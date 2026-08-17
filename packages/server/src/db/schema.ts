@@ -613,6 +613,37 @@ export const payments = sqliteTable(
   ],
 );
 
+/**
+ * Lightweight in/out transactions for side items tracked outside the main
+ * commercial flow (e.g. reusable empty sacks collected and later sold).
+ * Posting writes ordinary stock movements; this table holds the business
+ * detail (buyer, price) that a bare movement cannot.
+ */
+export const simpleTransactions = sqliteTable(
+  'simple_transactions',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    docNumber: text('doc_number').notNull(),
+    itemId: text('item_id').notNull(),
+    warehouseId: text('warehouse_id').notNull(),
+    type: text('type').notNull(), // 'collect' | 'sell'
+    qty: integer('qty').notNull(), // milli base-units, positive
+    buyer: text('buyer'),
+    unitPriceCents: integer('unit_price_cents'),
+    date: text('date').notNull(),
+    notes: text('notes'),
+    lifecycle: text('lifecycle').notNull().default('posted'),
+    reversalReason: text('reversal_reason'),
+    recordedBy: text('recorded_by'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [
+    uniqueIndex('simple_txn_number').on(t.tenantId, t.docNumber),
+    index('simple_txn_item').on(t.tenantId, t.itemId),
+  ],
+);
+
 /** One payment may be allocated across many invoices. */
 export const paymentAllocations = sqliteTable(
   'payment_allocations',

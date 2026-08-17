@@ -19,3 +19,6 @@ export * from './sales.js';
 export * from './deliveries.js';
 export * from './payments.js';
 export * from './creditview.js';
+export * from './simpletxn.js';
+export * from './reports.js';
+export * from './dashboard.js';
