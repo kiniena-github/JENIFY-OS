@@ -166,6 +166,107 @@ export interface GenealogyNode {
   detail: string;
 }
 
+export interface Invoice {
+  id: string;
+  docNumber: string;
+  date: string;
+  customerId: string;
+  status: string;
+  paymentTerm: string;
+  priceCategory: string;
+  subtotalCents: number | null;
+  discountCents: number | null;
+  vatCents: number | null;
+  totalCents: number | null;
+  paidCents: number | null;
+  dueDate: string | null;
+  fulfillment: string;
+  notes: string | null;
+  createdAt: string;
+}
+
+export interface InvoiceLine {
+  id: string;
+  invoiceId: string;
+  itemId: string;
+  lotId: string | null;
+  warehouseId: string;
+  qty: number;
+  entryUomId: string;
+  unitPriceCents: number | null;
+  priceSource: string | null;
+  discountCents: number | null;
+  lineSubtotalCents: number | null;
+  reservationId: string | null;
+}
+
+export interface Delivery {
+  id: string;
+  docNumber: string;
+  invoiceId: string;
+  customerId: string;
+  status: string;
+  deliveryType: string;
+  destination: string | null;
+  truckNumber: string | null;
+  driverName: string | null;
+  driverPhone: string | null;
+  dispatchDate: string | null;
+  expectedDate: string | null;
+  actualDate: string | null;
+  receivedBy: string | null;
+  notes: string | null;
+  createdAt: string;
+}
+
+export interface Payment {
+  id: string;
+  docNumber: string;
+  date: string;
+  customerId: string;
+  amountCents: number;
+  method: string;
+  referenceNumber: string | null;
+  notes: string | null;
+  status: string;
+  allocatedCents: number;
+  createdAt: string;
+}
+
+export interface CreditRow {
+  invoiceId: string;
+  invoiceNumber: string;
+  customerId: string;
+  customerName: string;
+  saleDate: string;
+  dueDate: string | null;
+  totalCents: number | null;
+  paidCents: number | null;
+  remainingCents: number | null;
+  lastPaymentDate: string | null;
+  status: string;
+}
+
+export interface CreditOverview {
+  rows: CreditRow[];
+  outstandingCents: number | null;
+  overdueCents: number | null;
+  dueThisWeekCents: number | null;
+}
+
+export interface PricingInfo {
+  pricing: {
+    version: number;
+    data: {
+      categories: string[];
+      customPrice?: { requiresApproval?: boolean };
+      discount?: { requiresApproval?: boolean };
+      prices: Record<string, Record<string, number | null>>;
+    };
+  } | null;
+  vat: { version: number; data: { enabled: boolean; ratePct: number } } | null;
+}
+
 export interface Movement {
   id: string;
   itemId: string;

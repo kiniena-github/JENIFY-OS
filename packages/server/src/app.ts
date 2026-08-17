@@ -10,6 +10,7 @@ import { registerAdminRoutes } from './routes/admin.js';
 import { registerMasterdataRoutes } from './routes/masterdata.js';
 import { registerInventoryRoutes } from './routes/inventory.js';
 import { registerProductionRoutes } from './routes/production.js';
+import { registerCommercialRoutes } from './routes/commercial.js';
 
 export const SESSION_COOKIE = 'fos_session';
 
@@ -57,6 +58,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   registerMasterdataRoutes(app, opts.db);
   registerInventoryRoutes(app, opts.db);
   registerProductionRoutes(app, opts.db);
+  registerCommercialRoutes(app, opts.db);
 
   return app;
 }

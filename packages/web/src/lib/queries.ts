@@ -13,6 +13,11 @@ import type {
   Batch,
   QualityTest,
   GenealogyNode,
+  Invoice,
+  Delivery,
+  Payment,
+  CreditOverview,
+  PricingInfo,
 } from './types.js';
 
 export function useItems(params = '') {
@@ -69,4 +74,19 @@ export function useSourceBatches(forStage: string, enabled = true) {
     queryFn: () => api.get<Batch[]>(`/api/production/sources?forStage=${forStage}`),
     enabled,
   });
+}
+export function useInvoices(params = '') {
+  return useQuery({ queryKey: ['invoices', params], queryFn: () => api.get<Invoice[]>(`/api/invoices${params}`) });
+}
+export function useDeliveries() {
+  return useQuery({ queryKey: ['deliveries'], queryFn: () => api.get<Delivery[]>('/api/deliveries') });
+}
+export function usePayments() {
+  return useQuery({ queryKey: ['payments'], queryFn: () => api.get<Payment[]>('/api/payments') });
+}
+export function useCredit(params = '') {
+  return useQuery({ queryKey: ['credit', params], queryFn: () => api.get<CreditOverview>(`/api/credit${params}`) });
+}
+export function usePricing() {
+  return useQuery({ queryKey: ['pricing'], queryFn: () => api.get<PricingInfo>('/api/pricing') });
 }
