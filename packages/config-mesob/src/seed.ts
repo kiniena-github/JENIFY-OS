@@ -29,6 +29,7 @@ import {
   type Ctx,
 } from '@factoryos/server/services';
 import { PLATFORM_KEYS } from '@factoryos/server/i18n-keys';
+import { createParty } from '@factoryos/server/services';
 import type { PermissionMatrix, ModuleId, ActionId } from '@factoryos/shared';
 import { MODULES, ACTIONS } from '@factoryos/shared';
 
@@ -98,7 +99,7 @@ const rawSalt = createItem(ctx, {
   baseUomId: kg,
   purchasable: true,
   sellable: true, // locked business fact: raw salt can be sold directly in bulk
-  attributes: { source: 'Afdera', sourceLocked: true },
+  attributes: { source: 'Afdera', sourceLocked: true, lotSeqKey: 'lot.raw' },
 });
 const salt500 = createItem(ctx, {
   code: 'SALT-500G',
@@ -134,6 +135,14 @@ const emptySack = createItem(ctx, {
   trackingMode: 'none',
   baseUomId: piece,
   sellable: true,
+});
+
+// --------------------------- Default supplier ------------------------------
+createParty(ctx, {
+  kind: 'supplier',
+  name: 'Afdera Salt Supplier',
+  location: 'Afdera, Afar',
+  notes: 'Default raw-salt supplier. Edit or add suppliers as needed.',
 });
 
 // --------------------------- Warehouses ------------------------------------

@@ -1,8 +1,15 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AuthProvider, useAuth } from './auth.js';
 import Layout, { usePageTitle } from './components/Layout.js';
 import LoginPage from './pages/LoginPage.js';
+import ReceivingPage from './pages/ReceivingPage.js';
+import InventoryPage from './pages/InventoryPage.js';
+
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false, staleTime: 15_000 } },
+});
 
 function Placeholder({ title }: { title: string }) {
   usePageTitle(title);
@@ -17,8 +24,8 @@ function Shell() {
     <Routes>
       <Route element={<Layout />}>
         <Route index element={<Placeholder title="Dashboard" />} />
-        <Route path="/receiving" element={<Placeholder title="Receiving" />} />
-        <Route path="/inventory" element={<Placeholder title="Inventory" />} />
+        <Route path="/receiving" element={<ReceivingPage />} />
+        <Route path="/inventory" element={<InventoryPage />} />
         <Route path="/production" element={<Placeholder title="Production" />} />
         <Route path="/customers" element={<Placeholder title="Customers" />} />
         <Route path="/sales" element={<Placeholder title="Sales" />} />
@@ -38,10 +45,12 @@ function Shell() {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
-        <Shell />
-      </AuthProvider>
-    </BrowserRouter>
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          <Shell />
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
   );
 }
