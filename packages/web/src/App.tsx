@@ -6,6 +6,7 @@ import Layout, { usePageTitle } from './components/Layout.js';
 import LoginPage from './pages/LoginPage.js';
 import ReceivingPage from './pages/ReceivingPage.js';
 import InventoryPage from './pages/InventoryPage.js';
+import ProductionPage from './pages/ProductionPage.js';
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false, staleTime: 15_000 } },
@@ -26,7 +27,7 @@ function Shell() {
         <Route index element={<Placeholder title="Dashboard" />} />
         <Route path="/receiving" element={<ReceivingPage />} />
         <Route path="/inventory" element={<InventoryPage />} />
-        <Route path="/production" element={<Placeholder title="Production" />} />
+        <Route path="/production" element={<ProductionPage />} />
         <Route path="/customers" element={<Placeholder title="Customers" />} />
         <Route path="/sales" element={<Placeholder title="Sales" />} />
         <Route path="/credit" element={<Placeholder title="Credit" />} />

@@ -8,6 +8,7 @@ import { createUser } from '../src/services/users.js';
 import { buildSessionUser } from '../src/services/auth.js';
 import { createUom, createItem, createWarehouse } from '../src/services/masterdata.js';
 import { defineSequence } from '../src/services/numbering.js';
+import { createStage } from '../src/services/production.js';
 
 export function testDb(): Db {
   return createDb(':memory:');
@@ -92,6 +93,7 @@ export function makeTestTenant(db: Db, code: string): TestTenant {
     baseUomId: kg,
     purchasable: true,
     sellable: true,
+    attributes: { lotSeqKey: 'lot.raw' },
   });
   const pack1kg = createItem(sysCtx, {
     code: 'FG1',
@@ -114,6 +116,9 @@ export function makeTestTenant(db: Db, code: string): TestTenant {
     ['invoice', 'INV-'],
     ['delivery', 'DEL-'],
     ['payment', 'PAY-'],
+    ['production.washing', 'WSH-'],
+    ['production.iodization', 'IOD-'],
+    ['production.packaging', 'PKG-'],
   ] as const) {
     defineSequence(sysCtx, key, prefix, 4);
   }
@@ -129,4 +134,51 @@ export function makeTestTenant(db: Db, code: string): TestTenant {
     items: { raw, pack1kg },
     warehouses: { a, b, c },
   };
+}
+
+/** Provision the standard process chain: washing -> iodization(QC) -> packaging. */
+export function makeProcessStages(tt: TestTenant): {
+  washing: string;
+  iodization: string;
+  packaging: string;
+} {
+  const washing = createStage(tt.sysCtx, {
+    code: 'washing',
+    nameKey: 'stage.washing',
+    sequence: 1,
+    inputSource: 'lot',
+    outputForm: 'bulk',
+    inputItemId: tt.items.raw,
+    docSeqKey: 'production.washing',
+  });
+  const iodization = createStage(tt.sysCtx, {
+    code: 'iodization',
+    nameKey: 'stage.iodization',
+    sequence: 2,
+    inputSource: 'prior_batch',
+    outputForm: 'bulk',
+    requiresQc: true,
+    priorStageId: washing,
+    attributes: [
+      {
+        key: 'iodine_added_kg',
+        labelKey: 'production.attr.iodine_added_kg',
+        type: 'number',
+        unit: 'kg',
+        required: true,
+      },
+    ],
+    docSeqKey: 'production.iodization',
+  });
+  const packaging = createStage(tt.sysCtx, {
+    code: 'packaging',
+    nameKey: 'stage.packaging',
+    sequence: 3,
+    inputSource: 'prior_batch',
+    outputForm: 'packaged_items',
+    priorStageId: iodization,
+    outputItemIds: [tt.items.pack1kg],
+    docSeqKey: 'production.packaging',
+  });
+  return { washing, iodization, packaging };
 }

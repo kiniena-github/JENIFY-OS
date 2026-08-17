@@ -1,6 +1,19 @@
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api.js';
-import type { Item, Uom, Warehouse, Party, Receipt, Transfer, StockRow, Movement } from './types.js';
+import type {
+  Item,
+  Uom,
+  Warehouse,
+  Party,
+  Receipt,
+  Transfer,
+  StockRow,
+  Movement,
+  Stage,
+  Batch,
+  QualityTest,
+  GenealogyNode,
+} from './types.js';
 
 export function useItems(params = '') {
   return useQuery({ queryKey: ['items', params], queryFn: () => api.get<Item[]>(`/api/items${params}`) });
@@ -27,5 +40,33 @@ export function useMovements(params = '') {
   return useQuery({
     queryKey: ['movements', params],
     queryFn: () => api.get<Movement[]>(`/api/movements${params}`),
+  });
+}
+export function useStages() {
+  return useQuery({ queryKey: ['stages'], queryFn: () => api.get<Stage[]>('/api/stages') });
+}
+export function useBatches(params = '') {
+  return useQuery({ queryKey: ['batches', params], queryFn: () => api.get<Batch[]>(`/api/batches${params}`) });
+}
+export function useBatchDetail(id: string | null) {
+  return useQuery({
+    queryKey: ['batch', id],
+    queryFn: () => api.get<{ batch: Batch; tests: QualityTest[] }>(`/api/batches/${id}`),
+    enabled: !!id,
+  });
+}
+export function useBatchGenealogy(id: string | null) {
+  return useQuery({
+    queryKey: ['genealogy', id],
+    queryFn: () =>
+      api.get<{ backward: GenealogyNode[]; forward: GenealogyNode[] }>(`/api/batches/${id}/genealogy`),
+    enabled: !!id,
+  });
+}
+export function useSourceBatches(forStage: string, enabled = true) {
+  return useQuery({
+    queryKey: ['sources', forStage],
+    queryFn: () => api.get<Batch[]>(`/api/production/sources?forStage=${forStage}`),
+    enabled,
   });
 }

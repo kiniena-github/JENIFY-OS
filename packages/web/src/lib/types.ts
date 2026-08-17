@@ -96,6 +96,76 @@ export interface StockRow {
   status: string;
 }
 
+export interface StageAttrDef {
+  key: string;
+  labelKey: string;
+  type: 'number' | 'text';
+  unit?: string;
+  required?: boolean;
+}
+
+export interface Stage {
+  id: string;
+  code: string;
+  nameKey: string;
+  sequence: number;
+  inputSource: 'lot' | 'prior_batch';
+  outputForm: 'bulk' | 'packaged_items';
+  requiresQc: boolean;
+  inputItemId: string | null;
+  priorStageId: string | null;
+  outputItemIds: string[] | null;
+  attributes: StageAttrDef[] | null;
+  docSeqKey: string;
+}
+
+export interface Batch {
+  id: string;
+  stageId: string;
+  docNumber: string;
+  date: string;
+  status: string;
+  inputLotId: string | null;
+  inputBatchId: string | null;
+  inputWarehouseId: string | null;
+  inputQty: number;
+  outputQty: number | null;
+  lossQty: number | null;
+  consumedOutputQty: number;
+  outputItemId: string | null;
+  unitsProduced: number | null;
+  unitsRejected: number | null;
+  outputWarehouseId: string | null;
+  outputLotId: string | null;
+  qcStatus: string;
+  qcApprovedAt: string | null;
+  operatorName: string | null;
+  attributes: Record<string, unknown> | null;
+  notes: string | null;
+  createdAt: string;
+}
+
+export interface QualityTest {
+  id: string;
+  batchId: string;
+  attemptNumber: number;
+  targetLevel: string | null;
+  actualResult: string;
+  status: string;
+  operatorName: string | null;
+  approvedBy: string | null;
+  approvedAt: string | null;
+  date: string;
+  notes: string | null;
+}
+
+export interface GenealogyNode {
+  kind: 'lot' | 'batch';
+  id: string;
+  label: string;
+  detail: string;
+}
+
 export interface Movement {
   id: string;
   itemId: string;
