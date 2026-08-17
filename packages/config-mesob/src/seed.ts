@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { createDb } from '@factoryos/server/db';
 import {
   createTenant,
@@ -69,6 +70,18 @@ if (getTenantByCode(db, 'mesob')) {
 
 registerTranslationKeys(db, PLATFORM_KEYS);
 
+// --------------------------- Locked brand assets ---------------------------
+// Exact approved Mesob logo and Tigray flag, extracted from the approved
+// Master. Copied next to the local database and served at /branding/.
+const here = path.dirname(fileURLToPath(import.meta.url));
+const assetsDir = path.resolve(here, '../assets');
+const brandingDir = path.resolve(process.cwd(), '../../data/branding');
+fs.mkdirSync(brandingDir, { recursive: true });
+for (const f of ['mesob-logo.jpg', 'tigray-flag.jpg']) {
+  const src = path.join(assetsDir, f);
+  if (fs.existsSync(src)) fs.copyFileSync(src, path.join(brandingDir, f));
+}
+
 console.log('Creating Mesob Salt Factory tenant…');
 const { ctx } = createTenant(db, {
   code: 'mesob',
@@ -77,12 +90,14 @@ const { ctx } = createTenant(db, {
   currency: 'ETB',
   timezone: 'Africa/Addis_Ababa',
   brandColor: '#1e6bd6',
+  logoPath: '/branding/mesob-logo.jpg',
 });
 
 // --------------------------- Languages -------------------------------------
 enableLanguage(ctx, 'en', 'English');
 enableLanguage(ctx, 'am', 'አማርኛ (Amharic)');
-enableLanguage(ctx, 'ti', 'ትግርኛ (Tigrinya)');
+// Tigrinya carries the exact approved Tigray flag image
+enableLanguage(ctx, 'ti', 'ትግርኛ (Tigrinya)', '/branding/tigray-flag.jpg');
 
 // --------------------------- Units of measure ------------------------------
 const kg = createUom(ctx, { code: 'kg', name: 'Kilogram', family: 'mass', factorToBase: 1 });

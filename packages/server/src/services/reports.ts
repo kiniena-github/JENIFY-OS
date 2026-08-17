@@ -62,19 +62,25 @@ export function rawStockReport(ctx: Ctx, p: Period, warehouseId?: string) {
 
   const lotRows = ctx.db.select().from(lots).where(eq(lots.tenantId, ctx.tenantId)).all();
   const lotById = new Map(lotRows.map((l) => [l.id, l]));
-  const usedByLot = new Map<string, number>();
+  // usage per lot AND per warehouse, so rows show where consumption happened
+  const usedByLotWh = new Map<string, number>();
   for (const m of usage) {
-    if (m.lotId) usedByLot.set(m.lotId, (usedByLot.get(m.lotId) ?? 0) - m.qty);
+    if (!m.lotId) continue;
+    const key = `${m.lotId}|${m.warehouseId}`;
+    usedByLotWh.set(key, (usedByLotWh.get(key) ?? 0) - m.qty);
   }
 
   const breakdown = stock
-    .filter((r) => r.lotId && (r.onHand !== 0 || (usedByLot.get(r.lotId) ?? 0) !== 0))
+    .filter(
+      (r) =>
+        r.lotId && (r.onHand !== 0 || (usedByLotWh.get(`${r.lotId}|${r.warehouseId}`) ?? 0) !== 0),
+    )
     .map((r) => ({
       lotNumber: r.lotNumber,
       source: r.lotSource,
       receivedAt: r.receivedAt,
       initialQty: r.initialQty,
-      usedQty: usedByLot.get(r.lotId!) ?? 0,
+      usedQty: usedByLotWh.get(`${r.lotId}|${r.warehouseId}`) ?? 0,
       remainingQty: r.onHand,
       reservedQty: r.reserved,
       warehouseCode: r.warehouseCode,

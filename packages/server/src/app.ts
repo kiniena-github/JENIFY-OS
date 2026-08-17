@@ -1,7 +1,11 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
+import fastifyStatic from '@fastify/static';
+import path from 'node:path';
+import fs from 'node:fs';
 import type { SessionUser } from '@factoryos/shared';
 import type { Db } from './db/index.js';
+import { defaultDbPath } from './db/index.js';
 import { AppError } from './util.js';
 import { resolveSession } from './services/auth.js';
 import type { Ctx } from './services/context.js';
@@ -28,6 +32,12 @@ export interface AppOptions {
 export function buildApp(opts: AppOptions): FastifyInstance {
   const app = Fastify({ logger: false });
   app.register(cookie);
+
+  // Tenant branding assets (logo, flags) live next to the local database.
+  const brandingDir = path.join(path.dirname(defaultDbPath()), 'branding');
+  if (fs.existsSync(brandingDir)) {
+    app.register(fastifyStatic, { root: brandingDir, prefix: '/branding/' });
+  }
 
   app.decorateRequest('sessionUser', null);
 

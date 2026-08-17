@@ -78,7 +78,13 @@ export default function Layout() {
       <aside className="sidebar">
         <div className="sidebar-brand">
           {tenant.logoPath ? (
-            <img src={tenant.logoPath} alt="" />
+            <img
+              src={tenant.logoPath}
+              alt=""
+              onError={(e) => {
+                (e.target as HTMLImageElement).style.display = 'none';
+              }}
+            />
           ) : (
             <div className="logo-fallback">{initials(tenant.name)}</div>
           )}
@@ -108,6 +114,17 @@ export default function Layout() {
             {sub ? <div className="header-sub">{sub}</div> : null}
           </div>
           <div className="header-spacer" />
+          {(() => {
+            // exact approved flag image for the selected language, when configured
+            const current = languages.find((l) => l.code === language);
+            return current?.flagEmoji?.startsWith('/') ? (
+              <img
+                src={current.flagEmoji}
+                alt=""
+                style={{ height: 20, borderRadius: 3, border: '1px solid var(--border)' }}
+              />
+            ) : null;
+          })()}
           <select
             aria-label={t('shell.language', 'Language')}
             value={language}
@@ -115,7 +132,7 @@ export default function Layout() {
           >
             {languages.map((l) => (
               <option key={l.code} value={l.code}>
-                {l.flagEmoji ? `${l.flagEmoji} ` : ''}
+                {l.flagEmoji && !l.flagEmoji.startsWith('/') ? `${l.flagEmoji} ` : ''}
                 {l.name}
               </option>
             ))}
