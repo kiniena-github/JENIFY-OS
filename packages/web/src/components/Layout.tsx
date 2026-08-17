@@ -1,0 +1,142 @@
+import React from 'react';
+import { NavLink, Outlet } from 'react-router-dom';
+import type { ActionId, ModuleId } from '@factoryos/shared';
+import { useAuth } from '../auth.js';
+
+interface NavEntry {
+  path: string;
+  module: ModuleId;
+  action?: ActionId;
+  labelKey: string;
+  fallback: string;
+  icon: string;
+}
+
+/** Generic platform navigation. Tenants relabel entries via translations. */
+const NAV: NavEntry[] = [
+  { path: '/', module: 'dashboard', labelKey: 'nav.dashboard', fallback: 'Dashboard', icon: 'D' },
+  { path: '/receiving', module: 'inventory', labelKey: 'nav.receiving', fallback: 'Receiving', icon: 'R' },
+  { path: '/inventory', module: 'inventory', labelKey: 'nav.inventory', fallback: 'Inventory', icon: 'I' },
+  { path: '/production', module: 'production', labelKey: 'nav.production', fallback: 'Production', icon: 'P' },
+  { path: '/customers', module: 'parties', labelKey: 'nav.customers', fallback: 'Customers', icon: 'C' },
+  { path: '/sales', module: 'sales', labelKey: 'nav.sales', fallback: 'Sales', icon: 'S' },
+  { path: '/credit', module: 'credit', labelKey: 'nav.credit', fallback: 'Credit', icon: '₵' },
+  { path: '/payments', module: 'payments', labelKey: 'nav.payments', fallback: 'Payments', icon: '$' },
+  { path: '/deliveries', module: 'delivery', labelKey: 'nav.deliveries', fallback: 'Deliveries', icon: 'L' },
+  { path: '/sacks', module: 'inventory', labelKey: 'nav.sacks', fallback: 'Empty Sacks', icon: 'E' },
+  { path: '/reports', module: 'reports', labelKey: 'nav.reports', fallback: 'Reports', icon: 'T' },
+  { path: '/users', module: 'users', labelKey: 'nav.users', fallback: 'Users & Roles', icon: 'U' },
+  { path: '/settings', module: 'settings', labelKey: 'nav.settings', fallback: 'Settings', icon: 'G' },
+  { path: '/audit', module: 'audit', labelKey: 'nav.audit', fallback: 'Audit Log', icon: 'A' },
+];
+
+export function initials(name: string): string {
+  return name
+    .split(/\s+/)
+    .map((p) => p[0])
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
+
+export const PageTitleContext = React.createContext<{
+  title: string;
+  sub: string;
+  setTitle: (title: string, sub?: string) => void;
+}>({ title: '', sub: '', setTitle: () => {} });
+
+export function usePageTitle(title: string, sub?: string): void {
+  const ctx = React.useContext(PageTitleContext);
+  React.useEffect(() => {
+    ctx.setTitle(title, sub);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [title, sub]);
+}
+
+export default function Layout() {
+  const { user, tenant, languages, language, setLanguage, logout, can, t } = useAuth();
+  const [title, setTitleState] = React.useState('');
+  const [sub, setSub] = React.useState('');
+  const titleCtx = React.useMemo(
+    () => ({
+      title,
+      sub,
+      setTitle: (ti: string, s?: string) => {
+        setTitleState(ti);
+        setSub(s ?? '');
+      },
+    }),
+    [title, sub],
+  );
+
+  if (!user || !tenant) return null;
+
+  const visibleNav = NAV.filter((n) => can(n.module, n.action ?? 'view'));
+
+  return (
+    <div className="app">
+      <aside className="sidebar">
+        <div className="sidebar-brand">
+          {tenant.logoPath ? (
+            <img src={tenant.logoPath} alt="" />
+          ) : (
+            <div className="logo-fallback">{initials(tenant.name)}</div>
+          )}
+          <div>
+            <div className="sidebar-brand-name">{tenant.name}</div>
+            <div className="sidebar-brand-sub">{t('shell.system', 'Management System')}</div>
+          </div>
+        </div>
+        <nav className="sidebar-nav">
+          {visibleNav.map((n) => (
+            <NavLink key={n.path} to={n.path} end={n.path === '/'}>
+              <span className="nav-icon">{n.icon}</span>
+              {t(n.labelKey, n.fallback)}
+            </NavLink>
+          ))}
+        </nav>
+        <div className="sidebar-footer">
+          {tenant.locationNote}
+          <br />
+          FactoryOS v0.1
+        </div>
+      </aside>
+      <div className="main">
+        <header className="header">
+          <div>
+            <div className="header-title">{title}</div>
+            {sub ? <div className="header-sub">{sub}</div> : null}
+          </div>
+          <div className="header-spacer" />
+          <select
+            aria-label={t('shell.language', 'Language')}
+            value={language}
+            onChange={(e) => void setLanguage(e.target.value)}
+          >
+            {languages.map((l) => (
+              <option key={l.code} value={l.code}>
+                {l.flagEmoji ? `${l.flagEmoji} ` : ''}
+                {l.name}
+              </option>
+            ))}
+          </select>
+          <div className="header-user">
+            <div className="avatar">{initials(user.displayName)}</div>
+            <div className="who">
+              <div className="name">{user.displayName}</div>
+              <div className="role">{user.roleName}</div>
+            </div>
+            <button className="btn btn-secondary btn-sm" onClick={() => void logout()}>
+              {t('shell.signout', 'Sign out')}
+            </button>
+          </div>
+        </header>
+        <main className="workspace">
+          <PageTitleContext.Provider value={titleCtx}>
+            <Outlet />
+          </PageTitleContext.Provider>
+        </main>
+      </div>
+    </div>
+  );
+}

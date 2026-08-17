@@ -1,0 +1,20 @@
+{
+  "name": "@factoryos/config-mesob",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "seed": "tsx src/seed.ts"
+  },
+  "dependencies": {
+    "@factoryos/server": "*",
+    "@factoryos/shared": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

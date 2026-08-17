@@ -1,0 +1,26 @@
+{
+  "name": "factoryos",
+  "version": "0.1.0",
+  "private": true,
+  "description": "FactoryOS — configurable manufacturing operations platform. One platform, many factory tenants.",
+  "workspaces": [
+    "packages/shared",
+    "packages/server",
+    "packages/web",
+    "packages/config-mesob"
+  ],
+  "scripts": {
+    "dev": "npm-run-all --parallel dev:server dev:web",
+    "dev:server": "npm run dev --workspace @factoryos/server",
+    "dev:web": "npm run dev --workspace @factoryos/web",
+    "seed:mesob": "npm run seed --workspace @factoryos/config-mesob",
+    "test": "npm run test --workspace @factoryos/server",
+    "build": "npm run build --workspace @factoryos/shared && npm run build --workspace @factoryos/server && npm run build --workspace @factoryos/web"
+  },
+  "devDependencies": {
+    "npm-run-all": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
