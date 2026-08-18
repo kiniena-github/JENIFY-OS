@@ -14,6 +14,7 @@ import {
   useStock,
 } from '../lib/queries.js';
 import * as fmt from '../lib/format.js';
+import { normalizePriceCategories } from '@factoryos/shared';
 import type { Invoice } from '../lib/types.js';
 
 interface LineDraft {
@@ -56,8 +57,17 @@ export default function SalesPage() {
   const [cancelling, setCancelling] = useState<Invoice | null>(null);
   const [overrideNeeded, setOverrideNeeded] = useState(false);
 
-  const categories = pricing.data?.pricing?.data.categories ?? ['retail', 'wholesale', 'distributor'];
-  const effCategory = priceCategory || categories[0];
+  const { categories: allCategories, defaultCode } = normalizePriceCategories(
+    pricing.data?.pricing?.data ?? { categories: ['retail', 'wholesale', 'distributor'] },
+  );
+  const categories = allCategories.filter((c) => c.active);
+  // the selected CUSTOMER drives the default category; workers never guess
+  const customerDefault = customers.data?.find((c) => c.id === customerId)?.defaultPriceCategory;
+  const effCategory =
+    priceCategory ||
+    (customerDefault && categories.some((c) => c.code === customerDefault) ? customerDefault : null) ||
+    defaultCode ||
+    'retail';
   const vatRate = pricing.data?.vat?.data.enabled ? pricing.data.vat.data.ratePct : 0;
 
   function listPrice(itemId: string): number | null {
@@ -217,7 +227,13 @@ export default function SalesPage() {
           <div className="panel-body">
             <div className="form-grid">
               <Field label={t('sales.customer', 'Customer')} required>
-                <select value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
+                <select
+                  value={customerId}
+                  onChange={(e) => {
+                    setCustomerId(e.target.value);
+                    setPriceCategory(''); // re-derive from the customer default
+                  }}
+                >
                   <option value="">—</option>
                   {customers.data
                     ?.filter((c) => c.active)
@@ -229,10 +245,14 @@ export default function SalesPage() {
                 </select>
               </Field>
               <Field label={t('sales.price_category', 'Price category')} required>
-                <select value={effCategory} onChange={(e) => setPriceCategory(e.target.value)}>
+                <select
+                  value={effCategory}
+                  disabled={!canApprovePrice && !!customerDefault}
+                  onChange={(e) => setPriceCategory(e.target.value)}
+                >
                   {categories.map((c) => (
-                    <option key={c} value={c}>
-                      {t(`sales.cat_${c}`, c)}
+                    <option key={c.code} value={c.code}>
+                      {t(`sales.cat_${c.code}`, c.name)}
                     </option>
                   ))}
                 </select>
@@ -420,6 +440,11 @@ export default function SalesPage() {
                       <button className="btn btn-secondary btn-sm" onClick={() => setCancelling(inv)}>
                         {t('shell.cancel', 'Cancel')}
                       </button>
+                    ) : null}{' '}
+                    {inv.status !== 'pending' && inv.status !== 'cancelled' ? (
+                      <a className="btn btn-ghost btn-sm" href={`/print/invoice/${inv.id}`}>
+                        {t('doc.print', 'Print')}
+                      </a>
                     ) : null}
                   </td>
                 </tr>

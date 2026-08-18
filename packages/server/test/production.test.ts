@@ -111,14 +111,23 @@ describe('washing (lot-input, bulk-output)', () => {
 });
 
 describe('iodization (prior-batch input, QC gate)', () => {
-  it('consumes washing output balance', () => {
+  it('consumes washing output balance; conserved stage keeps quantity', () => {
     const washId = completedWashing(9200);
     const iodId = makeIodization(washId, 9200);
-    completeBatch(tt.ownerCtx, iodId, { outputQty: 9150 });
+    completeBatch(tt.ownerCtx, iodId, {});
     expect(outputBalance(getBatch(tt.ownerCtx, washId))).toBe(0);
     const iod = getBatch(tt.ownerCtx, iodId);
     expect(iod.status).toBe('completed');
+    // CONSERVED: output equals input, zero automatic loss
+    expect(iod.outputQty).toBe(9200 * KG);
+    expect(iod.lossQty).toBe(0);
     expect(iod.qcStatus).toBe('pending'); // requiresQc: not released yet
+  });
+
+  it('conserved stage rejects an ad-hoc different output at completion', () => {
+    const washId = completedWashing(9200);
+    const iodId = makeIodization(washId, 9200);
+    expect(() => completeBatch(tt.ownerCtx, iodId, { outputQty: 9150 })).toThrow(/conserves/);
   });
 
   it('cannot consume more than the source batch balance', () => {
@@ -126,13 +135,13 @@ describe('iodization (prior-batch input, QC gate)', () => {
     // drafts do not hold balance, but completion does; and new drafts
     // beyond the remaining balance are rejected outright
     const firstId = makeIodization(washId, 5000);
-    completeBatch(tt.ownerCtx, firstId, { outputQty: 4900 });
+    completeBatch(tt.ownerCtx, firstId, {});
     expect(outputBalance(getBatch(tt.ownerCtx, washId))).toBe(4200 * KG);
     expect(() => makeIodization(washId, 5000)).toThrow(AppError);
     // a draft created while balance existed also re-checks at completion
     const secondId = makeIodization(washId, 4200);
     const thirdDraftBlocked = () => makeIodization(washId, 4200);
-    completeBatch(tt.ownerCtx, secondId, { outputQty: 4200 });
+    completeBatch(tt.ownerCtx, secondId, {});
     expect(thirdDraftBlocked).toThrow(AppError);
   });
 
@@ -151,7 +160,7 @@ describe('iodization (prior-batch input, QC gate)', () => {
   it('failed test blocks packaging; retest keeps full history; approval releases', () => {
     const washId = completedWashing(9200);
     const iodId = makeIodization(washId, 9200);
-    completeBatch(tt.ownerCtx, iodId, { outputQty: 9200 });
+    completeBatch(tt.ownerCtx, iodId, {});
 
     recordQualityTest(tt.ownerCtx, iodId, {
       targetLevel: '30-40 ppm',
@@ -202,7 +211,7 @@ describe('iodization (prior-batch input, QC gate)', () => {
   it('cannot approve a failed result; cannot re-test after approval', () => {
     const washId = completedWashing();
     const iodId = makeIodization(washId);
-    completeBatch(tt.ownerCtx, iodId, { outputQty: 9000 });
+    completeBatch(tt.ownerCtx, iodId, {});
     recordQualityTest(tt.ownerCtx, iodId, {
       actualResult: 'bad',
       status: 'failed',
@@ -229,7 +238,7 @@ describe('packaging (packaged-items output)', () => {
   function approvedIodization(outKg = 9200): string {
     const washId = completedWashing(outKg);
     const iodId = makeIodization(washId, outKg);
-    completeBatch(tt.ownerCtx, iodId, { outputQty: outKg });
+    completeBatch(tt.ownerCtx, iodId, {});
     recordQualityTest(tt.ownerCtx, iodId, {
       actualResult: 'pass',
       status: 'passed',
@@ -298,7 +307,7 @@ describe('genealogy', () => {
   it('traces backward to the raw lot and forward to the finished lot', () => {
     const washId = completedWashing(9200);
     const iodId = makeIodization(washId, 9200);
-    completeBatch(tt.ownerCtx, iodId, { outputQty: 9200 });
+    completeBatch(tt.ownerCtx, iodId, {});
     recordQualityTest(tt.ownerCtx, iodId, { actualResult: 'ok', status: 'passed', date: '2026-08-14' });
     approveQualityTest(tt.ownerCtx, iodId);
     const { id: pkgId } = createBatch(tt.ownerCtx, {

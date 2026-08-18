@@ -51,6 +51,12 @@ export function toBaseQty(ctx: Ctx, uomId: string, entryQty: number): number {
   return Math.round(entryQty * uom.factorToBase);
 }
 
+/** Human unit code (kg / pc / …) of an item's base unit — for audit text. */
+export function baseUomCode(ctx: Ctx, itemId: string): string {
+  const item = getItem(ctx, itemId);
+  return getUom(ctx, item.baseUomId).code;
+}
+
 // ----------------------------- Items ---------------------------------------
 
 export function createItem(

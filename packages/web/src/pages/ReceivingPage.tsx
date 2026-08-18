@@ -281,6 +281,11 @@ export default function ReceivingPage() {
                       <button className="btn btn-secondary btn-sm" onClick={() => setReversing(r)}>
                         {t('receiving.reverse', 'Reverse')}
                       </button>
+                    ) : null}{' '}
+                    {r.lifecycle === 'posted' ? (
+                      <a className="btn btn-ghost btn-sm" href={`/print/receiving/${r.id}`}>
+                        {t('doc.print', 'Print')}
+                      </a>
                     ) : null}
                   </td>
                 </tr>

@@ -238,17 +238,30 @@ export function completeBatch(ctx: Ctx, id: string, input: CompleteBatchInput): 
     // ---- record output ----
     let update: Partial<typeof productionBatches.$inferInsert>;
     if (stage.outputForm === 'bulk') {
-      if (input.outputQty == null || input.outputQty < 0) {
-        badRequest('output_required', 'Output quantity is required');
+      if (stage.outputPolicy === 'conserved') {
+        // Conserved stage: output = input by definition. No automatic mass
+        // loss and no invented efficiency. A real measured variance must go
+        // through the explicit audited correction (correctBatchOutput).
+        if (input.outputQty != null && Math.round(input.outputQty * 1000) !== batch.inputQty) {
+          badRequest(
+            'conserved_output',
+            'This stage conserves quantity: output equals input. Record a measured variance as an audited correction after completion.',
+          );
+        }
+        update = { outputQty: batch.inputQty, lossQty: 0 };
+      } else {
+        if (input.outputQty == null || input.outputQty < 0) {
+          badRequest('output_required', 'Output quantity is required');
+        }
+        const outBase = Math.round(input.outputQty * 1000);
+        if (outBase > batch.inputQty) {
+          badRequest('output_exceeds_input', 'Output cannot exceed input quantity');
+        }
+        update = {
+          outputQty: outBase,
+          lossQty: batch.inputQty - outBase,
+        };
       }
-      const outBase = Math.round(input.outputQty * 1000);
-      if (outBase > batch.inputQty) {
-        badRequest('output_exceeds_input', 'Output cannot exceed input quantity');
-      }
-      update = {
-        outputQty: outBase,
-        lossQty: batch.inputQty - outBase,
-      };
     } else {
       const { outputItemId, unitsProduced, unitsRejected = 0, outputWarehouseId } = input;
       if (!outputItemId || !unitsProduced || !outputWarehouseId) {
@@ -265,6 +278,13 @@ export function completeBatch(ctx: Ctx, id: string, input: CompleteBatchInput): 
       }
       if (!Number.isInteger(unitsRejected) || unitsRejected < 0 || unitsRejected > unitsProduced) {
         badRequest('units_invalid', 'Rejected count cannot be negative or exceed produced');
+      }
+      // converted stage: units cannot weigh more than the consumed input
+      if (item.unitWeightMilliKg != null && unitsProduced * item.unitWeightMilliKg > batch.inputQty) {
+        badRequest(
+          'weight_exceeds_input',
+          'Produced units weigh more than the quantity consumed from the source batch',
+        );
       }
       const goodUnits = unitsProduced - unitsRejected;
       const lotId = createLot(tx, {
@@ -321,6 +341,56 @@ export function completeBatch(ctx: Ctx, id: string, input: CompleteBatchInput): 
       reference: batch.docNumber,
       summary: `Batch ${batch.docNumber} completed`,
       after: update,
+    });
+  });
+}
+
+/**
+ * Explicit measured override for a completed bulk batch (typically a
+ * conserved stage where a real variance was later measured). Signed variance,
+ * reason, actor and before/after are all preserved in the audit trail.
+ */
+export function correctBatchOutput(
+  ctx: Ctx,
+  id: string,
+  measuredOutputKg: number,
+  reason: string,
+): void {
+  if (!reason?.trim()) badRequest('reason_required', 'A correction reason is required');
+  inTx(ctx, (tx) => {
+    const batch = getBatch(tx, id);
+    const stage = getStage(tx, batch.stageId);
+    if (stage.outputForm !== 'bulk') {
+      badRequest('not_bulk', 'Output corrections apply to bulk-output stages only');
+    }
+    if (batch.status !== 'completed') {
+      badRequest('not_completed', 'Only completed batches can be corrected');
+    }
+    const newOutput = Math.round(measuredOutputKg * 1000);
+    if (!(newOutput > 0)) badRequest('output_invalid', 'Measured output must be positive');
+    if (newOutput < batch.consumedOutputQty) {
+      badRequest(
+        'below_consumed',
+        `Measured output cannot be below the ${batch.consumedOutputQty / 1000} already consumed downstream`,
+      );
+    }
+    const before = { outputQty: batch.outputQty, lossQty: batch.lossQty };
+    const varianceMilli = newOutput - (batch.outputQty ?? 0);
+    tx.db
+      .update(productionBatches)
+      .set({ outputQty: newOutput, lossQty: batch.inputQty - newOutput })
+      .where(eq(productionBatches.id, id))
+      .run();
+    writeAudit(tx, {
+      module: 'production',
+      action: 'batch_output_correct',
+      entity: 'production_batch',
+      entityId: id,
+      reference: batch.docNumber,
+      summary: `Measured output correction on ${batch.docNumber}: ${varianceMilli > 0 ? '+' : ''}${varianceMilli / 1000} kg variance`,
+      before,
+      after: { outputQty: newOutput, lossQty: batch.inputQty - newOutput },
+      reason,
     });
   });
 }

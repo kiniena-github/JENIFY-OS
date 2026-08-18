@@ -5,7 +5,7 @@ import type { Ctx } from './context.js';
 import { actorId, inTx } from './context.js';
 import { writeAudit } from './audit.js';
 import { nextDocNumber } from './numbering.js';
-import { getItem, getUom, getWarehouse, toBaseQty } from './masterdata.js';
+import { getItem, getUom, getWarehouse, toBaseQty, baseUomCode } from './masterdata.js';
 import { getParty } from './parties.js';
 import { createLot, postMovement } from './inventory.js';
 
@@ -78,7 +78,7 @@ export function createReceipt(ctx: Ctx, input: ReceiptInput): { id: string; docN
       entity: 'goods_receipt',
       entityId: id,
       reference: docNumber,
-      summary: `Receiving ${docNumber} drafted (${netBase / 1000} base units)`,
+      summary: `Receiving ${docNumber} drafted (${netBase / 1000} ${baseUomCode(tx, input.itemId)})`,
     });
     return { id, docNumber };
   });
@@ -154,7 +154,7 @@ export function postReceipt(ctx: Ctx, id: string): void {
       entity: 'goods_receipt',
       entityId: id,
       reference: doc.docNumber,
-      summary: `Receiving ${doc.docNumber} approved: +${doc.netQty / 1000} base units into warehouse`,
+      summary: `Receiving ${doc.docNumber} approved: +${doc.netQty / 1000} ${baseUomCode(tx, doc.itemId)} into warehouse`,
       after: { lotId, netQty: doc.netQty },
     });
   });

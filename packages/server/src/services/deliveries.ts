@@ -25,6 +25,20 @@ export function createDelivery(ctx: Ctx, input: CreateDeliveryInput): { id: stri
     if (invoice.status !== 'confirmed') {
       badRequest('invoice_not_confirmed', 'A delivery needs a confirmed sale');
     }
+    // required at creation — destination and expected date always; vehicle and
+    // driver details only for factory deliveries (deliberately not required
+    // for customer pickup)
+    const type = input.deliveryType ?? invoice.fulfillment;
+    if (!input.destination?.trim()) badRequest('destination_required', 'Destination is required');
+    if (!input.expectedDate) badRequest('expected_required', 'Expected delivery date is required');
+    if (input.expectedDate < nowIso().slice(0, 10)) {
+      badRequest('expected_past', 'Expected delivery date cannot be before today');
+    }
+    if (type === 'delivery') {
+      if (!input.truckNumber?.trim()) badRequest('truck_required', 'Truck number is required');
+      if (!input.driverName?.trim()) badRequest('driver_required', 'Driver name is required');
+      if (!input.driverPhone?.trim()) badRequest('driver_phone_required', 'Driver phone is required');
+    }
     const open = tx.db
       .select()
       .from(deliveries)
@@ -175,6 +189,12 @@ export function markDelivered(
     if (d.status !== 'dispatched') badRequest('bad_transition', 'Only dispatched deliveries can complete');
     if (!input.actualDate || !input.receivedBy?.trim()) {
       badRequest('delivered_details', 'Actual date and receiver are required');
+    }
+    if (input.actualDate > nowIso().slice(0, 10)) {
+      badRequest('actual_future', 'Actual delivery date cannot be in the future');
+    }
+    if (d.dispatchDate && input.actualDate < d.dispatchDate) {
+      badRequest('actual_before_dispatch', 'Actual delivery date cannot be before the dispatch date');
     }
     tx.db
       .update(deliveries)

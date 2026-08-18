@@ -86,6 +86,7 @@ export function registerMasterdataRoutes(app: FastifyInstance, db: Db): void {
       location?: string;
       taxInfo?: string;
       creditLimit?: number;
+      defaultPriceCategory?: string;
       notes?: string;
     };
   }>('/api/parties', async (req) => {
@@ -104,14 +105,29 @@ export function registerMasterdataRoutes(app: FastifyInstance, db: Db): void {
       location?: string;
       taxInfo?: string;
       creditLimit?: number | null;
+      defaultPriceCategory?: string | null;
       notes?: string;
       active?: boolean;
     };
   }>('/api/parties/:id', async (req) => {
     const ctx = requireCtx(db, req);
-    requirePermission(ctx, 'parties', 'edit');
+    // identity/profile editing and financial/credit control are SEPARATE
+    // authorities: finance may govern credit without touching identity,
+    // and sales may maintain profiles without touching credit.
+    const identityFields = [
+      'name',
+      'partyType',
+      'phone',
+      'location',
+      'taxInfo',
+      'defaultPriceCategory',
+      'notes',
+      'active',
+    ] as const;
+    if (identityFields.some((f) => req.body[f] !== undefined)) {
+      requirePermission(ctx, 'parties', 'edit');
+    }
     if (req.body.creditLimit !== undefined) {
-      // credit limits are financial configuration
       requirePermission(ctx, 'parties', 'view_financial');
       requirePermission(ctx, 'parties', 'approve');
     }

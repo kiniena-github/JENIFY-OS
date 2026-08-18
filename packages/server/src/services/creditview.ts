@@ -1,8 +1,8 @@
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, desc, sql } from 'drizzle-orm';
 import { parties, paymentAllocations, payments, salesInvoices } from '../db/schema.js';
 import { nowIso } from '../util.js';
 import type { Ctx } from './context.js';
-import { invoicePaidCents, invoiceCreditStatus, type CreditStatus } from './sales.js';
+import { invoiceCreditStatus, type CreditStatus } from './sales.js';
 
 export interface CreditRow {
   invoiceId: string;
@@ -18,7 +18,11 @@ export interface CreditRow {
   status: CreditStatus;
 }
 
-/** Credit position of every committed invoice, derived from source records. */
+/**
+ * Credit position of every committed invoice, derived from source records.
+ * Paid amounts and last-payment dates are computed in two grouped queries
+ * (not per invoice) so the screen stays fast as history grows.
+ */
 export function creditOverview(ctx: Ctx, filter: { customerId?: string; status?: CreditStatus } = {}): {
   rows: CreditRow[];
   outstandingCents: number;
@@ -41,26 +45,32 @@ export function creditOverview(ctx: Ctx, filter: { customerId?: string; status?:
     .orderBy(desc(salesInvoices.date))
     .all();
 
+  // grouped: active allocation totals + latest payment date per invoice
+  const paidRows = ctx.db
+    .select({
+      invoiceId: paymentAllocations.invoiceId,
+      total: sql<number>`coalesce(sum(${paymentAllocations.amountCents}), 0)`,
+      lastDate: sql<string | null>`max(${payments.date})`,
+    })
+    .from(paymentAllocations)
+    .innerJoin(payments, eq(paymentAllocations.paymentId, payments.id))
+    .where(
+      and(
+        eq(paymentAllocations.tenantId, ctx.tenantId),
+        eq(paymentAllocations.status, 'active'),
+        eq(payments.status, 'posted'),
+      ),
+    )
+    .groupBy(paymentAllocations.invoiceId)
+    .all();
+  const paidByInvoice = new Map(paidRows.map((r) => [r.invoiceId, r]));
+
   const today = nowIso().slice(0, 10);
   const weekAhead = new Date(Date.now() + 7 * 86400_000).toISOString().slice(0, 10);
 
   const rows: CreditRow[] = invoices.map(({ inv, customerName }) => {
-    const paid = invoicePaidCents(ctx, inv.id);
-    const lastPayment = ctx.db
-      .select({ date: payments.date })
-      .from(paymentAllocations)
-      .innerJoin(payments, eq(paymentAllocations.paymentId, payments.id))
-      .where(
-        and(
-          eq(paymentAllocations.tenantId, ctx.tenantId),
-          eq(paymentAllocations.invoiceId, inv.id),
-          eq(paymentAllocations.status, 'active'),
-          eq(payments.status, 'posted'),
-        ),
-      )
-      .orderBy(desc(payments.date))
-      .limit(1)
-      .get();
+    const paidInfo = paidByInvoice.get(inv.id);
+    const paid = paidInfo?.total ?? 0;
     return {
       invoiceId: inv.id,
       invoiceNumber: inv.docNumber,
@@ -71,7 +81,7 @@ export function creditOverview(ctx: Ctx, filter: { customerId?: string; status?:
       totalCents: inv.totalCents,
       paidCents: paid,
       remainingCents: Math.max(0, inv.totalCents - paid),
-      lastPaymentDate: lastPayment?.date ?? null,
+      lastPaymentDate: paidInfo?.lastDate ?? null,
       status: invoiceCreditStatus(inv, paid, today),
     };
   });

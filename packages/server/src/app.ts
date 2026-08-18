@@ -33,11 +33,10 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   const app = Fastify({ logger: false });
   app.register(cookie);
 
-  // Tenant branding assets (logo, flags) live next to the local database.
+  // Tenant branding assets (logo, flags, stamps) live next to the local DB.
   const brandingDir = path.join(path.dirname(defaultDbPath()), 'branding');
-  if (fs.existsSync(brandingDir)) {
-    app.register(fastifyStatic, { root: brandingDir, prefix: '/branding/' });
-  }
+  fs.mkdirSync(brandingDir, { recursive: true });
+  app.register(fastifyStatic, { root: brandingDir, prefix: '/branding/' });
 
   app.decorateRequest('sessionUser', null);
 

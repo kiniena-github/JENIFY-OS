@@ -15,6 +15,13 @@
       "when": 1786964012790,
       "tag": "0001_silky_gorilla_man",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787087611248,
+      "tag": "0002_sudden_pretty_boy",
+      "breakpoints": true
     }
   ]
 }

@@ -43,17 +43,22 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
     return { user: ctx.user, tenant, languages };
   });
 
-  /** Self-service preferences (currently: display language). */
-  app.patch<{ Body: { language?: string } }>('/api/auth/me', async (req) => {
-    const ctx = requireCtx(db, req);
-    if (req.body.language) {
-      db.update(users)
-        .set({ language: req.body.language })
-        .where(eq(users.id, ctx.user!.id))
-        .run();
-    }
-    return { ok: true, at: nowIso() };
-  });
+  /** Self-service preferences: display language and theme. */
+  app.patch<{ Body: { language?: string; theme?: 'light' | 'dark' | 'system' } }>(
+    '/api/auth/me',
+    async (req) => {
+      const ctx = requireCtx(db, req);
+      const patch: Partial<{ language: string; theme: string }> = {};
+      if (req.body.language) patch.language = req.body.language;
+      if (req.body.theme && ['light', 'dark', 'system'].includes(req.body.theme)) {
+        patch.theme = req.body.theme;
+      }
+      if (Object.keys(patch).length) {
+        db.update(users).set(patch).where(eq(users.id, ctx.user!.id)).run();
+      }
+      return { ok: true, at: nowIso() };
+    },
+  );
 
   app.get<{ Params: { lang: string } }>('/api/i18n/:lang', async (req) => {
     const ctx = requireCtx(db, req);

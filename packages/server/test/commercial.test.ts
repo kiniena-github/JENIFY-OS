@@ -31,7 +31,7 @@ import {
   getPayment,
 } from '../src/services/payments.js';
 import { creditOverview } from '../src/services/creditview.js';
-import { AppError } from '../src/util.js';
+import { AppError, nowIso } from '../src/util.js';
 
 const PC = 1000; // milli-pieces per pack
 
@@ -245,6 +245,8 @@ describe('deliveries', () => {
       destination: 'Adigrat',
       truckNumber: 'ET-3-77210',
       driverName: 'Tesfay H.',
+      driverPhone: '+251 911 000 404',
+      expectedDate: '2099-12-31',
     });
     expect(docNumber).toBe('DEL-0001');
     markLoading(tt.ownerCtx, delId);
@@ -260,25 +262,81 @@ describe('deliveries', () => {
     expect(getInvoice(tt.ownerCtx, invId).status).toBe('completed');
   });
 
-  it('requires truck/driver/destination before dispatching a factory delivery', () => {
+  it('requires complete delivery details at creation for factory deliveries', () => {
     const invId = confirmedInvoice();
-    const { id: delId } = createDelivery(tt.ownerCtx, { invoiceId: invId });
-    expect(() => dispatchDelivery(tt.ownerCtx, delId)).toThrow(/Truck, driver and destination/);
-    updateDeliveryDetails(tt.ownerCtx, delId, {
-      destination: 'Mekelle',
-      truckNumber: 'T-1',
-      driverName: 'D',
+    // missing destination
+    expect(() =>
+      createDelivery(tt.ownerCtx, {
+        invoiceId: invId,
+        truckNumber: 'T-1',
+        driverName: 'D',
+        driverPhone: '1',
+        expectedDate: '2099-12-31',
+      }),
+    ).toThrow(/Destination/);
+    // missing expected date
+    expect(() =>
+      createDelivery(tt.ownerCtx, {
+        invoiceId: invId,
+        destination: 'Mekelle',
+        truckNumber: 'T-1',
+        driverName: 'D',
+        driverPhone: '1',
+      }),
+    ).toThrow(/Expected delivery date/);
+    // expected date in the past
+    expect(() =>
+      createDelivery(tt.ownerCtx, {
+        invoiceId: invId,
+        destination: 'Mekelle',
+        truckNumber: 'T-1',
+        driverName: 'D',
+        driverPhone: '1',
+        expectedDate: '2020-01-01',
+      }),
+    ).toThrow(/before today/);
+    // missing truck for a factory delivery
+    expect(() =>
+      createDelivery(tt.ownerCtx, {
+        invoiceId: invId,
+        destination: 'Mekelle',
+        driverName: 'D',
+        driverPhone: '1',
+        expectedDate: '2099-12-31',
+      }),
+    ).toThrow(/Truck/);
+    // pickup deliberately requires no truck/driver
+    const { id: pickupId } = createDelivery(tt.ownerCtx, {
+      invoiceId: invId,
+      deliveryType: 'pickup',
+      destination: 'Factory gate',
+      expectedDate: '2099-12-31',
     });
-    dispatchDelivery(tt.ownerCtx, delId);
+    dispatchDelivery(tt.ownerCtx, pickupId);
   });
 
-  it('blocks invalid status jumps and duplicate deliveries', () => {
+  it('blocks invalid status jumps, duplicate deliveries, and bad actual dates', () => {
     const invId = confirmedInvoice();
-    const { id: delId } = createDelivery(tt.ownerCtx, { invoiceId: invId });
-    expect(() => createDelivery(tt.ownerCtx, { invoiceId: invId })).toThrow(/already exists/);
+    const details = {
+      invoiceId: invId,
+      destination: 'Adigrat',
+      truckNumber: 'T-1',
+      driverName: 'D',
+      driverPhone: '1',
+      expectedDate: '2099-12-31',
+    };
+    const { id: delId } = createDelivery(tt.ownerCtx, details);
+    expect(() => createDelivery(tt.ownerCtx, details)).toThrow(/already exists/);
+    // delivered before dispatch = invalid transition
     expect(() =>
-      markDelivered(tt.ownerCtx, delId, { actualDate: '2026-08-18', receivedBy: 'X' }),
+      markDelivered(tt.ownerCtx, delId, { actualDate: nowIso().slice(0, 10), receivedBy: 'X' }),
     ).toThrow(AppError);
+    dispatchDelivery(tt.ownerCtx, delId);
+    // actual delivery date cannot be in the future
+    expect(() =>
+      markDelivered(tt.ownerCtx, delId, { actualDate: '2099-12-30', receivedBy: 'X' }),
+    ).toThrow(/future/);
+    markDelivered(tt.ownerCtx, delId, { actualDate: nowIso().slice(0, 10), receivedBy: 'X' });
   });
 });
 

@@ -82,6 +82,7 @@ export const users = sqliteTable(
     passwordHash: text('password_hash').notNull(),
     roleId: text('role_id').notNull(),
     language: text('language').notNull().default('en'),
+    theme: text('theme').notNull().default('system'), // light | dark | system
     active: integer('active', { mode: 'boolean' }).notNull().default(true),
     lastLoginAt: text('last_login_at'),
     createdBy: text('created_by'),
@@ -159,6 +160,8 @@ export const tenantLanguages = sqliteTable(
     tenantId: text('tenant_id').notNull(),
     code: text('code').notNull(), // 'en' | 'am' | 'ti' | ...
     name: text('name').notNull(),
+    nativeName: text('native_name'),
+    direction: text('direction').notNull().default('ltr'), // ltr | rtl
     flagEmoji: text('flag_emoji'),
     enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
   },
@@ -209,6 +212,7 @@ export const parties = sqliteTable(
     location: text('location'),
     taxInfo: text('tax_info'),
     creditLimitCents: integer('credit_limit_cents'),
+    defaultPriceCategory: text('default_price_category'),
     notes: text('notes'),
     active: integer('active', { mode: 'boolean' }).notNull().default(true),
     createdBy: text('created_by'),
@@ -421,6 +425,8 @@ export const productionStages = sqliteTable(
     inputSource: text('input_source').notNull(), // 'lot' | 'prior_batch'
     outputForm: text('output_form').notNull(), // 'bulk' | 'packaged_items'
     requiresQc: integer('requires_qc', { mode: 'boolean' }).notNull().default(false),
+    /** physics of the stage: measured (loss derived) | conserved (out = in) | converted (units) */
+    outputPolicy: text('output_policy').notNull().default('measured'),
     inputItemId: text('input_item_id'),
     priorStageId: text('prior_stage_id'),
     outputItemIds: text('output_item_ids', { mode: 'json' }),

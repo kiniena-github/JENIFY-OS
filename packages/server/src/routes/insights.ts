@@ -33,10 +33,19 @@ export function registerInsightRoutes(app: FastifyInstance, db: Db): void {
     const ctx = requireCtx(db, req);
     const { getSettings } = await import('../services/settings.js');
     const modules = getSettings<{ simpleItemScreens?: unknown[] }>(ctx, 'modules');
-    const production = getSettings<{ iodization?: { targetPpm?: string } }>(ctx, 'production');
+    const production = getSettings<{
+      iodization?: { targetPpm?: string; additiveName?: string; additiveUnit?: string };
+    }>(ctx, 'production');
+    const general = getSettings<{ calendar?: string }>(ctx, 'general');
+    const branding = getSettings<Record<string, unknown>>(ctx, 'branding');
+    const pricing = getSettings<{ categories?: unknown[]; defaultCategory?: string }>(ctx, 'pricing');
     return {
       simpleItemScreens: modules?.data.simpleItemScreens ?? [],
       qualityTargetPpm: production?.data.iodization?.targetPpm ?? null,
+      additiveName: production?.data.iodization?.additiveName ?? null,
+      calendar: general?.data.calendar ?? 'gregorian',
+      branding: branding?.data ?? null,
+      pricing: pricing ? { categories: pricing.data.categories, defaultCategory: pricing.data.defaultCategory } : null,
     };
   });
 

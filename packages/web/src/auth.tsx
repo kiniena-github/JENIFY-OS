@@ -2,6 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 import type { ModuleId, ActionId, SessionUser } from '@factoryos/shared';
 import { hasPermission } from '@factoryos/shared';
 import { api, ApiError } from './api.js';
+import { setDisplayCalendar } from './lib/format.js';
 
 export interface Tenant {
   id: string;
@@ -17,8 +18,12 @@ export interface Tenant {
 export interface Language {
   code: string;
   name: string;
+  nativeName?: string | null;
+  direction?: string;
   flagEmoji: string | null;
 }
+
+type Theme = 'light' | 'dark' | 'system';
 
 interface AuthState {
   loading: boolean;
@@ -27,11 +32,13 @@ interface AuthState {
   languages: Language[];
   bundle: Record<string, string>;
   language: string;
+  theme: Theme;
   login: (username: string, password: string, remember: boolean) => Promise<void>;
   logout: () => Promise<void>;
   setLanguage: (code: string) => Promise<void>;
+  setTheme: (theme: Theme) => Promise<void>;
   refresh: () => Promise<void>;
-  can: (module: ModuleId, action: ActionId) => boolean;
+  can: (module: ModuleId, action: ActionId | string) => boolean;
   t: (key: string, fallback?: string) => string;
 }
 
@@ -44,6 +51,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [languages, setLanguages] = useState<Language[]>([]);
   const [bundle, setBundle] = useState<Record<string, string>>({});
   const [language, setLanguageState] = useState('en');
+  const [theme, setThemeState] = useState<Theme>('system');
 
   const loadBundle = useCallback(async (lang: string) => {
     const b = await api.get<Record<string, string>>(`/api/i18n/${lang}`);
@@ -59,6 +67,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUser(me.user);
       setTenant(me.tenant);
       setLanguages(me.languages);
+      setThemeState(me.user.theme ?? 'system');
+      // tenant display calendar (non-sensitive UI config)
+      try {
+        const cfg = await api.get<{ calendar?: string }>('/api/ui-config');
+        setDisplayCalendar(cfg.calendar);
+      } catch {
+        /* calendar stays gregorian */
+      }
       await loadBundle(me.user.language || 'en');
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
@@ -98,6 +114,33 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [loadBundle, user],
   );
 
+  const setTheme = useCallback(
+    async (next: Theme) => {
+      setThemeState(next);
+      if (user) await api.patch('/api/auth/me', { theme: next });
+    },
+    [user],
+  );
+
+  // apply the effective theme to the document (per-user preference; 'system'
+  // follows the OS setting live)
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const apply = () => {
+      const effective = theme === 'system' ? (media.matches ? 'dark' : 'light') : theme;
+      document.documentElement.dataset.theme = effective;
+    };
+    apply();
+    media.addEventListener('change', apply);
+    return () => media.removeEventListener('change', apply);
+  }, [theme]);
+
+  // text direction follows the selected language (RTL support)
+  useEffect(() => {
+    const current = languages.find((l) => l.code === language);
+    document.documentElement.dir = current?.direction === 'rtl' ? 'rtl' : 'ltr';
+  }, [language, languages]);
+
   // apply tenant branding to CSS variables
   useEffect(() => {
     if (tenant?.brandColor) {
@@ -114,14 +157,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       languages,
       bundle,
       language,
+      theme,
       login,
       logout,
       setLanguage,
+      setTheme,
       refresh,
       can: (module, action) => (user ? hasPermission(user.permissions, module, action) : false),
       t: (key, fallback) => bundle[key] ?? fallback ?? key,
     }),
-    [loading, user, tenant, languages, bundle, language, login, logout, setLanguage, refresh],
+    [loading, user, tenant, languages, bundle, language, theme, login, logout, setLanguage, setTheme, refresh],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

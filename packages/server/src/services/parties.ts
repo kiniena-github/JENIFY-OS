@@ -16,6 +16,7 @@ export function createParty(
     location?: string;
     taxInfo?: string;
     creditLimit?: number; // major currency units
+    defaultPriceCategory?: string;
     notes?: string;
   },
 ): string {
@@ -36,6 +37,7 @@ export function createParty(
       location: input.location ?? null,
       taxInfo: input.taxInfo ?? null,
       creditLimitCents: input.creditLimit != null ? Math.round(input.creditLimit * 100) : null,
+      defaultPriceCategory: input.defaultPriceCategory ?? null,
       notes: input.notes ?? null,
       createdBy: actorId(ctx),
       createdAt: nowIso(),
@@ -62,6 +64,7 @@ export function updateParty(
     location?: string;
     taxInfo?: string;
     creditLimit?: number | null;
+    defaultPriceCategory?: string | null;
     notes?: string;
     active?: boolean;
   },
@@ -90,6 +93,10 @@ export function updateParty(
           : patch.creditLimit === null
             ? null
             : Math.round(patch.creditLimit * 100),
+      defaultPriceCategory:
+        patch.defaultPriceCategory === undefined
+          ? party.defaultPriceCategory
+          : patch.defaultPriceCategory,
       notes: patch.notes ?? party.notes,
       active: patch.active ?? party.active,
     })
@@ -105,6 +112,22 @@ export function updateParty(
     before,
     after: patch,
   });
+  // credit controls are financial events — audit them under the credit module
+  if (patch.creditLimit !== undefined) {
+    const newCents = patch.creditLimit === null ? null : Math.round(patch.creditLimit * 100);
+    if (newCents !== party.creditLimitCents) {
+      writeAudit(ctx, {
+        module: 'credit',
+        action: 'credit_limit_change',
+        entity: 'party',
+        entityId: partyId,
+        reference: party.name,
+        summary: `Credit limit for '${party.name}' changed from ${party.creditLimitCents != null ? party.creditLimitCents / 100 : '—'} to ${newCents != null ? newCents / 100 : '—'}`,
+        before: { creditLimitCents: party.creditLimitCents },
+        after: { creditLimitCents: newCents },
+      });
+    }
+  }
 }
 
 export function getParty(ctx: Ctx, partyId: string) {

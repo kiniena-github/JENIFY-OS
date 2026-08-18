@@ -7,6 +7,7 @@ import {
   createBatch,
   startBatch,
   completeBatch,
+  correctBatchOutput,
   cancelBatch,
   listBatches,
   getBatch,
@@ -75,6 +76,16 @@ export function registerProductionRoutes(app: FastifyInstance, db: Db): void {
       const ctx = requireCtx(db, req);
       requirePermission(ctx, 'production', 'edit');
       completeBatch(ctx, req.params.id, req.body);
+      return { ok: true };
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { measuredOutputKg: number; reason: string } }>(
+    '/api/batches/:id/correct-output',
+    async (req) => {
+      const ctx = requireCtx(db, req);
+      requirePermission(ctx, 'production', 'approve');
+      correctBatchOutput(ctx, req.params.id, req.body.measuredOutputKg, req.body.reason);
       return { ok: true };
     },
   );

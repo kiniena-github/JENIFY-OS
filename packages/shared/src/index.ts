@@ -35,7 +35,16 @@ export const ACTIONS = [
 ] as const;
 export type ActionId = (typeof ACTIONS)[number];
 
-export type PermissionMatrix = Partial<Record<ModuleId, Partial<Record<ActionId, boolean>>>>;
+/**
+ * Module-specific fine-grained actions beyond the generic matrix.
+ * Kept deliberately small — extend only where a workflow genuinely needs
+ * an action narrower than view/create/edit/approve.
+ */
+export const EXTRA_ACTIONS: Partial<Record<ModuleId, readonly string[]>> = {
+  delivery: ['load', 'dispatch'],
+};
+
+export type PermissionMatrix = Partial<Record<ModuleId, Partial<Record<string, boolean>>>>;
 
 // ---------------------------------------------------------------------------
 // Document lifecycle
@@ -109,6 +118,16 @@ export type StageInputSource = (typeof STAGE_INPUT_SOURCES)[number];
 /** How a production stage emits its output. */
 export const STAGE_OUTPUT_FORMS = ['bulk', 'packaged_items'] as const;
 export type StageOutputForm = (typeof STAGE_OUTPUT_FORMS)[number];
+
+/**
+ * Physical behavior of a stage — configured per tenant, never assumed:
+ *   measured   output is entered/measured; variance/loss is derived (washing)
+ *   conserved  output defaults to input; NO automatic mass loss (iodization);
+ *              a real measured variance needs an explicit audited correction
+ *   converted  input mass is converted into product units (packaging)
+ */
+export const STAGE_OUTPUT_POLICIES = ['measured', 'conserved', 'converted'] as const;
+export type StageOutputPolicy = (typeof STAGE_OUTPUT_POLICIES)[number];
 
 /** Declarative extra-field definition for a stage (e.g. iodine added). */
 export interface StageAttributeDef {
@@ -231,12 +250,91 @@ export interface SessionUser {
   roleName: string;
   permissions: PermissionMatrix;
   language: string;
+  theme: 'light' | 'dark' | 'system';
 }
 
 export function hasPermission(
   matrix: PermissionMatrix,
   module: ModuleId,
-  action: ActionId,
+  action: ActionId | string,
 ): boolean {
   return matrix[module]?.[action] === true;
+}
+
+// ---------------------------------------------------------------------------
+// Price categories (Core configuration — add / rename / archive / default)
+// ---------------------------------------------------------------------------
+
+export interface PriceCategory {
+  code: string;
+  name: string;
+  active: boolean;
+}
+
+/**
+ * Pricing settings historically stored categories as plain strings; the
+ * upgraded shape is objects with archive + default support. This normalizer
+ * accepts both so historical settings versions keep working.
+ */
+export function normalizePriceCategories(raw: {
+  categories?: Array<string | PriceCategory>;
+  defaultCategory?: string;
+}): { categories: PriceCategory[]; defaultCode: string | null } {
+  const categories = (raw.categories ?? []).map((c) =>
+    typeof c === 'string'
+      ? { code: c, name: c.charAt(0).toUpperCase() + c.slice(1), active: true }
+      : { code: c.code, name: c.name, active: c.active !== false },
+  );
+  const active = categories.filter((c) => c.active);
+  const defaultCode =
+    raw.defaultCategory && active.some((c) => c.code === raw.defaultCategory)
+      ? raw.defaultCategory
+      : (active[0]?.code ?? null);
+  return { categories, defaultCode };
+}
+
+// ---------------------------------------------------------------------------
+// Calendar display (Core capability — never changes stored dates)
+// ---------------------------------------------------------------------------
+
+export const ETHIOPIAN_MONTHS = [
+  'Meskerem',
+  'Tikimt',
+  'Hidar',
+  'Tahsas',
+  'Tir',
+  'Yekatit',
+  'Megabit',
+  'Miyazya',
+  'Ginbot',
+  'Sene',
+  'Hamle',
+  'Nehase',
+  'Pagume',
+] as const;
+
+/**
+ * Convert a Gregorian date to the Ethiopian calendar for DISPLAY purposes.
+ * Rule: Ethiopian New Year (Meskerem 1) falls on 11 September GC, or
+ * 12 September in the Gregorian year preceding a Gregorian leap year.
+ */
+export function toEthiopianDate(gc: Date): { year: number; month: number; day: number; monthName: string } {
+  const isGregorianLeap = (y: number) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const newYearDay = (gcYear: number) => (isGregorianLeap(gcYear + 1) ? 12 : 11);
+  const utc = Date.UTC(gc.getFullYear(), gc.getMonth(), gc.getDate());
+  let nyYear = gc.getFullYear();
+  let ny = Date.UTC(nyYear, 8, newYearDay(nyYear)); // September = month index 8
+  if (utc < ny) {
+    nyYear -= 1;
+    ny = Date.UTC(nyYear, 8, newYearDay(nyYear));
+  }
+  const dayOfYear = Math.floor((utc - ny) / 86_400_000); // 0-based
+  const month = Math.floor(dayOfYear / 30) + 1;
+  const day = (dayOfYear % 30) + 1;
+  return {
+    year: nyYear - 7,
+    month,
+    day,
+    monthName: ETHIOPIAN_MONTHS[month - 1] ?? `M${month}`,
+  };
 }

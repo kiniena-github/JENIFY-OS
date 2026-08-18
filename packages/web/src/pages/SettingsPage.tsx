@@ -5,8 +5,9 @@ import { api } from '../api.js';
 import { usePageTitle } from '../components/Layout.js';
 import { StatusBadge, ErrorBox, Field } from '../components/ui.js';
 import { useItems, useWarehouses } from '../lib/queries.js';
+import { normalizePriceCategories, type PriceCategory } from '@factoryos/shared';
 
-type Tab = 'general' | 'warehouses' | 'pricing' | 'translations' | 'numbering';
+type Tab = 'general' | 'warehouses' | 'pricing' | 'translations' | 'numbering' | 'documents';
 
 export default function SettingsPage() {
   const { t } = useAuth();
@@ -18,6 +19,7 @@ export default function SettingsPage() {
     ['pricing', 'settings.tab_pricing', 'Prices & VAT'],
     ['translations', 'settings.tab_translations', 'Languages & Translations'],
     ['numbering', 'settings.tab_numbering', 'Document numbering'],
+    ['documents', 'settings.tab_documents', 'Documents & Branding'],
   ];
   return (
     <div>
@@ -31,6 +33,7 @@ export default function SettingsPage() {
       {tab === 'general' ? (
         <>
           <GeneralTab />
+          <CalendarPanel />
           <QualityConfigPanel />
         </>
       ) : null}
@@ -38,6 +41,7 @@ export default function SettingsPage() {
       {tab === 'pricing' ? <PricingTab /> : null}
       {tab === 'translations' ? <TranslationsTab /> : null}
       {tab === 'numbering' ? <NumberingTab /> : null}
+      {tab === 'documents' ? <DocumentsTab /> : null}
     </div>
   );
 }
@@ -100,6 +104,56 @@ function GeneralTab() {
 }
 
 /** Quality defaults (e.g. target iodine ppm) — versioned tenant settings. */
+/** Calendar display configuration — display only, stored dates never change. */
+function CalendarPanel() {
+  const { t, can } = useAuth();
+  const qc = useQueryClient();
+  const canEdit = can('settings', 'edit');
+  const generalQ = useQuery({
+    queryKey: ['settings', 'general'],
+    queryFn: () => api.get<{ version: number; data: Record<string, unknown> }>('/api/settings/general'),
+  });
+  const [error, setError] = useState<unknown>(null);
+  const [saved, setSaved] = useState(false);
+  const calendar = (generalQ.data?.data.calendar as string) ?? 'gregorian';
+
+  async function save(next: string) {
+    setError(null);
+    try {
+      await api.put('/api/settings/general', { data: { ...(generalQ.data?.data ?? {}), calendar: next } });
+      setSaved(true);
+      await qc.invalidateQueries({ queryKey: ['settings', 'general'] });
+      await qc.invalidateQueries({ queryKey: ['ui-config'] });
+      window.location.reload(); // date formatting is applied at load
+    } catch (err) {
+      setError(err);
+    }
+  }
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <h2>{t('settings.calendar', 'Calendar display')}</h2>
+      </div>
+      <div className="panel-body">
+        <ErrorBox error={error} />
+        {saved ? <div className="page-info">{t('settings.saved', 'Saved. Settings change future behavior only.')}</div> : null}
+        <div className="form-grid">
+          <Field
+            label={t('settings.calendar', 'Calendar display')}
+            hint={t('settings.calendar_note', 'Display only ""—"" stored dates never change. Ethiopian dates are marked with EC.').replace('""—""', '—')}
+          >
+            <select value={calendar} disabled={!canEdit} onChange={(e) => void save(e.target.value)}>
+              <option value="gregorian">{t('settings.calendar_gc', 'Gregorian (GC)')}</option>
+              <option value="ethiopian">{t('settings.calendar_ec', 'Ethiopian (EC)')}</option>
+            </select>
+          </Field>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function QualityConfigPanel() {
   const { t, can } = useAuth();
   const qc = useQueryClient();
@@ -107,23 +161,41 @@ function QualityConfigPanel() {
   const prodQ = useQuery({
     queryKey: ['settings', 'production'],
     queryFn: () =>
-      api.get<{ version: number; data: { iodization?: { targetPpm?: string } } }>(
-        '/api/settings/production',
-      ),
+      api.get<{
+        version: number;
+        data: { iodization?: { targetPpm?: string; additiveName?: string; additiveForm?: string; additiveUnit?: string } };
+      }>('/api/settings/production'),
   });
   const [target, setTarget] = useState<string | null>(null);
+  const [additiveName, setAdditiveName] = useState<string | null>(null);
+  const [additiveForm, setAdditiveForm] = useState<string | null>(null);
+  const [additiveUnit, setAdditiveUnit] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [saved, setSaved] = useState(false);
-  const effective = target ?? prodQ.data?.data.iodization?.targetPpm ?? '';
+  const iod = prodQ.data?.data.iodization ?? {};
+  const effective = target ?? iod.targetPpm ?? '';
+  const effName = additiveName ?? iod.additiveName ?? '';
+  const effForm = additiveForm ?? iod.additiveForm ?? '';
+  const effUnit = additiveUnit ?? iod.additiveUnit ?? 'kg';
+  const dirty = target !== null || additiveName !== null || additiveForm !== null || additiveUnit !== null;
 
   async function save() {
     setError(null);
     try {
       const data = { ...(prodQ.data?.data ?? {}) };
-      data.iodization = { ...(data.iodization ?? {}), targetPpm: effective };
+      data.iodization = {
+        ...(data.iodization ?? {}),
+        targetPpm: effective,
+        additiveName: effName,
+        additiveForm: effForm,
+        additiveUnit: effUnit,
+      };
       await api.put('/api/settings/production', { data });
       setSaved(true);
       setTarget(null);
+      setAdditiveName(null);
+      setAdditiveForm(null);
+      setAdditiveUnit(null);
       await qc.invalidateQueries({ queryKey: ['settings', 'production'] });
       await qc.invalidateQueries({ queryKey: ['ui-config'] });
     } catch (err) {
@@ -143,7 +215,7 @@ function QualityConfigPanel() {
         {saved ? <div className="page-info">{t('settings.saved', 'Saved. Settings change future behavior only.')}</div> : null}
         <div className="form-grid">
           <Field
-            label={t('settings.quality_target', 'Target iodine level (ppm)')}
+            label={t('settings.quality_target', 'Target level (ppm)')}
             hint={t(
               'settings.quality_note',
               'Used as the default target on new quality tests. Tests already recorded keep the target that applied at the time.',
@@ -151,10 +223,22 @@ function QualityConfigPanel() {
           >
             <input value={effective} disabled={!canEdit} onChange={(e) => setTarget(e.target.value)} />
           </Field>
+          <Field label={t('settings.additive_name', 'Additive name')}>
+            <input value={effName} disabled={!canEdit} onChange={(e) => setAdditiveName(e.target.value)} />
+          </Field>
+          <Field
+            label={t('settings.additive_form', 'Additive form/type')}
+            hint={t('settings.additive_form_hint', 'e.g. powder, solution, premix — confirm with the factory before relying on it')}
+          >
+            <input value={effForm} disabled={!canEdit} onChange={(e) => setAdditiveForm(e.target.value)} />
+          </Field>
+          <Field label={t('settings.additive_unit', 'Additive unit')}>
+            <input value={effUnit} disabled={!canEdit} onChange={(e) => setAdditiveUnit(e.target.value)} />
+          </Field>
         </div>
         {canEdit ? (
           <div className="form-actions">
-            <button className="btn btn-primary" disabled={target === null} onClick={() => void save()}>
+            <button className="btn btn-primary" disabled={!dirty} onClick={() => void save()}>
               {t('settings.save', 'Save settings')}
             </button>
           </div>
@@ -167,10 +251,43 @@ function QualityConfigPanel() {
 function WarehousesTab() {
   const { t, can } = useAuth();
   const qc = useQueryClient();
-  const warehouses = useWarehouses();
+  const warehouses = useQuery({
+    queryKey: ['warehouses', 'all'],
+    queryFn: () => api.get<Array<{ id: string; code: string; name: string; locationNote: string | null; active: boolean }>>('/api/warehouses?includeInactive=true'),
+  });
   const canEdit = can('settings', 'edit');
   const [error, setError] = useState<unknown>(null);
   const [edits, setEdits] = useState<Record<string, { name: string; locationNote: string }>>({});
+  const [newCode, setNewCode] = useState('');
+  const [newName, setNewName] = useState('');
+  const [newLocation, setNewLocation] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function addWarehouse() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post('/api/warehouses', { code: newCode.trim(), name: newName.trim(), locationNote: newLocation || undefined });
+      setNewCode('');
+      setNewName('');
+      setNewLocation('');
+      await qc.invalidateQueries({ queryKey: ['warehouses'] });
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setActive(id: string, active: boolean) {
+    setError(null);
+    try {
+      await api.patch(`/api/warehouses/${id}`, { active });
+      await qc.invalidateQueries({ queryKey: ['warehouses'] });
+    } catch (err) {
+      setError(err);
+    }
+  }
 
   async function save(id: string) {
     setError(null);
@@ -192,8 +309,34 @@ function WarehousesTab() {
     <div>
       <ErrorBox error={error} />
       <div className="page-info">
-        {t('settings.warehouse_note', 'Stock balances are never edited here — they come from approved movements only.')}
+        {t('settings.warehouse_note', 'Stock balances are never edited here — they come from approved movements only.')}{' '}
+        {t('settings.warehouse_archive_note', 'A warehouse with stock or history is archived, never deleted. Move stock out before closing it.')}
       </div>
+      {canEdit ? (
+        <div className="panel">
+          <div className="panel-head">
+            <h2>{t('settings.add_warehouse', 'Add warehouse')}</h2>
+          </div>
+          <div className="panel-body">
+            <div className="form-grid">
+              <Field label={t('settings.code', 'Code')} required>
+                <input value={newCode} onChange={(e) => setNewCode(e.target.value)} />
+              </Field>
+              <Field label={t('settings.name', 'Name')} required>
+                <input value={newName} onChange={(e) => setNewName(e.target.value)} />
+              </Field>
+              <Field label={t('settings.location_note', 'Location note')}>
+                <input value={newLocation} onChange={(e) => setNewLocation(e.target.value)} />
+              </Field>
+            </div>
+            <div className="form-actions">
+              <button className="btn btn-primary" disabled={busy || !newCode.trim() || !newName.trim()} onClick={() => void addWarehouse()}>
+                {t('settings.add_warehouse', 'Add warehouse')}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <div className="cards" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))' }}>
         {(warehouses.data ?? []).map((w) => {
           const e = edits[w.id] ?? { name: w.name, locationNote: w.locationNote ?? '' };
@@ -219,11 +362,18 @@ function WarehousesTab() {
                   />
                 </Field>
               </div>
-              {canEdit && dirty ? (
-                <button className="btn btn-primary btn-sm mt" onClick={() => void save(w.id)}>
-                  {t('settings.save', 'Save settings')}
-                </button>
-              ) : null}
+              <div className="flex mt">
+                {canEdit && dirty ? (
+                  <button className="btn btn-primary btn-sm" onClick={() => void save(w.id)}>
+                    {t('settings.save', 'Save settings')}
+                  </button>
+                ) : null}
+                {canEdit ? (
+                  <button className="btn btn-secondary btn-sm" onClick={() => void setActive(w.id, !w.active)}>
+                    {w.active ? t('status.inactive', 'Archive') : t('status.active', 'Reactivate')}
+                  </button>
+                ) : null}
+              </div>
             </div>
           );
         })}
@@ -233,7 +383,8 @@ function WarehousesTab() {
 }
 
 interface PricingData {
-  categories: string[];
+  categories: Array<string | { code: string; name: string; active: boolean }>;
+  defaultCategory?: string;
   customPrice?: { enabled?: boolean; requiresApproval?: boolean };
   discount?: { requiresApproval?: boolean };
   prices: Record<string, Record<string, number | null>>;
@@ -268,7 +419,31 @@ function PricingTab() {
     }
   }, [vatQ.data]);
 
+  const [newCatName, setNewCatName] = useState('');
   if (!pricing) return <div className="centered-page">Loading…</div>;
+  const normalized = normalizePriceCategories(pricing);
+
+  function mutateCategories(fn: (cats: PriceCategory[]) => void) {
+    setPricing((p) => {
+      if (!p) return p;
+      const next: PricingData = JSON.parse(JSON.stringify(p));
+      const cats: PriceCategory[] = normalizePriceCategories(next).categories;
+      fn(cats);
+      next.categories = cats;
+      return next;
+    });
+    setSaved(false);
+  }
+
+  function addCategory() {
+    const name = newCatName.trim();
+    if (!name) return;
+    const code = name.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+    mutateCategories((cats) => {
+      if (!cats.some((c) => c.code === code)) cats.push({ code, name, active: true });
+    });
+    setNewCatName('');
+  }
 
   function setPrice(itemId: string, cat: string, value: string) {
     setPricing((p) => {
@@ -302,6 +477,67 @@ function PricingTab() {
       ) : null}
       <div className="panel">
         <div className="panel-head">
+          <h2>{t('settings.categories', 'Price categories')}</h2>
+          <div className="spacer" />
+          <span className="muted">{t('settings.category_note', 'Categories are archived, never deleted — historical invoices keep the category they used.')}</span>
+        </div>
+        <div className="panel-body">
+          <div className="flex" style={{ flexWrap: 'wrap', gap: 14 }}>
+            {normalized.categories.map((c) => (
+              <div key={c.code} className="flex" style={{ gap: 6 }}>
+                <input
+                  style={{ width: 130 }}
+                  value={c.name}
+                  disabled={!canEdit}
+                  onChange={(e) => mutateCategories((cats) => {
+                    const target = cats.find((x) => x.code === c.code);
+                    if (target) target.name = e.target.value;
+                  })}
+                />
+                <label className="flex" style={{ fontSize: 12 }}>
+                  <input
+                    type="radio"
+                    name="defaultCategory"
+                    checked={normalized.defaultCode === c.code}
+                    disabled={!canEdit || !c.active}
+                    onChange={() => {
+                      setPricing((p) => (p ? { ...p, defaultCategory: c.code } : p));
+                      setSaved(false);
+                    }}
+                  />
+                  {t('settings.category_default', 'Default')}
+                </label>
+                {canEdit ? (
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => mutateCategories((cats) => {
+                      const target = cats.find((x) => x.code === c.code);
+                      if (target) target.active = !target.active;
+                    })}
+                  >
+                    {c.active ? t('status.inactive', 'Archive') : t('status.active', 'Reactivate')}
+                  </button>
+                ) : null}
+              </div>
+            ))}
+            {canEdit ? (
+              <div className="flex" style={{ gap: 6 }}>
+                <input
+                  style={{ width: 130 }}
+                  placeholder={t('settings.category_add', 'Add category')}
+                  value={newCatName}
+                  onChange={(e) => setNewCatName(e.target.value)}
+                />
+                <button className="btn btn-secondary btn-sm" disabled={!newCatName.trim()} onClick={addCategory}>
+                  +
+                </button>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+      <div className="panel">
+        <div className="panel-head">
           <h2>{t('settings.price_master', 'Product price master')} ({currency})</h2>
           <div className="spacer" />
           <span className="muted">v{pricingQ.data?.version ?? 0}</span>
@@ -311,9 +547,9 @@ function PricingTab() {
             <thead>
               <tr>
                 <th>{t('inventory.product', 'Product')}</th>
-                {pricing.categories.map((c) => (
-                  <th key={c} className="num">
-                    {t(`sales.cat_${c}`, c)}
+                {normalized.categories.filter((c) => c.active).map((c) => (
+                  <th key={c.code} className="num">
+                    {t(`sales.cat_${c.code}`, c.name)}
                   </th>
                 ))}
               </tr>
@@ -322,15 +558,15 @@ function PricingTab() {
               {(items.data ?? []).map((i) => (
                 <tr key={i.id}>
                   <td>{i.name}</td>
-                  {pricing.categories.map((c) => (
-                    <td key={c} className="num" style={{ width: 140 }}>
+                  {normalized.categories.filter((c) => c.active).map((c) => (
+                    <td key={c.code} className="num" style={{ width: 140 }}>
                       <input
                         type="number"
                         min="0"
                         step="any"
                         disabled={!canEdit}
-                        value={pricing.prices[i.id]?.[c] ?? ''}
-                        onChange={(e) => setPrice(i.id, c, e.target.value)}
+                        value={pricing.prices[i.id]?.[c.code] ?? ''}
+                        onChange={(e) => setPrice(i.id, c.code, e.target.value)}
                       />
                     </td>
                   ))}
@@ -383,6 +619,115 @@ interface TranslationRow {
   overrides: Array<{ language: string; text: string; status: string }>;
 }
 
+/** Dynamic language manager: add languages, rename, direction, archive. */
+function LanguageManager() {
+  const { t, can, refresh } = useAuth();
+  const canEdit = can('settings', 'edit');
+  const qc = useQueryClient();
+  const langs = useQuery({
+    queryKey: ['languages', 'all'],
+    queryFn: () =>
+      api.get<Array<{ id: string; code: string; name: string; nativeName: string | null; direction: string; enabled: boolean }>>(
+        '/api/languages?includeDisabled=true',
+      ),
+  });
+  const [error, setError] = useState<unknown>(null);
+  const [name, setName] = useState('');
+  const [nativeName, setNativeName] = useState('');
+  const [code, setCode] = useState('');
+  const [direction, setDirection] = useState<'ltr' | 'rtl'>('ltr');
+  const [busy, setBusy] = useState(false);
+
+  async function add() {
+    setBusy(true);
+    setError(null);
+    try {
+      const display = nativeName.trim() ? `${nativeName.trim()} (${name.trim()})` : name.trim();
+      await api.post('/api/languages', {
+        code: code.trim(),
+        name: display,
+        nativeName: nativeName.trim() || undefined,
+        direction,
+      });
+      setName('');
+      setNativeName('');
+      setCode('');
+      setDirection('ltr');
+      await qc.invalidateQueries({ queryKey: ['languages'] });
+      await refresh();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setEnabled(id: string, enabled: boolean) {
+    setError(null);
+    try {
+      await api.patch(`/api/languages/${id}`, { enabled });
+      await qc.invalidateQueries({ queryKey: ['languages'] });
+      await refresh();
+    } catch (err) {
+      setError(err);
+    }
+  }
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <h2>{t('settings.add_language', 'Add language')}</h2>
+        <div className="spacer" />
+        <span className="muted">
+          {t('settings.lang_archive_note', 'Languages with translations are archived, never deleted. English stays as the fallback.')}
+        </span>
+      </div>
+      <div className="panel-body">
+        <ErrorBox error={error} />
+        {canEdit ? (
+          <div className="form-grid">
+            <Field label={t('settings.lang_name', 'Language name')} required>
+              <input value={name} placeholder="Afaan Oromo" onChange={(e) => setName(e.target.value)} />
+            </Field>
+            <Field label={t('settings.lang_native', 'Native name')}>
+              <input value={nativeName} placeholder="Afaan Oromoo" onChange={(e) => setNativeName(e.target.value)} />
+            </Field>
+            <Field label={t('settings.lang_code', 'Standard code')} required>
+              <input value={code} placeholder="om" onChange={(e) => setCode(e.target.value)} />
+            </Field>
+            <Field label={t('settings.lang_direction', 'Direction')}>
+              <select value={direction} onChange={(e) => setDirection(e.target.value as 'ltr' | 'rtl')}>
+                <option value="ltr">LTR</option>
+                <option value="rtl">RTL</option>
+              </select>
+            </Field>
+            <div className="field">
+              <label>&nbsp;</label>
+              <button className="btn btn-primary" disabled={busy || !name.trim() || !code.trim()} onClick={() => void add()}>
+                + {t('settings.add_language', 'Add language')}
+              </button>
+            </div>
+          </div>
+        ) : null}
+        <div className="flex mt" style={{ flexWrap: 'wrap' }}>
+          {(langs.data ?? []).map((l) => (
+            <div key={l.id} className="flex" style={{ gap: 6 }}>
+              <span className={`badge ${l.enabled ? 'badge-blue' : 'badge-gray'}`}>
+                {l.name} · {l.code} · {l.direction.toUpperCase()}
+              </span>
+              {canEdit && l.code !== 'en' ? (
+                <button className="btn btn-secondary btn-sm" onClick={() => void setEnabled(l.id, !l.enabled)}>
+                  {l.enabled ? t('status.inactive', 'Archive') : t('status.active', 'Reactivate')}
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TranslationsTab() {
   const { t, languages, can, refresh } = useAuth();
   const canEdit = can('settings', 'edit');
@@ -425,6 +770,7 @@ function TranslationsTab() {
       <div className="page-info">
         {t('settings.i18n_note', 'English is the base language. Missing translations fall back to English. Changing labels never changes business data.')}
       </div>
+      <LanguageManager />
       <div className="panel">
         <div className="panel-head">
           <div className="filters">
@@ -494,6 +840,162 @@ function TranslationsTab() {
   );
 }
 
+/** Documents & Branding: company details, logos/stamps, page setup. */
+function DocumentsTab() {
+  const { t, can, tenant } = useAuth();
+  const canEdit = can('settings', 'edit');
+  const qc = useQueryClient();
+  const brandingQ = useQuery({
+    queryKey: ['settings', 'branding'],
+    queryFn: () => api.get<{ version: number; data: Record<string, unknown> }>('/api/settings/branding'),
+  });
+  const [draft, setDraft] = useState<Record<string, unknown> | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [saved, setSaved] = useState(false);
+  const data = draft ?? brandingQ.data?.data ?? {};
+  const assets = (data.assets ?? {}) as Record<string, string>;
+
+  function set(key: string, value: unknown) {
+    setDraft({ ...data, [key]: value });
+    setSaved(false);
+  }
+
+  async function save() {
+    setError(null);
+    try {
+      await api.put('/api/settings/branding', { data });
+      setSaved(true);
+      setDraft(null);
+      await qc.invalidateQueries({ queryKey: ['settings', 'branding'] });
+      await qc.invalidateQueries({ queryKey: ['ui-config'] });
+    } catch (err) {
+      setError(err);
+    }
+  }
+
+  async function upload(kind: string, file: File) {
+    setError(null);
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const res = await api.post<{ path: string }>('/api/branding-asset', { kind, dataUrl });
+      if (kind !== 'logo') {
+        const nextAssets = { ...assets, [kind]: res.path };
+        await api.put('/api/settings/branding', { data: { ...data, assets: nextAssets } });
+      }
+      await qc.invalidateQueries();
+    } catch (err) {
+      setError(err);
+    }
+  }
+
+  const field = (key: string, labelKey: string, fallback: string) => (
+    <Field label={t(labelKey, fallback)}>
+      <input value={String(data[key] ?? '')} disabled={!canEdit} onChange={(e) => set(key, e.target.value)} />
+    </Field>
+  );
+
+  return (
+    <div>
+      <ErrorBox error={error} />
+      {saved ? <div className="page-info">{t('settings.saved', 'Saved. Settings change future behavior only.')}</div> : null}
+      <div className="page-info">{t('branding.immutable_note', 'Changing branding or templates never changes transaction data. Documents always show current branding with their original immutable values.')}</div>
+
+      <div className="panel">
+        <div className="panel-head">
+          <h2>{t('branding.company_details', 'Company details on documents')}</h2>
+        </div>
+        <div className="panel-body">
+          <div className="form-grid">
+            {field('companyName', 'settings.company_name', 'Company name')}
+            {field('address', 'branding.address', 'Address')}
+            {field('phone', 'branding.phone', 'Phone')}
+            {field('email', 'branding.email', 'Email')}
+            {field('tin', 'branding.tin', 'TIN / tax number')}
+            {field('headerNote', 'branding.header_note', 'Document header note')}
+            {field('footerNote', 'branding.footer_note', 'Document footer note')}
+            <Field label={t('branding.page_size', 'Page size')}>
+              <select value={String(data.pageSize ?? 'A4')} disabled={!canEdit} onChange={(e) => set('pageSize', e.target.value)}>
+                <option value="A4">A4</option>
+                <option value="Letter">Letter</option>
+              </select>
+            </Field>
+          </div>
+          {canEdit ? (
+            <div className="form-actions">
+              <button className="btn btn-primary" disabled={draft === null} onClick={() => void save()}>
+                {t('settings.save', 'Save settings')}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head">
+          <h2>{t('branding.assets', 'Logos & signatures')}</h2>
+        </div>
+        <div className="panel-body">
+          <div className="form-grid">
+            {(['logo', 'logo2', 'stamp', 'signature'] as const).map((kind) => {
+              const current = kind === 'logo' ? tenant?.logoPath : assets[kind];
+              return (
+                <div key={kind} className="field">
+                  <label>{t(`branding.${kind}`, kind)}</label>
+                  <div className="flex">
+                    {current ? (
+                      <img src={current} alt="" style={{ height: 44, borderRadius: 6, border: '1px solid var(--border)' }} />
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                    {canEdit ? (
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) void upload(kind, f);
+                        }}
+                      />
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="form-actions">
+            <a className="btn btn-secondary" href="/print/invoice/sample" onClick={(e) => e.preventDefault()} style={{ display: 'none' }}>
+              hidden
+            </a>
+            <PreviewButton />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Opens the most recent invoice (or any printable doc) as a live preview. */
+function PreviewButton() {
+  const { t } = useAuth();
+  const invoices = useQuery({
+    queryKey: ['invoices', ''],
+    queryFn: () => api.get<Array<{ id: string }>>('/api/invoices'),
+    retry: false,
+  });
+  const target = invoices.data?.[0];
+  if (!target) return null;
+  return (
+    <a className="btn btn-secondary" href={`/print/invoice/${target.id}`}>
+      {t('branding.preview', 'Preview sample document')}
+    </a>
+  );
+}
+
 interface SequenceRow {
   seqKey: string;
   prefix: string;
@@ -543,7 +1045,12 @@ function NumberingTab() {
             <tbody>
               {(data.data ?? []).map((s) => (
                 <tr key={s.seqKey}>
-                  <td className="mono">{s.seqKey}</td>
+                  <td>
+                    {t(`seq.${s.seqKey}`, s.seqKey)}{' '}
+                    <span className="muted mono" style={{ fontSize: 11 }}>
+                      {s.seqKey}
+                    </span>
+                  </td>
                   <td style={{ width: 160 }}>
                     <input
                       value={edits[s.seqKey] ?? s.prefix}

@@ -208,7 +208,8 @@ describe('end-to-end factory workflow over HTTP', () => {
       attributes: { iodine_added_kg: 0.21 },
     });
     iodId = created.id;
-    await ok('operations', 'POST', `/api/batches/${iodId}/complete`, { outputQty: 4580 });
+    // conserved stage: no output entry — released quantity equals input
+    await ok('operations', 'POST', `/api/batches/${iodId}/complete`, {});
 
     await ok('operations', 'POST', `/api/batches/${iodId}/qc-test`, {
       targetLevel: '30-40 ppm',
@@ -305,6 +306,8 @@ describe('end-to-end factory workflow over HTTP', () => {
       destination: 'Adigrat',
       truckNumber: 'ET-3-77210',
       driverName: 'Tesfay H.',
+      driverPhone: '+251 911 000 404',
+      expectedDate: '2099-12-31',
     });
     deliveryId = created.id;
     await ok('warehouse', 'POST', `/api/deliveries/${deliveryId}/loading`);

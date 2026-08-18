@@ -74,6 +74,7 @@ function StagePanel({ stage }: { stage: Stage }) {
   const [cancelling, setCancelling] = useState<Batch | null>(null);
   const [completing, setCompleting] = useState<Batch | null>(null);
   const [inspecting, setInspecting] = useState<Batch | null>(null);
+  const [correcting, setCorrecting] = useState<Batch | null>(null);
 
   const stageBatches = (batches.data ?? []).filter((b) => b.stageId === stage.id);
   const itemName = (id: string | null) => items.data?.find((i) => i.id === id)?.name ?? '—';
@@ -103,12 +104,14 @@ function StagePanel({ stage }: { stage: Stage }) {
           label={stage.outputForm === 'bulk' ? t('production.output_today', 'Output today') : t('production.packed_today', 'Packed today')}
           value={fmt.qtySmart(outputToday)}
           sub={
-            inputToday > 0 && stage.outputForm === 'bulk'
+            inputToday > 0 && stage.outputPolicy === 'measured'
               ? `${((outputToday / inputToday) * 100).toFixed(1)}% ${t('production.efficiency', 'efficiency')}`
-              : undefined
+              : stage.outputPolicy === 'conserved'
+                ? t('production.conserved', 'Conserved')
+                : undefined
           }
         />
-        {stage.outputForm === 'bulk' ? (
+        {stage.outputPolicy === 'measured' && stage.outputForm === 'bulk' ? (
           <StatCard label={t('production.loss_today', 'Waste / loss')} value={fmt.qtySmart(lossToday)} tone={lossToday > 0 ? 'danger' : undefined} />
         ) : null}
         <StatCard label={t('production.open', 'Open batches')} value={open.length} sub={t('status.in_process', 'In Process')} />
@@ -166,7 +169,13 @@ function StagePanel({ stage }: { stage: Stage }) {
                         : '—'}
                   </td>
                   {stage.outputForm === 'bulk' ? (
-                    <td className="num">{b.lossQty != null ? fmt.qty(b.lossQty) : '—'}</td>
+                    <td className="num">
+                      {stage.outputPolicy === 'conserved' && (b.lossQty ?? 0) === 0
+                        ? '—'
+                        : b.lossQty != null
+                          ? fmt.qty(b.lossQty)
+                          : '—'}
+                    </td>
                   ) : (
                     <td>{itemName(b.outputItemId)}</td>
                   )}
@@ -197,6 +206,11 @@ function StagePanel({ stage }: { stage: Stage }) {
                     {stage.requiresQc && b.status === 'completed' && !isReleased(b) ? (
                       <button className="btn btn-primary btn-sm" onClick={() => setInspecting(b)}>
                         {t('production.qc_action', 'Quality test')}
+                      </button>
+                    ) : null}{' '}
+                    {stage.outputForm === 'bulk' && b.status === 'completed' && can('production', 'approve') ? (
+                      <button className="btn btn-secondary btn-sm" onClick={() => setCorrecting(b)}>
+                        {t('production.correct_output', 'Record measured variance')}
                       </button>
                     ) : null}
                   </td>
@@ -231,8 +245,71 @@ function StagePanel({ stage }: { stage: Stage }) {
       {inspecting ? (
         <BatchDetailModal stage={stage} batch={inspecting} onClose={() => setInspecting(null)} />
       ) : null}
+      {correcting ? (
+        <CorrectOutputModal batch={correcting} onClose={() => setCorrecting(null)} />
+      ) : null}
     </div>
   );
+}
+
+/** Explicit measured variance for a completed bulk batch — audited with reason. */
+function CorrectOutputModal({ batch, onClose }: { batch: Batch; onClose: () => void }) {
+  const { t } = useAuth();
+  const qc = useQueryClient();
+  const [measured, setMeasured] = useState(String((batch.outputQty ?? batch.inputQty) / 1000));
+  const [reason, setReason] = useState('');
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const variance = Number(measured || 0) - (batch.outputQty ?? 0) / 1000;
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post(`/api/batches/${batch.id}/correct-output`, {
+        measuredOutputKg: Number(measured),
+        reason,
+      });
+      invalidate(qc);
+      onClose();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title={`${t('production.correct_output', 'Record measured variance')} — ${batch.docNumber}`} onClose={onClose}>
+      <ErrorBox error={error} />
+      <div className="page-info">
+        {t('production.input', 'Input')}: {fmt.qty(batch.inputQty)} kg · {t('production.output', 'Output')}:{' '}
+        {fmt.qty(batch.outputQty ?? 0)} kg
+      </div>
+      <div className="form-grid">
+        <Field label={t('production.measured_output', 'Measured output (kg)')} required>
+          <input type="number" min="0" step="any" value={measured} onChange={(e) => setMeasured(e.target.value)} />
+        </Field>
+        <Field label={t('audit.reason', 'Reason')} required hint={`${variance >= 0 ? '+' : ''}${variance.toFixed(2)} kg`}>
+          <input value={reason} onChange={(e) => setReason(e.target.value)} />
+        </Field>
+      </div>
+      <div className="form-actions">
+        <button className="btn btn-secondary" onClick={onClose}>
+          {t('shell.cancel', 'Cancel')}
+        </button>
+        <button className="btn btn-primary" disabled={busy || !reason.trim() || !(Number(measured) > 0)} onClick={() => void save()}>
+          {t('production.correct_output', 'Record measured variance')}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/** Attribute label with its unit — skipped when the translation already names it. */
+function attrLabel(label: string, unit?: string | null): string {
+  if (!unit || label.includes(`(${unit})`)) return label;
+  return `${label} (${unit})`;
 }
 
 /** Output + attribute fields shared by the new-batch form and complete modal. */
@@ -254,7 +331,7 @@ function OutputFields({
   return (
     <>
       {(stage.attributes ?? []).map((a) => (
-        <Field key={a.key} label={`${t(a.labelKey, a.key)}${a.unit ? ` (${a.unit})` : ''}`} required={a.required}>
+        <Field key={a.key} label={attrLabel(t(a.labelKey, a.key), a.unit)} required={a.required}>
           <input
             type={a.type === 'number' ? 'number' : 'text'}
             step="any"
@@ -263,7 +340,16 @@ function OutputFields({
           />
         </Field>
       ))}
-      {stage.outputForm === 'bulk' ? (
+      {stage.outputForm === 'bulk' && stage.outputPolicy === 'conserved' ? (
+        <div className="field" style={{ gridColumn: '1 / -1' }}>
+          <div className="page-info" style={{ margin: 0 }}>
+            {t(
+              'production.conserved_note',
+              'This stage conserves quantity — output equals input. A measured variance can be recorded later as an audited correction.',
+            )}
+          </div>
+        </div>
+      ) : stage.outputForm === 'bulk' ? (
         <Field label={t('production.output_qty', 'Output quantity (kg)')} required>
           <input type="number" min="0" step="any" value={state.outputQty ?? ''} onChange={(e) => setState('outputQty', e.target.value)} />
         </Field>
@@ -308,6 +394,7 @@ function collectOutput(stage: Stage, state: Record<string, string>) {
     if (v !== undefined && v !== '') attributes[a.key] = a.type === 'number' ? Number(v) : v;
   }
   if (stage.outputForm === 'bulk') {
+    if (stage.outputPolicy === 'conserved') return { attributes }; // output = input
     return { outputQty: state.outputQty ? Number(state.outputQty) : undefined, attributes };
   }
   return {
@@ -323,7 +410,9 @@ function outputReady(stage: Stage, state: Record<string, string>): boolean {
   for (const a of stage.attributes ?? []) {
     if (a.required && !(state[`attr_${a.key}`] ?? '').length) return false;
   }
-  if (stage.outputForm === 'bulk') return !!state.outputQty;
+  if (stage.outputForm === 'bulk') {
+    return stage.outputPolicy === 'conserved' ? true : !!state.outputQty;
+  }
   return !!state.outputItemId && !!state.unitsProduced && !!state.outputWarehouseId;
 }
 
@@ -525,9 +614,11 @@ function CompleteModal({ stage, batch, onClose }: { stage: Stage; batch: Batch; 
     return init;
   });
   const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
   const setState = (k: string, v: string) => setStateObj((s) => ({ ...s, [k]: v }));
 
   async function complete() {
+    setBusy(true);
     setError(null);
     try {
       await api.post(`/api/batches/${batch.id}/complete`, collectOutput(stage, state));
@@ -535,6 +626,8 @@ function CompleteModal({ stage, batch, onClose }: { stage: Stage; batch: Batch; 
       onClose();
     } catch (err) {
       setError(err);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -551,7 +644,7 @@ function CompleteModal({ stage, batch, onClose }: { stage: Stage; batch: Batch; 
         <button className="btn btn-secondary" onClick={onClose}>
           {t('shell.cancel', 'Cancel')}
         </button>
-        <button className="btn btn-primary" disabled={!outputReady(stage, state)} onClick={() => void complete()}>
+        <button className="btn btn-primary" disabled={busy || !outputReady(stage, state)} onClick={() => void complete()}>
           {t('production.complete_batch', 'Complete batch')}
         </button>
       </div>

@@ -136,7 +136,7 @@ beforeAll(async () => {
     attributes: { iodine_added_kg: 0.21 },
   });
   iodId = created.id;
-  await ok('operator.qc', 'POST', `/api/batches/${iodId}/complete`, { outputQty: 4580 });
+  await ok('operator.qc', 'POST', `/api/batches/${iodId}/complete`, {});
 });
 
 afterAll(async () => {

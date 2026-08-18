@@ -5,7 +5,7 @@ import type { Ctx } from './context.js';
 import { actorId, inTx } from './context.js';
 import { writeAudit } from './audit.js';
 import { nextDocNumber } from './numbering.js';
-import { getItem, getUom, getWarehouse, toBaseQty } from './masterdata.js';
+import { getItem, getUom, getWarehouse, toBaseQty, baseUomCode } from './masterdata.js';
 import { getAvailable, getLot, postMovement } from './inventory.js';
 
 export interface TransferInput {
@@ -82,7 +82,7 @@ export function postTransfer(ctx: Ctx, id: string): void {
     if (available < doc.qty) {
       badRequest(
         'insufficient_available',
-        `Only ${available / 1000} base units available in the source warehouse`,
+        `Only ${available / 1000} ${baseUomCode(tx, doc.itemId)} available in the source warehouse`,
       );
     }
     const outId = postMovement(tx, {
@@ -117,7 +117,7 @@ export function postTransfer(ctx: Ctx, id: string): void {
       entity: 'stock_transfer',
       entityId: id,
       reference: doc.docNumber,
-      summary: `Transfer ${doc.docNumber} approved: ${doc.qty / 1000} base units moved`,
+      summary: `Transfer ${doc.docNumber} approved: ${doc.qty / 1000} ${baseUomCode(tx, doc.itemId)} moved`,
     });
   });
 }

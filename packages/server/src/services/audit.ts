@@ -28,6 +28,12 @@ export function writeAudit(ctx: Ctx, event: AuditEventInput): void {
     .run();
 }
 
+/**
+ * Technical/system activity that must not bury operational stock, financial
+ * and security events. Shown only when the caller asks for system scope.
+ */
+export const TECHNICAL_ACTIONS = ['report_run', 'translation_edit'] as const;
+
 export interface AuditQuery {
   from?: string;
   to?: string;
@@ -36,6 +42,10 @@ export interface AuditQuery {
   userId?: string;
   entity?: string;
   entityId?: string;
+  /** free-text search over reference, summary, and action code */
+  search?: string;
+  /** 'operational' (default UI view) hides technical/system noise */
+  scope?: 'operational' | 'system' | 'all';
   limit?: number;
   offset?: number;
 }
@@ -49,6 +59,17 @@ export function listAudit(ctx: Ctx, q: AuditQuery) {
   if (q.userId) conds.push(eq(auditEvents.userId, q.userId));
   if (q.entity) conds.push(eq(auditEvents.entity, q.entity));
   if (q.entityId) conds.push(eq(auditEvents.entityId, q.entityId));
+  if (q.search?.trim()) {
+    const term = `%${q.search.trim()}%`;
+    conds.push(
+      sql`(${auditEvents.reference} LIKE ${term} COLLATE NOCASE OR ${auditEvents.summary} LIKE ${term} COLLATE NOCASE OR ${auditEvents.action} LIKE ${term} COLLATE NOCASE)`,
+    );
+  }
+  if (q.scope === 'operational') {
+    conds.push(sql`${auditEvents.action} NOT IN (${sql.join(TECHNICAL_ACTIONS.map((a) => sql`${a}`), sql`, `)})`);
+  } else if (q.scope === 'system') {
+    conds.push(sql`${auditEvents.action} IN (${sql.join(TECHNICAL_ACTIONS.map((a) => sql`${a}`), sql`, `)})`);
+  }
   const where = and(...conds);
   const rows = ctx.db
     .select()

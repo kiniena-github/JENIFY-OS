@@ -1,4 +1,11 @@
 /** Display helpers. Quantities arrive as integer milli base-units; money as cents. */
+import { toEthiopianDate } from '@factoryos/shared';
+
+// Calendar is tenant DISPLAY configuration — stored dates never change.
+let displayCalendar: 'gregorian' | 'ethiopian' = 'gregorian';
+export function setDisplayCalendar(cal: string | null | undefined): void {
+  displayCalendar = cal === 'ethiopian' ? 'ethiopian' : 'gregorian';
+}
 
 export function qty(milli: number | null | undefined, decimals = 0): string {
   if (milli == null) return '—';
@@ -28,6 +35,10 @@ export function date(iso: string | null | undefined): string {
   if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
+  if (displayCalendar === 'ethiopian') {
+    const ec = toEthiopianDate(d);
+    return `${ec.day} ${ec.monthName} ${ec.year} EC`;
+  }
   return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
@@ -35,6 +46,11 @@ export function dateTime(iso: string | null | undefined): string {
   if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
+  if (displayCalendar === 'ethiopian') {
+    const ec = toEthiopianDate(d);
+    const hm = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    return `${ec.day} ${ec.monthName} ${ec.year} EC, ${hm}`;
+  }
   return d.toLocaleString('en-GB', {
     day: '2-digit',
     month: 'short',

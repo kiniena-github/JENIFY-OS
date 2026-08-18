@@ -23,7 +23,7 @@ export function fullMatrix(): PermissionMatrix {
   return m;
 }
 
-export function matrixOf(entries: Array<[ModuleId, ActionId[]]>): PermissionMatrix {
+export function matrixOf(entries: Array<[ModuleId, Array<ActionId | string>]>): PermissionMatrix {
   const m: PermissionMatrix = {};
   for (const [mod, acts] of entries) {
     m[mod] = {};
@@ -157,6 +157,7 @@ export function makeProcessStages(tt: TestTenant): {
     sequence: 2,
     inputSource: 'prior_batch',
     outputForm: 'bulk',
+    outputPolicy: 'conserved',
     requiresQc: true,
     priorStageId: washing,
     attributes: [

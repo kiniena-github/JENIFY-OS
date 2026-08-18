@@ -4,7 +4,8 @@ import { useAuth } from '../auth.js';
 import { api } from '../api.js';
 import { usePageTitle } from '../components/Layout.js';
 import { StatCard, StatusBadge, ErrorBox, Field, Modal } from '../components/ui.js';
-import { useParties, useCredit } from '../lib/queries.js';
+import { useParties, useCredit, usePricing } from '../lib/queries.js';
+import { normalizePriceCategories } from '@factoryos/shared';
 import * as fmt from '../lib/format.js';
 import type { Party } from '../lib/types.js';
 
@@ -155,8 +156,13 @@ function CustomerModal({
   const { t, can } = useAuth();
   const canFinancial = can('parties', 'view_financial');
   const canApprove = can('parties', 'approve');
+  const pricingInfo = usePricing();
+  const { categories } = normalizePriceCategories(
+    pricingInfo.data?.pricing?.data ?? { categories: ['retail', 'wholesale', 'distributor'] },
+  );
   const [name, setName] = useState(customer?.name ?? '');
   const [partyType, setPartyType] = useState(customer?.partyType ?? 'retailer');
+  const [defaultCategory, setDefaultCategory] = useState(customer?.defaultPriceCategory ?? '');
   const [phone, setPhone] = useState(customer?.phone ?? '');
   const [location, setLocation] = useState(customer?.location ?? '');
   const [taxInfo, setTaxInfo] = useState(customer?.taxInfo ?? '');
@@ -172,7 +178,15 @@ function CustomerModal({
     setBusy(true);
     setLocalError(null);
     try {
-      const base = { name, partyType, phone, location, taxInfo, notes };
+      const base = {
+        name,
+        partyType,
+        phone,
+        location,
+        taxInfo,
+        notes,
+        defaultPriceCategory: defaultCategory || null,
+      };
       if (customer) {
         const patch: Record<string, unknown> = { ...base, active };
         if (canFinancial && canApprove && creditLimit !== '') patch.creditLimit = Number(creditLimit);
@@ -217,6 +231,21 @@ function CustomerModal({
         </Field>
         <Field label={t('customers.tax', 'Tax information')}>
           <input value={taxInfo} onChange={(e) => setTaxInfo(e.target.value)} />
+        </Field>
+        <Field
+          label={t('customers.default_category', 'Default price category')}
+          hint={t('sales.price_category', 'Price category') + ' → ' + t('nav.sales', 'Sales')}
+        >
+          <select value={defaultCategory} onChange={(e) => setDefaultCategory(e.target.value)}>
+            <option value="">—</option>
+            {categories
+              .filter((c) => c.active)
+              .map((c) => (
+                <option key={c.code} value={c.code}>
+                  {c.name}
+                </option>
+              ))}
+          </select>
         </Field>
         {canFinancial ? (
           <Field

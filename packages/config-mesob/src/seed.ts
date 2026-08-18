@@ -36,7 +36,7 @@ import { MODULES, ACTIONS } from '@factoryos/shared';
 
 // ---------------------------------------------------------------------------
 
-function m(entries: Array<[ModuleId, ActionId[]]>): PermissionMatrix {
+function m(entries: Array<[ModuleId, Array<ActionId | string>]>): PermissionMatrix {
   const out: PermissionMatrix = {};
   for (const [mod, acts] of entries) {
     out[mod] = {};
@@ -197,6 +197,7 @@ const iodization = createStage(ctx, {
   sequence: 2,
   inputSource: 'prior_batch',
   outputForm: 'bulk',
+  outputPolicy: 'conserved', // salt mass is conserved through iodization
   requiresQc: true,
   priorStageId: washing,
   attributes: [
@@ -238,7 +239,7 @@ const opsRole = createRole(ctx, {
     ['dashboard', ['view']],
     ['inventory', ['view', 'create', 'edit', 'approve', 'export']],
     ['production', ['view', 'create', 'edit', 'approve', 'export']],
-    ['quality', ['view', 'create', 'edit', 'approve', 'export']],
+    ['quality', ['view', 'export']], // QC authority is independent by default
     ['parties', ['view']],
     ['sales', ['view']],
     ['delivery', ['view', 'create', 'edit', 'approve', 'export']],
@@ -254,16 +255,17 @@ const warehouseRole = createRole(ctx, {
     ['dashboard', ['view']],
     ['inventory', ['view', 'create', 'edit', 'export']],
     ['production', ['view']],
-    ['delivery', ['view', 'create', 'edit']],
+    ['delivery', ['view', 'create', 'edit', 'load', 'dispatch']],
     ['reports', ['view']],
   ]),
 });
 
-// Production Operator records iodization but may NOT record or release QC —
-// quality testing and release belong to Quality Management.
+// Production Operator records production activity but may NOT record or
+// release QC — quality belongs to Quality Management. The Supervisor is a
+// SEPARATE role with production approval authority.
 const productionRole = createRole(ctx, {
   code: 'production',
-  name: 'Production Operator / Supervisor',
+  name: 'Production Operator',
   dashboardFocus: 'production',
   matrix: m([
     ['dashboard', ['view']],
@@ -271,6 +273,19 @@ const productionRole = createRole(ctx, {
     ['production', ['view', 'create', 'edit']],
     ['quality', ['view']],
     ['reports', ['view']],
+  ]),
+});
+
+const supervisorRole = createRole(ctx, {
+  code: 'production_supervisor',
+  name: 'Production Supervisor',
+  dashboardFocus: 'production',
+  matrix: m([
+    ['dashboard', ['view']],
+    ['inventory', ['view']],
+    ['production', ['view', 'create', 'edit', 'approve', 'export']],
+    ['quality', ['view']],
+    ['reports', ['view', 'export']],
   ]),
 });
 
@@ -309,7 +324,7 @@ const financeRole = createRole(ctx, {
   matrix: m([
     ['dashboard', ['view', 'view_financial']],
     ['inventory', ['view']],
-    ['parties', ['view', 'edit', 'approve', 'view_financial']],
+    ['parties', ['view', 'approve', 'view_financial']], // credit control, not identity editing
     ['sales', ['view', 'view_financial', 'export']],
     ['credit', ['view', 'create', 'edit', 'approve', 'view_financial', 'export']],
     ['payments', ['view', 'create', 'edit', 'approve', 'view_financial', 'export']],
@@ -329,7 +344,8 @@ function seedUser(username: string, displayName: string, roleId: string, roleNam
 seedUser('owner', 'Mesob Owner', ownerRole, 'Owner / Super Admin');
 seedUser('operations', 'Operations Manager', opsRole, 'Operations Manager');
 seedUser('warehouse', 'Warehouse Keeper', warehouseRole, 'Warehouse / Store Keeper');
-seedUser('production', 'Production Supervisor', productionRole, 'Production Operator / Supervisor');
+seedUser('production', 'Production Operator', productionRole, 'Production Operator');
+seedUser('supervisor', 'Production Supervisor', supervisorRole, 'Production Supervisor');
 seedUser('quality', 'Quality Manager', qualityRole, 'Quality Management');
 seedUser('sales', 'Sales Officer', salesRole, 'Sales & Customer Officer');
 seedUser('finance', 'Finance Accountant', financeRole, 'Finance / Accountant');
@@ -341,6 +357,7 @@ saveSettings(ctx, 'general', {
   rawSource: 'Afdera, Afar',
   rawSourceLocked: true,
   currency: 'ETB',
+  calendar: 'gregorian', // display config; 'ethiopian' shows EC-labeled dates
   sessionTimeoutMinutes: 720,
   alerts: { credit: true, stock: true },
 });
@@ -350,7 +367,12 @@ saveSettings(ctx, 'vat', {
   note: 'Sample rate — the authorized admin must confirm the approved VAT rate.',
 });
 saveSettings(ctx, 'pricing', {
-  categories: ['retail', 'wholesale', 'distributor'],
+  categories: [
+    { code: 'retail', name: 'Retail', active: true },
+    { code: 'wholesale', name: 'Wholesale', active: true },
+    { code: 'distributor', name: 'Distributor', active: true },
+  ],
+  defaultCategory: 'retail',
   customPrice: { enabled: true, requiresApproval: true, overrideReasonRequired: true },
   discount: { requiresApproval: true },
   // Unit prices in ETB per item; the authorized admin enters approved values.
@@ -366,8 +388,25 @@ saveSettings(ctx, 'production', {
     // Default target shown on new quality tests; editable in Settings.
     // Each recorded test preserves the target that applied at the time.
     targetPpm: '30-40 ppm',
+    // Additive metadata — the exact form/type must be confirmed with the
+    // factory; deliberately configurable instead of invented.
+    additiveName: 'Iodine',
+    additiveForm: '',
+    additiveUnit: 'kg',
   },
 });
+saveSettings(ctx, 'branding', {
+  companyName: 'Mesob Salt Factory',
+  address: 'Mekelle, Tigray, Ethiopia',
+  phone: '',
+  email: '',
+  tin: '',
+  headerNote: '',
+  footerNote: 'Thank you for your business.',
+  pageSize: 'A4',
+  assets: {}, // logo2/stamp/signature uploaded later via Settings
+});
+
 saveSettings(ctx, 'modules', {
   // Mesob "quick item" screen for empty sacks (pieces, separate from salt stock)
   simpleItemScreens: [
@@ -385,6 +424,7 @@ const enOverrides: Array<[string, string]> = [
   ['stage.washing', 'Washing / Production Batch'],
   ['stage.iodization', 'Iodization & Quality Test'],
   ['stage.packaging', 'Packaging'],
+  ['production.attr.iodine_added_kg', 'Iodine quantity added (kg)'],
 ];
 for (const [key, text] of enOverrides) upsertTranslation(ctx, key, 'en', text, 'active');
 

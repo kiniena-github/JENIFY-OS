@@ -88,7 +88,7 @@ beforeEach(() => {
     inputBatchQty: 9200,
     attributes: { iodine_added_kg: 0.42 },
   });
-  completeBatch(tt.ownerCtx, iod, { outputQty: 9150 });
+  completeBatch(tt.ownerCtx, iod, {});
   recordQualityTest(tt.ownerCtx, iod, {
     targetLevel: '30-40 ppm',
     actualResult: '34 ppm',
@@ -126,6 +126,8 @@ beforeEach(() => {
     destination: 'Town',
     truckNumber: 'T-9',
     driverName: 'Driver',
+    driverPhone: '+251 900 000 000',
+    expectedDate: '2099-12-31',
   });
   dispatchDelivery(tt.ownerCtx, del);
   createPayment(
@@ -150,14 +152,20 @@ describe('reports reconcile with source transactions', () => {
     expect(r.remainingQty).toBe(getOnHand(tt.ownerCtx, tt.items.raw));
   });
 
-  it('production report: loss and efficiency', () => {
+  it('production report: loss/efficiency describe measured stages only', () => {
     const r = productionReport(tt.ownerCtx, {});
-    // washing 10,000->9,200 plus iodization 9,200->9,150 (both bulk stages)
+    // washing 10,000->9,200 (measured) + iodization 9,200->9,200 (conserved)
     expect(r.inputQty).toBe((10000 + 9200) * KG);
-    expect(r.outputQty).toBe((9200 + 9150) * KG);
-    expect(r.lossQty).toBe((800 + 50) * KG);
+    expect(r.outputQty).toBe((9200 + 9200) * KG);
+    // NO invented iodization loss: only washing's measured 800 kg
+    expect(r.lossQty).toBe(800 * KG);
     const washRow = r.breakdown.find((b) => b.stage === 'washing')!;
     expect(washRow.efficiencyPct).toBeCloseTo(92.0, 1);
+    const iodRow = r.breakdown.find((b) => b.stage === 'iodization')!;
+    expect(iodRow.efficiencyPct).toBeNull();
+    expect(iodRow.outputPolicy).toBe('conserved');
+    const iodStage = r.perStage.find((sr) => sr.stageCode === 'iodization')!;
+    expect(iodStage.lossQty).toBeNull();
   });
 
   it('quality report: iodine total and pass counts', () => {

@@ -47,7 +47,7 @@ export function postMovement(ctx: Ctx, input: PostMovementInput): string {
   if (newQty < 0 && !input.allowNegative) {
     badRequest(
       'insufficient_stock',
-      `Insufficient stock: movement would leave ${newQty / 1000} base units`,
+      `Insufficient stock: this movement would leave ${newQty / 1000} below zero`,
     );
   }
   const id = newId();

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { MODULES, ACTIONS, type PermissionMatrix, type ModuleId, type ActionId } from '@factoryos/shared';
+import { MODULES, ACTIONS, EXTRA_ACTIONS, type PermissionMatrix, type ModuleId, type ActionId } from '@factoryos/shared';
 import { useAuth } from '../auth.js';
 import { api } from '../api.js';
 import { usePageTitle } from '../components/Layout.js';
@@ -226,7 +226,7 @@ function RolesTab() {
   const role = roles.data?.find((r) => r.id === roleId) ?? roles.data?.[0];
   const matrix: PermissionMatrix = draft ?? role?.matrix ?? {};
 
-  function toggle(mod: ModuleId, act: ActionId) {
+  function toggle(mod: ModuleId, act: ActionId | string) {
     if (!canManage) return;
     const next: PermissionMatrix = JSON.parse(JSON.stringify(matrix));
     next[mod] = next[mod] ?? {};
@@ -314,6 +314,25 @@ function RolesTab() {
                 ))}
               </tbody>
             </table>
+          </div>
+          {/* fine-grained module-specific actions (e.g. delivery Load/Dispatch) */}
+          <div className="mt">
+            <strong style={{ fontSize: 13 }}>{t('roles.extra', 'Module-specific actions')}</strong>
+            <div className="flex" style={{ marginTop: 8, flexWrap: 'wrap', gap: 18 }}>
+              {(Object.entries(EXTRA_ACTIONS) as Array<[ModuleId, readonly string[]]>).flatMap(([mod, acts]) =>
+                acts.map((a) => (
+                  <label key={`${mod}.${a}`} className="flex" style={{ fontSize: 13 }}>
+                    <input
+                      type="checkbox"
+                      checked={matrix[mod]?.[a] === true}
+                      disabled={!canManage}
+                      onChange={() => toggle(mod, a)}
+                    />
+                    {t(`nav.${mod === 'parties' ? 'customers' : mod}`, mod)}: {t(`perm.${a}`, a)}
+                  </label>
+                )),
+              )}
+            </div>
           </div>
         </div>
       </div>

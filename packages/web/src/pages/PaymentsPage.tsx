@@ -21,6 +21,18 @@ export default function PaymentsPage() {
   const [error, setError] = useState<unknown>(null);
   const [reversing, setReversing] = useState<Payment | null>(null);
   const [allocating, setAllocating] = useState<Payment | null>(null);
+  const [justPostedId, setJustPostedId] = useState<string | null>(null);
+
+  // step 2 of Record Payment: once the posted payment appears, open the
+  // allocation confirmation with a sensible oldest-first suggestion
+  React.useEffect(() => {
+    if (!justPostedId) return;
+    const p = payments.data?.find((x) => x.id === justPostedId);
+    if (p) {
+      setAllocating(p);
+      setJustPostedId(null);
+    }
+  }, [justPostedId, payments.data]);
 
   const today = fmt.todayIso();
   const todays = (payments.data ?? []).filter((p) => p.status === 'posted' && p.date === today);
@@ -60,7 +72,9 @@ export default function PaymentsPage() {
 
       <ErrorBox error={error} />
 
-      {can('payments', 'create') ? <NewPaymentForm onError={setError} /> : null}
+      {can('payments', 'create') ? (
+        <NewPaymentForm onError={setError} onPosted={(id) => setJustPostedId(id)} />
+      ) : null}
 
       <div className="panel">
         <div className="panel-head">
@@ -104,6 +118,11 @@ export default function PaymentsPage() {
                       <button className="btn btn-secondary btn-sm" onClick={() => setReversing(p)}>
                         {t('receiving.reverse', 'Reverse')}
                       </button>
+                    ) : null}{' '}
+                    {p.status === 'posted' ? (
+                      <a className="btn btn-ghost btn-sm" href={`/print/payment/${p.id}`}>
+                        {t('doc.print', 'Print')}
+                      </a>
                     ) : null}
                   </td>
                 </tr>
@@ -151,59 +170,47 @@ function useOpenInvoices(customerId: string) {
   );
 }
 
-function NewPaymentForm({ onError }: { onError: (e: unknown) => void }) {
-  const { t, can, tenant } = useAuth();
+function NewPaymentForm({
+  onError,
+  onPosted,
+}: {
+  onError: (e: unknown) => void;
+  onPosted: (paymentId: string) => void;
+}) {
+  const { t, can } = useAuth();
   const qc = useQueryClient();
   const customers = useParties('?kind=customer');
-  const currency = tenant?.currency ?? 'ETB';
   const [customerId, setCustomerId] = useState('');
   const [amount, setAmount] = useState('');
   const [method, setMethod] = useState('cash');
   const [date, setDate] = useState(fmt.todayIso());
   const [reference, setReference] = useState('');
   const [notes, setNotes] = useState('');
-  const [allocs, setAllocs] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
-  const open = useOpenInvoices(customerId);
 
-  const allocTotal = Object.values(allocs).reduce((s, v) => s + Number(v || 0), 0);
   const amountNum = Number(amount || 0);
   const canPost = can('payments', 'approve');
-
-  function autoFill() {
-    let left = amountNum;
-    const next: Record<string, string> = {};
-    for (const inv of open) {
-      if (left <= 0) break;
-      const take = Math.min(left, (inv.remainingCents ?? 0) / 100);
-      if (take > 0) next[inv.invoiceId] = String(Math.round(take * 100) / 100);
-      left -= take;
-    }
-    setAllocs(next);
-  }
 
   async function submit() {
     setBusy(true);
     onError(null);
     try {
-      await api.post('/api/payments', {
+      // step 1: post the money — allocation is a separate explicit confirmation
+      const { id } = await api.post<{ id: string }>('/api/payments', {
         customerId,
         date,
         amount: amountNum,
         method,
         referenceNumber: reference || undefined,
         notes: notes || undefined,
-        allocations: Object.entries(allocs)
-          .filter(([, v]) => Number(v) > 0)
-          .map(([invoiceId, v]) => ({ invoiceId, amount: Number(v) })),
         post: true,
       });
       setCustomerId('');
       setAmount('');
       setReference('');
       setNotes('');
-      setAllocs({});
       await qc.invalidateQueries();
+      onPosted(id); // step 2: open the allocation confirmation
     } catch (err) {
       onError(err);
     } finally {
@@ -215,18 +222,14 @@ function NewPaymentForm({ onError }: { onError: (e: unknown) => void }) {
     <div className="panel">
       <div className="panel-head">
         <h2>{t('payments.new', 'Record payment')}</h2>
+        <div className="spacer" />
+        <span className="muted">{t('payments.two_step', 'Posting opens the allocation step')}</span>
       </div>
       <div className="panel-body">
         <div className="form-grid">
           <Field label={t('sales.customer', 'Customer')} required>
-            <select
-              value={customerId}
-              onChange={(e) => {
-                setCustomerId(e.target.value);
-                setAllocs({});
-              }}
-            >
-              <option value="">—</option>
+            <select value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
+              <option value="">\u2014</option>
               {customers.data?.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name}
@@ -256,64 +259,10 @@ function NewPaymentForm({ onError }: { onError: (e: unknown) => void }) {
             <input value={notes} onChange={(e) => setNotes(e.target.value)} />
           </Field>
         </div>
-
-        {customerId ? (
-          <>
-            <div className="flex mt">
-              <h3 style={{ fontSize: 13.5 }}>{t('payments.allocations', 'Apply to invoices')}</h3>
-              <button className="btn btn-ghost btn-sm" disabled={!amountNum} onClick={autoFill}>
-                {t('payments.autofill', 'Auto-fill oldest first')}
-              </button>
-              <div className="spacer" />
-              <span className="muted">
-                {t('payments.allocated', 'Allocated')}: {fmt.money(Math.round(allocTotal * 100), currency)} /{' '}
-                {fmt.money(Math.round(amountNum * 100), currency)}
-              </span>
-            </div>
-            <div className="table-wrap">
-              <table className="data">
-                <thead>
-                  <tr>
-                    <th>{t('sales.invoice', 'Invoice')}</th>
-                    <th>{t('credit.due_date', 'Due date')}</th>
-                    <th className="num">{t('credit.remaining', 'Remaining')}</th>
-                    <th className="num">{t('payments.apply', 'Apply')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {open.map((inv) => (
-                    <tr key={inv.invoiceId}>
-                      <td className="mono">{inv.invoiceNumber}</td>
-                      <td>{fmt.date(inv.dueDate)}</td>
-                      <td className="num">{fmt.money(inv.remainingCents, currency)}</td>
-                      <td className="num" style={{ width: 140 }}>
-                        <input
-                          type="number"
-                          min="0"
-                          step="any"
-                          value={allocs[inv.invoiceId] ?? ''}
-                          onChange={(e) => setAllocs((a) => ({ ...a, [inv.invoiceId]: e.target.value }))}
-                        />
-                      </td>
-                    </tr>
-                  ))}
-                  {open.length === 0 ? (
-                    <tr>
-                      <td colSpan={4} className="table-empty">
-                        {t('payments.no_open', 'No open balances for this customer.')}
-                      </td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
-            </div>
-          </>
-        ) : null}
-
         <div className="form-actions">
           <button
             className="btn btn-primary"
-            disabled={!canPost || busy || !customerId || !(amountNum > 0) || allocTotal > amountNum}
+            disabled={!canPost || busy || !customerId || !(amountNum > 0)}
             onClick={() => void submit()}
           >
             {t('payments.post', 'Post payment')}
@@ -329,6 +278,23 @@ function AllocateModal({ payment, onClose, onDone }: { payment: Payment; onClose
   const currency = tenant?.currency ?? 'ETB';
   const open = useOpenInvoices(payment.customerId);
   const [allocs, setAllocs] = useState<Record<string, string>>({});
+  const [suggested, setSuggested] = useState(false);
+
+  // suggest an oldest-first allocation of the unallocated remainder; the
+  // user stays in control and must explicitly Apply
+  React.useEffect(() => {
+    if (suggested || open.length === 0) return;
+    let left = (payment.amountCents - payment.allocatedCents) / 100;
+    const next: Record<string, string> = {};
+    for (const inv of open) {
+      if (left <= 0) break;
+      const take = Math.min(left, (inv.remainingCents ?? 0) / 100);
+      if (take > 0) next[inv.invoiceId] = String(Math.round(take * 100) / 100);
+      left -= take;
+    }
+    setAllocs(next);
+    setSuggested(true);
+  }, [open, suggested, payment]);
   const [error, setError] = useState<unknown>(null);
   const remainder = payment.amountCents - payment.allocatedCents;
   const allocTotal = Object.values(allocs).reduce((s, v) => s + Number(v || 0), 0);

@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { Db } from '../db/index.js';
 import { requireCtx } from '../app.js';
-import { requirePermission, canViewFinancial } from '../services/permissions.js';
+import { requirePermission, requireAnyPermission, canViewFinancial } from '../services/permissions.js';
 import {
   createInvoice,
   confirmInvoice,
@@ -157,14 +157,16 @@ export function registerCommercialRoutes(app: FastifyInstance, db: Db): void {
 
   app.post<{ Params: { id: string } }>('/api/deliveries/:id/loading', async (req) => {
     const ctx = requireCtx(db, req);
-    requirePermission(ctx, 'delivery', 'edit');
+    // action-specific 'load' permission; broad 'edit' also accepted
+    requireAnyPermission(ctx, 'delivery', ['load', 'edit']);
     markLoading(ctx, req.params.id);
     return { ok: true };
   });
 
   app.post<{ Params: { id: string } }>('/api/deliveries/:id/dispatch', async (req) => {
     const ctx = requireCtx(db, req);
-    requirePermission(ctx, 'delivery', 'approve');
+    // action-specific 'dispatch' permission; broad 'approve' also accepted
+    requireAnyPermission(ctx, 'delivery', ['dispatch', 'approve']);
     dispatchDelivery(ctx, req.params.id);
     return { ok: true };
   });

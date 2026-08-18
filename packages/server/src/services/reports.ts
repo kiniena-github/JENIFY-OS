@@ -97,7 +97,11 @@ export function rawStockReport(ctx: Ctx, p: Period, warehouseId?: string) {
   };
 }
 
-/** Bulk production throughput: input, output, loss, efficiency per batch. */
+/**
+ * Bulk production throughput. Stage physics are respected: loss/efficiency
+ * metrics only ever aggregate MEASURED stages — conserved stages transfer
+ * their quantity by definition and must not fabricate a loss.
+ */
 export function productionReport(ctx: Ctx, p: Period, stageCode?: string) {
   const stages = ctx.db
     .select()
@@ -108,44 +112,71 @@ export function productionReport(ctx: Ctx, p: Period, stageCode?: string) {
     .filter((s) => s.outputForm === 'bulk' && (!stageCode || s.code === stageCode))
     .map((s) => s.id);
   const stageById = new Map(stages.map((s) => [s.id, s]));
-  const batches = ctx.db
+  const allBatches = ctx.db
     .select()
     .from(productionBatches)
-    .where(
-      and(
-        eq(productionBatches.tenantId, ctx.tenantId),
-        eq(productionBatches.status, 'completed'),
-        inArray(productionBatches.stageId, bulkStageIds.length ? bulkStageIds : ['-']),
-      ),
-    )
+    .where(eq(productionBatches.tenantId, ctx.tenantId))
     .all();
-  const rows = inPeriod(batches, p);
+  const batchNumById = new Map(allBatches.map((b) => [b.id, b.docNumber]));
+  const rows = inPeriod(
+    allBatches.filter((b) => b.status === 'completed' && bulkStageIds.includes(b.stageId)),
+    p,
+  );
   const lotRows = ctx.db.select().from(lots).where(eq(lots.tenantId, ctx.tenantId)).all();
   const lotById = new Map(lotRows.map((l) => [l.id, l]));
-  const batchNumById = new Map(batches.map((b) => [b.id, b.docNumber]));
 
-  const input = rows.reduce((s, b) => s + b.inputQty, 0);
-  const output = rows.reduce((s, b) => s + (b.outputQty ?? 0), 0);
+  const isMeasured = (b: (typeof rows)[number]) =>
+    stageById.get(b.stageId)?.outputPolicy === 'measured';
+  const measured = rows.filter(isMeasured);
+  const measuredInput = measured.reduce((s, b) => s + b.inputQty, 0);
+  const measuredOutput = measured.reduce((s, b) => s + (b.outputQty ?? 0), 0);
+
   return {
-    inputQty: input,
-    outputQty: output,
-    lossQty: rows.reduce((s, b) => s + (b.lossQty ?? 0), 0),
-    efficiencyPct: input > 0 ? (output / input) * 100 : null,
-    breakdown: rows.map((b) => ({
-      batchNumber: b.docNumber,
-      stage: stageById.get(b.stageId)?.code ?? '?',
-      sourceRef: b.inputLotId
-        ? (lotById.get(b.inputLotId)?.lotNumber ?? '—')
-        : b.inputBatchId
-          ? (batchNumById.get(b.inputBatchId) ?? '—')
-          : '—',
-      date: b.date,
-      inputQty: b.inputQty,
-      outputQty: b.outputQty,
-      lossQty: b.lossQty,
-      efficiencyPct: b.outputQty != null && b.inputQty > 0 ? (b.outputQty / b.inputQty) * 100 : null,
-      status: b.status,
-    })),
+    inputQty: rows.reduce((s, b) => s + b.inputQty, 0),
+    outputQty: rows.reduce((s, b) => s + (b.outputQty ?? 0), 0),
+    // loss / efficiency describe measured stages ONLY
+    lossQty: measured.reduce((s, b) => s + (b.lossQty ?? 0), 0),
+    efficiencyPct: measuredInput > 0 ? (measuredOutput / measuredInput) * 100 : null,
+    perStage: stages
+      .filter((s) => bulkStageIds.includes(s.id))
+      .sort((a, b) => a.sequence - b.sequence)
+      .map((s) => {
+        const stageRows = rows.filter((b) => b.stageId === s.id);
+        const inp = stageRows.reduce((x, b) => x + b.inputQty, 0);
+        const out = stageRows.reduce((x, b) => x + (b.outputQty ?? 0), 0);
+        return {
+          stageCode: s.code,
+          nameKey: s.nameKey,
+          outputPolicy: s.outputPolicy,
+          inputQty: inp,
+          outputQty: out,
+          lossQty: s.outputPolicy === 'measured' ? stageRows.reduce((x, b) => x + (b.lossQty ?? 0), 0) : null,
+          efficiencyPct: s.outputPolicy === 'measured' && inp > 0 ? (out / inp) * 100 : null,
+        };
+      }),
+    breakdown: rows.map((b) => {
+      const stage = stageById.get(b.stageId);
+      const measuredRow = stage?.outputPolicy === 'measured';
+      return {
+        batchNumber: b.docNumber,
+        stage: stage?.code ?? '?',
+        outputPolicy: stage?.outputPolicy ?? 'measured',
+        sourceRef: b.inputLotId
+          ? (lotById.get(b.inputLotId)?.lotNumber ?? '—')
+          : b.inputBatchId
+            ? (batchNumById.get(b.inputBatchId) ?? '—')
+            : '—',
+        date: b.date,
+        inputQty: b.inputQty,
+        outputQty: b.outputQty,
+        lossQty: measuredRow || (b.lossQty ?? 0) !== 0 ? b.lossQty : null,
+        efficiencyPct:
+          measuredRow && b.outputQty != null && b.inputQty > 0
+            ? (b.outputQty / b.inputQty) * 100
+            : null,
+        status: b.status,
+      };
+    }),
   };
 }
 
@@ -233,21 +264,20 @@ export function packagingReport(ctx: Ctx, p: Period) {
     .where(and(eq(productionStages.tenantId, ctx.tenantId), eq(productionStages.outputForm, 'packaged_items')))
     .all();
   const stageIds = stages.map((s) => s.id);
-  const batches = ctx.db
+  // number lookup must cover ALL batches, not only packaging-stage batches,
+  // otherwise the source iodization reference renders as '—'
+  const allBatches = ctx.db
     .select()
     .from(productionBatches)
-    .where(
-      and(
-        eq(productionBatches.tenantId, ctx.tenantId),
-        eq(productionBatches.status, 'completed'),
-        inArray(productionBatches.stageId, stageIds.length ? stageIds : ['-']),
-      ),
-    )
+    .where(eq(productionBatches.tenantId, ctx.tenantId))
     .all();
-  const rows = inPeriod(batches, p);
+  const batchNumById = new Map(allBatches.map((b) => [b.id, b.docNumber]));
+  const rows = inPeriod(
+    allBatches.filter((b) => b.status === 'completed' && stageIds.includes(b.stageId)),
+    p,
+  );
   const itemRows = ctx.db.select().from(items).where(eq(items.tenantId, ctx.tenantId)).all();
   const itemById = new Map(itemRows.map((i) => [i.id, i]));
-  const batchNumById = new Map(batches.map((b) => [b.id, b.docNumber]));
 
   const perItem = new Map<string, { produced: number; rejected: number; good: number; weight: number }>();
   for (const b of rows) {

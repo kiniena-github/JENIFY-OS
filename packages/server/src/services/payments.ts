@@ -1,4 +1,4 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { paymentAllocations, payments } from '../db/schema.js';
 import { newId, nowIso, badRequest, notFound } from '../util.js';
 import type { Ctx } from './context.js';
@@ -221,7 +221,20 @@ export function listPayments(ctx: Ctx, filter: { customerId?: string; limit?: nu
     .orderBy(desc(payments.createdAt))
     .limit(Math.min(filter.limit ?? 200, 1000))
     .all();
-  return rows.map((p) => ({ ...p, allocatedCents: allocatedCents(ctx, p.id) }));
+  // one grouped query instead of one allocation query per payment
+  const sums = ctx.db
+    .select({
+      paymentId: paymentAllocations.paymentId,
+      total: sql<number>`coalesce(sum(${paymentAllocations.amountCents}), 0)`,
+    })
+    .from(paymentAllocations)
+    .where(
+      and(eq(paymentAllocations.tenantId, ctx.tenantId), eq(paymentAllocations.status, 'active')),
+    )
+    .groupBy(paymentAllocations.paymentId)
+    .all();
+  const sumById = new Map(sums.map((s) => [s.paymentId, s.total]));
+  return rows.map((p) => ({ ...p, allocatedCents: sumById.get(p.id) ?? 0 }));
 }
 
 export function listAllocationsForPayment(ctx: Ctx, paymentId: string) {

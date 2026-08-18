@@ -132,5 +132,6 @@ export function buildSessionUser(db: Db, userId: string): SessionUser | null {
     roleName: role.name,
     permissions: getRoleMatrix(ctx, role.id),
     language: user.language,
+    theme: (user.theme as 'light' | 'dark' | 'system') ?? 'system',
   };
 }

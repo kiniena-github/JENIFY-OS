@@ -54,9 +54,10 @@ export function usePageTitle(title: string, sub?: string): void {
 }
 
 export default function Layout() {
-  const { user, tenant, languages, language, setLanguage, logout, can, t } = useAuth();
+  const { user, tenant, languages, language, setLanguage, theme, setTheme, logout, can, t } = useAuth();
   const [title, setTitleState] = React.useState('');
   const [sub, setSub] = React.useState('');
+  const [navOpen, setNavOpen] = React.useState(false);
   const titleCtx = React.useMemo(
     () => ({
       title,
@@ -74,7 +75,8 @@ export default function Layout() {
   const visibleNav = NAV.filter((n) => can(n.module, n.action ?? 'view'));
 
   return (
-    <div className="app">
+    <div className={`app${navOpen ? ' nav-open' : ''}`}>
+      <div className="sidebar-backdrop" onClick={() => setNavOpen(false)} />
       <aside className="sidebar">
         <div className="sidebar-brand">
           {tenant.logoPath ? (
@@ -95,7 +97,7 @@ export default function Layout() {
         </div>
         <nav className="sidebar-nav">
           {visibleNav.map((n) => (
-            <NavLink key={n.path} to={n.path} end={n.path === '/'}>
+            <NavLink key={n.path} to={n.path} end={n.path === '/'} onClick={() => setNavOpen(false)}>
               <span className="nav-icon">{n.icon}</span>
               {t(n.labelKey, n.fallback)}
             </NavLink>
@@ -109,11 +111,24 @@ export default function Layout() {
       </aside>
       <div className="main">
         <header className="header">
+          <button className="nav-toggle" aria-label="Menu" onClick={() => setNavOpen((v) => !v)}>
+            ☰
+          </button>
           <div>
             <div className="header-title">{title}</div>
             {sub ? <div className="header-sub">{sub}</div> : null}
           </div>
           <div className="header-spacer" />
+          <select
+            aria-label={t('shell.theme', 'Theme')}
+            value={theme}
+            onChange={(e) => void setTheme(e.target.value as 'light' | 'dark' | 'system')}
+            title={t('shell.theme', 'Theme')}
+          >
+            <option value="light">☀ {t('theme.light', 'Light')}</option>
+            <option value="dark">🌙 {t('theme.dark', 'Dark')}</option>
+            <option value="system">🖥 {t('theme.system', 'System')}</option>
+          </select>
           {(() => {
             // exact approved flag image for the selected language, when configured
             const current = languages.find((l) => l.code === language);

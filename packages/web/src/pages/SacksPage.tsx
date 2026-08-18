@@ -187,6 +187,7 @@ export default function SacksPage() {
                 <th className="num">{t('inventory.qty', 'Quantity')}</th>
                 <th>{t('reports.buyer', 'Buyer')}</th>
                 <th className="num">{t('sacks.price', 'Price')}</th>
+                <th className="num">{t('sacks.total', 'Total amount')}</th>
                 <th>{t('shell.status', 'Status')}</th>
                 <th>{t('shell.actions', 'Actions')}</th>
               </tr>
@@ -204,6 +205,11 @@ export default function SacksPage() {
                   <td className="num">{fmt.qty(x.qty)}</td>
                   <td>{x.buyer ?? '—'}</td>
                   <td className="num">{fmt.money(x.unitPriceCents, currency)}</td>
+                  <td className="num">
+                    {x.unitPriceCents != null
+                      ? fmt.money(Math.round((x.qty / 1000) * x.unitPriceCents), currency)
+                      : '—'}
+                  </td>
                   <td>
                     <StatusBadge status={x.lifecycle} />
                   </td>
@@ -218,7 +224,7 @@ export default function SacksPage() {
               ))}
               {txns.data?.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="table-empty">
+                  <td colSpan={9} className="table-empty">
                     {t('sacks.none', 'No transactions yet.')}
                   </td>
                 </tr>

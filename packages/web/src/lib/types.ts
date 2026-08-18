@@ -39,6 +39,7 @@ export interface Party {
   location: string | null;
   taxInfo: string | null;
   creditLimitCents: number | null;
+  defaultPriceCategory: string | null;
   notes: string | null;
   active: boolean;
 }
@@ -111,6 +112,7 @@ export interface Stage {
   sequence: number;
   inputSource: 'lot' | 'prior_batch';
   outputForm: 'bulk' | 'packaged_items';
+  outputPolicy: 'measured' | 'conserved' | 'converted';
   requiresQc: boolean;
   inputItemId: string | null;
   priorStageId: string | null;
@@ -258,7 +260,8 @@ export interface PricingInfo {
   pricing: {
     version: number;
     data: {
-      categories: string[];
+      categories: Array<string | { code: string; name: string; active: boolean }>;
+      defaultCategory?: string;
       customPrice?: { requiresApproval?: boolean };
       discount?: { requiresApproval?: boolean };
       prices: Record<string, Record<string, number | null>>;

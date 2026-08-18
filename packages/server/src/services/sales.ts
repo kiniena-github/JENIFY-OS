@@ -8,6 +8,7 @@ import { nextDocNumber } from './numbering.js';
 import { getItem, getUom, getWarehouse, toBaseQty } from './masterdata.js';
 import { getParty } from './parties.js';
 import { getSettings } from './settings.js';
+import { normalizePriceCategories } from '@factoryos/shared';
 import {
   getAvailable,
   createReservation,
@@ -16,7 +17,8 @@ import {
 } from './inventory.js';
 
 export interface PricingSettings {
-  categories: string[];
+  categories: Array<string | { code: string; name: string; active: boolean }>;
+  defaultCategory?: string;
   customPrice?: { enabled?: boolean; requiresApproval?: boolean };
   discount?: { requiresApproval?: boolean };
   prices: Record<string, Record<string, number | null>>;
@@ -38,7 +40,8 @@ export interface InvoiceLineInput {
 export interface CreateInvoiceInput {
   customerId: string;
   date: string;
-  priceCategory: string;
+  /** omitted -> customer's default category, then the tenant default */
+  priceCategory?: string;
   paymentTerm: 'paid' | 'credit' | 'partial';
   dueDate?: string;
   fulfillment?: 'delivery' | 'pickup';
@@ -64,8 +67,18 @@ export function createInvoice(
 
     const pricing = getSettings<PricingSettings>(tx, 'pricing');
     const vat = getSettings<VatSettings>(tx, 'vat');
-    if (pricing && !pricing.data.categories.includes(input.priceCategory)) {
-      badRequest('bad_category', `Unknown price category '${input.priceCategory}'`);
+    // Explicit category wins; otherwise the customer's default drives the
+    // invoice, then the tenant-wide default category.
+    const priceCategory =
+      input.priceCategory ??
+      customer.defaultPriceCategory ??
+      (pricing ? (normalizePriceCategories(pricing.data).defaultCode ?? undefined) : undefined);
+    if (!priceCategory) badRequest('bad_category', 'No price category given and no default configured');
+    if (pricing) {
+      const { categories } = normalizePriceCategories(pricing.data);
+      const cat = categories.find((c) => c.code === priceCategory);
+      if (!cat) badRequest('bad_category', `Unknown price category '${priceCategory}'`);
+      if (!cat.active) badRequest('archived_category', `Price category '${cat.name}' is archived`);
     }
 
     let subtotal = 0;
@@ -86,7 +99,7 @@ export function createInvoice(
       if (!(line.qty > 0)) badRequest('line_qty', 'Quantity must be positive');
       const baseQty = toBaseQty(tx, line.entryUomId, line.qty);
 
-      const listPrice = pricing?.data.prices?.[line.itemId]?.[input.priceCategory] ?? null;
+      const listPrice = pricing?.data.prices?.[line.itemId]?.[priceCategory] ?? null;
       let unitPriceCents: number;
       let priceSource: 'list' | 'custom';
       if (line.unitPrice != null) {
@@ -98,7 +111,7 @@ export function createInvoice(
       } else {
         badRequest(
           'price_missing',
-          `No ${input.priceCategory} price configured for '${item.name}' — enter an approved price`,
+          `No ${priceCategory} price configured for '${item.name}' — enter an approved price`,
         );
       }
       if (priceSource === 'custom') hasCustomPrice = true;
@@ -156,7 +169,7 @@ export function createInvoice(
         customerId: input.customerId,
         status: 'pending',
         paymentTerm: input.paymentTerm,
-        priceCategory: input.priceCategory,
+        priceCategory,
         customPriceApprovedBy: hasCustomPrice || discountTotal > 0 ? actorId(tx) : null,
         subtotalCents: subtotal,
         discountCents: discountTotal,

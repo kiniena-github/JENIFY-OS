@@ -1,7 +1,7 @@
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
 import { translationKeys, translations, tenantLanguages } from '../db/schema.js';
-import { newId, nowIso, notFound } from '../util.js';
+import { newId, nowIso, notFound, badRequest } from '../util.js';
 import type { Ctx } from './context.js';
 import { actorId } from './context.js';
 import { writeAudit } from './audit.js';
@@ -42,38 +42,101 @@ export function enableLanguage(
   code: string,
   name: string,
   flagEmoji?: string,
-): void {
+  opts: { nativeName?: string; direction?: 'ltr' | 'rtl' } = {},
+): string {
+  const normalized = code.trim().toLowerCase();
+  if (!normalized) badRequest('language_code', 'A language code is required');
   const existing = ctx.db
     .select()
     .from(tenantLanguages)
-    .where(and(eq(tenantLanguages.tenantId, ctx.tenantId), eq(tenantLanguages.code, code)))
+    .where(and(eq(tenantLanguages.tenantId, ctx.tenantId), eq(tenantLanguages.code, normalized)))
     .get();
   if (existing) {
     ctx.db
       .update(tenantLanguages)
-      .set({ name, flagEmoji: flagEmoji ?? existing.flagEmoji, enabled: true })
+      .set({
+        name,
+        nativeName: opts.nativeName ?? existing.nativeName,
+        direction: opts.direction ?? existing.direction,
+        flagEmoji: flagEmoji ?? existing.flagEmoji,
+        enabled: true,
+      })
       .where(eq(tenantLanguages.id, existing.id))
       .run();
-    return;
+    return existing.id;
   }
+  const id = newId();
   ctx.db
     .insert(tenantLanguages)
     .values({
-      id: newId(),
+      id,
       tenantId: ctx.tenantId,
-      code,
+      code: normalized,
       name,
+      nativeName: opts.nativeName ?? null,
+      direction: opts.direction ?? 'ltr',
       flagEmoji: flagEmoji ?? null,
       enabled: true,
     })
     .run();
+  writeAudit(ctx, {
+    module: 'settings',
+    action: 'language_add',
+    entity: 'tenant_language',
+    entityId: id,
+    reference: normalized,
+    summary: `Language '${name}' (${normalized}) added`,
+  });
+  return id;
 }
 
-export function listLanguages(ctx: Ctx) {
+/** Rename, change direction, or activate/deactivate a language. Languages are
+ *  archived (disabled), never destructively deleted once translations exist. */
+export function updateLanguage(
+  ctx: Ctx,
+  languageId: string,
+  patch: { name?: string; nativeName?: string; direction?: 'ltr' | 'rtl'; flagEmoji?: string | null; enabled?: boolean },
+): void {
+  const row = ctx.db
+    .select()
+    .from(tenantLanguages)
+    .where(and(eq(tenantLanguages.tenantId, ctx.tenantId), eq(tenantLanguages.id, languageId)))
+    .get();
+  if (!row) notFound('language_missing', 'Language not found');
+  if (row.code === 'en' && patch.enabled === false) {
+    badRequest('base_language', 'English is the base/fallback language and cannot be deactivated');
+  }
+  const before = { name: row.name, direction: row.direction, enabled: row.enabled };
+  ctx.db
+    .update(tenantLanguages)
+    .set({
+      name: patch.name ?? row.name,
+      nativeName: patch.nativeName ?? row.nativeName,
+      direction: patch.direction ?? row.direction,
+      flagEmoji: patch.flagEmoji === undefined ? row.flagEmoji : patch.flagEmoji,
+      enabled: patch.enabled ?? row.enabled,
+    })
+    .where(eq(tenantLanguages.id, languageId))
+    .run();
+  writeAudit(ctx, {
+    module: 'settings',
+    action: 'language_update',
+    entity: 'tenant_language',
+    entityId: languageId,
+    reference: row.code,
+    summary: `Language '${row.name}' updated`,
+    before,
+    after: patch,
+  });
+}
+
+export function listLanguages(ctx: Ctx, opts: { includeDisabled?: boolean } = {}) {
+  const conds = [eq(tenantLanguages.tenantId, ctx.tenantId)];
+  if (!opts.includeDisabled) conds.push(eq(tenantLanguages.enabled, true));
   return ctx.db
     .select()
     .from(tenantLanguages)
-    .where(and(eq(tenantLanguages.tenantId, ctx.tenantId), eq(tenantLanguages.enabled, true)))
+    .where(and(...conds))
     .all();
 }
 

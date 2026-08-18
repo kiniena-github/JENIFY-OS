@@ -125,10 +125,22 @@ export function saveRoleMatrix(ctx: Ctx, roleId: string, matrix: PermissionMatri
 }
 
 /** Guard used by every protected route/service. */
-export function requirePermission(ctx: Ctx, module: ModuleId, action: ActionId): void {
+export function requirePermission(ctx: Ctx, module: ModuleId, action: ActionId | string): void {
   if (!ctx.user) forbidden('unauthenticated', 'Sign in required');
   if (!hasPermission(ctx.user.permissions, module, action)) {
     forbidden('forbidden', `Missing permission ${module}.${action}`);
+  }
+}
+
+/** Passes when the user holds ANY of the listed actions on the module. */
+export function requireAnyPermission(
+  ctx: Ctx,
+  module: ModuleId,
+  actions: Array<ActionId | string>,
+): void {
+  if (!ctx.user) forbidden('unauthenticated', 'Sign in required');
+  if (!actions.some((a) => hasPermission(ctx.user!.permissions, module, a))) {
+    forbidden('forbidden', `Missing permission ${module}.${actions.join('|')}`);
   }
 }
 

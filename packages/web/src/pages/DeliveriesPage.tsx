@@ -92,12 +92,13 @@ export default function DeliveriesPage() {
                         {t('delivery.details', 'Details')}
                       </button>
                     ) : null}{' '}
-                    {d.status === 'pending' && can('delivery', 'edit') ? (
+                    {d.status === 'pending' && (can('delivery', 'load') || can('delivery', 'edit')) ? (
                       <button className="btn btn-secondary btn-sm" onClick={() => void act(`/api/deliveries/${d.id}/loading`)}>
                         {t('status.loading', 'Loading')}
                       </button>
                     ) : null}{' '}
-                    {(d.status === 'pending' || d.status === 'loading') && can('delivery', 'approve') ? (
+                    {(d.status === 'pending' || d.status === 'loading') &&
+                    (can('delivery', 'dispatch') || can('delivery', 'approve')) ? (
                       <button className="btn btn-primary btn-sm" onClick={() => void act(`/api/deliveries/${d.id}/dispatch`)}>
                         {t('delivery.dispatch', 'Dispatch')}
                       </button>
@@ -111,7 +112,10 @@ export default function DeliveriesPage() {
                       <button className="btn btn-secondary btn-sm" onClick={() => setCancelling(d)}>
                         {t('shell.cancel', 'Cancel')}
                       </button>
-                    ) : null}
+                    ) : null}{' '}
+                    <a className="btn btn-ghost btn-sm" href={`/print/delivery/${d.id}`}>
+                      {t('doc.print', 'Print')}
+                    </a>
                   </td>
                 </tr>
               ))}
@@ -129,7 +133,11 @@ export default function DeliveriesPage() {
 
       {creating ? (
         <CreateDeliveryModal
-          confirmable={confirmable.map((i) => ({ id: i.id, label: `${i.docNumber} — ${customerName(i.customerId)}` }))}
+          confirmable={confirmable.map((i) => ({
+            id: i.id,
+            label: `${i.docNumber} — ${customerName(i.customerId)}`,
+            fulfillment: i.fulfillment,
+          }))}
           onClose={() => setCreating(false)}
           onDone={() => {
             setCreating(false);
@@ -177,7 +185,7 @@ function CreateDeliveryModal({
   onClose,
   onDone,
 }: {
-  confirmable: Array<{ id: string; label: string }>;
+  confirmable: Array<{ id: string; label: string; fulfillment: string }>;
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -189,8 +197,16 @@ function CreateDeliveryModal({
   const [driverPhone, setDriverPhone] = useState('');
   const [expectedDate, setExpectedDate] = useState('');
   const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const isPickup = confirmable.find((i) => i.id === invoiceId)?.fulfillment === 'pickup';
+  const ready =
+    !!invoiceId &&
+    !!destination.trim() &&
+    !!expectedDate &&
+    (isPickup || (!!truckNumber.trim() && !!driverName.trim() && !!driverPhone.trim()));
 
   async function create() {
+    setBusy(true);
     setError(null);
     try {
       await api.post('/api/deliveries', {
@@ -204,6 +220,8 @@ function CreateDeliveryModal({
       onDone();
     } catch (err) {
       setError(err);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -221,27 +239,32 @@ function CreateDeliveryModal({
             ))}
           </select>
         </Field>
-        <Field label={t('delivery.destination', 'Destination')}>
+        <Field label={t('delivery.destination', 'Destination')} required>
           <input value={destination} onChange={(e) => setDestination(e.target.value)} />
         </Field>
-        <Field label={t('delivery.truck', 'Truck number')}>
+        <Field label={t('delivery.truck', 'Truck number')} required={!isPickup}>
           <input value={truckNumber} onChange={(e) => setTruckNumber(e.target.value)} />
         </Field>
-        <Field label={t('delivery.driver', 'Driver name')}>
+        <Field label={t('delivery.driver', 'Driver name')} required={!isPickup}>
           <input value={driverName} onChange={(e) => setDriverName(e.target.value)} />
         </Field>
-        <Field label={t('delivery.driver_phone', 'Driver phone')}>
+        <Field label={t('delivery.driver_phone', 'Driver phone')} required={!isPickup}>
           <input value={driverPhone} onChange={(e) => setDriverPhone(e.target.value)} />
         </Field>
-        <Field label={t('delivery.expected', 'Expected delivery')}>
-          <input type="date" value={expectedDate} onChange={(e) => setExpectedDate(e.target.value)} />
+        <Field label={t('delivery.expected', 'Expected delivery')} required>
+          <input
+            type="date"
+            min={fmt.todayIso()}
+            value={expectedDate}
+            onChange={(e) => setExpectedDate(e.target.value)}
+          />
         </Field>
       </div>
       <div className="form-actions">
         <button className="btn btn-secondary" onClick={onClose}>
           {t('shell.cancel', 'Cancel')}
         </button>
-        <button className="btn btn-primary" disabled={!invoiceId} onClick={() => void create()}>
+        <button className="btn btn-primary" disabled={busy || !ready} onClick={() => void create()}>
           {t('delivery.create', 'Create delivery')}
         </button>
       </div>
@@ -312,8 +335,10 @@ function DeliveredModal({ delivery, onClose, onDone }: { delivery: Delivery; onC
   const [receivedBy, setReceivedBy] = useState('');
   const [notes, setNotes] = useState('');
   const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
 
   async function save() {
+    setBusy(true);
     setError(null);
     try {
       await api.post(`/api/deliveries/${delivery.id}/delivered`, {
@@ -332,7 +357,13 @@ function DeliveredModal({ delivery, onClose, onDone }: { delivery: Delivery; onC
       <ErrorBox error={error} />
       <div className="form-grid">
         <Field label={t('delivery.actual', 'Actual delivery date')} required>
-          <input type="date" value={actualDate} onChange={(e) => setActualDate(e.target.value)} />
+          <input
+            type="date"
+            max={fmt.todayIso()}
+            min={delivery.dispatchDate ?? undefined}
+            value={actualDate}
+            onChange={(e) => setActualDate(e.target.value)}
+          />
         </Field>
         <Field label={t('delivery.received_by', 'Received by')} required>
           <input value={receivedBy} onChange={(e) => setReceivedBy(e.target.value)} />
@@ -345,7 +376,7 @@ function DeliveredModal({ delivery, onClose, onDone }: { delivery: Delivery; onC
         <button className="btn btn-secondary" onClick={onClose}>
           {t('shell.cancel', 'Cancel')}
         </button>
-        <button className="btn btn-primary" disabled={!receivedBy.trim()} onClick={() => void save()}>
+        <button className="btn btn-primary" disabled={busy || !receivedBy.trim()} onClick={() => void save()}>
           {t('delivery.mark_delivered', 'Mark delivered')}
         </button>
       </div>

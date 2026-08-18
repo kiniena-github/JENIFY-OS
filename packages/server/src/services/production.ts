@@ -1,5 +1,5 @@
 import { and, asc, eq } from 'drizzle-orm';
-import type { StageAttributeDef, StageInputSource, StageOutputForm } from '@factoryos/shared';
+import type { StageAttributeDef, StageInputSource, StageOutputForm, StageOutputPolicy } from '@factoryos/shared';
 import { productionStages } from '../db/schema.js';
 import { newId, notFound } from '../util.js';
 import type { Ctx } from './context.js';
@@ -14,6 +14,7 @@ export function createStage(
     sequence: number;
     inputSource: StageInputSource;
     outputForm: StageOutputForm;
+    outputPolicy?: StageOutputPolicy;
     requiresQc?: boolean;
     inputItemId?: string;
     priorStageId?: string;
@@ -33,6 +34,7 @@ export function createStage(
       sequence: input.sequence,
       inputSource: input.inputSource,
       outputForm: input.outputForm,
+      outputPolicy: input.outputPolicy ?? (input.outputForm === 'packaged_items' ? 'converted' : 'measured'),
       requiresQc: input.requiresQc ?? false,
       inputItemId: input.inputItemId ?? null,
       priorStageId: input.priorStageId ?? null,

@@ -1,14 +1,25 @@
 import type { FastifyInstance } from 'fastify';
+import path from 'node:path';
+import fs from 'node:fs';
 import type { PermissionMatrix } from '@factoryos/shared';
 import type { Db } from '../db/index.js';
+import { defaultDbPath } from '../db/index.js';
 import { requireCtx } from '../app.js';
 import { requirePermission, listRoles, saveRoleMatrix, createRole } from '../services/permissions.js';
 import { listUsers, createUser, updateUser, resetPassword } from '../services/users.js';
-import { listTranslationRows, upsertTranslation, listLanguages } from '../services/translations.js';
+import {
+  listTranslationRows,
+  upsertTranslation,
+  listLanguages,
+  enableLanguage,
+  updateLanguage,
+} from '../services/translations.js';
 import { getSettings, saveSettings } from '../services/settings.js';
 import { listAudit } from '../services/audit.js';
+import { writeAudit } from '../services/audit.js';
 import { updateTenantBranding, getTenant } from '../services/provisioning.js';
 import { listSequences, defineSequence } from '../services/numbering.js';
+import { badRequest } from '../util.js';
 
 export function registerAdminRoutes(app: FastifyInstance, db: Db): void {
   // ------------------------------- users -----------------------------------
@@ -107,6 +118,78 @@ export function registerAdminRoutes(app: FastifyInstance, db: Db): void {
     return { ok: true };
   });
 
+  // ------------------------------ languages --------------------------------
+  app.get<{ Querystring: { includeDisabled?: string } }>('/api/languages', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'settings', 'view');
+    return listLanguages(ctx, { includeDisabled: req.query.includeDisabled === 'true' });
+  });
+
+  app.post<{
+    Body: {
+      code: string;
+      name: string;
+      nativeName?: string;
+      direction?: 'ltr' | 'rtl';
+      flagEmoji?: string;
+    };
+  }>('/api/languages', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'settings', 'edit');
+    const id = enableLanguage(ctx, req.body.code, req.body.name, req.body.flagEmoji, {
+      nativeName: req.body.nativeName,
+      direction: req.body.direction,
+    });
+    return { id };
+  });
+
+  app.patch<{
+    Params: { id: string };
+    Body: {
+      name?: string;
+      nativeName?: string;
+      direction?: 'ltr' | 'rtl';
+      flagEmoji?: string | null;
+      enabled?: boolean;
+    };
+  }>('/api/languages/:id', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'settings', 'edit');
+    updateLanguage(ctx, req.params.id, req.body);
+    return { ok: true };
+  });
+
+  // -------------------------- branding assets ------------------------------
+  /**
+   * Accepts a small base64 image (logo/secondary logo/stamp/signature) and
+   * stores it next to the local database; served at /branding/. Changing a
+   * logo never changes transaction data.
+   */
+  app.post<{ Body: { kind: string; dataUrl: string } }>('/api/branding-asset', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'settings', 'edit');
+    const allowed = ['logo', 'logo2', 'stamp', 'signature'];
+    if (!allowed.includes(req.body.kind)) badRequest('asset_kind', 'Unknown asset kind');
+    const match = /^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/.exec(req.body.dataUrl ?? '');
+    if (!match) badRequest('asset_format', 'Provide a PNG, JPEG or WebP image');
+    const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
+    const buf = Buffer.from(match[2], 'base64');
+    if (buf.length > 2 * 1024 * 1024) badRequest('asset_size', 'Image must be 2 MB or smaller');
+    const brandingDir = path.join(path.dirname(defaultDbPath()), 'branding');
+    fs.mkdirSync(brandingDir, { recursive: true });
+    const fileName = `${ctx.tenantId.slice(0, 8)}-${req.body.kind}.${ext}`;
+    fs.writeFileSync(path.join(brandingDir, fileName), buf);
+    const urlPath = `/branding/${fileName}`;
+    if (req.body.kind === 'logo') updateTenantBranding(ctx, { logoPath: urlPath });
+    writeAudit(ctx, {
+      module: 'settings',
+      action: 'branding_asset',
+      reference: req.body.kind,
+      summary: `Branding asset '${req.body.kind}' updated (${Math.round(buf.length / 1024)} KB)`,
+    });
+    return { path: urlPath };
+  });
+
   // ------------------------------ settings ---------------------------------
   app.get<{ Params: { domain: string } }>('/api/settings/:domain', async (req) => {
     const ctx = requireCtx(db, req);
@@ -150,6 +233,8 @@ export function registerAdminRoutes(app: FastifyInstance, db: Db): void {
       userId?: string;
       entity?: string;
       entityId?: string;
+      search?: string;
+      scope?: 'operational' | 'system' | 'all';
       limit?: string;
       offset?: string;
     };
