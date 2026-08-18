@@ -28,7 +28,12 @@ export default function SettingsPage() {
           </button>
         ))}
       </div>
-      {tab === 'general' ? <GeneralTab /> : null}
+      {tab === 'general' ? (
+        <>
+          <GeneralTab />
+          <QualityConfigPanel />
+        </>
+      ) : null}
       {tab === 'warehouses' ? <WarehousesTab /> : null}
       {tab === 'pricing' ? <PricingTab /> : null}
       {tab === 'translations' ? <TranslationsTab /> : null}
@@ -85,6 +90,71 @@ function GeneralTab() {
         {canEdit ? (
           <div className="form-actions">
             <button className="btn btn-primary" onClick={() => void save()}>
+              {t('settings.save', 'Save settings')}
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/** Quality defaults (e.g. target iodine ppm) — versioned tenant settings. */
+function QualityConfigPanel() {
+  const { t, can } = useAuth();
+  const qc = useQueryClient();
+  const canEdit = can('settings', 'edit');
+  const prodQ = useQuery({
+    queryKey: ['settings', 'production'],
+    queryFn: () =>
+      api.get<{ version: number; data: { iodization?: { targetPpm?: string } } }>(
+        '/api/settings/production',
+      ),
+  });
+  const [target, setTarget] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [saved, setSaved] = useState(false);
+  const effective = target ?? prodQ.data?.data.iodization?.targetPpm ?? '';
+
+  async function save() {
+    setError(null);
+    try {
+      const data = { ...(prodQ.data?.data ?? {}) };
+      data.iodization = { ...(data.iodization ?? {}), targetPpm: effective };
+      await api.put('/api/settings/production', { data });
+      setSaved(true);
+      setTarget(null);
+      await qc.invalidateQueries({ queryKey: ['settings', 'production'] });
+      await qc.invalidateQueries({ queryKey: ['ui-config'] });
+    } catch (err) {
+      setError(err);
+    }
+  }
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <h2>{t('settings.quality', 'Quality configuration')}</h2>
+        <div className="spacer" />
+        <span className="muted">v{prodQ.data?.version ?? 0}</span>
+      </div>
+      <div className="panel-body">
+        <ErrorBox error={error} />
+        {saved ? <div className="page-info">{t('settings.saved', 'Saved. Settings change future behavior only.')}</div> : null}
+        <div className="form-grid">
+          <Field
+            label={t('settings.quality_target', 'Target iodine level (ppm)')}
+            hint={t(
+              'settings.quality_note',
+              'Used as the default target on new quality tests. Tests already recorded keep the target that applied at the time.',
+            )}
+          >
+            <input value={effective} disabled={!canEdit} onChange={(e) => setTarget(e.target.value)} />
+          </Field>
+        </div>
+        {canEdit ? (
+          <div className="form-actions">
+            <button className="btn btn-primary" disabled={target === null} onClick={() => void save()}>
               {t('settings.save', 'Save settings')}
             </button>
           </div>

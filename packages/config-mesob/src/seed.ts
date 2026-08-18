@@ -259,6 +259,8 @@ const warehouseRole = createRole(ctx, {
   ]),
 });
 
+// Production Operator records iodization but may NOT record or release QC —
+// quality testing and release belong to Quality Management.
 const productionRole = createRole(ctx, {
   code: 'production',
   name: 'Production Operator / Supervisor',
@@ -267,8 +269,21 @@ const productionRole = createRole(ctx, {
     ['dashboard', ['view']],
     ['inventory', ['view']],
     ['production', ['view', 'create', 'edit']],
-    ['quality', ['view', 'create', 'edit']],
+    ['quality', ['view']],
     ['reports', ['view']],
+  ]),
+});
+
+const qualityRole = createRole(ctx, {
+  code: 'quality',
+  name: 'Quality Management',
+  dashboardFocus: 'production',
+  matrix: m([
+    ['dashboard', ['view']],
+    ['inventory', ['view']],
+    ['production', ['view']],
+    ['quality', ['view', 'create', 'edit', 'approve', 'export']],
+    ['reports', ['view', 'export']],
   ]),
 });
 
@@ -315,6 +330,7 @@ seedUser('owner', 'Mesob Owner', ownerRole, 'Owner / Super Admin');
 seedUser('operations', 'Operations Manager', opsRole, 'Operations Manager');
 seedUser('warehouse', 'Warehouse Keeper', warehouseRole, 'Warehouse / Store Keeper');
 seedUser('production', 'Production Supervisor', productionRole, 'Production Operator / Supervisor');
+seedUser('quality', 'Quality Manager', qualityRole, 'Quality Management');
 seedUser('sales', 'Sales Officer', salesRole, 'Sales & Customer Officer');
 seedUser('finance', 'Finance Accountant', financeRole, 'Finance / Accountant');
 
@@ -347,7 +363,9 @@ saveSettings(ctx, 'pricing', {
 });
 saveSettings(ctx, 'production', {
   iodization: {
-    targetLevel: 'Admin-approved target (set before first real batch)',
+    // Default target shown on new quality tests; editable in Settings.
+    // Each recorded test preserves the target that applied at the time.
+    targetPpm: '30-40 ppm',
   },
 });
 saveSettings(ctx, 'modules', {

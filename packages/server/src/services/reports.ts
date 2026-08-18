@@ -200,7 +200,12 @@ export function qualityReport(ctx: Ctx, p: Period) {
     batchCount: rows.length,
     passedCount: rows.filter((b) => statusOf(b) === 'passed').length,
     failedCount: rows.filter((b) => b.qcStatus === 'failed').length,
-    retestOpenCount: rows.filter((b) => b.qcStatus === 'retest_required' || b.qcStatus === 'pending').length,
+    retestOpenCount: rows.filter(
+      (b) =>
+        b.qcStatus === 'retest_required' ||
+        b.qcStatus === 'pending' ||
+        b.qcStatus === 'passed_pending_release',
+    ).length,
     attributeTotals,
     breakdown: rows.map((b) => {
       const batchTests = (testsByBatch.get(b.id) ?? []).sort((a, z) => z.attemptNumber - a.attemptNumber);

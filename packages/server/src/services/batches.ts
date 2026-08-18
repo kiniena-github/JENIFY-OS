@@ -401,10 +401,11 @@ export function recordQualityTest(ctx: Ctx, batchId: string, input: QualityTestI
         createdAt: nowIso(),
       })
       .run();
-    // pending approval when passed; failed/retest block the batch immediately
+    // a passed test alone does NOT release the batch — it awaits an explicit
+    // approve & release by quality authority; failed/retest block immediately
     tx.db
       .update(productionBatches)
-      .set({ qcStatus: input.status === 'passed' ? 'pending' : input.status })
+      .set({ qcStatus: input.status === 'passed' ? 'passed_pending_release' : input.status })
       .where(eq(productionBatches.id, batchId))
       .run();
     writeAudit(tx, {
@@ -452,7 +453,7 @@ export function approveQualityTest(ctx: Ctx, batchId: string): void {
       entity: 'production_batch',
       entityId: batchId,
       reference: batch.docNumber,
-      summary: `Quality result approved for ${batch.docNumber}`,
+      summary: `Quality result approved — ${batch.docNumber} released for the next stage`,
     });
   });
 }

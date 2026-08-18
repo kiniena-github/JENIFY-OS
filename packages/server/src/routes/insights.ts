@@ -33,7 +33,11 @@ export function registerInsightRoutes(app: FastifyInstance, db: Db): void {
     const ctx = requireCtx(db, req);
     const { getSettings } = await import('../services/settings.js');
     const modules = getSettings<{ simpleItemScreens?: unknown[] }>(ctx, 'modules');
-    return { simpleItemScreens: modules?.data.simpleItemScreens ?? [] };
+    const production = getSettings<{ iodization?: { targetPpm?: string } }>(ctx, 'production');
+    return {
+      simpleItemScreens: modules?.data.simpleItemScreens ?? [],
+      qualityTargetPpm: production?.data.iodization?.targetPpm ?? null,
+    };
   });
 
   app.get('/api/dashboard', async (req) => {

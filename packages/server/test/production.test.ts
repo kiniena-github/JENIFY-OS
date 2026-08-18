@@ -183,8 +183,8 @@ describe('iodization (prior-batch input, QC gate)', () => {
       status: 'passed',
       date: '2026-08-15',
     });
-    // passed but NOT yet approved -> still gated
-    expect(getBatch(tt.ownerCtx, iodId).qcStatus).toBe('pending');
+    // passed but NOT yet released -> still gated
+    expect(getBatch(tt.ownerCtx, iodId).qcStatus).toBe('passed_pending_release');
     expect(availableSourceBatches(tt.ownerCtx, 'packaging').length).toBe(0);
 
     approveQualityTest(tt.ownerCtx, iodId);

@@ -58,6 +58,9 @@ export const PLATFORM_KEYS: Array<{ key: string; en: string; module?: string }> 
   { key: 'status.overdue', en: 'Overdue', module: 'status' },
   { key: 'status.active', en: 'Active', module: 'status' },
   { key: 'status.inactive', en: 'Inactive', module: 'status' },
+  { key: 'status.pending_qc', en: 'Pending QC', module: 'status' },
+  { key: 'status.passed_pending_release', en: 'Passed — Awaiting Release', module: 'status' },
+  { key: 'status.released', en: 'Released', module: 'status' },
 
   // receiving
   { key: 'receiving.subtitle', en: 'Receive material into a warehouse', module: 'receiving' },
@@ -452,4 +455,20 @@ export const PLATFORM_KEYS: Array<{ key: string; en: string; module?: string }> 
   { key: 'production.approved', en: 'Approved', module: 'production' },
   { key: 'production.awaiting', en: 'Awaiting approval', module: 'production' },
   { key: 'production.traceability', en: 'Traceability', module: 'production' },
+  { key: 'production.tested_by', en: 'Tested by', module: 'production' },
+  { key: 'production.test_date', en: 'Test date', module: 'production' },
+  { key: 'production.record_retest', en: 'Record retest', module: 'production' },
+  { key: 'production.approve_release', en: 'Approve & Release', module: 'production' },
+  { key: 'production.released_note', en: 'Released — available for Packaging.', module: 'production' },
+  { key: 'production.awaiting_release_note', en: 'Test passed. An authorized quality approver must Approve & Release before Packaging can use this batch.', module: 'production' },
+  { key: 'production.blocked_title', en: 'Batches not yet available for this stage', module: 'production' },
+  { key: 'production.blocked_pending', en: 'awaiting quality test', module: 'production' },
+  { key: 'production.blocked_failed', en: 'quality test failed — retest required before release', module: 'production' },
+  { key: 'production.blocked_retest', en: 'retest required', module: 'production' },
+  { key: 'production.blocked_release', en: 'passed — awaiting quality release', module: 'production' },
+
+  // quality settings
+  { key: 'settings.quality', en: 'Quality configuration', module: 'settings' },
+  { key: 'settings.quality_target', en: 'Target iodine level (ppm)', module: 'settings' },
+  { key: 'settings.quality_note', en: 'Used as the default target on new quality tests. Tests already recorded keep the target that applied at the time.', module: 'settings' },
 ];

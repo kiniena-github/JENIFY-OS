@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../auth.js';
 import { api } from '../api.js';
 import { usePageTitle } from '../components/Layout.js';
@@ -52,6 +52,17 @@ function invalidate(qc: ReturnType<typeof useQueryClient>) {
   void qc.invalidateQueries({ queryKey: ['stock'] });
   void qc.invalidateQueries({ queryKey: ['sources'] });
   void qc.invalidateQueries({ queryKey: ['batch'] });
+}
+
+/** Worker-facing QC state of a gated batch. */
+function qcDisplay(b: Batch): string {
+  if (b.qcStatus === 'passed' && b.qcApprovedAt) return 'released';
+  if (b.qcStatus === 'pending') return 'pending_qc';
+  return b.qcStatus; // failed | retest_required | passed_pending_release
+}
+
+function isReleased(b: Batch): boolean {
+  return b.qcStatus === 'passed' && !!b.qcApprovedAt;
 }
 
 function StagePanel({ stage }: { stage: Stage }) {
@@ -161,7 +172,7 @@ function StagePanel({ stage }: { stage: Stage }) {
                   )}
                   {stage.requiresQc ? (
                     <td>
-                      <StatusBadge status={b.qcStatus === 'passed' && b.qcApprovedAt ? 'passed' : b.qcStatus} />
+                      <StatusBadge status={qcDisplay(b)} />
                     </td>
                   ) : null}
                   <td>
@@ -183,7 +194,7 @@ function StagePanel({ stage }: { stage: Stage }) {
                         </button>
                       </>
                     ) : null}
-                    {stage.requiresQc && b.status === 'completed' && !(b.qcStatus === 'passed' && b.qcApprovedAt) ? (
+                    {stage.requiresQc && b.status === 'completed' && !isReleased(b) ? (
                       <button className="btn btn-primary btn-sm" onClick={() => setInspecting(b)}>
                         {t('production.qc_action', 'Quality test')}
                       </button>
@@ -322,6 +333,34 @@ function NewBatchForm({ stage, onError }: { stage: Stage; onError: (e: unknown) 
   const stock = useStock('?kind=raw_material');
   const uoms = useUoms();
   const sources = useSourceBatches(stage.code, stage.inputSource === 'prior_batch');
+  const stagesQ = useStages();
+  const allBatches = useBatches();
+
+  // batches of the QC-gated prior stage that still hold output but are not
+  // released yet — shown with the reason so workers know WHY they are missing
+  const priorStage = stagesQ.data?.find((s) => s.id === stage.priorStageId);
+  const blockedSources =
+    stage.inputSource === 'prior_batch' && priorStage?.requiresQc
+      ? (allBatches.data ?? []).filter(
+          (b) =>
+            b.stageId === priorStage.id &&
+            b.status === 'completed' &&
+            (b.outputQty ?? 0) - b.consumedOutputQty > 0 &&
+            !isReleased(b),
+        )
+      : [];
+  const blockedReason = (b: Batch): string => {
+    switch (qcDisplay(b)) {
+      case 'failed':
+        return t('production.blocked_failed', 'quality test failed — retest required before release');
+      case 'retest_required':
+        return t('production.blocked_retest', 'retest required');
+      case 'passed_pending_release':
+        return t('production.blocked_release', 'passed — awaiting quality release');
+      default:
+        return t('production.blocked_pending', 'awaiting quality test');
+    }
+  };
   const [state, setStateObj] = useState<Record<string, string>>({ date: fmt.todayIso() });
   const [busy, setBusy] = useState(false);
   const setState = (k: string, v: string) => setStateObj((s) => ({ ...s, [k]: v }));
@@ -389,6 +428,18 @@ function NewBatchForm({ stage, onError }: { stage: Stage; onError: (e: unknown) 
         </h2>
       </div>
       <div className="panel-body">
+        {blockedSources.length > 0 ? (
+          <div className="page-info">
+            <strong>{t('production.blocked_title', 'Batches not yet available for this stage')}:</strong>
+            {blockedSources.map((b) => (
+              <div key={b.id} className="flex" style={{ marginTop: 6 }}>
+                <span className="mono">{b.docNumber}</span>
+                <StatusBadge status={qcDisplay(b)} />
+                <span>— {blockedReason(b)}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
         <div className="form-grid">
           <Field label={t('shell.date', 'Date')} required>
             <input type="date" value={state.date ?? ''} onChange={(e) => setState('date', e.target.value)} />
@@ -513,25 +564,34 @@ function BatchDetailModal({ stage, batch, onClose }: { stage: Stage; batch: Batc
   const qc = useQueryClient();
   const detail = useBatchDetail(batch.id);
   const genealogy = useBatchGenealogy(batch.id);
+  const uiConfig = useQuery({
+    queryKey: ['ui-config'],
+    queryFn: () => api.get<{ qualityTargetPpm: string | null }>('/api/ui-config'),
+  });
   const [error, setError] = useState<unknown>(null);
-  const [target, setTarget] = useState('');
+  const [target, setTarget] = useState<string | null>(null); // null = use configured default
   const [actual, setActual] = useState('');
   const [status, setStatus] = useState<'passed' | 'failed' | 'retest_required'>('passed');
+  const [testedBy, setTestedBy] = useState('');
+  const [testDate, setTestDate] = useState(fmt.todayIso());
   const [notes, setNotes] = useState('');
 
   const b = detail.data?.batch ?? batch;
   const tests = detail.data?.tests ?? [];
-  const approved = b.qcStatus === 'passed' && !!b.qcApprovedAt;
+  const approved = isReleased(b);
   const latestPassedUnapproved = tests[0]?.status === 'passed' && !tests[0]?.approvedAt;
+  // configured target is the default; the recorded test keeps its own value
+  const effectiveTarget = target ?? uiConfig.data?.qualityTargetPpm ?? '';
 
   async function recordTest() {
     setError(null);
     try {
       await api.post(`/api/batches/${batch.id}/qc-test`, {
-        targetLevel: target || undefined,
+        targetLevel: effectiveTarget || undefined,
         actualResult: actual,
         status,
-        date: fmt.todayIso(),
+        operatorName: testedBy || undefined,
+        date: testDate,
         notes: notes || undefined,
       });
       setActual('');
@@ -571,21 +631,31 @@ function BatchDetailModal({ stage, batch, onClose }: { stage: Stage; batch: Batc
         {stage.requiresQc ? (
           <StatCard
             label={t('production.qc', 'Quality')}
-            value={<StatusBadge status={approved ? 'passed' : b.qcStatus} />}
-            sub={approved ? t('production.approved', 'Approved') : t('production.awaiting', 'Awaiting approval')}
+            value={<StatusBadge status={qcDisplay(b)} />}
+            sub={
+              approved
+                ? t('production.approved', 'Approved')
+                : b.qcStatus === 'passed_pending_release'
+                  ? t('production.awaiting', 'Awaiting approval')
+                  : undefined
+            }
           />
         ) : null}
       </div>
 
-      {stage.requiresQc && b.status === 'completed' && !approved && can('quality', 'create') ? (
+      {stage.requiresQc && approved ? (
+        <div className="page-info">{t('production.released_note', 'Released — available for Packaging.')}</div>
+      ) : null}
+
+      {stage.requiresQc && b.status === 'completed' && !approved && can('quality', 'create') && !latestPassedUnapproved ? (
         <div className="panel">
           <div className="panel-head">
-            <h2>{t('production.record_test', 'Record test result')}</h2>
+            <h2>{tests.length > 0 ? t('production.record_retest', 'Record retest') : t('production.record_test', 'Record test result')}</h2>
           </div>
           <div className="panel-body">
             <div className="form-grid">
               <Field label={t('production.target', 'Target level')}>
-                <input value={target} onChange={(e) => setTarget(e.target.value)} />
+                <input value={effectiveTarget} onChange={(e) => setTarget(e.target.value)} />
               </Field>
               <Field label={t('production.actual', 'Actual test result')} required>
                 <input value={actual} onChange={(e) => setActual(e.target.value)} />
@@ -597,20 +667,45 @@ function BatchDetailModal({ stage, batch, onClose }: { stage: Stage; batch: Batc
                   <option value="retest_required">{t('status.retest_required', 'Retest Required')}</option>
                 </select>
               </Field>
+              <Field label={t('production.tested_by', 'Tested by')} required>
+                <input value={testedBy} onChange={(e) => setTestedBy(e.target.value)} />
+              </Field>
+              <Field label={t('production.test_date', 'Test date')} required>
+                <input type="date" value={testDate} onChange={(e) => setTestDate(e.target.value)} />
+              </Field>
               <Field label={t('shell.notes', 'Notes')}>
                 <input value={notes} onChange={(e) => setNotes(e.target.value)} />
               </Field>
             </div>
             <div className="form-actions">
-              <button className="btn btn-primary" disabled={!actual.trim()} onClick={() => void recordTest()}>
-                {t('production.submit_test', 'Submit test')}
+              <button
+                className="btn btn-primary"
+                disabled={!actual.trim() || !testedBy.trim() || !testDate}
+                onClick={() => void recordTest()}
+              >
+                {tests.length > 0 ? t('production.record_retest', 'Record retest') : t('production.submit_test', 'Submit test')}
               </button>
-              {latestPassedUnapproved && can('quality', 'approve') ? (
-                <button className="btn btn-primary" onClick={() => void approve()}>
-                  {t('production.approve_result', 'Approve result')}
-                </button>
-              ) : null}
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {stage.requiresQc && b.status === 'completed' && !approved && latestPassedUnapproved ? (
+        <div className="panel">
+          <div className="panel-body">
+            <div className="page-info" style={{ marginBottom: can('quality', 'approve') ? 12 : 0 }}>
+              {t(
+                'production.awaiting_release_note',
+                'Test passed. An authorized quality approver must Approve & Release before Packaging can use this batch.',
+              )}
+            </div>
+            {can('quality', 'approve') ? (
+              <div className="form-actions">
+                <button className="btn btn-primary" onClick={() => void approve()}>
+                  {t('production.approve_release', 'Approve & Release')}
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -628,6 +723,7 @@ function BatchDetailModal({ stage, batch, onClose }: { stage: Stage; batch: Batc
                   <th>{t('shell.date', 'Date')}</th>
                   <th>{t('production.target', 'Target')}</th>
                   <th>{t('production.actual', 'Actual result')}</th>
+                  <th>{t('production.tested_by', 'Tested by')}</th>
                   <th>{t('shell.status', 'Status')}</th>
                   <th>{t('production.approved', 'Approved')}</th>
                 </tr>
@@ -639,6 +735,7 @@ function BatchDetailModal({ stage, batch, onClose }: { stage: Stage; batch: Batc
                     <td>{fmt.date(qt2.date)}</td>
                     <td>{qt2.targetLevel ?? '—'}</td>
                     <td>{qt2.actualResult}</td>
+                    <td>{qt2.operatorName ?? '—'}</td>
                     <td>
                       <StatusBadge status={qt2.status} />
                     </td>

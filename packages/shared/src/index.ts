@@ -85,7 +85,21 @@ export type LotStatus = (typeof LOT_STATUSES)[number];
 export const BATCH_STATUSES = ['draft', 'in_progress', 'completed', 'cancelled'] as const;
 export type BatchStatus = (typeof BATCH_STATUSES)[number];
 
-export const QC_STATUSES = ['pending', 'passed', 'failed', 'retest_required'] as const;
+/**
+ * QC lifecycle of a gated batch:
+ *   pending                  no decisive test yet ("Pending QC")
+ *   failed                   latest test failed — blocked, retest required
+ *   retest_required          tester explicitly requested a retest — blocked
+ *   passed_pending_release   latest test passed, awaiting explicit release
+ *   passed                   released by quality authority — next stage may consume
+ */
+export const QC_STATUSES = [
+  'pending',
+  'passed',
+  'failed',
+  'retest_required',
+  'passed_pending_release',
+] as const;
 export type QcStatus = (typeof QC_STATUSES)[number];
 
 /** How a production stage sources its input. */

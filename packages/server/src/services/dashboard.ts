@@ -186,13 +186,17 @@ export function dashboard(ctx: Ctx, opts: { includeFinancial: boolean }): Dashbo
       severity: 'warning',
     });
   }
-  const awaitingQc = batches.filter((b) => b.status === 'completed' && b.qcStatus === 'pending');
+  const awaitingQc = batches.filter(
+    (b) =>
+      b.status === 'completed' &&
+      (b.qcStatus === 'pending' || b.qcStatus === 'passed_pending_release'),
+  );
   const gatedStages = new Set(stages.filter((s) => s.requiresQc).map((s) => s.id));
   const awaitingApproval = awaitingQc.filter((b) => gatedStages.has(b.stageId));
   if (awaitingApproval.length > 0) {
     alerts.push({
       kind: 'qc_pending',
-      message: `${awaitingApproval.length} batch(es) awaiting quality approval`,
+      message: `${awaitingApproval.length} batch(es) awaiting quality test or release`,
       severity: 'info',
     });
   }
