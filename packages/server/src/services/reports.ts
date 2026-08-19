@@ -299,6 +299,15 @@ export function qualityReport(ctx: Ctx, p: Period) {
         targetLevel: latest?.targetLevel ?? null,
         attempts: batchTests.length,
         approvedBy: b.qcApprovedBy,
+        /** latest TEST outcome — passed/failed/retest_required/pending */
+        qcResult: latest?.status ?? 'pending',
+        /** formal business release — a passed test alone is not a release */
+        releaseStatus:
+          b.qcStatus === 'passed' && b.qcApprovedAt
+            ? 'released'
+            : b.qcStatus === 'failed' || b.qcStatus === 'retest_required'
+              ? 'held'
+              : 'pending',
         status: statusOf(b),
       };
     }),
@@ -327,6 +336,8 @@ export function packagingReport(ctx: Ctx, p: Period) {
   );
   const itemRows = ctx.db.select().from(items).where(eq(items.tenantId, ctx.tenantId)).all();
   const itemById = new Map(itemRows.map((i) => [i.id, i]));
+  const whRows = ctx.db.select().from(warehouses).where(eq(warehouses.tenantId, ctx.tenantId)).all();
+  const whById = new Map(whRows.map((w) => [w.id, w]));
 
   const perItem = new Map<string, { produced: number; rejected: number; good: number; weight: number }>();
   for (const b of rows) {
@@ -353,11 +364,14 @@ export function packagingReport(ctx: Ctx, p: Period) {
       batchNumber: b.docNumber,
       sourceRef: b.inputBatchId ? (batchNumById.get(b.inputBatchId) ?? '—') : '—',
       date: b.date,
+      inputQty: b.inputQty,
       itemName: b.outputItemId ? (itemById.get(b.outputItemId)?.name ?? '?') : '?',
       unitsProduced: b.unitsProduced,
       unitsRejected: b.unitsRejected,
       goodUnits: (b.unitsProduced ?? 0) - (b.unitsRejected ?? 0),
       goodWeight: b.outputQty,
+      warehouseCode: b.outputWarehouseId ? (whById.get(b.outputWarehouseId)?.code ?? '?') : '—',
+      warehouseName: b.outputWarehouseId ? (whById.get(b.outputWarehouseId)?.name ?? '?') : '—',
       status: b.status,
     })),
   };
@@ -552,6 +566,7 @@ export function simpleItemReport(ctx: Ctx, itemId: string, p: Period) {
       qty: t.qty,
       buyer: t.buyer,
       unitPriceCents: t.unitPriceCents,
+      totalCents: t.unitPriceCents != null ? Math.round((t.qty / 1000) * t.unitPriceCents) : null,
       status: t.lifecycle,
     })),
   };

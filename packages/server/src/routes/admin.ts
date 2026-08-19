@@ -287,9 +287,54 @@ export function registerAdminRoutes(app: FastifyInstance, db: Db): void {
     });
   });
 
+  // --------------------------- about / system info -------------------------
+  /** Non-sensitive deployment facts for the About panel. Never secrets. */
+  app.get('/api/system-info', async (req) => {
+    const ctx = requireCtx(db, req);
+    const tenant = getTenant(db, ctx.tenantId);
+    const dbPath = process.env.FACTORYOS_DB ?? defaultDbPath();
+    let dbSizeBytes: number | null = null;
+    try {
+      dbSizeBytes = fs.statSync(dbPath).size;
+    } catch {
+      /* in-memory or missing */
+    }
+    let lastBackup: { file: string; at: string } | null = null;
+    try {
+      const dir = path.dirname(dbPath);
+      const backups = fs
+        .readdirSync(dir)
+        .filter((f) => f.startsWith('backup-') && f.endsWith('.sqlite'))
+        .map((f) => ({ file: f, at: fs.statSync(path.join(dir, f)).mtime.toISOString() }))
+        .sort((a, b) => (a.at < b.at ? 1 : -1));
+      lastBackup = backups[0] ?? null;
+    } catch {
+      /* no backup dir */
+    }
+    let commit: string | null = null;
+    try {
+      const gitDir = path.resolve(path.dirname(dbPath), '../.git');
+      const head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
+      commit = head.startsWith('ref: ')
+        ? fs.readFileSync(path.join(gitDir, head.slice(5)), 'utf8').trim().slice(0, 7)
+        : head.slice(0, 7);
+    } catch {
+      /* not a git checkout */
+    }
+    return {
+      product: 'JENIFY OS',
+      version: '0.1.0',
+      tenant: tenant?.name ?? null,
+      environment: 'Local deployment',
+      commit,
+      database: { ok: dbSizeBytes != null, sizeBytes: dbSizeBytes },
+      lastBackup,
+    };
+  });
+
   // ------------------------------- tenant ----------------------------------
   app.patch<{
-    Body: { name?: string; locationNote?: string; brandColor?: string };
+    Body: { name?: string; locationNote?: string; brandColor?: string; timezone?: string };
   }>('/api/tenant', async (req) => {
     const ctx = requireCtx(db, req);
     requirePermission(ctx, 'settings', 'edit');

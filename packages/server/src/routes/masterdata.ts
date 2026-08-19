@@ -6,6 +6,8 @@ import { requirePermission, canViewFinancial } from '../services/permissions.js'
 import {
   listUoms,
   listItems,
+  createItem,
+  updateItem,
   listWarehouses,
   createWarehouse,
   updateWarehouse,
@@ -53,6 +55,35 @@ export function registerMasterdataRoutes(app: FastifyInstance, db: Db): void {
     const ctx = requireCtx(db, req);
     requirePermission(ctx, 'settings', 'edit');
     updateWarehouse(ctx, req.params.id, req.body);
+    return { ok: true };
+  });
+
+  // ------------------------------- items -----------------------------------
+  /** Create a product/item from the setup wizard or settings (config only). */
+  app.post<{
+    Body: {
+      code: string;
+      name: string;
+      kind: ItemKind;
+      trackingMode?: 'none' | 'lot';
+      baseUomId: string;
+      unitWeightKg?: number;
+      sellable?: boolean;
+      purchasable?: boolean;
+    };
+  }>('/api/items', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'settings', 'edit');
+    return { id: createItem(ctx, req.body) };
+  });
+
+  app.patch<{
+    Params: { id: string };
+    Body: { name?: string; sellable?: boolean; purchasable?: boolean; unitWeightKg?: number | null; active?: boolean };
+  }>('/api/items/:id', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'settings', 'edit');
+    updateItem(ctx, req.params.id, req.body);
     return { ok: true };
   });
 

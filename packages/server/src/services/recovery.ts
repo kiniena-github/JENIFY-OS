@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { and, eq, isNull } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
-import { recoveryCodes, users } from '../db/schema.js';
+import { recoveryCodes, sessions, users } from '../db/schema.js';
 import { newId, nowIso, hashPassword, badRequest, AppError } from '../util.js';
 import type { Ctx } from './context.js';
 import { actorId } from './context.js';
@@ -132,6 +132,11 @@ export function recoverWithCode(
   const now = nowIso();
   db.update(recoveryCodes).set({ usedAt: now }).where(eq(recoveryCodes.id, match!.id)).run();
   db.update(users).set({ passwordHash: hashPassword(input.newPassword) }).where(eq(users.id, user!.id)).run();
+  // every previously authenticated session is invalidated immediately
+  db.update(sessions)
+    .set({ revokedAt: now })
+    .where(and(eq(sessions.userId, user!.id), isNull(sessions.revokedAt)))
+    .run();
   writeAudit(
     { db, tenantId: user!.tenantId, user: null },
     {

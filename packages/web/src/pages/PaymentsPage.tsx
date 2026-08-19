@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../auth.js';
 import { api } from '../api.js';
 import { usePageTitle } from '../components/Layout.js';
@@ -101,7 +101,14 @@ export default function PaymentsPage() {
                   <td className="mono">{p.docNumber}</td>
                   <td>{fmt.date(p.date)}</td>
                   <td>{customerName(p.customerId)}</td>
-                  <td className="num">{fmt.money(p.amountCents, currency)}</td>
+                  <td className="num">
+                    {fmt.money(p.amountCents, currency)}
+                    {p.currency && p.originalAmountCents != null ? (
+                      <div className="muted" style={{ fontSize: 12 }}>
+                        {p.currency} {(p.originalAmountCents / 100).toLocaleString('en-US')} @ {p.fxRate}
+                      </div>
+                    ) : null}
+                  </td>
                   {/* a reversed payment is not allocatable money — show '—', never a misleading remainder */}
                   <td className="num">{p.status === 'reversed' ? '—' : fmt.money(p.allocatedCents, currency)}</td>
                   <td className="num">{p.status === 'reversed' ? '—' : fmt.money(p.amountCents - p.allocatedCents, currency)}</td>
@@ -184,16 +191,27 @@ function NewPaymentForm({
   onError: (e: unknown) => void;
   onPosted: (paymentId: string) => void;
 }) {
-  const { t, can } = useAuth();
+  const { t, can, tenant } = useAuth();
   const qc = useQueryClient();
   const customers = useParties('?kind=customer');
+  const currencyCfg = useQuery({
+    queryKey: ['settings', 'currency'],
+    queryFn: () =>
+      api.get<{ data: { currencies?: Array<{ code: string; name?: string; active?: boolean }>; rates?: Record<string, number> } }>(
+        '/api/settings/currency',
+      ),
+  });
   const [customerId, setCustomerId] = useState('');
   const [amount, setAmount] = useState('');
   const [method, setMethod] = useState('cash');
+  const [currency, setCurrency] = useState('');
   const [date, setDate] = useState(fmt.todayIso());
   const [reference, setReference] = useState('');
   const [notes, setNotes] = useState('');
   const [busy, setBusy] = useState(false);
+  const defaultCurrency = tenant?.currency ?? 'ETB';
+  const foreignCurrencies = (currencyCfg.data?.data.currencies ?? []).filter((c) => c.active !== false);
+  const fxRate = currency ? currencyCfg.data?.data.rates?.[currency] : undefined;
 
   const amountNum = Number(amount || 0);
   const canPost = can('payments', 'approve');
@@ -211,6 +229,7 @@ function NewPaymentForm({
         date,
         amount: amountNum,
         method,
+        currency: currency || undefined,
         referenceNumber: reference || undefined,
         notes: notes || undefined,
         post: true,
@@ -247,9 +266,30 @@ function NewPaymentForm({
               ))}
             </select>
           </Field>
-          <Field label={t('payments.amount', 'Amount')} required>
+          <Field
+            label={`${t('payments.amount', 'Amount')} (${currency || defaultCurrency})`}
+            required
+            hint={
+              currency && fxRate && amountNum > 0
+                ? `= ${fmt.money(Math.round(amountNum * fxRate * 100), defaultCurrency)} @ ${fxRate}`
+                : undefined
+            }
+          >
             <input type="number" min="0" step="any" value={amount} onChange={(e) => setAmount(e.target.value)} />
           </Field>
+          {foreignCurrencies.length > 0 ? (
+            <Field label={t('settings.currency', 'Currency')}>
+              <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
+                <option value="">{defaultCurrency}</option>
+                {foreignCurrencies.map((c) => (
+                  <option key={c.code} value={c.code}>
+                    {c.code}
+                    {c.name && c.name !== c.code ? ` — ${c.name}` : ''}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          ) : null}
           <Field label={t('payments.method', 'Payment method')} required>
             <select value={method} onChange={(e) => setMethod(e.target.value)}>
               {METHODS.map((m) => (

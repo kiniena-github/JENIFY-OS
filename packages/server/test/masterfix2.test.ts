@@ -227,7 +227,6 @@ describe('production flow: supervisor identity + reports', () => {
       inputUomId: tt.uoms.kg,
       operatorName: 'Abel',
       supervisorName: 'Saba',
-      andStart: true,
     });
     washId = id;
     completeBatch(tt.ownerCtx, id, { outputQty: 4600 });
@@ -412,6 +411,7 @@ describe('fresh production tenant initialization (go-live)', () => {
       name: 'MF2 Production',
       ownerUsername: 'prod.owner',
       ownerPassword: 'go-live-pass',
+      selection: { warehouseCodes: ['A', 'B', 'C'] },
     });
 
     const rows = <T extends { tenantId: string }>(all: T[]) => all.filter((r) => r.tenantId === tenantId);

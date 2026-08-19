@@ -2,7 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import type { Db } from '../db/index.js';
 import { requireCtx } from '../app.js';
 import { requirePermission } from '../services/permissions.js';
-import { listStages } from '../services/production.js';
+import { listStages, createStage, updateStage } from '../services/production.js';
+import { defineSequence } from '../services/numbering.js';
 import {
   createBatch,
   startBatch,
@@ -22,10 +23,47 @@ import {
 } from '../services/batches.js';
 
 export function registerProductionRoutes(app: FastifyInstance, db: Db): void {
-  app.get('/api/stages', async (req) => {
+  /** Stage configuration from the setup wizard / settings (settings.edit). */
+  app.post<{
+    Body: {
+      code: string;
+      nameKey: string;
+      sequence: number;
+      inputSource: 'lot' | 'prior_batch';
+      outputForm: 'bulk' | 'packaged_items';
+      outputPolicy?: 'measured' | 'conserved' | 'converted';
+      requiresQc?: boolean;
+      inputItemId?: string;
+      priorStageId?: string;
+      outputItemIds?: string[];
+      docSeqKey: string;
+      /** document prefix for the stage's batch numbers (e.g. GRN-) */
+      prefix?: string;
+    };
+  }>('/api/stages', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'settings', 'edit');
+    const { prefix, ...input } = req.body;
+    const id = createStage(ctx, input);
+    // a stage needs a batch-number sequence; define it alongside
+    defineSequence(ctx, input.docSeqKey, prefix ?? `${input.code.toUpperCase().slice(0, 3)}-`, 4);
+    return { id };
+  });
+
+  app.patch<{
+    Params: { id: string };
+    Body: { sequence?: number; outputPolicy?: 'measured' | 'conserved' | 'converted'; requiresQc?: boolean; active?: boolean };
+  }>('/api/stages/:id', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'settings', 'edit');
+    updateStage(ctx, req.params.id, req.body);
+    return { ok: true };
+  });
+
+  app.get<{ Querystring: { includeInactive?: string } }>('/api/stages', async (req) => {
     const ctx = requireCtx(db, req);
     requirePermission(ctx, 'production', 'view');
-    return listStages(ctx);
+    return listStages(ctx, { includeInactive: req.query.includeInactive === 'true' });
   });
 
   app.get<{ Querystring: { stageId?: string; status?: string } }>('/api/batches', async (req) => {

@@ -119,6 +119,7 @@ export interface Stage {
   outputItemIds: string[] | null;
   attributes: StageAttrDef[] | null;
   docSeqKey: string;
+  active: boolean;
 }
 
 export interface Batch {
@@ -233,6 +234,9 @@ export interface Payment {
   notes: string | null;
   status: string;
   reversalReason: string | null;
+  currency: string | null;
+  fxRate: number | null;
+  originalAmountCents: number | null;
   allocatedCents: number;
   createdAt: string;
 }

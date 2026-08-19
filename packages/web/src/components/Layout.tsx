@@ -106,7 +106,7 @@ export default function Layout() {
         <div className="sidebar-footer">
           {tenant.locationNote}
           <br />
-          FactoryOS v0.1
+          JENIFY OS v0.1
         </div>
       </aside>
       <div className="main">

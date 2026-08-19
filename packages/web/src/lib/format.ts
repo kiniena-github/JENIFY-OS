@@ -7,6 +7,17 @@ export function setDisplayCalendar(cal: string | null | undefined): void {
   displayCalendar = cal === 'ethiopian' ? 'ethiopian' : 'gregorian';
 }
 
+// Factory timezone is DISPLAY configuration too — stored timestamps stay UTC.
+let displayTimezone: string | undefined;
+export function setDisplayTimezone(tz: string | null | undefined): void {
+  try {
+    if (tz) new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    displayTimezone = tz ?? undefined;
+  } catch {
+    displayTimezone = undefined;
+  }
+}
+
 export function qty(milli: number | null | undefined, decimals = 0): string {
   if (milli == null) return '—';
   const v = milli / 1000;
@@ -51,7 +62,12 @@ export function date(iso: string | null | undefined): string {
     const ec = toEthiopianDate(d);
     return `${ec.day} ${ec.monthName} ${ec.year} EC`;
   }
-  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  return d.toLocaleDateString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    timeZone: displayTimezone,
+  });
 }
 
 export function dateTime(iso: string | null | undefined): string {
@@ -60,7 +76,7 @@ export function dateTime(iso: string | null | undefined): string {
   if (Number.isNaN(d.getTime())) return iso;
   if (displayCalendar === 'ethiopian') {
     const ec = toEthiopianDate(d);
-    const hm = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    const hm = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: displayTimezone });
     return `${ec.day} ${ec.monthName} ${ec.year} EC, ${hm}`;
   }
   return d.toLocaleString('en-GB', {
@@ -68,6 +84,7 @@ export function dateTime(iso: string | null | undefined): string {
     month: 'short',
     hour: '2-digit',
     minute: '2-digit',
+    timeZone: displayTimezone,
   });
 }
 

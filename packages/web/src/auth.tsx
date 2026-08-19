@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 import type { ModuleId, ActionId, SessionUser } from '@factoryos/shared';
 import { hasPermission } from '@factoryos/shared';
 import { api, ApiError } from './api.js';
-import { setDisplayCalendar } from './lib/format.js';
+import { setDisplayCalendar, setDisplayTimezone } from './lib/format.js';
 
 export interface Tenant {
   id: string;
@@ -68,6 +68,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setTenant(me.tenant);
       setLanguages(me.languages);
       setThemeState(me.user.theme ?? 'system');
+      setDisplayTimezone(me.tenant?.timezone);
       // tenant display calendar (non-sensitive UI config)
       try {
         const cfg = await api.get<{ calendar?: string }>('/api/ui-config');
@@ -146,7 +147,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (tenant?.brandColor) {
       document.documentElement.style.setProperty('--primary', tenant.brandColor);
     }
-    document.title = tenant ? `${tenant.name} — FactoryOS` : 'FactoryOS';
+    document.title = tenant ? `${tenant.name} — JENIFY OS` : 'JENIFY OS';
   }, [tenant]);
 
   const value = useMemo<AuthState>(

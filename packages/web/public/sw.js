@@ -1,9 +1,9 @@
 /*
- * Minimal FactoryOS service worker (PWA foundation, PROD only).
+ * Minimal JENIFY OS service worker (PWA foundation, PROD only).
  * Static shell assets: cache-first. API and navigation: network only —
  * business data must never be served stale from a cache.
  */
-const CACHE = 'factoryos-static-v1';
+const CACHE = 'jenifyos-static-v1';
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();

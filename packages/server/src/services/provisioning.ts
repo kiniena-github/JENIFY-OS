@@ -61,12 +61,31 @@ export function getTenantByCode(db: Db, code: string) {
   return db.select().from(tenants).where(eq(tenants.code, code)).get() ?? null;
 }
 
+/** True for a valid IANA timezone identifier (e.g. Africa/Addis_Ababa). */
+export function isValidTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function updateTenantBranding(
   ctx: Ctx,
-  patch: { name?: string; locationNote?: string; brandColor?: string; logoPath?: string },
+  patch: { name?: string; locationNote?: string; brandColor?: string; logoPath?: string; timezone?: string },
 ): void {
   const tenant = getTenant(ctx.db, ctx.tenantId);
   if (!tenant) badRequest('tenant_missing', 'Tenant not found');
+  if (patch.timezone != null && !isValidTimezone(patch.timezone)) {
+    badRequest('timezone_invalid', `'${patch.timezone}' is not a valid timezone identifier`);
+  }
+  const before = {
+    name: tenant.name,
+    locationNote: tenant.locationNote,
+    brandColor: tenant.brandColor,
+    timezone: tenant.timezone,
+  };
   ctx.db
     .update(tenants)
     .set({
@@ -74,9 +93,23 @@ export function updateTenantBranding(
       locationNote: patch.locationNote ?? tenant.locationNote,
       brandColor: patch.brandColor ?? tenant.brandColor,
       logoPath: patch.logoPath ?? tenant.logoPath,
+      timezone: patch.timezone ?? tenant.timezone,
     })
     .where(eq(tenants.id, ctx.tenantId))
     .run();
+  writeAudit(ctx, {
+    module: 'settings',
+    action: 'tenant_update',
+    entity: 'tenant',
+    entityId: ctx.tenantId,
+    reference: tenant.code,
+    summary:
+      patch.timezone && patch.timezone !== tenant.timezone
+        ? `Factory timezone changed to ${patch.timezone} (display only — stored transactions unchanged)`
+        : `Company profile updated`,
+    before,
+    after: patch,
+  });
 }
 
 /**
@@ -85,14 +118,78 @@ export function updateTenantBranding(
  * no transactions, no test customers, no batches, no payments, no audit noise.
  *
  * Copied: tenant identity/branding, latest settings versions, roles + latest
- * permission matrices, units, items, ACTIVE warehouses, languages, custom
- * translations, production stages, document numbering (counters reset to 1).
+ * permission matrices, units, items, EXPLICITLY APPROVED warehouses and
+ * languages, custom translations (approved languages only), production
+ * stages, document numbering (counters reset to 1).
  * Never copied: parties, lots, stock, batches, invoices, deliveries, payments,
- * simple transactions, users (a fresh owner is created), archived warehouses.
+ * simple transactions, users (a fresh owner is created), unapproved
+ * warehouses/languages, any operational history.
  *
- * Real-world opening stock/receivables at go-live should enter through proper
- * opening-balance documents later — never as fabricated history.
+ * Approval is EXPLICIT — nothing is carried over merely for being active in
+ * the validation database. Real-world opening stock/receivables at go-live
+ * should enter through proper opening documents later — never as fabricated
+ * history.
  */
+export interface FreshTenantSelection {
+  /** warehouse CODES explicitly approved for production — required */
+  warehouseCodes: string[];
+  /** language codes to carry; defaults to currently ENABLED languages */
+  languageCodes?: string[];
+}
+
+/** Dry-run: exactly what a fresh production tenant WOULD copy vs leave behind. */
+export function previewFreshProductionTenant(
+  db: Db,
+  sourceTenantId: string,
+  selection: FreshTenantSelection,
+): { willCopy: Record<string, string[] | string>; willNotCopy: Record<string, string> } {
+  const source = getTenant(db, sourceTenantId);
+  if (!source) badRequest('tenant_missing', 'Source tenant not found');
+  const whAll = db.select().from(warehouses).where(eq(warehouses.tenantId, source.id)).all();
+  const approvedWh = whAll.filter((w) => selection.warehouseCodes.includes(w.code) && w.active);
+  const langAll = db.select().from(tenantLanguages).where(eq(tenantLanguages.tenantId, source.id)).all();
+  const wantedLangs = selection.languageCodes ?? langAll.filter((l) => l.enabled).map((l) => l.code);
+  const approvedLangs = langAll.filter((l) => wantedLangs.includes(l.code));
+  const itemsAll = db.select().from(items).where(eq(items.tenantId, source.id)).all();
+  const stagesAll = db.select().from(productionStages).where(eq(productionStages.tenantId, source.id)).all();
+  const rolesAll = db.select().from(roles).where(eq(roles.tenantId, source.id)).all();
+  const seqAll = db.select().from(documentSequences).where(eq(documentSequences.tenantId, source.id)).all();
+  const settingsDomains = [
+    ...new Set(
+      db.select().from(tenantSettings).where(eq(tenantSettings.tenantId, source.id)).all().map((x) => x.domain),
+    ),
+  ];
+  return {
+    willCopy: {
+      company: `${source.name} (${source.currency}, ${source.timezone})`,
+      warehouses: approvedWh.map((w) => `${w.code} — ${w.name}`),
+      products: itemsAll.map((i) => i.name),
+      productionStages: stagesAll.sort((a, b) => a.sequence - b.sequence).map((st) => st.code),
+      roles: rolesAll.map((r) => r.name),
+      languages: approvedLangs.map((l) => l.code),
+      settings: settingsDomains,
+      numbering: seqAll.map((sq) => `${sq.prefix}${'\u2026'} (counter reset to 1)`),
+    },
+    willNotCopy: {
+      transactions: 'receipts, transfers, batches, invoices, payments, deliveries, sack transactions',
+      customersSuppliers: 'all parties',
+      stock: 'all lots, movements, balances, reservations',
+      users: 'all accounts (a fresh owner is created)',
+      unapprovedWarehouses:
+        whAll
+          .filter((w) => !(selection.warehouseCodes.includes(w.code) && w.active))
+          .map((w) => `${w.code} — ${w.name}`)
+          .join(', ') || 'none',
+      unapprovedLanguages:
+        langAll
+          .filter((l) => !wantedLangs.includes(l.code))
+          .map((l) => l.code)
+          .join(', ') || 'none',
+      history: 'audit trail and every operational record',
+    },
+  };
+}
+
 export function initFreshProductionTenant(
   db: Db,
   input: {
@@ -102,10 +199,15 @@ export function initFreshProductionTenant(
     ownerUsername: string;
     ownerPassword: string;
     ownerDisplayName?: string;
+    /** explicit approved-production selection — nothing copied by accident */
+    selection: FreshTenantSelection;
   },
 ): { tenantId: string; ownerUserId: string } {
   const source = getTenant(db, input.sourceTenantId);
   if (!source) badRequest('tenant_missing', 'Source tenant not found');
+  if (!input.selection?.warehouseCodes?.length) {
+    badRequest('selection_required', 'Explicitly list the approved production warehouse codes');
+  }
   const srcCtx: Ctx = { db, tenantId: source.id, user: null };
 
   const { tenantId, ctx } = createTenant(db, {
@@ -139,12 +241,19 @@ export function initFreshProductionTenant(
       .run();
   }
 
-  // ---- warehouses (active only — archived test locations stay behind) ----
-  for (const w of db
+  // ---- warehouses: EXPLICITLY approved codes only, never "whatever is active" ----
+  const approvedWarehouses = db
     .select()
     .from(warehouses)
     .where(and(eq(warehouses.tenantId, source.id), eq(warehouses.active, true)))
-    .all()) {
+    .all()
+    .filter((w) => input.selection.warehouseCodes.includes(w.code));
+  if (approvedWarehouses.length !== input.selection.warehouseCodes.length) {
+    const found = approvedWarehouses.map((w) => w.code);
+    const missing = input.selection.warehouseCodes.filter((c) => !found.includes(c));
+    badRequest('warehouse_selection', `Approved warehouse code(s) not found or inactive: ${missing.join(', ')}`);
+  }
+  for (const w of approvedWarehouses) {
     const id = newId();
     idMap.set(w.id, id);
     db.insert(warehouses)
@@ -187,12 +296,15 @@ export function initFreshProductionTenant(
       .run();
   }
 
-  // ---- languages + custom translations ----
-  for (const l of db
+  // ---- approved languages + their custom translations only ----
+  const langAll = db
     .select()
     .from(tenantLanguages)
     .where(eq(tenantLanguages.tenantId, source.id))
-    .all()) {
+    .all();
+  const approvedLangCodes =
+    input.selection.languageCodes ?? langAll.filter((l) => l.enabled).map((l) => l.code);
+  for (const l of langAll.filter((x) => approvedLangCodes.includes(x.code))) {
     db.insert(tenantLanguages)
       .values({ ...l, id: newId(), tenantId })
       .run();
@@ -201,7 +313,8 @@ export function initFreshProductionTenant(
     .select()
     .from(translations)
     .where(eq(translations.tenantId, source.id))
-    .all()) {
+    .all()
+    .filter((x) => approvedLangCodes.includes(x.language))) {
     db.insert(translations)
       .values({ ...tr, id: newId(), tenantId })
       .run();

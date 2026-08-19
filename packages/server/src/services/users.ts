@@ -1,5 +1,5 @@
-import { and, eq, ne } from 'drizzle-orm';
-import { roles, users } from '../db/schema.js';
+import { and, eq, isNull, ne } from 'drizzle-orm';
+import { roles, sessions, users } from '../db/schema.js';
 import { newId, nowIso, hashPassword, badRequest, notFound } from '../util.js';
 import type { Ctx } from './context.js';
 import { actorId } from './context.js';
@@ -153,6 +153,13 @@ export function resetPassword(ctx: Ctx, userId: string, newPassword: string): vo
     badRequest('password_weak', 'Password must be at least 6 characters');
   }
   ctx.db.update(users).set({ passwordHash: hashPassword(newPassword) }).where(eq(users.id, userId)).run();
+  // a password reset signs the account out everywhere — stale sessions must
+  // never survive a credential change
+  ctx.db
+    .update(sessions)
+    .set({ revokedAt: nowIso() })
+    .where(and(eq(sessions.userId, userId), isNull(sessions.revokedAt)))
+    .run();
   writeAudit(ctx, {
     module: 'users',
     action: 'password_reset',

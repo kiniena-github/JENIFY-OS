@@ -1,7 +1,7 @@
 {
-  "name": "FactoryOS",
-  "short_name": "FactoryOS",
-  "description": "Manufacturing operations platform",
+  "name": "JENIFY OS",
+  "short_name": "JENIFY OS",
+  "description": "JENIFY OS — manufacturing operations platform",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0f2b4c",

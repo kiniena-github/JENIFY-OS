@@ -16,6 +16,7 @@ const STATUS_COLORS: Record<string, string> = {
   passed: 'green',
   failed: 'red',
   retest_required: 'amber',
+  held: 'red',
   pending: 'gray',
   pending_qc: 'gray',
   passed_pending_release: 'amber',

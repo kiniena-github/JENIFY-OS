@@ -5,6 +5,7 @@ import { api } from '../api.js';
 import { usePageTitle } from '../components/Layout.js';
 import { StatusBadge, ErrorBox, Field } from '../components/ui.js';
 import { useItems, useWarehouses } from '../lib/queries.js';
+import { dateTime as fmtDateTime } from '../lib/format.js';
 import { normalizePriceCategories, type PriceCategory } from '@factoryos/shared';
 
 type Tab = 'general' | 'warehouses' | 'pricing' | 'translations' | 'numbering' | 'documents';
@@ -31,7 +32,7 @@ export default function SettingsPage() {
         ))}
         <div className="spacer" />
         <a className="btn btn-ghost btn-sm" href="/setup">
-          {t('setup.title', 'Factory setup')} →
+          {t('setup.title', 'JENIFY OS Setup')} →
         </a>
       </div>
       {tab === 'general' ? (
@@ -39,10 +40,16 @@ export default function SettingsPage() {
           <GeneralTab />
           <CalendarPanel />
           <QualityConfigPanel />
+          <AboutPanel />
         </>
       ) : null}
       {tab === 'warehouses' ? <WarehousesTab /> : null}
-      {tab === 'pricing' ? <PricingTab /> : null}
+      {tab === 'pricing' ? (
+        <>
+          <PricingTab />
+          <CurrencyPanel />
+        </>
+      ) : null}
       {tab === 'translations' ? <TranslationsTab /> : null}
       {tab === 'numbering' ? <NumberingTab /> : null}
       {tab === 'documents' ? <DocumentsTab /> : null}
@@ -50,19 +57,36 @@ export default function SettingsPage() {
   );
 }
 
+// common factory timezones offered directly; any IANA identifier may be typed
+const COMMON_TIMEZONES = [
+  'Africa/Addis_Ababa',
+  'Africa/Nairobi',
+  'Africa/Cairo',
+  'Africa/Lagos',
+  'Africa/Johannesburg',
+  'Europe/London',
+  'Europe/Istanbul',
+  'Asia/Dubai',
+  'Asia/Riyadh',
+  'Asia/Shanghai',
+  'America/New_York',
+  'UTC',
+];
+
 function GeneralTab() {
   const { t, tenant, refresh, can } = useAuth();
   const canEdit = can('settings', 'edit');
   const [name, setName] = useState(tenant?.name ?? '');
   const [locationNote, setLocationNote] = useState(tenant?.locationNote ?? '');
   const [brandColor, setBrandColor] = useState(tenant?.brandColor ?? '#1e6bd6');
+  const [timezone, setTimezone] = useState(tenant?.timezone ?? 'UTC');
   const [error, setError] = useState<unknown>(null);
   const [saved, setSaved] = useState(false);
 
   async function save() {
     setError(null);
     try {
-      await api.patch('/api/tenant', { name, locationNote, brandColor });
+      await api.patch('/api/tenant', { name, locationNote, brandColor, timezone });
       await refresh();
       setSaved(true);
     } catch (err) {
@@ -88,11 +112,20 @@ function GeneralTab() {
           <Field label={t('settings.brand_color', 'Brand color')}>
             <input type="color" value={brandColor} disabled={!canEdit} onChange={(e) => setBrandColor(e.target.value)} />
           </Field>
-          <Field label={t('settings.currency', 'Currency')}>
+          <Field label={t('settings.currency', 'Currency')} hint={t('settings.currency_hint', 'Default accounting currency. Additional currencies live under Prices & VAT.')}>
             <input value={tenant?.currency ?? ''} readOnly />
           </Field>
-          <Field label={t('settings.timezone', 'Timezone')}>
-            <input value={tenant?.timezone ?? ''} readOnly />
+          <Field
+            label={t('settings.timezone', 'Timezone')}
+            hint={t('settings.timezone_hint', 'Display only — stored transaction times never change.')}
+          >
+            <select value={timezone} disabled={!canEdit} onChange={(e) => setTimezone(e.target.value)}>
+              {[...new Set([timezone, ...COMMON_TIMEZONES])].map((tz) => (
+                <option key={tz} value={tz}>
+                  {tz}
+                </option>
+              ))}
+            </select>
           </Field>
         </div>
         {canEdit ? (
@@ -102,6 +135,65 @@ function GeneralTab() {
             </button>
           </div>
         ) : null}
+      </div>
+    </div>
+  );
+}
+
+/** About / System Info — non-sensitive deployment facts. Platform identity
+ *  stays subtle: the tenant is the star, JENIFY OS is the engine. */
+function AboutPanel() {
+  const { t } = useAuth();
+  const info = useQuery({
+    queryKey: ['system-info'],
+    queryFn: () =>
+      api.get<{
+        product: string;
+        version: string;
+        tenant: string | null;
+        environment: string;
+        commit: string | null;
+        database: { ok: boolean; sizeBytes: number | null };
+        lastBackup: { file: string; at: string } | null;
+      }>('/api/system-info'),
+  });
+  const pwa = typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
+  const d = info.data;
+  const row = (label: string, value: React.ReactNode) => (
+    <tr>
+      <td style={{ width: 220 }}>{label}</td>
+      <td>{value}</td>
+    </tr>
+  );
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <h2>{t('settings.about', 'About / System Info')}</h2>
+      </div>
+      <div className="panel-body">
+        {d ? (
+          <table className="data" style={{ maxWidth: 620 }}>
+            <tbody>
+              {row(t('settings.about_product', 'Platform'), `${d.product} v${d.version}`)}
+              {row(t('settings.about_tenant', 'Factory / tenant'), d.tenant ?? '—')}
+              {row(t('settings.about_env', 'Environment'), d.environment)}
+              {row(t('settings.about_build', 'Build'), d.commit ?? '—')}
+              {row(
+                t('settings.about_db', 'Database'),
+                d.database.ok
+                  ? `${t('status.active', 'OK')} · ${((d.database.sizeBytes ?? 0) / 1024).toFixed(0)} KB`
+                  : t('status.inactive', 'Unavailable'),
+              )}
+              {row(
+                t('settings.about_backup', 'Last backup'),
+                d.lastBackup ? `${d.lastBackup.file} · ${fmtDateTime(d.lastBackup.at)}` : t('settings.about_no_backup', 'No backups found'),
+              )}
+              {row(t('settings.about_pwa', 'Offline / PWA'), pwa ? t('settings.about_pwa_ok', 'Supported (installed in production builds)') : '—')}
+            </tbody>
+          </table>
+        ) : (
+          <div className="muted">…</div>
+        )}
       </div>
     </div>
   );
@@ -654,6 +746,145 @@ function PricingTab() {
   );
 }
 
+interface CurrencyData {
+  currencies?: Array<{ code: string; name?: string; active?: boolean }>;
+  rates?: Record<string, number>;
+}
+
+/**
+ * Simple multi-currency: configure additional currencies and their exchange
+ * rate to the default. Payments may then be received in those currencies;
+ * accounting always stays in the tenant default — no forex engine.
+ */
+function CurrencyPanel() {
+  const { t, can, tenant } = useAuth();
+  const canEdit = can('settings', 'edit');
+  const qc = useQueryClient();
+  const cfgQ = useQuery({
+    queryKey: ['settings', 'currency'],
+    queryFn: () => api.get<{ version: number; data: CurrencyData }>('/api/settings/currency'),
+  });
+  const [error, setError] = useState<unknown>(null);
+  const [newCode, setNewCode] = useState('');
+  const [newName, setNewName] = useState('');
+  const [newRate, setNewRate] = useState('');
+  const [rateEdits, setRateEdits] = useState<Record<string, string>>({});
+  const data = cfgQ.data?.data ?? {};
+  const currencies = data.currencies ?? [];
+  const defaultCurrency = tenant?.currency ?? 'ETB';
+
+  async function saveData(next: CurrencyData) {
+    setError(null);
+    try {
+      await api.put('/api/settings/currency', { data: next });
+      await qc.invalidateQueries({ queryKey: ['settings', 'currency'] });
+    } catch (err) {
+      setError(err);
+    }
+  }
+
+  async function add() {
+    const code = newCode.trim().toUpperCase();
+    if (!code || !(Number(newRate) > 0)) return;
+    await saveData({
+      currencies: [...currencies, { code, name: newName.trim() || code, active: true }],
+      rates: { ...(data.rates ?? {}), [code]: Number(newRate) },
+    });
+    setNewCode('');
+    setNewName('');
+    setNewRate('');
+  }
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <h2>{t('settings.currencies', 'Currencies & exchange rates')}</h2>
+        <div className="spacer" />
+        <span className="muted">
+          {t('settings.currency_note', 'Accounting stays in the default currency; foreign payments convert once at the configured rate.')}
+        </span>
+      </div>
+      <div className="panel-body">
+        <ErrorBox error={error} />
+        <div className="flex" style={{ flexWrap: 'wrap', marginBottom: 10 }}>
+          <span className="badge badge-blue">
+            {defaultCurrency} — {t('settings.default', 'Default')}
+          </span>
+          {currencies.map((c) => {
+            const rate = data.rates?.[c.code];
+            const edit = rateEdits[c.code];
+            return (
+              <span key={c.code} className="flex" style={{ gap: 6 }}>
+                <span className={`badge ${c.active === false ? 'badge-gray' : 'badge-green'}`}>
+                  {c.code}
+                  {c.name && c.name !== c.code ? ` — ${c.name}` : ''}
+                </span>
+                <input
+                  style={{ width: 110 }}
+                  type="number"
+                  min="0"
+                  step="any"
+                  disabled={!canEdit}
+                  value={edit ?? String(rate ?? '')}
+                  onChange={(e) => setRateEdits((x) => ({ ...x, [c.code]: e.target.value }))}
+                  title={`1 ${c.code} = ? ${defaultCurrency}`}
+                />
+                {canEdit && edit != null && Number(edit) > 0 && Number(edit) !== rate ? (
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={() =>
+                      void saveData({ currencies, rates: { ...(data.rates ?? {}), [c.code]: Number(edit) } }).then(() =>
+                        setRateEdits((x) => {
+                          const { [c.code]: _drop, ...rest } = x;
+                          return rest;
+                        }),
+                      )
+                    }
+                  >
+                    {t('settings.save_rate', 'Save rate')}
+                  </button>
+                ) : null}
+                {canEdit ? (
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() =>
+                      void saveData({
+                        currencies: currencies.map((x) => (x.code === c.code ? { ...x, active: x.active === false } : x)),
+                        rates: data.rates,
+                      })
+                    }
+                  >
+                    {c.active === false ? t('status.active', 'Reactivate') : t('status.inactive', 'Archive')}
+                  </button>
+                ) : null}
+              </span>
+            );
+          })}
+        </div>
+        {canEdit ? (
+          <div className="form-grid">
+            <Field label={t('settings.currency_code', 'Currency code')} required>
+              <input value={newCode} placeholder="USD" onChange={(e) => setNewCode(e.target.value)} />
+            </Field>
+            <Field label={t('settings.name', 'Name')}>
+              <input value={newName} placeholder="US Dollar" onChange={(e) => setNewName(e.target.value)} />
+            </Field>
+            <Field label={`1 ${newCode.trim().toUpperCase() || 'XXX'} = ? ${defaultCurrency}`} required>
+              <input type="number" min="0" step="any" value={newRate} onChange={(e) => setNewRate(e.target.value)} />
+            </Field>
+            <div className="field">
+              <label>&nbsp;</label>
+              <button className="btn btn-primary" disabled={!newCode.trim() || !(Number(newRate) > 0)} onClick={() => void add()}>
+                + {t('settings.add_currency', 'Add currency')}
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 interface TranslationRow {
   key: string;
   module: string | null;
@@ -669,9 +900,17 @@ function LanguageManager() {
   const langs = useQuery({
     queryKey: ['languages', 'all'],
     queryFn: () =>
-      api.get<Array<{ id: string; code: string; name: string; nativeName: string | null; direction: string; enabled: boolean }>>(
-        '/api/languages?includeDisabled=true',
-      ),
+      api.get<
+        Array<{
+          id: string;
+          code: string;
+          name: string;
+          nativeName: string | null;
+          direction: string;
+          enabled: boolean;
+          deletable: boolean;
+        }>
+      >('/api/languages?includeDisabled=true'),
   });
   const [error, setError] = useState<unknown>(null);
   const [name, setName] = useState('');
@@ -776,10 +1015,16 @@ function LanguageManager() {
                   {l.enabled ? t('status.inactive', 'Archive') : t('status.active', 'Reactivate')}
                 </button>
               ) : null}
-              {canEdit && l.code !== 'en' ? (
+              {/* deletion eligibility is DYNAMIC: only offered while the language
+                  has no translations and no users; clearing them re-enables it */}
+              {canEdit && l.code !== 'en' && l.deletable ? (
                 <button className="btn btn-danger btn-sm" onClick={() => void delLanguage(l.id)}>
                   {t('settings.wh_delete', 'Delete permanently')}
                 </button>
+              ) : canEdit && l.code !== 'en' ? (
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {t('settings.lang_in_use', 'In use (translations or users) — archive only')}
+                </span>
               ) : null}
             </div>
           ))}
@@ -964,7 +1209,12 @@ function DocumentsTab() {
     <div>
       <ErrorBox error={error} />
       {saved ? <div className="page-info">{t('settings.saved', 'Saved. Settings change future behavior only.')}</div> : null}
-      <div className="page-info">{t('branding.immutable_note', 'Changing branding or templates never changes transaction data. Documents always show current branding with their original immutable values.')}</div>
+      <div className="page-info">
+        {t(
+          'branding.immutable_note',
+          'Changing branding never changes transaction data. Issued documents keep the branding version they were issued with; only future documents use the new branding.',
+        )}
+      </div>
 
       <div className="panel">
         <div className="panel-head">
@@ -1106,12 +1356,8 @@ function NumberingTab() {
             <tbody>
               {(data.data ?? []).map((s) => (
                 <tr key={s.seqKey}>
-                  <td>
-                    {t(`seq.${s.seqKey}`, s.seqKey)}{' '}
-                    <span className="muted mono" style={{ fontSize: 11 }}>
-                      {s.seqKey}
-                    </span>
-                  </td>
+                  {/* clean business label only — internal keys stay internal */}
+                  <td>{t(`seq.${s.seqKey}`, s.seqKey)}</td>
                   <td style={{ width: 160 }}>
                     <input
                       value={edits[s.seqKey] ?? s.prefix}

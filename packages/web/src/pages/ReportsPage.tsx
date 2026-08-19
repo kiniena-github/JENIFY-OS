@@ -31,6 +31,8 @@ interface ReportDef {
   financial?: boolean;
   /** credit report: Open / Settled / All row scope */
   scopeFilter?: boolean;
+  /** contextual empty-state wording */
+  emptyText?: (t: (k: string, f?: string) => string, scope?: string) => string;
   /** custom flattening when the payload is not a flat `breakdown` array */
   rows?: (d: Record<string, unknown>) => Record<string, unknown>[];
   tableTitle?: (t: (k: string, f?: string) => string, scope?: string) => string;
@@ -90,10 +92,10 @@ function reportDefs(): ReportDef[] {
         { key: 'lotNumber', label: t('inventory.batch', 'Batch'), render: (r) => <span className="mono">{String(r.lotNumber ?? '')}</span> },
         { key: 'source', label: t('inventory.source', 'Source'), render: (r) => String(r.source ?? '') },
         { key: 'receivedAt', label: t('inventory.received', 'Received'), render: (r) => (r.receivedAt ? fmt.date(r.receivedAt as string) : '') },
-        { key: 'originalQty', label: t('report.original_qty', 'Original batch quantity'), render: (r) => (r.originalQty == null ? '' : q(r.originalQty)), num: true },
+        { key: 'originalQty', label: `${t('report.original_qty', 'Original batch quantity')} (kg)`, render: (r) => (r.originalQty == null ? '' : q(r.originalQty)), num: true },
         { key: 'warehouseCode', label: t('inventory.warehouse', 'Warehouse'), render: (r) => String(r.warehouseCode ?? '') },
-        { key: 'usedQty', label: t('reports.used', 'Used'), render: (r) => q(r.usedQty), num: true },
-        { key: 'remainingQty', label: t('reports.remaining', 'Remaining'), render: (r) => q(r.remainingQty), num: true },
+        { key: 'usedQty', label: `${t('reports.used', 'Used')} (kg)`, render: (r) => q(r.usedQty), num: true },
+        { key: 'remainingQty', label: `${t('reports.remaining', 'Remaining')} (kg)`, render: (r) => q(r.remainingQty), num: true },
         { key: 'status', label: t('shell.status', 'Status'), render: (r) => status(r.status) },
       ],
     },
@@ -171,7 +173,10 @@ function reportDefs(): ReportDef[] {
         { key: 'inputQty', label: t('production.input', 'Input'), render: (r) => q(r.inputQty), num: true },
         { key: 'actualResult', label: t('production.actual', 'Actual result'), render: (r) => normalizeResult(r.actualResult, r.targetLevel) },
         { key: 'attempts', label: t('reports.attempts', 'Attempts'), render: (r) => String(r.attempts), num: true },
-        { key: 'status', label: t('shell.status', 'Status'), render: (r) => status(r.status) },
+        // QC RESULT (latest test outcome) and RELEASE (formal business action)
+        // are different concepts and are shown separately
+        { key: 'qcResult', label: t('report.qc_result', 'QC result'), render: (r) => status(r.qcResult) },
+        { key: 'releaseStatus', label: t('report.release_status', 'Release status'), render: (r) => status(r.releaseStatus) },
       ],
     },
     {
@@ -195,11 +200,13 @@ function reportDefs(): ReportDef[] {
       columns: (t) => [
         { key: 'batchNumber', label: t('inventory.batch', 'Batch'), render: (r) => <span className="mono">{String(r.batchNumber)}</span> },
         { key: 'sourceRef', label: t('production.source_batch', 'Source'), render: (r) => <span className="mono">{String(r.sourceRef)}</span> },
+        { key: 'inputQty', label: `${t('report.input_received', 'Input received')} (kg)`, render: (r) => q(r.inputQty), num: true },
         { key: 'itemName', label: t('inventory.product', 'Product'), render: (r) => String(r.itemName) },
         { key: 'unitsProduced', label: t('production.units_produced', 'Produced'), render: (r) => q(r.unitsProduced), num: true },
         { key: 'unitsRejected', label: t('production.units_rejected', 'Rejected'), render: (r) => q(r.unitsRejected), num: true },
         { key: 'goodUnits', label: t('production.good_units', 'Good units'), render: (r) => q(r.goodUnits), num: true },
         { key: 'goodWeight', label: t('reports.good_weight', 'Good weight'), render: (r) => qs(r.goodWeight), num: true },
+        { key: 'warehouseName', label: t('report.dest_warehouse', 'Destination warehouse'), render: (r) => String(r.warehouseName ?? '—') },
         { key: 'status', label: t('shell.status', 'Status'), render: (r) => status(r.status) },
       ],
     },
@@ -262,6 +269,12 @@ function reportDefs(): ReportDef[] {
       desc: 'Balances, overdue, due this week and history.',
       financial: true,
       scopeFilter: true,
+      emptyText: (t, scope) =>
+        scope === 'settled'
+          ? t('reports.empty_settled', 'No settled invoices in this period.')
+          : scope === 'all'
+            ? t('reports.empty_generic', 'No transactions match this period.')
+            : t('reports.empty_credit', 'No open credit balances.'),
       rows: (d) => (d.rows ?? []) as Record<string, unknown>[],
       tableTitle: (t, scope) =>
         scope === 'settled'
@@ -305,6 +318,7 @@ function reportDefs(): ReportDef[] {
         { key: 'customerName', label: t('sales.customer', 'Customer'), render: (r) => String(r.customerName) },
         { key: 'destination', label: t('delivery.destination', 'Destination'), render: (r) => String(r.destination ?? '—') },
         { key: 'truckNumber', label: t('delivery.truck', 'Truck'), render: (r) => String(r.truckNumber ?? '—') },
+        { key: 'driverName', label: t('delivery.driver', 'Driver'), render: (r) => String(r.driverName ?? '—') },
         { key: 'expectedDate', label: t('delivery.expected', 'Expected'), render: (r) => fmt.date(r.expectedDate as string) },
         { key: 'actualDate', label: t('delivery.actual', 'Actual'), render: (r) => fmt.date(r.actualDate as string) },
         {
@@ -368,10 +382,16 @@ export default function ReportsPage() {
     columns: (tt, c) => [
       { key: 'docNumber', label: tt('inventory.document', 'Document'), render: (r) => <span className="mono">{String(r.docNumber)}</span> },
       { key: 'date', label: tt('shell.date', 'Date'), render: (r) => fmt.date(r.date as string) },
-      { key: 'type', label: tt('inventory.type', 'Type'), render: (r) => String(r.type) },
+      {
+        key: 'type',
+        label: tt('inventory.type', 'Type'),
+        render: (r) =>
+          r.type === 'collect' ? tt('sacks.collected', 'Collected') : tt('sacks.sold', 'Sold'),
+      },
       { key: 'qty', label: tt('inventory.qty', 'Quantity'), render: (r) => q(r.qty), num: true },
       { key: 'buyer', label: tt('reports.buyer', 'Buyer'), render: (r) => String(r.buyer ?? '—') },
       { key: 'unitPriceCents', label: tt('reports.price', 'Price'), render: (r) => m(r.unitPriceCents, c), num: true },
+      { key: 'totalCents', label: tt('sacks.total', 'Total amount'), render: (r) => m(r.totalCents, c), num: true },
       { key: 'status', label: tt('shell.status', 'Status'), render: (r) => status(r.status) },
     ],
   }));
@@ -524,7 +544,9 @@ function ReportView({ def, onBack }: { def: ReportDef; onBack: () => void }) {
                   {rows.length === 0 ? (
                     <tr>
                       <td colSpan={columns.length} className="table-empty">
-                        {t('reports.empty', 'No records in this period.')}
+                        {def.emptyText
+                          ? def.emptyText(t, scope)
+                          : t('reports.empty_generic', 'No transactions match this period.')}
                       </td>
                     </tr>
                   ) : null}

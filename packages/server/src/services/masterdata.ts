@@ -350,3 +350,45 @@ export function deleteWarehouse(ctx: Ctx, warehouseId: string): void {
     before: { code: wh.code, name: wh.name },
   });
 }
+
+/** Item configuration update — business identity/config only, never stock. */
+export function updateItem(
+  ctx: Ctx,
+  itemId: string,
+  patch: { name?: string; sellable?: boolean; purchasable?: boolean; unitWeightKg?: number | null; active?: boolean },
+): void {
+  const item = getItem(ctx, itemId);
+  const before = {
+    name: item.name,
+    sellable: item.sellable,
+    purchasable: item.purchasable,
+    unitWeightMilliKg: item.unitWeightMilliKg,
+    active: item.active,
+  };
+  ctx.db
+    .update(items)
+    .set({
+      name: patch.name ?? item.name,
+      sellable: patch.sellable ?? item.sellable,
+      purchasable: patch.purchasable ?? item.purchasable,
+      unitWeightMilliKg:
+        patch.unitWeightKg === undefined
+          ? item.unitWeightMilliKg
+          : patch.unitWeightKg == null
+            ? null
+            : Math.round(patch.unitWeightKg * 1000),
+      active: patch.active ?? item.active,
+    })
+    .where(eq(items.id, itemId))
+    .run();
+  writeAudit(ctx, {
+    module: 'settings',
+    action: 'item_update',
+    entity: 'item',
+    entityId: itemId,
+    reference: item.code,
+    summary: `Product '${item.name}' configuration updated`,
+    before,
+    after: patch,
+  });
+}

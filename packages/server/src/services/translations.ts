@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
 import { translationKeys, translations, tenantLanguages, users } from '../db/schema.js';
 import { newId, nowIso, notFound, badRequest } from '../util.js';
@@ -131,8 +131,11 @@ export function updateLanguage(
 }
 
 /**
- * True when the language has ever been meaningfully used: a user has it as
- * their display language, or custom translations were written for it.
+ * True while the language has CURRENT safe dependencies: a user has it as
+ * their display language, or non-empty translation values exist for it.
+ * Eligibility is DYNAMIC — clearing every translation (and freeing users)
+ * makes a language permanently deletable again; an empty cleared row does
+ * not lock it forever.
  */
 export function languageEverUsed(ctx: Ctx, code: string): boolean {
   const userWith = ctx.db
@@ -145,7 +148,13 @@ export function languageEverUsed(ctx: Ctx, code: string): boolean {
   const translated = ctx.db
     .select({ id: translations.id })
     .from(translations)
-    .where(and(eq(translations.tenantId, ctx.tenantId), eq(translations.language, code)))
+    .where(
+      and(
+        eq(translations.tenantId, ctx.tenantId),
+        eq(translations.language, code),
+        ne(translations.text, ''),
+      ),
+    )
     .limit(1)
     .get();
   return translated != null;
@@ -187,11 +196,16 @@ export function deleteLanguage(ctx: Ctx, languageId: string): void {
 export function listLanguages(ctx: Ctx, opts: { includeDisabled?: boolean } = {}) {
   const conds = [eq(tenantLanguages.tenantId, ctx.tenantId)];
   if (!opts.includeDisabled) conds.push(eq(tenantLanguages.enabled, true));
-  return ctx.db
+  const rows = ctx.db
     .select()
     .from(tenantLanguages)
     .where(and(...conds))
     .all();
+  // dynamic eligibility so the UI never offers an impossible Delete
+  return rows.map((r) => ({
+    ...r,
+    deletable: r.code !== 'en' && !languageEverUsed(ctx, r.code),
+  }));
 }
 
 /**

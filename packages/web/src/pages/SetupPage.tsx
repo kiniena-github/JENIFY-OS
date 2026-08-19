@@ -4,11 +4,11 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../auth.js';
 import { api } from '../api.js';
 import { usePageTitle } from '../components/Layout.js';
-import { ErrorBox, Field } from '../components/ui.js';
+import { ErrorBox, Field, StatusBadge } from '../components/ui.js';
 import { useItems, useStages, useWarehouses } from '../lib/queries.js';
 
 /**
- * FactoryOS first-time tenant setup — a reusable, config-driven guided flow.
+ * JENIFY OS first-time tenant setup — a reusable, config-driven guided flow.
  * Every step writes through the SAME settings/master-data APIs the normal
  * Settings screens use, so nothing here is Mesob-specific and everything
  * remains editable later. The wizard never forces itself on an already
@@ -31,7 +31,7 @@ type StepId = (typeof STEPS)[number][0];
 
 export default function SetupPage() {
   const { t, can } = useAuth();
-  usePageTitle(t('setup.title', 'Factory setup'), t('setup.subtitle', 'Guided first-time configuration — everything stays editable in Settings'));
+  usePageTitle(t('setup.title', 'JENIFY OS Setup'), t('setup.subtitle', 'Guided first-time configuration — everything stays editable in Settings'));
   const [step, setStep] = useState<StepId>('company');
   const idx = STEPS.findIndex(([id]) => id === step);
   if (!can('settings', 'edit')) {
@@ -244,24 +244,139 @@ function StructureStep() {
 
 function ItemsStep() {
   const { t } = useAuth();
+  const qc = useQueryClient();
   const items = useItems();
+  const uoms = useQuery({
+    queryKey: ['uoms'],
+    queryFn: () => api.get<Array<{ id: string; code: string; name: string; family: string }>>('/api/uoms'),
+  });
+  const [error, setError] = useState<unknown>(null);
+  const [code, setCode] = useState('');
+  const [name, setName] = useState('');
+  const [kind, setKind] = useState<'raw_material' | 'finished_good' | 'consumable'>('finished_good');
+  const [baseUomId, setBaseUomId] = useState('');
+  const [unitWeight, setUnitWeight] = useState('');
+  const [sellable, setSellable] = useState(true);
+
+  async function add() {
+    setError(null);
+    try {
+      await api.post('/api/items', {
+        code: code.trim(),
+        name: name.trim(),
+        kind,
+        trackingMode: kind === 'consumable' ? 'none' : 'lot',
+        baseUomId,
+        unitWeightKg: unitWeight ? Number(unitWeight) : undefined,
+        sellable,
+        purchasable: kind === 'raw_material',
+      });
+      setCode('');
+      setName('');
+      setUnitWeight('');
+      await qc.invalidateQueries({ queryKey: ['items'] });
+    } catch (err) {
+      setError(err);
+    }
+  }
+
+  async function patchItem(id: string, patch: Record<string, unknown>) {
+    setError(null);
+    try {
+      await api.patch(`/api/items/${id}`, patch);
+      await qc.invalidateQueries({ queryKey: ['items'] });
+    } catch (err) {
+      setError(err);
+    }
+  }
+
   return (
-    <Panel
-      title={t('setup.step_items', 'Items / Products / Units')}
-      hint={t('setup.config_pkg', 'Provisioned by the factory configuration package')}
-    >
-      <p style={{ maxWidth: 640 }}>
-        {t(
-          'setup.items_desc',
-          'Raw materials, finished products, pack sizes and units of measure are provisioned by the factory configuration package so physics (base units, pack weights, lot tracking) stay consistent. Current catalogue:',
-        )}
-      </p>
-      <div className="flex" style={{ flexWrap: 'wrap' }}>
-        {(items.data ?? []).map((i) => (
-          <span key={i.id} className={`badge ${i.kind === 'finished_good' ? 'badge-green' : 'badge-gray'}`}>
-            {i.name}
-          </span>
-        ))}
+    <Panel title={t('setup.step_items', 'Items / Products / Units')}>
+      <ErrorBox error={error} />
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th>{t('settings.code', 'Code')}</th>
+              <th>{t('settings.name', 'Name')}</th>
+              <th>{t('setup.item_kind', 'Type')}</th>
+              <th>{t('setup.unit_weight', 'Unit weight (kg)')}</th>
+              <th>{t('setup.sellable', 'Sellable')}</th>
+              <th>{t('shell.status', 'Status')}</th>
+              <th>{t('shell.actions', 'Actions')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(items.data ?? []).map((i) => (
+              <tr key={i.id}>
+                <td className="mono">{i.code}</td>
+                <td>
+                  <input
+                    defaultValue={i.name}
+                    onBlur={(e) => {
+                      if (e.target.value.trim() && e.target.value !== i.name) {
+                        void patchItem(i.id, { name: e.target.value.trim() });
+                      }
+                    }}
+                  />
+                </td>
+                <td>{t(`setup.kind_${i.kind}`, i.kind.replace('_', ' '))}</td>
+                <td>{i.unitWeightMilliKg != null ? i.unitWeightMilliKg / 1000 : '\u2014'}</td>
+                <td>
+                  <input type="checkbox" checked={i.sellable} onChange={() => void patchItem(i.id, { sellable: !i.sellable })} />
+                </td>
+                <td>
+                  <StatusBadge status={i.active ? 'active' : 'inactive'} />
+                </td>
+                <td>
+                  <button className="btn btn-secondary btn-sm" onClick={() => void patchItem(i.id, { active: !i.active })}>
+                    {i.active ? t('status.inactive', 'Archive') : t('status.active', 'Reactivate')}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="form-grid mt">
+        <Field label={t('settings.code', 'Code')} required>
+          <input value={code} onChange={(e) => setCode(e.target.value)} />
+        </Field>
+        <Field label={t('settings.name', 'Name')} required>
+          <input value={name} onChange={(e) => setName(e.target.value)} />
+        </Field>
+        <Field label={t('setup.item_kind', 'Type')} required>
+          <select value={kind} onChange={(e) => setKind(e.target.value as typeof kind)}>
+            <option value="raw_material">{t('setup.kind_raw_material', 'Raw material')}</option>
+            <option value="finished_good">{t('setup.kind_finished_good', 'Finished product')}</option>
+            <option value="consumable">{t('setup.kind_consumable', 'Side item / consumable')}</option>
+          </select>
+        </Field>
+        <Field label={t('receiving.unit', 'Unit')} required>
+          <select value={baseUomId} onChange={(e) => setBaseUomId(e.target.value)}>
+            <option value="">{'\u2014'}</option>
+            {(uoms.data ?? []).map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label={t('setup.unit_weight', 'Unit weight (kg)')}>
+          <input type="number" min="0" step="any" value={unitWeight} onChange={(e) => setUnitWeight(e.target.value)} />
+        </Field>
+        <Field label={t('setup.sellable', 'Sellable')}>
+          <select value={sellable ? '1' : '0'} onChange={(e) => setSellable(e.target.value === '1')}>
+            <option value="1">{t('shell.yes', 'Yes')}</option>
+            <option value="0">{t('shell.no', 'No')}</option>
+          </select>
+        </Field>
+        <div className="field">
+          <label>&nbsp;</label>
+          <button className="btn btn-primary" disabled={!code.trim() || !name.trim() || !baseUomId} onClick={() => void add()}>
+            + {t('setup.add_item', 'Add product')}
+          </button>
+        </div>
       </div>
     </Panel>
   );
@@ -269,29 +384,122 @@ function ItemsStep() {
 
 function ProductionStep() {
   const { t } = useAuth();
-  const stages = useStages();
+  const qc = useQueryClient();
+  // include disabled stages so they can be re-enabled from the wizard
+  const stages = useQuery({
+    queryKey: ['stages', 'all'],
+    queryFn: () =>
+      api.get<
+        Array<{
+          id: string;
+          code: string;
+          nameKey: string;
+          sequence: number;
+          outputForm: string;
+          outputPolicy: string;
+          requiresQc: boolean;
+          active: boolean;
+        }>
+      >('/api/stages?includeInactive=true'),
+  });
+  const [error, setError] = useState<unknown>(null);
+
+  async function patchStage(id: string, patch: Record<string, unknown>) {
+    setError(null);
+    try {
+      await api.patch(`/api/stages/${id}`, patch);
+      await qc.invalidateQueries({ queryKey: ['stages'] });
+    } catch (err) {
+      setError(err);
+    }
+  }
+
+  const ordered = [...(stages.data ?? [])].sort((a, b) => a.sequence - b.sequence);
+
   return (
     <Panel
       title={t('setup.step_production', 'Production template')}
-      hint={t('setup.config_pkg', 'Provisioned by the factory configuration package')}
+      hint={t('setup.stage_hint', 'Order, physics policy, and the quality gate are configurable; history keeps its recorded numbers')}
     >
-      <p style={{ maxWidth: 640 }}>
-        {t(
-          'setup.production_desc',
-          'The stage chain defines how material flows and which stage conserves, measures, or converts quantity, and where the quality gate sits. Configured chain:',
-        )}
-      </p>
-      <div className="flex" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
-        {(stages.data ?? []).map((s, i) => (
-          <React.Fragment key={s.id}>
-            {i > 0 ? <span className="muted">→</span> : null}
-            <span className="badge badge-blue">
-              {t(s.nameKey, s.code)}
-              {s.requiresQc ? ' · QC' : ''}
-              {s.outputPolicy === 'conserved' ? ` · ${t('production.conserved', 'Conserved')}` : ''}
-            </span>
-          </React.Fragment>
-        ))}
+      <ErrorBox error={error} />
+      <div className="flex" style={{ flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
+        {ordered
+          .filter((st) => st.active !== false)
+          .map((st, i) => (
+            <React.Fragment key={st.id}>
+              {i > 0 ? <span className="muted">{'\u2192'}</span> : null}
+              <span className="badge badge-blue">
+                {t(st.nameKey, st.code)}
+                {st.requiresQc ? ' \u00b7 QC' : ''}
+              </span>
+            </React.Fragment>
+          ))}
+      </div>
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th>{t('setup.stage_order', 'Order')}</th>
+              <th>{t('reports.stage', 'Stage')}</th>
+              <th>{t('setup.stage_policy', 'Quantity policy')}</th>
+              <th>{t('production.qc', 'Quality gate')}</th>
+              <th>{t('shell.status', 'Status')}</th>
+              <th>{t('shell.actions', 'Actions')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ordered.map((st) => (
+              <tr key={st.id}>
+                <td style={{ width: 90 }}>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    defaultValue={st.sequence}
+                    onBlur={(e) => {
+                      const v = Number(e.target.value);
+                      if (Number.isInteger(v) && v > 0 && v !== st.sequence) void patchStage(st.id, { sequence: v });
+                    }}
+                  />
+                </td>
+                <td>
+                  {t(st.nameKey, st.code)} <span className="muted mono" style={{ fontSize: 11 }}></span>
+                </td>
+                <td>
+                  {st.outputForm === 'packaged_items' ? (
+                    <span className="badge badge-gray">{t('setup.policy_converted', 'Converted (units)')}</span>
+                  ) : (
+                    <select
+                      value={st.outputPolicy}
+                      onChange={(e) => void patchStage(st.id, { outputPolicy: e.target.value })}
+                    >
+                      <option value="measured">{t('setup.policy_measured', 'Measured (loss derived)')}</option>
+                      <option value="conserved">{t('setup.policy_conserved', 'Conserved (output = input)')}</option>
+                    </select>
+                  )}
+                </td>
+                <td>
+                  <input
+                    type="checkbox"
+                    checked={st.requiresQc}
+                    onChange={() => void patchStage(st.id, { requiresQc: !st.requiresQc })}
+                  />
+                </td>
+                <td>
+                  <StatusBadge status={st.active !== false ? 'active' : 'inactive'} />
+                </td>
+                <td>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => void patchStage(st.id, { active: !(st.active !== false) })}
+                  >
+                    {st.active !== false ? t('status.inactive', 'Disable') : t('status.active', 'Enable')}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </Panel>
   );

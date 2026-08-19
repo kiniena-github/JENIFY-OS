@@ -100,6 +100,17 @@ function UsersTab() {
       {editing ? (
         <UserModal
           user={editing === 'new' ? null : editing}
+          isLastOwner={
+            editing !== 'new' &&
+            editing.active &&
+            (roles.data ?? []).find((r) => r.id === editing.roleId)?.isOwnerRole === true &&
+            !(users.data ?? []).some(
+              (u) =>
+                u.id !== editing.id &&
+                u.active &&
+                (roles.data ?? []).find((r) => r.id === u.roleId)?.isOwnerRole === true,
+            )
+          }
           roles={roles.data ?? []}
           onClose={() => setEditing(null)}
           onDone={() => {
@@ -115,12 +126,15 @@ function UsersTab() {
 
 function UserModal({
   user,
+  isLastOwner,
   roles,
   onClose,
   onDone,
   onError,
 }: {
   user: UserRow | null;
+  /** the ONLY active owner: role change and deactivation are blocked with an explanation */
+  isLastOwner?: boolean;
   roles: RoleRow[];
   onClose: () => void;
   onDone: () => void;
@@ -172,8 +186,12 @@ function UserModal({
         >
           <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
         </Field>
-        <Field label={t('users.role', 'Role')} required>
-          <select value={roleId} onChange={(e) => setRoleId(e.target.value)}>
+        <Field
+          label={t('users.role', 'Role')}
+          required
+          hint={isLastOwner ? t('users.last_owner_hint', 'This is the only active Owner. Create another active Owner first to change this role or deactivate this account.') : undefined}
+        >
+          <select value={roleId} disabled={isLastOwner} onChange={(e) => setRoleId(e.target.value)}>
             <option value="">—</option>
             {roles.map((r) => (
               <option key={r.id} value={r.id}>
@@ -190,7 +208,7 @@ function UserModal({
         </Field>
         {user ? (
           <Field label={t('shell.status', 'Status')}>
-            <select value={active ? '1' : '0'} onChange={(e) => setActive(e.target.value === '1')}>
+            <select value={active ? '1' : '0'} disabled={isLastOwner} onChange={(e) => setActive(e.target.value === '1')}>
               <option value="1">{t('status.active', 'Active')}</option>
               <option value="0">{t('status.inactive', 'Inactive')}</option>
             </select>
@@ -227,6 +245,7 @@ function RecoveryCodesPanel({ userId }: { userId: string }) {
     queryFn: () => api.get<{ active: number }>(`/api/users/${userId}/recovery-codes`),
   });
   const [codes, setCodes] = useState<string[] | null>(null);
+  const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
 
   async function generate() {
@@ -256,23 +275,71 @@ function RecoveryCodesPanel({ userId }: { userId: string }) {
         {t('users.codes_hint', 'Shown ONCE — store them offline. Generating new codes revokes all unused ones.')}
       </div>
       {codes ? (
-        <div
-          className="mono"
-          style={{
-            marginTop: 8,
-            display: 'grid',
-            gridTemplateColumns: '1fr 1fr',
-            gap: 6,
-            padding: 10,
-            background: 'var(--bg)',
-            borderRadius: 6,
-            fontSize: 13,
-          }}
-        >
-          {codes.map((c) => (
-            <span key={c}>{c}</span>
-          ))}
-        </div>
+        <>
+          <div
+            className="mono"
+            style={{
+              marginTop: 8,
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gap: 6,
+              padding: 10,
+              background: 'var(--bg)',
+              borderRadius: 6,
+              fontSize: 13,
+            }}
+          >
+            {codes.map((c) => (
+              <span key={c}>{c}</span>
+            ))}
+          </div>
+          <div className="flex mt">
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => {
+                void navigator.clipboard.writeText(codes.join('\n')).then(
+                  () => setCopied(true),
+                  () => setCopied(false),
+                );
+              }}
+            >
+              {copied ? t('users.copied', 'Copied ✓') : t('users.copy_all', 'Copy all')}
+            </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => {
+                const blob = new Blob(
+                  [`JENIFY OS emergency recovery codes\nGenerated ${new Date().toISOString().slice(0, 10)} — store OFFLINE.\nEach code works once; generating new codes revokes these.\n\n${codes.join('\n')}\n`],
+                  { type: 'text/plain;charset=utf-8' },
+                );
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = 'recovery-codes.txt';
+                a.click();
+                URL.revokeObjectURL(a.href);
+              }}
+            >
+              {t('users.download_codes', 'Download')}
+            </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => {
+                const w = window.open('', '_blank', 'width=480,height=640');
+                if (!w) return;
+                w.document.write(
+                  `<title>Recovery codes</title><body style="font-family:monospace;padding:24px"><h3 style="font-family:sans-serif">JENIFY OS emergency recovery codes</h3><p style="font-family:sans-serif;font-size:12px">Each code works once. Store offline. Generating new codes revokes these.</p><pre style="font-size:15px;line-height:1.9">${codes.join('\n')}</pre></body>`,
+                );
+                w.document.close();
+                w.print();
+              }}
+            >
+              {t('doc.print', 'Print')}
+            </button>
+            <span className="muted" style={{ fontSize: 12 }}>
+              {t('users.codes_gone', 'These codes disappear when this window closes.')}
+            </span>
+          </div>
+        </>
       ) : null}
     </div>
   );

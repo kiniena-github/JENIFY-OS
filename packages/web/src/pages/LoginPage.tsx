@@ -10,8 +10,8 @@ interface LoginInfo {
 
 /**
  * Tenant-branded sign-in. Identity comes from the tenant's own branding
- * configuration (never hard-coded per factory); FactoryOS stays the product
- * line ("Powered by FactoryOS"). There is deliberately NO public sign-up —
+ * configuration (never hard-coded per factory); JENIFY OS stays the product
+ * line ("Powered by JENIFY OS"). There is deliberately NO public sign-up —
  * staff accounts are created by factory admins only.
  */
 export default function LoginPage() {
@@ -34,7 +34,7 @@ export default function LoginPage() {
         setInfo(r);
         if (r.brandColor) document.documentElement.style.setProperty('--primary', r.brandColor);
       })
-      .catch(() => setInfo({ name: 'FactoryOS', logoPath: null, brandColor: null }));
+      .catch(() => setInfo({ name: 'JENIFY OS', logoPath: null, brandColor: null }));
   }, []);
 
   async function submit(e: React.FormEvent) {
@@ -202,7 +202,7 @@ export default function LoginPage() {
             </button>
           </>
         )}
-        <div className="login-note">Powered by FactoryOS — local factory deployment.</div>
+        <div className="login-note">Powered by JENIFY OS — local factory deployment.</div>
       </div>
     </div>
   );

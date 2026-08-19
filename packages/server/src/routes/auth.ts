@@ -17,7 +17,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
    */
   app.get('/api/login-info', async () => {
     const tenant = db.select().from(tenants).where(eq(tenants.active, true)).get();
-    if (!tenant) return { name: 'FactoryOS', logoPath: null, brandColor: null };
+    if (!tenant) return { name: 'JENIFY OS', logoPath: null, brandColor: null };
     return { name: tenant.name, logoPath: tenant.logoPath, brandColor: tenant.brandColor };
   });
 

@@ -1,5 +1,5 @@
 import { and, desc, eq, sql } from 'drizzle-orm';
-import { paymentAllocations, payments } from '../db/schema.js';
+import { paymentAllocations, payments, tenants } from '../db/schema.js';
 import { newId, nowIso, badRequest, notFound } from '../util.js';
 import type { Ctx } from './context.js';
 import { actorId, inTx } from './context.js';
@@ -69,11 +69,53 @@ export interface AllocationInput {
 export interface CreatePaymentInput {
   customerId: string;
   date: string;
-  amount: number; // ETB
+  /** amount in `currency` (or the tenant default when omitted) */
+  amount: number;
   method: string;
+  /** optional configured foreign currency; accounting stays in the default */
+  currency?: string;
   referenceNumber?: string;
   notes?: string;
   allocations?: AllocationInput[];
+}
+
+export interface CurrencySettings {
+  currencies?: Array<{ code: string; name?: string; active?: boolean }>;
+  /** default-currency units per 1 unit of the foreign currency */
+  rates?: Record<string, number>;
+}
+
+/**
+ * Simple multi-currency: a payment may be received in a configured foreign
+ * currency; it is converted ONCE at the configured rate and stored in the
+ * tenant default currency (amountCents), with the original amount and the
+ * snapshotted rate kept beside it. No revaluation, no forex accounting.
+ */
+function resolveCurrency(
+  tx: Ctx,
+  input: { amount: number; currency?: string },
+): { amountCents: number; currency: string | null; fxRate: number | null; originalAmountCents: number | null } {
+  const tenant = tx.db.select().from(tenants).where(eq(tenants.id, tx.tenantId)).get();
+  const defaultCurrency = tenant?.currency ?? 'ETB';
+  const code = input.currency?.trim().toUpperCase();
+  if (!code || code === defaultCurrency) {
+    return { amountCents: cents(input.amount), currency: null, fxRate: null, originalAmountCents: null };
+  }
+  const cfg = getSettings<CurrencySettings>(tx, 'currency');
+  const configured = (cfg?.data.currencies ?? []).find((c) => c.code.toUpperCase() === code);
+  if (!configured || configured.active === false) {
+    badRequest('currency_unknown', `Currency '${code}' is not configured — add it in Settings first`);
+  }
+  const rate = cfg?.data.rates?.[code];
+  if (!(rate != null && rate > 0)) {
+    badRequest('rate_missing', `No exchange rate configured for ${code}`);
+  }
+  return {
+    amountCents: Math.round(input.amount * rate! * 100),
+    currency: code,
+    fxRate: rate!,
+    originalAmountCents: cents(input.amount),
+  };
 }
 
 function cents(v: number): number {
@@ -90,6 +132,7 @@ export function createPayment(
     if (!(input.amount > 0)) badRequest('amount_invalid', 'Payment amount must be positive');
     if (!input.method?.trim()) badRequest('method_required', 'Payment method is required');
     validateReference(tx, input);
+    const money = resolveCurrency(tx, input);
 
     const docNumber = nextDocNumber(tx, 'payment');
     const id = newId();
@@ -101,7 +144,10 @@ export function createPayment(
         docNumber,
         date: input.date,
         customerId: input.customerId,
-        amountCents: cents(input.amount),
+        amountCents: money.amountCents,
+        currency: money.currency,
+        fxRate: money.fxRate,
+        originalAmountCents: money.originalAmountCents,
         method: input.method,
         referenceNumber: input.referenceNumber ?? null,
         receivedByUserId: actorId(tx),

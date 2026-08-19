@@ -1,8 +1,9 @@
 import { and, asc, eq } from 'drizzle-orm';
 import type { StageAttributeDef, StageInputSource, StageOutputForm, StageOutputPolicy } from '@factoryos/shared';
 import { productionStages } from '../db/schema.js';
-import { newId, notFound } from '../util.js';
+import { newId, notFound, badRequest } from '../util.js';
 import type { Ctx } from './context.js';
+import { writeAudit } from './audit.js';
 
 // Stage configuration (provisioning). Batch execution lives in batches.ts.
 
@@ -46,11 +47,13 @@ export function createStage(
   return id;
 }
 
-export function listStages(ctx: Ctx) {
+export function listStages(ctx: Ctx, opts: { includeInactive?: boolean } = {}) {
+  const conds = [eq(productionStages.tenantId, ctx.tenantId)];
+  if (!opts.includeInactive) conds.push(eq(productionStages.active, true));
   return ctx.db
     .select()
     .from(productionStages)
-    .where(and(eq(productionStages.tenantId, ctx.tenantId), eq(productionStages.active, true)))
+    .where(and(...conds))
     .orderBy(asc(productionStages.sequence))
     .all();
 }
@@ -73,4 +76,55 @@ export function getStageByCode(ctx: Ctx, code: string) {
     .get();
   if (!row) notFound('stage_missing', `Production stage '${code}' not found`);
   return row;
+}
+
+/**
+ * Stage configuration update (setup wizard / settings). Physics changes are
+ * audited; historical batches keep the numbers they were completed with.
+ */
+export function updateStage(
+  ctx: Ctx,
+  stageId: string,
+  patch: {
+    sequence?: number;
+    outputPolicy?: StageOutputPolicy;
+    requiresQc?: boolean;
+    active?: boolean;
+  },
+): void {
+  const stage = ctx.db
+    .select()
+    .from(productionStages)
+    .where(and(eq(productionStages.tenantId, ctx.tenantId), eq(productionStages.id, stageId)))
+    .get();
+  if (!stage) notFound('stage_missing', 'Production stage not found');
+  if (patch.outputPolicy && !['measured', 'conserved', 'converted'].includes(patch.outputPolicy)) {
+    badRequest('bad_policy', 'Stage policy must be measured, conserved, or converted');
+  }
+  const before = {
+    sequence: stage.sequence,
+    outputPolicy: stage.outputPolicy,
+    requiresQc: stage.requiresQc,
+    active: stage.active,
+  };
+  ctx.db
+    .update(productionStages)
+    .set({
+      sequence: patch.sequence ?? stage.sequence,
+      outputPolicy: patch.outputPolicy ?? stage.outputPolicy,
+      requiresQc: patch.requiresQc ?? stage.requiresQc,
+      active: patch.active ?? stage.active,
+    })
+    .where(eq(productionStages.id, stageId))
+    .run();
+  writeAudit(ctx, {
+    module: 'settings',
+    action: 'stage_update',
+    entity: 'production_stage',
+    entityId: stageId,
+    reference: stage.code,
+    summary: `Production stage '${stage.code}' configuration updated`,
+    before,
+    after: patch,
+  });
 }

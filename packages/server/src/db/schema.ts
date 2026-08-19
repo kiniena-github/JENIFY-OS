@@ -1,4 +1,4 @@
-import { index, integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 // ---------------------------------------------------------------------------
 // Conventions
@@ -606,8 +606,13 @@ export const payments = sqliteTable(
     docNumber: text('doc_number').notNull(),
     date: text('date').notNull(),
     customerId: text('customer_id').notNull(),
-    amountCents: integer('amount_cents').notNull(),
+    amountCents: integer('amount_cents').notNull(), // ALWAYS in the tenant default currency
     method: text('method').notNull(),
+    // simple multi-currency: original amount + snapshotted rate; accounting
+    // stays single-currency (amountCents) so history is never corrupted
+    currency: text('currency'), // null = tenant default
+    fxRate: real('fx_rate'), // default-currency units per 1 unit of `currency`
+    originalAmountCents: integer('original_amount_cents'),
     referenceNumber: text('reference_number'),
     receivedByUserId: text('received_by_user_id'),
     notes: text('notes'),
