@@ -14,6 +14,7 @@ import {
   stockMovements,
   warehouses,
 } from '../db/schema.js';
+import { deliveryPerformance } from '@factoryos/shared';
 import type { Ctx } from './context.js';
 import { stockOverview } from './stockview.js';
 import { creditOverview } from './creditview.js';
@@ -70,29 +71,49 @@ export function rawStockReport(ctx: Ctx, p: Period, warehouseId?: string) {
     usedByLotWh.set(key, (usedByLotWh.get(key) ?? 0) - m.qty);
   }
 
-  const breakdown = stock
-    .filter(
-      (r) =>
-        r.lotId && (r.onHand !== 0 || (usedByLotWh.get(`${r.lotId}|${r.warehouseId}`) ?? 0) !== 0),
-    )
-    .map((r) => ({
-      lotNumber: r.lotNumber,
-      source: r.lotSource,
-      receivedAt: r.receivedAt,
-      initialQty: r.initialQty,
-      usedQty: usedByLotWh.get(`${r.lotId}|${r.warehouseId}`) ?? 0,
-      remainingQty: r.onHand,
-      reservedQty: r.reserved,
-      warehouseCode: r.warehouseCode,
-      status: r.status,
-    }));
+  // One row per BATCH: the original received quantity belongs to the batch,
+  // never to each warehouse it later moved through — otherwise a transferred
+  // batch reads as if it was received twice. Warehouse detail nests below.
+  const byLot = new Map<string, typeof stock>();
+  for (const r of stock) {
+    if (!r.lotId) continue;
+    const used = usedByLotWh.get(`${r.lotId}|${r.warehouseId}`) ?? 0;
+    if (r.onHand === 0 && used === 0 && r.reserved === 0) continue;
+    const list = byLot.get(r.lotId) ?? [];
+    list.push(r);
+    byLot.set(r.lotId, list);
+  }
+  const batches = [...byLot.entries()].map(([lotId, locations]) => {
+    const first = locations[0];
+    const usedTotal = locations.reduce(
+      (s, r) => s + (usedByLotWh.get(`${r.lotId}|${r.warehouseId}`) ?? 0),
+      0,
+    );
+    return {
+      lotNumber: first.lotNumber,
+      source: first.lotSource,
+      receivedAt: first.receivedAt,
+      /** quantity of the ORIGINAL receipt — shown once for the whole batch */
+      originalQty: lotById.get(lotId)?.initialQty ?? first.initialQty,
+      usedQty: usedTotal,
+      remainingQty: locations.reduce((s, r) => s + r.onHand, 0),
+      reservedQty: locations.reduce((s, r) => s + r.reserved, 0),
+      locations: locations.map((r) => ({
+        warehouseCode: r.warehouseCode,
+        remainingQty: r.onHand,
+        usedQty: usedByLotWh.get(`${r.lotId}|${r.warehouseId}`) ?? 0,
+        reservedQty: r.reserved,
+        status: r.status,
+      })),
+    };
+  });
 
   return {
     receivedQty: receivedRows.reduce((s, r) => s + r.netQty, 0),
     usedQty: usage.reduce((s, m) => s - m.qty, 0),
     remainingQty: stock.reduce((s, r) => s + r.onHand, 0),
     reservedQty: stock.reduce((s, r) => s + r.reserved, 0),
-    breakdown,
+    batches,
     lotCount: lotById.size,
   };
 }
@@ -131,9 +152,24 @@ export function productionReport(ctx: Ctx, p: Period, stageCode?: string) {
   const measuredInput = measured.reduce((s, b) => s + b.inputQty, 0);
   const measuredOutput = measured.reduce((s, b) => s + (b.outputQty ?? 0), 0);
 
+  // Top KPIs must NOT add the throughput of consecutive stages together —
+  // the same physical material would be counted once per stage. The summary
+  // is therefore anchored to the first and last stage in scope.
+  const scopedStages = stages
+    .filter((s) => bulkStageIds.includes(s.id))
+    .sort((a, b) => a.sequence - b.sequence);
+  const firstStage = scopedStages[0];
+  const lastStage = scopedStages[scopedStages.length - 1];
+  const stageInput = (id: string) =>
+    rows.filter((b) => b.stageId === id).reduce((s, b) => s + b.inputQty, 0);
+  const stageOutput = (id: string) =>
+    rows.filter((b) => b.stageId === id).reduce((s, b) => s + (b.outputQty ?? 0), 0);
+
   return {
-    inputQty: rows.reduce((s, b) => s + b.inputQty, 0),
-    outputQty: rows.reduce((s, b) => s + (b.outputQty ?? 0), 0),
+    /** material entering the FIRST stage in scope — unique input, never summed across stages */
+    rawInputQty: firstStage ? stageInput(firstStage.id) : 0,
+    /** bulk output of the LAST stage in scope */
+    finalOutputQty: lastStage ? stageOutput(lastStage.id) : 0,
     // loss / efficiency describe measured stages ONLY
     lossQty: measured.reduce((s, b) => s + (b.lossQty ?? 0), 0),
     efficiencyPct: measuredInput > 0 ? (measuredOutput / measuredInput) * 100 : null,
@@ -227,11 +263,23 @@ export function qualityReport(ctx: Ctx, p: Period) {
   const statusOf = (b: (typeof rows)[number]) =>
     b.qcStatus === 'passed' && b.qcApprovedAt ? 'passed' : b.qcStatus;
 
+  // History is never erased by a final Pass: a batch that failed once and was
+  // retested to release still counts in the historical attempt metrics.
+  const rowIds = new Set(rows.map((b) => b.id));
+  const periodTests = tests.filter((qt) => rowIds.has(qt.batchId));
+  const attemptsOf = (b: (typeof rows)[number]) => (testsByBatch.get(b.id) ?? []).length;
+
   return {
     batchCount: rows.length,
-    passedCount: rows.filter((b) => statusOf(b) === 'passed').length,
-    failedCount: rows.filter((b) => b.qcStatus === 'failed').length,
-    retestOpenCount: rows.filter(
+    /** final state: passed AND explicitly released */
+    releasedCount: rows.filter((b) => statusOf(b) === 'passed').length,
+    /** final state: currently failed (no passing retest yet) */
+    currentlyFailedCount: rows.filter((b) => b.qcStatus === 'failed').length,
+    /** batches that needed more than one attempt, regardless of final state */
+    retestedBatchCount: rows.filter((b) => attemptsOf(b) > 1).length,
+    totalAttempts: periodTests.length,
+    failedAttempts: periodTests.filter((qt) => qt.status === 'failed').length,
+    awaitingCount: rows.filter(
       (b) =>
         b.qcStatus === 'retest_required' ||
         b.qcStatus === 'pending' ||
@@ -248,6 +296,7 @@ export function qualityReport(ctx: Ctx, p: Period) {
         inputQty: b.inputQty,
         attributes: b.attributes,
         actualResult: latest?.actualResult ?? null,
+        targetLevel: latest?.targetLevel ?? null,
         attempts: batchTests.length,
         approvedBy: b.qcApprovedBy,
         status: statusOf(b),
@@ -413,14 +462,24 @@ export function salesReport(ctx: Ctx, p: Period, filter: { customerId?: string }
   };
 }
 
-/** Credit balances + money collected in the period. */
-export function creditReport(ctx: Ctx, p: Period) {
+/**
+ * Credit balances + money collected in the period.
+ * scope: 'open' (default) shows only invoices with a remaining balance;
+ * 'settled' shows fully-paid ones so collected money is traceable; 'all' both.
+ */
+export function creditReport(ctx: Ctx, p: Period, scope: 'open' | 'settled' | 'all' = 'open') {
   const overview = creditOverview(ctx);
   const posted = listPayments(ctx).filter((pay) => pay.status === 'posted');
   const collected = posted
     .filter((pay) => (!p.from || pay.date >= p.from) && (!p.to || pay.date <= p.to))
     .reduce((s, pay) => s + pay.amountCents, 0);
-  return { ...overview, collectedCents: collected };
+  const rows =
+    scope === 'open'
+      ? overview.rows.filter((r) => r.remainingCents > 0)
+      : scope === 'settled'
+        ? overview.rows.filter((r) => r.remainingCents === 0)
+        : overview.rows;
+  return { ...overview, rows, scope, collectedCents: collected };
 }
 
 /** Fulfilment counts and rows by status/destination/truck. */
@@ -449,8 +508,14 @@ export function deliveryReport(ctx: Ctx, p: Period) {
       customerName: r.customerName,
       destination: r.del.destination,
       truckNumber: r.del.truckNumber,
+      driverName: r.del.driverName,
       expectedDate: r.del.expectedDate,
       actualDate: r.del.actualDate,
+      performance: deliveryPerformance({
+        expectedDate: r.del.expectedDate,
+        actualDate: r.del.actualDate,
+        status: r.del.status,
+      }),
       status: r.del.status,
     })),
   };

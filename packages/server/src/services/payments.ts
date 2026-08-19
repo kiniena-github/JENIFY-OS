@@ -7,6 +7,54 @@ import { writeAudit } from './audit.js';
 import { nextDocNumber } from './numbering.js';
 import { getParty } from './parties.js';
 import { getInvoice, invoicePaidCents } from './sales.js';
+import { getSettings } from './settings.js';
+
+/**
+ * External-reference policy by payment method. Cash may omit a reference;
+ * every electronic/bank method requires one unless the tenant explicitly
+ * configures otherwise in payment settings ({ referenceOptionalMethods }).
+ * The FactoryOS document number (PAY-xxxx) is always separate.
+ */
+function referenceRequired(ctx: Ctx, method: string): boolean {
+  const cfg = getSettings<{ referenceOptionalMethods?: string[] }>(ctx, 'payments');
+  const optional = cfg?.data.referenceOptionalMethods ?? ['cash'];
+  return !optional.includes(method.trim().toLowerCase());
+}
+
+function validateReference(
+  ctx: Ctx,
+  input: { method: string; referenceNumber?: string | null },
+  excludePaymentId?: string,
+): void {
+  const ref = input.referenceNumber?.trim() ?? '';
+  if (!ref && referenceRequired(ctx, input.method)) {
+    badRequest(
+      'reference_required',
+      `A transaction reference number is required for ${input.method.replace(/_/g, ' ')} payments`,
+    );
+  }
+  if (ref) {
+    const dup = ctx.db
+      .select({ id: payments.id, docNumber: payments.docNumber })
+      .from(payments)
+      .where(
+        and(
+          eq(payments.tenantId, ctx.tenantId),
+          eq(payments.method, input.method),
+          eq(payments.referenceNumber, ref),
+          sql`${payments.status} != 'reversed'`,
+        ),
+      )
+      .all()
+      .filter((p) => p.id !== excludePaymentId);
+    if (dup.length) {
+      badRequest(
+        'duplicate_reference',
+        `Reference '${ref}' was already used on payment ${dup[0].docNumber}`,
+      );
+    }
+  }
+}
 
 /**
  * One payment CAN be allocated across multiple invoices (founder decision).
@@ -41,6 +89,7 @@ export function createPayment(
     const customer = getParty(tx, input.customerId);
     if (!(input.amount > 0)) badRequest('amount_invalid', 'Payment amount must be positive');
     if (!input.method?.trim()) badRequest('method_required', 'Payment method is required');
+    validateReference(tx, input);
 
     const docNumber = nextDocNumber(tx, 'payment');
     const id = newId();
@@ -84,9 +133,15 @@ export function postPayment(ctx: Ctx, id: string, allocations: AllocationInput[]
   inTx(ctx, (tx) => {
     const payment = getPayment(tx, id);
     if (payment.status !== 'draft') badRequest('not_draft', 'Payment is already posted or reversed');
+    validateReference(tx, payment, id);
     tx.db
       .update(payments)
-      .set({ status: 'posted', postedAt: nowIso() })
+      .set({
+        status: 'posted',
+        postedAt: nowIso(),
+        // presentation snapshot: reprints keep the branding of issuance time
+        brandingVersion: getSettings(tx, 'branding')?.version ?? null,
+      })
       .where(eq(payments.id, id))
       .run();
     if (allocations.length) applyAllocations(tx, id, allocations);

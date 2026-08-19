@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../auth.js';
 import { api, ApiError } from '../api.js';
 import { usePageTitle } from '../components/Layout.js';
-import { StatCard, StatusBadge } from '../components/ui.js';
+import { StatCard, StatusBadge, DeliveryPerfBadge } from '../components/ui.js';
 import { useItems } from '../lib/queries.js';
 import * as fmt from '../lib/format.js';
 
@@ -29,6 +29,11 @@ interface ReportDef {
   descKey: string;
   desc: string;
   financial?: boolean;
+  /** credit report: Open / Settled / All row scope */
+  scopeFilter?: boolean;
+  /** custom flattening when the payload is not a flat `breakdown` array */
+  rows?: (d: Record<string, unknown>) => Record<string, unknown>[];
+  tableTitle?: (t: (k: string, f?: string) => string, scope?: string) => string;
   cards: (d: Record<string, unknown>, t: (k: string, f?: string) => string, currency: string) => Card[];
   columns: (t: (k: string, f?: string) => string, currency: string) => Column[];
 }
@@ -38,6 +43,18 @@ const qs = (v: unknown) => fmt.qtySmart(v as number);
 const m = (v: unknown, c: string) => fmt.money(v as number | null, c);
 const pct = (v: unknown) => (v == null ? '—' : `${(v as number).toFixed(1)}%`);
 const status = (v: unknown) => <StatusBadge status={String(v ?? '')} />;
+
+/**
+ * Consistent result display: a bare numeric reading inherits the unit of the
+ * configured target (e.g. target "30-40 ppm" turns "34" into "34 ppm").
+ */
+function normalizeResult(actual: unknown, target: unknown): string {
+  const a = actual == null ? '' : String(actual).trim();
+  if (!a) return '—';
+  if (!/^\d+(\.\d+)?$/.test(a)) return a;
+  const unit = typeof target === 'string' ? (target.match(/[a-zA-Z%]+\s*$/)?.[0]?.trim() ?? '') : '';
+  return unit ? `${a} ${unit}` : a;
+}
 
 function reportDefs(): ReportDef[] {
   return [
@@ -54,14 +71,29 @@ function reportDefs(): ReportDef[] {
         { label: t('reports.remaining', 'Remaining'), value: qs(d.remainingQty) },
         { label: t('inventory.reserved', 'Reserved'), value: qs(d.reservedQty) },
       ],
+      // one batch = one original quantity; warehouse locations nest below so a
+      // transferred batch can never read as if it was received twice
+      rows: (d) =>
+        ((d.batches ?? []) as Array<Record<string, unknown>>).flatMap((b) =>
+          ((b.locations ?? []) as Array<Record<string, unknown>>).map((loc, i) => ({
+            lotNumber: i === 0 ? b.lotNumber : '',
+            source: i === 0 ? b.source : '',
+            receivedAt: i === 0 ? b.receivedAt : null,
+            originalQty: i === 0 ? b.originalQty : null,
+            warehouseCode: loc.warehouseCode,
+            usedQty: loc.usedQty,
+            remainingQty: loc.remainingQty,
+            status: loc.status,
+          })),
+        ),
       columns: (t) => [
-        { key: 'lotNumber', label: t('inventory.batch', 'Batch'), render: (r) => <span className="mono">{String(r.lotNumber ?? '—')}</span> },
-        { key: 'source', label: t('inventory.source', 'Source'), render: (r) => String(r.source ?? '—') },
-        { key: 'receivedAt', label: t('inventory.received', 'Received'), render: (r) => fmt.date(r.receivedAt as string) },
-        { key: 'initialQty', label: t('inventory.initial', 'Initial'), render: (r) => q(r.initialQty), num: true },
+        { key: 'lotNumber', label: t('inventory.batch', 'Batch'), render: (r) => <span className="mono">{String(r.lotNumber ?? '')}</span> },
+        { key: 'source', label: t('inventory.source', 'Source'), render: (r) => String(r.source ?? '') },
+        { key: 'receivedAt', label: t('inventory.received', 'Received'), render: (r) => (r.receivedAt ? fmt.date(r.receivedAt as string) : '') },
+        { key: 'originalQty', label: t('report.original_qty', 'Original batch quantity'), render: (r) => (r.originalQty == null ? '' : q(r.originalQty)), num: true },
+        { key: 'warehouseCode', label: t('inventory.warehouse', 'Warehouse'), render: (r) => String(r.warehouseCode ?? '') },
         { key: 'usedQty', label: t('reports.used', 'Used'), render: (r) => q(r.usedQty), num: true },
         { key: 'remainingQty', label: t('reports.remaining', 'Remaining'), render: (r) => q(r.remainingQty), num: true },
-        { key: 'warehouseCode', label: t('inventory.warehouse', 'Warehouse'), render: (r) => String(r.warehouseCode ?? '') },
         { key: 'status', label: t('shell.status', 'Status'), render: (r) => status(r.status) },
       ],
     },
@@ -72,12 +104,33 @@ function reportDefs(): ReportDef[] {
       title: 'Production Report',
       descKey: 'reports.production_desc',
       desc: 'Input used, output, loss and efficiency.',
-      cards: (d, t) => [
-        { label: t('production.input', 'Input'), value: qs(d.inputQty) },
-        { label: t('production.output', 'Output'), value: qs(d.outputQty) },
-        { label: t('production.loss', 'Loss'), value: qs(d.lossQty), tone: (d.lossQty as number) > 0 ? 'danger' : undefined },
-        { label: t('production.efficiency', 'Efficiency'), value: pct(d.efficiencyPct) },
-      ],
+      // per-stage KPIs only — adding consecutive stages together would count
+      // the same physical material once per stage
+      cards: (d, t) => {
+        const per = (d.perStage ?? []) as Array<{
+          stageCode: string;
+          nameKey: string;
+          outputPolicy: string;
+          inputQty: number;
+          outputQty: number;
+          lossQty: number | null;
+          efficiencyPct: number | null;
+        }>;
+        const cards: Card[] = [{ label: t('report.raw_input', 'Raw input'), value: qs(d.rawInputQty) }];
+        for (const st of per) {
+          cards.push({
+            label: `${t(st.nameKey, st.stageCode)} — ${t('production.output', 'Output')}`,
+            value: qs(st.outputQty),
+            sub:
+              st.outputPolicy === 'measured'
+                ? `${t('production.loss', 'Loss')} ${qs(st.lossQty ?? 0)} · ${pct(st.efficiencyPct)}`
+                : st.outputPolicy === 'conserved'
+                  ? t('production.conserved', 'Conserved')
+                  : undefined,
+          });
+        }
+        return cards;
+      },
       columns: (t) => [
         { key: 'batchNumber', label: t('inventory.batch', 'Batch'), render: (r) => <span className="mono">{String(r.batchNumber)}</span> },
         { key: 'stage', label: t('reports.stage', 'Stage'), render: (r) => String(r.stage) },
@@ -96,16 +149,19 @@ function reportDefs(): ReportDef[] {
       title: 'Quality / Treatment Report',
       descKey: 'reports.quality_desc',
       desc: 'Additive use, results, pass, fail and retest.',
+      // final state and HISTORY are separate: a released batch that once
+      // failed still counts in retested/failed-attempt metrics
       cards: (d, t) => {
         const attrs = (d.attributeTotals ?? {}) as Record<string, number>;
         return [
-          { label: t('reports.batches', 'Batches'), value: String(d.batchCount) },
+          { label: t('report.q_released', 'Released batches'), value: String(d.releasedCount), tone: 'success' as const },
+          { label: t('report.q_failed_now', 'Currently failed'), value: String(d.currentlyFailedCount), tone: (d.currentlyFailedCount as number) > 0 ? ('danger' as const) : undefined },
+          { label: t('report.q_retested', 'Retested batches'), value: String(d.retestedBatchCount) },
+          { label: t('report.q_attempts', 'Total test attempts'), value: String(d.totalAttempts), sub: `${d.failedAttempts} ${t('report.q_failed_attempts', 'Failed attempts').toLowerCase()}` },
           ...Object.entries(attrs).map(([k, v]) => ({
             label: t(`production.attr.${k}`, k),
             value: v.toLocaleString('en-US', { maximumFractionDigits: 2 }),
           })),
-          { label: t('status.passed', 'Passed'), value: String(d.passedCount), tone: 'success' as const },
-          { label: t('reports.retest_failed', 'Retest / failed'), value: String((d.failedCount as number) + (d.retestOpenCount as number)) },
         ];
       },
       columns: (t) => [
@@ -113,7 +169,7 @@ function reportDefs(): ReportDef[] {
         { key: 'sourceRef', label: t('production.source_batch', 'Source'), render: (r) => <span className="mono">{String(r.sourceRef)}</span> },
         { key: 'date', label: t('shell.date', 'Date'), render: (r) => fmt.date(r.date as string) },
         { key: 'inputQty', label: t('production.input', 'Input'), render: (r) => q(r.inputQty), num: true },
-        { key: 'actualResult', label: t('production.actual', 'Actual result'), render: (r) => String(r.actualResult ?? '—') },
+        { key: 'actualResult', label: t('production.actual', 'Actual result'), render: (r) => normalizeResult(r.actualResult, r.targetLevel) },
         { key: 'attempts', label: t('reports.attempts', 'Attempts'), render: (r) => String(r.attempts), num: true },
         { key: 'status', label: t('shell.status', 'Status'), render: (r) => status(r.status) },
       ],
@@ -126,10 +182,14 @@ function reportDefs(): ReportDef[] {
       descKey: 'reports.packaging_desc',
       desc: 'Output and rejected packs by product size.',
       cards: (d, t) => {
-        const per = (d.perItem ?? []) as Array<{ itemName: string; good: number }>;
+        const per = (d.perItem ?? []) as Array<{ itemName: string; good: number; weight: number }>;
         return [
-          ...per.map((x) => ({ label: x.itemName, value: q(x.good) })),
-          { label: t('reports.rejected', 'Rejected'), value: q(d.totalRejected), tone: 'danger' as const },
+          ...per.map((x) => ({
+            label: `${x.itemName} — ${t('report.good_units', 'Good units produced')}`,
+            value: `${q(x.good)} ${t('report.packs', 'packs')}`,
+            sub: qs(x.weight),
+          })),
+          { label: t('reports.rejected', 'Rejected'), value: `${q(d.totalRejected)} ${t('report.packs', 'packs')}`, tone: 'danger' as const },
         ];
       },
       columns: (t) => [
@@ -201,6 +261,14 @@ function reportDefs(): ReportDef[] {
       descKey: 'reports.credit_desc',
       desc: 'Balances, overdue, due this week and history.',
       financial: true,
+      scopeFilter: true,
+      rows: (d) => (d.rows ?? []) as Record<string, unknown>[],
+      tableTitle: (t, scope) =>
+        scope === 'settled'
+          ? t('report.scope_settled', 'Settled')
+          : scope === 'all'
+            ? t('report.scope_all', 'All')
+            : t('report.credit_open', 'Open credit balances'),
       cards: (d, t, c) => [
         { label: t('credit.outstanding', 'Outstanding'), value: m(d.outstandingCents, c) },
         { label: t('credit.overdue', 'Overdue'), value: m(d.overdueCents, c), tone: (d.overdueCents as number) > 0 ? 'danger' : undefined },
@@ -226,7 +294,7 @@ function reportDefs(): ReportDef[] {
       descKey: 'reports.delivery_desc',
       desc: 'Pending, dispatched, delivered, destination and truck.',
       cards: (d, t) => [
-        { label: t('status.pending', 'Pending'), value: String(d.pending) },
+        { label: t('status.pending', 'Pending'), value: String(d.pending), sub: `${d.loading} ${t('status.loading', 'Loading').toLowerCase()}` },
         { label: t('status.dispatched', 'Dispatched'), value: String(d.dispatched) },
         { label: t('status.delivered', 'Delivered'), value: String(d.delivered), tone: 'success' },
         { label: t('status.cancelled', 'Cancelled'), value: String(d.cancelled) },
@@ -238,6 +306,18 @@ function reportDefs(): ReportDef[] {
         { key: 'destination', label: t('delivery.destination', 'Destination'), render: (r) => String(r.destination ?? '—') },
         { key: 'truckNumber', label: t('delivery.truck', 'Truck'), render: (r) => String(r.truckNumber ?? '—') },
         { key: 'expectedDate', label: t('delivery.expected', 'Expected'), render: (r) => fmt.date(r.expectedDate as string) },
+        { key: 'actualDate', label: t('delivery.actual', 'Actual'), render: (r) => fmt.date(r.actualDate as string) },
+        {
+          key: 'performance',
+          label: t('delivery.performance', 'Performance'),
+          render: (r) => (
+            <DeliveryPerfBadge
+              expectedDate={r.expectedDate as string | null}
+              actualDate={r.actualDate as string | null}
+              status={String(r.status)}
+            />
+          ),
+        },
         { key: 'status', label: t('shell.status', 'Status'), render: (r) => status(r.status) },
       ],
     },
@@ -328,8 +408,10 @@ function ReportView({ def, onBack }: { def: ReportDef; onBack: () => void }) {
   const [preset, setPreset] = useState<Preset>('month');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
+  const [scope, setScope] = useState<'open' | 'settled' | 'all'>('open');
   const range = periodRange(preset, from, to);
-  const query = `?${range.from ? `from=${range.from}&` : ''}${range.to ? `to=${range.to}` : ''}`;
+  const scopePart = def.scopeFilter ? `scope=${scope}&` : '';
+  const query = `?${scopePart}${range.from ? `from=${range.from}&` : ''}${range.to ? `to=${range.to}` : ''}`;
   const url = def.endpoint.includes('&')
     ? `/api/reports/${def.endpoint.split('&')[0]}${query}&${def.endpoint.split('&').slice(1).join('&')}`
     : `/api/reports/${def.endpoint}${query}`;
@@ -339,7 +421,11 @@ function ReportView({ def, onBack }: { def: ReportDef; onBack: () => void }) {
   });
 
   const columns = def.columns(t, currency);
-  const rows = ((data?.breakdown ?? []) as Record<string, unknown>[]) ?? [];
+  const rows: Record<string, unknown>[] = data
+    ? def.rows
+      ? def.rows(data)
+      : ((data.breakdown ?? []) as Record<string, unknown>[])
+    : [];
 
   function exportCsv() {
     const header = columns.map((c) => c.label).join(',');
@@ -380,6 +466,13 @@ function ReportView({ def, onBack }: { def: ReportDef; onBack: () => void }) {
             <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
           </>
         ) : null}
+        {def.scopeFilter ? (
+          <select value={scope} onChange={(e) => setScope(e.target.value as typeof scope)}>
+            <option value="open">{t('report.scope_open', 'Open')}</option>
+            <option value="settled">{t('report.scope_settled', 'Settled')}</option>
+            <option value="all">{t('report.scope_all', 'All')}</option>
+          </select>
+        ) : null}
         <button className="btn btn-secondary btn-sm" onClick={exportCsv} disabled={!rows.length}>
           {t('shell.export', 'Export')} CSV
         </button>
@@ -401,7 +494,7 @@ function ReportView({ def, onBack }: { def: ReportDef; onBack: () => void }) {
           </div>
           <div className="panel">
             <div className="panel-head">
-              <h2>{t('reports.breakdown', 'Breakdown')}</h2>
+              <h2>{def.tableTitle ? def.tableTitle(t, scope) : t('reports.breakdown', 'Breakdown')}</h2>
               <div className="spacer" />
               <span className="muted">
                 {range.from ?? '…'} → {range.to ?? '…'} · {t('reports.approved_only', 'Approved records only')}

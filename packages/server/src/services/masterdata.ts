@@ -1,6 +1,18 @@
-import { and, eq, gt, sql } from 'drizzle-orm';
+import { and, eq, gt, or, sql } from 'drizzle-orm';
 import type { ItemKind, TrackingMode } from '@factoryos/shared';
-import { items, uoms, warehouses, stockBalances, reservations } from '../db/schema.js';
+import {
+  items,
+  uoms,
+  warehouses,
+  stockBalances,
+  reservations,
+  stockMovements,
+  goodsReceipts,
+  stockTransfers,
+  productionBatches,
+  invoiceLines,
+  simpleTransactions,
+} from '../db/schema.js';
 import { newId, nowIso, badRequest, notFound } from '../util.js';
 import type { Ctx } from './context.js';
 import { writeAudit } from './audit.js';
@@ -228,5 +240,113 @@ export function updateWarehouse(
     summary: `Warehouse '${wh.name}' updated`,
     before,
     after: patch,
+  });
+}
+
+/**
+ * True when ANY transaction or history row has ever referenced the warehouse.
+ * Once used, a warehouse may only be archived — never permanently deleted —
+ * even if its current stock is back to zero, so history can always resolve.
+ */
+export function warehouseEverUsed(ctx: Ctx, warehouseId: string): boolean {
+  const t = ctx.tenantId;
+  const checks: Array<() => unknown> = [
+    () =>
+      ctx.db
+        .select({ id: stockMovements.id })
+        .from(stockMovements)
+        .where(and(eq(stockMovements.tenantId, t), eq(stockMovements.warehouseId, warehouseId)))
+        .limit(1)
+        .get(),
+    () =>
+      ctx.db
+        .select({ id: stockBalances.id })
+        .from(stockBalances)
+        .where(and(eq(stockBalances.tenantId, t), eq(stockBalances.warehouseId, warehouseId)))
+        .limit(1)
+        .get(),
+    () =>
+      ctx.db
+        .select({ id: reservations.id })
+        .from(reservations)
+        .where(and(eq(reservations.tenantId, t), eq(reservations.warehouseId, warehouseId)))
+        .limit(1)
+        .get(),
+    () =>
+      ctx.db
+        .select({ id: goodsReceipts.id })
+        .from(goodsReceipts)
+        .where(and(eq(goodsReceipts.tenantId, t), eq(goodsReceipts.warehouseId, warehouseId)))
+        .limit(1)
+        .get(),
+    () =>
+      ctx.db
+        .select({ id: stockTransfers.id })
+        .from(stockTransfers)
+        .where(
+          and(
+            eq(stockTransfers.tenantId, t),
+            or(
+              eq(stockTransfers.fromWarehouseId, warehouseId),
+              eq(stockTransfers.toWarehouseId, warehouseId),
+            ),
+          ),
+        )
+        .limit(1)
+        .get(),
+    () =>
+      ctx.db
+        .select({ id: productionBatches.id })
+        .from(productionBatches)
+        .where(
+          and(
+            eq(productionBatches.tenantId, t),
+            or(
+              eq(productionBatches.inputWarehouseId, warehouseId),
+              eq(productionBatches.outputWarehouseId, warehouseId),
+            ),
+          ),
+        )
+        .limit(1)
+        .get(),
+    () =>
+      ctx.db
+        .select({ id: invoiceLines.id })
+        .from(invoiceLines)
+        .where(and(eq(invoiceLines.tenantId, t), eq(invoiceLines.warehouseId, warehouseId)))
+        .limit(1)
+        .get(),
+    () =>
+      ctx.db
+        .select({ id: simpleTransactions.id })
+        .from(simpleTransactions)
+        .where(and(eq(simpleTransactions.tenantId, t), eq(simpleTransactions.warehouseId, warehouseId)))
+        .limit(1)
+        .get(),
+  ];
+  return checks.some((q) => q() != null);
+}
+
+/**
+ * Permanent delete — allowed ONLY for a warehouse that has never been touched
+ * by any transaction. Anything with history must be archived instead.
+ */
+export function deleteWarehouse(ctx: Ctx, warehouseId: string): void {
+  const wh = getWarehouse(ctx, warehouseId);
+  if (warehouseEverUsed(ctx, warehouseId)) {
+    badRequest(
+      'warehouse_has_history',
+      `Warehouse '${wh.name}' has transaction history and cannot be permanently deleted — archive it instead`,
+    );
+  }
+  ctx.db.delete(warehouses).where(eq(warehouses.id, warehouseId)).run();
+  writeAudit(ctx, {
+    module: 'settings',
+    action: 'warehouse_delete',
+    entity: 'warehouse',
+    entityId: warehouseId,
+    reference: wh.code,
+    summary: `Unused warehouse '${wh.name}' permanently deleted`,
+    before: { code: wh.code, name: wh.name },
   });
 }

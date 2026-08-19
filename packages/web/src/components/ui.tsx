@@ -1,4 +1,5 @@
 import React from 'react';
+import { deliveryPerformance } from '@factoryos/shared';
 import { useAuth } from '../auth.js';
 
 const STATUS_COLORS: Record<string, string> = {
@@ -25,6 +26,7 @@ const STATUS_COLORS: Record<string, string> = {
   loading: 'amber',
   paid: 'green',
   partial: 'amber',
+  credit: 'blue',
   overdue: 'red',
   active: 'blue',
   inactive: 'gray',
@@ -39,6 +41,43 @@ export function StatusBadge({ status }: { status: string }) {
 
 function prettify(s: string): string {
   return s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** Schedule performance of a delivery: "1 day early", "Overdue by 3 days", … */
+export function DeliveryPerfBadge({
+  expectedDate,
+  actualDate,
+  status,
+}: {
+  expectedDate?: string | null;
+  actualDate?: string | null;
+  status: string;
+}) {
+  const { t } = useAuth();
+  const perf = deliveryPerformance({ expectedDate, actualDate, status });
+  if (!perf) return <span className="muted">—</span>;
+  const dayWord = perf.days === 1 ? t('delivery.day', 'day') : t('delivery.days', 'days');
+  const text =
+    perf.code === 'early'
+      ? `${perf.days} ${dayWord} ${t('delivery.perf_early', 'early')}`
+      : perf.code === 'late'
+        ? `${perf.days} ${dayWord} ${t('delivery.perf_late', 'late')}`
+        : perf.code === 'overdue'
+          ? `${t('delivery.perf_overdue', 'Overdue')} ${perf.days} ${dayWord}`
+          : perf.code === 'on_time'
+            ? t('delivery.perf_on_time', 'On time')
+            : perf.code === 'due_today'
+              ? t('delivery.perf_due_today', 'Due today')
+              : t('delivery.perf_on_schedule', 'On schedule');
+  const color =
+    perf.code === 'early' || perf.code === 'on_time'
+      ? 'green'
+      : perf.code === 'late' || perf.code === 'overdue'
+        ? 'red'
+        : perf.code === 'due_today'
+          ? 'amber'
+          : 'gray';
+  return <span className={`badge badge-${color}`}>{text}</span>;
 }
 
 export function StatCard({

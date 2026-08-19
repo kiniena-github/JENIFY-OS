@@ -324,7 +324,13 @@ export function confirmInvoice(ctx: Ctx, id: string, opts: { creditOverride?: bo
 
     tx.db
       .update(salesInvoices)
-      .set({ status: 'confirmed', confirmedBy: actorId(tx), confirmedAt: nowIso() })
+      .set({
+        status: 'confirmed',
+        confirmedBy: actorId(tx),
+        confirmedAt: nowIso(),
+        // presentation snapshot: reprints keep issuance-time branding
+        brandingVersion: getSettings(tx, 'branding')?.version ?? null,
+      })
       .where(eq(salesInvoices.id, id))
       .run();
     writeAudit(tx, {

@@ -102,11 +102,18 @@ export default function PaymentsPage() {
                   <td>{fmt.date(p.date)}</td>
                   <td>{customerName(p.customerId)}</td>
                   <td className="num">{fmt.money(p.amountCents, currency)}</td>
-                  <td className="num">{fmt.money(p.allocatedCents, currency)}</td>
-                  <td className="num">{fmt.money(p.amountCents - p.allocatedCents, currency)}</td>
+                  {/* a reversed payment is not allocatable money — show '—', never a misleading remainder */}
+                  <td className="num">{p.status === 'reversed' ? '—' : fmt.money(p.allocatedCents, currency)}</td>
+                  <td className="num">{p.status === 'reversed' ? '—' : fmt.money(p.amountCents - p.allocatedCents, currency)}</td>
                   <td>{t(`payments.method_${p.method}`, p.method)}</td>
                   <td>
                     <StatusBadge status={p.status} />
+                    {p.status === 'reversed' ? (
+                      <div className="muted" style={{ fontSize: 12, maxWidth: 220 }}>
+                        {t('payments.reversed_note', 'Reversed — this payment no longer affects the customer balance')}
+                        {p.reversalReason ? ` (${p.reversalReason})` : ''}
+                      </div>
+                    ) : null}
                   </td>
                   <td>
                     {p.status === 'posted' && p.amountCents > p.allocatedCents && can('payments', 'approve') ? (
@@ -190,6 +197,9 @@ function NewPaymentForm({
 
   const amountNum = Number(amount || 0);
   const canPost = can('payments', 'approve');
+  // external reference is mandatory for every non-cash method (mobile money,
+  // bank transfer, cheque, card …); the PAY-xxxx number stays separate
+  const refRequired = method !== 'cash';
 
   async function submit() {
     setBusy(true);
@@ -252,7 +262,11 @@ function NewPaymentForm({
           <Field label={t('shell.date', 'Date')} required>
             <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
           </Field>
-          <Field label={t('payments.reference', 'Reference number')}>
+          <Field
+            label={t('payments.reference', 'Reference number')}
+            required={refRequired}
+            hint={refRequired ? t('payments.reference_hint', 'Required for every method except cash') : undefined}
+          >
             <input value={reference} onChange={(e) => setReference(e.target.value)} />
           </Field>
           <Field label={t('shell.notes', 'Notes')}>
@@ -262,7 +276,7 @@ function NewPaymentForm({
         <div className="form-actions">
           <button
             className="btn btn-primary"
-            disabled={!canPost || busy || !customerId || !(amountNum > 0)}
+            disabled={!canPost || busy || !customerId || !(amountNum > 0) || (refRequired && !reference.trim())}
             onClick={() => void submit()}
           >
             {t('payments.post', 'Post payment')}

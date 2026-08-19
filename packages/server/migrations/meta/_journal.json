@@ -22,6 +22,13 @@
       "when": 1787087611248,
       "tag": "0002_sudden_pretty_boy",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1787119548161,
+      "tag": "0003_curious_owl",
+      "breakpoints": true
     }
   ]
 }

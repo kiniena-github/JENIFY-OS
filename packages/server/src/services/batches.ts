@@ -41,6 +41,7 @@ export interface CreateBatchInput {
   inputBatchId?: string;
   inputBatchQty?: number; // natural units of bulk output (kg)
   operatorName?: string;
+  supervisorName?: string;
   attributes?: Record<string, unknown>;
   notes?: string;
 }
@@ -130,6 +131,7 @@ export function createBatch(ctx: Ctx, input: CreateBatchInput): { id: string; do
         inputWarehouseId: input.inputWarehouseId ?? null,
         inputQty: inputQtyBase,
         operatorName: input.operatorName ?? null,
+        supervisorName: input.supervisorName ?? null,
         recordedBy: actorId(tx),
         attributes: (input.attributes as object) ?? null,
         notes: input.notes ?? null,
@@ -188,6 +190,7 @@ export interface CompleteBatchInput {
   outputWarehouseId?: string;
   attributes?: Record<string, unknown>;
   operatorName?: string;
+  supervisorName?: string;
   notes?: string;
 }
 
@@ -326,6 +329,7 @@ export function completeBatch(ctx: Ctx, id: string, input: CompleteBatchInput): 
         status: 'completed',
         qcStatus: stage.requiresQc ? batch.qcStatus : 'passed',
         operatorName: input.operatorName ?? batch.operatorName,
+        supervisorName: input.supervisorName ?? batch.supervisorName,
         attributes: mergedAttrs as object,
         notes: input.notes ?? batch.notes,
         completedAt: nowIso(),
@@ -339,7 +343,13 @@ export function completeBatch(ctx: Ctx, id: string, input: CompleteBatchInput): 
       entity: 'production_batch',
       entityId: id,
       reference: batch.docNumber,
-      summary: `Batch ${batch.docNumber} completed`,
+      summary: `Batch ${batch.docNumber} completed${
+        input.operatorName ?? batch.operatorName ? ` — operator ${input.operatorName ?? batch.operatorName}` : ''
+      }${
+        input.supervisorName ?? batch.supervisorName
+          ? `, supervised by ${input.supervisorName ?? batch.supervisorName}`
+          : ''
+      }`,
       after: update,
     });
   });

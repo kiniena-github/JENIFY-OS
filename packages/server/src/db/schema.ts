@@ -380,6 +380,7 @@ export const goodsReceipts = sqliteTable(
     postedAt: text('posted_at'),
     reversalOfId: text('reversal_of_id'),
     reversalReason: text('reversal_reason'),
+    brandingVersion: integer('branding_version'),
     createdBy: text('created_by'),
     createdAt: text('created_at').notNull(),
   },
@@ -406,6 +407,7 @@ export const stockTransfers = sqliteTable(
     postedAt: text('posted_at'),
     reversalOfId: text('reversal_of_id'),
     reversalReason: text('reversal_reason'),
+    brandingVersion: integer('branding_version'),
     createdBy: text('created_by'),
     createdAt: text('created_at').notNull(),
   },
@@ -465,8 +467,9 @@ export const productionBatches = sqliteTable(
     qcStatus: text('qc_status').notNull().default('pending'), // pending|passed|failed|retest_required
     qcApprovedBy: text('qc_approved_by'),
     qcApprovedAt: text('qc_approved_at'),
-    // people / meta
+    // people / meta — operator performs, supervisor reviews (separate identities)
     operatorName: text('operator_name'),
+    supervisorName: text('supervisor_name'),
     recordedBy: text('recorded_by'),
     approvedBy: text('approved_by'),
     attributes: text('attributes', { mode: 'json' }), // e.g. { iodine_added_kg: 0.42 }
@@ -530,6 +533,7 @@ export const salesInvoices = sqliteTable(
     salespersonId: text('salesperson_id'),
     pricingVersion: integer('pricing_version'),
     vatSnapshot: text('vat_snapshot', { mode: 'json' }),
+    brandingVersion: integer('branding_version'), // presentation snapshot at issuance
     notes: text('notes'),
     confirmedBy: text('confirmed_by'),
     confirmedAt: text('confirmed_at'),
@@ -585,6 +589,7 @@ export const deliveries = sqliteTable(
     notes: text('notes'),
     cancelledReason: text('cancelled_reason'),
     recordedBy: text('recorded_by'),
+    brandingVersion: integer('branding_version'),
     createdAt: text('created_at').notNull(),
   },
   (t) => [
@@ -610,6 +615,7 @@ export const payments = sqliteTable(
     postedAt: text('posted_at'),
     reversalReason: text('reversal_reason'),
     reversalOfId: text('reversal_of_id'),
+    brandingVersion: integer('branding_version'),
     createdBy: text('created_by'),
     createdAt: text('created_at').notNull(),
   },
@@ -666,4 +672,25 @@ export const paymentAllocations = sqliteTable(
     index('allocations_payment').on(t.tenantId, t.paymentId),
     index('allocations_invoice').on(t.tenantId, t.invoiceId, t.status),
   ],
+);
+
+/**
+ * Owner emergency recovery codes. Generated in a batch, shown once, stored
+ * only as hashes. Using one forces an immediate password change, revokes the
+ * used code, and writes a permanent security audit event. No plaintext code
+ * or universal password ever exists in the database.
+ */
+export const recoveryCodes = sqliteTable(
+  'recovery_codes',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    userId: text('user_id').notNull(),
+    codeHash: text('code_hash').notNull(),
+    createdBy: text('created_by'),
+    createdAt: text('created_at').notNull(),
+    usedAt: text('used_at'),
+    revokedAt: text('revoked_at'),
+  },
+  (t) => [index('recovery_codes_user').on(t.tenantId, t.userId)],
 );

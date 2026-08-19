@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../auth.js';
 import { api } from '../api.js';
 import { usePageTitle } from '../components/Layout.js';
-import { StatCard, StatusBadge, ErrorBox, Field, Modal, ReasonDialog } from '../components/ui.js';
+import { StatCard, StatusBadge, DeliveryPerfBadge, ErrorBox, Field, Modal, ReasonDialog } from '../components/ui.js';
 import { useDeliveries, useInvoices, useParties } from '../lib/queries.js';
 import * as fmt from '../lib/format.js';
 import type { Delivery } from '../lib/types.js';
@@ -70,6 +70,7 @@ export default function DeliveriesPage() {
                 <th>{t('delivery.destination', 'Destination')}</th>
                 <th>{t('delivery.truck', 'Truck')}</th>
                 <th>{t('delivery.expected', 'Expected')}</th>
+                <th>{t('delivery.performance', 'Performance')}</th>
                 <th>{t('shell.status', 'Status')}</th>
                 <th>{t('shell.actions', 'Actions')}</th>
               </tr>
@@ -83,6 +84,9 @@ export default function DeliveriesPage() {
                   <td>{d.destination ?? (d.deliveryType === 'pickup' ? t('sales.customer_pickup', 'Customer pickup') : '—')}</td>
                   <td>{d.truckNumber ?? '—'}</td>
                   <td>{fmt.date(d.expectedDate)}</td>
+                  <td>
+                    <DeliveryPerfBadge expectedDate={d.expectedDate} actualDate={d.actualDate} status={d.status} />
+                  </td>
                   <td>
                     <StatusBadge status={d.status} />
                   </td>
@@ -121,7 +125,7 @@ export default function DeliveriesPage() {
               ))}
               {rows.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="table-empty">
+                  <td colSpan={9} className="table-empty">
                     {t('delivery.none', 'No deliveries yet. Confirmed sales appear here as delivery orders.')}
                   </td>
                 </tr>

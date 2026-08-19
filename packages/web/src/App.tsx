@@ -20,6 +20,7 @@ const SacksPage = lazy(() => import('./pages/SacksPage.js'));
 const ReportsPage = lazy(() => import('./pages/ReportsPage.js'));
 const UsersPage = lazy(() => import('./pages/UsersPage.js'));
 const SettingsPage = lazy(() => import('./pages/SettingsPage.js'));
+const SetupPage = lazy(() => import('./pages/SetupPage.js'));
 const AuditPage = lazy(() => import('./pages/AuditPage.js'));
 const PrintPage = lazy(() => import('./pages/PrintPage.js'));
 
@@ -54,6 +55,7 @@ function Shell() {
           <Route path="/reports" element={<ReportsPage />} />
           <Route path="/users" element={<UsersPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/setup" element={<SetupPage />} />
           <Route path="/audit" element={<AuditPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

@@ -393,9 +393,13 @@ function collectOutput(stage: Stage, state: Record<string, string>) {
     const v = state[`attr_${a.key}`];
     if (v !== undefined && v !== '') attributes[a.key] = a.type === 'number' ? Number(v) : v;
   }
+  const people = {
+    operatorName: state.operatorName || undefined,
+    supervisorName: state.supervisorName || undefined,
+  };
   if (stage.outputForm === 'bulk') {
-    if (stage.outputPolicy === 'conserved') return { attributes }; // output = input
-    return { outputQty: state.outputQty ? Number(state.outputQty) : undefined, attributes };
+    if (stage.outputPolicy === 'conserved') return { attributes, ...people }; // output = input
+    return { outputQty: state.outputQty ? Number(state.outputQty) : undefined, attributes, ...people };
   }
   return {
     outputItemId: state.outputItemId || undefined,
@@ -403,6 +407,7 @@ function collectOutput(stage: Stage, state: Record<string, string>) {
     unitsRejected: state.unitsRejected ? Number(state.unitsRejected) : 0,
     outputWarehouseId: state.outputWarehouseId || undefined,
     attributes,
+    ...people,
   };
 }
 
@@ -479,6 +484,7 @@ function NewBatchForm({ stage, onError }: { stage: Stage; onError: (e: unknown) 
         stageCode: stage.code,
         date: state.date,
         operatorName: state.operatorName || undefined,
+        supervisorName: state.supervisorName || undefined,
         notes: state.notes || undefined,
         attributes: collectOutput(stage, state).attributes,
       };
@@ -576,8 +582,12 @@ function NewBatchForm({ stage, onError }: { stage: Stage; onError: (e: unknown) 
             </>
           )}
           <OutputFields stage={stage} state={state} setState={setState} />
-          <Field label={t('production.operator', 'Operator / supervisor')}>
+          {/* two responsibilities, two identities — never one combined field */}
+          <Field label={t('production.operator', 'Operator')}>
             <input value={state.operatorName ?? ''} onChange={(e) => setState('operatorName', e.target.value)} />
+          </Field>
+          <Field label={t('production.supervisor', 'Supervisor / Reviewed by')}>
+            <input value={state.supervisorName ?? ''} onChange={(e) => setState('supervisorName', e.target.value)} />
           </Field>
           <Field label={t('shell.notes', 'Notes')}>
             <input value={state.notes ?? ''} onChange={(e) => setState('notes', e.target.value)} />
@@ -611,6 +621,8 @@ function CompleteModal({ stage, batch, onClose }: { stage: Stage; batch: Batch; 
       const v = (batch.attributes as Record<string, unknown> | null)?.[a.key];
       if (v != null) init[`attr_${a.key}`] = String(v);
     }
+    if (batch.operatorName) init.operatorName = batch.operatorName;
+    if (batch.supervisorName) init.supervisorName = batch.supervisorName;
     return init;
   });
   const [error, setError] = useState<unknown>(null);
@@ -639,6 +651,12 @@ function CompleteModal({ stage, batch, onClose }: { stage: Stage; batch: Batch; 
       </div>
       <div className="form-grid">
         <OutputFields stage={stage} state={state} setState={setState} />
+        <Field label={t('production.operator', 'Operator')}>
+          <input value={state.operatorName ?? ''} onChange={(e) => setState('operatorName', e.target.value)} />
+        </Field>
+        <Field label={t('production.supervisor', 'Supervisor / Reviewed by')}>
+          <input value={state.supervisorName ?? ''} onChange={(e) => setState('supervisorName', e.target.value)} />
+        </Field>
       </div>
       <div className="form-actions">
         <button className="btn btn-secondary" onClick={onClose}>
@@ -735,6 +753,16 @@ function BatchDetailModal({ stage, batch, onClose }: { stage: Stage; batch: Batc
           />
         ) : null}
       </div>
+
+      {b.operatorName || b.supervisorName ? (
+        <div className="muted" style={{ marginBottom: 10, fontSize: 13 }}>
+          {b.operatorName ? `${t('production.operator', 'Operator')}: ${b.operatorName}` : null}
+          {b.operatorName && b.supervisorName ? ' · ' : null}
+          {b.supervisorName
+            ? `${t('production.supervisor', 'Supervisor / Reviewed by')}: ${b.supervisorName}`
+            : null}
+        </div>
+      ) : null}
 
       {stage.requiresQc && approved ? (
         <div className="page-info">{t('production.released_note', 'Released — available for Packaging.')}</div>

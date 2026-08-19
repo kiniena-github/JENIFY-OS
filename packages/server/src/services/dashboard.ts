@@ -18,7 +18,10 @@ export interface DashboardData {
   production: Array<{
     stageCode: string;
     nameKey: string;
+    outputPolicy: string;
+    outputForm: string;
     todayInput: number;
+    /** bulk: output weight · converted: GOOD packed weight (rejects excluded) */
     todayOutput: number;
     todayLoss: number | null;
     openBatches: number;
@@ -80,9 +83,14 @@ export function dashboard(ctx: Ctx, opts: { includeFinancial: boolean }): Dashbo
       return {
         stageCode: s.code,
         nameKey: s.nameKey,
+        outputPolicy: s.outputPolicy,
+        outputForm: s.outputForm,
         todayInput: todayDone.reduce((x, b) => x + b.inputQty, 0),
         todayOutput: todayDone.reduce((x, b) => x + (b.outputQty ?? 0), 0),
-        todayLoss: s.outputForm === 'bulk' ? todayDone.reduce((x, b) => x + (b.lossQty ?? 0), 0) : null,
+        todayLoss:
+          s.outputForm === 'bulk' && s.outputPolicy === 'measured'
+            ? todayDone.reduce((x, b) => x + (b.lossQty ?? 0), 0)
+            : null,
         openBatches: batches.filter(
           (b) => b.stageId === s.id && (b.status === 'draft' || b.status === 'in_progress'),
         ).length,

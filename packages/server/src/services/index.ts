@@ -22,3 +22,4 @@ export * from './creditview.js';
 export * from './simpletxn.js';
 export * from './reports.js';
 export * from './dashboard.js';
+export * from './recovery.js';

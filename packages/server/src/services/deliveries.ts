@@ -7,6 +7,7 @@ import { writeAudit } from './audit.js';
 import { nextDocNumber } from './numbering.js';
 import { getInvoice, listInvoiceLines } from './sales.js';
 import { postMovement, listReservationsForDocument, consumeReservation } from './inventory.js';
+import { getSettings } from './settings.js';
 
 export interface CreateDeliveryInput {
   invoiceId: string;
@@ -71,6 +72,7 @@ export function createDelivery(ctx: Ctx, input: CreateDeliveryInput): { id: stri
         expectedDate: input.expectedDate ?? null,
         notes: input.notes ?? null,
         recordedBy: actorId(tx),
+        brandingVersion: getSettings(tx, 'branding')?.version ?? null,
         createdAt: nowIso(),
       })
       .run();

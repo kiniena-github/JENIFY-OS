@@ -25,6 +25,7 @@ interface PeriodQuery {
   customerId?: string;
   stageCode?: string;
   itemId?: string;
+  scope?: string; // credit report: open | settled | all
 }
 
 export function registerInsightRoutes(app: FastifyInstance, db: Db): void {
@@ -84,7 +85,11 @@ export function registerInsightRoutes(app: FastifyInstance, db: Db): void {
           return salesReport(ctx, p, { customerId: req.query.customerId });
         case 'credit':
           requireFinancial();
-          return creditReport(ctx, p);
+          return creditReport(
+            ctx,
+            p,
+            req.query.scope === 'settled' || req.query.scope === 'all' ? req.query.scope : 'open',
+          );
         case 'delivery':
           return deliveryReport(ctx, p);
         case 'simple-item': {

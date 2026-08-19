@@ -9,6 +9,8 @@ import {
   listWarehouses,
   createWarehouse,
   updateWarehouse,
+  deleteWarehouse,
+  warehouseEverUsed,
 } from '../services/masterdata.js';
 import { listParties, createParty, updateParty, getParty } from '../services/parties.js';
 
@@ -52,6 +54,21 @@ export function registerMasterdataRoutes(app: FastifyInstance, db: Db): void {
     requirePermission(ctx, 'settings', 'edit');
     updateWarehouse(ctx, req.params.id, req.body);
     return { ok: true };
+  });
+
+  /** Permanent delete — only for never-used warehouses; admins only. */
+  app.delete<{ Params: { id: string } }>('/api/warehouses/:id', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'settings', 'delete');
+    deleteWarehouse(ctx, req.params.id);
+    return { ok: true };
+  });
+
+  /** Whether a warehouse has ever been referenced (drives Delete vs Archive UI). */
+  app.get<{ Params: { id: string } }>('/api/warehouses/:id/usage', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'settings', 'view');
+    return { used: warehouseEverUsed(ctx, req.params.id) };
   });
 
   // ------------------------------- parties ---------------------------------

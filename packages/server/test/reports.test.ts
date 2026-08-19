@@ -137,6 +137,7 @@ beforeEach(() => {
       date: TODAY,
       amount: 100_000,
       method: 'bank',
+      referenceNumber: 'BNK-RPT-1',
       allocations: [{ invoiceId: inv, amount: 100_000 }],
     },
     { post: true },
@@ -152,13 +153,17 @@ describe('reports reconcile with source transactions', () => {
     expect(r.remainingQty).toBe(getOnHand(tt.ownerCtx, tt.items.raw));
   });
 
-  it('production report: loss/efficiency describe measured stages only', () => {
+  it('production report: no double-counted throughput; loss/efficiency measured-only', () => {
     const r = productionReport(tt.ownerCtx, {});
-    // washing 10,000->9,200 (measured) + iodization 9,200->9,200 (conserved)
-    expect(r.inputQty).toBe((10000 + 9200) * KG);
-    expect(r.outputQty).toBe((9200 + 9200) * KG);
+    // top KPIs never add consecutive stages together: raw input is the FIRST
+    // stage's input only, final output the LAST stage's output only
+    expect(r.rawInputQty).toBe(10000 * KG);
+    expect(r.finalOutputQty).toBe(9200 * KG);
     // NO invented iodization loss: only washing's measured 800 kg
     expect(r.lossQty).toBe(800 * KG);
+    // stage-level table still shows individual throughput
+    expect(r.perStage.find((sr) => sr.stageCode === 'washing')!.inputQty).toBe(10000 * KG);
+    expect(r.perStage.find((sr) => sr.stageCode === 'iodization')!.inputQty).toBe(9200 * KG);
     const washRow = r.breakdown.find((b) => b.stage === 'washing')!;
     expect(washRow.efficiencyPct).toBeCloseTo(92.0, 1);
     const iodRow = r.breakdown.find((b) => b.stage === 'iodization')!;
@@ -168,10 +173,11 @@ describe('reports reconcile with source transactions', () => {
     expect(iodStage.lossQty).toBeNull();
   });
 
-  it('quality report: iodine total and pass counts', () => {
+  it('quality report: iodine total and released counts', () => {
     const r = qualityReport(tt.ownerCtx, {});
     expect(r.batchCount).toBe(1);
-    expect(r.passedCount).toBe(1);
+    expect(r.releasedCount).toBe(1);
+    expect(r.currentlyFailedCount).toBe(0);
     expect(r.attributeTotals.iodine_added_kg).toBeCloseTo(0.42);
   });
 

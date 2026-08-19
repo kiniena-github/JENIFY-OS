@@ -7,14 +7,16 @@ import { defaultDbPath } from '../db/index.js';
 import { requireCtx } from '../app.js';
 import { requirePermission, listRoles, saveRoleMatrix, createRole } from '../services/permissions.js';
 import { listUsers, createUser, updateUser, resetPassword } from '../services/users.js';
+import { generateRecoveryCodes, countActiveRecoveryCodes } from '../services/recovery.js';
 import {
   listTranslationRows,
   upsertTranslation,
   listLanguages,
   enableLanguage,
   updateLanguage,
+  deleteLanguage,
 } from '../services/translations.js';
-import { getSettings, saveSettings } from '../services/settings.js';
+import { getSettings, saveSettings, getSettingsVersion } from '../services/settings.js';
 import { listAudit } from '../services/audit.js';
 import { writeAudit } from '../services/audit.js';
 import { updateTenantBranding, getTenant } from '../services/provisioning.js';
@@ -72,6 +74,22 @@ export function registerAdminRoutes(app: FastifyInstance, db: Db): void {
       return { ok: true };
     },
   );
+
+  /**
+   * Issue a fresh batch of emergency recovery codes. Plaintext is returned
+   * exactly once and never stored; previous unused codes are revoked.
+   */
+  app.post<{ Params: { id: string } }>('/api/users/:id/recovery-codes', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'users', 'manage_users');
+    return { codes: generateRecoveryCodes(ctx, req.params.id) };
+  });
+
+  app.get<{ Params: { id: string } }>('/api/users/:id/recovery-codes', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'users', 'manage_users');
+    return { active: countActiveRecoveryCodes(ctx, req.params.id) };
+  });
 
   // ------------------------------- roles -----------------------------------
   app.get('/api/roles', async (req) => {
@@ -159,6 +177,14 @@ export function registerAdminRoutes(app: FastifyInstance, db: Db): void {
     return { ok: true };
   });
 
+  /** Permanent delete — only for never-used languages; English is protected. */
+  app.delete<{ Params: { id: string } }>('/api/languages/:id', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'settings', 'delete');
+    deleteLanguage(ctx, req.params.id);
+    return { ok: true };
+  });
+
   // -------------------------- branding assets ------------------------------
   /**
    * Accepts a small base64 image (logo/secondary logo/stamp/signature) and
@@ -195,6 +221,19 @@ export function registerAdminRoutes(app: FastifyInstance, db: Db): void {
     const ctx = requireCtx(db, req);
     requirePermission(ctx, 'settings', 'view');
     return getSettings(ctx, req.params.domain) ?? { version: 0, data: {} };
+  });
+
+  /**
+   * Branding as it was at a specific version — used by document reprints so
+   * an old invoice keeps the presentation that applied when it was issued.
+   * Presentation-only data; any signed-in user who can open a document may
+   * reproduce its look.
+   */
+  app.get<{ Params: { version: string } }>('/api/branding-version/:version', async (req) => {
+    const ctx = requireCtx(db, req);
+    const v = Number(req.params.version);
+    if (!Number.isInteger(v) || v < 1) return { version: 0, data: null };
+    return getSettingsVersion(ctx, 'branding', v) ?? { version: 0, data: null };
   });
 
   app.put<{ Params: { domain: string }; Body: { data: unknown } }>(

@@ -197,6 +197,7 @@ function UserModal({
           </Field>
         ) : null}
       </div>
+      {user ? <RecoveryCodesPanel userId={user.id} /> : null}
       <div className="form-actions">
         <button className="btn btn-secondary" onClick={onClose}>
           {t('shell.cancel', 'Cancel')}
@@ -210,6 +211,70 @@ function UserModal({
         </button>
       </div>
     </Modal>
+  );
+}
+
+/**
+ * Emergency recovery codes: generated in a batch, shown exactly ONCE, stored
+ * only as hashes. Using one on the login screen consumes it, changes the
+ * password immediately, and leaves a permanent security audit trail.
+ */
+function RecoveryCodesPanel({ userId }: { userId: string }) {
+  const { t } = useAuth();
+  const qc = useQueryClient();
+  const count = useQuery({
+    queryKey: ['recovery-codes', userId],
+    queryFn: () => api.get<{ active: number }>(`/api/users/${userId}/recovery-codes`),
+  });
+  const [codes, setCodes] = useState<string[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function generate() {
+    setBusy(true);
+    try {
+      const res = await api.post<{ codes: string[] }>(`/api/users/${userId}/recovery-codes`);
+      setCodes(res.codes);
+      await qc.invalidateQueries({ queryKey: ['recovery-codes', userId] });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt" style={{ borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+      <div className="flex">
+        <strong style={{ fontSize: 13 }}>{t('users.recovery_codes', 'Emergency recovery codes')}</strong>
+        <span className="muted" style={{ fontSize: 12 }}>
+          {count.data ? `${count.data.active} ${t('users.codes_active', 'unused codes active')}` : ''}
+        </span>
+        <div className="spacer" />
+        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void generate()}>
+          {t('users.generate_codes', 'Generate new codes')}
+        </button>
+      </div>
+      <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+        {t('users.codes_hint', 'Shown ONCE — store them offline. Generating new codes revokes all unused ones.')}
+      </div>
+      {codes ? (
+        <div
+          className="mono"
+          style={{
+            marginTop: 8,
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
+            gap: 6,
+            padding: 10,
+            background: 'var(--bg)',
+            borderRadius: 6,
+            fontSize: 13,
+          }}
+        >
+          {codes.map((c) => (
+            <span key={c}>{c}</span>
+          ))}
+        </div>
+      ) : null}
+    </div>
   );
 }
 

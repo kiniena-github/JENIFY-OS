@@ -4,6 +4,7 @@ import { newId, nowIso, badRequest, notFound } from '../util.js';
 import type { Ctx } from './context.js';
 import { actorId, inTx } from './context.js';
 import { writeAudit } from './audit.js';
+import { getSettings } from './settings.js';
 import { nextDocNumber } from './numbering.js';
 import { getItem, getUom, getWarehouse, toBaseQty, baseUomCode } from './masterdata.js';
 import { getAvailable, getLot, postMovement } from './inventory.js';
@@ -108,7 +109,12 @@ export function postTransfer(ctx: Ctx, id: string): void {
     });
     tx.db
       .update(stockTransfers)
-      .set({ lifecycle: 'posted', approvedBy: actorId(tx), postedAt: nowIso() })
+      .set({
+        lifecycle: 'posted',
+        approvedBy: actorId(tx),
+        postedAt: nowIso(),
+        brandingVersion: getSettings(tx, 'branding')?.version ?? null,
+      })
       .where(eq(stockTransfers.id, id))
       .run();
     writeAudit(tx, {

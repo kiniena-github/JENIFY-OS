@@ -29,6 +29,10 @@ export default function SettingsPage() {
             {t(key, fallback)}
           </button>
         ))}
+        <div className="spacer" />
+        <a className="btn btn-ghost btn-sm" href="/setup">
+          {t('setup.title', 'Factory setup')} →
+        </a>
       </div>
       {tab === 'general' ? (
         <>
@@ -373,12 +377,50 @@ function WarehousesTab() {
                     {w.active ? t('status.inactive', 'Archive') : t('status.active', 'Reactivate')}
                   </button>
                 ) : null}
+                {canEdit ? <DeleteWarehouseButton id={w.id} onError={setError} /> : null}
               </div>
             </div>
           );
         })}
       </div>
     </div>
+  );
+}
+
+/**
+ * Permanent delete is offered ONLY for warehouses that no transaction has
+ * ever referenced. Anything with history — even at zero current stock —
+ * shows why it can only be archived.
+ */
+function DeleteWarehouseButton({ id, onError }: { id: string; onError: (e: unknown) => void }) {
+  const { t } = useAuth();
+  const qc = useQueryClient();
+  const usage = useQuery({
+    queryKey: ['warehouse-usage', id],
+    queryFn: () => api.get<{ used: boolean }>(`/api/warehouses/${id}/usage`),
+  });
+  if (!usage.data) return null;
+  if (usage.data.used) {
+    return (
+      <span className="muted" style={{ fontSize: 12 }}>
+        {t('settings.wh_used_hint', 'Has transaction history — archive only')}
+      </span>
+    );
+  }
+  async function del() {
+    if (!window.confirm(t('settings.wh_delete_confirm', 'Permanently delete this unused warehouse?'))) return;
+    onError(null);
+    try {
+      await api.del(`/api/warehouses/${id}`);
+      await qc.invalidateQueries({ queryKey: ['warehouses'] });
+    } catch (err) {
+      onError(err);
+    }
+  }
+  return (
+    <button className="btn btn-danger btn-sm" onClick={() => void del()}>
+      {t('settings.wh_delete', 'Delete permanently')}
+    </button>
   );
 }
 
@@ -673,6 +715,20 @@ function LanguageManager() {
     }
   }
 
+  // permanent delete — the server allows it only for a never-used language
+  // (no users, no translations); English is always protected
+  async function delLanguage(id: string) {
+    if (!window.confirm(t('settings.lang_delete_confirm', 'Permanently delete this unused language?'))) return;
+    setError(null);
+    try {
+      await api.del(`/api/languages/${id}`);
+      await qc.invalidateQueries({ queryKey: ['languages'] });
+      await refresh();
+    } catch (err) {
+      setError(err);
+    }
+  }
+
   return (
     <div className="panel">
       <div className="panel-head">
@@ -718,6 +774,11 @@ function LanguageManager() {
               {canEdit && l.code !== 'en' ? (
                 <button className="btn btn-secondary btn-sm" onClick={() => void setEnabled(l.id, !l.enabled)}>
                   {l.enabled ? t('status.inactive', 'Archive') : t('status.active', 'Reactivate')}
+                </button>
+              ) : null}
+              {canEdit && l.code !== 'en' ? (
+                <button className="btn btn-danger btn-sm" onClick={() => void delLanguage(l.id)}>
+                  {t('settings.wh_delete', 'Delete permanently')}
                 </button>
               ) : null}
             </div>

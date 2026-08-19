@@ -4,6 +4,7 @@ import { newId, nowIso, badRequest, notFound } from '../util.js';
 import type { Ctx } from './context.js';
 import { actorId, inTx } from './context.js';
 import { writeAudit } from './audit.js';
+import { getSettings } from './settings.js';
 import { nextDocNumber } from './numbering.js';
 import { getItem, getUom, getWarehouse, toBaseQty, baseUomCode } from './masterdata.js';
 import { getParty } from './parties.js';
@@ -145,7 +146,13 @@ export function postReceipt(ctx: Ctx, id: string): void {
     });
     tx.db
       .update(goodsReceipts)
-      .set({ lifecycle: 'posted', lotId, approvedBy: actorId(tx), postedAt: nowIso() })
+      .set({
+        lifecycle: 'posted',
+        lotId,
+        approvedBy: actorId(tx),
+        postedAt: nowIso(),
+        brandingVersion: getSettings(tx, 'branding')?.version ?? null,
+      })
       .where(eq(goodsReceipts.id, id))
       .run();
     writeAudit(tx, {

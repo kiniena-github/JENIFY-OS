@@ -338,3 +338,52 @@ export function toEthiopianDate(gc: Date): { year: number; month: number; day: n
     monthName: ETHIOPIAN_MONTHS[month - 1] ?? `M${month}`,
   };
 }
+
+// ============================ Delivery performance ==========================
+
+export interface DeliveryPerformance {
+  /** on_schedule | due_today | overdue (open) · early | on_time | late (delivered) */
+  code: 'on_schedule' | 'due_today' | 'overdue' | 'early' | 'on_time' | 'late';
+  /** whole days for overdue/early/late; 0 otherwise */
+  days: number;
+}
+
+function dayDiff(aIso: string, bIso: string): number {
+  const a = Date.UTC(
+    Number(aIso.slice(0, 4)),
+    Number(aIso.slice(5, 7)) - 1,
+    Number(aIso.slice(8, 10)),
+  );
+  const b = Date.UTC(
+    Number(bIso.slice(0, 4)),
+    Number(bIso.slice(5, 7)) - 1,
+    Number(bIso.slice(8, 10)),
+  );
+  return Math.round((a - b) / 86_400_000);
+}
+
+/**
+ * Schedule performance of a delivery against its expected date.
+ * Open deliveries compare expected vs today; delivered ones compare
+ * actual vs expected. Returns null when no expected date exists or the
+ * delivery was cancelled.
+ */
+export function deliveryPerformance(input: {
+  expectedDate?: string | null;
+  actualDate?: string | null;
+  status: string;
+  today?: string;
+}): DeliveryPerformance | null {
+  if (!input.expectedDate || input.status === 'cancelled') return null;
+  if (input.status === 'delivered' && input.actualDate) {
+    const d = dayDiff(input.actualDate, input.expectedDate);
+    if (d < 0) return { code: 'early', days: -d };
+    if (d > 0) return { code: 'late', days: d };
+    return { code: 'on_time', days: 0 };
+  }
+  const today = input.today ?? new Date().toISOString().slice(0, 10);
+  const d = dayDiff(today, input.expectedDate);
+  if (d > 0) return { code: 'overdue', days: d };
+  if (d === 0) return { code: 'due_today', days: 0 };
+  return { code: 'on_schedule', days: 0 };
+}

@@ -142,6 +142,7 @@ export interface Batch {
   qcStatus: string;
   qcApprovedAt: string | null;
   operatorName: string | null;
+  supervisorName: string | null;
   attributes: Record<string, unknown> | null;
   notes: string | null;
   createdAt: string;
@@ -231,6 +232,7 @@ export interface Payment {
   referenceNumber: string | null;
   notes: string | null;
   status: string;
+  reversalReason: string | null;
   allocatedCents: number;
   createdAt: string;
 }

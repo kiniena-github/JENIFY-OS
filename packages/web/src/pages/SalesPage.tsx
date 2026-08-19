@@ -425,7 +425,8 @@ export default function SalesPage() {
                   {canFinancial ? <td className="num">{fmt.money(inv.totalCents, currency)}</td> : null}
                   {canFinancial ? <td className="num">{fmt.money(inv.paidCents, currency)}</td> : null}
                   <td>
-                    <StatusBadge status={inv.paymentTerm === 'paid' ? 'paid' : inv.paymentTerm === 'partial' ? 'partial' : 'active'} />
+                    {/* the actual payment TERM — never an account status */}
+                    <StatusBadge status={inv.paymentTerm} />
                   </td>
                   <td>
                     <StatusBadge status={inv.status} />

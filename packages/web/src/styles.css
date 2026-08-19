@@ -370,3 +370,29 @@ table.data tr.clickable:hover td { background: #f6f9fd; }
 @media print {
   .print-doc { padding: 0; max-width: none; }
 }
+
+/* ---- printable document extras (master fix #2) ---- */
+.print-doc .doc-note {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--primary, #0f2b4c);
+  background: rgba(15, 43, 76, 0.06);
+  border-radius: 0 6px 6px 0;
+  font-size: 12.5px;
+  font-style: italic;
+  max-width: 420px;
+}
+.print-doc .doc-stamp {
+  position: absolute;
+  top: -6px;
+  right: 0;
+  padding: 6px 18px;
+  border: 3px solid #1a7f37;
+  color: #1a7f37;
+  font-weight: 800;
+  font-size: 20px;
+  letter-spacing: 3px;
+  border-radius: 8px;
+  transform: rotate(-8deg);
+  opacity: 0.85;
+}

@@ -351,7 +351,9 @@ describe('end-to-end factory workflow over HTTP', () => {
     expect(noFin.statusCode).toBe(403);
 
     const production = await ok('operations', 'GET', '/api/reports/production');
-    expect(production.inputQty).toBe((5000 + 4600) * 1000);
+    // top KPI is the FIRST stage's unique input — never stages summed together
+    expect(production.rawInputQty).toBe(5000 * 1000);
+    expect(production.finalOutputQty).toBe(4600 * 1000);
 
     const dash = await ok('finance', 'GET', '/api/dashboard');
     expect(dash.finance.outstandingCents).toBe(93_200_00);

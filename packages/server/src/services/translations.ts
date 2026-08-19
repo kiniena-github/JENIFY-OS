@@ -1,6 +1,6 @@
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
-import { translationKeys, translations, tenantLanguages } from '../db/schema.js';
+import { translationKeys, translations, tenantLanguages, users } from '../db/schema.js';
 import { newId, nowIso, notFound, badRequest } from '../util.js';
 import type { Ctx } from './context.js';
 import { actorId } from './context.js';
@@ -127,6 +127,60 @@ export function updateLanguage(
     summary: `Language '${row.name}' updated`,
     before,
     after: patch,
+  });
+}
+
+/**
+ * True when the language has ever been meaningfully used: a user has it as
+ * their display language, or custom translations were written for it.
+ */
+export function languageEverUsed(ctx: Ctx, code: string): boolean {
+  const userWith = ctx.db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.tenantId, ctx.tenantId), eq(users.language, code)))
+    .limit(1)
+    .get();
+  if (userWith) return true;
+  const translated = ctx.db
+    .select({ id: translations.id })
+    .from(translations)
+    .where(and(eq(translations.tenantId, ctx.tenantId), eq(translations.language, code)))
+    .limit(1)
+    .get();
+  return translated != null;
+}
+
+/**
+ * Permanent delete — only for an added language that was never used.
+ * English (the base/fallback) can never be deleted; anything with translation
+ * history or user usage must be archived (deactivated) instead.
+ */
+export function deleteLanguage(ctx: Ctx, languageId: string): void {
+  const row = ctx.db
+    .select()
+    .from(tenantLanguages)
+    .where(and(eq(tenantLanguages.tenantId, ctx.tenantId), eq(tenantLanguages.id, languageId)))
+    .get();
+  if (!row) notFound('language_missing', 'Language not found');
+  if (row.code === 'en') {
+    badRequest('base_language', 'English is the base/fallback language and cannot be deleted');
+  }
+  if (languageEverUsed(ctx, row.code)) {
+    badRequest(
+      'language_used',
+      `'${row.name}' has translations or users and cannot be permanently deleted — archive it instead`,
+    );
+  }
+  ctx.db.delete(tenantLanguages).where(eq(tenantLanguages.id, languageId)).run();
+  writeAudit(ctx, {
+    module: 'settings',
+    action: 'language_delete',
+    entity: 'tenant_language',
+    entityId: languageId,
+    reference: row.code,
+    summary: `Unused language '${row.name}' permanently deleted`,
+    before: { code: row.code, name: row.name },
   });
 }
 

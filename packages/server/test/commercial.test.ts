@@ -257,7 +257,7 @@ describe('deliveries', () => {
     expect(getReserved(tt.ownerCtx, tt.items.pack1kg, tt.warehouses.b)).toBe(0);
     expect(getInvoice(tt.ownerCtx, invId).status).toBe('dispatched');
 
-    markDelivered(tt.ownerCtx, delId, { actualDate: '2026-08-18', receivedBy: 'Shop Manager' });
+    markDelivered(tt.ownerCtx, delId, { actualDate: nowIso().slice(0, 10), receivedBy: 'Shop Manager' });
     expect(getDelivery(tt.ownerCtx, delId).status).toBe('delivered');
     expect(getInvoice(tt.ownerCtx, invId).status).toBe('completed');
   });
@@ -366,6 +366,7 @@ describe('payments and credit', () => {
         date: '2026-08-17',
         amount: 100_000,
         method: 'bank',
+        referenceNumber: 'BNK-ALLOC-1',
         allocations: [
           { invoiceId: a, amount: 80_000 },
           { invoiceId: b, amount: 9_200 },
@@ -439,6 +440,7 @@ describe('payments and credit', () => {
         date: '2026-08-17',
         amount: 50_000,
         method: 'bank',
+        referenceNumber: 'BNK-REV-1',
         allocations: [{ invoiceId: a, amount: 50_000 }],
       },
       { post: true },

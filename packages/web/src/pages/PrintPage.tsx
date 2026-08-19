@@ -43,7 +43,15 @@ export default function PrintPage() {
     queryKey: ['ui-config'],
     queryFn: () => api.get<{ branding: Branding | null }>('/api/ui-config'),
   });
-  const branding = uiConfig.data?.branding ?? {};
+  // §branding snapshot: reprints use the branding VERSION stamped on the
+  // document at issuance, so later template changes never alter old documents
+  const docVersion = useDocBrandingVersion(kind, id);
+  const versioned = useQuery({
+    queryKey: ['branding-version', docVersion],
+    queryFn: () => api.get<{ version: number; data: Branding | null }>(`/api/branding-version/${docVersion}`),
+    enabled: docVersion != null && docVersion > 0,
+  });
+  const branding = (docVersion != null && docVersion > 0 ? versioned.data?.data : null) ?? uiConfig.data?.branding ?? {};
 
   return (
     <div style={{ background: 'var(--bg)', minHeight: '100vh', padding: 16 }}>
@@ -70,6 +78,27 @@ export default function PrintPage() {
   );
 }
 
+/** brandingVersion stamped on the printed record (null when none exists). */
+function useDocBrandingVersion(kind?: string, id?: string): number | null | undefined {
+  const invoice = useQuery({
+    queryKey: ['invoice', id],
+    queryFn: () => api.get<{ invoice: { brandingVersion: number | null } }>(`/api/invoices/${id}`),
+    enabled: kind === 'invoice' && !!id,
+  });
+  const payments = usePayments();
+  const deliveries = useDeliveries();
+  const receipts = useReceipts();
+  const transfers = useTransfers();
+  if (kind === 'invoice') return invoice.data ? (invoice.data.invoice.brandingVersion ?? null) : undefined;
+  const pick = (rows?: Array<{ id: string; brandingVersion?: number | null }>) =>
+    rows ? (rows.find((r) => r.id === id)?.brandingVersion ?? null) : undefined;
+  if (kind === 'payment') return pick(payments.data as never);
+  if (kind === 'delivery') return pick(deliveries.data as never);
+  if (kind === 'receiving') return pick(receipts.data as never);
+  if (kind === 'transfer') return pick(transfers.data as never);
+  return null;
+}
+
 function DocHead({ branding, logo }: { branding: Branding; logo?: string | null }) {
   const { tenant } = useAuth();
   return (
@@ -81,7 +110,7 @@ function DocHead({ branding, logo }: { branding: Branding; logo?: string | null 
         {branding.phone ? <div>{branding.phone}</div> : null}
         {branding.email ? <div>{branding.email}</div> : null}
         {branding.tin ? <div>TIN: {branding.tin}</div> : null}
-        {branding.headerNote ? <div style={{ marginTop: 4, fontStyle: 'italic' }}>{branding.headerNote}</div> : null}
+        {branding.headerNote ? <div className="doc-note">{branding.headerNote}</div> : null}
       </div>
       {branding.assets?.logo2 ? <img src={branding.assets.logo2} alt="" /> : null}
     </div>
@@ -168,14 +197,23 @@ function InvoiceDoc({ id }: { id: string }) {
   if (!detail.data) return <div className="centered-page">Loading…</div>;
   const { invoice, lines } = detail.data;
   const customer = customers.data?.find((c) => c.id === invoice.customerId);
+  const remainingCents =
+    invoice.totalCents != null && invoice.paidCents != null ? invoice.totalCents - invoice.paidCents : null;
+  const fullyPaid = remainingCents === 0 && (invoice.totalCents ?? 0) > 0;
   return (
     <>
-      <DocTitle title={t('doc.invoice', 'Sales Invoice')} number={invoice.docNumber} />
+      <div style={{ position: 'relative' }}>
+        {fullyPaid ? <div className="doc-stamp">{t('doc.paid_stamp', 'PAID')}</div> : null}
+        <DocTitle title={t('doc.invoice', 'Sales Invoice')} number={invoice.docNumber} />
+      </div>
       <Meta
         rows={[
           [t('sales.customer', 'Customer'), customer?.name],
+          [t('customers.location', 'Address / location'), customer?.location ?? '—'],
+          [t('customers.phone', 'Phone'), customer?.phone ?? '—'],
+          [t('doc.tin', 'TIN'), customer?.taxInfo ?? '—'],
           [t('shell.date', 'Date'), fmt.date(invoice.date)],
-          [t('sales.payment_type', 'Payment'), invoice.paymentTerm],
+          [t('sales.payment_type', 'Payment type'), t(`status.${invoice.paymentTerm}`, invoice.paymentTerm)],
           [t('credit.due_date', 'Due date'), invoice.dueDate ? fmt.date(invoice.dueDate) : '—'],
           [t('sales.price_category', 'Price category'), invoice.priceCategory],
           [t('shell.status', 'Status'), invoice.status],
@@ -224,8 +262,12 @@ function InvoiceDoc({ id }: { id: string }) {
             <td className="num">{fmt.money(invoice.totalCents, currency)}</td>
           </tr>
           <tr>
-            <td>{t('sales.paid', 'Paid')}</td>
+            <td>{t('doc.paid', 'Paid')}</td>
             <td className="num">{fmt.money(invoice.paidCents, currency)}</td>
+          </tr>
+          <tr className={fullyPaid ? undefined : 'grand'}>
+            <td>{t('doc.remaining', 'Remaining / Balance')}</td>
+            <td className="num">{fmt.money(remainingCents, currency)}</td>
           </tr>
         </tbody>
       </table>

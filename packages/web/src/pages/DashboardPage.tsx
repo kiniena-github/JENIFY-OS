@@ -11,6 +11,8 @@ interface DashboardData {
   production: Array<{
     stageCode: string;
     nameKey: string;
+    outputPolicy: string;
+    outputForm: string;
     todayInput: number;
     todayOutput: number;
     todayLoss: number | null;
@@ -71,20 +73,45 @@ export default function DashboardPage() {
       </div>
 
       <div className="cards">
-        {data.production.map((s) => (
-          <StatCard
-            key={s.stageCode}
-            label={`${t('dashboard.today', 'Today')} — ${t(s.nameKey, s.stageCode)}`}
-            value={fmt.qtySmart(s.todayOutput)}
-            sub={
-              s.todayLoss != null && s.todayLoss > 0
-                ? `${t('production.loss', 'Loss')} ${fmt.qtySmart(s.todayLoss)}`
-                : s.openBatches > 0
-                  ? `${s.openBatches} ${t('production.open', 'Open batches').toLowerCase()}`
-                  : undefined
-            }
-          />
-        ))}
+        {data.production.flatMap((s) => {
+          // converted (packaging) stages get EXPLICIT input vs good-output
+          // cards — one ambiguous "Packaging" number hides the reject loss
+          if (s.outputForm === 'packaged_items') {
+            return [
+              <StatCard
+                key={`${s.stageCode}-in`}
+                label={`${t('dashboard.packaging_input', 'Packaging input today')} — ${t(s.nameKey, s.stageCode)}`}
+                value={fmt.qtyExact(s.todayInput)}
+              />,
+              <StatCard
+                key={`${s.stageCode}-out`}
+                label={`${t('dashboard.good_output', 'Good packed output today')} — ${t(s.nameKey, s.stageCode)}`}
+                value={fmt.qtyExact(s.todayOutput)}
+                sub={
+                  s.openBatches > 0
+                    ? `${s.openBatches} ${t('production.open', 'Open batches').toLowerCase()}`
+                    : undefined
+                }
+              />,
+            ];
+          }
+          return [
+            <StatCard
+              key={s.stageCode}
+              label={`${t('dashboard.today', 'Today')} — ${t(s.nameKey, s.stageCode)}`}
+              value={fmt.qtyExact(s.todayOutput)}
+              sub={
+                s.todayLoss != null && s.todayLoss > 0
+                  ? `${t('production.loss', 'Loss')} ${fmt.qtySmart(s.todayLoss)}`
+                  : s.outputPolicy === 'conserved'
+                    ? t('production.conserved', 'Conserved')
+                    : s.openBatches > 0
+                      ? `${s.openBatches} ${t('production.open', 'Open batches').toLowerCase()}`
+                      : undefined
+              }
+            />,
+          ];
+        })}
         {data.finished.map((f) => (
           <StatCard
             key={f.itemName}
