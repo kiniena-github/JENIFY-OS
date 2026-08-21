@@ -7,6 +7,27 @@ import { getRoleMatrix } from './permissions.js';
 import { writeAudit } from './audit.js';
 import type { Ctx } from './context.js';
 
+/**
+ * Resolve which candidate account a login/recovery attempt refers to.
+ * Disambiguation is by tenant CODE ('mesob') resolved to the tenant id —
+ * comparing the code against the UUID directly (the old D4 bug) never
+ * matched. FAIL-CLOSED rules: an explicitly supplied tenantCode that does
+ * not resolve to a tenant rejects the attempt even for a unique username;
+ * a shared username with no (or an unresolved) code matches nothing.
+ */
+export function resolveUserByTenantCode<T extends { tenantId: string }>(
+  db: Db,
+  candidates: T[],
+  tenantCode: string | undefined,
+): T | undefined {
+  if (tenantCode !== undefined) {
+    const tenant = db.select({ id: tenants.id }).from(tenants).where(eq(tenants.code, tenantCode)).get();
+    if (!tenant) return undefined; // explicit scope that resolves nowhere: reject
+    return candidates.find((u) => u.tenantId === tenant.id);
+  }
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
 const SESSION_HOURS = 12;
 const SESSION_HOURS_REMEMBER = 24 * 30;
 
@@ -31,18 +52,7 @@ export function login(
     .from(users)
     .where(eq(users.username, input.username.trim().toLowerCase()))
     .all();
-  // Disambiguation is by tenant CODE ('mesob'), which must be resolved to the
-  // tenant's id before matching — comparing the code against the UUID directly
-  // (the old bug, D4) could never match and locked out shared usernames.
-  const tenantScope = input.tenantCode
-    ? db.select({ id: tenants.id }).from(tenants).where(eq(tenants.code, input.tenantCode)).get()?.id
-    : undefined;
-  const user =
-    candidates.length === 1
-      ? tenantScope && candidates[0].tenantId !== tenantScope
-        ? undefined
-        : candidates[0]
-      : candidates.find((u) => u.tenantId === tenantScope);
+  const user = resolveUserByTenantCode(db, candidates, input.tenantCode);
 
   const fail = (reason: string): AppError => {
     if (user) {

@@ -76,15 +76,27 @@ function maybeAutoBackup(sqlite: Database.Database, dbPath: string): void {
 /** Open (and migrate) a FactoryOS database. Pass ':memory:' for tests. */
 export function createDb(dbPath: string = defaultDbPath()): Db {
   if (dbPath !== ':memory:') {
+    // Guard against silently starting an EMPTY database at the legacy path
+    // after a relocation: the renamed rollback artifact marks that the real
+    // data lives elsewhere (or must be restored) — refuse to fresh-create.
+    if (!fs.existsSync(dbPath) && fs.existsSync(`${dbPath}.pre-relocation`)) {
+      throw new Error(
+        `Refusing to create a NEW empty database at ${dbPath}: a .pre-relocation artifact exists. ` +
+          `The operational DB was relocated (check %LOCALAPPDATA%/JenifyOS) or must be restored.`,
+      );
+    }
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   }
+  const preExisting = dbPath !== ':memory:' && fs.existsSync(dbPath);
   const sqlite = new Database(dbPath);
   sqlite.pragma('journal_mode = WAL');
   sqlite.pragma('synchronous = NORMAL');
   sqlite.pragma('busy_timeout = 5000');
+  // daily snapshot runs BEFORE migrations so a bad migration always has a
+  // same-day pre-migration backup to restore from
+  if (preExisting) maybeAutoBackup(sqlite, dbPath);
   const db = drizzle(sqlite, { schema }) as Db;
   migrate(db, { migrationsFolder: MIGRATIONS_DIR });
-  if (dbPath !== ':memory:') maybeAutoBackup(sqlite, dbPath);
   return db;
 }
 

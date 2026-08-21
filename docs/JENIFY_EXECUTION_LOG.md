@@ -2,6 +2,19 @@
 
 Append-only. Newest entries last. Each entry: date, milestone, commit(s), tests, state.
 
+## 2026-08-21 — Wave 0: research program + foundation hardening + Henok demo
+Master Execution Mission started. Track A: all 8 research workstreams delivered to
+docs/research/ (Africa requirements, sector priority, 10-country pack intelligence,
+global competitor report + 72-row feature-intelligence dataset, role experience/simplicity,
+migration intelligence, AI master architecture, offline/hardware deployment). Track B
+(commit e5197c5 + gate follow-up): D4/D11/D12 fixed, auth rate limiting, DB relocated to
+%LOCALAPPDATA%/JenifyOS (hash-verified, rollback kept), codified auto/manual/restore
+backups, permanent cross-tenant negative-path suite. 175/175 tests green. FOUNDATION GATE
+PASSED (QA: PASS, Architect: APPROVE; their conditions landed same-day). Parallel task:
+isolated Mesob demo (separate VACUUM-INTO snapshot DB, rotated passwords, Henok /
+Operations Manager) verified end-to-end through a Cloudflare HTTPS quick tunnel — founder
+stack untouched. Wave 1 awaits Founder direction.
+
 ## 2026-08-17 — Phases 1–6: full local build (FactoryOS + Mesob tenant)
 Commits through `ac1fefe`. Monorepo (shared/server/web/config-mesob), core platform,
 Mesob configuration, commercial flow, reports, E2E validation. 88 tests green.

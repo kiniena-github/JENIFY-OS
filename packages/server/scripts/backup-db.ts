@@ -22,7 +22,12 @@ if (check !== 'ok') {
   console.error(`integrity quick_check reported '${check}' — backup aborted, investigate.`);
   process.exit(1);
 }
-db.pragma('wal_checkpoint(TRUNCATE)');
+const cp = db.pragma('wal_checkpoint(TRUNCATE)') as Array<{ busy: number }>;
+if (cp[0]?.busy) {
+  db.close();
+  console.error('Another process is using this database (checkpoint busy). STOP the server first for a guaranteed-complete backup.');
+  process.exit(1);
+}
 db.close();
 
 const backupsDir = path.join(path.dirname(dbPath), 'backups');

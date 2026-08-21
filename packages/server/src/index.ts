@@ -3,7 +3,10 @@ import { createDb } from './db/index.js';
 import { registerTranslationKeys } from './services/translations.js';
 import { PLATFORM_KEYS } from './i18n-keys.js';
 
+import { defaultDbPath } from './db/index.js';
+
 const port = Number(process.env.FACTORYOS_PORT ?? 3001);
+console.log(`FactoryOS database: ${defaultDbPath()}`);
 const db = createDb();
 registerTranslationKeys(db, PLATFORM_KEYS.map((k) => ({ key: k.key, en: k.en, module: k.module })));
 const app = buildApp({ db });

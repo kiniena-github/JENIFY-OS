@@ -9,7 +9,7 @@
  *  3. Branding assets move with the DB (they are served from the DB's folder).
  *  4. Nothing is deleted.
  *
- * Run from packages/server:  npx tsx scripts/relocate-db.ts
+ * STOP THE SERVER FIRST. Run from packages/server:  npx tsx scripts/relocate-db.ts
  */
 import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
@@ -46,7 +46,15 @@ if (check !== 'ok') {
   console.error(`integrity quick_check reported '${check}' — NOT relocating a suspect database.`);
   process.exit(1);
 }
-db.pragma('wal_checkpoint(TRUNCATE)');
+// H1 guard: TRUNCATE checkpoint reports busy>0 when another connection
+// (a still-running server) holds the database — refuse, or writes committed
+// between our copy and the rename would silently vanish.
+const cp = db.pragma('wal_checkpoint(TRUNCATE)') as Array<{ busy: number }>;
+if (cp[0]?.busy) {
+  db.close();
+  console.error('Another process is using this database (checkpoint busy). STOP the server first.');
+  process.exit(1);
+}
 db.close();
 
 // 2. copy + verify

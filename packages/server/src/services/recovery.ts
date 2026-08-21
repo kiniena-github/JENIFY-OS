@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
 import { and, eq, isNull } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
-import { recoveryCodes, sessions, tenants, users } from '../db/schema.js';
+import { recoveryCodes, sessions, users } from '../db/schema.js';
+import { resolveUserByTenantCode } from './auth.js';
 import { newId, nowIso, hashPassword, badRequest, AppError } from '../util.js';
 import type { Ctx } from './context.js';
 import { actorId } from './context.js';
@@ -102,15 +103,7 @@ export function recoverWithCode(
     .from(users)
     .where(eq(users.username, input.username.trim().toLowerCase()))
     .all();
-  const tenantScope = input.tenantCode
-    ? db.select({ id: tenants.id }).from(tenants).where(eq(tenants.code, input.tenantCode)).get()?.id
-    : undefined;
-  const user =
-    candidates.length === 1
-      ? tenantScope && candidates[0].tenantId !== tenantScope
-        ? undefined
-        : candidates[0]
-      : candidates.find((u) => u.tenantId === tenantScope);
+  const user = resolveUserByTenantCode(db, candidates, input.tenantCode);
   const fail = (): never => {
     if (user) {
       writeAudit(
