@@ -24,7 +24,19 @@ country-pack knowledge, not a fork.
 |---|---|---|---|
 | 0 | Mesob pilot build + 3 hardening passes | ✅ Done | Commits 2c053e2 → 70efbd6 |
 | 1 | Team setup (this) | ✅ Done | Agents, charter, docs, settings |
-| 2 | *Next execution mission* | ⏳ Awaiting Founder | Assigned separately by the Founder |
+| 2 | Wave 0: research program + foundation hardening + Henok demo | ✅ Done | Foundation Gate PASSED 2026-08-21; 175 tests |
+| 3 | Wave M: mobile + offline + language intelligence (Founder mission) | ✅ Research + first engineering done | 3 reports; language-intel substrate; mobile/offline UX substrate; 193 tests |
+| 4 | Wave 1 core substrates | ⏳ Awaiting Founder go | Unblocked by the gate |
+
+**Standing platform requirements (Founder mandate 2026-08-21, non-negotiable):**
+MOBILE-FIRST · LOW-END-DEVICE-FIRST · BAD-INTERNET-FIRST · LOW-BANDWIDTH-FIRST.
+Every important feature is judged on PC + phone + low-end device + weak internet +
+role-scoped payload before it ships (checklist in mission §3; budgets in
+`MOBILE_PERFORMANCE_BASELINE.md`). Offline status must always be honest; posted
+ledger transactions are never silently merged. Language: companies customize
+freely; JENIFY learns from aggregated usage (counts only, never company identity);
+officialization is always a human decision; official packs are versioned defaults
+that never override a company's own wording.
 
 Future candidate directions (unordered, unapproved — require the standard
 architecture-before-implementation flow): Mesob production go-live support; template

@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
+import compress from '@fastify/compress';
 import fastifyStatic from '@fastify/static';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -32,6 +33,9 @@ export interface AppOptions {
 export function buildApp(opts: AppOptions): FastifyInstance {
   const app = Fastify({ logger: false });
   app.register(cookie);
+  // Low-bandwidth standard: compress JSON responses over 1 kB (translation
+  // bundles, reports, movement lists shrink ~5-8x on weak mobile data).
+  app.register(compress, { global: true, threshold: 1024 });
 
   // Tenant branding assets (logo, flags, stamps) live next to the local DB.
   const brandingDir = path.join(path.dirname(defaultDbPath()), 'branding');

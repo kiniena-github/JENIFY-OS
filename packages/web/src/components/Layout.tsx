@@ -2,6 +2,7 @@ import React from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import type { ActionId, ModuleId } from '@factoryos/shared';
 import { useAuth } from '../auth.js';
+import { OfflineBanner } from './offline.js';
 
 interface NavEntry {
   path: string;
@@ -163,11 +164,31 @@ export default function Layout() {
             </button>
           </div>
         </header>
+        <OfflineBanner />
         <main className="workspace">
           <PageTitleContext.Provider value={titleCtx}>
             <Outlet />
           </PageTitleContext.Provider>
         </main>
+        {/* Role-scoped mobile bottom navigation: the user's first permitted
+            modules as large touch targets; everything else stays behind More
+            (the drawer). Hidden on desktop via CSS. A dedicated worker-mode
+            experience profile is the Role Experience Engine's job (Wave 1) —
+            this is the responsive substrate it will configure. */}
+        <nav className="bottom-nav no-print" aria-label="Primary">
+          {visibleNav.slice(0, 4).map((n) => (
+            <NavLink key={n.path} to={n.path} end={n.path === '/'} onClick={() => setNavOpen(false)}>
+              <span className="bn-icon" aria-hidden>{n.icon}</span>
+              <span className="bn-label">{t(n.labelKey, n.fallback)}</span>
+            </NavLink>
+          ))}
+          {visibleNav.length > 4 ? (
+            <button type="button" onClick={() => setNavOpen(true)}>
+              <span className="bn-icon" aria-hidden>⋯</span>
+              <span className="bn-label">{t('nav.more', 'More')}</span>
+            </button>
+          ) : null}
+        </nav>
       </div>
     </div>
   );

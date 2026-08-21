@@ -21,7 +21,7 @@ JENIFY OS (public rebrand of FactoryOS; internal package/DB names unchanged) is 
 packages/shared        @factoryos/shared       permission model, statuses, unit/money scaling,
                                                Ethiopian calendar, delivery performance
 packages/server        @factoryos/server       Fastify API: 7 route files (~98 endpoints),
-                                               26 services, 32-table Drizzle schema, migrations 0000–0004
+                                               27 services, 35-table Drizzle schema, migrations 0000–0005
 packages/web           @factoryos/web          React SPA: 17 lazy-loaded pages, app shell, print routes
 packages/config-mesob  @factoryos/config-mesob Mesob seed, ops scripts, init-production.ts go-live CLI
 ```
@@ -69,9 +69,9 @@ These are the crown jewels. No change may violate them.
 
 ## 4. Test posture
 
-- 163 vitest tests, 11 suites, all in `packages/server/test/` (in-memory DB via `helpers.ts` → `makeTestTenant` seeds a full "SaltCo" tenant with Addis timezone; `makeProcessStages` builds washing → iodization → packaging).
+- 196 vitest tests, 14 suites, all in `packages/server/test/` (in-memory DB via `helpers.ts` → `makeTestTenant` seeds a full "SaltCo" tenant with Addis timezone; `makeProcessStages` builds washing → iodization → packaging).
 - Real HTTP tests via `buildApp()` + `app.inject()` with role-scoped cookie sessions asserting cross-role 403s (`e2e.test.ts` and the fix-pass suites).
-- Migrations 0000–0004 exercise on every run (forward-only, empty DB).
+- Migrations 0000–0005 exercise on every run (forward-only, empty DB).
 - **Frontend: zero tests** (Milestone 1 WP7 bootstraps a harness).
 - **Concurrency: zero tests.** No CI, no linter.
 - Structural smell: the four "fix-pass" suites (`qc`, `masterfix`, `masterfix2`, `finalfix`) group regressions by when found, not by subsystem.
@@ -95,6 +95,19 @@ Severity: **C**ritical / **H**igh / **M**edium / **L**ow. Status updated as WPs 
 | D11 | Username-enumeration oracle in recovery: check ORDER leaks account existence — unknown user → 401 `recovery_invalid`, valid user + weak password → 400 `password_weak`. The finalfix "no disclosure" test always sends a valid password so it never catches this. Fix: validate password before the user lookup + add the weak-password/unknown-user parity test *(jenify test-team 2026-08-21)* | `services/recovery.ts:114-117`, `test/finalfix.test.ts:401-416` | H | WP3 | **FIXED** (e5197c5: validation precedes lookup; parity test in wave0-foundation) |
 | D12 | `nextDocNumber` read-then-return race: SELECT then separate UPDATE means two concurrent postings on one sequence can both read the same value — second committer dies on the unique doc-number index with an opaque error. No concurrent-posting test exists. Fix: single atomic `UPDATE … RETURNING` + interleaved-transaction test *(jenify test-team 2026-08-21)* | `services/numbering.ts:33-46`, `db/schema.ts:545` | M | WP2 | **FIXED** (e5197c5: atomic UPDATE..RETURNING; two-connection test) |
 | D13 | Error-surface hygiene: global handler returns raw `e.message` for non-`AppError` exceptions (internal detail on unexpected errors); `/api/branding-version/:version` is the one authenticated route with no `requirePermission` (presentation-only by design — make the exemption explicit in code comment or guard it) *(jenify test-team 2026-08-21)* | `app.ts:59-61`, `routes/admin.ts:232-237` | M | WP6 | OPEN |
+
+### Wave M residuals (architect + QA reviews 2026-08-21, tracked non-blocking)
+
+| # | Item | Sev |
+|---|---|---|
+| WM1 | `language_packs.status='retired'` has no code path (dead state) | L |
+| WM2 | No setter/controlled vocabulary for `tenants.sector/country/region`; scoped packs unreachable until one exists | L |
+| WM3 | languageIntel perf niceties: history N+1 entryCount, whole-language aggregation before key filter, uncached getBundle layering | L |
+| WM4 | ~~No HTTP-level 403 tests for /api/language-intel/*~~ FIXED same day (HTTP guard suite: 403s, k-floor, 400 on missing param) | L |
+| WM5 | Interim owner-as-platform-authority rule — hard multi-hosting exit criteria in JENIFY_PROGRAM_STATE.md | M |
+| WM6 | Rollback restores from the previous pack version, not the key's previous value — a no-op version with a misleading audit line is possible | L |
+| WM7 | An official pack can be approved for 'en' but getBundle never applies en packs (dead path; may confuse the decision ledger) | L |
+| WM8 | Offline banner is connectivity-only: server down while navigator.onLine=true shows no banner (no false claim made; accepted Phase O1 scope) | L |
 
 ### Deferred (tracked, not in Milestone 1)
 

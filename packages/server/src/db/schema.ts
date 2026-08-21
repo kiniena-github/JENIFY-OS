@@ -20,6 +20,11 @@ export const tenants = sqliteTable('tenants', {
   timezone: text('timezone').notNull().default('UTC'),
   brandColor: text('brand_color'),
   logoPath: text('logo_path'),
+  // classification used ONLY for aggregated language/terminology intelligence
+  // and future template routing — never for business logic branching
+  sector: text('sector'),
+  country: text('country'),
+  region: text('region'),
   active: integer('active', { mode: 'boolean' }).notNull().default(true),
   createdAt: text('created_at').notNull(),
 });
@@ -166,6 +171,65 @@ export const tenantLanguages = sqliteTable(
     enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
   },
   (t) => [uniqueIndex('tenant_languages_code').on(t.tenantId, t.code)],
+);
+
+// ------------------- Language intelligence (platform-level) ----------------
+// Official JENIFY language packs are global defaults layered UNDER tenant
+// overrides: English base -> official global pack -> country variant ->
+// sector variant -> tenant override -> user language choice. Packs are
+// versioned append-only snapshots; approving or rolling back a translation
+// always creates a NEW pack version — history is never rewritten.
+
+export const languagePacks = sqliteTable(
+  'language_packs',
+  {
+    id: text('id').primaryKey(),
+    language: text('language').notNull(),
+    scope: text('scope').notNull().default('global'), // global | country | sector
+    scopeValue: text('scope_value').notNull().default(''), // '' for global; country/sector code otherwise
+    version: integer('version').notNull(),
+    status: text('status').notNull().default('official'), // official | superseded | retired
+    notes: text('notes'),
+    createdBy: text('created_by'), // approving user id (platform language authority)
+    approvedAt: text('approved_at').notNull(),
+  },
+  (t) => [
+    uniqueIndex('language_packs_ver').on(t.language, t.scope, t.scopeValue, t.version),
+    index('language_packs_lang').on(t.language, t.status),
+  ],
+);
+
+export const languagePackEntries = sqliteTable(
+  'language_pack_entries',
+  {
+    id: text('id').primaryKey(),
+    packId: text('pack_id').notNull(),
+    keyId: text('key_id').notNull(),
+    value: text('value').notNull(),
+  },
+  (t) => [uniqueIndex('language_pack_entries_key').on(t.packId, t.keyId)],
+);
+
+// Append-only review ledger: every human decision on a translation candidate
+// (approve / reject / defer / sector_specific / regional_variant / rollback)
+// with who, when, why, previous value, and the resulting pack version.
+export const translationDecisions = sqliteTable(
+  'translation_decisions',
+  {
+    id: text('id').primaryKey(),
+    keyId: text('key_id').notNull(),
+    language: text('language').notNull(),
+    scope: text('scope').notNull().default('global'),
+    scopeValue: text('scope_value').notNull().default(''),
+    decision: text('decision').notNull(), // approve | reject | defer | sector_specific | regional_variant | rollback
+    value: text('value'), // the candidate value the decision addressed
+    previousValue: text('previous_value'), // official value before (null = none)
+    reason: text('reason'),
+    decidedBy: text('decided_by'),
+    decidedAt: text('decided_at').notNull(),
+    packVersion: integer('pack_version'), // set when the decision produced a pack version
+  },
+  (t) => [index('translation_decisions_key').on(t.keyId, t.language)],
 );
 
 export const attachments = sqliteTable(

@@ -16,6 +16,16 @@ import {
   updateLanguage,
   deleteLanguage,
 } from '../services/translations.js';
+import {
+  aggregateTranslationUsage,
+  recommendOfficialCandidates,
+  decideTranslation,
+  rollbackOfficialTranslation,
+  languagePackHistory,
+  requireLanguageAuthority,
+  MIN_ORGS_FOR_RECOMMENDATION,
+  type ReviewDecision,
+} from '../services/languageIntel.js';
 import { getSettings, saveSettings, getSettingsVersion } from '../services/settings.js';
 import { listAudit } from '../services/audit.js';
 import { writeAudit } from '../services/audit.js';
@@ -183,6 +193,70 @@ export function registerAdminRoutes(app: FastifyInstance, db: Db): void {
     requirePermission(ctx, 'settings', 'delete');
     deleteLanguage(ctx, req.params.id);
     return { ok: true };
+  });
+
+  // ------------------------ language intelligence --------------------------
+  // Platform-level: aggregated cross-company usage (counts only, never which
+  // company), ranked recommendations, human approval into versioned official
+  // packs. All endpoints require the language authority (owner role +
+  // settings.approve) because the data and decisions cross tenant boundaries.
+  app.get<{ Querystring: { language: string; key?: string; minShow?: string } }>(
+    '/api/language-intel/aggregate',
+    async (req) => {
+      const ctx = requireCtx(db, req);
+      requireLanguageAuthority(ctx);
+      if (!req.query.language) badRequest('language', 'language query parameter is required');
+      // k-suppression: variants used by fewer than k orgs appear only as an
+      // anonymous "other variants" bucket. Callers may RAISE k, never lower
+      // it below the floor (research: LANGUAGE_INTELLIGENCE_SYSTEMS.md §F;
+      // final k is an open Founder question — floor = 3 until decided).
+      const requested = Number(req.query.minShow);
+      const minShow = Number.isFinite(requested)
+        ? Math.max(MIN_ORGS_FOR_RECOMMENDATION, Math.floor(requested))
+        : MIN_ORGS_FOR_RECOMMENDATION;
+      return aggregateTranslationUsage(db, req.query.language, {
+        key: req.query.key,
+        minShow,
+      });
+    },
+  );
+
+  app.get<{ Querystring: { language: string } }>(
+    '/api/language-intel/recommendations',
+    async (req) => {
+      const ctx = requireCtx(db, req);
+      requireLanguageAuthority(ctx);
+      if (!req.query.language) badRequest('language', 'language query parameter is required');
+      return recommendOfficialCandidates(db, req.query.language);
+    },
+  );
+
+  app.post<{
+    Body: {
+      key: string;
+      language: string;
+      decision: ReviewDecision;
+      value?: string;
+      reason?: string;
+      scopeValue?: string;
+    };
+  }>('/api/language-intel/decision', async (req) => {
+    const ctx = requireCtx(db, req);
+    return decideTranslation(ctx, req.body);
+  });
+
+  app.post<{
+    Body: { key: string; language: string; reason: string; scope?: string; scopeValue?: string };
+  }>('/api/language-intel/rollback', async (req) => {
+    const ctx = requireCtx(db, req);
+    return rollbackOfficialTranslation(ctx, req.body);
+  });
+
+  app.get<{ Querystring: { language: string } }>('/api/language-intel/history', async (req) => {
+    const ctx = requireCtx(db, req);
+    requireLanguageAuthority(ctx);
+    if (!req.query.language) badRequest('language', 'language query parameter is required');
+    return languagePackHistory(db, req.query.language);
   });
 
   // -------------------------- branding assets ------------------------------

@@ -1,7 +1,8 @@
 import { and, eq, ne } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
-import { translationKeys, translations, tenantLanguages, users } from '../db/schema.js';
+import { tenants, translationKeys, translations, tenantLanguages, users } from '../db/schema.js';
 import { newId, nowIso, notFound, badRequest } from '../util.js';
+import { getOfficialEntries } from './languageIntel.js';
 import type { Ctx } from './context.js';
 import { actorId } from './context.js';
 import { writeAudit } from './audit.js';
@@ -209,25 +210,53 @@ export function listLanguages(ctx: Ctx, opts: { includeDisabled?: boolean } = {}
 }
 
 /**
- * Full label bundle for a language: tenant override else English fallback.
- * Overrides apply to 'en' as well, so a tenant can relabel terminology
- * (e.g. "Receiving" -> "Raw Salt Receiving") without touching platform code.
+ * Full label bundle for a language, resolved through the layering contract:
+ *   English base -> machine-seeded placeholder -> official JENIFY pack
+ *   (global -> country -> sector) -> ACTIVE tenant override.
+ * Official packs are DEFAULTS: a tenant's own deliberate wording always wins.
+ * "Deliberate" means status='active' — unreviewed placeholder seeds are
+ * better-than-English defaults, but a human-approved official translation
+ * beats them; only a human-edited override beats official.
  */
 export function getBundle(ctx: Ctx, language: string): Record<string, string> {
   const keys = ctx.db.select().from(translationKeys).all();
   const bundle: Record<string, string> = {};
   for (const k of keys) bundle[k.key] = k.enText;
+
   const overrides = ctx.db
     .select({
       key: translationKeys.key,
       text: translations.text,
+      status: translations.status,
     })
     .from(translations)
     .innerJoin(translationKeys, eq(translations.keyId, translationKeys.id))
     .where(and(eq(translations.tenantId, ctx.tenantId), eq(translations.language, language)))
     .all();
+
   for (const o of overrides) {
-    if (o.text.trim() !== '') bundle[o.key] = o.text;
+    if (o.status === 'placeholder' && o.text.trim() !== '') bundle[o.key] = o.text;
+  }
+  if (language !== 'en') {
+    const tenant = ctx.db
+      .select({ country: tenants.country, sector: tenants.sector })
+      .from(tenants)
+      .where(eq(tenants.id, ctx.tenantId))
+      .get();
+    const official = getOfficialEntries(ctx.db, language, {
+      country: tenant?.country,
+      sector: tenant?.sector,
+    });
+    if (official.size > 0) {
+      const keyById = new Map(keys.map((k) => [k.id, k.key]));
+      for (const [keyId, value] of official) {
+        const key = keyById.get(keyId);
+        if (key && value.trim() !== '') bundle[key] = value;
+      }
+    }
+  }
+  for (const o of overrides) {
+    if (o.status === 'active' && o.text.trim() !== '') bundle[o.key] = o.text;
   }
   return bundle;
 }

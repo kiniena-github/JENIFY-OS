@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@factoryos/shared": "*",
+    "@fastify/compress": "^9.2.0",
     "@fastify/cookie": "^11.0.0",
     "@fastify/static": "^8.0.0",
     "better-sqlite3": "^12.2.0",

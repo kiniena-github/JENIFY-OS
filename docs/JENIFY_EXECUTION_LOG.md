@@ -15,6 +15,19 @@ isolated Mesob demo (separate VACUUM-INTO snapshot DB, rotated passwords, Henok 
 Operations Manager) verified end-to-end through a Cloudflare HTTPS quick tunnel — founder
 stack untouched. Wave 1 awaits Founder direction.
 
+## 2026-08-21 — Wave M: mobile + offline + language intelligence (first slice)
+Founder expansion mission. Research: MOBILE_LOWEND_UX.md, OFFLINE_SYNC_ARCHITECTURE.md
+(O1/O2/O3 phased contract; CRDT/LWW rejected for ledgers), LANGUAGE_INTELLIGENCE_
+SYSTEMS.md (usage-not-voting consensus; Ethiopic normalization; k-suppression).
+Engineering: migration 0005 (language_packs, language_pack_entries, translation_
+decisions, tenant sector/country/region); languageIntel service (aggregation counts-only,
+recommendations, human-only approve/reject/defer/sector/regional/rollback, versioned
+packs, layered getBundle resolution); /api/language-intel/* owner-authority routes;
+mobile bottom nav + 48px touch targets + translated-label-safe layouts; offline
+banner + sync-status vocabulary (Phase O1); @fastify/compress; MOBILE_PERFORMANCE_
+BASELINE.md with budgets. QA scenarios 5–10 automated. 175→193 tests green; initial
+JS budget held (69.08 kB gzip). Sync engine deliberately NOT built (contracts only).
+
 ## 2026-08-17 — Phases 1–6: full local build (FactoryOS + Mesob tenant)
 Commits through `ac1fefe`. Monorepo (shared/server/web/config-mesob), core platform,
 Mesob configuration, commercial flow, reports, E2E validation. 88 tests green.

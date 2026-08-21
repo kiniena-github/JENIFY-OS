@@ -36,6 +36,13 @@
       "when": 1787134007019,
       "tag": "0004_sudden_shocker",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1787322090975,
+      "tag": "0005_lazy_overlord",
+      "breakpoints": true
     }
   ]
 }

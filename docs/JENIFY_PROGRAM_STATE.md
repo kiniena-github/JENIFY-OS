@@ -43,6 +43,47 @@ DB safety resolved ✓ · backups verified ✓ · Mesob E2E green ✓ · **jenif
 (H1 relocation guard landed; M2/M3/L1-L3 tracked) · **jenify-architect: APPROVE** (conditions
 1-3 landed; C4 login-info residual tracked). Wave 1 is UNBLOCKED pending Founder direction.
 
+## Wave M — Mobile + Offline + Language Intelligence (Founder mission 2026-08-21)
+
+### Research (all delivered to docs/research/)
+
+| ID | Workstream | Owner (role) | Deliverable | Status |
+|---|---|---|---|---|
+| M-R1 | Low-end Android / African device+network realities / mobile ERP UX / multilingual mobile UX | jenify-ux-engineer + jenify-product-research | MOBILE_LOWEND_UX.md | **DONE** |
+| M-R2 | PWA/local-first, SQLite site architecture, sync models, offline conflict handling for ledgers | jenify-offline-infra | OFFLINE_SYNC_ARCHITECTURE.md (phased O1/O2/O3 contract) | **DONE** |
+| M-R3 | Translation memory/termbases, crowdsourced models, HITL approval, consensus ranking, anonymization | jenify-country-localization + jenify-ai-engineer | LANGUAGE_INTELLIGENCE_SYSTEMS.md | **DONE** |
+
+### Engineering (stable-architecture subset; Team Lead implements, QA+Architect gate-review)
+
+| ID | Task | Status |
+|---|---|---|
+| M-E1 | Mobile performance baseline + budgets | **DONE** — docs/MOBILE_PERFORMANCE_BASELINE.md |
+| M-E2 | API response compression (low-bandwidth standard) | **DONE** — @fastify/compress, >1 kB |
+| M-E3 | Role-scoped mobile bottom navigation + 48 px touch targets + translated-label-safe layouts | **DONE** — responsive substrate; worker-mode profile awaits Role Experience Engine (Wave 1) |
+| M-E4 | Offline state UX primitives (honest status vocabulary: local/pending/synced/conflict/failed + offline banner) | **DONE** — Phase O1 substrate; no queued writes yet (deliberate) |
+| M-E5 | Language usage aggregation (counts only, one-org-one-voice, k-suppression) | **DONE** — services/languageIntel.ts |
+| M-E6 | Versioned official language packs + layered resolution (base→official→country→sector→company override) | **DONE** — migration 0005, getBundle layering |
+| M-E7 | Candidate recommendation + human approve/reject/defer/sector/regional/rollback workflow (owner-authority only, audited) | **DONE** — routes /api/language-intel/* |
+| M-E8 | QA scenarios 5–10 automated (100 simulated companies → dominance → approval → override survival → inheritance → rollback) | **DONE** — test/language-intel.test.ts, 18 tests |
+| M-E9 | Mesob regression | **DONE** — 193/193 tests green |
+
+**Deliberately deferred (contracts not ready / Founder input needed):** sync engine
+(O2 queued writes, O3 site-node — contracts written in M-R2), Ethiopic homophone
+normalization ruleset (clustering-only, per M-R3), frontend viewport test harness
+(needs WP7 harness decision), Ethiopic font subset shipping, AI variant clustering
+(AI milestone), platform-admin identity separate from tenant owner.
+
+**Interim language-authority rule (architect-reviewed 2026-08-21):** official-pack
+decisions require owner role + settings.approve. Acceptable ONLY on the single-box
+deployment. **Hard exit criteria — all required before any true multi-company
+hosting:** (1) dedicated platform-admin principal in a separate realm; tenant
+owners get 403 on all /api/language-intel/*; (2) server-side k-suppression floor
+already enforced (callers can raise k, never lower it); (3) Founder decision on
+consent posture (opt-in vs disclosure) for usage aggregation; (4) aggregation-job
+separation — reads tenant translations, writes only an anonymized store; (5)
+platform-level identity semantics for createdBy/decidedBy (today: tenant-scoped
+user ids, no realm qualifier).
+
 ## Wave 1 (BLOCKED until gate) — planned
 Core configuration/template substrate · Country-pack substrate (Ethiopia formalized + dummy second pack) ·
 Terminology engine · Role-experience engine · AI safe-action architecture (from R7) · Migration/import foundation (from R6).

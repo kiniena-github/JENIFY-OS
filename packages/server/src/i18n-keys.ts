@@ -752,4 +752,13 @@ export const PLATFORM_KEYS: Array<{ key: string; en: string; module?: string }> 
   { key: 'audit.action.tenant_update', en: 'Company Profile Updated', module: 'audit' },
   { key: 'audit.action.user_update', en: 'User Updated', module: 'audit' },
   { key: 'audit.action.item_create', en: 'Product Created', module: 'audit' },
+  // mobile shell + offline/sync honesty vocabulary (Mobile+Offline mission)
+  { key: 'nav.more', en: 'More', module: 'nav' },
+  { key: 'offline.title', en: 'You are offline.', module: 'shell' },
+  { key: 'offline.body', en: 'Showing last loaded data — changes cannot be saved until the connection returns.', module: 'shell' },
+  { key: 'sync.local', en: 'Saved locally', module: 'shell' },
+  { key: 'sync.pending', en: 'Waiting to sync', module: 'shell' },
+  { key: 'sync.synced', en: 'Synced', module: 'shell' },
+  { key: 'sync.conflict', en: 'Conflict — review required', module: 'shell' },
+  { key: 'sync.failed', en: 'Failed — retry', module: 'shell' },
 ];
