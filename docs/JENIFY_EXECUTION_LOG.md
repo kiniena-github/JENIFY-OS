@@ -1,0 +1,40 @@
+# JENIFY OS — Execution Log
+
+Append-only. Newest entries last. Each entry: date, milestone, commit(s), tests, state.
+
+## 2026-08-17 — Phases 1–6: full local build (FactoryOS + Mesob tenant)
+Commits through `ac1fefe`. Monorepo (shared/server/web/config-mesob), core platform,
+Mesob configuration, commercial flow, reports, E2E validation. 88 tests green.
+
+## 2026-08-18 — QC fix
+Commit `2c053e2`. Quality Management role split, explicit Approve & Release gate,
+immutable retests, configurable target ppm. Live data preserved.
+
+## 2026-08-19 — Master fix (core + Mesob hardening & performance)
+Commit `67c2ab5`, tag `checkpoint-pre-masterfix`. Conserved-stage physics (IOD-0001
+corrected via audited mechanism), stage output policies, audit UX, dynamic warehouses/
+languages, per-user themes, EC calendar, print/PDF documents, PWA, code splitting
+(344.65→210 kB initial JS). 101→121 tests green. Migration 0002.
+
+## 2026-08-19 — Master fix #2 (founder validation follow-up + go-live readiness)
+Commit `90a1591`, tag `checkpoint-pre-masterfix2`. Warehouse/language delete-vs-archive,
+quantity precision policy, payment references, reversed-payment presentation, delivery
+performance, operator/supervisor split, report redesigns, branding snapshots,
+tenant-branded login, recovery codes, last-owner protection, setup wizard, fresh-tenant
+provisioning. 121→145 tests green. Migration 0003.
+
+## 2026-08-19 — Final master fix (JENIFY OS rebrand + polish + go-live hardening)
+Commit `70efbd6`, tag `checkpoint-pre-final-masterfix`. Public rebrand to JENIFY OS,
+dynamic language eligibility, simple multi-currency, editable timezone, wizard item/stage
+editing, approved-selection provisioning with dry-run, recovery session-invalidation +
+code UX, About panel, report field additions, UI polish. 145→163 tests green.
+Migration 0004. Founder E2E validation: PASS.
+
+## 2026-08-21 — Team setup (this session)
+Permanent Claude Code development team: Team Lead operating model, 10 project specialists
+in `.claude/agents/`, `CLAUDE.md`, charter/decisions/roadmap/log docs,
+`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` enabled in project settings (takes effect on new
+sessions; this session ran the documented subagent fallback). Read-only test-team review
+executed (architect + qa-security + product-research); findings recorded, nothing
+implemented. Dev servers left running at http://localhost:5173. Current baseline:
+commit `70efbd6` + team files, 163 server tests green.

@@ -56,6 +56,16 @@ visibility, stock-ledger identities, reservations, unit conversions, batch
 genealogy, QC gates, reversals, payment allocations, report reconciliation,
 and a full end-to-end workflow over the real HTTP API.
 
+## Documentation
+
+| Document | Purpose |
+|---|---|
+| [docs/FACTORY_OS_CURRENT_STATE.md](docs/FACTORY_OS_CURRENT_STATE.md) | Audit snapshot: modules, invariants, test posture, defects register |
+| [docs/FACTORY_OS_ARCHITECTURE_PLAN.md](docs/FACTORY_OS_ARCHITECTURE_PLAN.md) | Target architecture, module boundaries, milestone roadmap |
+| [docs/FACTORY_OS_FEATURE_MATRIX.md](docs/FACTORY_OS_FEATURE_MATRIX.md) | Per-feature status, quality, priority, and responsible agent |
+
+Specialist Claude Code agent definitions live in `.claude/agents/` (14 domain agents with ownership boundaries and shared invariants).
+
 ## Architecture (for developers)
 
 npm workspaces monorepo:
