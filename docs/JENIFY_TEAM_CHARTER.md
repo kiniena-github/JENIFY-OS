@@ -1,21 +1,26 @@
 # JENIFY OS — Team Charter
 
-## Structure
+## Structure (unified 24-agent model — Founder-approved 2026-08-21)
 
 ```
 FOUNDER
    ↕  (one conversation)
-JENIFY OS TEAM LEAD  (the main Claude Code session — orchestrator)
+ONE OFFICIAL JENIFY TEAM LEAD  (the main Claude Code session — orchestrator)
    ↕  (delegation, review, synthesis)
-SPECIALIST TEAM  (.claude/agents/, spawned per milestone)
+10 MAIN jenify-* SPECIALISTS   (official Founder-facing team, spawned per milestone)
+   ↕  (deep implementation / review slices, via the Team Lead)
+14 DEEPER DOMAIN SPECIALISTS   (called when useful; never self-directing)
 ```
 
+**There is exactly ONE Team Lead / Founder-facing orchestrator.** No second command
+center, no duplicate leadership, no independent milestones, no uncoordinated repo edits.
 The Founder talks to the Team Lead only. The Team Lead breaks work into tasks, decides
 which specialists are needed, delegates, coordinates dependencies, resolves conflicting
 recommendations, reviews results, protects the architecture, ensures tests pass, and
 returns ONE synthesized answer. The Founder never acts as project manager between agents.
+All 24 specialist definitions are preserved; none may be deleted without a Founder decision.
 
-## Specialists
+## Official Founder-facing specialists (the 10 `jenify-*` agents)
 
 | Agent | Role | Owns |
 |---|---|---|
@@ -29,6 +34,41 @@ returns ONE synthesized answer. The Founder never acts as project manager betwee
 | jenify-data-migration | Data / Migration | Excel/CSV import, mapping, validation, duplicates, opening balances, previews, rollback/reconciliation, onboarding migration. |
 | jenify-product-research | Product Intelligence | Competitor research only (ERPNext, Odoo, SAP, Dynamics, Oracle, Infor, Turkish/Indian/Chinese/African, sector software). Value-vs-complexity recommendations; never copies proprietary code. |
 | jenify-qa-security | QA / Security / Perf | Regression, E2E, tenant isolation, authorization, security review, transaction integrity, recovery testing, performance, destructive-action validation. Skeptical by design. |
+
+## Deeper domain specialists (the 14 additional agents)
+
+Called by the Team Lead (directly, or on a jenify-* specialist's recommendation) for deep
+implementation/review slices. They never open milestones, commit on their own initiative,
+or modify docs/ unassigned.
+
+**Leadership-class (subordinated):**
+- `lead-architect` — deep integration reviewer only (cross-domain contracts, schema/
+  migration review, migration-number bookkeeping for the Team Lead). Its former
+  orchestration duties (milestone gates, conflict resolution, docs ownership, final
+  approval) belong to the Team Lead; architecture direction belongs to jenify-architect.
+
+**Overlapping — deeper implementation arms under a jenify-* owner:**
+| Domain agent | Works under | Depth |
+|---|---|---|
+| frontend-ux | jenify-ux-engineer | Hands-on `packages/web` implementation |
+| africa-localization | jenify-country-localization (+ jenify-offline-infra) | i18n / Amharic-Tigrinya / EC calendar / resilience |
+| security-permissions | jenify-qa-security (+ jenify-core-engineer) | Route-level permission/tenancy/validation review & fixes |
+| qa-factory-simulation | jenify-qa-security | Test-suite authorship, factory-scenario E2E |
+| inventory-warehouse | jenify-core-engineer | Stock ledger / lots / reservations slice |
+| production-manufacturing | jenify-core-engineer + jenify-template-engineer | Batch / stage / QC-gate mechanics |
+| quality-traceability | jenify-core-engineer + jenify-qa-security | QC / genealogy / traceability slice |
+| sales-customer | jenify-core-engineer | Commercial services / routes / UI slice |
+| jenify-ai-qos | jenify-ai-engineer | Intelligence-layer design. **FUTURE PLANNED — inactive until the Founder starts the AI milestone** (a major planned part of JENIFY OS, not out of scope) |
+
+**Unique future-domain specialists (design-only until their milestone activates):**
+`finance-costing` (costing/COGS/valuation; money-math reviewer now) ·
+`procurement-supplier` (POs, supplier pricing) · `maintenance-asset` (domain not yet in
+code) · `workforce-shift` (domain not yet in code).
+
+**Shared conventions:** migrations stay additive-only from 0005 with numbers allocated
+centrally through the Team Lead; per task there is one owner with an explicit file/domain
+boundary — a domain agent and its jenify-* owner never edit the same files concurrently;
+design-only/future agents write only under `docs/` until activated.
 
 ## Team Lead rules
 

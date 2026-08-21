@@ -92,6 +92,9 @@ Severity: **C**ritical / **H**igh / **M**edium / **L**ow. Status updated as WPs 
 | D8 | Frontend: read errors swallowed on 15/17 pages (`isLoading`/`isError` used zero times — failed GET renders as empty table); Modal lacks Escape/focus-trap/aria; CSS `var(--panel)` and `var(--muted)` undefined | `packages/web` (esp. `styles.css:407,411,441`, `ui.tsx` Modal) | H | WP7 | OPEN |
 | D9 | Ops scripts mutate live DB on import — no dry-run/backup/transaction; cwd-dependent logins path; `saveRoleMatrix` bumps versions even when unchanged | `config-mesob/apply-masterfix.ts`, `apply-qc-update.ts` | H | WP6 | OPEN |
 | D10 | Hygiene: dead `sessionTimeoutMinutes`; 1-char passwords in `createUser`; branding upload dead > ~750 KB (bodyLimit 1 MB < app cap 2 MB); `/api/system-info` leaks git SHA/DB size to any user; `logger:false`; no rate limit on login/recover; `inTx` deferred BEGIN (`SQLITE_BUSY_SNAPSHOT` not retried) | `auth.ts`, `users.ts:42`, `app.ts:33`, `routes/admin.ts:292`, `context.ts` | M | WP6 | OPEN |
+| D11 | Username-enumeration oracle in recovery: check ORDER leaks account existence — unknown user → 401 `recovery_invalid`, valid user + weak password → 400 `password_weak`. The finalfix "no disclosure" test always sends a valid password so it never catches this. Fix: validate password before the user lookup + add the weak-password/unknown-user parity test *(jenify test-team 2026-08-21)* | `services/recovery.ts:114-117`, `test/finalfix.test.ts:401-416` | H | WP3 | OPEN |
+| D12 | `nextDocNumber` read-then-return race: SELECT then separate UPDATE means two concurrent postings on one sequence can both read the same value — second committer dies on the unique doc-number index with an opaque error. No concurrent-posting test exists. Fix: single atomic `UPDATE … RETURNING` + interleaved-transaction test *(jenify test-team 2026-08-21)* | `services/numbering.ts:33-46`, `db/schema.ts:545` | M | WP2 | OPEN |
+| D13 | Error-surface hygiene: global handler returns raw `e.message` for non-`AppError` exceptions (internal detail on unexpected errors); `/api/branding-version/:version` is the one authenticated route with no `requirePermission` (presentation-only by design — make the exemption explicit in code comment or guard it) *(jenify test-team 2026-08-21)* | `app.ts:59-61`, `routes/admin.ts:232-237` | M | WP6 | OPEN |
 
 ### Deferred (tracked, not in Milestone 1)
 
@@ -124,7 +127,7 @@ Severity: **C**ritical / **H**igh / **M**edium / **L**ow. Status updated as WPs 
 | Offline writes | Service worker is deliberately shell-only | Deferred |
 | Expiry / FEFO, serial tracking | Declared (`trackingMode: serial`), unimplemented | Deferred |
 | Multi-site | Single-site by construction (warehouses only) | Deferred |
-| QOS / AI | Nothing exists; **out of scope per founder** | Design-only |
+| QOS / AI | Nothing exists in code; **FUTURE PLANNED — a major planned part of JENIFY OS, inactive until the Founder starts the AI milestone** (Founder decision 2026-08-21) | AI milestone (design-only until then) |
 
 ## 7. Deployment reality
 

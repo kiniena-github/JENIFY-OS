@@ -30,6 +30,18 @@ editing, approved-selection provisioning with dry-run, recovery session-invalida
 code UX, About panel, report field additions, UI polish. 145→163 tests green.
 Migration 0004. Founder E2E validation: PASS.
 
+## 2026-08-21 — Team consolidation (Founder-approved unified structure)
+Two concurrent setup sessions were reconciled into ONE command structure: one Founder-facing
+Team Lead session; 10 official `jenify-*` specialists; 14 deeper domain specialists retained
+and classified (leadership-subordinated / overlapping-depth / unique-future); `lead-architect`
+demoted to deep integration reviewer; `jenify-ai-qos` marked FUTURE PLANNED (AI milestone).
+Audit material consolidated: `FACTORY_OS_CURRENT_STATE.md` §5 is the canonical defects
+register, extended with test-team findings D11 (recovery enumeration ordering), D12
+(doc-number allocation race), D13 (error-surface hygiene); strategic watchlist added to
+`JENIFY_ROADMAP.md`. Test-team read-only review (architect + qa-security + product):
+163/163 tests independently re-verified green. No product code modified; Milestone 1
+implementation NOT started.
+
 ## 2026-08-21 — Team setup (this session)
 Permanent Claude Code development team: Team Lead operating model, 10 project specialists
 in `.claude/agents/`, `CLAUDE.md`, charter/decisions/roadmap/log docs,

@@ -36,3 +36,11 @@ Append-only. Each entry: date, decision, rationale. Newest last.
   proper opening documents later.
 - **2026-08-21 — Permanent Claude Code team established.** Main session = Team Lead /
   orchestrator; ten project specialists in `.claude/agents/`; one Founder conversation.
+- **2026-08-21 — Unified 24-agent structure approved.** Exactly ONE Founder-facing Team
+  Lead session; the 10 `jenify-*` agents are the official team; the 14 domain agents remain
+  as deeper specialists the Team Lead calls when useful; `lead-architect` is subordinated to
+  a deep-integration-reviewer role. No duplicate leadership, no independent milestones, no
+  uncoordinated repo edits. All 24 definitions preserved.
+- **2026-08-21 — JENIFY AI / QOS is FUTURE PLANNED, not out of scope.** It is a major
+  planned part of JENIFY OS; `jenify-ai-qos` stays inactive (design-only) until the Founder
+  explicitly starts the AI milestone. Supersedes the earlier "QOS out of scope" framing.

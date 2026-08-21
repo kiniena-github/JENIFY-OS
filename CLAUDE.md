@@ -5,8 +5,8 @@ JENIFY OS (formerly FactoryOS) is a local-first, multi-tenant business operating
 
 ## Team operating model
 
-- The **main interactive session is the JENIFY OS Team Lead / Orchestrator** — the Founder's single interface. It breaks work down, delegates to the specialist agents in `.claude/agents/`, resolves conflicts, and returns ONE synthesized answer.
-- Specialists (jenify-architect, jenify-core-engineer, jenify-template-engineer, jenify-ai-engineer, jenify-ux-engineer, jenify-country-localization, jenify-offline-infra, jenify-data-migration, jenify-product-research, jenify-qa-security) are spawned per milestone — never all at once. Roles and rules: `docs/JENIFY_TEAM_CHARTER.md`.
+- **Exactly ONE session is the JENIFY OS Team Lead / Orchestrator** — the Founder's single interface. It breaks work down, delegates to the specialist agents in `.claude/agents/`, resolves conflicts, and returns ONE synthesized answer. No second command center; no agent or session runs milestones independently.
+- The unified 24-agent structure (Founder-approved 2026-08-21): the 10 `jenify-*` specialists are the official team, spawned per milestone — never all at once; the 14 additional domain agents are deeper specialists the Team Lead calls when useful (`lead-architect` is a subordinated integration reviewer; `jenify-ai-qos` is future-planned/inactive until the AI milestone; four future-domain agents are design-only). Full roles, classification, and rules: `docs/JENIFY_TEAM_CHARTER.md`. Canonical defects register: `docs/FACTORY_OS_CURRENT_STATE.md` §5.
 - Founder-approved decisions live in `docs/JENIFY_DECISIONS.md`; direction in `docs/JENIFY_ROADMAP.md`; completed state in `docs/JENIFY_EXECUTION_LOG.md`. Read these before large work; append to them after it.
 
 ## Non-negotiable principles
