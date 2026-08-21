@@ -302,12 +302,19 @@ export function registerAdminRoutes(app: FastifyInstance, db: Db): void {
     let lastBackup: { file: string; at: string } | null = null;
     try {
       const dir = path.dirname(dbPath);
-      const backups = fs
-        .readdirSync(dir)
-        .filter((f) => f.startsWith('backup-') && f.endsWith('.sqlite'))
-        .map((f) => ({ file: f, at: fs.statSync(path.join(dir, f)).mtime.toISOString() }))
-        .sort((a, b) => (a.at < b.at ? 1 : -1));
-      lastBackup = backups[0] ?? null;
+      const candidates: Array<{ file: string; at: string }> = [];
+      const scan = (d: string, prefixes: string[]) => {
+        if (!fs.existsSync(d)) return;
+        for (const f of fs.readdirSync(d)) {
+          if (prefixes.some((p) => f.startsWith(p)) && f.endsWith('.sqlite')) {
+            candidates.push({ file: f, at: fs.statSync(path.join(d, f)).mtime.toISOString() });
+          }
+        }
+      };
+      scan(dir, ['backup-']); // legacy manual snapshots
+      scan(path.join(dir, 'backups'), ['auto-', 'manual-']); // codified backups
+      candidates.sort((a, b) => (a.at < b.at ? 1 : -1));
+      lastBackup = candidates[0] ?? null;
     } catch {
       /* no backup dir */
     }

@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { and, eq, isNull } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
-import { recoveryCodes, sessions, users } from '../db/schema.js';
+import { recoveryCodes, sessions, tenants, users } from '../db/schema.js';
 import { newId, nowIso, hashPassword, badRequest, AppError } from '../util.js';
 import type { Ctx } from './context.js';
 import { actorId } from './context.js';
@@ -88,13 +88,29 @@ export function generateRecoveryCodes(ctx: Ctx, userId: string): string[] {
  */
 export function recoverWithCode(
   db: Db,
-  input: { username: string; code: string; newPassword: string },
+  input: { username: string; code: string; newPassword: string; tenantCode?: string },
 ): void {
-  const user = db
+  // Input validation happens BEFORE any account lookup so the response can
+  // never become a username-existence oracle (same 400 for everyone).
+  if (!input.newPassword || input.newPassword.length < 6) {
+    badRequest('password_weak', 'New password must be at least 6 characters');
+  }
+  // Multi-tenant boxes disambiguate by tenant CODE resolved to its id; a shared
+  // username with no disambiguator fails closed rather than picking a tenant.
+  const candidates = db
     .select()
     .from(users)
     .where(eq(users.username, input.username.trim().toLowerCase()))
-    .get();
+    .all();
+  const tenantScope = input.tenantCode
+    ? db.select({ id: tenants.id }).from(tenants).where(eq(tenants.code, input.tenantCode)).get()?.id
+    : undefined;
+  const user =
+    candidates.length === 1
+      ? tenantScope && candidates[0].tenantId !== tenantScope
+        ? undefined
+        : candidates[0]
+      : candidates.find((u) => u.tenantId === tenantScope);
   const fail = (): never => {
     if (user) {
       writeAudit(
@@ -112,9 +128,6 @@ export function recoverWithCode(
     throw new AppError(401, 'recovery_invalid', 'Invalid username or recovery code');
   };
   if (!user || !user.active) fail();
-  if (!input.newPassword || input.newPassword.length < 6) {
-    badRequest('password_weak', 'New password must be at least 6 characters');
-  }
   const match = db
     .select()
     .from(recoveryCodes)

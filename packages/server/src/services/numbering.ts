@@ -29,20 +29,26 @@ export function defineSequence(
     .run();
 }
 
-/** Atomically allocate the next document number for a sequence. */
+/**
+ * Atomically allocate the next document number for a sequence.
+ * The increment and the value we hand out come from ONE statement
+ * (UPDATE … RETURNING), so two concurrent postings can never both
+ * read the same counter and mint duplicate numbers.
+ */
 export function nextDocNumber(ctx: Ctx, seqKey: string): string {
-  const row = ctx.db
-    .select()
-    .from(documentSequences)
-    .where(and(eq(documentSequences.tenantId, ctx.tenantId), eq(documentSequences.seqKey, seqKey)))
-    .get();
-  if (!row) badRequest('sequence_missing', `Document sequence '${seqKey}' is not configured`);
-  ctx.db
+  const updated = ctx.db
     .update(documentSequences)
     .set({ nextValue: sql`${documentSequences.nextValue} + 1` })
-    .where(eq(documentSequences.id, row.id))
-    .run();
-  return `${row.prefix}${String(row.nextValue).padStart(row.padding, '0')}`;
+    .where(and(eq(documentSequences.tenantId, ctx.tenantId), eq(documentSequences.seqKey, seqKey)))
+    .returning({
+      prefix: documentSequences.prefix,
+      padding: documentSequences.padding,
+      nextValue: documentSequences.nextValue,
+    })
+    .get();
+  if (!updated) badRequest('sequence_missing', `Document sequence '${seqKey}' is not configured`);
+  const allocated = updated.nextValue - 1; // RETURNING yields the post-increment counter
+  return `${updated.prefix}${String(allocated).padStart(updated.padding, '0')}`;
 }
 
 export function listSequences(ctx: Ctx) {

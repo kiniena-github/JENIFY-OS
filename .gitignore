@@ -10,3 +10,7 @@ data/*.sqlite-shm
 desktop.ini
 coverage/
 data/*.txt
+data/backups/
+data/**/*.sqlite*
+*.sqlite.pre-relocation
+data/demo/

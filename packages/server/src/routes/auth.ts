@@ -5,6 +5,11 @@ import { login, logout } from '../services/auth.js';
 import { getTenant } from '../services/provisioning.js';
 import { getBundle, listLanguages } from '../services/translations.js';
 import { recoverWithCode } from '../services/recovery.js';
+import {
+  assertNotRateLimited,
+  recordAuthFailure,
+  clearAuthFailures,
+} from '../services/ratelimit.js';
 import { eq } from 'drizzle-orm';
 import { tenants, users } from '../db/schema.js';
 import { nowIso } from '../util.js';
@@ -25,23 +30,41 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
    * Public, unauthenticated: emergency recovery with a one-time offline code.
    * Never reveals the old password; consumes the code; audited permanently.
    */
-  app.post<{ Body: { username: string; code: string; newPassword: string } }>(
+  app.post<{ Body: { username: string; code: string; newPassword: string; tenantCode?: string } }>(
     '/api/auth/recover',
     async (req) => {
-      recoverWithCode(db, req.body);
+      const key = `${req.ip}|recover|${(req.body.username ?? '').trim().toLowerCase()}`;
+      assertNotRateLimited(key);
+      try {
+        recoverWithCode(db, req.body);
+      } catch (err) {
+        recordAuthFailure(key);
+        throw err;
+      }
+      clearAuthFailures(key);
       return { ok: true };
     },
   );
   app.post<{
     Body: { username: string; password: string; remember?: boolean; tenantCode?: string };
   }>('/api/auth/login', async (req, reply) => {
-    const result = login(db, {
-      username: req.body.username,
-      password: req.body.password,
-      remember: req.body.remember,
-      tenantCode: req.body.tenantCode,
-      userAgent: req.headers['user-agent'],
-    });
+    // failed-attempt throttling only — successful sign-ins reset the budget
+    const rlKey = `${req.ip}|login|${(req.body.username ?? '').trim().toLowerCase()}`;
+    assertNotRateLimited(rlKey);
+    let result;
+    try {
+      result = login(db, {
+        username: req.body.username,
+        password: req.body.password,
+        remember: req.body.remember,
+        tenantCode: req.body.tenantCode,
+        userAgent: req.headers['user-agent'],
+      });
+    } catch (err) {
+      recordAuthFailure(rlKey);
+      throw err;
+    }
+    clearAuthFailures(rlKey);
     reply.setCookie(SESSION_COOKIE, result.token, {
       path: '/',
       httpOnly: true,

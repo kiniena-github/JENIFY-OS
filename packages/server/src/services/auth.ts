@@ -1,7 +1,7 @@
 import { and, eq } from 'drizzle-orm';
 import type { SessionUser } from '@factoryos/shared';
 import type { Db } from '../db/index.js';
-import { roles, sessions, users } from '../db/schema.js';
+import { roles, sessions, tenants, users } from '../db/schema.js';
 import { newId, nowIso, randomToken, verifyPassword, AppError } from '../util.js';
 import { getRoleMatrix } from './permissions.js';
 import { writeAudit } from './audit.js';
@@ -31,10 +31,18 @@ export function login(
     .from(users)
     .where(eq(users.username, input.username.trim().toLowerCase()))
     .all();
+  // Disambiguation is by tenant CODE ('mesob'), which must be resolved to the
+  // tenant's id before matching — comparing the code against the UUID directly
+  // (the old bug, D4) could never match and locked out shared usernames.
+  const tenantScope = input.tenantCode
+    ? db.select({ id: tenants.id }).from(tenants).where(eq(tenants.code, input.tenantCode)).get()?.id
+    : undefined;
   const user =
     candidates.length === 1
-      ? candidates[0]
-      : candidates.find((u) => u.tenantId === input.tenantCode);
+      ? tenantScope && candidates[0].tenantId !== tenantScope
+        ? undefined
+        : candidates[0]
+      : candidates.find((u) => u.tenantId === tenantScope);
 
   const fail = (reason: string): AppError => {
     if (user) {
