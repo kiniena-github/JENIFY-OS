@@ -171,29 +171,34 @@ export function dispatchDelivery(
     if (opts.lineQtys && opts.lineQtys.length > 0) {
       // ---- split (partial) dispatch ----
       const byId = new Map(lines.map((l) => [l.id, l]));
-      let shippedAny = false;
+      // Aggregate the caller's lineQtys by id BEFORE validating (red-team R3
+      // F2): a duplicate id in one request must not bypass the per-line
+      // over-dispatch ceiling. Each line ships exactly once, its total qty
+      // checked against the remaining and its qtyDelivered advanced once.
+      const agg = new Map<string, number>();
       for (const { invoiceLineId, qty } of opts.lineQtys) {
-        const line = byId.get(invoiceLineId);
-        if (!line) badRequest('dispatch_line_unknown', `Invoice line ${invoiceLineId} not on this invoice`);
+        if (!byId.has(invoiceLineId)) badRequest('dispatch_line_unknown', `Invoice line ${invoiceLineId} not on this invoice`);
         const qtyMilli = Math.round(qty * 1000);
-        const remaining = line!.qty - line!.qtyDelivered;
         if (qtyMilli <= 0) badRequest('dispatch_qty', 'Dispatch quantity must be positive');
+        agg.set(invoiceLineId, (agg.get(invoiceLineId) ?? 0) + qtyMilli);
+      }
+      for (const [invoiceLineId, qtyMilli] of agg) {
+        const line = byId.get(invoiceLineId)!;
+        const remaining = line.qty - line.qtyDelivered;
         if (qtyMilli > remaining) badRequest('over_dispatch', `Cannot dispatch more than remaining (${remaining / 1000}) for this line`);
         postMovement(tx, {
-          itemId: line!.itemId,
-          lotId: line!.lotId,
-          warehouseId: line!.warehouseId,
+          itemId: line.itemId,
+          lotId: line.lotId,
+          warehouseId: line.warehouseId,
           qty: -qtyMilli,
           movementType: 'sale_dispatch',
           documentKind: 'delivery',
           documentId: id,
           documentNumber: d.docNumber,
         });
-        if (line!.reservationId) reduceReservation(tx, line!.reservationId, qtyMilli);
-        tx.db.update(invoiceLines).set({ qtyDelivered: line!.qtyDelivered + qtyMilli }).where(eq(invoiceLines.id, line!.id)).run();
-        shippedAny = true;
+        if (line.reservationId) reduceReservation(tx, line.reservationId, qtyMilli);
+        tx.db.update(invoiceLines).set({ qtyDelivered: line.qtyDelivered + qtyMilli }).where(eq(invoiceLines.id, line.id)).run();
       }
-      if (!shippedAny) badRequest('nothing_dispatched', 'No quantities to dispatch');
     } else {
       // ---- full dispatch (ship all remaining reservations) ----
       const reservations = listReservationsForDocument(tx, 'sales_invoice', d.invoiceId).filter(

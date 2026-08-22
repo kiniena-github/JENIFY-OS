@@ -80,38 +80,47 @@ export function createSalesReturn(ctx: Ctx, input: SalesReturnInput): { id: stri
   if (!input.lines?.length) badRequest('return_lines', 'At least one return line is required');
   const lines = listInvoiceLines(ctx, input.invoiceId);
   const byId = new Map(lines.map((l) => [l.id, l]));
-  const alreadyReturned = returnedByLine(ctx, input.invoiceId);
+
+  // Aggregate the caller's lines by invoiceLineId BEFORE validating (red-team
+  // R3 F1): a duplicate id in one request must not bypass the cumulative
+  // over-return ceiling. Each line is validated and processed exactly once
+  // against its total requested qty. `restock=false` on ANY entry for a line
+  // marks the whole aggregated return of that line as non-restocking.
+  const aggregated = new Map<string, { qtyMilli: number; restock: boolean }>();
+  for (const rl of input.lines) {
+    if (!byId.has(rl.invoiceLineId)) badRequest('return_line_unknown', `Invoice line ${rl.invoiceLineId} not on this invoice`);
+    if (!(rl.qty > 0)) badRequest('return_qty', 'Return quantity must be positive');
+    const cur = aggregated.get(rl.invoiceLineId) ?? { qtyMilli: 0, restock: true };
+    cur.qtyMilli += Math.round(rl.qty * 1000);
+    if (rl.restock === false) cur.restock = false;
+    aggregated.set(rl.invoiceLineId, cur);
+  }
 
   return inTx(ctx, (tx) => {
     ensureSeq(tx, 'credit_note', 'CN-');
+    // TOCTOU defense (R3 F3): read prior-returned inside the tx
+    const alreadyReturned = returnedByLine(tx, input.invoiceId);
     const docNumber = nextDocNumber(tx, 'credit_note');
     const creditNoteId = newId();
     const now = nowIso();
     let totalCents = 0;
     const outLines: Array<{ id: string; itemId: string; warehouseId: string; lotId: string | null; qty: number; restock: boolean; amountCents: number; invoiceLineId: string }> = [];
 
-    for (const rl of input.lines) {
-      const line = byId.get(rl.invoiceLineId);
-      if (!line) badRequest('return_line_unknown', `Invoice line ${rl.invoiceLineId} not on this invoice`);
-      if (!(rl.qty > 0)) badRequest('return_qty', 'Return quantity must be positive');
-      // line.qty is milli base-units; rl.qty is in the same natural unit the
-      // line was sold — the line stores qty already in base-units, so we treat
-      // rl.qty as base units to keep the check exact and unit-free.
-      const qtyMilli = Math.round(rl.qty * 1000);
-      const soldMilli = line!.qty;
-      const priorMilli = alreadyReturned.get(rl.invoiceLineId) ?? 0;
+    for (const [invoiceLineId, { qtyMilli, restock }] of aggregated) {
+      const line = byId.get(invoiceLineId)!;
+      const soldMilli = line.qty;
+      const priorMilli = alreadyReturned.get(invoiceLineId) ?? 0;
       if (priorMilli + qtyMilli > soldMilli) {
-        badRequest('over_return', `Cannot return more than sold (line ${rl.invoiceLineId}: sold ${soldMilli / 1000}, already returned ${priorMilli / 1000})`);
+        badRequest('over_return', `Cannot return more than sold (line ${invoiceLineId}: sold ${soldMilli / 1000}, already returned ${priorMilli / 1000})`);
       }
       // proportional credit of the line subtotal (grounded, never invented)
-      const amountCents = Math.round((line!.lineSubtotalCents * qtyMilli) / soldMilli);
+      const amountCents = Math.round((line.lineSubtotalCents * qtyMilli) / soldMilli);
       totalCents += amountCents;
-      const restock = rl.restock !== false;
       if (restock) {
         postMovement(tx, {
-          itemId: line!.itemId,
-          lotId: line!.lotId,
-          warehouseId: line!.warehouseId,
+          itemId: line.itemId,
+          lotId: line.lotId,
+          warehouseId: line.warehouseId,
           qty: qtyMilli, // + : stock returns
           movementType: 'sale_return',
           documentKind: 'credit_note',
@@ -119,7 +128,7 @@ export function createSalesReturn(ctx: Ctx, input: SalesReturnInput): { id: stri
           documentNumber: docNumber,
         });
       }
-      outLines.push({ id: newId(), itemId: line!.itemId, warehouseId: line!.warehouseId, lotId: line!.lotId, qty: qtyMilli, restock, amountCents, invoiceLineId: rl.invoiceLineId });
+      outLines.push({ id: newId(), itemId: line.itemId, warehouseId: line.warehouseId, lotId: line.lotId, qty: qtyMilli, restock, amountCents, invoiceLineId });
     }
 
     tx.db.insert(creditNotes).values({

@@ -73,6 +73,17 @@ describe('Sales returns / credit notes (Gap A)', () => {
     expect(() => createSalesReturn(tt.ownerCtx, { invoiceId, date: nowIso().slice(0, 10), lines: [{ invoiceLineId: line.id, qty: 4 }] })).toThrowError(/more than sold/);
   });
 
+  it('R3 F1 — duplicate line ids in ONE request cannot bypass the over-return ceiling', () => {
+    const { invoiceId } = soldInvoice(10);
+    fullyDeliver(invoiceId);
+    const line = listInvoiceLines(tt.ownerCtx, invoiceId)[0]!;
+    // two entries of 6 for the same line sum to 12 > 10 sold — must be blocked
+    expect(() => createSalesReturn(tt.ownerCtx, { invoiceId, date: nowIso().slice(0, 10), lines: [{ invoiceLineId: line.id, qty: 6 }, { invoiceLineId: line.id, qty: 6 }] })).toThrowError(/more than sold/);
+    // and a legitimate duplicate-summing-to-valid aggregates to one credit
+    const cn = createSalesReturn(tt.ownerCtx, { invoiceId, date: nowIso().slice(0, 10), lines: [{ invoiceLineId: line.id, qty: 3 }, { invoiceLineId: line.id, qty: 2 }] });
+    expect(cn.totalCents).toBe(5 * 50 * 100); // aggregated to 5 packs, not double-processed
+  });
+
   it('a return on an undispatched invoice is refused; reversing a credit note un-restocks', () => {
     const { invoiceId, customerId } = soldInvoice(10);
     const line = listInvoiceLines(tt.ownerCtx, invoiceId)[0]!;
@@ -132,6 +143,20 @@ describe('Single-invoice split delivery (Gap B)', () => {
     const line = listInvoiceLines(tt.ownerCtx, invoiceId)[0]!;
     const d1 = createDelivery(tt.ownerCtx, { invoiceId, destination: 'X', truckNumber: 'T1', driverName: 'D', driverPhone: '+2519', expectedDate: nowIso().slice(0, 10) });
     expect(() => dispatchDelivery(tt.ownerCtx, d1.id, { lineQtys: [{ invoiceLineId: line.id, qty: 11 }] })).toThrowError(/more than remaining/);
+  });
+
+  it('R3 F2 — duplicate line ids in ONE dispatch cannot over-ship', () => {
+    const { invoiceId } = soldInvoice(10);
+    const line = listInvoiceLines(tt.ownerCtx, invoiceId)[0]!;
+    const onHandStart = getOnHand(tt.ownerCtx, tt.items.pack1kg, tt.warehouses.a);
+    const d1 = createDelivery(tt.ownerCtx, { invoiceId, destination: 'X', truckNumber: 'T1', driverName: 'D', driverPhone: '+2519', expectedDate: nowIso().slice(0, 10) });
+    // two entries of 6 sum to 12 > 10 ordered — must be blocked, nothing shipped
+    expect(() => dispatchDelivery(tt.ownerCtx, d1.id, { lineQtys: [{ invoiceLineId: line.id, qty: 6 }, { invoiceLineId: line.id, qty: 6 }] })).toThrowError(/more than remaining/);
+    expect(getOnHand(tt.ownerCtx, tt.items.pack1kg, tt.warehouses.a)).toBe(onHandStart); // rolled back
+    // a duplicate summing to valid aggregates and advances qtyDelivered once
+    dispatchDelivery(tt.ownerCtx, d1.id, { lineQtys: [{ invoiceLineId: line.id, qty: 4 }, { invoiceLineId: line.id, qty: 3 }] });
+    expect(getOnHand(tt.ownerCtx, tt.items.pack1kg, tt.warehouses.a)).toBe(onHandStart - 7000);
+    expect(listInvoiceLines(tt.ownerCtx, invoiceId)[0]!.qtyDelivered).toBe(7000);
   });
 
   it('a full dispatch (no lineQtys) still completes the invoice on delivery', () => {

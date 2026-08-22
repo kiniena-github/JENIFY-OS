@@ -110,6 +110,22 @@ All conditions landed before commit. Remaining tracked items:
 | TE-L1 | recovery.ts tx cast `as unknown as Db` | L | tracked — writeAudit tx overload later |
 | TE-L3 | STANDARD_TEMPLATE_LAYERS live in config-mesob (platform layers in tenant pkg) | L | tracked — move to a platform package at tenant #2 |
 
+### Red team R3 — the 3 operational gaps (2026-08-22)
+
+Ledger arithmetic invariant HOLDS end-to-end through returns+split-delivery. No
+Criticals. Two Highs (same root cause: duplicate line id in one request bypassing a
+cumulative ceiling) — both FIXED.
+
+| # | Item | Sev | Status |
+|---|---|---|---|
+| R3-F1 | createSalesReturn: duplicate invoiceLineId in one request over-restocked + over-credited (HTTP-reachable) | H | **FIXED** — input lines aggregated by id before validating; TOCTOU read moved inside tx; test |
+| R3-F2 | dispatchDelivery: duplicate lineQtys id over-shipped, mis-tracked qtyDelivered (latent — route doesn't forward lineQtys yet) | H | **FIXED** — lineQtys aggregated by id before validating; test |
+| R3-F3 | returnedByLine read outside tx (TOCTOU) | M | **FIXED** — moved inside inTx |
+| R3-F4 | No reversal/correction workflow for a dispatched delivery | L | tracked |
+
+PROVEN SOUND: purchase returns (scalar qty, no array), tenant isolation, reversed-receipt
+/ negative / cross-tenant / cross-invoice / double-reverse all blocked.
+
 ### Red team R2 — slice 3 engines (2026-08-22)
 
 Attacked AI actions, offline replay, approvals, role experience, migration, template.
