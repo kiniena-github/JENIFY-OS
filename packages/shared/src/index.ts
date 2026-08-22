@@ -3,6 +3,10 @@
 
 // Template & capability platform (capability catalog, layer resolution algebra)
 export * from './templates.js';
+// Role Experience (presentation, strictly subordinate to permissions)
+export * from './experience.js';
+// Approvals (reusable server-enforced approval capability)
+export * from './approvals.js';
 
 // ---------------------------------------------------------------------------
 // Permission model

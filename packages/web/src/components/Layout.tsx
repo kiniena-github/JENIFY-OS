@@ -1,7 +1,8 @@
 import React from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import type { ActionId, ModuleId } from '@factoryos/shared';
+import type { ActionId, EffectiveExperience, ModuleId, QuickAction } from '@factoryos/shared';
 import { useAuth } from '../auth.js';
+import { api } from '../api.js';
 import { OfflineBanner } from './offline.js';
 
 interface NavEntry {
@@ -59,6 +60,19 @@ export default function Layout() {
   const [title, setTitleState] = React.useState('');
   const [sub, setSub] = React.useState('');
   const [navOpen, setNavOpen] = React.useState(false);
+  // Role Experience: the server resolves the worker's mobile action set (already
+  // intersected with their permissions). When present it drives the bottom bar,
+  // giving a warehouse worker a tiny RECEIVE/MOVE/ISSUE/COUNT/LOOKUP-style bar
+  // instead of the first four desktop menu items.
+  const [experience, setExperience] = React.useState<EffectiveExperience | null>(null);
+  React.useEffect(() => {
+    let live = true;
+    api.get<EffectiveExperience>('/api/experience').then(
+      (e) => { if (live) setExperience(e); },
+      () => { /* fall back to permission-derived nav */ },
+    );
+    return () => { live = false; };
+  }, []);
   const titleCtx = React.useMemo(
     () => ({
       title,
@@ -176,18 +190,43 @@ export default function Layout() {
             experience profile is the Role Experience Engine's job (Wave 1) —
             this is the responsive substrate it will configure. */}
         <nav className="bottom-nav no-print" aria-label="Primary">
-          {visibleNav.slice(0, 4).map((n) => (
-            <NavLink key={n.path} to={n.path} end={n.path === '/'} onClick={() => setNavOpen(false)}>
-              <span className="bn-icon" aria-hidden>{n.icon}</span>
-              <span className="bn-label">{t(n.labelKey, n.fallback)}</span>
-            </NavLink>
-          ))}
-          {visibleNav.length > 4 ? (
-            <button type="button" onClick={() => setNavOpen(true)}>
-              <span className="bn-icon" aria-hidden>⋯</span>
-              <span className="bn-label">{t('nav.more', 'More')}</span>
-            </button>
-          ) : null}
+          {(() => {
+            // worker-mode: a configured mobile action set wins; else the first
+            // permitted nav items. Both already respect permissions server-side.
+            const workerActions: QuickAction[] = experience?.mobileActions ?? [];
+            if (workerActions.length > 0) {
+              return (
+                <>
+                  {workerActions.slice(0, 5).map((a) => (
+                    <NavLink key={a.id} to={a.path} onClick={() => setNavOpen(false)}>
+                      <span className="bn-icon" aria-hidden>{a.icon ?? a.labelKey.charAt(0).toUpperCase()}</span>
+                      <span className="bn-label">{t(a.labelKey, a.id)}</span>
+                    </NavLink>
+                  ))}
+                  <button type="button" onClick={() => setNavOpen(true)}>
+                    <span className="bn-icon" aria-hidden>⋯</span>
+                    <span className="bn-label">{t('nav.more', 'More')}</span>
+                  </button>
+                </>
+              );
+            }
+            return (
+              <>
+                {visibleNav.slice(0, 4).map((n) => (
+                  <NavLink key={n.path} to={n.path} end={n.path === '/'} onClick={() => setNavOpen(false)}>
+                    <span className="bn-icon" aria-hidden>{n.icon}</span>
+                    <span className="bn-label">{t(n.labelKey, n.fallback)}</span>
+                  </NavLink>
+                ))}
+                {visibleNav.length > 4 ? (
+                  <button type="button" onClick={() => setNavOpen(true)}>
+                    <span className="bn-icon" aria-hidden>⋯</span>
+                    <span className="bn-label">{t('nav.more', 'More')}</span>
+                  </button>
+                ) : null}
+              </>
+            );
+          })()}
         </nav>
       </div>
     </div>

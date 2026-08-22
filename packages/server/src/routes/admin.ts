@@ -31,6 +31,20 @@ import {
   resolveTenantConfig,
   listTemplateLayers,
 } from '../services/templates.js';
+import {
+  effectiveExperience,
+  getRoleExperience,
+  saveRoleExperience,
+} from '../services/experience.js';
+import {
+  saveApprovalPolicy,
+  getApprovalPolicy,
+  decideApproval,
+  cancelApproval,
+  approvalHistory,
+  pendingApprovalsForActor,
+} from '../services/approvals.js';
+import type { RoleExperienceSpec, ApprovalPolicy } from '@factoryos/shared';
 import { getSettings, saveSettings, getSettingsVersion } from '../services/settings.js';
 import { listAudit } from '../services/audit.js';
 import { writeAudit } from '../services/audit.js';
@@ -220,6 +234,72 @@ export function registerAdminRoutes(app: FastifyInstance, db: Db): void {
     const ctx = requireCtx(db, req);
     requirePermission(ctx, 'settings', 'view');
     return listTemplateLayers(db, { kind: req.query.kind as never });
+  });
+
+  // ------------------------- role experience -------------------------------
+  // The effective experience for the CURRENT user (spec ∩ permissions). Any
+  // authenticated user may read their own; RBAC is still enforced per route.
+  app.get('/api/experience', async (req) => {
+    const ctx = requireCtx(db, req);
+    return effectiveExperience(ctx);
+  });
+
+  app.get<{ Params: { id: string } }>('/api/roles/:id/experience', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'users', 'view');
+    return { spec: getRoleExperience(ctx, req.params.id) };
+  });
+
+  app.put<{ Params: { id: string }; Body: { spec: RoleExperienceSpec } }>(
+    '/api/roles/:id/experience',
+    async (req) => {
+      const ctx = requireCtx(db, req);
+      // saveRoleExperience enforces manage_users itself
+      const version = saveRoleExperience(ctx, req.params.id, req.body.spec);
+      return { version };
+    },
+  );
+
+  // ----------------------------- approvals ---------------------------------
+  app.put<{ Params: { subjectType: string }; Body: { policy: ApprovalPolicy } }>(
+    '/api/approval-policies/:subjectType',
+    async (req) => {
+      const ctx = requireCtx(db, req);
+      const version = saveApprovalPolicy(ctx, req.params.subjectType, req.body.policy);
+      return { version };
+    },
+  );
+
+  app.get<{ Params: { subjectType: string } }>('/api/approval-policies/:subjectType', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'settings', 'view');
+    return { policy: getApprovalPolicy(ctx, req.params.subjectType) };
+  });
+
+  app.get('/api/approvals/pending', async (req) => {
+    const ctx = requireCtx(db, req);
+    return pendingApprovalsForActor(ctx);
+  });
+
+  app.post<{ Params: { id: string }; Body: { comment?: string } }>('/api/approvals/:id/approve', async (req) => {
+    const ctx = requireCtx(db, req);
+    return decideApproval(ctx, req.params.id, 'approve', req.body?.comment);
+  });
+
+  app.post<{ Params: { id: string }; Body: { comment?: string } }>('/api/approvals/:id/reject', async (req) => {
+    const ctx = requireCtx(db, req);
+    return decideApproval(ctx, req.params.id, 'reject', req.body?.comment);
+  });
+
+  app.post<{ Params: { id: string }; Body: { comment?: string } }>('/api/approvals/:id/cancel', async (req) => {
+    const ctx = requireCtx(db, req);
+    cancelApproval(ctx, req.params.id, req.body?.comment);
+    return { ok: true };
+  });
+
+  app.get<{ Params: { id: string } }>('/api/approvals/:id/history', async (req) => {
+    const ctx = requireCtx(db, req);
+    return approvalHistory(ctx, req.params.id);
   });
 
   // ------------------------ language intelligence --------------------------

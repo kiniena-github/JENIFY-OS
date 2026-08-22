@@ -65,3 +65,9 @@ T1–T10). Directional risks the Team Lead weighs when sequencing milestones:
    milestone gates must stay mechanical.
 
 *Update this file when the Founder sets or reprioritizes milestones.*
+
+## Research watch (updated 2026-08-22)
+
+- **New sector opportunities** (docs/research/PRODUCT_INTELLIGENCE_LIBRARY.md): Pharmacy = FEFO + expiry alerts on the ALREADY-SHIPPED batch/lot/genealogy core (small build, whole sector); Logistics/last-mile = offline POD + COD cash reconciliation on the shipped Deliveries+Payments spine.
+- **Mobile-money**: no pan-African API exists → reconcile-first, one core payment seam + thin per-country adapters (Telebirr/M-PESA/Paystack). Works offline.
+- **Competitor watch**: Odoo 20 launches 24-26 Sep 2026 with agentic AI + rebuilt mobile + Odoo Experience Africa (Nairobi 3-4 Sep). Marketing-timing threat, NOT architecture — Odoo stays cloud-first + consultant-gated. MONITOR whether Odoo 20 mobile works offline; if yes, real escalation. Embedded-finance rails (OmniRetail/Wasoko) still argue for the payment/credit-rail seam.

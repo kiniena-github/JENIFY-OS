@@ -110,6 +110,32 @@ All conditions landed before commit. Remaining tracked items:
 | TE-L1 | recovery.ts tx cast `as unknown as Db` | L | tracked — writeAudit tx overload later |
 | TE-L3 | STANDARD_TEMPLATE_LAYERS live in config-mesob (platform layers in tenant pkg) | L | tracked — move to a platform package at tenant #2 |
 
+### Wave 1 engine slice review (combined architect+QA, 2026-08-22 — APPROVE, 0 must-fix)
+
+Four load-bearing safety properties CONFIRMED holding: experience⊆permission, approvals
+server-enforcement+SoD, offline at-most-once, AI permission/tenant safety. Conditions landed
+before commit; L-items tracked.
+
+| # | Item | Sev | Status |
+|---|---|---|---|
+| APR-M1 | Approvals evaluated latest policy, not the request's pinned version | M | **FIXED** — decideApproval/pendingApprovals use getApprovalPolicyVersion(req.policyVersion); test |
+| APR-M2 | SoD did not stop one user clearing two same-role steps | M | **FIXED** — saveApprovalPolicy rejects duplicate approver roles; test |
+| APR-L1 | status re-check not inside decide tx | L | **FIXED** — re-assert pending inside inTx |
+| EXP-L2 | homeFocus may default to dashboard without a view check | L | tracked (dashboard route still enforces; no leak) |
+| EXP-L3 | client renders mobileActions without a can() re-check | L | tracked (target route 403s; no escalation) |
+| PERF-L4 | invoicesPaidCents binds all ids in one inArray (SQLite ~32k param ceiling) | L | tracked — chunk for very large tenants |
+| IMP-L5 | /api/import/detect authenticated but not permission-gated | L | tracked (no tenant reads/writes; caller data only) |
+
+### Capability gaps surfaced by simulation lab (2026-08-22, feed roadmap)
+
+Found by driving real services through operational periods (test/simulation.test.ts):
+
+| # | Gap | Impact |
+|---|---|---|
+| GAP-1 | No sales return / credit note (restock returned goods + credit customer) | needed by retail + wholesale + pharmacy |
+| GAP-2 | No partial/split delivery of a SINGLE invoice (dispatch ships all reservations at once) | wholesale/distribution route delivery |
+| GAP-3 | No partial purchase return to supplier (only full reverseReceipt) | procurement spine |
+
 ### Wave 1 red-team + performance (2026-08-22)
 
 | # | Item | Sev | Status |

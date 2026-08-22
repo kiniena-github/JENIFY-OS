@@ -17,6 +17,9 @@ import { registerInventoryRoutes } from './routes/inventory.js';
 import { registerProductionRoutes } from './routes/production.js';
 import { registerCommercialRoutes } from './routes/commercial.js';
 import { registerInsightRoutes } from './routes/insights.js';
+import { registerSyncRoutes } from './routes/sync.js';
+import { registerImportRoutes } from './routes/importing.js';
+import { registerAssistantRoutes } from './routes/assistant.js';
 
 export const SESSION_COOKIE = 'fos_session';
 
@@ -74,6 +77,9 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   registerProductionRoutes(app, opts.db);
   registerCommercialRoutes(app, opts.db);
   registerInsightRoutes(app, opts.db);
+  registerSyncRoutes(app, opts.db);
+  registerImportRoutes(app, opts.db);
+  registerAssistantRoutes(app, opts.db);
 
   return app;
 }

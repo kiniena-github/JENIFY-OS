@@ -223,6 +223,103 @@ export const tenantTemplateBindings = sqliteTable(
   (t) => [uniqueIndex('tenant_template_bindings_ver').on(t.tenantId, t.version)],
 );
 
+// ------------------- Role Experience (presentation config) -----------------
+// Versioned per role, like role_permissions. The spec is a PRESENTATION hint;
+// RBAC remains authoritative and is enforced independently on every route. The
+// resolver intersects this with the user's real permissions before serving it.
+export const roleExperiences = sqliteTable(
+  'role_experiences',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    roleId: text('role_id').notNull(),
+    version: integer('version').notNull(),
+    spec: text('spec', { mode: 'json' }).notNull(), // RoleExperienceSpec
+    createdBy: text('created_by'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [uniqueIndex('role_experiences_ver').on(t.roleId, t.version)],
+);
+
+// ------------------- Approvals (shared Core capability) --------------------
+export const approvalPolicies = sqliteTable(
+  'approval_policies',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    subjectType: text('subject_type').notNull(),
+    version: integer('version').notNull(),
+    policy: text('policy', { mode: 'json' }).notNull(), // ApprovalPolicy
+    createdBy: text('created_by'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [uniqueIndex('approval_policies_ver').on(t.tenantId, t.subjectType, t.version)],
+);
+
+export const approvalRequests = sqliteTable(
+  'approval_requests',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    subjectType: text('subject_type').notNull(),
+    subjectId: text('subject_id').notNull(), // the domain record awaiting approval
+    magnitudeMinor: integer('magnitude_minor').notNull().default(0),
+    status: text('status').notNull().default('pending'), // pending|approved|rejected|cancelled
+    currentStep: integer('current_step').notNull().default(0),
+    totalSteps: integer('total_steps').notNull().default(1),
+    policyVersion: integer('policy_version'),
+    requestedBy: text('requested_by'),
+    createdAt: text('created_at').notNull(),
+    resolvedAt: text('resolved_at'),
+  },
+  (t) => [
+    index('approval_requests_subject').on(t.tenantId, t.subjectType, t.subjectId),
+    index('approval_requests_status').on(t.tenantId, t.status),
+  ],
+);
+
+// Append-only ledger of every action taken on an approval request.
+export const approvalActions = sqliteTable(
+  'approval_actions',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    requestId: text('request_id').notNull(),
+    step: integer('step').notNull(),
+    action: text('action').notNull(), // submit|approve|reject|cancel|comment|resubmit
+    actorUserId: text('actor_user_id'),
+    comment: text('comment'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [index('approval_actions_request').on(t.requestId)],
+);
+
+// ------------------- Offline sync (O2 — Receiving first) -------------------
+// Server-authoritative operation log. A device captures an operation offline
+// with a client-generated idempotency key; on reconnect it replays here. The
+// server applies each op AT MOST ONCE and records the outcome, so a duplicate
+// replay returns the original result instead of double-posting. NEVER a silent
+// last-write-wins: a business rejection is recorded and surfaced, not merged.
+export const syncOps = sqliteTable(
+  'sync_ops',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    // client-generated UUIDv7 idempotency key — the uniqueness anchor
+    opKey: text('op_key').notNull(),
+    opType: text('op_type').notNull(), // e.g. 'receiving.post'
+    payload: text('payload', { mode: 'json' }).notNull(),
+    status: text('status').notNull(), // applied | rejected | conflict
+    resultRef: text('result_ref'), // id/number of the created record when applied
+    message: text('message'), // rejection/conflict explanation (surfaced to user)
+    deviceId: text('device_id'),
+    appliedBy: text('applied_by'),
+    clientCreatedAt: text('client_created_at'),
+    serverAppliedAt: text('server_applied_at').notNull(),
+  },
+  (t) => [uniqueIndex('sync_ops_key').on(t.tenantId, t.opKey)],
+);
+
 // ------------------- Language intelligence (platform-level) ----------------
 // Official JENIFY language packs are global defaults layered UNDER tenant
 // overrides: English base -> official global pack -> country variant ->

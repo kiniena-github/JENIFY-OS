@@ -57,6 +57,13 @@
       "when": 1787367036401,
       "tag": "0007_clear_maelstrom",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1787370387263,
+      "tag": "0008_gray_brood",
+      "breakpoints": true
     }
   ]
 }

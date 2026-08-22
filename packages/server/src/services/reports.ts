@@ -18,7 +18,7 @@ import { deliveryPerformance } from '@factoryos/shared';
 import type { Ctx } from './context.js';
 import { stockOverview } from './stockview.js';
 import { creditOverview } from './creditview.js';
-import { invoicePaidCents } from './sales.js';
+import { invoicePaidCents, invoicesPaidCents } from './sales.js';
 import { listPayments } from './payments.js';
 
 export interface Period {
@@ -454,13 +454,16 @@ export function salesReport(ctx: Ctx, p: Period, filter: { customerId?: string }
     linesByInvoice.set(line.invoiceId, list);
   }
 
+  // perf: one grouped query for all invoices' paid-cents, not N per-invoice
+  const paidByInvoice = invoicesPaidCents(ctx, invoices.map((r) => r.inv.id));
+
   return {
     invoiceCount: invoices.length,
     subtotalCents: invoices.reduce((s, r) => s + r.inv.subtotalCents, 0),
     discountCents: invoices.reduce((s, r) => s + r.inv.discountCents, 0),
     vatCents: invoices.reduce((s, r) => s + r.inv.vatCents, 0),
     totalCents: invoices.reduce((s, r) => s + r.inv.totalCents, 0),
-    paidCents: invoices.reduce((s, r) => s + invoicePaidCents(ctx, r.inv.id), 0),
+    paidCents: invoices.reduce((s, r) => s + (paidByInvoice.get(r.inv.id) ?? 0), 0),
     cancelledCount: inPeriod(cancelled, p).length,
     breakdown: invoices.map(({ inv, customerName }) => ({
       invoiceNumber: inv.docNumber,

@@ -396,6 +396,35 @@ export function invoicePaidCents(ctx: Ctx, invoiceId: string): number {
   return rows[0]?.total ?? 0;
 }
 
+/**
+ * Paid-cents for MANY invoices in ONE grouped query (perf: replaces the
+ * per-invoice N+1 in reports/credit views). Returns a Map invoiceId → cents;
+ * invoices with no posted allocations are absent (treat as 0).
+ */
+export function invoicesPaidCents(ctx: Ctx, invoiceIds: string[]): Map<string, number> {
+  const out = new Map<string, number>();
+  if (invoiceIds.length === 0) return out;
+  const rows = ctx.db
+    .select({
+      invoiceId: paymentAllocations.invoiceId,
+      total: sql<number>`coalesce(sum(${paymentAllocations.amountCents}), 0)`,
+    })
+    .from(paymentAllocations)
+    .innerJoin(payments, eq(paymentAllocations.paymentId, payments.id))
+    .where(
+      and(
+        eq(paymentAllocations.tenantId, ctx.tenantId),
+        inArray(paymentAllocations.invoiceId, invoiceIds),
+        eq(paymentAllocations.status, 'active'),
+        eq(payments.status, 'posted'),
+      ),
+    )
+    .groupBy(paymentAllocations.invoiceId)
+    .all();
+  for (const r of rows) out.set(r.invoiceId, r.total);
+  return out;
+}
+
 export type CreditStatus = 'active' | 'partial' | 'paid' | 'overdue';
 
 export function invoiceCreditStatus(
@@ -423,9 +452,11 @@ export function customerOutstanding(ctx: Ctx, customerId: string): number {
       ),
     )
     .all();
+  // perf: one grouped paid-cents query for all the customer's invoices, not N
+  const paidByInvoice = invoicesPaidCents(ctx, invoices.map((i) => i.id));
   let outstanding = 0;
   for (const inv of invoices) {
-    outstanding += Math.max(0, inv.totalCents - invoicePaidCents(ctx, inv.id));
+    outstanding += Math.max(0, inv.totalCents - (paidByInvoice.get(inv.id) ?? 0));
   }
   return outstanding;
 }

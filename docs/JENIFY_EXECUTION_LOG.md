@@ -15,6 +15,26 @@ isolated Mesob demo (separate VACUUM-INTO snapshot DB, rotated passwords, Henok 
 Operations Manager) verified end-to-end through a Cloudflare HTTPS quick tunnel — founder
 stack untouched. Wave 1 awaits Founder direction.
 
+## 2026-08-22 — Wave 1 slice 2: Role Experience + Approvals + Offline Receiving + Migration + AI
+Continued Wave 1 (Founder "keep moving"). Built as Core (Team Lead) with 4 parallel agents.
+BUILD: (A) Role Experience Engine — experience is presentation strictly ⊆ permissions;
+versioned per-role spec; effectiveExperience intersects with the live permission matrix;
+web bottom-bar becomes a worker action set. (C) Shared Approvals Engine — ONE reusable
+capability; server-enforced (only step-role approves), separation of duties, threshold,
+multi-step, append-only action log, isApproved gates posting. (B) Offline Receiving O2
+server substrate — sync_ops at-most-once idempotent replay; business rejection recorded &
+surfaced, never LWW/merged; apply+marker atomic. (A4) Migration MVP — parsed→detect→map→
+validate→dedupe→preview(zero-writes)→import; opening stock via audited ledger adjustments;
+never invents values. (A5) JENIFY AI v0 read-only — 16 typed intents, permission-first
+fail-closed, tenant-from-ctx-only, no DB handle/no raw SQL, deterministic local NL matcher
+(no LLM), every invocation audited incl. refusals. (D) Perf — grouped invoicesPaidCents
+kills the sales-report + customerOutstanding N+1. Migration 0008 (role_experiences,
+approval_policies/requests/actions, sync_ops), additive. Agents also delivered: simulation
+lab (2 business profiles, non-happy paths, ledger invariants; surfaced GAP-1 returns/
+credit-note, GAP-2 single-invoice split delivery, GAP-3 partial purchase return) and the
+Product Intelligence Library (Pharmacy FEFO + Logistics last-mile opportunities; Odoo 20
+watch). 219→303 tests green (+3 documented skips); JS budget held (69.22 kB gzip).
+
 ## 2026-08-22 — Wave 1 (GO): template engine + security hardening + parallel program
 Founder authorized Wave 1 + expanded 24-agent parallel mission. Repo: main fast-forwarded to
 d1d9707, tag checkpoint-pre-wave1, DB snapshot verified. Branch `wave-1`. Applied 12 Founder

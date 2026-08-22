@@ -25,3 +25,6 @@ export * from './dashboard.js';
 export * from './recovery.js';
 export * from './languageIntel.js';
 export * from './templates.js';
+export * from './experience.js';
+export * from './approvals.js';
+export * from './syncops.js';
