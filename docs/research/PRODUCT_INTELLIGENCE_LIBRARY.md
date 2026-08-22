@@ -311,3 +311,130 @@ is still **Excel + WhatsApp + nothing** — R2 §1.3 — the deepest "competitor
    `docs/JENIFY_DECISIONS.md`.
 5. **No invented statistics; concept-level study only** (Odoo LGPLv3 / ERPNext GPLv3 — never code/schema).
 6. New rounds **append** (mark `Rn`) and extend; they do not rewrite prior findings.
+
+---
+
+# Final-acceleration refresh (2026-08-22)
+
+**Round tag `R4`.** A REFRESH — extends §1–§5 above and does not repeat them. Web sources accessed
+2026-08-22; index in §R4-src. Confidence + status legends per §0. The four blocks below use the mission's
+own section numbers (§12 competitor moves, §13 Africa intelligence, §11 next-sector readiness, §20
+research→product decisions) so the Team Lead can find them by the numbers requested.
+
+## §12 · Competitor moves (2026) — problem → why good → complexity → JENIFY simpler? → verdict
+
+**The single most important development — the Odoo-20 offline watch item is now RESOLVED (and reassuring).**
+The R3 library (§2C) said: *"if Odoo 20's mobile genuinely works offline (it has not, historically), that
+would be a real escalation — verify post-launch."* Verified against **Odoo's own v19 documentation**:
+Odoo's general offline mode makes *"certain data available offline for logged-in users"* but **"previously
+opened records can be viewed but not modified while offline"** (max **2 GB** cache, oldest evicted). In
+plain terms Odoo 20's "rebuilt mobile / offline-first" is an **offline *read* cache, not offline data
+entry** — **Point of Sale remains the only module with genuine offline *writes*** (IndexedDB queue). So the
+escalation did **not** happen: Odoo still cannot let a warehouse clerk or salesperson *transact* offline
+across modules, which is exactly JENIFY's contracted O2 queued-write moat. **Verdict for the Team Lead:
+hold the line — Odoo 20 is a marketing-timing threat on "mobile + AI," not an architecture threat on
+offline-writes or no-consultant.** Conf HIGH (primary vendor doc). `[X-R4-1]`
+
+| # | Vendor / move (2026) | Problem it solves → why good | What makes it complex | JENIFY simpler-value answer | Verdict |
+|---|---|---|---|---|---|
+| M-Odoo | **Odoo 20** (GA at Odoo Experience Brussels 24–26 Sep 2026; Africa event Nairobi 3–4 Sep): agentic AI ("Ask AI", AI agents, doc automation), **rebuilt mobile**, module simplification. Note Odoo itself calls v20 *"a list of things we will maybe do"* — directional. | Breadth + modern mobile + AI on one data model; Africa push. | Cloud-first, **still partner/consultant-gated** (R2 §3: 40% fail, $15k/16-mo cases); **mobile offline = read-only cache, POS-only writes** `[X-R4-1]`. | Local-first zero-cloud + **offline writes (O2)** + no-consultant onboarding + real factory floor — the axes Odoo structurally can't follow. Don't race its AI. | **LATER/monitor** (hold axis) |
+| M-ERPNx | **ERPNext v16** (released Jan 2026, launched Frappeverse Egypt Dec 2025): Frappe Framework v16 "AI era" — Integrated **AI Actions** (native LLM NL queries), Raven AI agents, an **MCP bridge to Claude/ChatGPT**, "Frappe Caffeine" perf, redesigned UI, **Phantom BOMs**. | NL questions over the ERP + faster UI + a real MCP path to Claude; free core. | Self-hosted, **offline still effectively none**; AI value arrives via community apps + LLM keys, i.e. more assembly/consultant work. | JENIFY's AI1 (read-only NL over a *typed action catalog*) is the safer same-value path; MCP-to-Claude is a pattern to note, not a race. Phantom BOM ≈ our planned BOM-lite (S6). | **BUILD** (AI action-catalog seam) · MCP note = LATER |
+| M-BC | **Dynamics 365 BC 2026 wave 1**: built-in **Sales Order Agent** + **Payables Agent** (reads invoices, matches vendor/account, **prepares for approval with human oversight**), **Agent Designer GA May 2026**, **MCP** support, unified agent task pane; copilot in-license. | "Agentic ERP" that drafts and waits for human approval — the strongest mainstream proof of suggest-and-confirm. | Cloud + partner setup ceremony; $70–100/user/mo; **no offline**. | This *validates JENIFY's AI1 design* (intent→action→permission→validation→**preview/confirm**→audit). The Payables-Agent "read → prepare → human approves" loop is literally our safety pipeline — adopt the pattern, keep it local + read-first. | **BUILD** (validates AI1 direction) |
+| M-SAP | **SAP** Joule + AI agents now across **35 solutions**; "Joule Work" orchestrates end-to-end processes across SAP/non-SAP. Business One specifically stays quiet — the energy is S/4HANA. | Enterprise-grade agent orchestration. | Enterprise scale, cost, complexity — not the SME-offline tier. | Irrelevant to JENIFY's ICP; do not chase. | **REJECT** (to chase) |
+| M-Zoho | **Zoho** Zia **Agent Studio** (no-code, 700+ actions) + Agent Marketplace (25+ agents); **Zoho Books**: NL financial queries, **transaction anomaly detection**, predictive cashflow (Zia Insights). | NL finance queries + anomaly flags — genuinely useful owner intelligence. | Cloud; per-user + AI add-on economics. | Anomaly detection validates AI2 (cash/COD/expiry variance flags over our ledger); NL query validates AI1. Deliver locally, suggest-only. | **LATER** (AI2 confirm) |
+| M-Tally | **TallyPrime 6.0 (2026)**: **Connected Banking** (145 IN + 80 intl banks) → **auto bank-statement import + auto-categorise + reconciliation**; WhatsApp-for-Business; e-invoice/GST filing. Mobile app still *"real-time access to data"* (view/monitor), **not full offline entry**. | Kills hours of manual bank posting; pushes Tally "connected". | Ironically erodes Tally's pure-offline identity; mobile is still **read/monitor, not an offline data-entry client** (confirms R2 §2). | Tally's mobile still can't transact offline — JENIFY's exact opening is unchanged. Bank-statement auto-categorise = a LATER capability worth noting (bank CSV import + rules) on top of our reconcile-first seam. | **LATER** (bank-import capability) |
+| M-Afr | **African vendors:** Ashewa **SmartERP** (Ethiopia) publicly targets "East-Africa leader by 2030" — still **cloud SaaS**; **ERPNext Kenya** ships native **M-PESA + KRA eTIMS + VAT** and flat hosting pricing vs "2–6% of revenue" per-user SaaS. | Localised compliance + payments at home / one border over. | Cloud (Ashewa) fails the connectivity/power reality; localised ERPNext inherits the consultant-failure pattern (R2 §3). | JENIFY's local-first + Mesob factory depth + EC calendar + editable Amharic stays unoccupied at home; the *lesson* is that a pharmacy/retail pack increasingly needs the **country e-doc seam bundled** (CO1) to match ERPNext-KE. | **BUILD** (bundle e-doc seam sooner) |
+
+## §13 · Africa intelligence — one-line status per country (digital-tax / e-invoicing + mobile-money rail) + 2026 flag
+
+Synthesis of `AFRICA_COUNTRY_PACK_INTELLIGENCE.md` (dated 2026-08-21) with fresh 2026 confirmations. Every
+tax/e-doc item is `[VERIFY-LOCAL]`. **⚑ = a 2026 regulatory change JENIFY's country-pack roadmap must track.**
+
+| Country | e-invoicing / digital-tax status (2026) | Mobile-money rail | ⚑ 2026 change to track |
+|---|---|---|---|
+| **Ethiopia** 🇪🇹 | VAT 15%; **Directive 1142/2026** clearance regime (IRN+QR, Ministry-authorised software, **26 sectors with mandatory offline resilience**) — issued 2026, phased; some trackers now read effective **~2027**. | Telebirr (58.6M) + CBE Birr; M-PESA-ET live. | **⚑ #1 — HOME MARKET:** JENIFY may itself need Ministry authorisation as invoicing software; exact phase dates + vendor-authorisation procedure still unpinned. Conf MED. `[X-R4-2]` |
+| **Kenya** 🇰🇪 | VAT 16%; **eTIMS mandatory & enforced beyond VAT**; **since 1 Jan 2026 KRA cross-validates income/expense against eTIMS** → non-eTIMS invoices worthless for deductions + gate Tax Compliance Certs. | M-PESA (Daraja) + Pesalink (2026 fee cuts). | ⚑ eTIMS **certification is the critical path** for any Kenya pack; cross-validation now live. Conf HIGH. |
+| **Nigeria** 🇳🇬 | VAT 7.5%; **FIRSMBS/Peppol** — large from Nov 2025, **medium 2026**; **small phase now reads 2027 with a ₦50M-turnover relief threshold**. | NIBSS→NPS (ISO 20022); OPay/PalmPay/aggregators. | ⚑ SME phase eased to **2027 + ₦50M threshold**; free FIRS SME portal mooted — monitor whether that undercuts third-party invoicing. Conf MED. `[X-R4-3]` |
+| **South Africa** 🇿🇦 | VAT 15% (2025 hike reversed); **no mandate — SARS Digital-VAT-Model consultation opened 17 Aug 2026, comments due 16 Oct 2026, mandatory ~2030**. | Card/EFT + **PayShap** instant (scaling). | ⚑ Consultation window **open now**; decentralised/Peppol-style model signalled → build readiness, not integration. Conf HIGH. |
+| **Ghana** 🇬🇭 | 2026 VAT overhaul → effective **20%**, levies now input-deductible; **E-VAT CIS clearance mandatory for ALL VAT-registered from Jan 2026, no threshold**. | MTN MoMo ~60%; e-levy abolished Apr 2025. | ⚑ **CIS certification required**; new "levies-on-base, VAT-on-base+levies" stacking must be generic in the tax adapter. Conf HIGH. |
+| **Tanzania** 🇹🇿 | VAT 18% (Zanzibar 15%, separate authority); **VFD (Virtual Fiscal Device)** fiscal receipts mandatory ~all sales. | M-Pesa/Mixx/Airtel + TIPS. | ⚑ Path = integrate an **accredited VFD provider** first, own accreditation later. Conf HIGH. |
+| **Uganda** 🇺🇬 | VAT 18%; **EFRIS real-time**; since Jul 2025 mandatory for **12 sectors incl. manufacturing**; **Aug 2026: income-tax deductions denied without EFRIS e-invoices**. | MTN/Airtel MoMo (>70% adults). | **⚑ Hits JENIFY's factory ICP directly** — a Ugandan factory tenant needs EFRIS from day 1. Conf HIGH. |
+| **Rwanda** 🇷🇼 | VAT 18%; **EBM** receipt for every sale; **software must be RRA CIS-certified with a Developer ID** to connect OSDC API. | MTN MoMo + Airtel. | ⚑ Cleanest rules = best **certification-pilot market** to learn the E-Africa playbook cheaply. Conf HIGH. |
+| **Egypt** 🇪🇬 | VAT 14%; **ETA B2B e-invoicing mandatory since 2023 + B2C e-receipts expanding**; **VAT threshold cut to EGP 250k, registration by 31 Mar 2026** pulls micro-SMEs in. | InstaPay + Fawry + wallets (Meeza). | ⚑ Threshold cut widens the regime; **RTL + digital-signature hardware** = the platform's biggest single localisation cost. Conf HIGH. |
+| **Morocco** 🇲🇦 | VAT 20%; **CTC e-invoicing rollout 2026–27** (DGI); French-first invoices. | Cash ~84%; Maroc Pay wallet infra. | ⚑ CTC timing + French-first pack (reusable across francophone Africa). Conf MED. |
+
+**Most urgent single item:** **Ethiopia Directive 1142/2026** — it is the *home* tenant, its go-live timing
+is still unpinned (2026 vs ~2027), and it may require JENIFY itself to be Ministry-authorised invoicing
+software. Uganda EFRIS (factory ICP) and Kenya eTIMS cross-validation are the close seconds. The pan-African
+pattern is unchanged and hardening: **in 8/10 countries invoicing software is a government-certified,
+government-connected component** — so the CO1 e-document seam is now a *near-term* build, not a "when
+mandated" one.
+
+## §11 · Next-sector readiness
+
+**Already-scoped sectors — readiness delta since R3:**
+- **Pharmacy** — *delta: the country e-doc seam is now co-required.* Reuse is still HIGH (FEFO/expiry on
+  shipped batch/genealogy, SE7), but ERPNext-KE-class pharma packs now bundle **eTIMS + M-PESA** natively,
+  so a competitive pharmacy pack must ship the CO1 e-doc seam alongside FEFO — pull CO1 forward. Conf HIGH.
+- **Logistics** — *delta: the moat got cheaper to defend.* POD + COD reconciliation on shipped
+  deliveries+payments (SE10/SE11) is unchanged HIGH-reuse, and the §12 finding that **Odoo/Tally mobile
+  still can't transact offline** widens the gap — offline POD/COD capture is a field-grade record no cloud
+  TMS matches. Conf HIGH.
+
+**New sectors — single highest-leverage JENIFY entry point each (so the next expansion is cheaper):**
+| Sector | Cheapest entry primitive (maximum reuse of shipped/designed core) | Leans on |
+|---|---|---|
+| **Hospitality (hotel)** | **Folio = an open invoice with running charges**; room = a bookable resource. | shipped invoicing + credit/aging (C4) |
+| **Restaurant** | **Recipe = BOM-lite backflush** for plate cost + table order = a draft sale; kitchen ticket ≈ make-order board (SE2). | BOM-lite (S6, M3) + shipped sales |
+| **Agriculture** | **Harvest = a production batch (lot + season)**; input distribution on the credit core; landmark addressing (S12) for outgrower collection. | shipped batch/genealogy + credit |
+| **Healthcare (clinic)** | **Patient = a party, visit = a document**; drug/consumable dispensing rides pharmacy FEFO; insurance = payer party (SE9). | pharmacy FEFO (SE7) + documents |
+| **Automotive (workshop)** | **Job card = a stage-based work order** consuming parts (ledger) + labour lines → invoice. | shipped batches/stages + ledger |
+| **Real Estate** | **Rent roll = a recurring-invoice schedule** per unit/lease, with statements/aging. | shipped invoicing + statements (C4) |
+| **Professional Services** | **Engagement = the shared project cost object (SE6)** + timesheet line → billable invoice. | SE6 cost dimension (already designed) |
+
+**The two cheapest next-sector entry points** (least new machinery, most reuse):
+1. **Professional Services** — reuses the **already-designed project cost object (SE6)** built for
+   construction; add only a timesheet line → billable invoice. Once SE6 ships, PS is nearly free.
+2. **Real Estate** — a **recurring-invoice schedule (rent roll)** on the shipped invoicing + statements/aging
+   spine; the only new machinery is a schedule generator. (Restaurant is a close third but is gated on
+   BOM-lite/M3.)
+
+## §20 · Research → product decisions (every R4 finding classified)
+
+| Finding (R4) | Classification | Status | Note |
+|---|---|---|---|
+| Odoo-20 mobile offline = **read-only cache, POS-only writes** (moat intact) | (intelligence — reinforces **CORE** offline-writes O2) | designed (O2) | Hold axis; O2 queued writes remain the differentiator. |
+| BC Payables/Sales Agent = validated **suggest-and-confirm** loop | **AI** (AI1) | designed | Adopt pattern; keep local + read-first + human-approve. |
+| ERPNext MCP-to-Claude bridge; NL AI Actions | **AI** (AI1) | designed | Typed action catalog is our safer same-value path. |
+| Zoho Books anomaly detection / NL finance queries | **AI** (AI2/AI1) | not-started | Variance flags over the ledger; suggest-only. |
+| Tally 6.0 auto bank-statement import + categorise | **SHARED CAPABILITY** | not-started | Bank CSV import + rules on the reconcile-first seam. |
+| ERPNext-KE bundles eTIMS+M-PESA → pull e-doc seam forward | **COUNTRY** (CO1) | designed | Now a near-term build, not "when mandated". |
+| Ethiopia 1142/2026 authorisation + phase timing | **COUNTRY** (CO1/CO3) | designed | ⚑ Home-market #1; commission legal read (owned by research-einvoicing). |
+| Uganda EFRIS manufacturing mandate / Kenya eTIMS cross-validation | **COUNTRY** (CO1) | designed | Factory ICP + E-Africa critical path. |
+| SARS Digital-VAT consultation (SA), Morocco CTC 2026–27 | **COUNTRY** (CO1) | not-started | Readiness only; monitor. |
+| Hospitality folio primitive | **SECTOR** (new) | not-started | Open invoice + running charges. |
+| Restaurant recipe=BOM-lite + table order | **SECTOR** (new) | not-started | Gated on BOM-lite (S6). |
+| Agriculture harvest=batch | **SECTOR** (new) | not-started | Reuses batch/genealogy + S12. |
+| Healthcare patient=party, visit=document | **SECTOR** (new) | not-started | Rides pharmacy FEFO. |
+| Automotive job card=stage work order | **SECTOR** (new) | not-started | Reuses stages + ledger. |
+| **Real Estate rent roll = recurring invoice schedule** | **SECTOR** (new) — *cheapest #2* | not-started | Only new machinery: schedule generator. |
+| **Professional Services engagement = SE6 cost object + timesheet** | **SECTOR** (new) — *cheapest #1* | not-started | Nearly free once SE6 ships. |
+| SAP Joule enterprise-agent race | **REJECT** (to chase) | — | Out of JENIFY's SME-offline tier. |
+
+## §R4-src · Source index (accessed 2026-08-22)
+
+- `[X-R4-1]` odoo.com/documentation/19.0 **offline_mode** (offline = view previously-opened records, *"not
+  modified while offline"*, 2 GB cap) — primary; odoo.com/forum offline-functionality (POS-only writes);
+  banibro.com, flexsin.com, aspiresoftserv.com, odooskillz.com (Odoo 20 Sep 2026: agentic AI, rebuilt
+  mobile, "maybe-do" caveat; v19.3 "offline-first" claim = the read cache above).
+- `[X-R4-2]` ERPNext v16: ksolves.com, frappe.io/erpnext/version-16, finbyz.tech, mith.tech (AI Actions,
+  Raven, MCP-to-Claude, Frappe Caffeine, Phantom BOM); Ethiopia 1142/2026: kiyalaw.com, feyselandassociates
+  (PKF ET), eagleadvocates.com, e-invoice.app/country/ET (effective ~2027 read).
+- `[X-R4-3]` D365 BC 2026 wave 1: learn.microsoft.com release-plan 2026wave1, stoneridgesoftware.com,
+  dynamics.tensoft.com (Sales Order + Payables Agents, Agent Designer GA May 2026, MCP); SAP: news.sap.com
+  Q1/Q2 2026 (Joule 35 solutions, Joule Work); Zoho: zoho.com/books AI features, crmforyourbusiness.com,
+  aiproductivity.ai (Zia Agent Studio, anomaly detection); Tally 6.0: softwaresuggest.com/tallyprime,
+  spectracompunet.com, tallyatcloud.com (Connected Banking, mobile view-only); Africa vendors:
+  ashewatechnology.com, smarterp.et, frappe.io/erpnext/kenya, nexprobusinesssolutions.co.ke; Nigeria SME
+  phase 2027/₦50M: globalvatcompliance.com, riotimesonline.com, tryduplo.com; Kenya/other countries carried
+  from `AFRICA_COUNTRY_PACK_INTELLIGENCE.md` (2026-08-21).

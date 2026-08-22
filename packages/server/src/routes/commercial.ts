@@ -3,6 +3,15 @@ import type { Db } from '../db/index.js';
 import { requireCtx } from '../app.js';
 import { requirePermission, requireAnyPermission, canViewFinancial } from '../services/permissions.js';
 import {
+  createSalesReturn,
+  reverseSalesReturn,
+  listCreditNotes,
+  createPurchaseReturn,
+  listPurchaseReturns,
+  type SalesReturnInput,
+  type PurchaseReturnInput,
+} from '../services/returns.js';
+import {
   createInvoice,
   confirmInvoice,
   cancelInvoice,
@@ -43,6 +52,31 @@ function maskMoney<T extends object>(row: T, fields: (keyof T)[], canSee: boolea
 }
 
 export function registerCommercialRoutes(app: FastifyInstance, db: Db): void {
+  // ------------------------------- returns ---------------------------------
+  app.post<{ Body: SalesReturnInput }>('/api/sales-returns', async (req) => {
+    const ctx = requireCtx(db, req);
+    return createSalesReturn(ctx, req.body); // enforces sales.create
+  });
+  app.post<{ Params: { id: string }; Body: { reason: string } }>('/api/sales-returns/:id/reverse', async (req) => {
+    const ctx = requireCtx(db, req);
+    reverseSalesReturn(ctx, req.params.id, req.body?.reason);
+    return { ok: true };
+  });
+  app.get<{ Querystring: { invoiceId?: string } }>('/api/sales-returns', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'sales', 'view');
+    return listCreditNotes(ctx, req.query);
+  });
+  app.post<{ Body: PurchaseReturnInput }>('/api/purchase-returns', async (req) => {
+    const ctx = requireCtx(db, req);
+    return createPurchaseReturn(ctx, req.body); // enforces inventory.create
+  });
+  app.get<{ Querystring: { receiptId?: string } }>('/api/purchase-returns', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'inventory', 'view');
+    return listPurchaseReturns(ctx, req.query);
+  });
+
   // ------------------------------- sales -----------------------------------
   app.get<{ Querystring: { customerId?: string; status?: string } }>('/api/invoices', async (req) => {
     const ctx = requireCtx(db, req);

@@ -655,13 +655,12 @@ describe('§38 simulation — Profile B: simple trading business', () => {
 // ===========================================================================
 
 describe('§38 simulation — capability GAPS (roadmap feed)', () => {
-  it('the inventory ledger has NO sales/purchase return movement type (gap is real)', () => {
-    // A return/credit note would need a first-class ledger movement so restocked
-    // goods reconcile. None exists today — proving the gap concretely.
-    expect(MOVEMENT_TYPES).not.toContain('sale_return');
-    expect(MOVEMENT_TYPES).not.toContain('goods_return');
-    expect(MOVEMENT_TYPES).not.toContain('purchase_return');
-    expect(MOVEMENT_TYPES).not.toContain('credit_note');
+  it('GAP #1 CLOSED — the ledger now has first-class return movement types', () => {
+    // Closed 2026-08-22 (final-acceleration): sales returns/credit notes +
+    // purchase returns are implemented (services/returns.ts) with dedicated
+    // ledger movements, so restocked/returned goods reconcile on the ledger.
+    expect(MOVEMENT_TYPES).toContain('sale_return');
+    expect(MOVEMENT_TYPES).toContain('purchase_return');
   });
 
   // TODO(GAP #1 — SALES RETURN / CREDIT NOTE): after a delivery is completed

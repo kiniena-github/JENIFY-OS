@@ -3,6 +3,7 @@ import { parties, paymentAllocations, payments, salesInvoices } from '../db/sche
 import { nowIso } from '../util.js';
 import type { Ctx } from './context.js';
 import { invoiceCreditStatus, type CreditStatus } from './sales.js';
+import { creditNotedByInvoice } from './returns.js';
 
 export interface CreditRow {
   invoiceId: string;
@@ -64,6 +65,8 @@ export function creditOverview(ctx: Ctx, filter: { customerId?: string; status?:
     .groupBy(paymentAllocations.invoiceId)
     .all();
   const paidByInvoice = new Map(paidRows.map((r) => [r.invoiceId, r]));
+  // credit notes reduce the receivable: remaining = total - paid - creditNoted
+  const creditNoted = creditNotedByInvoice(ctx, invoices.map((i) => i.inv.id));
 
   const today = nowIso().slice(0, 10);
   const weekAhead = new Date(Date.now() + 7 * 86400_000).toISOString().slice(0, 10);
@@ -71,6 +74,8 @@ export function creditOverview(ctx: Ctx, filter: { customerId?: string; status?:
   const rows: CreditRow[] = invoices.map(({ inv, customerName }) => {
     const paidInfo = paidByInvoice.get(inv.id);
     const paid = paidInfo?.total ?? 0;
+    const credited = creditNoted.get(inv.id) ?? 0;
+    const effectiveTotal = Math.max(0, inv.totalCents - credited);
     return {
       invoiceId: inv.id,
       invoiceNumber: inv.docNumber,
@@ -78,11 +83,11 @@ export function creditOverview(ctx: Ctx, filter: { customerId?: string; status?:
       customerName,
       saleDate: inv.date,
       dueDate: inv.dueDate,
-      totalCents: inv.totalCents,
+      totalCents: effectiveTotal,
       paidCents: paid,
-      remainingCents: Math.max(0, inv.totalCents - paid),
+      remainingCents: Math.max(0, effectiveTotal - paid),
       lastPaymentDate: paidInfo?.lastDate ?? null,
-      status: invoiceCreditStatus(inv, paid, today),
+      status: invoiceCreditStatus({ ...inv, totalCents: effectiveTotal }, paid, today),
     };
   });
 

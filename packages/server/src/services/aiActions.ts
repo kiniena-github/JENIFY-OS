@@ -6,6 +6,7 @@ import { requirePermission } from './permissions.js';
 import { writeAudit } from './audit.js';
 import { createReceipt, type ReceiptInput } from './receiving.js';
 import { createInvoice, type CreateInvoiceInput } from './sales.js';
+import { createParty } from './parties.js';
 
 /**
  * JENIFY AI safe-ACTION substrate.
@@ -57,6 +58,40 @@ const EXECUTABLE_RISKS: ReadonlySet<ActionRisk> = new Set<ActionRisk>(['draft'])
 // ---------------------------------------------------------------------------
 
 const ACTIONS: readonly ActionDef[] = [
+  {
+    id: 'draft.customer',
+    description: 'Create a new customer record.',
+    module: 'parties',
+    permission: 'create',
+    risk: 'draft',
+    reversible: true,
+    confirmation: 'preview',
+    validate: (_ctx, p) => {
+      if (!p.name || typeof p.name !== 'string' || !p.name.trim()) throw new AppError(400, 'action_param', 'name is required');
+    },
+    preview: (_ctx, p) => ({ summary: `Create customer '${String(p.name)}'`, details: { name: p.name, phone: p.phone } }),
+    execute: (ctx, p) => {
+      const id = createParty(ctx, { kind: 'customer', name: String(p.name), phone: p.phone ? String(p.phone) : undefined });
+      return { resultRef: id, resultLabel: String(p.name) };
+    },
+  },
+  {
+    id: 'draft.supplier',
+    description: 'Create a new supplier record.',
+    module: 'parties',
+    permission: 'create',
+    risk: 'draft',
+    reversible: true,
+    confirmation: 'preview',
+    validate: (_ctx, p) => {
+      if (!p.name || typeof p.name !== 'string' || !p.name.trim()) throw new AppError(400, 'action_param', 'name is required');
+    },
+    preview: (_ctx, p) => ({ summary: `Create supplier '${String(p.name)}'`, details: { name: p.name, phone: p.phone } }),
+    execute: (ctx, p) => {
+      const id = createParty(ctx, { kind: 'supplier', name: String(p.name), phone: p.phone ? String(p.phone) : undefined });
+      return { resultRef: id, resultLabel: String(p.name) };
+    },
+  },
   {
     id: 'draft.receiving',
     description: 'Prepare a draft goods receipt (not posted).',

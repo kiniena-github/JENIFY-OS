@@ -223,6 +223,78 @@ export const tenantTemplateBindings = sqliteTable(
   (t) => [uniqueIndex('tenant_template_bindings_ver').on(t.tenantId, t.version)],
 );
 
+// ------------------- Returns (sales credit notes + purchase returns) -------
+// Immutable, append-only. A return NEVER edits the original invoice/receipt;
+// it is a new posted document that posts its own compensating stock movement
+// (sale_return: +stock; purchase_return: -stock) and adjusts the derived
+// receivable/payable. Partial quantities are supported; over-return is blocked.
+
+export const creditNotes = sqliteTable(
+  'credit_notes',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    docNumber: text('doc_number').notNull(),
+    invoiceId: text('invoice_id').notNull(),
+    customerId: text('customer_id').notNull(),
+    date: text('date').notNull(),
+    reason: text('reason'),
+    totalCents: integer('total_cents').notNull().default(0),
+    status: text('status').notNull().default('posted'), // posted | reversed
+    reversalReason: text('reversal_reason'),
+    createdBy: text('created_by'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [
+    uniqueIndex('credit_notes_number').on(t.tenantId, t.docNumber),
+    index('credit_notes_invoice').on(t.tenantId, t.invoiceId),
+    index('credit_notes_customer').on(t.tenantId, t.customerId, t.status),
+  ],
+);
+
+export const creditNoteLines = sqliteTable(
+  'credit_note_lines',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    creditNoteId: text('credit_note_id').notNull(),
+    invoiceLineId: text('invoice_line_id'),
+    itemId: text('item_id').notNull(),
+    warehouseId: text('warehouse_id').notNull(),
+    lotId: text('lot_id'),
+    qty: integer('qty').notNull(), // milli base-units returned
+    restock: integer('restock', { mode: 'boolean' }).notNull().default(true),
+    amountCents: integer('amount_cents').notNull().default(0),
+  },
+  (t) => [index('credit_note_lines_note').on(t.creditNoteId)],
+);
+
+export const purchaseReturns = sqliteTable(
+  'purchase_returns',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    docNumber: text('doc_number').notNull(),
+    receiptId: text('receipt_id').notNull(),
+    supplierId: text('supplier_id').notNull(),
+    date: text('date').notNull(),
+    reason: text('reason'),
+    itemId: text('item_id').notNull(),
+    warehouseId: text('warehouse_id').notNull(),
+    lotId: text('lot_id'),
+    qty: integer('qty').notNull(), // milli base-units returned to supplier
+    amountCents: integer('amount_cents').notNull().default(0),
+    status: text('status').notNull().default('posted'), // posted | reversed
+    reversalReason: text('reversal_reason'),
+    createdBy: text('created_by'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [
+    uniqueIndex('purchase_returns_number').on(t.tenantId, t.docNumber),
+    index('purchase_returns_receipt').on(t.tenantId, t.receiptId),
+  ],
+);
+
 // ------------------- Role Experience (presentation config) -----------------
 // Versioned per role, like role_permissions. The spec is a PRESENTATION hint;
 // RBAC remains authoritative and is enforced independently on every route. The
@@ -784,6 +856,9 @@ export const invoiceLines = sqliteTable(
     discountCents: integer('discount_cents').notNull().default(0),
     lineSubtotalCents: integer('line_subtotal_cents').notNull(),
     reservationId: text('reservation_id'),
+    // split delivery: milli base-units already dispatched for this line; the
+    // invoice completes only when every line's qtyDelivered reaches its qty
+    qtyDelivered: integer('qty_delivered').notNull().default(0),
   },
   (t) => [index('invoice_lines_invoice').on(t.tenantId, t.invoiceId)],
 );

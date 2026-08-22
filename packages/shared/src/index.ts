@@ -79,6 +79,8 @@ export const MOVEMENT_TYPES = [
   'production_consume',
   'production_output',
   'sale_dispatch',
+  'sale_return', // customer returns goods -> stock comes back in
+  'purchase_return', // goods returned to supplier -> stock goes out
   'adjustment',
   'reversal',
 ] as const;

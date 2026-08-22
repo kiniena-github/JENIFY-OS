@@ -209,6 +209,28 @@ function closeReservation(ctx: Ctx, reservationId: string, status: 'consumed' | 
 export function consumeReservation(ctx: Ctx, reservationId: string): void {
   closeReservation(ctx, reservationId, 'consumed');
 }
+
+/**
+ * Partially consume a reservation (split delivery): reduce its active qty by
+ * `byQty` milli base-units; when it reaches zero the reservation is fully
+ * consumed. Reserved stock (getReserved sums active qty) decreases exactly by
+ * what was shipped — no double count.
+ */
+export function reduceReservation(ctx: Ctx, reservationId: string, byQty: number): void {
+  const row = ctx.db
+    .select()
+    .from(reservations)
+    .where(and(eq(reservations.tenantId, ctx.tenantId), eq(reservations.id, reservationId)))
+    .get();
+  if (!row) notFound('reservation_missing', 'Reservation not found');
+  if (row.status !== 'active') badRequest('reservation_closed', 'Reservation is not active');
+  if (byQty <= 0 || byQty > row.qty) badRequest('reservation_qty', 'Invalid partial reservation quantity');
+  if (byQty === row.qty) {
+    closeReservation(ctx, reservationId, 'consumed');
+  } else {
+    ctx.db.update(reservations).set({ qty: row.qty - byQty }).where(eq(reservations.id, reservationId)).run();
+  }
+}
 export function releaseReservation(ctx: Ctx, reservationId: string): void {
   closeReservation(ctx, reservationId, 'released');
 }

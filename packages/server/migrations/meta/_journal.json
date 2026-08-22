@@ -64,6 +64,13 @@
       "when": 1787370387263,
       "tag": "0008_gray_brood",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1787395733564,
+      "tag": "0009_faulty_jackal",
+      "breakpoints": true
     }
   ]
 }

@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
-import { invoiceLines, lots, salesInvoices, paymentAllocations, payments } from '../db/schema.js';
+import { creditNotes, invoiceLines, lots, salesInvoices, paymentAllocations, payments } from '../db/schema.js';
 import { newId, nowIso, badRequest, notFound } from '../util.js';
 import type { Ctx } from './context.js';
 import { actorId, inTx } from './context.js';
@@ -453,10 +453,25 @@ export function customerOutstanding(ctx: Ctx, customerId: string): number {
     )
     .all();
   // perf: one grouped paid-cents query for all the customer's invoices, not N
-  const paidByInvoice = invoicesPaidCents(ctx, invoices.map((i) => i.id));
+  const invoiceIds = invoices.map((i) => i.id);
+  const paidByInvoice = invoicesPaidCents(ctx, invoiceIds);
+  // credit notes reduce the receivable too (queried inline to avoid a
+  // sales<->returns import cycle)
+  const creditNoted = new Map<string, number>();
+  if (invoiceIds.length > 0) {
+    for (const r of ctx.db
+      .select({ invoiceId: creditNotes.invoiceId, total: sql<number>`coalesce(sum(${creditNotes.totalCents}), 0)` })
+      .from(creditNotes)
+      .where(and(eq(creditNotes.tenantId, ctx.tenantId), inArray(creditNotes.invoiceId, invoiceIds), eq(creditNotes.status, 'posted')))
+      .groupBy(creditNotes.invoiceId)
+      .all()) {
+      creditNoted.set(r.invoiceId, r.total);
+    }
+  }
   let outstanding = 0;
   for (const inv of invoices) {
-    outstanding += Math.max(0, inv.totalCents - (paidByInvoice.get(inv.id) ?? 0));
+    const effectiveTotal = Math.max(0, inv.totalCents - (creditNoted.get(inv.id) ?? 0));
+    outstanding += Math.max(0, effectiveTotal - (paidByInvoice.get(inv.id) ?? 0));
   }
   return outstanding;
 }
