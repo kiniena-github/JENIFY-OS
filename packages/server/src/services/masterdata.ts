@@ -54,10 +54,25 @@ export function getUom(ctx: Ctx, uomId: string) {
 }
 
 /**
+ * Ledger-integrity ceiling (D5). A single entry quantity is capped far below
+ * anything a real business posts (1e9 natural units) but far below
+ * MAX_SAFE_INTEGER after conversion, so no movement — even one smuggled through
+ * an import or offline replay — can push a running on-hand sum past the exact
+ * integer range and permanently corrupt the append-only ledger.
+ */
+export const MAX_ENTRY_QTY = 1e9;
+
+/**
  * Convert an entry quantity to milli base-units.
  * entryQty is in natural units (e.g. 10.5 ton); result is milli base (kg*1000).
  */
 export function toBaseQty(ctx: Ctx, uomId: string, entryQty: number): number {
+  if (!Number.isFinite(entryQty)) {
+    badRequest('qty_invalid', 'Quantity must be a finite number');
+  }
+  if (Math.abs(entryQty) > MAX_ENTRY_QTY) {
+    badRequest('qty_range', `Quantity is out of the allowed range (max ${MAX_ENTRY_QTY})`);
+  }
   const uom = getUom(ctx, uomId);
   // factorToBase is stored in milli, so this yields milli base-units directly.
   return Math.round(entryQty * uom.factorToBase);

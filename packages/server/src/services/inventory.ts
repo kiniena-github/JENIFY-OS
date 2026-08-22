@@ -26,9 +26,18 @@ export interface PostMovementInput {
   allowNegative?: boolean;
 }
 
+// Ledger-integrity ceiling (D5): a single movement in milli base-units is
+// capped so no smuggled/oversized qty can push a running balance past the exact
+// integer range. 1e12 milli = 1e9 base units — astronomically above real use,
+// well under MAX_SAFE_INTEGER (~9e15) even summed over a realistic history.
+const MAX_MOVEMENT_QTY = 1e12;
+
 export function postMovement(ctx: Ctx, input: PostMovementInput): string {
   if (!Number.isInteger(input.qty) || input.qty === 0) {
     badRequest('movement_qty', 'Movement quantity must be a non-zero integer');
+  }
+  if (Math.abs(input.qty) > MAX_MOVEMENT_QTY) {
+    badRequest('movement_qty_range', 'Movement quantity is out of the allowed range');
   }
   const lotKey = input.lotId ?? '';
   const balance = ctx.db

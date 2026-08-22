@@ -303,7 +303,16 @@ export function cancelApproval(ctx: Ctx, requestId: string, comment?: string): v
   });
 }
 
-/** Whether a subject has been approved (for a domain service to gate posting). */
+/**
+ * Whether a subject has been approved (for a domain service to gate posting).
+ *
+ * BANKED GUIDANCE (red-team F-APPR-1): when the first domain wires approvals,
+ * it MUST (a) compute the subject's magnitude server-side from the persisted
+ * record — never trust a client-supplied magnitude passed to
+ * openApprovalIfRequired — and (b) if the amount can change after approval,
+ * gate on a magnitude-bound check (approved-for-at-least-this-amount), not this
+ * bare boolean, so an approval for a small amount cannot authorize a larger one.
+ */
 export function isApproved(ctx: Ctx, subjectType: string, subjectId: string): boolean {
   const req = ctx.db
     .select({ status: approvalRequests.status })

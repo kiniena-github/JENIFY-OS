@@ -5,6 +5,7 @@ import type { Ctx } from './context.js';
 import { actorId, inTx } from './context.js';
 import { requirePermission } from './permissions.js';
 import { createReceipt, postReceipt, type ReceiptInput } from './receiving.js';
+import { markDelivered } from './deliveries.js';
 
 /**
  * Offline sync — O2, Receiving first.
@@ -49,14 +50,37 @@ function applyReceivingPost(ctx: Ctx, payload: unknown): { resultRef: string } {
   const input = payload as ReceiptInput;
   // re-run through the normal permission + validation + posting path
   requirePermission(ctx, 'inventory', 'create');
-  const { id } = createReceipt(ctx, input);
+  // server authority: the receipt is attributed to the SYNCING user, never a
+  // client-supplied receivedByUserId (createReceipt defaults it to the actor).
+  const { receivedByUserId: _ignore, ...safe } = input;
+  const { id } = createReceipt(ctx, safe as ReceiptInput);
   requirePermission(ctx, 'inventory', 'approve');
   postReceipt(ctx, id);
   return { resultRef: id };
 }
 
+/** O2 workflow #2 — offline delivery confirmation (proof of delivery). */
+function applyDeliveryConfirm(ctx: Ctx, payload: unknown): { resultRef: string } {
+  const input = payload as {
+    deliveryId: string;
+    actualDate: string;
+    receivedBy: string;
+    proofAttachmentId?: string;
+    notes?: string;
+  };
+  requirePermission(ctx, 'delivery', 'edit');
+  markDelivered(ctx, input.deliveryId, {
+    actualDate: input.actualDate,
+    receivedBy: input.receivedBy,
+    proofAttachmentId: input.proofAttachmentId,
+    notes: input.notes,
+  });
+  return { resultRef: input.deliveryId };
+}
+
 const HANDLERS: Record<string, (ctx: Ctx, payload: unknown) => { resultRef: string }> = {
   'receiving.post': applyReceivingPost,
+  'delivery.confirm': applyDeliveryConfirm,
 };
 
 function recordedResult(ctx: Ctx, opKey: string): SyncOpResult | null {

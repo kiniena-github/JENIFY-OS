@@ -3,6 +3,7 @@ import type { Db } from '../db/index.js';
 import { requireCtx } from '../app.js';
 import { requirePermission, canViewFinancial } from '../services/permissions.js';
 import { dashboard } from '../services/dashboard.js';
+import { ownerBrief } from '../services/brief.js';
 import {
   rawStockReport,
   productionReport,
@@ -54,6 +55,13 @@ export function registerInsightRoutes(app: FastifyInstance, db: Db): void {
     const ctx = requireCtx(db, req);
     requirePermission(ctx, 'dashboard', 'view');
     return dashboard(ctx, { includeFinancial: canViewFinancial(ctx, 'dashboard') });
+  });
+
+  // Owner daily brief: what happened / what needs attention (in-app digest).
+  app.get('/api/brief', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'dashboard', 'view');
+    return ownerBrief(ctx);
   });
 
   app.get<{ Params: { name: string }; Querystring: PeriodQuery }>(

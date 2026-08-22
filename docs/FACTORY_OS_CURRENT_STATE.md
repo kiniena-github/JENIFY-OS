@@ -110,6 +110,25 @@ All conditions landed before commit. Remaining tracked items:
 | TE-L1 | recovery.ts tx cast `as unknown as Db` | L | tracked — writeAudit tx overload later |
 | TE-L3 | STANDARD_TEMPLATE_LAYERS live in config-mesob (platform layers in tenant pkg) | L | tracked — move to a platform package at tenant #2 |
 
+### Red team R2 — slice 3 engines (2026-08-22)
+
+Attacked AI actions, offline replay, approvals, role experience, migration, template.
+No new Critical. One High (D5) confirmed reachable via the new write paths → FIXED.
+
+| # | Item | Sev | Status |
+|---|---|---|---|
+| D5 | Unbounded/non-finite qty could push the on-hand sum past MAX_SAFE_INTEGER (reachable via import + offline receiving) | H | **FIXED** — magnitude+finiteness guard in toBaseQty (MAX_ENTRY_QTY) + postMovement (MAX_MOVEMENT_QTY); 3 tests |
+| F-SYNC-4 | Any authed user could flood sync_ops with rejected rows | M | **FIXED** — /api/sync/replay batch capped at 200 |
+| F-APPR-1 | isApproved/openApprovalIfRequired trust caller magnitude | M | **BANKED** — doc guidance: first consumer computes magnitude server-side + magnitude-bound gate (dormant: no domain consumes approvals yet) |
+| F-IMPORT-4 | Concurrent double-import of opening inventory (no unique docId) | L | tracked — single-connection serialization makes the race unlikely; add unique index when import scales |
+| F-SYNC-2 | Client-asserted deviceId/clientCreatedAt (attributional only; appliedBy from ctx) | L | tracked |
+| F-AI-3 | No assistant kill-switch / rate budget | L | tracked |
+| F-APPR-4 | Approval-history read not permission-gated | L | tracked |
+| UX | .bn-label -webkit-line-clamp:2 visually clips a >2-line worker verb (full text in DOM) | L | tracked — worker-mode typography pass |
+
+PROVEN SAFE (no action): experience⊆permission, AI cross-tenant + SQL-escape closed, offline
+opKey tenant-scoped, publishTemplateLayer system-only+unwired, import cross-tenant/proto-pollution.
+
 ### Wave 1 engine slice review (combined architect+QA, 2026-08-22 — APPROVE, 0 must-fix)
 
 Four load-bearing safety properties CONFIRMED holding: experience⊆permission, approvals

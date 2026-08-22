@@ -15,6 +15,19 @@ isolated Mesob demo (separate VACUUM-INTO snapshot DB, rotated passwords, Henok 
 Operations Manager) verified end-to-end through a Cloudflare HTTPS quick tunnel — founder
 stack untouched. Wave 1 awaits Founder direction.
 
+## 2026-08-22 — Wave 1 slice 3: AI safe-action substrate + Offline O2 #2 + Owner brief
+Continued Wave 1. BUILD: (G) AI safe-action substrate — full pipeline request→intent→typed
+action→permission→validation→risk→PREVIEW→confirm→domain API→verify→audit; a closed typed
+action registry (no arbitrary exec, no SQL); execute is impossible without a matching preview
+(HMAC confirmation token bound to tenant+user+action+params); RISK GATING — only reversible
+draft actions execute this milestone, post/destructive registered-but-refuse; every preview
+and execute (incl. refusals) audited. (B2) Offline O2 #2 delivery confirmation — offline
+proof-of-delivery replays at-most-once through markDelivered; receiving handler hardened to
+strip client-supplied receivedByUserId (server attributes to the syncing actor). (A6) Owner
+daily brief — in-app what-happened/needs-attention digest composed from existing services,
+financial-masked, severity-sorted (no WhatsApp dependency). 305→315 tests green. Mobile
+viewport regression harness + BriefCard web component + red-team round 2 in flight (agents).
+
 ## 2026-08-22 — Wave 1 slice 2: Role Experience + Approvals + Offline Receiving + Migration + AI
 Continued Wave 1 (Founder "keep moving"). Built as Core (Team Lead) with 4 parallel agents.
 BUILD: (A) Role Experience Engine — experience is presentation strictly ⊆ permissions;

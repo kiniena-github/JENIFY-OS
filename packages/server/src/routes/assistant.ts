@@ -10,6 +10,11 @@ import {
   listIntentCatalog,
   type IntentParams,
 } from '../services/ai.js';
+import {
+  previewAction,
+  executeAction,
+  listActionCatalog,
+} from '../services/aiActions.js';
 
 /**
  * JENIFY AI (read-only, v0). The assistant answers ONLY through the typed
@@ -24,6 +29,33 @@ export function registerAssistantRoutes(app: FastifyInstance, db: Db): void {
     const ctx = requireCtx(db, req);
     return { available: availableIntents(ctx), catalog: listIntentCatalog() };
   });
+
+  // action catalog (what the AI CAN do, with risk/executable flags)
+  app.get('/api/assistant/actions', async (req) => {
+    requireCtx(db, req);
+    return { catalog: listActionCatalog() };
+  });
+
+  // PREVIEW an action — side-effect free; returns a confirmation token for
+  // executable (draft) actions. Permission is enforced inside previewAction.
+  app.post<{ Body: { actionId: string; params?: Record<string, unknown> } }>(
+    '/api/assistant/action/preview',
+    async (req) => {
+      const ctx = requireCtx(db, req);
+      return previewAction(ctx, req.body.actionId, req.body.params ?? {});
+    },
+  );
+
+  // EXECUTE an action — requires the matching preview's confirmation token.
+  app.post<{ Body: { actionId: string; params?: Record<string, unknown>; confirmationToken?: string } }>(
+    '/api/assistant/action/execute',
+    async (req) => {
+      const ctx = requireCtx(db, req);
+      return executeAction(ctx, req.body.actionId, req.body.params ?? {}, {
+        confirmationToken: req.body.confirmationToken,
+      });
+    },
+  );
 
   app.post<{ Body: { intentId?: string; utterance?: string; params?: IntentParams } }>(
     '/api/assistant/ask',
