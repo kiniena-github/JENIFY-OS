@@ -1,6 +1,9 @@
 // FactoryOS shared platform vocabulary.
 // Nothing in this package may reference a specific factory/tenant.
 
+// Template & capability platform (capability catalog, layer resolution algebra)
+export * from './templates.js';
+
 // ---------------------------------------------------------------------------
 // Permission model
 // ---------------------------------------------------------------------------

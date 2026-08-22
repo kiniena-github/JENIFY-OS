@@ -84,13 +84,48 @@ separation — reads tenant translations, writes only an anonymized store; (5)
 platform-level identity semantics for createdBy/decidedBy (today: tenant-scoped
 user ids, no realm qualifier).
 
-## Wave 1 (BLOCKED until gate) — planned
-Core configuration/template substrate · Country-pack substrate (Ethiopia formalized + dummy second pack) ·
-Terminology engine · Role-experience engine · AI safe-action architecture (from R7) · Migration/import foundation (from R6).
+## Wave 1 — GO (Founder 2026-08-22) — expanded 4-track parallel program
 
-## Wave 2 (BLOCKED until core/template contracts stabilize) — planned
-Manufacturing template formalization · Retail template · Wholesale/Distribution template ·
-Construction/Projects template · AI read-only intelligence · Onboarding resolver · Excel/CSV MVP · Offline/sync substrate.
+**Repo control:** main fast-forwarded to d1d9707; tag `checkpoint-pre-wave1`; DB snapshot
+`%LOCALAPPDATA%/JenifyOS/backups/checkpoint-pre-wave1.sqlite` (quick_check ok). Build branch:
+`wave-1`. Baseline 197 tests (now 198 after k=5). ONE merge point: Team Lead.
+
+### Track A · BUILD (Team Lead implements core; strict file ownership; QA+Architect gate)
+
+| ID | Task | Depends | Owns (new files unless noted) | Acceptance |
+|---|---|---|---|---|
+| W1-A1 | Capability registry + template engine (versioned immutable publish, inheritance chain, deterministic resolution + provenance, validation, diff/preview) + Ethiopia pack formalized + dummy country pack + Mesob classified as Core+Mfg+Process+Salt+ET+company config | — | shared capability catalog; migration 0006; services/templates.ts; test/templates.test.ts | **DONE** — 14 tests; dummy Testland pack proves no ET hard-coding; Mesob resolves cleanly; company overrides win |
+| W1-A2 | Role Experience Engine (permission ≠ experience): versioned per-role experience spec; effective-experience API; mobile worker home + nav honoring it | A1 | services/experience.ts; routes; web RoleHome | warehouse role sees RECEIVE/MOVE/ISSUE/COUNT/LOOKUP-class home on mobile; RBAC untouched/authoritative |
+| W1-A3 | Offline O2 — RECEIVING (client queue + idempotent server replay; 5 honest states; duplicate/reject/restart simulations) | — | sync_ops table (mig 0006); services/syncops.ts; routes/sync.ts; web queue | O2 simulations green: dup replay once-only; reject→CONFLICT; no LWW; server authority |
+| W1-A4 | Migration MVP: CSV upload→detect→map→validate→dedupe→preview→import for customers/suppliers/items/opening inventory | — | services/importing.ts; routes/importing.ts; test | never invents values; preview-first; opening stock via audited adjustment movements |
+| W1-A5 | JENIFY AI v0 read-only + safe-action substrate: typed action registry (id/permission/risk/schema/confirmation), English intent resolver, grounded answers with references + explicit uncertainty, audited | — | shared action catalog; services/ai.ts; routes/ai.ts; test | 10 example intents answered tenant/role/permission-safe; zero invented values; every ask audited |
+| W1-A6 | Owner daily brief (in-app): what happened / needs attention / why | A5 partial | services/brief.ts; route; dashboard card | signals: sales, credit, low stock, QC, late deliveries; no WhatsApp dependency |
+| W1-A7 | Mobile viewport regression harness (Founder-approved) | A2 | packages/web tests | automated small-viewport checks incl. long-label wrapping |
+
+### Track B · DESIGN — all delivered (docs/design/)
+B1 **SECTOR_WHOLESALE_DISTRIBUTION.md** (~80-85% reuse; NEW: orders/purchasing/returns/vansales/routes) ·
+B2 **SECTOR_RETAIL.md** (tiny-shop 5-verb mode; POS UI + till sessions NEW) ·
+B3 **MANUFACTURING_FORMALIZATION.md** (Process/Batch exists, Job/Discrete future; Salt→subsector template) ·
+B4 **SECTOR_CONSTRUCTION_PROJECTS.md** (needs core project/cost-code dimension + approvals engine) ·
+B5 **SHARED_CAPABILITY_SPINES.md** (shared APPROVALS engine is the reusable primitive; GL = integrate-first, don't own).
+
+### Track C · RESEARCH — all delivered (docs/research/)
+C1 **ETHIOPIA_EINVOICING_VERIFICATION.md** — directive 1142/2018 EC CONFIRMED real (pre-clearance, Mesob in scope,
+software needs accreditation) but NO compliance schedule published / in-force unconfirmed → Founder escalation ·
+C2 **COMPETITOR_WAR_ROOM_R2.md** + 19 new FEATURE_INTELLIGENCE rows (consultant-in-critical-path = sharpest wedge;
+Tally weakness = mobile) · C3 **AI_COMMAND_SIMULATION_LIBRARY.md** (177 commands; 15-intent read-only v0 set).
+
+### Track D · ATTACK — all delivered (docs/security/)
+D1 **RED_TEAM_R1.md** — NO tenant-escape/auth-bypass (crown jewels held); 2 High (H1 rate-limit ceiling, H2
+self-escalation) + D3 → **ALL FIXED this slice** w/ regression tests (test/redteam-r1.test.ts) ·
+D2 **PERFORMANCE_ATTACK_R1.md** — JS budget holds (69.08 kB); worst = Sales-report N+1 17.4s, /api/stock 12MB
+payload, missing indexes → **migration 0007 indexes landed**; N+1 + pagination tracked for next slice ·
+D3 **UX_ELIMINATION_R1.md** — receiving = highest friction; eliminations feed W1-A2/A3 (default operator to
+logged-in user, wire dashboardFocus into role homes, receiving as card flow).
+
+**Standing constraints:** k=5 floor (landed) · budgets hard (≤75 kB gzip initial) · Mesob sacred ·
+no deploy · Henok pipeline separate (docs/HENOK_FEEDBACK.md) · agents never edit the same file ·
+research/design outputs are inputs to Team Lead classification, never auto-implemented.
 
 ## Standing rules
 No uncoordinated overlapping edits (one owner per file/domain per task) · research never

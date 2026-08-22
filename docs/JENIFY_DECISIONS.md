@@ -44,3 +44,27 @@ Append-only. Each entry: date, decision, rationale. Newest last.
 - **2026-08-21 — JENIFY AI / QOS is FUTURE PLANNED, not out of scope.** It is a major
   planned part of JENIFY OS; `jenify-ai-qos` stays inactive (design-only) until the Founder
   explicitly starts the AI milestone. Supersedes the earlier "QOS out of scope" framing.
+- **2026-08-22 — WAVE 1: GO.** Expanded 24-agent parallel execution mission approved
+  (Build / Design / Research / Attack tracks).
+- **2026-08-22 — Mobile design target:** ~2 GB RAM Android Go-class low-end phone.
+  Performance budgets remain hard constraints (initial JS ≤75 kB gzip unless a future
+  Founder-approved architecture decision changes it).
+- **2026-08-22 — Offline O2 order:** RECEIVING first; DELIVERY CONFIRMATION second.
+  Server stays final authority; no LWW, no silent merges, no fake sync status.
+- **2026-08-22 — Language-intelligence k = 5.** A translation variant needs ≥5
+  organizations before surfacing in aggregate recommendations; callers can never lower
+  the floor.
+- **2026-08-22 — Global language authority = Founder only initially.** A dedicated
+  JENIFY Platform Language Administrator role comes later; tenant Owners customize their
+  own tenant language but never approve global JENIFY translations.
+- **2026-08-22 — Translation-learning model KEPT** (freedom → anonymized aggregation →
+  consensus → human review → official pack → overrides allowed). Production-scale
+  multi-company aggregation requires a clear consent/privacy posture first.
+- **2026-08-22 — Automated mobile-viewport regression testing: APPROVED.**
+- **2026-08-22 — AI-assisted translation clustering: PLANNED.** AI groups/recommends;
+  human approves. Never auto-promote.
+- **2026-08-22 — Ethiopia e-invoicing: VERIFY FIRST.** Build extensible integration
+  boundaries; no compliance claims or certification-specific behavior from unverified
+  research.
+- **2026-08-22 — Henok continues separately** (Mesob testing, translation work, usability
+  feedback) through a structured intake; his work never blocks platform development.

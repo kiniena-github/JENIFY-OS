@@ -15,6 +15,18 @@ isolated Mesob demo (separate VACUUM-INTO snapshot DB, rotated passwords, Henok 
 Operations Manager) verified end-to-end through a Cloudflare HTTPS quick tunnel — founder
 stack untouched. Wave 1 awaits Founder direction.
 
+## 2026-08-22 — Wave 1 (GO): template engine + security hardening + parallel program
+Founder authorized Wave 1 + expanded 24-agent parallel mission. Repo: main fast-forwarded to
+d1d9707, tag checkpoint-pre-wave1, DB snapshot verified. Branch `wave-1`. Applied 12 Founder
+decisions (k=5 language floor landed). BUILD (W1-A1 template engine): shared capability catalog +
+pure deterministic resolution algebra (resolve/validate/diff), immutable versioned template layers,
+tenant bindings, company-overrides-win layering; Mesob formalized as Core→Manufacturing→Process→
+Salt→Ethiopia with a dummy Testland pack proving Ethiopia is not hard-coded (migration 0006; 14
+tests). Security (red-team must-fix): H1 rate-limit source-IP ceiling, H2 self-escalation guards
+(owner-exempt), D3 atomic recovery (6 regression tests). Perf: migration 0007 indexes. DESIGN
+(5 blueprints), RESEARCH (e-invoicing verification, war room R2, AI sim library), ATTACK (red team,
+perf, UX elimination) all delivered. 197→217 tests green; JS budget held (69.08 kB). No deploy.
+
 ## 2026-08-21 — Wave M: mobile + offline + language intelligence (first slice)
 Founder expansion mission. Research: MOBILE_LOWEND_UX.md, OFFLINE_SYNC_ARCHITECTURE.md
 (O1/O2/O3 phased contract; CRDT/LWW rejected for ledgers), LANGUAGE_INTELLIGENCE_

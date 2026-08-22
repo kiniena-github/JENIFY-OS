@@ -155,7 +155,14 @@ export const translations = sqliteTable(
     updatedBy: text('updated_by'),
     updatedAt: text('updated_at').notNull(),
   },
-  (t) => [uniqueIndex('translations_key_lang').on(t.tenantId, t.keyId, t.language)],
+  (t) => [
+    uniqueIndex('translations_key_lang').on(t.tenantId, t.keyId, t.language),
+    // perf (migration 0007): getBundle filters by (tenant, language); the
+    // cross-tenant language-intelligence aggregation filters by (language,
+    // status) across all tenants — both were scanning the table
+    index('translations_tenant_lang').on(t.tenantId, t.language),
+    index('translations_lang_status').on(t.language, t.status),
+  ],
 );
 
 export const tenantLanguages = sqliteTable(
@@ -171,6 +178,49 @@ export const tenantLanguages = sqliteTable(
     enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
   },
   (t) => [uniqueIndex('tenant_languages_code').on(t.tenantId, t.code)],
+);
+
+// ------------------- Template & capability platform ------------------------
+// Published template layers are IMMUTABLE (append-only versions). A tenant
+// binds to an ordered set of layers; its effective config is resolved
+// deterministically (see @factoryos/shared resolveTemplate). Company overrides
+// remain in tenant_settings — the highest-precedence layer at resolution time.
+
+export const templateLayers = sqliteTable(
+  'template_layers',
+  {
+    id: text('id').primaryKey(),
+    templateId: text('template_id').notNull(), // stable id, e.g. 'sector.manufacturing'
+    kind: text('kind').notNull(), // core | capability | sector | subsector | country | company
+    version: integer('version').notNull(),
+    labelKey: text('label_key').notNull(),
+    extendsId: text('extends_id'), // parent template id (null for roots)
+    status: text('status').notNull().default('published'), // published | superseded
+    // full TemplateLayer payload (activations + config) as authored
+    definition: text('definition', { mode: 'json' }).notNull(),
+    createdBy: text('created_by'),
+    publishedAt: text('published_at').notNull(),
+  },
+  (t) => [
+    uniqueIndex('template_layers_ver').on(t.templateId, t.version),
+    index('template_layers_kind').on(t.kind, t.status),
+  ],
+);
+
+// Which published layers (by templateId, pinned to a version) a tenant binds
+// to, and in what order. Append-only history; the active binding is the newest.
+export const tenantTemplateBindings = sqliteTable(
+  'tenant_template_bindings',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    version: integer('version').notNull(), // binding-set version (not layer version)
+    // ordered [{ templateId, version }] lowest-precedence first
+    layers: text('layers', { mode: 'json' }).notNull(),
+    createdBy: text('created_by'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [uniqueIndex('tenant_template_bindings_ver').on(t.tenantId, t.version)],
 );
 
 // ------------------- Language intelligence (platform-level) ----------------
@@ -377,6 +427,9 @@ export const stockMovements = sqliteTable(
     index('movements_item_wh').on(t.tenantId, t.itemId, t.warehouseId),
     index('movements_lot').on(t.tenantId, t.lotId),
     index('movements_doc').on(t.tenantId, t.documentKind, t.documentId),
+    // perf (migration 0007): report/list filters by type over time were
+    // full-scanning + temp-b-tree sorting the whole tenant table
+    index('movements_type_time').on(t.tenantId, t.movementType, t.postedAt),
   ],
 );
 
@@ -571,7 +624,11 @@ export const qualityTests = sqliteTable(
     previousTestId: text('previous_test_id'),
     createdAt: text('created_at').notNull(),
   },
-  (t) => [uniqueIndex('qc_attempt').on(t.batchId, t.attemptNumber)],
+  (t) => [
+    uniqueIndex('qc_attempt').on(t.batchId, t.attemptNumber),
+    // perf (migration 0007): batch QC lookups were full-scanning quality_tests
+    index('qc_tenant_batch').on(t.tenantId, t.batchId),
+  ],
 );
 
 // ============================ Commercial ===================================
@@ -608,6 +665,9 @@ export const salesInvoices = sqliteTable(
   (t) => [
     uniqueIndex('invoices_number').on(t.tenantId, t.docNumber),
     index('invoices_customer').on(t.tenantId, t.customerId, t.status),
+    // perf (migration 0007): period reports/lists sort the tenant's invoices
+    // by date — was a temp-b-tree sort of the whole table
+    index('invoices_date').on(t.tenantId, t.date),
   ],
 );
 
@@ -691,6 +751,8 @@ export const payments = sqliteTable(
   (t) => [
     uniqueIndex('payments_number').on(t.tenantId, t.docNumber),
     index('payments_customer').on(t.tenantId, t.customerId, t.status),
+    // perf (migration 0007): period cash-inflow reports sort payments by date
+    index('payments_date').on(t.tenantId, t.date),
   ],
 );
 

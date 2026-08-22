@@ -26,6 +26,11 @@ import {
   MIN_ORGS_FOR_RECOMMENDATION,
   type ReviewDecision,
 } from '../services/languageIntel.js';
+import {
+  tenantCapabilities,
+  resolveTenantConfig,
+  listTemplateLayers,
+} from '../services/templates.js';
 import { getSettings, saveSettings, getSettingsVersion } from '../services/settings.js';
 import { listAudit } from '../services/audit.js';
 import { writeAudit } from '../services/audit.js';
@@ -195,6 +200,28 @@ export function registerAdminRoutes(app: FastifyInstance, db: Db): void {
     return { ok: true };
   });
 
+  // ----------------------- template / capabilities -------------------------
+  // Read-only introspection of the tenant's resolved configuration and the
+  // published template catalog. Binding/publishing is a provisioning-time
+  // operation (services + onboarding), not a casual runtime edit.
+  app.get('/api/capabilities', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'settings', 'view');
+    return { active: tenantCapabilities(db, ctx.tenantId) };
+  });
+
+  app.get('/api/template/resolved', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'settings', 'view');
+    return resolveTenantConfig(db, ctx.tenantId);
+  });
+
+  app.get<{ Querystring: { kind?: string } }>('/api/template/layers', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'settings', 'view');
+    return listTemplateLayers(db, { kind: req.query.kind as never });
+  });
+
   // ------------------------ language intelligence --------------------------
   // Platform-level: aggregated cross-company usage (counts only, never which
   // company), ranked recommendations, human approval into versioned official
@@ -208,8 +235,7 @@ export function registerAdminRoutes(app: FastifyInstance, db: Db): void {
       if (!req.query.language) badRequest('language', 'language query parameter is required');
       // k-suppression: variants used by fewer than k orgs appear only as an
       // anonymous "other variants" bucket. Callers may RAISE k, never lower
-      // it below the floor (research: LANGUAGE_INTELLIGENCE_SYSTEMS.md §F;
-      // final k is an open Founder question — floor = 3 until decided).
+      // it below the floor (Founder decision 2026-08-22: k = 5).
       const requested = Number(req.query.minShow);
       const minShow = Number.isFinite(requested)
         ? Math.max(MIN_ORGS_FOR_RECOMMENDATION, Math.floor(requested))

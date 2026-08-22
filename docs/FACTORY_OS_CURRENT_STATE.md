@@ -96,6 +96,31 @@ Severity: **C**ritical / **H**igh / **M**edium / **L**ow. Status updated as WPs 
 | D12 | `nextDocNumber` read-then-return race: SELECT then separate UPDATE means two concurrent postings on one sequence can both read the same value — second committer dies on the unique doc-number index with an opaque error. No concurrent-posting test exists. Fix: single atomic `UPDATE … RETURNING` + interleaved-transaction test *(jenify test-team 2026-08-21)* | `services/numbering.ts:33-46`, `db/schema.ts:545` | M | WP2 | **FIXED** (e5197c5: atomic UPDATE..RETURNING; two-connection test) |
 | D13 | Error-surface hygiene: global handler returns raw `e.message` for non-`AppError` exceptions (internal detail on unexpected errors); `/api/branding-version/:version` is the one authenticated route with no `requirePermission` (presentation-only by design — make the exemption explicit in code comment or guard it) *(jenify test-team 2026-08-21)* | `app.ts:59-61`, `routes/admin.ts:232-237` | M | WP6 | OPEN |
 
+### Wave 1 template-engine review (architect, 2026-08-22 — APPROVE WITH CONDITIONS)
+
+All conditions landed before commit. Remaining tracked items:
+
+| # | Item | Sev | Status |
+|---|---|---|---|
+| TE-H1 | publishTemplateLayer writes GLOBAL template_layers | H | **FIXED** — restricted to system context (no tenant user); WM5 platform-admin will replace |
+| TE-H2 | company layer = domain blobs, not key-level semantic override of template defaults | M | **DOCUMENTED** — honest comment+test; key-level override is a follow-up (no feature reads resolved semantic core keys yet) |
+| TE-M1 | ResolvedConfig.conflicts was dead code | M | **FIXED** — records blocked dependencies of active capabilities; tested |
+| TE-M2 | extends chain resolves to latest published (pinning not hermetic through ancestors) | M | **DOCUMENTED** — bindings capture membership, not frozen parent chain |
+| TE-M3 | publishTemplateLayer read+insert+supersede not atomic | M | **FIXED** — wrapped in inTx |
+| TE-L1 | recovery.ts tx cast `as unknown as Db` | L | tracked — writeAudit tx overload later |
+| TE-L3 | STANDARD_TEMPLATE_LAYERS live in config-mesob (platform layers in tenant pkg) | L | tracked — move to a platform package at tenant #2 |
+
+### Wave 1 red-team + performance (2026-08-22)
+
+| # | Item | Sev | Status |
+|---|---|---|---|
+| RT-H1 | Rate limiter had no per-source-IP ceiling (username spray evaded per-username bucket) | H | **FIXED** — source-IP ceiling (30/15min), success does not clear it; test/redteam-r1 |
+| RT-H2 | `manage_users` transitively owner-equivalent (self-edit own role matrix + self-assign owner) | H | **FIXED** — non-owner cannot change own role or edit own role matrix; owners exempt; test/redteam-r1 |
+| RT-D3 | `recoverWithCode` not atomic (code consume + password + session revoke) | M | **FIXED** — wrapped in db.transaction; test/redteam-r1 |
+| PERF-1 | Sales report / customerOutstanding payment N+1 (~17.4s at 20k invoices) | H | OPEN — grouped payment_allocations aggregate; next slice |
+| PERF-2 | /api/stock (12MB) and /api/credit (3.9MB) unpaginated payloads | H | OPEN — pagination + SQL filters; next slice |
+| PERF-3 | Missing indexes → full-table scans + temp-b-tree sorts | M | **FIXED** — migration 0007 (movements/qc/invoices/payments/translations) |
+
 ### Wave M residuals (architect + QA reviews 2026-08-21, tracked non-blocking)
 
 | # | Item | Sev |

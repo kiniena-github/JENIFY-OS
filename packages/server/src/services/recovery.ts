@@ -136,24 +136,33 @@ export function recoverWithCode(
     .get();
   if (!match) fail();
   const now = nowIso();
-  db.update(recoveryCodes).set({ usedAt: now }).where(eq(recoveryCodes.id, match!.id)).run();
-  db.update(users).set({ passwordHash: hashPassword(input.newPassword) }).where(eq(users.id, user!.id)).run();
-  // every previously authenticated session is invalidated immediately
-  db.update(sessions)
-    .set({ revokedAt: now })
-    .where(and(eq(sessions.userId, user!.id), isNull(sessions.revokedAt)))
-    .run();
-  writeAudit(
-    { db, tenantId: user!.tenantId, user: null },
-    {
-      module: 'users',
-      action: 'recovery_used',
-      entity: 'user',
-      entityId: user!.id,
-      reference: user!.username,
-      summary: `Emergency recovery code used for '${user!.displayName}' — password changed, code consumed`,
-    },
-  );
+  // Atomic (red-team D3): consuming the code, changing the password, and
+  // revoking sessions must commit together. A crash between them could leave a
+  // consumed code with an unchanged password (lock-out) or a changed password
+  // with live stale sessions (the code's whole point defeated).
+  const hashedPassword = hashPassword(input.newPassword);
+  // drizzle's better-sqlite3 transaction executes the callback synchronously
+  // and commits/rolls back atomically.
+  db.transaction((tx) => {
+    tx.update(recoveryCodes).set({ usedAt: now }).where(eq(recoveryCodes.id, match!.id)).run();
+    tx.update(users).set({ passwordHash: hashedPassword }).where(eq(users.id, user!.id)).run();
+    // every previously authenticated session is invalidated immediately
+    tx.update(sessions)
+      .set({ revokedAt: now })
+      .where(and(eq(sessions.userId, user!.id), isNull(sessions.revokedAt)))
+      .run();
+    writeAudit(
+      { db: tx as unknown as Db, tenantId: user!.tenantId, user: null },
+      {
+        module: 'users',
+        action: 'recovery_used',
+        entity: 'user',
+        entityId: user!.id,
+        reference: user!.username,
+        summary: `Emergency recovery code used for '${user!.displayName}' — password changed, code consumed`,
+      },
+    );
+  });
 }
 
 /** Count of currently valid (unused, unrevoked) codes — for the settings UI. */

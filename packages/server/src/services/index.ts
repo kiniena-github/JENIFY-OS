@@ -23,3 +23,5 @@ export * from './simpletxn.js';
 export * from './reports.js';
 export * from './dashboard.js';
 export * from './recovery.js';
+export * from './languageIntel.js';
+export * from './templates.js';

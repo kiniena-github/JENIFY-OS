@@ -80,6 +80,14 @@ export function saveRoleMatrix(ctx: Ctx, roleId: string, matrix: PermissionMatri
     .where(and(eq(roles.tenantId, ctx.tenantId), eq(roles.id, roleId)))
     .get();
   if (!role) notFound('role_missing', 'Role not found');
+  // Red-team H2: a NON-OWNER must not rewrite the permissions of their OWN
+  // role — otherwise manage_users is silently equivalent to granting yourself
+  // every permission. Owners are already fully privileged (and the owner
+  // role's user-management authority is separately protected below), so this
+  // guard binds non-owners only; editing OTHER roles is always allowed.
+  if (ctx.user && ctx.user.roleId === roleId && !role.isOwnerRole) {
+    forbidden('self_permission_edit', 'You cannot edit the permissions of your own role');
+  }
   if (role.isOwnerRole) {
     // The owner role must never lose the authority to manage users/permissions,
     // otherwise the tenant can lock itself out permanently.

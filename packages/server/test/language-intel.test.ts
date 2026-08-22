@@ -157,10 +157,11 @@ describe('scenario 5+6 — aggregation across 100 companies with a dominant vari
     expect(rec.totalOrgs).toBe(100);
   });
 
-  it('withholds recommendations below the minimum-organization threshold', () => {
-    simulateCompany(db, 700, VARIANT_A);
-    simulateCompany(db, 701, VARIANT_A);
-    expect(recommendOfficialCandidates(db, AM)).toHaveLength(0); // 2 orgs < 3
+  it('withholds recommendations below the k=5 organization floor (Founder decision)', () => {
+    for (let i = 0; i < 4; i++) simulateCompany(db, 700 + i, VARIANT_A);
+    expect(recommendOfficialCandidates(db, AM)).toHaveLength(0); // 4 orgs < 5
+    simulateCompany(db, 704, VARIANT_A);
+    expect(recommendOfficialCandidates(db, AM)).toHaveLength(1); // 5 orgs = floor
   });
 });
 
@@ -282,7 +283,7 @@ describe('authority guard — official decisions are human + owner-role only', (
     const rec = recommendOfficialCandidates(db, AM).find((r) => r.key === KEY)!;
     // B (14 orgs) and C (5 orgs) may appear; the 8 single-company variants never
     expect(rec.alternatives.map((v) => v.value)).toEqual([VARIANT_B, VARIANT_C]);
-    expect(rec.alternatives.every((v) => v.orgCount >= 3)).toBe(true);
+    expect(rec.alternatives.every((v) => v.orgCount >= 5)).toBe(true);
   });
 });
 
@@ -336,7 +337,7 @@ describe('HTTP route guards — /api/language-intel/*', () => {
     expect(agg.statusCode).toBe(200);
     const rows = agg.json() as Array<{ variants: Array<{ orgCount: number }>; otherVariantCount: number }>;
     const forKey = rows.find((r) => (r as { key?: string }).key === KEY)!;
-    expect(forKey.variants.every((v) => v.orgCount >= 3)).toBe(true);
+    expect(forKey.variants.every((v) => v.orgCount >= 5)).toBe(true); // k=5 floor holds
     expect(forKey.otherVariantCount).toBeGreaterThan(0); // singletons stayed suppressed
 
     // missing language param is a 400, not a 500

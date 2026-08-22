@@ -28,7 +28,9 @@ import { requirePermission } from './permissions.js';
  *    version, prior versions stay queryable forever.
  */
 
-export const MIN_ORGS_FOR_RECOMMENDATION = 3;
+// Founder decision 2026-08-22: k = 5 organizations minimum before a variant
+// can surface in aggregate recommendations; callers may never lower the floor.
+export const MIN_ORGS_FOR_RECOMMENDATION = 5;
 const DOMINANT_SHARE_PCT = 60;
 const CLEAR_MARGIN_PCT = 20;
 

@@ -1,9 +1,20 @@
 import { and, eq, isNull, ne } from 'drizzle-orm';
 import { roles, sessions, users } from '../db/schema.js';
-import { newId, nowIso, hashPassword, badRequest, notFound } from '../util.js';
+import { newId, nowIso, hashPassword, badRequest, notFound, forbidden } from '../util.js';
 import type { Ctx } from './context.js';
 import { actorId } from './context.js';
 import { writeAudit } from './audit.js';
+
+/** True when the acting user currently holds an owner role. */
+function callerIsOwner(ctx: Ctx): boolean {
+  if (!ctx.user) return false;
+  const role = ctx.db
+    .select({ isOwnerRole: roles.isOwnerRole })
+    .from(roles)
+    .where(and(eq(roles.tenantId, ctx.tenantId), eq(roles.id, ctx.user.roleId)))
+    .get();
+  return role?.isOwnerRole === true;
+}
 
 export function listUsers(ctx: Ctx) {
   return ctx.db
@@ -98,6 +109,17 @@ export function updateUser(
     .where(and(eq(users.tenantId, ctx.tenantId), eq(users.id, userId)))
     .get();
   if (!user) notFound('user_missing', 'User not found');
+
+  // Red-team H2: a NON-OWNER with manage_users must not escalate their own
+  // account by self-assigning a different (higher) role. Owners are already
+  // fully privileged, so an owner changing their own role is not an escalation
+  // — and legitimate owner handover (deactivate self once a second owner
+  // exists) must keep working, still guarded by the last-owner check below.
+  if (ctx.user && ctx.user.id === userId && !callerIsOwner(ctx)) {
+    if (patch.roleId && patch.roleId !== user.roleId) {
+      forbidden('self_role_change', 'You cannot change your own role');
+    }
+  }
 
   if (patch.active === false || (patch.roleId && patch.roleId !== user.roleId)) {
     assertNotLastActiveOwner(ctx, user.id, user.roleId);
