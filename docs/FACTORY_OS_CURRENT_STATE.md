@@ -110,6 +110,26 @@ All conditions landed before commit. Remaining tracked items:
 | TE-L1 | recovery.ts tx cast `as unknown as Db` | L | tracked — writeAudit tx overload later |
 | TE-L3 | STANDARD_TEMPLATE_LAYERS live in config-mesob (platform layers in tenant pkg) | L | tracked — move to a platform package at tenant #2 |
 
+### Red team R4 — sector capabilities (2026-08-22)
+
+No Criticals. Three CONFIRMED Highs, all HTTP-reachable by a low-privilege user — ALL FIXED.
+
+| # | Item | Sev | Status |
+|---|---|---|---|
+| R4-H1 | Double-booking rule was a lexicographic string compare — the same instant sent as `+03:00` did not collide, so a resource could be double-booked over HTTP | H | **FIXED** — all instants canonicalised to UTC via Date.parse/toISOString before storage AND comparison (create, reschedule, conflict probe, day view); 3 regression tests |
+| R4-H2 | Work-order parts checked on-hand, not AVAILABLE — a job silently consumed stock reserved for a confirmed sale, driving available to −40 000 milli | H | **FIXED** — getAvailable check inside the issue transaction; regression test |
+| R4-H3 | A single booking could block a resource forever (`"!"`..`"~"`, or a 1000-year span) — self-service DoS | H | **FIXED** — instant validation + MAX_BOOKING_DAYS=366; 2 regression tests |
+| R4-M1 | `inventory.create` alone could consume stock against any open job | M | **FIXED** — parts issue now also requires production.edit; test |
+| R4-M2 | Permission checked AFTER status/existence → 400/403/404 job-existence oracle | M | **FIXED** — authority first in transition() and its wrappers; identical error for real vs fake id; test |
+| R4-M3 | `?limit=-1` / `?limit=abc` returned all rows past the 500 cap | M | **FIXED** — clampLimit; test |
+| R4-M4 | `qty:true` coerced past `> 0` and posted a real ledger movement | M | **FIXED** — strict numeric validation; test |
+| R4-L1 | Five new routes 500 on a missing body | L | tracked |
+| R4-L2 | Onboarding publishes a new global sector-layer version per run; non-atomic on failure | M | tracked — provisioning is system-context and unrouted, so not reachable by a tenant |
+
+PROVEN SOUND: tenant isolation across all four new tables; sector data integrity (20 sectors
+× 5 tiers, no unknown capabilities, no unresolvable stacks); the onboarding resolver performs
+no DB reads; provisioning genuinely unrouted; R2 magnitude guards cover the new parts path.
+
 ### Red team R3 — the 3 operational gaps (2026-08-22)
 
 Ledger arithmetic invariant HOLDS end-to-end through returns+split-delivery. No

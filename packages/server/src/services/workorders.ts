@@ -5,7 +5,7 @@ import type { Ctx } from './context.js';
 import { actorId, inTx } from './context.js';
 import { writeAudit } from './audit.js';
 import { requirePermission } from './permissions.js';
-import { postMovement } from './inventory.js';
+import { postMovement, getAvailable } from './inventory.js';
 import { nextDocNumber, defineSequence } from './numbering.js';
 import { getItem, getWarehouse } from './masterdata.js';
 
@@ -42,6 +42,13 @@ export interface CreateWorkOrderInput {
   assignedToUserId?: string;
   priority?: 'low' | 'normal' | 'high';
   scheduledFor?: string;
+}
+
+/** A caller-supplied limit must never widen the page (?limit=-1 returned all rows). */
+function clampLimit(value: unknown, fallback: number, max: number): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n) || n < 1) return fallback;
+  return Math.min(Math.floor(n), max);
 }
 
 function ensureSeq(ctx: Ctx): void {
@@ -143,18 +150,18 @@ function transition(
   id: string,
   to: WorkOrderStatus,
   patch: Record<string, unknown>,
-  summary: string,
+  summaryFor: (docNumber: string) => string,
   reason?: string,
 ): void {
+  // Authority FIRST (red-team R4 M2): checking status before permission gave an
+  // account with only dashboard.view a 400/403/404 oracle revealing whether a
+  // job id existed and what state it was in.
+  requirePermission(ctx, 'production', 'edit');
   const wo = getWorkOrder(ctx, id);
   const from = wo.status as WorkOrderStatus;
   if (!ALLOWED[from]?.includes(to)) {
     badRequest('wo_transition', `A job cannot go from ${from} to ${to}`);
   }
-  // the assignee may advance their own job with production.edit; anyone else
-  // advancing someone else's job needs the same authority — assignment itself
-  // is the dispatcher's control point.
-  requirePermission(ctx, 'production', 'edit');
   const isAssignee = wo.assignedToUserId != null && wo.assignedToUserId === actorId(ctx);
   if (!isAssignee && wo.assignedToUserId != null) {
     // a different user is closing someone else's job — allowed only with approve
@@ -168,7 +175,7 @@ function transition(
       entity: 'work_order',
       entityId: id,
       reference: wo.docNumber,
-      summary,
+      summary: summaryFor(wo.docNumber),
       before: { status: from },
       after: { status: to },
       reason,
@@ -176,26 +183,26 @@ function transition(
   });
 }
 
+// These wrappers must NOT read the job before transition() has checked
+// authority, or the 404 itself becomes an existence oracle (red-team R4 M2).
 export function startWorkOrder(ctx: Ctx, id: string): void {
-  const wo = getWorkOrder(ctx, id);
-  transition(ctx, id, 'in_progress', { startedAt: nowIso() }, `Work order ${wo.docNumber} started`);
+  transition(ctx, id, 'in_progress', { startedAt: nowIso() }, (n) => `Work order ${n} started`);
 }
 
 export function completeWorkOrder(ctx: Ctx, id: string, completionNote?: string): void {
-  const wo = getWorkOrder(ctx, id);
   transition(
     ctx,
     id,
     'completed',
     { completedAt: nowIso(), completionNote: completionNote ?? null },
-    `Work order ${wo.docNumber} completed`,
+    (n) => `Work order ${n} completed`,
   );
 }
 
 export function cancelWorkOrder(ctx: Ctx, id: string, reason: string): void {
+  requirePermission(ctx, 'production', 'edit');
   if (!reason?.trim()) badRequest('wo_reason', 'A cancellation reason is required');
-  const wo = getWorkOrder(ctx, id);
-  transition(ctx, id, 'cancelled', { cancelledReason: reason }, `Work order ${wo.docNumber} cancelled`, reason);
+  transition(ctx, id, 'cancelled', { cancelledReason: reason }, (n) => `Work order ${n} cancelled`, reason);
 }
 
 /**
@@ -207,14 +214,22 @@ export function issuePartToWorkOrder(
   id: string,
   input: { itemId: string; warehouseId: string; lotId?: string | null; qty: number },
 ): { partId: string } {
+  // Issuing parts both consumes stock AND charges a job, so it needs the job
+  // authority as well as the stock authority (red-team R4 M1: inventory.create
+  // alone let an account with no job rights consume stock against any open job).
   requirePermission(ctx, 'inventory', 'create');
+  requirePermission(ctx, 'production', 'edit');
   const wo = getWorkOrder(ctx, id);
   if (wo.status !== 'scheduled' && wo.status !== 'in_progress') {
     badRequest('wo_not_open', 'Parts can only be issued to a scheduled or in-progress job');
   }
   const item = getItem(ctx, input.itemId);
   getWarehouse(ctx, input.warehouseId);
-  if (!(input.qty > 0)) badRequest('wo_part_qty', 'Issued quantity must be positive');
+  // reject non-numeric input outright: `true` coerces past a bare `> 0` test and
+  // posted a real ledger movement (red-team R4)
+  if (typeof input.qty !== 'number' || !Number.isFinite(input.qty) || input.qty <= 0) {
+    badRequest('wo_part_qty', 'Issued quantity must be a positive number');
+  }
   // Traceability: a lot-tracked part must name the lot it came from, otherwise
   // the issue would post against an untracked balance and break lot genealogy.
   if (item.trackingMode === 'lot' && !input.lotId) {
@@ -222,6 +237,17 @@ export function issuePartToWorkOrder(
   }
   const qtyMilli = Math.round(input.qty * 1000);
   return inTx(ctx, (tx) => {
+    // AVAILABLE, not on-hand (red-team R4 H2): postMovement only guards
+    // on-hand >= 0 and knows nothing about reservations, so a job could silently
+    // consume stock already committed to a confirmed sale and drive available
+    // stock negative. Production does this correctly; work orders must too.
+    const available = getAvailable(tx, input.itemId, input.warehouseId, input.lotId ?? null);
+    if (qtyMilli > available) {
+      badRequest(
+        'insufficient_available',
+        `Only ${available / 1000} of '${item.name}' is available (the rest is reserved for other commitments)`,
+      );
+    }
     postMovement(tx, {
       itemId: input.itemId,
       lotId: input.lotId ?? null,
@@ -272,7 +298,7 @@ export function listWorkOrders(
     .from(workOrders)
     .where(and(...conds))
     .orderBy(asc(workOrders.scheduledFor), desc(workOrders.createdAt))
-    .limit(Math.min(filter.limit ?? 100, 500))
+    .limit(clampLimit(filter.limit, 100, 500))
     .all();
 }
 
