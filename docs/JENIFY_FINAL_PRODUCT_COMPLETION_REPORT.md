@@ -77,19 +77,36 @@ Not re-measured this wave: large-catalogue query performance and low-end-device 
 timings (last measured in PERFORMANCE_ATTACK_R1). `/api/stock` and `/api/credit`
 pagination remains **NOT DONE** and is the known scaling limit.
 
-## E. SECURITY / RED TEAM STATUS — **PARTIAL**
+## E. SECURITY / RED TEAM STATUS — **DONE for this wave** (4 rounds, all confirmed findings fixed)
 
 Four red-team rounds have run against this platform (R1–R3 on prior waves, R4 on this
 wave's new capabilities). Prior confirmed findings were fixed with regression tests:
 rate-limit source ceiling, self-escalation guards, atomic recovery, ledger magnitude
 overflow (D5), duplicate-line over-return/over-dispatch bypasses.
 
-**R4 (this wave's capabilities) — IN FLIGHT, verdict not yet returned.** An independent
-security specialist is attacking the new work orders / bookings / onboarding / sector
-code (tenant escape, permission bypass, double-booking evasion, cross-tenant assignment,
-provisioning escalation). **Until it reports, the new capabilities are NOT security-
-certified** and this section stays PARTIAL. Any Critical/High it finds must be fixed and
-regression-tested before these capabilities go near a pilot.
+**R4 (this wave's capabilities) — RETURNED. No Criticals; three CONFIRMED Highs, all
+HTTP-reachable by a low-privilege user, ALL NOW FIXED with regression tests** (`e80de7e`):
+
+- **H1 — the double-booking rule was decorative.** Overlap compared ISO strings
+  lexicographically, so the same instant sent as `+03:00` rather than `Z` did not collide
+  and a resource could be double-booked through the API. Every shipped test used one `Z`
+  format, so the gap was invisible to them. **This means my previous report's claim of
+  "double-booking prevention" was wrong for non-UTC input.** Instants are now canonicalised
+  to UTC before storage and comparison everywhere.
+- **H2 — work-order parts consumed RESERVED stock**, silently taking inventory committed
+  to a confirmed sale (probe drove available to −40 000 milli). Now checks `getAvailable`
+  inside the transaction, as production already did.
+- **H3 — one booking could block a resource forever** (garbage or 1000-year spans): a
+  self-service denial of service. Instants validated, spans capped at 366 days.
+
+Mediums fixed in the same pass: parts issue now also requires `production.edit`; authority
+is checked before existence so a job id is no longer an oracle; caller-supplied limits
+clamped; `qty:true` can no longer coerce past the positivity test into the ledger.
+
+R4 also proved sound: tenant isolation across all four new tables, sector data integrity
+(20 sectors × 5 tiers), the onboarding resolver performing no DB reads, and provisioning
+genuinely unrouted. Remaining tracked: five routes 500 on a missing body; onboarding
+publishes a new global layer version per run (system-context only, unreachable by tenants).
 
 Security properties already asserted by this wave's own tests (necessary, not sufficient):
 tenant-scoped assignment (a job cannot be assigned to another tenant's user), permission
