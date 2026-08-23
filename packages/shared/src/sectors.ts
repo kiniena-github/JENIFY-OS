@@ -53,7 +53,14 @@ export interface SectorAIMastery {
   recommends: string[];
   /** low-risk drafts the AI may prepare (never posts) */
   prepares: string[];
+  /** human-readable limits (shown to reviewers/auditors) */
   neverDoes: string[];
+  /**
+   * ENFORCEABLE form of the limits above: if a request mentions one of these
+   * terms, the assistant refuses in this sector before any intent runs. Prose
+   * alone cannot be enforced, so safety-critical sectors declare keywords.
+   */
+  guardKeywords?: string[];
 }
 
 export interface SectorDefinition {
@@ -346,6 +353,7 @@ export const SECTORS: readonly SectorDefinition[] = [
       recommends: ['FEFO picking order', 'what to reorder'],
       prepares: ['draft receiving'],
       neverDoes: ['give clinical/medical advice', 'dispense without a human', 'alter batch records'],
+      guardKeywords: ['diagnos', 'symptom', 'treatment', 'dosage', 'dose', 'medical advice', 'is it safe to take', 'side effect'],
     },
     offlineWorkflows: ['receiving', 'selling (design-gated)'],
     config: { expiry: { fefo: true } },
@@ -380,6 +388,7 @@ export const SECTORS: readonly SectorDefinition[] = [
         'read or infer clinical records',
         'anything beyond administrative/billing scope',
       ],
+      guardKeywords: ['diagnos', 'symptom', 'treatment', 'prescri', 'dosage', 'dose', 'medication for', 'clinical', 'triage', 'patient record', 'medical advice'],
     },
     offlineWorkflows: [],
     config: { core: { scope: 'administrative_only', clinicalOutOfScope: true } },
@@ -410,6 +419,7 @@ export const SECTORS: readonly SectorDefinition[] = [
       recommends: ['what to reorder'],
       prepares: ['draft receiving'],
       neverDoes: ['give agronomic/chemical dosing advice', 'invent yield forecasts'],
+      guardKeywords: ['pesticide dose', 'spray rate', 'chemical dosage', 'how much fertilizer', 'safe to spray'],
     },
     offlineWorkflows: ['field activity capture (planned)', 'receiving'],
   },
@@ -557,6 +567,7 @@ export const SECTORS: readonly SectorDefinition[] = [
       recommends: ['maintenance priorities'],
       prepares: ['draft work order'],
       neverDoes: ['make safety determinations', 'close a safety case'],
+      guardKeywords: ['is it safe to enter', 'safety clearance', 'declare safe', 'close the safety'],
     },
     offlineWorkflows: ['production capture (planned)', 'equipment status (planned)'],
   },
@@ -707,6 +718,7 @@ export const SECTORS: readonly SectorDefinition[] = [
         'grant or deny an application',
         'expose citizen data beyond permission',
       ],
+      guardKeywords: ['approve the application', 'deny the application', 'reject the application', 'grant the permit', 'decide the case', 'rule on'],
     },
     offlineWorkflows: ['field case capture (planned)'],
     config: { core: { publicAccountability: true } },

@@ -15,6 +15,11 @@ import {
   executeAction,
   listActionCatalog,
 } from '../services/aiActions.js';
+import {
+  sectorContext,
+  sectorRefusal,
+  sectorCapabilityStatement,
+} from '../services/aiSector.js';
 
 /**
  * JENIFY AI (read-only, v0). The assistant answers ONLY through the typed
@@ -28,6 +33,12 @@ export function registerAssistantRoutes(app: FastifyInstance, db: Db): void {
   app.get('/api/assistant/intents', async (req) => {
     const ctx = requireCtx(db, req);
     return { available: availableIntents(ctx), catalog: listIntentCatalog() };
+  });
+
+  /** What business is this assistant inside, and what may it do here? */
+  app.get('/api/assistant/context', async (req) => {
+    const ctx = requireCtx(db, req);
+    return { context: sectorContext(ctx), statement: sectorCapabilityStatement(ctx) };
   });
 
   // action catalog (what the AI CAN do, with risk/executable flags)
@@ -63,6 +74,24 @@ export function registerAssistantRoutes(app: FastifyInstance, db: Db): void {
       const ctx = requireCtx(db, req);
       let intentId = req.body.intentId;
       let params = req.body.params ?? {};
+
+      // SECTOR GUARD FIRST (§27): some sectors forbid whole classes of question
+      // outright (clinical advice, deciding a citizen case, dosing guidance).
+      // This runs before intent matching so nothing downstream can bypass it.
+      if (req.body.utterance) {
+        const refusal = sectorRefusal(ctx, req.body.utterance);
+        if (refusal) {
+          writeAudit(ctx, {
+            module: 'dashboard',
+            action: 'assistant_query',
+            entity: 'assistant',
+            reference: refusal.sectorId,
+            summary: `AI refused (sector limit): ${refusal.limit}`,
+            result: 'blocked',
+          });
+          return refusal;
+        }
+      }
 
       // natural-language path: deterministic local matcher, never an LLM guess
       if (!intentId && req.body.utterance) {

@@ -35,3 +35,4 @@ export * from './returns.js';
 export * from './onboarding.js';
 export * from './workorders.js';
 export * from './bookings.js';
+export * from './aiSector.js';
