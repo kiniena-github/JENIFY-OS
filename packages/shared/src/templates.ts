@@ -108,6 +108,71 @@ export const CAPABILITY_CATALOG: Record<CapabilityId, CapabilityDef> = {
   timesheets: { id: 'timesheets', labelKey: 'cap.timesheets', modules: ['users'], dependsOn: ['workforce'], category: 'people' },
 };
 
+/**
+ * How much of a capability actually EXISTS behind the template that activates it.
+ *
+ *   'implemented' — services + routes + tests; usable business capability
+ *   'partial'     — core exists but named sub-workflows are missing
+ *   'declared'    — the capability ID and its activation are real, but no service
+ *                   backs it yet. A template may activate it as roadmap intent;
+ *                   nothing may present it to a user as working functionality.
+ *
+ * This map is the single source of truth for honest capability reporting (§41).
+ * Keep it accurate: it is what stops a configured template from being mistaken
+ * for a finished product.
+ */
+export type CapabilityImplementation = 'implemented' | 'partial' | 'declared';
+
+export const CAPABILITY_STATUS: Record<CapabilityId, CapabilityImplementation> = {
+  // proven by the Mesob pilot and the shipped trade spine
+  parties: 'implemented',
+  customers: 'implemented',
+  suppliers: 'implemented',
+  inventory: 'implemented',
+  warehouses: 'implemented',
+  sales: 'implemented',
+  invoicing: 'implemented',
+  credit: 'implemented',
+  payments: 'implemented',
+  delivery: 'implemented',
+  production: 'implemented',
+  quality: 'implemented',
+  traceability: 'implemented',
+  reports: 'implemented',
+  approvals: 'implemented',
+  migration: 'implemented',
+  ai: 'implemented',
+  workorders: 'implemented',
+  bookings: 'implemented',
+  // core exists, named sub-workflows still missing
+  documents: 'partial', // attachments exist; document management does not
+  procurement: 'partial', // receiving exists; PO/RFQ/matching do not
+  projects: 'partial', // reporting hooks only; cost dimension missing
+  workforce: 'partial', // users/roles exist; employee registry does not
+  assets: 'partial', // referenced by work orders; no asset register
+  maintenance: 'partial', // reactive via work orders; no preventive schedules
+  // activated by templates as roadmap intent — NO service behind them yet
+  orders: 'declared',
+  pos: 'declared',
+  fleet: 'declared',
+  recipes: 'declared',
+  expiry: 'declared',
+  cases: 'declared',
+  billing: 'declared',
+  timesheets: 'declared',
+};
+
+/** Split a capability list by how much of it really exists. */
+export function capabilityReadiness(caps: CapabilityId[]): {
+  implemented: CapabilityId[];
+  partial: CapabilityId[];
+  declared: CapabilityId[];
+} {
+  const out = { implemented: [] as CapabilityId[], partial: [] as CapabilityId[], declared: [] as CapabilityId[] };
+  for (const c of caps) out[CAPABILITY_STATUS[c]].push(c);
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Template layers
 // ---------------------------------------------------------------------------

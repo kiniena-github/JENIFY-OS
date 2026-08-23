@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   CAPABILITY_CATALOG,
+  CAPABILITY_STATUS,
   resolveTemplate,
   validateResolved,
   MODULES,
@@ -224,8 +225,9 @@ describe('onboarding resolver', () => {
     expect(rec.capabilities).toEqual(expect.arrayContaining(['sales', 'inventory']));
     expect(rec.roles.length).toBeGreaterThanOrEqual(3);
     expect(rec.issues).toHaveLength(0);
-    // readiness is reported, not hidden
-    expect(rec.surfaceReadiness.live + rec.surfaceReadiness.planned).toBe(rec.simpleSurface.length);
+    // readiness is reported, not hidden — every surface is counted somewhere
+    const r = rec.surfaceReadiness;
+    expect(r.live + r.api + r.planned).toBe(rec.simpleSurface.length);
     expect(rec.templateStack).toContain('country.ethiopia');
     expect(rec.aiMastery.neverDoes.length).toBeGreaterThan(0);
   });
@@ -234,6 +236,35 @@ describe('onboarding resolver', () => {
     const before = listRoles(tt.ownerCtx).length;
     recommendConfiguration(db, { country: 'ethiopia', sectorId: 'sector.logistics' });
     expect(listRoles(tt.ownerCtx).length).toBe(before);
+  });
+
+  it('EVERY sector reports a fully-counted surface (no verb goes unreported)', () => {
+    for (const s of SECTORS) {
+      const rec = recommendConfiguration(db, { country: 'ethiopia', sectorId: s.id });
+      const r = rec.surfaceReadiness;
+      expect(r.live + r.api + r.planned, s.id).toBe(rec.simpleSurface.length);
+    }
+  });
+
+  it('reports honestly which recommended capabilities have NO service behind them', () => {
+    const rec = recommendConfiguration(db, { country: 'ethiopia', sectorId: 'sector.restaurant', tier: 'medium' });
+    const cr = rec.capabilityReadiness;
+    // every active capability is classified exactly once
+    expect(cr.implemented.length + cr.partial.length + cr.declared.length).toBe(rec.capabilities.length);
+    // restaurant at 'medium' activates recipes/bookings/expiry — recipes has no
+    // service yet and must be surfaced as 'declared', never as a working feature
+    expect(cr.declared).toContain('recipes');
+    expect(cr.implemented).toContain('inventory');
+  });
+
+  it('capability status is accurate: implemented capabilities really are backed by services', () => {
+    // work orders + bookings were implemented this wave and must say so;
+    // orders/pos/etc were NOT and must not claim to be.
+    expect(CAPABILITY_STATUS.workorders).toBe('implemented');
+    expect(CAPABILITY_STATUS.bookings).toBe('implemented');
+    for (const c of ['orders', 'pos', 'recipes', 'expiry', 'cases', 'billing', 'timesheets', 'fleet'] as const) {
+      expect(CAPABILITY_STATUS[c], `${c} has no service yet`).toBe('declared');
+    }
   });
 
   it('rejects an unknown sector', () => {

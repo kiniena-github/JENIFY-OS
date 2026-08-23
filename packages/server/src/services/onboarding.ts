@@ -1,5 +1,5 @@
 import type { CapabilityId, ModuleId, PermissionMatrix } from '@factoryos/shared';
-import { resolveTemplate, validateResolved, CAPABILITY_CATALOG } from '@factoryos/shared';
+import { resolveTemplate, validateResolved, CAPABILITY_CATALOG, capabilityReadiness } from '@factoryos/shared';
 import type {
   GrowthTier,
   SectorAction,
@@ -51,9 +51,19 @@ export interface OnboardingRecommendation {
   tier: GrowthTier;
   /** the 4–6 things a business of this size actually sees */
   simpleSurface: SectorAction[];
-  /** how many of those work today vs are specified-but-unbuilt (honesty) */
-  surfaceReadiness: { live: number; planned: number };
+  /**
+   * How many of those verbs work end-to-end today (`live`), are implemented
+   * server-side but have no screen (`api`), or are specified only (`planned`).
+   * All three are reported — a surface must never go uncounted (§41).
+   */
+  surfaceReadiness: { live: number; api: number; planned: number };
   capabilities: CapabilityId[];
+  /**
+   * HONESTY (§41): how much of the recommended configuration actually exists.
+   * `declared` capabilities are activated as roadmap intent and have no service
+   * behind them yet — they must never be sold to the user as working features.
+   */
+  capabilityReadiness: { implemented: CapabilityId[]; partial: CapabilityId[]; declared: CapabilityId[] };
   roles: Array<{ roleCode: string; labelKey: string; actionCount: number; liveActionCount: number }>;
   offlineWorkflows: string[];
   aiMastery: SectorDefinition['ai'];
@@ -102,9 +112,11 @@ export function recommendConfiguration(db: Db, answers: OnboardingAnswers): Onbo
     simpleSurface: surface,
     surfaceReadiness: {
       live: surface.filter((a) => a.status === 'live').length,
+      api: surface.filter((a) => a.status === 'api').length,
       planned: surface.filter((a) => a.status === 'planned').length,
     },
     capabilities: resolved.activeCapabilities,
+    capabilityReadiness: capabilityReadiness(resolved.activeCapabilities),
     roles: sector!.roles.map((r) => ({
       roleCode: r.roleCode,
       labelKey: r.labelKey,
