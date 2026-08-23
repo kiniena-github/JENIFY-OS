@@ -5,17 +5,19 @@
 // template engine. Adding a sector must never fork the platform.
 //
 // HONESTY CONTRACT (directive §41): every surfaced action carries a `status`.
-//   'live'    — the screen/route exists and works today
-//   'planned' — the workflow is specified and activated in the template, but the
-//               dedicated screen is not built yet; it must NOT be presented as
-//               finished product. Role resolution filters these out of worker
-//               surfaces so no user is shown a dead end.
-// A sector counts as DONE only when its defined workflows actually run.
+//   'live'    — usable end to end by a real user TODAY (screen + API + tests)
+//   'api'     — the workflow is IMPLEMENTED and tested server-side (service +
+//               route + tests) but has no dedicated screen yet. Real capability,
+//               not a mockup — but not yet something a worker can tap.
+//   'planned' — specified and activated in the template; no implementation yet.
+// Only 'live' actions reach a worker's surface, so nobody is handed a dead end.
+// A sector counts as DONE only when its defined workflows actually run END TO
+// END; 'api' coverage makes a sector PARTIAL, never DONE.
 
 import type { ModuleId } from './index.js';
 import type { ActivationMode, CapabilityId, TemplateLayer } from './templates.js';
 
-export type SurfaceStatus = 'live' | 'planned';
+export type SurfaceStatus = 'live' | 'api' | 'planned';
 
 export interface SectorAction {
   id: string;
@@ -77,6 +79,10 @@ const live = (id: string, path: string, module: ModuleId, action?: string): Sect
 });
 const planned = (id: string, path: string, module: ModuleId, action?: string): SectorAction => ({
   id, labelKey: `verb.${id}`, path, module, action, status: 'planned',
+});
+/** Implemented + tested server-side; screen not built yet. */
+const api = (id: string, path: string, module: ModuleId, action?: string): SectorAction => ({
+  id, labelKey: `verb.${id}`, path, module, action, status: 'api',
 });
 
 // Common live surfaces that already exist in the shipped web app.
@@ -287,7 +293,7 @@ export const SECTORS: readonly SectorDefinition[] = [
   {
     id: 'sector.hospitality',
     labelKey: 'sector.hospitality',
-    simpleSurface: [planned('bookings', '/bookings', 'sales'), planned('rooms', '/rooms', 'reports'), planned('housekeeping', '/housekeeping', 'production'), MONEY, TODAY],
+    simpleSurface: [api('bookings', '/bookings', 'sales'), planned('rooms', '/rooms', 'reports'), planned('housekeeping', '/housekeeping', 'production'), MONEY, TODAY],
     baseActivations: {
       parties: 'required', customers: 'required', bookings: 'required', sales: 'required',
       invoicing: 'required', payments: 'required', reports: 'required',
@@ -299,9 +305,9 @@ export const SECTORS: readonly SectorDefinition[] = [
     ],
     roles: [
       { roleCode: 'owner', labelKey: 'role.owner', homeFocus: 'dashboard', actions: [TODAY, REPORTS, MONEY] },
-      { roleCode: 'reception', labelKey: 'role.reception', homeFocus: 'sales', actions: [planned('check_in', '/bookings', 'sales', 'edit'), CUSTOMERS] },
+      { roleCode: 'reception', labelKey: 'role.reception', homeFocus: 'sales', actions: [api('check_in', '/bookings', 'sales', 'edit'), CUSTOMERS] },
       { roleCode: 'housekeeper', labelKey: 'role.housekeeper', homeFocus: 'production', actions: [planned('rooms_to_clean', '/housekeeping', 'production', 'edit')] },
-      { roleCode: 'maintenance', labelKey: 'role.maintenance', homeFocus: 'production', actions: [planned('work_orders', '/workorders', 'production')] },
+      { roleCode: 'maintenance', labelKey: 'role.maintenance', homeFocus: 'production', actions: [api('work_orders', '/workorders', 'production')] },
     ],
     ai: {
       understands: ['bookings', 'occupancy', 'room status', 'guest requests', 'revenue per room'],
@@ -348,7 +354,7 @@ export const SECTORS: readonly SectorDefinition[] = [
   {
     id: 'sector.healthcare',
     labelKey: 'sector.healthcare',
-    simpleSurface: [planned('appointments', '/bookings', 'sales'), planned('patients', '/customers', 'parties'), planned('billing', '/sales', 'sales'), MONEY, TODAY],
+    simpleSurface: [api('appointments', '/bookings', 'sales'), planned('patients', '/customers', 'parties'), planned('billing', '/sales', 'sales'), MONEY, TODAY],
     baseActivations: {
       parties: 'required', customers: 'required', bookings: 'required', invoicing: 'required',
       payments: 'required', documents: 'recommended', reports: 'required',
@@ -360,7 +366,7 @@ export const SECTORS: readonly SectorDefinition[] = [
     ],
     roles: [
       { roleCode: 'owner', labelKey: 'role.owner', homeFocus: 'dashboard', actions: [TODAY, REPORTS, MONEY] },
-      { roleCode: 'reception', labelKey: 'role.reception', homeFocus: 'parties', actions: [planned('book', '/bookings', 'sales', 'create'), CUSTOMERS] },
+      { roleCode: 'reception', labelKey: 'role.reception', homeFocus: 'parties', actions: [api('book', '/bookings', 'sales', 'create'), CUSTOMERS] },
       { roleCode: 'finance', labelKey: 'role.finance', homeFocus: 'payments', actions: [MONEY, CREDIT] },
     ],
     ai: {
@@ -411,7 +417,7 @@ export const SECTORS: readonly SectorDefinition[] = [
   {
     id: 'sector.automotive',
     labelKey: 'sector.automotive',
-    simpleSurface: [planned('jobs', '/workorders', 'production'), planned('vehicles', '/assets', 'inventory'), planned('parts', '/inventory', 'inventory'), MONEY, TODAY],
+    simpleSurface: [api('jobs', '/workorders', 'production'), planned('vehicles', '/assets', 'inventory'), planned('parts', '/inventory', 'inventory'), MONEY, TODAY],
     baseActivations: {
       parties: 'required', customers: 'required', inventory: 'required', workorders: 'required',
       assets: 'recommended', sales: 'required', invoicing: 'required', payments: 'required',
@@ -424,7 +430,7 @@ export const SECTORS: readonly SectorDefinition[] = [
     ],
     roles: [
       { roleCode: 'owner', labelKey: 'role.owner', homeFocus: 'dashboard', actions: [TODAY, REPORTS, MONEY] },
-      { roleCode: 'technician', labelKey: 'role.technician', homeFocus: 'production', actions: [planned('my_jobs', '/workorders', 'production', 'edit')] },
+      { roleCode: 'technician', labelKey: 'role.technician', homeFocus: 'production', actions: [api('my_jobs', '/workorders', 'production', 'edit')] },
       { roleCode: 'service_advisor', labelKey: 'role.service_advisor', homeFocus: 'sales', actions: [CUSTOMERS, planned('estimate', '/sales', 'sales', 'create')] },
       { roleCode: 'parts', labelKey: 'role.parts', homeFocus: 'inventory', actions: [RECEIVE, STOCK] },
     ],
@@ -455,7 +461,7 @@ export const SECTORS: readonly SectorDefinition[] = [
     roles: [
       { roleCode: 'owner', labelKey: 'role.owner', homeFocus: 'dashboard', actions: [TODAY, REPORTS, MONEY] },
       { roleCode: 'property_manager', labelKey: 'role.property_manager', homeFocus: 'parties', actions: [CUSTOMERS, planned('leases', '/billing', 'sales')] },
-      { roleCode: 'maintenance', labelKey: 'role.maintenance', homeFocus: 'production', actions: [planned('work_orders', '/workorders', 'production')] },
+      { roleCode: 'maintenance', labelKey: 'role.maintenance', homeFocus: 'production', actions: [api('work_orders', '/workorders', 'production')] },
     ],
     ai: {
       understands: ['properties/units', 'tenants', 'leases', 'rent due', 'arrears', 'maintenance'],
@@ -500,7 +506,7 @@ export const SECTORS: readonly SectorDefinition[] = [
   {
     id: 'sector.education',
     labelKey: 'sector.education',
-    simpleSurface: [planned('students', '/customers', 'parties'), planned('classes', '/bookings', 'sales'), planned('fees', '/billing', 'sales'), MONEY, TODAY],
+    simpleSurface: [planned('students', '/customers', 'parties'), api('classes', '/bookings', 'sales'), planned('fees', '/billing', 'sales'), MONEY, TODAY],
     baseActivations: {
       parties: 'required', customers: 'required', bookings: 'recommended', billing: 'required',
       invoicing: 'required', payments: 'required', credit: 'recommended', reports: 'required',
@@ -512,7 +518,7 @@ export const SECTORS: readonly SectorDefinition[] = [
     ],
     roles: [
       { roleCode: 'owner', labelKey: 'role.owner', homeFocus: 'dashboard', actions: [TODAY, REPORTS, MONEY] },
-      { roleCode: 'registrar', labelKey: 'role.registrar', homeFocus: 'parties', actions: [CUSTOMERS, planned('enrol', '/bookings', 'sales', 'create')] },
+      { roleCode: 'registrar', labelKey: 'role.registrar', homeFocus: 'parties', actions: [CUSTOMERS, api('enrol', '/bookings', 'sales', 'create')] },
       { roleCode: 'finance', labelKey: 'role.finance', homeFocus: 'payments', actions: [MONEY, CREDIT] },
     ],
     ai: {
@@ -542,7 +548,7 @@ export const SECTORS: readonly SectorDefinition[] = [
     roles: [
       { roleCode: 'owner', labelKey: 'role.owner', homeFocus: 'dashboard', actions: [TODAY, REPORTS, MONEY] },
       { roleCode: 'supervisor', labelKey: 'role.supervisor', homeFocus: 'production', actions: [PRODUCTION, STOCK] },
-      { roleCode: 'maintenance', labelKey: 'role.maintenance', homeFocus: 'production', actions: [planned('work_orders', '/workorders', 'production')] },
+      { roleCode: 'maintenance', labelKey: 'role.maintenance', homeFocus: 'production', actions: [api('work_orders', '/workorders', 'production')] },
     ],
     ai: {
       understands: ['production output', 'equipment availability', 'materials', 'downtime', 'safety events'],
@@ -599,8 +605,8 @@ export const SECTORS: readonly SectorDefinition[] = [
     ],
     roles: [
       { roleCode: 'owner', labelKey: 'role.owner', homeFocus: 'dashboard', actions: [TODAY, REPORTS, MONEY] },
-      { roleCode: 'technician', labelKey: 'role.technician', homeFocus: 'production', actions: [planned('my_jobs', '/workorders', 'production', 'edit')] },
-      { roleCode: 'dispatcher', labelKey: 'role.dispatcher', homeFocus: 'production', actions: [planned('assign', '/workorders', 'production', 'edit'), CUSTOMERS] },
+      { roleCode: 'technician', labelKey: 'role.technician', homeFocus: 'production', actions: [api('my_jobs', '/workorders', 'production', 'edit')] },
+      { roleCode: 'dispatcher', labelKey: 'role.dispatcher', homeFocus: 'production', actions: [api('assign', '/workorders', 'production', 'edit'), CUSTOMERS] },
     ],
     ai: {
       understands: ['work orders', 'technicians', 'customer assets', 'parts used', 'service contracts'],
@@ -658,7 +664,7 @@ export const SECTORS: readonly SectorDefinition[] = [
     ],
     roles: [
       { roleCode: 'owner', labelKey: 'role.owner', homeFocus: 'dashboard', actions: [TODAY, REPORTS, MONEY] },
-      { roleCode: 'field_tech', labelKey: 'role.field_tech', homeFocus: 'production', actions: [planned('my_jobs', '/workorders', 'production', 'edit')] },
+      { roleCode: 'field_tech', labelKey: 'role.field_tech', homeFocus: 'production', actions: [api('my_jobs', '/workorders', 'production', 'edit')] },
       { roleCode: 'billing_clerk', labelKey: 'role.billing_clerk', homeFocus: 'sales', actions: [planned('run_billing', '/billing', 'sales', 'create'), MONEY] },
     ],
     ai: {

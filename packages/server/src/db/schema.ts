@@ -223,6 +223,106 @@ export const tenantTemplateBindings = sqliteTable(
   (t) => [uniqueIndex('tenant_template_bindings_ver').on(t.tenantId, t.version)],
 );
 
+// ------------------- Work orders (shared capability) -----------------------
+// ONE dispatched-job primitive serving automotive workshops, field service,
+// utilities field crews, mining/hospitality/property maintenance. Lifecycle is
+// append-only in spirit: status transitions are audited, parts consumed post
+// real stock movements, and a completed job is corrected by a new job or an
+// audited reopen — never by silently editing history.
+export const workOrders = sqliteTable(
+  'work_orders',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    docNumber: text('doc_number').notNull(),
+    /** sector-neutral job type slug, e.g. 'repair' | 'service' | 'inspection' */
+    kind: text('kind').notNull().default('job'),
+    title: text('title').notNull(),
+    description: text('description'),
+    /** who the job is for (customer) — optional for internal maintenance */
+    customerId: text('customer_id'),
+    /** what the job is on (vehicle, machine, room, meter) — free reference */
+    assetRef: text('asset_ref'),
+    assignedToUserId: text('assigned_to_user_id'),
+    status: text('status').notNull().default('draft'), // draft|scheduled|in_progress|completed|cancelled
+    priority: text('priority').notNull().default('normal'), // low|normal|high
+    scheduledFor: text('scheduled_for'),
+    startedAt: text('started_at'),
+    completedAt: text('completed_at'),
+    completionNote: text('completion_note'),
+    cancelledReason: text('cancelled_reason'),
+    createdBy: text('created_by'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [
+    uniqueIndex('work_orders_number').on(t.tenantId, t.docNumber),
+    index('work_orders_assignee').on(t.tenantId, t.assignedToUserId, t.status),
+    index('work_orders_status').on(t.tenantId, t.status, t.scheduledFor),
+  ],
+);
+
+/** Parts/materials consumed by a job — each row posted a real stock movement. */
+export const workOrderParts = sqliteTable(
+  'work_order_parts',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    workOrderId: text('work_order_id').notNull(),
+    itemId: text('item_id').notNull(),
+    warehouseId: text('warehouse_id').notNull(),
+    lotId: text('lot_id'),
+    qty: integer('qty').notNull(), // milli base-units issued
+    issuedBy: text('issued_by'),
+    issuedAt: text('issued_at').notNull(),
+  },
+  (t) => [index('work_order_parts_wo').on(t.workOrderId)],
+);
+
+// ------------------- Bookings (shared capability) ---------------------------
+// ONE reserved-time-or-space primitive serving hotel rooms, restaurant tables,
+// clinic appointments and class sessions. The load-bearing rule is the same in
+// every sector: a resource cannot be double-booked for overlapping time.
+export const bookableResources = sqliteTable(
+  'bookable_resources',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    code: text('code').notNull(),
+    name: text('name').notNull(),
+    /** 'room' | 'table' | 'practitioner' | 'class' — sector wording via i18n */
+    kind: text('kind').notNull().default('resource'),
+    capacity: integer('capacity').notNull().default(1),
+    active: integer('active', { mode: 'boolean' }).notNull().default(true),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [uniqueIndex('bookable_resources_code').on(t.tenantId, t.code)],
+);
+
+export const bookings = sqliteTable(
+  'bookings',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    docNumber: text('doc_number').notNull(),
+    resourceId: text('resource_id').notNull(),
+    customerId: text('customer_id'),
+    /** ISO instants; [startAt, endAt) half-open so back-to-back never collides */
+    startAt: text('start_at').notNull(),
+    endAt: text('end_at').notNull(),
+    partySize: integer('party_size').notNull().default(1),
+    status: text('status').notNull().default('confirmed'), // confirmed|checked_in|completed|cancelled|no_show
+    notes: text('notes'),
+    cancelledReason: text('cancelled_reason'),
+    createdBy: text('created_by'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [
+    uniqueIndex('bookings_number').on(t.tenantId, t.docNumber),
+    index('bookings_resource_time').on(t.tenantId, t.resourceId, t.startAt),
+    index('bookings_status').on(t.tenantId, t.status, t.startAt),
+  ],
+);
+
 // ------------------- Returns (sales credit notes + purchase returns) -------
 // Immutable, append-only. A return NEVER edits the original invoice/receipt;
 // it is a new posted document that posts its own compensating stock movement

@@ -21,6 +21,7 @@ import { registerSyncRoutes } from './routes/sync.js';
 import { registerImportRoutes } from './routes/importing.js';
 import { registerAssistantRoutes } from './routes/assistant.js';
 import { registerOnboardingRoutes } from './routes/onboarding.js';
+import { registerOperationsRoutes } from './routes/operations.js';
 
 export const SESSION_COOKIE = 'fos_session';
 
@@ -82,6 +83,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   registerImportRoutes(app, opts.db);
   registerAssistantRoutes(app, opts.db);
   registerOnboardingRoutes(app, opts.db);
+  registerOperationsRoutes(app, opts.db);
 
   return app;
 }

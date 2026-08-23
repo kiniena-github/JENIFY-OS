@@ -132,10 +132,30 @@ describe('client bundle protection', () => {
 // Honesty contract (§41) — planned surfaces must never masquerade as finished
 // ---------------------------------------------------------------------------
 describe('honesty contract', () => {
-  it('every action declares live|planned status', () => {
+  it('every action declares a precise live|api|planned status', () => {
     for (const s of SECTORS) {
       for (const a of [...s.simpleSurface, ...s.roles.flatMap((r) => r.actions)]) {
-        expect(['live', 'planned']).toContain(a.status);
+        expect(['live', 'api', 'planned']).toContain(a.status);
+      }
+    }
+  });
+
+  it("'api' means implemented server-side — those paths map to real capabilities", () => {
+    // work orders and bookings are implemented + routed + tested; nothing else
+    // may claim 'api' without the same evidence.
+    const apiPaths = new Set(
+      SECTORS.flatMap((s) => [...s.simpleSurface, ...s.roles.flatMap((r) => r.actions)])
+        .filter((a) => a.status === 'api')
+        .map((a) => a.path),
+    );
+    expect(apiPaths.size).toBeGreaterThan(0);
+    for (const p of apiPaths) expect(['/workorders', '/bookings']).toContain(p);
+  });
+
+  it("'api' actions still do NOT reach a worker's surface (only 'live' does)", () => {
+    for (const s of SECTORS) {
+      for (const r of s.roles) {
+        expect(liveActions(r.actions).every((a) => a.status === 'live')).toBe(true);
       }
     }
   });
