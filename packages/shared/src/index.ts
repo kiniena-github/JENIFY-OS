@@ -3,6 +3,11 @@
 
 // Template & capability platform (capability catalog, layer resolution algebra)
 export * from './templates.js';
+// NOTE: the 20 sector definitions are deliberately NOT re-exported here.
+// They are server/onboarding-side data (~6 kB gzipped) and re-exporting them
+// from this barrel pulled every sector table into the browser bundle, which
+// violates the performance law ("a sector not enabled for a tenant should not
+// burden that tenant's client"). Import them from '@factoryos/shared/sectors'.
 // Role Experience (presentation, strictly subordinate to permissions)
 export * from './experience.js';
 // Approvals (reusable server-enforced approval capability)

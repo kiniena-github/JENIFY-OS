@@ -20,6 +20,7 @@ import { registerInsightRoutes } from './routes/insights.js';
 import { registerSyncRoutes } from './routes/sync.js';
 import { registerImportRoutes } from './routes/importing.js';
 import { registerAssistantRoutes } from './routes/assistant.js';
+import { registerOnboardingRoutes } from './routes/onboarding.js';
 
 export const SESSION_COOKIE = 'fos_session';
 
@@ -80,6 +81,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   registerSyncRoutes(app, opts.db);
   registerImportRoutes(app, opts.db);
   registerAssistantRoutes(app, opts.db);
+  registerOnboardingRoutes(app, opts.db);
 
   return app;
 }

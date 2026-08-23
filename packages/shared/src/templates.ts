@@ -38,6 +38,17 @@ export const CAPABILITIES = [
   'documents',
   'ai',
   'migration',
+  // --- sector-recurring primitives (activated, never forked) ---
+  'orders', // an order precedes the invoice (wholesale, retail, restaurant, e-commerce)
+  'pos', // point of sale + till/shift sessions (retail, restaurant, pharmacy)
+  'bookings', // reserved time/space: rooms, tables, appointments, classes
+  'workorders', // dispatched jobs: field service, workshop, maintenance
+  'fleet', // vehicles, drivers, routes, fuel
+  'recipes', // formula/BOM: menu recipes, production formulas
+  'expiry', // batch expiry + FEFO picking (pharmacy, food, agriculture)
+  'cases', // service requests / tickets / applications (public, utilities, NGO)
+  'billing', // recurring periodic billing (leases, utilities, fees, subscriptions)
+  'timesheets', // labour time capture -> billing/costing
 ] as const;
 export type CapabilityId = (typeof CAPABILITIES)[number];
 
@@ -85,6 +96,16 @@ export const CAPABILITY_CATALOG: Record<CapabilityId, CapabilityDef> = {
   documents: { id: 'documents', labelKey: 'cap.documents', modules: ['reports'], dependsOn: [], category: 'platform' },
   ai: { id: 'ai', labelKey: 'cap.ai', modules: ['dashboard'], dependsOn: [], category: 'platform' },
   migration: { id: 'migration', labelKey: 'cap.migration', modules: ['settings'], dependsOn: [], category: 'platform' },
+  orders: { id: 'orders', labelKey: 'cap.orders', modules: ['sales'], dependsOn: ['sales'], category: 'commercial' },
+  pos: { id: 'pos', labelKey: 'cap.pos', modules: ['sales', 'payments'], dependsOn: ['sales', 'payments'], category: 'commercial' },
+  bookings: { id: 'bookings', labelKey: 'cap.bookings', modules: ['sales', 'parties'], dependsOn: ['parties'], category: 'operations' },
+  workorders: { id: 'workorders', labelKey: 'cap.workorders', modules: ['production'], dependsOn: ['parties'], category: 'operations' },
+  fleet: { id: 'fleet', labelKey: 'cap.fleet', modules: ['delivery'], dependsOn: ['assets'], category: 'operations' },
+  recipes: { id: 'recipes', labelKey: 'cap.recipes', modules: ['production'], dependsOn: ['inventory'], category: 'operations' },
+  expiry: { id: 'expiry', labelKey: 'cap.expiry', modules: ['inventory'], dependsOn: ['inventory', 'traceability'], category: 'operations' },
+  cases: { id: 'cases', labelKey: 'cap.cases', modules: ['reports'], dependsOn: ['parties'], category: 'operations' },
+  billing: { id: 'billing', labelKey: 'cap.billing', modules: ['sales'], dependsOn: ['invoicing'], category: 'commercial' },
+  timesheets: { id: 'timesheets', labelKey: 'cap.timesheets', modules: ['users'], dependsOn: ['workforce'], category: 'people' },
 };
 
 // ---------------------------------------------------------------------------
