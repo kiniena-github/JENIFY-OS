@@ -15,6 +15,31 @@ isolated Mesob demo (separate VACUUM-INTO snapshot DB, rotated passwords, Henok 
 Operations Manager) verified end-to-end through a Cloudflare HTTPS quick tunnel — founder
 stack untouched. Wave 1 awaits Founder direction.
 
+## 2026-08-22 — FINAL MASTER DIRECTIVE: 20 sector families + shared capabilities
+Founder directive supersedes the "no sector template without a real pilot" rule: build
+strong templates now from research + simulation; pilots refine later. Delivered:
+(1) capability catalogue 23->33 — orders, pos, bookings, workorders, fleet, recipes,
+expiry, cases, billing, timesheets; (2) ALL 20 sector families as real platform data
+(packages/shared/src/sectors.ts) — micro surface, growth tiers, role experiences, AI
+mastery, offline workflows — resolving through the existing template engine at every
+tier; (3) onboarding resolver (Country->Sector->Size, zero-write preview, re-runnable
+provisioning); (4) WORK ORDERS capability implemented (job lifecycle, tenant-scoped
+assignment, technician queue, parts issue posting real ledger movements) — makes 6
+sectors materially real; (5) BOOKINGS capability implemented (double-booking prevention
+with half-open intervals, re-checked inside the transaction) — 4 more sectors; (6)
+sector-aware AI with ENFORCED refusals for healthcare/pharmacy/government/agriculture/
+mining; (7) operational-period simulations (workshop week, hotel period); (8)
+CAPABILITY_STATUS so "activated but not built" can never be hidden.
+Bugs found and fixed in-wave: onboarding crashed on existing role codes (now
+re-runnable, never clobbers); sector tables leaked into the browser bundle (69.22->74.88
+kB, fixed via subpath + permanent guard test); lot-tracked parts could be issued without
+a lot; surfaceReadiness silently dropped 'api' surfaces.
+342 -> 402 tests (389 server + 13 web). Budget 69.22 kB gzip unchanged. Commits
+4f52f67, 6ac5f14, 7d2899c, 598ff03, 14306e2. Canonical main.
+BLOCKED: the Google Drive AI Bridge does not exist and no ChatGPT/Gemini tool is
+available to the session — cross-model independent review could not be performed and
+was NOT faked. Artifacts written to docs/AI_BRIDGE/ for manual relay.
+
 ## 2026-08-22 — Wave 1 slice 3: AI safe-action substrate + Offline O2 #2 + Owner brief
 Continued Wave 1. BUILD: (G) AI safe-action substrate — full pipeline request→intent→typed
 action→permission→validation→risk→PREVIEW→confirm→domain API→verify→audit; a closed typed
