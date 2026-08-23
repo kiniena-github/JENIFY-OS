@@ -84,9 +84,18 @@ wave's new capabilities). Prior confirmed findings were fixed with regression te
 rate-limit source ceiling, self-escalation guards, atomic recovery, ledger magnitude
 overflow (D5), duplicate-line over-return/over-dispatch bypasses.
 
-**R4 (this wave's capabilities) — see `docs/security/RED_TEAM_R4.md` for the verdict
-and any must-fixes.** Findings from R4 are recorded in the defects register and any
-Critical/High is fixed before this report is treated as final.
+**R4 (this wave's capabilities) — IN FLIGHT, verdict not yet returned.** An independent
+security specialist is attacking the new work orders / bookings / onboarding / sector
+code (tenant escape, permission bypass, double-booking evasion, cross-tenant assignment,
+provisioning escalation). **Until it reports, the new capabilities are NOT security-
+certified** and this section stays PARTIAL. Any Critical/High it finds must be fixed and
+regression-tested before these capabilities go near a pilot.
+
+Security properties already asserted by this wave's own tests (necessary, not sufficient):
+tenant-scoped assignment (a job cannot be assigned to another tenant's user), permission
+fail-closure on every new service, tenant isolation on all four new tables, the
+double-booking rule re-checked inside the transaction, and AI sector refusals that run
+before intent matching so no downstream path can bypass them.
 
 Security properties asserted by tests this wave: tenant-scoped assignment (a job cannot
 be assigned to another tenant's user), permission fail-closure on all new services,
