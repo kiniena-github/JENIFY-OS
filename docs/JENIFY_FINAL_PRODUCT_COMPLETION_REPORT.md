@@ -28,8 +28,8 @@ genuine multi-sector platform skeleton with real teeth:
   configuration.
 
 **What is honestly NOT achieved:** most of the 20 sectors do not yet have their
-sector-specific deep workflows or dedicated screens. Seven of the ten new capability
-IDs (orders, pos, recipes, expiry, cases, billing, timesheets, fleet) are *activated by
+sector-specific deep workflows or dedicated screens. Eight of the ten new capability
+IDs (orders, pos, fleet, recipes, expiry, cases, billing, timesheets) are *activated by
 templates but not implemented*. §43 requires all 20 as functioning product capabilities;
 that is a multi-wave program, not a single push. **Roughly 35–40% of the directive's
 total scope is DONE; the platform substrate is far further along than the sector depth.**
@@ -39,9 +39,10 @@ total scope is DONE; the platform substrate is far further along than the sector
 ## B. CANONICAL COMMIT / TAGS
 
 - **Canonical branch:** `main`
-- **HEAD:** `598ff03`
+- **HEAD:** `b83b8c2`
 - Wave commits: `4f52f67` (capabilities + 20 sectors + onboarding) → `6ac5f14`
   (work orders + bookings) → `7d2899c` (sector AI mastery) → `598ff03` (simulations)
+  → `14306e2` (capability readiness) → `e80de7e` (red-team R4 fixes)
 - Prior baseline preserved: `fbf39d4`, tags `checkpoint-wave1-complete`,
   `master-mission-complete`. History preserved, no squash, working tree clean,
   no DB artifacts or secrets committed. Migrations 0000–0010, all additive.
@@ -50,14 +51,14 @@ total scope is DONE; the platform substrate is far further along than the sector
 
 | Check | Result |
 |---|---|
-| Server tests | **386 passed + 3 skipped** (25 suites) |
+| Server tests | **399 passed + 3 skipped** (26 suites) |
 | Web tests | **13 passed** (3 suites) |
 | TypeScript | clean in shared, server, web, config-mesob |
 | Production build | green |
-| Migrations | 0000–0010, additive-only, exercised every run |
+| Migrations | 0000–0010 (11 files), additive-only, zero destructive statements |
 | Mesob regression | green throughout |
 
-Test count rose 342 → 399 total. Per §33, count is not the measure: the new tests
+Test count rose 342 → 412 total (399 server + 13 web). Per §33, count is not the measure: the new tests
 assert ledger reconciliation, tenant isolation, permission fail-closure, sector
 resolution at every tier, AI refusals, and operational-period simulations.
 
@@ -113,11 +114,6 @@ tenant-scoped assignment (a job cannot be assigned to another tenant's user), pe
 fail-closure on every new service, tenant isolation on all four new tables, the
 double-booking rule re-checked inside the transaction, and AI sector refusals that run
 before intent matching so no downstream path can bypass them.
-
-Security properties asserted by tests this wave: tenant-scoped assignment (a job cannot
-be assigned to another tenant's user), permission fail-closure on all new services,
-tenant isolation on all four new tables, and AI sector refusals that cannot be bypassed
-downstream.
 
 ## F. CORE PLATFORM STATUS — **DONE**
 
