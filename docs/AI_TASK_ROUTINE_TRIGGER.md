@@ -2,157 +2,103 @@
 
 ## Purpose
 
-ChatGPT (manager) records approved work as GitHub `[AI TASK]` issues. The
-execution worker is the existing claude.ai Claude Code Routine **AI WORKERS**.
-Anthropic's native routine GitHub-event triggers currently cover **pull
-request** and **release** events, not **issues**, so creating an `[AI TASK]`
-issue did not start the routine by itself.
+ChatGPT records approved work as routed GitHub AI-task issues. The Claude execution worker is the existing claude.ai Claude Code Routine **AI WORKERS**.
 
-The bridge is `.github/workflows/ai-task-trigger.yml`: a minimal GitHub
-Actions job (no checkout, no build, no application code) that reacts to issue
-events and sends one authenticated HTTP POST to the routine's fire endpoint.
+The bridge is `.github/workflows/ai-task-trigger.yml`: a minimal GitHub Actions job that reacts to Claude-routed issue events and sends one authenticated HTTP POST to the Routine fire endpoint.
 
+The cross-model routing contract is documented in `docs/JENIFY_AI_TEAM_BRIDGE.md`.
+
+## Claude routing
+
+| Title prefix | Claude fires? |
+|---|---|
+| `[AI TASK]` | Yes — legacy/default Claude route |
+| `[AI TASK][CLAUDE]` | Yes |
+| `[AI TASK][BOTH]` | Yes — Google runs independently in its own workflow |
+| `[AI TASK][GEMINI]` | No — Google-only route |
+
+Automatic issue-triggered work is accepted only when the issue was created by the repository owner. A manual `workflow_dispatch` also validates the issue title and owner before firing.
+
+## Result handoff
+
+The fire message now instructs AI WORKERS to write its final report back to the **same GitHub issue**, beginning with:
+
+```html
+<!-- jenify-claude-result -->
 ```
-ChatGPT creates "[AI TASK]" issue
-        │  (issues: opened / labeled)
-        ▼
-GitHub Actions: AI Task Routine Bridge
-        │  POST {"text": "Work the approved GitHub AI task at <issue url> ..."}
-        ▼
-claude.ai Routine "AI WORKERS"  →  new Claude Code web session
-        │
-        ▼
-Claude reads the issue, works on a branch, opens a PR (normal workflow)
+
+followed by:
+
+```text
+## Claude Engineering / Review Report
 ```
 
-## Endpoint contract (verified against Anthropic docs, Aug 2026)
+This removes Founder copy/paste from the Claude → ChatGPT handoff. ChatGPT can read the actual issue comment directly.
 
-- `POST <fire URL>` where the fire URL looks like
-  `https://api.anthropic.com/v1/claude_code/routines/trig_.../fire` and is
-  shown in the routine's API-trigger modal at claude.ai/code/routines.
-- Headers: `Authorization: Bearer <per-routine token, sk-ant-oat01-...>`,
-  `anthropic-version: 2023-06-01`,
-  `anthropic-beta: experimental-cc-routine-2026-04-01`,
-  `Content-Type: application/json`.
-- Body: `{"text": "<freeform run context, ≤ 65,536 chars>"}` — passed to the
-  routine **alongside its saved prompt**.
-- Success: `200` with `claude_code_session_id` / `claude_code_session_url`.
-- This is the claude.ai Claude Code product surface, billed against the
-  existing Claude Code subscription allowance. It is **not** the paid Claude
-  Platform API; the bridge must never use `ANTHROPIC_API_KEY`.
-- The dated beta header will rotate over time; Anthropic keeps the two
-  previous versions working, so update the header value in the workflow when
-  Anthropic announces a new one.
+## Endpoint contract
+
+- `POST <fire URL>` shown in the AI WORKERS Routine API-trigger view.
+- Headers include the per-Routine bearer token, `anthropic-version: 2023-06-01`, the current supported Claude Code Routine beta header, and JSON content type.
+- Body is `{"text": "<run context>"}` and is passed alongside the Routine's saved prompt.
+- Success returns HTTP `200` with a Claude Code session id/url.
+- This uses the claude.ai Claude Code product surface and the existing Claude subscription allowance. It deliberately does **not** use `ANTHROPIC_API_KEY` or the paid Claude Platform API.
 
 ## When the bridge fires
 
 | Event | Condition |
 |---|---|
-| Issue **opened** | Title starts with `[AI TASK]` |
-| Issue **labeled** | The added label is exactly `ai-task` AND the title starts with `[AI TASK]` (used to re-trigger an existing issue, e.g. #11) |
-| **workflow_dispatch** | Manual run with an `issue_number` input; refused unless that issue's title starts with `[AI TASK]` |
+| Issue **opened** | Owner-authored title is Claude-routed |
+| Issue **labeled** | Added label is exactly `ai-task`, title is Claude-routed, owner authored |
+| **workflow_dispatch** | Manual issue number; workflow validates route + owner |
 
 Duplicate protection:
 
-- A per-issue Actions concurrency group collapses rapid repeated label
-  events (only one run can wait per group; extras are cancelled).
-- A `labeled` event arriving within 120 s of issue creation is skipped,
-  because the `opened` event already fires the routine for new `[AI TASK]`
-  issues (an issue created with the label pre-applied emits both events).
-- The fire endpoint itself has **no idempotency key** — every successful POST
-  creates a new session — so do **not** pre-apply the `ai-task` label in the
-  issue template, and re-add the label (or use manual dispatch) only when you
-  intentionally want a fresh session.
+- Per-issue Actions concurrency prevents parallel duplicate runs.
+- A label event within 120 seconds of issue creation is skipped because the opened event already handles the task.
+- The Routine fire endpoint has no idempotency key; intentional re-triggering creates a fresh session.
 
-The `ai-task` label does not exist in the repo yet; GitHub creates it the
-first time someone adds it from the issue sidebar (or create it under
-Issues → Labels). New issues fire on the title prefix alone, so the label is
-only needed for re-triggering.
+## Founder-only private setup
 
-## Founder-only setup (one time, private)
+The live post-merge test on **2026-08-25** reached Anthropic but returned **HTTP 401**, so the stored Routine authentication is not valid yet.
 
-1. **Regenerate the routine token.** The previously displayed token must be
-   treated as compromised. At claude.ai/code/routines open **AI WORKERS** →
-   API trigger → generate a new token (generating a new token revokes the
-   old one). Copy the fire URL and the fresh token from the modal.
-2. In GitHub: **JENIFY-OS → Settings → Secrets and variables → Actions →
-   New repository secret**, add:
-   - `CLAUDE_ROUTINE_URL` — the full fire URL
-   - `CLAUDE_ROUTINE_TOKEN` — the fresh token
-3. Never paste either value into chat, an issue, a commit, a log, or a PR.
-   The workflow reads them only from GitHub Secrets; GitHub masks secret
-   values in logs automatically.
+One-time repair:
 
-Token risk is bounded by design: the bearer token is scoped to this single
-routine, can only start it, and grants no read access to sessions, other
-routines, or account data.
+1. In claude.ai/code/routines open **AI WORKERS** → API trigger.
+2. Regenerate the Routine token and obtain the matching fire URL/token from the same view.
+3. In GitHub repository Actions secrets replace:
+   - `CLAUDE_ROUTINE_URL`
+   - `CLAUDE_ROUTINE_TOKEN`
+4. Never paste either value into ChatGPT, an issue, a commit, a PR, or a log.
 
-## Rollout and first live test
+The bearer token is private infrastructure material. ChatGPT does not need to see it.
 
-**GitHub Actions constraint (verified empirically 2026-08-25):** workflows
-triggered by repository events (`issues`) or `workflow_dispatch` execute only
-from the file on the **default branch**. A pre-merge dispatch of this
-workflow from its PR branch returns `404 Not Found` — the workflow is not
-even registered until it lands on `main`. Therefore **no pre-merge live test
-of this exact workflow exists**; the first live fire necessarily happens
-after a one-time, explicitly approved merge. The sequence below makes that
-gate and its rollback path explicit.
+## Controlled live test
 
-1. **Secrets first (Founder, private).** Complete the secret setup above.
-   Adding the secrets is safe before merge — nothing reads them until the
-   workflow runs. (Merging before secrets is also safe: the job fails fast
-   at the secrets guard with a clear setup error and makes no external call.)
-2. **One-time approval gate.** Independent (ChatGPT) review approves the
-   bridge PR on the strength of CI plus the static/dry-run evidence in the
-   PR. The merge is performed deliberately as the enabling step — never
-   automatically by the implementing AI.
-3. **Immediately after merge — controlled dispatch test.** Actions →
-   **AI Task Routine Bridge** → **Run workflow** with `issue_number` set to
-   a controlled `[AI TASK]` issue (e.g. `12`), or the equivalent REST
-   dispatch on `main`. Verify: job succeeds; log shows HTTP 200 and a
-   `claude.ai/code/session_...` URL; a new **AI WORKERS** session appears
-   with the correct repository + issue URL context; no credentials in logs.
-4. **If the test fails:** fix forward on a branch when the cause is clear
-   (e.g. wrong secret value → update the secret and re-dispatch). To take
-   the bridge offline while diagnosing, use Actions → AI Task Routine
-   Bridge → **⋯ → Disable workflow** (one click, fully reversible, no code
-   change), or revert the merge commit with a normal `git revert` (no
-   history rewrite). Both paths are non-destructive.
-5. **If the test passes:** trigger Issue #11 by adding the `ai-task` label
-   to it (or manual dispatch with `11`) — do not duplicate the issue — and
-   confirm Claude starts that task automatically. The bridge is operational
-   only after this verification.
+Because issue-event workflows run from the default branch, the exact live trigger can only be tested after the workflow version is merged to `main`.
 
-## Routine prompt compatibility
+After private secret repair and reviewed merge:
 
-The saved **AI WORKERS** prompt already says to "read the GitHub task/issue
-supplied to you," and the fire endpoint passes the bridge's `text` alongside
-that saved prompt, so the current prompt is sufficient to act on the supplied
-issue link. One optional clarifying sentence is recommended in the Routine UI
-to make the no-context fallback explicit (observed in practice: when the
-routine fires with *no* supplied text, the worker must infer its intake):
+1. Create an owner-authored test issue such as `[AI TASK][CLAUDE] Bridge smoke test`, or use controlled manual dispatch.
+2. Verify Actions reports HTTP `200` and a new AI WORKERS session URL.
+3. Verify Claude reads the correct issue.
+4. Verify Claude posts the marked `<!-- jenify-claude-result -->` report back to the same issue.
+5. Verify no credential appears in logs or comments.
 
-> "If the trigger message names a specific repository and issue URL, work
-> only that issue; if no issue is supplied, scan the open `[AI TASK]` issues
-> and work the highest-priority approved one."
-
-This tightens targeting and does not weaken any safety rule.
+For the full two-model smoke test use `[AI TASK][BOTH]` and the acceptance criteria in `docs/JENIFY_AI_TEAM_BRIDGE.md`.
 
 ## Cost
 
-- GitHub Actions: one tiny ubuntu job (a few seconds) per task issue — well
-  within the free/included allowance; no paid add-ons enabled.
-- Claude: routine runs draw on the existing claude.ai Claude Code
-  subscription allowance (per-account daily routine-run limit applies). No
-  paid Claude Platform API, no new service, no usage billing added.
+- GitHub Actions: small included workflow job.
+- Claude: existing Claude Max / Claude Code subscription allowance.
+- No paid Claude API is used.
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
-| Job fails at "Check routine secrets" | Secrets not added yet (Founder setup above) |
-| HTTP 400 | Beta header rejected (rotate to current dated version) or the routine is paused |
-| HTTP 401 | Token revoked/regenerated — update `CLAUDE_ROUTINE_TOKEN` |
-| HTTP 404 | Fire URL wrong or routine deleted — update `CLAUDE_ROUTINE_URL` |
-| HTTP 429 | Daily routine-run or usage limit reached; retry after the window resets |
-| 500 / 503 | Transient Anthropic-side error; the job already retries twice |
+| Missing-secret failure | `CLAUDE_ROUTINE_URL` / `CLAUDE_ROUTINE_TOKEN` not configured |
+| HTTP 400 | Routine paused or Routine beta/version contract changed |
+| HTTP 401 | Routine token revoked, stale, or mismatched with URL |
+| HTTP 404 | Wrong fire URL or deleted Routine |
+| HTTP 429 | Routine/session allowance exhausted |
+| HTTP 500 / 503 | Transient Anthropic error; workflow retries |
