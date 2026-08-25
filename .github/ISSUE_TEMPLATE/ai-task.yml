@@ -1,0 +1,74 @@
+name: AI Engineering Task
+description: Shared task format for Claude, Jules, ChatGPT, and human review
+title: "[AI TASK] "
+labels: []
+body:
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: What outcome should be achieved?
+      placeholder: Describe the business/engineering goal in plain language.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: What must be true before this task is considered complete?
+      placeholder: Include tests, behavior, security, performance, and UX expectations where relevant.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: worker
+    attributes:
+      label: Primary worker
+      options:
+        - Claude
+        - Jules
+        - ChatGPT
+        - Human
+        - Unassigned
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reviewer
+    attributes:
+      label: Independent reviewer
+      options:
+        - Jules
+        - Claude
+        - ChatGPT
+        - Human
+        - Not yet assigned
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety gates
+      options:
+        - label: No production deployment without Founder approval
+          required: true
+        - label: No new paid API/service without Founder approval
+          required: true
+        - label: No destructive migration or direct production-data change without Founder approval
+          required: true
+        - label: No unsupported compliance/government commitment
+          required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence / context
+      description: Relevant commits, reports, bugs, screenshots, architecture notes, or dependencies.
+
+  - type: textarea
+    id: result
+    attributes:
+      label: Completion report
+      description: Worker fills this with what changed, tests run, risks, and next action.
