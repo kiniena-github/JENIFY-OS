@@ -13,7 +13,7 @@ GitHub is the technical source of truth for code, commits, branches, pull reques
 - **Founder** — business/product authority and approval gate for high-impact actions.
 
 ## Default execution loop
-1. A task is recorded in GitHub with objective and acceptance criteria.
+1. A task is recorded in GitHub with objective and acceptance criteria. Opening an `[AI TASK]` issue automatically starts the Claude "AI WORKERS" routine via the trigger bridge (`.github/workflows/ai-task-trigger.yml` — setup and re-trigger rules in `docs/AI_TASK_ROUTINE_TRIGGER.md`).
 2. Primary worker implements on a non-main branch.
 3. Worker runs relevant local tests before pushing.
 4. A pull request is opened against `main`.
