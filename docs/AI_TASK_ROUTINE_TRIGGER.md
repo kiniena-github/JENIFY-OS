@@ -87,17 +87,41 @@ Token risk is bounded by design: the bearer token is scoped to this single
 routine, can only start it, and grants no read access to sessions, other
 routines, or account data.
 
-## Test plan (after secrets are configured)
+## Rollout and first live test
 
-1. Actions → **AI Task Routine Bridge** → **Run workflow**, with
-   `issue_number` set to a controlled `[AI TASK]` test issue (or `12`).
-2. Confirm the job succeeds and the log prints an HTTP 200 and a
-   `claude.ai/code/session_...` URL, with no credentials printed.
-3. Open claude.ai/code and confirm a new **AI WORKERS** session appeared and
-   received the correct repository + issue URL in its starting context.
-4. Confirm Claude reads the issue and begins work in the named repository.
-5. Then trigger Issue #11 by adding the `ai-task` label to it (or manual
-   dispatch with `11`) — do not duplicate the issue.
+**GitHub Actions constraint (verified empirically 2026-08-25):** workflows
+triggered by repository events (`issues`) or `workflow_dispatch` execute only
+from the file on the **default branch**. A pre-merge dispatch of this
+workflow from its PR branch returns `404 Not Found` — the workflow is not
+even registered until it lands on `main`. Therefore **no pre-merge live test
+of this exact workflow exists**; the first live fire necessarily happens
+after a one-time, explicitly approved merge. The sequence below makes that
+gate and its rollback path explicit.
+
+1. **Secrets first (Founder, private).** Complete the secret setup above.
+   Adding the secrets is safe before merge — nothing reads them until the
+   workflow runs. (Merging before secrets is also safe: the job fails fast
+   at the secrets guard with a clear setup error and makes no external call.)
+2. **One-time approval gate.** Independent (ChatGPT) review approves the
+   bridge PR on the strength of CI plus the static/dry-run evidence in the
+   PR. The merge is performed deliberately as the enabling step — never
+   automatically by the implementing AI.
+3. **Immediately after merge — controlled dispatch test.** Actions →
+   **AI Task Routine Bridge** → **Run workflow** with `issue_number` set to
+   a controlled `[AI TASK]` issue (e.g. `12`), or the equivalent REST
+   dispatch on `main`. Verify: job succeeds; log shows HTTP 200 and a
+   `claude.ai/code/session_...` URL; a new **AI WORKERS** session appears
+   with the correct repository + issue URL context; no credentials in logs.
+4. **If the test fails:** fix forward on a branch when the cause is clear
+   (e.g. wrong secret value → update the secret and re-dispatch). To take
+   the bridge offline while diagnosing, use Actions → AI Task Routine
+   Bridge → **⋯ → Disable workflow** (one click, fully reversible, no code
+   change), or revert the merge commit with a normal `git revert` (no
+   history rewrite). Both paths are non-destructive.
+5. **If the test passes:** trigger Issue #11 by adding the `ai-task` label
+   to it (or manual dispatch with `11`) — do not duplicate the issue — and
+   confirm Claude starts that task automatically. The bridge is operational
+   only after this verification.
 
 ## Routine prompt compatibility
 
