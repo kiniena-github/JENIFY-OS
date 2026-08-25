@@ -1,18 +1,19 @@
 name: AI Task Routine Bridge
 
-# Bridges GitHub "[AI TASK]" issues to the existing claude.ai Claude Code
-# Routine "AI WORKERS" (API trigger / fire endpoint). Anthropic's native
-# routine GitHub-event support covers pull request and release events, not
-# issues, so this tiny job performs the missing hop: issue event -> HTTP POST
-# to the routine's fire URL. No checkout, no build, no application code.
+# Bridges routed GitHub AI tasks to the existing claude.ai Claude Code Routine
+# "AI WORKERS" (API trigger / fire endpoint).
 #
-# Secrets (GitHub Settings -> Secrets and variables -> Actions):
-#   CLAUDE_ROUTINE_URL   - the routine's full fire URL shown in the API
-#                          trigger modal at claude.ai/code/routines
-#   CLAUDE_ROUTINE_TOKEN - the per-routine bearer token (sk-ant-oat01-...)
+# Routing:
+#   [AI TASK] ...          -> Claude only (legacy/default)
+#   [AI TASK][CLAUDE] ...  -> Claude only
+#   [AI TASK][BOTH] ...    -> Claude + Gemini
+#   [AI TASK][GEMINI] ...  -> Gemini only (handled by ai-task-gemini.yml)
+#
+# Secrets:
+#   CLAUDE_ROUTINE_URL
+#   CLAUDE_ROUTINE_TOKEN
 # Uses only the existing claude.ai Routine subscription allowance. This is
 # NOT the paid Claude Platform API; never use ANTHROPIC_API_KEY here.
-# Setup, test plan, and duplicate-protection notes: docs/AI_TASK_ROUTINE_TRIGGER.md
 
 on:
   issues:
@@ -20,15 +21,13 @@ on:
   workflow_dispatch:
     inputs:
       issue_number:
-        description: "Number of the [AI TASK] issue to send to the AI WORKERS routine"
+        description: "Number of the Claude-routed [AI TASK] issue"
         required: true
         type: string
 
 permissions:
   issues: read
 
-# One group per issue: rapid repeated label events collapse instead of
-# queueing several runs (only one run may wait per group; extras are cancelled).
 concurrency:
   group: ai-task-bridge-${{ github.event.issue.number || inputs.issue_number }}
   cancel-in-progress: false
@@ -40,11 +39,13 @@ jobs:
     timeout-minutes: 5
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'issues' && github.event.action == 'opened' &&
-       startsWith(github.event.issue.title, '[AI TASK]')) ||
-      (github.event_name == 'issues' && github.event.action == 'labeled' &&
-       github.event.label.name == 'ai-task' &&
-       startsWith(github.event.issue.title, '[AI TASK]'))
+      (github.event_name == 'issues' &&
+       github.event.issue.user.login == github.repository_owner &&
+       ((github.event.action == 'opened') ||
+        (github.event.action == 'labeled' && github.event.label.name == 'ai-task')) &&
+       startsWith(github.event.issue.title, '[AI TASK]') &&
+       !startsWith(github.event.issue.title, '[AI TASK][GEMINI]'))
+
     steps:
       - name: Check routine secrets are configured
         env:
@@ -57,9 +58,6 @@ jobs:
           fi
           echo "Routine secrets are configured."
 
-      # An issue opened with the [AI TASK] title AND the ai-task label already
-      # applied would emit both an 'opened' and a 'labeled' event. The 'opened'
-      # run fires the routine; suppress the near-simultaneous 'labeled' twin.
       - name: Skip duplicate open-time label event
         if: github.event_name == 'issues' && github.event.action == 'labeled'
         env:
@@ -69,7 +67,7 @@ jobs:
           now=$(date +%s)
           age=$(( now - created ))
           if [ "$age" -lt 120 ]; then
-            echo "Label added ${age}s after issue creation; the 'opened' event already fires the routine for new [AI TASK] issues. Skipping duplicate."
+            echo "Label added ${age}s after issue creation; the 'opened' event already fires the routine for new routed AI tasks. Skipping duplicate."
             echo "SKIP_FIRE=true" >> "$GITHUB_ENV"
           fi
 
@@ -94,15 +92,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER_IN: ${{ inputs.issue_number }}
         run: |
-          title=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER_IN" --jq .title)
-          url=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER_IN" --jq .html_url)
+          issue=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER_IN")
+          title=$(printf '%s' "$issue" | jq -r '.title')
+          url=$(printf '%s' "$issue" | jq -r '.html_url')
+          author=$(printf '%s' "$issue" | jq -r '.user.login')
           case "$title" in
+            "[AI TASK][GEMINI]"*)
+              echo "::error::Issue #$ISSUE_NUMBER_IN is Gemini-only; refusing to fire Claude."
+              exit 1
+              ;;
             "[AI TASK]"*) ;;
             *)
               echo "::error::Issue #$ISSUE_NUMBER_IN title does not start with [AI TASK]; refusing to fire the routine."
               exit 1
               ;;
           esac
+          if [ "$author" != "$GITHUB_REPOSITORY_OWNER" ]; then
+            echo "::error::Automatic AI tasks must be created by the repository owner."
+            exit 1
+          fi
           {
             echo "ISSUE_TITLE<<JENIFY_EOF_7f3a"
             echo "$title"
@@ -117,7 +125,7 @@ jobs:
           ROUTINE_URL: ${{ secrets.CLAUDE_ROUTINE_URL }}
           ROUTINE_TOKEN: ${{ secrets.CLAUDE_ROUTINE_TOKEN }}
         run: |
-          text="Work the approved GitHub AI task at ${ISSUE_URL} (${GITHUB_REPOSITORY} issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}). Read that issue first and execute it under the saved AI WORKERS routine rules."
+          text="Work the approved GitHub AI task at ${ISSUE_URL} (${GITHUB_REPOSITORY} issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}). Read that issue first and execute only what it asks under the saved AI WORKERS routine rules. If it is an analysis/review task, do not modify code unless the issue explicitly requests implementation. When finished, write a concise final report back to THE SAME GitHub issue as a comment beginning exactly with '<!-- jenify-claude-result -->' and then '## Claude Engineering / Review Report'. Include verdict, work performed or findings, tests/evidence, risks/blockers, and next action. Do not require the Founder to copy your report into another AI."
           body=$(jq -cn --arg text "$text" '{text: $text}')
           status=$(curl -sS -o response.json -w "%{http_code}" \
             --retry 2 --retry-delay 5 \

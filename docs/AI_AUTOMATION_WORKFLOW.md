@@ -1,27 +1,40 @@
 # JENIFY OS AI Automation Workflow
 
 ## Goal
-Reduce Founder involvement in routine engineering while keeping irreversible, paid, production, security, and compliance decisions under explicit Founder control.
+Reduce Founder involvement in routine engineering and research while keeping irreversible, paid, production, security, and compliance decisions under explicit Founder control.
 
 ## Shared source of truth
-GitHub is the technical source of truth for code, commits, branches, pull requests, issues, and CI results.
+GitHub is the technical source of truth for code, commits, branches, pull requests, AI tasks, AI reports, and CI results. Google Drive is the long-term company knowledge/archive layer.
 
 ## Roles
-- **Claude Code** — primary implementation engineer on the local repository; builds, tests, refactors, and commits.
-- **Jules** — independent cloud engineer/reviewer; works from the GitHub repository and should normally use isolated branches/PRs.
-- **ChatGPT** — architecture, product decisions, independent review, PR/CI inspection, disagreement resolution, and task routing.
+- **Claude Code / AI WORKERS** — primary engineering execution: builds, tests, refactors, reviews, and works on branches/PRs.
+- **Google research lane** — independent research, market/competitor/regulatory/technical intelligence, verification, and challenge. The automatic GitHub lane is research-only.
+- **Jules** — optional independent cloud engineer/reviewer; works from the GitHub repository and should normally use isolated branches/PRs.
+- **ChatGPT** — command center: architecture, product decisions, task routing, cross-model comparison, PR/CI inspection, disagreement resolution, and final review.
 - **Founder** — business/product authority and approval gate for high-impact actions.
 
+## AI task routing
+ChatGPT records approved work as an owner-authored GitHub issue using one of these prefixes:
+
+- `[AI TASK]` — Claude legacy/default.
+- `[AI TASK][CLAUDE]` — Claude only.
+- `[AI TASK][GEMINI]` — Google research lane only.
+- `[AI TASK][BOTH]` — Claude and Google independently.
+
+Opening a routed issue is the wake-up signal. The Founder should not have to carry prompts or reports between AI products.
+
+Detailed bridge contract: `docs/JENIFY_AI_TEAM_BRIDGE.md`.
+
 ## Default execution loop
-1. A task is recorded in GitHub with objective and acceptance criteria. Opening an `[AI TASK]` issue automatically starts the Claude "AI WORKERS" routine via the trigger bridge (`.github/workflows/ai-task-trigger.yml` — setup and re-trigger rules in `docs/AI_TASK_ROUTINE_TRIGGER.md`).
-2. Primary worker implements on a non-main branch.
-3. Worker runs relevant local tests before pushing.
-4. A pull request is opened against `main`.
-5. JENIFY CI automatically installs locked dependencies, runs tests, and builds all workspaces.
-6. An independent AI reviews material changes when useful.
-7. ChatGPT compares implementation, CI, and reviewer evidence and records PASS or CHANGES REQUESTED.
+1. ChatGPT discusses/decides the task with the Founder when needed, then records the approved objective and acceptance criteria in one routed GitHub issue.
+2. GitHub automatically wakes the selected worker(s): Claude through `.github/workflows/ai-task-trigger.yml`; Google through `.github/workflows/ai-task-gemini.yml`.
+3. Research/review workers post their marked report back to the same issue. Claude implementation work uses a non-main branch and PR.
+4. Worker runs relevant tests before pushing implementation.
+5. JENIFY CI installs locked dependencies, runs tests, and builds applicable workspaces.
+6. Independent AI review is used where material risk or disagreement justifies it.
+7. ChatGPT reads the actual GitHub issue/PR/CI evidence, compares Claude and Google when both were routed, and records PASS, CHANGES REQUESTED, or a business decision.
 8. Routine low-risk work may proceed after gates pass; high-impact actions escalate to the Founder.
-9. GitHub remains the durable record; do not rely on chat history as the only record of engineering state.
+9. Important final research/decisions may be archived to Google Drive; GitHub remains the durable technical record.
 
 ## Founder-only gates
 The workflow must stop and ask the Founder before:
@@ -47,10 +60,14 @@ A reviewer should challenge the change rather than merely summarize it. Check, a
 - performance and mobile budget;
 - security and information leakage;
 - duplicated capabilities or architectural drift;
-- sector-specific behavior versus reusable core primitives.
+- sector-specific behavior versus reusable core primitives;
+- factual/source quality for research claims;
+- disagreement between AI workers and why it exists.
 
 ## Cost rule
-The automation is designed to use existing subscriptions and free/included GitHub capabilities. Do not introduce separately billed model APIs or other paid services without explicit Founder approval.
+The automation is designed to use existing subscriptions and free/included GitHub/Google capabilities. Do not introduce separately billed model APIs or other paid services without explicit Founder approval.
 
-## Current limitation
-This is not yet a fully autonomous model-to-model message bus. GitHub provides the shared technical state and automation gates; Claude, Jules, and ChatGPT still have different execution environments. The workflow should minimize Founder message-carrying by putting tasks, PRs, CI evidence, and review outcomes in GitHub whenever possible.
+The Google GitHub automation must use an AI Studio project with billing disabled unless the Founder explicitly approves a paid Google path. Exhausted free quota should stop the Google lane, not silently fall back to billing.
+
+## Current platform boundary
+Claude Max can be awakened PC-off through the existing Claude Code Routine fire endpoint once its private Routine token is valid. Google's paid AI Pro developer-agent access moved to Antigravity in June 2026; Antigravity consumer sign-in is currently interactive and is not a supported fresh-environment CI credential. Therefore the PC-off Google automation lane currently uses free AI Studio quota, while paid Google AI Pro remains available for Gemini app/Deep Research/NotebookLM/Antigravity work. See `docs/JENIFY_AI_TEAM_BRIDGE.md` for the migration rule.
