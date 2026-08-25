@@ -11,9 +11,9 @@ name: AI Task Gemini Research Bridge
 #   That keeps this lane on Google's free-of-charge API quota: no Vertex AI,
 #   no pay-as-you-go fallback, and no separately billed Google service.
 #
-# The job is deliberately research/review-only. It posts its result back to the
-# source issue with a machine-readable marker so ChatGPT can read both model
-# reports from GitHub without the Founder copying messages between products.
+# The model receives only a sanitized local task snapshot. Its tool allowlist is
+# read_file + google_web_search. It receives no GitHub token and no shell/write
+# tools. A separate deterministic step posts the result back to the issue.
 
 on:
   issues:
@@ -101,12 +101,6 @@ jobs:
           echo "GEMINI_READY=true" >> "$GITHUB_ENV"
           echo "Gemini free-quota credential is configured."
 
-      - name: Checkout trusted repository
-        if: env.SKIP_GEMINI != 'true' && env.GEMINI_READY == 'true'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          persist-credentials: false
-
       - name: Snapshot task as untrusted data
         if: env.SKIP_GEMINI != 'true' && env.GEMINI_READY == 'true'
         env:
@@ -122,13 +116,18 @@ jobs:
         id: gemini
         uses: google-github-actions/run-gemini-cli@a3bf79042542528e91937b3a3a6fbc4967ee3c31
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ""
           GEMINI_CLI_TRUST_WORKSPACE: "true"
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           gemini_cli_version: "0.55.1"
-          github_issue_number: ${{ env.ISSUE_NUMBER }}
           upload_artifacts: "false"
+          settings: |
+            {
+              "tools": {
+                "core": ["read_file", "google_web_search"]
+              }
+            }
           prompt: |
             You are the independent Google research and intelligence department for Jenify Labs.
 
