@@ -66,7 +66,8 @@ These markers let ChatGPT locate the two independent reports reliably.
 
 - Automatic issue-triggered work only accepts tasks created by the repository owner.
 - Secrets stay in GitHub Actions Secrets and must never be pasted into ChatGPT, Claude messages, issues, commits, PRs, or logs.
-- Gemini automation has `contents: read` only; it cannot push code from this workflow.
+- The Gemini model receives no GitHub token. It receives only a sanitized task snapshot plus the allowlisted `read_file` and `google_web_search` tools; no shell, file-write, commit, push, merge, or deployment tools are available to the model.
+- A deterministic workflow step, not the model, posts the Gemini report back to the issue.
 - Gemini's role here is research, verification, criticism, and independent analysis. Implementation belongs to the engineering lane unless an explicitly reviewed future workflow says otherwise.
 - Claude continues to use a branch/PR for implementation and the normal CI/review gates.
 - No production deployment, destructive migration, separately billed API, paid cloud resource, material security change, or official/compliance commitment may be introduced without Founder approval.
@@ -81,12 +82,17 @@ These markers let ChatGPT locate the two independent reports reliably.
 
 `.github/workflows/ai-task-gemini.yml` uses Google's official `google-github-actions/run-gemini-cli` action with an AI Studio `GEMINI_API_KEY`.
 
-The key must come from a Google AI Studio project with **billing disabled**. This means:
+The key must come from a Google AI Studio project with **billing disabled**. The automatic worker is explicitly pinned to `gemini-2.5-flash`, because Google's current free tier includes Google Search grounding for Gemini 2.5 Flash (subject to Google's free rate limits). The workflow does not use Gemini 3 as its zero-cost research default because free-tier Search grounding availability differs by model generation.
 
-- free-of-charge Gemini API quota only;
+This means:
+
+- free-of-charge Gemini 2.5 Flash API quota only;
+- Google Search grounding within the applicable free quota;
 - no Vertex AI;
 - no pay-as-you-go fallback;
-- if the free quota is exhausted, the automation fails/stops instead of charging money.
+- if free quota is exhausted or unavailable for the project, the automation fails/stops instead of charging money.
+
+The free API tier has different privacy/data-use terms from a paid API tier; do not send secrets or confidential credentials through the research lane.
 
 ### Why the automatic lane is not using the Google AI Pro subscription directly
 
@@ -112,7 +118,7 @@ Never send either value to another AI or chat.
 
 ### 2. Add the free Google automation credential
 
-Create a Google AI Studio API key in a project that has billing disabled, then store it directly in GitHub Actions Secrets as:
+Create a Google AI Studio API key in a project that has billing disabled, confirm that the project is on Google's **Free** tier, then store the key directly in GitHub Actions Secrets as:
 
 - `GEMINI_API_KEY`
 
@@ -129,7 +135,7 @@ After independent review/CI passes, merge the bridge to `main`, then create one 
 The acceptance criteria are:
 
 1. Claude workflow starts and receives HTTP 200 from the AI WORKERS Routine.
-2. Google workflow succeeds without a paid Google Cloud credential.
+2. Google workflow succeeds using `gemini-2.5-flash` without a paid Google Cloud credential.
 3. Claude posts `<!-- jenify-claude-result -->` to the test issue.
 4. Google posts `<!-- jenify-gemini-result -->` to the test issue.
 5. No credential appears in Actions logs or issue comments.
