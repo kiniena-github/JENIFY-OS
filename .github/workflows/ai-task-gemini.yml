@@ -8,8 +8,9 @@ name: AI Task Gemini Research Bridge
 #
 # Authentication:
 #   GEMINI_API_KEY must be an AI Studio key from a project with billing DISABLED.
-#   That keeps this lane on Google's free-of-charge API quota: no Vertex AI,
-#   no pay-as-you-go fallback, and no separately billed Google service.
+#   The worker is pinned to Gemini 2.5 Flash because Google's current free tier
+#   includes Google Search grounding for that model (subject to free quotas).
+#   No Vertex AI, no pay-as-you-go fallback, and no separately billed service.
 #
 # The model receives only a sanitized local task snapshot. Its tool allowlist is
 # read_file + google_web_search. It receives no GitHub token and no shell/write
@@ -121,6 +122,7 @@ jobs:
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           gemini_cli_version: "0.55.1"
+          gemini_model: "gemini-2.5-flash"
           upload_artifacts: "false"
           settings: |
             {
