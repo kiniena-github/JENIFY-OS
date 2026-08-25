@@ -26,3 +26,34 @@ JENIFY OS (formerly FactoryOS) is a local-first, multi-tenant business operating
 - Dev: `npm run dev` → web http://localhost:5173, API :3001. Tests: `cd packages/server && npx vitest run`. Type checks: `npx tsc --noEmit` per package. Build: `cd packages/web && npx vite build` (initial JS budget ≈ 214 kB / 69 kB gzip — do not regress code splitting).
 - Quantities are integer milli base-units; money is integer cents in the tenant default currency; per-domain settings are append-only versioned.
 - Credentials: `data/mesob-logins.txt` is gitignored dev-only; passwords are hashed; no plaintext secrets in the repo — keep it that way.
+
+## GitHub automation bridge
+
+The Team Lead remains the one local Claude command center. GitHub is the external coordination bridge shared with ChatGPT, Jules, CI, and the Founder.
+
+### At the start of work
+
+1. Inspect `git status` and preserve any existing local work. Never discard, reset, stash, or overwrite Founder/other-agent changes merely to synchronize.
+2. If the tree is clean and `origin` is available, synchronize safely with `git fetch origin` and `git pull --ff-only origin main` before starting a new task.
+3. Read the latest relevant open GitHub `[AI TASK]` issue and existing PR discussion when GitHub CLI/access is available. If the Founder says **“check and do”** or **“continue”**, treat the highest-priority approved GitHub task as the default intake unless the Founder explicitly names another task.
+4. Respect every Founder-only gate in `docs/AI_AUTOMATION_WORKFLOW.md`.
+
+### While implementing
+
+1. Do routine feature/fix work on a non-`main` branch, normally `ai/<issue-number>-<short-slug>` or `claude/<short-slug>`.
+2. Keep the internal Claude specialist/team workflow unchanged: the Team Lead delegates, synthesizes, tests, and remains responsible for the final local engineering result.
+3. Run the relevant tests, type checks, build, regression checks, and red-team/security checks required by the change. Do not claim success from code inspection alone.
+4. Never deploy, enable paid APIs/services, perform destructive production/data migrations, or make Founder-gated commitments automatically.
+
+### When work is ready
+
+1. Commit the coherent tested change and push the branch to `origin`.
+2. Open or update a pull request to `main` using `.github/pull_request_template.md` when GitHub CLI/access is available.
+3. Put the completion evidence in the PR: what changed, tests/build results, risk, known limitations, and any unresolved decision.
+4. Leave the PR for independent CI/ChatGPT/Jules review. **Do not merge your own material feature PR merely because local tests passed.**
+5. If a reviewer requests changes, treat the PR discussion as the next technical input, fix on the same branch, re-test, push, and update the PR.
+6. Once an accepted PR is merged by the review/coordination layer, synchronize local `main` before starting the next task.
+
+### Founder interruption policy
+
+Do not stop the Founder for routine technical choices that can be resolved safely by evidence, existing decisions, tests, or independent review. Escalate only when a genuine Founder-only gate, material unresolved product choice, irreversible/high-impact action, or external blocker is reached.
