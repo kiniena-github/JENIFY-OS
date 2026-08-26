@@ -15,6 +15,8 @@ Every result report must include:
 
 If the allowed priority list is exhausted, stop and report. Do not quietly substitute a weaker or unapproved model.
 
+Family names such as **Fable** and **Opus** describe the approved model family priority. Reports should still include the exact configured/served identifier when the harness exposes one.
+
 ## Anthropic / Claude lane
 
 Priority:
@@ -23,6 +25,8 @@ Priority:
 3. STOP and report if neither is available.
 
 The Claude lane must not execute tasks explicitly routed to Codex, Jules, Gemini, or another named worker.
+
+Current Claude Routine limitation: unlike the Gemini lane, the Claude routine does not expose an independent server-side model-attestation field. Claude reports the saved routine configuration plus any surfaced fallback event. This must be labeled as configuration/self-report evidence rather than falsely described as server attestation.
 
 ## OpenAI lane
 
@@ -40,7 +44,7 @@ Priority:
 2. next-best explicitly approved Google model;
 3. STOP and report if no approved model is available.
 
-For exact-pinned automated lanes, server/model attestation remains mandatory. Never fall back to a paid API or a different model silently.
+For exact-pinned automated lanes that expose server/model attestation, attestation remains mandatory. Never fall back to a paid API or a different model silently.
 
 ## Worker identity rule
 
@@ -50,7 +54,7 @@ A route label is an identity contract:
 - `[JULES]` must be a real Jules lane or remain unexecuted.
 - `[GEMINI]` must be Gemini.
 
-No worker may impersonate another named worker merely because a generic automation caught the issue.
+Any unknown or future bracketed worker tag must default to **not Claude** unless that route is deliberately added. No worker may impersonate another named worker merely because a generic automation caught the issue.
 
 ## Review independence
 
