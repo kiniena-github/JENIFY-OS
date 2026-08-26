@@ -80,13 +80,56 @@ export type ApprovalRejection =
   | 'approval_not_approved'
   | 'approval_expired'
   | 'approval_already_consumed'
-  | 'approval_digest_mismatch';
+  | 'approval_digest_mismatch'
+  | 'approval_claim_binding_mismatch';
 
 export interface ApprovalRecordForValidation {
   decision: string;
   actionDigest: string | null;
   expiresAt: string | null;
   consumedAt: string | null;
+}
+
+/**
+ * Consumption binding written atomically with the single-use nonce at claim
+ * time (issue #77): which worker's claim consumed the approval, under which
+ * fencing token, and the random per-claim nonce that the claim also stamped
+ * onto the task row.
+ */
+export interface ApprovalConsumptionForValidation {
+  consumedAt: string | null;
+  consumedBy: string | null;
+  consumedFence: number | null;
+  consumedClaimNonce: string | null;
+}
+
+/**
+ * Verify at execution start that the approval was consumed by exactly the
+ * claim now trying to execute (issue #77): same worker, same fencing token,
+ * same per-claim nonce as the task row carries. A consumed approval
+ * reattached to a forced assigned state or to a different worker/claim can
+ * never satisfy all three, and an approval that was never consumed (a forced
+ * state that skipped the claim path) has no binding at all. Missing binding
+ * fields never admit anything.
+ */
+export function validateApprovalClaimBinding(
+  record: ApprovalConsumptionForValidation | null,
+  claim: { workerId: string; fence: number; claimNonce: string | null },
+): ApprovalRejection | null {
+  if (!record) return 'approval_missing';
+  if (
+    !record.consumedAt ||
+    !record.consumedBy ||
+    record.consumedFence === null ||
+    !record.consumedClaimNonce ||
+    !claim.claimNonce ||
+    record.consumedBy !== claim.workerId ||
+    record.consumedFence !== claim.fence ||
+    record.consumedClaimNonce !== claim.claimNonce
+  ) {
+    return 'approval_claim_binding_mismatch';
+  }
+  return null;
 }
 
 /**

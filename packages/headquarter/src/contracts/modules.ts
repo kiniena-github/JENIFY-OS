@@ -68,6 +68,15 @@ export interface ApprovalRequest {
   expiresAt: string | null;
   /** Set when the single-use approval nonce was consumed at claim time. */
   consumedAt: string | null;
+  /** Worker whose claim consumed the approval (issue #77 claim binding). */
+  consumedBy: string | null;
+  /** Fencing token of the consuming claim (issue #77 claim binding). */
+  consumedFence: number | null;
+  /**
+   * Random per-claim nonce stamped on both the approval and the task row at
+   * consumption; execution start requires them to still match (issue #77).
+   */
+  consumedClaimNonce: string | null;
 }
 
 export interface ChatMessage {

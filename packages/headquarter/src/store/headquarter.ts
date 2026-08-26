@@ -220,6 +220,9 @@ export class HeadquarterStore {
       actionDigest: (r.action_digest as string | null) ?? null,
       expiresAt: (r.expires_at as string | null) ?? null,
       consumedAt: (r.consumed_at as string | null) ?? null,
+      consumedBy: (r.consumed_by as string | null) ?? null,
+      consumedFence: (r.consumed_fence as number | null) ?? null,
+      consumedClaimNonce: (r.consumed_claim_nonce as string | null) ?? null,
     };
   }
 

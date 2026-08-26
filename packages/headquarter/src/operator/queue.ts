@@ -28,6 +28,7 @@ import {
   approvalExpiredAt,
   taskActionDigest,
   validateApproval,
+  validateApprovalClaimBinding,
   type ApprovalRejection,
 } from './approvals.js';
 
@@ -49,6 +50,13 @@ export interface OperatorTask {
   fence: number;
   claimedBy: string | null;
   leaseExpiresAt: string | null;
+  /**
+   * Random nonce minted by the current claim (issue #77). The claim stamps
+   * the same nonce onto the approval row when it consumes the single-use
+   * approval; start() verifies the two still match, so a consumed approval
+   * cannot be reattached to a forced assigned state or a different claim.
+   */
+  claimNonce: string | null;
   /** Single-use approval nonce currently bound to this task, if any. */
   approvalId: string | null;
   reviewState: ReviewState;
@@ -283,19 +291,28 @@ export class OperatorQueue {
       }
     }
     const leaseExpires = new Date(Date.now() + leaseMs).toISOString();
+    const claimNonce = uuid();
+    const claimFence = candidate.fence + 1;
     const res = this.db
       .prepare(
         `UPDATE op_tasks
-         SET status = 'assigned', fence = fence + 1, claimed_by = ?, lease_expires_at = ?, updated_at = ?
+         SET status = 'assigned', fence = fence + 1, claimed_by = ?, lease_expires_at = ?, claim_nonce = ?, updated_at = ?
          WHERE id = ? AND status = 'queued' AND fence = ?`,
       )
-      .run(workerId, leaseExpires, nowIso(), candidate.id, candidate.fence);
+      .run(workerId, leaseExpires, claimNonce, nowIso(), candidate.id, candidate.fence);
     if (res.changes === 0) return null; // lost the race; caller may retry
-    // Consume the single-use approval nonce exactly once, with the claim.
+    // Consume the single-use approval nonce exactly once, with the claim —
+    // recording WHICH claim consumed it (issue #77): worker, fencing token,
+    // and the per-claim nonce, written in the same atomic conditional UPDATE
+    // as the consumption itself. start() re-verifies this binding.
     if (cap && approvalRequired(cap, this.policyCtx) && task.approvalId) {
       const consumed = this.db
-        .prepare(`UPDATE hq_approvals SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL`)
-        .run(nowIso(), task.approvalId);
+        .prepare(
+          `UPDATE hq_approvals
+           SET consumed_at = ?, consumed_by = ?, consumed_fence = ?, consumed_claim_nonce = ?
+           WHERE id = ? AND consumed_at IS NULL`,
+        )
+        .run(nowIso(), workerId, claimFence, claimNonce, task.approvalId);
       if (consumed.changes === 0) {
         // Nonce raced/replayed: undo nothing destructive — surface loudly.
         throw new Error(`Approval nonce ${task.approvalId} was already consumed (replay rejected)`);
@@ -304,7 +321,7 @@ export class OperatorQueue {
         taskId: candidate.id,
         actor: workerId,
         kind: 'approval_consumed',
-        payload: { approvalId: task.approvalId },
+        payload: { approvalId: task.approvalId, consumedBy: workerId, consumedFence: claimFence, claimNonce },
       });
     }
     this.recordEvent(candidate.id, 'assigned', workerId, `Claimed by ${workerId}`);
@@ -325,9 +342,12 @@ export class OperatorQueue {
    * approval that was valid (and consumed) at claim can expire before the
    * worker actually starts; execution never proceeds on an expired approval —
    * the claim is released and the task returns to needs_approval for a fresh
-   * Founder decision. Consumption state itself is expected at this point
-   * (the nonce was legitimately consumed by this claim), so only decision,
-   * digest, and expiry are re-checked.
+   * Founder decision. Consumption is not merely expected here — it is
+   * VERIFIED (issue #77): the approval must have been consumed by exactly
+   * this claim (same worker, same fencing token, same per-claim nonce as the
+   * task row), so a consumed approval reattached to a forced assigned state
+   * or a different claim, or an approval never consumed through the claim
+   * path at all, is rejected as hostile.
    */
   start(taskId: string, workerId: string, fence: number): OperatorTask {
     this.assertFence(taskId, workerId, fence);
@@ -345,6 +365,17 @@ export class OperatorQueue {
         this.rejectAtExecutionBoundary(task, 'approval_not_approved');
         throw new Error(
           `Task ${taskId}: approval record is not an approval; fresh Founder approval required`,
+        );
+      }
+      const bindingRejection = validateApprovalClaimBinding(approval, {
+        workerId,
+        fence: task.fence,
+        claimNonce: task.claimNonce,
+      });
+      if (bindingRejection) {
+        this.rejectAtExecutionBoundary(task, bindingRejection);
+        throw new Error(
+          `Task ${taskId}: approval was not consumed by this claim (worker/fence/nonce binding mismatch); execution rejected`,
         );
       }
       if (approvalExpiredAt(approval)) {
@@ -482,7 +513,7 @@ export class OperatorQueue {
       } else {
         this.transition(row.id, 'queued', 'system', 'Lease expired; task re-queued');
         this.db
-          .prepare(`UPDATE op_tasks SET claimed_by = NULL, lease_expires_at = NULL WHERE id = ?`)
+          .prepare(`UPDATE op_tasks SET claimed_by = NULL, lease_expires_at = NULL, claim_nonce = NULL WHERE id = ?`)
           .run(row.id);
         requeued.push(row.id);
       }
@@ -522,7 +553,7 @@ export class OperatorQueue {
     }
     const requeued = this.transition(taskId, 'queued', by, `Reconciled not-executed: ${note}`);
     this.db
-      .prepare(`UPDATE op_tasks SET claimed_by = NULL, lease_expires_at = NULL WHERE id = ?`)
+      .prepare(`UPDATE op_tasks SET claimed_by = NULL, lease_expires_at = NULL, claim_nonce = NULL WHERE id = ?`)
       .run(taskId);
     return this.get(taskId) ?? requeued;
   }
@@ -543,6 +574,7 @@ export class OperatorQueue {
       fence: row.fence as number,
       claimedBy: (row.claimed_by as string | null) ?? null,
       leaseExpiresAt: (row.lease_expires_at as string | null) ?? null,
+      claimNonce: (row.claim_nonce as string | null) ?? null,
       approvalId: (row.approval_id as string | null) ?? null,
       reviewState: (row.review_state as ReviewState | null) ?? 'none',
       submittedBy: (row.submitted_by as string | null) ?? null,
@@ -562,15 +594,32 @@ export class OperatorQueue {
     return rows.map((r) => this.get(r.id)!);
   }
 
-  /** Read a hq_approvals row in the shape validateApproval() needs. */
-  private getApprovalRecord(
-    approvalId: string | null,
-  ): { decision: string; actionDigest: string | null; expiresAt: string | null; consumedAt: string | null } | null {
+  /** Read a hq_approvals row in the shape validateApproval()/validateApprovalClaimBinding() need. */
+  private getApprovalRecord(approvalId: string | null): {
+    decision: string;
+    actionDigest: string | null;
+    expiresAt: string | null;
+    consumedAt: string | null;
+    consumedBy: string | null;
+    consumedFence: number | null;
+    consumedClaimNonce: string | null;
+  } | null {
     if (!approvalId) return null;
     const row = this.db
-      .prepare(`SELECT decision, action_digest, expires_at, consumed_at FROM hq_approvals WHERE id = ?`)
+      .prepare(
+        `SELECT decision, action_digest, expires_at, consumed_at, consumed_by, consumed_fence, consumed_claim_nonce
+         FROM hq_approvals WHERE id = ?`,
+      )
       .get(approvalId) as
-      | { decision: string; action_digest: string | null; expires_at: string | null; consumed_at: string | null }
+      | {
+          decision: string;
+          action_digest: string | null;
+          expires_at: string | null;
+          consumed_at: string | null;
+          consumed_by: string | null;
+          consumed_fence: number | null;
+          consumed_claim_nonce: string | null;
+        }
       | undefined;
     if (!row) return null;
     return {
@@ -578,6 +627,9 @@ export class OperatorQueue {
       actionDigest: row.action_digest,
       expiresAt: row.expires_at,
       consumedAt: row.consumed_at,
+      consumedBy: row.consumed_by,
+      consumedFence: row.consumed_fence,
+      consumedClaimNonce: row.consumed_claim_nonce,
     };
   }
 
@@ -587,12 +639,13 @@ export class OperatorQueue {
 
   /**
    * An approval-gated task failed approval validation at the execution
-   * boundary. A digest mismatch means the action was mutated after approval —
-   * that is hostile or a bug, so the task is blocked for investigation. Every
-   * other rejection (missing/expired/consumed/undecided approval) sends the
-   * task back to needs_approval for a fresh Founder decision. The stale
-   * approval binding is cleared either way; approvals themselves are
-   * immutable records.
+   * boundary. A digest mismatch means the action was mutated after approval,
+   * and a claim-binding mismatch (issue #77) means a consumed approval was
+   * reattached to a forced state or a different claim — both are hostile or
+   * a bug, so the task is blocked for investigation. Every other rejection
+   * (missing/expired/consumed/undecided approval) sends the task back to
+   * needs_approval for a fresh Founder decision. The stale approval binding
+   * is cleared either way; approvals themselves are immutable records.
    */
   private rejectAtExecutionBoundary(task: OperatorTask, rejection: ApprovalRejection): void {
     this.evidence.append({
@@ -602,13 +655,15 @@ export class OperatorQueue {
       payload: { rejection, approvalId: task.approvalId },
     });
     this.db.prepare(`UPDATE op_tasks SET approval_id = NULL WHERE id = ?`).run(task.id);
-    if (rejection === 'approval_digest_mismatch') {
+    if (rejection === 'approval_digest_mismatch' || rejection === 'approval_claim_binding_mismatch') {
+      const reason =
+        rejection === 'approval_digest_mismatch'
+          ? 'Approval invalidated: action payload/capability changed after Founder approval'
+          : 'Approval invalidated: approval was not consumed by the current legitimate claim (reattach/replay rejected)';
       if (task.status !== 'blocked') {
-        this.transition(task.id, 'blocked', 'system', 'Approval invalidated: action changed after Founder approval');
+        this.transition(task.id, 'blocked', 'system', reason);
       }
-      this.db
-        .prepare(`UPDATE op_tasks SET block_reason = ? WHERE id = ?`)
-        .run('Approval invalidated: action payload/capability changed after Founder approval', task.id);
+      this.db.prepare(`UPDATE op_tasks SET block_reason = ? WHERE id = ?`).run(reason, task.id);
       return;
     }
     if (task.status !== 'needs_approval') {
@@ -618,7 +673,7 @@ export class OperatorQueue {
     // between claim and start) releases the worker and its lease; the stale
     // fence can no longer act on the task. No-op for unclaimed tasks.
     this.db
-      .prepare(`UPDATE op_tasks SET claimed_by = NULL, lease_expires_at = NULL WHERE id = ?`)
+      .prepare(`UPDATE op_tasks SET claimed_by = NULL, lease_expires_at = NULL, claim_nonce = NULL WHERE id = ?`)
       .run(task.id);
   }
 
