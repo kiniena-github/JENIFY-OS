@@ -1,0 +1,27 @@
+{
+  "name": "@factoryos/headquarter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "JENIFY Headquarter foundation — canonical activity/event model, Headquarter module contracts, and the Universal Operator control plane. Private internal MVP; no deployment target.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./contracts": "./src/contracts/index.ts",
+    "./operator": "./src/operator/index.ts",
+    "./store": "./src/store/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "uuid": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}
