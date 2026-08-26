@@ -56,11 +56,14 @@ th, td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid var
 .msg { border-left: 3px solid var(--accent); padding: 0.2rem 0.6rem; margin: 0.4rem 0; }
 `;
 
-function shell(title: string, activeFile: string, body: string): string {
+function shell(title: string, activeFile: string, body: string, provenanceNote?: string): string {
   const nav = HQ_PAGES.map(
     (page) =>
       `<a href="${page.file}"${page.file === activeFile ? ' aria-current="page"' : ''}>${escapeHtml(page.title)}</a>`,
   ).join('');
+  const footer = provenanceNote
+    ? `<footer class="muted" data-provenance>Data provenance: ${escapeHtml(provenanceNote)}</footer>`
+    : '';
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -73,6 +76,7 @@ function shell(title: string, activeFile: string, body: string): string {
 <header><h1>JENIFY Headquarter</h1><nav>${nav}</nav></header>
 <main><h1>${escapeHtml(title)}</h1>
 ${body}
+${footer}
 </main>
 </body>
 </html>`;
@@ -99,7 +103,7 @@ function taskRows(states: TaskState[]): string {
 /* Pages                                                               */
 /* ------------------------------------------------------------------ */
 
-export function renderCommandCenter(dashboard: FounderDashboard, workers: WorkerStatus[]): string {
+export function renderCommandCenter(dashboard: FounderDashboard, workers: WorkerStatus[], provenanceNote?: string): string {
   const sections = [
     ['NOW', dashboard.now],
     ['DONE TODAY', dashboard.doneToday],
@@ -121,12 +125,13 @@ export function renderCommandCenter(dashboard: FounderDashboard, workers: Worker
 <p class="muted">last seen ${escapeHtml(worker.lastSeen)}</p></div>`,
       )
       .join('\n')}</div></section>`;
-  return shell('Command Center', 'index.html', body);
+  return shell('Command Center', 'index.html', body, provenanceNote);
 }
 
 export function renderProjects(
   cards: ProjectCard[],
   timelines: Map<string, { occurredAt: string; status: string; title: string; worker: string }[]>,
+  provenanceNote?: string,
 ): string {
   const cardHtml = `<div class="cards">${cards
     .map(
@@ -146,7 +151,7 @@ export function renderProjects(
         .join('\n')}</tbody></table></section>`,
     )
     .join('\n');
-  return shell('Projects', 'projects.html', `<section><h2>Project Cards</h2>${cardHtml}</section>${timelineHtml}`);
+  return shell('Projects', 'projects.html', `<section><h2>Project Cards</h2>${cardHtml}</section>${timelineHtml}`, provenanceNote);
 }
 
 function renderThreads(threads: ChatThread[]): string {
@@ -166,19 +171,19 @@ ${thread.messages
     .join('\n');
 }
 
-export function renderExecutiveRoom(threads: ChatThread[]): string {
+export function renderExecutiveRoom(threads: ChatThread[], provenanceNote?: string): string {
   const note =
     '<p class="muted">Presentation layer over recorded transcripts. Live messaging arrives with the operator control layer.</p>';
-  return shell('Executive Room', 'executive-room.html', note + renderThreads(threads));
+  return shell('Executive Room', 'executive-room.html', note + renderThreads(threads), provenanceNote);
 }
 
-export function renderDirectChats(threads: ChatThread[]): string {
+export function renderDirectChats(threads: ChatThread[], provenanceNote?: string): string {
   const note =
     '<p class="muted">Direct Founder ↔ worker transcripts. Live messaging arrives with the operator control layer.</p>';
-  return shell('Direct Chats', 'direct-chats.html', note + renderThreads(threads));
+  return shell('Direct Chats', 'direct-chats.html', note + renderThreads(threads), provenanceNote);
 }
 
-export function renderSpecialistDirectory(specialists: Specialist[]): string {
+export function renderSpecialistDirectory(specialists: Specialist[], provenanceNote?: string): string {
   const body = `<div class="cards">${specialists
     .map(
       (specialist) => `<div class="card"><h3>${escapeHtml(specialist.name)}</h3>
@@ -186,19 +191,23 @@ export function renderSpecialistDirectory(specialists: Specialist[]): string {
 <p class="muted">lane: ${escapeHtml(specialist.lane)} · <span class="badge">${escapeHtml(specialist.status)}</span></p></div>`,
     )
     .join('\n')}</div>`;
-  return shell('Specialist Directory', 'specialists.html', body);
+  return shell('Specialist Directory', 'specialists.html', body, provenanceNote);
 }
 
-export function renderFounderApprovals(waiting: TaskState[]): string {
+export function renderFounderApprovals(waiting: TaskState[], provenanceNote?: string): string {
   const note =
     '<p class="muted">Read-only approval queue. Approve/Reject actions are wired through the operator control layer (Founder-gated) — this page never executes actions itself.</p>';
-  return shell('Founder Approvals', 'approvals.html', note + taskRows(waiting));
+  return shell('Founder Approvals', 'approvals.html', note + taskRows(waiting), provenanceNote);
 }
+
+const ARCHIVE_BANNER =
+  '<p class="muted" data-archive-banner>These rows are reconstructed canonical records, not original evidence: each links to its preserved original via the source column. Dates flagged &quot;inferred&quot; or &quot;estimated&quot; are not authoritative and must be verified against the original before being relied on.</p>';
 
 export function renderArchive(
   records: ArchiveRecord[],
   monthly: MonthlyGroup[],
   evolutions: Map<string, EvolutionChain[]>,
+  provenanceNote?: string,
 ): string {
   const monthlyHtml = monthly
     .map(
@@ -250,5 +259,5 @@ export function renderArchive(
   });
 })();
 </script></section>`;
-  return shell('Archive', 'archive.html', searchUi + monthlyHtml + evolutionHtml);
+  return shell('Archive', 'archive.html', ARCHIVE_BANNER + searchUi + monthlyHtml + evolutionHtml, provenanceNote);
 }

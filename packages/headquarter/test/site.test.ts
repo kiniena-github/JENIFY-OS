@@ -46,6 +46,25 @@ describe('buildSite', () => {
     expect(html).not.toContain('<button');
   });
 
+  it('renders the bundle provenance note on every page so samples cannot pass as authoritative', () => {
+    for (const page of HQ_PAGES) {
+      const html = site.get(page.file)!;
+      expect(html).toContain('data-provenance');
+      expect(html).toContain('reconstructed from real GitHub-visible JENIFY-OS activity');
+    }
+    // A bundle without a note renders no empty provenance footer.
+    const bare = buildSite({ ...sample, note: undefined });
+    expect(bare.get('index.html')).not.toContain('data-provenance');
+  });
+
+  it('Archive page always carries the not-original-evidence banner', () => {
+    const html = site.get('archive.html')!;
+    expect(html).toContain('data-archive-banner');
+    expect(html).toContain('not original evidence');
+    const bare = buildSite({ ...sample, note: undefined });
+    expect(bare.get('archive.html')).toContain('data-archive-banner');
+  });
+
   it('Archive page shows monthly groups, evolution, source links, and confidence flags', () => {
     const html = site.get('archive.html')!;
     expect(html).toContain('<h2>2026-08</h2>');

@@ -46,12 +46,12 @@ export function buildSite(data: HeadquarterData): Map<string, string> {
   );
 
   const site = new Map<string, string>();
-  site.set('index.html', renderCommandCenter(dashboard, workers));
-  site.set('projects.html', renderProjects(cards, timelines));
-  site.set('executive-room.html', renderExecutiveRoom(data.executiveRoom));
-  site.set('direct-chats.html', renderDirectChats(data.directChats));
-  site.set('specialists.html', renderSpecialistDirectory(data.specialists));
-  site.set('approvals.html', renderFounderApprovals(dashboard.waitingForFounder));
-  site.set('archive.html', renderArchive(data.archive, monthly, evolutions));
+  site.set('index.html', renderCommandCenter(dashboard, workers, data.note));
+  site.set('projects.html', renderProjects(cards, timelines, data.note));
+  site.set('executive-room.html', renderExecutiveRoom(data.executiveRoom, data.note));
+  site.set('direct-chats.html', renderDirectChats(data.directChats, data.note));
+  site.set('specialists.html', renderSpecialistDirectory(data.specialists, data.note));
+  site.set('approvals.html', renderFounderApprovals(dashboard.waitingForFounder, data.note));
+  site.set('archive.html', renderArchive(data.archive, monthly, evolutions, data.note));
   return site;
 }
