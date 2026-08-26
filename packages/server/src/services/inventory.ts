@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import type { MovementType, LotStatus } from '@factoryos/shared';
 import { lots, reservations, stockBalances, stockMovements } from '../db/schema.js';
 import { newId, nowIso, badRequest, notFound } from '../util.js';
@@ -152,6 +152,43 @@ export function getAvailable(
 }
 
 // ----------------------------- Reservations --------------------------------
+
+/**
+ * FIFO lot allocation (reusable order-domain primitive): walk the item's lots
+ * oldest-first and take AVAILABLE stock (on hand minus active reservations)
+ * from the given warehouse until `qty` milli base-units are covered. Pure
+ * planning — the caller turns the allocations into reservations. Throws
+ * `insufficient_available` when the warehouse cannot cover the quantity.
+ */
+export function allocateLotsFifo(
+  ctx: Ctx,
+  input: { itemId: string; warehouseId: string; qty: number; itemName?: string },
+): Array<{ lotId: string; qty: number }> {
+  requireQty(input.qty, 'Allocation quantity', { integerOnly: true, max: MAX_MOVEMENT_QTY });
+  let remaining = input.qty;
+  const candidateLots = ctx.db
+    .select()
+    .from(lots)
+    .where(and(eq(lots.tenantId, ctx.tenantId), eq(lots.itemId, input.itemId)))
+    .orderBy(asc(lots.createdAt))
+    .all();
+  const allocations: Array<{ lotId: string; qty: number }> = [];
+  for (const lot of candidateLots) {
+    if (remaining <= 0) break;
+    const avail = getAvailable(ctx, input.itemId, input.warehouseId, lot.id);
+    if (avail <= 0) continue;
+    const take = Math.min(avail, remaining);
+    allocations.push({ lotId: lot.id, qty: take });
+    remaining -= take;
+  }
+  if (remaining > 0) {
+    badRequest(
+      'insufficient_available',
+      `Not enough available stock of '${input.itemName ?? input.itemId}' in the selected warehouse`,
+    );
+  }
+  return allocations;
+}
 
 export function createReservation(
   ctx: Ctx,

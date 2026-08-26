@@ -1,5 +1,5 @@
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
-import { creditNotes, invoiceLines, lots, salesInvoices, paymentAllocations, payments } from '../db/schema.js';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { creditNotes, invoiceLines, salesInvoices, paymentAllocations, payments } from '../db/schema.js';
 import { newId, nowIso, badRequest, notFound } from '../util.js';
 import type { Ctx } from './context.js';
 import { actorId, inTx } from './context.js';
@@ -11,6 +11,7 @@ import { getSettings } from './settings.js';
 import { normalizePriceCategories } from '@factoryos/shared';
 import {
   getAvailable,
+  allocateLotsFifo,
   createReservation,
   listReservationsForDocument,
   releaseReservation,
@@ -28,14 +29,7 @@ export interface VatSettings {
   ratePct: number;
 }
 
-export interface InvoiceLineInput {
-  itemId: string;
-  warehouseId: string;
-  qty: number; // natural units (packs / kg)
-  entryUomId: string;
-  unitPrice?: number; // ETB; omitted -> price list
-  discount?: number; // ETB per line total
-}
+export type InvoiceLineInput = CommercialLineInput;
 
 export interface CreateInvoiceInput {
   customerId: string;
@@ -52,8 +46,140 @@ export interface CreateInvoiceInput {
 }
 
 /** Money helpers — everything in integer cents. */
-function cents(v: number): number {
+export function cents(v: number): number {
   return Math.round(v * 100);
+}
+
+// ------------------- Reusable commercial pricing (orders + invoices) -------
+
+/** One commercial line as entered: natural qty + optional custom price. */
+export interface CommercialLineInput {
+  itemId: string;
+  warehouseId: string;
+  qty: number; // natural units (packs / kg)
+  entryUomId: string;
+  unitPrice?: number; // ETB; omitted -> price list
+  discount?: number; // ETB per line total
+}
+
+/** A priced commercial line, document-neutral (used by orders AND invoices). */
+export interface PricedLine {
+  itemId: string;
+  warehouseId: string;
+  qty: number; // milli base-units
+  entryUomId: string;
+  unitPriceCents: number;
+  priceSource: 'list' | 'custom';
+  discountCents: number;
+  lineSubtotalCents: number; // net of the line discount
+}
+
+/** Explicit category wins; then the customer's default; then the tenant default. */
+export function resolvePriceCategory(
+  ctx: Ctx,
+  customer: { defaultPriceCategory: string | null },
+  explicit: string | undefined,
+  pricing: { data: PricingSettings } | null,
+): string {
+  const priceCategory =
+    explicit ??
+    customer.defaultPriceCategory ??
+    (pricing ? (normalizePriceCategories(pricing.data).defaultCode ?? undefined) : undefined);
+  if (!priceCategory) badRequest('bad_category', 'No price category given and no default configured');
+  if (pricing) {
+    const { categories } = normalizePriceCategories(pricing.data);
+    const cat = categories.find((c) => c.code === priceCategory);
+    if (!cat) badRequest('bad_category', `Unknown price category '${priceCategory}'`);
+    if (!cat.active) badRequest('archived_category', `Price category '${cat.name}' is archived`);
+  }
+  return priceCategory;
+}
+
+/**
+ * Price a set of commercial lines against the tenant price list — the ONE
+ * shared pricing discipline for sales documents (sellable check, UoM family
+ * check, list/custom price resolution, per-line discount bounds). Pure with
+ * respect to the caller's document: returns priced lines + totals + whether
+ * any custom price was used.
+ */
+export function priceCommercialLines(
+  ctx: Ctx,
+  lines: CommercialLineInput[],
+  priceCategory: string,
+  pricing: { data: PricingSettings } | null,
+): { lines: PricedLine[]; subtotal: number; discountTotal: number; hasCustomPrice: boolean } {
+  let subtotal = 0;
+  let discountTotal = 0;
+  let hasCustomPrice = false;
+  const priced: PricedLine[] = [];
+  for (const line of lines) {
+    const item = getItem(ctx, line.itemId);
+    if (!item.sellable) badRequest('not_sellable', `'${item.name}' is not sellable`);
+    getWarehouse(ctx, line.warehouseId);
+    const uom = getUom(ctx, line.entryUomId);
+    const baseUom = getUom(ctx, item.baseUomId);
+    if (uom.family !== baseUom.family) {
+      badRequest('line_uom', `Unit '${uom.code}' does not measure '${item.name}'`);
+    }
+    if (!(line.qty > 0)) badRequest('line_qty', 'Quantity must be positive');
+    const baseQty = toBaseQty(ctx, line.entryUomId, line.qty);
+
+    const listPrice = pricing?.data.prices?.[line.itemId]?.[priceCategory] ?? null;
+    let unitPriceCents: number;
+    let priceSource: 'list' | 'custom';
+    if (line.unitPrice != null) {
+      unitPriceCents = cents(line.unitPrice);
+      priceSource = listPrice != null && cents(listPrice) === unitPriceCents ? 'list' : 'custom';
+    } else if (listPrice != null) {
+      unitPriceCents = cents(listPrice);
+      priceSource = 'list';
+    } else {
+      badRequest(
+        'price_missing',
+        `No ${priceCategory} price configured for '${item.name}' — enter an approved price`,
+      );
+    }
+    if (priceSource === 'custom') hasCustomPrice = true;
+
+    const lineDiscount = cents(line.discount ?? 0);
+    if (lineDiscount < 0) badRequest('discount_invalid', 'Discount cannot be negative');
+    // price is per natural unit (per pack / per kg of the entry uom's base)
+    const lineSubtotal = Math.round((baseQty / baseUom.factorToBase) * unitPriceCents);
+    if (lineDiscount > lineSubtotal) {
+      badRequest('discount_invalid', 'Discount cannot exceed the line amount');
+    }
+    subtotal += lineSubtotal;
+    discountTotal += lineDiscount;
+
+    priced.push({
+      itemId: line.itemId,
+      warehouseId: line.warehouseId,
+      qty: baseQty,
+      entryUomId: line.entryUomId,
+      unitPriceCents,
+      priceSource,
+      discountCents: lineDiscount,
+      lineSubtotalCents: lineSubtotal - lineDiscount,
+    });
+  }
+  return { lines: priced, subtotal, discountTotal, hasCustomPrice };
+}
+
+/** Shared approval gate: custom prices/discounts need explicit authorization. */
+export function requirePricingApproval(
+  pricing: { data: PricingSettings } | null,
+  hasCustomPrice: boolean,
+  discountTotal: number,
+  customApproved: boolean | undefined,
+): void {
+  if (hasCustomPrice || discountTotal > 0) {
+    const needsApproval =
+      (hasCustomPrice && (pricing?.data.customPrice?.requiresApproval ?? true)) ||
+      (discountTotal > 0 && (pricing?.data.discount?.requiresApproval ?? true));
+    if (needsApproval && !customApproved) {
+      badRequest('approval_required', 'Custom price or discount requires authorized approval');
+    }
+  }
 }
 
 export function createInvoice(
@@ -67,89 +193,31 @@ export function createInvoice(
 
     const pricing = getSettings<PricingSettings>(tx, 'pricing');
     const vat = getSettings<VatSettings>(tx, 'vat');
-    // Explicit category wins; otherwise the customer's default drives the
-    // invoice, then the tenant-wide default category.
-    const priceCategory =
-      input.priceCategory ??
-      customer.defaultPriceCategory ??
-      (pricing ? (normalizePriceCategories(pricing.data).defaultCode ?? undefined) : undefined);
-    if (!priceCategory) badRequest('bad_category', 'No price category given and no default configured');
-    if (pricing) {
-      const { categories } = normalizePriceCategories(pricing.data);
-      const cat = categories.find((c) => c.code === priceCategory);
-      if (!cat) badRequest('bad_category', `Unknown price category '${priceCategory}'`);
-      if (!cat.active) badRequest('archived_category', `Price category '${cat.name}' is archived`);
-    }
-
-    let subtotal = 0;
-    let discountTotal = 0;
-    const preparedLines: Array<typeof invoiceLines.$inferInsert> = [];
-    let hasCustomPrice = false;
+    const priceCategory = resolvePriceCategory(tx, customer, input.priceCategory, pricing);
 
     const id = newId();
-    for (const line of input.lines) {
-      const item = getItem(tx, line.itemId);
-      if (!item.sellable) badRequest('not_sellable', `'${item.name}' is not sellable`);
-      getWarehouse(tx, line.warehouseId);
-      const uom = getUom(tx, line.entryUomId);
-      const baseUom = getUom(tx, item.baseUomId);
-      if (uom.family !== baseUom.family) {
-        badRequest('line_uom', `Unit '${uom.code}' does not measure '${item.name}'`);
-      }
-      if (!(line.qty > 0)) badRequest('line_qty', 'Quantity must be positive');
-      const baseQty = toBaseQty(tx, line.entryUomId, line.qty);
+    const { lines, subtotal, discountTotal, hasCustomPrice } = priceCommercialLines(
+      tx,
+      input.lines,
+      priceCategory,
+      pricing,
+    );
+    const preparedLines: Array<typeof invoiceLines.$inferInsert> = lines.map((l) => ({
+      id: newId(),
+      tenantId: tx.tenantId,
+      invoiceId: id,
+      itemId: l.itemId,
+      lotId: null,
+      warehouseId: l.warehouseId,
+      qty: l.qty,
+      entryUomId: l.entryUomId,
+      unitPriceCents: l.unitPriceCents,
+      priceSource: l.priceSource,
+      discountCents: l.discountCents,
+      lineSubtotalCents: l.lineSubtotalCents,
+    }));
 
-      const listPrice = pricing?.data.prices?.[line.itemId]?.[priceCategory] ?? null;
-      let unitPriceCents: number;
-      let priceSource: 'list' | 'custom';
-      if (line.unitPrice != null) {
-        unitPriceCents = cents(line.unitPrice);
-        priceSource = listPrice != null && cents(listPrice) === unitPriceCents ? 'list' : 'custom';
-      } else if (listPrice != null) {
-        unitPriceCents = cents(listPrice);
-        priceSource = 'list';
-      } else {
-        badRequest(
-          'price_missing',
-          `No ${priceCategory} price configured for '${item.name}' — enter an approved price`,
-        );
-      }
-      if (priceSource === 'custom') hasCustomPrice = true;
-
-      const lineDiscount = cents(line.discount ?? 0);
-      if (lineDiscount < 0) badRequest('discount_invalid', 'Discount cannot be negative');
-      // price is per natural unit (per pack / per kg of the entry uom's base)
-      const lineSubtotal = Math.round((baseQty / baseUom.factorToBase) * unitPriceCents);
-      if (lineDiscount > lineSubtotal) {
-        badRequest('discount_invalid', 'Discount cannot exceed the line amount');
-      }
-      subtotal += lineSubtotal;
-      discountTotal += lineDiscount;
-
-      preparedLines.push({
-        id: newId(),
-        tenantId: tx.tenantId,
-        invoiceId: id,
-        itemId: line.itemId,
-        lotId: null,
-        warehouseId: line.warehouseId,
-        qty: baseQty,
-        entryUomId: line.entryUomId,
-        unitPriceCents,
-        priceSource,
-        discountCents: lineDiscount,
-        lineSubtotalCents: lineSubtotal - lineDiscount,
-      });
-    }
-
-    if (hasCustomPrice || discountTotal > 0) {
-      const needsApproval =
-        (hasCustomPrice && (pricing?.data.customPrice?.requiresApproval ?? true)) ||
-        (discountTotal > 0 && (pricing?.data.discount?.requiresApproval ?? true));
-      if (needsApproval && !input.customApproved) {
-        badRequest('approval_required', 'Custom price or discount requires authorized approval');
-      }
-    }
+    requirePricingApproval(pricing, hasCustomPrice, discountTotal, input.customApproved);
 
     const taxable = subtotal - discountTotal;
     const vatCents = vat?.data.enabled ? Math.round((taxable * vat.data.ratePct) / 100) : 0;
@@ -226,29 +294,14 @@ export function confirmInvoice(ctx: Ctx, id: string, opts: { creditOverride?: bo
     for (const line of lines) {
       const item = getItem(tx, line.itemId);
       if (item.trackingMode === 'lot') {
-        // FIFO allocation across lots in the selected warehouse
-        let remaining = line.qty;
-        const candidateLots = tx.db
-          .select()
-          .from(lots)
-          .where(and(eq(lots.tenantId, tx.tenantId), eq(lots.itemId, line.itemId)))
-          .orderBy(asc(lots.createdAt))
-          .all();
-        const allocations: Array<{ lotId: string; qty: number }> = [];
-        for (const lot of candidateLots) {
-          if (remaining <= 0) break;
-          const avail = getAvailable(tx, line.itemId, line.warehouseId, lot.id);
-          if (avail <= 0) continue;
-          const take = Math.min(avail, remaining);
-          allocations.push({ lotId: lot.id, qty: take });
-          remaining -= take;
-        }
-        if (remaining > 0) {
-          badRequest(
-            'insufficient_available',
-            `Not enough available stock of '${item.name}' in the selected warehouse`,
-          );
-        }
+        // FIFO allocation across lots in the selected warehouse (shared
+        // primitive — the same discipline order confirmation uses)
+        const allocations = allocateLotsFifo(tx, {
+          itemId: line.itemId,
+          warehouseId: line.warehouseId,
+          qty: line.qty,
+          itemName: item.name,
+        });
         // first allocation stays on this line; extra allocations become new
         // lines, and money splits proportionally with no rounding loss
         const [first, ...rest] = allocations;
