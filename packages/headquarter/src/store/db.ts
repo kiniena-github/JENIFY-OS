@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS op_tasks (
   fence INTEGER NOT NULL DEFAULT 0,
   claimed_by TEXT,
   lease_expires_at TEXT,
+  claim_nonce TEXT,
   approval_id TEXT,
   review_state TEXT NOT NULL DEFAULT 'none',
   submitted_by TEXT,
@@ -105,7 +106,11 @@ CREATE TABLE IF NOT EXISTS hq_approvals (
   decision_note TEXT,
   action_digest TEXT,
   expires_at TEXT,
-  consumed_at TEXT
+  consumed_at TEXT,
+  consumed_by TEXT,
+  consumed_task_id TEXT,
+  consumed_fence INTEGER,
+  consumed_claim_nonce TEXT
 );
 
 CREATE TABLE IF NOT EXISTS hq_chat_messages (
@@ -149,6 +154,14 @@ const COLUMN_UPGRADES: readonly { table: string; column: string; ddl: string }[]
   { table: 'hq_approvals', column: 'action_digest', ddl: 'TEXT' },
   { table: 'hq_approvals', column: 'expires_at', ddl: 'TEXT' },
   { table: 'hq_approvals', column: 'consumed_at', ddl: 'TEXT' },
+  // Issue #77: approval consumption binds to the legitimate claim.
+  { table: 'op_tasks', column: 'claim_nonce', ddl: 'TEXT' },
+  { table: 'hq_approvals', column: 'consumed_by', ddl: 'TEXT' },
+  { table: 'hq_approvals', column: 'consumed_fence', ddl: 'INTEGER' },
+  { table: 'hq_approvals', column: 'consumed_claim_nonce', ddl: 'TEXT' },
+  // Issue #79: the consumption record also pins the exact task, so a consumed
+  // approval cannot ride another task even behind a forged action digest.
+  { table: 'hq_approvals', column: 'consumed_task_id', ddl: 'TEXT' },
 ];
 
 function ensureColumns(db: HqDatabase): void {

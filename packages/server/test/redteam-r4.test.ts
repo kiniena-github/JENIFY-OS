@@ -81,7 +81,11 @@ describe('R4 H3 — a single booking permanently blocking a resource', () => {
     const room = createResource(tt.ownerCtx, { code: 'R5', name: 'Room 5' });
     expect(() =>
       createBooking(tt.ownerCtx, { resourceId: room, startAt: '2026-01-01T00:00:00.000Z', endAt: '3026-01-01T00:00:00.000Z' }),
-    ).toThrowError(/exceed 366 days/);
+    ).toThrowError(/supported date range/); // caught even earlier now: year 3026 is out of range
+    // and a long-but-in-range span is still refused by the duration cap
+    expect(() =>
+      createBooking(tt.ownerCtx, { resourceId: room, startAt: '2026-01-01T00:00:00.000Z', endAt: '2028-01-01T00:00:00.000Z' }),
+    ).toThrowError(/may not exceed/);
   });
 });
 
@@ -113,7 +117,7 @@ describe('R4 H2 — work-order parts consuming RESERVED stock', () => {
     const wo = createWorkOrder(tt.ownerCtx, { title: 'Job', scheduledFor: '2026-08-23' });
     expect(() =>
       issuePartToWorkOrder(tt.ownerCtx, wo.id, { itemId: tt.items.pack1kg, warehouseId: tt.warehouses.a, lotId, qty: true as unknown as number }),
-    ).toThrowError(/positive number/);
+    ).toThrowError(/must be a number/);
     expect(getOnHand(tt.ownerCtx, tt.items.pack1kg, tt.warehouses.a, lotId)).toBe(10000);
   });
 });

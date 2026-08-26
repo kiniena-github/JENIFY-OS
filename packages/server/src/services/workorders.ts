@@ -8,6 +8,7 @@ import { requirePermission } from './permissions.js';
 import { postMovement, getAvailable } from './inventory.js';
 import { nextDocNumber, defineSequence } from './numbering.js';
 import { getItem, getWarehouse } from './masterdata.js';
+import { requireQty, clampLimit } from '../validate.js';
 
 /**
  * Work orders — ONE dispatched-job capability shared by automotive workshops,
@@ -42,13 +43,6 @@ export interface CreateWorkOrderInput {
   assignedToUserId?: string;
   priority?: 'low' | 'normal' | 'high';
   scheduledFor?: string;
-}
-
-/** A caller-supplied limit must never widen the page (?limit=-1 returned all rows). */
-function clampLimit(value: unknown, fallback: number, max: number): number {
-  const n = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(n) || n < 1) return fallback;
-  return Math.min(Math.floor(n), max);
 }
 
 function ensureSeq(ctx: Ctx): void {
@@ -227,9 +221,7 @@ export function issuePartToWorkOrder(
   getWarehouse(ctx, input.warehouseId);
   // reject non-numeric input outright: `true` coerces past a bare `> 0` test and
   // posted a real ledger movement (red-team R4)
-  if (typeof input.qty !== 'number' || !Number.isFinite(input.qty) || input.qty <= 0) {
-    badRequest('wo_part_qty', 'Issued quantity must be a positive number');
-  }
+  requireQty(input.qty, 'Issued quantity');
   // Traceability: a lot-tracked part must name the lot it came from, otherwise
   // the issue would post against an untracked balance and break lot genealogy.
   if (item.trackingMode === 'lot' && !input.lotId) {

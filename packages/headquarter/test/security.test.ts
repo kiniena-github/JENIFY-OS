@@ -282,6 +282,172 @@ describe('issue #71: approval expiry is revalidated at actual execution start', 
   });
 });
 
+describe('issue #77: approval consumption binds to the legitimate claim', () => {
+  let db: HqDatabase;
+  let queue: OperatorQueue;
+
+  beforeEach(() => {
+    db = openMemoryHqDatabase();
+    queue = makeQueue(db);
+  });
+
+  it('a legitimate claim records the full consumption binding and still starts before expiry', () => {
+    const id = enqueueGated(queue);
+    queue.approve(id);
+    const t = queue.claim('claude', 'ops.risky')!;
+    expect(t.claimNonce).toBeTruthy();
+    const row = db
+      .prepare(
+        `SELECT consumed_at, consumed_by, consumed_fence, consumed_claim_nonce FROM hq_approvals WHERE id = ?`,
+      )
+      .get(t.approvalId) as Record<string, unknown>;
+    expect(row.consumed_at).not.toBeNull();
+    expect(row.consumed_by).toBe('claude');
+    expect(row.consumed_fence).toBe(t.fence);
+    expect(row.consumed_claim_nonce).toBe(t.claimNonce);
+    // The binding is on the evidence record too.
+    const consumedEv = queue.evidence.list(id).find((e) => e.kind === 'approval_consumed');
+    expect(consumedEv?.payload.consumedBy).toBe('claude');
+    expect(consumedEv?.payload.consumedFence).toBe(t.fence);
+    expect(consumedEv?.payload.claimNonce).toBe(t.claimNonce);
+    // The legitimate claim still executes normally.
+    expect(queue.start(id, 'claude', t.fence).status).toBe('running');
+  });
+
+  it('HOSTILE: an approval consumed by worker A cannot be reattached to a forced assigned state for worker B', () => {
+    const id = enqueueGated(queue);
+    queue.approve(id);
+    const t = queue.claim('claude', 'ops.risky')!; // legitimately consumed by claude's claim
+    // Attacker hands the assigned task (with its consumed approval still
+    // attached) to a different worker via direct SQL.
+    db.prepare(`UPDATE op_tasks SET claimed_by = 'intruder' WHERE id = ?`).run(id);
+    expect(() => queue.start(id, 'intruder', t.fence)).toThrow(/not consumed by this claim/i);
+    const task = queue.get(id)!;
+    expect(task.status).toBe('blocked');
+    expect(task.approvalId).toBeNull();
+    const rejection = queue.evidence.list(id).find((e) => e.kind === 'approval_rejected_at_execution');
+    expect(rejection?.payload.rejection).toBe('approval_claim_binding_mismatch');
+  });
+
+  it('HOSTILE: a forced assigned state that skipped the claim path (approval never consumed) cannot start', () => {
+    const id = enqueueGated(queue);
+    queue.approve(id); // approved and queued; nonce NOT consumed — no claim happened
+    db.prepare(
+      `UPDATE op_tasks SET status = 'assigned', claimed_by = 'claude', fence = 1,
+         claim_nonce = 'forged', lease_expires_at = ? WHERE id = ?`,
+    ).run(new Date(Date.now() + 60_000).toISOString(), id);
+    expect(() => queue.start(id, 'claude', 1)).toThrow(/not consumed by this claim/i);
+    expect(queue.get(id)!.status).toBe('blocked');
+  });
+
+  it('HOSTILE: a stale/forged claim nonce on the task row cannot start execution', () => {
+    const id = enqueueGated(queue);
+    queue.approve(id);
+    const t = queue.claim('claude', 'ops.risky')!;
+    // Attacker overwrites the task's per-claim nonce (e.g. while restoring a forced state).
+    db.prepare(`UPDATE op_tasks SET claim_nonce = 'forged-nonce' WHERE id = ?`).run(id);
+    expect(() => queue.start(id, 'claude', t.fence)).toThrow(/not consumed by this claim/i);
+    expect(queue.get(id)!.status).toBe('blocked');
+  });
+
+  it('HOSTILE: a released claim cannot be force-restored onto its old consumed approval', () => {
+    const id = enqueueGated(queue);
+    queue.approve(id);
+    const t = queue.claim('claude', 'ops.risky', -1)!; // lease already expired while assigned
+    queue.sweepExpiredLeases(); // safely re-queued; claim released, nonce cleared
+    const released = queue.get(id)!;
+    expect(released.status).toBe('queued');
+    expect(released.claimNonce).toBeNull();
+    // Attacker resurrects the old claim by force, pointing at the consumed approval.
+    db.prepare(
+      `UPDATE op_tasks SET status = 'assigned', claimed_by = 'claude', fence = ?,
+         approval_id = ?, lease_expires_at = ? WHERE id = ?`,
+    ).run(t.fence, t.approvalId, new Date(Date.now() + 60_000).toISOString(), id);
+    expect(() => queue.start(id, 'claude', t.fence)).toThrow(/not consumed by this claim/i);
+    expect(queue.get(id)!.status).toBe('blocked');
+  });
+
+  it('valid-at-claim but expired-at-start is still the safe needs_approval path, not a hostile block', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+      const id = enqueueGated(queue);
+      queue.approve(id, 'founder', { ttlMs: 60_000 });
+      const t = queue.claim('claude', 'ops.risky')!; // binding intact, legitimately consumed
+      vi.setSystemTime(new Date('2026-01-01T00:01:00.001Z'));
+      // The legitimate claim's binding passes; only the time-box rejects — so
+      // the recovery path stays needs_approval (issue #71), never blocked.
+      expect(() => queue.start(id, 'claude', t.fence)).toThrow(/expired before execution start/i);
+      expect(queue.get(id)!.status).toBe('needs_approval');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('issue #79: consumption also pins the exact task (cross-task riding fails even behind a forged digest)', () => {
+  let db: HqDatabase;
+  let queue: OperatorQueue;
+
+  beforeEach(() => {
+    db = openMemoryHqDatabase();
+    queue = makeQueue(db);
+  });
+
+  it('a legitimate claim records the exact task id in the consumption record', () => {
+    const id = enqueueGated(queue);
+    queue.approve(id);
+    const t = queue.claim('claude', 'ops.risky')!;
+    const row = db
+      .prepare(`SELECT consumed_task_id FROM hq_approvals WHERE id = ?`)
+      .get(t.approvalId) as Record<string, unknown>;
+    expect(row.consumed_task_id).toBe(id);
+    const consumedEv = queue.evidence.list(id).find((e) => e.kind === 'approval_consumed');
+    expect(consumedEv?.payload.consumedTaskId).toBe(id);
+    expect(queue.start(id, 'claude', t.fence).status).toBe('running');
+  });
+
+  it("HOSTILE: task B forged into assigned state cannot ride task A's consumed approval even with a forged digest and a copied claim nonce", () => {
+    const a = enqueueGated(queue, 'risky-a', { same: 'payload' });
+    const b = enqueueGated(queue, 'risky-b', { same: 'payload' });
+    queue.approve(a);
+    const claimedA = queue.claim('claude', 'ops.risky')!; // consumes A's approval legitimately
+    // Attacker copies EVERYTHING observable from A's legitimate claim onto B
+    // (worker, fence, claim nonce, consumed approval) and even rewrites the
+    // approval's action digest to match B — defeating every check except the
+    // consumed task id, which pins the consumption to A alone.
+    db.prepare(`UPDATE hq_approvals SET action_digest = ? WHERE id = ?`).run(
+      taskActionDigest(queue.get(b)!),
+      claimedA.approvalId,
+    );
+    db.prepare(
+      `UPDATE op_tasks SET status = 'assigned', claimed_by = 'claude', fence = ?,
+         claim_nonce = ?, approval_id = ?, lease_expires_at = ? WHERE id = ?`,
+    ).run(
+      claimedA.fence,
+      claimedA.claimNonce,
+      claimedA.approvalId,
+      new Date(Date.now() + 60_000).toISOString(),
+      b,
+    );
+    expect(() => queue.start(b, 'claude', claimedA.fence)).toThrow(/not consumed by this claim/i);
+    const taskB = queue.get(b)!;
+    expect(taskB.status).toBe('blocked');
+    expect(taskB.approvalId).toBeNull();
+    const rejection = queue.evidence.list(b).find((e) => e.kind === 'approval_rejected_at_execution');
+    expect(rejection?.payload.rejection).toBe('approval_claim_binding_mismatch');
+  });
+
+  it('HOSTILE: wiping the consumed task id via direct SQL fails closed at start()', () => {
+    const id = enqueueGated(queue);
+    queue.approve(id);
+    const t = queue.claim('claude', 'ops.risky')!;
+    db.prepare(`UPDATE hq_approvals SET consumed_task_id = NULL WHERE id = ?`).run(t.approvalId);
+    expect(() => queue.start(id, 'claude', t.fence)).toThrow(/not consumed by this claim/i);
+    expect(queue.get(id)!.status).toBe('blocked');
+  });
+});
+
 describe('correction B: executor can never self-complete a review-required action', () => {
   let db: HqDatabase;
   let queue: OperatorQueue;
