@@ -7,7 +7,8 @@
     "packages/shared",
     "packages/server",
     "packages/web",
-    "packages/config-mesob"
+    "packages/config-mesob",
+    "packages/headquarter"
   ],
   "scripts": {
     "dev": "npm-run-all --parallel dev:server dev:web",
@@ -15,6 +16,7 @@
     "dev:web": "npm run dev --workspace @factoryos/web",
     "seed:mesob": "npm run seed --workspace @factoryos/config-mesob",
     "test": "npm run test --workspace @factoryos/server",
+    "test:hq": "npm run test --workspace @factoryos/headquarter",
     "build": "npm run build --workspace @factoryos/shared && npm run build --workspace @factoryos/server && npm run build --workspace @factoryos/web"
   },
   "devDependencies": {
