@@ -1,0 +1,56 @@
+name: Gemini 3.7 Branch Smoke
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-gemini-37:
+    if: github.event.pull_request.head.ref == 'fix/gemini-37-cli-routing'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify exact Gemini 3.7 Flash server response
+        env:
+          GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
+          EXPECTED_MODEL: gemini-3.7-flash
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$GEMINI_KEY" ]; then
+            echo "::error::GEMINI_API_KEY is unavailable to this same-repository PR smoke test."
+            exit 1
+          fi
+
+          jq -n '{contents:[{role:"user",parts:[{text:"Reply with exactly: OK"}]}],generationConfig:{temperature:0,maxOutputTokens:8}}' > request.json
+
+          code=$(curl --silent --show-error --max-time 60 \
+            --output response.json \
+            --write-out '%{http_code}' \
+            -H "x-goog-api-key: ${GEMINI_KEY}" \
+            -H 'Content-Type: application/json' \
+            -X POST "https://generativelanguage.googleapis.com/v1beta/models/${EXPECTED_MODEL}:generateContent" \
+            --data-binary @request.json)
+
+          if [ "$code" != "200" ]; then
+            msg=$(jq -r '.error.message // "No error message"' response.json 2>/dev/null | head -c 1000 || true)
+            echo "::error::Gemini smoke request failed with HTTP ${code}: ${msg}"
+            exit 1
+          fi
+
+          served=$(jq -r '.modelVersion // empty' response.json)
+          text=$(jq -r '[.candidates[]?.content.parts[]?.text // empty] | join(" ")' response.json)
+          case "$served" in
+            gemini-3.7-flash*) ;;
+            *) echo "::error::Server model mismatch. Requested ${EXPECTED_MODEL}, served '${served:-unknown}'."; exit 1 ;;
+          esac
+
+          if ! printf '%s' "$text" | grep -q 'OK'; then
+            echo "::error::Gemini 3.7 responded but did not return the expected smoke-test text."
+            exit 1
+          fi
+
+          echo "PASS: Google server attested ${served}."
