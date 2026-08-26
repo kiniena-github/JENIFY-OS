@@ -82,7 +82,7 @@ These markers let ChatGPT locate the two independent reports reliably.
 
 `.github/workflows/ai-task-gemini.yml` uses Google's official `google-github-actions/run-gemini-cli` action with an AI Studio `GEMINI_API_KEY`.
 
-The key must come from a Google AI Studio project with **billing disabled**. The automatic worker is explicitly pinned to `gemini-2.5-flash`, because Google's current free tier includes Google Search grounding for Gemini 2.5 Flash (subject to Google's free rate limits). The workflow does not use Gemini 3 as its zero-cost research default because free-tier Search grounding availability differs by model generation.
+The key must come from a Google AI Studio project with **billing disabled**. The automatic worker is explicitly pinned to `gemini-3.7-flash` both at the action level (`gemini_model`) and in the `settings.model.name` configuration to prevent Gemini CLI from falling back to `gemini-3.5-flash` or default models on transient 503 high-demand errors.
 
 This means:
 
@@ -135,7 +135,7 @@ After independent review/CI passes, merge the bridge to `main`, then create one 
 The acceptance criteria are:
 
 1. Claude workflow starts and receives HTTP 200 from the AI WORKERS Routine.
-2. Google workflow succeeds using `gemini-2.5-flash` without a paid Google Cloud credential.
+2. Google workflow succeeds using `gemini-3.7-flash` without a paid Google Cloud credential.
 3. Claude posts `<!-- jenify-claude-result -->` to the test issue.
 4. Google posts `<!-- jenify-gemini-result -->` to the test issue.
 5. No credential appears in Actions logs or issue comments.
