@@ -2,7 +2,6 @@ import { and, desc, eq, sql } from 'drizzle-orm';
 import type { MovementType, LotStatus } from '@factoryos/shared';
 import { lots, reservations, stockBalances, stockMovements } from '../db/schema.js';
 import { newId, nowIso, badRequest, notFound } from '../util.js';
-import { requireQty } from '../validate.js';
 import type { Ctx } from './context.js';
 import { actorId } from './context.js';
 
@@ -34,13 +33,12 @@ export interface PostMovementInput {
 const MAX_MOVEMENT_QTY = 1e12;
 
 export function postMovement(ctx: Ctx, input: PostMovementInput): string {
-  // Ledger writes are integer milli base-units, signed, non-zero and bounded.
-  requireQty(input.qty, 'Movement quantity', {
-    allowNegative: true,
-    integerOnly: true,
-    max: MAX_MOVEMENT_QTY,
-  });
-  if (input.qty === 0) badRequest('movement_qty', 'Movement quantity must be a non-zero integer');
+  if (!Number.isInteger(input.qty) || input.qty === 0) {
+    badRequest('movement_qty', 'Movement quantity must be a non-zero integer');
+  }
+  if (Math.abs(input.qty) > MAX_MOVEMENT_QTY) {
+    badRequest('movement_qty_range', 'Movement quantity is out of the allowed range');
+  }
   const lotKey = input.lotId ?? '';
   const balance = ctx.db
     .select()
@@ -164,7 +162,9 @@ export function createReservation(
     documentId: string;
   },
 ): string {
-  requireQty(input.qty, 'Reservation quantity', { integerOnly: true, max: MAX_MOVEMENT_QTY });
+  if (!Number.isInteger(input.qty) || input.qty <= 0) {
+    badRequest('reservation_qty', 'Reservation quantity must be positive');
+  }
   const available = getAvailable(ctx, input.itemId, input.warehouseId, input.lotId ?? undefined);
   if (available < input.qty) {
     badRequest(
