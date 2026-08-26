@@ -244,6 +244,27 @@ export function renderFounderApprovals(
   return shell('Founder Approvals', 'approvals.html', body, provenanceNote);
 }
 
+/**
+ * Schemes allowed to become clickable links in rendered pages. Evidence
+ * locators come from external exports (static/Drive adapters), so anything
+ * not explicitly allowed — repo paths, Drive ids, javascript:, data:,
+ * unknown schemes — renders as escaped, non-clickable text instead.
+ */
+const LINKABLE_SCHEMES = ['https:'];
+
+export function renderSourceRef(sourceRef: string): string {
+  let scheme: string | null = null;
+  try {
+    scheme = new URL(sourceRef).protocol;
+  } catch {
+    scheme = null;
+  }
+  if (scheme !== null && LINKABLE_SCHEMES.includes(scheme)) {
+    return `<a href="${escapeHtml(sourceRef)}">original</a>`;
+  }
+  return `<code>${escapeHtml(sourceRef)}</code>`;
+}
+
 const ARCHIVE_BANNER =
   '<p class="muted" data-archive-banner>These rows are reconstructed canonical records, not original evidence: each links to its preserved original via the source column. Dates flagged &quot;inferred&quot; or &quot;estimated&quot; are not authoritative and must be verified against the original before being relied on.</p>';
 
@@ -260,7 +281,7 @@ export function renderArchive(
         .map(
           (record) => `<tr data-archive-id="${escapeHtml(record.id)}"><td>${escapeHtml(record.created.date)}${
             record.created.confidence === 'exact' ? '' : ` <span class="badge">${record.created.confidence}</span>`
-          }</td><td>${escapeHtml(record.title)}</td><td>${escapeHtml(record.project)}</td><td>${escapeHtml(record.category)}</td><td>${escapeHtml(record.version)}</td><td><span class="badge">${escapeHtml(record.status)}</span></td><td><a href="${escapeHtml(record.sourceRef)}">original</a></td></tr>`,
+          }</td><td>${escapeHtml(record.title)}</td><td>${escapeHtml(record.project)}</td><td>${escapeHtml(record.category)}</td><td>${escapeHtml(record.version)}</td><td><span class="badge">${escapeHtml(record.status)}</span></td><td>${renderSourceRef(record.sourceRef)}</td></tr>`,
         )
         .join('\n')}</tbody></table></section>`,
     )

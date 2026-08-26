@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { escapeHtml, HQ_PAGES } from '../src/ui/render.js';
+import { escapeHtml, HQ_PAGES, renderSourceRef } from '../src/ui/render.js';
 import { buildSite, type HeadquarterData } from '../src/ui/site.js';
 
 const samplePath = join(dirname(fileURLToPath(import.meta.url)), '..', 'sample-data', 'hq-sample.json');
@@ -78,6 +78,40 @@ describe('buildSite', () => {
     expect(html).toContain('Evolution — QOS');
     expect(html).toContain('https://github.com/kiniena-github/JENIFY-OS/pull/36');
     expect(html).toContain('archive-search');
+  });
+
+  it('makes sourceRef clickable only for allowed schemes', () => {
+    // Normal https evidence link stays clickable.
+    expect(renderSourceRef('https://github.com/kiniena-github/JENIFY-OS/pull/36')).toBe(
+      '<a href="https://github.com/kiniena-github/JENIFY-OS/pull/36">original</a>',
+    );
+    // Hostile or non-web locators render as escaped text, never as links.
+    for (const hostile of [
+      'javascript:alert(1)',
+      'data:text/html,<script>alert(1)</script>',
+      'JAVASCRIPT:alert(1)',
+      'drive://q0',
+      'docs/reports/2026-07.md',
+      'http://insecure.example',
+    ]) {
+      const rendered = renderSourceRef(hostile);
+      expect(rendered).not.toContain('<a ');
+      expect(rendered).not.toContain('href');
+    }
+    // End-to-end: a hostile sourceRef in a record never becomes a link on the page.
+    const hostileData: HeadquarterData = {
+      ...sample,
+      archive: [
+        {
+          ...sample.archive[0],
+          id: 'doc-hostile',
+          sourceRef: 'javascript:alert(1)',
+        },
+      ],
+    };
+    const html = buildSite(hostileData).get('archive.html')!;
+    expect(html).not.toContain('href="javascript:');
+    expect(html).toContain('javascript:alert(1)</code>');
   });
 
   it('escapes untrusted content in rendered pages', () => {
