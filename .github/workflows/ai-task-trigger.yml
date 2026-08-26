@@ -8,6 +8,8 @@ name: AI Task Routine Bridge
 #   [AI TASK][CLAUDE] ...  -> Claude only
 #   [AI TASK][BOTH] ...    -> Claude + Gemini
 #   [AI TASK][GEMINI] ...  -> Gemini only (handled by ai-task-gemini.yml)
+#   [AI TASK][CODEX] ...   -> NEVER Claude; requires a real Codex route/reviewer
+#   [AI TASK][JULES] ...   -> NEVER Claude; requires a real Jules route/worker
 #
 # Secrets:
 #   CLAUDE_ROUTINE_URL
@@ -44,7 +46,9 @@ jobs:
        ((github.event.action == 'opened') ||
         (github.event.action == 'labeled' && github.event.label.name == 'ai-task')) &&
        startsWith(github.event.issue.title, '[AI TASK]') &&
-       !startsWith(github.event.issue.title, '[AI TASK][GEMINI]'))
+       !startsWith(github.event.issue.title, '[AI TASK][GEMINI]') &&
+       !startsWith(github.event.issue.title, '[AI TASK][CODEX]') &&
+       !startsWith(github.event.issue.title, '[AI TASK][JULES]'))
 
     steps:
       - name: Check routine secrets are configured
@@ -101,6 +105,14 @@ jobs:
               echo "::error::Issue #$ISSUE_NUMBER_IN is Gemini-only; refusing to fire Claude."
               exit 1
               ;;
+            "[AI TASK][CODEX]"*)
+              echo "::error::Issue #$ISSUE_NUMBER_IN is Codex-only; refusing to impersonate Codex with Claude."
+              exit 1
+              ;;
+            "[AI TASK][JULES]"*)
+              echo "::error::Issue #$ISSUE_NUMBER_IN is Jules-only; refusing to impersonate Jules with Claude."
+              exit 1
+              ;;
             "[AI TASK]"*) ;;
             *)
               echo "::error::Issue #$ISSUE_NUMBER_IN title does not start with [AI TASK]; refusing to fire the routine."
@@ -125,7 +137,7 @@ jobs:
           ROUTINE_URL: ${{ secrets.CLAUDE_ROUTINE_URL }}
           ROUTINE_TOKEN: ${{ secrets.CLAUDE_ROUTINE_TOKEN }}
         run: |
-          text="Work the approved GitHub AI task at ${ISSUE_URL} (${GITHUB_REPOSITORY} issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}). Read that issue first and execute only what it asks under the saved AI WORKERS routine rules. If it is an analysis/review task, do not modify code unless the issue explicitly requests implementation. When finished, write a concise final report back to THE SAME GitHub issue as a comment beginning exactly with '<!-- jenify-claude-result -->' and then '## Claude Engineering / Review Report'. Include verdict, work performed or findings, tests/evidence, risks/blockers, and next action. Do not require the Founder to copy your report into another AI."
+          text="Work the approved GitHub AI task at ${ISSUE_URL} (${GITHUB_REPOSITORY} issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}). Read that issue first and execute only what it asks under the saved AI WORKERS routine rules. MODEL POLICY: attempt Fable first; if Fable is unavailable, use Opus; if neither is available, stop and report instead of silently downgrading. Your final report must state the exact model requested, the exact model actually used, whether fallback occurred, and why. If it is an analysis/review task, do not modify code unless the issue explicitly requests implementation. When finished, write a concise final report back to THE SAME GitHub issue as a comment beginning exactly with '<!-- jenify-claude-result -->' and then '## Claude Engineering / Review Report'. Include verdict, model requested/used/fallback, work performed or findings, tests/evidence, risks/blockers, and next action. Do not require the Founder to copy your report into another AI."
           body=$(jq -cn --arg text "$text" '{text: $text}')
           status=$(curl -sS -o response.json -w "%{http_code}" \
             --retry 2 --retry-delay 5 \
