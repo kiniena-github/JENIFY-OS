@@ -25,6 +25,7 @@ import { approvalRequired, evaluatePolicy, type PolicyContext } from './policy.j
 import { EvidenceLog, assertNoSecretLikeContent } from './evidence.js';
 import {
   DEFAULT_APPROVAL_TTL_MS,
+  approvalExpiredAt,
   taskActionDigest,
   validateApproval,
   type ApprovalRejection,
@@ -320,6 +321,13 @@ export class OperatorQueue {
    * Worker signals it has started executing. Fence must match, and for an
    * approval-gated task the payload must still match the digest the Founder
    * approved — a mutation between claim and start invalidates the approval.
+   * The approval's time-box is also re-validated here (issue #71): an
+   * approval that was valid (and consumed) at claim can expire before the
+   * worker actually starts; execution never proceeds on an expired approval —
+   * the claim is released and the task returns to needs_approval for a fresh
+   * Founder decision. Consumption state itself is expected at this point
+   * (the nonce was legitimately consumed by this claim), so only decision,
+   * digest, and expiry are re-checked.
    */
   start(taskId: string, workerId: string, fence: number): OperatorTask {
     this.assertFence(taskId, workerId, fence);
@@ -331,6 +339,18 @@ export class OperatorQueue {
         this.rejectAtExecutionBoundary(task, 'approval_digest_mismatch');
         throw new Error(
           `Task ${taskId}: action changed after Founder approval; approval invalidated`,
+        );
+      }
+      if (approval.decision !== 'approved') {
+        this.rejectAtExecutionBoundary(task, 'approval_not_approved');
+        throw new Error(
+          `Task ${taskId}: approval record is not an approval; fresh Founder approval required`,
+        );
+      }
+      if (approvalExpiredAt(approval)) {
+        this.rejectAtExecutionBoundary(task, 'approval_expired');
+        throw new Error(
+          `Task ${taskId}: Founder approval expired before execution start; fresh approval required`,
         );
       }
     }
@@ -594,6 +614,12 @@ export class OperatorQueue {
     if (task.status !== 'needs_approval') {
       this.transition(task.id, 'needs_approval', 'system', `Fresh Founder approval required (${rejection})`);
     }
+    // A claim voided at the execution boundary (issue #71: e.g. expiry
+    // between claim and start) releases the worker and its lease; the stale
+    // fence can no longer act on the task. No-op for unclaimed tasks.
+    this.db
+      .prepare(`UPDATE op_tasks SET claimed_by = NULL, lease_expires_at = NULL WHERE id = ?`)
+      .run(task.id);
   }
 
   /** Shared guard for reviewPass/reviewFail: pending review + independent reviewer. */

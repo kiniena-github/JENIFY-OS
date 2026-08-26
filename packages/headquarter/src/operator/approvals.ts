@@ -90,6 +90,21 @@ export interface ApprovalRecordForValidation {
 }
 
 /**
+ * Single source of truth for the expiry boundary: an approval is expired at
+ * or after `expiresAt` (`now >= expiresAt`, ISO-8601 string comparison), and
+ * a missing/unbound expiry never admits anything. Used by validateApproval()
+ * at claim and re-checked at actual execution start (issue #71), where the
+ * nonce is already legitimately consumed by the claim and only the time-box
+ * can still be re-validated.
+ */
+export function approvalExpiredAt(
+  record: Pick<ApprovalRecordForValidation, 'expiresAt'> | null,
+  now: Date = new Date(),
+): boolean {
+  return !record?.expiresAt || now.toISOString() >= record.expiresAt;
+}
+
+/**
  * Validate an approval record against the task's CURRENT canonical digest.
  * Returns null when the approval admits execution, otherwise the rejection
  * reason. Missing digest/expiry on the record is treated as invalid — an
@@ -107,7 +122,7 @@ export function validateApproval(
   if (!record.actionDigest || record.actionDigest !== currentDigest) {
     return 'approval_digest_mismatch';
   }
-  if (!record.expiresAt || now.toISOString() >= record.expiresAt) return 'approval_expired';
+  if (approvalExpiredAt(record, now)) return 'approval_expired';
   if (record.consumedAt) return 'approval_already_consumed';
   return null;
 }
