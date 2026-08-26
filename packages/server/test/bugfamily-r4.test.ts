@@ -13,7 +13,7 @@ import { postMovement, getOnHand, getAvailable, createReservation } from '../src
 import { toBaseQty } from '../src/services/masterdata.js';
 import { createWorkOrder, issuePartToWorkOrder, startWorkOrder, listWorkOrders } from '../src/services/workorders.js';
 import { createResource, createBooking, listBookings, conflictingBookings } from '../src/services/bookings.js';
-import { requireInstant, requireQty, requireSpan, clampLimit, requireEnum, requireText } from '../src/validate.js';
+import { requireInstant, requireDate, requireQty, requireSpan, clampLimit, requireEnum, requireText } from '../src/validate.js';
 
 /**
  * AI TASK #3 — R4 BUG-FAMILY regression matrix.
@@ -102,8 +102,43 @@ describe('bug family: time/date safety', () => {
     expect(requireSpan('2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z', { start: 's', end: 'e' }).end).toBe('2026-01-02T00:00:00.000Z');
   });
 
-  it('an instant with no timezone resolves deterministically and canonically', () => {
-    expect(requireInstant('2026-09-01', 'when')).toBe('2026-09-01T00:00:00.000Z');
+  it('an instant WITHOUT an explicit timezone is refused, never guessed at', () => {
+    // A timezone-less date-time names a different moment in every environment;
+    // issue #3 requires it to be rejected wherever an instant is required.
+    const TIMEZONE_LESS = [
+      '2026-09-01T12:00:00',      // full date-time, no designator
+      '2026-09-01T12:00:00.000',  // with millis, no designator
+      '2026-09-01T12:00',         // minutes precision, no designator
+      '2026-09-01',               // bare calendar date is not an instant
+      '2026-09-01 12:00:00Z',     // space separator is not canonical ISO
+      'Sep 1 2026 12:00:00 GMT',  // non-ISO formats Date.parse would accept
+    ];
+    for (const bad of TIMEZONE_LESS) {
+      expect(() => requireInstant(bad, 'when'), `accepted ${JSON.stringify(bad)}`)
+        .toThrowError(/explicit timezone/);
+    }
+  });
+
+  it('timezone-less instants are refused end to end at the booking APIs', () => {
+    const room = createResource(tt.ownerCtx, { code: 'TZ', name: 'TZ' });
+    expect(() => createBooking(tt.ownerCtx, {
+      resourceId: room, startAt: '2026-09-01T09:00:00', endAt: '2026-09-01T10:00:00.000Z',
+    })).toThrowError(/explicit timezone/);
+    expect(() => listBookings(tt.ownerCtx, { from: '2026-09-01', to: '2026-09-02T00:00:00.000Z' }))
+      .toThrowError(/explicit timezone/);
+  });
+
+  it('calendar dates go through requireDate, a separate explicit path', () => {
+    expect(requireDate('2026-09-01', 'day')).toBe('2026-09-01');
+    // an instant is not a calendar date, exactly as a bare date is not an instant
+    expect(() => requireDate('2026-09-01T00:00:00.000Z', 'day')).toThrowError(/YYYY-MM-DD/);
+    expect(() => requireDate('2026-02-30', 'day')).toThrowError(/real calendar date/);
+    expect(() => requireDate('2026-13-01', 'day')).toThrowError(/real calendar date/);
+    expect(() => requireDate('1000-01-01', 'day')).toThrowError(/supported date range/);
+    for (const bad of ['', '   ', null, undefined, 42, true, {}, []]) {
+      expect(() => requireDate(bad, 'day'), `accepted ${JSON.stringify(bad)}`)
+        .toThrowError(/required/);
+    }
   });
 });
 

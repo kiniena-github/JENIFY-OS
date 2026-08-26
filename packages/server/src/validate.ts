@@ -112,18 +112,41 @@ const MIN_YEAR = 1970;
 const MAX_YEAR = 2200;
 
 /**
+ * ISO-8601 date-time WITH an explicit timezone designator (`Z` or ±hh:mm).
+ * A timezone-less string like `2026-09-01T12:00:00` names a different moment
+ * in every environment, and a bare date is a calendar value, not an instant —
+ * both must be rejected here, never guessed at (see requireDate for the
+ * calendar-only path).
+ */
+const INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
+
+/** A calendar date exactly as `YYYY-MM-DD` — no time, no timezone. */
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
  * Canonicalise an instant to UTC ISO-8601.
  *
  * Instants are stored in TEXT columns and compared with SQL string operators,
  * so the stored form MUST be canonical or the comparison is lexicographic
  * instead of chronological — which is exactly how the same moment written
  * `T12:00:00.000+03:00` failed to collide with `T09:00:00.000Z`.
+ *
+ * The timezone designator is REQUIRED. Delegating to bare `Date.parse()`
+ * accepted timezone-less input, which is ambiguous/environment-dependent and
+ * breaks the canonical-instant invariant (R4 acceptance criterion, issue #3).
  */
 export function requireInstant(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.trim() === '') {
     badRequest('invalid_instant', `${field} is required`);
   }
-  const ms = Date.parse(value as string);
+  const s = (value as string).trim();
+  if (!INSTANT_RE.test(s)) {
+    badRequest(
+      'invalid_instant',
+      `${field} must be a valid date and time in ISO-8601 form with an explicit timezone (Z or ±hh:mm offset)`,
+    );
+  }
+  const ms = Date.parse(s);
   if (!Number.isFinite(ms)) {
     badRequest('invalid_instant', `${field} must be a valid date and time`);
   }
@@ -135,10 +158,35 @@ export function requireInstant(value: unknown, field: string): string {
   return d.toISOString();
 }
 
-/** A calendar date (no time component), canonicalised to YYYY-MM-DD. */
+/**
+ * A calendar date (no time component), canonicalised to YYYY-MM-DD.
+ *
+ * This is an explicit, separate path from requireInstant: a calendar date is
+ * a different kind of value from a moment in time, so it accepts ONLY the
+ * `YYYY-MM-DD` form — an instant string is rejected here just as a bare date
+ * is rejected by requireInstant.
+ */
 export function requireDate(value: unknown, field: string): string {
-  const iso = requireInstant(value, field);
-  return iso.slice(0, 10);
+  if (typeof value !== 'string' || value.trim() === '') {
+    badRequest('invalid_date', `${field} is required`);
+  }
+  const s = (value as string).trim();
+  if (!DATE_RE.test(s)) {
+    badRequest('invalid_date', `${field} must be a calendar date in YYYY-MM-DD form`);
+  }
+  // Interpreting the date at UTC midnight is only a validity check — the
+  // returned value stays a plain calendar date. The round-trip comparison
+  // rejects impossible dates (2026-02-30) even if the engine would roll
+  // them over instead of failing the parse.
+  const ms = Date.parse(`${s}T00:00:00Z`);
+  if (!Number.isFinite(ms) || new Date(ms).toISOString().slice(0, 10) !== s) {
+    badRequest('invalid_date', `${field} must be a real calendar date`);
+  }
+  const year = Number(s.slice(0, 4));
+  if (year < MIN_YEAR || year > MAX_YEAR) {
+    badRequest('date_out_of_range', `${field} is outside the supported date range`);
+  }
+  return s;
 }
 
 /** An ordered instant range that must end after it starts and stay bounded. */
