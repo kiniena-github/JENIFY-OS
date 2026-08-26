@@ -146,3 +146,16 @@ sessions; this session ran the documented subagent fallback). Read-only test-tea
 executed (architect + qa-security + product-research); findings recorded, nothing
 implemented. Dev servers left running at http://localhost:5173. Current baseline:
 commit `70efbd6` + team files, 163 server tests green.
+
+## 2026-08-26 — Stream 2: Headquarter UI + Archive foundation (issue #43)
+New isolated workspace `packages/headquarter` (branch `claude/serene-hopper-xhlhon`, PR to
+follow): canonical activity/event model (war-room #41 order B), Founder dashboard views
+(NOW / DONE TODAY / BLOCKED / WAITING FOR FOUNDER / NEXT), worker status, project
+cards/timelines, historical-archive metadata schema (year/month/project/category, date
+confidence, CURRENT/SUPERSEDED/REJECTED/EXPERIMENTAL/ARCHIVED, predecessor/successor
+links), read-only inventory/reconstruction pipeline over git log + GitHub exports (Drive
+adapter contract prepared), monthly + project-evolution views, inverted-index search
+foundation, and a 7-page framework-free static HQ site. 31 new tests green; server suite
+399 passed + 3 pre-existing skips; web bundle unchanged at 69.22 kB gzip. Docs:
+`docs/HEADQUARTER/ARCHIVE_SCHEMA.md`, `docs/HEADQUARTER/HEADQUARTER_UI.md`. No Mesob
+package or operator/control-plane file touched; originals preserved; local-only.

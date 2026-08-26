@@ -1,0 +1,21 @@
+{
+  "repo": "kiniena-github/JENIFY-OS",
+  "repoUrl": "https://github.com/kiniena-github/JENIFY-OS",
+  "issues": [
+    { "number": 41, "title": "[STREAM 2 WAR ROOM] Company Infrastructure — Founder-approved execution control", "created_at": "2026-08-26T10:00:45Z", "state": "open", "labels": ["ai-task"] },
+    { "number": 43, "title": "[AI TASK][JULES] Stream 2 — Headquarter UI + Documentation/Archive implementation", "created_at": "2026-08-26T10:01:18Z", "state": "open", "labels": ["ai-task"] }
+  ],
+  "pullRequests": [
+    { "number": 6, "title": "Independent R4 + Orders Architecture Review", "created_at": "2026-08-25T07:01:09Z", "state": "open" },
+    { "number": 7, "title": "Close R4 bug-family regression matrix (#3)", "created_at": "2026-08-25T07:12:14Z", "state": "open" },
+    { "number": 9, "title": "Review JENIFY OS PR #7 at head SHA 7143ac5", "created_at": "2026-08-25T08:00:30Z", "state": "open" },
+    { "number": 17, "title": "Draft: Jenify Labs AI corporate structure V0", "created_at": "2026-08-26T00:22:03Z", "state": "open" },
+    { "number": 20, "title": "Add Jules Independent Corporate-Structure V0 Review", "created_at": "2026-08-26T00:27:11Z", "state": "open" },
+    { "number": 24, "title": "Research: Jenify universal creation system architecture", "created_at": "2026-08-26T02:03:42Z", "state": "open" },
+    { "number": 25, "title": "Add Jenify Labs zero-additional-cost capability architecture research", "created_at": "2026-08-26T02:03:49Z", "state": "open" },
+    { "number": 28, "title": "Fix Gemini worker model pinning and fallback prevention", "created_at": "2026-08-26T02:22:19Z", "state": "open" },
+    { "number": 30, "title": "Research: Codex independent Jenify Universal Operator plan", "created_at": "2026-08-26T05:08:40Z", "state": "open" },
+    { "number": 32, "title": "Jenify Universal Operator Architecture Proposal", "created_at": "2026-08-26T05:12:23Z", "state": "open" },
+    { "number": 36, "title": "Codex review: QOS full-upgrade fastest-finish strategy", "created_at": "2026-08-26T07:43:51Z", "state": "open" }
+  ]
+}
