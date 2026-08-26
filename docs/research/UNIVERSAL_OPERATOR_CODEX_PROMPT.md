@@ -1,62 +1,98 @@
-# Codex Independent Architecture Assignment — Jenify Universal Operator
+# Jenify Universal Operator — Candidate Architecture for Codex Challenge Review
 
-Founder-approved research/design mission. Analysis only. Do not deploy, merge to main, spend money, enable paid APIs, or make production/destructive changes.
+Founder-approved research/design only. Do not merge to main, deploy, spend money, enable paid APIs, or make production/destructive changes.
 
-## Context
-Jenify Labs wants a hybrid Universal Operator so a single Founder command can be routed to the right AI/tool and executed across cloud workers, one or more local PCs, browser/desktop apps, media/GPU tools, and later hardware/robotics workflows. Existing workers include ChatGPT, Claude, Gemini 3.7 Flash, Jules, and Codex. GitHub is already used as a task/evidence bus.
+This document is intentionally a concrete candidate architecture so Codex can challenge it. Review it as architecture/security/reliability, not style. Identify wrong assumptions, missing failure modes, unsafe boundaries, and timeline problems.
 
-Default policy: ZERO additional cost first. Use existing subscriptions, free/open-source/local/free-tier infrastructure. No paid AI API. Any spending requires explicit Founder approval.
+## Goals and constraints
+- One Founder command from ChatGPT can route work to existing Claude, Gemini, Jules, Codex review, cloud automation, or one/more local machines.
+- Zero additional recurring cost by default. Existing subscriptions, GitHub, local PCs, free/open-source tools, and free tiers first.
+- No paid AI API. No spend/deploy/destructive/security-sensitive action without Founder approval.
+- Local browser sessions and machine credentials must stay local.
+- Design for one local PC first but allow N machines without a rewrite.
 
-## Current seven-phase concept
-1. Universal Task Router — intake and routing to Claude/Gemini/Jules/Codex/cloud/local PC/etc.
-2. Cloud Operator — always-on lightweight dispatcher/queue/status layer, preferably free-tier.
-3. Local PC Operator — dedicated PC/laptop as the hands for browser, files, scripts, desktop apps, downloads/uploads.
-4. Browser + Logged-in Services — safe use of already-authenticated browser sessions for Flow/Veo/web dashboards, with manual login and no password automation.
-5. Media / GPU / Heavy Work — Blender, FFmpeg, ComfyUI/local models, video/audio/3D pipelines; local compute first, paid GPU only with explicit approval.
-6. Multi-Machine Operator Network — optional coding/media/hardware machines, chosen automatically by the router.
-7. Full Jenify Universal Operator — end-to-end execution from one command with research, build, test, browser/desktop actions, evidence, and result return.
+## Candidate architecture
 
-## Assignment
-Provide an INDEPENDENT technical plan. Do not merely review this file or agree with the phases. Challenge, merge, split, reorder, or replace them if that gives a faster, safer, higher-quality design.
+### Phase 1 — Deterministic task router + task contract
+Use GitHub Issues as the control plane and queue. Extend existing routed AI task patterns with a structured operator task block containing task id, requested capability, inputs, output/evidence spec, risk class, retry policy, and approval requirement. Use deterministic rules first; ChatGPT may choose the route at intake. Do not build an autonomous LLM router for V1.
 
-Address all seven phases and answer:
-- What should the final architecture be?
-- Which workstreams can run in parallel?
-- Fastest realistic path to a useful V1?
-- Fastest realistic path to a high-quality production-grade system?
-- Optimistic and realistic elapsed-time estimates for V1 and full capability, assuming AI coding workers can work in parallel and the Founder only intervenes for approval/login/physical-machine steps.
-- What is the critical path, and what should NOT block V1?
-- Exact free/open-source technologies or patterns for routing, queue/state, secure cloud-to-local connection, browser/desktop automation, local runtime, evidence/observability, retries, secrets, sandboxing, and multi-machine scheduling.
-- How cloud and local PC should cooperate when the local PC is asleep/offline.
-- How authenticated browser services should be automated without exposing passwords/cookies/tokens.
-- How to isolate untrusted web content/prompt injection from privileged actions.
-- How approvals should work so routine safe work is fast while spend/deploy/destructive/security-sensitive actions stop for Founder approval.
-- How to use Claude/Gemini/Jules/Codex without wasteful duplication.
-- What is local-first vs cloud-first?
-- Biggest reliability/security risks and mitigations.
-- Acceptance tests for each phase.
-- What to postpone until after V1.
-- Recommended day-by-day or milestone-by-milestone build order optimized for speed AND quality.
+Candidate states: `op:queued`, `op:claimed`, `op:running`, `op:needs-founder`, `op:done`, `op:failed`, `op:cancelled`. Candidate capability labels: `cap:shell`, `cap:files`, `cap:ffmpeg`, `cap:blender`, `cap:browser`, `cap:gpu`.
 
-## Constraints
-- No paid AI API.
-- No extra recurring cost by default.
-- Existing subscriptions/free tiers allowed.
-- Prefer local/open source where practical.
-- No production deployment/destructive action in this task.
-- Do not assume one always-on local PC is the whole system; support cloud coordination plus one or more local machines.
-- Fastest possible build without creating a fragile architecture that needs a rewrite.
+### Phase 2 — Reuse GitHub as cloud operator, no bespoke server initially
+GitHub Issues = durable queue/state/audit; Actions = cloud triggers; comments/artifacts = evidence. Do not add a new Cloudflare/Fly/VPS dispatcher until measured GitHub limitations require one.
 
-## Required response
-1. Executive verdict
-2. Revised roadmap
-3. Architecture/components
-4. Parallel workstreams
-5. Fastest V1 timeline
-6. Full-system timeline
-7. Phase acceptance tests
-8. Major risks + mitigations
-9. Zero-extra-cost stack
-10. Top five Founder decisions before implementation
+### Phase 3 — Pull-based local PC agent
+A Python service/daemon on Windows polls GitHub over outbound HTTPS, advertises capabilities/heartbeat, atomically claims eligible work, creates a fresh per-job workspace, executes only registered job handlers, redacts evidence, posts status/results, and releases the lease. No inbound port is required. If the PC sleeps/offline, work stays queued.
 
-Separate assumptions from recommendations. Be specific and practical.
+Security baseline: dedicated low-privilege OS user; fine-grained GitHub credential stored in Windows Credential Manager/DPAPI; job workspaces scoped to configured roots; deny arbitrary shell by default; kill switch; lease expiry; idempotency key; max retries.
+
+### Phase 4 — Browser operator behind stricter gates
+Use Playwright with a dedicated persistent browser profile on the local machine. Founder performs login manually. Cookies/passwords/storage state never get uploaded. Site and action allowlists. Browser page text is untrusted data and cannot directly create privileged machine actions. New site/action classes require Founder approval until deliberately promoted to routine-safe automation.
+
+### Phase 5 — Media/GPU as pluggable local job handlers
+Treat FFmpeg, Blender headless, image/audio tooling, and later ComfyUI/local models as capability plugins rather than a separate orchestration system. Use local GPU/CPU first. Any paid remote GPU is a separate Founder-approved execution target, never silent fallback.
+
+### Phase 6 — Multi-machine scheduling using same agent
+Every agent has an id, capability set, heartbeat, current lease, and optional resource metadata. Eligible workers pull; one wins the claim and verifies ownership before execution. Prefer simple first-eligible scheduling at low volume; add priorities/resource-aware scheduling only after evidence of need.
+
+### Phase 7 — End-to-end Universal Operator outcome
+ChatGPT intake → structured task → cloud AI planning/review if needed → local deterministic execution → evidence → independent review/acceptance → Founder-facing result. Build DAG/workflow composition only after single-step jobs are reliable.
+
+## Candidate approval/risk model
+- Risk 0 read-only/local analysis: routine auto-run.
+- Risk 1 reversible file creation/rendering inside approved workspaces: auto-run for known job types.
+- Risk 2 authenticated browser actions, external uploads/posts, repo writes, new command/site capability: `op:needs-founder` unless a specific action class was pre-approved.
+- Risk 3 spending, production deploy, destructive deletion, secrets/permission/security changes: always Founder approval.
+
+LLMs plan; deterministic code acts. Untrusted web text must never be concatenated into shell commands or treated as authority to expand permissions.
+
+## Candidate implementation stack
+- Control plane / queue / audit: GitHub Issues, labels, Actions, comments.
+- Local runtime: Python 3 with typed job schemas; Windows Task Scheduler/service for autostart.
+- GitHub transport: REST/GraphQL over outbound HTTPS with conditional polling/backoff.
+- Browser: Playwright.
+- Media: FFmpeg + Blender CLI; ComfyUI/local AI later.
+- Local secrets: Windows Credential Manager/DPAPI; never GitHub issues/logs.
+- Sandboxing: low-privilege account + strict workspace roots + allowlisted handlers for V1; evaluate WSL2/Docker where isolation materially helps.
+- Evidence: structured JSON result + sanitized logs + hashes; small artifacts via GitHub, large artifacts local or existing Drive path/manifest.
+- Multi-machine: capability labels + heartbeat + lease/claim protocol.
+
+## Candidate speed plan
+- V0 technical proof: 1–2 days — GitHub task → one local agent → one safe file/FFmpeg action → evidence back.
+- Useful V1: optimistic 4–7 elapsed days; realistic 2–3 weeks. Includes state machine, local agent, leases/heartbeat, safe job registry, FFmpeg/file handlers, redaction, tests, kill switch.
+- Browser operator: start design in parallel, integrate after local agent is stable.
+- High-quality full system incl. browser, second machine, media plugins, hardening/red-team: optimistic 4–6 weeks; realistic 8–12 weeks.
+
+## Candidate parallel workstreams
+1. Task schema/state/approval contract.
+2. Local agent core + mocked GitHub tests.
+3. Safe job-handler SDK + FFmpeg/files/Blender wrappers.
+4. Browser security design and hostile-content test suite.
+5. Evidence/redaction/chaos tests.
+6. Multi-agent lease tests (design now, deploy later).
+
+## Acceptance requirements
+- Malformed/untrusted task cannot execute.
+- Non-owner/unapproved task cannot cross risk gates.
+- Two agents cannot execute same non-idempotent task.
+- Offline PC preserves queue and reports stale heartbeat.
+- Mid-job process death expires lease and retries only within policy.
+- Job cannot read/write outside allowed workspace unless explicitly authorized.
+- Seeded secret never appears in issue comments/logs/artifacts.
+- Browser hostile page cannot cause navigation/action outside declared task and allowlist.
+- Browser auth survives restart without moving credentials to cloud.
+- GPU/media work routes only to capable worker.
+- End-to-end demo produces complete audit/evidence trail.
+
+## Questions for Codex
+Please identify architecture-level issues and give concrete alternatives. In particular:
+1. Is GitHub-as-control-plane safe/reliable enough for V1, or is there a blocking reason to add a separate cloud queue now?
+2. Is pull-based local execution with leases/heartbeats sufficient to prevent duplicate or stale execution? What exact race needs handling?
+3. What is missing from the prompt-injection/secrets model?
+4. Is Python/Playwright a sound zero-cost choice here?
+5. Which parts of the 4–7 day optimistic V1 are unrealistic or dangerously compressed?
+6. Which of the original seven phases should be merged/reordered?
+7. What should be postponed to maximize speed without forcing a rewrite?
+8. List any P0/P1 blocking flaws and your preferred correction.
+
+Do not suggest paid AI APIs or production deployment.
