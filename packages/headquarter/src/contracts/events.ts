@@ -35,6 +35,11 @@ export type ActivityStatus = (typeof ACTIVITY_STATUSES)[number];
  *   moves it through review_passed to completed. Approval-gated tasks are
  *   additionally re-validated against the Founder-approved action digest at
  *   the claim/start execution boundary (correction A).
+ * - `assigned -> needs_approval` exists only for the start-time approval
+ *   revalidation (issue #71): an approval that was valid when the task was
+ *   claimed can expire before the worker actually starts; the claimed task
+ *   is then released and returned for a fresh Founder decision instead of
+ *   executing on a stale approval.
  * - `outcome_unknown` is NEVER blindly retried. It leaves only through an
  *   explicit reconciliation decision (see operator/queue.ts):
  *   confirmed-done -> completed, confirmed-failed -> review_failed,
@@ -44,7 +49,7 @@ export type ActivityStatus = (typeof ACTIVITY_STATUSES)[number];
  */
 export const ALLOWED_TRANSITIONS: Record<ActivityStatus, readonly ActivityStatus[]> = {
   queued: ['assigned', 'blocked', 'needs_approval'],
-  assigned: ['running', 'queued', 'blocked'],
+  assigned: ['running', 'queued', 'blocked', 'needs_approval'],
   running: [
     'blocked',
     'needs_approval',

@@ -11,7 +11,7 @@
  * with task rows, to prove the gates hold even against code paths that
  * bypass the public API.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openMemoryHqDatabase, type HqDatabase } from '../src/store/db.js';
 import { OperatorQueue } from '../src/operator/queue.js';
 import { canonicalActionDigest, canonicalJson, taskActionDigest } from '../src/operator/approvals.js';
@@ -204,6 +204,81 @@ describe('correction A: approval binds to the exact immutable action', () => {
     expect(row.decision).toBe('denied');
     expect(row.decided_by).toBe('founder');
     expect(row.decision_note).toBe('not this wave');
+  });
+});
+
+describe('issue #71: approval expiry is revalidated at actual execution start', () => {
+  let db: HqDatabase;
+  let queue: OperatorQueue;
+
+  beforeEach(() => {
+    db = openMemoryHqDatabase();
+    queue = makeQueue(db);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('HOSTILE: approval valid at claim but expired before start() never executes; task returns to needs_approval with evidence', () => {
+    const id = enqueueGated(queue);
+    queue.approve(id, 'founder', { ttlMs: 60_000 }); // expires 00:01:00.000Z
+    const t = queue.claim('claude', 'ops.risky')!; // valid at claim; nonce consumed here
+    expect(t.status).toBe('assigned');
+    // Clock advances beyond expires_at between claim and start.
+    vi.setSystemTime(new Date('2026-01-01T00:01:00.001Z'));
+    expect(() => queue.start(id, 'claude', t.fence)).toThrow(/expired before execution start/i);
+    const task = queue.get(id)!;
+    expect(task.status).toBe('needs_approval'); // safe approval-required path, not running
+    expect(task.approvalId).toBeNull(); // stale binding cleared
+    expect(task.claimedBy).toBeNull(); // void claim released
+    expect(task.leaseExpiresAt).toBeNull();
+    const rejection = queue.evidence
+      .list(id)
+      .find((e) => e.kind === 'approval_rejected_at_execution');
+    expect(rejection?.payload.rejection).toBe('approval_expired');
+    // The consumed approval stays immutably consumed — single-use is preserved.
+    expect(
+      (db.prepare(`SELECT consumed_at FROM hq_approvals WHERE id = ?`).get(t.approvalId) as Record<string, unknown>)
+        .consumed_at,
+    ).not.toBeNull();
+    // The old worker's stale fence can no longer act on the task.
+    expect(() => queue.start(id, 'claude', t.fence)).toThrow(/stale fence/i);
+    // Recovery is exactly the existing contract: a FRESH Founder approval.
+    queue.approve(id, 'founder', { ttlMs: 60_000 });
+    const t2 = queue.claim('claude', 'ops.risky')!;
+    expect(t2.fence).toBeGreaterThan(t.fence);
+    expect(t2.approvalId).not.toBe(t.approvalId);
+    expect(queue.start(id, 'claude', t2.fence).status).toBe('running');
+  });
+
+  it('boundary: start() exactly AT expires_at is rejected (expiry is inclusive: now >= expires_at)', () => {
+    const id = enqueueGated(queue);
+    queue.approve(id, 'founder', { ttlMs: 60_000 }); // expires 00:01:00.000Z
+    const t = queue.claim('claude', 'ops.risky')!;
+    vi.setSystemTime(new Date('2026-01-01T00:01:00.000Z'));
+    expect(() => queue.start(id, 'claude', t.fence)).toThrow(/expired before execution start/i);
+    expect(queue.get(id)!.status).toBe('needs_approval');
+  });
+
+  it('boundary: start() strictly before expires_at (expiry minus 1ms) still executes', () => {
+    const id = enqueueGated(queue);
+    queue.approve(id, 'founder', { ttlMs: 60_000 }); // expires 00:01:00.000Z
+    const t = queue.claim('claude', 'ops.risky')!;
+    vi.setSystemTime(new Date('2026-01-01T00:00:59.999Z'));
+    expect(queue.start(id, 'claude', t.fence).status).toBe('running');
+  });
+
+  it('HOSTILE: approval expiry wiped via direct SQL between claim and start never admits execution', () => {
+    const id = enqueueGated(queue);
+    queue.approve(id, 'founder', { ttlMs: 60_000 });
+    const t = queue.claim('claude', 'ops.risky')!;
+    // Attacker strips the time-box entirely; an unbound expiry must never admit.
+    db.prepare(`UPDATE hq_approvals SET expires_at = NULL WHERE id = ?`).run(t.approvalId);
+    expect(() => queue.start(id, 'claude', t.fence)).toThrow(/expired before execution start/i);
+    expect(queue.get(id)!.status).toBe('needs_approval');
   });
 });
 
