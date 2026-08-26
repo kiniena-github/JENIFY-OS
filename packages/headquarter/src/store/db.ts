@@ -1,0 +1,179 @@
+/**
+ * Headquarter storage. Deliberately a SEPARATE SQLite database from the
+ * FactoryOS tenant database — Headquarter must never touch
+ * data/factoryos.sqlite (Founder data is sacred, CLAUDE.md rule 8).
+ *
+ * Plain better-sqlite3 with explicit DDL for the foundation wave; a move to
+ * drizzle migrations is a follow-up decision recorded in the architecture
+ * doc.
+ */
+
+import Database from 'better-sqlite3';
+
+export type HqDatabase = Database.Database;
+
+export const DEFAULT_HQ_DB_PATH = 'data/headquarter.sqlite';
+
+const DDL = `
+CREATE TABLE IF NOT EXISTS hq_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  at TEXT NOT NULL,
+  subject_kind TEXT NOT NULL,
+  subject_id TEXT NOT NULL,
+  status TEXT,
+  actor TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  detail TEXT,
+  refs TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_hq_events_subject ON hq_events(subject_kind, subject_id, seq);
+
+CREATE TABLE IF NOT EXISTS op_capabilities (
+  id TEXT PRIMARY KEY,
+  description TEXT NOT NULL,
+  risk_class TEXT NOT NULL,
+  side_effect INTEGER NOT NULL,
+  idempotent INTEGER NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS op_tasks (
+  id TEXT PRIMARY KEY,
+  capability_id TEXT NOT NULL REFERENCES op_capabilities(id),
+  payload TEXT NOT NULL,
+  idempotency_key TEXT,
+  status TEXT NOT NULL,
+  fence INTEGER NOT NULL DEFAULT 0,
+  claimed_by TEXT,
+  lease_expires_at TEXT,
+  approval_id TEXT,
+  review_state TEXT NOT NULL DEFAULT 'none',
+  submitted_by TEXT,
+  submitted_at TEXT,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  result TEXT,
+  block_reason TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_op_tasks_idem
+  ON op_tasks(capability_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_op_tasks_status ON op_tasks(status);
+
+CREATE TABLE IF NOT EXISTS op_evidence (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  at TEXT NOT NULL,
+  task_id TEXT,
+  actor TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  prev_hash TEXT NOT NULL,
+  hash TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS op_kill_switch (
+  scope TEXT PRIMARY KEY,
+  engaged INTEGER NOT NULL,
+  reason TEXT,
+  engaged_by TEXT,
+  engaged_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS hq_projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  stream TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS hq_approvals (
+  id TEXT PRIMARY KEY,
+  task_id TEXT,
+  project_id TEXT,
+  ask TEXT NOT NULL,
+  risk_class TEXT NOT NULL,
+  requested_by TEXT NOT NULL,
+  requested_at TEXT NOT NULL,
+  decision TEXT NOT NULL DEFAULT 'pending',
+  decided_at TEXT,
+  decided_by TEXT,
+  decision_note TEXT,
+  action_digest TEXT,
+  expires_at TEXT,
+  consumed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS hq_chat_messages (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  author TEXT NOT NULL,
+  at TEXT NOT NULL,
+  body TEXT NOT NULL,
+  refs TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_hq_chat_thread ON hq_chat_messages(thread_id, at);
+
+CREATE TABLE IF NOT EXISTS hq_specialists (
+  id TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  vendor TEXT NOT NULL,
+  role TEXT NOT NULL,
+  allowed_capabilities TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS hq_archive_refs (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  locator TEXT NOT NULL,
+  project_id TEXT,
+  added_at TEXT NOT NULL
+);
+`;
+
+/**
+ * Columns added after the first foundation commit (issue #53 corrections).
+ * CREATE TABLE IF NOT EXISTS does not extend an existing table, so a database
+ * file created from the earlier DDL gets them via idempotent ALTERs here.
+ */
+const COLUMN_UPGRADES: readonly { table: string; column: string; ddl: string }[] = [
+  { table: 'op_tasks', column: 'review_state', ddl: `TEXT NOT NULL DEFAULT 'none'` },
+  { table: 'op_tasks', column: 'submitted_by', ddl: 'TEXT' },
+  { table: 'op_tasks', column: 'submitted_at', ddl: 'TEXT' },
+  { table: 'hq_approvals', column: 'decided_by', ddl: 'TEXT' },
+  { table: 'hq_approvals', column: 'action_digest', ddl: 'TEXT' },
+  { table: 'hq_approvals', column: 'expires_at', ddl: 'TEXT' },
+  { table: 'hq_approvals', column: 'consumed_at', ddl: 'TEXT' },
+];
+
+function ensureColumns(db: HqDatabase): void {
+  for (const up of COLUMN_UPGRADES) {
+    const cols = db.prepare(`PRAGMA table_info(${up.table})`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === up.column)) {
+      db.exec(`ALTER TABLE ${up.table} ADD COLUMN ${up.column} ${up.ddl}`);
+    }
+  }
+}
+
+export function openHqDatabase(path: string = DEFAULT_HQ_DB_PATH): HqDatabase {
+  const db = new Database(path);
+  db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+  db.exec(DDL);
+  ensureColumns(db);
+  return db;
+}
+
+/** In-memory database for tests. */
+export function openMemoryHqDatabase(): HqDatabase {
+  return openHqDatabase(':memory:');
+}
+
+export function nowIso(): string {
+  return new Date().toISOString();
+}
