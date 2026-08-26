@@ -14,7 +14,6 @@ import {
   simpleTransactions,
 } from '../db/schema.js';
 import { newId, nowIso, badRequest, notFound } from '../util.js';
-import { requireQty } from '../validate.js';
 import type { Ctx } from './context.js';
 import { writeAudit } from './audit.js';
 
@@ -68,11 +67,12 @@ export const MAX_ENTRY_QTY = 1e9;
  * entryQty is in natural units (e.g. 10.5 ton); result is milli base (kg*1000).
  */
 export function toBaseQty(ctx: Ctx, uomId: string, entryQty: number): number {
-  // Shared discipline (AI TASK #3): reject by TYPE first — booleans, numeric
-  // strings, arrays and objects are never quantities however JS coerces them —
-  // then finiteness, then magnitude. This is the single funnel every
-  // natural-unit quantity passes through, so the whole bug family dies here.
-  requireQty(entryQty, 'Quantity', { allowNegative: true, max: MAX_ENTRY_QTY });
+  if (!Number.isFinite(entryQty)) {
+    badRequest('qty_invalid', 'Quantity must be a finite number');
+  }
+  if (Math.abs(entryQty) > MAX_ENTRY_QTY) {
+    badRequest('qty_range', `Quantity is out of the allowed range (max ${MAX_ENTRY_QTY})`);
+  }
   const uom = getUom(ctx, uomId);
   // factorToBase is stored in milli, so this yields milli base-units directly.
   return Math.round(entryQty * uom.factorToBase);

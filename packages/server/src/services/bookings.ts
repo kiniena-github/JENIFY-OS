@@ -7,10 +7,6 @@ import { writeAudit } from './audit.js';
 import { requirePermission } from './permissions.js';
 import { nextDocNumber, defineSequence } from './numbering.js';
 import { getParty } from './parties.js';
-import { requireInstant, requireSpan, requireQty } from '../validate.js';
-
-/** Shared alias: bookings canonicalise instants exactly like every other module. */
-const normalizeInstant = requireInstant;
 
 /**
  * Bookings — ONE reserved-time-or-space capability serving hotel rooms,
@@ -25,7 +21,42 @@ const normalizeInstant = requireInstant;
 
 export type BookingStatus = 'confirmed' | 'checked_in' | 'completed' | 'cancelled' | 'no_show';
 
+/**
+ * Longest bookable span. Guards against a single booking permanently occupying
+ * a resource (red-team R4 H3: a 1000-year range, or garbage like "!" .. "~",
+ * blocked a room forever and was a self-service denial of service).
+ */
+const MAX_BOOKING_DAYS = 366;
 
+/**
+ * CANONICALISE every instant before it is stored or compared.
+ *
+ * Overlap is evaluated with SQL string comparison on a text column, so the
+ * stored form must be canonical UTC or the comparison is lexicographic rather
+ * than chronological. Red-team R4 H1: the same moment written
+ * '...T12:00:00.000+03:00' instead of '...T09:00:00.000Z' did not collide, so
+ * a resource could be double-booked through the API. Normalising here means the
+ * conflict query compares like with like, whatever the client sends.
+ */
+/** A booking must end after it starts and may not occupy a resource forever. */
+function assertSaneSpan(startAt: string, endAt: string): void {
+  if (!(startAt < endAt)) badRequest('booking_range', 'A booking must end after it starts');
+  const days = (Date.parse(endAt) - Date.parse(startAt)) / 86_400_000;
+  if (days > MAX_BOOKING_DAYS) {
+    badRequest('booking_too_long', `A booking may not exceed ${MAX_BOOKING_DAYS} days`);
+  }
+}
+
+function normalizeInstant(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    badRequest('booking_time', `${field} is required`);
+  }
+  const ms = Date.parse(value as string);
+  if (!Number.isFinite(ms)) {
+    badRequest('booking_time', `${field} must be a valid date and time`);
+  }
+  return new Date(ms).toISOString();
+}
 
 /** Statuses that still occupy the resource. */
 const BLOCKING: BookingStatus[] = ['confirmed', 'checked_in'];
@@ -134,10 +165,14 @@ export function createBooking(ctx: Ctx, input: CreateBookingInput): { id: string
   requirePermission(ctx, 'sales', 'create');
   const resource = getResource(ctx, input.resourceId);
   if (!resource.active) badRequest('resource_inactive', 'That resource is not bookable');
-  const { start: startAt, end: endAt } = requireSpan(input.startAt, input.endAt, { start: 'startAt', end: 'endAt' });
+  const startAt = normalizeInstant(input.startAt, 'startAt');
+  const endAt = normalizeInstant(input.endAt, 'endAt');
+  assertSaneSpan(startAt, endAt);
   if (input.customerId) getParty(ctx, input.customerId); // tenant-scoped
   const partySize = input.partySize ?? 1;
-  requireQty(partySize, 'Party size', { integerOnly: true, max: 100000 });
+  if (typeof partySize !== 'number' || !Number.isInteger(partySize) || partySize < 1) {
+    badRequest('party_size', 'Party size must be a whole number of at least 1');
+  }
   if (partySize > resource.capacity) {
     badRequest('over_capacity', `'${resource.name}' holds ${resource.capacity}, not ${partySize}`);
   }
@@ -223,7 +258,9 @@ export function rescheduleBooking(ctx: Ctx, id: string, startAt: string, endAt: 
   requirePermission(ctx, 'sales', 'edit');
   const b = getBooking(ctx, id);
   if (b.status !== 'confirmed') badRequest('booking_not_open', 'Only a confirmed booking can be moved');
-  const { start: from, end: to } = requireSpan(startAt, endAt, { start: 'startAt', end: 'endAt' });
+  const from = normalizeInstant(startAt, 'startAt');
+  const to = normalizeInstant(endAt, 'endAt');
+  assertSaneSpan(from, to);
   inTx(ctx, (tx) => {
     const clash = conflictingBookings(tx, b.resourceId, from, to, id);
     if (clash.length > 0) badRequest('double_booked', 'That resource is already booked for the new time');
