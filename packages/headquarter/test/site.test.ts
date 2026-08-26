@@ -90,6 +90,15 @@ describe('buildSite', () => {
       'javascript:alert(1)',
       'data:text/html,<script>alert(1)</script>',
       'JAVASCRIPT:alert(1)',
+      ' javascript:alert(1)', // leading whitespace is stripped by URL parsers
+      '\tjavascript:alert(1)',
+      '\njavascript:alert(1)',
+      'java\tscript:alert(1)', // tabs/newlines inside the scheme are stripped by URL parsers
+      'java\nscript:alert(1)',
+      'javascript&#58;alert(1)', // HTML-entity-encoded colon
+      '%6A%61vascript:alert(1)', // percent-encoded scheme
+      'vbscript:msgbox(1)',
+      'file:///etc/passwd',
       'drive://q0',
       'docs/reports/2026-07.md',
       'http://insecure.example',
