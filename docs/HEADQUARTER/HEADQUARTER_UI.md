@@ -17,15 +17,21 @@ Seven pages sharing one navigation shell, rendered from canonical data:
 | Executive Room | `renderExecutiveRoom` | Presentation layer over recorded multi-party transcripts (`ChatThread` contract). |
 | Direct Chats | `renderDirectChats` | Founder ↔ worker transcript presentation (same contract). |
 | Specialist Directory | `renderSpecialistDirectory` | Worker/specialist roster with lane + status. |
-| Founder Approvals | `renderFounderApprovals` | Read-only queue of `needs_approval` tasks. |
+| Founder Approvals | `renderFounderApprovals` | Read-only: D15 approval requests (digest/expiry/consumption/decider) + `needs_approval` tasks; no approve/reject controls. |
 | Archive | `renderArchive` | Monthly browsing, project-evolution chains, links to preserved originals, date-confidence flags, client-side search. |
 
 ## Canonical activity model
 
-`src/events.ts` implements war-room order B exactly:
+The ONE canonical event model lives in `src/contracts/events.ts` (PR #45
+integration base per issue #53 correction D / architecture doc §6b):
 `queued / assigned / running / blocked / needs_approval / review_failed /
-review_passed / completed / outcome_unknown`, as append-only `ActivityEvent`s.
-A task's state is the latest event; `latestTaskStates()` keeps full history.
+review_passed / completed / outcome_unknown`, as append-only `ActivityEvent`s
+(`subjectKind`/`subjectId`/`actor`/`seq`/`at`). The UI defines no parallel
+status vocabulary: `src/ui/model.ts` derives a `TaskState` view-model from
+that contract; `latestTaskStates()` keeps full history (status-`null`
+annotation events are preserved without changing state). Founder Approvals
+renders the D15 approval fields (`actionDigest`, `expiresAt`, `consumedAt`,
+`decidedBy`) read-only from the contracts' `ApprovalRequest`.
 
 Dashboard mapping (`DASHBOARD_BUCKET`):
 - **NOW** — `assigned`, `running`, `review_failed` (rework), `review_passed` (finishing)
