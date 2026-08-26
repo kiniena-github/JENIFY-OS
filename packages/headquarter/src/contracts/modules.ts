@@ -53,8 +53,21 @@ export interface ApprovalRequest {
   requestedAt: string;
   decision: 'pending' | 'approved' | 'denied';
   decidedAt: string | null;
+  /** Actor that made the decision (issue #53 correction A). */
+  decidedBy: string | null;
   /** Founder's note; required on deny. */
   decisionNote: string | null;
+  /**
+   * SHA-256 digest of the canonical serialized action the decision binds to
+   * (issue #53 correction A). Null only for non-task approvals (e.g.
+   * project-level asks); a task approval without a digest never admits
+   * execution.
+   */
+  actionDigest: string | null;
+  /** Approval time-box; expired approvals never admit execution. */
+  expiresAt: string | null;
+  /** Set when the single-use approval nonce was consumed at claim time. */
+  consumedAt: string | null;
 }
 
 export interface ChatMessage {

@@ -26,6 +26,15 @@ export type ActivityStatus = (typeof ACTIVITY_STATUSES)[number];
  *
  * Notes:
  * - `completed` is the only terminal status.
+ * - This table is necessary but NOT sufficient: it is capability-blind, so
+ *   the operator queue adds capability-aware enforcement on top of it
+ *   (issue #53 correction B). `running -> completed` directly is legal only
+ *   for read-only, no-side-effect capabilities; a side-effect execution's
+ *   reported result waits in a review-gated path (reviewState 'pending')
+ *   and only an INDEPENDENT reviewer decision (never the executing worker)
+ *   moves it through review_passed to completed. Approval-gated tasks are
+ *   additionally re-validated against the Founder-approved action digest at
+ *   the claim/start execution boundary (correction A).
  * - `outcome_unknown` is NEVER blindly retried. It leaves only through an
  *   explicit reconciliation decision (see operator/queue.ts):
  *   confirmed-done -> completed, confirmed-failed -> review_failed,

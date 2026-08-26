@@ -28,6 +28,8 @@ services. It is a library package with its own SQLite store; an HTTP/UI layer co
 | D12 | No arbitrary-command capability exists; capabilities are named, typed actions | Issue #42 order 5. The control plane (this package) never executes anything itself — it only queues, gates, fences, and records. |
 | D13 | Vendor-neutral `WorkerAdapter` seam; Claude/Codex/Jules/Google are registry entries | Issue #42 order 6: no vendor hard-coded as the system. |
 | D14 | Plain better-sqlite3 + explicit DDL (no drizzle) for the foundation | Smaller review surface for wave 1; migration to drizzle-kit is a recorded follow-up, not a constraint. |
+| D15 | Founder approval binds to the exact immutable action: SHA-256 digest of the canonical serialized task (task id + capability + payload + idempotency key) + expiry + single-use nonce, re-validated at the claim/start execution boundary | Issue #53 correction A (gate G5): an approval must not survive payload/capability mutation, expiry, or replay. Digest mismatch blocks the task; missing/expired/consumed approvals send it back to `needs_approval` for a fresh decision. |
+| D16 | Side-effect execution results are review-gated: the executing worker's `complete()` lands in `reviewState: pending` (status stays `running`, lease released), and only an independent reviewer — never the executing/submitting/requesting worker, never `system` — can pass it through `review_passed` to terminal `completed` | Issue #53 correction B: builder != final reviewer. The legal-transition table stays capability-blind and necessary-but-not-sufficient; the queue adds capability-aware enforcement. Reconciliation of `outcome_unknown` requires the same reviewer independence. Read-only capabilities still complete directly. |
 
 ## 3. Module map (war room order C)
 
@@ -66,6 +68,30 @@ Claude-owned (this package): `src/contracts/**`, `src/operator/**`, `src/store/*
 Jules-owned: Headquarter UI views, archive metadata schema + reconstruction pipeline, search/indexing.
 Interface between the two: the contracts in `src/contracts/` and the read models on `HeadquarterStore`; archive collision is avoided via opaque `ArchiveRef.locator`.
 
+## 6b. Canonical-contract ownership — integration base for PR #46 (issue #53 correction D)
+
+PR #45 and PR #46 both scaffolded `packages/headquarter` and independently defined the
+event model. Resolution (Founder-approved via issue #53):
+
+- **This branch's corrected `src/contracts/` (events, workers, modules) and package
+  scaffolding are the SINGLE canonical integration base.** The nine canonical statuses,
+  the legal-transition table, and the queue-level enforcement in D15/D16 are the one
+  event model every layer binds to.
+- **PR #46 is NOT absorbed here.** Its archive/UI implementation (dashboard views,
+  archive metadata schema, reconstruction pipeline, search, static HQ site) remains its
+  own deliverable and must be **rebased/adapted onto this corrected contract**:
+  - drop #46's duplicate workspace scaffolding (`packages/headquarter/package.json`,
+    `tsconfig.json`, root workspace entry) in favour of this branch's;
+  - replace #46's locally-defined `ActivityEvent`/status types with imports from
+    `@factoryos/headquarter/contracts`;
+  - keep #46's archive/UI modules in non-colliding paths (e.g. `src/archive/`,
+    `src/ui/`, `site/`) — nothing in this branch occupies those;
+  - #46's read-only Founder Approvals page must render the D15 approval fields
+    (`actionDigest`, `expiresAt`, `consumedAt`, `decidedBy`) and must not offer
+    approve/reject actions — decisions stay in the operator control plane;
+  - re-run the combined test/build suite on the post-integration head before that
+    integrated result is accepted.
+
 ## 7. Deliberately NOT built this wave
 
 - No HTTP routes, UI, or deployment target (no DNS, no hosting).
@@ -76,8 +102,13 @@ Interface between the two: the contracts in `src/contracts/` and the read models
 
 ## 8. Test evidence
 
-- `packages/headquarter`: 36 vitest tests across events/policy/queue/evidence/store (all passing).
-- `packages/server`: full existing suite re-run — 399 passed, 3 skipped (pre-existing), 0 failed.
+- `packages/headquarter`: 57 vitest tests across events/policy/queue/evidence/store plus
+  `test/security.test.ts` — 21 hostile security regression tests for D15/D16 (approval
+  digest binding, expiry, single-use nonce/replay rejection, post-approval mutation via
+  direct SQL, cross-task approval riding, self-approval, self-review, self-reconciliation,
+  review-pending sweep safety). All passing.
+- `packages/server`: full existing suite re-run — see PR #45 validation section for the
+  current counts on the corrected head.
 - `tsc --noEmit` clean for `headquarter` and `server`.
 
 ## 9. Rollback

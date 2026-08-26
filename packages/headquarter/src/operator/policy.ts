@@ -24,6 +24,20 @@ export interface PolicyContext {
   preApprovedCapabilities?: ReadonlySet<string>;
 }
 
+/**
+ * Whether executing this capability requires a bound, unexpired, unconsumed
+ * Founder approval record (issue #53 correction A). Derived only from the
+ * registry entry + standing pre-approvals — never from the task payload.
+ * Checked again at the execution boundary (claim/start), not just enqueue.
+ */
+export function approvalRequired(capability: Capability, ctx: PolicyContext = {}): boolean {
+  if (FOUNDER_GATED.includes(capability.riskClass)) return true;
+  if (APPROVAL_GATED.includes(capability.riskClass)) {
+    return !ctx.preApprovedCapabilities?.has(capability.id);
+  }
+  return false;
+}
+
 export function evaluatePolicy(
   capability: Capability | null,
   requestedBy: { workerId: string; allowedCapabilities: readonly string[] },

@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS op_tasks (
   claimed_by TEXT,
   lease_expires_at TEXT,
   approval_id TEXT,
+  review_state TEXT NOT NULL DEFAULT 'none',
+  submitted_by TEXT,
+  submitted_at TEXT,
   created_by TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -98,7 +101,11 @@ CREATE TABLE IF NOT EXISTS hq_approvals (
   requested_at TEXT NOT NULL,
   decision TEXT NOT NULL DEFAULT 'pending',
   decided_at TEXT,
-  decision_note TEXT
+  decided_by TEXT,
+  decision_note TEXT,
+  action_digest TEXT,
+  expires_at TEXT,
+  consumed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS hq_chat_messages (
@@ -129,11 +136,36 @@ CREATE TABLE IF NOT EXISTS hq_archive_refs (
 );
 `;
 
+/**
+ * Columns added after the first foundation commit (issue #53 corrections).
+ * CREATE TABLE IF NOT EXISTS does not extend an existing table, so a database
+ * file created from the earlier DDL gets them via idempotent ALTERs here.
+ */
+const COLUMN_UPGRADES: readonly { table: string; column: string; ddl: string }[] = [
+  { table: 'op_tasks', column: 'review_state', ddl: `TEXT NOT NULL DEFAULT 'none'` },
+  { table: 'op_tasks', column: 'submitted_by', ddl: 'TEXT' },
+  { table: 'op_tasks', column: 'submitted_at', ddl: 'TEXT' },
+  { table: 'hq_approvals', column: 'decided_by', ddl: 'TEXT' },
+  { table: 'hq_approvals', column: 'action_digest', ddl: 'TEXT' },
+  { table: 'hq_approvals', column: 'expires_at', ddl: 'TEXT' },
+  { table: 'hq_approvals', column: 'consumed_at', ddl: 'TEXT' },
+];
+
+function ensureColumns(db: HqDatabase): void {
+  for (const up of COLUMN_UPGRADES) {
+    const cols = db.prepare(`PRAGMA table_info(${up.table})`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === up.column)) {
+      db.exec(`ALTER TABLE ${up.table} ADD COLUMN ${up.column} ${up.ddl}`);
+    }
+  }
+}
+
 export function openHqDatabase(path: string = DEFAULT_HQ_DB_PATH): HqDatabase {
   const db = new Database(path);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(DDL);
+  ensureColumns(db);
   return db;
 }
 

@@ -21,8 +21,23 @@ import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
 import { assertTransition, type ActivityStatus } from '../contracts/events.js';
 import { CapabilityRegistry } from './capabilities.js';
-import { evaluatePolicy, type PolicyContext } from './policy.js';
+import { approvalRequired, evaluatePolicy, type PolicyContext } from './policy.js';
 import { EvidenceLog, assertNoSecretLikeContent } from './evidence.js';
+import {
+  DEFAULT_APPROVAL_TTL_MS,
+  taskActionDigest,
+  validateApproval,
+  type ApprovalRejection,
+} from './approvals.js';
+
+/**
+ * Independent-review pipeline state for a task's reported result (issue #53
+ * correction B). Orthogonal to the canonical activity status: a side-effect
+ * execution that reported a result sits in `pending` (status stays `running`)
+ * until an independent reviewer — never the executing worker — passes or
+ * fails it.
+ */
+export type ReviewState = 'none' | 'pending' | 'passed' | 'failed';
 
 export interface OperatorTask {
   id: string;
@@ -33,6 +48,12 @@ export interface OperatorTask {
   fence: number;
   claimedBy: string | null;
   leaseExpiresAt: string | null;
+  /** Single-use approval nonce currently bound to this task, if any. */
+  approvalId: string | null;
+  reviewState: ReviewState;
+  /** Worker that submitted the execution result now awaiting review. */
+  submittedBy: string | null;
+  submittedAt: string | null;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -149,16 +170,86 @@ export class OperatorQueue {
     return { accepted: true, task: this.get(id)!, deduplicated: false };
   }
 
-  /** Founder approval moves a needs_approval task into the queue. */
-  approve(taskId: string, by = 'founder'): OperatorTask {
-    return this.transition(taskId, 'queued', by, 'Founder approved');
+  /**
+   * Founder approval moves a needs_approval task into the queue — bound to
+   * the exact immutable action (issue #53 correction A): the approval record
+   * stores the SHA-256 digest of the task's canonical serialization, a
+   * time-box, and acts as a single-use nonce consumed at claim time. Any
+   * later capability/payload mutation, expiry, or replay invalidates it at
+   * the execution boundary.
+   */
+  approve(taskId: string, by = 'founder', opts: { ttlMs?: number; note?: string } = {}): OperatorTask {
+    const task = this.get(taskId);
+    if (!task) throw new Error(`Unknown task: ${taskId}`);
+    if (task.status !== 'needs_approval') {
+      throw new Error(`Task ${taskId} is not awaiting approval (status: ${task.status})`);
+    }
+    if (by === task.createdBy || (task.claimedBy && by === task.claimedBy) || by === 'system') {
+      throw new Error(
+        `Actor ${by} cannot approve task ${taskId}: the requesting/executing worker may not approve its own action`,
+      );
+    }
+    const digest = taskActionDigest(task);
+    const approvalId = uuid();
+    const at = nowIso();
+    const expiresAt = new Date(Date.now() + (opts.ttlMs ?? DEFAULT_APPROVAL_TTL_MS)).toISOString();
+    const cap = this.capabilities.get(task.capabilityId);
+    this.db
+      .prepare(
+        `INSERT INTO hq_approvals (id, task_id, ask, risk_class, requested_by, requested_at,
+           decision, decided_at, decided_by, decision_note, action_digest, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        approvalId,
+        taskId,
+        `Execute ${task.capabilityId}`,
+        cap?.riskClass ?? 'unknown',
+        task.createdBy,
+        at,
+        at,
+        by,
+        opts.note ?? null,
+        digest,
+        expiresAt,
+      );
+    this.db.prepare(`UPDATE op_tasks SET approval_id = ? WHERE id = ?`).run(approvalId, taskId);
+    this.evidence.append({
+      taskId,
+      actor: by,
+      kind: 'founder_approved',
+      payload: { approvalId, actionDigest: digest, expiresAt },
+    });
+    return this.transition(taskId, 'queued', by, 'Founder approved (digest-bound, single-use)');
   }
 
-  /** Founder denial blocks the task with a reason. */
+  /** Founder denial blocks the task with a reason; the denial is recorded immutably. */
   deny(taskId: string, reason: string, by = 'founder'): OperatorTask {
+    const before = this.get(taskId);
+    if (!before) throw new Error(`Unknown task: ${taskId}`);
+    const cap = this.capabilities.get(before.capabilityId);
     const task = this.transition(taskId, 'blocked', by, `Founder denied: ${reason}`);
     this.db.prepare(`UPDATE op_tasks SET block_reason = ? WHERE id = ?`).run(reason, taskId);
-    return this.get(taskId)!;
+    this.db
+      .prepare(
+        `INSERT INTO hq_approvals (id, task_id, ask, risk_class, requested_by, requested_at,
+           decision, decided_at, decided_by, decision_note, action_digest)
+         VALUES (?, ?, ?, ?, ?, ?, 'denied', ?, ?, ?, ?)`,
+      )
+      .run(
+        uuid(),
+        taskId,
+        `Execute ${before.capabilityId}`,
+        cap?.riskClass ?? 'unknown',
+        before.createdBy,
+        nowIso(),
+        nowIso(),
+        by,
+        reason,
+        taskActionDigest(before),
+      );
+    this.evidence.append({ taskId, actor: by, kind: 'founder_denied', payload: { reason } });
+    return this.get(taskId) ?? task;
   }
 
   // ---- claim / execute lifecycle ----
@@ -177,6 +268,19 @@ export class OperatorQueue {
       )
       .get(capabilityId) as { id: string; fence: number } | undefined;
     if (!candidate) return null;
+    // Execution boundary (issue #53 correction A): an approval-gated task is
+    // admitted only with a valid, unexpired, unconsumed approval bound to the
+    // task's CURRENT digest — even if something forced its status to queued.
+    const task = this.get(candidate.id)!;
+    const cap = this.capabilities.get(capabilityId);
+    if (!cap || !cap.enabled) return null; // deny by default
+    if (approvalRequired(cap, this.policyCtx)) {
+      const rejection = this.validateTaskApproval(task);
+      if (rejection) {
+        this.rejectAtExecutionBoundary(task, rejection);
+        return null;
+      }
+    }
     const leaseExpires = new Date(Date.now() + leaseMs).toISOString();
     const res = this.db
       .prepare(
@@ -186,6 +290,22 @@ export class OperatorQueue {
       )
       .run(workerId, leaseExpires, nowIso(), candidate.id, candidate.fence);
     if (res.changes === 0) return null; // lost the race; caller may retry
+    // Consume the single-use approval nonce exactly once, with the claim.
+    if (cap && approvalRequired(cap, this.policyCtx) && task.approvalId) {
+      const consumed = this.db
+        .prepare(`UPDATE hq_approvals SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL`)
+        .run(nowIso(), task.approvalId);
+      if (consumed.changes === 0) {
+        // Nonce raced/replayed: undo nothing destructive — surface loudly.
+        throw new Error(`Approval nonce ${task.approvalId} was already consumed (replay rejected)`);
+      }
+      this.evidence.append({
+        taskId: candidate.id,
+        actor: workerId,
+        kind: 'approval_consumed',
+        payload: { approvalId: task.approvalId },
+      });
+    }
     this.recordEvent(candidate.id, 'assigned', workerId, `Claimed by ${workerId}`);
     this.evidence.append({
       taskId: candidate.id,
@@ -196,9 +316,24 @@ export class OperatorQueue {
     return this.get(candidate.id)!;
   }
 
-  /** Worker signals it has started executing. Fence must match. */
+  /**
+   * Worker signals it has started executing. Fence must match, and for an
+   * approval-gated task the payload must still match the digest the Founder
+   * approved — a mutation between claim and start invalidates the approval.
+   */
   start(taskId: string, workerId: string, fence: number): OperatorTask {
     this.assertFence(taskId, workerId, fence);
+    const task = this.get(taskId)!;
+    const cap = this.capabilities.get(task.capabilityId);
+    if (cap && approvalRequired(cap, this.policyCtx)) {
+      const approval = this.getApprovalRecord(task.approvalId);
+      if (!approval?.actionDigest || approval.actionDigest !== taskActionDigest(task)) {
+        this.rejectAtExecutionBoundary(task, 'approval_digest_mismatch');
+        throw new Error(
+          `Task ${taskId}: action changed after Founder approval; approval invalidated`,
+        );
+      }
+    }
     return this.transition(taskId, 'running', workerId, 'Execution started');
   }
 
@@ -211,9 +346,15 @@ export class OperatorQueue {
   }
 
   /**
-   * Worker reports completion with evidence. Side-effect completions go to
-   * review_passed only via an independent reviewer; workers land on
-   * `completed` directly only for read-only capabilities.
+   * Worker reports its execution result (issue #53 correction B).
+   *
+   * A worker can NEVER self-complete a review-required action: for any
+   * side-effect capability the result lands in the review-gated path
+   * (reviewState 'pending', status stays `running`, lease released) and only
+   * an independent reviewer decision — reviewPass()/reviewFail() by an actor
+   * other than the executing/submitting/requesting worker — can reach the
+   * terminal `completed` status. Only read-only, no-side-effect capabilities
+   * complete directly.
    */
   complete(
     taskId: string,
@@ -224,6 +365,28 @@ export class OperatorQueue {
   ): OperatorTask {
     this.assertFence(taskId, workerId, fence);
     assertNoSecretLikeContent(result);
+    const task = this.get(taskId)!;
+    const cap = this.capabilities.get(task.capabilityId);
+    if (cap?.sideEffect) {
+      if (task.status !== 'running') {
+        throw new Error(`Task ${taskId} is not running (status: ${task.status})`);
+      }
+      this.db.prepare(`UPDATE op_tasks SET result = ? WHERE id = ?`).run(JSON.stringify(result), taskId);
+      this.db
+        .prepare(
+          `UPDATE op_tasks SET review_state = 'pending', submitted_by = ?, submitted_at = ?,
+             lease_expires_at = NULL, updated_at = ? WHERE id = ?`,
+        )
+        .run(workerId, nowIso(), nowIso(), taskId);
+      this.recordEvent(taskId, 'running', workerId, 'Result submitted; awaiting independent review');
+      this.evidence.append({
+        taskId,
+        actor: workerId,
+        kind: 'execution_result_submitted_for_review',
+        payload: { result, refs: evidenceRefs },
+      });
+      return this.get(taskId)!;
+    }
     this.db.prepare(`UPDATE op_tasks SET result = ? WHERE id = ?`).run(JSON.stringify(result), taskId);
     this.evidence.append({
       taskId,
@@ -232,6 +395,38 @@ export class OperatorQueue {
       payload: { result, refs: evidenceRefs },
     });
     return this.transition(taskId, 'completed', workerId, 'Execution completed');
+  }
+
+  /**
+   * Independent reviewer passes a submitted side-effect result. This is the
+   * ONLY path by which a review-required task reaches terminal `completed`.
+   * The reviewer must be independent: not the executing worker, not the
+   * submitter, not the task's requester, and not 'system'.
+   */
+  reviewPass(taskId: string, reviewerId: string, note = ''): OperatorTask {
+    this.requirePendingReview(taskId, reviewerId);
+    this.evidence.append({
+      taskId,
+      actor: reviewerId,
+      kind: 'review_passed',
+      payload: { note },
+    });
+    this.db.prepare(`UPDATE op_tasks SET review_state = 'passed' WHERE id = ?`).run(taskId);
+    this.transition(taskId, 'review_passed', reviewerId, `Independent review passed${note ? `: ${note}` : ''}`);
+    return this.transition(taskId, 'completed', reviewerId, 'Completed by independent reviewer decision');
+  }
+
+  /** Independent reviewer rejects a submitted result; the task goes to review_failed for rework. */
+  reviewFail(taskId: string, reviewerId: string, reason: string): OperatorTask {
+    this.requirePendingReview(taskId, reviewerId);
+    this.evidence.append({
+      taskId,
+      actor: reviewerId,
+      kind: 'review_failed',
+      payload: { reason },
+    });
+    this.db.prepare(`UPDATE op_tasks SET review_state = 'failed' WHERE id = ?`).run(taskId);
+    return this.transition(taskId, 'review_failed', reviewerId, `Independent review failed: ${reason}`);
   }
 
   fail(taskId: string, workerId: string, fence: number, reason: string): OperatorTask {
@@ -254,7 +449,8 @@ export class OperatorQueue {
       .prepare(
         `SELECT t.id, t.status, c.side_effect AS side_effect
          FROM op_tasks t JOIN op_capabilities c ON c.id = t.capability_id
-         WHERE t.status IN ('assigned', 'running') AND t.lease_expires_at IS NOT NULL AND t.lease_expires_at < ?`,
+         WHERE t.status IN ('assigned', 'running') AND t.review_state != 'pending'
+           AND t.lease_expires_at IS NOT NULL AND t.lease_expires_at < ?`,
       )
       .all(now) as { id: string; status: ActivityStatus; side_effect: number }[];
     const requeued: string[] = [];
@@ -285,6 +481,11 @@ export class OperatorQueue {
     if (!task) throw new Error(`Unknown task: ${taskId}`);
     if (task.status !== 'outcome_unknown') {
       throw new Error(`Task ${taskId} is not outcome_unknown`);
+    }
+    if (by === task.claimedBy || by === task.createdBy || by === 'system') {
+      throw new Error(
+        `Actor ${by} cannot reconcile task ${taskId}: reconciliation requires an independent reviewer`,
+      );
     }
     this.evidence.append({ taskId, actor: by, kind: 'reconciliation', payload: { decision, note } });
     if (decision === 'confirmed_done') {
@@ -322,6 +523,10 @@ export class OperatorQueue {
       fence: row.fence as number,
       claimedBy: (row.claimed_by as string | null) ?? null,
       leaseExpiresAt: (row.lease_expires_at as string | null) ?? null,
+      approvalId: (row.approval_id as string | null) ?? null,
+      reviewState: (row.review_state as ReviewState | null) ?? 'none',
+      submittedBy: (row.submitted_by as string | null) ?? null,
+      submittedAt: (row.submitted_at as string | null) ?? null,
       createdBy: row.created_by as string,
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,
@@ -335,6 +540,80 @@ export class OperatorQueue {
       .prepare(`SELECT id FROM op_tasks WHERE status = ? ORDER BY created_at`)
       .all(status) as { id: string }[];
     return rows.map((r) => this.get(r.id)!);
+  }
+
+  /** Read a hq_approvals row in the shape validateApproval() needs. */
+  private getApprovalRecord(
+    approvalId: string | null,
+  ): { decision: string; actionDigest: string | null; expiresAt: string | null; consumedAt: string | null } | null {
+    if (!approvalId) return null;
+    const row = this.db
+      .prepare(`SELECT decision, action_digest, expires_at, consumed_at FROM hq_approvals WHERE id = ?`)
+      .get(approvalId) as
+      | { decision: string; action_digest: string | null; expires_at: string | null; consumed_at: string | null }
+      | undefined;
+    if (!row) return null;
+    return {
+      decision: row.decision,
+      actionDigest: row.action_digest,
+      expiresAt: row.expires_at,
+      consumedAt: row.consumed_at,
+    };
+  }
+
+  private validateTaskApproval(task: OperatorTask): ApprovalRejection | null {
+    return validateApproval(this.getApprovalRecord(task.approvalId), taskActionDigest(task));
+  }
+
+  /**
+   * An approval-gated task failed approval validation at the execution
+   * boundary. A digest mismatch means the action was mutated after approval —
+   * that is hostile or a bug, so the task is blocked for investigation. Every
+   * other rejection (missing/expired/consumed/undecided approval) sends the
+   * task back to needs_approval for a fresh Founder decision. The stale
+   * approval binding is cleared either way; approvals themselves are
+   * immutable records.
+   */
+  private rejectAtExecutionBoundary(task: OperatorTask, rejection: ApprovalRejection): void {
+    this.evidence.append({
+      taskId: task.id,
+      actor: 'system',
+      kind: 'approval_rejected_at_execution',
+      payload: { rejection, approvalId: task.approvalId },
+    });
+    this.db.prepare(`UPDATE op_tasks SET approval_id = NULL WHERE id = ?`).run(task.id);
+    if (rejection === 'approval_digest_mismatch') {
+      if (task.status !== 'blocked') {
+        this.transition(task.id, 'blocked', 'system', 'Approval invalidated: action changed after Founder approval');
+      }
+      this.db
+        .prepare(`UPDATE op_tasks SET block_reason = ? WHERE id = ?`)
+        .run('Approval invalidated: action payload/capability changed after Founder approval', task.id);
+      return;
+    }
+    if (task.status !== 'needs_approval') {
+      this.transition(task.id, 'needs_approval', 'system', `Fresh Founder approval required (${rejection})`);
+    }
+  }
+
+  /** Shared guard for reviewPass/reviewFail: pending review + independent reviewer. */
+  private requirePendingReview(taskId: string, reviewerId: string): OperatorTask {
+    const task = this.get(taskId);
+    if (!task) throw new Error(`Unknown task: ${taskId}`);
+    if (task.reviewState !== 'pending') {
+      throw new Error(`Task ${taskId} has no result awaiting review (reviewState: ${task.reviewState})`);
+    }
+    if (
+      reviewerId === 'system' ||
+      reviewerId === task.claimedBy ||
+      reviewerId === task.submittedBy ||
+      reviewerId === task.createdBy
+    ) {
+      throw new Error(
+        `Actor ${reviewerId} cannot review task ${taskId}: the executing/submitting/requesting worker may not review its own action (builder != final reviewer)`,
+      );
+    }
+    return task;
   }
 
   private assertFence(taskId: string, workerId: string, fence: number): void {

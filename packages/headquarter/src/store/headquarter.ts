@@ -179,14 +179,24 @@ export class HeadquarterStore {
     return this.getApproval(id)!;
   }
 
-  decideApproval(id: string, decision: 'approved' | 'denied', note: string | null): ApprovalRequest {
+  decideApproval(
+    id: string,
+    decision: 'approved' | 'denied',
+    note: string | null,
+    decidedBy = 'founder',
+  ): ApprovalRequest {
     const existing = this.getApproval(id);
     if (!existing) throw new Error(`Unknown approval: ${id}`);
     if (existing.decision !== 'pending') throw new Error(`Approval ${id} already decided`);
     if (decision === 'denied' && !note) throw new Error('A denial requires a decision note');
+    if (decidedBy === existing.requestedBy || decidedBy === 'system') {
+      throw new Error(`Actor ${decidedBy} cannot decide an approval it requested itself`);
+    }
     this.db
-      .prepare(`UPDATE hq_approvals SET decision = ?, decided_at = ?, decision_note = ? WHERE id = ?`)
-      .run(decision, nowIso(), note, id);
+      .prepare(
+        `UPDATE hq_approvals SET decision = ?, decided_at = ?, decided_by = ?, decision_note = ? WHERE id = ?`,
+      )
+      .run(decision, nowIso(), decidedBy, note, id);
     return this.getApproval(id)!;
   }
 
@@ -205,7 +215,11 @@ export class HeadquarterStore {
       requestedAt: r.requested_at as string,
       decision: r.decision as ApprovalRequest['decision'],
       decidedAt: (r.decided_at as string | null) ?? null,
+      decidedBy: (r.decided_by as string | null) ?? null,
       decisionNote: (r.decision_note as string | null) ?? null,
+      actionDigest: (r.action_digest as string | null) ?? null,
+      expiresAt: (r.expires_at as string | null) ?? null,
+      consumedAt: (r.consumed_at as string | null) ?? null,
     };
   }
 
