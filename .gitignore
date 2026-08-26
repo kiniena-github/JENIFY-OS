@@ -14,8 +14,3 @@ data/backups/
 data/**/*.sqlite*
 *.sqlite.pre-relocation
 data/demo/
-
-# AI automation local state / credentials
-.gemini/
-gha-creds-*.json
-.ai-bridge/
