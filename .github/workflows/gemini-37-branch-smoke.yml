@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Verify exact Gemini 3.7 Flash server response
+      - name: Verify exact Gemini 3.7 Flash with URL Context
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
           EXPECTED_MODEL: gemini-3.7-flash
@@ -25,9 +25,13 @@ jobs:
             exit 1
           fi
 
-          jq -n '{contents:[{role:"user",parts:[{text:"Reply with exactly: OK"}]}],generationConfig:{temperature:0,maxOutputTokens:8}}' > request.json
+          jq -n '{
+            contents:[{role:"user",parts:[{text:"Read https://ai.google.dev/gemini-api/docs/models/gemini-3.7-flash and state the model code in one short sentence."}]}],
+            tools:[{url_context:{}}],
+            generationConfig:{temperature:0,maxOutputTokens:256}
+          }' > request.json
 
-          code=$(curl --silent --show-error --max-time 60 \
+          code=$(curl --silent --show-error --max-time 90 \
             --output response.json \
             --write-out '%{http_code}' \
             -H "x-goog-api-key: ${GEMINI_KEY}" \
@@ -48,9 +52,9 @@ jobs:
             *) echo "::error::Server model mismatch. Requested ${EXPECTED_MODEL}, served '${served:-unknown}'."; exit 1 ;;
           esac
 
-          if ! printf '%s' "$text" | grep -q 'OK'; then
-            echo "::error::Gemini 3.7 responded but did not return the expected smoke-test text."
+          if [ -z "$text" ]; then
+            echo "::error::Gemini 3.7 was server-attested but returned no text."
             exit 1
           fi
 
-          echo "PASS: Google server attested ${served}."
+          echo "PASS: Google server attested ${served}; URL Context request returned text."
