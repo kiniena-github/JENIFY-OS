@@ -385,6 +385,69 @@ describe('issue #77: approval consumption binds to the legitimate claim', () => 
   });
 });
 
+describe('issue #79: consumption also pins the exact task (cross-task riding fails even behind a forged digest)', () => {
+  let db: HqDatabase;
+  let queue: OperatorQueue;
+
+  beforeEach(() => {
+    db = openMemoryHqDatabase();
+    queue = makeQueue(db);
+  });
+
+  it('a legitimate claim records the exact task id in the consumption record', () => {
+    const id = enqueueGated(queue);
+    queue.approve(id);
+    const t = queue.claim('claude', 'ops.risky')!;
+    const row = db
+      .prepare(`SELECT consumed_task_id FROM hq_approvals WHERE id = ?`)
+      .get(t.approvalId) as Record<string, unknown>;
+    expect(row.consumed_task_id).toBe(id);
+    const consumedEv = queue.evidence.list(id).find((e) => e.kind === 'approval_consumed');
+    expect(consumedEv?.payload.consumedTaskId).toBe(id);
+    expect(queue.start(id, 'claude', t.fence).status).toBe('running');
+  });
+
+  it("HOSTILE: task B forged into assigned state cannot ride task A's consumed approval even with a forged digest and a copied claim nonce", () => {
+    const a = enqueueGated(queue, 'risky-a', { same: 'payload' });
+    const b = enqueueGated(queue, 'risky-b', { same: 'payload' });
+    queue.approve(a);
+    const claimedA = queue.claim('claude', 'ops.risky')!; // consumes A's approval legitimately
+    // Attacker copies EVERYTHING observable from A's legitimate claim onto B
+    // (worker, fence, claim nonce, consumed approval) and even rewrites the
+    // approval's action digest to match B — defeating every check except the
+    // consumed task id, which pins the consumption to A alone.
+    db.prepare(`UPDATE hq_approvals SET action_digest = ? WHERE id = ?`).run(
+      taskActionDigest(queue.get(b)!),
+      claimedA.approvalId,
+    );
+    db.prepare(
+      `UPDATE op_tasks SET status = 'assigned', claimed_by = 'claude', fence = ?,
+         claim_nonce = ?, approval_id = ?, lease_expires_at = ? WHERE id = ?`,
+    ).run(
+      claimedA.fence,
+      claimedA.claimNonce,
+      claimedA.approvalId,
+      new Date(Date.now() + 60_000).toISOString(),
+      b,
+    );
+    expect(() => queue.start(b, 'claude', claimedA.fence)).toThrow(/not consumed by this claim/i);
+    const taskB = queue.get(b)!;
+    expect(taskB.status).toBe('blocked');
+    expect(taskB.approvalId).toBeNull();
+    const rejection = queue.evidence.list(b).find((e) => e.kind === 'approval_rejected_at_execution');
+    expect(rejection?.payload.rejection).toBe('approval_claim_binding_mismatch');
+  });
+
+  it('HOSTILE: wiping the consumed task id via direct SQL fails closed at start()', () => {
+    const id = enqueueGated(queue);
+    queue.approve(id);
+    const t = queue.claim('claude', 'ops.risky')!;
+    db.prepare(`UPDATE hq_approvals SET consumed_task_id = NULL WHERE id = ?`).run(t.approvalId);
+    expect(() => queue.start(id, 'claude', t.fence)).toThrow(/not consumed by this claim/i);
+    expect(queue.get(id)!.status).toBe('blocked');
+  });
+});
+
 describe('correction B: executor can never self-complete a review-required action', () => {
   let db: HqDatabase;
   let queue: OperatorQueue;

@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS hq_approvals (
   expires_at TEXT,
   consumed_at TEXT,
   consumed_by TEXT,
+  consumed_task_id TEXT,
   consumed_fence INTEGER,
   consumed_claim_nonce TEXT
 );
@@ -158,6 +159,9 @@ const COLUMN_UPGRADES: readonly { table: string; column: string; ddl: string }[]
   { table: 'hq_approvals', column: 'consumed_by', ddl: 'TEXT' },
   { table: 'hq_approvals', column: 'consumed_fence', ddl: 'INTEGER' },
   { table: 'hq_approvals', column: 'consumed_claim_nonce', ddl: 'TEXT' },
+  // Issue #79: the consumption record also pins the exact task, so a consumed
+  // approval cannot ride another task even behind a forged action digest.
+  { table: 'hq_approvals', column: 'consumed_task_id', ddl: 'TEXT' },
 ];
 
 function ensureColumns(db: HqDatabase): void {

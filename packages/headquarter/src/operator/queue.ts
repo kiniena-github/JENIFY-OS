@@ -302,17 +302,18 @@ export class OperatorQueue {
       .run(workerId, leaseExpires, claimNonce, nowIso(), candidate.id, candidate.fence);
     if (res.changes === 0) return null; // lost the race; caller may retry
     // Consume the single-use approval nonce exactly once, with the claim —
-    // recording WHICH claim consumed it (issue #77): worker, fencing token,
-    // and the per-claim nonce, written in the same atomic conditional UPDATE
-    // as the consumption itself. start() re-verifies this binding.
+    // recording WHICH claim consumed it (issues #77/#79): worker, exact task,
+    // fencing token, and the per-claim nonce, written in the same atomic
+    // conditional UPDATE as the consumption itself. start() re-verifies this
+    // binding.
     if (cap && approvalRequired(cap, this.policyCtx) && task.approvalId) {
       const consumed = this.db
         .prepare(
           `UPDATE hq_approvals
-           SET consumed_at = ?, consumed_by = ?, consumed_fence = ?, consumed_claim_nonce = ?
+           SET consumed_at = ?, consumed_by = ?, consumed_task_id = ?, consumed_fence = ?, consumed_claim_nonce = ?
            WHERE id = ? AND consumed_at IS NULL`,
         )
-        .run(nowIso(), workerId, claimFence, claimNonce, task.approvalId);
+        .run(nowIso(), workerId, candidate.id, claimFence, claimNonce, task.approvalId);
       if (consumed.changes === 0) {
         // Nonce raced/replayed: undo nothing destructive — surface loudly.
         throw new Error(`Approval nonce ${task.approvalId} was already consumed (replay rejected)`);
@@ -321,7 +322,13 @@ export class OperatorQueue {
         taskId: candidate.id,
         actor: workerId,
         kind: 'approval_consumed',
-        payload: { approvalId: task.approvalId, consumedBy: workerId, consumedFence: claimFence, claimNonce },
+        payload: {
+          approvalId: task.approvalId,
+          consumedBy: workerId,
+          consumedTaskId: candidate.id,
+          consumedFence: claimFence,
+          claimNonce,
+        },
       });
     }
     this.recordEvent(candidate.id, 'assigned', workerId, `Claimed by ${workerId}`);
@@ -368,6 +375,7 @@ export class OperatorQueue {
         );
       }
       const bindingRejection = validateApprovalClaimBinding(approval, {
+        taskId: task.id,
         workerId,
         fence: task.fence,
         claimNonce: task.claimNonce,
@@ -375,7 +383,7 @@ export class OperatorQueue {
       if (bindingRejection) {
         this.rejectAtExecutionBoundary(task, bindingRejection);
         throw new Error(
-          `Task ${taskId}: approval was not consumed by this claim (worker/fence/nonce binding mismatch); execution rejected`,
+          `Task ${taskId}: approval was not consumed by this claim (worker/task/fence/nonce binding mismatch); execution rejected`,
         );
       }
       if (approvalExpiredAt(approval)) {
@@ -601,13 +609,14 @@ export class OperatorQueue {
     expiresAt: string | null;
     consumedAt: string | null;
     consumedBy: string | null;
+    consumedTaskId: string | null;
     consumedFence: number | null;
     consumedClaimNonce: string | null;
   } | null {
     if (!approvalId) return null;
     const row = this.db
       .prepare(
-        `SELECT decision, action_digest, expires_at, consumed_at, consumed_by, consumed_fence, consumed_claim_nonce
+        `SELECT decision, action_digest, expires_at, consumed_at, consumed_by, consumed_task_id, consumed_fence, consumed_claim_nonce
          FROM hq_approvals WHERE id = ?`,
       )
       .get(approvalId) as
@@ -617,6 +626,7 @@ export class OperatorQueue {
           expires_at: string | null;
           consumed_at: string | null;
           consumed_by: string | null;
+          consumed_task_id: string | null;
           consumed_fence: number | null;
           consumed_claim_nonce: string | null;
         }
@@ -628,6 +638,7 @@ export class OperatorQueue {
       expiresAt: row.expires_at,
       consumedAt: row.consumed_at,
       consumedBy: row.consumed_by,
+      consumedTaskId: row.consumed_task_id,
       consumedFence: row.consumed_fence,
       consumedClaimNonce: row.consumed_claim_nonce,
     };

@@ -99,31 +99,36 @@ export interface ApprovalRecordForValidation {
 export interface ApprovalConsumptionForValidation {
   consumedAt: string | null;
   consumedBy: string | null;
+  /** Exact task the consuming claim was for (issue #79). */
+  consumedTaskId: string | null;
   consumedFence: number | null;
   consumedClaimNonce: string | null;
 }
 
 /**
  * Verify at execution start that the approval was consumed by exactly the
- * claim now trying to execute (issue #77): same worker, same fencing token,
- * same per-claim nonce as the task row carries. A consumed approval
- * reattached to a forced assigned state or to a different worker/claim can
- * never satisfy all three, and an approval that was never consumed (a forced
- * state that skipped the claim path) has no binding at all. Missing binding
- * fields never admit anything.
+ * claim now trying to execute (issues #77/#79): same worker, same task, same
+ * fencing token, same per-claim nonce as the task row carries. A consumed
+ * approval reattached to a forced assigned state, a different worker/claim,
+ * or a different task (even behind a forged action digest) can never satisfy
+ * all four, and an approval that was never consumed (a forced state that
+ * skipped the claim path) has no binding at all. Missing binding fields never
+ * admit anything.
  */
 export function validateApprovalClaimBinding(
   record: ApprovalConsumptionForValidation | null,
-  claim: { workerId: string; fence: number; claimNonce: string | null },
+  claim: { taskId: string; workerId: string; fence: number; claimNonce: string | null },
 ): ApprovalRejection | null {
   if (!record) return 'approval_missing';
   if (
     !record.consumedAt ||
     !record.consumedBy ||
+    !record.consumedTaskId ||
     record.consumedFence === null ||
     !record.consumedClaimNonce ||
     !claim.claimNonce ||
     record.consumedBy !== claim.workerId ||
+    record.consumedTaskId !== claim.taskId ||
     record.consumedFence !== claim.fence ||
     record.consumedClaimNonce !== claim.claimNonce
   ) {

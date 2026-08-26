@@ -29,7 +29,7 @@ services. It is a library package with its own SQLite store; an HTTP/UI layer co
 | D13 | Vendor-neutral `WorkerAdapter` seam; Claude/Codex/Jules/Google are registry entries | Issue #42 order 6: no vendor hard-coded as the system. |
 | D14 | Plain better-sqlite3 + explicit DDL (no drizzle) for the foundation | Smaller review surface for wave 1; migration to drizzle-kit is a recorded follow-up, not a constraint. |
 | D15 | Founder approval binds to the exact immutable action: SHA-256 digest of the canonical serialized task (task id + capability + payload + idempotency key) + expiry + single-use nonce, re-validated at the claim/start execution boundary | Issue #53 correction A (gate G5): an approval must not survive payload/capability mutation, expiry, or replay. Digest mismatch blocks the task; missing/expired/consumed approvals send it back to `needs_approval` for a fresh decision. |
-| D15b | Approval consumption binds to the legitimate claim: consuming the single-use nonce at claim time atomically records `consumed_by` (worker), `consumed_fence` (the claim's fencing token) and `consumed_claim_nonce` (a random per-claim nonce also stamped on the task row); `start()` verifies all three against the current worker/fence/task nonce in addition to decision, digest, expiry and fencing | Issue #77 (Jules review #72, HIGH): a consumed approval must prove it was consumed by the claim now executing. A consumed approval reattached to a forced assigned state, a different worker, or a resurrected released claim fails the binding and blocks the task as hostile (`approval_claim_binding_mismatch`); the issue #71 expired-at-start path stays `needs_approval` because a legitimate claim's binding passes before the time-box rejects. Claim release (sweep/requeue/boundary rejection) clears the task's claim nonce so a stale claim can never be restored onto its old approval. |
+| D15b | Approval consumption binds to the legitimate claim: consuming the single-use nonce at claim time atomically records `consumed_by` (worker), `consumed_task_id` (the exact task, issue #79), `consumed_fence` (the claim's fencing token) and `consumed_claim_nonce` (a random per-claim nonce also stamped on the task row); `start()` verifies all four against the current worker/task/fence/task nonce in addition to decision, digest, expiry and fencing | Issues #77/#79 (Jules review #72/#74, HIGH): a consumed approval must prove it was consumed by the claim now executing. A consumed approval reattached to a forced assigned state, a different worker, a different task (cross-task riding, even behind a forged action digest), or a resurrected released claim fails the binding and blocks the task as hostile (`approval_claim_binding_mismatch`); the issue #71 expired-at-start path stays `needs_approval` because a legitimate claim's binding passes before the time-box rejects. Claim release (sweep/requeue/boundary rejection) clears the task's claim nonce so a stale claim can never be restored onto its old approval. |
 | D16 | Side-effect execution results are review-gated: the executing worker's `complete()` lands in `reviewState: pending` (status stays `running`, lease released), and only an independent reviewer — never the executing/submitting/requesting worker, never `system` — can pass it through `review_passed` to terminal `completed` | Issue #53 correction B: builder != final reviewer. The legal-transition table stays capability-blind and necessary-but-not-sufficient; the queue adds capability-aware enforcement. Reconciliation of `outcome_unknown` requires the same reviewer independence. Read-only capabilities still complete directly. |
 
 ## 3. Module map (war room order C)
@@ -89,7 +89,7 @@ event model. Resolution (Founder-approved via issue #53):
     `src/ui/`, `site/`) — nothing in this branch occupies those;
   - #46's read-only Founder Approvals page must render the D15/D15b approval fields
     (`actionDigest`, `expiresAt`, `consumedAt`, `decidedBy`, `consumedBy`,
-    `consumedFence`, `consumedClaimNonce`) and must not offer
+    `consumedTaskId`, `consumedFence`, `consumedClaimNonce`) and must not offer
     approve/reject actions — decisions stay in the operator control plane;
   - re-run the combined test/build suite on the post-integration head before that
     integrated result is accepted.
@@ -104,12 +104,14 @@ event model. Resolution (Founder-approved via issue #53):
 
 ## 8. Test evidence
 
-- `packages/headquarter`: 67 vitest tests across events/policy/queue/evidence/store plus
-  `test/security.test.ts` — 31 hostile security regression tests for D15/D15b/D16 (approval
+- `packages/headquarter`: 70 vitest tests across events/policy/queue/evidence/store plus
+  `test/security.test.ts` — 34 hostile security regression tests for D15/D15b/D16 (approval
   digest binding, expiry — including expiry revalidated at execution start (issue #71) —
   single-use nonce/replay rejection, claim-binding of consumption (issue #77: reattach to a
   forced assigned state or different worker, claim path skipped entirely, forged/stale claim
-  nonce, resurrected released claim), post-approval mutation via
+  nonce, resurrected released claim; issue #79: consumption pins the exact task, so
+  cross-task riding fails even behind a forged digest with a copied claim nonce),
+  post-approval mutation via
   direct SQL, cross-task approval riding, self-approval, self-review, self-reconciliation,
   review-pending sweep safety). All passing.
 - `packages/server`: full existing suite re-run — see PR #45 validation section for the

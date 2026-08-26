@@ -70,6 +70,8 @@ export interface ApprovalRequest {
   consumedAt: string | null;
   /** Worker whose claim consumed the approval (issue #77 claim binding). */
   consumedBy: string | null;
+  /** Exact task the consuming claim was for (issue #79 claim binding). */
+  consumedTaskId: string | null;
   /** Fencing token of the consuming claim (issue #77 claim binding). */
   consumedFence: number | null;
   /**

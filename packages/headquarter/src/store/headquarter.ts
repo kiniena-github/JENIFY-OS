@@ -221,6 +221,7 @@ export class HeadquarterStore {
       expiresAt: (r.expires_at as string | null) ?? null,
       consumedAt: (r.consumed_at as string | null) ?? null,
       consumedBy: (r.consumed_by as string | null) ?? null,
+      consumedTaskId: (r.consumed_task_id as string | null) ?? null,
       consumedFence: (r.consumed_fence as number | null) ?? null,
       consumedClaimNonce: (r.consumed_claim_nonce as string | null) ?? null,
     };
