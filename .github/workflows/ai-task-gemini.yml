@@ -127,6 +127,7 @@ jobs:
           settings: |
             {
               "model": {
+                "name": "gemini-3.7-flash",
                 "maxSessionTurns": 12
               },
               "tools": {
