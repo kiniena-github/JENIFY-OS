@@ -8,8 +8,7 @@
  * JSON shape and feeding it through StaticExportAdapter — no new pipeline.
  */
 
-import type { RelatedRefs } from '../events.js';
-import type { ArchiveRecord, ArchiveStatus, DateConfidence } from './schema.js';
+import type { ArchiveRecord, ArchiveStatus, DateConfidence, RelatedRefs } from './schema.js';
 
 export interface EvidenceItem {
   kind: 'commit' | 'issue' | 'pull_request' | 'file' | 'report';

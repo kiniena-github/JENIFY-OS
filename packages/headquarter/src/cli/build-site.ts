@@ -8,7 +8,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSite, type HeadquarterData } from '../hq/site.js';
+import { buildSite, type HeadquarterData } from '../ui/site.js';
 import type { ArchiveRecord } from '../archive/schema.js';
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');

@@ -1,0 +1,113 @@
+/**
+ * Founder-approval binding (issue #53, correction A).
+ *
+ * An approval is not a boolean on a task — it is a record bound to the exact
+ * immutable action the Founder saw:
+ *
+ * - `actionDigest`: SHA-256 over the canonical serialization of the task's
+ *   identity + capability + payload + idempotency key. Any mutation of the
+ *   capability or payload after approval changes the digest and invalidates
+ *   the approval.
+ * - `expiresAt`: approvals are time-boxed; an expired approval can never
+ *   admit a task to execution.
+ * - single-use nonce: the approval row id is consumed exactly once, at claim
+ *   time. A re-queued or replayed task needs a fresh Founder approval.
+ *
+ * Validation happens at the execution boundary (claim/start in
+ * operator/queue.ts), not only at approve time, so a payload mutated between
+ * approval and execution is always caught.
+ */
+
+import { createHash } from 'node:crypto';
+
+/** Default approval time-box. Configurable per approval via approve(). */
+export const DEFAULT_APPROVAL_TTL_MS = 60 * 60_000;
+
+/**
+ * Canonical JSON: deterministic serialization with recursively sorted object
+ * keys, so the digest of a payload does not depend on key insertion order.
+ */
+export function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`);
+  return `{${entries.join(',')}}`;
+}
+
+export interface ApprovableAction {
+  /** The exact task row the approval binds to — never transferable. */
+  taskId: string;
+  capabilityId: string;
+  payload: Record<string, unknown>;
+  idempotencyKey: string | null;
+}
+
+/** SHA-256 digest of the canonical serialized action. */
+export function canonicalActionDigest(action: ApprovableAction): string {
+  return createHash('sha256')
+    .update(
+      canonicalJson({
+        taskId: action.taskId,
+        capabilityId: action.capabilityId,
+        payload: action.payload,
+        idempotencyKey: action.idempotencyKey,
+      }),
+    )
+    .digest('hex');
+}
+
+/** Digest of an operator task row (adapter from the task shape to ApprovableAction). */
+export function taskActionDigest(task: {
+  id: string;
+  capabilityId: string;
+  payload: Record<string, unknown>;
+  idempotencyKey: string | null;
+}): string {
+  return canonicalActionDigest({
+    taskId: task.id,
+    capabilityId: task.capabilityId,
+    payload: task.payload,
+    idempotencyKey: task.idempotencyKey,
+  });
+}
+
+/** Why an approval failed validation at the execution boundary. */
+export type ApprovalRejection =
+  | 'approval_missing'
+  | 'approval_not_approved'
+  | 'approval_expired'
+  | 'approval_already_consumed'
+  | 'approval_digest_mismatch';
+
+export interface ApprovalRecordForValidation {
+  decision: string;
+  actionDigest: string | null;
+  expiresAt: string | null;
+  consumedAt: string | null;
+}
+
+/**
+ * Validate an approval record against the task's CURRENT canonical digest.
+ * Returns null when the approval admits execution, otherwise the rejection
+ * reason. Missing digest/expiry on the record is treated as invalid — an
+ * unbound approval never admits anything.
+ */
+export function validateApproval(
+  record: ApprovalRecordForValidation | null,
+  currentDigest: string,
+  now: Date = new Date(),
+): ApprovalRejection | null {
+  if (!record) return 'approval_missing';
+  if (record.decision !== 'approved') return 'approval_not_approved';
+  // Digest mismatch outranks every other rejection: a mutated action is a
+  // hostile signal and must be blocked, not politely sent back for re-approval.
+  if (!record.actionDigest || record.actionDigest !== currentDigest) {
+    return 'approval_digest_mismatch';
+  }
+  if (!record.expiresAt || now.toISOString() >= record.expiresAt) return 'approval_expired';
+  if (record.consumedAt) return 'approval_already_consumed';
+  return null;
+}

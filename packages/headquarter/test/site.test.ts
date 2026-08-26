@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { escapeHtml, HQ_PAGES } from '../src/hq/render.js';
-import { buildSite, type HeadquarterData } from '../src/hq/site.js';
+import { escapeHtml, HQ_PAGES } from '../src/ui/render.js';
+import { buildSite, type HeadquarterData } from '../src/ui/site.js';
 
 const samplePath = join(dirname(fileURLToPath(import.meta.url)), '..', 'sample-data', 'hq-sample.json');
 const sample = JSON.parse(readFileSync(samplePath, 'utf8')) as HeadquarterData;
@@ -39,11 +39,18 @@ describe('buildSite', () => {
     expect(html).toContain('Fix Gemini 3.7 worker model routing'); // DONE TODAY from sample
   });
 
-  it('Founder Approvals lists only needs_approval tasks and stays read-only', () => {
+  it('Founder Approvals renders the D15 fields read-only with no action controls', () => {
     const html = site.get('approvals.html')!;
-    expect(html).toContain('Universal Operator architecture proposal');
-    expect(html).toContain('operator control layer');
+    expect(html).toContain('Universal Operator architecture proposal'); // waiting task
+    expect(html).toContain('operator control plane');
+    // D15 approval fields (§6b): actionDigest, expiresAt, consumedAt, decidedBy
+    expect(html).toContain('Action digest');
+    expect(html).toContain('3f9a1c2b4d5e6f70'); // truncated digest rendered
+    expect(html).toContain('2026-08-27T05:12:23Z'); // expiresAt
+    expect(html).toContain('2026-08-26T09:35:00Z'); // consumedAt
+    expect(html).toContain('founder'); // decidedBy
     expect(html).not.toContain('<button');
+    expect(html).not.toContain('<form');
   });
 
   it('renders the bundle provenance note on every page so samples cannot pass as authoritative', () => {
@@ -79,12 +86,14 @@ describe('buildSite', () => {
       events: [
         {
           id: 'x1',
-          taskId: 'x',
-          project: '<b>P</b>',
-          title: '<script>alert(1)</script>',
-          worker: 'claude',
+          seq: 1,
+          at: '2026-08-26T10:00:00Z',
+          subjectKind: 'task',
+          subjectId: 'x',
           status: 'running',
-          occurredAt: '2026-08-26T10:00:00Z',
+          actor: 'claude',
+          summary: '<script>alert(1)</script>',
+          detail: { project: '<b>P</b>', title: '<script>alert(1)</script>' },
         },
       ],
     };
@@ -93,9 +102,13 @@ describe('buildSite', () => {
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
   });
 
-  it('Direct chats and executive room render transcripts from the contract', () => {
-    expect(site.get('direct-chats.html')).toContain('sample transcript');
-    expect(site.get('executive-room.html')).toContain('Stream 2 war room open');
+  it('splits canonical chat messages into executive room and direct chats by threadId', () => {
+    const executive = site.get('executive-room.html')!;
+    expect(executive).toContain('Stream 2 war room open');
+    expect(executive).not.toContain('dm:claude');
+    const direct = site.get('direct-chats.html')!;
+    expect(direct).toContain('dm:claude');
+    expect(direct).toContain('isolated from operator/control-plane files');
     expect(site.get('specialists.html')).toContain('Codex');
   });
 });

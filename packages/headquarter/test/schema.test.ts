@@ -5,7 +5,6 @@ import {
   validateArchiveRecord,
   type ArchiveRecord,
 } from '../src/archive/schema.js';
-import { validateActivityEvent, type ActivityEvent } from '../src/events.js';
 
 const record: ArchiveRecord = {
   id: 'doc-1',
@@ -48,22 +47,5 @@ describe('archive schema', () => {
   it('derives the year/month/project/category archive path', () => {
     expect(archivePeriod(record)).toEqual({ year: '2026', month: '08' });
     expect(archivePath(record)).toBe('archive/2026/08/QOS/upgrade/doc-1');
-  });
-});
-
-describe('activity event validation', () => {
-  it('accepts a valid event and rejects unknown statuses', () => {
-    const event: ActivityEvent = {
-      id: 'e1',
-      taskId: 'JENIFY-OS#43',
-      project: 'JENIFY-OS',
-      title: 'Stream 2',
-      worker: 'claude',
-      status: 'running',
-      occurredAt: '2026-08-26T10:30:00Z',
-    };
-    expect(validateActivityEvent(event)).toEqual([]);
-    expect(validateActivityEvent({ ...event, status: 'doing' as never })).toHaveLength(1);
-    expect(validateActivityEvent({ ...event, occurredAt: '26/08/2026' })).toHaveLength(1);
   });
 });

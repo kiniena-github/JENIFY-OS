@@ -3,10 +3,12 @@
  *
  * Derives NOW / DONE TODAY / BLOCKED / WAITING FOR FOUNDER / NEXT,
  * worker status, project cards, and project timelines from the canonical
- * activity model — presentation never invents state.
+ * activity contract (§6b) — presentation never invents state.
  */
 
-import type { ActivityEvent, ActivityStatus, TaskState } from '../events.js';
+import type { ActivityEvent, ActivityStatus } from '../contracts/events.js';
+import type { TaskState } from './model.js';
+import { eventProject } from './model.js';
 
 export interface FounderDashboard {
   now: TaskState[];
@@ -108,9 +110,9 @@ export function projectCards(states: TaskState[]): ProjectCard[] {
   return [...byProject.values()].sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
 }
 
-/** Chronological event timeline for one project (oldest first). */
+/** Chronological task-event timeline for one project (by canonical seq). */
 export function projectTimeline(events: ActivityEvent[], project: string): ActivityEvent[] {
   return events
-    .filter((event) => event.project === project)
-    .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || a.id.localeCompare(b.id));
+    .filter((event) => event.subjectKind === 'task' && eventProject(event) === project)
+    .sort((a, b) => a.seq - b.seq);
 }

@@ -1,5 +1,6 @@
 /**
- * Headquarter presentation layer (issue #43, order 1).
+ * Headquarter presentation layer (issue #43, order 1; adapted to the
+ * canonical contracts per issue #53 correction D / architecture doc §6b).
  *
  * Framework-free HTML renderers for the HQ information architecture
  * (war room #41, order C): Command Center, Projects, Executive Room,
@@ -7,14 +8,18 @@
  *
  * Pure string renderers: testable without a DOM, servable as static files,
  * embeddable later behind the operator control layer. No external requests,
- * no secrets, read-only over canonical data.
+ * no secrets, read-only over canonical data. Founder Approvals renders the
+ * D15 approval fields read-only and offers NO approve/reject actions —
+ * decisions stay in the operator control plane.
  */
 
-import type { TaskState } from '../events.js';
+import type { ActivityEvent } from '../contracts/events.js';
+import type { ApprovalRequest, ChatMessage } from '../contracts/modules.js';
+import type { WorkerDescriptor } from '../contracts/workers.js';
 import type { ArchiveRecord } from '../archive/schema.js';
 import type { MonthlyGroup, EvolutionChain } from '../archive/views.js';
+import type { TaskState } from './model.js';
 import type { FounderDashboard, WorkerStatus, ProjectCard } from './views.js';
-import type { ChatThread, Specialist } from './chat.js';
 
 export function escapeHtml(value: string): string {
   return value
@@ -54,6 +59,7 @@ th, td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid var
 .muted { opacity: 0.7; font-size: 0.85rem; }
 .empty { opacity: 0.6; font-style: italic; }
 .msg { border-left: 3px solid var(--accent); padding: 0.2rem 0.6rem; margin: 0.4rem 0; }
+code { font-size: 0.8rem; word-break: break-all; }
 `;
 
 function shell(title: string, activeFile: string, body: string, provenanceNote?: string): string {
@@ -130,7 +136,7 @@ export function renderCommandCenter(dashboard: FounderDashboard, workers: Worker
 
 export function renderProjects(
   cards: ProjectCard[],
-  timelines: Map<string, { occurredAt: string; status: string; title: string; worker: string }[]>,
+  timelines: Map<string, ActivityEvent[]>,
   provenanceNote?: string,
 ): string {
   const cardHtml = `<div class="cards">${cards
@@ -143,10 +149,10 @@ export function renderProjects(
   const timelineHtml = [...timelines.entries()]
     .map(
       ([project, events]) => `<section><h2>Timeline — ${escapeHtml(project)}</h2>
-<table><thead><tr><th>When</th><th>Status</th><th>Event</th><th>Worker</th></tr></thead><tbody>${events
+<table><thead><tr><th>When</th><th>Status</th><th>Event</th><th>Actor</th></tr></thead><tbody>${events
         .map(
           (event) =>
-            `<tr><td>${escapeHtml(event.occurredAt)}</td><td><span class="badge">${escapeHtml(event.status)}</span></td><td>${escapeHtml(event.title)}</td><td>${escapeHtml(event.worker)}</td></tr>`,
+            `<tr><td>${escapeHtml(event.at)}</td><td><span class="badge">${escapeHtml(event.status ?? 'note')}</span></td><td>${escapeHtml(event.summary)}</td><td>${escapeHtml(event.actor)}</td></tr>`,
         )
         .join('\n')}</tbody></table></section>`,
     )
@@ -154,50 +160,88 @@ export function renderProjects(
   return shell('Projects', 'projects.html', `<section><h2>Project Cards</h2>${cardHtml}</section>${timelineHtml}`, provenanceNote);
 }
 
-function renderThreads(threads: ChatThread[]): string {
-  if (threads.length === 0) return '<p class="empty">No transcripts available yet.</p>';
-  return threads
-    .map(
-      (thread) => `<section><h2>${escapeHtml(thread.title)} <span class="muted">(${thread.participants
+/** Group canonical chat messages into displayable threads by threadId. */
+function renderThreads(messages: ChatMessage[]): string {
+  if (messages.length === 0) return '<p class="empty">No transcripts available yet.</p>';
+  const byThread = new Map<string, ChatMessage[]>();
+  for (const message of messages) {
+    const list = byThread.get(message.threadId) ?? [];
+    list.push(message);
+    byThread.set(message.threadId, list);
+  }
+  return [...byThread.entries()]
+    .map(([threadId, threadMessages]) => {
+      const ordered = [...threadMessages].sort((a, b) => a.at.localeCompare(b.at));
+      const participants = [...new Set(ordered.map((message) => message.author))];
+      return `<section><h2>${escapeHtml(threadId)} <span class="muted">(${participants
         .map(escapeHtml)
         .join(', ')})</span></h2>
-${thread.messages
+${ordered
   .map(
     (message) =>
-      `<div class="msg"><strong>${escapeHtml(message.author)}</strong> <span class="muted">${escapeHtml(message.at)}</span><br>${escapeHtml(message.text)}</div>`,
+      `<div class="msg"><strong>${escapeHtml(message.author)}</strong> <span class="muted">${escapeHtml(message.at)}</span><br>${escapeHtml(message.body)}</div>`,
   )
-  .join('\n')}</section>`,
-    )
+  .join('\n')}</section>`;
+    })
     .join('\n');
 }
 
-export function renderExecutiveRoom(threads: ChatThread[], provenanceNote?: string): string {
+export function renderExecutiveRoom(messages: ChatMessage[], provenanceNote?: string): string {
   const note =
     '<p class="muted">Presentation layer over recorded transcripts. Live messaging arrives with the operator control layer.</p>';
-  return shell('Executive Room', 'executive-room.html', note + renderThreads(threads), provenanceNote);
+  return shell('Executive Room', 'executive-room.html', note + renderThreads(messages), provenanceNote);
 }
 
-export function renderDirectChats(threads: ChatThread[], provenanceNote?: string): string {
+export function renderDirectChats(messages: ChatMessage[], provenanceNote?: string): string {
   const note =
     '<p class="muted">Direct Founder ↔ worker transcripts. Live messaging arrives with the operator control layer.</p>';
-  return shell('Direct Chats', 'direct-chats.html', note + renderThreads(threads), provenanceNote);
+  return shell('Direct Chats', 'direct-chats.html', note + renderThreads(messages), provenanceNote);
 }
 
-export function renderSpecialistDirectory(specialists: Specialist[], provenanceNote?: string): string {
-  const body = `<div class="cards">${specialists
+export function renderSpecialistDirectory(workers: WorkerDescriptor[], provenanceNote?: string): string {
+  const body = `<div class="cards">${workers
     .map(
-      (specialist) => `<div class="card"><h3>${escapeHtml(specialist.name)}</h3>
-<p>${escapeHtml(specialist.role)}</p>
-<p class="muted">lane: ${escapeHtml(specialist.lane)} · <span class="badge">${escapeHtml(specialist.status)}</span></p></div>`,
+      (worker) => `<div class="card"><h3>${escapeHtml(worker.displayName)}</h3>
+<p class="muted">${escapeHtml(worker.vendor)} · ${escapeHtml(worker.role)}</p>
+<p><span class="badge">${worker.active ? 'active' : 'inactive'}</span></p></div>`,
     )
     .join('\n')}</div>`;
   return shell('Specialist Directory', 'specialists.html', body, provenanceNote);
 }
 
-export function renderFounderApprovals(waiting: TaskState[], provenanceNote?: string): string {
+/**
+ * Read-only Founder Approvals page (§6b): renders the D15 approval fields
+ * (actionDigest, expiresAt, consumedAt, decidedBy) and offers NO
+ * approve/reject actions — decisions stay in the operator control plane.
+ */
+export function renderFounderApprovals(
+  waiting: TaskState[],
+  approvals: ApprovalRequest[],
+  provenanceNote?: string,
+): string {
   const note =
-    '<p class="muted">Read-only approval queue. Approve/Reject actions are wired through the operator control layer (Founder-gated) — this page never executes actions itself.</p>';
-  return shell('Founder Approvals', 'approvals.html', note + taskRows(waiting), provenanceNote);
+    '<p class="muted">Read-only approval queue. Approve/Reject decisions happen in the Founder-gated operator control plane — this page never executes actions itself.</p>';
+  const approvalRows =
+    approvals.length === 0
+      ? '<p class="empty">No approval requests recorded.</p>'
+      : `<table><thead><tr><th>Ask</th><th>Risk</th><th>Requested by</th><th>Decision</th><th>Decided by</th><th>Action digest</th><th>Expires</th><th>Consumed</th></tr></thead><tbody>${approvals
+          .map(
+            (approval) => `<tr>
+<td>${escapeHtml(approval.ask)}${approval.taskId ? `<br><span class="muted">task ${escapeHtml(approval.taskId)}</span>` : ''}</td>
+<td><span class="badge">${escapeHtml(approval.riskClass)}</span></td>
+<td>${escapeHtml(approval.requestedBy)}<br><span class="muted">${escapeHtml(approval.requestedAt)}</span></td>
+<td><span class="badge">${escapeHtml(approval.decision)}</span>${approval.decisionNote ? `<br><span class="muted">${escapeHtml(approval.decisionNote)}</span>` : ''}</td>
+<td>${approval.decidedBy ? escapeHtml(approval.decidedBy) : '<span class="muted">—</span>'}</td>
+<td>${approval.actionDigest ? `<code>${escapeHtml(approval.actionDigest.slice(0, 16))}…</code>` : '<span class="muted">—</span>'}</td>
+<td>${approval.expiresAt ? escapeHtml(approval.expiresAt) : '<span class="muted">—</span>'}</td>
+<td>${approval.consumedAt ? escapeHtml(approval.consumedAt) : '<span class="muted">—</span>'}</td>
+</tr>`,
+          )
+          .join('\n')}</tbody></table>`;
+  const body = `${note}
+<section><h2>Approval Requests</h2>${approvalRows}</section>
+<section><h2>Tasks Waiting For Founder</h2>${taskRows(waiting)}</section>`;
+  return shell('Founder Approvals', 'approvals.html', body, provenanceNote);
 }
 
 const ARCHIVE_BANNER =

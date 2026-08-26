@@ -6,7 +6,14 @@
  * this system — records point at originals via sourceRef.
  */
 
-import type { RelatedRefs } from '../events.js';
+/** Cross-links to durable evidence. Identifiers only — never copies. */
+export interface RelatedRefs {
+  issues?: number[];
+  pullRequests?: number[];
+  commits?: string[];
+  /** Free-form artifact locators (file paths, report names, Drive ids later). */
+  artifacts?: string[];
+}
 
 export const ARCHIVE_STATUSES = [
   'CURRENT',

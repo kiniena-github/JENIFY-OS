@@ -1,17 +1,51 @@
 {
-  "note": "Sample bundle reconstructed from real GitHub-visible JENIFY-OS activity on 2026-08-26. Chat transcripts are illustrative samples of the presentation contract, not real conversations.",
+  "note": "Sample bundle reconstructed from real GitHub-visible JENIFY-OS activity on 2026-08-26. Chat transcripts and approval rows are illustrative samples of the presentation contracts, not real conversations or real Founder decisions.",
   "todayUtcDate": "2026-08-26",
   "events": [
-    { "id": "e1", "taskId": "JENIFY-OS#3", "project": "JENIFY-OS", "title": "R4 bug-family regression matrix", "worker": "claude", "status": "queued", "occurredAt": "2026-08-25T06:00:00Z", "refs": { "issues": [3] } },
-    { "id": "e2", "taskId": "JENIFY-OS#3", "project": "JENIFY-OS", "title": "R4 bug-family regression matrix", "worker": "claude", "status": "running", "occurredAt": "2026-08-25T06:30:00Z", "refs": { "issues": [3] } },
-    { "id": "e3", "taskId": "JENIFY-OS#3", "project": "JENIFY-OS", "title": "R4 bug-family regression matrix", "worker": "claude", "status": "review_failed", "occurredAt": "2026-08-25T08:00:30Z", "detail": "Jules review issued BLOCK on PR #7", "refs": { "issues": [3], "pullRequests": [7, 9] } },
-    { "id": "e4", "taskId": "JENIFY-OS#26", "project": "JENIFY-OS", "title": "Gemini worker model pinning fix", "worker": "jules", "status": "needs_approval", "occurredAt": "2026-08-26T02:22:19Z", "detail": "PR #28 awaiting review decision", "refs": { "issues": [26], "pullRequests": [28] } },
-    { "id": "e5", "taskId": "JENIFY-OS#29", "project": "JENIFY-OS", "title": "Universal Operator architecture proposal", "worker": "jules", "status": "needs_approval", "occurredAt": "2026-08-26T05:12:23Z", "detail": "PR #32 awaiting Founder/executive decision", "refs": { "issues": [29], "pullRequests": [32] } },
-    { "id": "e6", "taskId": "QOS#upgrade", "project": "QOS", "title": "QOS full-upgrade fastest-finish strategy review", "worker": "codex", "status": "running", "occurredAt": "2026-08-26T07:43:51Z", "refs": { "pullRequests": [36] } },
-    { "id": "e7", "taskId": "JENIFY-OS#27", "project": "JENIFY-OS", "title": "Fix Gemini 3.7 worker model routing", "worker": "claude", "status": "completed", "occurredAt": "2026-08-26T09:40:00Z", "detail": "Merged as ed20eb2", "refs": { "commits": ["ed20eb2"] } },
-    { "id": "e8", "taskId": "JENIFY-OS#43", "project": "JENIFY-OS", "title": "Stream 2 — Headquarter UI + Documentation/Archive implementation", "worker": "jules", "status": "queued", "occurredAt": "2026-08-26T10:01:18Z", "refs": { "issues": [41, 43] } },
-    { "id": "e9", "taskId": "JENIFY-OS#43", "project": "JENIFY-OS", "title": "Stream 2 — Headquarter UI + Documentation/Archive implementation", "worker": "claude", "status": "running", "occurredAt": "2026-08-26T10:30:00Z", "detail": "Branch-isolated implementation in packages/headquarter", "refs": { "issues": [41, 43] } },
-    { "id": "e10", "taskId": "JENIFY-OS#23", "project": "Jenify Labs", "title": "Zero-additional-cost capability architecture research", "worker": "jules", "status": "blocked", "occurredAt": "2026-08-26T02:03:49Z", "detail": "Awaiting cross-review reconciliation", "refs": { "issues": [23], "pullRequests": [24, 25] } }
+    { "id": "e1", "seq": 1, "at": "2026-08-25T06:00:00Z", "subjectKind": "task", "subjectId": "JENIFY-OS#3", "status": "queued", "actor": "system", "summary": "R4 bug-family regression matrix", "detail": { "project": "JENIFY-OS", "title": "R4 bug-family regression matrix" }, "refs": ["https://github.com/kiniena-github/JENIFY-OS/issues/3"] },
+    { "id": "e2", "seq": 2, "at": "2026-08-25T06:30:00Z", "subjectKind": "task", "subjectId": "JENIFY-OS#3", "status": "running", "actor": "claude", "summary": "R4 bug-family regression matrix", "detail": { "project": "JENIFY-OS", "title": "R4 bug-family regression matrix" } },
+    { "id": "e3", "seq": 3, "at": "2026-08-25T08:00:30Z", "subjectKind": "task", "subjectId": "JENIFY-OS#3", "status": "review_failed", "actor": "claude", "summary": "Jules review issued BLOCK on PR #7", "detail": { "project": "JENIFY-OS", "title": "R4 bug-family regression matrix" }, "refs": ["https://github.com/kiniena-github/JENIFY-OS/pull/7", "https://github.com/kiniena-github/JENIFY-OS/pull/9"] },
+    { "id": "e4", "seq": 4, "at": "2026-08-26T02:22:19Z", "subjectKind": "task", "subjectId": "JENIFY-OS#26", "status": "needs_approval", "actor": "jules", "summary": "PR #28 awaiting review decision", "detail": { "project": "JENIFY-OS", "title": "Gemini worker model pinning fix" }, "refs": ["https://github.com/kiniena-github/JENIFY-OS/pull/28"] },
+    { "id": "e5", "seq": 5, "at": "2026-08-26T05:12:23Z", "subjectKind": "task", "subjectId": "JENIFY-OS#29", "status": "needs_approval", "actor": "jules", "summary": "PR #32 awaiting Founder/executive decision", "detail": { "project": "JENIFY-OS", "title": "Universal Operator architecture proposal" }, "refs": ["https://github.com/kiniena-github/JENIFY-OS/pull/32"] },
+    { "id": "e6", "seq": 6, "at": "2026-08-26T07:43:51Z", "subjectKind": "task", "subjectId": "QOS#upgrade", "status": "running", "actor": "codex", "summary": "QOS full-upgrade fastest-finish strategy review", "detail": { "project": "QOS", "title": "QOS full-upgrade fastest-finish strategy review" }, "refs": ["https://github.com/kiniena-github/JENIFY-OS/pull/36"] },
+    { "id": "e7", "seq": 7, "at": "2026-08-26T09:40:00Z", "subjectKind": "task", "subjectId": "JENIFY-OS#27", "status": "completed", "actor": "claude", "summary": "Merged as ed20eb2", "detail": { "project": "JENIFY-OS", "title": "Fix Gemini 3.7 worker model routing" }, "refs": ["ed20eb2"] },
+    { "id": "e8", "seq": 8, "at": "2026-08-26T10:01:18Z", "subjectKind": "task", "subjectId": "JENIFY-OS#43", "status": "queued", "actor": "system", "summary": "Stream 2 — Headquarter UI + Documentation/Archive implementation", "detail": { "project": "JENIFY-OS", "title": "Stream 2 — Headquarter UI + Documentation/Archive implementation" }, "refs": ["https://github.com/kiniena-github/JENIFY-OS/issues/43"] },
+    { "id": "e9", "seq": 9, "at": "2026-08-26T10:30:00Z", "subjectKind": "task", "subjectId": "JENIFY-OS#43", "status": "running", "actor": "claude", "summary": "Branch-isolated implementation in packages/headquarter", "detail": { "project": "JENIFY-OS", "title": "Stream 2 — Headquarter UI + Documentation/Archive implementation" }, "refs": ["https://github.com/kiniena-github/JENIFY-OS/pull/46"] },
+    { "id": "e10", "seq": 10, "at": "2026-08-26T02:03:49Z", "subjectKind": "task", "subjectId": "JENIFY-Labs#23", "status": "blocked", "actor": "jules", "summary": "Awaiting cross-review reconciliation", "detail": { "project": "Jenify Labs", "title": "Zero-additional-cost capability architecture research" }, "refs": ["https://github.com/kiniena-github/JENIFY-OS/pull/24", "https://github.com/kiniena-github/JENIFY-OS/pull/25"] }
+  ],
+  "approvals": [
+    {
+      "id": "ap-1",
+      "taskId": "JENIFY-OS#29",
+      "projectId": "jenify-os",
+      "ask": "Adopt the Universal Operator architecture proposal as the Stream 2 control-plane baseline (sample row)",
+      "riskClass": "founder_gate",
+      "requestedBy": "jules",
+      "requestedAt": "2026-08-26T05:12:23Z",
+      "decision": "pending",
+      "decidedAt": null,
+      "decidedBy": null,
+      "decisionNote": null,
+      "actionDigest": "3f9a1c2b4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
+      "expiresAt": "2026-08-27T05:12:23Z",
+      "consumedAt": null
+    },
+    {
+      "id": "ap-2",
+      "taskId": "JENIFY-OS#27",
+      "projectId": "jenify-os",
+      "ask": "Merge the reviewed Gemini 3.7 worker routing fix into main (sample row)",
+      "riskClass": "repo_write",
+      "requestedBy": "claude",
+      "requestedAt": "2026-08-26T09:00:00Z",
+      "decision": "approved",
+      "decidedAt": "2026-08-26T09:30:00Z",
+      "decidedBy": "founder",
+      "decisionNote": null,
+      "actionDigest": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "expiresAt": "2026-08-27T09:30:00Z",
+      "consumedAt": "2026-08-26T09:35:00Z"
+    }
   ],
   "archive": [
     {
@@ -63,32 +97,16 @@
       "tags": ["validation", "regression", "review"]
     }
   ],
-  "executiveRoom": [
-    {
-      "id": "exec-sample",
-      "title": "Stream 2 kickoff (sample transcript)",
-      "participants": ["founder", "chatgpt", "claude", "jules", "codex"],
-      "messages": [
-        { "author": "founder", "at": "2026-08-26T10:00:45Z", "text": "Stream 2 war room open — build the HQ foundation privately, no public launch." },
-        { "author": "chatgpt", "at": "2026-08-26T10:01:18Z", "text": "Routed #43 to the implementation lane: Headquarter UI + archive schema, branch-isolated." }
-      ]
-    }
-  ],
-  "directChats": [
-    {
-      "id": "dm-sample",
-      "title": "Founder ↔ implementation worker (sample transcript)",
-      "participants": ["founder", "claude"],
-      "messages": [
-        { "author": "claude", "at": "2026-08-26T10:30:00Z", "text": "Starting #43 in packages/headquarter — isolated from operator/control-plane files." }
-      ]
-    }
+  "chatMessages": [
+    { "id": "m1", "threadId": "executive-room", "author": "founder", "at": "2026-08-26T10:00:45Z", "body": "Stream 2 war room open — build the HQ foundation privately, no public launch. (sample transcript)" },
+    { "id": "m2", "threadId": "executive-room", "author": "chatgpt", "at": "2026-08-26T10:01:18Z", "body": "Routed #43 to the implementation lane: Headquarter UI + archive schema, branch-isolated. (sample transcript)" },
+    { "id": "m3", "threadId": "dm:claude", "author": "claude", "at": "2026-08-26T10:30:00Z", "body": "Starting #43 in packages/headquarter — isolated from operator/control-plane files. (sample transcript)" }
   ],
   "specialists": [
-    { "name": "ChatGPT", "role": "Stream Mission Director — architecture, coordination, Founder-facing synthesis", "lane": "executive", "status": "active" },
-    { "name": "Claude", "role": "Infrastructure build lead — backend/frontend/operator architecture", "lane": "implementation", "status": "active" },
-    { "name": "Jules", "role": "Bounded parallel implementation — UI, archive, search/indexing", "lane": "implementation", "status": "active" },
-    { "name": "Codex", "role": "Independent security/reliability/permissions/release gatekeeper", "lane": "review", "status": "active" },
-    { "name": "Google tools", "role": "Spark/Gemini/Notebooks/Antigravity/Flow — on-demand specialist capability", "lane": "specialist-tool", "status": "on-demand" }
+    { "id": "chatgpt", "displayName": "ChatGPT", "vendor": "OpenAI", "role": "mission_director", "allowedCapabilities": [], "active": true },
+    { "id": "claude", "displayName": "Claude", "vendor": "Anthropic", "role": "build_lead", "allowedCapabilities": [], "active": true },
+    { "id": "jules", "displayName": "Jules", "vendor": "Google", "role": "parallel_implementer", "allowedCapabilities": [], "active": true },
+    { "id": "codex", "displayName": "Codex", "vendor": "OpenAI", "role": "reviewer_gatekeeper", "allowedCapabilities": [], "active": true },
+    { "id": "google-tools", "displayName": "Google specialist tools", "vendor": "Google", "role": "specialist_tool", "allowedCapabilities": [], "active": true }
   ]
 }
