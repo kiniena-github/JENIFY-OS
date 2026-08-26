@@ -40,6 +40,18 @@ import {
   type CreatePaymentInput,
   type AllocationInput,
 } from '../services/payments.js';
+import {
+  createOrder,
+  confirmOrder,
+  createInvoiceFromOrder,
+  cancelOrder,
+  listOrders,
+  getOrder,
+  listOrderLines,
+  listInvoicesForOrder,
+  type CreateOrderInput,
+  type InvoiceOrderInput,
+} from '../services/orders.js';
 import { creditOverview } from '../services/creditview.js';
 import { getSettings } from '../services/settings.js';
 
@@ -76,6 +88,80 @@ export function registerCommercialRoutes(app: FastifyInstance, db: Db): void {
     requirePermission(ctx, 'inventory', 'view');
     return listPurchaseReturns(ctx, req.query);
   });
+
+  // ------------------------------- orders ----------------------------------
+  app.get<{ Querystring: { customerId?: string; status?: string; channel?: string } }>(
+    '/api/orders',
+    async (req) => {
+      const ctx = requireCtx(db, req);
+      requirePermission(ctx, 'sales', 'view');
+      const canSee = canViewFinancial(ctx, 'sales');
+      return listOrders(ctx, req.query).map((o) =>
+        maskMoney(o, ['subtotalCents', 'discountCents', 'vatCents', 'totalCents'], canSee),
+      );
+    },
+  );
+
+  app.get<{ Params: { id: string } }>('/api/orders/:id', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'sales', 'view');
+    const canSee = canViewFinancial(ctx, 'sales');
+    const order = getOrder(ctx, req.params.id);
+    const lines = listOrderLines(ctx, req.params.id).map((l) =>
+      maskMoney(l, ['unitPriceCents', 'discountCents', 'lineSubtotalCents'], canSee),
+    );
+    const invoices = listInvoicesForOrder(ctx, req.params.id).map((inv) =>
+      maskMoney(inv, ['subtotalCents', 'discountCents', 'vatCents', 'totalCents'], canSee),
+    );
+    return {
+      order: maskMoney(order, ['subtotalCents', 'discountCents', 'vatCents', 'totalCents'], canSee),
+      lines,
+      invoices,
+    };
+  });
+
+  app.post<{ Body: CreateOrderInput & { andConfirm?: boolean } }>('/api/orders', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'sales', 'create');
+    const { andConfirm, ...input } = req.body;
+    const hasCustom = input.lines?.some((l) => l.unitPrice != null || (l.discount ?? 0) > 0);
+    if (hasCustom) {
+      // custom price / discount requires the approve permission on sales
+      requirePermission(ctx, 'sales', 'approve');
+      input.customApproved = true;
+    }
+    const result = createOrder(ctx, input);
+    if (andConfirm) confirmOrder(ctx, result.id);
+    return result;
+  });
+
+  app.post<{ Params: { id: string } }>('/api/orders/:id/confirm', async (req) => {
+    const ctx = requireCtx(db, req);
+    requirePermission(ctx, 'sales', 'edit');
+    confirmOrder(ctx, req.params.id);
+    return { ok: true };
+  });
+
+  app.post<{ Params: { id: string }; Body: InvoiceOrderInput }>(
+    '/api/orders/:id/invoice',
+    async (req) => {
+      const ctx = requireCtx(db, req);
+      // creates an invoice, so the invoice-creation permission governs
+      requirePermission(ctx, 'sales', 'create');
+      if (req.body?.creditOverride) requirePermission(ctx, 'credit', 'approve');
+      return createInvoiceFromOrder(ctx, req.params.id, req.body);
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { reason: string } }>(
+    '/api/orders/:id/cancel',
+    async (req) => {
+      const ctx = requireCtx(db, req);
+      requirePermission(ctx, 'sales', 'edit');
+      cancelOrder(ctx, req.params.id, req.body?.reason);
+      return { ok: true };
+    },
+  );
 
   // ------------------------------- sales -----------------------------------
   app.get<{ Querystring: { customerId?: string; status?: string } }>('/api/invoices', async (req) => {

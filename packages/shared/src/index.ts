@@ -180,6 +180,25 @@ export const INVOICE_STATUSES = [
 ] as const;
 export type InvoiceStatus = (typeof INVOICE_STATUSES)[number];
 
+/**
+ * Reusable order lifecycle (Order Capability, issue #4):
+ *   draft                priced, editable intent — no stock commitment
+ *   confirmed            commercial commitment — availability reserved
+ *   partially_fulfilled  part of the ordered quantity carried to invoice(s)
+ *   fulfilled            every line fully carried to invoice(s)
+ *   cancelled            closed without (further) fulfilment; reservations released
+ * Invoicing/payment/dispatch remain facts of the linked invoice documents —
+ * the order never duplicates them.
+ */
+export const ORDER_STATUSES = [
+  'draft',
+  'confirmed',
+  'partially_fulfilled',
+  'fulfilled',
+  'cancelled',
+] as const;
+export type OrderStatus = (typeof ORDER_STATUSES)[number];
+
 export const PAYMENT_TERMS = ['paid', 'credit', 'partial'] as const;
 export type PaymentTerm = (typeof PAYMENT_TERMS)[number];
 

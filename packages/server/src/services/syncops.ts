@@ -6,6 +6,7 @@ import { actorId, inTx } from './context.js';
 import { requirePermission } from './permissions.js';
 import { createReceipt, postReceipt, type ReceiptInput } from './receiving.js';
 import { markDelivered } from './deliveries.js';
+import { createOrder, type CreateOrderInput } from './orders.js';
 
 /**
  * Offline sync — O2, Receiving first.
@@ -78,9 +79,28 @@ function applyDeliveryConfirm(ctx: Ctx, payload: unknown): { resultRef: string }
   return { resultRef: input.deliveryId };
 }
 
+/** Order Capability #1 — offline order capture (order taken in the field). */
+function applyOrderCreate(ctx: Ctx, payload: unknown): { resultRef: string } {
+  const input = payload as CreateOrderInput;
+  // re-run through the normal permission + validation path on the server
+  requirePermission(ctx, 'sales', 'create');
+  // server authority: a custom price/discount replayed from a device still
+  // needs the approve permission NOW — a client-supplied approval flag is
+  // never trusted.
+  const hasCustom = input.lines?.some((l) => l.unitPrice != null || (l.discount ?? 0) > 0);
+  const { customApproved: _ignore, ...safe } = input;
+  if (hasCustom) {
+    requirePermission(ctx, 'sales', 'approve');
+    (safe as CreateOrderInput).customApproved = true;
+  }
+  const { id } = createOrder(ctx, safe as CreateOrderInput);
+  return { resultRef: id };
+}
+
 const HANDLERS: Record<string, (ctx: Ctx, payload: unknown) => { resultRef: string }> = {
   'receiving.post': applyReceivingPost,
   'delivery.confirm': applyDeliveryConfirm,
+  'order.create': applyOrderCreate,
 };
 
 function recordedResult(ctx: Ctx, opKey: string): SyncOpResult | null {

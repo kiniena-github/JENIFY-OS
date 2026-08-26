@@ -147,6 +147,24 @@ executed (architect + qa-security + product-research); findings recorded, nothin
 implemented. Dev servers left running at http://localhost:5173. Current baseline:
 commit `70efbd6` + team files, 163 server tests green.
 
+## 2026-08-26 — Order Capability increment 1 (issue #80 / mission #4)
+Post-R4 implementation lane started. New reusable sales-order domain
+(`packages/server/src/services/orders.ts`): draft (frozen price/VAT snapshot via the
+shared pricing helpers extracted from invoices) → confirm (FIFO lot reservations through
+the new shared `allocateLotsFifo` primitive — same allocator the invoice uses, so order
+commitments are visible to every per-lot availability check) → partial/full invoicing
+(atomic reservation hand-off to a confirmed invoice, cumulative-rounding discount
+carry-over, credit limit enforced at the invoice) → cancel (releases the remainder).
+Offline idempotent order capture added as sync op `order.create` (server re-checks
+permissions; client approval flags never trusted). Routes under `/api/orders` with
+sales-module permissions + financial masking. Migration 0011 (additive: sales_orders,
+sales_order_lines, sales_invoices.order_id). 17 new regression tests
+(test/orders.test.ts): reserved-stock protection, confirm rollback atomicity, partial
+fulfilment, discount exactness, credit limit/override, tenant isolation + identifier
+non-leakage, idempotent replay, hostile numeric/date input. 442 tests green (3 pre-existing
+documented skips), 4 packages type-clean, web bundle unchanged (69.22 kB gzip — no web
+code in this increment). PR opened for independent Jules + ChatGPT review; not self-merged.
+
 ## 2026-08-26 — Stream 2: Headquarter UI + Archive foundation (issue #43)
 New isolated workspace `packages/headquarter` (branch `claude/serene-hopper-xhlhon`, PR to
 follow): canonical activity/event model (war-room #41 order B), Founder dashboard views

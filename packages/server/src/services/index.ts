@@ -16,6 +16,7 @@ export * from './receiving.js';
 export * from './transfers.js';
 export * from './stockview.js';
 export * from './sales.js';
+export * from './orders.js';
 export * from './deliveries.js';
 export * from './payments.js';
 export * from './creditview.js';

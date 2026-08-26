@@ -902,6 +902,68 @@ export const qualityTests = sqliteTable(
 
 // ============================ Commercial ===================================
 
+/**
+ * Reusable customer orders (Order Capability, issue #4). An order is the
+ * commercial intent BEFORE the invoice: draft → confirmed (stock reserved)
+ * → partially_fulfilled/fulfilled as quantities are carried to invoices.
+ * Sector experiences differ via `channel` + configuration, not via copies.
+ */
+export const salesOrders = sqliteTable(
+  'sales_orders',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    docNumber: text('doc_number').notNull(),
+    date: text('date').notNull(),
+    customerId: text('customer_id').notNull(),
+    status: text('status').notNull().default('draft'), // draft|confirmed|partially_fulfilled|fulfilled|cancelled
+    /** sector adapter tag ('standard', 'pos', 'ecommerce', ...) — reporting/UX only, never a fork of the lifecycle */
+    channel: text('channel').notNull().default('standard'),
+    priceCategory: text('price_category').notNull(),
+    customPriceApprovedBy: text('custom_price_approved_by'),
+    subtotalCents: integer('subtotal_cents').notNull().default(0),
+    discountCents: integer('discount_cents').notNull().default(0),
+    vatCents: integer('vat_cents').notNull().default(0),
+    totalCents: integer('total_cents').notNull().default(0),
+    fulfillment: text('fulfillment').notNull().default('delivery'), // delivery | pickup
+    expectedDate: text('expected_date'),
+    pricingVersion: integer('pricing_version'),
+    vatSnapshot: text('vat_snapshot', { mode: 'json' }),
+    notes: text('notes'),
+    confirmedBy: text('confirmed_by'),
+    confirmedAt: text('confirmed_at'),
+    cancelledReason: text('cancelled_reason'),
+    createdBy: text('created_by'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [
+    uniqueIndex('orders_number').on(t.tenantId, t.docNumber),
+    index('orders_customer').on(t.tenantId, t.customerId, t.status),
+    index('orders_date').on(t.tenantId, t.date),
+  ],
+);
+
+export const salesOrderLines = sqliteTable(
+  'sales_order_lines',
+  {
+    id: text('id').primaryKey(),
+    tenantId: text('tenant_id').notNull(),
+    orderId: text('order_id').notNull(),
+    itemId: text('item_id').notNull(),
+    warehouseId: text('warehouse_id').notNull(),
+    qty: integer('qty').notNull(), // milli base-units ordered
+    entryUomId: text('entry_uom_id').notNull(),
+    unitPriceCents: integer('unit_price_cents').notNull(),
+    priceSource: text('price_source'), // 'list' | 'custom'
+    discountCents: integer('discount_cents').notNull().default(0),
+    lineSubtotalCents: integer('line_subtotal_cents').notNull(),
+    // partial fulfilment: milli base-units already carried to invoices; the
+    // order is fulfilled only when every line's qtyInvoiced reaches its qty
+    qtyInvoiced: integer('qty_invoiced').notNull().default(0),
+  },
+  (t) => [index('order_lines_order').on(t.tenantId, t.orderId)],
+);
+
 export const salesInvoices = sqliteTable(
   'sales_invoices',
   {
@@ -910,6 +972,8 @@ export const salesInvoices = sqliteTable(
     docNumber: text('doc_number').notNull(),
     date: text('date').notNull(),
     customerId: text('customer_id').notNull(),
+    /** set when this invoice fulfils (part of) a sales order */
+    orderId: text('order_id'),
     status: text('status').notNull().default('pending'), // pending|confirmed|dispatched|completed|cancelled
     paymentTerm: text('payment_term').notNull(), // paid | credit | partial
     priceCategory: text('price_category').notNull(),
@@ -934,6 +998,7 @@ export const salesInvoices = sqliteTable(
   (t) => [
     uniqueIndex('invoices_number').on(t.tenantId, t.docNumber),
     index('invoices_customer').on(t.tenantId, t.customerId, t.status),
+    index('invoices_order').on(t.tenantId, t.orderId),
     // perf (migration 0007): period reports/lists sort the tenant's invoices
     // by date — was a temp-b-tree sort of the whole table
     index('invoices_date').on(t.tenantId, t.date),
