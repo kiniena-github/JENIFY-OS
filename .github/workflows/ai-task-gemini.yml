@@ -156,10 +156,7 @@ jobs:
           )
 
           task_data=$(cat .ai-bridge/task-safe.json)
-          prompt="${instructions}
-
-TASK DATA:
-${task_data}"
+          prompt=$(printf '%s\n\nTASK DATA:\n%s' "$instructions" "$task_data")
 
           jq -n --arg prompt "$prompt" '{
             contents: [{role: "user", parts: [{text: $prompt}]}],
@@ -217,14 +214,11 @@ ${task_data}"
           fi
 
           served_model=$(jq -r '.modelVersion // empty' .ai-bridge/gemini-response.json)
-          case "$served_model" in
-            gemini-3.7-flash*) ;;
-            *)
-              write_output error "Model verification failed: requested ${EXPECTED_MODEL}, but Google server attested '${served_model:-unknown}'. Result rejected; no fallback accepted."
-              write_output served_model "${served_model:-unknown}"
-              exit 1
-              ;;
-          esac
+          if [ "$served_model" != "$EXPECTED_MODEL" ]; then
+            write_output error "Model verification failed: requested ${EXPECTED_MODEL}, but Google server attested '${served_model:-unknown}'. Result rejected; no fallback accepted."
+            write_output served_model "${served_model:-unknown}"
+            exit 1
+          fi
 
           summary=$(jq -r '[.candidates[]?.content.parts[]?.text // empty] | join("\n")' .ai-bridge/gemini-response.json)
           if [ -z "$summary" ]; then
