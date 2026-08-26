@@ -1,33 +1,38 @@
-# Gemini 3.7 worker routing fix — review brief
+# Gemini 3.7 worker routing fix — reviewed decision
 
-Status: diagnosis / proposed workaround only. Do not merge or deploy until reviewed.
+Status: implementation on branch for review/testing. Do not merge until Founder approval.
 
-## Observed failure
+## Root cause
 
-The Jenify Gemini workflow pins `gemini_model: gemini-3.7-flash` with Gemini CLI `0.55.1`. Issue #22 smoke test succeeded, but issue #23 later failed after 503 retries and then a free-tier 429 explicitly attributed to `gemini-3.5-flash`.
+The Jenify Gemini workflow correctly configured `gemini-3.7-flash`, but Gemini CLI `0.55.1` has a confirmed upstream P1 resolver bug: explicit bare Flash IDs shaped like `gemini-<X.Y>-flash` can be silently rewritten to `gemini-3.5-flash`.
 
-The pinned Google `run-gemini-cli` action sets `GEMINI_MODEL` and invokes Gemini CLI without an explicit `--model` argument. Current Gemini CLI docs say `GEMINI_MODEL` should still take precedence over settings/defaults.
+Upstream evidence: google-gemini/gemini-cli issue #28859 reproduces `gemini-3.7-flash -> gemini-3.5-flash` with an API key that can serve 3.7 correctly over raw REST. The issue also reports the bug in the then-current preview/nightly builds. Upstream fix PR #28893 (`fix(core): preserve explicit flash model IDs`) remains open as of 2026-08-26.
 
-## Upstream finding
+The issue #23 failure is consistent with that bug: our configuration said 3.7, while Google's quota error named `gemini-3.5-flash`.
 
-Google Gemini CLI issue #28859 reproduces a v0.55.1 bug where explicit bare Flash IDs shaped like `gemini-<X.Y>-flash` are silently rewritten to `gemini-3.5-flash`, including the valid `gemini-3.7-flash`. The reporter verified the raw Gemini REST endpoint correctly serves 3.7 using the same key. The bug also reproduces in the then-current preview/nightly builds.
+## Independent review
 
-Upstream PR #28893 (`fix(core): preserve explicit flash model IDs`) is open and specifically fixes this resolver bug. It has not yet landed in the current stable CLI.
+- **Codex:** rejected the initial `gemini-flash-latest` + membership-only `stats.models` guard as insufficient. `stats.models` can aggregate multiple model calls; the safer temporary path is the exact free-tier REST model endpoint with server-returned `modelVersion` verification.
+- **Claude:** independently recommended server-attested model verification and strict 429/503 handling. Claude also noted that CLI routing/internal helper calls can consume other model quotas, so configuration alone is not a trustworthy proof of the served model.
+- **Jules:** initially proposed adding `settings.model.name`; upstream #28859 shows settings-level self-mapping does not fix this resolver bug, so that proposal was challenged and must not be merged as the final fix.
 
-The same upstream reproduction found that `gemini-flash-latest` currently passes through and is served by `gemini-3.7-flash` instead of being rewritten.
+## Chosen temporary fix
 
-## Proposed temporary Jenify workaround
+Until Google's CLI fix ships in a stable release:
 
-Until an upstream CLI release containing #28893 is available:
+1. Keep the existing AI Studio key with **billing disabled**. No Vertex, no pay-as-you-go, no paid fallback.
+2. Bypass Gemini CLI for this automated lane.
+3. Call the exact `gemini-3.7-flash:generateContent` REST endpoint once per task.
+4. Require the Google server's `modelVersion` to start with `gemini-3.7-flash`; reject any mismatch.
+5. Treat HTTP 429 as a quota stop and HTTP 503 as temporary capacity failure. Do not silently switch models.
+6. Use URL Context only for explicit public URLs supplied in the task. Google Search grounding is not available on the Gemini 3.7 Flash free API tier, so broader web discovery must be supplied separately rather than paid for or guessed.
+7. Surface the server-attested model in the posted GitHub result.
+8. When upstream #28893 lands in a stable Gemini CLI release, re-evaluate returning to the official CLI action; retain server-side verification as a regression guard.
 
-1. Keep billing disabled and continue AI Studio free-tier authentication only.
-2. Keep Gemini CLI pinned to stable `0.55.1` rather than switching to preview/nightly builds that have the same bug.
-3. Change the workflow model input from `gemini-3.7-flash` to `gemini-flash-latest` as a temporary transport alias.
-4. Add a post-run verification step that parses `gemini-artifacts/stdout.log` and requires `stats.models` to contain `gemini-3.7-flash`; if it does not, mark the result unverified/fail instead of silently claiming 3.7.
-5. Surface the served model in the GitHub result comment for auditability.
-6. When upstream #28893 ships in stable Gemini CLI, update the pinned CLI version, restore the explicit `gemini-3.7-flash` model ID, and retain runtime verification as a regression guard.
-7. Treat 429 quota exhaustion as a hard stop. Do not use paid API/Vertex/pay-as-you-go fallback. Avoid immediately rerunning quota failures.
+## Why this is stronger
 
-## Review request
+This removes the buggy CLI model resolver and its multi-turn/internal fallback behavior from the automated path. One task becomes one model request, which also reduces free-tier request consumption. The exact REST endpoint plus `modelVersion` makes the model identity auditable rather than inferred from client configuration.
 
-Please challenge this workaround. In particular check whether the alias + runtime-stat verification is the safest minimal fix, whether model routing/sub-agents can make `stats.models` ambiguous, and whether a direct free-tier REST call would be safer than Gemini CLI until the upstream fix ships.
+## Remaining limitation
+
+This free automated lane is an **independent intelligence/review worker**, not a general fresh-web search engine. It can analyze task data and explicit public URLs through URL Context. Full Google Search grounding for Gemini 3.7 is not available on the free API tier. A future subscription-authenticated persistent operator can be evaluated separately if we want to use Google AI Pro's interactive capabilities without paid API billing.
