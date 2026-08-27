@@ -164,3 +164,16 @@ fulfilment, discount exactness, credit limit/override, tenant isolation + identi
 non-leakage, idempotent replay, hostile numeric/date input. 442 tests green (3 pre-existing
 documented skips), 4 packages type-clean, web bundle unchanged (69.22 kB gzip — no web
 code in this increment). PR opened for independent Jules + ChatGPT review; not self-merged.
+
+## 2026-08-26 — Stream 2: Headquarter UI + Archive foundation (issue #43)
+New isolated workspace `packages/headquarter` (branch `claude/serene-hopper-xhlhon`, PR to
+follow): canonical activity/event model (war-room #41 order B), Founder dashboard views
+(NOW / DONE TODAY / BLOCKED / WAITING FOR FOUNDER / NEXT), worker status, project
+cards/timelines, historical-archive metadata schema (year/month/project/category, date
+confidence, CURRENT/SUPERSEDED/REJECTED/EXPERIMENTAL/ARCHIVED, predecessor/successor
+links), read-only inventory/reconstruction pipeline over git log + GitHub exports (Drive
+adapter contract prepared), monthly + project-evolution views, inverted-index search
+foundation, and a 7-page framework-free static HQ site. 31 new tests green; server suite
+399 passed + 3 pre-existing skips; web bundle unchanged at 69.22 kB gzip. Docs:
+`docs/HEADQUARTER/ARCHIVE_SCHEMA.md`, `docs/HEADQUARTER/HEADQUARTER_UI.md`. No Mesob
+package or operator/control-plane file touched; originals preserved; local-only.
