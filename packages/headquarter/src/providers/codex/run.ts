@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { providerConnectivity } from '../../routing/index.js';
-import { extractEvidence, verifyReviewedSha } from './evidence.js';
+import { extractEvidence, extractRuntimeError, isQuotaError, verifyReviewedSha } from './evidence.js';
 import { probeCodex, type CodexProbeResult } from './probe.js';
 import { CODEX_REVIEW_SCHEMA, buildReviewPrompt, parseReviewOutput } from './review.js';
 import { EMPTY_EVIDENCE, type CodexReviewOutcome, type CodexReviewRequest } from './types.js';
@@ -31,7 +31,12 @@ export interface SpawnResultLike {
   error?: Error;
 }
 
-export type SpawnImpl = (command: string, args: string[], timeoutMs: number) => SpawnResultLike;
+export type SpawnImpl = (
+  command: string,
+  args: string[],
+  timeoutMs: number,
+  env?: NodeJS.ProcessEnv,
+) => SpawnResultLike;
 
 export interface RunOptions {
   /** Milliseconds before the Codex run is abandoned. */
@@ -42,6 +47,8 @@ export interface RunOptions {
   workDir?: string;
   /** Model override; defaults to whatever the CLI is configured to use. */
   model?: string | null;
+  /** Reasoning effort override. Defaults to 'medium' for the fast review lane. */
+  reasoningEffort?: string | null;
   /**
    * Injection seam so the safety rules below can be tested exhaustively
    * without spending real Codex allowance. Production always uses spawnSync.
@@ -64,6 +71,12 @@ export function buildCodexExecArgs(opts: {
   lastMessageFile: string;
   prompt: string;
   model?: string | null;
+  /**
+   * Reasoning effort for this run. The Founder workstation's Codex config is
+   * pinned to 'ultra', which is far too slow for a FAST reviewer lane, so the
+   * lane sets its own value rather than inheriting the interactive default.
+   */
+  reasoningEffort?: string | null;
 }): string[] {
   const args = [
     'exec',
@@ -79,16 +92,20 @@ export function buildCodexExecArgs(opts: {
     '--skip-git-repo-check',
   ];
   if (opts.model != null && opts.model.trim() !== '') args.push('--model', opts.model.trim());
+  if (opts.reasoningEffort != null && opts.reasoningEffort.trim() !== '') {
+    args.push('-c', `model_reasoning_effort="${opts.reasoningEffort.trim()}"`);
+  }
   args.push(opts.prompt);
   return args;
 }
 
-const defaultSpawn: SpawnImpl = (command, args, timeoutMs) => {
+const defaultSpawn: SpawnImpl = (command, args, timeoutMs, env) => {
   const r = spawnSync(command, args, {
     encoding: 'utf8',
     timeout: timeoutMs,
     windowsHide: true,
     maxBuffer: 64 * 1024 * 1024,
+    env: env ?? process.env,
     // stdin is closed: `codex exec` otherwise waits on it and would hang.
     input: '',
   });
@@ -224,10 +241,20 @@ export function runCodexReview(request: CodexReviewRequest, options: RunOptions 
     lastMessageFile,
     prompt: buildReviewPrompt(request),
     model: options.model,
+    reasoningEffort: options.reasoningEffort ?? 'medium',
   });
 
+  // The Codex agent shells out to its own bundled tools (ripgrep). The desktop
+  // app puts those on PATH; a headless spawn has to do it explicitly or every
+  // repo search inside the review fails.
+  const sep = process.platform === 'win32' ? ';' : ':';
+  const spawnEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: [...probe.helperPaths, process.env['PATH'] ?? ''].filter((p) => p !== '').join(sep),
+  };
+
   const spawnImpl = options.spawnImpl ?? defaultSpawn;
-  const result = spawnImpl(cliPath, args, options.timeoutMs ?? 15 * 60 * 1000);
+  const result = spawnImpl(cliPath, args, options.timeoutMs ?? 15 * 60 * 1000, spawnEnv);
 
   const events = result.stdout ?? '';
   writeFileSync(eventsFile, events, 'utf8');
@@ -246,8 +273,29 @@ export function runCodexReview(request: CodexReviewRequest, options: RunOptions 
   if (result.error != null) {
     return fail(request, 'execution_failed', `Codex CLI failed to run: ${result.error.message}`);
   }
+
+  // The runtime's own refusal outranks the exit code: it says WHY, and whether
+  // retrying later is the right answer. It also outranks any review file left
+  // on disk — a turn that failed did not produce a trustworthy verdict.
+  const runtimeError = extractRuntimeError(events);
+  if (runtimeError != null) {
+    return isQuotaError(runtimeError)
+      ? fail(
+          request,
+          'quota_exhausted',
+          `Codex declined the request: ${runtimeError} Nothing is wrong with the reviewed code, ` +
+            'and no other provider was substituted. Re-run the review once the allowance resets.',
+        )
+      : fail(request, 'provider_error', `Codex reported an error: ${runtimeError}`);
+  }
+
   if (result.status !== 0) {
-    const stderr = (result.stderr ?? '').split(/\r?\n/).slice(-5).join('\n').trim();
+    const stderr = (result.stderr ?? '')
+      .split(/\r?\n/)
+      .filter((l) => l.trim() !== '' && !l.startsWith('Reading additional input from stdin'))
+      .slice(-15)
+      .join('\n')
+      .trim();
     return fail(request, 'execution_failed', `Codex CLI exited ${result.status}. ${stderr}`);
   }
 

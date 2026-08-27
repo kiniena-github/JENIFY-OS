@@ -118,6 +118,10 @@ export type CodexFailureKind =
   | 'unparseable_result'
   | 'empty_result'
   | 'worktree_mutated'
+  /** The provider itself refused: exhausted subscription quota, rate limit, server fault. */
+  | 'provider_error'
+  /** The provider's allowance is spent. A retry later may succeed; nothing is wrong with the code. */
+  | 'quota_exhausted'
   | 'execution_failed';
 
 export interface CodexReviewOutcome {

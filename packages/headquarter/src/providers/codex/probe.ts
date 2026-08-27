@@ -16,7 +16,7 @@
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 export interface CodexProbeResult {
   installed: boolean;
@@ -26,6 +26,12 @@ export interface CodexProbeResult {
   /** True when auth.json holds a usable credential of some kind. */
   authenticated: boolean;
   codexHome: string | null;
+  /**
+   * Directories holding the CLI's bundled helper executables (ripgrep, the
+   * command runner). Codex shells out to these; if they are not on PATH the
+   * agent cannot search the repo and the review fails.
+   */
+  helperPaths: string[];
   /** Non-secret facts to merge into the routing environment. */
   facts: Record<string, string>;
   /** Human-readable explanation, safe to print. */
@@ -118,6 +124,31 @@ export interface ProbeOptions {
   codexHome?: string | null;
 }
 
+/**
+ * The Codex installer keeps its helper binaries in sibling versioned folders
+ * next to codex.exe. The desktop app puts them on PATH for itself; a headless
+ * spawn must do the same or the agent's own tooling is missing.
+ */
+function findHelperPaths(cliPath: string | null): string[] {
+  if (cliPath == null) return [];
+  const ownDir = dirname(cliPath);
+  const binRoot = dirname(ownDir);
+  const out = new Set<string>([ownDir]);
+  try {
+    for (const entry of readdirSync(binRoot)) {
+      const dir = join(binRoot, entry);
+      try {
+        if (statSync(dir).isDirectory()) out.add(dir);
+      } catch {
+        /* skip unreadable entry */
+      }
+    }
+  } catch {
+    /* binRoot unreadable; the CLI's own directory is still useful */
+  }
+  return [...out];
+}
+
 export function probeCodex(options: ProbeOptions = {}): CodexProbeResult {
   const codexHome = options.codexHome ?? process.env['CODEX_HOME'] ?? join(homedir(), '.codex');
   const cliPath = findCodexBinary(options.cliPath ?? process.env['CODEX_CLI_PATH'] ?? null);
@@ -139,5 +170,5 @@ export function probeCodex(options: ProbeOptions = {}): CodexProbeResult {
     reason = `Codex CLI ${cliPath} is installed and authenticated (auth mode: ${authMode}).`;
   }
 
-  return { installed, cliPath, authMode, authenticated, codexHome, facts, reason };
+  return { installed, cliPath, authMode, authenticated, codexHome, helperPaths: findHelperPaths(cliPath), facts, reason };
 }

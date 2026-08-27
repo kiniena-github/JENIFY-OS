@@ -21,6 +21,8 @@ import {
   buildCodexExecArgs,
   buildReviewPrompt,
   extractEvidence,
+  extractRuntimeError,
+  isQuotaError,
   parseReviewOutput,
   renderCodexProvenance,
   runCodexReview,
@@ -106,6 +108,7 @@ const CONNECTED_PROBE: CodexProbeResult = {
   authMode: 'chatgpt',
   authenticated: true,
   codexHome: 'C:\\fake\\.codex',
+  helperPaths: ['C:\\fake\\bin'],
   facts: { CODEX_CLI_PATH: 'C:\\fake\\codex.exe', CODEX_AUTH_MODE: 'chatgpt' },
   reason: 'fake connected probe',
 };
@@ -116,6 +119,7 @@ const DISCONNECTED_PROBE: CodexProbeResult = {
   authMode: null,
   authenticated: false,
   codexHome: null,
+  helperPaths: [],
   facts: {},
   reason: 'Codex CLI not found.',
 };
@@ -692,6 +696,85 @@ describe('11: unknown providers still fail closed', () => {
         expect(def.executorKind).not.toBeNull();
       }
     }
+  });
+});
+
+// ===========================================================================
+// The provider's own refusal is reported in its own words
+// ===========================================================================
+describe('a Codex refusal is reported honestly, never as a review', () => {
+  /** Verbatim event stream captured from the real CLI on 2026-08-27. */
+  const QUOTA_EVENTS = [
+    JSON.stringify({ type: 'thread.started', thread_id: '01a043f3-3ece-70c2-a045-bbf468204a36' }),
+    JSON.stringify({ type: 'turn.started' }),
+    JSON.stringify({
+      type: 'error',
+      message:
+        "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 11:25 PM.",
+    }),
+    JSON.stringify({
+      type: 'turn.failed',
+      error: { message: "You've hit your usage limit." },
+    }),
+  ].join('\n');
+
+  it('an exhausted allowance is reported as quota_exhausted, in the provider own words', () => {
+    const { dir, sha } = makeRepo();
+    const outcome = runCodexReview(reviewRequest(dir, sha), {
+      probe: CONNECTED_PROBE,
+      spawnImpl: () => ({ status: 1, stdout: QUOTA_EVENTS, stderr: 'Reading additional input from stdin...' }),
+    });
+    expect(outcome.ok).toBe(false);
+    expect(outcome.failure?.kind).toBe('quota_exhausted');
+    expect(outcome.failure?.message).toContain('usage limit');
+    expect(outcome.failure?.message).toContain('11:25 PM');
+    // and it must be clear this is not a verdict on the code
+    expect(outcome.failure?.message).toContain('Nothing is wrong with the reviewed code');
+    expect(outcome.review).toBeNull();
+    expect(outcome.actualProvider).toBeNull();
+  });
+
+  it('a non-quota runtime error is reported as provider_error', () => {
+    const { dir, sha } = makeRepo();
+    const events = JSON.stringify({ type: 'error', message: 'upstream connection reset' });
+    const outcome = runCodexReview(reviewRequest(dir, sha), {
+      probe: CONNECTED_PROBE,
+      spawnImpl: () => ({ status: 1, stdout: events, stderr: '' }),
+    });
+    expect(outcome.failure?.kind).toBe('provider_error');
+    expect(outcome.failure?.message).toContain('upstream connection reset');
+  });
+
+  it('a refusal is never turned into a PASS', () => {
+    const { dir, sha } = makeRepo();
+    const good = scriptedCodex({ sha });
+    const outcome = runCodexReview(reviewRequest(dir, sha), {
+      probe: CONNECTED_PROBE,
+      // a valid review file is on disk, but the runtime also reported an error:
+      // the error wins, because the review cannot be trusted.
+      spawnImpl: (c, a) => {
+        good.spawnImpl(c, a, 0);
+        return { status: 1, stdout: QUOTA_EVENTS, stderr: '' };
+      },
+      readSessionRollout: good.readSessionRollout,
+    });
+    expect(outcome.ok).toBe(false);
+    expect(outcome.review).toBeNull();
+  });
+
+  it('quota detection recognises the real wordings, and does not over-match', () => {
+    expect(isQuotaError("You've hit your usage limit.")).toBe(true);
+    expect(isQuotaError('429 Too Many Requests')).toBe(true);
+    expect(isQuotaError('quota exceeded for this project')).toBe(true);
+    expect(isQuotaError('TypeError: cannot read property of undefined')).toBe(false);
+    expect(isQuotaError(null)).toBe(false);
+  });
+
+  it('extractRuntimeError finds the message in either event shape', () => {
+    expect(extractRuntimeError(QUOTA_EVENTS)).toContain('usage limit');
+    expect(extractRuntimeError(JSON.stringify({ type: 'turn.failed', error: { message: 'boom' } }))).toBe('boom');
+    expect(extractRuntimeError(JSON.stringify({ type: 'turn.completed' }))).toBeNull();
+    expect(extractRuntimeError(undefined)).toBeNull();
   });
 });
 

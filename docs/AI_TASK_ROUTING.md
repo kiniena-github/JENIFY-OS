@@ -57,13 +57,18 @@ suite is literally the rule that runs in CI.
 [AI TASK][CLAUDE] <title>               → CLAUDE
 [AI TASK][GEMINI] <title>               → GEMINI
 [AI TASK][BOTH] <title>                 → CLAUDE + GEMINI
-[AI TASK][CODEX] <title>                → BLOCKED (see §5)
+[AI TASK][CODEX] <title>                → CODEX    (local lane; see docs/AI_CODEX_LANE.md)
 [AI TASK][GEMINI][REVIEWER] <title>     → GEMINI, acting as Reviewer
+[AI TASK][REVIEWER] <title>             → whoever currently holds REVIEWER (§5.1)
 ```
 
 Provider and role tags are order-independent. **Role is separate from provider
-identity** — `ROLE=Reviewer` can move from one provider to another by editing the
-title, with no code change. Roles: `MANAGER`, `BUILDER`, `REVIEWER`, `RESEARCHER`.
+identity** — `ROLE=Reviewer` can move from one provider to another with no code
+change. Roles: `MANAGER`, `BUILDER`, `REVIEWER`, `RESEARCHER`.
+
+A title that names a **role but no provider** is staffed from the assignment
+table in §5.1 rather than defaulting to Claude. That is the mechanism by which
+the Founder restaffs a role without touching routing.
 
 An unrecognised tag is **blocked**, never quietly treated as Claude.
 
@@ -138,11 +143,48 @@ reported blocked; Claude is never told to cover for Codex.
 |---|---|---|---|
 | CLAUDE | `.github/workflows/ai-task-trigger.yml` | `CLAUDE_ROUTINE_URL`, `CLAUDE_ROUTINE_TOKEN` | **Operational** |
 | GEMINI | `.github/workflows/ai-task-gemini.yml` | `GEMINI_API_KEY` | **Operational** |
-| CODEX | none | `CODEX_API_KEY` (absent) | Not connected |
-| JULES, XAI, MICROSOFT, META, MISTRAL, QWEN, DEEPSEEK, LOCAL, CUSTOM, JENIFY | none | absent | Not connected |
+| CODEX | `packages/headquarter/src/cli/codex-review.ts` (local CLI) | local Codex CLI session (`CODEX_CLI_PATH`, `CODEX_AUTH_MODE`) | **Operational locally**, blocked in CI |
+| JULES | `jules` CLI (local) | `JULES_CLI_PATH` — CLI not yet logged in | Not connected |
+| XAI, MICROSOFT, META, MISTRAL, QWEN, DEEPSEEK, LOCAL, CUSTOM, JENIFY | none | absent | Not connected |
 
-To connect a new provider: add its executor workflow, add its secret, and set
-`executor` in the registry. Routing needs no other change.
+#### Two kinds of executor
+
+`github-workflow` providers run on a GitHub runner and authenticate with Actions
+secrets. `local-cli` providers (Codex, Jules) run on the Founder workstation and
+hold **no** GitHub credential, so CI observes none of their local facts and
+**fails closed for them by design** rather than substituting Claude. This is a
+property of where the credential lives, not a limitation to be worked around.
+
+To connect a new provider: add its executor, declare its credential or local
+facts, and set `executor` in the registry. Routing needs no other change.
+
+---
+
+## 5.1 Role → provider staffing
+
+`packages/headquarter/src/routing/assignments.ts` is the only place a role's
+current provider is named.
+
+| Role | Primary | Backup (explicit dispatch only) |
+|---|---|---|
+| MANAGER | CLAUDE | — |
+| BUILDER | CLAUDE | — |
+| REVIEWER | JULES | CODEX, GEMINI |
+| RESEARCHER | GEMINI | — |
+
+Restaffing a role is a data edit, or a runtime override with no code change:
+
+```
+JENIFY_ROLE_REVIEWER=CODEX
+```
+
+Two deliberate non-features:
+
+- **`backup` is not an automatic fallback.** A role staffed to an unconnected
+  provider fails closed. Silently promoting the backup would be exactly the
+  vendor-substitution this system exists to prevent.
+- **An unknown override is rejected, not ignored** — a typo must never quietly
+  leave the old staffing in place while appearing to have changed it.
 
 ---
 
