@@ -5,3 +5,5 @@ export * from './archive/index.js';
 export * from './connectors/index.js';
 export * from './ui/index.js';
 export * from './organization/index.js';
+export * from './registry/index.js';
+export * from './providers/index.js';
