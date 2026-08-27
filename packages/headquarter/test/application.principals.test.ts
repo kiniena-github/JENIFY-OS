@@ -262,6 +262,12 @@ describe('lane F — approval authority is positive and separate', () => {
     expect(!res.ok && res.error.message).toMatch(/never carries approval authority/i);
   });
 
+  /**
+   * PINS A FOUNDER DECISION (2026-08-27, PR #142, see docs/JENIFY_DECISIONS.md):
+   * the two-actor rule stands as built, and neither a self-approval exception
+   * nor a risk-tiered exception may be added. If a future change introduces
+   * one, this test fails — which is the point.
+   */
   it('will not let a human approve the very task they opened', () => {
     // The Founder holds BOTH rights — originate archive.index_document, and
     // approval authority. They still cannot round-trip a gated action alone:

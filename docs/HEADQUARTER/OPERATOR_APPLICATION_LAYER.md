@@ -160,6 +160,15 @@ Three separations are enforced and tested:
 > letting a worker originate. It is deliberately **not** solved with a Founder
 > exception, which would weaken a canonical Operator guarantee.
 
+**Founder decision, 2026-08-27 (PR #142) — settled, not open.** The two-actor
+rule stands exactly as built. In the current one-human setup the Founder is the
+only human required: an AI worker originates a gated action and the Founder
+approves or rejects it; if the Founder personally originates one, they do not
+self-approve that same action. **No self-approval exception and no risk-tiered
+exception is to be added.** Recorded in `docs/JENIFY_DECISIONS.md`, and pinned
+by the test *"will not let a human approve the very task they opened"* — a
+future change that introduces an exception fails the suite.
+
 Review and reconciliation use the same positive-identity rule but need no
 grant: the decisive property there is independence (queue-enforced), so any
 assignable worker or active principal may review — an unknown id may not.
