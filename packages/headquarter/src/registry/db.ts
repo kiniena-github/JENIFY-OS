@@ -39,7 +39,11 @@ CREATE TABLE IF NOT EXISTS hq_ai_members (
   cost_class TEXT NOT NULL,
   context_window_tokens INTEGER,
   tool_metadata TEXT NOT NULL DEFAULT '{}',
-  role_eligibility TEXT NOT NULL DEFAULT '[]',
+  -- Roles a registrar intentionally assigned. NOT eligibility: eligibility is
+  -- derived from current capabilities/role requirements on every read
+  -- (see registry/eligibility.ts) and is deliberately never stored, so it
+  -- cannot go stale when a capability or a role definition changes.
+  assigned_roles TEXT NOT NULL DEFAULT '[]',
   advertised_capabilities TEXT NOT NULL DEFAULT '[]',
   granted_capabilities TEXT NOT NULL DEFAULT '[]',
   status TEXT NOT NULL DEFAULT 'active',
@@ -78,6 +82,24 @@ CREATE TABLE IF NOT EXISTS hq_ai_member_assignments (
 CREATE INDEX IF NOT EXISTS idx_hq_ai_member_assignments_member ON hq_ai_member_assignments(member_id, status);
 `;
 
+/**
+ * Upgrades a database created before eligibility became derived (issue #131):
+ * the old `role_eligibility` column stored eligibility directly, which is
+ * exactly the state that could go stale. Its values were the registrar's
+ * assignments, so they carry over verbatim into `assigned_roles`; the legacy
+ * column is left in place (never read again) rather than dropped, so the
+ * upgrade cannot lose data on any SQLite version.
+ */
+function migrateLegacyRoleEligibilityColumn(db: HqDatabase): void {
+  const columns = db.prepare(`PRAGMA table_info(hq_ai_members)`).all() as { name: string }[];
+  const names = new Set(columns.map((c) => c.name));
+  if (names.has('assigned_roles') || !names.has('role_eligibility')) return;
+
+  db.exec(`ALTER TABLE hq_ai_members ADD COLUMN assigned_roles TEXT NOT NULL DEFAULT '[]'`);
+  db.exec(`UPDATE hq_ai_members SET assigned_roles = role_eligibility`);
+}
+
 export function ensureRegistrySchema(db: HqDatabase): void {
   db.exec(REGISTRY_DDL);
+  migrateLegacyRoleEligibilityColumn(db);
 }

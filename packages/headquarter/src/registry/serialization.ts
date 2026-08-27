@@ -8,6 +8,13 @@
  * `AiMember` itself already stores only a `providerId` string plus
  * data, never a live `ProviderAdapter`.
  *
+ * A snapshot carries a member's DERIVED fields (`roleEligibility`,
+ * `effectiveCapabilities`, `suspendedRoles`) for readability only — import
+ * never reads them, because `insertMemberRow` persists just the assigned
+ * roles and the target database recomputes eligibility itself. An edited or
+ * legacy snapshot therefore cannot resurrect eligibility that the target's
+ * own capabilities and role definitions do not support (issue #131).
+ *
  * `importRegistry` re-validates every item against a *target* database and
  * `ProviderDirectory` and is deliberately **all-or-nothing**: if any item
  * fails validation, NOTHING is written and the full list of per-item errors
@@ -80,6 +87,7 @@ function validateSnapshot(
     }
   }
   const capabilityIds = new Set(snapshot.capabilities.map((c) => c.id));
+  const roleIds = new Set(snapshot.roles.map((r) => r.roleId));
 
   for (const role of snapshot.roles) {
     for (const reqCap of role.requiredCapabilities) {
@@ -111,6 +119,15 @@ function validateSnapshot(
           itemType: 'member',
           id: member.id,
           message: `References capability '${capId}', which is not present in this snapshot`,
+        });
+      }
+    }
+    for (const roleId of member.assignedRoles) {
+      if (!roleIds.has(roleId)) {
+        errors.push({
+          itemType: 'member',
+          id: member.id,
+          message: `Is assigned role '${roleId}', which is not present in this snapshot`,
         });
       }
     }

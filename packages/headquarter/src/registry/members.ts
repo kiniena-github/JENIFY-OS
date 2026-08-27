@@ -41,6 +41,12 @@ import { nowIso } from '../store/db.js';
 import type { ProviderDirectory } from '../providers/directory.js';
 import { MemberCapabilityRegistry } from './capabilities.js';
 import { ensureRegistrySchema } from './db.js';
+import {
+  deriveEligibility,
+  loadEligibilityContext,
+  type EligibilityContext,
+  type SuspendedRole,
+} from './eligibility.js';
 
 export const WORKER_TYPES = ['interactive', 'execution', 'review', 'automation'] as const;
 export type WorkerType = (typeof WORKER_TYPES)[number];
@@ -86,11 +92,32 @@ export interface AiMember {
   costClass: CostClass;
   contextWindowTokens: number | null;
   toolMetadata: Record<string, unknown>;
-  roleEligibility: string[];
+  /**
+   * PERSISTED INTENT — the roles a registrar explicitly put this member
+   * forward for. Being assigned a role does NOT by itself make the member
+   * eligible for it; see `roleEligibility`.
+   */
+  assignedRoles: string[];
   /** Untrusted — what the provider/member claims it can do. Never used for permission checks. */
   advertisedCapabilities: string[];
-  /** Trusted — what a registrar explicitly granted. The only thing permission checks/routing use. */
+  /** Trusted — what a registrar explicitly granted. Persisted; narrowed by `effectiveCapabilities`. */
   grantedCapabilities: string[];
+  /**
+   * DERIVED, never stored — `grantedCapabilities` minus any capability that
+   * is no longer registered or has been disabled registry-wide. This, not
+   * `grantedCapabilities`, is what routing and eligibility check.
+   */
+  effectiveCapabilities: string[];
+  /**
+   * DERIVED, never stored — the subset of `assignedRoles` whose
+   * `requiredCapabilities` are ALL currently held effectively. Recomputed on
+   * every read from current capabilities and current role definitions, so it
+   * cannot survive a capability revocation or a role-requirement change
+   * (issue #131).
+   */
+  roleEligibility: string[];
+  /** DERIVED, never stored — assigned roles that are NOT currently eligible, and why. */
+  suspendedRoles: SuspendedRole[];
   status: MemberStatus;
   health: MemberHealth;
   healthCheckedAt: string | null;
@@ -114,6 +141,11 @@ export interface RegisterMemberInput {
   costClass: CostClass;
   contextWindowTokens?: number | null;
   toolMetadata?: Record<string, unknown>;
+  /**
+   * Roles to assign at registration. Validated against the granted
+   * capabilities up front, so a member is never registered claiming a role
+   * it cannot perform. Stored as `assignedRoles`.
+   */
   roleEligibility?: string[];
   advertisedCapabilities?: string[];
   grantedCapabilities?: string[];
@@ -177,11 +209,30 @@ const UPDATE_BLOCKED_FIELDS = [
   'replacedById',
   'createdAt',
   'updatedAt',
+  'assignedRoles',
   'roleEligibility',
+  'effectiveCapabilities',
+  'suspendedRoles',
   'benchmarks',
 ] as const;
 
-function memberToRow(m: AiMember): Record<string, unknown> {
+/**
+ * What actually lives in `hq_ai_members`. The derived fields of `AiMember`
+ * are absent by construction, so no write path can persist eligibility and
+ * no read path can return a stored (potentially stale) copy of it.
+ */
+export type PersistedMember = Omit<
+  AiMember,
+  'roleEligibility' | 'effectiveCapabilities' | 'suspendedRoles'
+>;
+
+/** Recomputes the derived fields of a persisted member against current truth. */
+export function deriveMember(persisted: PersistedMember, context: EligibilityContext): AiMember {
+  const derived = deriveEligibility(persisted.grantedCapabilities, persisted.assignedRoles, context);
+  return { ...persisted, ...derived };
+}
+
+function memberToRow(m: PersistedMember): Record<string, unknown> {
   return {
     id: m.id,
     displayName: m.displayName,
@@ -196,7 +247,7 @@ function memberToRow(m: AiMember): Record<string, unknown> {
     costClass: m.costClass,
     contextWindowTokens: m.contextWindowTokens,
     toolMetadata: JSON.stringify(m.toolMetadata),
-    roleEligibility: JSON.stringify(m.roleEligibility),
+    assignedRoles: JSON.stringify(m.assignedRoles),
     advertisedCapabilities: JSON.stringify(m.advertisedCapabilities),
     grantedCapabilities: JSON.stringify(m.grantedCapabilities),
     status: m.status,
@@ -209,7 +260,7 @@ function memberToRow(m: AiMember): Record<string, unknown> {
   };
 }
 
-function rowToMember(row: Record<string, unknown>): AiMember {
+function rowToMember(row: Record<string, unknown>): PersistedMember {
   return {
     id: row.id as string,
     displayName: row.display_name as string,
@@ -224,7 +275,7 @@ function rowToMember(row: Record<string, unknown>): AiMember {
     costClass: row.cost_class as CostClass,
     contextWindowTokens: (row.context_window_tokens as number | null) ?? null,
     toolMetadata: JSON.parse(row.tool_metadata as string),
-    roleEligibility: JSON.parse(row.role_eligibility as string),
+    assignedRoles: JSON.parse(row.assigned_roles as string),
     advertisedCapabilities: JSON.parse(row.advertised_capabilities as string),
     grantedCapabilities: JSON.parse(row.granted_capabilities as string),
     status: row.status as MemberStatus,
@@ -238,24 +289,24 @@ function rowToMember(row: Record<string, unknown>): AiMember {
 }
 
 /** Standalone insert, independent of any class instance — reused by `registry/serialization.ts` on import. */
-export function insertMemberRow(db: HqDatabase, member: AiMember): void {
+export function insertMemberRow(db: HqDatabase, member: PersistedMember): void {
   const r = memberToRow(member);
   db.prepare(
     `INSERT INTO hq_ai_members (
       id, display_name, provider_id, model_id, model_version, identity_key, worker_type, enabled,
-      locality, privacy_class, cost_class, context_window_tokens, tool_metadata, role_eligibility,
+      locality, privacy_class, cost_class, context_window_tokens, tool_metadata, assigned_roles,
       advertised_capabilities, granted_capabilities, status, health, health_checked_at, benchmarks,
       replaced_by_id, created_at, updated_at
     ) VALUES (
       @id, @displayName, @providerId, @modelId, @modelVersion, @identityKey, @workerType, @enabled,
-      @locality, @privacyClass, @costClass, @contextWindowTokens, @toolMetadata, @roleEligibility,
+      @locality, @privacyClass, @costClass, @contextWindowTokens, @toolMetadata, @assignedRoles,
       @advertisedCapabilities, @grantedCapabilities, @status, @health, @healthCheckedAt, @benchmarks,
       @replacedById, @createdAt, @updatedAt
     )`,
   ).run(r);
 }
 
-function updateMemberRow(db: HqDatabase, member: AiMember): void {
+function updateMemberRow(db: HqDatabase, member: PersistedMember): void {
   const r = memberToRow(member);
   db.prepare(
     `UPDATE hq_ai_members SET
@@ -267,7 +318,7 @@ function updateMemberRow(db: HqDatabase, member: AiMember): void {
       cost_class = @costClass,
       context_window_tokens = @contextWindowTokens,
       tool_metadata = @toolMetadata,
-      role_eligibility = @roleEligibility,
+      assigned_roles = @assignedRoles,
       advertised_capabilities = @advertisedCapabilities,
       granted_capabilities = @grantedCapabilities,
       status = @status,
@@ -283,7 +334,8 @@ function updateMemberRow(db: HqDatabase, member: AiMember): void {
 /** Standalone reader, independent of any class instance — reused by `registry/serialization.ts`. */
 export function listAllMembers(db: HqDatabase): AiMember[] {
   const rows = db.prepare(`SELECT * FROM hq_ai_members ORDER BY created_at`).all() as Record<string, unknown>[];
-  return rows.map(rowToMember);
+  const context = loadEligibilityContext(db);
+  return rows.map((row) => deriveMember(rowToMember(row), context));
 }
 
 function rowToRole(row: Record<string, unknown>): MemberRole {
@@ -354,12 +406,20 @@ export class AiMemberRegistry {
     return warnings;
   }
 
+  /**
+   * Guards the ASSIGNMENT of roles: a registrar may not put a member forward
+   * for a role it cannot currently perform. Checked against effective
+   * capabilities (a granted-but-disabled capability satisfies nothing), so
+   * assignment and the derived eligibility in `eligibility.ts` always agree.
+   */
   private validateRoleEligibility(roleIds: readonly string[], granted: readonly string[]): void {
+    const context = this.eligibilityContext();
+    const effective = new Set(granted.filter((c) => context.grantableCapabilityIds.has(c)));
     const missingByRole: Record<string, string[]> = {};
     for (const roleId of roleIds) {
       const role = this.getRole(roleId);
       if (!role) throw new Error(`Unknown role: ${roleId}`);
-      const missing = role.requiredCapabilities.filter((c) => !granted.includes(c));
+      const missing = role.requiredCapabilities.filter((c) => !effective.has(c));
       if (missing.length > 0) missingByRole[roleId] = missing;
     }
     if (Object.keys(missingByRole).length > 0) {
@@ -367,6 +427,26 @@ export class AiMemberRegistry {
         `Member is not eligible for role(s), missing granted capabilities: ${JSON.stringify(missingByRole)}`,
       );
     }
+  }
+
+  /**
+   * Runs a member write and its history record as one unit, so a failure
+   * part-way through can never leave the member row changed with no audit
+   * entry (or the reverse). Nested calls are safe — better-sqlite3 uses
+   * savepoints — so composite operations like `replace()` can wrap the
+   * primitives they call.
+   */
+  private inTransaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
+  /** Current capability/role truth, loaded fresh so no read can use a cached view. */
+  private eligibilityContext(): EligibilityContext {
+    return loadEligibilityContext(this.db);
+  }
+
+  private derive(persisted: PersistedMember): AiMember {
+    return deriveMember(persisted, this.eligibilityContext());
   }
 
   private recordHistory(memberId: string, event: string, detail: Record<string, unknown>, actor: string): void {
@@ -420,13 +500,13 @@ export class AiMemberRegistry {
     const granted = input.grantedCapabilities ?? [];
     const warnings = this.validateGrants(advertised, granted);
 
-    const roleEligibility = input.roleEligibility ?? [];
-    if (roleEligibility.length > 0) {
-      this.validateRoleEligibility(roleEligibility, granted);
+    const assignedRoles = input.roleEligibility ?? [];
+    if (assignedRoles.length > 0) {
+      this.validateRoleEligibility(assignedRoles, granted);
     }
 
     const now = nowIso();
-    const member: AiMember = {
+    const persisted: PersistedMember = {
       id: input.id,
       displayName: input.displayName,
       providerId: input.providerId,
@@ -440,7 +520,7 @@ export class AiMemberRegistry {
       costClass: input.costClass,
       contextWindowTokens: input.contextWindowTokens ?? null,
       toolMetadata: input.toolMetadata ?? {},
-      roleEligibility,
+      assignedRoles,
       advertisedCapabilities: advertised,
       grantedCapabilities: granted,
       status: 'active',
@@ -451,21 +531,27 @@ export class AiMemberRegistry {
       createdAt: now,
       updatedAt: now,
     };
-    insertMemberRow(this.db, member);
-    this.recordHistory(
-      member.id,
-      'registered',
-      { providerId: member.providerId, modelId: member.modelId, modelVersion: member.modelVersion },
-      actor,
-    );
-    return { member, warnings };
+    this.inTransaction(() => {
+      insertMemberRow(this.db, persisted);
+      this.recordHistory(
+        persisted.id,
+        'registered',
+        {
+          providerId: persisted.providerId,
+          modelId: persisted.modelId,
+          modelVersion: persisted.modelVersion,
+        },
+        actor,
+      );
+    });
+    return { member: this.derive(persisted), warnings };
   }
 
   get(id: string): AiMember | null {
     const row = this.db.prepare(`SELECT * FROM hq_ai_members WHERE id = ?`).get(id) as
       | Record<string, unknown>
       | undefined;
-    return row ? rowToMember(row) : null;
+    return row ? this.derive(rowToMember(row)) : null;
   }
 
   list(filter?: { status?: MemberStatus }): AiMember[] {
@@ -494,8 +580,8 @@ export class AiMemberRegistry {
         );
       }
     }
-    const member = this.mustGet(id);
-    const next: AiMember = { ...member };
+    const before = this.mustGet(id);
+    const next: PersistedMember = { ...before };
     let warnings: string[] = [];
 
     if (patch.displayName !== undefined) next.displayName = patch.displayName;
@@ -513,17 +599,50 @@ export class AiMemberRegistry {
       const advertised = patch.advertisedCapabilities ?? next.advertisedCapabilities;
       const granted = patch.grantedCapabilities ?? next.grantedCapabilities;
       warnings = this.validateGrants(advertised, granted);
-      // A capability grant that no longer covers a currently-eligible role is
-      // left in place rather than silently dropping the role; setRoleEligibility
-      // must be called again explicitly if the registrar wants it re-checked.
       next.advertisedCapabilities = advertised;
       next.grantedCapabilities = granted;
     }
 
     next.updatedAt = nowIso();
-    updateMemberRow(this.db, next);
-    this.recordHistory(id, 'updated', { fields: Object.keys(patch) }, actor);
-    return { member: next, warnings };
+
+    // The grant change and every record of its authorization consequences
+    // commit together or not at all.
+    const member = this.inTransaction(() => {
+      updateMemberRow(this.db, next);
+      this.recordHistory(id, 'updated', { fields: Object.keys(patch) }, actor);
+
+      // Eligibility is derived, so revoking a capability here has ALREADY
+      // made the member ineligible for every role that needed it — there is
+      // no stored value left to go stale (issue #131). What still has to
+      // happen is that the change is not silent: any role this update just
+      // suspended is reported to the caller and written to the append-only
+      // history.
+      const updated = this.derive(next);
+      const newlySuspended = updated.suspendedRoles.filter(
+        (s) => !before.suspendedRoles.some((prev) => prev.roleId === s.roleId),
+      );
+      if (newlySuspended.length > 0) {
+        this.recordHistory(id, 'role_eligibility_suspended', { suspended: newlySuspended }, actor);
+        for (const suspension of newlySuspended) {
+          warnings.push(
+            `Role '${suspension.roleId}' is no longer eligible for this member: missing granted capabilities ${JSON.stringify(
+              suspension.missingCapabilities,
+            )}. The assignment is kept and becomes eligible again if the capabilities are restored.`,
+          );
+        }
+      }
+
+      const restored = updated.roleEligibility.filter((roleId) =>
+        before.suspendedRoles.some((prev) => prev.roleId === roleId),
+      );
+      if (restored.length > 0) {
+        this.recordHistory(id, 'role_eligibility_restored', { roles: restored }, actor);
+      }
+
+      return updated;
+    });
+
+    return { member, warnings };
   }
 
   /**
@@ -565,11 +684,13 @@ export class AiMemberRegistry {
     if (member.status !== 'active') {
       throw new Error(`Cannot disable member '${id}': status is '${member.status}', expected 'active'`);
     }
-    const handoverRequired = this.flipActiveAssignments(id);
-    const next: AiMember = { ...member, status: 'disabled', enabled: false, updatedAt: nowIso() };
-    updateMemberRow(this.db, next);
-    this.recordHistory(id, 'disabled', { reason, handoverCount: handoverRequired.length }, actor);
-    return { member: next, handoverRequired };
+    return this.inTransaction(() => {
+      const handoverRequired = this.flipActiveAssignments(id);
+      const next: PersistedMember = { ...member, status: 'disabled', enabled: false, updatedAt: nowIso() };
+      updateMemberRow(this.db, next);
+      this.recordHistory(id, 'disabled', { reason, handoverCount: handoverRequired.length }, actor);
+      return { member: this.derive(next), handoverRequired };
+    });
   }
 
   /** Marks a member removed. Row, history, and assignments are all kept — hard delete does not exist. */
@@ -578,19 +699,22 @@ export class AiMemberRegistry {
     if (member.status === 'removed') {
       throw new Error(`Member '${id}' is already removed`);
     }
-    const next: AiMember = { ...member, status: 'removed', enabled: false, updatedAt: nowIso() };
-    updateMemberRow(this.db, next);
-    this.recordHistory(id, 'removed', { reason }, actor);
-    return next;
+    const next: PersistedMember = { ...member, status: 'removed', enabled: false, updatedAt: nowIso() };
+    return this.inTransaction(() => {
+      updateMemberRow(this.db, next);
+      this.recordHistory(id, 'removed', { reason }, actor);
+      return this.derive(next);
+    });
   }
 
   /**
    * Registers a new member as the replacement for `oldId` (e.g. a model
    * upgrade), marks the old member `status: 'replaced'` with `replacedById`
-   * set, flips its active assignments to `handover_pending`, and copies role
-   * eligibility from the old member to the new one only for roles the new
-   * member's granted capabilities still satisfy. History is recorded on
-   * both members.
+   * set, flips its active assignments to `handover_pending`, and carries the
+   * old member's role ASSIGNMENTS forward only for the roles the new
+   * member's own effective capabilities actually satisfy — a replacement can
+   * never inherit eligibility it cannot back up. History is recorded on both
+   * members.
    */
   replace(
     oldId: string,
@@ -603,15 +727,15 @@ export class AiMemberRegistry {
     const handoverRequired = this.flipActiveAssignments(oldId);
 
     let newMember = registered;
-    const compatibleRoles = old.roleEligibility.filter((roleId) => {
+    const compatibleRoles = old.assignedRoles.filter((roleId) => {
       const role = this.getRole(roleId);
-      return !!role && role.requiredCapabilities.every((c) => newMember.grantedCapabilities.includes(c));
+      return !!role && role.requiredCapabilities.every((c) => newMember.effectiveCapabilities.includes(c));
     });
     if (compatibleRoles.length > 0) {
       newMember = this.setRoleEligibility(newMember.id, compatibleRoles, actor).member;
     }
 
-    const oldNext: AiMember = {
+    const oldNext: PersistedMember = {
       ...old,
       status: 'replaced',
       enabled: false,
@@ -622,24 +746,31 @@ export class AiMemberRegistry {
     this.recordHistory(oldId, 'replaced', { newMemberId: newMember.id, handoverCount: handoverRequired.length }, actor);
     this.recordHistory(newMember.id, 'replaced_predecessor', { oldMemberId: oldId }, actor);
 
-    return { oldMember: oldNext, newMember, warnings, handoverRequired };
+    return { oldMember: this.derive(oldNext), newMember, warnings, handoverRequired };
   }
 
   // ---- role eligibility ---------------------------------------------------
 
   /**
-   * Sets which roles a member is eligible for. Throws (naming the missing
-   * capabilities) if any role's `requiredCapabilities` is not a subset of
-   * the member's own `grantedCapabilities` — never silently drops the
-   * requirement or auto-grants what's missing.
+   * Assigns the roles a member is put forward for. Throws (naming the
+   * missing capabilities) if any role's `requiredCapabilities` is not
+   * currently satisfied — never silently drops the requirement or
+   * auto-grants what's missing.
+   *
+   * This sets INTENT only. The resulting `member.roleEligibility` is still
+   * derived from current capabilities on read, so a capability revoked after
+   * this call suspends the role automatically; restoring the capability
+   * makes it eligible again without the assignment having to be redone.
    */
   setRoleEligibility(memberId: string, roleIds: string[], actor = 'system'): { member: AiMember } {
     const member = this.mustGet(memberId);
     this.validateRoleEligibility(roleIds, member.grantedCapabilities);
-    const next: AiMember = { ...member, roleEligibility: roleIds, updatedAt: nowIso() };
-    updateMemberRow(this.db, next);
-    this.recordHistory(memberId, 'role_eligibility_set', { roleIds }, actor);
-    return { member: next };
+    const next: PersistedMember = { ...member, assignedRoles: roleIds, updatedAt: nowIso() };
+    return this.inTransaction(() => {
+      updateMemberRow(this.db, next);
+      this.recordHistory(memberId, 'role_eligibility_set', { roleIds }, actor);
+      return { member: this.derive(next) };
+    });
   }
 
   // ---- benchmarks / health --------------------------------------------------
@@ -649,19 +780,23 @@ export class AiMemberRegistry {
       throw new Error(`Benchmark score must be within 0-100, got ${benchmark.score}`);
     }
     const member = this.mustGet(memberId);
-    const next: AiMember = { ...member, benchmarks: [...member.benchmarks, benchmark], updatedAt: nowIso() };
-    updateMemberRow(this.db, next);
-    this.recordHistory(memberId, 'benchmark_recorded', { ...benchmark }, actor);
-    return next;
+    const next: PersistedMember = { ...member, benchmarks: [...member.benchmarks, benchmark], updatedAt: nowIso() };
+    return this.inTransaction(() => {
+      updateMemberRow(this.db, next);
+      this.recordHistory(memberId, 'benchmark_recorded', { ...benchmark }, actor);
+      return this.derive(next);
+    });
   }
 
   setHealth(memberId: string, health: MemberHealth, actor = 'system'): AiMember {
     const member = this.mustGet(memberId);
     const at = nowIso();
-    const next: AiMember = { ...member, health, healthCheckedAt: at, updatedAt: at };
-    updateMemberRow(this.db, next);
-    this.recordHistory(memberId, 'health_updated', { health }, actor);
-    return next;
+    const next: PersistedMember = { ...member, health, healthCheckedAt: at, updatedAt: at };
+    return this.inTransaction(() => {
+      updateMemberRow(this.db, next);
+      this.recordHistory(memberId, 'health_updated', { health }, actor);
+      return this.derive(next);
+    });
   }
 
   // ---- assignments ---------------------------------------------------------

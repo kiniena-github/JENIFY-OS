@@ -6,12 +6,19 @@
  * testable without wall-clock flakiness.
  *
  * CRITICAL SECURITY BOUNDARY: routing only SELECTS among members that
- * already hold a granted capability — it can never grant, escalate, or
- * widen any member's permissions. A member missing the required capability
- * is excluded outright (capability-mismatch), even if it advertises that
+ * already hold a capability — it can never grant, escalate, or widen any
+ * member's permissions. A member missing the required capability is
+ * excluded outright (capability-mismatch), even if it advertises that
  * capability; advertised claims are never trusted here (see
  * `registry/members.ts`). There is no code path in this file that writes
  * to `grantedCapabilities` or any other permission state.
+ *
+ * Both permission inputs this function reads — `effectiveCapabilities` and
+ * `roleEligibility` — are DERIVED fields, recomputed from the capability
+ * and role registries every time a member is read (`registry/eligibility.ts`).
+ * That is what makes it safe for this pure function to trust them: neither
+ * can be a stale snapshot of a capability the member has since lost, or of
+ * a role whose requirements have since been tightened (issue #131).
  */
 
 import type { AiMember, CostClass, PrivacyClass, WorkerType } from './members.js';
@@ -62,8 +69,8 @@ function hardFilterReason(member: AiMember, request: RoutingRequest): string | n
   if (member.health === 'unavailable') {
     return `member health is 'unavailable'`;
   }
-  if (!member.grantedCapabilities.includes(request.requiredCapability)) {
-    return `capability-mismatch: '${request.requiredCapability}' is not in grantedCapabilities (advertised alone is not enough)`;
+  if (!member.effectiveCapabilities.includes(request.requiredCapability)) {
+    return `capability-mismatch: '${request.requiredCapability}' is not in effectiveCapabilities (advertised alone is not enough; a granted capability that has been disabled registry-wide no longer counts)`;
   }
   if (request.privacyFloor && privacyRank(member.privacyClass) < privacyRank(request.privacyFloor)) {
     return `privacy class '${member.privacyClass}' is below the required floor '${request.privacyFloor}'`;
@@ -75,7 +82,14 @@ function hardFilterReason(member: AiMember, request: RoutingRequest): string | n
     return `cost class '${member.costClass}' exceeds the maximum '${request.maxCostClass}'`;
   }
   if (request.roleId && !member.roleEligibility.includes(request.roleId)) {
-    return `member is not eligible for role '${request.roleId}'`;
+    const suspension = member.suspendedRoles.find((s) => s.roleId === request.roleId);
+    return suspension
+      ? `member is assigned role '${request.roleId}' but is not currently eligible for it (${suspension.reason}${
+          suspension.missingCapabilities.length > 0
+            ? `: missing ${JSON.stringify(suspension.missingCapabilities)}`
+            : ''
+        })`
+      : `member is not eligible for role '${request.roleId}'`;
   }
   return null;
 }

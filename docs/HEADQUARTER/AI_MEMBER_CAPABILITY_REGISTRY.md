@@ -53,6 +53,10 @@ One row per AI worker instance. Key fields:
   / `unavailable`) + `healthCheckedAt`.
 - **Routing inputs**: `locality`, `privacyClass`, `costClass`,
   `contextWindowTokens`, `roleEligibility`, `benchmarks`.
+- **Roles**: `assignedRoles` is the only stored role fact — the roles a
+  registrar deliberately put this member forward for. `roleEligibility`,
+  `effectiveCapabilities` and `suspendedRoles` are **derived on every read**
+  and never stored (see "Eligibility is derived, never stored" below).
 - `toolMetadata` — an opaque JSON bag for anything provider-specific that
   isn't worth its own column (never used by permission checks or routing).
 
@@ -60,7 +64,8 @@ One row per AI worker instance. Key fields:
 
 Every lifecycle event (`registered`, `updated`, `disabled`, `removed`,
 `replaced`, `replaced_predecessor`, `assigned`, `assignment_completed`,
-`role_eligibility_set`, `benchmark_recorded`, `health_updated`,
+`role_eligibility_set`, `role_eligibility_suspended`,
+`role_eligibility_restored`, `benchmark_recorded`, `health_updated`,
 `identity_verification_failed`, ...) as one row: `memberId`, `at`, `event`,
 `detail` (JSON), `actor`. **No row is ever updated or deleted.** This is the
 audit trail a Founder (or a future review) can always replay.
@@ -77,7 +82,10 @@ counts `status = 'active'` rows on read.
 Named role requirement definitions: `roleId`, `requiredCapabilities` (JSON
 array of capability ids), `description`. A member's `roleEligibility` may
 only ever include a role whose `requiredCapabilities` is a subset of that
-member's own `grantedCapabilities` — enforced by `setRoleEligibility`.
+member's own effective capabilities. `setRoleEligibility` enforces that at
+assignment time, and `registry/eligibility.ts` re-establishes it on every
+read thereafter, so changing a role definition here takes effect for every
+member immediately.
 
 All four tables are created by `registry/db.ts`'s `ensureRegistrySchema(db)`
 — its own DDL, run against the existing `HqDatabase` from `store/db.ts`
@@ -85,6 +93,45 @@ without editing that file. Idempotent: safe to call on every registry
 construction and repeatedly in tests.
 
 ## Security properties
+
+### 0. Eligibility is derived, never stored (issue #131)
+
+Independent review of the first implementation found a High-severity defect:
+`update()` could reduce `grantedCapabilities` while leaving the stored
+`roleEligibility` untouched, so a member stayed marked eligible for a role it
+could no longer perform and `rankMembers()` would route role-gated work to
+it. The same staleness was reachable by tightening a role definition,
+disabling a capability registry-wide, or importing a snapshot.
+
+The correction is structural rather than a patch on each mutation path.
+Exactly one role fact is persisted — `assignedRoles`, the registrar's intent
+— and `registry/eligibility.ts` recomputes the rest from current truth on
+every read:
+
+```
+effectiveCapabilities = grantedCapabilities ∩ {registered AND enabled}
+roleEligibility       = assignedRoles whose requirements ⊆ effectiveCapabilities
+suspendedRoles        = assignedRoles that fail that test, with the reason
+```
+
+There is no stored eligibility left to go stale, so no mutation path can
+forget to revalidate one. Two consequences worth knowing:
+
+- **Derivation can only narrow.** A role is never added to eligibility that a
+  registrar did not explicitly assign, so nothing here can widen permissions.
+- **Intent survives a revocation.** Revoking a capability suspends the role
+  rather than deleting the assignment, so restoring the capability makes the
+  member eligible again without the Founder having to re-assign it — while
+  the member is correctly ineligible for the whole period in between.
+  `update()` returns a warning and writes `role_eligibility_suspended` /
+  `role_eligibility_restored` to the append-only history, so the transition
+  is never silent.
+
+A database written before this change is upgraded in place by
+`ensureRegistrySchema`: the old `role_eligibility` column held the
+registrar's assignments, so its values carry over into `assigned_roles` and
+eligibility is recomputed from them — a stale value cannot survive the
+upgrade.
 
 ### 1. Advertised vs. granted (the core rule)
 

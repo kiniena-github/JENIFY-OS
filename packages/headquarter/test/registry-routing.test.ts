@@ -4,7 +4,15 @@ import type { AiMember } from '../src/registry/members.js';
 
 const NOW = new Date('2026-08-27T00:00:00.000Z');
 
+/**
+ * Builds a member the way the registry would return one: `rankMembers` reads
+ * the DERIVED fields, so the factory keeps them coherent with the persisted
+ * ones (`effectiveCapabilities` mirrors the grants, `roleEligibility` mirrors
+ * the assignments) unless a test overrides them deliberately.
+ */
 function makeMember(overrides: Partial<AiMember> = {}): AiMember {
+  const grantedCapabilities = overrides.grantedCapabilities ?? ['coding'];
+  const assignedRoles = overrides.assignedRoles ?? overrides.roleEligibility ?? [];
   return {
     id: 'member-1',
     displayName: 'Test Member',
@@ -19,9 +27,12 @@ function makeMember(overrides: Partial<AiMember> = {}): AiMember {
     costClass: 'medium',
     contextWindowTokens: 128000,
     toolMetadata: {},
-    roleEligibility: [],
+    assignedRoles,
     advertisedCapabilities: ['coding'],
-    grantedCapabilities: ['coding'],
+    grantedCapabilities,
+    effectiveCapabilities: grantedCapabilities,
+    roleEligibility: assignedRoles,
+    suspendedRoles: [],
     status: 'active',
     health: 'healthy',
     healthCheckedAt: null,
