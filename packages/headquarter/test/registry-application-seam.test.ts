@@ -217,9 +217,16 @@ describe('composition can only narrow, never widen', () => {
     expect(composite().assignability('legacy').assignable).toBe(true);
   });
 
-  it('a worker known only to the Registry is still governed by it', () => {
+  it('a worker known ONLY to the Registry holds nothing and cannot be assigned', () => {
+    // #182: the Registry may narrow and nominate, never enrol. Before it was
+    // supplied this id was `worker_unknown`; supplying it must not change that.
     registerMember('m1', ['docs.write']);
-    expect([...composite().allowedCapabilities('m1')]).toEqual(['docs.write']);
+    expect([...composite().allowedCapabilities('m1')]).toEqual([]);
+    const verdict = composite().assignability('m1');
+    expect(verdict.assignable).toBe(false);
+    expect(verdict).toMatchObject({ reason: 'worker_unknown', details: { knownTo: 'registry_only' } });
+    // Identity is still recognised, so the id can never be taken for a human.
+    expect(composite().isRegistered('m1')).toBe(true);
   });
 
   it('either directory refusing assignability is enough to refuse', () => {
