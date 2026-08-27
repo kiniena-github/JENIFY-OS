@@ -20,7 +20,7 @@ export interface EvidenceItem {
   /** ISO date/instant when known. */
   date?: string;
   /** Where the date came from; decides confidence. */
-  dateSource?: 'git' | 'github-api' | 'filename' | 'manual' | 'unknown';
+  dateSource?: 'git' | 'github-api' | 'drive-api' | 'filename' | 'manual' | 'unknown';
   body?: string;
   refs?: RelatedRefs;
   /** Original evidence location (URL or repo path). Preserved verbatim. */
@@ -151,7 +151,9 @@ export interface ReconstructOptions {
 }
 
 function confidenceFor(source: EvidenceItem['dateSource']): DateConfidence {
-  if (source === 'git' || source === 'github-api') return 'exact';
+  // Authoritative source timestamps: git author date, GitHub API, Drive file
+  // metadata (issue #140 — the Drive connector reports createdTime verbatim).
+  if (source === 'git' || source === 'github-api' || source === 'drive-api') return 'exact';
   if (source === 'filename' || source === 'manual') return 'inferred';
   return 'estimated';
 }
