@@ -1,5 +1,6 @@
 import {
   ALL_RESULT_MARKERS,
+  PROVIDERS,
   PROVIDER_REGISTRY,
   isProviderId,
   isRole,
@@ -189,8 +190,52 @@ export interface RoutingDecision {
    * the Founder's staffing decided this, not a hard-coded vendor.
    */
   staffedFromRole: boolean;
+  /**
+   * The ONE provider whose workflow must post the routing-blocked notice for
+   * this decision, or null when there is nothing blocked to report.
+   *
+   * Every provider that `observesAllAiTasks` wakes up for every `[AI TASK]`
+   * issue and computes this same decision. Without a single named owner they
+   * would each post the same notice (spam); with the owner gate keyed on
+   * outcome instead of on `blocked`, a partially-blocked ROUTE posted nothing
+   * at all (silence). Naming the owner here — in the one tested decision both
+   * workflows read — is what makes the report exactly-once.
+   */
+  blockedReportOwner: ProviderId | null;
+  /**
+   * Stable identity of THIS blocked notice: same issue + same blocked set =>
+   * same key. The posted comment carries it, so a re-label, a re-dispatch or a
+   * repeated comment can recognise its own earlier notice and not post it
+   * twice — while a genuinely different block still gets reported.
+   */
+  blockedReportKey: string | null;
   reason: string;
   dedupeKey?: string;
+}
+
+/**
+ * Which provider is responsible for posting the shared blocked notice?
+ *
+ * The first provider, in registry order, whose workflow observes every AI task.
+ * Deliberately independent of connectivity and of who was requested: the notice
+ * is posted with the repository's own GitHub token, so a provider missing its
+ * OWN credential can still truthfully report that someone else is blocked. That
+ * matters because the providers most likely to be blocked (`local-cli`: Codex,
+ * Jules) have no CI workflow at all and can never report themselves.
+ */
+export function blockedReportOwnerFor(blocked: ProviderDecision[]): ProviderId | null {
+  if (blocked.length === 0) return null;
+  return PROVIDERS.find((p) => PROVIDER_REGISTRY[p].observesAllAiTasks) ?? null;
+}
+
+/** Stable per-issue identity for a blocked notice; see `blockedReportKey`. */
+export function blockedReportKeyFor(blocked: ProviderDecision[]): string | null {
+  if (blocked.length === 0) return null;
+  return blocked
+    .map((b) => b.provider)
+    .slice()
+    .sort()
+    .join('+');
 }
 
 /** Human-readable blocked line, e.g. "ROUTING BLOCKED — CODEX NOT CONNECTED". */
@@ -205,6 +250,8 @@ export function decideRouting(req: RoutingRequest): RoutingDecision {
     role: null as Role | null,
     dispatchTo: [] as ProviderId[],
     staffedFromRole: false,
+    blockedReportOwner: null as ProviderId | null,
+    blockedReportKey: null as string | null,
     dedupeKey: req.dedupeKey,
   };
   const assignments = req.assignments ?? DEFAULT_ROLE_ASSIGNMENTS;
@@ -257,11 +304,26 @@ export function decideRouting(req: RoutingRequest): RoutingDecision {
   }
 
   // ---- 4. unknown provider tags fail closed ------------------------------
-  if (parsed.unknownTags.length > 0 && parsed.requestedProviders.length === 0) {
+  // ANY unrecognised tag in the routing region blocks the whole task, even when
+  // a recognised provider sits beside it.
+  //
+  // Jules review of PR #153 (report PR #163) found this guard fail-OPEN: it
+  // previously also required `parsed.requestedProviders.length === 0`, so
+  // `[AI TASK][CLAUDE][CODEXX]` recognised CLAUDE, skipped the guard entirely
+  // and fired Claude. A typo'd vendor tag is not a harmless extra word — it is
+  // an instruction we did not understand, and the safe reading of an
+  // instruction we did not understand is to run NO worker and say so. Refusing
+  // to guess also protects the case the typo was meant to be: had `CODEXX`
+  // been `CODEX`, the task wanted a second provider's share done, and running
+  // only Claude would silently under-deliver while looking successful.
+  if (parsed.unknownTags.length > 0) {
     return {
       ...base,
       outcome: 'BLOCKED',
-      reason: `Unrecognised routing tag(s): ${parsed.unknownTags.join(', ')}. Refusing to default to Claude.`,
+      requestedProviders: [],
+      reason:
+        `Unrecognised routing tag(s): ${parsed.unknownTags.join(', ')}. ` +
+        'Refusing to guess a provider; no worker was started.',
     };
   }
 
@@ -296,6 +358,8 @@ export function decideRouting(req: RoutingRequest): RoutingDecision {
       blocked,
       role: parsed.role,
       staffedFromRole,
+      blockedReportOwner: blockedReportOwnerFor(blocked),
+      blockedReportKey: blockedReportKeyFor(blocked),
       reason: blocked.map((b) => `${blockedHeadline(b.provider)} — ${b.reason}`).join(' | '),
     };
   }
@@ -308,6 +372,10 @@ export function decideRouting(req: RoutingRequest): RoutingDecision {
     blocked,
     role: parsed.role,
     staffedFromRole,
+    // A partially-blocked route reports too. Claude doing its own share is not
+    // a reason to stay silent about the share nobody did.
+    blockedReportOwner: blockedReportOwnerFor(blocked),
+    blockedReportKey: blockedReportKeyFor(blocked),
     reason:
       blocked.length === 0
         ? `Routing to ${live.join(', ')}.`

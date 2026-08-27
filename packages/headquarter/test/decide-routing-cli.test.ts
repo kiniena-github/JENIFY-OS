@@ -149,7 +149,7 @@ describe('decide-routing.ts — workflow entry point', () => {
     it('an unrecognised provider tag refuses to default to Claude', () => {
       const r = decide({ ISSUE_TITLE: '[AI TASK][NOTAPROVIDER] x', TARGET_PROVIDER: 'CLAUDE' });
       expect(r.outcome).toBe('BLOCKED');
-      expect(r.reason).toContain('Refusing to default to Claude');
+      expect(r.reason).toContain('Refusing to guess a provider');
     });
 
     it('a mixed [CLAUDE][CODEX] task runs Claude only and reports Codex blocked', () => {

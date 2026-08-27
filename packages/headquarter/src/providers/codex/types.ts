@@ -118,6 +118,8 @@ export type CodexFailureKind =
   | 'unparseable_result'
   | 'empty_result'
   | 'worktree_mutated'
+  /** The session rollout file could not be proven to belong to this run. */
+  | 'session_unbound'
   /** The provider itself refused: exhausted subscription quota, rate limit, server fault. */
   | 'provider_error'
   /** The provider's allowance is spent. A retry later may succeed; nothing is wrong with the code. */

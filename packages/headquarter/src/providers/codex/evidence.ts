@@ -121,6 +121,100 @@ export function isQuotaError(message: string | null): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Session binding — "the rollout we read must be the run we started"
+// ---------------------------------------------------------------------------
+
+/**
+ * A Codex session id is a UUID. Requiring the full shape matters because the
+ * session id is used to LOCATE the rollout file, and the rollout file is where
+ * the attested commit and model come from. A short or oddly-shaped id — `a`,
+ * `0`, `-`, a fragment of a path — would match far more than the intended file.
+ *
+ * The id arrives from the CLI's own event stream, which is runtime output: it
+ * is evidence to be validated, not a trusted parameter.
+ */
+const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isPlausibleSessionId(value: string | null | undefined): boolean {
+  return typeof value === 'string' && SESSION_ID_RE.test(value.trim());
+}
+
+/**
+ * Does this rollout FILENAME belong to this session?
+ *
+ * The id must appear as a whole delimited token, not as a substring. Codex
+ * names rollouts `rollout-<timestamp>-<uuid>.jsonl`, so the id is always
+ * bounded by `-`, `.`, `_` or the ends of the name. Plain `includes()` — what
+ * this replaced — would bind session `…-abc` to a file for a DIFFERENT session
+ * whose name merely contained those characters, and the caller would then read
+ * that other run's attested commit and model as if they were this run's.
+ */
+export function sessionRolloutNameMatches(fileName: string, sessionId: string): boolean {
+  if (!isPlausibleSessionId(sessionId)) return false;
+  if (typeof fileName !== 'string' || fileName === '') return false;
+  const id = sessionId.trim().toLowerCase();
+  const name = fileName.toLowerCase();
+  const at = name.indexOf(id);
+  if (at < 0) return false;
+  const boundary = (ch: string | undefined): boolean => ch === undefined || /[-._/\\]/.test(ch);
+  return boundary(name[at - 1]) && boundary(name[at + id.length]);
+}
+
+/** Session id the rollout file itself declares in its `session_meta` record. */
+export function extractRolloutSessionId(rollout: string | null | undefined): string | null {
+  for (const entry of parseJsonl(rollout ?? '')) {
+    if (str(entry['type']) !== 'session_meta') continue;
+    const payload = (entry['payload'] ?? {}) as Json;
+    const id = str(payload['session_id']) ?? str(payload['id']);
+    if (id != null) return id;
+  }
+  return null;
+}
+
+export type SessionBinding =
+  | { ok: true; sessionId: string }
+  | { ok: false; message: string };
+
+/**
+ * Verify that a rollout file genuinely belongs to the session we executed.
+ *
+ * Finding a file by name is not proof of ownership — a name can collide, and a
+ * runtime that emits a chosen `thread_id` picks which file we go looking for.
+ * So the file's OWN declared session id must equal the one the run attested. A
+ * rollout that declares nothing, or declares someone else, is refused rather
+ * than mined for a commit SHA that would then be reported as this run's.
+ */
+export function verifyRolloutBinding(expectedSessionId: string | null, rollout: string | null): SessionBinding {
+  if (!isPlausibleSessionId(expectedSessionId)) {
+    return {
+      ok: false,
+      message:
+        'The Codex runtime did not attest a well-formed session id, so no rollout file can be bound to ' +
+        'this run. The result is rejected rather than attributed to an unidentified session.',
+    };
+  }
+  const declared = extractRolloutSessionId(rollout);
+  if (declared == null) {
+    return {
+      ok: false,
+      message:
+        'The session rollout file declares no session id of its own, so it cannot be proven to belong ' +
+        'to this run. Its attestations are refused.',
+    };
+  }
+  if (declared.trim().toLowerCase() !== String(expectedSessionId).trim().toLowerCase()) {
+    return {
+      ok: false,
+      message:
+        `The session rollout file declares session ${declared}, but this run attested session ` +
+        `${expectedSessionId}. Refusing to read another session's attested commit and model as if they ` +
+        'were this run\'s.',
+    };
+  }
+  return { ok: true, sessionId: declared.trim() };
+}
+
+// ---------------------------------------------------------------------------
 // SHA verification — "a review cannot silently target a stale SHA"
 // ---------------------------------------------------------------------------
 

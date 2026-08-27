@@ -672,7 +672,7 @@ describe('11: unknown providers still fail closed', () => {
     const d = decideRouting(req({ issueTitle: '[AI TASK][CODE X] x', secrets: LOCAL_SECRETS }));
     expect(d.outcome).toBe('BLOCKED');
     expect(d.dispatchTo).toEqual([]);
-    expect(d.reason).toContain('Refusing to default to Claude');
+    expect(d.reason).toContain('Refusing to guess a provider');
   });
 
   it('an unknown provider in a run directive is refused', () => {

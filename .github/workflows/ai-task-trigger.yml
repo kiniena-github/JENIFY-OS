@@ -110,25 +110,41 @@ jobs:
           HAS_GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY != '' }}
         run: npx --yes tsx .github/scripts/decide-routing.ts
 
+      # Gated on OWNERSHIP, not on outcome.
+      #
+      # Two independent defects lived in the old gate. It required
+      # `outcome == 'BLOCKED'`, so a task where one provider ran and another was
+      # blocked (outcome ROUTE, blocked non-empty) reported NOTHING — the
+      # blocked provider's share was silently dropped. And every workflow that
+      # wakes for an AI task computed the same notice, so the Gemini lane had to
+      # narrow itself by hand (`requested == 'GEMINI'`) to avoid double-posting,
+      # which is what created the silence in the mixed case.
+      #
+      # `should_report_blocked` is true for exactly ONE workflow per decision,
+      # and it keys on `blocked` rather than on outcome. Truthful and once.
       - name: Report fail-closed routing to the issue
-        if: steps.routing.outputs.outcome == 'BLOCKED' && steps.routing.outputs.blocked_report != ''
+        if: steps.routing.outputs.should_report_blocked == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
           REPORT: ${{ steps.routing.outputs.blocked_report }}
+          MARKER: ${{ steps.routing.outputs.blocked_marker }}
         run: |
           printf '%s\n' "$REPORT" > blocked.md
           # Duplicate delivery guard: an issue can be re-labelled, re-dispatched
-          # or re-commented. If the identical blocked notice is already the most
-          # recent one on this issue, do not post it again.
+          # or re-commented. The marker identifies this exact blocked set, so an
+          # identical notice is recognised ANYWHERE in the thread rather than
+          # only as the most recent comment — while a genuinely different block
+          # (a different provider going down) still gets reported.
           existing=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" \
-            | jq -s -r 'add // [] | map(select(.body | contains("<!-- jenify-routing-blocked -->"))) | last | .body // ""')
-          if [ "$existing" = "$(cat blocked.md)" ]; then
-            echo "Identical routing-blocked notice already present on issue #$ISSUE_NUMBER; not posting a duplicate."
+            | jq -s -r --arg marker "$MARKER" \
+              'add // [] | map(select(.body | contains($marker))) | length')
+          if [ "${existing:-0}" != "0" ]; then
+            echo "This routing-blocked notice ($MARKER) is already on issue #$ISSUE_NUMBER; not posting a duplicate."
           else
             gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file blocked.md
           fi
-          echo "::warning::Routing blocked; no provider was substituted."
+          echo "::warning::A requested provider was blocked; no provider was substituted."
 
       - name: Stop unless Claude is the routed provider
         if: steps.routing.outputs.should_run != 'true'

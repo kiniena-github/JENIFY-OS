@@ -19,7 +19,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { providerConnectivity } from '../../routing/index.js';
-import { extractEvidence, extractRuntimeError, isQuotaError, verifyReviewedSha } from './evidence.js';
+import {
+  extractEvidence,
+  extractRuntimeError,
+  isPlausibleSessionId,
+  isQuotaError,
+  sessionRolloutNameMatches,
+  verifyReviewedSha,
+  verifyRolloutBinding,
+} from './evidence.js';
 import { probeCodex, type CodexProbeResult } from './probe.js';
 import { CODEX_REVIEW_SCHEMA, buildReviewPrompt, parseReviewOutput } from './review.js';
 import { EMPTY_EVIDENCE, type CodexReviewOutcome, type CodexReviewRequest } from './types.js';
@@ -157,11 +165,22 @@ function fail(
 /**
  * Find the session rollout file the CLI just wrote, so its attested metadata
  * (model, CLI version, git commit) can be read back.
+ *
+ * Fails closed in three ways, all of them deliberate:
+ *
+ *  - the session id must be a well-formed UUID (it comes from runtime output,
+ *    not from us);
+ *  - the id must match the filename as a whole delimited token, never as a
+ *    bare substring;
+ *  - if MORE THAN ONE file matches, none is returned. An ambiguous match is
+ *    exactly the case where picking one silently would bind the wrong run's
+ *    attested commit to this review, and directory order is not evidence.
  */
-function findSessionRollout(codexHome: string, sessionId: string | null): string | null {
-  if (sessionId == null) return null;
-  const roots = [join(codexHome, 'sessions')];
-  const stack = [...roots];
+export function findSessionRollout(codexHome: string, sessionId: string | null): string | null {
+  if (!isPlausibleSessionId(sessionId)) return null;
+  const id = String(sessionId).trim();
+  const stack = [join(codexHome, 'sessions')];
+  const matches: string[] = [];
   while (stack.length > 0) {
     const dir = stack.pop();
     if (dir == null || !existsSync(dir)) continue;
@@ -180,10 +199,12 @@ function findSessionRollout(codexHome: string, sessionId: string | null): string
         continue;
       }
       if (isDir) stack.push(full);
-      else if (entry.includes(sessionId)) return full;
+      else if (sessionRolloutNameMatches(entry, id)) matches.push(full);
     }
   }
-  return null;
+  // Exactly one, or nothing. Two files claiming the same session is a fact we
+  // cannot resolve, and guessing would defeat the point of the check.
+  return matches.length === 1 ? (matches[0] ?? null) : null;
 }
 
 /**
@@ -314,6 +335,15 @@ export function runCodexReview(request: CodexReviewRequest, options: RunOptions 
     });
   const rollout = readRollout(evidence.sessionId);
   if (rollout != null) {
+    // Locating a file by name is not proof it is OUR run's file. The rollout is
+    // the sole source of the attested commit and model, so an unbound or
+    // mis-bound rollout is rejected outright rather than quietly ignored: if we
+    // merely dropped it we would fall through reporting "no SHA attested",
+    // which hides that a foreign session's evidence was offered to us.
+    const binding = verifyRolloutBinding(evidence.sessionId, rollout);
+    if (!binding.ok) {
+      return fail(request, 'session_unbound', binding.message, evidence);
+    }
     // keep the exec-only evidence as a floor; missing fields render as _unverified_
     evidence = extractEvidence({ execEvents: events, sessionRollout: rollout });
   }

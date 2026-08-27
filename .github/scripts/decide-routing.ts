@@ -27,6 +27,8 @@
  *   dispatch_to       comma-separated providers that will run
  *   role              MANAGER | BUILDER | REVIEWER | RESEARCHER | '' (never implies a provider)
  *   blocked_report    markdown block for unconnected providers ('' if none)
+ *   blocked_marker    stable HTML marker identifying this exact blocked notice
+ *   should_report_blocked  'true' only for the ONE workflow that must post it
  */
 import { appendFileSync } from 'node:fs';
 import {
@@ -93,17 +95,36 @@ const decision = decideRouting({
 const shouldRun =
   target !== '' && decision.outcome === 'ROUTE' && decision.dispatchTo.includes(target as ProviderId);
 
+/**
+ * The blocked notice is keyed by WHICH providers are blocked, so the posting
+ * workflow can recognise its own earlier notice anywhere in the thread rather
+ * than only as the most recent comment.
+ */
 const blockedReport =
   decision.blocked.length === 0
     ? ''
     : [
-        '<!-- jenify-routing-blocked -->',
+        `<!-- jenify-routing-blocked:${decision.blockedReportKey ?? 'unknown'} -->`,
         '## Routing blocked',
+        '',
+        // Say plainly whether anything ran. A partially-blocked task used to be
+        // reported as nothing at all, which read as success.
+        decision.dispatchTo.length === 0
+          ? '**No worker was started for this task.**'
+          : `**${decision.dispatchTo.join(', ')} ${decision.dispatchTo.length === 1 ? 'is doing its' : 'are doing their'} own share of this task. The following requested provider(s) did NOT run, and their share of the task is NOT done:**`,
         '',
         ...decision.blocked.map((b) => `**${blockedHeadline(b.provider)}**\n\n${b.reason}\n`),
         '',
         '_The task was NOT re-routed to a different provider. JENIFY never substitutes one AI for another._',
       ].join('\n');
+
+/**
+ * Exactly one workflow posts. Every provider that observes all AI tasks reaches
+ * this same decision, so without the owner gate the notice would be posted once
+ * per woken workflow.
+ */
+const shouldReportBlocked =
+  target !== '' && decision.blocked.length > 0 && decision.blockedReportOwner === (target as ProviderId);
 
 setOutput('outcome', decision.outcome);
 setOutput('should_run', shouldRun ? 'true' : 'false');
@@ -112,6 +133,8 @@ setOutput('requested', decision.requestedProviders.join(','));
 setOutput('dispatch_to', decision.dispatchTo.join(','));
 setOutput('role', decision.role ?? '');
 setOutput('blocked_report', blockedReport);
+setOutput('blocked_marker', decision.blockedReportKey == null ? '' : `<!-- jenify-routing-blocked:${decision.blockedReportKey} -->`);
+setOutput('should_report_blocked', shouldReportBlocked ? 'true' : 'false');
 
 console.log(`[routing] trigger=${triggerKind()} target=${target || '<none>'}`);
 console.log(`[routing] outcome=${decision.outcome} dispatchTo=[${decision.dispatchTo.join(', ')}] shouldRun=${shouldRun}`);

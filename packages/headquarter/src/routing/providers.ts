@@ -86,6 +86,20 @@ export interface ProviderDef {
    * worker's report can never re-trigger that same worker.
    */
   resultMarker: string | null;
+  /**
+   * True when this provider's executor workflow is triggered for EVERY
+   * `[AI TASK]` issue, not only for tasks addressed to it.
+   *
+   * This is a statement of fact about the workflow's pre-gate, and it is what
+   * makes a provider eligible to post the SHARED routing-blocked notice on
+   * behalf of a provider that has no workflow of its own (a `local-cli`
+   * provider observes nothing in CI and can never report its own block).
+   *
+   * Exactly one eligible provider is chosen as the reporter for any given
+   * decision — see `blockedReportOwner` in route.ts — so a blocked provider is
+   * reported once rather than once per workflow that happened to wake up.
+   */
+  observesAllAiTasks: boolean;
   /** Human-readable note shown when the provider is unavailable. */
   note?: string;
 }
@@ -99,6 +113,9 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderDef> = {
     executor: '.github/workflows/ai-task-trigger.yml',
     executorKind: 'github-workflow',
     resultMarker: 'jenify-claude-result',
+    // ai-task-trigger.yml pre-gates on `startsWith(title, '[AI TASK]')`, so it
+    // wakes for every AI task regardless of which provider was requested.
+    observesAllAiTasks: true,
   },
   GEMINI: {
     id: 'GEMINI',
@@ -108,6 +125,8 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderDef> = {
     executor: '.github/workflows/ai-task-gemini.yml',
     executorKind: 'github-workflow',
     resultMarker: 'jenify-gemini-result',
+    // ai-task-gemini.yml carries the same catch-all pre-gate.
+    observesAllAiTasks: true,
   },
   CODEX: {
     id: 'CODEX',
@@ -117,6 +136,8 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderDef> = {
     executor: 'packages/headquarter/src/cli/codex-review.ts',
     executorKind: 'local-cli',
     resultMarker: 'jenify-codex-result',
+    // Local CLI: nothing of Codex's runs in CI, so it can never report itself.
+    observesAllAiTasks: false,
     note:
       'Codex executes on the Founder workstation through the installed Codex CLI using the ' +
       'existing ChatGPT subscription session (no API key, no new paid service). It is NOT ' +
@@ -131,19 +152,20 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderDef> = {
     executor: 'jules (npm @google/jules CLI)',
     executorKind: 'local-cli',
     resultMarker: 'jenify-jules-result',
+    observesAllAiTasks: false,
     note:
       'Jules is driven from the Founder workstation, or opens its own review PR directly on ' +
       'GitHub. It has no GitHub Actions credential, so CI fails closed for JULES.',
   },
-  XAI: { id: 'XAI', label: 'xAI / Grok', requiredSecrets: ['XAI_API_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-xai-result' },
-  MICROSOFT: { id: 'MICROSOFT', label: 'Microsoft / Copilot', requiredSecrets: ['MICROSOFT_AI_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-microsoft-result' },
-  META: { id: 'META', label: 'Meta / Llama', requiredSecrets: ['META_AI_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-meta-result' },
-  MISTRAL: { id: 'MISTRAL', label: 'Mistral', requiredSecrets: ['MISTRAL_API_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-mistral-result' },
-  QWEN: { id: 'QWEN', label: 'Qwen', requiredSecrets: ['QWEN_API_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-qwen-result' },
-  DEEPSEEK: { id: 'DEEPSEEK', label: 'DeepSeek', requiredSecrets: ['DEEPSEEK_API_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-deepseek-result' },
-  LOCAL: { id: 'LOCAL', label: 'Local / self-hosted model', requiredSecrets: ['LOCAL_MODEL_ENDPOINT'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-local-result' },
-  CUSTOM: { id: 'CUSTOM', label: 'Custom provider', requiredSecrets: ['CUSTOM_AI_ENDPOINT'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-custom-result' },
-  JENIFY: { id: 'JENIFY', label: 'Future JENIFY AI', requiredSecrets: ['JENIFY_AI_ENDPOINT'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-jenify-result' },
+  XAI: { id: 'XAI', label: 'xAI / Grok', requiredSecrets: ['XAI_API_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-xai-result', observesAllAiTasks: false },
+  MICROSOFT: { id: 'MICROSOFT', label: 'Microsoft / Copilot', requiredSecrets: ['MICROSOFT_AI_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-microsoft-result', observesAllAiTasks: false },
+  META: { id: 'META', label: 'Meta / Llama', requiredSecrets: ['META_AI_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-meta-result', observesAllAiTasks: false },
+  MISTRAL: { id: 'MISTRAL', label: 'Mistral', requiredSecrets: ['MISTRAL_API_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-mistral-result', observesAllAiTasks: false },
+  QWEN: { id: 'QWEN', label: 'Qwen', requiredSecrets: ['QWEN_API_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-qwen-result', observesAllAiTasks: false },
+  DEEPSEEK: { id: 'DEEPSEEK', label: 'DeepSeek', requiredSecrets: ['DEEPSEEK_API_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-deepseek-result', observesAllAiTasks: false },
+  LOCAL: { id: 'LOCAL', label: 'Local / self-hosted model', requiredSecrets: ['LOCAL_MODEL_ENDPOINT'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-local-result', observesAllAiTasks: false },
+  CUSTOM: { id: 'CUSTOM', label: 'Custom provider', requiredSecrets: ['CUSTOM_AI_ENDPOINT'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-custom-result', observesAllAiTasks: false },
+  JENIFY: { id: 'JENIFY', label: 'Future JENIFY AI', requiredSecrets: ['JENIFY_AI_ENDPOINT'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-jenify-result', observesAllAiTasks: false },
 };
 
 /** Every result marker in the registry — nothing carrying one may re-trigger. */
