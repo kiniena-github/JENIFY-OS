@@ -20,7 +20,12 @@
  *     answer is the INTERSECTION of what each allows. Neither source can widen
  *     the other, so introducing the Registry can never grant a worker something
  *     the operator directory did not already permit — and vice versa.
- *  3. The Operator remains the final capability and risk authority. This layer
+ *  3. The base execution directory stays the CANONICAL worker-registration
+ *     authority. A worker only the Registry knows is nominatable but not
+ *     executable: it holds no capabilities and is never assignable, because
+ *     supplying a Registry must not enrol anybody into execution. See
+ *     `NarrowingWorkerDirectory` for why that is the whole safety argument.
+ *  4. The Operator remains the final capability and risk authority. This layer
  *     only supplies the allow-list; `operator/policy.ts` still applies risk
  *     class, side-effect and approval rules on top, unchanged.
  *
@@ -105,16 +110,49 @@ export class RegistryWorkerDirectory implements WorkerDirectoryPort {
 }
 
 /**
- * Composes two directories so neither can widen the other.
+ * Composes two directories so that supplying a Registry can only ever REMOVE
+ * authority, never add any.
  *
- * Where both know a worker, capabilities are the INTERSECTION and the worker is
- * assignable only if BOTH say so. Where only one knows the worker, that one
- * answers — so adding a Registry does not strand workers that exist only in the
- * operator directory, and a Registry-only worker is still governed.
+ * The base directory is the canonical execution authority: membership in it is
+ * what makes an id executable at all. On top of that:
  *
- * The intersection is what makes this safe to switch on: it is impossible for
- * the seam to hand the policy engine a capability that the pre-integration
- * behaviour would not also have handed it.
+ * - **Both know the worker** — capabilities are the INTERSECTION, and the
+ *   worker is assignable only if BOTH say so (either refusal wins).
+ * - **Base only** — the base answers alone, so enabling the Registry does not
+ *   strand workers that exist only in the operator directory. Nothing is
+ *   widened: this is exactly the pre-integration answer.
+ * - **Registry only** — no capabilities, never assignable. The Registry may
+ *   narrow and it may nominate; it may not enrol. See below.
+ *
+ * ## Why a Registry-only worker holds nothing (issue #182)
+ *
+ * The first version of this class let the Registry answer alone for a worker
+ * the base did not know. That looked symmetrical, but it was a widening: an id
+ * that was refused as `worker_unknown` before the Registry was supplied became
+ * executable, with Registry-granted capabilities, purely because
+ * `memberRegistry` was passed to `HeadquarterOperations`. Registration in the
+ * Registry — a provider/model catalogue that anyone onboarding a model writes
+ * to — would then have been enough to enter the execution path, which is
+ * precisely the authority migration issue #174 Mission C forbade.
+ *
+ * So the invariant this class actually guarantees is the strong one: for every
+ * worker id, `allowedCapabilities` is a SUBSET of what the base directory would
+ * have returned alone, and `assignability` is assignable only where the base
+ * alone would also have said yes. Composition is a filter over the base, never
+ * a second source of members.
+ *
+ * Turning the Registry into the canonical worker-registration authority is a
+ * separate, deliberate authority migration — it is not something this seam may
+ * do as a side effect of being switched on.
+ *
+ * `isRegistered` is the one method that still ORs the two sources, because it
+ * answers a question about IDENTITY, not eligibility: "is this id a worker at
+ * all, as opposed to a human principal?" Keeping Registry-only ids recognised
+ * as worker identities is itself narrowing — it is what stops a Registry member
+ * id from being mistaken for a human and picking up approval authority or the
+ * human-principal path in `HeadquarterOperations.resolveRequester`. Recognition
+ * grants nothing: such an id resolves to zero capabilities and a refusal, so
+ * every execution path still ends in a deny.
  */
 export class NarrowingWorkerDirectory implements WorkerDirectoryPort {
   constructor(
@@ -122,39 +160,41 @@ export class NarrowingWorkerDirectory implements WorkerDirectoryPort {
     private registry: WorkerDirectoryPort,
   ) {}
 
+  /** Identity, not eligibility — see the class comment. */
   isRegistered(workerId: string): boolean {
     return this.base.isRegistered(workerId) || this.registry.isRegistered(workerId);
   }
 
   allowedCapabilities(workerId: string): readonly string[] {
-    const inBase = this.base.isRegistered(workerId);
-    const inRegistry = this.registry.isRegistered(workerId);
-    if (inBase && inRegistry) {
-      const allowed = new Set(this.registry.allowedCapabilities(workerId));
-      return this.base.allowedCapabilities(workerId).filter((c) => allowed.has(c));
-    }
-    if (inRegistry) return this.registry.allowedCapabilities(workerId);
-    if (inBase) return this.base.allowedCapabilities(workerId);
-    return [];
+    // Not in the canonical execution directory => holds nothing, whatever the
+    // Registry granted. Registry grants narrow base capabilities; they never
+    // stand on their own.
+    if (!this.base.isRegistered(workerId)) return [];
+    if (!this.registry.isRegistered(workerId)) return this.base.allowedCapabilities(workerId);
+    const allowed = new Set(this.registry.allowedCapabilities(workerId));
+    return this.base.allowedCapabilities(workerId).filter((c) => allowed.has(c));
   }
 
   assignability(workerId: string): WorkerAssignability {
-    const inBase = this.base.isRegistered(workerId);
-    const inRegistry = this.registry.isRegistered(workerId);
-    if (!inBase && !inRegistry) return { assignable: false, reason: 'worker_unknown' };
+    if (!this.base.isRegistered(workerId)) {
+      // Unknown to the authority that decides who may execute. Reported as
+      // `worker_unknown` — which is what the base alone would have said — with
+      // the Registry sighting carried in details so the refusal is diagnosable
+      // ("it is in the Registry, but nobody registered it for execution")
+      // without inventing a new authority state.
+      return this.registry.isRegistered(workerId)
+        ? { assignable: false, reason: 'worker_unknown', details: { knownTo: 'registry_only' } }
+        : { assignable: false, reason: 'worker_unknown' };
+    }
 
     // Any "no" wins. The Registry is consulted first only so that its richer
     // reasons (replaced, handover_pending) are the ones reported when both
     // directories would refuse.
-    if (inRegistry) {
+    if (this.registry.isRegistered(workerId)) {
       const verdict = this.registry.assignability(workerId);
       if (!verdict.assignable) return verdict;
     }
-    if (inBase) {
-      const verdict = this.base.assignability(workerId);
-      if (!verdict.assignable) return verdict;
-    }
-    return { assignable: true };
+    return this.base.assignability(workerId);
   }
 }
 
