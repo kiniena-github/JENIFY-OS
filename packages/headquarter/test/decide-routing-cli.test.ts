@@ -43,6 +43,8 @@ interface Outputs {
   dispatch_to: string;
   role: string;
   blocked_report: string;
+  blocked_marker: string;
+  should_report_blocked: string;
 }
 
 let counter = 0;
@@ -96,6 +98,8 @@ function decide(env: Record<string, string>): Outputs {
     dispatch_to: out.dispatch_to ?? '',
     role: out.role ?? '',
     blocked_report: out.blocked_report ?? '',
+    blocked_marker: out.blocked_marker ?? '',
+    should_report_blocked: out.should_report_blocked ?? '',
   };
 }
 
@@ -267,5 +271,61 @@ describe('decide-routing.ts — workflow entry point', () => {
       expect(r.outcome).toBe('IGNORE');
       expect(r.blocked_report).toBe('');
     });
+  });
+});
+
+// ===========================================================================
+// Blocked reporting must be truthful AND single (issue #174, Jules #163)
+// ===========================================================================
+describe('decide-routing.ts — blocked reporting wiring', () => {
+  it('a partially-blocked ROUTE still emits a report', () => {
+    // The regression: the workflows gated on outcome == 'BLOCKED', so this
+    // case — Claude runs, Codex does not — reported nothing at all.
+    const r = decide({ ISSUE_TITLE: '[AI TASK][CLAUDE][CODEX] x', TARGET_PROVIDER: 'CLAUDE' });
+    expect(r.outcome).toBe('ROUTE');
+    expect(r.should_run).toBe('true');
+    expect(r.should_report_blocked).toBe('true');
+    expect(r.blocked_report).toContain('CODEX NOT CONNECTED');
+  });
+
+  it('the report says plainly that the blocked share is NOT done', () => {
+    const r = decide({ ISSUE_TITLE: '[AI TASK][CLAUDE][CODEX] x', TARGET_PROVIDER: 'CLAUDE' });
+    expect(r.blocked_report).toContain('did NOT run');
+    expect(r.blocked_report).toContain('never substitutes');
+  });
+
+  it('only ONE workflow is told to post it', () => {
+    const claude = decide({ ISSUE_TITLE: '[AI TASK][BOTH][CODEX] x', TARGET_PROVIDER: 'CLAUDE' });
+    const gemini = decide({ ISSUE_TITLE: '[AI TASK][BOTH][CODEX] x', TARGET_PROVIDER: 'GEMINI' });
+    const posting = [claude, gemini].filter((r) => r.should_report_blocked === 'true');
+    expect(posting).toHaveLength(1);
+  });
+
+  it('a fully blocked task is still reported', () => {
+    const r = decide({ ISSUE_TITLE: '[AI TASK][CODEX] x', TARGET_PROVIDER: 'CLAUDE' });
+    expect(r.outcome).toBe('BLOCKED');
+    expect(r.should_report_blocked).toBe('true');
+    expect(r.blocked_marker).toBe('<!-- jenify-routing-blocked:CODEX -->');
+  });
+
+  it('nothing blocked means nothing posted', () => {
+    const r = decide({ ISSUE_TITLE: '[AI TASK][CLAUDE] x', TARGET_PROVIDER: 'CLAUDE' });
+    expect(r.should_report_blocked).toBe('false');
+    expect(r.blocked_report).toBe('');
+    expect(r.blocked_marker).toBe('');
+  });
+
+  it('the marker identifies the blocked set, so a repeat is recognisable', () => {
+    const a = decide({ ISSUE_TITLE: '[AI TASK][CLAUDE][CODEX] x', TARGET_PROVIDER: 'CLAUDE' });
+    const b = decide({ ISSUE_TITLE: '[AI TASK][CODEX][CLAUDE] x', TARGET_PROVIDER: 'CLAUDE' });
+    expect(a.blocked_marker).toBe(b.blocked_marker);
+    expect(a.blocked_report).toBe(b.blocked_report);
+  });
+
+  it('a mixed known+unknown tag fires no worker and reports nothing to run', () => {
+    const r = decide({ ISSUE_TITLE: '[AI TASK][CLAUDE][CODEXX] x', TARGET_PROVIDER: 'CLAUDE' });
+    expect(r.outcome).toBe('BLOCKED');
+    expect(r.should_run).toBe('false');
+    expect(r.dispatch_to).toBe('');
   });
 });
