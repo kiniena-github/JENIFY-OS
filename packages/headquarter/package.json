@@ -11,7 +11,8 @@
     "./store": "./src/store/index.ts",
     "./archive": "./src/archive/index.ts",
     "./ui": "./src/ui/index.ts",
-    "./organization": "./src/organization/index.ts"
+    "./organization": "./src/organization/index.ts",
+    "./application": "./src/application/index.ts"
   },
   "scripts": {
     "test": "vitest run",
