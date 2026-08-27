@@ -218,9 +218,16 @@ export class HandoverStore {
   }
 
   /**
-   * Successor acknowledges the handover. The successor must be an ACTIVE
-   * entry in hq_specialists (read via the existing HeadquarterStore) and
-   * must differ from the predecessor.
+   * Successor acknowledges the handover. The successor must be a KNOWN,
+   * ACTIVE entry in hq_specialists (read via the existing HeadquarterStore),
+   * must differ from the predecessor, and must be ASSIGNABLE.
+   *
+   * Accepting the handover transfers the predecessor's entire workload, so it
+   * is an assignment of new work and is bound by the same canonical invariant
+   * as OperatorQueue.claim(): a worker that is itself frozen (being replaced)
+   * or deactivated must not be handed a workload. Without the
+   * assertAssignable() check below, Headquarter would happily replace Claude
+   * with a Gemini that was itself mid-replacement.
    */
   acknowledge(handoverId: string, successorId: string, acknowledgedBy: string = successorId): HandoverRecord {
     const h = this.requireState(handoverId, 'package_ready');
@@ -231,6 +238,9 @@ export class HandoverStore {
     if (!specialist || !specialist.active) {
       throw new Error(`Handover ${handoverId}: successor ${successorId} is not an active specialist`);
     }
+    // Same guard as the assignment boundary — one source of truth, so a
+    // successor cannot be frozen/deactivated by any route the queue honours.
+    assertAssignable(this.db, successorId);
     const at = nowIso();
     this.db
       .prepare(
@@ -375,12 +385,21 @@ export class HandoverStore {
 }
 
 /**
- * Guard future queue integration (and anything else assigning work) should
- * call before letting a worker claim/be assigned new work: throws if the
- * worker is deactivated in hq_specialists, or has an active (non-completed,
+ * THE canonical worker-assignability guard: throws if the worker is
+ * deactivated in hq_specialists, or has an active (non-completed,
  * non-aborted) handover — including a plain freeze that never progressed
- * further. Wiring this into operator/queue.ts's claim() path is a follow-up
- * (documented in docs/JENIFY_HQ_MEMORY_HANDOVER.md), not done by this issue.
+ * further.
+ *
+ * This is wired into operator/queue.ts's claim() — the only code path that
+ * writes a worker id into op_tasks.claimed_by — so the replacement-safety
+ * invariant ("a worker being replaced receives no new work") is enforced at
+ * the assignment boundary itself rather than in individual callers or a UI.
+ * Anything that grows a new way to hand work to a worker must call this too;
+ * do not re-derive freeze state from a second source.
+ *
+ * Reads state straight from the database (not from any in-memory handle), so
+ * it holds across process restarts and for callers that never construct a
+ * HandoverStore. Self-sufficient: ensures its own tables first.
  */
 export function assertAssignable(db: HqDatabase, workerId: string): void {
   ensureHandoverTables(db); // callable independently of HandoverStore construction

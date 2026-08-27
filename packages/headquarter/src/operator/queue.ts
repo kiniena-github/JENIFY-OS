@@ -23,6 +23,15 @@ import { assertTransition, type ActivityStatus } from '../contracts/events.js';
 import { CapabilityRegistry } from './capabilities.js';
 import { approvalRequired, evaluatePolicy, type PolicyContext } from './policy.js';
 import { EvidenceLog, assertNoSecretLikeContent } from './evidence.js';
+// Worker-assignability guard. The handover module owns the freeze/replacement
+// state, so the queue consults IT rather than re-deriving "is this worker
+// frozen?" from its own copy of that logic — one source of truth, per the
+// replacement-safety model. handover/ depends only on leaf modules
+// (store/, memory/, operator/evidence.js) and never on this file, so this
+// import introduces no cycle.
+// assertAssignable is self-sufficient (it ensures its own tables), so the
+// guard holds regardless of whether a HandoverStore was ever constructed.
+import { assertAssignable } from '../handover/replacement.js';
 import {
   DEFAULT_APPROVAL_TTL_MS,
   approvalExpiredAt,
@@ -266,8 +275,21 @@ export class OperatorQueue {
   /**
    * Atomically claim the oldest queued task for a capability. Returns null
    * when nothing is claimable or the kill switch is engaged.
+   *
+   * THROWS when `workerId` is not assignable — frozen by an active handover,
+   * or deactivated (see assertAssignable). This is the canonical assignment
+   * boundary: `claim()` is the ONLY code path in the repository that writes a
+   * worker id into `op_tasks.claimed_by`, so enforcing the replacement-safety
+   * invariant here enforces it for every supported assignment path, including
+   * callers that never construct a HandoverStore. A rejection is loud rather
+   * than a silent `null` so a frozen worker cannot mistake "you are being
+   * replaced" for "the queue is empty".
    */
   claim(workerId: string, capabilityId: string, leaseMs = 5 * 60_000): OperatorTask | null {
+    // Deny-by-default, and FIRST: before any read, any state mutation, and
+    // crucially before the single-use approval nonce is consumed below, so a
+    // rejected claim can never burn an approval or inflate a fencing token.
+    assertAssignable(this.db, workerId);
     if (this.killSwitchEngaged(capabilityId)) return null;
     const candidate = this.db
       .prepare(

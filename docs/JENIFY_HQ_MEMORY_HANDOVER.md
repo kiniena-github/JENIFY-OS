@@ -89,8 +89,9 @@ is structurally impossible, not just discouraged.
 - **abort** — from any pre-completed state, with a reason; itself terminal.
 - **assertAssignable(db, workerId)** — throws if the worker is deactivated
   or has any active (non-completed, non-aborted) handover, including a bare
-  freeze that never progressed. This is the enforcement point a future
-  "assign new work" path must call — see Follow-ups.
+  freeze that never progressed. This is THE canonical enforcement point, and
+  it is wired in (see "Canonical safety invariant" below). Any new path that
+  hands work to a worker must call it rather than re-deriving freeze state.
 
 `HandoverPackage` (`handover/package.ts`, pure read, no mutation of
 `op_tasks`/`hq_memory`):
@@ -150,12 +151,40 @@ appears in the record's `tags`. This is documented at the point of use
 (`handover/package.ts`'s `ownedBy()`) and called out here so it can be
 revisited once project-level worker ownership actually exists.
 
+## Canonical safety invariant
+
+> While a worker is frozen (an active, non-terminal handover) or deactivated,
+> NO new work may be assigned to that worker through ANY supported
+> assignment path.
+
+Enforced at the control boundary, not in callers, a UI, or a helper:
+
+- **`OperatorQueue.claim()`** calls `assertAssignable()` as its first action.
+  `claim()` is the only code path in the repository that writes a worker id
+  into `op_tasks.claimed_by`, so this covers every supported assignment path
+  — including callers that never construct a `HandoverStore`, a queue built
+  in a fresh process, and a task whose row was forced back to `queued`.
+  The guard runs before any mutation, so a rejected claim never consumes the
+  single-use Founder approval nonce nor inflates a fencing token.
+- **`HandoverStore.acknowledge()`** calls `assertAssignable()` on the
+  successor. Accepting a handover transfers a whole workload, so it is an
+  assignment: a worker that is itself frozen or deactivated cannot be named
+  successor.
+
+Rejection is a thrown error, not a silent `null`, so a frozen worker cannot
+mistake "you are being replaced" for "the queue is empty".
+
+**Deliberate boundary — freeze blocks acquisition, not the drain.**
+`start()`/`complete()`/`fail()`/`reconcile()` remain open to a frozen worker,
+and `enqueue()` remains open too. The lifecycle *requires* in-flight work to
+be completed, reassigned, or reconciled before `verify()` will pass, so
+blocking the drain path would strand the very work the handover exists to
+transfer. `verify()` is what refuses to let a replacement finish while any
+task is still `assigned`/`running`/`outcome_unknown` under the predecessor.
+
+Regression coverage: `test/handover-freeze-enforcement.test.ts`.
+
 ## Explicit follow-ups (not built here)
 
-- **Queue-side `assertAssignable` wiring.** `operator/queue.ts`'s `claim()`
-  does not yet call `assertAssignable()` before honoring a claim — this
-  issue builds the guard and its enforcement semantics, but wiring it into
-  the live claim path is a follow-up so it can be reviewed against the
-  queue's existing fencing/approval invariants on its own.
 - **UI.** No Jules-owned surface for browsing memory or driving a handover
   through its states — this issue is the data/lifecycle layer only.
