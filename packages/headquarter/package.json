@@ -3,23 +3,26 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "JENIFY Headquarter foundation — canonical activity/event model, Headquarter module contracts, the Universal Operator control plane, and the Founder-facing UI/archive layer (documentation/archive schema, inventory/reconstruction pipeline, search foundations, static HQ site). Private internal MVP; no deployment target.",
+  "description": "JENIFY Headquarter foundation \u2014 canonical activity/event model, Headquarter module contracts, the Universal Operator control plane, and the Founder-facing UI/archive layer (documentation/archive schema, inventory/reconstruction pipeline, search foundations, static HQ site). Private internal MVP; no deployment target.",
   "exports": {
     ".": "./src/index.ts",
     "./contracts": "./src/contracts/index.ts",
     "./operator": "./src/operator/index.ts",
     "./store": "./src/store/index.ts",
     "./archive": "./src/archive/index.ts",
-    "./connectors": "./src/connectors/index.ts",
     "./ui": "./src/ui/index.ts",
-    "./organization": "./src/organization/index.ts"
+    "./organization": "./src/organization/index.ts",
+    "./routing": "./src/routing/index.ts",
+    "./providers": "./src/providers/index.ts"
   },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
     "inventory": "tsx src/cli/inventory.ts",
-    "build:site": "tsx src/cli/build-site.ts"
+    "build:site": "tsx src/cli/build-site.ts",
+    "codex:review": "tsx src/cli/codex-review.ts",
+    "codex:probe": "tsx src/cli/codex-review.ts --probe-only"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",
