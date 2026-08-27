@@ -138,9 +138,39 @@ Two ways to move a task into `handover_pending`:
 requires a concrete target, resolved either from the handover's own `toWorkerId` or an
 explicit `resolvedToWorkerId` argument (which must agree with a non-null `toWorkerId` if
 both are given). Completing a handover with no resolvable target is
-`handover_invalid_state`; completing sets the task back to `state: 'owned'` under the
-new worker and marks the `Handover` `'completed'` with its own actor/reason — the task is
-never silently re-owned.
+`handover_invalid_state`.
+
+**Completion is a full re-validation, not a rubber stamp (PR #126 review fix).**
+`initiateHandover` deliberately does **not** validate the target beyond "this worker id
+exists" — a Founder can name who they *intend* to hand a task to before that person is
+ever staffed into the role (`toWorkerId` can even be `null`, per above). That intentional
+looseness at initiation means `completeHandover` is where enforcement actually has to
+live, and it re-derives the decision from current state rather than trusting anything
+recorded at initiation time:
+
+1. The resolved target must be a **current occupant of `ownership.roleId`** (checked
+   against the live `Occupant` set, the same way `registerTaskOwnership` is) — fails
+   closed with `handover_target_not_occupant` otherwise.
+2. The resolved target must **currently pass `evaluateRoleEligibility`** against that same
+   role — fails closed with the matching eligibility reason code
+   (`worker_inactive` / `occupant_type_not_eligible` / `capability_not_granted`) otherwise.
+
+Either failure appends no version (history stays exactly as it was) and leaves the task in
+`handover_pending` with the `Handover` still `'pending'` — no silent orphaning, and no
+backdoor around `assignRole`'s/`registerTaskOwnership`'s stricter invariants. Only when
+both checks pass does completion set the task back to `state: 'owned'` under the new
+worker and mark the `Handover` `'completed'` with its own actor/reason.
+
+*Reachability note:* because `defineRole`/`registerWorker` are create-only (see the design
+decisions below), every field that feeds eligibility — `worker.active`,
+`worker.occupantType`, `worker.allowedCapabilities`, `role.eligibleOccupantTypes`,
+`role.requiredCapabilities` — is fixed forever at creation. Since `assignRole` already
+enforces the identical eligibility check before an `Occupant` record can exist, "occupies
+the role" and "is eligible for the role" cannot drift apart from each other through
+today's public API — check 1 is, today, a strict superset of check 2. Check 2 is kept
+anyway as deliberate defense-in-depth: it is the safety net that keeps this fix correct if
+a future op is ever added that can mutate any of those fields after creation (e.g. a
+`setWorkerActive`), rather than silently reopening the exact class of bug this fix closes.
 
 ## Team-size target: shrink-below-headcount is a **warning**, not a rejection
 
@@ -191,7 +221,8 @@ no-op. `OrgError.code` is one of a closed `OrgErrorCode` union (`invalid_input`,
 `capability_not_granted`, `worker_inactive`, `occupant_type_not_eligible`,
 `exclusivity_violation`, `multi_role_not_allowed`, `max_occupants_exceeded`,
 `not_occupant`, `active_tasks_require_handover`, `handover_invalid_state`,
-`task_force_already_dissolved`, `invalid_version`), so a UI or an automated caller can
+`handover_target_not_occupant`, `task_force_already_dissolved`, `invalid_version`), so a
+UI or an automated caller can
 switch on the failure reason instead of pattern-matching an error string.
 
 ## Design decisions made where the issue left a choice
@@ -208,3 +239,12 @@ switch on the failure reason instead of pattern-matching an error string.
   random id, keeping the whole engine free of non-deterministic id generation (the only
   auto-generated ids are handover ids, drawn from a monotonic in-state counter).
 - **Team-size shrink below headcount**: accept with a warning, not reject — see above.
+- **`completeHandover`'s occupancy + eligibility recheck (PR #126 review fix)**: added as
+  two explicit, independently-failing gates rather than folded into one check, so each has
+  its own error code and its own test coverage. As noted above, genuine "was eligible at
+  initiation, drifted to ineligible before completion" cannot currently be constructed
+  through the public API (nothing mutates a registered worker's or defined role's
+  eligibility-relevant fields after creation) — the hostile tests for this fix cover what
+  *is* reachable today (a target who was never staffed into the role, including one who is
+  inactive/capability-mismatched/wrong-occupant-type and is therefore inescapably also a
+  non-occupant) and document this limitation rather than fabricate an unreachable scenario.

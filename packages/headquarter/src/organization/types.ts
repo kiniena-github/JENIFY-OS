@@ -183,6 +183,7 @@ export type OrgErrorCode =
   | 'not_occupant'
   | 'active_tasks_require_handover'
   | 'handover_invalid_state'
+  | 'handover_target_not_occupant'
   | 'task_force_already_dissolved'
   | 'invalid_version';
 

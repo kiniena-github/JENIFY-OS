@@ -73,6 +73,12 @@ describe('organization engine — manager swap during active tasks (handover req
     expect(handover.toWorkerId).toBe('bob');
     expect(handover.status).toBe('pending');
 
+    // completeHandover requires the target to actually occupy the role the
+    // task is owned through — it is not a backdoor around assignRole's
+    // eligibility/occupancy checks. Bob must be staffed into the vacated
+    // role first.
+    expect(engine.assignRole('role-manager', 'bob', 'founder', 'staff replacement manager').ok).toBe(true);
+
     // Not owned again until explicitly completed.
     const complete = engine.completeHandover(handover.id, 'founder', 'bob picked it up');
     expect(complete.ok).toBe(true);
@@ -95,9 +101,200 @@ describe('organization engine — manager swap during active tasks (handover req
     expect(failed.ok).toBe(false);
     if (!failed.ok) expect(failed.error.code).toBe('handover_invalid_state');
 
+    // Resolving to bob still requires bob to actually occupy the role.
+    expect(engine.assignRole('role-manager', 'bob', 'founder', 'staff replacement manager').ok).toBe(true);
     const completed = engine.completeHandover(handoverId, 'founder', 'found one', 'bob');
     expect(completed.ok).toBe(true);
     expect(engine.getCurrentOrg().taskOwnerships.find((t) => t.taskId === 'task-1')?.workerId).toBe('bob');
+  });
+});
+
+/**
+ * PR #126 independent review fix: completeHandover() used to transfer
+ * ownership after checking only that the target worker existed and was
+ * active — it never verified the target actually occupied the ownership's
+ * role, nor re-ran eligibility. That let a handover be "completed" straight
+ * to a worker who was never staffed into the role at all, bypassing the
+ * stricter invariant assignRole()/registerTaskOwnership() already enforce.
+ *
+ * Fix: completeHandover now (1) requires the target to be a CURRENT
+ * occupant of `ownership.roleId`, and (2) re-runs evaluateRoleEligibility
+ * against current draft state before transferring. Both fail closed with a
+ * typed error, append no version, and leave the task in 'handover_pending'
+ * with the handover still 'pending'.
+ *
+ * Reachability note (also recorded in ORGANIZATION_MODEL.md): every field
+ * that feeds evaluateRoleEligibility — worker.active, worker.occupantType,
+ * worker.allowedCapabilities, role.eligibleOccupantTypes,
+ * role.requiredCapabilities — is set exactly once, at registerWorker/
+ * defineRole time, and this module has no op that mutates any of them
+ * afterward (both are deliberately create-only). Since assignRole enforces
+ * the identical evaluateRoleEligibility check before an occupant record can
+ * ever be created, "currently occupies the role" and "currently eligible
+ * for the role" cannot drift apart from one another through the public API
+ * as it stands today — a worker who is inactive, wrong occupant type, or
+ * missing a required capability can never have become an occupant in the
+ * first place, so completing a handover to one always fails at the new
+ * occupancy gate (`handover_target_not_occupant`) rather than at the
+ * capability/active-specific eligibility reason codes. The eligibility
+ * recheck is still added exactly as required — it is real, wired,
+ * defense-in-depth against any future op that mutates those fields (e.g. a
+ * later `setWorkerActive` or a role-requirements update), not dead code:
+ * removing it would silently reopen this exact class of bug the moment such
+ * an op is added, with nothing here to catch it.
+ */
+describe('organization engine — completeHandover: occupancy + fresh eligibility (PR #126 fix)', () => {
+  let engine: OrganizationEngine;
+
+  beforeEach(() => {
+    engine = createOrganizationEngine({ capabilityIds: CAPS });
+    engine.defineDepartment({ id: 'eng', name: 'Engineering' }, 'founder', 'seed');
+    // maxOccupants: 2 (unlike seedDeptAndRoles' default of 1) so this
+    // block's tests can stage a second, already-eligible occupant on the
+    // SAME role without tripping unrelated maxOccupants friction.
+    engine.defineRole(
+      {
+        id: 'role-manager',
+        name: 'Manager',
+        departmentId: 'eng',
+        isManagerRole: true,
+        teamSizeTarget: 1,
+        maxOccupants: 2,
+        eligibleOccupantTypes: ['human', 'ai'],
+        requiredCapabilities: [],
+      },
+      'founder',
+      'seed',
+    );
+    seedWorkers(engine);
+    engine.assignRole('role-manager', 'alice', 'founder', 'staff manager role');
+    engine.registerTaskOwnership('task-1', 'role-manager', 'alice', 'founder', 'assign work');
+  });
+
+  it('(a) fails closed when the resolved target was never staffed into the ownership role at all', () => {
+    const initiated = engine.initiateHandover('task-1', 'founder', 'looking for a replacement', 'bob');
+    expect(initiated.ok).toBe(true);
+    if (!initiated.ok) return;
+
+    // Bob was NAMED as the target but never actually assigned to role-manager
+    // — exactly the gap the review found (the old code only checked
+    // worker.exists + worker.active).
+    const historyBefore = engine.getHistory().length;
+    const res = engine.completeHandover(initiated.data.id, 'founder', 'bob picks it up');
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe('handover_target_not_occupant');
+
+    // No silent orphaning: failed completion appended no version, and the
+    // task/handover are exactly where they were left.
+    expect(engine.getHistory().length).toBe(historyBefore);
+    const org = engine.getCurrentOrg();
+    expect(org.taskOwnerships.find((t) => t.taskId === 'task-1')?.state).toBe('handover_pending');
+    expect(org.handovers.find((h) => h.id === initiated.data.id)?.status).toBe('pending');
+  });
+
+  it('(a-variant) fails closed when the target occupies a DIFFERENT role, not the one the task is owned through', () => {
+    engine.defineRole(
+      { id: 'role-other', name: 'Other', departmentId: 'eng', teamSizeTarget: 1, eligibleOccupantTypes: ['human'], requiredCapabilities: [] },
+      'founder',
+      'seed',
+    );
+    engine.assignRole('role-other', 'bob', 'founder', 'staff an unrelated role');
+
+    const initiated = engine.initiateHandover('task-1', 'founder', 'reassign', 'bob');
+    expect(initiated.ok).toBe(true);
+    if (!initiated.ok) return;
+    const res = engine.completeHandover(initiated.data.id, 'founder', 'complete');
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe('handover_target_not_occupant');
+    // Bob's unrelated occupancy is untouched.
+    expect(engine.rolesForWorker('bob')).toEqual(['role-other']);
+  });
+
+  it('(b)/(c) fails closed on a capability-ineligible / inactive target (which, given create-only workers/roles, is inescapably also a non-occupant — see reachability note above)', () => {
+    engine.defineRole(
+      {
+        id: 'role-needs-cap',
+        name: 'Needs a capability',
+        departmentId: 'eng',
+        teamSizeTarget: 1,
+        eligibleOccupantTypes: ['human'],
+        requiredCapabilities: ['ops.deploy'],
+      },
+      'founder',
+      'seed',
+    );
+    engine.registerWorker(
+      { id: 'dave', displayName: 'Dave', occupantType: 'human', active: true, allowedCapabilities: [] }, // lacks ops.deploy
+      'founder',
+      'seed',
+    );
+    engine.registerWorker(
+      { id: 'erin', displayName: 'Erin', occupantType: 'human', active: false, allowedCapabilities: CAPS }, // inactive
+      'founder',
+      'seed',
+    );
+    // A dedicated occupant (not alice, who already holds role-manager and
+    // would otherwise trip the org's single-role-per-worker default policy).
+    engine.registerWorker(
+      { id: 'frank', displayName: 'Frank', occupantType: 'human', active: true, allowedCapabilities: CAPS },
+      'founder',
+      'seed',
+    );
+    engine.assignRole('role-needs-cap', 'frank', 'founder', 'staff role');
+    // Two independent 'owned' task ownerships through the same occupancy,
+    // so each target can be tried from a clean 'owned' starting state
+    // (initiateHandover requires 'owned'; one task per attempt).
+    engine.registerTaskOwnership('task-cap-1', 'role-needs-cap', 'frank', 'founder', 'assign');
+    engine.registerTaskOwnership('task-cap-2', 'role-needs-cap', 'frank', 'founder', 'assign');
+
+    const toDave = engine.initiateHandover('task-cap-1', 'founder', 'try dave', 'dave');
+    expect(toDave.ok).toBe(true);
+    if (toDave.ok) {
+      const res = engine.completeHandover(toDave.data.id, 'founder', 'complete to dave');
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.code).toBe('handover_target_not_occupant');
+      expect(engine.getCurrentOrg().taskOwnerships.find((t) => t.taskId === 'task-cap-1')?.state).toBe('handover_pending');
+    }
+
+    const toErin = engine.initiateHandover('task-cap-2', 'founder', 'try erin instead', 'erin');
+    expect(toErin.ok).toBe(true);
+    if (toErin.ok) {
+      const res = engine.completeHandover(toErin.data.id, 'founder', 'complete to erin');
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.code).toBe('handover_target_not_occupant');
+      expect(engine.getCurrentOrg().taskOwnerships.find((t) => t.taskId === 'task-cap-2')?.state).toBe('handover_pending');
+    }
+  });
+
+  it('(d) an occupant who WAS eligible at assignment stays eligible through completion — no drift path exists to test, by design (see reachability note above); this documents that guarantee holds', () => {
+    // role-manager and alice's capabilities are fixed forever after
+    // defineRole/registerWorker (both create-only), so alice's eligibility
+    // for role-manager cannot change between initiation and completion.
+    engine.assignRole('role-manager', 'bob', 'founder', 'stage bob as an eligible occupant too');
+    const initiated = engine.initiateHandover('task-1', 'founder', 'reassign to bob', 'bob');
+    expect(initiated.ok).toBe(true);
+    if (!initiated.ok) return;
+    const res = engine.completeHandover(initiated.data.id, 'founder', 'bob remains fully eligible');
+    expect(res.ok).toBe(true);
+  });
+
+  it('(e) happy path: succeeds once the target is a current, fully eligible occupant of the ownership role', () => {
+    const unassigned = engine.unassignRole('role-manager', 'alice', 'founder', 'swap manager', {
+      handover: { toWorkerId: 'bob', reason: 'alice is off the project' },
+    });
+    expect(unassigned.ok).toBe(true);
+    if (!unassigned.ok) return;
+    expect(engine.assignRole('role-manager', 'bob', 'founder', 'staff replacement manager').ok).toBe(true);
+
+    const handoverId = unassigned.data.handoverIds[0];
+    const res = engine.completeHandover(handoverId, 'founder', 'bob picked it up');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.data.state).toBe('owned');
+    expect(res.data.workerId).toBe('bob');
+    const handover = engine.getCurrentOrg().handovers.find((h) => h.id === handoverId)!;
+    expect(handover.status).toBe('completed');
+    expect(handover.toWorkerId).toBe('bob');
   });
 });
 

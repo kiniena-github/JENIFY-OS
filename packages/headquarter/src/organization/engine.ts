@@ -511,12 +511,36 @@ export class OrganizationEngine {
       }
       const worker = draft.workers[target];
       if (!worker) return fail('not_found', `Target worker ${target} does not exist`);
-      if (!worker.active) return fail('worker_inactive', `Target worker ${target} is not active`);
 
       const ownership = draft.taskOwnerships[handover.taskId];
       if (!ownership) return fail('not_found', `Task ${handover.taskId} has no ownership record`);
       if (ownership.state !== 'handover_pending') {
         return fail('handover_invalid_state', `Task ${handover.taskId} is not pending handover`);
+      }
+
+      // Completing a handover must never be a backdoor around
+      // assignRole/registerTaskOwnership's stricter invariants: the target
+      // must currently occupy the role the task is owned through, AND must
+      // still pass a fresh eligibility check against CURRENT draft state
+      // (active / occupant type / required capabilities can all have
+      // drifted between initiateHandover and completeHandover). Both checks
+      // fail closed — a failure here appends no version and leaves the task
+      // in 'handover_pending' with the handover still 'pending'.
+      if (!draft.occupants[occupantId(ownership.roleId, target)]) {
+        return fail(
+          'handover_target_not_occupant',
+          `Target worker ${target} does not occupy role ${ownership.roleId}; cannot own this task through it`,
+        );
+      }
+      const role = draft.roles[ownership.roleId];
+      if (!role) return fail('not_found', `Role ${ownership.roleId} no longer exists`);
+      const eligibility = evaluateRoleEligibility(role, worker);
+      if (!eligibility.eligible) {
+        return fail(
+          eligibility.reason,
+          `Target worker ${target} is no longer eligible for role ${ownership.roleId}`,
+          eligibility.details,
+        );
       }
 
       ownership.workerId = target;
