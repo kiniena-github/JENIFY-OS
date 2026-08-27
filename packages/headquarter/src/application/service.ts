@@ -47,6 +47,23 @@
  *    therefore human"), which admitted every unknown string; authority is now
  *    positive and deny-by-default on both sides. All of this sits on top of —
  *    never instead of — the queue's own self-approval guards.
+ *
+ * ## Standing rule for anyone extending this file
+ *
+ * **Every method that writes a record carrying an actor's name must resolve
+ * that actor first** — `resolveRequester()` when a capability grant is needed,
+ * `resolveActor()` when mere identity is enough, `assertApprovalAuthority()`
+ * for Founder decisions, or the fencing token (`assertFence`) for a worker
+ * mid-execution. There is no fifth option, and "this path is harmless" is not
+ * one: authorization and attribution are different properties.
+ *
+ * That distinction is why the Jules review of `ff105a2` found four attributed
+ * writes still unresolved (`rejectProposal`, `assignTask`, `postMissionMessage`,
+ * `proposeMission`). None could escalate privilege — a proposal and a message
+ * are inert, an assignment intent is advisory — but each let an unknown
+ * identity choose what it SIGNED, in a hash-chained evidence log that exists
+ * precisely so history can be trusted. Group-room attribution is the sharpest
+ * case: it is what a human reads before deciding to promote a mission.
  */
 
 import { v4 as uuid } from 'uuid';

@@ -22,9 +22,11 @@ safety; this layer is the typed way a UI reaches it.
 | `src/application/principals.ts` | Human identity, separate from AI worker identity |
 | `src/application/db.ts` | Module-owned, additive DDL |
 
-Two new tables, both **presentation/routing metadata only**, never authority:
-`hq_op_task_meta` (project/title label + advisory assignment) and
-`hq_mission_proposals` (inert group-room proposals).
+Three new tables. Two are **presentation/routing metadata only**, never
+authority: `hq_op_task_meta` (project/title label + advisory assignment) and
+`hq_mission_proposals` (inert group-room proposals). The third,
+`hq_human_principals` (§4a), *is* authority — and starts empty, so it grants
+nothing until a Founder explicitly registers someone.
 
 `src/store/db.ts` is deliberately **not** edited, so this lane can land beside
 the other #117 lanes without schema conflicts.
@@ -162,6 +164,27 @@ Review and reconciliation use the same positive-identity rule but need no
 grant: the decisive property there is independence (queue-enforced), so any
 assignable worker or active principal may review — an unknown id may not.
 
+### Attribution is not authorization — the standing rule
+
+**Every method that writes a record carrying an actor's name must resolve that
+actor first.** Four options, no fifth: `resolveRequester()` (capability grant
+needed), `resolveActor()` (identity is enough), `assertApprovalAuthority()`
+(Founder decisions), or the fencing token via `assertFence` (worker
+mid-execution). "This path is harmless" is not an exemption.
+
+The Jules review of `ff105a2` found four attributed writes still unresolved —
+`rejectProposal`, `assignTask`, `postMissionMessage`, `proposeMission`. None
+could escalate privilege: a proposal and a message are inert, an assignment
+intent is advisory. That is exactly why they were missed — the earlier audit
+asked what an actor could *do*, and these paths let an unknown identity choose
+what it could *sign*, in a hash-chained evidence log that exists so history can
+be trusted. Group-room attribution is the sharpest case: it is what a human
+reads before deciding to promote a mission.
+
+All four resolve now, and each is attacked in tests with an unknown id, a
+deactivated worker, a deactivated human and `system`, asserting no record is
+written and `evidence.verifyChain()` still returns clean.
+
 ## 4. Nomination vs. authority
 
 Organization and registry hooks may **nominate** workers. That is all they do.
@@ -265,7 +288,7 @@ the guard a caller runs before disabling anyone.
 
 ## 8. Tests
 
-83 new tests across four files; no pre-existing test was edited.
+88 new tests across four files; no pre-existing test was edited.
 
 - `test/application.lifecycle.test.ts` (24) — classify, create, dedupe, route,
   advisory assignment, read-only vs. review-gated completion, the full
