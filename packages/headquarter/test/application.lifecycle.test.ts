@@ -92,15 +92,26 @@ describe('lane F — create', () => {
     expect(!res.ok && res.error.message).toContain('least privilege');
   });
 
-  it('refuses an unknown requester (deny by default)', () => {
+  it('refuses an unknown requester — neither worker nor human principal', () => {
     const res = fx.ops.createTask({
       capabilityId: CAPS.readStatus,
       payload: {},
       requestedBy: 'ghost',
     });
     expect(res.ok).toBe(false);
+    expect(!res.ok && res.error.code).toBe('unknown_principal');
+    expect(!res.ok && res.error.details?.reason).toBe('principal_unknown');
+  });
+
+  it('refuses a disabled worker on the worker path specifically', () => {
+    const res = fx.ops.createTask({
+      capabilityId: CAPS.readStatus,
+      payload: {},
+      requestedBy: 'retired-bot',
+    });
+    expect(res.ok).toBe(false);
     expect(!res.ok && res.error.code).toBe('worker_not_assignable');
-    expect(!res.ok && res.error.details?.reason).toBe('worker_unknown');
+    expect(!res.ok && res.error.details?.reason).toBe('worker_inactive');
   });
 
   it('requires an idempotency key for a side-effect capability', () => {

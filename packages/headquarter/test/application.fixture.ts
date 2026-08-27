@@ -9,6 +9,7 @@ import { openMemoryHqDatabase, type HqDatabase } from '../src/store/db.js';
 import { HeadquarterStore } from '../src/store/headquarter.js';
 import { HeadquarterOperations } from '../src/application/service.js';
 import type { NominationSourcePort, WorkerNomination } from '../src/application/ports.js';
+import { HumanPrincipalRegistry } from '../src/application/principals.js';
 
 /** Capability ids used across the lane F tests. */
 export const CAPS = {
@@ -26,6 +27,7 @@ export interface Fixture {
   db: HqDatabase;
   ops: HeadquarterOperations;
   store: HeadquarterStore;
+  principals: HumanPrincipalRegistry;
 }
 
 export function setupFixture(
@@ -105,7 +107,46 @@ export function setupFixture(
     active: false,
   });
 
-  return { db, ops, store };
+  // Human principals — a deliberately separate registry from the worker
+  // directory. Nobody is authorized until registered here.
+  const principals = new HumanPrincipalRegistry(db);
+  // The Founder: may decide approvals and the kill switch, and may ORIGINATE
+  // work for the two read-only/reversible-ish capabilities. Note this is still
+  // not an execution right, and (per the canonical self-approval rule) does not
+  // let them approve a task they opened themselves.
+  principals.register({
+    id: 'founder',
+    displayName: 'Founder',
+    originateCapabilities: [CAPS.readStatus, CAPS.openPr, CAPS.indexDoc],
+    approvalAuthority: true,
+    active: true,
+  });
+  // A second human with approval authority but no origination grant at all.
+  principals.register({
+    id: 'coo',
+    displayName: 'Chief Operating Officer',
+    originateCapabilities: [],
+    approvalAuthority: true,
+    active: true,
+  });
+  // A human who may open work but may never decide an approval.
+  principals.register({
+    id: 'analyst',
+    displayName: 'Operations Analyst',
+    originateCapabilities: [CAPS.readStatus],
+    approvalAuthority: false,
+    active: true,
+  });
+  // A departed human — registered but inactive.
+  principals.register({
+    id: 'former-cto',
+    displayName: 'Former CTO',
+    originateCapabilities: [CAPS.readStatus],
+    approvalAuthority: true,
+    active: false,
+  });
+
+  return { db, ops, store, principals };
 }
 
 /** Unwrap an expected-successful result, failing loudly otherwise. */

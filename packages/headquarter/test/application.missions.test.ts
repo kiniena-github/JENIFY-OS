@@ -85,10 +85,18 @@ describe('lane F — a group-room message executes nothing', () => {
     expect(!denied.ok && denied.error.code).toBe('enqueue_rejected');
     expect(fx.ops.getProposal(proposal.id)!.status).toBe('proposed');
 
-    // An unknown "worker" named in a chat message cannot promote it either.
+    // An unknown id named in a chat message — "founder-bot" sounds official
+    // and is nobody — cannot promote it either.
     const ghost = fx.ops.promoteProposal({ proposalId: proposal.id, promotedBy: 'founder-bot' });
     expect(ghost.ok).toBe(false);
-    expect(!ghost.ok && ghost.error.code).toBe('worker_not_assignable');
+    expect(!ghost.ok && ghost.error.code).toBe('unknown_principal');
+
+    // Even the real Founder cannot promote THIS one: infra.drop_index is not
+    // in their origination grant. Being the Founder is not a capability.
+    const founder = fx.ops.promoteProposal({ proposalId: proposal.id, promotedBy: 'founder' });
+    expect(founder.ok).toBe(false);
+    expect(!founder.ok && founder.error.code).toBe('enqueue_rejected');
+    expect(!founder.ok && founder.error.message).toContain('least privilege');
   });
 
   it('promotes to an ordinary task that is still Founder-gated', () => {

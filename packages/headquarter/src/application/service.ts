@@ -22,11 +22,12 @@
  * that clears a rejection, and no path that writes `op_tasks`/`hq_approvals`
  * columns behind the queue's back.
  *
- * ## The four hardenings this lane adds
+ * ## The hardenings this lane adds
  *
- * 1. **Allow-lists come from the directory.** `OperatorQueue.enqueue()` takes
+ * 1. **Allow-lists come from a registry.** `OperatorQueue.enqueue()` takes
  *    `requestedBy.allowedCapabilities` from its caller. Here that argument is
- *    always filled from `WorkerDirectoryPort` — a caller cannot hand in its
+ *    always filled from `WorkerDirectoryPort` (workers) or
+ *    `originateCapabilities` (human principals) — a caller cannot hand in its
  *    own permissions.
  * 2. **Approvals are digest-echoed.** `approveTask()` requires the console to
  *    send back the exact action digest it displayed. If the action changed
@@ -36,9 +37,16 @@
  * 3. **Assignability is re-checked at claim and at start.** A worker disabled
  *    or replaced mid-flight cannot take new work, and cannot start work it had
  *    already claimed.
- * 4. **Founder-only actions are human-principal-only.** Approve, deny, and the
- *    kill switch are refused for any actor that is a registered worker, on top
- *    of the queue's own self-approval guards.
+ * 4. **Every actor must positively BE someone.** Approve, deny and the kill
+ *    switch need a registered, active human principal carrying approval
+ *    authority; opening work needs a worker or a human with the capability
+ *    granted; review and reconciliation need a known actor. Registered workers
+ *    are still refused approval authority outright, and human principals can
+ *    never claim or start work. See `principals.ts` — an earlier version of
+ *    this file authorized Founder actions by elimination ("not a worker,
+ *    therefore human"), which admitted every unknown string; authority is now
+ *    positive and deny-by-default on both sides. All of this sits on top of —
+ *    never instead of — the queue's own self-approval guards.
  */
 
 import { v4 as uuid } from 'uuid';
@@ -58,6 +66,12 @@ import {
   type WorkerDirectoryPort,
 } from './ports.js';
 import { classifyCapability, type TaskClassification } from './classification.js';
+import {
+  HumanPrincipalRegistry,
+  resolveApprover,
+  resolvePrincipal,
+  type HumanPrincipalPort,
+} from './principals.js';
 import {
   detectActionLanguage,
   missionProposalDigest,
@@ -79,6 +93,8 @@ export type OpsErrorCode =
   | 'task_not_awaiting_approval'
   | 'assigned_to_other_worker'
   | 'nothing_claimable'
+  | 'unknown_principal'
+  | 'humans_do_not_execute'
   | 'enqueue_rejected'
   | 'operator_rejected'
   | 'proposal_not_found'
@@ -108,7 +124,11 @@ export interface CreateTaskInput {
   capabilityId: string;
   payload: Record<string, unknown>;
   idempotencyKey?: string;
-  /** Worker requesting the work. Its permissions are read from the directory. */
+  /**
+   * Worker or human principal opening the work. Permissions are read from the
+   * matching registry, never from the caller. A human's grant is to ORIGINATE
+   * only — it never confers a claim.
+   */
   requestedBy: string;
   /** Console labels only — never authority. */
   project?: string;
@@ -195,15 +215,27 @@ export interface ReplacementPlan {
 export interface HeadquarterOperationsOptions {
   policyCtx?: PolicyContext;
   workers?: WorkerDirectoryPort;
+  /** Human identity seam. Defaults to the (initially empty) table-backed registry. */
+  humanPrincipals?: HumanPrincipalPort;
   nominationSources?: readonly NominationSourcePort[];
   store?: HeadquarterStore;
   queue?: OperatorQueue;
 }
 
+/** Who an actor turned out to be, once resolved against both registries. */
+type ResolvedRequester =
+  | { kind: 'worker'; allowedCapabilities: readonly string[] }
+  | { kind: 'human'; allowedCapabilities: readonly string[] };
+
 export class HeadquarterOperations {
   readonly queue: OperatorQueue;
   readonly store: HeadquarterStore;
   readonly workers: WorkerDirectoryPort;
+  /**
+   * Human identity, deliberately separate from worker identity. Empty by
+   * default: nobody is a principal until a Founder registers them.
+   */
+  readonly principals: HumanPrincipalPort;
   private readonly nominationSources: readonly NominationSourcePort[];
   private readonly policyCtx: PolicyContext;
 
@@ -215,6 +247,7 @@ export class HeadquarterOperations {
     this.store = options.store ?? new HeadquarterStore(db);
     this.queue = options.queue ?? new OperatorQueue(db, options.policyCtx ?? {});
     this.workers = options.workers ?? new SpecialistDirectoryAdapter(this.store);
+    this.principals = options.humanPrincipals ?? new HumanPrincipalRegistry(db);
     this.nominationSources = options.nominationSources ?? [];
     this.policyCtx = options.policyCtx ?? {};
   }
@@ -256,9 +289,13 @@ export class HeadquarterOperations {
   // ---- create ----
 
   /**
-   * Create a task on behalf of a worker. The worker's capability allow-list is
-   * read from the directory, never accepted from the caller, and a worker that
-   * is not assignable cannot open work at all.
+   * Create a task on behalf of a worker OR a human principal.
+   *
+   * Either way the capability allow-list is read from a registry — the
+   * specialist directory for a worker, `originateCapabilities` for a human —
+   * and never accepted from the caller. Deny by default: an id in neither
+   * registry can open nothing, and a human's origination grant confers no
+   * execution right whatsoever (see `claimNext`/`startTask`).
    */
   createTask(input: CreateTaskInput): OpsResult<CreatedTask> {
     if (!input.capabilityId || !input.requestedBy) {
@@ -268,10 +305,8 @@ export class HeadquarterOperations {
     if (!cap) return fail('unknown_capability', `Unknown capability: ${input.capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${cap.id} is disabled`);
 
-    const assignability = this.workers.assignability(input.requestedBy);
-    if (!assignability.assignable) {
-      return this.rejectNotAssignable(input.requestedBy, assignability, 'create_task');
-    }
+    const requester = this.resolveRequester(input.requestedBy, 'create_task');
+    if (!requester.ok) return requester;
 
     const result = this.queue.enqueue({
       capabilityId: input.capabilityId,
@@ -279,8 +314,8 @@ export class HeadquarterOperations {
       idempotencyKey: input.idempotencyKey,
       requestedBy: {
         workerId: input.requestedBy,
-        // Authority: the directory, not the caller.
-        allowedCapabilities: [...this.workers.allowedCapabilities(input.requestedBy)],
+        // Authority: the registry, not the caller.
+        allowedCapabilities: [...requester.data.allowedCapabilities],
       },
     });
     if (!result.accepted) {
@@ -457,7 +492,7 @@ export class HeadquarterOperations {
   approveTask(input: ApproveTaskInput): OpsResult<OperatorTask> {
     const task = this.queue.get(input.taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${input.taskId}`);
-    const principal = this.assertFounderPrincipal(input.founderId, 'approve');
+    const principal = this.assertApprovalAuthority(input.founderId, 'approve');
     if (principal) return principal;
     if (task.status !== 'needs_approval') {
       return fail(
@@ -503,7 +538,7 @@ export class HeadquarterOperations {
   denyTask(input: DenyTaskInput): OpsResult<OperatorTask> {
     const task = this.queue.get(input.taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${input.taskId}`);
-    const principal = this.assertFounderPrincipal(input.founderId, 'deny');
+    const principal = this.assertApprovalAuthority(input.founderId, 'deny');
     if (principal) return principal;
     if (!input.reason) return fail('invalid_input', 'A denial requires a reason');
     const currentDigest = taskActionDigest(task);
@@ -547,6 +582,8 @@ export class HeadquarterOperations {
     if (!cap) return fail('unknown_capability', `Unknown capability: ${capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${capabilityId} is disabled`);
 
+    const human = this.rejectHumanExecution(workerId, 'claim work');
+    if (human) return human;
     const assignability = this.workers.assignability(workerId);
     if (!assignability.assignable) {
       return this.rejectNotAssignable(workerId, assignability, 'claim');
@@ -591,6 +628,8 @@ export class HeadquarterOperations {
    * `OperatorQueue.start()`.
    */
   startTask(taskId: string, workerId: string, fence: number): OpsResult<OperatorTask> {
+    const human = this.rejectHumanExecution(workerId, 'start work');
+    if (human) return human;
     const assignability = this.workers.assignability(workerId);
     if (!assignability.assignable) {
       return this.rejectNotAssignable(workerId, assignability, 'start', { taskId });
@@ -658,10 +697,12 @@ export class HeadquarterOperations {
   }
 
   /**
-   * Independent review of a submitted result. The reviewer must be assignable
-   * (a disabled worker is not a valid reviewer); independence itself — never
-   * the executing, submitting or requesting worker — is enforced by the queue.
-   * Human reviewers that are not registered workers are accepted.
+   * Independent review of a submitted result.
+   *
+   * The reviewer must BE someone: an assignable worker, or a registered active
+   * human principal. (Approval authority is not required — reviewing a result
+   * is not deciding a Founder approval.) Independence itself — never the
+   * executing, submitting or requesting worker — is enforced by the queue.
    */
   reviewTask(
     taskId: string,
@@ -672,12 +713,8 @@ export class HeadquarterOperations {
     if (verdict === 'fail' && !note) {
       return fail('invalid_input', 'A failed review requires a reason');
     }
-    if (this.workers.isRegistered(reviewerId)) {
-      const assignability = this.workers.assignability(reviewerId);
-      if (!assignability.assignable) {
-        return this.rejectNotAssignable(reviewerId, assignability, 'review', { taskId });
-      }
-    }
+    const reviewer = this.resolveActor(reviewerId, 'review');
+    if (!reviewer.ok) return reviewer;
     try {
       return ok(
         verdict === 'pass'
@@ -691,8 +728,9 @@ export class HeadquarterOperations {
 
   /**
    * Resolve an `outcome_unknown` task after a human checked the real world.
-   * Independence and the "never blindly re-queue a non-idempotent capability"
-   * rule are the queue's.
+   * The reconciler must be a known actor (same rule as review); independence
+   * and the "never blindly re-queue a non-idempotent capability" rule are the
+   * queue's.
    */
   reconcileTask(
     taskId: string,
@@ -701,6 +739,8 @@ export class HeadquarterOperations {
     note: string,
   ): OpsResult<OperatorTask> {
     if (!note) return fail('invalid_input', 'Reconciliation requires a note');
+    const reconciler = this.resolveActor(by, 'reconcile');
+    if (!reconciler.ok) return reconciler;
     try {
       return ok(this.queue.reconcile(taskId, decision, by, note));
     } catch (error) {
@@ -711,14 +751,14 @@ export class HeadquarterOperations {
   // ---- kill switch (Founder only) ----
 
   engageKillSwitch(scope: string, founderId: string, reason: string): OpsResult<null> {
-    const principal = this.assertFounderPrincipal(founderId, 'engage the kill switch');
+    const principal = this.assertApprovalAuthority(founderId, 'engage the kill switch');
     if (principal) return principal;
     this.queue.engageKillSwitch(scope, founderId, reason);
     return ok(null);
   }
 
   releaseKillSwitch(scope: string, founderId: string): OpsResult<null> {
-    const principal = this.assertFounderPrincipal(founderId, 'release the kill switch');
+    const principal = this.assertApprovalAuthority(founderId, 'release the kill switch');
     if (principal) return principal;
     this.queue.releaseKillSwitch(scope, founderId);
     return ok(null);
@@ -1048,12 +1088,63 @@ export class HeadquarterOperations {
   // ---- internals ----
 
   /**
-   * Founder-facing decisions require a HUMAN principal. Any id the directory
-   * knows as a worker is refused outright, so an AI worker cannot approve an
-   * action or touch the kill switch even if it somehow reaches this API. This
-   * sits on top of — not instead of — the queue's own self-approval guards.
+   * Resolve an actor that must simply BE someone — an assignable worker or an
+   * active human principal — without needing a capability grant. Used for
+   * review and reconciliation, where the decisive property is independence
+   * (enforced by the queue) rather than permission to act on a capability.
+   * Deny by default: an unknown id is nobody and can do neither.
    */
-  private assertFounderPrincipal(actor: string, action: string): OpsResult<never> | null {
+  private resolveActor(actor: string, action: string): OpsResult<ResolvedRequester> {
+    if (!actor) return fail('invalid_input', `An actor is required to ${action}`);
+    if (actor === 'system') {
+      return fail('not_permitted', `'system' cannot ${action}`);
+    }
+    return this.resolveRequester(actor, action);
+  }
+
+  /**
+   * Resolve who is opening work. A worker must be assignable; a human must be
+   * a registered, active principal. Neither can supply its own allow-list.
+   */
+  private resolveRequester(actor: string, action: string): OpsResult<ResolvedRequester> {
+    if (this.workers.isRegistered(actor)) {
+      const assignability = this.workers.assignability(actor);
+      if (!assignability.assignable) {
+        return this.rejectNotAssignable(actor, assignability, action);
+      }
+      return ok({ kind: 'worker', allowedCapabilities: this.workers.allowedCapabilities(actor) });
+    }
+    const human = resolvePrincipal(this.principals, actor);
+    if (!human.ok) {
+      this.queue.evidence.append({
+        actor: 'system',
+        kind: 'principal_rejected',
+        payload: { actorId: actor, action, reason: human.reason },
+      });
+      return fail(
+        'unknown_principal',
+        `${actor} may not ${action}: not a registered worker, and ${human.reason.replace('principal_', 'the human principal is ')}`,
+        { actor, reason: human.reason },
+      );
+    }
+    // A human's grant is for ORIGINATING work only. It never reaches
+    // claim/start — those paths are worker-only by construction.
+    return ok({ kind: 'human', allowedCapabilities: human.principal.originateCapabilities });
+  }
+
+  /**
+   * Founder-facing decisions require a registered, active human principal that
+   * carries approval authority — deny by default.
+   *
+   * The earlier version of this guard authorized by elimination ("not a known
+   * worker, therefore human"), which denied workers but admitted every unknown
+   * string. Authority is now positive: an actor must BE someone, not merely
+   * fail to be a worker. Any id the directory knows as a worker is still
+   * refused outright, so worker identity can never carry approval authority.
+   * All of this sits on top of — never instead of — the queue's own
+   * self-approval guards, which still stop a requester approving its own action.
+   */
+  private assertApprovalAuthority(actor: string, action: string): OpsResult<never> | null {
     if (!actor) return fail('invalid_input', `An actor is required to ${action}`);
     if (actor === 'system') {
       return fail('not_permitted', `'system' cannot ${action}: a human principal is required`);
@@ -1061,11 +1152,44 @@ export class HeadquarterOperations {
     if (this.workers.isRegistered(actor)) {
       return fail(
         'not_permitted',
-        `Registered worker ${actor} cannot ${action}: this is a Founder-only action`,
+        `Registered worker ${actor} cannot ${action}: worker identity never carries approval authority`,
         { actor },
       );
     }
+    const approver = resolveApprover(this.principals, actor);
+    if (!approver.ok) {
+      this.queue.evidence.append({
+        actor: 'system',
+        kind: 'approval_authority_refused',
+        payload: { actorId: actor, action, reason: approver.reason },
+      });
+      return fail('not_permitted', `${actor} may not ${action}: ${approver.reason}`, {
+        actor,
+        reason: approver.reason,
+      });
+    }
     return null;
+  }
+
+  /**
+   * Execution is worker-only. A human principal may originate work and may
+   * decide approvals; it can never hold a fenced claim, so `claimNext()` and
+   * `startTask()` refuse it explicitly rather than letting it fall through the
+   * worker-directory lookup with a confusing "unknown worker".
+   */
+  private rejectHumanExecution(actorId: string, action: string): OpsResult<never> | null {
+    if (this.workers.isRegistered(actorId)) return null;
+    if (!this.principals.get(actorId)) return null;
+    this.queue.evidence.append({
+      actor: 'system',
+      kind: 'human_execution_refused',
+      payload: { actorId, action },
+    });
+    return fail(
+      'humans_do_not_execute',
+      `Human principal ${actorId} may not ${action}: originating and approving work never grants execution capability`,
+      { actorId },
+    );
   }
 
   private rejectNotAssignable(

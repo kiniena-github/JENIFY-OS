@@ -18,7 +18,8 @@ safety; this layer is the typed way a UI reaches it.
 | `src/application/console.ts` | `founderConsole()` — the Founder-facing read model |
 | `src/application/classification.ts` | Registry-derived task classification |
 | `src/application/missions.ts` | Group-room proposal types + digest |
-| `src/application/ports.ts` | The two narrow integration seams |
+| `src/application/ports.ts` | The two narrow worker-side integration seams |
+| `src/application/principals.ts` | Human identity, separate from AI worker identity |
 | `src/application/db.ts` | Module-owned, additive DDL |
 
 Two new tables, both **presentation/routing metadata only**, never authority:
@@ -75,13 +76,14 @@ layer. **None of it was redesigned, relaxed, or duplicated.**
 - `outcome_unknown` and the kill switch.
 - Deny-by-default capability registry; no shell/browser executor exists.
 
-### The four hardenings this lane adds
+### The hardenings this lane adds
 
 All are strictly **narrowing** — each one refuses more than the raw queue would.
 
-1. **Allow-lists come from the directory.** `OperatorQueue.enqueue()` accepts
+1. **Allow-lists come from a registry.** `OperatorQueue.enqueue()` accepts
    `requestedBy.allowedCapabilities` from its caller. `HeadquarterOperations`
-   always fills that from `WorkerDirectoryPort`; there is no argument through
+   always fills that from `WorkerDirectoryPort` (workers) or
+   `originateCapabilities` (human principals); there is no argument through
    which a caller can supply its own permissions.
 2. **Approvals are digest-echoed.** `approveTask()` requires the console to
    send back the digest it displayed. If the action changed between render and
@@ -92,10 +94,8 @@ All are strictly **narrowing** — each one refuses more than the raw queue woul
 3. **Assignability is re-checked at claim AND at start.** A worker disabled or
    replaced mid-flight gets no new work and cannot start work it had already
    claimed. Its live claims surface as handover/reconciliation blockers.
-4. **Founder actions require a human principal.** Approve, deny and the kill
-   switch are refused for any id the directory knows as a registered worker, on
-   top of the queue's own self-approval guards. An AI worker cannot approve an
-   action or turn the kill switch off.
+4. **Every actor must positively BE someone.** See §4a — this replaces an
+   earlier check that authorized Founder actions by elimination.
 
 One more, found while wiring: `submitResult()` refuses a result for a task that
 already has one awaiting review. `OperatorQueue.complete()` releases the lease
@@ -116,6 +116,51 @@ the queue's back. A test asserts the public surface carries no
 that adds one fails CI.
 
 ---
+
+## 4a. Human principals — three rights, held apart
+
+*Added in the correction after the PR #142 review, which caught a real hole and
+a real product gap in the first cut.*
+
+The first version authorized Founder actions by **elimination**: "this actor is
+not a registered worker, therefore it is a human". That denied workers but
+admitted *every unknown string* — a typo'd or invented id could approve. It also
+left the Founder unable to originate work at all without being registered as a
+worker, which would then have barred them from approving.
+
+`principals.ts` makes human identity its own first-class, deny-by-default seam,
+deliberately separate from AI worker identity. **The registry starts empty**;
+registering a principal is a Founder-gated, code-reviewed action, exactly like
+registering a capability. No default grant or default authority is invented.
+
+Each principal carries two independent authorities:
+
+| | Grant | What it does | What it never does |
+|---|---|---|---|
+| **Originate** | `originateCapabilities: string[]` | Open work for those capability ids | Confer any execution right |
+| **Approve** | `approvalAuthority: boolean` | Decide Founder approvals, operate the kill switch | Confer a capability |
+
+Three separations are enforced and tested:
+
+- **Originating is never executing.** `claimNext()` and `startTask()` refuse a
+  human principal outright (`humans_do_not_execute`). Execution requires a live
+  fenced claim, and no code path gives a human one.
+- **Approval authority is never worker membership.** A registered worker is
+  refused approval authority *before* the principal lookup, so an id cannot be
+  laundered into approving by also being listed as a principal.
+- **Nobody round-trips a gated action alone.** The canonical
+  requester-cannot-approve rule is untouched, so a human who opens a gated task
+  cannot approve it. A second approval-authorized principal must — or, the
+  ordinary Headquarter flow, a worker originates and the Founder approves.
+
+> That last consequence is real: in a one-approver org, Founder-*originated*
+> gated work has no approver. The answer is a second approval principal, or
+> letting a worker originate. It is deliberately **not** solved with a Founder
+> exception, which would weaken a canonical Operator guarantee.
+
+Review and reconciliation use the same positive-identity rule but need no
+grant: the decisive property there is independence (queue-enforced), so any
+assignable worker or active principal may review — an unknown id may not.
 
 ## 4. Nomination vs. authority
 
@@ -166,17 +211,10 @@ Three deliberate non-features, and they are the security argument:
 `detectActionLanguage()` flags imperative-looking chat for a human reader. It is
 decoration and is never consulted by any authorization path.
 
-> **Open question for the Founder — a human cannot promote a proposal today.**
-> Promotion creates a task whose requester must hold the capability in the
-> directory, and the directory holds AI specialists, not humans. So a mission
-> the Founder raises in the group room becomes work when a *worker* promotes it
-> (and the Founder then approves the gated task), not by the Founder promoting
-> it directly. Registering the Founder as a directory worker would fix that but
-> would also make them a "registered worker", which is exactly the class barred
-> from approving — so the two rules would collide. The safe direction was taken
-> and the rule is **not** invented here: if the Founder wants direct promotion,
-> it needs a human-principal grant model, which is a product decision, not an
-> implementation detail.
+A human principal **can** promote a proposal, for capabilities their
+`originateCapabilities` grant covers (§4a). Promotion is still authorized on the
+Operator side and still grants nothing: the promoted task is gated exactly as
+any other, and the promoter — human or worker — gets no execution right from it.
 
 ---
 
@@ -227,7 +265,7 @@ the guard a caller runs before disabling anyone.
 
 ## 8. Tests
 
-64 new tests across three files; no existing test was edited.
+83 new tests across four files; no pre-existing test was edited.
 
 - `test/application.lifecycle.test.ts` (24) — classify, create, dedupe, route,
   advisory assignment, read-only vs. review-gated completion, the full
@@ -242,11 +280,18 @@ the guard a caller runs before disabling anyone.
 - `test/application.missions.test.ts` (15) — four textbook prompt-injection
   messages that change nothing, inert proposals, promotion authority, and the
   console-vs-canonical-state consistency checks.
+- `test/application.principals.test.ts` (18) — the human seam: a Founder
+  originating and promoting within their grant; grants held to least privilege;
+  unknown, inactive and unauthorized humans denied; humans refused claim and
+  start; a worker id refused approval even when also registered as a principal;
+  a human unable to approve the task they opened, and a second approver able to;
+  the kill switch on the same positive authority; unknown reviewers and
+  reconcilers denied.
 
 ---
 
 ## 9. Rollback
 
-Revert the single commit. The schema is additive (two new `hq_*` tables created
-idempotently and read by nothing else), and no existing file changed except
-`src/index.ts` (+1 export line) and `package.json` (+1 subpath export).
+Revert the branch's commits. The schema is additive (three new `hq_*` tables
+created idempotently and read by nothing else), and no existing file changed
+except `src/index.ts` (+1 export line) and `package.json` (+1 subpath export).
