@@ -437,6 +437,11 @@ export class HeadquarterOperations {
     const cap = this.queue.capabilities.get(task.capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${task.capabilityId}`);
 
+    // The actor RECORDING the intent must be someone: this writes an
+    // actor-attributed annotation event and evidence entry.
+    const actor = this.resolveActor(assignedBy, 'record an assignment intent');
+    if (!actor.ok) return actor;
+
     const assignability = this.workers.assignability(workerId);
     if (!assignability.assignable) {
       return this.rejectNotAssignable(workerId, assignability, 'assign_task');
@@ -809,6 +814,11 @@ export class HeadquarterOperations {
   /**
    * Post a group-room message. Storage only. This never creates a task, never
    * touches an approval, and never grants anything, whatever the text says.
+   *
+   * The AUTHOR must still be a resolvable identity. A message is inert, so a
+   * forged author escalates nothing — but attribution in the group room is
+   * exactly what a human reads before deciding to promote a mission, so an
+   * unknown id must not be able to publish under a trusted-looking name.
    */
   postMissionMessage(input: {
     threadId: string;
@@ -819,6 +829,8 @@ export class HeadquarterOperations {
     if (!input.threadId || !input.author) {
       return fail('invalid_input', 'threadId and author are required');
     }
+    const actor = this.resolveActor(input.author, 'post to a group room');
+    if (!actor.ok) return actor;
     const message = this.store.postMessage(input);
     return ok({
       messageId: message.id,
@@ -843,6 +855,9 @@ export class HeadquarterOperations {
     if (!input.threadId || !input.capabilityId || !input.proposedBy) {
       return fail('invalid_input', 'threadId, capabilityId and proposedBy are required');
     }
+    // Inert, but it enters the evidence chain under this actor's name.
+    const actor = this.resolveActor(input.proposedBy, 'raise a mission proposal');
+    if (!actor.ok) return actor;
     try {
       assertNoSecretLikeContent(input.payload);
     } catch (error) {
@@ -956,6 +971,16 @@ export class HeadquarterOperations {
     return created;
   }
 
+  /**
+   * Close an open proposal without promoting it.
+   *
+   * Rejection is a one-way state change on a shared record, attributed to the
+   * deciding actor in both the proposal row and the hash-chained evidence log,
+   * so `by` must resolve to a known worker or active human principal (Jules
+   * review of `ff105a2`). An unknown or deactivated identity could otherwise
+   * close other people's proposals and write a false name into the evidence
+   * trail.
+   */
   rejectProposal(proposalId: string, by: string, note: string): OpsResult<MissionProposal> {
     const proposal = this.getProposal(proposalId);
     if (!proposal) return fail('proposal_not_found', `Unknown proposal: ${proposalId}`);
@@ -963,6 +988,8 @@ export class HeadquarterOperations {
       return fail('proposal_not_open', `Proposal ${proposalId} is already ${proposal.status}`);
     }
     if (!note) return fail('invalid_input', 'Rejecting a proposal requires a note');
+    const actor = this.resolveActor(by, 'reject a mission proposal');
+    if (!actor.ok) return actor;
     this.db
       .prepare(
         `UPDATE hq_mission_proposals SET status = 'rejected', decided_by = ?, decided_at = ?, decision_note = ?
