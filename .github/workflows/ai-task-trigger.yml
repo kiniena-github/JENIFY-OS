@@ -3,11 +3,25 @@ name: AI Task Routine Bridge
 # Bridges routed GitHub AI tasks to the existing claude.ai Claude Code Routine
 # "AI WORKERS" (API trigger / fire endpoint).
 #
-# Routing:
-#   [AI TASK] ...          -> Claude only (legacy/default)
-#   [AI TASK][CLAUDE] ...  -> Claude only
-#   [AI TASK][BOTH] ...    -> Claude + Gemini
-#   [AI TASK][GEMINI] ...  -> Gemini only (handled by ai-task-gemini.yml)
+# Routing is decided by the UNIT-TESTED module
+# packages/headquarter/src/routing (see packages/headquarter/test/routing.test.ts),
+# invoked through .github/scripts/decide-routing.ts. This workflow never
+# re-implements routing rules in YAML.
+#
+#   [AI TASK] ...            -> Claude only (legacy/default)
+#   [AI TASK][CLAUDE] ...    -> Claude only
+#   [AI TASK][BOTH] ...      -> Claude + Gemini
+#   [AI TASK][GEMINI] ...    -> Gemini only (ai-task-gemini.yml)
+#   [AI TASK][CODEX] ...     -> FAILS CLOSED. Previously this workflow's guard was
+#                               `startsWith('[AI TASK]') && !startsWith('[AI TASK][GEMINI]')`,
+#                               so EVERY non-Gemini provider tag fired Claude and
+#                               Claude was asked to impersonate another vendor.
+#   [AI TASK][<any other>]   -> FAILS CLOSED unless genuinely connected.
+#
+# Re-triggering: an existing task wakes only when the repository owner posts a
+# comment containing the machine-readable directive `<!-- jenify-run -->`
+# (optionally `<!-- jenify-run: PROVIDER -->`). Worker result comments carry
+# `jenify-*-result` markers and can never re-trigger themselves.
 #
 # Secrets:
 #   CLAUDE_ROUTINE_URL
@@ -18,6 +32,8 @@ name: AI Task Routine Bridge
 on:
   issues:
     types: [opened, labeled]
+  issue_comment:
+    types: [created]
   workflow_dispatch:
     inputs:
       issue_number:
@@ -26,7 +42,8 @@ on:
         type: string
 
 permissions:
-  issues: read
+  contents: read
+  issues: write
 
 concurrency:
   group: ai-task-bridge-${{ github.event.issue.number || inputs.issue_number }}
@@ -37,17 +54,106 @@ jobs:
     name: Fire AI WORKERS routine
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Cheap pre-gate only. The AUTHORITATIVE decision (provider, authorization,
+    # loop-safety, fail-closed) is made by the tested routing module below.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'issues' &&
-       github.event.issue.user.login == github.repository_owner &&
        ((github.event.action == 'opened') ||
         (github.event.action == 'labeled' && github.event.label.name == 'ai-task')) &&
+       startsWith(github.event.issue.title, '[AI TASK]')) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request == null &&
        startsWith(github.event.issue.title, '[AI TASK]') &&
-       !startsWith(github.event.issue.title, '[AI TASK][GEMINI]'))
+       contains(github.event.comment.body, 'jenify-run'))
 
     steps:
+      - name: Check out routing contract
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Resolve issue for manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER_IN: ${{ inputs.issue_number }}
+        run: |
+          issue=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER_IN")
+          {
+            echo "DISPATCH_TITLE<<JENIFY_EOF_7f3a"
+            printf '%s' "$issue" | jq -r '.title'
+            echo "JENIFY_EOF_7f3a"
+            echo "DISPATCH_URL=$(printf '%s' "$issue" | jq -r '.html_url')"
+            echo "DISPATCH_AUTHOR=$(printf '%s' "$issue" | jq -r '.user.login')"
+          } >> "$GITHUB_ENV"
+
+      # ---- AUTHORITATIVE ROUTING DECISION (unit-tested module) ------------
+      - name: Decide routing
+        id: routing
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          ISSUE_TITLE: ${{ github.event.issue.title || env.DISPATCH_TITLE }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login || env.DISPATCH_AUTHOR }}
+          ACTOR: ${{ github.event.comment.user.login || github.event.issue.user.login || github.actor }}
+          ACTOR_TYPE: ${{ github.event.comment.user.type || github.event.issue.user.type || 'User' }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          TARGET_PROVIDER: CLAUDE
+          DEDUPE_KEY: ${{ github.event.issue.number }}-${{ github.event.comment.id || github.event.action || 'dispatch' }}
+          HAS_CLAUDE_ROUTINE_URL: ${{ secrets.CLAUDE_ROUTINE_URL != '' }}
+          HAS_CLAUDE_ROUTINE_TOKEN: ${{ secrets.CLAUDE_ROUTINE_TOKEN != '' }}
+          HAS_GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY != '' }}
+        run: npx --yes tsx .github/scripts/decide-routing.ts
+
+      # Gated on OWNERSHIP, not on outcome.
+      #
+      # Two independent defects lived in the old gate. It required
+      # `outcome == 'BLOCKED'`, so a task where one provider ran and another was
+      # blocked (outcome ROUTE, blocked non-empty) reported NOTHING — the
+      # blocked provider's share was silently dropped. And every workflow that
+      # wakes for an AI task computed the same notice, so the Gemini lane had to
+      # narrow itself by hand (`requested == 'GEMINI'`) to avoid double-posting,
+      # which is what created the silence in the mixed case.
+      #
+      # `should_report_blocked` is true for exactly ONE workflow per decision,
+      # and it keys on `blocked` rather than on outcome. Truthful and once.
+      - name: Report fail-closed routing to the issue
+        if: steps.routing.outputs.should_report_blocked == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
+          REPORT: ${{ steps.routing.outputs.blocked_report }}
+          MARKER: ${{ steps.routing.outputs.blocked_marker }}
+        run: |
+          printf '%s\n' "$REPORT" > blocked.md
+          # Duplicate delivery guard: an issue can be re-labelled, re-dispatched
+          # or re-commented. The marker identifies this exact blocked set, so an
+          # identical notice is recognised ANYWHERE in the thread rather than
+          # only as the most recent comment — while a genuinely different block
+          # (a different provider going down) still gets reported.
+          existing=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" \
+            | jq -s -r --arg marker "$MARKER" \
+              'add // [] | map(select(.body | contains($marker))) | length')
+          if [ "${existing:-0}" != "0" ]; then
+            echo "This routing-blocked notice ($MARKER) is already on issue #$ISSUE_NUMBER; not posting a duplicate."
+          else
+            gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file blocked.md
+          fi
+          echo "::warning::A requested provider was blocked; no provider was substituted."
+
+      - name: Stop unless Claude is the routed provider
+        if: steps.routing.outputs.should_run != 'true'
+        run: |
+          echo "Not routed to Claude: ${{ steps.routing.outputs.reason }}"
+          echo "SKIP_FIRE=true" >> "$GITHUB_ENV"
+
       - name: Check routine secrets are configured
+        if: env.SKIP_FIRE != 'true'
         env:
           ROUTINE_URL: ${{ secrets.CLAUDE_ROUTINE_URL }}
           ROUTINE_TOKEN: ${{ secrets.CLAUDE_ROUTINE_TOKEN }}
@@ -59,7 +165,7 @@ jobs:
           echo "Routine secrets are configured."
 
       - name: Skip duplicate open-time label event
-        if: github.event_name == 'issues' && github.event.action == 'labeled'
+        if: env.SKIP_FIRE != 'true' && github.event_name == 'issues' && github.event.action == 'labeled'
         env:
           CREATED_AT: ${{ github.event.issue.created_at }}
         run: |
@@ -72,7 +178,7 @@ jobs:
           fi
 
       - name: Resolve issue details (issue event)
-        if: github.event_name == 'issues'
+        if: env.SKIP_FIRE != 'true' && (github.event_name == 'issues' || github.event_name == 'issue_comment')
         env:
           ISSUE_TITLE_IN: ${{ github.event.issue.title }}
           ISSUE_URL_IN: ${{ github.event.issue.html_url }}
@@ -87,45 +193,38 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Resolve issue details (manual dispatch)
-        if: github.event_name == 'workflow_dispatch'
+        if: env.SKIP_FIRE != 'true' && github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER_IN: ${{ inputs.issue_number }}
         run: |
+          # Routing authorisation/provider checks already happened in the
+          # "Decide routing" step, which is the single tested source of truth.
+          # This step only resolves the display details the prompt needs.
           issue=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER_IN")
-          title=$(printf '%s' "$issue" | jq -r '.title')
-          url=$(printf '%s' "$issue" | jq -r '.html_url')
-          author=$(printf '%s' "$issue" | jq -r '.user.login')
-          case "$title" in
-            "[AI TASK][GEMINI]"*)
-              echo "::error::Issue #$ISSUE_NUMBER_IN is Gemini-only; refusing to fire Claude."
-              exit 1
-              ;;
-            "[AI TASK]"*) ;;
-            *)
-              echo "::error::Issue #$ISSUE_NUMBER_IN title does not start with [AI TASK]; refusing to fire the routine."
-              exit 1
-              ;;
-          esac
-          if [ "$author" != "$GITHUB_REPOSITORY_OWNER" ]; then
-            echo "::error::Automatic AI tasks must be created by the repository owner."
-            exit 1
-          fi
           {
             echo "ISSUE_TITLE<<JENIFY_EOF_7f3a"
-            echo "$title"
+            printf '%s' "$issue" | jq -r '.title'
             echo "JENIFY_EOF_7f3a"
-            echo "ISSUE_URL=$url"
+            echo "ISSUE_URL=$(printf '%s' "$issue" | jq -r '.html_url')"
             echo "ISSUE_NUMBER=$ISSUE_NUMBER_IN"
           } >> "$GITHUB_ENV"
 
       - name: Fire AI WORKERS routine
         if: env.SKIP_FIRE != 'true'
+        id: fire
         env:
           ROUTINE_URL: ${{ secrets.CLAUDE_ROUTINE_URL }}
           ROUTINE_TOKEN: ${{ secrets.CLAUDE_ROUTINE_TOKEN }}
+          TRIGGER_EVENT: ${{ github.event_name }}
+          ROUTED_ROLE: ${{ steps.routing.outputs.role }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          text="Work the approved GitHub AI task at ${ISSUE_URL} (${GITHUB_REPOSITORY} issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}). Read that issue first and execute only what it asks under the saved AI WORKERS routine rules. If it is an analysis/review task, do not modify code unless the issue explicitly requests implementation. When finished, write a concise final report back to THE SAME GitHub issue as a comment beginning exactly with '<!-- jenify-claude-result -->' and then '## Claude Engineering / Review Report'. Include verdict, work performed or findings, tests/evidence, risks/blockers, and next action. Do not require the Founder to copy your report into another AI."
+          followup=""
+          if [ "$TRIGGER_EVENT" = "issue_comment" ]; then
+            followup="This run was woken by a NEW instruction comment on the issue, not by the issue being opened. Read the WHOLE issue thread and treat the most recent owner comment carrying the <!-- jenify-run --> directive as the current instruction, taking earlier comments as history. "
+          fi
+          text="Work the approved GitHub AI task at ${ISSUE_URL} (${GITHUB_REPOSITORY} issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}). ${followup}Read that issue first and execute only what it asks under the saved AI WORKERS routine rules. If it is an analysis/review task, do not modify code unless the issue explicitly requests implementation. When finished, write a concise final report back to THE SAME GitHub issue as a comment beginning exactly with '<!-- jenify-claude-result -->' and then '## Claude Engineering / Review Report'. Include verdict, work performed or findings, tests/evidence, risks/blockers, and next action. End the comment with a provenance block stating: requested provider CLAUDE, the actual model you are running as, role ${ROUTED_ROLE:-unset}, trigger ${TRIGGER_EVENT}, dispatching run ${RUN_URL}, and your session id. State your actual model honestly; if you cannot verify it, write 'unverified' rather than guessing. Never claim to be a different provider or model than the one actually executing. Do not require the Founder to copy your report into another AI."
           body=$(jq -cn --arg text "$text" '{text: $text}')
           status=$(curl -sS -o response.json -w "%{http_code}" \
             --retry 2 --retry-delay 5 \
@@ -142,4 +241,37 @@ jobs:
             exit 1
           fi
           session_url=$(jq -r '.claude_code_session_url // empty' response.json)
+          echo "SESSION_URL=${session_url}" >> "$GITHUB_ENV"
           echo "AI WORKERS routine session started for issue #${ISSUE_NUMBER}: ${session_url:-<no session url in response>}"
+
+      # Dispatch provenance (requirement D). This records only what this
+      # workflow can PROVE: that a Claude routine session was dispatched. The
+      # executing model is attested by the worker itself in its own report; we
+      # never assert it here.
+      - name: Record dispatch provenance
+        if: env.SKIP_FIRE != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRIGGER_EVENT: ${{ github.event_name }}
+          ROUTED_ROLE: ${{ steps.routing.outputs.role }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "<!-- jenify-provenance -->"
+            echo "### Dispatch provenance"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Issue | #${ISSUE_NUMBER} |"
+            echo "| Requested provider | CLAUDE |"
+            echo "| Executor | .github/workflows/ai-task-trigger.yml |"
+            echo "| Actual provider | CLAUDE (routine session dispatched) |"
+            echo "| Actual model | _attested by the worker in its own report_ |"
+            echo "| Role | ${ROUTED_ROLE:-_unset_} |"
+            echo "| Trigger | ${TRIGGER_EVENT} |"
+            echo "| Session | ${SESSION_URL:-_not returned_} |"
+            echo "| Dispatching run | ${RUN_URL} |"
+            echo "| Status | dispatched |"
+            echo "| Timestamp | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
+          } > provenance.md
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file provenance.md
