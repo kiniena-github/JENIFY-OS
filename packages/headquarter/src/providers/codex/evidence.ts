@@ -88,6 +88,38 @@ export function extractEvidence(opts: { sessionRollout?: string; execEvents?: st
   return evidence;
 }
 
+/**
+ * Pull the provider's OWN error message out of the event stream.
+ *
+ * Codex reports a refusal — an exhausted subscription quota, a rate limit, a
+ * server fault — as an `error` / `turn.failed` event while still exiting in a
+ * way that looks like an ordinary non-zero exit. Surfacing the runtime's own
+ * words matters: "you have hit your usage limit, try again at 11:25 PM" is an
+ * actionable answer, while a truncated stderr tail is not.
+ */
+export function extractRuntimeError(execEvents: string | undefined): string | null {
+  let found: string | null = null;
+  for (const entry of parseJsonl(execEvents ?? '')) {
+    const type = str(entry['type']);
+    if (type === 'error') {
+      found ??= str(entry['message']);
+    }
+    if (type === 'turn.failed') {
+      const err = entry['error'];
+      if (err != null && typeof err === 'object') {
+        found ??= str((err as Json)['message']);
+      }
+    }
+  }
+  return found;
+}
+
+/** Does this runtime error describe an exhausted or throttled allowance? */
+export function isQuotaError(message: string | null): boolean {
+  if (message == null) return false;
+  return /usage limit|rate limit|quota|too many requests|purchase more credits/i.test(message);
+}
+
 // ---------------------------------------------------------------------------
 // SHA verification — "a review cannot silently target a stale SHA"
 // ---------------------------------------------------------------------------

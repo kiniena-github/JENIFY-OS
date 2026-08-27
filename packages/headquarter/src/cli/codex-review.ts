@@ -17,6 +17,8 @@
  *   --role <ROLE>        role being performed (default: REVIEWER)
  *   --out <FILE>         write the markdown report here (default: stdout only)
  *   --instructions <T>   extra reviewer instructions
+ *   --effort <LEVEL>     reasoning effort (default: medium — this is the FAST lane)
+ *   --timeout <SECONDS>  give up after this long (default: 900)
  *   --probe-only         report Codex connectivity and exit
  *
  * Exit codes:
@@ -83,7 +85,12 @@ const request: CodexReviewRequest = {
 console.error(`[codex] ${probe.reason}`);
 console.error(`[codex] reviewing ${request.targetSha} in ${request.repoDir} against ${request.baseRef} ...`);
 
-const outcome = runCodexReview(request, { probe });
+const timeoutSec = Number(arg('timeout') ?? 900);
+const outcome = runCodexReview(request, {
+  probe,
+  reasoningEffort: arg('effort') ?? 'medium',
+  timeoutMs: (Number.isFinite(timeoutSec) && timeoutSec > 0 ? timeoutSec : 900) * 1000,
+});
 
 const provenance = renderCodexProvenance({
   requestedProvider: request.requestedProvider,
