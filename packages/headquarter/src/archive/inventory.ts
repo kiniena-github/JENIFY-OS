@@ -19,15 +19,8 @@ export interface EvidenceItem {
   category?: string;
   /** ISO date/instant when known. */
   date?: string;
-  /** Where the date came from; decides confidence unless dateConfidence is set. */
-  dateSource?: 'git' | 'github-api' | 'drive-api' | 'filename' | 'manual' | 'unknown';
-  /**
-   * Explicit confidence, overriding the value derived from `dateSource`.
-   * Connector adapters (issue #123/#140) establish this themselves — e.g. a
-   * Drive file with only a modification time is `inferred`, not `exact` —
-   * and their judgement must not be re-derived away here.
-   */
-  dateConfidence?: DateConfidence;
+  /** Where the date came from; decides confidence. */
+  dateSource?: 'git' | 'github-api' | 'filename' | 'manual' | 'unknown';
   body?: string;
   refs?: RelatedRefs;
   /** Original evidence location (URL or repo path). Preserved verbatim. */
@@ -158,7 +151,7 @@ export interface ReconstructOptions {
 }
 
 function confidenceFor(source: EvidenceItem['dateSource']): DateConfidence {
-  if (source === 'git' || source === 'github-api' || source === 'drive-api') return 'exact';
+  if (source === 'git' || source === 'github-api') return 'exact';
   if (source === 'filename' || source === 'manual') return 'inferred';
   return 'estimated';
 }
@@ -184,11 +177,7 @@ export function versionFromTitle(title: string): string {
 export function reconstructArchive(items: EvidenceItem[], options: ReconstructOptions): ArchiveRecord[] {
   return items.map((item) => {
     const dated = item.date
-      ? {
-          date: item.date,
-          confidence: item.dateConfidence ?? confidenceFor(item.dateSource),
-          source: item.dateSource ?? 'unknown',
-        }
+      ? { date: item.date, confidence: confidenceFor(item.dateSource), source: item.dateSource ?? 'unknown' }
       : { date: options.fallbackDate, confidence: 'estimated' as DateConfidence, source: 'fallback' };
     return {
       id: `${KIND_PREFIX[item.kind]}-${item.id}`,
