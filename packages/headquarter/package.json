@@ -16,7 +16,8 @@
     "./memory": "./src/memory/index.ts",
     "./handover": "./src/handover/index.ts",
     "./registry": "./src/registry/index.ts",
-    "./providers": "./src/providers/index.ts"
+    "./providers": "./src/providers/index.ts",
+    "./application": "./src/application/index.ts"
   },
   "scripts": {
     "test": "vitest run",
