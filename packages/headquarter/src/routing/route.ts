@@ -8,6 +8,7 @@ import {
   type Role,
   type SecretsEnv,
 } from './providers.js';
+import { DEFAULT_ROLE_ASSIGNMENTS, providerForRole, type RoleAssignments } from './assignments.js';
 
 /**
  * Deterministic routing decisions for JENIFY AI tasks.
@@ -29,6 +30,13 @@ import {
 export interface ParsedTask {
   isAiTask: boolean;
   requestedProviders: ProviderId[];
+  /**
+   * True when the title named a provider outright. False when
+   * `requestedProviders` only holds the legacy `[AI TASK]` => CLAUDE default,
+   * which is what lets a role-only task be staffed from the assignment table
+   * instead of silently going to Claude.
+   */
+  providerExplicit: boolean;
   role: Role | null;
   /** tags present in the title that are neither a provider nor a role */
   unknownTags: string[];
@@ -37,7 +45,7 @@ export interface ParsedTask {
 const TASK_PREFIX = '[AI TASK]';
 
 export function parseTaskTitle(title: string): ParsedTask {
-  const empty: ParsedTask = { isAiTask: false, requestedProviders: [], role: null, unknownTags: [] };
+  const empty: ParsedTask = { isAiTask: false, requestedProviders: [], providerExplicit: false, role: null, unknownTags: [] };
   if (typeof title !== 'string') return empty;
   const trimmed = title.trim();
   if (!trimmed.toUpperCase().startsWith(TASK_PREFIX)) return empty;
@@ -72,11 +80,15 @@ export function parseTaskTitle(title: string): ParsedTask {
     }
   }
 
+  const providerExplicit = requested.length > 0;
+
   // legacy bare [AI TASK] with no provider tag => Claude, preserving today's
-  // working behaviour exactly.
+  // working behaviour exactly. A title that names a ROLE but no provider is
+  // still recorded as CLAUDE here for backward compatibility; decideRouting is
+  // what re-staffs it from the assignment table.
   if (requested.length === 0 && unknownTags.length === 0) requested.push('CLAUDE');
 
-  return { isAiTask: true, requestedProviders: requested, role, unknownTags };
+  return { isAiTask: true, requestedProviders: requested, providerExplicit, role, unknownTags };
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +159,12 @@ export interface RoutingRequest {
   /** stable id used for duplicate suppression */
   dedupeKey?: string;
   secrets: SecretsEnv;
+  /**
+   * Current ROLE -> PROVIDER staffing. Only consulted when a task names a role
+   * and no explicit provider. Defaults to DEFAULT_ROLE_ASSIGNMENTS, so callers
+   * that do not care about staffing keep today's behaviour.
+   */
+  assignments?: RoleAssignments;
 }
 
 export type RoutingOutcome = 'ROUTE' | 'IGNORE' | 'BLOCKED';
@@ -165,6 +183,12 @@ export interface RoutingDecision {
   requestedProviders: ProviderId[];
   blocked: ProviderDecision[];
   role: Role | null;
+  /**
+   * True when the provider was chosen from the ROLE -> PROVIDER assignment
+   * table rather than named in the task. Recorded so provenance can show that
+   * the Founder's staffing decided this, not a hard-coded vendor.
+   */
+  staffedFromRole: boolean;
   reason: string;
   dedupeKey?: string;
 }
@@ -175,7 +199,15 @@ export function blockedHeadline(provider: ProviderId): string {
 }
 
 export function decideRouting(req: RoutingRequest): RoutingDecision {
-  const base = { requestedProviders: [] as ProviderId[], blocked: [] as ProviderDecision[], role: null as Role | null, dispatchTo: [] as ProviderId[], dedupeKey: req.dedupeKey };
+  const base = {
+    requestedProviders: [] as ProviderId[],
+    blocked: [] as ProviderDecision[],
+    role: null as Role | null,
+    dispatchTo: [] as ProviderId[],
+    staffedFromRole: false,
+    dedupeKey: req.dedupeKey,
+  };
+  const assignments = req.assignments ?? DEFAULT_ROLE_ASSIGNMENTS;
 
   // ---- 1. the issue must be a routed AI task -----------------------------
   const parsed = parseTaskTitle(req.issueTitle);
@@ -199,6 +231,7 @@ export function decideRouting(req: RoutingRequest): RoutingDecision {
 
   // ---- 3. comment triggers need an explicit directive --------------------
   let requested = parsed.requestedProviders;
+  let providerExplicit = parsed.providerExplicit;
   if (req.trigger === 'issue_comment') {
     const directive = parseRunDirective(req.commentBody);
     // A worker's own report must NEVER wake a worker, even if it quotes the
@@ -217,7 +250,10 @@ export function decideRouting(req: RoutingRequest): RoutingDecision {
         reason: `Unknown provider(s) in run directive: ${directive.unknownOverrides.join(', ')}. Refusing to guess a provider.`,
       };
     }
-    if (directive.overrideProviders.length > 0) requested = directive.overrideProviders;
+    if (directive.overrideProviders.length > 0) {
+      requested = directive.overrideProviders;
+      providerExplicit = true;
+    }
   }
 
   // ---- 4. unknown provider tags fail closed ------------------------------
@@ -227,6 +263,17 @@ export function decideRouting(req: RoutingRequest): RoutingDecision {
       outcome: 'BLOCKED',
       reason: `Unrecognised routing tag(s): ${parsed.unknownTags.join(', ')}. Refusing to default to Claude.`,
     };
+  }
+
+  // ---- 4b. staff a role-only task from the assignment table --------------
+  // `[AI TASK][REVIEWER] ...` names a JOB, not a vendor. Whoever currently
+  // holds REVIEWER does it. This is the mechanism that lets the Founder move a
+  // role between providers with no architectural change — and the reason a
+  // role-only task must NOT keep silently defaulting to Claude.
+  let staffedFromRole = false;
+  if (parsed.role != null && !providerExplicit) {
+    requested = [providerForRole(parsed.role, assignments)];
+    staffedFromRole = true;
   }
 
   // ---- 5. connectivity: every requested provider must be genuinely live ---
@@ -248,6 +295,7 @@ export function decideRouting(req: RoutingRequest): RoutingDecision {
       requestedProviders: requested,
       blocked,
       role: parsed.role,
+      staffedFromRole,
       reason: blocked.map((b) => `${blockedHeadline(b.provider)} — ${b.reason}`).join(' | '),
     };
   }
@@ -259,6 +307,7 @@ export function decideRouting(req: RoutingRequest): RoutingDecision {
     requestedProviders: requested,
     blocked,
     role: parsed.role,
+    staffedFromRole,
     reason:
       blocked.length === 0
         ? `Routing to ${live.join(', ')}.`

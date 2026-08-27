@@ -134,13 +134,30 @@ describe('scenario 3: Codex without genuine connectivity FAILS CLOSED', () => {
     }
   });
 
-  it('a connected provider becomes routable the moment its credential exists', () => {
-    // proves connectivity is DERIVED, never hard-coded
-    const withCodex = { ...REAL_SECRETS, CODEX_API_KEY: 'k' };
-    // still blocked: the credential alone is not enough without an executor
-    const d = decideRouting(req({ issueTitle: '[AI TASK][CODEX] x', secrets: withCodex }));
+  it('a credential alone is never enough without an executor', () => {
+    // proves connectivity is DERIVED, never hard-coded. xAI has a credential
+    // name declared but no execution mechanism at all, so handing it a key
+    // must still leave it unroutable.
+    const withXai = { ...REAL_SECRETS, XAI_API_KEY: 'k' };
+    const d = decideRouting(req({ issueTitle: '[AI TASK][XAI] x', secrets: withXai }));
     expect(d.outcome).toBe('BLOCKED');
-    expect(providerConnectivity('CODEX', withCodex).hasExecutor).toBe(false);
+    expect(providerConnectivity('XAI', withXai).hasExecutor).toBe(false);
+    expect(providerConnectivity('XAI', withXai).connected).toBe(false);
+  });
+
+  it('Codex has a real executor but stays blocked until its local facts are observed', () => {
+    // Codex now genuinely exists (local Codex CLI), so `hasExecutor` is true —
+    // but an environment that cannot see the CLI must still fail closed rather
+    // than hand the task to Claude.
+    const conn = providerConnectivity('CODEX', REAL_SECRETS);
+    expect(conn.hasExecutor).toBe(true);
+    expect(conn.executorKind).toBe('local-cli');
+    expect(conn.connected).toBe(false);
+    expect(conn.missingLocalFacts).toEqual(['CODEX_CLI_PATH', 'CODEX_AUTH_MODE']);
+
+    const d = decideRouting(req({ issueTitle: '[AI TASK][CODEX] x', secrets: REAL_SECRETS }));
+    expect(d.outcome).toBe('BLOCKED');
+    expect(d.dispatchTo).toEqual([]);
   });
 
   it('Claude becomes unroutable if its credentials are removed (no silent fallback)', () => {
