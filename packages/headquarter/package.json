@@ -10,9 +10,10 @@
     "./operator": "./src/operator/index.ts",
     "./store": "./src/store/index.ts",
     "./archive": "./src/archive/index.ts",
-    "./connectors": "./src/connectors/index.ts",
     "./ui": "./src/ui/index.ts",
-    "./organization": "./src/organization/index.ts"
+    "./organization": "./src/organization/index.ts",
+    "./memory": "./src/memory/index.ts",
+    "./handover": "./src/handover/index.ts"
   },
   "scripts": {
     "test": "vitest run",
