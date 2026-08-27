@@ -4,10 +4,13 @@ name: AI Task Routine Bridge
 # "AI WORKERS" (API trigger / fire endpoint).
 #
 # Routing:
-#   [AI TASK] ...          -> Claude only (legacy/default)
+#   [AI TASK] ...          -> Claude only (legacy/default, only when no bracketed worker tag follows)
 #   [AI TASK][CLAUDE] ...  -> Claude only
 #   [AI TASK][BOTH] ...    -> Claude + Gemini
 #   [AI TASK][GEMINI] ...  -> Gemini only (handled by ai-task-gemini.yml)
+#   [AI TASK][CODEX] ...   -> NEVER Claude; requires a real Codex route/reviewer
+#   [AI TASK][JULES] ...   -> NEVER Claude; requires a real Jules route/worker
+#   Any other [AI TASK][WORKER] tag -> NEVER Claude unless explicitly added as an allowed Claude route.
 #
 # Secrets:
 #   CLAUDE_ROUTINE_URL
@@ -47,7 +50,40 @@ jobs:
        !startsWith(github.event.issue.title, '[AI TASK][GEMINI]'))
 
     steps:
+      - name: Validate Claude route (issue event)
+        if: github.event_name == 'issues'
+        env:
+          ISSUE_TITLE_IN: ${{ github.event.issue.title }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          upper=$(printf '%s' "$ISSUE_TITLE_IN" | tr '[:lower:]' '[:upper:]')
+          case "$upper" in
+            "[AI TASK]"*) ;;
+            *)
+              echo "::error::Issue title is not an AI task; refusing Claude route."
+              echo "SKIP_FIRE=true" >> "$GITHUB_ENV"
+              exit 0
+              ;;
+          esac
+
+          rest=${upper#"[AI TASK]"}
+          rest=$(printf '%s' "$rest" | sed 's/^[[:space:]]*//')
+          case "$rest" in
+            "[CLAUDE]"*|"[BOTH]"*)
+              echo "Explicit Claude-capable route accepted."
+              ;;
+            "["*)
+              echo "Named non-Claude or unknown worker route detected; refusing to fire Claude."
+              echo "SKIP_FIRE=true" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "Legacy bare [AI TASK] route accepted for Claude."
+              ;;
+          esac
+
       - name: Check routine secrets are configured
+        if: env.SKIP_FIRE != 'true'
         env:
           ROUTINE_URL: ${{ secrets.CLAUDE_ROUTINE_URL }}
           ROUTINE_TOKEN: ${{ secrets.CLAUDE_ROUTINE_TOKEN }}
@@ -59,7 +95,7 @@ jobs:
           echo "Routine secrets are configured."
 
       - name: Skip duplicate open-time label event
-        if: github.event_name == 'issues' && github.event.action == 'labeled'
+        if: env.SKIP_FIRE != 'true' && github.event_name == 'issues' && github.event.action == 'labeled'
         env:
           CREATED_AT: ${{ github.event.issue.created_at }}
         run: |
@@ -86,27 +122,39 @@ jobs:
             echo "ISSUE_NUMBER=$ISSUE_NUMBER_IN"
           } >> "$GITHUB_ENV"
 
-      - name: Resolve issue details (manual dispatch)
+      - name: Resolve and validate issue details (manual dispatch)
         if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER_IN: ${{ inputs.issue_number }}
+        shell: bash
         run: |
+          set -euo pipefail
           issue=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER_IN")
           title=$(printf '%s' "$issue" | jq -r '.title')
           url=$(printf '%s' "$issue" | jq -r '.html_url')
           author=$(printf '%s' "$issue" | jq -r '.user.login')
-          case "$title" in
-            "[AI TASK][GEMINI]"*)
-              echo "::error::Issue #$ISSUE_NUMBER_IN is Gemini-only; refusing to fire Claude."
-              exit 1
-              ;;
+
+          upper=$(printf '%s' "$title" | tr '[:lower:]' '[:upper:]')
+          case "$upper" in
             "[AI TASK]"*) ;;
             *)
-              echo "::error::Issue #$ISSUE_NUMBER_IN title does not start with [AI TASK]; refusing to fire the routine."
+              echo "::error::Issue #$ISSUE_NUMBER_IN title does not start with [AI TASK]; refusing to fire Claude."
               exit 1
               ;;
           esac
+
+          rest=${upper#"[AI TASK]"}
+          rest=$(printf '%s' "$rest" | sed 's/^[[:space:]]*//')
+          case "$rest" in
+            "[CLAUDE]"*|"[BOTH]"*) ;;
+            "["*)
+              echo "::error::Issue #$ISSUE_NUMBER_IN is routed to a named non-Claude/unknown worker; refusing to impersonate that worker with Claude."
+              exit 1
+              ;;
+            *) ;;
+          esac
+
           if [ "$author" != "$GITHUB_REPOSITORY_OWNER" ]; then
             echo "::error::Automatic AI tasks must be created by the repository owner."
             exit 1
@@ -125,7 +173,7 @@ jobs:
           ROUTINE_URL: ${{ secrets.CLAUDE_ROUTINE_URL }}
           ROUTINE_TOKEN: ${{ secrets.CLAUDE_ROUTINE_TOKEN }}
         run: |
-          text="Work the approved GitHub AI task at ${ISSUE_URL} (${GITHUB_REPOSITORY} issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}). Read that issue first and execute only what it asks under the saved AI WORKERS routine rules. If it is an analysis/review task, do not modify code unless the issue explicitly requests implementation. When finished, write a concise final report back to THE SAME GitHub issue as a comment beginning exactly with '<!-- jenify-claude-result -->' and then '## Claude Engineering / Review Report'. Include verdict, work performed or findings, tests/evidence, risks/blockers, and next action. Do not require the Founder to copy your report into another AI."
+          text="Work the approved GitHub AI task at ${ISSUE_URL} (${GITHUB_REPOSITORY} issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}). Read that issue first and execute only what it asks under the saved AI WORKERS routine rules. ROUTING DEFENSE: if the issue title is actually routed to any named non-Claude worker other than [BOTH], stop and report a routing error instead of doing the work. MODEL POLICY: attempt Fable first; if Fable is unavailable, use Opus; if neither is available, stop and report instead of silently downgrading. Your final report must state the exact model requested, the exact model actually used, whether fallback occurred, and why. If it is an analysis/review task, do not modify code unless the issue explicitly requests implementation. When finished, write a concise final report back to THE SAME GitHub issue as a comment beginning exactly with '<!-- jenify-claude-result -->' and then '## Claude Engineering / Review Report'. Include verdict, model requested/used/fallback, work performed or findings, tests/evidence, risks/blockers, and next action. Do not require the Founder to copy your report into another AI."
           body=$(jq -cn --arg text "$text" '{text: $text}')
           status=$(curl -sS -o response.json -w "%{http_code}" \
             --retry 2 --retry-delay 5 \
