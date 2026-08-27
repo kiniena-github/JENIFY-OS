@@ -78,3 +78,17 @@ Append-only. Each entry: date, decision, rationale. Newest last.
   (`hq_human_principals`) that starts empty and grants nothing until a Founder registers
   someone; originating work and approving work are independent rights, and neither ever
   confers execution.
+- **2026-08-27 — Registry ↔ Application capability seam: the Registry may only NARROW.**
+  (Issue #174 Mission C; closes the seam PR #172 deliberately left open.) When lane C's
+  AI Member Registry is supplied to `HeadquarterOperations`, worker capability reads are
+  the INTERSECTION of the operator specialist directory and the Registry's
+  granted/effective capabilities — never advertised ones. Where both directories know a
+  worker neither can widen the other, so enabling the seam can never grant a capability
+  that the pre-integration behaviour would not also have granted; where only one knows
+  the worker, that one answers, so existing workers are unaffected and Registry-only
+  workers are still governed. Assignability is refused if EITHER source refuses. The
+  Operator remains the final capability and risk authority: this layer only supplies the
+  allow-list, and `operator/policy.ts` still applies risk, side-effect and approval rules
+  on top. The seam is opt-in (`memberRegistry`); with no Registry supplied, behaviour is
+  exactly as before.
+

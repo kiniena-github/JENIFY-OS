@@ -111,6 +111,27 @@ Anything not attested renders as `_unverified_`. Requested provider and actual
 provider are separate rows, so a disagreement is visible rather than smoothed
 over.
 
+### The rollout must be bound to the run
+
+The session rollout supplies the attested commit and the actual model, so
+picking the *wrong* rollout is how a review would end up reporting another
+run's evidence as its own. The session id used to find it comes from the CLI's
+event stream — runtime output, which is evidence to be validated, not a trusted
+parameter. Binding is therefore structural:
+
+1. the session id must be a well-formed UUID; a short or malformed id selects
+   nothing at all;
+2. it must match the rollout **filename as a whole delimited token**, never as a
+   bare substring — a longer id that merely contains ours is not a match;
+3. if more than one file matches, **none** is used: directory order is not
+   evidence, and guessing would defeat the check;
+4. the rollout's own declared `session_id` must equal the id this run attested.
+
+A rollout that fails any of these is rejected outright (`session_unbound`)
+rather than quietly ignored — being offered a foreign session's evidence is
+itself a fact worth failing on, not something to paper over with
+`no_sha_attested`.
+
 ---
 
 ## 6. Failure modes and what they mean
@@ -123,6 +144,7 @@ over.
 | `sha_mismatch` | The checkout, or the runtime's attestation, is not the requested commit. |
 | `no_sha_attested` | The runtime did not say what it reviewed. Rejected, not assumed. |
 | `worktree_mutated` | The reviewer changed the code it was reviewing. Rejected. |
+| `session_unbound` | The session rollout could not be proven to belong to this run (see §5). Rejected. |
 | `unparseable_result` / `empty_result` | No usable verdict. Never treated as PASS. |
 | `provider_mismatch` | The runner was handed a non-CODEX request and refused it. |
 

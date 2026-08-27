@@ -5,3 +5,4 @@ export * from './classification.js';
 export * from './missions.js';
 export * from './service.js';
 export * from './console.js';
+export * from './registry-directory.js';

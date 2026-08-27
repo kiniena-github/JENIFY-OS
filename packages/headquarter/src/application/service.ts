@@ -82,6 +82,7 @@ import {
   type WorkerAssignability,
   type WorkerDirectoryPort,
 } from './ports.js';
+import { narrowByRegistry, type MemberDirectorySource } from './registry-directory.js';
 import { classifyCapability, type TaskClassification } from './classification.js';
 import {
   HumanPrincipalRegistry,
@@ -237,6 +238,19 @@ export interface HeadquarterOperationsOptions {
   nominationSources?: readonly NominationSourcePort[];
   store?: HeadquarterStore;
   queue?: OperatorQueue;
+  /**
+   * Lane C's AI Member Registry (issue #174 Mission C).
+   *
+   * When supplied, worker capability reads are narrowed to the Registry's
+   * GRANTED/EFFECTIVE capabilities, so nomination and authorization can no
+   * longer diverge from the provider-neutral Registry. The Registry may only
+   * narrow — see application/registry-directory.ts. Omit it and behaviour is
+   * exactly as before.
+   *
+   * Ignored when an explicit `workers` port is supplied: an explicit directory
+   * is already a deliberate override of this whole resolution.
+   */
+  memberRegistry?: MemberDirectorySource;
 }
 
 /** Who an actor turned out to be, once resolved against both registries. */
@@ -263,7 +277,8 @@ export class HeadquarterOperations {
     ensureApplicationSchema(db);
     this.store = options.store ?? new HeadquarterStore(db);
     this.queue = options.queue ?? new OperatorQueue(db, options.policyCtx ?? {});
-    this.workers = options.workers ?? new SpecialistDirectoryAdapter(this.store);
+    this.workers =
+      options.workers ?? narrowByRegistry(new SpecialistDirectoryAdapter(this.store), options.memberRegistry);
     this.principals = options.humanPrincipals ?? new HumanPrincipalRegistry(db);
     this.nominationSources = options.nominationSources ?? [];
     this.policyCtx = options.policyCtx ?? {};

@@ -70,7 +70,14 @@ A title that names a **role but no provider** is staffed from the assignment
 table in §5.1 rather than defaulting to Claude. That is the mechanism by which
 the Founder restaffs a role without touching routing.
 
-An unrecognised tag is **blocked**, never quietly treated as Claude.
+**Any unrecognised tag in the routing region blocks the whole task**, even when
+a recognised provider sits beside it. `[AI TASK][CLAUDE][CODEXX]` runs *nothing*
+— not Claude, not a corrected Codex. An instruction we did not understand is
+refused rather than guessed at, and running only the half we recognised would
+silently under-deliver the other half while looking successful.
+
+Only the contiguous bracket tags immediately following `[AI TASK]` are the
+routing region; brackets later in the prose are ordinary title text.
 
 ---
 
@@ -136,6 +143,34 @@ with the reason, and the task is **not** re-routed. No other model is substitute
 and no worker is asked to impersonate the requested provider. On a mixed request
 such as `[AI TASK][CLAUDE][CODEX]`, Claude does its own share and Codex is
 reported blocked; Claude is never told to cover for Codex.
+
+### Who posts the blocked notice
+
+A blocked provider is reported **whenever anything is blocked** — including when
+another provider is routed successfully at the same time. A partially-blocked
+task is the case that matters most: something ran, so the issue looks handled,
+while a requested share of the work quietly did not happen.
+
+Every provider whose workflow wakes for all AI tasks computes the same routing
+decision, so the decision itself names the ONE provider that owns the notice
+(`blockedReportOwner`). That is what keeps the report truthful *and* single:
+
+- gating on "is anything blocked" rather than on the overall outcome is what
+  stops a partially-blocked task from reporting nothing;
+- gating on ownership rather than on each workflow narrowing itself by hand is
+  what stops two workflows posting the same notice.
+
+The owner is chosen from a registry fact (`observesAllAiTasks`), not from a
+vendor preference, and it is deliberately independent of connectivity: the
+notice is posted with the repository's own token, so a provider missing its own
+credential can still report that someone else is blocked. This matters because
+the providers most likely to be blocked — the `local-cli` ones, Codex and Jules
+— have no CI workflow at all and can never report themselves.
+
+Each notice carries a stable marker identifying the blocked set
+(`<!-- jenify-routing-blocked:CODEX+GEMINI -->`), so a re-label, re-dispatch or
+repeated comment recognises its own earlier notice anywhere in the thread, while
+a genuinely different outage is still reported.
 
 ### Provider status
 
