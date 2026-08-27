@@ -11,7 +11,21 @@
  * The rule this registry enforces: a provider may only execute when it has a
  * REAL executor and REAL credentials. Everything else fails closed. Declaring a
  * provider here does NOT make it connected — connectivity is derived from the
- * secrets actually present in the environment at run time.
+ * facts actually observed in the environment at run time.
+ *
+ * Two kinds of executor exist, and the difference is load-bearing:
+ *
+ *   'github-workflow'  runs on a GitHub-hosted runner. Its credentials are
+ *                      GitHub Actions secrets (`requiredSecrets`).
+ *   'local-cli'        runs on the Founder workstation via an installed CLI
+ *                      holding its own local session. It has NO GitHub secret,
+ *                      so it is deliberately NOT connected inside CI — a
+ *                      GitHub Actions run fails closed for that provider
+ *                      instead of pretending it ran.
+ *
+ * `requiredLocalFacts` are NON-SECRET observations (a CLI path, an auth mode
+ * name) produced by a probe on the machine that will execute. Secret VALUES
+ * never enter routing: presence is all routing needs.
  */
 
 export const PROVIDERS = [
@@ -39,20 +53,34 @@ export type ProviderId = (typeof PROVIDERS)[number];
 export const ROLES = ['MANAGER', 'BUILDER', 'REVIEWER', 'RESEARCHER'] as const;
 export type Role = (typeof ROLES)[number];
 
+/** Where a provider's execution physically happens. */
+export type ExecutorKind = 'github-workflow' | 'local-cli';
+
 export interface ProviderDef {
   id: ProviderId;
   label: string;
   /**
-   * Every one of these must be present and non-empty for the provider to be
-   * considered connected. An empty list alone is NOT enough — `executor` must
-   * also exist, otherwise there is nothing to run.
+   * GitHub Actions secrets that must all be present and non-empty for a
+   * 'github-workflow' provider to be considered connected. An empty list alone
+   * is NOT enough — `executor` must also exist, otherwise there is nothing to
+   * run.
    */
   requiredSecrets: string[];
   /**
-   * The workflow file that genuinely executes this provider, or null when no
-   * execution mechanism exists. null => permanently fail closed.
+   * Non-secret environment facts that must all be present for a 'local-cli'
+   * provider to be considered connected (e.g. CODEX_CLI_PATH, CODEX_AUTH_MODE).
+   * Absent inside GitHub Actions by design, so a local provider fails closed
+   * there rather than being silently replaced.
+   */
+  requiredLocalFacts: string[];
+  /**
+   * The workflow file or local entry point that genuinely executes this
+   * provider, or null when no execution mechanism exists.
+   * null => permanently fail closed.
    */
   executor: string | null;
+  /** How `executor` runs. null exactly when `executor` is null. */
+  executorKind: ExecutorKind | null;
   /**
    * Marker that this provider's own result comments carry. Used to guarantee a
    * worker's report can never re-trigger that same worker.
@@ -67,41 +95,55 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderDef> = {
     id: 'CLAUDE',
     label: 'Claude (claude.ai Routine — AI WORKERS)',
     requiredSecrets: ['CLAUDE_ROUTINE_URL', 'CLAUDE_ROUTINE_TOKEN'],
+    requiredLocalFacts: [],
     executor: '.github/workflows/ai-task-trigger.yml',
+    executorKind: 'github-workflow',
     resultMarker: 'jenify-claude-result',
   },
   GEMINI: {
     id: 'GEMINI',
     label: 'Gemini (AI Studio, billing-disabled key)',
     requiredSecrets: ['GEMINI_API_KEY'],
+    requiredLocalFacts: [],
     executor: '.github/workflows/ai-task-gemini.yml',
+    executorKind: 'github-workflow',
     resultMarker: 'jenify-gemini-result',
   },
   CODEX: {
     id: 'CODEX',
-    label: 'Codex / OpenAI',
-    requiredSecrets: ['CODEX_API_KEY'],
-    executor: null,
+    label: 'Codex (OpenAI Codex CLI — existing ChatGPT subscription session)',
+    requiredSecrets: [],
+    requiredLocalFacts: ['CODEX_CLI_PATH', 'CODEX_AUTH_MODE'],
+    executor: 'packages/headquarter/src/cli/codex-review.ts',
+    executorKind: 'local-cli',
     resultMarker: 'jenify-codex-result',
-    note: 'No Codex execution workflow exists and no Codex credential is configured. Tasks tagged [CODEX] fail closed and are NEVER re-routed to another provider.',
+    note:
+      'Codex executes on the Founder workstation through the installed Codex CLI using the ' +
+      'existing ChatGPT subscription session (no API key, no new paid service). It is NOT ' +
+      'available to GitHub-hosted runners, so a GitHub Actions run fails closed for CODEX ' +
+      'instead of substituting another provider.',
   },
   JULES: {
     id: 'JULES',
     label: 'Jules (Google independent engineer)',
-    requiredSecrets: ['JULES_API_KEY'],
-    executor: null,
+    requiredSecrets: [],
+    requiredLocalFacts: ['JULES_CLI_PATH'],
+    executor: 'jules (npm @google/jules CLI)',
+    executorKind: 'local-cli',
     resultMarker: 'jenify-jules-result',
-    note: 'Jules currently works from GitHub directly; there is no automated execution route.',
+    note:
+      'Jules is driven from the Founder workstation, or opens its own review PR directly on ' +
+      'GitHub. It has no GitHub Actions credential, so CI fails closed for JULES.',
   },
-  XAI: { id: 'XAI', label: 'xAI / Grok', requiredSecrets: ['XAI_API_KEY'], executor: null, resultMarker: 'jenify-xai-result' },
-  MICROSOFT: { id: 'MICROSOFT', label: 'Microsoft / Copilot', requiredSecrets: ['MICROSOFT_AI_KEY'], executor: null, resultMarker: 'jenify-microsoft-result' },
-  META: { id: 'META', label: 'Meta / Llama', requiredSecrets: ['META_AI_KEY'], executor: null, resultMarker: 'jenify-meta-result' },
-  MISTRAL: { id: 'MISTRAL', label: 'Mistral', requiredSecrets: ['MISTRAL_API_KEY'], executor: null, resultMarker: 'jenify-mistral-result' },
-  QWEN: { id: 'QWEN', label: 'Qwen', requiredSecrets: ['QWEN_API_KEY'], executor: null, resultMarker: 'jenify-qwen-result' },
-  DEEPSEEK: { id: 'DEEPSEEK', label: 'DeepSeek', requiredSecrets: ['DEEPSEEK_API_KEY'], executor: null, resultMarker: 'jenify-deepseek-result' },
-  LOCAL: { id: 'LOCAL', label: 'Local / self-hosted model', requiredSecrets: ['LOCAL_MODEL_ENDPOINT'], executor: null, resultMarker: 'jenify-local-result' },
-  CUSTOM: { id: 'CUSTOM', label: 'Custom provider', requiredSecrets: ['CUSTOM_AI_ENDPOINT'], executor: null, resultMarker: 'jenify-custom-result' },
-  JENIFY: { id: 'JENIFY', label: 'Future JENIFY AI', requiredSecrets: ['JENIFY_AI_ENDPOINT'], executor: null, resultMarker: 'jenify-jenify-result' },
+  XAI: { id: 'XAI', label: 'xAI / Grok', requiredSecrets: ['XAI_API_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-xai-result' },
+  MICROSOFT: { id: 'MICROSOFT', label: 'Microsoft / Copilot', requiredSecrets: ['MICROSOFT_AI_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-microsoft-result' },
+  META: { id: 'META', label: 'Meta / Llama', requiredSecrets: ['META_AI_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-meta-result' },
+  MISTRAL: { id: 'MISTRAL', label: 'Mistral', requiredSecrets: ['MISTRAL_API_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-mistral-result' },
+  QWEN: { id: 'QWEN', label: 'Qwen', requiredSecrets: ['QWEN_API_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-qwen-result' },
+  DEEPSEEK: { id: 'DEEPSEEK', label: 'DeepSeek', requiredSecrets: ['DEEPSEEK_API_KEY'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-deepseek-result' },
+  LOCAL: { id: 'LOCAL', label: 'Local / self-hosted model', requiredSecrets: ['LOCAL_MODEL_ENDPOINT'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-local-result' },
+  CUSTOM: { id: 'CUSTOM', label: 'Custom provider', requiredSecrets: ['CUSTOM_AI_ENDPOINT'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-custom-result' },
+  JENIFY: { id: 'JENIFY', label: 'Future JENIFY AI', requiredSecrets: ['JENIFY_AI_ENDPOINT'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-jenify-result' },
 };
 
 /** Every result marker in the registry — nothing carrying one may re-trigger. */
@@ -117,40 +159,65 @@ export function isRole(value: string): value is Role {
   return (ROLES as readonly string[]).includes(value);
 }
 
-/** Secrets available to a run: name -> value. Empty/blank counts as absent. */
+/**
+ * Facts available to a run: name -> value. Empty/blank counts as absent.
+ * Holds BOTH secret-presence flags and non-secret local facts; routing never
+ * receives a real secret value.
+ */
 export type SecretsEnv = Record<string, string | undefined>;
 
 export interface ConnectivityReport {
   provider: ProviderId;
   connected: boolean;
   hasExecutor: boolean;
+  executorKind: ExecutorKind | null;
   missingSecrets: string[];
+  /** Missing non-secret local facts (local-cli providers). */
+  missingLocalFacts: string[];
   reason: string;
+}
+
+function absent(env: SecretsEnv, name: string): boolean {
+  const v = env[name];
+  return v == null || String(v).trim() === '';
 }
 
 /**
  * Is this provider genuinely able to execute right now?
  *
- * Connectivity is NEVER assumed or hard-coded to true: it requires both a real
- * executor workflow and every required secret actually present.
+ * Connectivity is NEVER assumed or hard-coded to true: it requires a real
+ * executor plus every required secret AND every required local fact actually
+ * observed in the supplied environment.
  */
 export function providerConnectivity(provider: ProviderId, secrets: SecretsEnv): ConnectivityReport {
   const def = PROVIDER_REGISTRY[provider];
   const hasExecutor = def.executor != null;
-  const missingSecrets = def.requiredSecrets.filter((s) => {
-    const v = secrets[s];
-    return v == null || String(v).trim() === '';
-  });
-  const connected = hasExecutor && missingSecrets.length === 0;
+  const missingSecrets = def.requiredSecrets.filter((s) => absent(secrets, s));
+  const missingLocalFacts = def.requiredLocalFacts.filter((s) => absent(secrets, s));
+  const connected = hasExecutor && missingSecrets.length === 0 && missingLocalFacts.length === 0;
+
+  const suffix = def.note ? ` ${def.note}` : '';
   let reason: string;
   if (connected) {
     reason = `${def.label} is connected.`;
   } else if (!hasExecutor) {
-    reason = `${provider} NOT CONNECTED — no execution mechanism exists.${def.note ? ` ${def.note}` : ''}`;
-  } else {
+    reason = `${provider} NOT CONNECTED — no execution mechanism exists.${suffix}`;
+  } else if (missingSecrets.length > 0) {
     reason = `${provider} NOT CONNECTED — missing credential(s): ${missingSecrets.join(', ')}.`;
+  } else {
+    reason =
+      `${provider} NOT CONNECTED — its executor is a local CLI and the required local fact(s) ` +
+      `were not observed here: ${missingLocalFacts.join(', ')}.${suffix}`;
   }
-  return { provider, connected, hasExecutor, missingSecrets, reason };
+  return {
+    provider,
+    connected,
+    hasExecutor,
+    executorKind: def.executorKind,
+    missingSecrets,
+    missingLocalFacts,
+    reason,
+  };
 }
 
 export function connectedProviders(secrets: SecretsEnv): ProviderId[] {

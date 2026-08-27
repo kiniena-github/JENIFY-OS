@@ -12,14 +12,17 @@
     "./archive": "./src/archive/index.ts",
     "./ui": "./src/ui/index.ts",
     "./organization": "./src/organization/index.ts",
-    "./routing": "./src/routing/index.ts"
+    "./routing": "./src/routing/index.ts",
+    "./providers": "./src/providers/index.ts"
   },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
     "inventory": "tsx src/cli/inventory.ts",
-    "build:site": "tsx src/cli/build-site.ts"
+    "build:site": "tsx src/cli/build-site.ts",
+    "codex:review": "tsx src/cli/codex-review.ts",
+    "codex:probe": "tsx src/cli/codex-review.ts --probe-only"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",
