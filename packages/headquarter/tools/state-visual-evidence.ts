@@ -225,7 +225,10 @@ const CLASSES_THAT_MUST_MOVE: readonly string[] = ['working', 'reviewing'];
 interface FigureMotion {
   name: string;
   duration: number;
-  moves: boolean;
+  /** The figure's GEOMETRY changes across the animation's own timeline. */
+  movesGeometrically: boolean;
+  /** Anything at all changes — colour, opacity, geometry. */
+  changesAnything: boolean;
 }
 
 function readFigureMotion(stationId: string): FigureMotion[] {
@@ -237,7 +240,8 @@ function readFigureMotion(stationId: string): FigureMotion[] {
     const name = getComputedStyle(node).animationName;
     if (!name || name === 'none') continue;
     let duration = 0;
-    let moves = false;
+    let movesGeometrically = false;
+    let changesAnything = false;
     // NOTE: written inline, no helper functions — this is serialised into the
     // browser, where the build's `keepNames` helper does not exist.
     for (const animation of node.getAnimations()) {
@@ -245,19 +249,24 @@ function readFigureMotion(stationId: string): FigureMotion[] {
       const span = timing ? Number(timing.duration) || 0 : 0;
       if (span > duration) duration = span;
       if (span <= 0) continue;
-      const seen: string[] = [];
+      const geometry: string[] = [];
+      const everything: string[] = [];
       const resume = animation.currentTime;
       for (const fraction of [0, 0.25, 0.5, 0.75]) {
         animation.currentTime = span * fraction;
         const at = getComputedStyle(node);
-        seen.push(`${at.transform}|${at.opacity}|${at.fillOpacity}|${at.fill}|${at.stroke}`);
+        geometry.push(`${at.transform}|${at.translate}|${at.rotate}|${at.scale}`);
+        everything.push(`${at.transform}|${at.opacity}|${at.fillOpacity}|${at.fill}|${at.stroke}`);
       }
       animation.currentTime = resume;
-      for (const sample of seen) {
-        if (sample !== seen[0]) moves = true;
+      for (const sample of geometry) {
+        if (sample !== geometry[0]) movesGeometrically = true;
+      }
+      for (const sample of everything) {
+        if (sample !== everything[0]) changesAnything = true;
       }
     }
-    found.push({ name, duration, moves });
+    found.push({ name, duration, movesGeometrically, changesAnything });
   }
   return found;
 }
@@ -538,25 +547,43 @@ const main = async () => {
     // stylesheet. `signatureFor` has just loaded this state's page.
     if (occupant.stationId !== null) {
       const animations = await page.evaluate(readFigureMotion, occupant.stationId);
-      const moving = animations.filter((entry) => entry.moves);
       const expected = CLASSES_THAT_MUST_MOVE.includes(
         probe === PROBE_OFFLINE ? 'offline' : ACTIVITY_PLAN_CLASS[probe],
       );
-      if (expected && moving.length === 0) {
-        // Distinguish "no rule reached it" from "a rule reached it and does
-        // nothing", because they are different bugs with the same symptom.
-        const inert = animations
-          .map((entry) => `${entry.name} (duration ${entry.duration}ms, no change across phases)`)
-          .join(', ');
+
+      // The two directions take DIFFERENT signals, because the page makes two
+      // different promises and a single test cannot carry both.
+      //
+      // Positive: an active figure MOVES, so only a geometric change counts.
+      // Comparing every property let a keyframe set that pulses `fill` or
+      // `fill-opacity` register as motion while the figure stood
+      // geometrically still — the page's promise regressed and this passed
+      // (Codex review of `724d243`).
+      //
+      // Negative: a stalled figure must be still in every sense, so ANY
+      // animation is a failure — a colour pulse on a blocked worker still
+      // asserts something is happening.
+      if (expected && !animations.some((entry) => entry.movesGeometrically)) {
+        const detail =
+          animations.length === 0
+            ? 'no animation reaches it'
+            : `inert or non-geometric: ${animations
+                .map(
+                  (entry) =>
+                    `${entry.name} (duration ${entry.duration}ms, ` +
+                    `${entry.changesAnything ? 'changes only colour/opacity' : 'no change across phases'})`,
+                )
+                .join(', ')}`;
         failures.push(
-          `activity: ${probe} is a class the floor promises to animate, but nothing moves its ` +
-            `figure in the browser — ${animations.length === 0 ? 'no animation reaches it' : `inert: ${inert}`}`,
+          `activity: ${probe} is a class the floor promises to animate, but its figure does not ` +
+            `move geometrically in the browser — ${detail}`,
         );
       }
-      if (!expected && moving.length > 0) {
+      if (!expected && animations.length > 0) {
         failures.push(
-          `activity: ${probe} is a stalled or idle state, but its figure animates ` +
-            `(${moving.map((entry) => entry.name).join(', ')}) — motion here asserts work that is not happening`,
+          `activity: ${probe} is a stalled or idle state, but its figure carries an animation ` +
+            `(${animations.map((entry) => entry.name).join(', ')}) — any motion here asserts ` +
+            'work that is not happening',
         );
       }
     }
