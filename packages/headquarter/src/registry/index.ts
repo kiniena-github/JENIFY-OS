@@ -1,5 +1,6 @@
 export * from './db.js';
 export * from './capabilities.js';
+export * from './capability-stack.js';
 export * from './eligibility.js';
 export * from './members.js';
 export * from './routing.js';
