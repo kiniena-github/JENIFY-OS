@@ -13,8 +13,13 @@
  *            the timestamps match, but the snapshot says its own data is not
  *            live. Freshness is not truth: the static preview ships a sample
  *            bundle, and it may not announce itself as LIVE
- *   UPDATED  the snapshot fetched, and it is NEWER than this render — the
- *            page you are reading is behind; reload to see it
+ *   UPDATED  the snapshot fetched, and it is NEWER than this render — newer
+ *            canonical state exists and this page does not show it. It does
+ *            NOT say "reload": these pages are static HTML written by
+ *            `build-site.ts`, and the poll never applies a snapshot section to
+ *            the document, so reloading re-serves the same build. Seeing the
+ *            newer state takes a site rebuild, and the chip says so rather
+ *            than sending a reader round a loop that cannot end
  *   STALE    the snapshot fetched, and it is OLDER than this render — the
  *            data file backing this page does not match it, so nothing here
  *            can be claimed to be current
@@ -66,10 +71,20 @@ export const FRESHNESS_VERDICT_JS = `function freshnessVerdict(renderedAt, gener
     // snapshot whose own provenance is sample or reconstructed is reported by
     // that provenance, however exactly its instant matches — otherwise the
     // static preview, which ships a sample bundle, would announce LIVE.
-    if (typeof mode === 'string' && mode !== '' && mode !== 'live') {
+    //
+    // And the test is POSITIVE (Codex round-3 follow-up): only mode === 'live'
+    // reaches the live return. \`HqSnapshot.mode\` is mandatory, so a snapshot
+    // that omits it, sends null, or sends an empty string is malformed or from
+    // some other producer — and previously that absence of provenance was
+    // rewarded with the strongest label in the set. Unknown provenance now
+    // fails closed, exactly like every other unknown in this system.
+    if (mode === 'live') {
+      return { state: 'live', label: 'LIVE', hint: 'Snapshot matches this render exactly (' + generatedAt + ') and states live provenance.' };
+    }
+    if (typeof mode === 'string' && mode !== '') {
       return { state: 'not-live', label: String(mode).toUpperCase() + ' — not live data', hint: 'The snapshot next to this page matches this render (' + generatedAt + '), but its own provenance is ' + mode + ', not live.' };
     }
-    return { state: 'live', label: 'LIVE', hint: 'Snapshot matches this render exactly (' + generatedAt + ').' };
+    return { state: 'not-live', label: 'UNKNOWN PROVENANCE — not live data', hint: 'The snapshot next to this page matches this render (' + generatedAt + ') but states no provenance mode, so it cannot be reported as live.' };
   }
   var fetched = Date.parse(generatedAt);
   var rendered = Date.parse(renderedAt);
@@ -77,7 +92,7 @@ export const FRESHNESS_VERDICT_JS = `function freshnessVerdict(renderedAt, gener
     return { state: 'error', label: 'ERROR — unreadable snapshot', hint: 'The snapshot timestamp (' + generatedAt + ') is not a valid instant, so its freshness cannot be established.' };
   }
   if (fetched > rendered) {
-    return { state: 'updated', label: 'UPDATED — reload', hint: 'A newer snapshot exists (' + generatedAt + '). This page still shows the ' + renderedAt + ' render.' };
+    return { state: 'updated', label: 'UPDATED — page not rebuilt', hint: 'Newer canonical state exists (' + generatedAt + '), but these pages are static HTML written by the site build: reloading re-serves the same ' + renderedAt + ' render. Rebuild the site to see it.' };
   }
   if (fetched < rendered) {
     return { state: 'stale', label: 'STALE — not live', hint: 'The snapshot next to this page (' + generatedAt + ') is OLDER than the ' + renderedAt + ' render, so this page is not showing current data.' };

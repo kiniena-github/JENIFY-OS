@@ -277,51 +277,85 @@ function orderFail(
 }
 
 /**
- * Field separator for the idempotency digest.
+ * Unambiguous encoding for the idempotency digest.
  *
- * A character that cannot occur in any of the four inputs, so `a|b` and `ab|`
- * can never hash alike. Written as an ESCAPE and named, deliberately: the same
- * separator was previously a literal NUL byte in this source file, which made
- * the file `data` rather than text to `file`, `grep` and friends — and any tool
- * that stripped or normalised that byte would have silently changed every
- * idempotency key, breaking deduplication of in-flight orders with no visible
- * diff. Same bytes at run time; no invisible control character in the source.
+ * Every field is LENGTH-PREFIXED rather than separated, so no input can imitate
+ * a field boundary whatever bytes it contains. Two earlier versions of this
+ * were wrong in instructive ways. First a raw NUL byte written literally into
+ * this source file: invisible in a diff, and silently rewritten by any tool
+ * that normalises control characters, which would have changed every key with
+ * no visible change. Then the same byte as an escape — which fixed the source
+ * but not the CLAIM, because a programmatic or JSON caller can put a NUL inside
+ * `project` or `instruction` and nothing rejects it. `("p\u0000q", "r")` and
+ * `("p", "q\u0000r")` joined to identical bytes, so two genuinely different
+ * orders hashed alike and the second was deduplicated onto the first, keeping
+ * the wrong canonical instruction.
+ *
+ * A length prefix has no such escape hatch: a reader never has to guess where a
+ * field ends, so no field content can be mistaken for structure. Byte length,
+ * not code-unit length, so a multi-byte character cannot shift a boundary
+ * either.
  */
-const FIELD_SEPARATOR = '\u0000';
+function encodeDigestFields(fields: readonly string[]): string {
+  return fields.map((field) => `${Buffer.byteLength(field, 'utf8')}:${field}`).join('');
+}
 
 /**
  * Deterministic idempotency key.
  *
- * Derived from everything that makes the order the same order — who asked,
- * what they asked for, which project, and which route. A double-clicked
- * composer therefore dedupes onto the first task instead of creating a second
- * one, without the browser having to remember anything. Changing any of those
- * inputs is a genuinely different order and gets its own key.
+ * Derived from everything that makes an order THE SAME ORDER: who asked, what
+ * they asked for, which project, which route was requested, which provider it
+ * actually resolved to, how much is known about the caller, and any key the
+ * caller supplied. A double-clicked composer therefore dedupes onto the first
+ * task instead of creating a second one, without the browser having to remember
+ * anything; changing any of those inputs is a genuinely different order and
+ * gets its own key.
  *
- * A caller-supplied key is one more DERIVATION INPUT, never the key itself
- * (open Codex finding on idempotency trust). Passing it through verbatim made
- * the deduplication table addressable by the caller: `op_tasks` is unique on
- * (capability, idempotency key), so a caller that supplied a key another order
- * already held had its own order silently discarded and was handed the
- * EXISTING task back as its receipt — a different principal's order, under a
- * different instruction, presented as the outcome of its own submission.
- * Whether by collision or on purpose, the receipt would not have described
- * what was created. Mixing it into the digest keeps its legitimate use — the
- * same order with a different key is a deliberate second order — while making
- * it impossible for one order's key to name another's task.
+ * Each input earns its place by a way the receipt would otherwise lie:
+ *
+ * - **The RESOLVED provider, not only the requested route.** An `AUTO` order
+ *   that resolved to CLAUDE and a later `AUTO` order that resolves to CODEX are
+ *   the same four fields, so the second deduplicated onto the CLAUDE task while
+ *   its receipt and the CLI both reported `AUTO → CODEX`. The submission result
+ *   disagreed with the canonical payload it pointed at — separate from
+ *   claim-time binding, which was enforcing the payload correctly.
+ * - **The actor-authentication marker.** It is deliberately persisted inside
+ *   the approval digest, so an order first submitted with the default
+ *   `unauthenticated` marker and then through the local-admin CLI (or the
+ *   reverse) returned the original task carrying a different trust context than
+ *   the caller supplied. Deduplicating across trust values makes the receipt's
+ *   trust context untruthful.
+ * - **A caller-supplied key, as an INPUT and never as the key itself.** Passing
+ *   it through verbatim made the deduplication table addressable by the caller:
+ *   `op_tasks` is unique on (capability, idempotency key), so a caller that
+ *   supplied a key another order already held had its own order silently
+ *   discarded and was handed the EXISTING task back as its receipt — a
+ *   different principal's order, under a different instruction, presented as
+ *   the outcome of its own submission. Mixing it into the digest keeps its
+ *   legitimate use (the same order with a different key is a deliberate second
+ *   order) while making it impossible for one order's key to name another's
+ *   task.
  */
 export function directOrderIdempotencyKey(
-  input: Pick<DirectOrderInput, 'instruction' | 'project' | 'route' | 'requestedBy' | 'idempotencyKey'>,
+  input: Pick<
+    DirectOrderInput,
+    'instruction' | 'project' | 'route' | 'requestedBy' | 'idempotencyKey' | 'actorAuthentication'
+  > & {
+    /** The provider the route actually resolved to, when it is known. */
+    resolvedProvider?: string | null;
+  },
 ): string {
   const digest = createHash('sha256')
     .update(
-      [
+      encodeDigestFields([
         input.requestedBy,
         input.route,
+        input.resolvedProvider ?? '',
+        input.actorAuthentication ?? DEFAULT_ACTOR_AUTHENTICATION,
         input.project ?? '',
         input.idempotencyKey ?? '',
         input.instruction.trim(),
-      ].join(FIELD_SEPARATOR),
+      ]),
     )
     .digest('hex');
   return `direct-order:${digest.slice(0, 32)}`;
@@ -437,8 +471,15 @@ export function submitDirectOrder(
     });
   }
 
-  // Always derived, never adopted: see `directOrderIdempotencyKey`.
-  const idempotencyKey = directOrderIdempotencyKey({ ...input, instruction });
+  // Always derived, never adopted, and derived AFTER the route resolves so the
+  // key names the provider the order actually carries — see
+  // `directOrderIdempotencyKey`.
+  const idempotencyKey = directOrderIdempotencyKey({
+    ...input,
+    instruction,
+    resolvedProvider: route.resolved,
+    actorAuthentication: input.actorAuthentication ?? DEFAULT_ACTOR_AUTHENTICATION,
+  });
   const created = ops.createTask({
     capabilityId: DIRECT_ORDER_CAPABILITY.id,
     payload: {

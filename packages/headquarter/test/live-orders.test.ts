@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { setupFixture, type Fixture } from './application.fixture.js';
 import { founderConsole } from '../src/application/console.js';
+import { DEFAULT_ACTOR_AUTHENTICATION } from '../src/live/local-trust.js';
 import {
   AUTO_ROUTE_PREFERENCE,
   DIRECT_ORDER_CAPABILITY,
@@ -262,6 +263,74 @@ describe('idempotency', () => {
     expect(hijack.data.task.payload.instruction).toBe('Delete the Q3 maintenance plan instead.');
     expect(ops.queue.get(mine.data.task.id)!.payload.instruction).toBe(ORDER.instruction);
     expect(ops.queue.listByStatus('needs_approval')).toHaveLength(2);
+  });
+
+  /**
+   * Open Codex finding — AUTO idempotency was not bound to the resolved
+   * provider. Two `AUTO` orders with the same four fields derived the same key,
+   * so an order that resolved to CODEX after availability changed was
+   * deduplicated onto the earlier CLAUDE task while its own receipt reported
+   * `AUTO → CODEX`. The submission result disagreed with the payload it named.
+   */
+  it('binds an AUTO order’s key to the provider it actually resolved to', () => {
+    const { ops } = ordersFixture();
+    const auto = { ...ORDER, route: 'AUTO' as const };
+    const first = submitDirectOrder(ops, auto, CLAUDE_ONLY);
+    const second = submitDirectOrder(ops, auto, CODEX_ONLY);
+    if (!first.ok || !second.ok) throw new Error('expected both to succeed');
+    expect(first.data.route.resolved).toBe('CLAUDE');
+    expect(second.data.route.resolved).toBe('CODEX');
+    expect(second.data.deduplicated).toBe(false);
+    expect(second.data.task.id).not.toBe(first.data.task.id);
+    // The receipt describes the task it actually names.
+    expect(second.data.task.payload.executionProvider).toBe('CODEX');
+    expect(ops.queue.get(first.data.task.id)!.payload.executionProvider).toBe('CLAUDE');
+  });
+
+  /**
+   * Open Codex finding (P2) — the actor-authentication marker is persisted
+   * inside the approval digest, so deduplicating across its values handed a
+   * caller a task carrying a different trust context than it supplied.
+   */
+  it('does not dedupe across actor-authentication markers', () => {
+    const { ops } = ordersFixture();
+    const asserted = submitDirectOrder(
+      ops,
+      { ...ORDER, actorAuthentication: 'unauthenticated_local_assertion' },
+      CLAUDE_ONLY,
+    );
+    const bare = submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
+    if (!asserted.ok || !bare.ok) throw new Error('expected both to succeed');
+    expect(bare.data.deduplicated).toBe(false);
+    expect(bare.data.task.id).not.toBe(asserted.data.task.id);
+    expect(asserted.data.task.payload.actorAuthentication).toBe('unauthenticated_local_assertion');
+    expect(bare.data.task.payload.actorAuthentication).toBe(DEFAULT_ACTOR_AUTHENTICATION);
+  });
+
+  /**
+   * Open Codex finding (P2) — the digest encoding was ambiguous. A JSON caller
+   * can put the separator inside a field, and nothing rejected it, so
+   * ("p\0q", "r") and ("p", "q\0r") joined to identical bytes: two different
+   * orders, one key, the wrong canonical instruction kept.
+   */
+  it('cannot have one field imitate a boundary in another', () => {
+    const base = { route: 'AUTO' as const, requestedBy: 'founder' };
+    expect(
+      directOrderIdempotencyKey({ ...base, project: 'p q', instruction: 'r' }),
+    ).not.toBe(directOrderIdempotencyKey({ ...base, project: 'p', instruction: 'q r' }));
+    // The same holds for any separator anyone might reach for next.
+    for (const hostile of ['|', ':', '', '2:', '7:founder']) {
+      expect(
+        directOrderIdempotencyKey({ ...base, project: `p${hostile}q`, instruction: 'r' }),
+        hostile,
+      ).not.toBe(
+        directOrderIdempotencyKey({ ...base, project: 'p', instruction: `${hostile}q${hostile}r` }),
+      );
+    }
+    // And a multi-byte character cannot shift a boundary either.
+    expect(
+      directOrderIdempotencyKey({ ...base, project: 'é', instruction: 'x' }),
+    ).not.toBe(directOrderIdempotencyKey({ ...base, project: 'e', instruction: 'x' }));
   });
 
   it('still lets a supplied key distinguish a deliberate repeat of the same order', () => {

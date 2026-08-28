@@ -235,7 +235,11 @@ describe('provenance and freshness are never overstated', () => {
     expect(html).toContain('freshness is unknown');
     // And it can say the page is behind, which is the case a stale render must
     // be able to report.
-    expect(html).toContain('UPDATED — reload');
+    expect(html).toContain('UPDATED — page not rebuilt');
+    // And it does not promise that reloading will reveal the newer state:
+    // these pages are static HTML and the poll renders no snapshot section,
+    // so a reload re-serves the same build (Codex round-3 follow-up).
+    expect(html).toContain('Rebuild the site to see it');
   });
 
   it('ships exactly one freshness decision, and the page runs that one', () => {
@@ -250,7 +254,9 @@ describe('provenance and freshness are never overstated', () => {
     const verdict = freshnessVerdict();
     const rendered = '2026-08-28T12:00:00.000Z';
 
-    expect(verdict(rendered, rendered).state).toBe('live');
+    // `live` provenance is required positively; the timestamp alone is not
+    // enough (see the mode test below).
+    expect(verdict(rendered, rendered, 'live').state).toBe('live');
 
     for (const older of [
       '2026-08-28T11:59:59.999Z',
@@ -278,9 +284,16 @@ describe('provenance and freshness are never overstated', () => {
       expect(result.label, mode).not.toBe('LIVE');
       expect(result.hint, mode).toContain('not live');
     }
-    // A live snapshot, and a snapshot that states no mode at all, are unchanged.
+    // A snapshot that states `live` is the ONLY path to the live label.
     expect(verdict(rendered, rendered, 'live').state).toBe('live');
-    expect(verdict(rendered, rendered, undefined).state).toBe('live');
+    // Absent provenance fails closed (Codex round-3 follow-up). `mode` is
+    // mandatory on HqSnapshot, so a snapshot missing it is malformed or from
+    // another producer — and it used to be rewarded with the strongest label.
+    for (const missing of [undefined, null, '']) {
+      const result = verdict(rendered, rendered, missing);
+      expect(result.state, String(missing)).toBe('not-live');
+      expect(result.label, String(missing)).toContain('UNKNOWN PROVENANCE');
+    }
   });
 
   it('reads the snapshot mode from the page, not only from the rule', () => {
