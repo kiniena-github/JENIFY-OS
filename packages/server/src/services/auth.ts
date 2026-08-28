@@ -163,6 +163,22 @@ export function resolveSessionRecord(db: Db, token: string): SessionRecord | nul
  * person at the keyboard still knows the password. A deactivated account
  * fails closed even if its session has not yet expired.
  */
+/**
+ * The identifier the rate limiter buckets an account's password failures
+ * under — the stored username, which `createUser` already lower-cases, so it
+ * matches the key `/api/auth/login` builds from the submitted username.
+ *
+ * It exists so a second password surface can charge the SAME per-account
+ * bucket as sign-in rather than opening a parallel one. Returns null for an
+ * unknown or deactivated account, so a caller that cannot name a bucket fails
+ * closed instead of falling back to an unbudgeted path.
+ */
+export function accountLoginIdentifier(db: Db, userId: string): string | null {
+  const user = db.select().from(users).where(eq(users.id, userId)).get();
+  if (!user || !user.active) return null;
+  return user.username;
+}
+
 export function verifyAccountPassword(db: Db, userId: string, password: string): boolean {
   if (!password) return false;
   const user = db.select().from(users).where(eq(users.id, userId)).get();

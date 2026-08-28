@@ -55,8 +55,12 @@ fails closed on its own:
 3. **`principalId` names a registered, active HQ human principal**, which is
    also where its originate grants and approval authority live. The binding
    grants nothing by itself.
-4. **`allowedOrigins` lists the origin the browser actually uses.** Empty means
-   every state-changing request is refused.
+4. **`allowedOrigins` lists the origin the browser actually uses**, as an
+   `http://` or `https://` origin. Empty — or holding only entries that are not
+   web origins — means every state-changing request is refused. Custom and
+   extension schemes (`foo://`, `chrome-extension://`) are rejected rather than
+   accepted: the URL parser gives every opaque scheme the same literal origin
+   `null`, so honouring one would have admitted all of them.
 
 ### Finding the account id
 
@@ -113,14 +117,16 @@ either a session established in the last five minutes, or the account's password
 re-entered as `stepUpPassword`. A long-lived cookie on an unattended machine is
 not consent to an irreversible action.
 
-Password attempts run under the same failure budget as sign-in, keyed
-`ip|login|hq-stepup:<account>`. The middle component is what the limiter
-collapses to a per-source ceiling, so naming it `login` is what genuinely
-shares that ceiling with failed sign-ins — in both directions — while the
-`hq-stepup:` prefix keeps the per-account buckets distinct. A stolen stale
-session therefore cannot be turned into a password oracle, cannot buy a fresh
-allowance by moving between the two endpoints, and cannot exhaust the event
-loop with repeated scrypt calls. An exhausted budget answers
+Password attempts use **the same rate-limit key as sign-in** —
+`ip|login|<username>`, built from the stored username — so both the
+per-account bucket and the source-wide ceiling are genuinely shared. Ten
+failures total across the two surfaces, not ten each: an attacker who burns
+the sign-in budget against a known username gets nothing further here, and the
+reverse holds too. A different account is unaffected, and a correct password
+clears only its own bucket, exactly as a successful sign-in does. So a stolen
+stale session cannot be turned into a password oracle, cannot buy a fresh
+allowance by switching endpoints, and cannot exhaust the event loop with
+repeated scrypt calls. An exhausted budget answers
 `429 step_up_rate_limited` — deliberately distinct from a wrong password,
 which is `403 step_up_failed`.
 

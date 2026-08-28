@@ -201,9 +201,29 @@ export type OriginRejection =
 
 export type OriginCheck = { ok: true } | { ok: false; reason: OriginRejection; message: string };
 
+/**
+ * The only schemes an origin may use here.
+ *
+ * Restricting to HTTP(S) is what stops distinct origins collapsing into one
+ * (issue #200, Codex round 5 P2). The WHATWG URL parser gives every opaque
+ * scheme the literal origin `"null"` — `foo://trusted` and `foo://evil` are
+ * indistinguishable once normalized, as are all `chrome-extension://` pages —
+ * so configuring a single custom-scheme origin in the allow-list would have
+ * admitted EVERY custom-scheme and extension origin at the CSRF boundary.
+ *
+ * A browser sends a hierarchical origin for any page this console is served
+ * to, so nothing legitimate is lost by refusing the rest.
+ */
+const ORIGIN_SCHEMES: readonly string[] = ['http:', 'https:'];
+
 function normalizeOrigin(value: string): string | null {
   try {
     const url = new URL(value);
+    if (!ORIGIN_SCHEMES.includes(url.protocol)) return null;
+    // Belt and braces, and a marker for the hazard: an opaque origin serializes
+    // to the string "null", which must never be treated as a value that two
+    // origins can match on.
+    if (url.origin === 'null') return null;
     // Origin is scheme + host + port only. Anything else in the header is not
     // an origin and is refused rather than trimmed into one.
     if (url.pathname !== '/' && url.pathname !== '') return null;
