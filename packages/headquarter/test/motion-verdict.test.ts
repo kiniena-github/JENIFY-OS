@@ -57,6 +57,18 @@ describe('an active figure must genuinely move', () => {
     expect(failure).toContain('does not move geometrically');
   });
 
+  it('rejects geometry that moves while nothing is painted', () => {
+    // The silhouette pass forces `opacity: 1` so a colour animation cannot
+    // pass as motion — which also reveals a figure hidden with `opacity: 0`.
+    // Its geometry then moves in the flattened frames while the reader sees
+    // nothing, and the page passed. Introduced by the silhouette fix itself.
+    const [failure] = motionFailures('running', true, [
+      animation({ movesGeometrically: true, changesAnything: false }),
+    ]);
+    expect(failure).toContain('the figure is not visible');
+    expect(failure).toContain('does not move geometrically');
+  });
+
   it('accepts a moving animation even when a still one sits beside it', () => {
     // The rule asks whether ANY animation moves the figure, not whether all
     // of them do — a decorative static effect alongside real motion is not a
@@ -64,7 +76,7 @@ describe('an active figure must genuinely move', () => {
     expect(
       motionFailures('running', true, [
         animation({ name: 'hq-tint', movesGeometrically: false }),
-        animation({ name: 'hq-work', movesGeometrically: true }),
+        animation({ name: 'hq-work', movesGeometrically: true, changesAnything: true }),
       ]),
     ).toEqual([]);
   });

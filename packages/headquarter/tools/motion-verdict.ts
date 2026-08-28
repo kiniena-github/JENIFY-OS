@@ -33,9 +33,16 @@ export interface FigureMotion {
   name: string;
   /** Effective duration in ms, for the failure message. */
   duration: number;
-  /** The figure's GEOMETRY changes across the animation's own timeline. */
+  /**
+   * The figure's SHAPE or POSITION changes across the animation's timeline,
+   * measured with colour flattened. Raw fact: it says nothing about whether
+   * the figure is visible while it happens.
+   */
   movesGeometrically: boolean;
-  /** Anything at all changes — colour, opacity, geometry. */
+  /**
+   * The PAINTED output changes — anything at all, colour or geometry. Raw
+   * fact, and the one that decides whether a reader could see it.
+   */
   changesAnything: boolean;
 }
 
@@ -54,19 +61,36 @@ export function motionFailures(
 ): string[] {
   const failures: string[] = [];
 
-  if (mustMove && !animations.some((entry) => entry.movesGeometrically)) {
-    // Name which of the three causes it is: they need different repairs, and
+  // BOTH raw facts are required, and the conjunction lives here rather than in
+  // the measurement because it is a decision, not an observation.
+  //
+  // Geometry alone is not enough. The silhouette pass that measures shape
+  // forces `opacity: 1` so that a colour or opacity animation cannot pass as
+  // motion — which also makes an INVISIBLE figure visible to the measurement.
+  // A figure hidden with `opacity: 0` therefore moved in the flattened frames
+  // while the reader saw nothing at all, and the tool passed a page whose
+  // figure never visibly moves. That defect arrived with the silhouette fix
+  // itself (Codex review of `94f8414`).
+  //
+  // Requiring the painted output to change too settles it: if nothing the
+  // reader can see changed, nothing moved, whatever the geometry did.
+  if (mustMove && !animations.some((entry) => entry.movesGeometrically && entry.changesAnything)) {
+    // Name which of the four causes it is: they need different repairs, and
     // an undifferentiated "it does not move" sent me looking in the wrong
     // place more than once.
     const detail =
       animations.length === 0
         ? 'no animation reaches it'
         : `inert or non-geometric: ${animations
-            .map(
-              (entry) =>
-                `${entry.name} (duration ${entry.duration}ms, ` +
-                `${entry.changesAnything ? 'changes only colour/opacity' : 'no change across phases'})`,
-            )
+            .map((entry) => {
+              let why = 'no change across phases';
+              if (entry.movesGeometrically && !entry.changesAnything) {
+                why = 'geometry moves but nothing is painted — the figure is not visible';
+              } else if (entry.changesAnything && !entry.movesGeometrically) {
+                why = 'changes only colour/opacity';
+              }
+              return `${entry.name} (duration ${entry.duration}ms, ${why})`;
+            })
             .join(', ')}`;
     failures.push(
       `activity: ${label} is a class the floor promises to animate, but its figure does not ` +
