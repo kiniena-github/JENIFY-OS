@@ -36,6 +36,7 @@
  *     npx tsx tools/state-visual-evidence.ts
  */
 
+import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import type { ActivityEvent, ActivityStatus } from '../src/contracts/events.js';
@@ -210,104 +211,84 @@ const ACTIVITY_PLAN_CLASS: Record<ActivityStatus, string> = {
 const CLASSES_THAT_MUST_MOVE: readonly string[] = ['working', 'reviewing'];
 
 /**
- * Every animation inside this station's figure that DEMONSTRABLY moves it.
+ * What has to be known about a figure before its pixels can be compared.
  *
- * An animation name is not motion. `animationName` stays non-`none` when the
- * keyframes are flattened to identical values, or when the duration is
- * overridden to `0s` — and in both cases the figure stands perfectly still
- * while the name still reads `hq-work`. Verified both ways: each left this
- * tool AND all 81 unit tests passing (Codex review of `981cedf`).
- *
- * So each animation is seeked to distinct phases through the Web Animations
- * API and the resulting computed style compared. If nothing changes between
- * phases, the animation is not motion, whatever it is called. `moves` is that
- * measurement; `name` and `duration` are reported for the failure message.
+ * Returns the animations found, the phases worth sampling (the union of their
+ * declared keyframe offsets plus midpoints), and a FIXED clip rectangle. The
+ * clip must not follow the element: an element-relative screenshot moves with
+ * whatever it captures, so a pure translation would photograph identically at
+ * every phase. It is the station's box, padded, held constant across phases.
  */
-function readFigureMotion(stationId: string): FigureMotion[] {
+interface MotionPlan {
+  animations: { name: string; duration: number }[];
+  fractions: number[];
+  clip: { x: number; y: number; width: number; height: number } | null;
+}
+
+function readMotionPlan(stationId: string): MotionPlan {
   const station = document.querySelector(`[data-station="${stationId}"]`);
   const figure = station ? station.querySelector('.hq-figure') : null;
-  if (!figure) return [];
-  const found: FigureMotion[] = [];
+  if (!station || !figure) return { animations: [], fractions: [], clip: null };
+
+  const animations: { name: string; duration: number }[] = [];
+  const offsets: number[] = [];
   for (const node of [figure, ...figure.querySelectorAll('*')]) {
     const name = getComputedStyle(node).animationName;
     if (!name || name === 'none') continue;
     let duration = 0;
-    let movesGeometrically = false;
-    let changesAnything = false;
-    // NOTE: written inline, no helper functions — this is serialised into the
-    // browser, where the build's `keepNames` helper does not exist.
     for (const animation of node.getAnimations()) {
       const timing = animation.effect ? animation.effect.getComputedTiming() : null;
       const span = timing ? Number(timing.duration) || 0 : 0;
       if (span > duration) duration = span;
-      if (span <= 0) continue;
-      // Sample where the animation ACTUALLY changes, not on a fixed grid.
-      //
-      // Four quarter-phase samples assume a keyframe layout. They miss any
-      // change confined between them: a transform introduced at 85% and
-      // restored at 100% moves visibly, yet 0/0.25/0.5/0.75 all read
-      // identically, and the tool then REJECTS a correct page. Verified —
-      // that exact keyframe set failed as "no change across phases" (Codex
-      // review of `ad5530c`).
-      //
-      // The declared offsets bound every value the animation takes, so
-      // sampling them settles whether anything changes. Midpoints are added
-      // as well, because a `cubic-bezier` with overshoot can leave the
-      // interval spanned by its own endpoints.
-      const offsets: number[] = [];
       const effect = animation.effect;
       if (effect && typeof (effect as KeyframeEffect).getKeyframes === 'function') {
         for (const frame of (effect as KeyframeEffect).getKeyframes()) {
           if (typeof frame.offset === 'number') offsets.push(frame.offset);
         }
       }
-      if (offsets.length === 0) offsets.push(0, 0.25, 0.5, 0.75, 1);
-      offsets.sort((a, b) => a - b);
-      const fractions: number[] = [];
-      for (let index = 0; index < offsets.length; index += 1) {
-        fractions.push(offsets[index]);
-        if (index + 1 < offsets.length) fractions.push((offsets[index] + offsets[index + 1]) / 2);
-      }
-
-      const geometry: string[] = [];
-      const everything: string[] = [];
-      const resume = animation.currentTime;
-      for (const fraction of fractions) {
-        animation.currentTime = span * fraction;
-        const at = getComputedStyle(node);
-        // Rendered geometry, not a property whitelist.
-        //
-        // This used to sample `transform`/`translate`/`rotate`/`scale`, which
-        // is a list of the ways I happened to think of moving something. A
-        // figure moved by an SVG geometry property — `cy`, `x`, `offset-
-        // distance` — or by a shifting `transform-origin` under a non-identity
-        // transform moves visibly and changes none of them, so the tool
-        // rejected a correct page. Verified with a head bobbing 6px via `cy`,
-        // reported as "no change across phases" (Codex review of `c94f152`).
-        //
-        // The bounding box and the screen CTM are what the browser actually
-        // put on screen, so they need no list and cannot fall behind CSS.
-        const box = node.getBoundingClientRect();
-        let matrix = '';
-        const graphical = node as unknown as SVGGraphicsElement;
-        if (typeof graphical.getScreenCTM === 'function') {
-          const ctm = graphical.getScreenCTM();
-          if (ctm) matrix = `${ctm.a},${ctm.b},${ctm.c},${ctm.d},${ctm.e},${ctm.f}`;
-        }
-        geometry.push(`${box.x},${box.y},${box.width},${box.height}|${matrix}`);
-        everything.push(`${at.transform}|${at.opacity}|${at.fillOpacity}|${at.fill}|${at.stroke}`);
-      }
-      animation.currentTime = resume;
-      for (const sample of geometry) {
-        if (sample !== geometry[0]) movesGeometrically = true;
-      }
-      for (const sample of everything) {
-        if (sample !== everything[0]) changesAnything = true;
-      }
     }
-    found.push({ name, duration, movesGeometrically, changesAnything });
+    animations.push({ name, duration });
   }
-  return found;
+  if (animations.length === 0) return { animations: [], fractions: [], clip: null };
+
+  // Sample the animation's OWN offsets, not a fixed grid: a change confined
+  // between grid points is invisible to it, and the tool then rejects a
+  // correct page. Midpoints too, because a `cubic-bezier` with overshoot can
+  // leave the interval spanned by its own endpoints.
+  if (offsets.length === 0) offsets.push(0, 0.25, 0.5, 0.75, 1);
+  offsets.sort((a, b) => a - b);
+  const fractions: number[] = [];
+  for (let index = 0; index < offsets.length; index += 1) {
+    if (fractions[fractions.length - 1] !== offsets[index]) fractions.push(offsets[index]);
+    if (index + 1 < offsets.length) fractions.push((offsets[index] + offsets[index + 1]) / 2);
+  }
+
+  const box = station.getBoundingClientRect();
+  const pad = 24;
+  return {
+    animations,
+    fractions,
+    clip: {
+      x: Math.max(0, Math.floor(box.x - pad)),
+      y: Math.max(0, Math.floor(box.y - pad)),
+      width: Math.max(1, Math.ceil(box.width + pad * 2)),
+      height: Math.max(1, Math.ceil(box.height + pad * 2)),
+    },
+  };
+}
+
+/** Seek every animation inside the figure to the same fraction of its own timeline. */
+function applyMotionPhase(input: { stationId: string; fraction: number }): void {
+  const station = document.querySelector(`[data-station="${input.stationId}"]`);
+  const figure = station ? station.querySelector('.hq-figure') : null;
+  if (!figure) return;
+  for (const node of [figure, ...figure.querySelectorAll('*')]) {
+    for (const animation of node.getAnimations()) {
+      const timing = animation.effect ? animation.effect.getComputedTiming() : null;
+      const span = timing ? Number(timing.duration) || 0 : 0;
+      if (span > 0) animation.currentTime = span * input.fraction;
+    }
+  }
 }
 
 function assertMeaningsAreHonest(): string[] {
@@ -522,6 +503,83 @@ function panelEntryFor(state: ConnectionState, fixtureId: string): string {
     .trim();
 }
 
+/**
+ * Flatten every colour inside the figure, so a screenshot records only SHAPE.
+ *
+ * The distinction the floor needs is "the figure moved" versus "the figure
+ * changed colour", and painted pixels alone cannot tell them apart — both
+ * differ. Photographing the figure twice, once as painted and once with all
+ * paint forced uniform, separates them: a colour animation leaves the flattened
+ * frames identical, a geometric one does not.
+ */
+function silhouetteCss(stationId: string): string {
+  const scope = `[data-station="${stationId}"] .hq-figure`;
+  return `${scope}, ${scope} * {
+  fill: #000 !important;
+  stroke: #000 !important;
+  stroke-opacity: 1 !important;
+  fill-opacity: 1 !important;
+  opacity: 1 !important;
+  filter: none !important;
+}`;
+}
+
+/**
+ * Does this figure MOVE — measured from the pixels the browser painted.
+ *
+ * Five earlier versions of this measurement each approximated the question and
+ * each was wrong at an edge a reviewer found: the animation name; whether the
+ * name was present at all; whether any computed property changed; whether one
+ * of four transform-ish properties changed; whether the bounding box or screen
+ * CTM changed. The last of those still had both a false negative (an animated
+ * `clip-path`, or a shape morph whose extrema stay fixed, changes neither) and
+ * a false positive (rotating the solid circular `.fig-head` about its centre
+ * changes the CTM while painting identical pixels) — Codex review of `c1e701f`.
+ *
+ * Every one of those was a proxy for "what does the reader see". So this
+ * compares what the reader sees. Two passes over the same fixed clip
+ * rectangle: as painted, and with all colour inside the figure flattened.
+ *
+ *   flattened frames differ  →  the SHAPE or POSITION changed  →  it moves
+ *   only painted frames differ →  colour or opacity changed only
+ *
+ * The clip is fixed, not element-relative, because an element-relative
+ * screenshot travels with what it captures and would photograph a translating
+ * figure identically at every phase.
+ */
+async function measureFigureMotion(page: any, stationId: string): Promise<FigureMotion[]> {
+  const plan: MotionPlan = await page.evaluate(readMotionPlan, stationId);
+  if (plan.animations.length === 0 || plan.clip === null) return [];
+
+  const framesFor = async (): Promise<string[]> => {
+    const frames: string[] = [];
+    for (const fraction of plan.fractions) {
+      await page.evaluate(applyMotionPhase, { stationId, fraction });
+      const shot: Buffer = await page.screenshot({ clip: plan.clip });
+      frames.push(createHash('sha1').update(shot).digest('hex'));
+    }
+    return frames;
+  };
+
+  const painted = await framesFor();
+  const flattened = await page.addStyleTag({ content: silhouetteCss(stationId) });
+  const shapes = await framesFor();
+  await flattened.evaluate((node: Element) => node.remove());
+
+  const differs = (frames: string[]): boolean => frames.some((frame) => frame !== frames[0]);
+  const movesGeometrically = differs(shapes);
+  const changesAnything = differs(painted);
+
+  // Reported per animation for the message; the measurement is per figure,
+  // because "does this figure move" is not a question about one keyframe set.
+  return plan.animations.map((entry) => ({
+    name: entry.name,
+    duration: entry.duration,
+    movesGeometrically,
+    changesAnything,
+  }));
+}
+
 const main = async () => {
   const { chromium } = await loadPlaywright();
   const browser = await chromium.launch(
@@ -582,10 +640,10 @@ const main = async () => {
     }
     occupantLook.set(probe, await signatureFor(floor, 'build-floor', occupant.stationId));
 
-    // The motion claim, measured in the browser rather than read off the
+    // The motion claim, measured from PAINTED PIXELS rather than the
     // stylesheet. `signatureFor` has just loaded this state's page.
     if (occupant.stationId !== null) {
-      const animations = await page.evaluate(readFigureMotion, occupant.stationId);
+      const animations = await measureFigureMotion(page, occupant.stationId);
       const expected = CLASSES_THAT_MUST_MOVE.includes(
         probe === PROBE_OFFLINE ? 'offline' : ACTIVITY_PLAN_CLASS[probe],
       );
