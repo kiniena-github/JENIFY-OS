@@ -241,10 +241,38 @@ function readFigureMotion(stationId: string): FigureMotion[] {
       const span = timing ? Number(timing.duration) || 0 : 0;
       if (span > duration) duration = span;
       if (span <= 0) continue;
+      // Sample where the animation ACTUALLY changes, not on a fixed grid.
+      //
+      // Four quarter-phase samples assume a keyframe layout. They miss any
+      // change confined between them: a transform introduced at 85% and
+      // restored at 100% moves visibly, yet 0/0.25/0.5/0.75 all read
+      // identically, and the tool then REJECTS a correct page. Verified —
+      // that exact keyframe set failed as "no change across phases" (Codex
+      // review of `ad5530c`).
+      //
+      // The declared offsets bound every value the animation takes, so
+      // sampling them settles whether anything changes. Midpoints are added
+      // as well, because a `cubic-bezier` with overshoot can leave the
+      // interval spanned by its own endpoints.
+      const offsets: number[] = [];
+      const effect = animation.effect;
+      if (effect && typeof (effect as KeyframeEffect).getKeyframes === 'function') {
+        for (const frame of (effect as KeyframeEffect).getKeyframes()) {
+          if (typeof frame.offset === 'number') offsets.push(frame.offset);
+        }
+      }
+      if (offsets.length === 0) offsets.push(0, 0.25, 0.5, 0.75, 1);
+      offsets.sort((a, b) => a - b);
+      const fractions: number[] = [];
+      for (let index = 0; index < offsets.length; index += 1) {
+        fractions.push(offsets[index]);
+        if (index + 1 < offsets.length) fractions.push((offsets[index] + offsets[index + 1]) / 2);
+      }
+
       const geometry: string[] = [];
       const everything: string[] = [];
       const resume = animation.currentTime;
-      for (const fraction of [0, 0.25, 0.5, 0.75]) {
+      for (const fraction of fractions) {
         animation.currentTime = span * fraction;
         const at = getComputedStyle(node);
         geometry.push(`${at.transform}|${at.translate}|${at.rotate}|${at.scale}`);
