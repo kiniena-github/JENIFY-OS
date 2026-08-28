@@ -212,21 +212,52 @@ function known<T extends string>(vocabulary: Record<T, true>, value: unknown): v
  * an object where a word belongs, and carrying none of what was inside it.
  * Diagnostics are worth having, but not at the price of being the leak.
  *
- * Bounded either way, because an adapter's string is still an adapter's
- * string. No `JSON.stringify`, so a circular value and a `BigInt` — both of
- * which made it THROW, defeating the fail-closed path it exists to serve —
- * are now simply described.
+ * Bounded on EVERY path, and the bound is applied at the single exit rather
+ * than per branch. The first version of this said "bounded either way" and
+ * then bounded only the string branch — `String(value)` on a primitive had no
+ * cap at all, so an adapter returning a large enough `BigInt` wrote a
+ * multi-megabyte diagnostic into a rendered page (issue #200, Codex
+ * exact-head finding on `a6577af`). A stated invariant enforced at some of its
+ * paths is the recurring shape of this whole review series, and this function
+ * was an instance of it. One exit, one cap, so a branch added later cannot
+ * forget.
+ *
+ * No `JSON.stringify`, so a circular value no longer makes the describer THROW
+ * and defeat the fail-closed path it exists to serve.
  */
+const MAX_DESCRIPTION = 80;
+
+/**
+ * Past this magnitude a `BigInt` is reported by type alone. The cap has to come
+ * BEFORE the decimal conversion, not after it: converting a huge `BigInt` to a
+ * string is superlinear and allocates the whole result, so truncating the
+ * output afterwards would already have paid the cost the bound exists to
+ * avoid. Comparison, unlike conversion, is cheap.
+ */
+const MAX_DESCRIBED_BIGINT = 10n ** 32n;
+
 function describeUnrecognised(value: unknown): string {
+  const described = describeRaw(value);
+  return described.length > MAX_DESCRIPTION ? `${described.slice(0, MAX_DESCRIPTION)}…` : described;
+}
+
+function describeRaw(value: unknown): string {
   if (typeof value === 'string') {
-    const quoted = JSON.stringify(value.length > 60 ? `${value.slice(0, 60)}…` : value);
-    return quoted;
+    // Truncated BEFORE quoting so the common case stays validly quoted; the
+    // cap at the exit is the backstop for escape expansion, since 60 quote or
+    // backslash characters serialise to twice that.
+    return JSON.stringify(value.length > 60 ? `${value.slice(0, 60)}…` : value);
   }
   if (value === null) return 'null';
   if (value === undefined) return 'undefined';
   if (Array.isArray(value)) return `an array of ${value.length}`;
   const type = typeof value;
-  if (type === 'number' || type === 'boolean' || type === 'bigint') return String(value);
+  if (type === 'bigint') {
+    const magnitude = value as bigint;
+    const huge = magnitude > MAX_DESCRIBED_BIGINT || magnitude < -MAX_DESCRIBED_BIGINT;
+    return huge ? 'a bigint too large to quote' : String(magnitude);
+  }
+  if (type === 'number' || type === 'boolean') return String(value);
   // Object, function, symbol: the TYPE, never the contents.
   return `a value of type ${type}`;
 }
