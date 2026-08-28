@@ -41,6 +41,8 @@
  * reading LIVE, and it never fabricates a newer timestamp.
  */
 
+import { jsonForScript } from './components.js';
+
 /** Poll interval, within the 10–30s band the mission brief specifies. */
 export const SNAPSHOT_POLL_INTERVAL_MS = 20_000;
 
@@ -107,7 +109,13 @@ export const FRESHNESS_VERDICT_JS = `function freshnessVerdict(renderedAt, gener
  * known instants rather than against the viewer's clock, which may be wrong.
  */
 export function liveRefreshScript(renderedAt: string): string {
-  const renderedAtJson = JSON.stringify(renderedAt);
+  // Script context, not HTML text: `JSON.stringify` alone leaves `<` intact,
+  // and the HTML parser finds `</script` inside a JavaScript string literal
+  // before the JavaScript parser sees the string at all. `renderedAt` comes
+  // from `bundleAsOf`, i.e. from bundle content — which the rest of this UI
+  // already treats as untrusted and escapes (issue #200, Codex finding on
+  // `1c5683f`).
+  const renderedAtJson = jsonForScript(renderedAt);
   return `<script>
 (function () {
   var RENDERED_AT = ${renderedAtJson};
@@ -133,7 +141,7 @@ export function liveRefreshScript(renderedAt: string): string {
   }
 
   function poll() {
-    fetch(${JSON.stringify(SNAPSHOT_FILENAME)} + '?t=' + Date.now(), { cache: 'no-store' })
+    fetch(${jsonForScript(SNAPSHOT_FILENAME)} + '?t=' + Date.now(), { cache: 'no-store' })
       .then(function (response) {
         if (!response.ok) throw new Error('HTTP ' + response.status);
         return response.json();
@@ -148,7 +156,7 @@ export function liveRefreshScript(renderedAt: string): string {
         set(
           'offline',
           'OFFLINE — build-time data',
-          'Could not reach ' + ${JSON.stringify(SNAPSHOT_FILENAME)} + ' (' + error.message + '). Showing the ' + RENDERED_AT + ' render; freshness is unknown.'
+          'Could not reach ' + ${jsonForScript(SNAPSHOT_FILENAME)} + ' (' + error.message + '). Showing the ' + RENDERED_AT + ' render; freshness is unknown.'
         );
       });
   }

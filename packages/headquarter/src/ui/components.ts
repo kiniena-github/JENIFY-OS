@@ -17,6 +17,37 @@ export function escapeHtml(value: string): string {
     .replaceAll("'", '&#39;');
 }
 
+/**
+ * Serialise a value for embedding inside an inline `<script>` element.
+ *
+ * `escapeHtml` is the wrong tool here and `JSON.stringify` alone is not
+ * enough. Inside a script element the HTML parser looks for the literal
+ * characters `</script` before the JavaScript parser sees anything at all, so
+ * a string containing `</script>` closes the element from INSIDE a JavaScript
+ * string literal — everything after it is fresh markup. `JSON.stringify`
+ * leaves `<` untouched, so it hands that straight through (issue #200, Codex
+ * exact-head finding on `1c5683f`: a bundle timestamp beginning
+ * `z</script><script>…`, chosen to sort last so `bundleAsOf` selects it, became
+ * stored script execution on every generated page).
+ *
+ * `<` and `>` become their `\u003c` / `\u003e` escapes, which the HTML parser
+ * cannot read as a tag boundary and which JavaScript reads as exactly the
+ * characters they encode — the embedded value is byte-identical at run time. U+2028 and U+2029
+ * are escaped for the same class of reason: they are line terminators to a
+ * JavaScript parser but legal inside a JSON string.
+ *
+ * Use this for anything interpolated into executable inline script. A
+ * `<script type="application/json">` block is a different context with a
+ * different rule, and `archive-search.ts` documents its own.
+ */
+export function jsonForScript(value: unknown): string {
+  return JSON.stringify(value)
+    .replaceAll('<', '\\u003c')
+    .replaceAll('>', '\\u003e')
+    .replaceAll('\u2028', '\\u2028')
+    .replaceAll('\u2029', '\\u2029');
+}
+
 export type Tone = 'accent' | 'info' | 'warn' | 'danger' | 'violet' | 'neutral';
 
 /** Status → (human label, tone). The vocabulary stays the canonical one. */
