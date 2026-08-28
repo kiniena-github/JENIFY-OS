@@ -898,3 +898,99 @@ describe('an unreadable answer is described by type, never serialised', () => {
     expect(() => assertBrowserSafe([status], 'test.connections')).toThrow();
   });
 });
+
+/**
+ * Codex exact-head P2 on `a6577af`. The describer's 60-character bound applied
+ * to the string branch alone, so `String(value)` on a numeric answer was
+ * unbounded — and a `BigInt` has no size limit. An adapter returning
+ * `10n ** 200000n` put a 200,171-character diagnostic into `reason`, and
+ * `reason` is rendered into the Connections page.
+ *
+ * Bounded output was already the documented guarantee of this function; it is
+ * enforced in every branch now. A large BigInt is reported by SIZE rather than
+ * truncated after the fact, because converting an arbitrarily large integer to
+ * decimal is the other half of what that answer costs.
+ */
+describe('every description is bounded, whatever branch produced it', () => {
+  const descriptor: ConnectionDescriptor = {
+    id: 'alien',
+    displayName: 'Alien Adapter',
+    category: 'workspace',
+    authMechanism: 'oauth',
+    locality: 'cloud',
+    advertisedCapabilities: [],
+    requiredFacts: [],
+    setupHint: 'n/a',
+    recheckable: false,
+    revocable: false,
+  };
+
+  const honest = {
+    state: 'connected',
+    verification: 'live_check',
+    outcome: 'verified',
+    observedFacts: [],
+    missingFacts: [],
+    effectiveCapabilities: [],
+    lastVerifiedAt: NOW,
+    evidenceSource: 'a real check',
+    reason: 'Alien Adapter: verified',
+  };
+
+  const assess = (evidence: unknown) =>
+    assessConnections(NOTHING, {
+      now: NOW,
+      catalog: [descriptor],
+      probes: [{ id: 'alien', probe: () => evidence as never }],
+    })[0]!;
+
+  it('bounds a huge BigInt without converting it', () => {
+    const started = Date.now();
+    const status = assess({ ...honest, outcome: 10n ** 200000n });
+    expect(status.state).toBe('error');
+    expect(status.reason.length).toBeLessThan(400);
+    expect(status.reason).toContain('bigint');
+    // Reported by size: the decimal expansion is never built at all.
+    expect(status.reason).not.toMatch(/\d{100}/);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('still shows a BigInt small enough to read', () => {
+    expect(assess({ ...honest, outcome: 42n }).reason).toContain('42');
+    expect(assess({ ...honest, outcome: -7n }).reason).toContain('-7');
+  });
+
+  it('bounds a long string answer even after escaping expands it', () => {
+    // 60 quote characters survive the content bound and then each escapes to
+    // two, so the quoted form has to be bounded as well.
+    for (const hostile of ['x'.repeat(50000), '"'.repeat(50000), '\n'.repeat(50000)]) {
+      const status = assess({ ...honest, state: hostile });
+      expect(status.state).toBe('error');
+      expect(status.reason.length).toBeLessThan(400);
+    }
+  });
+
+  it('bounds every field independently, so several at once cannot add up', () => {
+    const status = assess({
+      state: 'y'.repeat(50000),
+      verification: 'z'.repeat(50000),
+      outcome: 10n ** 100000n,
+      observedFacts: 'w'.repeat(50000),
+      missingFacts: 'v'.repeat(50000),
+      effectiveCapabilities: 'u'.repeat(50000),
+      evidenceSource: 10n ** 100000n,
+      reason: 't'.repeat(50000),
+      lastVerifiedAt: 10n ** 100000n,
+    });
+    expect(status.state).toBe('error');
+    expect(status.reason.length).toBeLessThan(2000);
+  });
+
+  it('a huge array is reported by length, never by contents', () => {
+    const status = assess({ ...honest, observedFacts: new Array(100000).fill({ a: 'secret' }) });
+    expect(status.state).toBe('error');
+    expect(status.reason).toContain('100000');
+    expect(status.reason).not.toContain('secret');
+    expect(status.reason.length).toBeLessThan(400);
+  });
+});

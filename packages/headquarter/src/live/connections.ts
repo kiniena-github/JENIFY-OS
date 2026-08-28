@@ -217,16 +217,45 @@ function known<T extends string>(vocabulary: Record<T, true>, value: unknown): v
  * which made it THROW, defeating the fail-closed path it exists to serve —
  * are now simply described.
  */
+const DESCRIBE_LIMIT = 60;
+
+/**
+ * Cap every description, whatever branch produced it.
+ *
+ * The bound used to apply to the string branch alone, so `String(value)` on a
+ * numeric answer was unbounded — and a `BigInt` has no size limit. An adapter
+ * returning `10n ** 200000n` put a 200,000-character diagnostic into `reason`
+ * and from there into the rendered page (Codex P2 on `a6577af`, reproduced:
+ * 200,171 characters). Bounded output was the stated guarantee; now it is the
+ * enforced one.
+ */
+function bound(text: string): string {
+  return text.length > DESCRIBE_LIMIT ? `${text.slice(0, DESCRIBE_LIMIT)}…` : text;
+}
+
+/**
+ * Past this magnitude a BigInt is reported by size rather than converted.
+ * Truncating afterwards would still pay for the decimal conversion of an
+ * arbitrarily large integer, which is the other half of what that answer
+ * costs — so the conversion never happens at all.
+ */
+const BIGINT_DESCRIBE_LIMIT = 10n ** BigInt(DESCRIBE_LIMIT);
+
 function describeUnrecognised(value: unknown): string {
-  if (typeof value === 'string') {
-    const quoted = JSON.stringify(value.length > 60 ? `${value.slice(0, 60)}…` : value);
-    return quoted;
-  }
+  // Bounded twice: once on the content, so a long answer is cut, and once on
+  // the quoted form, since escaping can expand what survived.
+  if (typeof value === 'string') return bound(JSON.stringify(bound(value)));
   if (value === null) return 'null';
   if (value === undefined) return 'undefined';
   if (Array.isArray(value)) return `an array of ${value.length}`;
+  if (typeof value === 'bigint') {
+    const magnitude = value < 0n ? -value : value;
+    return magnitude < BIGINT_DESCRIBE_LIMIT
+      ? String(value)
+      : `a bigint of more than ${DESCRIBE_LIMIT} digits`;
+  }
   const type = typeof value;
-  if (type === 'number' || type === 'boolean' || type === 'bigint') return String(value);
+  if (type === 'number' || type === 'boolean') return bound(String(value));
   // Object, function, symbol: the TYPE, never the contents.
   return `a value of type ${type}`;
 }
