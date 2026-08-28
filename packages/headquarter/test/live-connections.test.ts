@@ -765,6 +765,26 @@ describe('a probe answering outside the vocabulary fails closed', () => {
     expect(() => renderConnections([status], NOW, undefined, 'sample')).not.toThrow();
   });
 
+  /**
+   * Codex raised this vector separately against `ec4e75a` (P1): a malformed
+   * LIST — `observedFacts: [{ password: '…' }]` — whose nested values were
+   * funnelled through the describer. The type-only rule already covers it,
+   * because an array is reported by length and never by contents, but the
+   * vector is distinct from a directly-malformed scalar field and is locked
+   * here so it cannot regress independently.
+   */
+  it('names the offending list without echoing what is inside it', () => {
+    for (const field of ['observedFacts', 'missingFacts', 'effectiveCapabilities'] as const) {
+      const status = assess({ ...honest, [field]: [{ password: 'ordinary-secret' }] });
+      expect(status.reason, field).not.toContain('ordinary-secret');
+      expect(status.reason, field).not.toContain('password');
+      // Still says which field and what arrived, which is what an operator
+      // needs to find the adapter.
+      expect(status.reason, field).toContain(`${field} an array of 1`);
+      expect(status.state, field).toBe('error');
+    }
+  });
+
   it('still refuses to publish a credential hidden inside a structured answer', () => {
     // Belt and braces: the contents are not copied, so there is nothing for
     // the guard to catch — and the row is still an error carrying nothing.
