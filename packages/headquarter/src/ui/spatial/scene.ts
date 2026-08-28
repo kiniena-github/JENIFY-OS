@@ -21,6 +21,7 @@
 import { escapeHtml } from '../components.js';
 import { floorExtent, type Station, type StationKind, type Zone } from './world.js';
 import {
+  LIVENESS_PRESENTATION,
   fixtureIsPositive,
   fixtureNeedsAttention,
   occupantIsPositive,
@@ -554,10 +555,21 @@ function renderZone(zoneState: ZoneState): string {
 
   // The whole room is one link: it is the room the Founder clicks, and a link
   // is focusable and reachable by keyboard without any script.
+  // The accessible name must carry the room's liveness word. Without it a
+  // room needing attention only because of a failing fixture announced
+  // "0 of 1 lit" — an ordinary count — while sighted readers got the warm
+  // tint and the fault marker. The label is where that reader gets the same
+  // finding (Codex review of `5cba822`).
+  const attentionCount =
+    zoneState.occupants.filter(occupantNeedsAttention).length +
+    zoneState.fixtures.filter(fixtureNeedsAttention).length;
+  const liveness = LIVENESS_PRESENTATION[zoneState.liveness].label;
+  const attentionNote =
+    zoneState.liveness === 'attention' ? ` ${attentionCount} item(s) need attention.` : '';
   return `<a class="hq-zone" href="#room-${escapeHtml(zone.id)}" data-zone="${escapeHtml(
     zone.id,
   )}" data-liveness="${escapeHtml(zoneState.liveness)}" aria-label="${escapeHtml(
-    `${zone.name} — ${zoneState.summary}. Open room detail.`,
+    `${zone.name} — ${liveness}.${attentionNote} ${zoneState.summary}. Open room detail.`,
   )}">
 ${slab(zone)}${floorGrid(zone)}${walls(zone)}${wallLight(zone)}${drawn}
 </a>`;

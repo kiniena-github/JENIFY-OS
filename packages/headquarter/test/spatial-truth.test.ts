@@ -24,8 +24,15 @@ import { CONNECTION_CATALOG } from '../src/live/connections.js';
 import { latestTaskStates } from '../src/ui/model.js';
 import { founderDashboard, projectBoard, workerStatuses } from '../src/ui/views.js';
 import { buildSite, type HeadquarterData } from '../src/ui/site.js';
+import { MOTION_LEGEND } from '../src/ui/spatial/page.js';
 import { THEME_CSS } from '../src/ui/theme.js';
-import { HQ_FLOOR, ROLE_ZONE, STATION_KINDS, floorExtent } from '../src/ui/spatial/world.js';
+import {
+  HQ_FLOOR,
+  ROLE_ZONE,
+  STATION_FOOTPRINT,
+  STATION_KINDS,
+  floorExtent,
+} from '../src/ui/spatial/world.js';
 import {
   ACTIVITY_PRESENTATION,
   ANIMATED_ACTIVITIES,
@@ -442,17 +449,41 @@ describe('the projection and floor plan are stable', () => {
     expect(extent.depth).toBeGreaterThan(0);
   });
 
-  it('gives every station a unique id and keeps it inside its room', () => {
+  it('gives every station a unique id and keeps its RENDERED CONTENTS inside its room', () => {
+    // This test used to check the anchor point only — `station.x < zone.width`
+    // — which passes for a review bay at x 5.2 whose occupant, chair and
+    // marker are drawn out to 6.53 in a room six units wide. Testing the
+    // anchor instead of the extent is the same mistake as testing the rule
+    // instead of the interaction, and it let two stations render in the
+    // gutter (Codex review of `5cba822`).
     const ids = new Set<string>();
     for (const zone of HQ_FLOOR) {
       for (const station of zone.stations) {
         expect(ids.has(station.id), `duplicate station id ${station.id}`).toBe(false);
         ids.add(station.id);
-        expect(station.x).toBeGreaterThanOrEqual(0);
-        expect(station.y).toBeGreaterThanOrEqual(0);
-        expect(station.x).toBeLessThan(zone.width);
-        expect(station.y).toBeLessThan(zone.depth);
+
+        const footprint = STATION_FOOTPRINT[station.kind];
+        expect(footprint, `${station.kind} has no recorded footprint`).toBeDefined();
+        expect(
+          station.x - footprint.west,
+          `${station.id} reaches west of its room`,
+        ).toBeGreaterThanOrEqual(0);
+        expect(
+          station.x + footprint.east,
+          `${station.id} reaches east of its room (to ${station.x + footprint.east}, room is ${zone.width})`,
+        ).toBeLessThanOrEqual(zone.width);
+        expect(station.y - footprint.north, `${station.id} reaches north of its room`).toBeGreaterThanOrEqual(0);
+        expect(
+          station.y + footprint.south,
+          `${station.id} reaches south of its room (to ${station.y + footprint.south}, room is ${zone.depth})`,
+        ).toBeLessThanOrEqual(zone.depth);
       }
+    }
+  });
+
+  it('records a footprint for every station kind', () => {
+    for (const kind of STATION_KINDS) {
+      expect(STATION_FOOTPRINT[kind], `${kind} has no footprint`).toBeDefined();
     }
   });
 
@@ -1123,10 +1154,42 @@ describe('the Headquarters Floor page joins the site under its rules', () => {
     for (const id of new Set(linked)) expect(html).toContain(`id="room-${id}"`);
   });
 
-  it('states the motion vocabulary on the page rather than leaving it implicit', () => {
+  it('states the motion vocabulary on the page, covering EVERY activity', () => {
     expect(html).toContain('WHAT THE MOTION MEANS');
-    expect(html).toContain('the stillness IS the finding');
     expect(html).toContain('Nothing on this floor is animated for effect');
+
+    // Derived from the activity vocabulary, so an activity added later must be
+    // documented rather than rendering as an unexplained still figure. The
+    // legend skipped `queued` entirely, leaving that figure indistinguishable
+    // in meaning from an offline one (Codex review of `5cba822`).
+    const listed = MOTION_LEGEND.map((entry) => entry.activity);
+    for (const presentation of Object.values(ACTIVITY_PRESENTATION)) {
+      expect(listed, `the legend never explains "${presentation.label}"`).toContain(presentation.label);
+      expect(html).toContain(presentation.label);
+    }
+
+    // And the Offline line must not claim the universal the code does not
+    // honour: a registry-inactive specialist is offline even with a running
+    // task recorded.
+    const offline = MOTION_LEGEND.find((entry) => entry.activity === 'Offline')!;
+    expect(offline.means).toContain('inactive');
+    expect(html).not.toContain('the stillness IS the finding');
+  });
+
+  it('announces a room’s attention state in its accessible name, not only its tint', () => {
+    // A room needing attention solely because of a failing fixture announced
+    // "0 of 1 lit" — an ordinary count — while sighted readers got the tint
+    // and the fault marker (Codex review of `5cba822`).
+    const floor = floorFrom([], [], [connectionWithState('error')]);
+    const label = /aria-label="([^"]*Uplink Gallery[^"]*)"/.exec(renderScene(floor))![1];
+    expect(label).toContain('Needs attention');
+    expect(label).toMatch(/\d+ item\(s\) need attention/);
+
+    // A healthy room does not cry wolf.
+    const calm = floorFrom([], [], [connectionWithState('connected')]);
+    const calmLabel = /aria-label="([^"]*Uplink Gallery[^"]*)"/.exec(renderScene(calm))![1];
+    expect(calmLabel).not.toContain('Needs attention');
+    expect(calmLabel).not.toContain('need attention');
   });
 
   it('offers no control that could mutate anything', () => {

@@ -82,6 +82,32 @@ export interface Zone {
 const ZONE_SPAN = 6;
 const ZONE_GUTTER = 1.4;
 
+/**
+ * How far each station kind's RENDERED contents reach from its anchor point.
+ *
+ * The anchor is not the object. A review bay's occupant stands 0.95 east of
+ * it and is 0.38 wide; a bench is drawn from 0.4 west to 1.6 east. Laying
+ * stations out on the anchor alone put the fourth review bay's reviewer — and
+ * their chair and attention marker — at x 6.15–6.53 in a room six units wide,
+ * and pushed the third Command Deck console to 6.2 (Codex review of
+ * `5cba822`). The objects were drawn in the gutter between rooms.
+ *
+ * `row()` reserves this space, and `test/spatial-truth.test.ts` asserts every
+ * station in the plan renders inside its own room — the invariant my earlier
+ * check missed by testing the anchor rather than the extent.
+ */
+export const STATION_FOOTPRINT: Record<string, { west: number; east: number; north: number; south: number }> = {
+  // north is toward y=0; a north-facing figure stands 0.62 in front of the desk.
+  desk: { west: 0, east: 0.72, north: 0.62, south: 0.72 },
+  review_bay: { west: 0.06, east: 1.35, north: 0, south: 0.9 },
+  console: { west: 0, east: 1.0, north: 0, south: 0.5 },
+  bench: { west: 0.4, east: 1.6, north: 0, south: 0.8 },
+  bay: { west: 0, east: 0.8, north: 0, south: 0.8 },
+  uplink: { west: 0, east: 0.7, north: 0, south: 0.7 },
+  stack: { west: 0, east: 0.8, north: 0, south: 1.0 },
+  table: { west: 0.6, east: 1.8, north: 0, south: 1.4 },
+};
+
 function origin(column: number, row: number): { x: number; y: number } {
   return { x: column * (ZONE_SPAN + ZONE_GUTTER), y: row * (ZONE_SPAN + ZONE_GUTTER) };
 }
@@ -90,15 +116,21 @@ function origin(column: number, row: number): { x: number; y: number } {
  * Lay `count` stations out along the zone floor in a stable reading order:
  * left-to-right, then front-to-back. Deterministic, so the same floor plan
  * always renders byte-identically.
+ *
+ * The usable span is inset by the kind's own footprint, so the last station's
+ * CONTENTS end at the room edge rather than its anchor point.
  */
 function row(zoneId: string, kind: StationKind, count: number, atY: number, facing: Station['facing']): Station[] {
+  const footprint = STATION_FOOTPRINT[kind];
+  const first = Math.max(0.35, footprint.west);
+  const last = ZONE_SPAN - footprint.east - 0.15;
   const stations: Station[] = [];
-  const step = (ZONE_SPAN - 1.6) / Math.max(1, count - 1 || 1);
+  const step = count > 1 ? (last - first) / (count - 1) : 0;
   for (let index = 0; index < count; index += 1) {
     stations.push({
       id: `${zoneId}-${kind}-${index + 1}`,
       kind,
-      x: count === 1 ? ZONE_SPAN / 2 - 0.4 : 0.8 + index * step,
+      x: count === 1 ? (first + last) / 2 : Math.round((first + index * step) * 1000) / 1000,
       y: atY,
       facing,
     });

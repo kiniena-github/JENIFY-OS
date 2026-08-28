@@ -48,8 +48,20 @@ export const MOTION_LEGEND: readonly { activity: string; means: string }[] = [
   { activity: 'In review', means: 'a task held by this worker is recorded review_passed or review_failed' },
   { activity: 'Waiting on Founder', means: 'a task is recorded needs_approval and can move no further' },
   { activity: 'Blocked', means: 'a task is recorded blocked or outcome_unknown' },
+  { activity: 'Queued', means: 'a task is recorded queued — accepted and not started, so the figure is still' },
   { activity: 'Last task completed', means: 'the most recent recorded outcome was a completion; nothing is active' },
-  { activity: 'Offline', means: 'no canonical event places this worker on any task — the stillness IS the finding' },
+  {
+    activity: 'Offline',
+    // This line used to read "no canonical event places this worker on any
+    // task — the stillness IS the finding". That is false for one supported
+    // state: a specialist the registry marks INACTIVE is offline here even
+    // when the log shows it running, because an inactive entry may hold no
+    // work. The legend asserted a universal the code does not honour, so it
+    // now states both routes and each occupant's own evidence says which one
+    // applies to it (Codex review of `5cba822`).
+    means:
+      'either no canonical event places this worker on a task, or the registry marks it inactive — each figure’s evidence says which',
+  },
 ];
 
 export const FLOOR_HONESTY_NOTE =
@@ -164,7 +176,7 @@ export function spatialFloorBody({ floor, nowIso }: FloorPageInput): string {
     {
       label: 'Dark on the floor',
       value: totals.offline,
-      hint: 'no canonical event places them on a task',
+      hint: 'no task recorded, or the registry marks them inactive',
       tone: 'neutral',
     },
     {
