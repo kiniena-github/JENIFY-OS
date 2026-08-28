@@ -177,3 +177,36 @@ foundation, and a 7-page framework-free static HQ site. 31 new tests green; serv
 399 passed + 3 pre-existing skips; web bundle unchanged at 69.22 kB gzip. Docs:
 `docs/HEADQUARTER/ARCHIVE_SCHEMA.md`, `docs/HEADQUARTER/HEADQUARTER_UI.md`. No Mesob
 package or operator/control-plane file touched; originals preserved; local-only.
+
+## 2026-08-28 — Headquarter advanced UI/UX upgrade (issue #138)
+Founder-approved executive UI direction implemented across all seven Headquarter
+pages, on the existing framework-free renderers — no backend redesign, no new runtime
+dependency, no new state. New `src/ui/theme.ts` (one dark premium design system as a CSS
+string), `src/ui/components.ts` (escaping-by-default fragments: status chips, identity
+avatars, KPI cards, meters, scroll-contained table wrappers), `src/ui/archive-search.ts`
+(search semantics as plain functions that are unit-tested AND serialized into the page,
+so the browser cannot drift from the tests), and new derived read models in
+`src/ui/views.ts` (`projectBoard`/`projectHealth`, `founderAttentionQueue`,
+`activityFeed`, `specialistProfiles`) — all computed from the SAME canonical
+ActivityEvent/ApprovalRequest/ChatMessage/WorkerDescriptor contracts. Command Center
+gained a KPI strip, a Founder attention queue, a live activity feed and an AI workforce
+strip; Projects became a portfolio board with health/progress/blocker/next; Executive
+Room and Direct Chats gained AI identities (vendor + role) and a real context panel;
+Specialist Directory surfaces granted capabilities and recorded workload; Founder
+Approvals became risk-weighted decision cards. Fixed the known archive UX inconsistency:
+search, filters, the ranked result list and the Evolution chains now share one match set.
+
+Truthfulness boundaries preserved and test-locked: no `<button>` and no `<form>` on any
+page, Approve/Reject/Ask-for-changes drawn as inert `aria-disabled` placeholders labelled
+"not wired", no fabricated cost/token/sentiment/ETA fields, provenance note shown at the
+top of every page as well as the footer, and "as of" derived from the newest timestamp in
+the bundle rather than wall-clock time (renders stay byte-reproducible).
+
+The confirmed 390px horizontal-overflow defect is eliminated, not masked: `overflow-x:
+hidden` is banned and asserted absent. New `tools/ui-evidence.mjs` measures
+`documentElement.scrollWidth <= innerWidth` (and `body`) for all 7 pages at 1440/1024/
+414/390/360/320 px — 42/42 OK — exercises the archive search interaction in a real
+browser (8/8 OK) and writes the screenshot set. Playwright is deliberately not a package
+dependency; CI keeps the structural equivalents in `test/ui-responsive.test.ts`.
+777 headquarter tests green (was 665 on main; +112), `tsc --noEmit` clean. No Mesob/server/web package,
+migration, credential or CI workflow touched; local only, nothing deployed.

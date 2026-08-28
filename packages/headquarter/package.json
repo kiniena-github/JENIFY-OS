@@ -27,7 +27,8 @@
     "inventory": "tsx src/cli/inventory.ts",
     "build:site": "tsx src/cli/build-site.ts",
     "codex:review": "tsx src/cli/codex-review.ts",
-    "codex:probe": "tsx src/cli/codex-review.ts --probe-only"
+    "codex:probe": "tsx src/cli/codex-review.ts --probe-only",
+    "evidence:ui": "node tools/ui-evidence.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",
