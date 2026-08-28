@@ -1,0 +1,124 @@
+Headquarter horizontal-overflow measurement — issue #138
+Tool: packages/headquarter/tools/ui-evidence.mjs (Chromium, file:// URLs)
+Assertion per page per width: documentElement.scrollWidth <= innerWidth AND body.scrollWidth <= innerWidth
+
+Note on the BEFORE run: after printing the width table it stops with a TypeError on
+'#archive-browse'. That is expected and is not the overflow measurement failing — the
+pre-upgrade Archive page has no browse/results split for the tool's search-consistency
+check to read. The width table above that error is complete.
+
+===================================================================
+BEFORE — origin/main @ fae685a
+===================================================================
+viewport      page            innerWidth  scrollWidth  result
+1440          command-center  1440        1440         OK
+1440          projects        1440        1440         OK
+1440          executive-room  1440        1440         OK
+1440          direct-chats    1440        1440         OK
+1440          specialists     1440        1440         OK
+1440          approvals       1440        1440         OK
+1440          archive         1440        1440         OK
+1024          command-center  1024        1024         OK
+1024          projects        1024        1024         OK
+1024          executive-room  1024        1024         OK
+1024          direct-chats    1024        1024         OK
+1024          specialists     1024        1024         OK
+1024          approvals       1024        1024         OK
+1024          archive         1024        1024         OK
+414           command-center  414         702          OVERFLOW +288px (table.)
+414           projects        414         517          OVERFLOW +103px (td.)
+414           executive-room  414         414          OK
+414           direct-chats    414         414          OK
+414           specialists     414         414          OK
+414           approvals       414         820          OVERFLOW +406px (table.)
+414           archive         414         663          OVERFLOW +249px (table.)
+390           command-center  390         702          OVERFLOW +312px (table.)
+390           projects        390         517          OVERFLOW +127px (td.)
+390           executive-room  390         390          OK
+390           direct-chats    390         390          OK
+390           specialists     390         390          OK
+390           approvals       390         820          OVERFLOW +430px (table.)
+390           archive         390         663          OVERFLOW +273px (table.)
+360           command-center  360         702          OVERFLOW +342px (table.)
+360           projects        360         517          OVERFLOW +157px (td.)
+360           executive-room  360         360          OK
+360           direct-chats    360         360          OK
+360           specialists     360         360          OK
+360           approvals       360         820          OVERFLOW +460px (table.)
+360           archive         360         663          OVERFLOW +303px (table.)
+320           command-center  320         702          OVERFLOW +382px (table.)
+320           projects        320         517          OVERFLOW +197px (td.)
+320           executive-room  320         320          OK
+320           direct-chats    320         320          OK
+320           specialists     320         320          OK
+320           approvals       320         820          OVERFLOW +500px (table.)
+320           archive         320         663          OVERFLOW +343px (table.)
+page.evaluate: TypeError: Cannot read properties of null (reading 'hidden')
+    at eval (eval at evaluate (:311:30), <anonymous>:2:62)
+    at UtilityScript.evaluate (<anonymous>:313:16)
+    at UtilityScript.<anonymous> (<anonymous>:1:44)
+    at readState (/home/user/JENIFY-OS/packages/headquarter/tools/ui-evidence.mjs:169:17)
+    at main (/home/user/JENIFY-OS/packages/headquarter/tools/ui-evidence.mjs:181:22) {
+  log: []
+}
+
+===================================================================
+AFTER — this branch
+===================================================================
+viewport      page            innerWidth  scrollWidth  result
+1440          command-center  1440        1440         OK
+1440          projects        1440        1440         OK
+1440          executive-room  1440        1440         OK
+1440          direct-chats    1440        1440         OK
+1440          specialists     1440        1440         OK
+1440          approvals       1440        1440         OK
+1440          archive         1440        1440         OK
+1024          command-center  1024        1024         OK
+1024          projects        1024        1024         OK
+1024          executive-room  1024        1024         OK
+1024          direct-chats    1024        1024         OK
+1024          specialists     1024        1024         OK
+1024          approvals       1024        1024         OK
+1024          archive         1024        1024         OK
+414           command-center  414         414          OK
+414           projects        414         414          OK
+414           executive-room  414         414          OK
+414           direct-chats    414         414          OK
+414           specialists     414         414          OK
+414           approvals       414         414          OK
+414           archive         414         414          OK
+390           command-center  390         390          OK
+390           projects        390         390          OK
+390           executive-room  390         390          OK
+390           direct-chats    390         390          OK
+390           specialists     390         390          OK
+390           approvals       390         390          OK
+390           archive         390         390          OK
+360           command-center  360         360          OK
+360           projects        360         360          OK
+360           executive-room  360         360          OK
+360           direct-chats    360         360          OK
+360           specialists     360         360          OK
+360           approvals       360         360          OK
+360           archive         360         360          OK
+320           command-center  320         320          OK
+320           projects        320         320          OK
+320           executive-room  320         320          OK
+320           direct-chats    320         320          OK
+320           specialists     320         320          OK
+320           approvals       320         320          OK
+320           archive         320         320          OK
+
+archive search / evolution consistency
+  OK   idle shows the chronological browser
+  OK   idle dims no evolution entry
+  OK   a query swaps in the ranked result list
+  OK   results are narrowed
+  OK   evolution agrees with the result set
+  OK   the count is announced
+  OK   clearing restores the browser
+  OK   clearing un-dims evolution
+
+Screenshots → packages/headquarter/dist/ui-evidence
+
+No horizontal overflow at any of: 1440, 1024, 414, 390, 360, 320 px.
