@@ -11,6 +11,11 @@ import {
 import type { Db } from '../db/index.js';
 import { SESSION_COOKIE } from '../app.js';
 import { resolveSessionRecord, verifyAccountPassword } from '../services/auth.js';
+import {
+  assertNotRateLimited,
+  recordAuthFailure,
+  clearAuthFailures,
+} from '../services/ratelimit.js';
 
 /**
  * The JENIFY OS host adapter for the Headquarter browser-control API
@@ -70,10 +75,9 @@ export type HeadquarterControlPlane = Pick<
  * on every request rather than cached. It never looks at the body, the query
  * string, or any header other than the cookie.
  */
-function sessionResolver(db: Db, cookieFor: (request: ControlRequest) => string | undefined): SessionResolverPort {
+function sessionResolver(db: Db, token: string | undefined): SessionResolverPort {
   return {
-    resolve(request) {
-      const token = cookieFor(request);
+    resolve() {
       if (!token) return null;
       const record = resolveSessionRecord(db, token);
       if (!record) return null;
@@ -87,10 +91,39 @@ function sessionResolver(db: Db, cookieFor: (request: ControlRequest) => string 
   };
 }
 
-function credentialVerifier(db: Db): CredentialVerifierPort {
+/**
+ * Step-up password verification, under the SAME failure budget as login and
+ * recovery.
+ *
+ * Without a budget this endpoint is the softest target in the system, and
+ * precisely against the attacker step-up exists to stop: someone holding a
+ * stale Founder session can already reach it, so unlimited guesses here would
+ * turn a stolen cookie into a password oracle. `verifyPassword` is a
+ * synchronous scrypt, so each guess also blocks the event loop — an unbudgeted
+ * verifier is a denial-of-service surface as well as a guessing one. The
+ * budget bounds both.
+ *
+ * The key is `ip|hq-stepup|account`, so it shares the limiter's per-source
+ * ceiling with login: an attacker cannot spread guesses across accounts to
+ * stay under the per-account limit, and cannot evade the login budget by
+ * moving here. A correct password clears only its own bucket, exactly as a
+ * successful sign-in does.
+ */
+function credentialVerifier(db: Db, ip: string): CredentialVerifierPort {
   return {
     verify(account, password) {
-      return verifyAccountPassword(db, account.accountId, password);
+      const key = `${ip}|hq-stepup|${account.accountId}`;
+      try {
+        assertNotRateLimited(key);
+      } catch {
+        return 'rate_limited';
+      }
+      if (!verifyAccountPassword(db, account.accountId, password)) {
+        recordAuthFailure(key);
+        return 'rejected';
+      }
+      clearAuthFailures(key);
+      return 'ok';
     },
   };
 }
@@ -100,45 +133,34 @@ export function registerHeadquarterRoutes(
   db: Db,
   plane: HeadquarterControlPlane,
 ): void {
-  // The cookie is carried per-request in a WeakMap keyed by the reduced
-  // request object rather than being put on the request shape, because
-  // `ControlRequest` deliberately has no field a credential could sit in —
-  // that shape is what stops the boundary reading identity out of a body.
-  const tokens = new WeakMap<ControlRequest, string>();
-  const deps: ControlApiDeps = {
-    ops: plane.ops,
-    principals: plane.principals,
-    founderMap: plane.founderMap,
-    allowedOrigins: plane.allowedOrigins,
-    secretsEnv: plane.secretsEnv,
-    sessions: sessionResolver(db, (request) => tokens.get(request)),
-    credentials: credentialVerifier(db),
-    audit: plane.audit,
-  };
-
-  const mutationsEnabled = plane.mutationsEnabled !== false;
-
   const handle = async (req: FastifyRequest, reply: import('fastify').FastifyReply) => {
     const method = req.method.toUpperCase();
-    if (!mutationsEnabled && method !== 'GET') {
-      reply.status(403).send({
-        ok: false,
-        error: {
-          code: 'mutations_disabled',
-          message: 'HQ browser writes are switched off for this deployment.',
-        },
-      });
-      return;
-    }
-
     const headers: Record<string, string | undefined> = {};
     for (const [name, value] of Object.entries(req.headers)) {
       headers[name.toLowerCase()] = Array.isArray(value) ? value[0] : (value as string | undefined);
     }
     const path = req.url.split('?')[0]!;
     const control: ControlRequest = { method, path, headers, body: req.body };
-    const token = req.cookies?.[SESSION_COOKIE];
-    if (token) tokens.set(control, token);
+
+    // Ports are built PER REQUEST, closed over this request's cookie and
+    // source address. `ControlRequest` deliberately has no field a credential
+    // or an IP could sit in — that shape is what stops the boundary reading
+    // identity out of a body — so the two are bound here instead, where they
+    // cannot be reached by anything the caller sends.
+    const deps: ControlApiDeps = {
+      ops: plane.ops,
+      principals: plane.principals,
+      founderMap: plane.founderMap,
+      allowedOrigins: plane.allowedOrigins,
+      secretsEnv: plane.secretsEnv,
+      // The flag is passed through rather than enforced here, so the layer that
+      // refuses a write is the same one that tells the console whether the
+      // button works. Enforcing it in this adapter left the two disagreeing.
+      mutationsEnabled: plane.mutationsEnabled,
+      sessions: sessionResolver(db, req.cookies?.[SESSION_COOKIE]),
+      credentials: credentialVerifier(db, req.ip),
+      audit: plane.audit,
+    };
 
     const result = handleControlRequest(control, deps);
     // No caching of an authenticated, principal-specific answer, ever.

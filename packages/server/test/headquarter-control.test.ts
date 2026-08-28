@@ -13,10 +13,11 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { eq } from 'drizzle-orm';
-import { buildApp, type AppOptions } from '../src/app.js';
+import { buildApp, hostnameFromHeader, isPrivateHost, type AppOptions } from '../src/app.js';
 import { sessions } from '../src/db/schema.js';
 import { createUser } from '../src/services/users.js';
 import { createRole } from '../src/services/permissions.js';
+import { _resetRateLimiter } from '../src/services/ratelimit.js';
 import { testDb, makeTestTenant, fullMatrix, matrixOf, type TestTenant } from './helpers.js';
 import type { Db } from '../src/db/index.js';
 import { openMemoryHqDatabase } from '@factoryos/headquarter/store';
@@ -345,5 +346,118 @@ describe('the session cookie hardens itself on a hosted origin', () => {
     // Secure by default: a public site over plaintext fails visibly rather
     // than quietly running an authenticated session in the clear.
     expect((await loginCookie('hq.example.com')).secure).toBe(true);
+  });
+});
+
+describe('host classification decides Secure, and fails safe (Codex round 1, P1)', () => {
+  it('keeps a public IPv6 literal Secure over plaintext', () => {
+    // The shipped defect: stripping the brackets left a colon-containing
+    // string with no dot, which the bare-LAN-hostname rule swallowed — so a
+    // globally routable IPv6 host served the session cookie without Secure.
+    for (const host of [
+      '[2606:4700:4700::1111]:3001',
+      '[2606:4700:4700::1111]',
+      '[2001:db8::1]:8080',
+      '2606:4700:4700::1111',
+    ]) {
+      expect(isPrivateHost(hostnameFromHeader(host)), host).toBe(false);
+    }
+  });
+
+  it('still allows plaintext on genuinely private IPv6 hosts', () => {
+    for (const host of [
+      '[::1]:3001',
+      '[::1]',
+      '[fe80::1ff:fe23:4567:890a]:3001', // link-local
+      '[fd12:3456:789a::1]:3001', // unique-local
+      '[fc00::1]',
+      '[::ffff:192.168.1.10]:3001', // IPv4-mapped private
+    ]) {
+      expect(isPrivateHost(hostnameFromHeader(host)), host).toBe(true);
+    }
+  });
+
+  it('classifies an IPv4-mapped PUBLIC address as public', () => {
+    expect(isPrivateHost(hostnameFromHeader('[::ffff:8.8.8.8]:3001'))).toBe(false);
+  });
+
+  it('keeps the IPv4 and hostname rules intact', () => {
+    for (const host of ['localhost:3001', '127.0.0.1:3001', '192.168.1.10:3001', '10.0.0.4', 'mesob-server:3001']) {
+      expect(isPrivateHost(hostnameFromHeader(host)), host).toBe(true);
+    }
+    for (const host of ['hq.example.com', '8.8.8.8:3001', '172.32.0.1', '999.1.1.1']) {
+      expect(isPrivateHost(hostnameFromHeader(host)), host).toBe(false);
+    }
+  });
+
+  it('treats an unknown or unparseable host as public, so a gap only adds Secure', () => {
+    for (const host of ['', '   ', '[not-an-address]', '[]']) {
+      expect(isPrivateHost(hostnameFromHeader(host)), JSON.stringify(host)).toBe(false);
+    }
+  });
+
+  it('does not eat a hextet off an unbracketed IPv6 address', () => {
+    expect(hostnameFromHeader('2606:4700:4700::1111')).toBe('2606:4700:4700::1111');
+    expect(hostnameFromHeader('[::1]:3001')).toBe('::1');
+    expect(hostnameFromHeader('hq.example.com:3001')).toBe('hq.example.com');
+  });
+});
+
+describe('step-up password attempts are rate limited (Codex round 1, P1)', () => {
+  it('stops unlimited guessing from a stale Founder session', async () => {
+    _resetRateLimiter();
+    const plane = hqPlane();
+    const instance = app(plane);
+    const founder = await signIn(instance, 'founder.salta');
+    // Age the session past the step-up window: the exact attacker position
+    // step-up exists to contain — a stolen, long-lived cookie.
+    db.update(sessions)
+      .set({ createdAt: '2026-08-01T00:00:00.000Z' })
+      .where(eq(sessions.token, founder.split('=')[1]!))
+      .run();
+
+    plane.principals.register({
+      id: 'coo',
+      displayName: 'COO',
+      originateCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+      approvalAuthority: true,
+      active: true,
+    });
+    const created = plane.ops.createTask({
+      capabilityId: DIRECT_ORDER_CAPABILITY.id,
+      payload: { kind: 'direct_order', instruction: 'x', executionProvider: 'CLAUDE' },
+      idempotencyKey: 'coo-order-1',
+      requestedBy: 'coo',
+      title: 'COO order',
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const taskId = created.data.task.id;
+
+    const guess = () =>
+      instance.inject({
+        method: 'POST',
+        url: '/api/hq/control/approvals/approve',
+        headers: { ...JSON_HEADERS, cookie: founder },
+        payload: { taskId, expectedActionDigest: 'x'.repeat(64), stepUpPassword: 'wrong' },
+      });
+
+    const codes: string[] = [];
+    for (let i = 0; i < 14; i += 1) {
+      const response = await guess();
+      codes.push(response.json().error.code);
+    }
+
+    // The budget bites well before 14 attempts, and every guess after it is
+    // refused without reaching scrypt at all.
+    expect(codes).toContain('step_up_failed');
+    expect(codes).toContain('step_up_rate_limited');
+    expect(codes[codes.length - 1]).toBe('step_up_rate_limited');
+    expect(codes.filter((c) => c === 'step_up_failed').length).toBeLessThanOrEqual(10);
+
+    // Nothing was approved, and the correct password is refused too while the
+    // budget is exhausted — a lockout, not a bypass.
+    expect(plane.ops.queue.get(taskId)!.status).toBe('needs_approval');
+    _resetRateLimiter();
   });
 });

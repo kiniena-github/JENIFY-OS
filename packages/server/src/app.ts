@@ -30,22 +30,85 @@ import {
 export const SESSION_COOKIE = 'fos_session';
 
 /**
+ * The hostname out of a `Host` header, port removed.
+ *
+ * An IPv6 literal must be bracketed in a Host header, so the brackets are what
+ * makes the port unambiguous. Stripping a trailing `:digits` FIRST — the
+ * obvious implementation — corrupts an unbracketed IPv6 address by eating its
+ * last hextet, so a colon surviving the strip is treated as "this was an
+ * address, not a port" and the original is kept.
+ */
+export function hostnameFromHeader(hostHeader: string): string {
+  const raw = hostHeader.trim().toLowerCase();
+  const bracketed = /^\[([^\]]*)\](?::\d+)?$/.exec(raw);
+  // Brackets mean IPv6, so the contents must look like one. Anything else in
+  // brackets is malformed and is handed on WITH its brackets, which no private
+  // rule can match — malformed input ends up public, never private.
+  if (bracketed && bracketed[1]!.includes(':')) return bracketed[1]!;
+  const withoutPort = raw.replace(/:\d+$/, '');
+  return withoutPort.includes(':') ? raw : withoutPort;
+}
+
+function isPrivateIpv4(host: string): boolean {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!m) return false;
+  const octets = m.slice(1).map(Number);
+  if (octets.some((o) => o > 255)) return false;
+  const [a, b] = octets as [number, number, number, number];
+  return (
+    a === 127 ||
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254)
+  );
+}
+
+/**
+ * IPv6 ranges on which plaintext is legitimate: loopback, unique-local
+ * (`fc00::/7`) and link-local (`fe80::/10`), plus IPv4-mapped forms, which are
+ * classified by their embedded IPv4 address. Everything else — every globally
+ * routable address included — is public.
+ */
+function isPrivateIpv6(host: string): boolean {
+  if (host === '::1' || host === '::') return true;
+  const mapped = /^::(?:ffff:)?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(host);
+  if (mapped) return isPrivateIpv4(mapped[1]!);
+  const head = host.split(':')[0] ?? '';
+  if (/^f[cd][0-9a-f]{2}$/.test(head)) return true; // fc00::/7 unique-local
+  if (/^fe[89ab][0-9a-f]$/.test(head)) return true; // fe80::/10 link-local
+  return false;
+}
+
+/**
  * Hosts on which a plaintext session cookie is still legitimate: a developer's
  * own machine, and the private networks JENIFY OS is designed to run on. A
  * factory server at `http://192.168.1.10:3001` is the normal local-first
  * deployment, not a misconfiguration.
+ *
+ * Order matters, and one ordering bug is worth naming because it shipped in
+ * the first draft: the "a name with no dot is a bare LAN hostname" rule ran
+ * before any address parsing, so a public IPv6 literal — all colons, no dots —
+ * fell into it and a globally routable host served the session cookie without
+ * `Secure` over plaintext. Addresses are now classified as addresses first,
+ * and the bare-hostname rule only ever sees a name.
+ *
+ * Everything unrecognised is PUBLIC, so a parsing gap can only ever add
+ * `Secure`, never drop it.
  */
-function isPrivateHost(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  if (host === 'localhost' || host === '::1' || host.endsWith('.local')) return true;
+export function isPrivateHost(hostname: string): boolean {
+  const host = hostname.trim().toLowerCase();
+  if (host === '') return false; // unknown host ⇒ assume public ⇒ Secure
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host.endsWith('.local')) return true;
+  if (host.includes(':')) return isPrivateIpv6(host);
+  // Not a hostname at all (stray brackets, spaces, control characters) ⇒
+  // public. Without this the bare-hostname rule below would swallow anything
+  // that merely happens to contain no dot.
+  if (!/^[a-z0-9.-]+$/.test(host)) return false;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return isPrivateIpv4(host);
   if (!host.includes('.')) return true; // a bare LAN hostname, e.g. 'mesob-server'
-  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (!v4) return false;
-  const [a, b] = [Number(v4[1]), Number(v4[2])];
-  return (
-    a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) ||
-    (a === 169 && b === 254)
-  );
+  return false;
 }
 
 /**
@@ -83,7 +146,7 @@ export function sessionCookieOptions(req: FastifyRequest): {
     .trim()
     .toLowerCase();
   const https = req.protocol === 'https' || forwarded === 'https';
-  const hostname = String(req.headers.host ?? '').replace(/:\d+$/, '');
+  const hostname = hostnameFromHeader(String(req.headers.host ?? ''));
   return {
     path: '/',
     httpOnly: true,

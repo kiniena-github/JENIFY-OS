@@ -89,9 +89,28 @@ export interface SessionResolverPort {
   resolve(request: ControlRequest): AuthenticatedAccount | null;
 }
 
-/** Re-verify the account's own password, for step-up on high-risk actions. */
+/**
+ * What a step-up credential check concluded.
+ *
+ * Three outcomes rather than a boolean, because collapsing `rate_limited` into
+ * "wrong password" would be a lie to the person at the keyboard and would hide
+ * an attack in progress from the response. It is deliberately an enum and not
+ * a thrown error: this boundary is framework-free, so a host's HTTP exception
+ * type must not be able to travel through it.
+ */
+export type StepUpVerification = 'ok' | 'rejected' | 'rate_limited';
+
+/**
+ * Re-verify the account's own password, for step-up on high-risk actions.
+ *
+ * The implementer MUST apply a failure budget before doing the work. Password
+ * verification here is reachable by anyone holding a stale session — the exact
+ * situation step-up exists to contain — so an unbudgeted verifier would allow
+ * unlimited online guessing, and a synchronous KDF would let those guesses
+ * exhaust the event loop as well.
+ */
 export interface CredentialVerifierPort {
-  verify(account: AuthenticatedAccount, password: string): boolean;
+  verify(account: AuthenticatedAccount, password: string): StepUpVerification;
 }
 
 /* ------------------------------------------------------------------ */
@@ -504,7 +523,11 @@ export const STEP_UP_MAX_SESSION_AGE_MS = 5 * 60_000;
  */
 export const STEP_UP_RISK_CLASSES: readonly string[] = ['founder_gate', 'destructive'];
 
-export type StepUpFailure = 'step_up_required' | 'step_up_failed' | 'step_up_unavailable';
+export type StepUpFailure =
+  | 'step_up_required'
+  | 'step_up_failed'
+  | 'step_up_rate_limited'
+  | 'step_up_unavailable';
 
 export type StepUpResult =
   | { ok: true; via: 'fresh_session' | 'password' }
@@ -555,7 +578,16 @@ export function verifyStepUp(
         'the action is refused.',
     };
   }
-  if (!deps.credentials.verify(founder.account, password)) {
+  const verdict = deps.credentials.verify(founder.account, password);
+  if (verdict === 'rate_limited') {
+    return {
+      ok: false,
+      reason: 'step_up_rate_limited',
+      message:
+        'Too many failed confirmation attempts. Wait before trying again. Nothing was changed.',
+    };
+  }
+  if (verdict === 'rejected') {
     return {
       ok: false,
       reason: 'step_up_failed',

@@ -109,6 +109,18 @@ export interface ControlApiDeps {
   credentials?: CredentialVerifierPort;
   audit?: ControlAuditPort;
   now?: () => Date;
+  /**
+   * Set false to serve the reads without the writes — the safe posture while a
+   * deployment's Founder binding is still being established.
+   *
+   * It lives here, in the layer that also computes `controls`, rather than in
+   * the host adapter, and that placement is the fix for a real defect: with the
+   * flag enforced in the adapter only, the session route went on advertising
+   * `directOrder`/`approve`/`deny` as available, so a read-only deployment told
+   * the UI to draw buttons that could only ever return `mutations_disabled`.
+   * One flag, read once, decides both what happens and what is claimed.
+   */
+  mutationsEnabled?: boolean;
 }
 
 function json(status: number, body: Record<string, unknown>): ControlResponse {
@@ -196,6 +208,15 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
   if (!known) {
     // Deny by default, and say nothing about what does exist.
     return refusal(404, 'not_found', 'No such HQ control route.');
+  }
+
+  const mutationsEnabled = deps.mutationsEnabled !== false;
+  if (!mutationsEnabled && method !== 'GET') {
+    return refusal(
+      403,
+      'mutations_disabled',
+      'HQ browser writes are switched off for this deployment.',
+    );
   }
 
   const audit = (
@@ -306,10 +327,14 @@ type Audit = (outcome: 'allowed' | 'refused', detail: string, founder?: Resolved
 
 /** What the UI may draw as live, derived from configuration rather than hope. */
 function controlAvailability(deps: ControlApiDeps, founder: boolean): Record<string, unknown> {
+  // Every write control is gated on the SAME flag that refuses the write, so
+  // the console can never be told a button works when the route will refuse it.
+  const writable = founder && deps.mutationsEnabled !== false;
   return {
-    directOrder: founder && directOrderCapabilityState(deps.ops) === 'enabled',
-    approve: founder,
-    deny: founder,
+    directOrder: writable && directOrderCapabilityState(deps.ops) === 'enabled',
+    approve: writable,
+    deny: writable,
+    mutationsEnabled: deps.mutationsEnabled !== false,
     // Stated, not hidden: the canonical model has no third decision, so the
     // UI must not draw one. See the module docstring.
     askForChanges: false,
@@ -462,7 +487,13 @@ function approve(
     });
     if (!stepUp.ok) {
       audit('refused', stepUp.reason, founder);
-      return refusal(stepUp.reason === 'step_up_failed' ? 403 : 401, stepUp.reason, stepUp.message);
+      const status =
+        stepUp.reason === 'step_up_rate_limited'
+          ? 429
+          : stepUp.reason === 'step_up_failed'
+            ? 403
+            : 401;
+      return refusal(status, stepUp.reason, stepUp.message);
     }
   }
 

@@ -90,6 +90,12 @@ either a session established in the last five minutes, or the account's password
 re-entered as `stepUpPassword`. A long-lived cookie on an unattended machine is
 not consent to an irreversible action.
 
+Password attempts share the login failure budget (`ip|hq-stepup|account`,
+including its per-source ceiling), so a stolen stale session cannot be turned
+into a password oracle and repeated scrypt calls cannot exhaust the event loop.
+An exhausted budget answers `429 step_up_rate_limited` — deliberately distinct
+from a wrong password, which is `403 step_up_failed`.
+
 Creating an order does not require step-up — it executes nothing, it lands in
 `needs_approval` behind the digest gate. Neither does a denial: making it harder
 to stop something than to allow it would be backwards.
@@ -97,11 +103,14 @@ to stop something than to allow it would be backwards.
 ## Session cookie behaviour
 
 `fos_session` is `HttpOnly` and `SameSite=Lax` everywhere. `Secure` is set by
-default and omitted only for loopback and private-network hosts (`localhost`,
-`127.x`, `10.x`, `172.16–31.x`, `192.168.x`, `169.254.x`, `*.local`, bare LAN
-hostnames), so the local-first deployment — a factory server on the LAN over
-plain HTTP — keeps working while a hosted site gets `Secure` even behind a
-TLS-terminating proxy. `x-forwarded-proto: https` is honoured, but only to add
+default and omitted only for loopback and private-network hosts — `localhost`,
+`*.localhost`, `*.local`, bare LAN hostnames, IPv4 `127.x`/`10.x`/`172.16–31.x`/
+`192.168.x`/`169.254.x`, and IPv6 `::1`, `fc00::/7`, `fe80::/10` and
+IPv4-mapped forms of the above. Everything else, a globally routable IPv6
+literal included, is public and gets `Secure`; anything unparseable is treated
+as public too, so a gap in the classifier can only ever ADD `Secure`. The
+local-first deployment — a factory server on the LAN over plain HTTP — keeps
+working while a hosted site gets `Secure` even behind a TLS-terminating proxy. `x-forwarded-proto: https` is honoured, but only to add
 `Secure`, so forging it achieves nothing.
 
 This is deliberately not `req.protocol === 'https'`: behind a proxy that

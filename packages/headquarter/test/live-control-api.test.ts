@@ -61,6 +61,9 @@ function harness(
     founderMap?: unknown;
     origins?: string[];
     password?: string;
+    /** Make the credential verifier report an exhausted failure budget. */
+    rateLimited?: boolean;
+    mutationsEnabled?: boolean;
     /** Grant the Founder principal origination for the direct-order capability. */
     grant?: boolean;
   } = {},
@@ -93,8 +96,16 @@ function harness(
     allowedOrigins: options.origins ?? [ORIGIN],
     secretsEnv: CLAUDE_ONLY,
     sessions: { resolve: () => current },
-    credentials: { verify: (_a, p) => p === (options.password ?? 'correct-horse') },
+    credentials: {
+      verify: (_a, p) =>
+        options.rateLimited === true
+          ? 'rate_limited'
+          : p === (options.password ?? 'correct-horse')
+            ? 'ok'
+            : 'rejected',
+    },
     audit: { record: (event) => audit.push(event) },
+    mutationsEnabled: options.mutationsEnabled,
     now: () => NOW,
   };
 
@@ -506,5 +517,80 @@ describe('the browser-safety guard runs on the way out', () => {
     });
     expect(response.body.ok).toBe(false);
     expect(h.fixture.ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+  });
+});
+
+describe('read-only deployments say so (Codex round 1, P2)', () => {
+  it('never advertises a write control the same layer would refuse', () => {
+    // The defect this replaces: the flag was enforced in the host adapter and
+    // never reached the availability calculation, so a read-only deployment
+    // told the console that approve/deny/directOrder were live and every
+    // click came back mutations_disabled.
+    const h = harness({ mutationsEnabled: false });
+    const session = h.call({ method: 'GET', path: CONTROL_ROUTES.session });
+    const controls = session.body.controls as Record<string, unknown>;
+    expect(controls).toMatchObject({
+      directOrder: false,
+      approve: false,
+      deny: false,
+      mutationsEnabled: false,
+    });
+  });
+
+  it('refuses the write it just said was unavailable, and creates nothing', () => {
+    const h = harness({ mutationsEnabled: false });
+    const response = h.call({ body: ORDER_BODY });
+    expect(response.status).toBe(403);
+    expect((response.body.error as { code: string }).code).toBe('mutations_disabled');
+    expect(h.fixture.ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+  });
+
+  it('still serves the reads', () => {
+    const h = harness({ mutationsEnabled: false });
+    expect(h.call({ method: 'GET', path: CONTROL_ROUTES.approvals }).status).toBe(200);
+  });
+
+  it('advertises the writes as live when they are', () => {
+    const h = harness();
+    const controls = h.call({ method: 'GET', path: CONTROL_ROUTES.session }).body
+      .controls as Record<string, unknown>;
+    expect(controls).toMatchObject({ directOrder: true, approve: true, deny: true });
+  });
+});
+
+describe('an exhausted step-up budget is reported as 429', () => {
+  it('refuses the approval and leaves the task awaiting approval', () => {
+    const h = harness({ rateLimited: true });
+    h.fixture.principals.register({
+      id: 'coo',
+      displayName: 'Chief Operating Officer',
+      originateCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+      approvalAuthority: true,
+      active: true,
+    });
+    const created = h.fixture.ops.createTask({
+      capabilityId: DIRECT_ORDER_CAPABILITY.id,
+      payload: { kind: 'direct_order', instruction: 'x', [EXECUTION_PROVIDER_KEY]: 'CLAUDE' },
+      idempotencyKey: 'coo-order-rl',
+      requestedBy: 'coo',
+      title: 'COO order',
+    });
+    if (!created.ok) throw new Error(JSON.stringify(created.error));
+    const card = founderConsole(h.fixture.ops, NOW).approvals[0]!;
+    const stale = { ...FOUNDER_ACCOUNT, authenticatedAt: STALE };
+    const response = h.call(
+      {
+        path: CONTROL_ROUTES.approve,
+        body: {
+          taskId: card.taskId,
+          expectedActionDigest: card.actionDigest,
+          stepUpPassword: 'guess',
+        },
+      },
+      stale,
+    );
+    expect(response.status).toBe(429);
+    expect((response.body.error as { code: string }).code).toBe('step_up_rate_limited');
+    expect(h.fixture.ops.queue.get(card.taskId)!.status).toBe('needs_approval');
   });
 });

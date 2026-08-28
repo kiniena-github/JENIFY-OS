@@ -27,6 +27,7 @@ import {
   type ControlRequest,
   type FounderDenial,
   type SessionResolverPort,
+  type StepUpVerification,
 } from '../src/live/auth.js';
 import { HumanPrincipalRegistry } from '../src/application/principals.js';
 import { openMemoryHqDatabase } from '../src/store/db.js';
@@ -372,7 +373,10 @@ describe('step-up: an old cookie is not consent to an irreversible action', () =
   });
 
   it('refuses a wrong password and accepts the right one', () => {
-    const credentials = { verify: (_a: AuthenticatedAccount, p: string) => p === 'correct-horse' };
+    const credentials = {
+      verify: (_a: AuthenticatedAccount, p: string) =>
+        (p === 'correct-horse' ? 'ok' : 'rejected') as StepUpVerification,
+    };
     expect(verifyStepUp(founder, 'wrong', { now: NOW, credentials })).toMatchObject({
       ok: false,
       reason: 'step_up_failed',
@@ -399,5 +403,82 @@ describe('step-up: an old cookie is not consent to an irreversible action', () =
         reason: 'step_up_required',
       });
     }
+  });
+});
+
+describe('step-up guessing is budgeted, not merely checked (Codex round 1, P1)', () => {
+  const founder = {
+    account: {
+      realmId: 'tenant-1',
+      accountId: 'user-1',
+      displayName: 'Founder',
+      authenticatedAt: '2026-08-27T15:00:00.000Z',
+    },
+    binding: MAP[0]!,
+    principal: {
+      id: 'founder',
+      displayName: 'Founder',
+      originateCapabilities: [],
+      approvalAuthority: true,
+      active: true,
+    },
+  };
+
+  it('reports an exhausted budget distinctly from a wrong password', () => {
+    // Collapsing the two would lie to the person at the keyboard and hide an
+    // attack in progress. The verifier contract has three outcomes for that
+    // reason, and it is an enum so no host exception can travel through here.
+    const limited = verifyStepUp(founder, 'anything', {
+      now: NOW,
+      credentials: { verify: () => 'rate_limited' },
+    });
+    expect(limited).toMatchObject({ ok: false, reason: 'step_up_rate_limited' });
+
+    const wrong = verifyStepUp(founder, 'anything', {
+      now: NOW,
+      credentials: { verify: () => 'rejected' },
+    });
+    expect(wrong).toMatchObject({ ok: false, reason: 'step_up_failed' });
+  });
+
+  it('does not call the verifier at all when the session is already fresh', () => {
+    // The budget can only be spent by a caller that actually needs step-up, so
+    // a legitimate fresh Founder can never be locked out by someone else's
+    // guessing against the same account.
+    let calls = 0;
+    const fresh = {
+      ...founder,
+      account: {
+        ...founder.account,
+        authenticatedAt: new Date(NOW.getTime() - 30_000).toISOString(),
+      },
+    };
+    const result = verifyStepUp(fresh, 'irrelevant', {
+      now: NOW,
+      credentials: {
+        verify: () => {
+          calls += 1;
+          return 'ok';
+        },
+      },
+    });
+    expect(result).toEqual({ ok: true, via: 'fresh_session' });
+    expect(calls).toBe(0);
+  });
+
+  it('does not call the verifier when no password was supplied', () => {
+    // An empty attempt must not consume budget either — otherwise a UI that
+    // renders the prompt would spend the allowance before anyone typed.
+    let calls = 0;
+    verifyStepUp(founder, undefined, {
+      now: NOW,
+      credentials: {
+        verify: () => {
+          calls += 1;
+          return 'ok';
+        },
+      },
+    });
+    expect(calls).toBe(0);
   });
 });
