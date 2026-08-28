@@ -17,6 +17,7 @@ import { describe, expect, it } from 'vitest';
 import {
   checkMutationOrigin,
   loadFounderBindings,
+  normalizedTrustedOrigins,
   resolveFounderPrincipal,
   scanForClientIdentity,
   verifyStepUp,
@@ -480,5 +481,43 @@ describe('step-up guessing is budgeted, not merely checked (Codex round 1, P1)',
       },
     });
     expect(calls).toBe(0);
+  });
+});
+
+describe('opaque-scheme origins never collapse into one (Codex round 5, P2)', () => {
+  it('refuses a custom-scheme origin in the allow-list rather than matching every other one', () => {
+    // The WHATWG parser gives every opaque scheme the literal origin "null",
+    // so before this fix `foo://trusted` in the allow-list admitted
+    // `foo://evil` — and every chrome-extension:// page — at the CSRF boundary.
+    const result = checkMutationOrigin(
+      request({ headers: { origin: 'foo://evil', 'content-type': 'application/json' } }),
+      ['foo://trusted'],
+    );
+    // The configured entry is not a usable origin, so the list is empty.
+    expect(result).toMatchObject({ ok: false, reason: 'origin_allowlist_empty' });
+  });
+
+  it('refuses an extension origin even when one is deliberately configured', () => {
+    const result = checkMutationOrigin(
+      request({
+        headers: { origin: 'chrome-extension://aaaa', 'content-type': 'application/json' },
+      }),
+      ['chrome-extension://aaaa', 'https://hq.example'],
+    );
+    expect(result).toMatchObject({ ok: false, reason: 'origin_not_allowed' });
+  });
+
+  it('drops opaque entries from the usable set but keeps the web ones', () => {
+    expect(normalizedTrustedOrigins(['foo://trusted', 'https://hq.example'])).toEqual([
+      'https://hq.example',
+    ]);
+    expect(normalizedTrustedOrigins(['foo://a', 'chrome-extension://b'])).toEqual([]);
+  });
+
+  it('still accepts ordinary http and https origins', () => {
+    expect(normalizedTrustedOrigins(['https://hq.example', 'http://localhost:3001'])).toEqual([
+      'https://hq.example',
+      'http://localhost:3001',
+    ]);
   });
 });

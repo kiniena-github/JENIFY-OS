@@ -55,8 +55,12 @@ fails closed on its own:
 3. **`principalId` names a registered, active HQ human principal**, which is
    also where its originate grants and approval authority live. The binding
    grants nothing by itself.
-4. **`allowedOrigins` lists the origin the browser actually uses.** Empty means
-   every state-changing request is refused.
+4. **`allowedOrigins` lists the origin the browser actually uses**, as an
+   `http://` or `https://` origin. Empty — or holding only entries that are not
+   web origins — means every state-changing request is refused. Custom and
+   extension schemes (`foo://`, `chrome-extension://`) are rejected rather than
+   accepted: the URL parser gives every opaque scheme the same literal origin
+   `null`, so honouring one would have admitted all of them.
 
 ### Finding the account id
 
