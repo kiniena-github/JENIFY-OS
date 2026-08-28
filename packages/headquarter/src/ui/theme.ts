@@ -19,7 +19,9 @@
  *    `prefers-reduced-motion`.
  */
 
-export const THEME_CSS = `
+import { SPATIAL_CSS } from './spatial/theme.js';
+
+const BASE_CSS = `
 :root {
   color-scheme: dark;
   --bg: #070a11;
@@ -546,3 +548,14 @@ footer[data-provenance] {
   * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }
 `;
+
+/**
+ * The one stylesheet every HQ page carries.
+ *
+ * The spatial rules are concatenated here rather than shipped as a separate
+ * sheet so that the responsive/accessibility invariants which parse
+ * `THEME_CSS` cover the living Headquarters too. The reduced-motion block in
+ * `BASE_CSS` uses `!important`, so it disables the spatial animations
+ * regardless of the order the two halves appear in.
+ */
+export const THEME_CSS = `${BASE_CSS}${SPATIAL_CSS}`;

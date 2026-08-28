@@ -58,8 +58,12 @@ function freshnessVerdict(): (
 }
 
 describe('the Connections page joins the site without disturbing it', () => {
-  it('keeps all seven original pages and adds Connections as the eighth', () => {
-    expect(HQ_PAGES).toHaveLength(8);
+  it('keeps all seven original pages, Connections as the eighth, and the Headquarters Floor as the ninth', () => {
+    // The count is asserted so a page can never be added silently; the list
+    // below is the part that matters, and it is the original seven plus the
+    // two surfaces added by issue #200 — the Connection Center and the
+    // spatial Headquarters Floor.
+    expect(HQ_PAGES).toHaveLength(9);
     for (const file of [
       'index.html',
       'projects.html',
@@ -69,6 +73,7 @@ describe('the Connections page joins the site without disturbing it', () => {
       'approvals.html',
       'archive.html',
       'connections.html',
+      'headquarters.html',
     ]) {
       expect(bare.has(file)).toBe(true);
     }
@@ -80,7 +85,13 @@ describe('the Connections page joins the site without disturbing it', () => {
     }
   });
 
-  it('holds the site-wide no-mutation invariant on the new pages too', () => {
+  it('holds the re-scoped inertness invariant on every page: static markup carries no control', () => {
+    // The invariant is RE-SCOPED, not weakened (issue #200, integration lane):
+    // "no mutation outside the control API, and no control rendered that
+    // /session did not grant." Statically that still means literally no form,
+    // no button, no inline handler — working controls exist only as DOM nodes
+    // the control-console scripts create after an explicit grant, and the
+    // scripts' fetch targets are allow-listed in `control-console.test.ts`.
     for (const page of HQ_PAGES) {
       const html = bare.get(page.file)!;
       expect(html).not.toContain('<form');
@@ -164,7 +175,7 @@ describe('Connections renders evidence, not descriptors', () => {
   });
 });
 
-describe('the Direct Order composer is truthful about being blocked', () => {
+describe('the Direct Order composer is truthful about when it works', () => {
   const html = bare.get('index.html')!;
 
   it('appears on the Command Center', () => {
@@ -172,12 +183,19 @@ describe('the Direct Order composer is truthful about being blocked', () => {
     expect(html).toContain('id="direct-order"');
   });
 
-  it('states the actual blocker rather than showing a live-looking control', () => {
-    expect(html).toContain('Headquarter has no authenticated Founder session');
-    expect(html).toContain('No weak');
+  it('states the real gate — a control-API grant — rather than showing a live-looking static control', () => {
+    // Re-scoped with the Founder-auth control plane (issue #200, integration
+    // lane): the static render is still inert, and says that what unlocks the
+    // composer is the server-side session grant, not anything on this page.
+    expect(html).toContain('This static render submits nothing');
+    expect(DIRECT_ORDER_BLOCKER).toContain('ONLY when');
+    expect(DIRECT_ORDER_BLOCKER).toContain('control API');
+    expect(DIRECT_ORDER_BLOCKER).toContain('no control is drawn');
     expect(DIRECT_ORDER_BLOCKER).toContain('hq:order');
-    // Start Task is drawn so its place is visible, and is inert.
+    // The static Start Task is drawn so its place is visible, and is inert;
+    // the live mount next to it starts EMPTY.
     expect(html).toContain('<span class="control-readonly" aria-disabled="true">Start Task</span>');
+    expect(html).toContain('<div data-order-console></div>');
   });
 
   it('explains that an order is Founder-gated and executes nothing on creation', () => {

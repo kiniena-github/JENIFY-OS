@@ -30,6 +30,7 @@
  * worker happened to write.
  */
 
+import path from 'node:path';
 import type { ActivityEvent } from '../contracts/events.js';
 import type { WorkerDescriptor } from '../contracts/workers.js';
 import type { Capability } from '../operator/capabilities.js';
@@ -298,4 +299,29 @@ export function liveSnapshotFromOperations(
       provenance: provenanceFor('hq_events via HeadquarterStore.latestStatusPerSubject'),
     },
   });
+}
+
+/**
+ * A provenance label for a bundle path that is truthful AND portable
+ * (issue #200, integration lane — coordinator finding on `hq-snapshot.json`).
+ *
+ * The snapshot is served to the browser, and the naive interpolation of a
+ * resolved `dataPath` embedded the build machine's absolute checkout path in
+ * three provenance `source` fields — host filesystem layout and account name
+ * a client has no business receiving, and a build that differed byte-for-byte
+ * per checkout location, breaking reproducible builds.
+ *
+ * This keeps the attribution genuinely informative without either problem:
+ * a path inside the repository becomes repo-relative with forward slashes
+ * (identical on every machine and OS); a path OUTSIDE the repository — a
+ * custom bundle on some operator's disk — contributes only its basename,
+ * because everything above it is precisely the host information that must
+ * not travel.
+ */
+export function portableSourceLabel(dataPath: string, repoRoot: string): string {
+  const resolved = path.resolve(dataPath);
+  const relative = path.relative(path.resolve(repoRoot), resolved);
+  if (relative === '') return '.';
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return path.basename(resolved);
+  return relative.split(path.sep).join('/');
 }
