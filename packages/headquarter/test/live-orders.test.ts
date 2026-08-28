@@ -485,3 +485,78 @@ describe('input validation', () => {
     expect(ops.queue.listByStatus('needs_approval')).toHaveLength(0);
   });
 });
+
+/**
+ * Codex exact-head P2 on `7a1c21d`.
+ *
+ * `title` is the one field of an order published to the browser, and
+ * `HeadquarterOperations.createTask` deliberately skips its metadata upsert for
+ * a deduplicated task. Two submissions differing only in title therefore hashed
+ * alike: the second deduplicated onto the first, and the newly requested
+ * browser-visible title was silently discarded while the receipt reported
+ * success. The console kept showing the first title.
+ *
+ * The EFFECTIVE title participates now, not the raw input, so an omitted title
+ * and one written out as the same neutral default remain the same order.
+ */
+describe('the published title is part of what makes an order the same order', () => {
+  it('treats a different explicit title as a different order', () => {
+    const { ops } = ordersFixture();
+    const first = submitDirectOrder(ops, { ...ORDER, title: 'Maintenance plan' }, CLAUDE_ONLY);
+    const second = submitDirectOrder(ops, { ...ORDER, title: 'Q3 plan' }, CLAUDE_ONLY);
+    if (!first.ok || !second.ok) throw new Error('expected both to succeed');
+    expect(second.data.deduplicated).toBe(false);
+    expect(second.data.task.id).not.toBe(first.data.task.id);
+    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(2);
+  });
+
+  it('never leaves a task carrying a title nobody asked for', () => {
+    // The defect, stated as the property that failed: whatever the receipt
+    // points at must carry the title that submission requested.
+    const { ops } = ordersFixture();
+    submitDirectOrder(ops, { ...ORDER, title: 'Maintenance plan' }, CLAUDE_ONLY);
+    const second = submitDirectOrder(ops, { ...ORDER, title: 'Q3 plan' }, CLAUDE_ONLY);
+    if (!second.ok) throw new Error('expected ok');
+    expect(second.data.deduplicated).toBe(false);
+    const titles = founderConsole(ops).approvals.map((entry) => entry.title);
+    // Before the fix this read ['Maintenance plan'] alone: one task, and the
+    // second submission's requested title existed nowhere.
+    expect(titles).toContain('Q3 plan');
+    expect(titles).toContain('Maintenance plan');
+  });
+
+  it('still dedupes a genuine resubmission carrying the same title', () => {
+    const { ops } = ordersFixture();
+    const first = submitDirectOrder(ops, { ...ORDER, title: 'Maintenance plan' }, CLAUDE_ONLY);
+    const second = submitDirectOrder(ops, { ...ORDER, title: 'Maintenance plan' }, CLAUDE_ONLY);
+    if (!first.ok || !second.ok) throw new Error('expected both to succeed');
+    expect(second.data.deduplicated).toBe(true);
+    expect(second.data.task.id).toBe(first.data.task.id);
+  });
+
+  it('the EFFECTIVE title participates, so the neutral default is not a second order', () => {
+    // Omitting the title and writing out the default it resolves to are the
+    // same order, because the task ends up identical either way.
+    const { ops } = ordersFixture();
+    const first = submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
+    const second = submitDirectOrder(ops, { ...ORDER, title: 'Direct order → CLAUDE' }, CLAUDE_ONLY);
+    if (!first.ok || !second.ok) throw new Error('expected both to succeed');
+    expect(second.data.deduplicated).toBe(true);
+    expect(second.data.task.id).toBe(first.data.task.id);
+  });
+
+  it('a whitespace-only title is the omitted one, not a third order', () => {
+    const { ops } = ordersFixture();
+    const first = submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
+    const second = submitDirectOrder(ops, { ...ORDER, title: '   ' }, CLAUDE_ONLY);
+    if (!first.ok || !second.ok) throw new Error('expected both to succeed');
+    expect(second.data.deduplicated).toBe(true);
+  });
+
+  it('the derivation itself distinguishes titles', () => {
+    const base = { instruction: 'do a thing', project: 'p', route: 'AUTO' as const, requestedBy: 'founder' };
+    const key = directOrderIdempotencyKey({ ...base, effectiveTitle: 'One' });
+    expect(directOrderIdempotencyKey({ ...base, effectiveTitle: 'One' })).toBe(key);
+    expect(directOrderIdempotencyKey({ ...base, effectiveTitle: 'Two' })).not.toBe(key);
+  });
+});

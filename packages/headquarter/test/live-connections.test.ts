@@ -719,3 +719,103 @@ describe('a probe answering outside the vocabulary fails closed', () => {
     expect(() => assertBrowserSafe([status], 'test.connections')).toThrow();
   });
 });
+
+/**
+ * Codex exact-head P1 on `7a1c21d`, against the fail-closed reporting added in
+ * that same commit. The reason string is RENDERED, and it quoted the offending
+ * answer back with `JSON.stringify` — which copies an adapter's object property
+ * values into the page.
+ *
+ * `assertBrowserSafe` could not cover for it. An outcome of
+ * `{ password: 'ordinary-secret' }` became the string
+ * `{"password":"ordinary-secret"}`: the key rule no longer applies, because
+ * `password` is now inside a string rather than being a field name, and the
+ * value rule's `key: value` regex is defeated by the quote JSON puts between
+ * the key and the colon. Both rules missed it and the secret reached
+ * `connections.html`.
+ *
+ * A probe cannot be trusted to keep credentials out of a field HQ prints, so
+ * the answer is to stop printing adapter-authored structure at all rather than
+ * to teach the guard one more encoding of it.
+ */
+describe('an unreadable answer is described by type, never serialised', () => {
+  const descriptor: ConnectionDescriptor = {
+    id: 'alien',
+    displayName: 'Alien Adapter',
+    category: 'workspace',
+    authMechanism: 'oauth',
+    locality: 'cloud',
+    advertisedCapabilities: [],
+    requiredFacts: [],
+    setupHint: 'n/a',
+    recheckable: false,
+    revocable: false,
+  };
+
+  const honest = {
+    state: 'connected',
+    verification: 'live_check',
+    outcome: 'verified',
+    observedFacts: [],
+    missingFacts: [],
+    effectiveCapabilities: [],
+    lastVerifiedAt: NOW,
+    evidenceSource: 'a real check',
+    reason: 'Alien Adapter: verified',
+  };
+
+  const assess = (evidence: unknown) =>
+    assessConnections(NOTHING, {
+      now: NOW,
+      catalog: [descriptor],
+      probes: [{ id: 'alien', probe: () => evidence as never }],
+    })[0]!;
+
+  it('never copies an object property value into the rendered reason', () => {
+    const status = assess({ ...honest, outcome: { password: 'ordinary-secret' } });
+    expect(status.state).toBe('error');
+    expect(status.reason).not.toContain('ordinary-secret');
+    expect(status.reason).not.toContain('password');
+    expect(status.reason).toContain('[object]');
+    expect(renderConnections([status], NOW, undefined, 'sample')).not.toContain('ordinary-secret');
+  });
+
+  it('holds for every field and for nesting, arrays and functions alike', () => {
+    for (const field of ['state', 'verification', 'outcome', 'observedFacts', 'evidenceSource', 'reason']) {
+      for (const hostile of [
+        { password: 'ordinary-secret' },
+        [{ token: 'ordinary-secret' }],
+        { a: { b: { c: 'ordinary-secret' } } },
+        () => 'ordinary-secret',
+      ]) {
+        const status = assess({ ...honest, [field]: hostile });
+        expect(status.state).toBe('error');
+        expect(JSON.stringify(status)).not.toContain('ordinary-secret');
+      }
+    }
+  });
+
+  it('still names a primitive, which is the whole diagnostic', () => {
+    expect(assess({ ...honest, state: 'totally_fine' }).reason).toContain('totally_fine');
+    expect(assess({ ...honest, outcome: 42 }).reason).toContain('42');
+    expect(assess({ ...honest, outcome: false }).reason).toContain('false');
+    expect(assess({ ...honest, outcome: null }).reason).toContain('null');
+  });
+
+  it('does not throw on a BigInt or a circular value', () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    for (const hostile of [10n, circular, Symbol('s')]) {
+      const status = assess({ ...honest, outcome: hostile });
+      expect(status.state).toBe('error');
+      expect(() => renderConnections([status], NOW, undefined, 'sample')).not.toThrow();
+    }
+  });
+
+  it('a primitive carrying credential material still cannot be published', () => {
+    // A bare string faces both browser-safety rules intact, which is exactly
+    // why primitives are safe to name and structures are not.
+    const status = assess({ ...honest, state: 'sk-abcdefghijklmnopqrstuvwxyz012345' });
+    expect(() => assertBrowserSafe([status], 'test.connections')).toThrow();
+  });
+});

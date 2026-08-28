@@ -335,6 +335,15 @@ function encodeDigestFields(fields: readonly string[]): string {
  *   legitimate use (the same order with a different key is a deliberate second
  *   order) while making it impossible for one order's key to name another's
  *   task.
+ * - **The EFFECTIVE title.** The title is the one field of an order published
+ *   to the browser, and `HeadquarterOperations.createTask` deliberately skips
+ *   its metadata upsert for a deduplicated task. Two submissions differing only
+ *   in title therefore hashed alike, the second was deduplicated onto the
+ *   first, and the newly requested browser-visible title was silently
+ *   discarded — the console kept showing the first one while the receipt
+ *   reported success (Codex P2 on `7a1c21d`). The EFFECTIVE title is what
+ *   participates, not the raw input, so an omitted title and one written out
+ *   as the same neutral default are correctly the same order.
  */
 export function directOrderIdempotencyKey(
   input: Pick<
@@ -343,6 +352,12 @@ export function directOrderIdempotencyKey(
   > & {
     /** The provider the route actually resolved to, when it is known. */
     resolvedProvider?: string | null;
+    /**
+     * The title the task will actually carry — a supplied one, or the neutral
+     * default. Omitted only by callers deriving a key for an order whose title
+     * is not yet decided.
+     */
+    effectiveTitle?: string | null;
   },
 ): string {
   const digest = createHash('sha256')
@@ -354,6 +369,7 @@ export function directOrderIdempotencyKey(
         input.actorAuthentication ?? DEFAULT_ACTOR_AUTHENTICATION,
         input.project ?? '',
         input.idempotencyKey ?? '',
+        (input.effectiveTitle ?? '').trim(),
         input.instruction.trim(),
       ]),
     )
@@ -471,6 +487,12 @@ export function submitDirectOrder(
     });
   }
 
+  // The title the task will actually carry. Resolved before the key is derived
+  // because it participates in it: `createTask` skips its metadata upsert on a
+  // dedupe, so an order that hashed alike but asked for a different title had
+  // that title silently dropped.
+  const effectiveTitle = title || defaultTitle(route);
+
   // Always derived, never adopted, and derived AFTER the route resolves so the
   // key names the provider the order actually carries — see
   // `directOrderIdempotencyKey`.
@@ -479,6 +501,7 @@ export function submitDirectOrder(
     instruction,
     resolvedProvider: route.resolved,
     actorAuthentication: input.actorAuthentication ?? DEFAULT_ACTOR_AUTHENTICATION,
+    effectiveTitle,
   });
   const created = ops.createTask({
     capabilityId: DIRECT_ORDER_CAPABILITY.id,
@@ -502,7 +525,7 @@ export function submitDirectOrder(
     idempotencyKey,
     requestedBy: input.requestedBy,
     project: input.project,
-    title: title || defaultTitle(route),
+    title: effectiveTitle,
   });
 
   if (!created.ok) {

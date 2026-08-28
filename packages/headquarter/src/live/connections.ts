@@ -191,19 +191,53 @@ function known<T extends string>(vocabulary: Record<T, true>, value: unknown): v
 }
 
 /**
- * Quote an unrecognised probe answer for a reason string. Bounded, because
- * the value comes from an adapter and an unbounded one would be copied into
- * a rendered page.
+ * Describe an unreadable probe answer for a reason string that is rendered.
+ *
+ * Types are named; contents are NOT serialised. An earlier version of this
+ * used `JSON.stringify`, which copied an adapter's object property values
+ * straight into the page — and `assertBrowserSafe` could not catch them
+ * (Codex P1 on `7a1c21d`). An outcome of `{ password: 'ordinary-secret' }`
+ * became the string `{"password":"ordinary-secret"}`: the key rule no longer
+ * applies, because `password` is now inside a string rather than a field
+ * name, and the value rule's `key: value` regex is defeated by the quote JSON
+ * puts between the key and the colon. The secret reached `connections.html`.
+ *
+ * A probe cannot be trusted to keep credentials out of a field HQ prints, so
+ * the fix is to stop printing adapter-authored structure at all rather than
+ * to widen the guard to cover one more encoding of it. Naming the type is
+ * what makes the message actionable anyway — an adapter author needs to know
+ * they returned an object where a word was expected, not what was in it.
+ *
+ * Primitives are still shown: they are the whole diagnostic (`'totally_fine'`
+ * is the answer that has to be reported back), they carry no nested structure
+ * to hide a credential inside, and as bare strings they face both browser
+ * safety rules intact. Bounded, since the length came from an adapter too.
  */
 function quoteUnrecognised(value: unknown): string {
-  let encoded: string;
-  try {
-    encoded = JSON.stringify(value) ?? String(value);
-  } catch {
-    // A circular or throwing-`toJSON` value is itself the answer.
-    encoded = Object.prototype.toString.call(value);
+  if (value === null) return 'null';
+  switch (typeof value) {
+    case 'undefined':
+      return 'undefined';
+    case 'string':
+      return bounded(JSON.stringify(value));
+    case 'number':
+    case 'boolean':
+    case 'bigint':
+      // `String` rather than `JSON.stringify`, which throws on a BigInt.
+      return bounded(String(value));
+    case 'symbol':
+      return '[symbol]';
+    case 'function':
+      return '[function]';
+    default:
+      // Arrays and objects, including circular ones and anything with a
+      // hostile `toJSON`. The type, never the contents.
+      return Array.isArray(value) ? '[array]' : '[object]';
   }
-  return encoded.length > 60 ? `${encoded.slice(0, 60)}…` : encoded;
+}
+
+function bounded(text: string): string {
+  return text.length > 60 ? `${text.slice(0, 60)}…` : text;
 }
 
 /**
