@@ -274,6 +274,50 @@ describe('idempotency', () => {
   });
 
   /**
+   * Codex exact-head finding on `7a1c21d` (P2). The title was not a digest
+   * input, so two orders alike in every other field but carrying different
+   * titles derived the same key — and `HeadquarterOperations.createTask`
+   * deliberately skips its metadata upsert for a deduplicated task. The second
+   * caller's title, the ONE field of an order that reaches the browser, was
+   * therefore discarded in silence while the Founder console went on showing
+   * the first one. Same class as the route, resolved-provider and actor-trust
+   * findings before it: a receipt naming a task that does not carry what the
+   * caller asked for.
+   */
+  it('treats a different title as a different order', () => {
+    const { ops } = ordersFixture();
+    const first = submitDirectOrder(ops, { ...ORDER, title: 'Q3 plan' }, CLAUDE_ONLY);
+    const second = submitDirectOrder(ops, { ...ORDER, title: 'Q3 plan (urgent)' }, CLAUDE_ONLY);
+    if (!first.ok || !second.ok) throw new Error('expected both to succeed');
+    expect(second.data.deduplicated).toBe(false);
+    expect(second.data.task.id).not.toBe(first.data.task.id);
+    // Each task carries the title its own caller asked for.
+    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(2);
+  });
+
+  it('still dedupes when the title is the same, including when both omit it', () => {
+    const { ops } = ordersFixture();
+    const a = submitDirectOrder(ops, { ...ORDER, title: 'Q3 plan' }, CLAUDE_ONLY);
+    const b = submitDirectOrder(ops, { ...ORDER, title: 'Q3 plan' }, CLAUDE_ONLY);
+    if (!a.ok || !b.ok) throw new Error('expected ok');
+    expect(b.data.task.id).toBe(a.data.task.id);
+
+    const { ops: ops2 } = ordersFixture();
+    const c = submitDirectOrder(ops2, ORDER, CLAUDE_ONLY);
+    const d = submitDirectOrder(ops2, ORDER, CLAUDE_ONLY);
+    if (!c.ok || !d.ok) throw new Error('expected ok');
+    expect(d.data.task.id).toBe(c.data.task.id);
+  });
+
+  it('ignores whitespace around a title, so a stray space is not a new order', () => {
+    const { ops } = ordersFixture();
+    const a = submitDirectOrder(ops, { ...ORDER, title: 'Q3 plan' }, CLAUDE_ONLY);
+    const b = submitDirectOrder(ops, { ...ORDER, title: '  Q3 plan  ' }, CLAUDE_ONLY);
+    if (!a.ok || !b.ok) throw new Error('expected ok');
+    expect(b.data.task.id).toBe(a.data.task.id);
+  });
+
+  /**
    * Open Codex finding — AUTO idempotency was not bound to the resolved
    * provider. Two `AUTO` orders with the same four fields derived the same key,
    * so an order that resolved to CODEX after availability changed was
@@ -534,15 +578,16 @@ describe('the published title is part of what makes an order the same order', ()
     expect(second.data.task.id).toBe(first.data.task.id);
   });
 
-  it('the EFFECTIVE title participates, so the neutral default is not a second order', () => {
-    // Omitting the title and writing out the default it resolves to are the
-    // same order, because the task ends up identical either way.
+  it('the RAW title participates, so asking for the default is not the same as omitting it', () => {
+    // A deliberate choice, and the conservative one: the two tasks come out
+    // byte-identical, but the submissions did not say the same thing, and a
+    // dedupe that collapses distinct intent is the harder failure to see. Only
+    // fields the caller actually sent are compared.
     const { ops } = ordersFixture();
     const first = submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
     const second = submitDirectOrder(ops, { ...ORDER, title: 'Direct order → CLAUDE' }, CLAUDE_ONLY);
     if (!first.ok || !second.ok) throw new Error('expected both to succeed');
-    expect(second.data.deduplicated).toBe(true);
-    expect(second.data.task.id).toBe(first.data.task.id);
+    expect(second.data.deduplicated).toBe(false);
   });
 
   it('a whitespace-only title is the omitted one, not a third order', () => {
@@ -555,8 +600,12 @@ describe('the published title is part of what makes an order the same order', ()
 
   it('the derivation itself distinguishes titles', () => {
     const base = { instruction: 'do a thing', project: 'p', route: 'AUTO' as const, requestedBy: 'founder' };
-    const key = directOrderIdempotencyKey({ ...base, effectiveTitle: 'One' });
-    expect(directOrderIdempotencyKey({ ...base, effectiveTitle: 'One' })).toBe(key);
-    expect(directOrderIdempotencyKey({ ...base, effectiveTitle: 'Two' })).not.toBe(key);
+    const key = directOrderIdempotencyKey({ ...base, title: 'One' });
+    expect(directOrderIdempotencyKey({ ...base, title: 'One' })).toBe(key);
+    expect(directOrderIdempotencyKey({ ...base, title: 'Two' })).not.toBe(key);
+    // A title is not interchangeable with an instruction across the boundary.
+    expect(directOrderIdempotencyKey({ ...base, title: 'One', instruction: 'do a thing' })).not.toBe(
+      directOrderIdempotencyKey({ ...base, title: '', instruction: 'Onedo a thing' }),
+    );
   });
 });
