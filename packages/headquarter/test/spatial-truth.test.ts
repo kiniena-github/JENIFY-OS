@@ -396,6 +396,18 @@ describe('the rendered scene cannot animate more than the state supports', () =>
     expect(svg).toContain(`${floor.totals.offline} offline`);
   });
 
+  it('does not make the interactive scene an atomic image', () => {
+    // Per ARIA the descendants of a `role="img"` are presentational, so the
+    // eight room links — the scene-to-panel navigation this page advertises —
+    // would not be exposed. Chromium happens to expose them anyway, which is
+    // why this survived my browser check; the markup is still wrong and other
+    // engines may prune it (Codex review of `5cba822`).
+    expect(svg).not.toContain('role="img"');
+    expect(svg).toContain('role="group"');
+    // The links are real anchors inside it, one per room.
+    expect([...svg.matchAll(/<a class="hq-zone"/g)]).toHaveLength(HQ_FLOOR.length);
+  });
+
   it('fetches nothing: no external asset, no script, no foreign object', () => {
     expect(svg).not.toContain('<image');
     expect(svg).not.toContain('<foreignObject');

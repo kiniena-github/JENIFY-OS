@@ -601,7 +601,19 @@ export function renderScene(floor: FloorState): string {
     `${floor.totals.blocked} blocked, ${floor.totals.awaitingFounder} waiting on the Founder, ` +
     `${floor.totals.offline} offline, and ${floor.totals.litUplinks} of ${floor.totals.uplinks} service uplinks lit.`;
 
-  return `<svg class="hq-scene" viewBox="${viewBox}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="${escapeHtml(
+  // `role="group"`, NOT `role="img"`.
+  //
+  // Per ARIA the descendants of a `role="img"` are presentational, which
+  // would make the eight room links unavailable to a screen reader — the
+  // scene-to-panel navigation this page advertises. Chromium in fact still
+  // exposes them (measured: 8 links in the full AX tree, names intact), so
+  // this is not a reproduced total failure here; but the markup is wrong per
+  // spec, other engines and assistive tech may prune it, and resting an
+  // accessibility guarantee on one engine's leniency is exactly the
+  // "correct where it was looked at" reasoning this file keeps being bitten
+  // by. `group` keeps the scene's description as its accessible name while
+  // leaving its children exposed. (Codex review of `5cba822`.)
+  return `<svg class="hq-scene" viewBox="${viewBox}" preserveAspectRatio="xMidYMid meet" role="group" aria-label="${escapeHtml(
     description,
   )}">
 <g class="hq-floorplan">
