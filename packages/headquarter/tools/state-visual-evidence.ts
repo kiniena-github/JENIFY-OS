@@ -275,7 +275,26 @@ function readFigureMotion(stationId: string): FigureMotion[] {
       for (const fraction of fractions) {
         animation.currentTime = span * fraction;
         const at = getComputedStyle(node);
-        geometry.push(`${at.transform}|${at.translate}|${at.rotate}|${at.scale}`);
+        // Rendered geometry, not a property whitelist.
+        //
+        // This used to sample `transform`/`translate`/`rotate`/`scale`, which
+        // is a list of the ways I happened to think of moving something. A
+        // figure moved by an SVG geometry property — `cy`, `x`, `offset-
+        // distance` — or by a shifting `transform-origin` under a non-identity
+        // transform moves visibly and changes none of them, so the tool
+        // rejected a correct page. Verified with a head bobbing 6px via `cy`,
+        // reported as "no change across phases" (Codex review of `c94f152`).
+        //
+        // The bounding box and the screen CTM are what the browser actually
+        // put on screen, so they need no list and cannot fall behind CSS.
+        const box = node.getBoundingClientRect();
+        let matrix = '';
+        const graphical = node as unknown as SVGGraphicsElement;
+        if (typeof graphical.getScreenCTM === 'function') {
+          const ctm = graphical.getScreenCTM();
+          if (ctm) matrix = `${ctm.a},${ctm.b},${ctm.c},${ctm.d},${ctm.e},${ctm.f}`;
+        }
+        geometry.push(`${box.x},${box.y},${box.width},${box.height}|${matrix}`);
         everything.push(`${at.transform}|${at.opacity}|${at.fillOpacity}|${at.fill}|${at.stroke}`);
       }
       animation.currentTime = resume;
