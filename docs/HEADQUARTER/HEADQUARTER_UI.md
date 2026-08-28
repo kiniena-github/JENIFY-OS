@@ -125,16 +125,47 @@ Mobile is treated as a first-class Founder surface, not a squeezed desktop.
 ## Build & run (local only)
 
 ```
-npm run test --workspace @factoryos/headquarter        # 777 tests
+npm run test --workspace @factoryos/headquarter        # 785 tests
 npm run evidence:ui --workspace @factoryos/headquarter # browser overflow proof + screenshots
 npm run typecheck --workspace @factoryos/headquarter
 npm run inventory --workspace @factoryos/headquarter   # reconstruct archive from repo history
 npm run build:site --workspace @factoryos/headquarter  # render dist/site/*.html
+npm run build:preview --workspace @factoryos/headquarter # fold all 7 pages into one file
 ```
 
 `dist/` is derived, gitignored output. The sample bundle
 (`sample-data/hq-sample.json`) is reconstructed from real GitHub-visible
 activity; its chat transcripts are labeled illustrative samples.
+
+## Founder preview (issue #196)
+
+`build:preview` writes `dist/preview/jenify-hq-preview.html`: one
+self-contained file carrying all seven pages, openable in a normal browser
+with no server and no deployment. It exists because `dist/site/` is seven
+documents linked by relative hrefs — correct for a directory, unusable as a
+single link.
+
+How it stays honest about what it is showing:
+
+- Each page is copied **byte-for-byte** into an `<iframe srcdoc>`, so it keeps
+  its own document, stylesheet and script. Nothing is re-rendered, no IDs
+  collide, and the shell's CSS cannot leak into the product. The bundler
+  throws rather than emit a site with a page missing.
+- The frame is the viewport for the page inside it, so the page's own media
+  queries fire off the frame's width. The shell's width switcher narrows the
+  frame to 1024px/390px, which exercises the real breakpoints.
+- The product's own left-rail `*.html` links are intercepted and turned into a
+  frame swap, so navigation is the product's navigation. The shell's page
+  control (buttons on wide screens, a select below 720px) is the fallback if
+  the frame cannot be scripted, and `#command-center`…`#archive` make every
+  page addressable by URL.
+- The shell adds no data and no control that pretends to act. It states the
+  source commit and that the render is static, read-only and not connected to
+  a live backend; the full provenance note stays where it already was, at the
+  top and foot of every page.
+
+The bundle references no external origin: everything it needs is inside it.
+It carries sample data only — there is no path from it to a live system.
 
 ## File ownership (issue #43 order 6)
 
