@@ -40,7 +40,7 @@ import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import type { ActivityEvent, ActivityStatus } from '../src/contracts/events.js';
 import type { ConnectionState, ConnectionStatus } from '../src/live/connections.js';
-import { CONNECTION_CATALOG } from '../src/live/connections.js';
+import { CONNECTION_CATALOG, CONNECTION_STATE_TONE } from '../src/live/connections.js';
 import { latestTaskStates } from '../src/ui/model.js';
 import { founderDashboard, projectBoard, workerStatuses } from '../src/ui/views.js';
 import { THEME_CSS } from '../src/ui/theme.js';
@@ -86,6 +86,85 @@ const CONNECTION_STATES: ConnectionState[] = [
   'setup_required',
 ];
 
+/**
+ * What each connection state MEANS — declared here, independently of how the
+ * floor draws it.
+ *
+ * This table used to be computed as `${fixture.lit}/${severity}` from
+ * `Fixture.lit` and `Fixture.tone` — the presentation fields under test. That
+ * made the whole biconditional self-referential: the oracle could only ever
+ * agree with the renderer, because it was the renderer's own output wearing a
+ * different name. It cost exactly the collision you would predict —
+ * `dispatchable` and `not_connected` render identically, and the derived
+ * oracle called them both `false/none` and accepted it, though
+ * `CONNECTION_STATE_TONE` deliberately separates them as `info` and `neutral`
+ * (Codex review of `fe16a3f`).
+ *
+ * Every grouping below is an EXPLICIT approval with a reason, not a
+ * convenience. `assertMeaningsAreHonest` then checks the table against the
+ * canonical tone vocabulary so a future edit cannot quietly invent an
+ * equivalence to make a failure go away.
+ */
+const CONNECTION_MEANING: Record<ConnectionState, string> = {
+  // APPROVED EQUIVALENCE. Lighting a pillar makes one claim — "this is
+  // reachable now" — and that claim is identical for a verified remote
+  // service and a local-only one. The floor is entitled to draw them alike.
+  connected: 'reachable',
+  local_only: 'reachable',
+
+  // Distinct from everything else: work CAN be dispatched here, but
+  // connectivity has not been verified. Not a failure, not an absence.
+  dispatchable: 'dispatchable-unverified',
+
+  // Distinct from dispatchable: nothing is set up at all.
+  not_connected: 'absent',
+
+  // APPROVED EQUIVALENCE. Three routes to one operational fact: setup or
+  // credentials are incomplete and a human must finish them. The canonical
+  // vocabulary assigns all three `warn`, so this is the declared intent
+  // rather than a grouping invented here.
+  configured: 'setup-incomplete',
+  expired: 'setup-incomplete',
+  setup_required: 'setup-incomplete',
+
+  // Distinct: a verified failure is not an unfinished setup.
+  error: 'failing',
+};
+
+/**
+ * Guard the hand-written table above against wishful thinking.
+ *
+ * Two states may share a meaning only if the canonical `CONNECTION_STATE_TONE`
+ * also treats them alike — or if they are the one pair explicitly approved to
+ * differ in tone while meaning the same thing (`connected`/`local_only`, which
+ * are `accent` and `info` but make the same claim to the reader).
+ */
+const APPROVED_TONE_EXCEPTIONS: readonly (readonly [ConnectionState, ConnectionState])[] = [
+  ['connected', 'local_only'],
+];
+
+function assertMeaningsAreHonest(): string[] {
+  const problems: string[] = [];
+  for (let i = 0; i < CONNECTION_STATES.length; i += 1) {
+    for (let j = i + 1; j < CONNECTION_STATES.length; j += 1) {
+      const a = CONNECTION_STATES[i];
+      const b = CONNECTION_STATES[j];
+      if (CONNECTION_MEANING[a] !== CONNECTION_MEANING[b]) continue;
+      if (CONNECTION_STATE_TONE[a] === CONNECTION_STATE_TONE[b]) continue;
+      const approved = APPROVED_TONE_EXCEPTIONS.some(
+        ([x, y]) => (x === a && y === b) || (x === b && y === a),
+      );
+      if (!approved) {
+        problems.push(
+          `CONNECTION_MEANING groups ${a} with ${b}, but the canonical tone table separates them ` +
+            `(${CONNECTION_STATE_TONE[a]} vs ${CONNECTION_STATE_TONE[b]}) and the pair is not an approved exception`,
+        );
+      }
+    }
+  }
+  return problems;
+}
+
 function connection(state: ConnectionState): ConnectionStatus {
   const descriptor = CONNECTION_CATALOG[0];
   return {
@@ -120,16 +199,23 @@ function taskEvent(status: ActivityStatus): ActivityEvent {
   };
 }
 
-function floorFor(events: ActivityEvent[], connections: ConnectionStatus[]): FloorState {
+function floorFor(
+  events: ActivityEvent[],
+  connections: ConnectionStatus[],
+  // Registering the worker used to be inferred from `events.length > 0`, which
+  // silently made the offline probe measure nothing: offline is precisely the
+  // case of a REGISTERED worker with no events, so the inference excluded the
+  // one state it most needed to include.
+  registerWorker = events.length > 0,
+): FloorState {
   const states = latestTaskStates(events);
   return floorState({
     states,
     dashboard: founderDashboard(states, '2026-08-28'),
     workers: workerStatuses(states),
-    specialists:
-      events.length > 0
-        ? [{ id: 'w', displayName: 'W', vendor: 'v', role: 'build_lead', allowedCapabilities: [], active: true }]
-        : [],
+    specialists: registerWorker
+      ? [{ id: 'w', displayName: 'W', vendor: 'v', role: 'build_lead', allowedCapabilities: [], active: true }]
+      : [],
     projects: projectBoard(states),
     approvals: [],
     connections,
@@ -139,20 +225,50 @@ function floorFor(events: ActivityEvent[], connections: ConnectionStatus[]): Flo
 }
 
 /**
- * Everything the browser can see about one station: the computed fill and
- * opacity of every shape inside it, in document order. Two stations that
- * produce the same signature are indistinguishable on screen.
+ * Everything the browser can see about one station: the computed fill and the
+ * EFFECTIVE opacity of every shape inside it, in document order. Two stations
+ * that produce the same signature are indistinguishable on screen.
+ *
+ * The effective opacity has to be composed by walking ancestors, and getting
+ * that wrong is how this function was blind for four review rounds. CSS
+ * `opacity` is NOT inherited: it establishes a group that the browser
+ * composites, so `getComputedStyle(leaf).opacity` reports `1` no matter what
+ * any ancestor is set to. The rules that dim a stalled worker apply opacity to
+ * `.hq-figure`, an intermediate group — neither the leaf shapes this function
+ * read, nor the outer `[data-station]` element it also read. Measured: a
+ * `queued` figure really renders at 0.78 and an `offline` one at 0.4, and the
+ * signature recorded neither. Any two states differing ONLY by figure opacity
+ * were therefore certain to be called identical, on a render that was correct
+ * (Codex review of `fe16a3f`).
+ *
+ * So multiply every ancestor's opacity up to and including the station root.
+ * That is what the compositor does, and it is the only reading that makes
+ * "same signature" mean "same pixels".
  */
 function readSignature(stationId: string): string {
   const station = document.querySelector(`[data-station="${stationId}"]`);
   if (!station) return 'MISSING';
+
+  // NOTE: the ancestor walk is written inline rather than as a helper. This
+  // function is serialised and evaluated inside the browser, where the
+  // build's `keepNames` helper (`__name`) does not exist — a named inner
+  // function turns into a ReferenceError at page.evaluate time.
   const parts: string[] = [];
-  for (const shape of station.querySelectorAll('polygon, circle, ellipse, rect, line')) {
+  const shapes = [...station.querySelectorAll('polygon, circle, ellipse, rect, line'), station];
+  for (const shape of shapes) {
+    let opacity = 1;
+    let current: Element | null = shape;
+    while (current) {
+      opacity *= Number.parseFloat(getComputedStyle(current).opacity) || 0;
+      if (current === station) break;
+      current = current.parentElement;
+    }
+    // Rounded, because float multiplication of ancestor opacities is not
+    // exact and a 1e-16 difference is not a visible one.
     const style = getComputedStyle(shape);
-    parts.push(`${style.fill}|${style.fillOpacity}|${style.stroke}|${style.opacity}`);
+    const label = shape === station ? 'group' : `${style.fill}|${style.fillOpacity}|${style.stroke}`;
+    parts.push(`${label}|${opacity.toFixed(4)}`);
   }
-  // The group's own opacity applies to everything inside it.
-  parts.push(`group:${getComputedStyle(station).opacity}`);
   return parts.join(';');
 }
 
@@ -175,25 +291,42 @@ const main = async () => {
   }
 
   /* ---- fixtures: uplink pillars -------------------------------------- */
+  failures.push(...assertMeaningsAreHonest());
   const fixtureLook = new Map<ConnectionState, string>();
-  const fixtureMeaning = new Map<ConnectionState, string>();
   for (const state of CONNECTION_STATES) {
     const floor = floorFor([], [connection(state)]);
     const zone = floor.zones.find((entry) => entry.zone.id === 'uplink-gallery')!;
     const fixture = zone.fixtures[0];
     fixtureLook.set(state, await signatureFor(floor, 'uplink-gallery', fixture.stationId));
-    // Matches `test/spatial-truth.test.ts`: lit-ness plus severity, because
-    // the floor draws warn apart from danger but draws accent and info alike.
-    const severity = fixture.tone === 'danger' ? 'danger' : fixture.tone === 'warn' ? 'warn' : 'none';
-    fixtureMeaning.set(state, `${fixture.lit}/${severity}`);
   }
 
   /* ---- occupants: desk figures --------------------------------------- */
-  const occupantLook = new Map<ActivityStatus, string>();
-  for (const status of STATUSES) {
-    const floor = floorFor([taskEvent(status)], []);
+  //
+  // `offline` is included even though no ActivityStatus maps to it, because it
+  // is the state whose entire visual distinctness rested on the figure opacity
+  // the old signature could not see — measuring the other nine while omitting
+  // the one that exercises the fix would be evidence of nothing. It is reached
+  // the only way the product reaches it: a registered worker the log never
+  // names. `PROBE_OFFLINE` is not an ActivityStatus, so it cannot collide with
+  // one.
+  const PROBE_OFFLINE = 'offline (no canonical event)' as const;
+  type ActivityProbe = ActivityStatus | typeof PROBE_OFFLINE;
+  const ACTIVITY_PROBES: ActivityProbe[] = [...STATUSES, PROBE_OFFLINE];
+
+  const occupantLook = new Map<ActivityProbe, string>();
+  for (const probe of ACTIVITY_PROBES) {
+    const floor = floorFor(probe === PROBE_OFFLINE ? [] : [taskEvent(probe)], [], true);
     const zone = floor.zones.find((entry) => entry.zone.id === 'build-floor')!;
-    occupantLook.set(status, await signatureFor(floor, 'build-floor', zone.occupants[0].stationId));
+    const occupant = zone.occupants[0];
+    if (!occupant) {
+      failures.push(`${probe}: no occupant was placed on the build floor, so nothing was measured`);
+      continue;
+    }
+    if (probe === PROBE_OFFLINE && occupant.activity !== 'offline') {
+      // Fail rather than silently measure a state other than the one named.
+      failures.push(`${PROBE_OFFLINE}: expected an offline occupant, got '${occupant.activity}'`);
+    }
+    occupantLook.set(probe, await signatureFor(floor, 'build-floor', occupant.stationId));
   }
 
   function compare<T extends string>(
@@ -219,8 +352,10 @@ const main = async () => {
     }
   }
 
-  compare('connection', CONNECTION_STATES, fixtureLook, (state) => fixtureMeaning.get(state)!);
-  compare('activity', STATUSES, occupantLook, (status) => STATUS_ACTIVITY[status]);
+  compare('connection', CONNECTION_STATES, fixtureLook, (state) => CONNECTION_MEANING[state]);
+  compare('activity', ACTIVITY_PROBES, occupantLook, (probe) =>
+    probe === PROBE_OFFLINE ? 'offline' : STATUS_ACTIVITY[probe],
+  );
 
   await browser.close();
 

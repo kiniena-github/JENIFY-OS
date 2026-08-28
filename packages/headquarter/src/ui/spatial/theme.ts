@@ -105,6 +105,22 @@ export const SPATIAL_CSS = `
 .prop-screen.is-lit { fill: var(--info); fill-opacity: 0.9; animation: hq-screen 3.4s ease-in-out infinite; }
 
 .prop-lamp.face-top, .prop-lamp.face-east, .prop-lamp.face-south { fill: #1a2338; }
+
+/* STANDBY, not lit and not dead.
+   NOTE: no backticks anywhere in this file — it is one template literal.
+   A dispatchable uplink means work CAN be sent to this service, but nothing
+   has verified the connection — so it must not light (that would claim
+   reachability the evidence does not support) and must not read as attention
+   (nothing is wrong). It used to render byte-identically to not_connected,
+   a service nobody has set up at all, which are two very different answers to
+   the question "can I use this?". The canonical tone table separates them as
+   info and neutral; the floor now does too (Codex review of fe16a3f).
+   Scoped to :not(.is-lit) so a lit local_only uplink, also info, keeps its
+   lit treatment. */
+.hq-station[data-tone="info"] .prop-lamp:not(.is-lit).face-top { fill: #26415e; }
+.hq-station[data-tone="info"] .prop-lamp:not(.is-lit).face-east { fill: #1c3048; }
+.hq-station[data-tone="info"] .prop-lamp:not(.is-lit).face-south { fill: #142334; }
+
 .prop-lamp.is-lit.face-top { fill: var(--accent); }
 .prop-lamp.is-lit.face-east { fill: var(--accent-deep); }
 .prop-lamp.is-lit.face-south { fill: #0a5540; }

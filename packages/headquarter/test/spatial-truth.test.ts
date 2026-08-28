@@ -20,7 +20,7 @@ import { describe, expect, it } from 'vitest';
 import type { ActivityEvent, ActivityStatus } from '../src/contracts/events.js';
 import type { WorkerDescriptor } from '../src/contracts/workers.js';
 import type { ConnectionState, ConnectionStatus } from '../src/live/connections.js';
-import { CONNECTION_CATALOG } from '../src/live/connections.js';
+import { CONNECTION_CATALOG, CONNECTION_STATE_TONE } from '../src/live/connections.js';
 import { latestTaskStates, type TaskState } from '../src/ui/model.js';
 import { founderDashboard, projectBoard, workerStatuses, type WorkerStatus } from '../src/ui/views.js';
 import { escapeHtml } from '../src/ui/components.js';
@@ -840,6 +840,46 @@ describe('the floor never drops or invents people', () => {
 
     // A stopped thing is never animated.
     expect(THEME_CSS).not.toMatch(/\.fault-(stem|dot)[^{]*\{[^}]*animation:/);
+  });
+
+  it('draws a dispatchable uplink apart from one nobody has set up', () => {
+    // "Work can be sent here but nothing has verified the link" and "nothing
+    // is set up at all" are different answers to "can I use this?", and
+    // CONNECTION_STATE_TONE says so: `info` versus `neutral`. The two pillars
+    // nevertheless rendered byte-identically, because the only rules keyed on
+    // an unlit prop were the attention ones and neither state is attention.
+    //
+    // Found by the browser tool only AFTER its semantic oracle stopped being
+    // derived from Fixture.lit/tone — the derived oracle collapsed both to
+    // "false/none" and blessed the collision (Codex review of `fe16a3f`).
+    const dispatchable = connectionWithState('dispatchable');
+    const absent = { ...connectionWithState('not_connected'), id: 'probe-absent', displayName: 'PROBE ABSENT' };
+
+    const floor = floorFrom([], [], [dispatchable, absent]);
+    const gallery = floor.zones.find((zone) => zone.zone.id === 'uplink-gallery')!;
+    const [litness, tones] = [
+      gallery.fixtures.map((fixture) => fixture.lit),
+      gallery.fixtures.map((fixture) => fixture.tone),
+    ];
+
+    // Neither lights: lighting either would claim reachability nothing verified.
+    expect(litness).toEqual([false, false]);
+    // But the canonical vocabulary keeps them apart, and the floor carries it.
+    expect(tones).toEqual([CONNECTION_STATE_TONE.dispatchable, CONNECTION_STATE_TONE.not_connected]);
+    expect(CONNECTION_STATE_TONE.dispatchable).not.toBe(CONNECTION_STATE_TONE.not_connected);
+
+    // The standby treatment exists, and is scoped to the UNLIT prop so a lit
+    // local_only uplink — also `info` — keeps its lit rendering.
+    for (const face of ['top', 'east', 'south']) {
+      expect(THEME_CSS).toContain(`.hq-station[data-tone="info"] .prop-lamp:not(.is-lit).face-${face}`);
+    }
+    // Standby is not attention: it must not borrow the fault marker's amber.
+    const standby = THEME_CSS.match(
+      /\.hq-station\[data-tone="info"\] \.prop-lamp:not\(\.is-lit\)\.face-top \{([^}]*)\}/,
+    );
+    expect(standby, 'no standby rule for an unlit info-toned uplink').not.toBeNull();
+    expect(standby![1]).not.toContain('--warn');
+    expect(standby![1]).not.toContain('--danger');
   });
 
   it('marks every attention fixture it seats, in every room', () => {
