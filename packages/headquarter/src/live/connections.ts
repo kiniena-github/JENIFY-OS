@@ -145,6 +145,61 @@ const VERIFYING_METHODS: readonly VerificationMethod[] = ['live_check'];
 /** Methods that may support `dispatchable` — a weaker, honestly-named claim. */
 const DISPATCH_METHODS: readonly VerificationMethod[] = ['routing_contract'];
 
+/*
+ * The three vocabularies a probe answers in, written as exhaustive records so
+ * TypeScript refuses to compile a new member that is not listed here. A plain
+ * array would let the enum grow past its own validator in silence, which is
+ * the failure mode these guards exist to prevent.
+ *
+ * `options.probes` accepts arbitrary adapters, and `outcome` became an
+ * execution-authority input in this round (a check that RAN is not a check
+ * that SUCCEEDED). A value outside the vocabulary is therefore no longer a
+ * display curiosity: it is an unknown, and unknowns fail closed here like
+ * every other unknown in the control plane.
+ */
+const KNOWN_STATES: Record<ConnectionState, true> = {
+  connected: true,
+  local_only: true,
+  dispatchable: true,
+  configured: true,
+  not_connected: true,
+  expired: true,
+  error: true,
+  setup_required: true,
+};
+
+const KNOWN_METHODS: Record<VerificationMethod, true> = {
+  none: true,
+  configuration: true,
+  routing_contract: true,
+  live_check: true,
+};
+
+const KNOWN_OUTCOMES: Record<VerificationOutcome, true> = {
+  verified: true,
+  not_attempted: true,
+  expired: true,
+  revoked: true,
+  malformed: true,
+  wrong_project: true,
+  unreachable: true,
+  failed: true,
+};
+
+function known<T extends string>(vocabulary: Record<T, true>, value: unknown): value is T {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(vocabulary, value);
+}
+
+/**
+ * Quote an unrecognised probe answer for a reason string. Bounded, because
+ * the value comes from an adapter and an unbounded one would be copied into
+ * a rendered page.
+ */
+function quoteUnrecognised(value: unknown): string {
+  const encoded = JSON.stringify(value) ?? String(value);
+  return encoded.length > 60 ? `${encoded.slice(0, 60)}…` : encoded;
+}
+
 /** How HQ would authenticate to the service, if it were connected. */
 export type AuthMechanism =
   | 'oauth'
@@ -700,6 +755,51 @@ export function assessConnections(
           reason: `${descriptor.displayName}: connection probe failed (${(error as Error).message}).`,
         };
       }
+    }
+
+    // Answers outside the vocabulary are unknowns, and unknowns fail closed.
+    //
+    // Every invariant below reads `state`, `verification` and `outcome`, and
+    // all three arrive from an adapter this layer does not control. An
+    // unrecognised value used to be forwarded verbatim: a state of
+    // `'totally_fine'` reached the Connection Center, where it has no label
+    // and no tone, and rendering the page threw a TypeError naming
+    // `escapeHtml` rather than the adapter that caused it — so one bad probe
+    // took down the whole site build with an error pointing at the wrong
+    // place. A malformed `outcome` did the same. Neither could forge a
+    // connection (an unknown state is not `connected`, and an unknown outcome
+    // is not `verified`), so this is honesty and robustness rather than an
+    // authority hole — but "fail closed on unknown" is the rule everywhere
+    // else in the control plane, and the one layer documented as enforcing
+    // the probe invariants centrally is where it belongs.
+    //
+    // `error` and `failed` are the honest readings of a probe that answered
+    // in a language HQ does not speak, and the original value is preserved in
+    // `reason` so the adapter is nameable from the page itself.
+    if (!known(KNOWN_STATES, evidence.state) || !known(KNOWN_METHODS, evidence.verification) ||
+        !known(KNOWN_OUTCOMES, evidence.outcome)) {
+      const unrecognised = [
+        known(KNOWN_STATES, evidence.state) ? null : `state ${quoteUnrecognised(evidence.state)}`,
+        known(KNOWN_METHODS, evidence.verification)
+          ? null
+          : `verification ${quoteUnrecognised(evidence.verification)}`,
+        known(KNOWN_OUTCOMES, evidence.outcome)
+          ? null
+          : `outcome ${quoteUnrecognised(evidence.outcome)}`,
+      ].filter((part): part is string => part != null);
+      evidence = {
+        ...evidence,
+        state: 'error',
+        verification: 'none',
+        outcome: 'failed',
+        effectiveCapabilities: [],
+        lastVerifiedAt: null,
+        evidenceSource: `probe ${descriptor.id} answered outside the vocabulary`,
+        reason:
+          `${descriptor.displayName}: the connection probe returned ${unrecognised.join(' and ')}, ` +
+          'which HQ does not recognise. An unrecognised answer establishes nothing, so it is ' +
+          'reported as an error rather than shown as a connection.',
+      };
     }
 
     // A claim of connectivity is only as good as the method behind it.

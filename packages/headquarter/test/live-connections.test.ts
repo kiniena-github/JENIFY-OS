@@ -23,6 +23,7 @@ import {
   type VerificationOutcome,
 } from '../src/live/connections.js';
 import { assertBrowserSafe } from '../src/live/redaction.js';
+import { renderConnections } from '../src/ui/render.js';
 
 const NOW = '2026-08-28T12:00:00Z';
 
@@ -545,5 +546,123 @@ describe('summary counts', () => {
       NOW,
     );
     expect(evidence.state).toBe('not_connected');
+  });
+});
+
+/**
+ * Found while verifying the round-5 fixes, and a residual of the same defect
+ * class as the second of them: `options.probes` accepts arbitrary adapters,
+ * and this layer is the one place documented as enforcing the probe
+ * invariants centrally — so an answer outside the vocabulary has to fail
+ * closed here too.
+ *
+ * It did not. `state`, `verification` and `outcome` were forwarded verbatim,
+ * so a probe answering `state: 'totally_fine'` reached the Connection Center,
+ * where that state has no label and no tone; rendering the page threw a
+ * TypeError inside `escapeHtml`, naming neither the connection nor the
+ * adapter. One bad probe took down the whole site build pointing at the wrong
+ * place. A malformed `outcome` (`null`, a number, a made-up word) did the
+ * same, and `outcome` became an execution-authority input in this very round.
+ *
+ * No unrecognised value could ever forge a connection — an unknown state is
+ * not `connected` and an unknown outcome is not `verified`, so both already
+ * failed closed on the security question. What was missing is the honesty and
+ * robustness half: "fail closed on unknown" is the rule everywhere else in
+ * this control plane.
+ */
+describe('a probe answering outside the vocabulary fails closed', () => {
+  const descriptor: ConnectionDescriptor = {
+    id: 'alien',
+    displayName: 'Alien Adapter',
+    category: 'workspace',
+    authMechanism: 'oauth',
+    locality: 'cloud',
+    advertisedCapabilities: ['everything'],
+    requiredFacts: [],
+    setupHint: 'n/a',
+    recheckable: true,
+    revocable: false,
+  };
+
+  const answering = (evidence: unknown): ConnectionProbe => ({
+    id: 'alien',
+    probe: () => evidence as never,
+  });
+
+  const honest = {
+    state: 'connected',
+    verification: 'live_check',
+    outcome: 'verified',
+    observedFacts: [],
+    missingFacts: [],
+    effectiveCapabilities: ['everything'],
+    lastVerifiedAt: NOW,
+    evidenceSource: 'a real check',
+    reason: 'Alien Adapter: verified',
+  };
+
+  const assess = (evidence: unknown) =>
+    assessConnections(NOTHING, { now: NOW, catalog: [descriptor], probes: [answering(evidence)] })[0]!;
+
+  it('reports an unrecognised state as an error, not as itself', () => {
+    const status = assess({ ...honest, state: 'totally_fine' });
+    expect(status.state).toBe('error');
+    expect(status.effectiveCapabilities).toEqual([]);
+    expect(status.lastVerifiedAt).toBeNull();
+    // The offending answer is nameable from the page rather than swallowed.
+    expect(status.reason).toContain('totally_fine');
+    expect(status.reason).toContain('does not recognise');
+  });
+
+  it('reports an unrecognised or malformed outcome as an error', () => {
+    for (const outcome of ['ok', null, undefined, 42, { verified: true }]) {
+      const status = assess({ ...honest, outcome });
+      expect(status.state).toBe('error');
+      expect(status.outcome).toBe('failed');
+      expect(status.effectiveCapabilities).toEqual([]);
+      expect(status.lastVerifiedAt).toBeNull();
+    }
+  });
+
+  it('reports an unrecognised verification method as an error', () => {
+    const status = assess({ ...honest, verification: 'vibes' });
+    expect(status.state).toBe('error');
+    expect(status.verification).toBe('none');
+    expect(status.effectiveCapabilities).toEqual([]);
+  });
+
+  it('names every unrecognised field, not just the first', () => {
+    const status = assess({ ...honest, state: 'fine', verification: 'vibes', outcome: 'ok' });
+    expect(status.reason).toContain('fine');
+    expect(status.reason).toContain('vibes');
+    expect(status.reason).toContain('ok');
+  });
+
+  it('bounds what it quotes back, since the value came from an adapter', () => {
+    const status = assess({ ...honest, state: 'x'.repeat(5000) });
+    expect(status.reason.length).toBeLessThan(500);
+  });
+
+  it('leaves a probe answering in the vocabulary completely untouched', () => {
+    const status = assess(honest);
+    expect(status.state).toBe('connected');
+    expect(status.effectiveCapabilities).toEqual(['everything']);
+    expect(status.lastVerifiedAt).toBe(NOW);
+    expect(status.reason).toBe('Alien Adapter: verified');
+  });
+
+  it('the rendered page survives it and says error rather than throwing', () => {
+    const status = assess({ ...honest, state: 'totally_fine' });
+    const html = renderConnections([status], NOW, undefined, 'sample');
+    expect(html).toContain('Error');
+    expect(html).not.toContain('totally_fine</span>'); // never rendered as a state chip
+    expect(html).not.toContain('undefined');
+  });
+
+  it('an unrecognised answer carrying credential material still cannot be rendered', () => {
+    // The quoted-back value goes to the browser, so the boundary guard has to
+    // see it. It does: the site refuses rather than publishing.
+    const status = assess({ ...honest, state: 'sk-abcdefghijklmnopqrstuvwxyz012345' });
+    expect(() => assertBrowserSafe([status], 'test.connections')).toThrow();
   });
 });
