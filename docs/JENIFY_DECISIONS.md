@@ -92,3 +92,24 @@ Append-only. Each entry: date, decision, rationale. Newest last.
   on top. The seam is opt-in (`memberRegistry`); with no Registry supplied, behaviour is
   exactly as before.
 
+- **2026-08-28 — HQ browser Founder identity REUSES the existing JENIFY OS login.**
+  (Issue #200, Founder decision comment of 2026-08-28.) Headquarter grows no second
+  password system. The acting HQ principal for a browser write is derived server-side
+  from the existing `fos_session` session (`resolveSessionRecord`, which enforces
+  expiry, revocation and account deactivation on every request) plus an EXPLICIT
+  configured binding from `(realmId, accountId)` to a registered HQ human principal.
+  Nothing is inferred from a username, display name, email, admin role or tenant
+  ownership, and a request body that names an actor is REFUSED rather than
+  re-attributed. A missing, malformed or ambiguous map, an unregistered or deactivated
+  principal, an untrusted `Origin`, or a non-JSON content type all fail closed with no
+  mutation. Authentication proves identity ONLY: `HeadquarterOperations`, the principal
+  registry's originate grants, `founder_gate` policy, no-self-approval, the action
+  digest, provider binding, fencing and the kill switch are unchanged and still decide
+  what that identity may do. Approving an irreversible (`founder_gate` / `destructive`)
+  action additionally requires step-up — a session under five minutes old, or password
+  re-entry through the existing credential boundary. Denial is never step-up-gated.
+  The browser write surface is exactly three routes (create order, approve, deny) plus
+  two reads; there is no generic mutation endpoint and no "ask for changes", because
+  the canonical model records approve or deny only. HQ routes exist only when a host
+  passes an explicit control plane to `buildApp`, so an ordinary tenant deployment has
+  none of them.

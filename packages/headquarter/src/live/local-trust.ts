@@ -16,17 +16,19 @@
  * So the honest classification, recorded here rather than in prose that can
  * drift: `hq:order` is a **trusted-local-admin / maintenance interface**. It is
  * for someone who already holds full local trust over the HQ database. It is
- * NOT an authenticated Founder-facing path, and issue #200 is therefore not
- * "Founder-operable" through it — that remains a Founder-gated security
- * decision (a real HQ authentication boundary), not something automation may
- * invent.
+ * NOT an authenticated Founder-facing path. That was the whole of the story
+ * until the Founder decided the mechanism on 2026-08-28: HQ now reuses the
+ * existing JENIFY OS login (`live/auth.ts`), and the browser control API is
+ * the authenticated Founder path. This CLI is unchanged and is still not one.
  *
  * ## Fail closed, in three ways
  *
- * 1. **There is no `authenticated` value.** `ActorAuthentication` can only say
- *    *how little* is known. Adding a value that claims authentication would
- *    require adding it here, in a code-reviewed change, next to the mechanism
- *    that earns it — it cannot be asserted by a caller or inferred from a flag.
+ * 1. **An `authenticated` value exists only where something earns it.** The
+ *    rule has always been that adding one requires a code-reviewed change
+ *    here, next to the mechanism — never a caller's assertion or an inferred
+ *    flag. `authenticated_os_session` was added under exactly that rule and is
+ *    settable only by `live/control-api.ts`, which refuses to read it from a
+ *    request at all. This CLI still cannot reach it.
  * 2. **The default is the weakest value.** A caller that says nothing is
  *    recorded as `unauthenticated`, never as trusted-local, and never silently
  *    upgraded.
@@ -54,10 +56,35 @@
 /**
  * What is known about the actor behind a write.
  *
- * Deliberately has no `authenticated` member: nothing in Headquarter can
- * currently authenticate a human, so nothing may record that it did.
+ * Rule 1 above said a value claiming authentication could only be added "in a
+ * code-reviewed change, next to the mechanism that earns it". This is that
+ * change: the Founder decided on 2026-08-28 that HQ reuses the existing
+ * JENIFY OS login, and `live/auth.ts` implements that boundary. So there is
+ * now exactly one authenticated value, and the rule that produced it is
+ * unchanged — a third value would need the same treatment again.
  */
 export type ActorAuthentication =
+  /**
+   * The acting principal was derived server-side from a live JENIFY OS
+   * session plus an EXPLICIT configured account→principal binding.
+   *
+   * What this value does and does not claim, precisely, because a marker that
+   * overclaims is worse than none:
+   *
+   * - It claims the caller held a valid, unexpired, unrevoked session for an
+   *   account the deployment bound to this HQ principal by configuration.
+   * - It does NOT claim the human was re-verified at this moment. Step-up
+   *   (`verifyStepUp`) is what does that, and it is required separately for
+   *   irreversible approvals rather than folded in here.
+   * - It grants nothing. It is a record of how the attribution was obtained,
+   *   travelling inside the action digest so an approver sees it and it
+   *   cannot be edited between rendering and approval.
+   *
+   * Only `live/control-api.ts` may set it, because only that path resolves an
+   * identity through `live/auth.ts`. No caller can supply it: the control API
+   * refuses any request body carrying `actorAuthentication` at all.
+   */
+  | 'authenticated_os_session'
   /**
    * A principal id asserted at a trusted-local-admin interface. Establishes
    * local process access to the HQ database; establishes nothing about WHO.

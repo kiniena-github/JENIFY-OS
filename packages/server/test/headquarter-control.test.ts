@@ -1,0 +1,349 @@
+/**
+ * The HQ browser-control API over real HTTP, with real sessions
+ * (JENIFY-OS issue #200, Founder decision of 2026-08-28).
+ *
+ * `@factoryos/headquarter`'s own suites prove the boundary and the wiring with
+ * ports. This suite proves the things only a real server can be wrong about:
+ * that the session cookie is genuinely what identifies the caller, that
+ * logging out and expiring really do stop mutations, that a hosted HTTPS
+ * request gets a `Secure` cookie while local development does not, and that an
+ * ordinary tenant deployment — the Mesob pilot's shape — has none of these
+ * routes at all.
+ */
+
+import { describe, it, expect, beforeEach } from 'vitest';
+import { eq } from 'drizzle-orm';
+import { buildApp, type AppOptions } from '../src/app.js';
+import { sessions } from '../src/db/schema.js';
+import { createUser } from '../src/services/users.js';
+import { createRole } from '../src/services/permissions.js';
+import { testDb, makeTestTenant, fullMatrix, matrixOf, type TestTenant } from './helpers.js';
+import type { Db } from '../src/db/index.js';
+import { openMemoryHqDatabase } from '@factoryos/headquarter/store';
+import { HeadquarterStore } from '@factoryos/headquarter/store';
+import { HeadquarterOperations, HumanPrincipalRegistry } from '@factoryos/headquarter/application';
+import {
+  registerDirectOrderCapability,
+  DIRECT_ORDER_CAPABILITY,
+} from '@factoryos/headquarter/live';
+
+const ORIGIN = 'http://localhost:3001';
+const JSON_HEADERS = { origin: ORIGIN, 'content-type': 'application/json' };
+/** Claude genuinely connected; Codex genuinely not. Facts, not fabrication. */
+const SECRETS = { CLAUDE_ROUTINE_URL: 'present', CLAUDE_ROUTINE_TOKEN: 'present' };
+
+let db: Db;
+let tenant: TestTenant;
+let founderUserId: string;
+let staffUserId: string;
+
+interface Plane {
+  ops: HeadquarterOperations;
+  principals: HumanPrincipalRegistry;
+}
+
+function hqPlane(): Plane {
+  const hqDb = openMemoryHqDatabase();
+  const ops = new HeadquarterOperations(hqDb, { store: new HeadquarterStore(hqDb) });
+  registerDirectOrderCapability(ops);
+  const principals = new HumanPrincipalRegistry(hqDb);
+  principals.register({
+    id: 'founder',
+    displayName: 'Founder',
+    originateCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+    approvalAuthority: true,
+    active: true,
+  });
+  return { ops, principals };
+}
+
+function app(plane: Plane, overrides: Partial<NonNullable<AppOptions['headquarter']>> = {}) {
+  return buildApp({
+    db,
+    headquarter: {
+      ops: plane.ops,
+      principals: plane.principals,
+      founderMap: [{ realmId: tenant.tenantId, accountId: founderUserId, principalId: 'founder' }],
+      allowedOrigins: [ORIGIN],
+      secretsEnv: SECRETS,
+      ...overrides,
+    },
+  });
+}
+
+async function signIn(
+  instance: ReturnType<typeof buildApp>,
+  username: string,
+): Promise<string> {
+  const response = await instance.inject({
+    method: 'POST',
+    url: '/api/auth/login',
+    payload: { username, password: 'test-password' },
+  });
+  expect(response.statusCode).toBe(200);
+  const cookie = response.cookies.find((c) => c.name === 'fos_session')!;
+  return `fos_session=${cookie.value}`;
+}
+
+const ORDER = {
+  instruction: 'Draft the Q3 maintenance plan for the Mesob line.',
+  route: 'CLAUDE',
+  title: 'Q3 maintenance plan',
+};
+
+beforeEach(() => {
+  db = testDb();
+  tenant = makeTestTenant(db, 'SALTA');
+  founderUserId = createUser(tenant.sysCtx, {
+    username: 'founder.salta',
+    displayName: 'The Founder',
+    password: 'test-password',
+    roleId: tenant.ownerRoleId,
+  });
+  const staffRoleId = createRole(tenant.sysCtx, {
+    code: 'staff',
+    name: 'Staff',
+    matrix: matrixOf([['inventory', ['view']]]),
+  });
+  staffUserId = createUser(tenant.sysCtx, {
+    username: 'staff.salta',
+    displayName: 'Warehouse Lead',
+    password: 'test-password',
+    roleId: staffRoleId,
+  });
+  expect(fullMatrix).toBeTypeOf('function');
+});
+
+describe('the session cookie is what identifies the caller', () => {
+  it('lets the mapped Founder create a canonical order and refuses everyone else', async () => {
+    const plane = hqPlane();
+    const instance = app(plane);
+
+    const anonymous = await instance.inject({
+      method: 'POST',
+      url: '/api/hq/control/orders',
+      headers: JSON_HEADERS,
+      payload: ORDER,
+    });
+    expect(anonymous.statusCode).toBe(401);
+
+    const staff = await signIn(instance, 'staff.salta');
+    const asStaff = await instance.inject({
+      method: 'POST',
+      url: '/api/hq/control/orders',
+      headers: { ...JSON_HEADERS, cookie: staff },
+      payload: ORDER,
+    });
+    expect(asStaff.statusCode).toBe(403);
+    expect(asStaff.json().error.code).toBe('not_founder');
+
+    const founder = await signIn(instance, 'founder.salta');
+    const asFounder = await instance.inject({
+      method: 'POST',
+      url: '/api/hq/control/orders',
+      headers: { ...JSON_HEADERS, cookie: founder },
+      payload: ORDER,
+    });
+    expect(asFounder.statusCode).toBe(201);
+    expect(asFounder.json().requiresFounderApproval).toBe(true);
+
+    // Exactly one canonical task, attributed to the mapped principal.
+    const tasks = plane.ops.queue.listByStatus('needs_approval');
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]!.createdBy).toBe('founder');
+    expect(staffUserId).not.toBe(founderUserId);
+  });
+
+  it('refuses a body that names its own principal, even from the real Founder', async () => {
+    const plane = hqPlane();
+    const instance = app(plane);
+    const founder = await signIn(instance, 'founder.salta');
+    const response = await instance.inject({
+      method: 'POST',
+      url: '/api/hq/control/orders',
+      headers: { ...JSON_HEADERS, cookie: founder },
+      payload: { ...ORDER, requestedBy: 'somebody-else' },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe('client_identity_supplied');
+    expect(plane.ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+  });
+
+  it('stops mutating the moment the session is revoked by signing out', async () => {
+    const plane = hqPlane();
+    const instance = app(plane);
+    const founder = await signIn(instance, 'founder.salta');
+    await instance.inject({
+      method: 'POST',
+      url: '/api/auth/logout',
+      headers: { cookie: founder },
+    });
+    const response = await instance.inject({
+      method: 'POST',
+      url: '/api/hq/control/orders',
+      headers: { ...JSON_HEADERS, cookie: founder },
+      payload: ORDER,
+    });
+    expect(response.statusCode).toBe(401);
+    expect(plane.ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+  });
+
+  it('stops mutating once the session has expired', async () => {
+    const plane = hqPlane();
+    const instance = app(plane);
+    const founder = await signIn(instance, 'founder.salta');
+    db.update(sessions)
+      .set({ expiresAt: '2020-01-01T00:00:00.000Z' })
+      .where(eq(sessions.token, founder.split('=')[1]!))
+      .run();
+    const response = await instance.inject({
+      method: 'POST',
+      url: '/api/hq/control/orders',
+      headers: { ...JSON_HEADERS, cookie: founder },
+      payload: ORDER,
+    });
+    expect(response.statusCode).toBe(401);
+    expect(plane.ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+  });
+
+  it('blocks a forged cross-site request carrying a real cookie', async () => {
+    const plane = hqPlane();
+    const instance = app(plane);
+    const founder = await signIn(instance, 'founder.salta');
+
+    const crossSite = await instance.inject({
+      method: 'POST',
+      url: '/api/hq/control/orders',
+      headers: { ...JSON_HEADERS, origin: 'https://evil.example', cookie: founder },
+      payload: ORDER,
+    });
+    expect(crossSite.statusCode).toBe(403);
+    expect(crossSite.json().error.code).toBe('origin_not_allowed');
+
+    // The classic cross-site form post. Fastify's own content-type gate
+    // refuses it first (415) and the API's JSON requirement is the backstop —
+    // either way nothing is created, which is the property that matters.
+    const formPost = await instance.inject({
+      method: 'POST',
+      url: '/api/hq/control/orders',
+      headers: { origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded', cookie: founder },
+      payload: 'instruction=x&route=CLAUDE',
+    });
+    expect(formPost.statusCode).toBeGreaterThanOrEqual(400);
+    expect(plane.ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+  });
+});
+
+describe('configuration decides what exists', () => {
+  it('gives an ordinary tenant deployment no HQ routes at all', async () => {
+    // The Mesob pilot's shape: buildApp with a db and nothing else.
+    const instance = buildApp({ db });
+    for (const url of [
+      '/api/hq/control/session',
+      '/api/hq/control/orders',
+      '/api/hq/control/approvals',
+    ]) {
+      const response = await instance.inject({ method: 'GET', url });
+      expect(response.statusCode, url).toBe(404);
+    }
+  });
+
+  it('authenticates no Founder when no account is bound', async () => {
+    const plane = hqPlane();
+    const instance = app(plane, { founderMap: [] });
+    const founder = await signIn(instance, 'founder.salta');
+    const response = await instance.inject({
+      method: 'POST',
+      url: '/api/hq/control/orders',
+      headers: { ...JSON_HEADERS, cookie: founder },
+      payload: ORDER,
+    });
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.code).toBe('founder_map_unconfigured');
+  });
+
+  it('can serve the read routes with writes switched off', async () => {
+    const plane = hqPlane();
+    const instance = app(plane, { mutationsEnabled: false });
+    const founder = await signIn(instance, 'founder.salta');
+    const read = await instance.inject({
+      method: 'GET',
+      url: '/api/hq/control/approvals',
+      headers: { cookie: founder },
+    });
+    expect(read.statusCode).toBe(200);
+    const write = await instance.inject({
+      method: 'POST',
+      url: '/api/hq/control/orders',
+      headers: { ...JSON_HEADERS, cookie: founder },
+      payload: ORDER,
+    });
+    expect(write.statusCode).toBe(403);
+    expect(write.json().error.code).toBe('mutations_disabled');
+    expect(plane.ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+  });
+
+  it('never caches an authenticated, principal-specific answer', async () => {
+    const plane = hqPlane();
+    const instance = app(plane);
+    const founder = await signIn(instance, 'founder.salta');
+    const response = await instance.inject({
+      method: 'GET',
+      url: '/api/hq/control/session',
+      headers: { cookie: founder },
+    });
+    expect(response.headers['cache-control']).toBe('no-store');
+  });
+
+  it('leaks no session token or password into any HQ response', async () => {
+    const plane = hqPlane();
+    const instance = app(plane);
+    const founder = await signIn(instance, 'founder.salta');
+    const token = founder.split('=')[1]!;
+    for (const url of ['/api/hq/control/session', '/api/hq/control/approvals']) {
+      const response = await instance.inject({ method: 'GET', url, headers: { cookie: founder } });
+      expect(response.body).not.toContain(token);
+      expect(response.body).not.toContain('test-password');
+    }
+  });
+});
+
+describe('the session cookie hardens itself on a hosted origin', () => {
+  async function loginCookie(host: string, headers: Record<string, string> = {}) {
+    const instance = buildApp({ db });
+    const response = await instance.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      headers: { host, ...headers },
+      payload: { username: 'founder.salta', password: 'test-password' },
+    });
+    expect(response.statusCode).toBe(200);
+    return response.cookies.find((c) => c.name === 'fos_session')!;
+  }
+
+  it('is always HttpOnly and SameSite=Lax', async () => {
+    expect(await loginCookie('localhost:3001')).toMatchObject({
+      httpOnly: true,
+      sameSite: 'Lax',
+    });
+  });
+
+  it('stays plaintext-capable on loopback and private-network hosts', async () => {
+    // The local-first deployment: a factory server on the LAN, over plain HTTP.
+    for (const host of ['localhost:3001', '127.0.0.1:3001', '192.168.1.10:3001', 'mesob-server:3001']) {
+      expect((await loginCookie(host)).secure, host).toBeFalsy();
+    }
+  });
+
+  it('sets Secure behind a TLS-terminating proxy, where req.protocol says http', async () => {
+    // The case a naive `req.protocol === 'https'` check gets silently wrong.
+    const cookie = await loginCookie('hq.example.com', { 'x-forwarded-proto': 'https' });
+    expect(cookie.secure).toBe(true);
+  });
+
+  it('sets Secure on a public hostname even with no proxy header at all', async () => {
+    // Secure by default: a public site over plaintext fails visibly rather
+    // than quietly running an authenticated session in the clear.
+    expect((await loginCookie('hq.example.com')).secure).toBe(true);
+  });
+});
