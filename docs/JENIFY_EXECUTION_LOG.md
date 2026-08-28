@@ -210,3 +210,95 @@ browser (8/8 OK) and writes the screenshot set. Playwright is deliberately not a
 dependency; CI keeps the structural equivalents in `test/ui-responsive.test.ts`.
 777 headquarter tests green (was 665 on main; +112), `tsc --noEmit` clean. No Mesob/server/web package,
 migration, credential or CI workflow touched; local only, nothing deployed.
+
+## 2026-08-28 — LIVE HQ CONTROL V1 (issue #200)
+The read-only Headquarter UI became operational in the four ways the mission defined,
+without weakening a single existing authority boundary. New `packages/headquarter/src/live/`
+holds the whole seam: `provenance.ts` (the live/reconstructed/sample vocabulary every
+snapshot section carries), `redaction.ts` (fail-closed browser-safety guard),
+`connections.ts` (Connection Center), `orders.ts` (Direct Orders), `snapshot.ts` (the
+browser-safe projection). One new HQ page — Connections — brings the site to eight; all
+seven existing pages are unchanged in purpose and pass their original assertions.
+
+**Scope A — live data.** `liveSnapshotFromOperations()` projects canonical state
+(`founderConsole` over `op_tasks`/`hq_approvals`, the specialist directory, the capability
+registry, `hq_events`) into a versioned JSON snapshot with per-section provenance and an
+overall mode that degrades to the WEAKEST section, so one sample section can never let a
+bundle render as LIVE. Task payloads never cross the boundary: `ConsoleTask` carries none
+and nothing reaches past it. Activity `detail` is whitelisted to project/title and refs are
+filtered to https, so arbitrary worker-written detail and local filesystem paths cannot leak.
+`assertBrowserSafe` + `assertNoFabricatedFields` run on every snapshot and THROW rather than
+publish. The pages poll `hq-snapshot.json` every 20s and report LIVE / UPDATED / OFFLINE /
+ERROR truthfully — the chip starts at CHECKING, never at LIVE, and an unreachable snapshot
+degrades to OFFLINE instead of claiming freshness it has not verified. New CLI
+`npm run hq:snapshot`.
+
+**Scope B — Direct Orders.** `submitDirectOrder()` is a thin seam over the existing
+`HeadquarterOperations.createTask`: no table write, no bypass, no new authority. The single
+narrow capability `hq.direct_order` is `founder_gate` — the one risk class
+`operator/policy.ts` refuses to let a standing pre-approval override — because a free-text
+instruction is unclassifiable in advance and the only honest class for it is the highest one.
+Every order therefore parks in `needs_approval` with an action digest and executes nothing.
+Routing is truthful and fails closed: AUTO picks only from providers evidence shows are
+connected, and an explicit CLAUDE or CODEX never silently becomes the other. Idempotency is
+derived from (requester, route, project, instruction), so a double submit dedupes.
+
+**Scope C — Connection Center.** State is EVIDENCE-derived, never descriptor-derived. The
+catalogue (Anthropic/Claude, OpenAI/Codex, Google/Gemini, GitHub, Vercel, Supabase, Google
+Workspace) holds only the questions; answers come from a `ConnectionProbe`, and a descriptor
+without a probe is `not_connected`. AI providers reuse `routing/providers.ts`
+`providerConnectivity`, so the page and the router cannot diverge; Codex reports LOCAL-ONLY
+rather than connected, preserving the truth that it is unavailable to CI and to a hosted
+preview. Advertised capabilities become effective only with evidence — enforced centrally, so
+an over-eager future adapter cannot promote its own claims. Only secret PRESENCE is read;
+fact NAMES are rendered, values never are. No Disconnect control is drawn anywhere in V1
+because HQ holds no credential store to revoke from.
+
+**Scope D — approvals stay read-only. SECURITY GATE, unresolved.** Headquarter has no
+authenticated Founder session, and `createTask`/`approveTask` authorize by resolving the
+actor against the human-principal registry. A browser write would have to trust a
+client-supplied principal id (impersonation) or ship a new auth boundary invented under
+automation. Neither was done. Approvals remain read-only, the Direct Order composer is drawn
+inert with the blocker stated in the UI itself, and the working write path is the local CLI
+`npm run hq:order` — a trusted-local-admin/maintenance interface, NOT an authenticated
+Founder path (see the correction below).
+
+**Correction after the PR #201 review (same day).** The review was right that the CLI
+overclaimed: `--as <id>` accepts a caller-supplied principal id bound to nothing — not the OS
+user, not the process owner, not a credential — so describing the OS session as "the
+authentication" was false. The interface is now classified for what it is, in code
+(`live/local-trust.ts`) rather than in prose that can drift: a trusted-local-admin /
+maintenance path for someone who already holds full local access to the HQ database, and who
+therefore gains no authority from it. Three fail-closed consequences: `ActorAuthentication`
+has NO value that claims authentication (only `unauthenticated` and
+`unauthenticated_local_assertion`), so no caller can assert one; the default is the weakest
+value; and the CLI refuses to run under CI at all — with no override — and otherwise requires
+an explicit `--local-admin` acknowledgement, so an unattended script cannot place
+principal-attributed orders. Every order now records its `actorAuthentication` in the payload,
+which puts it inside the action digest the approver echoes back. The containment for an
+impersonated assertion is the two canonical rules, both untouched and now hostile-tested:
+deny-by-default (an unregistered, ungranted, inactive or worker id opens NOTHING) and
+no-self-approval (the asserted principal is exactly the one barred from approving the order
+it opened, so a local assertion can never manufacture an approved action — a second, genuinely
+present approval-authorized human must decide it, seeing the recorded assertion).
+
+**Readiness, stated truthfully: issue #200 V1 is NOT fully accepted.** HQ is not
+Founder-operable from a browser while the composer is inert and approvals are read-only, and
+the CLI does not close that gap because it authenticates nobody either. A real HQ
+authentication boundary remains an open Founder-gated security decision; scopes A, B
+(server-side), C, the mobile/UX work, the tests and the preview-ready build are complete.
+
+Two real defects were found by the new tests and fixed. (1) The evidence log's secret
+heuristic missed quoted credentials in free text: it ran on the JSON encoding, where
+`api_key: "…"` becomes `api_key: \"…\"` and the backslash defeats the pattern. The browser
+guard now also scans each raw string. (2) An order's title defaulted to the instruction's
+first line, which published Founder-typed content to the browser as a side effect of writing
+the instruction; the default is now a neutral `Direct order → <PROVIDER>` label, and a title
+is published only when its author deliberately chose one.
+
+895 headquarter tests green (787 on main; +91 for V1, +17 for the actor-trust correction),
+server 442 passed + 3 pre-existing skips,
+`tsc --noEmit` clean in headquarter/server/shared/web, web bundle unchanged at 69.22 kB gzip.
+Browser evidence: 48/48 no-horizontal-overflow at 1440/1024/414/390/360/320 px across all
+eight pages, archive interaction 8/8. Local only — nothing deployed, no paid service enabled,
+no migration, no credential change, no CI workflow touched.
