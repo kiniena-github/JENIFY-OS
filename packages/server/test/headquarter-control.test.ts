@@ -562,10 +562,11 @@ describe('step-up shares the login source budget (Codex round 2, P2)', () => {
     _resetRateLimiter();
   });
 
-  it('keeps per-account buckets distinct, so step-up cannot lock a sign-in out alone', async () => {
-    // Sharing the SOURCE ceiling must not mean sharing the per-account bucket:
-    // a few wrong step-up guesses for the Founder should not stop an unrelated
-    // account signing in from the same host.
+  it('gives no fresh per-account allowance by switching endpoints', async () => {
+    // Codex round 6: sharing the source ceiling was not enough. Ten failed
+    // sign-ins against a known username used to leave ten MORE guesses at
+    // step-up against the same password, because the per-account buckets were
+    // separate keys. Both surfaces now charge ip|login|<username>.
     _resetRateLimiter();
     const plane = hqPlane();
     const instance = app(plane);
@@ -573,7 +574,36 @@ describe('step-up shares the login source budget (Codex round 2, P2)', () => {
     ageSession(founder);
     const taskId = pendingTaskId(plane);
 
-    for (let i = 0; i < 11; i += 1) {
+    for (let i = 0; i < 10; i += 1) {
+      await instance.inject({
+        method: 'POST',
+        url: '/api/auth/login',
+        payload: { username: 'founder.salta', password: 'wrong' },
+      });
+    }
+
+    const stepUp = await instance.inject({
+      method: 'POST',
+      url: '/api/hq/control/approvals/approve',
+      headers: { ...JSON_HEADERS, cookie: founder },
+      payload: { taskId, expectedActionDigest: 'x'.repeat(64), stepUpPassword: 'wrong' },
+    });
+    expect(stepUp.statusCode).toBe(429);
+    expect(stepUp.json().error.code).toBe('step_up_rate_limited');
+    expect(plane.ops.queue.get(taskId)!.status).toBe('needs_approval');
+    _resetRateLimiter();
+  });
+
+  it('locks the account out of sign-in once step-up burns the shared bucket', async () => {
+    // The same property in the other direction.
+    _resetRateLimiter();
+    const plane = hqPlane();
+    const instance = app(plane);
+    const founder = await signIn(instance, 'founder.salta');
+    ageSession(founder);
+    const taskId = pendingTaskId(plane);
+
+    for (let i = 0; i < 10; i += 1) {
       await instance.inject({
         method: 'POST',
         url: '/api/hq/control/approvals/approve',
@@ -585,9 +615,36 @@ describe('step-up shares the login source budget (Codex round 2, P2)', () => {
     const login = await instance.inject({
       method: 'POST',
       url: '/api/auth/login',
+      payload: { username: 'founder.salta', password: 'test-password' },
+    });
+    expect(login.statusCode).toBe(429);
+    _resetRateLimiter();
+  });
+
+  it('still leaves a DIFFERENT account able to sign in', async () => {
+    // Sharing one account's bucket must not become a global lockout.
+    _resetRateLimiter();
+    const plane = hqPlane();
+    const instance = app(plane);
+    const founder = await signIn(instance, 'founder.salta');
+    ageSession(founder);
+    const taskId = pendingTaskId(plane);
+
+    for (let i = 0; i < 10; i += 1) {
+      await instance.inject({
+        method: 'POST',
+        url: '/api/hq/control/approvals/approve',
+        headers: { ...JSON_HEADERS, cookie: founder },
+        payload: { taskId, expectedActionDigest: 'x'.repeat(64), stepUpPassword: 'wrong' },
+      });
+    }
+
+    const other = await instance.inject({
+      method: 'POST',
+      url: '/api/auth/login',
       payload: { username: 'staff.salta', password: 'test-password' },
     });
-    expect(login.statusCode).toBe(200);
+    expect(other.statusCode).toBe(200);
     _resetRateLimiter();
   });
 });

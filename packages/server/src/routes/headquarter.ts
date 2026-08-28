@@ -10,7 +10,11 @@ import {
 } from '@factoryos/headquarter/live';
 import type { Db } from '../db/index.js';
 import { SESSION_COOKIE } from '../app.js';
-import { resolveSessionRecord, verifyAccountPassword } from '../services/auth.js';
+import {
+  accountLoginIdentifier,
+  resolveSessionRecord,
+  verifyAccountPassword,
+} from '../services/auth.js';
 import {
   assertNotRateLimited,
   recordAuthFailure,
@@ -103,30 +107,37 @@ function sessionResolver(db: Db, token: string | undefined): SessionResolverPort
  * verifier is a denial-of-service surface as well as a guessing one. The
  * budget bounds both.
  *
- * ## Why the key says `login`
+ * ## Why the key is EXACTLY the one `/api/auth/login` uses
  *
- * `sourceKeyOf` collapses a key to `ip|<second component>|*`, so that second
- * component — not the identifier — is what decides which failures share a
- * per-source ceiling. An earlier version keyed this `ip|hq-stepup|account`
- * and claimed to share login's budget; it did not. It produced its own
- * `ip|hq-stepup|*` ceiling, so exhausting the login budget constrained
- * step-up not at all and an attacker who ran out of login guesses got a fresh
- * allowance simply by moving to this endpoint (issue #200, Codex round 2 P2).
+ * `assertNotRateLimited` enforces two buckets: the key itself, and the source
+ * key `sourceKeyOf` derives as `ip|<second component>|*`. Sharing a budget
+ * with sign-in therefore means sharing BOTH, and it took two corrections to
+ * get there — worth recording, because each intermediate version looked
+ * shared and was not.
  *
- * Naming the family `login` is what makes the shared ceiling real: failures
- * here charge the same `ip|login|*` bucket that failed sign-ins do, in both
- * directions. The `hq-stepup:` prefix on the identifier keeps the per-account
- * buckets distinct, so a locked-out step-up account does not lock a different
- * account's sign-in. A correct password clears only its own bucket, exactly as
- * a successful sign-in does — the source ceiling is deliberately not cleared,
- * so a spray in progress is not wiped by one success.
+ * `ip|hq-stepup|<account>` shared neither: it had its own source ceiling too,
+ * so exhausting the login budget constrained step-up not at all (Codex round
+ * 2 P2). `ip|login|hq-stepup:<account>` shared the ceiling but not the
+ * per-account bucket, so an attacker who burned ten sign-in guesses against a
+ * known username still got ten more here against the same password before the
+ * source ceiling bit (Codex round 6 P2).
+ *
+ * The key is now the login key: `ip|login|<username>`, built from the stored
+ * username `createUser` already lower-cased, which is what
+ * `/api/auth/login` derives from the submitted one. Ten failures total across
+ * both surfaces, not ten each. A correct password clears only that bucket,
+ * exactly as a successful sign-in does — the source ceiling is deliberately
+ * not cleared, so a spray in progress is not wiped by one success.
+ *
+ * An account whose username cannot be resolved (deleted or deactivated
+ * mid-session) is refused rather than run through an unbudgeted path.
  */
-const STEP_UP_RATE_LIMIT_FAMILY = 'login';
-
 function credentialVerifier(db: Db, ip: string): CredentialVerifierPort {
   return {
     verify(account, password) {
-      const key = `${ip}|${STEP_UP_RATE_LIMIT_FAMILY}|hq-stepup:${account.accountId}`;
+      const identifier = accountLoginIdentifier(db, account.accountId);
+      if (identifier === null) return 'rejected';
+      const key = `${ip}|login|${identifier}`;
       try {
         assertNotRateLimited(key);
       } catch {
