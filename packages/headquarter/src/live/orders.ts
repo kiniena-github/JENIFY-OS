@@ -325,6 +325,16 @@ function encodeDigestFields(fields: readonly string[]): string {
  *   reverse) returned the original task carrying a different trust context than
  *   the caller supplied. Deduplicating across trust values makes the receipt's
  *   trust context untruthful.
+ * - **The published title.** `createTask` deliberately skips its metadata
+ *   upsert for a deduplicated task, so two orders alike in every other field
+ *   but carrying different titles collapsed onto the first — and the second
+ *   caller's title, the one field of an order that reaches the browser, was
+ *   silently discarded while the console went on showing the first. Either the
+ *   title is part of what makes an order the same order, or a dedupe has to
+ *   reject a differing one; it is cheaper and more honest to derive from it.
+ *   The RAW trimmed title is used, not the effective one, so that an order
+ *   which omitted a title and one which typed the default out longhand stay
+ *   distinguishable from each other's intent.
  * - **A caller-supplied key, as an INPUT and never as the key itself.** Passing
  *   it through verbatim made the deduplication table addressable by the caller:
  *   `op_tasks` is unique on (capability, idempotency key), so a caller that
@@ -339,7 +349,13 @@ function encodeDigestFields(fields: readonly string[]): string {
 export function directOrderIdempotencyKey(
   input: Pick<
     DirectOrderInput,
-    'instruction' | 'project' | 'route' | 'requestedBy' | 'idempotencyKey' | 'actorAuthentication'
+    | 'instruction'
+    | 'project'
+    | 'route'
+    | 'requestedBy'
+    | 'idempotencyKey'
+    | 'actorAuthentication'
+    | 'title'
   > & {
     /** The provider the route actually resolved to, when it is known. */
     resolvedProvider?: string | null;
@@ -354,6 +370,7 @@ export function directOrderIdempotencyKey(
         input.actorAuthentication ?? DEFAULT_ACTOR_AUTHENTICATION,
         input.project ?? '',
         input.idempotencyKey ?? '',
+        (input.title ?? '').trim(),
         input.instruction.trim(),
       ]),
     )

@@ -191,19 +191,44 @@ function known<T extends string>(vocabulary: Record<T, true>, value: unknown): v
 }
 
 /**
- * Quote an unrecognised probe answer for a reason string. Bounded, because
- * the value comes from an adapter and an unbounded one would be copied into
- * a rendered page.
+ * Describe an unrecognised probe answer for a reason string, WITHOUT
+ * serialising it.
+ *
+ * This used to be `JSON.stringify(value)`, which copied an object's property
+ * VALUES into the reason — and `reason` is published to the browser. That
+ * defeated both halves of the boundary guard at once (issue #200, Codex
+ * exact-head finding on `7a1c21d`): an outcome of
+ * `{ password: 'ordinary-secret' }` became the flat string
+ * `{"password":"ordinary-secret"}`, so `assertBrowserSafe` no longer saw
+ * `password` as a credential-holder KEY — there was no key left, only text —
+ * and its `key: value` heuristic missed it too, because JSON puts a quote
+ * between the key and the colon. A guard written to stop exactly this was
+ * walked straight past by the diagnostic that was supposed to be helping.
+ *
+ * So nothing structured is serialised at all now. A string is quoted, because
+ * a string is the answer a real adapter bug gives — a typo'd vocabulary word —
+ * and it stays a string, which the guard scans normally. Everything else is
+ * reported by TYPE only: enough to tell an operator that the adapter returned
+ * an object where a word belongs, and carrying none of what was inside it.
+ * Diagnostics are worth having, but not at the price of being the leak.
+ *
+ * Bounded either way, because an adapter's string is still an adapter's
+ * string. No `JSON.stringify`, so a circular value and a `BigInt` — both of
+ * which made it THROW, defeating the fail-closed path it exists to serve —
+ * are now simply described.
  */
-function quoteUnrecognised(value: unknown): string {
-  let encoded: string;
-  try {
-    encoded = JSON.stringify(value) ?? String(value);
-  } catch {
-    // A circular or throwing-`toJSON` value is itself the answer.
-    encoded = Object.prototype.toString.call(value);
+function describeUnrecognised(value: unknown): string {
+  if (typeof value === 'string') {
+    const quoted = JSON.stringify(value.length > 60 ? `${value.slice(0, 60)}…` : value);
+    return quoted;
   }
-  return encoded.length > 60 ? `${encoded.slice(0, 60)}…` : encoded;
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (Array.isArray(value)) return `an array of ${value.length}`;
+  const type = typeof value;
+  if (type === 'number' || type === 'boolean' || type === 'bigint') return String(value);
+  // Object, function, symbol: the TYPE, never the contents.
+  return `a value of type ${type}`;
 }
 
 /**
@@ -220,29 +245,29 @@ function quoteUnrecognised(value: unknown): string {
  */
 function unreadableParts(raw: unknown): string[] {
   if (typeof raw !== 'object' || raw == null) {
-    return [`an answer that is not an object (${quoteUnrecognised(raw)})`];
+    return [`an answer that is not an object (${describeUnrecognised(raw)})`];
   }
   const evidence = raw as Record<string, unknown>;
   const parts: string[] = [];
-  if (!known(KNOWN_STATES, evidence.state)) parts.push(`state ${quoteUnrecognised(evidence.state)}`);
+  if (!known(KNOWN_STATES, evidence.state)) parts.push(`state ${describeUnrecognised(evidence.state)}`);
   if (!known(KNOWN_METHODS, evidence.verification)) {
-    parts.push(`verification ${quoteUnrecognised(evidence.verification)}`);
+    parts.push(`verification ${describeUnrecognised(evidence.verification)}`);
   }
   if (!known(KNOWN_OUTCOMES, evidence.outcome)) {
-    parts.push(`outcome ${quoteUnrecognised(evidence.outcome)}`);
+    parts.push(`outcome ${describeUnrecognised(evidence.outcome)}`);
   }
   for (const field of ['observedFacts', 'missingFacts', 'effectiveCapabilities'] as const) {
     const value = evidence[field];
     if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
-      parts.push(`${field} ${quoteUnrecognised(value)}`);
+      parts.push(`${field} ${describeUnrecognised(value)}`);
     }
   }
   for (const field of ['evidenceSource', 'reason'] as const) {
-    if (typeof evidence[field] !== 'string') parts.push(`${field} ${quoteUnrecognised(evidence[field])}`);
+    if (typeof evidence[field] !== 'string') parts.push(`${field} ${describeUnrecognised(evidence[field])}`);
   }
   const verifiedAt = evidence.lastVerifiedAt;
   if (verifiedAt != null && typeof verifiedAt !== 'string') {
-    parts.push(`lastVerifiedAt ${quoteUnrecognised(verifiedAt)}`);
+    parts.push(`lastVerifiedAt ${describeUnrecognised(verifiedAt)}`);
   }
   return parts;
 }

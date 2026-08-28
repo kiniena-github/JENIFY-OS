@@ -718,4 +718,62 @@ describe('a probe answering outside the vocabulary fails closed', () => {
     const status = assess({ ...honest, state: 'sk-abcdefghijklmnopqrstuvwxyz012345' });
     expect(() => assertBrowserSafe([status], 'test.connections')).toThrow();
   });
+
+  /**
+   * Codex exact-head finding on `7a1c21d` (P1). The describer used to be
+   * `JSON.stringify`, which copied an OBJECT'S PROPERTY VALUES into `reason` —
+   * and `reason` is published. That walked past both halves of the boundary
+   * guard: flattening `{ password: 'ordinary-secret' }` to
+   * `{"password":"ordinary-secret"}` left no KEY for the credential-holder
+   * check to see, and JSON's quote between key and colon defeated the
+   * `key: value` heuristic. The diagnostic added to make a bad probe visible
+   * had become the way a secret got out.
+   */
+  it('never copies the contents of a structured answer into the reason', () => {
+    for (const field of ['state', 'outcome', 'verification'] as const) {
+      const status = assess({ ...honest, [field]: { password: 'ordinary-secret' } });
+      expect(status.reason, field).not.toContain('ordinary-secret');
+      expect(status.reason, field).not.toContain('password');
+      // Still diagnostic: an operator learns an object arrived where a word
+      // belongs, which is what they need to find the adapter.
+      expect(status.reason, field).toContain('type object');
+    }
+  });
+
+  it('describes rather than serialises every non-string answer', () => {
+    const cases: [unknown, string][] = [
+      [{ secret: 'x' }, 'type object'],
+      [['a', 'b'], 'an array of 2'],
+      [42, '42'],
+      [true, 'true'],
+      [null, 'null'],
+      [undefined, 'undefined'],
+      [() => 'x', 'type function'],
+    ];
+    for (const [value, expected] of cases) {
+      expect(assess({ ...honest, outcome: value }).reason, String(expected)).toContain(expected);
+    }
+  });
+
+  it('does not throw on the values JSON.stringify refuses', () => {
+    // Both used to make the describer THROW, defeating the fail-closed path it
+    // exists to serve. A BigInt is a TypeError to `JSON.stringify`; a circular
+    // object is covered above and stays covered.
+    const status = assess({ ...honest, outcome: BigInt(7) });
+    expect(status.outcome).toBe('failed');
+    expect(status.effectiveCapabilities).toEqual([]);
+    expect(() => renderConnections([status], NOW, undefined, 'sample')).not.toThrow();
+  });
+
+  it('still refuses to publish a credential hidden inside a structured answer', () => {
+    // Belt and braces: the contents are not copied, so there is nothing for
+    // the guard to catch — and the row is still an error carrying nothing.
+    const status = assess({
+      ...honest,
+      outcome: { token: 'sk-abcdefghijklmnopqrstuvwxyz012345' },
+    });
+    expect(status.reason).not.toContain('sk-abcdefghijklmnopqrstuvwxyz012345');
+    expect(() => assertBrowserSafe([status], 'test.connections')).not.toThrow();
+    expect(status.state).toBe('error');
+  });
 });

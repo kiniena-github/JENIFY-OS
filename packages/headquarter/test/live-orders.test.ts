@@ -274,6 +274,50 @@ describe('idempotency', () => {
   });
 
   /**
+   * Codex exact-head finding on `7a1c21d` (P2). The title was not a digest
+   * input, so two orders alike in every other field but carrying different
+   * titles derived the same key — and `HeadquarterOperations.createTask`
+   * deliberately skips its metadata upsert for a deduplicated task. The second
+   * caller's title, the ONE field of an order that reaches the browser, was
+   * therefore discarded in silence while the Founder console went on showing
+   * the first one. Same class as the route, resolved-provider and actor-trust
+   * findings before it: a receipt naming a task that does not carry what the
+   * caller asked for.
+   */
+  it('treats a different title as a different order', () => {
+    const { ops } = ordersFixture();
+    const first = submitDirectOrder(ops, { ...ORDER, title: 'Q3 plan' }, CLAUDE_ONLY);
+    const second = submitDirectOrder(ops, { ...ORDER, title: 'Q3 plan (urgent)' }, CLAUDE_ONLY);
+    if (!first.ok || !second.ok) throw new Error('expected both to succeed');
+    expect(second.data.deduplicated).toBe(false);
+    expect(second.data.task.id).not.toBe(first.data.task.id);
+    // Each task carries the title its own caller asked for.
+    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(2);
+  });
+
+  it('still dedupes when the title is the same, including when both omit it', () => {
+    const { ops } = ordersFixture();
+    const a = submitDirectOrder(ops, { ...ORDER, title: 'Q3 plan' }, CLAUDE_ONLY);
+    const b = submitDirectOrder(ops, { ...ORDER, title: 'Q3 plan' }, CLAUDE_ONLY);
+    if (!a.ok || !b.ok) throw new Error('expected ok');
+    expect(b.data.task.id).toBe(a.data.task.id);
+
+    const { ops: ops2 } = ordersFixture();
+    const c = submitDirectOrder(ops2, ORDER, CLAUDE_ONLY);
+    const d = submitDirectOrder(ops2, ORDER, CLAUDE_ONLY);
+    if (!c.ok || !d.ok) throw new Error('expected ok');
+    expect(d.data.task.id).toBe(c.data.task.id);
+  });
+
+  it('ignores whitespace around a title, so a stray space is not a new order', () => {
+    const { ops } = ordersFixture();
+    const a = submitDirectOrder(ops, { ...ORDER, title: 'Q3 plan' }, CLAUDE_ONLY);
+    const b = submitDirectOrder(ops, { ...ORDER, title: '  Q3 plan  ' }, CLAUDE_ONLY);
+    if (!a.ok || !b.ok) throw new Error('expected ok');
+    expect(b.data.task.id).toBe(a.data.task.id);
+  });
+
+  /**
    * Open Codex finding — AUTO idempotency was not bound to the resolved
    * provider. Two `AUTO` orders with the same four fields derived the same key,
    * so an order that resolved to CODEX after availability changed was
