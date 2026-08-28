@@ -210,3 +210,147 @@ browser (8/8 OK) and writes the screenshot set. Playwright is deliberately not a
 dependency; CI keeps the structural equivalents in `test/ui-responsive.test.ts`.
 777 headquarter tests green (was 665 on main; +112), `tsc --noEmit` clean. No Mesob/server/web package,
 migration, credential or CI workflow touched; local only, nothing deployed.
+
+## 2026-08-28 — LIVE HQ CONTROL V1 (issue #200)
+The read-only Headquarter UI became operational in the four ways the mission defined,
+without weakening a single existing authority boundary. New `packages/headquarter/src/live/`
+holds the whole seam: `provenance.ts` (the live/reconstructed/sample vocabulary every
+snapshot section carries), `redaction.ts` (fail-closed browser-safety guard),
+`connections.ts` (Connection Center), `orders.ts` (Direct Orders), `snapshot.ts` (the
+browser-safe projection). One new HQ page — Connections — brings the site to eight; all
+seven existing pages are unchanged in purpose and pass their original assertions.
+
+**Scope A — live data.** `liveSnapshotFromOperations()` projects canonical state
+(`founderConsole` over `op_tasks`/`hq_approvals`, the specialist directory, the capability
+registry, `hq_events`) into a versioned JSON snapshot with per-section provenance and an
+overall mode that degrades to the WEAKEST section, so one sample section can never let a
+bundle render as LIVE. Task payloads never cross the boundary: `ConsoleTask` carries none
+and nothing reaches past it. Activity `detail` is whitelisted to project/title and refs are
+filtered to https, so arbitrary worker-written detail and local filesystem paths cannot leak.
+`assertBrowserSafe` + `assertNoFabricatedFields` run on every snapshot and THROW rather than
+publish. The pages poll `hq-snapshot.json` every 20s and report LIVE / UPDATED / OFFLINE /
+ERROR truthfully — the chip starts at CHECKING, never at LIVE, and an unreachable snapshot
+degrades to OFFLINE instead of claiming freshness it has not verified. New CLI
+`npm run hq:snapshot`.
+
+**Scope B — Direct Orders.** `submitDirectOrder()` is a thin seam over the existing
+`HeadquarterOperations.createTask`: no table write, no bypass, no new authority. The single
+narrow capability `hq.direct_order` is `founder_gate` — the one risk class
+`operator/policy.ts` refuses to let a standing pre-approval override — because a free-text
+instruction is unclassifiable in advance and the only honest class for it is the highest one.
+Every order therefore parks in `needs_approval` with an action digest and executes nothing.
+Routing is truthful and fails closed: AUTO picks only from providers evidence shows are
+connected, and an explicit CLAUDE or CODEX never silently becomes the other. Idempotency is
+derived from (requester, route, project, instruction), so a double submit dedupes.
+
+**Scope C — Connection Center.** State is EVIDENCE-derived, never descriptor-derived. The
+catalogue (Anthropic/Claude, OpenAI/Codex, Google/Gemini, GitHub, Vercel, Supabase, Google
+Workspace) holds only the questions; answers come from a `ConnectionProbe`, and a descriptor
+without a probe is `not_connected`. AI providers reuse `routing/providers.ts`
+`providerConnectivity`, so the page and the router cannot diverge; Codex reports LOCAL-ONLY
+rather than connected, preserving the truth that it is unavailable to CI and to a hosted
+preview. Advertised capabilities become effective only with evidence — enforced centrally, so
+an over-eager future adapter cannot promote its own claims. Only secret PRESENCE is read;
+fact NAMES are rendered, values never are. No Disconnect control is drawn anywhere in V1
+because HQ holds no credential store to revoke from.
+
+**Scope D — approvals stay read-only. SECURITY GATE, unresolved.** Headquarter has no
+authenticated Founder session, and `createTask`/`approveTask` authorize by resolving the
+actor against the human-principal registry. A browser write would have to trust a
+client-supplied principal id (impersonation) or ship a new auth boundary invented under
+automation. Neither was done. Approvals remain read-only, the Direct Order composer is drawn
+inert with the blocker stated in the UI itself, and the working write path is the local CLI
+`npm run hq:order` — a trusted-local-admin/maintenance interface, NOT an authenticated
+Founder path (see the correction below).
+
+**Correction after the PR #201 review (same day).** The review was right that the CLI
+overclaimed: `--as <id>` accepts a caller-supplied principal id bound to nothing — not the OS
+user, not the process owner, not a credential — so describing the OS session as "the
+authentication" was false. The interface is now classified for what it is, in code
+(`live/local-trust.ts`) rather than in prose that can drift: a trusted-local-admin /
+maintenance path for someone who already holds full local access to the HQ database, and who
+therefore gains no authority from it. Three fail-closed consequences: `ActorAuthentication`
+has NO value that claims authentication (only `unauthenticated` and
+`unauthenticated_local_assertion`), so no caller can assert one; the default is the weakest
+value; and the CLI refuses to run under CI at all — with no override — and otherwise requires
+an explicit `--local-admin` acknowledgement, so an unattended script cannot place
+principal-attributed orders. Every order now records its `actorAuthentication` in the payload,
+which puts it inside the action digest the approver echoes back. The containment for an
+impersonated assertion is the two canonical rules, both untouched and now hostile-tested:
+deny-by-default (an unregistered, ungranted, inactive or worker id opens NOTHING) and
+no-self-approval (the asserted principal is exactly the one barred from approving the order
+it opened, so a local assertion can never manufacture an approved action — a second, genuinely
+present approval-authorized human must decide it, seeing the recorded assertion).
+
+**Readiness, stated truthfully: issue #200 V1 is NOT fully accepted.** HQ is not
+Founder-operable from a browser while the composer is inert and approvals are read-only, and
+the CLI does not close that gap because it authenticates nobody either. A real HQ
+authentication boundary remains an open Founder-gated security decision; scopes A, B
+(server-side), C, the mobile/UX work, the tests and the preview-ready build are complete.
+
+Two real defects were found by the new tests and fixed. (1) The evidence log's secret
+heuristic missed quoted credentials in free text: it ran on the JSON encoding, where
+`api_key: "…"` becomes `api_key: \"…\"` and the backslash defeats the pattern. The browser
+guard now also scans each raw string. (2) An order's title defaulted to the instruction's
+first line, which published Founder-typed content to the browser as a side effect of writing
+the instruction; the default is now a neutral `Direct order → <PROVIDER>` label, and a title
+is published only when its author deliberately chose one.
+
+895 headquarter tests green (787 on main; +91 for V1, +17 for the actor-trust correction),
+server 442 passed + 3 pre-existing skips,
+`tsc --noEmit` clean in headquarter/server/shared/web, web bundle unchanged at 69.22 kB gzip.
+Browser evidence: 48/48 no-horizontal-overflow at 1440/1024/414/390/360/320 px across all
+eight pages, archive interaction 8/8. Local only — nothing deployed, no paid service enabled,
+no migration, no credential change, no CI workflow touched.
+
+**Second correction round: four P1 findings from the Codex exact-head review of `90dd0b9`
+(same day).** All four were real, all four are fixed on the same PR branch, each with hostile
+regression coverage.
+
+1. **The resolved provider is now an execution authority, not payload metadata.** An order
+   routed to CLAUDE could still be claimed out of the shared `hq.direct_order` queue by a
+   CODEX worker: no-substitution held at creation and evaporated at the execution boundary.
+   New `operator/provider-binding.ts` defines the reserved `executionProvider` payload key and
+   a DECLARED worker→provider map (`op_worker_providers`); `OperatorQueue.claim` and `start`
+   both refuse any worker that is not declared as the bound provider, loudly and with an
+   evidence record. The mapping is declared, never inferred — a worker's `vendor` string says
+   who makes it, not which executor runs it, and guessing `openai → CODEX` would be an
+   invented business rule. Deny by default in both directions: an undeclared worker, and a
+   malformed binding, execute nothing. Because the key lives in the payload it is inside the
+   action digest, so the provider cannot be swapped between approval and execution.
+2. **Registration can no longer re-enable a disabled capability.** `CapabilityRegistry.register`
+   wrote `enabled = excluded.enabled` (default 1), and the CLI called it on the way to
+   submitting an order — so disabling `hq.direct_order`, the way a deployment stops direct
+   orders, was silently undone by the next order. `register` now leaves `enabled` alone unless
+   a caller states it explicitly; `hq:order` no longer registers anything, and registration is
+   a separate `--register-capability` run that also respects a disabled state. Invocation fails
+   closed with `capability_not_registered` / `capability_disabled`.
+3. **LIVE now requires an exact snapshot/render match.** The freshness chip treated everything
+   "not newer" as LIVE, so an OLDER snapshot rendered as LIVE. The decision is now one shared
+   piece of source embedded in the page and executed directly by the tests: exact match → LIVE,
+   newer → UPDATED, older or merely equal-but-differently-written → STALE, unreadable → ERROR.
+4. **Credential presence is configuration, not connectivity.** A generic integration with all
+   its facts present was reported `connected` and granted its advertised capabilities — a
+   descriptor-shaped claim wearing evidence's clothes. New `configured` state: presence is setup
+   evidence, grants nothing, and carries no verification timestamp. `connected` now requires a
+   verifying method — the routing lane's own dispatch contract for AI providers, or a real live
+   check — and `assessConnections` downgrades any probe that claims otherwise, so a third-party
+   adapter cannot restore the defect. Expired / revoked / malformed / wrong-project / unreachable
+   are representable through the `ConnectionVerifier` seam; V1 registers no verifiers, because
+   a real one would make a network call.
+
+925 headquarter tests green (895 before this round; +30 hostile tests across
+`test/provider-binding.test.ts`, `test/capability-registration.test.ts` and additions to the
+connections/UI suites), server 442 passed + 3 pre-existing skips, `tsc --noEmit` clean in
+headquarter/server/shared/web, web bundle unchanged at 215.66 kB / 69.22 kB gzip, browser
+evidence 48/48 at 1440/1024/414/390/360/320 px across all eight pages, archive interaction 8/8.
+The browser Founder-auth gate is unchanged and still open: the composer stays inert, approvals
+stay read-only, and issue #200 V1 is still NOT marked accepted.
+
+**Follow-up on the same correction round: freshness is not truthfulness.** The exact-match
+rule for LIVE left one case open. The static preview ships a `sample` snapshot whose
+`generatedAt` is by construction the render instant, so it matched exactly and the chip
+announced LIVE over demonstration data — next to a provenance chip correctly reading SAMPLE.
+`freshnessVerdict` now also reads the snapshot's own `mode`: a bundle that says it is
+`sample` or `reconstructed` is reported by that provenance, however exactly its timestamp
+matches. A snapshot that states no mode, and a genuinely `live` one, are unchanged.

@@ -75,6 +75,12 @@ import { evaluatePolicy, type PolicyContext, type PolicyDecision } from '../oper
 import { taskActionDigest } from '../operator/approvals.js';
 import { assertNoSecretLikeContent } from '../operator/evidence.js';
 import { OperatorQueue, type OperatorTask, type ReconcileDecision } from '../operator/queue.js';
+import {
+  ProviderBindingViolation,
+  ProviderDeclarationRejected,
+  WorkerProviderRegistrar,
+  type WorkerProviderRecord,
+} from '../operator/provider-binding.js';
 import { ensureApplicationSchema } from './db.js';
 import {
   SpecialistDirectoryAdapter,
@@ -110,6 +116,8 @@ export type OpsErrorCode =
   | 'action_digest_mismatch'
   | 'task_not_awaiting_approval'
   | 'assigned_to_other_worker'
+  | 'provider_binding_mismatch'
+  | 'unknown_provider'
   | 'nothing_claimable'
   | 'unknown_principal'
   | 'humans_do_not_execute'
@@ -269,6 +277,8 @@ export class HeadquarterOperations {
   readonly principals: HumanPrincipalPort;
   private readonly nominationSources: readonly NominationSourcePort[];
   private readonly policyCtx: PolicyContext;
+  /** Write side of the worker → provider map. Private by design — see below. */
+  private readonly workerProviderRegistrar: WorkerProviderRegistrar;
 
   constructor(
     private db: HqDatabase,
@@ -277,6 +287,11 @@ export class HeadquarterOperations {
     ensureApplicationSchema(db);
     this.store = options.store ?? new HeadquarterStore(db);
     this.queue = options.queue ?? new OperatorQueue(db, options.policyCtx ?? {});
+    // The WRITE side of the worker → provider map lives here and nowhere else
+    // (issue #200, Codex round-3 P1 #1). It is private: the only ways in are
+    // `declareWorkerProvider`/`revokeWorkerProvider`, which resolve the actor
+    // and require approval authority first.
+    this.workerProviderRegistrar = new WorkerProviderRegistrar(db);
     this.workers =
       options.workers ?? narrowByRegistry(new SpecialistDirectoryAdapter(this.store), options.memberRegistry);
     this.principals = options.humanPrincipals ?? new HumanPrincipalRegistry(db);
@@ -635,23 +650,47 @@ export class HeadquarterOperations {
       return fail('kill_switch_engaged', `Kill switch is engaged for ${capabilityId}`);
     }
 
-    const head = this.queue
-      .listByStatus('queued')
-      .find((candidate) => candidate.capabilityId === capabilityId);
-    if (!head) return fail('nothing_claimable', `No queued task for ${capabilityId}`);
-    const intent = this.readMeta(head.id)?.assignment;
-    if (intent && intent.workerId !== workerId) {
+    // Peek at the task this worker would actually be offered — the oldest one
+    // COMPATIBLE with its declared execution provider, not merely the oldest
+    // one (issue #200, Codex round-3 P1 #2). Peeking at the raw head would put
+    // the head-of-line block back in this layer: a CLAUDE-bound order sitting
+    // in front would make every later CODEX-compatible task unreachable
+    // through the assignment-intent check below.
+    const peek = this.queue.selectClaimable(workerId, capabilityId);
+    if (!peek.task && !peek.refusal) {
+      return fail('nothing_claimable', `No queued task for ${capabilityId}`);
+    }
+    // A refusal (queued work exists, none of it this worker's) is deliberately
+    // NOT answered here: it is raised and written to the evidence log once, by
+    // the canonical boundary in `OperatorQueue.claim` below, and translated to
+    // a typed error in the catch. Answering it here would record it twice or
+    // not at all, depending on the caller.
+    const head = peek.task;
+    const intent = head ? this.readMeta(head.id)?.assignment : null;
+    if (head && intent && intent.workerId !== workerId) {
       return fail(
         'assigned_to_other_worker',
         `Task ${head.id} is assigned to ${intent.workerId}`,
         { taskId: head.id, assignedTo: intent.workerId },
       );
     }
-
+    // Provider binding (issue #200, Codex P1 #1) is deliberately NOT
+    // re-implemented here. It is enforced once, at the canonical execution
+    // boundary in `OperatorQueue.claim`, which is also where the refusal is
+    // written to the evidence log — so it holds for callers that never come
+    // through this layer, and it cannot be recorded twice or drift between two
+    // copies. This layer only translates the violation into a typed error.
     let claimed: OperatorTask | null;
     try {
       claimed = this.queue.claim(workerId, capabilityId, leaseMs);
     } catch (error) {
+      if (error instanceof ProviderBindingViolation) {
+        return fail('provider_binding_mismatch', error.message, {
+          taskId: error.taskId,
+          requiredProvider: error.requiredProvider,
+          workerProvider: error.workerProvider,
+        });
+      }
       return fail('operator_rejected', errorMessage(error), { capabilityId });
     }
     if (!claimed) return fail('nothing_claimable', `No claimable task for ${capabilityId}`);
@@ -674,6 +713,13 @@ export class HeadquarterOperations {
     try {
       return ok(this.queue.start(taskId, workerId, fence));
     } catch (error) {
+      if (error instanceof ProviderBindingViolation) {
+        return fail('provider_binding_mismatch', error.message, {
+          taskId: error.taskId,
+          requiredProvider: error.requiredProvider,
+          workerProvider: error.workerProvider,
+        });
+      }
       return fail('operator_rejected', errorMessage(error), { taskId });
     }
   }
@@ -799,6 +845,90 @@ export class HeadquarterOperations {
     if (principal) return principal;
     this.queue.releaseKillSwitch(scope, founderId);
     return ok(null);
+  }
+
+  // ---- execution-provider declarations (Founder only) ----
+
+  /**
+   * Declare which provider a worker genuinely executes as (issue #200, Codex
+   * round-3 P1 #1).
+   *
+   * This is the ONLY authorized way the worker → provider map is written. It
+   * sits here, beside the kill switch, because it is the same kind of act: a
+   * configuration decision that changes who may execute what. It therefore
+   * carries the same gate — a registered, active human principal holding
+   * approval authority. Registered workers are refused that authority
+   * outright (`principals.ts`), so no execution worker can declare a provider,
+   * its own least of all: the queue it holds exposes lookup only.
+   *
+   * `declaredBy` is the RESOLVED principal, not a caller-supplied string, so
+   * the recorded attribution cannot differ from the identity that was checked.
+   * The declaration narrows only — it decides which bound tasks a worker may
+   * take, never which capabilities it holds, which stay with the directory.
+   */
+  declareWorkerProvider(input: {
+    workerId: string;
+    providerId: string;
+    founderId: string;
+  }): OpsResult<WorkerProviderRecord> {
+    const principal = this.assertApprovalAuthority(
+      input.founderId,
+      'declare a worker execution provider',
+    );
+    if (principal) return principal;
+    try {
+      const record = this.workerProviderRegistrar.declare(
+        input.workerId,
+        input.providerId,
+        input.founderId,
+      );
+      this.queue.evidence.append({
+        actor: input.founderId,
+        kind: 'worker_provider_declared',
+        payload: {
+          workerId: record.workerId,
+          providerId: record.providerId,
+          declaredAt: record.declaredAt,
+        },
+      });
+      return ok(record);
+    } catch (error) {
+      if (error instanceof ProviderDeclarationRejected) {
+        return fail(
+          error.reason === 'unknown_provider' ? 'unknown_provider' : 'invalid_input',
+          error.message,
+          { workerId: input.workerId, providerId: input.providerId },
+        );
+      }
+      return fail('operator_rejected', errorMessage(error), { workerId: input.workerId });
+    }
+  }
+
+  /**
+   * Withdraw a worker's execution-provider declaration. Same authority as
+   * declaring one, and strictly narrowing in effect: the worker can then claim
+   * no provider-bound task at all.
+   */
+  revokeWorkerProvider(input: { workerId: string; founderId: string }): OpsResult<boolean> {
+    const principal = this.assertApprovalAuthority(
+      input.founderId,
+      'revoke a worker execution provider',
+    );
+    if (principal) return principal;
+    const removed = this.workerProviderRegistrar.revoke(input.workerId);
+    if (removed) {
+      this.queue.evidence.append({
+        actor: input.founderId,
+        kind: 'worker_provider_revoked',
+        payload: { workerId: input.workerId },
+      });
+    }
+    return ok(removed);
+  }
+
+  /** Every declaration currently in force. A read, available to any caller. */
+  workerProviderDeclarations(): WorkerProviderRecord[] {
+    return this.queue.workerProviders.list();
   }
 
   // ---- worker replacement ----

@@ -19,7 +19,9 @@
  *    `prefers-reduced-motion`.
  */
 
-export const THEME_CSS = `
+import { SPATIAL_CSS } from './spatial/theme.js';
+
+const BASE_CSS = `
 :root {
   color-scheme: dark;
   --bg: #070a11;
@@ -509,6 +511,30 @@ details.record[open] { background: var(--surface-2); border-color: var(--line-st
   max-width: 100%;
 }
 
+/* Direct Order composer + Connection Center (issue #200). Both reuse the
+   existing card/chip/control-readonly vocabulary; these rules only add the
+   stacking and label treatment, so nothing here can widen a narrow viewport. */
+.order-composer { display: grid; gap: 0.75rem; min-width: 0; }
+.order-field { min-width: 0; display: grid; gap: 0.3rem; }
+.order-label {
+  margin: 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.order-field .control-readonly {
+  justify-content: flex-start;
+  font-weight: 500;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.order-route { min-width: 0; }
+.order-route p { min-width: 0; overflow-wrap: anywhere; }
+[data-connection] .record-meta code { overflow-wrap: anywhere; }
+[data-live-detail] { margin: 0.25rem 0 0; min-width: 0; overflow-wrap: anywhere; }
+
 footer[data-provenance] {
   margin-top: 2rem;
   padding-top: 0.9rem;
@@ -522,3 +548,14 @@ footer[data-provenance] {
   * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }
 `;
+
+/**
+ * The one stylesheet every HQ page carries.
+ *
+ * The spatial rules are concatenated here rather than shipped as a separate
+ * sheet so that the responsive/accessibility invariants which parse
+ * `THEME_CSS` cover the living Headquarters too. The reduced-motion block in
+ * `BASE_CSS` uses `!important`, so it disables the spatial animations
+ * regardless of the order the two halves appear in.
+ */
+export const THEME_CSS = `${BASE_CSS}${SPATIAL_CSS}`;
