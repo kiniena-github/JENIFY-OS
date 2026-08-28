@@ -274,11 +274,18 @@ describe('no interface string claims the CLI authenticates the Founder', () => {
     }
   });
 
-  it('states the classification and the remaining gate instead', () => {
+  it('states the classification and the real gate instead', () => {
     expect(LOCAL_ADMIN_INTERFACE_NOTICE).toContain('TRUSTED-LOCAL-ADMIN');
     expect(LOCAL_ADMIN_INTERFACE_NOTICE).toContain('does not authenticate');
     expect(DIRECT_ORDER_BLOCKER).toContain('TRUSTED-LOCAL-ADMIN');
     expect(DIRECT_ORDER_BLOCKER).toContain('does not authenticate the Founder');
-    expect(DIRECT_ORDER_BLOCKER).toContain('NOT fully Founder-operable');
+    // Since the Founder-auth boundary landed (issue #200, integration lane)
+    // the browser IS operable — but only conditionally, and the string must
+    // state the condition rather than claim it either way unconditionally:
+    // the control plane mounted by the host, plus a server-resolved session
+    // mapped to a registered Founder principal, or nothing is drawn.
+    expect(DIRECT_ORDER_BLOCKER).toContain('ONLY when');
+    expect(DIRECT_ORDER_BLOCKER).toContain('server-resolved session');
+    expect(DIRECT_ORDER_BLOCKER).toContain('no control is drawn');
   });
 });
