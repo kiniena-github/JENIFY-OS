@@ -908,6 +908,53 @@ describe('the floor never drops or invents people', () => {
     }
   });
 
+  it('never lets a nameplate paint over a fault marker', () => {
+    // Nameplates are drawn in a layer ON TOP of the whole plan, so anything
+    // they overlap is hidden — and a hidden fault marker is a locator that
+    // does not locate. I raised this collision risk when requesting a review
+    // and then judged it by eye from a screenshot, where the Founder Suite
+    // marker LOOKED like it was under the plate. It is not; measuring said
+    // adjacent, not overlapping. Pinning the measurement so the next change
+    // to plate size, marker height or room layout has to keep it true.
+    const floor = floorFrom(
+      [
+        event('stuck', 't1', 'blocked', { project: 'ALPHA' }),
+        event('gated', 't2', 'needs_approval', { project: 'BETA' }),
+      ],
+      [worker('stuck', 'build_lead'), worker('gated', 'build_lead')],
+      [connectionWithState('error'), connectionWithState('expired')],
+    );
+    const svg = renderScene(floor);
+
+    const plates = [...svg.matchAll(/<rect class="zone-plate-bg" x="([-\d.]+)" y="([-\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)].map(
+      (match) => {
+        const [x, y, width, height] = match.slice(1).map(Number);
+        return { x1: x, y1: y, x2: x + width, y2: y + height };
+      },
+    );
+    const markers = [...svg.matchAll(/<g class="fault-marker">([\s\S]*?)<\/g>/g)].map((match) => {
+      const points = [...match[1].matchAll(/points="([^"]+)"/g)].flatMap((entry) =>
+        entry[1].split(' ').map((pair) => pair.split(',').map(Number)),
+      );
+      return {
+        x1: Math.min(...points.map((point) => point[0])),
+        x2: Math.max(...points.map((point) => point[0])),
+        y1: Math.min(...points.map((point) => point[1])),
+        y2: Math.max(...points.map((point) => point[1])),
+      };
+    });
+
+    expect(plates).toHaveLength(HQ_FLOOR.length);
+    expect(markers.length, 'the fixture must actually produce markers to check').toBeGreaterThan(0);
+
+    for (const marker of markers) {
+      for (const plate of plates) {
+        const overlaps = marker.x1 < plate.x2 && marker.x2 > plate.x1 && marker.y1 < plate.y2 && marker.y2 > plate.y1;
+        expect(overlaps, `a nameplate covers a fault marker at ${JSON.stringify(marker)}`).toBe(false);
+      }
+    }
+  });
+
   it('marks an attention-causing WORKER, not only a fixture', () => {
     // Codex review of `a455799`. Restricting the marker to fixtures left a
     // blocked figure identifiable only by head colour — recreating, for
