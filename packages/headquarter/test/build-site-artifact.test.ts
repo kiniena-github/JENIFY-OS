@@ -52,19 +52,35 @@ describe('portableSourceLabel', () => {
   });
 });
 
+/**
+ * Run the genuine CLI (not a reimplementation: a regression in build-site.ts
+ * itself must fail here) and return every artefact it wrote.
+ *
+ * `env` defaults to the inherited environment; the leak scan below re-runs
+ * the build with a scrubbed environment as a counterfactual control.
+ */
+function runBuild(env?: NodeJS.ProcessEnv): Map<string, string> {
+  execFileSync(process.execPath, [tsxCli, path.join(packageRoot, 'src', 'cli', 'build-site.ts')], {
+    cwd: packageRoot,
+    stdio: 'pipe',
+    ...(env ? { env } : {}),
+  });
+  return new Map(
+    readdirSync(siteDir).map((file) => [file, readFileSync(path.join(siteDir, file), 'utf8')]),
+  );
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  let count = 0;
+  for (let i = haystack.indexOf(needle); i !== -1; i = haystack.indexOf(needle, i + 1)) count += 1;
+  return count;
+}
+
 describe('the real site build', () => {
   let artifacts: Map<string, string>;
 
   beforeAll(() => {
-    // The genuine CLI, not a reimplementation: a regression in build-site.ts
-    // itself must fail here.
-    execFileSync(process.execPath, [tsxCli, path.join(packageRoot, 'src', 'cli', 'build-site.ts')], {
-      cwd: packageRoot,
-      stdio: 'pipe',
-    });
-    artifacts = new Map(
-      readdirSync(siteDir).map((file) => [file, readFileSync(path.join(siteDir, file), 'utf8')]),
-    );
+    artifacts = runBuild();
   }, 120_000);
 
   it('produced the nine pages and the snapshot', () => {
@@ -123,9 +139,84 @@ describe('the real site build', () => {
         !name.startsWith('npm_package_'),
     );
     expect(suspicious.length).toBeGreaterThan(0);
+
+    // First pass: which suspicious values appear in which artefact at all?
+    const hits: Array<{ file: string; name: string; value: string }> = [];
     for (const [file, content] of artifacts) {
       for (const [name, value] of suspicious) {
-        expect(content.includes(value!), `${file} contains the value of $${name}`).toBe(false);
+        if (content.includes(value!)) hits.push({ file, name, value: value! });
+      }
+    }
+    if (hits.length === 0) return;
+
+    // Counterfactual control (the provenance rule, decided on issue #200):
+    // a hit alone does not prove environment egress, because committed build
+    // inputs can legitimately contain the same string as a generic CI
+    // variable — on the CI runner, $GITHUB_REPOSITORY_OWNER equals the
+    // repository owner that the committed sample bundle's public
+    // github.com ref URLs already spell out. So re-run the SAME CLI with a
+    // scrubbed environment and compare per-file occurrence COUNTS:
+    //
+    //   - a value the environment contributed cannot appear as often (or at
+    //     all) when the environment is empty → real egress → FAIL;
+    //   - a value whose every occurrence survives an empty environment was
+    //     produced from committed inputs alone → the environment provably
+    //     was not the source → not egress.
+    //
+    // Threat-model boundary, explicitly: this test detects values FLOWING
+    // FROM THE BUILD ENVIRONMENT into a served artefact — host paths,
+    // account names, tokens, CI metadata. It deliberately does NOT detect a
+    // secret that has been committed into the build inputs themselves: such
+    // a value appears with the environment empty, so no environment-side
+    // scan can attribute it to the environment. That class is a repository
+    // hygiene incident (never commit secrets; secret scanning), not build
+    // egress, and pretending this test covered it would be false comfort.
+    // No variable is exempted by NAME — GITHUB_* included: if the build ever
+    // starts copying $GITHUB_REPOSITORY_OWNER's value into a page, the
+    // occurrence count rises above the scrubbed build's and this fails.
+    //
+    // The scrubbed environment is as close to empty as the OS allows
+    // (Windows needs SystemRoot to spawn processes). A kept variable must
+    // not itself carry a flagged value, or the control would be unsound.
+    const keep = process.platform === 'win32' ? ['SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR'] : [];
+    const scrubbedEnv: NodeJS.ProcessEnv = {};
+    for (const name of keep) {
+      const value = process.env[name];
+      if (value != null && !hits.some((hit) => value.includes(hit.value))) {
+        scrubbedEnv[name] = value;
+      }
+    }
+    const scrubbed = runBuild(scrubbedEnv);
+
+    for (const { file, name, value } of hits) {
+      const withEnv = countOccurrences(artifacts.get(file)!, value);
+      const withoutEnv = countOccurrences(scrubbed.get(file) ?? '', value);
+      expect(
+        withEnv,
+        `${file} contains the value of $${name} ${withEnv}× with the environment present but ` +
+          `only ${withoutEnv}× with it scrubbed — the difference came from the environment`,
+      ).toBeLessThanOrEqual(withoutEnv);
+    }
+  });
+
+  it('contains nothing credential-shaped, wherever it came from', () => {
+    // Complement to the environment-side scan above, closing its declared
+    // blind spot from the artefact side: a token-shaped string is forbidden
+    // in a served artefact REGARDLESS of provenance — environment, committed
+    // input, or renderer bug. High-signal, well-known prefixes only; this is
+    // not a general secret scanner (that runs on the repository, not here).
+    const credentialShaped: Array<[string, RegExp]> = [
+      ['GitHub token', /\bgh[opusr]_[A-Za-z0-9]{36}/],
+      ['GitHub fine-grained PAT', /\bgithub_pat_[A-Za-z0-9_]{22,}/],
+      ['private key block', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
+      ['AWS access key id', /\bAKIA[0-9A-Z]{16}\b/],
+      ['Slack token', /\bxox[abprs]-[A-Za-z0-9-]{10,}/],
+      ['OpenAI-style key', /\bsk-[A-Za-z0-9_-]{20,}/],
+      ['JWT', /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}/],
+    ];
+    for (const [file, content] of artifacts) {
+      for (const [label, pattern] of credentialShaped) {
+        expect(pattern.test(content), `${file} contains a ${label} (${pattern})`).toBe(false);
       }
     }
   });
