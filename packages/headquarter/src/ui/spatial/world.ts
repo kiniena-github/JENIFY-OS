@@ -133,7 +133,25 @@ export const HQ_FLOOR: readonly Zone[] = [
     ...origin(2, 0),
     width: ZONE_SPAN,
     depth: ZONE_SPAN,
-    stations: [...row('founder-suite', 'bench', 1, 1.8, 'north'), ...row('founder-suite', 'desk', 2, 4.2, 'north')],
+    // TWO benches, placed explicitly rather than with `row()`.
+    //
+    // The Founder Suite carries two distinct canonical claims — pending
+    // approval REQUESTS, and tasks recorded as needs_approval — and with one
+    // bench the second was left unseated. When nothing was pending but work
+    // was gated, the unlit fixture took the only bench and the LIT one
+    // vanished from the plan: a dark bench in a room whose whole purpose is
+    // to show the Founder what is waiting on them (Codex review of
+    // `9c0e354`, P2). Combining the two claims would have lost the
+    // distinction, so the room gained the station it was short of.
+    //
+    // `row()` spaces stations across the full span, which would push the
+    // second bench's 2.0-unit footprint past the room's edge; these two
+    // positions keep both benches inside it.
+    stations: [
+      { id: 'founder-suite-bench-1', kind: 'bench', x: 0.7, y: 1.6, facing: 'north' },
+      { id: 'founder-suite-bench-2', kind: 'bench', x: 3.2, y: 1.6, facing: 'north' },
+      ...row('founder-suite', 'desk', 2, 4.2, 'north'),
+    ],
   },
   {
     id: 'build-floor',

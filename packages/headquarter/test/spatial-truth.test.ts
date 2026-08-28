@@ -528,6 +528,80 @@ describe('the floor never drops or invents people', () => {
     expect(station).toContain('In flight');
   });
 
+  it('never drops a LIT fixture while an unlit one holds a station', () => {
+    // Codex review of `9c0e354`, P2. With one bench and two Founder-Suite
+    // fixtures, the unlit "pending approval requests" claim took the only
+    // station and the LIT "gated work" claim was left unseated — a dark bench
+    // in the one room whose whole purpose is showing what waits on the
+    // Founder. The room gained a second bench; this asserts the general rule
+    // that outlives that particular room.
+    const floor = floorFrom(
+      [event('w', 't1', 'needs_approval')],
+      [worker('w', 'build_lead')],
+      // More connections than the Uplink Gallery has pillars, unlit first, so
+      // naive ordering would seat the dark ones and drop the live one.
+      [
+        ...Array.from({ length: 9 }, () => connectionWithState('not_connected')),
+        connectionWithState('connected'),
+      ],
+    );
+    for (const zone of floor.zones) {
+      const unseatedLit = zone.fixtures.filter((fixture) => fixture.lit && fixture.stationId === null);
+      const seatedUnlit = zone.fixtures.filter((fixture) => !fixture.lit && fixture.stationId !== null);
+      expect(
+        unseatedLit.length === 0 || seatedUnlit.length === 0,
+        `${zone.zone.id}: lit ${unseatedLit.map((f) => f.id).join()} dropped while unlit ${seatedUnlit
+          .map((f) => f.id)
+          .join()} kept a station`,
+      ).toBe(true);
+    }
+  });
+
+  it('seats every Founder Suite claim, so gated work is never a dark bench', () => {
+    const floor = floorFrom([event('w', 't1', 'needs_approval')], [worker('w', 'build_lead')]);
+    const suite = floor.zones.find((zone) => zone.zone.id === 'founder-suite')!;
+    const gated = suite.fixtures.find((fixture) => fixture.id === 'bench-gated-tasks')!;
+    expect(gated.lit).toBe(true);
+    for (const fixture of suite.fixtures) expect(fixture.stationId, `${fixture.id} has no station`).not.toBeNull();
+    const station = [...renderScene(floor).split('<g class="hq-station"')].find((fragment) =>
+      fragment.includes(`data-station="${gated.stationId}"`),
+    )!;
+    expect(station).toContain('is-lit');
+    expect(station).toContain('Gated work');
+  });
+
+  it('gives every room at least as many fixture stations as it can hold fixed-count fixtures', () => {
+    // Rooms whose fixture list is a fixed set — not one-per-connection or
+    // one-per-project — must have the capacity to draw all of it.
+    const fixedCapacity: Record<string, number> = {
+      'command-deck': 3,
+      'founder-suite': 2,
+      'archive-stacks': 2,
+      'situation-room': 1,
+    };
+    for (const [zoneId, needed] of Object.entries(fixedCapacity)) {
+      const zone = HQ_FLOOR.find((entry) => entry.id === zoneId)!;
+      const stations = zone.stations.filter((station) =>
+        (FIXTURE_STATION_KINDS as readonly string[]).includes(station.kind),
+      );
+      expect(stations.length, `${zoneId} has ${stations.length} fixture stations, needs ${needed}`).toBeGreaterThanOrEqual(
+        needed,
+      );
+    }
+  });
+
+  it('keeps every station inside its room after the Founder Suite gained a bench', () => {
+    // benchProp draws a 2.0-unit footprint starting at x - 0.4, which is
+    // wider than the station point itself; `row()` spacing would have pushed
+    // the second bench past the room edge.
+    for (const zone of HQ_FLOOR) {
+      for (const station of zone.stations.filter((entry) => entry.kind === 'bench')) {
+        expect(station.x - 0.4).toBeGreaterThanOrEqual(0);
+        expect(station.x - 0.4 + 2.0).toBeLessThanOrEqual(zone.width);
+      }
+    }
+  });
+
   it('counts totals from the occupants it actually holds', () => {
     const floor = floorFrom(
       [event('a', 't1', 'running'), event('b', 't2', 'blocked'), event('c', 't3', 'needs_approval')],
