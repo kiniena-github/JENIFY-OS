@@ -12,7 +12,8 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { HQ_PAGES, DIRECT_ORDER_BLOCKER } from '../src/ui/render.js';
+import { HQ_PAGES, DIRECT_ORDER_BROWSER_POLICY } from '../src/ui/render.js';
+import { CONTROL_CONSOLE_JS } from '../src/ui/control-console.js';
 import { buildSite, type HeadquarterData } from '../src/ui/site.js';
 import {
   FRESHNESS_VERDICT_JS,
@@ -85,7 +86,12 @@ describe('the Connections page joins the site without disturbing it', () => {
     }
   });
 
-  it('holds the site-wide no-mutation invariant on the new pages too', () => {
+  it('keeps every page’s STATIC markup mutation-free', () => {
+    // Re-scoped by the issue #200 integration, not weakened: the static HTML
+    // still contains no form, button or inline handler anywhere. Write
+    // controls exist only as runtime constructions by the control console,
+    // and only after GET /api/hq/control/session granted them — that half of
+    // the invariant is executed, not grepped, in control-console.test.ts.
     for (const page of HQ_PAGES) {
       const html = bare.get(page.file)!;
       expect(html).not.toContain('<form');
@@ -94,12 +100,30 @@ describe('the Connections page joins the site without disturbing it', () => {
     }
   });
 
-  it('adds no input control on the two new surfaces', () => {
+  it('adds no static input control on the two new surfaces', () => {
     // The Archive page legitimately carries client-side filter inputs; the
-    // Direct Order composer and Connection Center carry none, so neither can
-    // look like something that submits.
+    // Direct Order composer and Connection Center render none, so neither can
+    // look submittable when served without the control plane.
     expect(bare.get('connections.html')!).not.toContain('<input');
     expect(bare.get('index.html')!).not.toContain('<input');
+  });
+
+  it('ships the control console on exactly the two pages that carry a mount', () => {
+    // The console is the ONLY write-capable script, and it must exist only
+    // where a [data-hq-control] mount exists — every other page ships no
+    // mutation-capable code at all, so its read-only nature is structural.
+    const withConsole = new Set(['index.html', 'approvals.html']);
+    for (const page of HQ_PAGES) {
+      const html = bare.get(page.file)!;
+      if (withConsole.has(page.file)) {
+        expect(html, page.file).toContain(CONTROL_CONSOLE_JS);
+        expect(html, page.file).toContain('data-hq-control=');
+        expect(html, page.file).toContain('data-hq-control-mount');
+      } else {
+        expect(html, page.file).not.toContain('controlPlan(');
+        expect(html, page.file).not.toContain('data-hq-control=');
+      }
+    }
   });
 });
 
@@ -169,7 +193,7 @@ describe('Connections renders evidence, not descriptors', () => {
   });
 });
 
-describe('the Direct Order composer is truthful about being blocked', () => {
+describe('the Direct Order composer is truthful about when submission exists', () => {
   const html = bare.get('index.html')!;
 
   it('appears on the Command Center', () => {
@@ -177,12 +201,19 @@ describe('the Direct Order composer is truthful about being blocked', () => {
     expect(html).toContain('id="direct-order"');
   });
 
-  it('states the actual blocker rather than showing a live-looking control', () => {
-    expect(html).toContain('Headquarter has no authenticated Founder session');
-    expect(html).toContain('No weak');
-    expect(DIRECT_ORDER_BLOCKER).toContain('hq:order');
-    // Start Task is drawn so its place is visible, and is inert.
-    expect(html).toContain('<span class="control-readonly" aria-disabled="true">Start Task</span>');
+  it('states the real submission policy rather than showing a live-looking control', () => {
+    // The policy is conditional and says so: browser submission exists only on
+    // a control-plane host with a mapped, signed-in Founder — and the control
+    // is drawn only after the API grants it, never by default.
+    expect(html).toContain('verified Founder session');
+    expect(html).toContain('drawn only after the control');
+    expect(DIRECT_ORDER_BROWSER_POLICY).toContain('hq:order');
+    // The static markup offers NO submit control of any kind — the mount is
+    // empty until the console constructs the granted form at runtime.
+    expect(html).not.toContain('>Start Task</span>');
+    expect(html).toContain('data-hq-control="direct-order"');
+    expect(html).toContain('data-hq-control-status');
+    expect(html).toContain('data-hq-control-mount');
   });
 
   it('explains that an order is Founder-gated and executes nothing on creation', () => {

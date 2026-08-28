@@ -48,7 +48,7 @@ describe('buildSite', () => {
   it('Founder Approvals renders the D15 fields read-only with no action controls', () => {
     const html = site.get('approvals.html')!;
     expect(html).toContain('Universal Operator architecture proposal'); // waiting task
-    expect(html).toContain('operator control plane');
+    expect(html).toContain('control API verifies a Founder session');
     // D15 approval fields (§6b): actionDigest, expiresAt, consumedAt, decidedBy
     expect(html).toContain('Action digest');
     expect(html).toContain('3f9a1c2b4d5e6f70'); // truncated digest rendered
@@ -59,14 +59,23 @@ describe('buildSite', () => {
     expect(html).not.toContain('<form');
   });
 
-  it('draws the decision controls as inert, explicitly-labelled placeholders', () => {
+  it('points decisions at the grant-gated LIVE DECISIONS panel, and offers no third decision', () => {
     const html = site.get('approvals.html')!;
-    for (const control of ['Approve', 'Reject', 'Ask for changes']) {
-      expect(html).toContain(`<span class="control-readonly" aria-disabled="true">${control}</span>`);
-    }
-    expect(html).toContain('not wired — read-only page');
-    // Nothing anywhere in the site may submit, navigate to a mutation, or run
-    // an inline handler.
+    // The old inert Approve/Reject placeholders are gone: decisions live in
+    // the LIVE DECISIONS mount, which the control console upgrades ONLY after
+    // /api/hq/control/session reports approval authority (issue #200
+    // integration; executed end-to-end in control-console.test.ts).
+    expect(html).toContain('<h2>LIVE DECISIONS</h2>');
+    expect(html).toContain('data-hq-control="approvals"');
+    expect(html).toContain('data-hq-control-mount');
+    // Ask-for-changes is deliberately NOT drawn, and the reason is stated:
+    // the canonical model records approve or deny only.
+    expect(html).not.toContain('control-readonly" aria-disabled="true">Ask for changes');
+    expect(html).not.toContain('>Ask for changes<');
+    expect(html).toContain('records approve or deny only');
+    // Static markup site-wide still may not submit, navigate to a mutation,
+    // or run an inline handler — write controls are runtime constructions,
+    // drawn only for a granted session.
     for (const page of HQ_PAGES) {
       const pageHtml = site.get(page.file)!;
       expect(pageHtml).not.toContain('<form');

@@ -31,7 +31,7 @@ import {
   registerDirectOrderCapability,
   submitDirectOrder,
 } from '../src/live/orders.js';
-import { DIRECT_ORDER_BLOCKER } from '../src/ui/render.js';
+import { DIRECT_ORDER_BROWSER_POLICY } from '../src/ui/render.js';
 import { taskActionDigest } from '../src/operator/approvals.js';
 
 const CLAUDE_ONLY = { CLAUDE_ROUTINE_URL: 'present', CLAUDE_ROUTINE_TOKEN: 'present' };
@@ -265,7 +265,7 @@ describe('an impersonated assertion cannot reach execution', () => {
 });
 
 describe('no interface string claims the CLI authenticates the Founder', () => {
-  const strings = [LOCAL_ADMIN_INTERFACE_NOTICE, DIRECT_ORDER_BLOCKER];
+  const strings = [LOCAL_ADMIN_INTERFACE_NOTICE, DIRECT_ORDER_BROWSER_POLICY];
 
   it('never repeats the corrected overclaim', () => {
     for (const text of strings) {
@@ -274,11 +274,16 @@ describe('no interface string claims the CLI authenticates the Founder', () => {
     }
   });
 
-  it('states the classification and the remaining gate instead', () => {
+  it('states the CLI classification, and the browser path’s conditions, precisely', () => {
     expect(LOCAL_ADMIN_INTERFACE_NOTICE).toContain('TRUSTED-LOCAL-ADMIN');
     expect(LOCAL_ADMIN_INTERFACE_NOTICE).toContain('does not authenticate');
-    expect(DIRECT_ORDER_BLOCKER).toContain('TRUSTED-LOCAL-ADMIN');
-    expect(DIRECT_ORDER_BLOCKER).toContain('does not authenticate the Founder');
-    expect(DIRECT_ORDER_BLOCKER).toContain('NOT fully Founder-operable');
+    expect(DIRECT_ORDER_BROWSER_POLICY).toContain('TRUSTED-LOCAL-ADMIN');
+    expect(DIRECT_ORDER_BROWSER_POLICY).toContain('does not authenticate the Founder');
+    // The browser path is now real, and the claim about it must stay
+    // CONDITIONAL: operable only where the control plane, session, and
+    // explicit Founder mapping all hold — never operable unconditionally.
+    expect(DIRECT_ORDER_BROWSER_POLICY).toContain('Founder-operable from a browser ONLY');
+    expect(DIRECT_ORDER_BROWSER_POLICY).toContain('explicitly');
+    expect(DIRECT_ORDER_BROWSER_POLICY).toContain('mapped to the registered Founder principal');
   });
 });

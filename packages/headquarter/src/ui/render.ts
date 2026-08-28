@@ -11,12 +11,17 @@
  * embeddable later behind the operator control layer. No external requests,
  * no secrets, read-only over canonical data.
  *
- * Three honesty rules survive the #138 visual upgrade unchanged:
+ * Three honesty rules survive the #138 visual upgrade, the first re-scoped by
+ * the issue #200 integration now that the Founder-auth boundary exists:
  *
- *   1. Founder Approvals renders the D15 approval fields read-only and offers
- *      NO approve/reject actions — no <button>, no <form>, no mutation. The
- *      decision controls are drawn so the Founder can see where they will
- *      live, and are explicitly labelled as not wired.
+ *   1. The STATIC MARKUP of every page carries no mutation — no <button>, no
+ *      <form>, no <input>, no inline handler. Write controls (the Direct
+ *      Order composer and the Approve/Deny decisions) are constructed at
+ *      runtime by `control-console.ts`, and ONLY after
+ *      `GET /api/hq/control/session` granted each specific control; a page
+ *      served without the control plane, without a session, or without the
+ *      grant stays read-only and says why. Every write goes through the
+ *      Founder-gated control API — the same canonical seam the CLI has.
  *   2. A field the canonical data cannot answer is omitted, never filled in.
  *      There is no fabricated cost, token usage, sentiment or ETA anywhere.
  *   3. When the bundle carries a provenance note, every page states it at the
@@ -56,6 +61,7 @@ import {
 } from './components.js';
 import { archiveSearchScript, type ArchiveSearchRow } from './archive-search.js';
 import { liveRefreshScript } from './live-refresh.js';
+import { controlConsoleScript } from './control-console.js';
 import {
   AUTH_MECHANISM_LABELS,
   CONNECTION_STATE_LABELS,
@@ -132,6 +138,12 @@ interface ShellOptions {
    * is itself honest for a bundle that never stated one.
    */
   sourceMode?: SourceMode;
+  /**
+   * Include the Founder control console script. Set ONLY by pages that carry a
+   * `[data-hq-control]` mount (Command Center, Founder Approvals) — every
+   * other page ships no write-capable script at all.
+   */
+  controlConsole?: boolean;
 }
 
 /** Chip tone per provenance mode — SAMPLE must never look like LIVE. */
@@ -164,33 +176,33 @@ export interface DirectOrderRouteAvailability {
 }
 
 /**
- * Why the composer is drawn but not wired, stated in the UI itself.
+ * The composer's browser-submission policy, stated in the UI itself.
  *
- * This is not a TODO. `HeadquarterOperations.createTask` authorizes by
- * resolving `requestedBy` against the human-principal registry, and HQ has no
- * authenticated browser session that can establish who the requester is — the
- * FactoryOS Fastify server authenticates tenant users for the business app and
- * is a different trust domain entirely. A browser write here would therefore
- * have to either trust a client-supplied principal id (impersonation) or ship
- * a new auth boundary invented under automation, which the mission brief
- * explicitly gates. So the seam is built and tested server-side and the
- * composer shows exactly what it would submit.
+ * The Founder-auth boundary now exists (issue #200, Founder decision of
+ * 2026-08-28): a browser write is possible, but only when this page is served
+ * by a JENIFY OS host that mounted the HQ control plane, the viewer holds a
+ * live JENIFY OS session, and explicit configuration maps that account to the
+ * registered Founder principal. The submission control is therefore never in
+ * the static markup — `control-console.ts` constructs it at runtime, only
+ * after `GET /api/hq/control/session` granted it, so the drawn UI and the
+ * server's refusal conditions cannot disagree. Served statically (or with the
+ * control plane off) the composer stays read-only and says why.
  *
- * The CLI is named as the working path, and named honestly: it is a
- * trusted-local-admin/maintenance interface which does not authenticate the
- * Founder either — it asserts a principal id (see `live/local-trust.ts`). An
- * earlier draft of this string claimed the OS session was the authentication;
- * it is not, and HQ is therefore not yet Founder-operable in the browser.
+ * The CLI path remains, and remains honestly named: `hq:order` is a
+ * TRUSTED-LOCAL-ADMIN maintenance interface which does not authenticate the
+ * Founder — it asserts a principal id (see `live/local-trust.ts`) that
+ * deny-by-default authorization and no-self-approval then contain. The
+ * browser path is the one entitled to `authenticated_os_session`; the CLI is
+ * not, and the two must never be described interchangeably.
  */
-export const DIRECT_ORDER_BLOCKER =
-  'Submitting from the browser is BLOCKED: Headquarter has no authenticated Founder session, and ' +
-  'creating a task requires a registered human principal that a browser cannot prove it is. No weak ' +
-  'auth boundary was invented for V1. The order path itself is real and tested — run it with ' +
-  '`npm run hq:order --workspace @factoryos/headquarter -- --local-admin`, which is a ' +
-  'TRUSTED-LOCAL-ADMIN maintenance interface: it does not authenticate the Founder either, it ' +
-  'asserts a principal id that deny-by-default authorization and the no-self-approval rule then ' +
-  'contain. Until a real HQ authentication boundary exists — a Founder-gated security decision — ' +
-  'HQ is NOT fully Founder-operable from a browser.';
+export const DIRECT_ORDER_BROWSER_POLICY =
+  'Submitting from this browser requires a verified Founder session: the page must be served by a ' +
+  'JENIFY OS host with the HQ control plane enabled, and the signed-in account must be explicitly ' +
+  'mapped to the registered Founder principal. The submit control is drawn only after the control ' +
+  'API grants it — never by default — so HQ is Founder-operable from a browser ONLY on such a host; ' +
+  'served statically, this page stays read-only. The separate `hq:order` CLI is a ' +
+  'TRUSTED-LOCAL-ADMIN maintenance interface: it does not authenticate the Founder, it asserts a ' +
+  'principal id that deny-by-default authorization and the no-self-approval rule then contain.';
 
 const ROUTE_STATE_PRESENTATION: Record<'ready' | 'blocked' | 'unknown', { label: string; tone: Tone }> = {
   ready: { label: 'Available', tone: 'accent' },
@@ -199,9 +211,11 @@ const ROUTE_STATE_PRESENTATION: Record<'ready' | 'blocked' | 'unknown', { label:
 };
 
 /**
- * The composer. Rendered entirely from inert elements — no `<form>`, no
- * `<button>`, no `<input>` — so the site-wide "nothing on any page executes
- * anything" invariant holds literally rather than by convention.
+ * The composer. Its STATIC markup is still entirely inert — no `<form>`, no
+ * `<button>`, no `<input>` — so a page served without the control plane can
+ * never look submittable. The live form is constructed into
+ * `[data-hq-control-mount]` by `control-console.ts`, and only after the
+ * control API granted `directOrder` for the current session.
  */
 function directOrderComposer(routes: DirectOrderRouteAvailability[] | undefined): string {
   const fields = [
@@ -227,16 +241,17 @@ function directOrderComposer(routes: DirectOrderRouteAvailability[] | undefined)
 </div>`;
   }).join('\n');
 
-  return `<div class="panel order-composer">
-<p class="readonly-note">${escapeHtml(DIRECT_ORDER_BLOCKER)}</p>
+  return `<div class="panel order-composer" data-hq-control="direct-order">
+<p class="readonly-note">${escapeHtml(DIRECT_ORDER_BROWSER_POLICY)}</p>
 ${fields}
 <div class="order-field">
 <p class="order-label">Route</p>
 <div class="grid grid-cards">${routeChips}</div>
 </div>
-<div class="decision-controls" role="group" aria-label="Direct order controls — not available in the browser">
-<span class="control-readonly" aria-disabled="true">Start Task</span>
-<span class="faint">not wired in the browser — see the note above</span>
+<div class="order-field" role="group" aria-label="Submit from this browser">
+<p class="order-label">Submit from this browser</p>
+<p class="faint" data-hq-control-status>Checking for a Founder session… With scripting unavailable, or served without the JENIFY OS control plane, this composer stays read-only and nothing here can execute.</p>
+<div data-hq-control-mount></div>
 </div>
 <p class="muted">Every direct order is created as the Founder-gated capability <code>hq.direct_order</code>: it lands in <code>needs_approval</code> with an action digest and executes nothing until a Founder approves that exact action. An order for a provider that is not connected is refused outright — no other provider is ever substituted.</p>
 <p class="muted">The resolved provider is binding at execution, not a label: the order records it as <code>executionProvider</code>, and the Operator refuses to let any worker but one declared as that provider claim or start it. Because it sits in the payload, it is inside the digest the Founder approves — the provider cannot be swapped between approval and execution. <code>hq.direct_order</code> must also already be registered and enabled here: placing an order never registers it, and never re-enables one that was disabled.</p>
@@ -258,6 +273,7 @@ function shell({
   body,
   provenanceNote,
   sourceMode,
+  controlConsole,
 }: ShellOptions): string {
   const nav = HQ_PAGES.map(
     (page) =>
@@ -281,7 +297,7 @@ function shell({
 <header class="rail">
 <div class="brand"><span class="mark" aria-hidden="true">JQ</span><span class="wordmark"><b>JENIFY</b><span>Headquarter</span></span></div>
 <nav aria-label="Headquarter sections"><ul>${nav}</ul></nav>
-<p class="rail-foot">Read-only Founder view over the canonical activity log. No action on any page executes anything.</p>
+<p class="rail-foot">Founder view over the canonical activity log. Pages render read-only; a write control appears only after the HQ control API verifies a Founder session and grants that control, and every write goes through the Founder-gated canonical queue.</p>
 </header>
 <main id="hq-main">
 <div class="page-head">
@@ -297,6 +313,7 @@ ${provenanceNote ? provenanceBanner(provenanceNote) : ''}
 ${body}
 ${footer}
 ${liveRefreshScript(asOf)}
+${controlConsole ? controlConsoleScript() : ''}
 </main>
 </div>
 </body>
@@ -539,6 +556,7 @@ ${section('ACTIVE AI WORKFORCE', workforce)}
     body,
     provenanceNote,
     sourceMode,
+    controlConsole: true,
   });
 }
 
@@ -896,13 +914,16 @@ ${
 const HIGH_RISK_CLASSES = ['founder_gate', 'destructive', 'production', 'payment', 'irreversible'];
 
 /**
- * Read-only Founder Approvals page (§6b): renders the D15 approval fields
- * (actionDigest, expiresAt, consumedAt, decidedBy) and offers NO
- * approve/reject actions — decisions stay in the operator control plane.
+ * Founder Approvals page (§6b): renders the D15 approval fields
+ * (actionDigest, expiresAt, consumedAt, decidedBy) read-only, plus the LIVE
+ * DECISIONS mount that `control-console.ts` upgrades — only after
+ * `GET /api/hq/control/session` reports this session holds approval
+ * authority — into real Approve/Deny controls against the Founder-gated
+ * control API (digest-bound, step-up on irreversible risk classes).
  *
- * The Approve / Reject / Ask for Changes affordances are drawn so the layout
- * is honest about where decisions will live, but they are inert spans, not
- * buttons or form controls, and each carries a visible "not wired" label.
+ * There is deliberately no Ask-for-changes control anywhere: the canonical
+ * approval model records approve or deny only, and drawing a third decision
+ * would show the Founder an outcome the Operator does not track.
  */
 export function renderFounderApprovals(
   waiting: TaskState[],
@@ -912,16 +933,19 @@ export function renderFounderApprovals(
   sourceMode?: SourceMode,
 ): string {
   const note =
-    'Read-only approval queue. Approve / Reject / Ask for changes are shown as disabled placeholders: this page never executes an action. Decisions happen in the Founder-gated operator control plane, which enforces the action digest, expiry and single-use nonce.';
+    'The cards below are the build-time record, read-only. Decisions happen in LIVE DECISIONS: its controls are drawn only after the HQ control API verifies a Founder session with approval authority, every approval binds to the exact rendered action digest, and irreversible risk classes demand step-up confirmation. There is no Ask-for-changes: the canonical model records approve or deny only.';
 
   const pending = approvals.filter((approval) => approval.decision === 'pending');
   const decided = approvals.filter((approval) => approval.decision !== 'pending');
 
-  const decisionControls = `<div class="decision-controls" role="group" aria-label="Decision controls — not available on this page">
-<span class="control-readonly" aria-disabled="true">Approve</span>
-<span class="control-readonly" aria-disabled="true">Reject</span>
-<span class="control-readonly" aria-disabled="true">Ask for changes</span>
-<span class="faint">not wired — read-only page</span>
+  const decisionControls = `<div class="decision-controls" role="group" aria-label="Where this is decided">
+<span class="faint">Decide this in the LIVE DECISIONS panel above — controls are drawn there only for a verified Founder session with approval authority. Ask for changes is not offered: the canonical approval model records approve or deny only.</span>
+</div>`;
+
+  const liveDecisions = `<div class="panel" data-hq-control="approvals">
+<p class="readonly-note">Approve binds a single-use approval to the exact action digest shown; Deny blocks the task with an immutable, bounded reason. Approving a founder_gate or destructive action additionally demands a fresh credential (step-up). A rate-limited step-up is reported as rate-limited, never as a wrong password.</p>
+<p class="faint" data-hq-control-status>Checking for a Founder session with decision authority… With scripting unavailable, or served without the JENIFY OS control plane, decisions are not available here and nothing on this page can execute.</p>
+<div data-hq-control-mount></div>
 </div>`;
 
   function approvalCard(approval: ApprovalRequest): string {
@@ -969,6 +993,7 @@ ${kpiRow([
   { label: 'Decided', value: decided.length, hint: 'recorded decisions' },
   { label: 'Tasks waiting', value: waiting.length, hint: 'tasks in needs_approval' },
 ])}
+${section('LIVE DECISIONS', liveDecisions, 'live-decisions')}
 ${section('PENDING DECISIONS', pendingHtml)}
 ${section('DECISION HISTORY', decidedHtml)}
 ${section('TASKS WAITING FOR FOUNDER', taskRows(waiting, 'Tasks waiting for the Founder'))}`;
@@ -982,6 +1007,7 @@ ${section('TASKS WAITING FOR FOUNDER', taskRows(waiting, 'Tasks waiting for the 
     body,
     provenanceNote,
     sourceMode,
+    controlConsole: true,
   });
 }
 
