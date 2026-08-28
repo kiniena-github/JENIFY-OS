@@ -11,12 +11,17 @@
  * embeddable later behind the operator control layer. No external requests,
  * no secrets, read-only over canonical data.
  *
- * Three honesty rules survive the #138 visual upgrade unchanged:
+ * Three honesty rules survive the #138 visual upgrade, the first re-scoped by
+ * the issue #200 integration now that the Founder-auth boundary exists:
  *
- *   1. Founder Approvals renders the D15 approval fields read-only and offers
- *      NO approve/reject actions — no <button>, no <form>, no mutation. The
- *      decision controls are drawn so the Founder can see where they will
- *      live, and are explicitly labelled as not wired.
+ *   1. The STATIC MARKUP of every page carries no mutation — no <button>, no
+ *      <form>, no <input>, no inline handler. Write controls (the Direct
+ *      Order composer and the Approve/Deny decisions) are constructed at
+ *      runtime by `control-console.ts`, and ONLY after
+ *      `GET /api/hq/control/session` granted each specific control; a page
+ *      served without the control plane, without a session, or without the
+ *      grant stays read-only and says why. Every write goes through the
+ *      Founder-gated control API — the same canonical seam the CLI has.
  *   2. A field the canonical data cannot answer is omitted, never filled in.
  *      There is no fabricated cost, token usage, sentiment or ETA anywhere.
  *   3. When the bundle carries a provenance note, every page states it at the
@@ -55,14 +60,30 @@ import {
   type Tone,
 } from './components.js';
 import { archiveSearchScript, type ArchiveSearchRow } from './archive-search.js';
+import { liveRefreshScript } from './live-refresh.js';
+import { controlConsoleScript } from './control-console.js';
+import {
+  AUTH_MECHANISM_LABELS,
+  CONNECTION_STATE_LABELS,
+  CONNECTION_STATE_TONE,
+  connectionSummary,
+  type ConnectionState,
+  type ConnectionStatus,
+} from '../live/connections.js';
+import { DIRECT_ORDER_ROUTES, type RouteResolution } from '../live/orders.js';
+import { SOURCE_MODE_LABELS, type SourceMode } from '../live/provenance.js';
+import type { FloorState } from './spatial/state.js';
+import { spatialFloorBody } from './spatial/page.js';
 
 export const HQ_PAGES = [
   { file: 'index.html', title: 'Command Center', glyph: '◈' },
+  { file: 'headquarters.html', title: 'Headquarters Floor', glyph: '⬡' },
   { file: 'projects.html', title: 'Projects', glyph: '▤' },
   { file: 'executive-room.html', title: 'Executive Room', glyph: '◎' },
   { file: 'direct-chats.html', title: 'Direct Chats', glyph: '✉' },
   { file: 'specialists.html', title: 'Specialist Directory', glyph: '⚇' },
   { file: 'approvals.html', title: 'Founder Approvals', glyph: '⚖' },
+  { file: 'connections.html', title: 'Connections', glyph: '⇄' },
   { file: 'archive.html', title: 'Archive', glyph: '▦' },
 ] as const;
 
@@ -110,6 +131,131 @@ interface ShellOptions {
   asOf: string;
   body: string;
   provenanceNote?: string;
+  /**
+   * Where the bundle's data actually came from. Rendered as a chip on every
+   * page so LIVE, RECONSTRUCTED and SAMPLE are distinguishable at a glance
+   * rather than buried in a footer. Omitted → no claim is made at all, which
+   * is itself honest for a bundle that never stated one.
+   */
+  sourceMode?: SourceMode;
+  /**
+   * Include the Founder control console script. Set ONLY by pages that carry a
+   * `[data-hq-control]` mount (Command Center, Founder Approvals) — every
+   * other page ships no write-capable script at all.
+   */
+  controlConsole?: boolean;
+}
+
+/** Chip tone per provenance mode — SAMPLE must never look like LIVE. */
+const SOURCE_MODE_TONE: Record<SourceMode, Tone> = {
+  live: 'accent',
+  reconstructed: 'violet',
+  sample: 'warn',
+};
+
+/**
+ * The freshness chip the polling script updates.
+ *
+ * It starts as CHECKING rather than LIVE: before the first poll returns, the
+ * page genuinely does not know whether it is current, and saying LIVE would
+ * be a claim the render cannot back. With scripting unavailable it simply
+ * stays CHECKING, next to the build-time "As of" stamp that is always true.
+ */
+function freshnessChip(): string {
+  return `<span class="chip tone-neutral" data-live-state="checking"><span class="dot" aria-hidden="true"></span><span data-live-label>CHECKING…</span></span>`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Direct Order composer (issue #200, scope B — UI half)               */
+/* ------------------------------------------------------------------ */
+
+/** One route the composer offers, with the verdict evidence actually gives it. */
+export interface DirectOrderRouteAvailability {
+  route: (typeof DIRECT_ORDER_ROUTES)[number];
+  resolution: RouteResolution;
+}
+
+/**
+ * The composer's browser-submission policy, stated in the UI itself.
+ *
+ * The Founder-auth boundary now exists (issue #200, Founder decision of
+ * 2026-08-28): a browser write is possible, but only when this page is served
+ * by a JENIFY OS host that mounted the HQ control plane, the viewer holds a
+ * live JENIFY OS session, and explicit configuration maps that account to the
+ * registered Founder principal. The submission control is therefore never in
+ * the static markup — `control-console.ts` constructs it at runtime, only
+ * after `GET /api/hq/control/session` granted it, so the drawn UI and the
+ * server's refusal conditions cannot disagree. Served statically (or with the
+ * control plane off) the composer stays read-only and says why.
+ *
+ * The CLI path remains, and remains honestly named: `hq:order` is a
+ * TRUSTED-LOCAL-ADMIN maintenance interface which does not authenticate the
+ * Founder — it asserts a principal id (see `live/local-trust.ts`) that
+ * deny-by-default authorization and no-self-approval then contain. The
+ * browser path is the one entitled to `authenticated_os_session`; the CLI is
+ * not, and the two must never be described interchangeably.
+ */
+export const DIRECT_ORDER_BROWSER_POLICY =
+  'Submitting from this browser requires a verified Founder session: the page must be served by a ' +
+  'JENIFY OS host with the HQ control plane enabled, and the signed-in account must be explicitly ' +
+  'mapped to the registered Founder principal. The submit control is drawn only after the control ' +
+  'API grants it — never by default — so HQ is Founder-operable from a browser ONLY on such a host; ' +
+  'served statically, this page stays read-only. The separate `hq:order` CLI is a ' +
+  'TRUSTED-LOCAL-ADMIN maintenance interface: it does not authenticate the Founder, it asserts a ' +
+  'principal id that deny-by-default authorization and the no-self-approval rule then contain.';
+
+const ROUTE_STATE_PRESENTATION: Record<'ready' | 'blocked' | 'unknown', { label: string; tone: Tone }> = {
+  ready: { label: 'Available', tone: 'accent' },
+  blocked: { label: 'Blocked — not connected', tone: 'danger' },
+  unknown: { label: 'Not evaluated', tone: 'neutral' },
+};
+
+/**
+ * The composer. Its STATIC markup is still entirely inert — no `<form>`, no
+ * `<button>`, no `<input>` — so a page served without the control plane can
+ * never look submittable. The live form is constructed into
+ * `[data-hq-control-mount]` by `control-console.ts`, and only after the
+ * control API granted `directOrder` for the current session.
+ */
+function directOrderComposer(routes: DirectOrderRouteAvailability[] | undefined): string {
+  const fields = [
+    ['Instruction', 'What you want done, in your own words. A brief for a worker — never a command to run.'],
+    ['Project (optional)', 'A label only. Labels are presentation, never authority.'],
+  ]
+    .map(
+      ([label, hint]) => `<div class="order-field">
+<p class="order-label">${escapeHtml(label)}</p>
+<span class="control-readonly" aria-disabled="true">${escapeHtml(hint)}</span>
+</div>`,
+    )
+    .join('\n');
+
+  const routeChips = DIRECT_ORDER_ROUTES.map((route) => {
+    const found = routes?.find((entry) => entry.route === route);
+    const state = found == null ? 'unknown' : found.resolution.connected ? 'ready' : 'blocked';
+    const presentation = ROUTE_STATE_PRESENTATION[state];
+    const detail = found?.resolution.reason ?? 'Route availability was not evaluated for this build.';
+    return `<div class="order-route" data-route="${escapeHtml(route)}">
+<p class="row">${chip(route, 'neutral', true)}${chip(presentation.label, presentation.tone)}</p>
+<p class="faint">${escapeHtml(detail)}</p>
+</div>`;
+  }).join('\n');
+
+  return `<div class="panel order-composer" data-hq-control="direct-order">
+<p class="readonly-note">${escapeHtml(DIRECT_ORDER_BROWSER_POLICY)}</p>
+${fields}
+<div class="order-field">
+<p class="order-label">Route</p>
+<div class="grid grid-cards">${routeChips}</div>
+</div>
+<div class="order-field" role="group" aria-label="Submit from this browser">
+<p class="order-label">Submit from this browser</p>
+<p class="faint" data-hq-control-status>Checking for a Founder session… With scripting unavailable, or served without the JENIFY OS control plane, this composer stays read-only and nothing here can execute.</p>
+<div data-hq-control-mount></div>
+</div>
+<p class="muted">Every direct order is created as the Founder-gated capability <code>hq.direct_order</code>: it lands in <code>needs_approval</code> with an action digest and executes nothing until a Founder approves that exact action. An order for a provider that is not connected is refused outright — no other provider is ever substituted.</p>
+<p class="muted">The resolved provider is binding at execution, not a label: the order records it as <code>executionProvider</code>, and the Operator refuses to let any worker but one declared as that provider claim or start it. Because it sits in the payload, it is inside the digest the Founder approves — the provider cannot be swapped between approval and execution. <code>hq.direct_order</code> must also already be registered and enabled here: placing an order never registers it, and never re-enables one that was disabled.</p>
+</div>`;
 }
 
 function provenanceBanner(note: string): string {
@@ -118,7 +264,17 @@ function provenanceBanner(note: string): string {
 </div>`;
 }
 
-function shell({ title, activeFile, eyebrow, lede, asOf, body, provenanceNote }: ShellOptions): string {
+function shell({
+  title,
+  activeFile,
+  eyebrow,
+  lede,
+  asOf,
+  body,
+  provenanceNote,
+  sourceMode,
+  controlConsole,
+}: ShellOptions): string {
   const nav = HQ_PAGES.map(
     (page) =>
       `<li><a href="${page.file}"${page.file === activeFile ? ' aria-current="page"' : ''}><span class="glyph" aria-hidden="true">${page.glyph}</span>${escapeHtml(page.title)}</a></li>`,
@@ -141,18 +297,23 @@ function shell({ title, activeFile, eyebrow, lede, asOf, body, provenanceNote }:
 <header class="rail">
 <div class="brand"><span class="mark" aria-hidden="true">JQ</span><span class="wordmark"><b>JENIFY</b><span>Headquarter</span></span></div>
 <nav aria-label="Headquarter sections"><ul>${nav}</ul></nav>
-<p class="rail-foot">Read-only Founder view over the canonical activity log. No action on any page executes anything.</p>
+<p class="rail-foot">Founder view over the canonical activity log. Pages render read-only; a write control appears only after the HQ control API verifies a Founder session and grants that control, and every write goes through the Founder-gated canonical queue.</p>
 </header>
 <main id="hq-main">
 <div class="page-head">
 <p class="eyebrow">${escapeHtml(eyebrow)}</p>
 <h1>${escapeHtml(title)}</h1>
 <p class="lede">${escapeHtml(lede)}</p>
-<p class="row" data-as-of>${chip(`As of ${asOf}`, 'neutral', true)}</p>
+<p class="row" data-as-of>${chip(`As of ${asOf}`, 'neutral', true)}${
+    sourceMode ? chip(SOURCE_MODE_LABELS[sourceMode], SOURCE_MODE_TONE[sourceMode], true) : ''
+  }${freshnessChip()}</p>
+<p class="faint" data-live-detail>Checking whether a newer snapshot exists…</p>
 </div>
 ${provenanceNote ? provenanceBanner(provenanceNote) : ''}
 ${body}
 ${footer}
+${liveRefreshScript(asOf)}
+${controlConsole ? controlConsoleScript() : ''}
 </main>
 </div>
 </body>
@@ -235,6 +396,14 @@ export interface CommandCenterInput {
   /** UTC instant the page treats as "now" for relative ages. */
   nowIso: string;
   provenanceNote?: string;
+  sourceMode?: SourceMode;
+  /**
+   * Truthful route availability for the Direct Order composer, as observed
+   * by `resolveOrderRoute`. Omitted → the composer states that availability
+   * was not evaluated for this build, which is different from (and must not
+   * be rendered as) "unavailable".
+   */
+  orderRoutes?: DirectOrderRouteAvailability[];
 }
 
 export function renderCommandCenter({
@@ -245,6 +414,8 @@ export function renderCommandCenter({
   approvals,
   nowIso,
   provenanceNote,
+  sourceMode,
+  orderRoutes,
 }: CommandCenterInput): string {
   const attention = founderAttentionQueue(dashboard);
   const pendingApprovals = approvals.filter((approval) => approval.decision === 'pending');
@@ -367,6 +538,7 @@ ${event.status ? ` ${statusChip(event.status)}` : ` ${chip('note', 'neutral')}`}
 <div class="split-main">
 <div>
 ${section('WHAT NEEDS THE FOUNDER', attentionPanel, 'founder-attention')}
+${section('DIRECT ORDER', directOrderComposer(orderRoutes), 'direct-order')}
 <div class="grid grid-lanes">${lanes}</div>
 </div>
 <div>
@@ -383,6 +555,8 @@ ${section('ACTIVE AI WORKFORCE', workforce)}
     asOf: nowIso,
     body,
     provenanceNote,
+    sourceMode,
+    controlConsole: true,
   });
 }
 
@@ -395,6 +569,7 @@ export function renderProjects(
   timelines: Map<string, ActivityEvent[]>,
   nowIso: string,
   provenanceNote?: string,
+  sourceMode?: SourceMode,
 ): string {
   const board =
     cards.length === 0
@@ -465,6 +640,7 @@ ${
     asOf: nowIso,
     body: `${section('PORTFOLIO', board)}${timelineHtml}`,
     provenanceNote,
+    sourceMode,
   });
 }
 
@@ -519,6 +695,7 @@ export function renderExecutiveRoom(
   approvals: ApprovalRequest[],
   nowIso: string,
   provenanceNote?: string,
+  sourceMode?: SourceMode,
 ): string {
   const threads = groupThreads(messages);
   const all = threads.flatMap((thread) => thread.messages);
@@ -586,6 +763,7 @@ ${kpiRow([
     asOf: nowIso,
     body,
     provenanceNote,
+    sourceMode,
   });
 }
 
@@ -595,6 +773,7 @@ export function renderDirectChats(
   states: TaskState[],
   nowIso: string,
   provenanceNote?: string,
+  sourceMode?: SourceMode,
 ): string {
   const threads = groupThreads(messages);
 
@@ -663,6 +842,7 @@ ${waiting.length > 0 ? `<p class="muted">Waiting on Founder: ${waiting.map((stat
     asOf: nowIso,
     body,
     provenanceNote,
+    sourceMode,
   });
 }
 
@@ -674,6 +854,7 @@ export function renderSpecialistDirectory(
   profiles: SpecialistProfile[],
   nowIso: string,
   provenanceNote?: string,
+  sourceMode?: SourceMode,
 ): string {
   const cards =
     profiles.length === 0
@@ -722,6 +903,7 @@ ${
     asOf: nowIso,
     body: `<p class="readonly-note">${escapeHtml(note)}</p>${section('WORKFORCE', cards)}`,
     provenanceNote,
+    sourceMode,
   });
 }
 
@@ -732,31 +914,38 @@ ${
 const HIGH_RISK_CLASSES = ['founder_gate', 'destructive', 'production', 'payment', 'irreversible'];
 
 /**
- * Read-only Founder Approvals page (§6b): renders the D15 approval fields
- * (actionDigest, expiresAt, consumedAt, decidedBy) and offers NO
- * approve/reject actions — decisions stay in the operator control plane.
+ * Founder Approvals page (§6b): renders the D15 approval fields
+ * (actionDigest, expiresAt, consumedAt, decidedBy) read-only, plus the LIVE
+ * DECISIONS mount that `control-console.ts` upgrades — only after
+ * `GET /api/hq/control/session` reports this session holds approval
+ * authority — into real Approve/Deny controls against the Founder-gated
+ * control API (digest-bound, step-up on irreversible risk classes).
  *
- * The Approve / Reject / Ask for Changes affordances are drawn so the layout
- * is honest about where decisions will live, but they are inert spans, not
- * buttons or form controls, and each carries a visible "not wired" label.
+ * There is deliberately no Ask-for-changes control anywhere: the canonical
+ * approval model records approve or deny only, and drawing a third decision
+ * would show the Founder an outcome the Operator does not track.
  */
 export function renderFounderApprovals(
   waiting: TaskState[],
   approvals: ApprovalRequest[],
   nowIso: string,
   provenanceNote?: string,
+  sourceMode?: SourceMode,
 ): string {
   const note =
-    'Read-only approval queue. Approve / Reject / Ask for changes are shown as disabled placeholders: this page never executes an action. Decisions happen in the Founder-gated operator control plane, which enforces the action digest, expiry and single-use nonce.';
+    'The cards below are the build-time record, read-only. Decisions happen in LIVE DECISIONS: its controls are drawn only after the HQ control API verifies a Founder session with approval authority, every approval binds to the exact rendered action digest, and irreversible risk classes demand step-up confirmation. There is no Ask-for-changes: the canonical model records approve or deny only.';
 
   const pending = approvals.filter((approval) => approval.decision === 'pending');
   const decided = approvals.filter((approval) => approval.decision !== 'pending');
 
-  const decisionControls = `<div class="decision-controls" role="group" aria-label="Decision controls — not available on this page">
-<span class="control-readonly" aria-disabled="true">Approve</span>
-<span class="control-readonly" aria-disabled="true">Reject</span>
-<span class="control-readonly" aria-disabled="true">Ask for changes</span>
-<span class="faint">not wired — read-only page</span>
+  const decisionControls = `<div class="decision-controls" role="group" aria-label="Where this is decided">
+<span class="faint">Decide this in the LIVE DECISIONS panel above — controls are drawn there only for a verified Founder session with approval authority. Ask for changes is not offered: the canonical approval model records approve or deny only.</span>
+</div>`;
+
+  const liveDecisions = `<div class="panel" data-hq-control="approvals">
+<p class="readonly-note">Approve binds a single-use approval to the exact action digest shown; Deny blocks the task with an immutable, bounded reason. Approving a founder_gate or destructive action additionally demands a fresh credential (step-up). A rate-limited step-up is reported as rate-limited, never as a wrong password.</p>
+<p class="faint" data-hq-control-status>Checking for a Founder session with decision authority… With scripting unavailable, or served without the JENIFY OS control plane, decisions are not available here and nothing on this page can execute.</p>
+<div data-hq-control-mount></div>
 </div>`;
 
   function approvalCard(approval: ApprovalRequest): string {
@@ -804,6 +993,7 @@ ${kpiRow([
   { label: 'Decided', value: decided.length, hint: 'recorded decisions' },
   { label: 'Tasks waiting', value: waiting.length, hint: 'tasks in needs_approval' },
 ])}
+${section('LIVE DECISIONS', liveDecisions, 'live-decisions')}
 ${section('PENDING DECISIONS', pendingHtml)}
 ${section('DECISION HISTORY', decidedHtml)}
 ${section('TASKS WAITING FOR FOUNDER', taskRows(waiting, 'Tasks waiting for the Founder'))}`;
@@ -816,11 +1006,141 @@ ${section('TASKS WAITING FOR FOUNDER', taskRows(waiting, 'Tasks waiting for the 
     asOf: nowIso,
     body,
     provenanceNote,
+    sourceMode,
+    controlConsole: true,
   });
 }
 
 /* ------------------------------------------------------------------ */
-/* Page 7 — Archive / Knowledge (+ page 8 search experience)           */
+/* Page 7 — Connections (issue #200, scope C)                          */
+/* ------------------------------------------------------------------ */
+
+const CONNECTIONS_NOTE =
+  'Every state on this page is derived from facts actually observed in this environment — not from ' +
+  'the provider catalogue, not from a registered AI member, and not from a vendor descriptor. A name ' +
+  'appearing here means HQ knows what the integration would be, never that it is reachable. ' +
+  'CONFIGURED means the credentials are present and nothing has checked them. DISPATCHABLE means ' +
+  'more — an executor exists and every fact it needs to run is present, so HQ would route work to ' +
+  'it — but still nothing has asked the provider itself, so an expired or revoked credential would ' +
+  'look identical. Neither is Connected, and neither grants a capability: CONNECTED means a live ' +
+  'check ran against the service and succeeded, and HQ registers no such check yet. Only secret ' +
+  'PRESENCE is recorded anywhere in HQ; no credential value is read, stored, logged or rendered.';
+
+export function renderConnections(
+  statuses: ConnectionStatus[],
+  nowIso: string,
+  provenanceNote?: string,
+  sourceMode?: SourceMode,
+): string {
+  const counts = connectionSummary(statuses);
+
+  const card = (status: ConnectionStatus): string => {
+    const usable = status.state === 'connected' || status.state === 'local_only';
+    const capabilities =
+      status.effectiveCapabilities.length > 0
+        ? `<p class="row">${status.effectiveCapabilities.map((capability) => chip(capability, 'accent')).join('')}</p>`
+        : `<p class="faint">No capability is available to HQ through this connection${
+            usable
+              ? '.'
+              : status.state === 'dispatchable'
+                ? ': HQ would route work to it, but nothing has asked the provider whether the credential still works, and dispatchability alone grants nothing.'
+                : status.state === 'configured'
+                  ? ': its credentials are present, but nothing has verified them, and configuration alone grants nothing.'
+                  : ' while it is not connected.'
+          }</p>`;
+
+    // Fact NAMES only. This is the presence-not-value convention that makes a
+    // connection status renderable in a browser at all.
+    const facts = [
+      status.observedFacts.length > 0
+        ? `<p class="faint">Observed present: ${status.observedFacts.map((fact) => `<code>${escapeHtml(fact)}</code>`).join(', ')}</p>`
+        : '',
+      status.missingFacts.length > 0
+        ? `<p class="faint">Observed absent: ${status.missingFacts.map((fact) => `<code>${escapeHtml(fact)}</code>`).join(', ')}</p>`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    // A control is drawn ONLY where a real implementation exists. An
+    // unavailable action is described in words instead of mocked as a button.
+    const controls = `<div class="decision-controls" role="group" aria-label="Connection controls">
+${
+  status.canRecheck
+    ? '<span class="control-readonly" aria-disabled="true">Recheck</span>'
+    : ''
+}
+<span class="faint">${escapeHtml(
+      status.canRecheck
+        ? 'Recheck re-reads the same non-secret facts; it is not wired to the browser, and runs from the Founder workstation.'
+        : 'No safe recheck exists for this integration yet, so no control is drawn.',
+    )}</span>
+<span class="faint">${escapeHtml(
+      status.canDisconnect
+        ? 'Disconnect revokes the stored credential.'
+        : 'No Disconnect/Revoke control is drawn: HQ holds no credential of its own to revoke, so the control would do nothing.',
+    )}</span>
+</div>`;
+
+    return `<article class="card" data-connection="${escapeHtml(status.id)}">
+<p class="row">${chip(CONNECTION_STATE_LABELS[status.state], CONNECTION_STATE_TONE[status.state], true)}${chip(
+      AUTH_MECHANISM_LABELS[status.authMechanism],
+      'neutral',
+    )}${chip(status.locality === 'local' ? 'Local' : 'Cloud', 'neutral')}</p>
+<h3>${escapeHtml(status.displayName)}</h3>
+<p class="muted">${escapeHtml(status.reason)}</p>
+${capabilities}
+<div class="record-meta">
+${facts}
+<p class="faint">Evidence: ${escapeHtml(status.evidenceSource)}</p>
+<p class="faint">Verification: ${escapeHtml(status.verification.replace(/_/g, ' '))} — ${escapeHtml(status.outcome.replace(/_/g, ' '))}</p>
+<p class="faint">Last verified: ${status.lastVerifiedAt ? escapeHtml(status.lastVerifiedAt) : 'never'}</p>
+</div>
+${controls}
+</article>`;
+  };
+
+  const body = `<p class="readonly-note">${escapeHtml(CONNECTIONS_NOTE)}</p>
+${kpiRow([
+  { label: 'Connected', value: counts.connected, hint: 'a live check succeeded', tone: counts.connected > 0 ? 'accent' : 'neutral' },
+  { label: 'Dispatchable', value: counts.dispatchable, hint: 'routable, never verified', tone: counts.dispatchable > 0 ? 'info' : 'neutral' },
+  { label: 'Configured', value: counts.configured, hint: 'credentials present, never verified', tone: counts.configured > 0 ? 'warn' : 'neutral' },
+  { label: 'Setup required', value: counts.setup_required, hint: 'partially configured', tone: counts.setup_required > 0 ? 'warn' : 'neutral' },
+  { label: 'Not connected', value: counts.not_connected, hint: 'no required fact observed' },
+  { label: 'Error', value: counts.error, hint: 'a check failed or the probe threw', tone: counts.error > 0 ? 'danger' : 'neutral' },
+])}
+${section(
+  'CONNECTIONS',
+  statuses.length === 0
+    ? emptyState('No integration is catalogued.')
+    : `<div class="grid grid-wide">${statuses.map(card).join('\n')}</div>`,
+)}
+${section(
+  'ADDING A CONNECTION',
+  `<div class="panel">
+<p class="muted">A new integration is a descriptor plus a probe (<code>live/connections.ts</code>). A descriptor added without a probe stays <em>not connected</em> rather than optimistic — deny by default, as everywhere else in the control plane.</p>
+<p class="muted">Adapter preference, in order: OAuth, then API key, then MCP or a local CLI, with browser automation only as a last resort.</p>
+<div class="decision-controls" role="group" aria-label="Add connection — not available in the browser">
+<span class="control-readonly" aria-disabled="true">+ Add Connection</span>
+<span class="faint">not wired — adding a connection needs credentials HQ deliberately cannot hold on a Founder's behalf from a browser</span>
+</div>
+</div>`,
+)}`;
+
+  return shell({
+    title: 'Connections',
+    activeFile: 'connections.html',
+    eyebrow: 'Connection center',
+    lede: 'What HQ can genuinely reach right now, how it authenticates, what that grants — and what is merely catalogued.',
+    asOf: nowIso,
+    body,
+    provenanceNote,
+    sourceMode,
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Page 8 — Archive / Knowledge (+ page 9 search experience)           */
 /* ------------------------------------------------------------------ */
 
 /**
@@ -914,6 +1234,7 @@ export function renderArchive(
   evolutions: Map<string, EvolutionChain[]>,
   nowIso: string,
   provenanceNote?: string,
+  sourceMode?: SourceMode,
 ): string {
   const byProject = new Map<string, ArchiveRecord[]>();
   for (const record of records) {
@@ -1002,5 +1323,42 @@ ${archiveSearchScript(searchRows)}`;
     asOf: nowIso,
     body,
     provenanceNote,
+    sourceMode,
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Page 9 — Headquarters Floor (issue #200, spatial HQ mission)        */
+/*                                                                     */
+/* The living headquarters: the same canonical read models the other    */
+/* eight pages render, projected into a room-and-desk plan the Founder  */
+/* can walk. It adds no data source and no authority — every room links */
+/* back to the read-only page that holds its full detail.               */
+/* ------------------------------------------------------------------ */
+
+export interface HeadquartersFloorInput {
+  floor: FloorState;
+  specialists: WorkerDescriptor[];
+  nowIso: string;
+  provenanceNote?: string;
+  sourceMode?: SourceMode;
+}
+
+export function renderHeadquartersFloor({
+  floor,
+  specialists,
+  nowIso,
+  provenanceNote,
+  sourceMode,
+}: HeadquartersFloorInput): string {
+  return shell({
+    title: 'Headquarters Floor',
+    activeFile: 'headquarters.html',
+    eyebrow: 'The living headquarters',
+    lede: 'The whole company as one floor: who is at work, what is blocked, what waits on you, and which uplinks are lit — drawn only from canonical state.',
+    asOf: nowIso,
+    body: spatialFloorBody({ floor, nowIso, specialists }),
+    provenanceNote,
+    sourceMode,
   });
 }

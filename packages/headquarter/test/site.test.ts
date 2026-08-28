@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest';
 import { escapeHtml } from '../src/ui/components.js';
 import { HQ_PAGES, renderSourceRef } from '../src/ui/render.js';
 import { buildSite, bundleAsOf, type HeadquarterData } from '../src/ui/site.js';
+import { BrowserSafetyError } from '../src/live/redaction.js';
+import type { ConnectionStatus } from '../src/live/connections.js';
 
 const samplePath = join(dirname(fileURLToPath(import.meta.url)), '..', 'sample-data', 'hq-sample.json');
 const sample = JSON.parse(readFileSync(samplePath, 'utf8')) as HeadquarterData;
@@ -46,7 +48,7 @@ describe('buildSite', () => {
   it('Founder Approvals renders the D15 fields read-only with no action controls', () => {
     const html = site.get('approvals.html')!;
     expect(html).toContain('Universal Operator architecture proposal'); // waiting task
-    expect(html).toContain('operator control plane');
+    expect(html).toContain('control API verifies a Founder session');
     // D15 approval fields (§6b): actionDigest, expiresAt, consumedAt, decidedBy
     expect(html).toContain('Action digest');
     expect(html).toContain('3f9a1c2b4d5e6f70'); // truncated digest rendered
@@ -57,14 +59,23 @@ describe('buildSite', () => {
     expect(html).not.toContain('<form');
   });
 
-  it('draws the decision controls as inert, explicitly-labelled placeholders', () => {
+  it('points decisions at the grant-gated LIVE DECISIONS panel, and offers no third decision', () => {
     const html = site.get('approvals.html')!;
-    for (const control of ['Approve', 'Reject', 'Ask for changes']) {
-      expect(html).toContain(`<span class="control-readonly" aria-disabled="true">${control}</span>`);
-    }
-    expect(html).toContain('not wired — read-only page');
-    // Nothing anywhere in the site may submit, navigate to a mutation, or run
-    // an inline handler.
+    // The old inert Approve/Reject placeholders are gone: decisions live in
+    // the LIVE DECISIONS mount, which the control console upgrades ONLY after
+    // /api/hq/control/session reports approval authority (issue #200
+    // integration; executed end-to-end in control-console.test.ts).
+    expect(html).toContain('<h2>LIVE DECISIONS</h2>');
+    expect(html).toContain('data-hq-control="approvals"');
+    expect(html).toContain('data-hq-control-mount');
+    // Ask-for-changes is deliberately NOT drawn, and the reason is stated:
+    // the canonical model records approve or deny only.
+    expect(html).not.toContain('control-readonly" aria-disabled="true">Ask for changes');
+    expect(html).not.toContain('>Ask for changes<');
+    expect(html).toContain('records approve or deny only');
+    // Static markup site-wide still may not submit, navigate to a mutation,
+    // or run an inline handler — write controls are runtime constructions,
+    // drawn only for a granted session.
     for (const page of HQ_PAGES) {
       const pageHtml = site.get(page.file)!;
       expect(pageHtml).not.toContain('<form');
@@ -264,5 +275,81 @@ describe('buildSite', () => {
     expect(html).toContain('Blocked'); // Jenify Labs is blocked
     expect(html).toContain('Latest achievement:');
     expect(html).toContain('Recent update:');
+  });
+});
+
+/**
+ * Codex exact-head finding on `5c767fa` (P1). A caller-supplied `connections`
+ * bundle went straight to the renderer with nothing having scanned it, and the
+ * snapshot guard could not cover for that: `build-site.ts` recomputes the
+ * snapshot's connections from `env`, independently of the bundle, and the HTML
+ * is written first. A credential that reached a verifier's `reason`,
+ * `evidenceSource` or fact list therefore landed in `connections.html` with no
+ * boundary in the path having looked at it.
+ *
+ * The guard now runs on the connections that are actually RENDERED, on both
+ * branches, so the invariant does not depend on which one a caller took.
+ */
+describe('rendered connections cross the browser boundary through the guard', () => {
+  const poisoned = (overrides: Partial<ConnectionStatus>): HeadquarterData => ({
+    ...sample,
+    connections: [
+      {
+        id: 'supabase',
+        displayName: 'Supabase',
+        category: 'infrastructure',
+        authMechanism: 'api_key',
+        locality: 'cloud',
+        advertisedCapabilities: [],
+        requiredFacts: [],
+        setupHint: 'n/a',
+        recheckable: false,
+        revocable: false,
+        state: 'configured',
+        verification: 'configuration',
+        outcome: 'not_attempted',
+        observedFacts: [],
+        missingFacts: [],
+        effectiveCapabilities: [],
+        lastVerifiedAt: null,
+        evidenceSource: 'test',
+        reason: 'test',
+        canRecheck: false,
+        canDisconnect: false,
+        ...overrides,
+      } as ConnectionStatus,
+    ],
+  });
+
+  it('throws rather than rendering a credential a verifier put in its reason', () => {
+    expect(() =>
+      buildSite(poisoned({ reason: 'Supabase: verified — using sk-abcdefghijklmnopqrstuvwxyz012345' })),
+    ).toThrow(BrowserSafetyError);
+  });
+
+  it('throws rather than rendering one carried in evidenceSource or a fact list', () => {
+    expect(() =>
+      buildSite(poisoned({ evidenceSource: 'token ghp_abcdefghijklmnopqrstuvwxyz0123456789' })),
+    ).toThrow(BrowserSafetyError);
+    expect(() =>
+      buildSite(poisoned({ observedFacts: ['sk-abcdefghijklmnopqrstuvwxyz012345'] })),
+    ).toThrow(BrowserSafetyError);
+  });
+
+  it('never writes the page when it refuses', () => {
+    // The throw has to come BEFORE any HTML exists, not after: the real build
+    // writes each page to disk as it goes.
+    let site: Map<string, string> | undefined;
+    try {
+      site = buildSite(poisoned({ reason: 'sk-abcdefghijklmnopqrstuvwxyz012345' }));
+    } catch {
+      site = undefined;
+    }
+    expect(site).toBeUndefined();
+  });
+
+  it('lets an honest bundle through untouched', () => {
+    const html = buildSite(poisoned({})).get('connections.html')!;
+    expect(html).toContain('Supabase');
   });
 });

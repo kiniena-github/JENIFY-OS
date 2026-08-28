@@ -33,6 +33,13 @@ import { EvidenceLog, assertNoSecretLikeContent } from './evidence.js';
 // guard holds regardless of whether a HandoverStore was ever constructed.
 import { assertAssignable } from '../handover/replacement.js';
 import {
+  checkProviderBinding,
+  readProviderBinding,
+  WorkerProviderDirectory,
+  type ProviderBindingViolation,
+  type WorkerProviderLookup,
+} from './provider-binding.js';
+import {
   DEFAULT_APPROVAL_TTL_MS,
   approvalExpiredAt,
   taskActionDigest,
@@ -97,6 +104,14 @@ const GLOBAL_SCOPE = '*';
 export class OperatorQueue {
   readonly capabilities: CapabilityRegistry;
   readonly evidence: EvidenceLog;
+  /**
+   * Declared worker → provider map, LOOKUP ONLY (issue #200, Codex round-3
+   * P1 #1). The object behind this handle has no write method at all: writing
+   * the map is a configuration act gated on approval authority in
+   * `HeadquarterOperations`, so nothing on the execution path — which is what
+   * holds a queue — can move its own provider identity.
+   */
+  readonly workerProviders: WorkerProviderLookup;
 
   constructor(
     private db: HqDatabase,
@@ -104,6 +119,101 @@ export class OperatorQueue {
   ) {
     this.capabilities = new CapabilityRegistry(db);
     this.evidence = new EvidenceLog(db);
+    this.workerProviders = new WorkerProviderDirectory(db);
+  }
+
+  /**
+   * Refuse a worker that does not match a task's declared execution provider.
+   *
+   * Called at BOTH execution boundaries — claim and start — so a task whose
+   * status was forced to `assigned` behind the queue's back still cannot be
+   * executed by the wrong provider. The refusal is loud (a throw) and
+   * evidenced, never a silent `null`: "this is not yours" and "the queue is
+   * empty" are different facts.
+   */
+  private assertProviderBinding(task: OperatorTask, workerId: string): void {
+    const binding = readProviderBinding(task.payload);
+    if (!binding.bound) return;
+    const workerProvider = this.workerProviders.providerOf(workerId);
+    const violation: ProviderBindingViolation | null = checkProviderBinding(
+      task.id,
+      workerId,
+      binding,
+      workerProvider,
+    );
+    if (!violation) return;
+    this.recordBindingRefusal(violation, workerId);
+    throw violation;
+  }
+
+  private recordBindingRefusal(violation: ProviderBindingViolation, workerId: string): void {
+    this.evidence.append({
+      taskId: violation.taskId,
+      actor: workerId,
+      kind: 'provider_binding_rejected',
+      payload: {
+        requiredProvider: violation.requiredProvider,
+        workerProvider: violation.workerProvider,
+        reason: violation.message,
+      },
+    });
+  }
+
+  /**
+   * The oldest QUEUED task for a capability that this worker may actually
+   * claim (issue #200, Codex round-3 P1 #2).
+   *
+   * Provider binding takes part in SELECTION, not only in refusal. Previously
+   * the queue offered the single oldest queued task and then refused it if the
+   * binding did not match, so one CLAUDE-bound order at the head could block a
+   * CODEX worker from every later CODEX-compatible task in the same
+   * capability — indefinitely, since a queued task only leaves the head by
+   * being claimed. The worker is now offered the oldest COMPATIBLE task
+   * instead.
+   *
+   * Nothing is loosened by skipping: an incompatible task was never claimable
+   * by this worker, at the head or anywhere else, and malformed or undeclared
+   * bindings still fail closed — a malformed `executionProvider` is compatible
+   * with nobody, and a worker with no declaration is compatible only with
+   * unbound tasks.
+   *
+   * Silence and refusal stay different facts. When nothing compatible exists
+   * the FIRST incompatible task's violation is returned, so the caller can
+   * still say "that work is not yours" (evidenced, loudly) rather than "the
+   * queue is empty".
+   *
+   * The worker's declared provider is read ONCE, before the scan, so the
+   * comparison cannot drift mid-scan and no query runs inside the row walk.
+   */
+  selectClaimable(
+    workerId: string,
+    capabilityId: string,
+  ): { task: OperatorTask | null; refusal: ProviderBindingViolation | null } {
+    const workerProvider = this.workerProviders.providerOf(workerId);
+    // Queued depth per capability is small in HQ; ids and payloads only.
+    const rows = this.db
+      .prepare(
+        `SELECT id, payload FROM op_tasks
+         WHERE capability_id = ? AND status = 'queued'
+         ORDER BY created_at`,
+      )
+      .all(capabilityId) as { id: string; payload: string }[];
+    let firstRefusal: ProviderBindingViolation | null = null;
+    for (const row of rows) {
+      let payload: Record<string, unknown>;
+      try {
+        payload = JSON.parse(row.payload) as Record<string, unknown>;
+      } catch {
+        // An unparseable payload is not offered to anyone: a task whose
+        // binding cannot even be read is exactly the case to fail closed on.
+        continue;
+      }
+      const binding = readProviderBinding(payload);
+      const violation = checkProviderBinding(row.id, workerId, binding, workerProvider);
+      if (!violation) return { task: this.get(row.id), refusal: null };
+      firstRefusal ??= violation;
+    }
+    return { task: null, refusal: firstRefusal };
   }
 
   // ---- kill switch ----
@@ -291,18 +401,30 @@ export class OperatorQueue {
     // rejected claim can never burn an approval or inflate a fencing token.
     assertAssignable(this.db, workerId);
     if (this.killSwitchEngaged(capabilityId)) return null;
-    const candidate = this.db
-      .prepare(
-        `SELECT id, fence FROM op_tasks
-         WHERE capability_id = ? AND status = 'queued'
-         ORDER BY created_at LIMIT 1`,
-      )
-      .get(capabilityId) as { id: string; fence: number } | undefined;
-    if (!candidate) return null;
+    // Provider binding participates in SELECTION, before any mutation and
+    // before the single-use approval nonce can be consumed: the worker is
+    // offered the oldest task compatible with its declared provider, and an
+    // order routed to one provider is never handed to another (issue #200,
+    // Codex P1 #1 and round-3 P1 #2).
+    const { task: selected, refusal } = this.selectClaimable(workerId, capabilityId);
+    if (!selected) {
+      // Nothing compatible. If incompatible work exists, say so loudly and
+      // evidence it — "not yours" is not "the queue is empty".
+      if (refusal) {
+        this.recordBindingRefusal(refusal, workerId);
+        throw refusal;
+      }
+      return null;
+    }
+    const candidate = { id: selected.id, fence: selected.fence };
     // Execution boundary (issue #53 correction A): an approval-gated task is
     // admitted only with a valid, unexpired, unconsumed approval bound to the
     // task's CURRENT digest — even if something forced its status to queued.
-    const task = this.get(candidate.id)!;
+    const task = selected;
+    // Belt and braces: the selected task is compatible by construction, and
+    // this re-derives that from the task row itself rather than trusting the
+    // scan, on the path that is about to consume an approval.
+    this.assertProviderBinding(task, workerId);
     const cap = this.capabilities.get(capabilityId);
     if (!cap || !cap.enabled) return null; // deny by default
     if (approvalRequired(cap, this.policyCtx)) {
@@ -381,6 +503,10 @@ export class OperatorQueue {
   start(taskId: string, workerId: string, fence: number): OperatorTask {
     this.assertFence(taskId, workerId, fence);
     const task = this.get(taskId)!;
+    // Re-checked here as well as at claim: a task forced into `assigned` never
+    // passed through claim's check, and provider binding is an execution
+    // authority, not a routing hint.
+    this.assertProviderBinding(task, workerId);
     const cap = this.capabilities.get(task.capabilityId);
     if (cap && approvalRequired(cap, this.policyCtx)) {
       const approval = this.getApprovalRecord(task.approvalId);

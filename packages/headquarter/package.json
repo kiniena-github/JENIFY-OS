@@ -18,7 +18,8 @@
     "./registry": "./src/registry/index.ts",
     "./providers": "./src/providers/index.ts",
     "./application": "./src/application/index.ts",
-    "./routing": "./src/routing/index.ts"
+    "./routing": "./src/routing/index.ts",
+    "./live": "./src/live/index.ts"
   },
   "scripts": {
     "test": "vitest run",
@@ -26,9 +27,12 @@
     "build": "tsc --noEmit",
     "inventory": "tsx src/cli/inventory.ts",
     "build:site": "tsx src/cli/build-site.ts",
+    "hq:order": "tsx src/cli/direct-order.ts",
+    "hq:snapshot": "tsx src/cli/snapshot.ts",
     "codex:review": "tsx src/cli/codex-review.ts",
     "codex:probe": "tsx src/cli/codex-review.ts --probe-only",
-    "evidence:ui": "node tools/ui-evidence.mjs"
+    "evidence:ui": "node tools/ui-evidence.mjs",
+    "evidence:states": "tsx tools/state-visual-evidence.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",

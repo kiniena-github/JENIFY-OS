@@ -62,6 +62,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_op_tasks_idem
   ON op_tasks(capability_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_op_tasks_status ON op_tasks(status);
 
+-- Which provider a worker id genuinely executes as (issue #200, Codex P1 #1).
+-- Deliberately EXPLICIT and empty by default: nothing infers a worker's
+-- provider from a vendor string, a display name or a registry descriptor, and
+-- a worker with no row here can never claim a provider-bound task.
+CREATE TABLE IF NOT EXISTS op_worker_providers (
+  worker_id TEXT PRIMARY KEY,
+  provider_id TEXT NOT NULL,
+  declared_by TEXT NOT NULL,
+  declared_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS op_evidence (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   id TEXT NOT NULL UNIQUE,
@@ -179,6 +190,30 @@ export function openHqDatabase(path: string = DEFAULT_HQ_DB_PATH): HqDatabase {
   db.pragma('foreign_keys = ON');
   db.exec(DDL);
   ensureColumns(db);
+  return db;
+}
+
+/**
+ * Open the Headquarter database for READING ONLY (issue #200, Codex finding
+ * on the snapshot tool).
+ *
+ * `openHqDatabase` is a migrating open: it creates the file if it is missing,
+ * switches the journal to WAL, runs the full DDL and adds any missing columns.
+ * That is right for a process that owns the store, and wrong for one that only
+ * projects it — the snapshot CLI described itself as read-only while every run
+ * altered the Founder's schema, and pointing it at a typo'd path silently
+ * created an empty database and then reported it as LIVE HQ state.
+ *
+ * This open takes nothing on itself: SQLite refuses writes at the connection,
+ * so the guarantee is enforced by the engine rather than by the caller's good
+ * intentions, and a missing file is an error instead of a new empty database.
+ * Schema migration stays exclusively with the process that owns the store, so a
+ * database this connection cannot read is reported, never repaired.
+ */
+export function openHqDatabaseReadOnly(path: string = DEFAULT_HQ_DB_PATH): HqDatabase {
+  const db = new Database(path, { readonly: true, fileMustExist: true });
+  // A connection-scoped read setting; it writes nothing to the file.
+  db.pragma('foreign_keys = ON');
   return db;
 }
 
