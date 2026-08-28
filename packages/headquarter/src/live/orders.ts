@@ -255,6 +255,19 @@ function orderFail(
 }
 
 /**
+ * Field separator for the idempotency digest.
+ *
+ * A character that cannot occur in any of the four inputs, so `a|b` and `ab|`
+ * can never hash alike. Written as an ESCAPE and named, deliberately: the same
+ * separator was previously a literal NUL byte in this source file, which made
+ * the file `data` rather than text to `file`, `grep` and friends — and any tool
+ * that stripped or normalised that byte would have silently changed every
+ * idempotency key, breaking deduplication of in-flight orders with no visible
+ * diff. Same bytes at run time; no invisible control character in the source.
+ */
+const FIELD_SEPARATOR = '\u0000';
+
+/**
  * Deterministic idempotency key.
  *
  * Derived from everything that makes the order the same order — who asked,
@@ -268,7 +281,9 @@ export function directOrderIdempotencyKey(
 ): string {
   const digest = createHash('sha256')
     .update(
-      [input.requestedBy, input.route, input.project ?? '', input.instruction.trim()].join(' '),
+      [input.requestedBy, input.route, input.project ?? '', input.instruction.trim()].join(
+        FIELD_SEPARATOR,
+      ),
     )
     .digest('hex');
   return `direct-order:${digest.slice(0, 32)}`;

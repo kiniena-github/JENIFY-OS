@@ -12,6 +12,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { setupFixture, type Fixture } from './application.fixture.js';
 import {
   AUTO_ROUTE_PREFERENCE,
@@ -188,6 +190,37 @@ describe('idempotency', () => {
     ]) {
       expect(directOrderIdempotencyKey({ ...base, ...change })).not.toBe(key);
     }
+  });
+
+  it('separates the digest fields, so a shifted boundary is not the same order', () => {
+    // 'founder' + 'CLAUDE' concatenated must not collide with 'founderCLAUDE'.
+    const a = directOrderIdempotencyKey({
+      instruction: 'x',
+      project: 'p',
+      route: 'AUTO',
+      requestedBy: 'founder',
+    });
+    const b = directOrderIdempotencyKey({
+      instruction: 'x',
+      project: 'p',
+      route: 'AUTO',
+      requestedBy: 'founderAUTO',
+    });
+    expect(a).not.toBe(b);
+  });
+
+  it('keeps the separator out of the source as a literal control character', () => {
+    // It used to be a raw NUL byte written straight into orders.ts, which made
+    // the file `data` rather than text to file/grep and — worse — meant any
+    // tool that stripped or normalised control characters would have silently
+    // changed EVERY idempotency key, breaking dedup of in-flight orders with
+    // no visible diff. Same bytes at run time; escape in the source.
+    const source = readFileSync(
+      fileURLToPath(new URL('../src/live/orders.ts', import.meta.url)),
+      'utf8',
+    );
+    // eslint-disable-next-line no-control-regex
+    expect(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(source)).toBe(false);
   });
 
   it('ignores surrounding whitespace, so a stray newline is not a new order', () => {
