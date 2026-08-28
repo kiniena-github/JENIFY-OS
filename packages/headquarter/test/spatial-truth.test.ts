@@ -1144,6 +1144,104 @@ describe('the Headquarters Floor page joins the site under its rules', () => {
     expect(THEME_CSS).not.toMatch(/\.hq-scene \{[^}]*min-width: \d+px/);
   });
 
+  // Distinct ids on purpose. `connectionWithState` reuses CONNECTION_CATALOG[0],
+  // so two calls produce two connections sharing one id — the panel lookup
+  // below then matches the first and compares it against the second's state,
+  // failing for a reason that has nothing to do with the product.
+  const PANEL_PROBE_CONNECTIONS = [
+    { ...connectionWithState('error'), id: 'probe-error', displayName: 'PROBE ERROR' },
+    { ...connectionWithState('connected'), id: 'probe-live', displayName: 'PROBE LIVE' },
+  ];
+
+  it('makes the room panel and the plan agree about every station', () => {
+    // Two surfaces, one truth — the shape of every finding on this PR so far.
+    // `page.ts` and `scene.ts` each read the same FloorState, so they could
+    // drift without either being individually wrong: a fixture drawn lit on
+    // the plan and listed unlit in the panel would be two defensible renders
+    // of one state and a contradiction to the reader.
+    //
+    // Checked against the state, not against each other, so a shared error
+    // cannot satisfy it.
+    const floor = floorState({
+      states: latestTaskStates(sample.events),
+      dashboard: founderDashboard(latestTaskStates(sample.events), sample.todayUtcDate),
+      workers: workerStatuses(latestTaskStates(sample.events)),
+      specialists: sample.specialists,
+      projects: projectBoard(latestTaskStates(sample.events)),
+      approvals: sample.approvals,
+      connections: PANEL_PROBE_CONNECTIONS,
+      archive: sample.archive,
+      chatMessages: sample.chatMessages,
+    });
+    const scene = renderScene(floor);
+    const page = buildSite({ ...sample, connections: PANEL_PROBE_CONNECTIONS }).get('headquarters.html')!;
+
+    for (const zone of floor.zones) {
+      for (const occupant of zone.occupants) {
+        // The panel lists EVERY occupant, seated or not — nothing is dropped
+        // from the data just because the room ran out of desks.
+        const entry = page.match(
+          new RegExp(`<li class="hq-occupant" data-worker="${occupant.id}" data-activity="([a-z_]+)"`),
+        );
+        expect(entry, `${occupant.id} is missing from the ${zone.zone.id} panel`).not.toBeNull();
+        expect(entry![1], `${occupant.id}: panel and state disagree about activity`).toBe(occupant.activity);
+      }
+
+      for (const fixture of zone.fixtures) {
+        const entry = page.match(new RegExp(`<li class="hq-fixture" data-fixture="${fixture.id}" data-lit="(yes|no)"`));
+        expect(entry, `${fixture.id} is missing from the ${zone.zone.id} panel`).not.toBeNull();
+        expect(entry![1] === 'yes', `${fixture.id}: panel and state disagree about lit`).toBe(fixture.lit);
+
+        if (fixture.stationId === null) continue;
+        const station = scene
+          .split('<g class="hq-station"')
+          .find((fragment) => fragment.includes(`data-station="${fixture.stationId}"`))!;
+        expect(station.includes('is-lit'), `${fixture.id}: plan and state disagree about lit`).toBe(fixture.lit);
+        expect(
+          station.includes('data-attention="yes"'),
+          `${fixture.id}: plan and state disagree about attention`,
+        ).toBe(fixture.tone === 'warn' || fixture.tone === 'danger');
+      }
+    }
+  });
+
+  it('gives the least-exercised rooms real content and real evidence', () => {
+    // archive-stacks and situation-room are fed by inputs every other test in
+    // this file leaves empty, so their fixtures have had the least scrutiny
+    // of the eight rooms.
+    const states = latestTaskStates(sample.events);
+    const floor = floorState({
+      states,
+      dashboard: founderDashboard(states, sample.todayUtcDate),
+      workers: workerStatuses(states),
+      specialists: sample.specialists,
+      projects: projectBoard(states),
+      approvals: sample.approvals,
+      connections: [],
+      archive: sample.archive,
+      chatMessages: sample.chatMessages,
+    });
+
+    const stacks = floor.zones.find((zone) => zone.zone.id === 'archive-stacks')!;
+    expect(stacks.fixtures.length).toBeGreaterThan(0);
+    for (const fixture of stacks.fixtures) {
+      expect(fixture.stationId, `${fixture.id} unseated`).not.toBeNull();
+      // Archive records are reconstructed documentation, never live evidence,
+      // so a stack is never lit whatever the archive holds.
+      expect(fixture.lit, 'an archive stack must never be drawn as live').toBe(false);
+      expect(fixture.evidence.length).toBeGreaterThan(20);
+    }
+    expect(stacks.fixtures[0].detail).toMatch(/\d+ record/);
+
+    const situation = floor.zones.find((zone) => zone.zone.id === 'situation-room')!;
+    for (const fixture of situation.fixtures) {
+      expect(fixture.stationId, `${fixture.id} unseated`).not.toBeNull();
+      // A transcript is a record, never a live meeting.
+      expect(fixture.lit, 'a transcript must never be drawn as live').toBe(false);
+      expect(fixture.evidence).toMatch(/record|no Executive Room message/);
+    }
+  });
+
   it('renders reproducibly', () => {
     expect(buildSite(sample).get('headquarters.html')).toBe(html);
   });
