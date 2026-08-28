@@ -509,6 +509,30 @@ details.record[open] { background: var(--surface-2); border-color: var(--line-st
   max-width: 100%;
 }
 
+/* Direct Order composer + Connection Center (issue #200). Both reuse the
+   existing card/chip/control-readonly vocabulary; these rules only add the
+   stacking and label treatment, so nothing here can widen a narrow viewport. */
+.order-composer { display: grid; gap: 0.75rem; min-width: 0; }
+.order-field { min-width: 0; display: grid; gap: 0.3rem; }
+.order-label {
+  margin: 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.order-field .control-readonly {
+  justify-content: flex-start;
+  font-weight: 500;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.order-route { min-width: 0; }
+.order-route p { min-width: 0; overflow-wrap: anywhere; }
+[data-connection] .record-meta code { overflow-wrap: anywhere; }
+[data-live-detail] { margin: 0.25rem 0 0; min-width: 0; overflow-wrap: anywhere; }
+
 footer[data-provenance] {
   margin-top: 2rem;
   padding-top: 0.9rem;
