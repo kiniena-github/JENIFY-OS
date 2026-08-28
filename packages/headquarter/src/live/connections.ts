@@ -212,50 +212,52 @@ function known<T extends string>(vocabulary: Record<T, true>, value: unknown): v
  * an object where a word belongs, and carrying none of what was inside it.
  * Diagnostics are worth having, but not at the price of being the leak.
  *
- * Bounded either way, because an adapter's string is still an adapter's
- * string. No `JSON.stringify`, so a circular value and a `BigInt` — both of
- * which made it THROW, defeating the fail-closed path it exists to serve —
- * are now simply described.
- */
-const DESCRIBE_LIMIT = 60;
-
-/**
- * Cap every description, whatever branch produced it.
+ * Bounded on EVERY path, and the bound is applied at the single exit rather
+ * than per branch. The first version of this said "bounded either way" and
+ * then bounded only the string branch — `String(value)` on a primitive had no
+ * cap at all, so an adapter returning a large enough `BigInt` wrote a
+ * multi-megabyte diagnostic into a rendered page (issue #200, Codex
+ * exact-head finding on `a6577af`). A stated invariant enforced at some of its
+ * paths is the recurring shape of this whole review series, and this function
+ * was an instance of it. One exit, one cap, so a branch added later cannot
+ * forget.
  *
- * The bound used to apply to the string branch alone, so `String(value)` on a
- * numeric answer was unbounded — and a `BigInt` has no size limit. An adapter
- * returning `10n ** 200000n` put a 200,000-character diagnostic into `reason`
- * and from there into the rendered page (Codex P2 on `a6577af`, reproduced:
- * 200,171 characters). Bounded output was the stated guarantee; now it is the
- * enforced one.
+ * No `JSON.stringify`, so a circular value no longer makes the describer THROW
+ * and defeat the fail-closed path it exists to serve.
  */
-function bound(text: string): string {
-  return text.length > DESCRIBE_LIMIT ? `${text.slice(0, DESCRIBE_LIMIT)}…` : text;
-}
+const MAX_DESCRIPTION = 80;
 
 /**
- * Past this magnitude a BigInt is reported by size rather than converted.
- * Truncating afterwards would still pay for the decimal conversion of an
- * arbitrarily large integer, which is the other half of what that answer
- * costs — so the conversion never happens at all.
+ * Past this magnitude a `BigInt` is reported by type alone. The cap has to come
+ * BEFORE the decimal conversion, not after it: converting a huge `BigInt` to a
+ * string is superlinear and allocates the whole result, so truncating the
+ * output afterwards would already have paid the cost the bound exists to
+ * avoid. Comparison, unlike conversion, is cheap.
  */
-const BIGINT_DESCRIBE_LIMIT = 10n ** BigInt(DESCRIBE_LIMIT);
+const MAX_DESCRIBED_BIGINT = 10n ** 32n;
 
 function describeUnrecognised(value: unknown): string {
-  // Bounded twice: once on the content, so a long answer is cut, and once on
-  // the quoted form, since escaping can expand what survived.
-  if (typeof value === 'string') return bound(JSON.stringify(bound(value)));
+  const described = describeRaw(value);
+  return described.length > MAX_DESCRIPTION ? `${described.slice(0, MAX_DESCRIPTION)}…` : described;
+}
+
+function describeRaw(value: unknown): string {
+  if (typeof value === 'string') {
+    // Truncated BEFORE quoting so the common case stays validly quoted; the
+    // cap at the exit is the backstop for escape expansion, since 60 quote or
+    // backslash characters serialise to twice that.
+    return JSON.stringify(value.length > 60 ? `${value.slice(0, 60)}…` : value);
+  }
   if (value === null) return 'null';
   if (value === undefined) return 'undefined';
   if (Array.isArray(value)) return `an array of ${value.length}`;
-  if (typeof value === 'bigint') {
-    const magnitude = value < 0n ? -value : value;
-    return magnitude < BIGINT_DESCRIBE_LIMIT
-      ? String(value)
-      : `a bigint of more than ${DESCRIBE_LIMIT} digits`;
-  }
   const type = typeof value;
-  if (type === 'number' || type === 'boolean') return bound(String(value));
+  if (type === 'bigint') {
+    const magnitude = value as bigint;
+    const huge = magnitude > MAX_DESCRIBED_BIGINT || magnitude < -MAX_DESCRIBED_BIGINT;
+    return huge ? 'a bigint too large to quote' : String(magnitude);
+  }
+  if (type === 'number' || type === 'boolean') return String(value);
   // Object, function, symbol: the TYPE, never the contents.
   return `a value of type ${type}`;
 }

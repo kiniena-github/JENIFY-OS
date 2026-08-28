@@ -785,6 +785,43 @@ describe('a probe answering outside the vocabulary fails closed', () => {
     }
   });
 
+  /**
+   * Codex exact-head finding on `a6577af` (P2). The describer's own docs said
+   * "bounded either way" while `String(value)` bounded nothing, so a large
+   * enough `BigInt` wrote a multi-megabyte diagnostic into a rendered page.
+   * The bound now lives at the single exit, and the BigInt cap is applied
+   * BEFORE the decimal conversion — truncating afterwards would already have
+   * paid the superlinear cost the bound exists to avoid.
+   */
+  it('bounds the diagnostic on every path, not just the string one', () => {
+    const huge = 10n ** 20000n;
+    const started = Date.now();
+    const status = assess({ ...honest, outcome: huge });
+    // Fast, because the value is never converted to decimal at all.
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(status.reason.length).toBeLessThan(400);
+    expect(status.reason).toContain('a bigint too large to quote');
+    expect(status.state).toBe('error');
+  });
+
+  it('still quotes a BigInt small enough to be worth reading', () => {
+    expect(assess({ ...honest, outcome: 42n }).reason).toContain('42');
+  });
+
+  it('bounds a long string answer too, and stays validly quoted', () => {
+    const long = 'x'.repeat(5000);
+    const reason = assess({ ...honest, outcome: long }).reason;
+    expect(reason.length).toBeLessThan(400);
+    expect(reason).toContain('xxx');
+  });
+
+  it('bounds a string of escape-expanding characters', () => {
+    // 60 backslashes serialise to 120 characters: the pre-quote truncation is
+    // not the bound, the exit is.
+    const reason = assess({ ...honest, outcome: '\\'.repeat(500) }).reason;
+    expect(reason.length).toBeLessThan(400);
+  });
+
   it('still refuses to publish a credential hidden inside a structured answer', () => {
     // Belt and braces: the contents are not copied, so there is nothing for
     // the guard to catch — and the row is still an error carrying nothing.
