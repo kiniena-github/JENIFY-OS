@@ -24,6 +24,7 @@ import { registerOnboardingRoutes } from './routes/onboarding.js';
 import { registerOperationsRoutes } from './routes/operations.js';
 import {
   registerHeadquarterRoutes,
+  registerHeadquarterSite,
   type HeadquarterControlPlane,
 } from './routes/headquarter.js';
 
@@ -171,6 +172,14 @@ export interface AppOptions {
    * something a server acquires by upgrading.
    */
   headquarter?: HeadquarterControlPlane;
+  /**
+   * Serve the static HQ site from this origin at /hq/, Founder-gated.
+   *
+   * Requires `headquarter` — the gate reuses the control plane's Founder map
+   * and principal registry, so serving the site without the plane is a
+   * configuration error and refused loudly rather than served open.
+   */
+  headquarterSite?: { root: string };
 }
 
 export function buildApp(opts: AppOptions): FastifyInstance {
@@ -223,6 +232,16 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   registerOnboardingRoutes(app, opts.db);
   registerOperationsRoutes(app, opts.db);
   if (opts.headquarter) registerHeadquarterRoutes(app, opts.db, opts.headquarter);
+  if (opts.headquarterSite) {
+    if (!opts.headquarter) {
+      throw new Error(
+        'headquarterSite requires the headquarter control plane: the /hq/ gate is built from ' +
+          'the plane\'s Founder map and principal registry, so serving the site without the ' +
+          'plane would mean serving it ungated. Refused.',
+      );
+    }
+    registerHeadquarterSite(app, opts.db, opts.headquarter, opts.headquarterSite.root);
+  }
 
   return app;
 }

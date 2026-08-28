@@ -45,10 +45,10 @@ describe('buildSite', () => {
     expect(html).toContain('Fix Gemini 3.7 worker model routing'); // DONE TODAY from sample
   });
 
-  it('Founder Approvals renders the D15 fields read-only with no action controls', () => {
+  it('Founder Approvals renders the D15 fields read-only with no static action controls', () => {
     const html = site.get('approvals.html')!;
     expect(html).toContain('Universal Operator architecture proposal'); // waiting task
-    expect(html).toContain('operator control plane');
+    expect(html).toContain('control API');
     // D15 approval fields (§6b): actionDigest, expiresAt, consumedAt, decidedBy
     expect(html).toContain('Action digest');
     expect(html).toContain('3f9a1c2b4d5e6f70'); // truncated digest rendered
@@ -59,14 +59,19 @@ describe('buildSite', () => {
     expect(html).not.toContain('<form');
   });
 
-  it('draws the decision controls as inert, explicitly-labelled placeholders', () => {
+  it('draws the build-time decision controls as inert, explicitly-labelled placeholders', () => {
     const html = site.get('approvals.html')!;
     for (const control of ['Approve', 'Reject', 'Ask for changes']) {
       expect(html).toContain(`<span class="control-readonly" aria-disabled="true">${control}</span>`);
     }
-    expect(html).toContain('not wired — read-only page');
-    // Nothing anywhere in the site may submit, navigate to a mutation, or run
-    // an inline handler.
+    expect(html).toContain('inert build-time card');
+    // The site-wide invariant, RE-SCOPED with the live control plane (issue
+    // #200, integration lane) but still load-bearing: the STATIC markup of
+    // every page carries no form, no button and no inline handler — a working
+    // control may exist only as a DOM node the control-console scripts create
+    // AFTER `/session` granted it, and no mutation may go anywhere but the
+    // control API (that half is asserted, script by script, in
+    // `control-console.test.ts`).
     for (const page of HQ_PAGES) {
       const pageHtml = site.get(page.file)!;
       expect(pageHtml).not.toContain('<form');

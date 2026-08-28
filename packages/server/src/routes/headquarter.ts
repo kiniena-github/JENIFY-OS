@@ -1,6 +1,8 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import fastifyStatic from '@fastify/static';
 import {
   handleControlRequest,
+  resolveFounderPrincipal,
   CONTROL_API_PREFIX,
   type ControlApiDeps,
   type ControlAuditPort,
@@ -186,4 +188,81 @@ export function registerHeadquarterRoutes(
   // the two could drift.
   app.get(`${CONTROL_API_PREFIX}/*`, handle);
   app.post(`${CONTROL_API_PREFIX}/*`, handle);
+}
+
+/** Where the static HQ site is mounted when a host chooses to serve it. */
+export const HQ_SITE_PREFIX = '/hq/';
+
+/**
+ * Serve the static HQ site from the API's own origin, Founder-gated.
+ *
+ * ## Why same-origin serving exists at all
+ *
+ * The pages poll `hq-snapshot.json` and call the control API with the
+ * `fos_session` cookie, which is HttpOnly and SameSite=Lax — a browser only
+ * sends it to the host that set it. A separately-hosted copy of the site
+ * would therefore reach the control API with no cookie and be told
+ * `unauthenticated` on every request. Serving the pages from this origin is
+ * what makes the design's implicit same-origin requirement explicit and true.
+ *
+ * ## Why every request is Founder-gated
+ *
+ * The rendered pages project canonical company state — tasks, approvals,
+ * transcripts, connection evidence. They are static files, but they are not
+ * public files. Every request through this mount re-resolves the session and
+ * the SAME explicit Founder binding the control API enforces (same map, same
+ * principal registry, same fail-closed rules), so a signed-in non-Founder
+ * tenant user gets a 403, not a floor plan. There is no caching exemption:
+ * `no-store` on every response keeps a shared cache from ever answering for
+ * this gate.
+ */
+export function registerHeadquarterSite(
+  app: FastifyInstance,
+  db: Db,
+  plane: HeadquarterControlPlane,
+  root: string,
+): void {
+  app.register(async (scope) => {
+    scope.addHook('onRequest', async (req, reply) => {
+      // `headers: {}` is deliberate and loses nothing: `resolveFounderPrincipal`
+      // reads the request ONLY to hand it to the sessions port, and the
+      // resolver built here ignores it entirely — it closes over the cookie
+      // token the host's own cookie layer already parsed. Origin allow-listing
+      // is NOT part of Founder resolution: `checkMutationOrigin` is a separate
+      // gate the control API applies to state-changing methods only, and this
+      // mount serves only GET/HEAD, for which that gate passes uncondition-
+      // ally on the mutation path too. So an empty header bag can neither
+      // skip nor weaken any check the control API performs — resolution is
+      // genuinely header-independent, and an unresolvable session still fails
+      // closed to 401/403 below.
+      const resolution = resolveFounderPrincipal(
+        { method: 'GET', path: req.url.split('?')[0]!, headers: {} },
+        {
+          sessions: sessionResolver(db, req.cookies?.[SESSION_COOKIE]),
+          principals: plane.ops.principals,
+          founderMap: plane.founderMap,
+        },
+      );
+      if (!resolution.ok) {
+        // `return reply` is load-bearing, not style: in an ASYNC Fastify hook
+        // the documented way to respond and stop the chain is to return the
+        // reply. Relying on implicit short-circuiting in the one hook that
+        // gates canonical company state would fail OPEN into the static
+        // handler if a framework bump ever changed the implicit behavior.
+        return reply
+          .status(resolution.reason === 'unauthenticated' ? 401 : 403)
+          .header('cache-control', 'no-store')
+          .type('text/plain; charset=utf-8')
+          .send(`HQ access refused: ${resolution.message}`);
+      }
+    });
+    scope.addHook('onSend', async (_req, reply) => {
+      reply.header('cache-control', 'no-store');
+    });
+    scope.register(fastifyStatic, {
+      root,
+      prefix: HQ_SITE_PREFIX,
+      decorateReply: false,
+    });
+  });
 }
