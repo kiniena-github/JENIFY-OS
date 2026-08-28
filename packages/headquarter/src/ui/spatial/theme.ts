@@ -118,6 +118,39 @@ export const SPATIAL_CSS = `
 .hq-station[data-tone="info"] .prop-beacon.is-lit.face-top { fill: var(--info); }
 .hq-station[data-tone="accent"] .prop-beacon.is-lit.face-top { fill: var(--accent); }
 
+/* A FAILING fixture is not lit — lighting it would claim positive evidence,
+   which is the one thing this floor must never do — but it must not look
+   like an ordinary dark pillar either. An errored or expired uplink used to
+   render byte-identically to a service nobody has configured, so the room
+   could say "Needs attention" with nothing on the plan explaining why
+   (Codex review of 67bbaac).
+   These rules tint the whole prop; the fault marker beside them carries the
+   same information as a SHAPE, so nothing here rests on colour alone. */
+.hq-station[data-attention="yes"] .prop-lamp.face-top,
+.hq-station[data-attention="yes"] .prop-beacon.face-top { fill: var(--warn); }
+.hq-station[data-attention="yes"] .prop-lamp.face-east,
+.hq-station[data-attention="yes"] .prop-beacon.face-east { fill: #a9762c; }
+.hq-station[data-attention="yes"] .prop-lamp.face-south,
+.hq-station[data-attention="yes"] .prop-beacon.face-south { fill: #7a541d; }
+.hq-station[data-attention="yes"][data-tone="danger"] .prop-lamp.face-top,
+.hq-station[data-attention="yes"][data-tone="danger"] .prop-beacon.face-top { fill: var(--danger); }
+.hq-station[data-attention="yes"][data-tone="danger"] .prop-lamp.face-east,
+.hq-station[data-attention="yes"][data-tone="danger"] .prop-beacon.face-east { fill: #a83f3f; }
+.hq-station[data-attention="yes"][data-tone="danger"] .prop-lamp.face-south,
+.hq-station[data-attention="yes"][data-tone="danger"] .prop-beacon.face-south { fill: #7d2e2e; }
+
+/* The marker itself. Static: it reports a stopped thing, and this floor does
+   not animate stopped things. */
+.fault-stem.face-top, .fault-dot.face-top { fill: var(--warn); }
+.fault-stem.face-east, .fault-dot.face-east { fill: #a9762c; }
+.fault-stem.face-south, .fault-dot.face-south { fill: #7a541d; }
+.hq-station[data-tone="danger"] .fault-stem.face-top,
+.hq-station[data-tone="danger"] .fault-dot.face-top { fill: var(--danger); }
+.hq-station[data-tone="danger"] .fault-stem.face-east,
+.hq-station[data-tone="danger"] .fault-dot.face-east { fill: #a83f3f; }
+.hq-station[data-tone="danger"] .fault-stem.face-south,
+.hq-station[data-tone="danger"] .fault-dot.face-south { fill: #7d2e2e; }
+
 /* Figures. */
 .fig-shadow { fill: rgba(0,0,0,0.42); }
 .fig-torso.face-top { fill: #8496b8; }

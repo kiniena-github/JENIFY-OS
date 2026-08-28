@@ -22,6 +22,7 @@ import { escapeHtml } from '../components.js';
 import { floorExtent, type Station, type Zone } from './world.js';
 import {
   fixtureIsPositive,
+  fixtureNeedsAttention,
   occupantIsPositive,
   type Fixture,
   type FloorState,
@@ -281,6 +282,43 @@ function prop(station: Station, zone: Zone, lit: boolean): string {
   }
 }
 
+/**
+ * An explicit fault marker: a stylised "!" standing above a fixture that is
+ * WHY its room needs attention.
+ *
+ * An errored or expired uplink is `lit: false` — lighting it would claim
+ * positive evidence, which is the one thing this floor must never do — so
+ * before this it rendered byte-identically to a service nobody has configured.
+ * The room said "Needs attention" and the pillar explaining it was invisible
+ * unless you found its <title> (Codex review of `67bbaac`).
+ *
+ * The marker is a SHAPE, not just a colour, so the distinction survives for a
+ * reader who cannot separate the red from the neutral: the stylesheet tints
+ * these props as well, but the silhouette alone already differs.
+ */
+const MARKER_HEIGHT: Record<string, number> = {
+  uplink: 2.0,
+  bench: 1.35,
+  bay: 1.15,
+  console: 1.55,
+  stack: 1.15,
+  table: 0.75,
+};
+
+function faultMarker(station: Station, zone: Zone): string {
+  const x = zone.x + station.x + 0.25;
+  const y = zone.y + station.y + 0.25;
+  const base = MARKER_HEIGHT[station.kind] ?? 1.2;
+  return `<g class="fault-marker">${box(x, y, 0.12, 0.12, base + 0.52, 'fault-stem')}${box(
+    x,
+    y,
+    0.12,
+    0.12,
+    base + 0.14,
+    'fault-dot',
+  )}</g>`;
+}
+
 /* ------------------------------------------------------------------ */
 /* Figures                                                             */
 /* ------------------------------------------------------------------ */
@@ -415,11 +453,14 @@ function renderZone(zoneState: ZoneState): string {
         : fixture
           ? `${fixture.label}, ${fixture.detail}`
           : `empty ${station.kind.replaceAll('_', ' ')}`;
+      const attention = fixture != null && fixtureNeedsAttention(fixture);
       return `<g class="hq-station" data-station="${escapeHtml(station.id)}" data-occupied="${
         occupant ? 'worker' : fixture ? 'fixture' : 'empty'
-      }"${tone}><title>${escapeHtml(label)}</title>${prop(station, zone, lit)}${
-        occupant ? figure(occupant, station, zone) : ''
-      }</g>`;
+      }"${tone}${attention ? ' data-attention="yes"' : ''}><title>${escapeHtml(label)}</title>${prop(
+        station,
+        zone,
+        lit,
+      )}${attention ? faultMarker(station, zone) : ''}${occupant ? figure(occupant, station, zone) : ''}</g>`;
     })
     .join('');
 

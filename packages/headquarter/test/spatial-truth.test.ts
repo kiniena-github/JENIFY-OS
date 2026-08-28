@@ -652,6 +652,69 @@ describe('the floor never drops or invents people', () => {
     }
   });
 
+  it('draws a failing fixture differently from one nobody ever configured', () => {
+    // Codex review of `67bbaac`. Seating the failure was necessary and not
+    // sufficient: an errored uplink is `lit: false` — lighting it would claim
+    // positive evidence, the one thing this floor must never do — so it
+    // rendered byte-identically to a service nobody has set up. The room said
+    // "Needs attention" and the pillar explaining it was invisible unless the
+    // reader found its <title>.
+    const broken = { ...connectionWithState('error'), id: 'broken', displayName: 'BROKEN' };
+    const never = { ...connectionWithState('not_connected'), id: 'never', displayName: 'NEVERSET' };
+    const floor = floorFrom([], [], [broken, never]);
+    const gallery = floor.zones.find((zone) => zone.zone.id === 'uplink-gallery')!;
+    const svg = renderScene(floor);
+    const stationOf = (fixtureId: string) => {
+      const fixture = gallery.fixtures.find((entry) => entry.id === fixtureId)!;
+      expect(fixture.stationId, `${fixtureId} unseated`).not.toBeNull();
+      return svg
+        .split('<g class="hq-station"')
+        .find((fragment) => fragment.includes(`data-station="${fixture.stationId}"`))!;
+    };
+
+    const failing = stationOf('uplink-broken');
+    const unconfigured = stationOf('uplink-never');
+
+    // Neither is lit: a failure is not positive evidence either.
+    expect(failing).not.toContain('is-lit');
+    expect(unconfigured).not.toContain('is-lit');
+
+    // But the failure is marked, and the mark is a SHAPE, so the distinction
+    // does not rest on colour alone.
+    expect(failing).toContain('data-attention="yes"');
+    expect(failing).toContain('class="fault-marker"');
+    expect(unconfigured).not.toContain('data-attention');
+    expect(unconfigured).not.toContain('fault-marker');
+
+    // The stylesheet also tints it, and specifically targets the UNLIT prop —
+    // the gap that made the two identical.
+    expect(THEME_CSS).toContain('.hq-station[data-attention="yes"] .prop-lamp.face-top');
+    expect(THEME_CSS).toContain('.fault-stem.face-top');
+
+    // A stopped thing is never animated.
+    expect(THEME_CSS).not.toMatch(/\.fault-(stem|dot)[^{]*\{[^}]*animation:/);
+  });
+
+  it('marks every attention fixture it seats, in every room', () => {
+    const floor = floorFrom(
+      [event('w', 't1', 'needs_approval')],
+      [worker('w', 'build_lead')],
+      [connectionWithState('error'), connectionWithState('expired')],
+    );
+    const svg = renderScene(floor);
+    for (const zone of floor.zones) {
+      for (const fixture of zone.fixtures) {
+        if (fixture.stationId === null) continue;
+        const station = svg
+          .split('<g class="hq-station"')
+          .find((fragment) => fragment.includes(`data-station="${fixture.stationId}"`))!;
+        const marked = station.includes('data-attention="yes"');
+        const causesAttention = fixture.tone === 'warn' || fixture.tone === 'danger';
+        expect(marked, `${fixture.id} (tone ${fixture.tone}) marked=${marked}`).toBe(causesAttention);
+      }
+    }
+  });
+
   it('seats deterministically when several items tie on priority', () => {
     const connections = Array.from({ length: 12 }, (_, index) => ({
       ...connectionWithState('connected'),
