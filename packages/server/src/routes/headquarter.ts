@@ -64,6 +64,15 @@ export type HeadquarterControlPlane = Pick<
    */
   mutationsEnabled?: boolean;
   audit?: ControlAuditPort;
+  /**
+   * Absolute path to the built HQ static site (`build:site` output). When set,
+   * `buildApp` serves it read-only at `/hq/` on this server's own origin —
+   * which is what lets the `fos_session` cookie (`HttpOnly; SameSite=Lax`)
+   * accompany the console's control-API requests at all: a cross-origin page's
+   * fetch would carry no cookie. Optional; only meaningful alongside the
+   * control plane, and never mounted without it.
+   */
+  siteDir?: string;
 };
 
 /**

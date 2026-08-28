@@ -222,7 +222,21 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   registerAssistantRoutes(app, opts.db);
   registerOnboardingRoutes(app, opts.db);
   registerOperationsRoutes(app, opts.db);
-  if (opts.headquarter) registerHeadquarterRoutes(app, opts.db, opts.headquarter);
+  if (opts.headquarter) {
+    registerHeadquarterRoutes(app, opts.db, opts.headquarter);
+    // The HQ static site, same-origin with the control API. Served ONLY when
+    // the control plane itself is passed: without a plane there is no HQ
+    // surface on this server at all, static pages included. `decorateReply`
+    // is off because the branding mount above already claimed the decorator.
+    if (opts.headquarter.siteDir) {
+      app.register(fastifyStatic, {
+        root: opts.headquarter.siteDir,
+        prefix: '/hq/',
+        decorateReply: false,
+        index: ['index.html'],
+      });
+    }
+  }
 
   return app;
 }
