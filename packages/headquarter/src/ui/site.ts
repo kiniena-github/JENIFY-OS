@@ -30,8 +30,14 @@ import {
   renderDirectChats,
   renderSpecialistDirectory,
   renderFounderApprovals,
+  renderConnections,
   renderArchive,
+  type DirectOrderRouteAvailability,
 } from './render.js';
+import { assessConnections, type ConnectionStatus } from '../live/connections.js';
+import { DIRECT_ORDER_ROUTES, resolveOrderRoute } from '../live/orders.js';
+import type { SourceMode } from '../live/provenance.js';
+import type { SecretsEnv } from '../routing/providers.js';
 
 export const EXECUTIVE_ROOM_THREAD_ID = 'executive-room';
 export const DIRECT_CHAT_THREAD_PREFIX = 'dm:';
@@ -56,6 +62,25 @@ export interface HeadquarterData {
   archive: ArchiveRecord[];
   chatMessages: ChatMessage[];
   specialists: WorkerDescriptor[];
+  /**
+   * What the bundle actually is (issue #200, scope A). Rendered as a chip on
+   * every page. Omitted → no claim is made, which is what an older bundle
+   * that predates provenance modes honestly is.
+   */
+  sourceMode?: SourceMode;
+  /**
+   * Non-secret environment facts used to derive Connection Center state and
+   * Direct Order route availability. Only PRESENCE is ever read; values never
+   * reach a rendered page. Omitted → nothing is observed, so every connection
+   * renders as not connected, which is the correct deny-by-default answer for
+   * a build that observed nothing.
+   */
+  env?: SecretsEnv;
+  /**
+   * Pre-computed connection statuses. Supply to render a snapshot taken
+   * elsewhere; omit and they are derived from `env` at build time.
+   */
+  connections?: ConnectionStatus[];
 }
 
 /** Newest timestamp anywhere in the bundle, or midnight on `todayUtcDate`. */
@@ -90,6 +115,18 @@ export function buildSite(data: HeadquarterData): Map<string, string> {
     message.threadId.startsWith(DIRECT_CHAT_THREAD_PREFIX),
   );
 
+  // Connection state and route availability are derived from observed facts
+  // at build time, never from the bundle's own provenance mode: a SAMPLE
+  // bundle rendered on a machine with a real Claude credential still reports
+  // that credential truthfully, and a LIVE bundle on a bare machine still
+  // reports nothing connected.
+  const env = data.env ?? {};
+  const connections = data.connections ?? assessConnections(env, { now: nowIso });
+  const orderRoutes: DirectOrderRouteAvailability[] = DIRECT_ORDER_ROUTES.map((route) => ({
+    route,
+    resolution: resolveOrderRoute(route, env),
+  }));
+
   const site = new Map<string, string>();
   site.set(
     'index.html',
@@ -101,25 +138,31 @@ export function buildSite(data: HeadquarterData): Map<string, string> {
       approvals: data.approvals,
       nowIso,
       provenanceNote: data.note,
+      sourceMode: data.sourceMode,
+      orderRoutes,
     }),
   );
-  site.set('projects.html', renderProjects(cards, timelines, nowIso, data.note));
+  site.set('projects.html', renderProjects(cards, timelines, nowIso, data.note, data.sourceMode));
   site.set(
     'executive-room.html',
-    renderExecutiveRoom(executiveRoom, data.specialists, data.approvals, nowIso, data.note),
+    renderExecutiveRoom(executiveRoom, data.specialists, data.approvals, nowIso, data.note, data.sourceMode),
   );
   site.set(
     'direct-chats.html',
-    renderDirectChats(directChats, data.specialists, states, nowIso, data.note),
+    renderDirectChats(directChats, data.specialists, states, nowIso, data.note, data.sourceMode),
   );
   site.set(
     'specialists.html',
-    renderSpecialistDirectory(specialistProfiles(data.specialists, workers), nowIso, data.note),
+    renderSpecialistDirectory(specialistProfiles(data.specialists, workers), nowIso, data.note, data.sourceMode),
   );
   site.set(
     'approvals.html',
-    renderFounderApprovals(dashboard.waitingForFounder, data.approvals, nowIso, data.note),
+    renderFounderApprovals(dashboard.waitingForFounder, data.approvals, nowIso, data.note, data.sourceMode),
   );
-  site.set('archive.html', renderArchive(data.archive, monthly, evolutions, nowIso, data.note));
+  site.set('connections.html', renderConnections(connections, nowIso, data.note, data.sourceMode));
+  site.set(
+    'archive.html',
+    renderArchive(data.archive, monthly, evolutions, nowIso, data.note, data.sourceMode),
+  );
   return site;
 }

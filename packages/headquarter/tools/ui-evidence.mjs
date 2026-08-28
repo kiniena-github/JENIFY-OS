@@ -52,6 +52,7 @@ const PAGES = [
   ['direct-chats.html', 'direct-chats'],
   ['specialists.html', 'specialists'],
   ['approvals.html', 'approvals'],
+  ['connections.html', 'connections'],
   ['archive.html', 'archive'],
 ];
 
