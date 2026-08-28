@@ -26,7 +26,7 @@ import type { ActivityStatus } from '../../contracts/events.js';
 import type { WorkerDescriptor } from '../../contracts/workers.js';
 import type { ArchiveRecord } from '../../archive/schema.js';
 import type { ConnectionStatus } from '../../live/connections.js';
-import { CONNECTION_STATE_LABELS } from '../../live/connections.js';
+import { CONNECTION_STATE_LABELS, CONNECTION_STATE_TONE } from '../../live/connections.js';
 import type { TaskState } from '../model.js';
 import type { FounderDashboard, ProjectBoardCard, WorkerStatus } from '../views.js';
 import type { Tone } from '../components.js';
@@ -390,7 +390,11 @@ function uplinkFixtures(connections: readonly ConnectionStatus[]): Fixture[] {
       label: connection.displayName,
       detail: CONNECTION_STATE_LABELS[connection.state],
       lit,
-      tone: lit ? 'accent' : connection.state === 'error' || connection.state === 'expired' ? 'danger' : 'neutral',
+      // The SAME table the Connections page renders from. The floor used to
+      // keep its own, and the two disagreed on four states — most materially
+      // `configured` and `setup_required`, which warned there and were silent
+      // here (Codex review of `9a3e892`).
+      tone: CONNECTION_STATE_TONE[connection.state],
       evidence: connection.reason,
       stationId: null,
     };

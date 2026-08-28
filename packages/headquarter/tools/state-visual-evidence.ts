@@ -182,7 +182,10 @@ const main = async () => {
     const zone = floor.zones.find((entry) => entry.zone.id === 'uplink-gallery')!;
     const fixture = zone.fixtures[0];
     fixtureLook.set(state, await signatureFor(floor, 'uplink-gallery', fixture.stationId));
-    fixtureMeaning.set(state, `${fixture.lit}/${fixture.tone === 'warn' || fixture.tone === 'danger'}`);
+    // Matches `test/spatial-truth.test.ts`: lit-ness plus severity, because
+    // the floor draws warn apart from danger but draws accent and info alike.
+    const severity = fixture.tone === 'danger' ? 'danger' : fixture.tone === 'warn' ? 'warn' : 'none';
+    fixtureMeaning.set(state, `${fixture.lit}/${severity}`);
   }
 
   /* ---- occupants: desk figures --------------------------------------- */

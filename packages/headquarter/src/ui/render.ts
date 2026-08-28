@@ -59,6 +59,7 @@ import { liveRefreshScript } from './live-refresh.js';
 import {
   AUTH_MECHANISM_LABELS,
   CONNECTION_STATE_LABELS,
+  CONNECTION_STATE_TONE,
   connectionSummary,
   type ConnectionState,
   type ConnectionStatus,
@@ -987,17 +988,6 @@ ${section('TASKS WAITING FOR FOUNDER', taskRows(waiting, 'Tasks waiting for the 
 /* ------------------------------------------------------------------ */
 /* Page 7 — Connections (issue #200, scope C)                          */
 /* ------------------------------------------------------------------ */
-
-const CONNECTION_STATE_TONE: Record<ConnectionState, Tone> = {
-  connected: 'accent',
-  local_only: 'info',
-  dispatchable: 'info',
-  configured: 'warn',
-  not_connected: 'neutral',
-  expired: 'warn',
-  error: 'danger',
-  setup_required: 'warn',
-};
 
 const CONNECTIONS_NOTE =
   'Every state on this page is derived from facts actually observed in this environment — not from ' +

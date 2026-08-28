@@ -907,7 +907,16 @@ describe('the floor never drops or invents people', () => {
       const zone = floor.zones.find((entry) => entry.zone.id === 'uplink-gallery')!;
       const fixture = zone.fixtures[0];
       fixtureRender.set(state, stationFor(floor, 'uplink-gallery', fixture.stationId));
-      fixtureClass.set(state, `${fixture.lit}/${fixture.tone === 'warn' || fixture.tone === 'danger'}`);
+      // MARKUP class: lit-ness plus the FULL tone, because tone reaches the
+      // markup as `data-tone` and this test compares markup.
+      //
+      // The measured counterpart in `tools/state-visual-evidence.ts` uses a
+      // coarser class — lit-ness plus severity — because it compares
+      // APPEARANCE, and the stylesheet draws accent and info alike for a lit
+      // pillar. The two are asking different questions and must not share a
+      // definition: `connected` and `local_only` differ in markup and look
+      // identical, and both facts are correct.
+      fixtureClass.set(state, `${fixture.lit}/${fixture.tone}`);
     }
     for (const a of connectionStates) {
       for (const b of connectionStates) {
@@ -923,8 +932,11 @@ describe('the floor never drops or invents people', () => {
 
     // And the classes really are distinct, so the biconditional is not
     // vacuously satisfied by everything landing in one bucket.
-    expect(new Set(fixtureClass.values()).size).toBe(3);
-    expect(new Set(fixtureRender.values()).size).toBe(3);
+    // Six markup classes across the eight states; asserted so the
+    // biconditional above cannot be satisfied by everything collapsing into
+    // one bucket.
+    expect(new Set(fixtureClass.values()).size).toBe(6);
+    expect(new Set(fixtureRender.values()).size).toBe(6);
   });
 
   it('builds the fault marker as two separated shapes floating above the prop', () => {
