@@ -125,13 +125,21 @@ export const SPATIAL_CSS = `
 .fig-torso.face-south { fill: #4d5b7e; }
 .fig-head { fill: #bcc8e0; }
 
+/* ONLY the animated activities move.
+   ANIMATED_ACTIVITIES is ['working', 'reviewing'], and the page tells the
+   reader in so many words that a figure moves only while a canonical event
+   says its task is active. Blocked and awaiting-Founder figures used to
+   pulse, which made STOPPED work assert ongoing activity — the page breaking
+   its own stated rule, which is worse than never having stated it. Stalled
+   work is now perfectly still; its state is carried by head colour, the room
+   tint, the room's liveness chip and the panel, never by motion.
+   (Codex exact-head review of 936a682, P1.)
+   NOTE: no backticks in this block — it lives inside a TS template literal. */
 .hq-figure.act-working .fig-body { animation: hq-work 2.1s ease-in-out infinite; }
 .hq-figure.act-reviewing .fig-body { animation: hq-review 4.6s ease-in-out infinite; }
 .hq-figure.act-reviewing .fig-head { fill: var(--violet); }
 .hq-figure.act-blocked .fig-head { fill: var(--danger); }
-.hq-figure.act-blocked .fig-body { animation: hq-pulse 2.6s ease-in-out infinite; }
 .hq-figure.act-awaiting_founder .fig-head { fill: var(--warn); }
-.hq-figure.act-awaiting_founder .fig-body { animation: hq-pulse 3.2s ease-in-out infinite; }
 .hq-figure.act-complete .fig-head { fill: var(--accent); }
 .hq-figure.act-queued { opacity: 0.78; }
 /* Offline is deliberately inert and dimmed: the absence of motion is the

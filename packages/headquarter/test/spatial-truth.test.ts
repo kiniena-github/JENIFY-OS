@@ -27,8 +27,11 @@ import { buildSite, type HeadquarterData } from '../src/ui/site.js';
 import { THEME_CSS } from '../src/ui/theme.js';
 import { HQ_FLOOR, ROLE_ZONE, floorExtent } from '../src/ui/spatial/world.js';
 import {
+  ACTIVITY_PRESENTATION,
   ANIMATED_ACTIVITIES,
+  FIXTURE_STATION_KINDS,
   LIT_CONNECTION_STATES,
+  WORKER_STATION_KINDS,
   STATUS_ACTIVITY,
   floorOccupants,
   floorState,
@@ -346,10 +349,26 @@ describe('the rendered scene cannot animate more than the state supports', () =>
     expect(litDrawn).toBe(litFixtures.length);
   });
 
-  it('gives offline figures no animation in the stylesheet, and working figures one', () => {
-    expect(THEME_CSS).toContain('.hq-figure.act-working .fig-body { animation:');
+  it('animates a figure for EVERY animated activity and for no other', () => {
+    // Derived from ANIMATED_ACTIVITIES rather than listing cases, so adding a
+    // new activity cannot quietly acquire motion. This is the rule the page
+    // states in words, checked against the stylesheet that has to keep it.
+    //
+    // Codex P1 on `936a682`: `blocked` and `awaiting_founder` figures pulsed.
+    // The page tells the reader a figure moves only while a canonical event
+    // says its task is active, so animating stopped work made the page break
+    // its own stated rule — worse than never having stated it.
+    const activities = Object.keys(ACTIVITY_PRESENTATION) as OccupantActivity[];
+    for (const activity of activities) {
+      const rules = [...THEME_CSS.matchAll(/\.hq-figure\.act-([a-z_]+)([^{]*)\{([^}]*)\}/g)].filter(
+        ([, name]) => name === activity,
+      );
+      const animates = rules.some(([, , , body]) => /animation:\s*[^;]*\bhq-/.test(body));
+      expect(animates, `act-${activity} must ${ANIMATED_ACTIVITIES.includes(activity) ? '' : 'NOT '}animate`).toBe(
+        ANIMATED_ACTIVITIES.includes(activity),
+      );
+    }
     expect(THEME_CSS).toContain('.hq-figure.act-offline { opacity:');
-    expect(THEME_CSS).not.toMatch(/\.hq-figure\.act-offline[^{]*\{[^}]*animation:/);
   });
 
   it('states the floor totals in the scene’s accessible description', () => {
@@ -456,6 +475,57 @@ describe('the floor never drops or invents people', () => {
     for (const seatless of zone.occupants.filter((occupant) => occupant.stationId === null)) {
       expect(seatless.evidence.length).toBeGreaterThan(0);
     }
+  });
+
+  it('never seats a worker and a fixture at the same station', () => {
+    // Codex P2 on `936a682`. Both seating lists contained `console`, so on the
+    // Command Deck a registered mission_director and the "In flight" console
+    // were assigned the same station. The renderer gives the occupant
+    // precedence, so an OFFLINE director made the in-flight console read as
+    // dark while tasks were genuinely in flight, and dropped the fixture's
+    // label from the station's accessible title.
+    expect(
+      WORKER_STATION_KINDS.filter((kind) => (FIXTURE_STATION_KINDS as readonly string[]).includes(kind)),
+    ).toEqual([]);
+
+    // And the property that matters, checked on a floor that crowds every room.
+    const crowd = [
+      worker('director', 'mission_director'),
+      worker('lead', 'build_lead'),
+      worker('rev', 'reviewer_gatekeeper'),
+      ...Array.from({ length: 12 }, (_, index) => worker(`extra${index}`, 'parallel_implementer')),
+    ];
+    const floor = floorFrom([event('lead', 't1', 'running')], crowd, [connectionWithState('connected')]);
+    for (const zone of floor.zones) {
+      const taken = new Map<string, string>();
+      for (const occupant of zone.occupants) {
+        if (occupant.stationId) taken.set(occupant.stationId, `worker ${occupant.id}`);
+      }
+      for (const fixture of zone.fixtures) {
+        if (!fixture.stationId) continue;
+        expect(
+          taken.has(fixture.stationId),
+          `${fixture.id} collides with ${taken.get(fixture.stationId)} at ${fixture.stationId}`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  it('keeps a lit Command Deck console lit even when an offline director is on the floor', () => {
+    // The end-to-end shape of the P2 defect, asserted on the rendered SVG.
+    const floor = floorFrom(
+      [event('lead', 't1', 'running')],
+      [worker('director', 'mission_director'), worker('lead', 'build_lead')],
+    );
+    const deck = floor.zones.find((zone) => zone.zone.id === 'command-deck')!;
+    const inFlight = deck.fixtures.find((fixture) => fixture.id === 'console-inflight')!;
+    expect(inFlight.lit).toBe(true);
+    const station = [...renderScene(floor).split('<g class="hq-station"')].find((fragment) =>
+      fragment.includes(`data-station="${inFlight.stationId}"`),
+    )!;
+    expect(station).toContain('data-occupied="fixture"');
+    expect(station).toContain('is-lit');
+    expect(station).toContain('In flight');
   });
 
   it('counts totals from the occupants it actually holds', () => {

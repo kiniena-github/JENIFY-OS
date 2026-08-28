@@ -537,6 +537,25 @@ function liveness(occupants: readonly Occupant[], fixtures: readonly Fixture[]):
  * it simply has no seat drawn, which is the truthful rendering of a room that
  * is over capacity. Nothing is dropped from the data.
  */
+/**
+ * Station kinds a WORKER may stand at, and those a FIXTURE may stand on.
+ *
+ * These two sets MUST stay disjoint, and `test/spatial-truth.test.ts` asserts
+ * that they are. Both lists once contained `console`, so on the Command Deck a
+ * registered `mission_director` and the "In flight" console were seated at the
+ * same station; the renderer gives the occupant precedence, so an OFFLINE
+ * director made the in-flight console read as dark while tasks were genuinely
+ * in flight — the fixture's canonical lit state silently replaced by the
+ * worker's, and its label dropped from the station's accessible title.
+ *
+ * That is the exact failure this page exists to prevent, so the fix is
+ * structural rather than a tie-break rule: a station belongs to one kind of
+ * claim, and the two can never collide to be arbitrated in the first place.
+ * (Codex exact-head review of `936a682`, P2.)
+ */
+export const WORKER_STATION_KINDS = ['desk', 'review_bay'] as const;
+export const FIXTURE_STATION_KINDS = ['uplink', 'bay', 'stack', 'bench', 'console', 'table'] as const;
+
 function seat<T extends { stationId: string | null }>(items: T[], zone: Zone, kinds: readonly string[]): T[] {
   const stations = zone.stations.filter((station) => kinds.includes(station.kind));
   return items.map((item, index) => ({
@@ -574,15 +593,8 @@ export function floorState(input: FloorInput): FloorState {
   };
 
   const zones: ZoneState[] = HQ_FLOOR.map((zone) => {
-    const zoneOccupants = seat(byZone.get(zone.id) ?? [], zone, ['desk', 'review_bay', 'console']);
-    const zoneFixtures = seat(fixturesByZone[zone.id] ?? [], zone, [
-      'uplink',
-      'bay',
-      'stack',
-      'bench',
-      'console',
-      'table',
-    ]);
+    const zoneOccupants = seat(byZone.get(zone.id) ?? [], zone, WORKER_STATION_KINDS);
+    const zoneFixtures = seat(fixturesByZone[zone.id] ?? [], zone, FIXTURE_STATION_KINDS);
     const active = zoneOccupants.filter((occupant) => ANIMATED_ACTIVITIES.includes(occupant.activity)).length;
     const attention = zoneOccupants.filter((occupant) => ATTENTION_ACTIVITIES.includes(occupant.activity)).length;
     const summaryParts: string[] = [];
