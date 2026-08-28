@@ -988,6 +988,7 @@ ${section('TASKS WAITING FOR FOUNDER', taskRows(waiting, 'Tasks waiting for the 
 const CONNECTION_STATE_TONE: Record<ConnectionState, Tone> = {
   connected: 'accent',
   local_only: 'info',
+  dispatchable: 'info',
   configured: 'warn',
   not_connected: 'neutral',
   expired: 'warn',
@@ -999,9 +1000,12 @@ const CONNECTIONS_NOTE =
   'Every state on this page is derived from facts actually observed in this environment — not from ' +
   'the provider catalogue, not from a registered AI member, and not from a vendor descriptor. A name ' +
   'appearing here means HQ knows what the integration would be, never that it is reachable. ' +
-  'CONFIGURED means the credentials are present and nothing has checked them: it is not Connected, ' +
-  'and it grants no capability. Only secret PRESENCE is recorded anywhere in HQ; no credential value ' +
-  'is read, stored, logged or rendered.';
+  'CONFIGURED means the credentials are present and nothing has checked them. DISPATCHABLE means ' +
+  'more — an executor exists and every fact it needs to run is present, so HQ would route work to ' +
+  'it — but still nothing has asked the provider itself, so an expired or revoked credential would ' +
+  'look identical. Neither is Connected, and neither grants a capability: CONNECTED means a live ' +
+  'check ran against the service and succeeded, and HQ registers no such check yet. Only secret ' +
+  'PRESENCE is recorded anywhere in HQ; no credential value is read, stored, logged or rendered.';
 
 export function renderConnections(
   statuses: ConnectionStatus[],
@@ -1019,9 +1023,11 @@ export function renderConnections(
         : `<p class="faint">No capability is available to HQ through this connection${
             usable
               ? '.'
-              : status.state === 'configured'
-                ? ': its credentials are present, but nothing has verified them, and configuration alone grants nothing.'
-                : ' while it is not connected.'
+              : status.state === 'dispatchable'
+                ? ': HQ would route work to it, but nothing has asked the provider whether the credential still works, and dispatchability alone grants nothing.'
+                : status.state === 'configured'
+                  ? ': its credentials are present, but nothing has verified them, and configuration alone grants nothing.'
+                  : ' while it is not connected.'
           }</p>`;
 
     // Fact NAMES only. This is the presence-not-value convention that makes a
@@ -1077,8 +1083,8 @@ ${controls}
 
   const body = `<p class="readonly-note">${escapeHtml(CONNECTIONS_NOTE)}</p>
 ${kpiRow([
-  { label: 'Connected', value: counts.connected, hint: 'verified reachable', tone: counts.connected > 0 ? 'accent' : 'neutral' },
-  { label: 'Local-only', value: counts.local_only, hint: 'Founder workstation only', tone: counts.local_only > 0 ? 'info' : 'neutral' },
+  { label: 'Connected', value: counts.connected, hint: 'a live check succeeded', tone: counts.connected > 0 ? 'accent' : 'neutral' },
+  { label: 'Dispatchable', value: counts.dispatchable, hint: 'routable, never verified', tone: counts.dispatchable > 0 ? 'info' : 'neutral' },
   { label: 'Configured', value: counts.configured, hint: 'credentials present, never verified', tone: counts.configured > 0 ? 'warn' : 'neutral' },
   { label: 'Setup required', value: counts.setup_required, hint: 'partially configured', tone: counts.setup_required > 0 ? 'warn' : 'neutral' },
   { label: 'Not connected', value: counts.not_connected, hint: 'no required fact observed' },

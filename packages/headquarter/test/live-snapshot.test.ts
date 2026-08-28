@@ -22,6 +22,11 @@ import { assertBrowserSafe, assertNoFabricatedFields, BrowserSafetyError } from 
 import { weakestMode } from '../src/live/provenance.js';
 import { registerDirectOrderCapability, submitDirectOrder, DIRECT_ORDER_CAPABILITY } from '../src/live/orders.js';
 import type { ActivityEvent } from '../src/contracts/events.js';
+import { existsSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openHqDatabase, openHqDatabaseReadOnly } from '../src/store/db.js';
+import { HeadquarterOperations } from '../src/application/service.js';
 
 const NOW = '2026-08-28T12:00:00Z';
 const CLAUDE_ONLY = { CLAUDE_ROUTINE_URL: 'present', CLAUDE_ROUTINE_TOKEN: 'present' };
@@ -83,9 +88,12 @@ describe('shape and provenance', () => {
       'retired-bot',
     ]);
     expect(snapshot.capabilities.data.map((capability) => capability.id)).toContain(CAPS.openPr);
-    // Connection state is probed independently of the snapshot's own mode.
+    // Connection state is probed independently of the snapshot's own mode —
+    // and routing evidence reaches DISPATCHABLE, never connected (Codex
+    // round-3 P1 #3).
     const claude = snapshot.connections.data.find((entry) => entry.id === 'anthropic-claude')!;
-    expect(claude.state).toBe('connected');
+    expect(claude.state).toBe('dispatchable');
+    expect(claude.effectiveCapabilities).toEqual([]);
   });
 });
 
@@ -241,5 +249,65 @@ describe('reproducibility', () => {
     const console_ = founderConsole(fixture.ops, new Date(NOW));
     expect(snapshot.counts.approvals).toBe(console_.approvals.length);
     expect(snapshot.counts.queued).toBe(console_.queued.length);
+  });
+});
+
+/**
+ * Open Codex finding — the snapshot tool's database open.
+ *
+ * `src/cli/snapshot.ts` describes itself as read-only, but it used to open the
+ * store with `openHqDatabase`, which is a MIGRATING open: it creates the file
+ * when absent, switches the journal to WAL and applies DDL. So a tool whose
+ * whole contract is "project the Founder's state and touch nothing" altered
+ * that state's schema on every run, and a typo in `--db` created an empty
+ * database that was then published as LIVE HQ state.
+ */
+describe('projecting the store never writes to it', () => {
+  const tmp = () => join(mkdtempSync(join(tmpdir(), 'hq-ro-')), 'headquarter.sqlite');
+
+  it('refuses a write at the connection, not merely by convention', () => {
+    const path = tmp();
+    openHqDatabase(path).close();
+    const ro = openHqDatabaseReadOnly(path);
+    expect(() =>
+      ro
+        .prepare(
+          `INSERT INTO hq_events (id, at, subject_kind, subject_id, status, actor, summary)
+           VALUES ('x', 'now', 'task', 't', 'queued', 'nobody', 'should never land')`,
+        )
+        .run(),
+    ).toThrow(/readonly/i);
+    expect(() => ro.exec(`CREATE TABLE sneaky (a TEXT)`)).toThrow(/readonly/i);
+    ro.close();
+  });
+
+  it('reports a database that is not there instead of creating one', () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'hq-ro-')), 'typo.sqlite');
+    expect(() => openHqDatabaseReadOnly(path)).toThrow();
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it('still projects a real snapshot over the read-only handle', () => {
+    // The guarantee is worth nothing if the read path cannot run under it.
+    const path = tmp();
+    const writable = openHqDatabase(path);
+    const seeded = new HeadquarterOperations(writable);
+    seeded.queue.capabilities.register({
+      id: 'repo.read_status',
+      description: 'Read repo/CI status',
+      riskClass: 'read_only',
+      sideEffect: false,
+      idempotent: true,
+    });
+    writable.close();
+
+    const ro = openHqDatabaseReadOnly(path);
+    const snapshot = liveSnapshotFromOperations(new HeadquarterOperations(ro), {
+      now: NOW,
+      env: CLAUDE_ONLY,
+    });
+    expect(snapshot.mode).toBe('live');
+    expect(snapshot.capabilities.data.map((c) => c.id)).toContain('repo.read_status');
+    ro.close();
   });
 });

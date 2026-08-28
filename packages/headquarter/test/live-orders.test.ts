@@ -15,11 +15,13 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { setupFixture, type Fixture } from './application.fixture.js';
+import { founderConsole } from '../src/application/console.js';
 import {
   AUTO_ROUTE_PREFERENCE,
   DIRECT_ORDER_CAPABILITY,
   directOrderIdempotencyKey,
   MAX_INSTRUCTION_LENGTH,
+  MAX_TITLE_LENGTH,
   registerDirectOrderCapability,
   resolveOrderRoute,
   submitDirectOrder,
@@ -229,6 +231,86 @@ describe('idempotency', () => {
     const second = submitDirectOrder(ops, { ...ORDER, instruction: `\n${ORDER.instruction}  ` }, CLAUDE_ONLY);
     if (!first.ok || !second.ok) throw new Error('expected both to succeed');
     expect(second.data.task.id).toBe(first.data.task.id);
+  });
+
+  /**
+   * Open Codex finding — idempotency trust. A caller-supplied key used to be
+   * adopted verbatim, so the deduplication table was addressable by the
+   * caller: supplying a key another order already held silently discarded the
+   * new order and returned the EXISTING task as the receipt.
+   */
+  it('never lets a supplied key name another order’s task', () => {
+    const { ops } = ordersFixture();
+    const mine = submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
+    if (!mine.ok) throw new Error('expected ok');
+
+    // Someone else submits a different instruction under the first order's key.
+    const hijack = submitDirectOrder(
+      ops,
+      {
+        ...ORDER,
+        instruction: 'Delete the Q3 maintenance plan instead.',
+        idempotencyKey: mine.data.idempotencyKey,
+      },
+      CLAUDE_ONLY,
+    );
+    if (!hijack.ok) throw new Error('expected ok');
+    expect(hijack.data.deduplicated).toBe(false);
+    expect(hijack.data.task.id).not.toBe(mine.data.task.id);
+    // The receipt describes what was actually created, not what was collided
+    // with — and the first order is untouched.
+    expect(hijack.data.task.payload.instruction).toBe('Delete the Q3 maintenance plan instead.');
+    expect(ops.queue.get(mine.data.task.id)!.payload.instruction).toBe(ORDER.instruction);
+    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(2);
+  });
+
+  it('still lets a supplied key distinguish a deliberate repeat of the same order', () => {
+    const { ops } = ordersFixture();
+    const first = submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
+    const deliberate = submitDirectOrder(ops, { ...ORDER, idempotencyKey: 'retry-2' }, CLAUDE_ONLY);
+    const repeatOfRetry = submitDirectOrder(ops, { ...ORDER, idempotencyKey: 'retry-2' }, CLAUDE_ONLY);
+    if (!first.ok || !deliberate.ok || !repeatOfRetry.ok) throw new Error('expected ok');
+    expect(deliberate.data.task.id).not.toBe(first.data.task.id);
+    expect(repeatOfRetry.data.deduplicated).toBe(true);
+    expect(repeatOfRetry.data.task.id).toBe(deliberate.data.task.id);
+  });
+});
+
+/**
+ * Open Codex finding — title pre-write validation. `title` is the one field of
+ * an order PUBLISHED to the browser snapshot, and it was neither bounded nor
+ * safety-scanned before the write.
+ */
+describe('the published title is validated before anything is written', () => {
+  it('refuses a title that looks like a credential, and creates nothing', () => {
+    const { ops } = ordersFixture();
+    const result = submitDirectOrder(
+      ops,
+      { ...ORDER, title: 'sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
+      CLAUDE_ONLY,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('unsafe_instruction');
+    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+  });
+
+  it('bounds the title, so a second instruction cannot arrive as a label', () => {
+    const { ops } = ordersFixture();
+    const result = submitDirectOrder(ops, { ...ORDER, title: 'x'.repeat(MAX_TITLE_LENGTH + 1) }, CLAUDE_ONLY);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('title_too_long');
+    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+  });
+
+  it('falls back to the neutral default for an empty or whitespace title', () => {
+    const { ops } = ordersFixture();
+    const result = submitDirectOrder(ops, { ...ORDER, title: '   ' }, CLAUDE_ONLY);
+    if (!result.ok) throw new Error('expected ok');
+    // The default reveals nothing about the instruction.
+    expect(founderConsole(ops).approvals[0]!.title).toBe('Direct order → CLAUDE');
+    expect(founderConsole(ops).approvals[0]!.title).not.toContain('maintenance');
   });
 });
 

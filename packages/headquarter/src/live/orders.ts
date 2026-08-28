@@ -32,11 +32,21 @@
  *
  * ## Fail closed, never substitute
  *
- * If the requested provider is not genuinely connected the order is REFUSED
+ * If the requested provider is not genuinely dispatchable the order is REFUSED
  * and nothing is created. `AUTO` picks only from providers evidence shows are
- * connected; an explicit `CLAUDE` or `CODEX` never silently falls back to the
- * other one. This is the same failure that made the pre-registry bridge stall
- * silently, and the fix is to say so rather than to route around it.
+ * dispatchable; an explicit `CLAUDE` or `CODEX` never silently falls back to
+ * the other one. This is the same failure that made the pre-registry bridge
+ * stall silently, and the fix is to say so rather than to route around it.
+ *
+ * A note on the word, because two modules use it differently on purpose.
+ * `providerConnectivity().connected` is the ROUTING lane's dispatch contract:
+ * an executor exists and every fact it needs is present. That is the right and
+ * only available gate for placing an order — HQ registers no live provider
+ * check, so requiring one here would mean no order could ever be placed. It is
+ * deliberately NOT the Connection Center's `connected`, which since Codex
+ * round-3 P1 #3 means "a live check ran and succeeded" and nothing less; the
+ * same evidence is shown there as `dispatchable`. An order therefore fails
+ * closed on dispatchability and claims nothing about reachability.
  *
  * The resolved provider is then BINDING at execution, not a label on the task:
  * it is written to the reserved `executionProvider` payload key, and
@@ -123,6 +133,13 @@ export type DirectOrderRoute = (typeof DIRECT_ORDER_ROUTES)[number];
 export const AUTO_ROUTE_PREFERENCE: readonly ProviderId[] = ['CLAUDE', 'CODEX'];
 
 export const MAX_INSTRUCTION_LENGTH = 4000;
+
+/**
+ * A title is a label, not a second instruction. It is also the one field of an
+ * order that is PUBLISHED to the browser snapshot, so it is bounded here
+ * rather than left to whatever a caller sends.
+ */
+export const MAX_TITLE_LENGTH = 120;
 
 export interface RouteCandidate {
   provider: ProviderId;
@@ -221,7 +238,11 @@ export interface DirectOrderInput {
    * value that claims authentication (see `live/local-trust.ts`).
    */
   actorAuthentication?: ActorAuthentication;
-  /** Supply to make a retry explicit; otherwise derived deterministically. */
+  /**
+   * Supply to distinguish a deliberate second order from an accidental
+   * repeat of the same one. It is MIXED INTO the derived key, never used as
+   * the key: a caller cannot choose the key another order already holds.
+   */
   idempotencyKey?: string;
 }
 
@@ -240,6 +261,7 @@ export type DirectOrderErrorCode =
   | 'capability_not_registered'
   | 'empty_instruction'
   | 'instruction_too_long'
+  | 'title_too_long'
   | 'unsafe_instruction';
 
 export type DirectOrderResult =
@@ -274,16 +296,32 @@ const FIELD_SEPARATOR = '\u0000';
  * what they asked for, which project, and which route. A double-clicked
  * composer therefore dedupes onto the first task instead of creating a second
  * one, without the browser having to remember anything. Changing any of those
- * four inputs is a genuinely different order and gets its own key.
+ * inputs is a genuinely different order and gets its own key.
+ *
+ * A caller-supplied key is one more DERIVATION INPUT, never the key itself
+ * (open Codex finding on idempotency trust). Passing it through verbatim made
+ * the deduplication table addressable by the caller: `op_tasks` is unique on
+ * (capability, idempotency key), so a caller that supplied a key another order
+ * already held had its own order silently discarded and was handed the
+ * EXISTING task back as its receipt — a different principal's order, under a
+ * different instruction, presented as the outcome of its own submission.
+ * Whether by collision or on purpose, the receipt would not have described
+ * what was created. Mixing it into the digest keeps its legitimate use — the
+ * same order with a different key is a deliberate second order — while making
+ * it impossible for one order's key to name another's task.
  */
 export function directOrderIdempotencyKey(
-  input: Pick<DirectOrderInput, 'instruction' | 'project' | 'route' | 'requestedBy'>,
+  input: Pick<DirectOrderInput, 'instruction' | 'project' | 'route' | 'requestedBy' | 'idempotencyKey'>,
 ): string {
   const digest = createHash('sha256')
     .update(
-      [input.requestedBy, input.route, input.project ?? '', input.instruction.trim()].join(
-        FIELD_SEPARATOR,
-      ),
+      [
+        input.requestedBy,
+        input.route,
+        input.project ?? '',
+        input.idempotencyKey ?? '',
+        input.instruction.trim(),
+      ].join(FIELD_SEPARATOR),
     )
     .digest('hex');
   return `direct-order:${digest.slice(0, 32)}`;
@@ -334,6 +372,20 @@ export function submitDirectOrder(
   if (!input.requestedBy) {
     return orderFail('invalid_input', 'requestedBy is required.');
   }
+  // The title is the ONE part of an order that reaches the browser, so it is
+  // bounded and safety-scanned before the write, exactly like the instruction
+  // (open Codex finding on title pre-write validation). An empty or
+  // whitespace-only title is not an error — it falls back to the neutral
+  // default, the same as omitting it.
+  const title = (input.title ?? '').trim();
+  if (title.length > MAX_TITLE_LENGTH) {
+    return orderFail(
+      'title_too_long',
+      `An order title may be at most ${MAX_TITLE_LENGTH} characters. It is a label for the ` +
+        'Founder console, not a second instruction.',
+      { length: title.length },
+    );
+  }
   if (!DIRECT_ORDER_ROUTES.includes(input.route)) {
     // Deny by default on an unknown route, exactly as on an unknown capability.
     return orderFail('invalid_input', `Unknown route: ${String(input.route)}`);
@@ -366,12 +418,13 @@ export function submitDirectOrder(
   // two guards — it scans each raw string as well as the encoded payload, so a
   // quoted secret cannot hide behind JSON escaping.
   try {
-    assertBrowserSafe({ instruction, project: input.project ?? null }, 'order');
+    assertBrowserSafe({ instruction, project: input.project ?? null, title: title || null }, 'order');
   } catch {
     return orderFail(
       'unsafe_instruction',
-      'The instruction looks like it contains a credential. Orders are recorded in the ' +
-        'append-only evidence log, so secrets must never be pasted into one.',
+      'The order looks like it contains a credential. Orders are recorded in the ' +
+        'append-only evidence log — and the title is published to the browser — so secrets ' +
+        'must never be pasted into one.',
     );
   }
 
@@ -384,7 +437,8 @@ export function submitDirectOrder(
     });
   }
 
-  const idempotencyKey = input.idempotencyKey ?? directOrderIdempotencyKey({ ...input, instruction });
+  // Always derived, never adopted: see `directOrderIdempotencyKey`.
+  const idempotencyKey = directOrderIdempotencyKey({ ...input, instruction });
   const created = ops.createTask({
     capabilityId: DIRECT_ORDER_CAPABILITY.id,
     payload: {
@@ -407,7 +461,7 @@ export function submitDirectOrder(
     idempotencyKey,
     requestedBy: input.requestedBy,
     project: input.project,
-    title: input.title ?? defaultTitle(route),
+    title: title || defaultTitle(route),
   });
 
   if (!created.ok) {

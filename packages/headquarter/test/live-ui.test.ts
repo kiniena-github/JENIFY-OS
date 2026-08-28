@@ -116,12 +116,15 @@ describe('Connections renders evidence, not descriptors', () => {
     expect(html).toContain(stateChip('Not connected', 'neutral'));
   });
 
-  it('does show the connected chip once evidence supports it', () => {
-    const connected = buildSite({
+  it('shows the dispatchable chip — not the connected one — on routing evidence', () => {
+    // Codex round-3 P1 #3: satisfying the routing dispatch contract is not a
+    // live check, so the page must not draw the Connected chip for it.
+    const routable = buildSite({
       ...sample,
       env: { CLAUDE_ROUTINE_URL: 'x', CLAUDE_ROUTINE_TOKEN: 'y' },
     }).get('connections.html')!;
-    expect(connected).toContain(stateChip('Connected', 'accent'));
+    expect(routable).toContain(stateChip('Dispatchable — unverified', 'info'));
+    expect(routable).not.toContain(stateChip('Connected', 'accent'));
   });
 
   it('states plainly that state comes from observed facts, not from the catalogue', () => {
@@ -129,12 +132,15 @@ describe('Connections renders evidence, not descriptors', () => {
     expect(html).toContain('never that it is reachable');
   });
 
-  it('reports Codex as Local-only once its local facts are observed', () => {
+  it('reports Codex as dispatchable and Local once its local facts are observed', () => {
     const local = buildSite({
       ...sample,
       env: { CODEX_CLI_PATH: '/usr/local/bin/codex', CODEX_AUTH_MODE: 'chatgpt' },
     }).get('connections.html')!;
-    expect(local).toContain('>Local-only<');
+    expect(local).toContain(stateChip('Dispatchable — unverified', 'info'));
+    // The local/cloud distinction is load-bearing and survives on the card.
+    expect(local).toContain('>Local<');
+    expect(local).not.toContain(stateChip('Connected', 'accent'));
   });
 
   it('names facts but never renders an observed value', () => {

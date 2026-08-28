@@ -70,10 +70,24 @@ import {
  * strength of it — was a descriptor-shaped claim wearing evidence's clothes.
  * Credential PRESENCE is setup evidence. `connected` now requires a
  * provider-specific verification that actually succeeded.
+ *
+ * `dispatchable` is the state the round-3 review found missing above it (Codex
+ * round-3 P1 #3). The routing lane's dispatch contract — an executor exists AND
+ * every fact it needs is present — is genuinely stronger than bare credential
+ * presence: it is what HQ consults before it will route work at all. But it is
+ * still an inventory of what is present locally, and cannot tell an expired,
+ * revoked, malformed or wrong-project credential from a good one, because it
+ * never asks the provider anything. Calling that `connected` and handing over
+ * the integration's advertised capabilities read as "verified reachable" to
+ * anyone looking at the page. So routing evidence now tops out at
+ * `dispatchable`: HQ may dispatch to it, nothing has confirmed it answers, and
+ * no capability is granted. `connected` (and `local_only`) means one thing
+ * only — a live check ran and succeeded.
  */
 export type ConnectionState =
   | 'connected'
   | 'local_only'
+  | 'dispatchable'
   | 'configured'
   | 'not_connected'
   | 'expired'
@@ -83,6 +97,7 @@ export type ConnectionState =
 export const CONNECTION_STATE_LABELS: Record<ConnectionState, string> = {
   connected: 'Connected',
   local_only: 'Local-only',
+  dispatchable: 'Dispatchable — unverified',
   configured: 'Configured — unverified',
   not_connected: 'Not connected',
   expired: 'Expired',
@@ -96,11 +111,13 @@ export const CONNECTION_STATE_LABELS: Record<ConnectionState, string> = {
  *
  *   none            nothing was observed at all
  *   configuration   required facts were observed present — setup evidence only
- *   routing_contract the routing lane's own connectivity contract was
- *                   satisfied: an executor genuinely exists AND every fact it
- *                   needs to dispatch is present. This is the same computation
- *                   the router uses to decide it may dispatch, so a page that
- *                   disagreed with it would be the thing that is wrong.
+ *   routing_contract the routing lane's own dispatch contract was satisfied:
+ *                   an executor genuinely exists AND every fact it needs to
+ *                   dispatch is present. This is the same computation the
+ *                   router uses to decide it may dispatch — so a page that
+ *                   disagreed about DISPATCHABILITY would be the thing that is
+ *                   wrong — but it asks the provider nothing, so it cannot
+ *                   establish connectivity (Codex round-3 P1 #3).
  *   live_check      a provider-specific check ran against the service and
  *                   returned an answer
  */
@@ -117,8 +134,16 @@ export type VerificationOutcome =
   | 'unreachable'
   | 'failed';
 
-/** Methods that may support a `connected`/`local_only` state and grant capabilities. */
-const VERIFYING_METHODS: readonly VerificationMethod[] = ['routing_contract', 'live_check'];
+/**
+ * Methods that may support a `connected`/`local_only` state and grant
+ * capabilities. Exactly one qualifies: a check that actually asked the
+ * provider. Routing evidence proves dispatchability, not connectivity, and is
+ * downgraded in `assessConnections` rather than trusted here.
+ */
+const VERIFYING_METHODS: readonly VerificationMethod[] = ['live_check'];
+
+/** Methods that may support `dispatchable` — a weaker, honestly-named claim. */
+const DISPATCH_METHODS: readonly VerificationMethod[] = ['routing_contract'];
 
 /** How HQ would authenticate to the service, if it were connected. */
 export type AuthMechanism =
@@ -508,14 +533,17 @@ export function verifiedProbe(
  * Center row and its actual routability can never disagree. Reuses the
  * existing connectivity computation rather than re-deriving it.
  *
- * This is the one place `connected` may be reached without a live check, and
- * the reason is specific rather than convenient: `providerConnectivity` is not
- * a credential-presence heuristic, it is the routing lane's own dispatch
- * contract — an executor must exist AND every fact that executor needs must be
- * present. It is the exact computation the router consults before dispatching,
- * so a Connection Center that reported something weaker would be contradicting
- * the thing HQ actually does. `verification: 'routing_contract'` records that
- * distinction instead of letting it hide inside the word "connected".
+ * What it can and cannot establish (Codex round-3 P1 #3): `providerConnectivity`
+ * is not a credential-presence heuristic — it is the routing lane's own
+ * dispatch contract, requiring that an executor exist AND that every fact that
+ * executor needs be present, and it is the exact computation the router
+ * consults before dispatching. So a Connection Center that called a
+ * dispatchable provider merely "configured" would be contradicting what HQ
+ * actually does. But the contract asks the provider NOTHING: a revoked token, a
+ * rotated secret and a working one are indistinguishable to it. It therefore
+ * reports `dispatchable` — a real, named claim, above `configured` and below
+ * `connected` — and grants no capability and leaves no verification timestamp.
+ * Reaching `connected` takes a `ConnectionVerifier`.
  */
 export function routingProbe(descriptor: ConnectionDescriptor, provider: ProviderId): ConnectionProbe {
   return {
@@ -526,7 +554,7 @@ export function routingProbe(descriptor: ConnectionDescriptor, provider: Provide
       const observed = descriptor.requiredFacts.filter((fact) => !missing.includes(fact));
       let state: ConnectionState;
       if (report.connected) {
-        state = report.executorKind === 'local-cli' ? 'local_only' : 'connected';
+        state = 'dispatchable';
       } else if (!report.hasExecutor) {
         // No execution mechanism exists at all: this is not something a
         // credential would fix, so it is not "setup required".
@@ -536,17 +564,26 @@ export function routingProbe(descriptor: ConnectionDescriptor, provider: Provide
       } else {
         state = 'not_connected';
       }
-      const usable = state === 'connected' || state === 'local_only';
       return {
         state,
         verification: 'routing_contract',
-        outcome: usable ? 'verified' : 'not_attempted',
+        // Nothing was attempted against the provider itself, whatever the
+        // dispatch contract says — so the outcome is `not_attempted`, and
+        // there is no verification instant to record.
+        outcome: 'not_attempted',
         observedFacts: observed,
         missingFacts: missing,
-        effectiveCapabilities: usable ? [...descriptor.advertisedCapabilities] : [],
-        lastVerifiedAt: usable ? now : null,
+        // Advertised, never granted: no capability is available through a
+        // connection nothing has checked.
+        effectiveCapabilities: [],
+        lastVerifiedAt: null,
         evidenceSource: `routing/providers.ts providerConnectivity(${provider})`,
-        reason: report.reason,
+        reason:
+          state === 'dispatchable'
+            ? `${report.reason} HQ may DISPATCH to ${provider} on this evidence; nothing has ` +
+              'asked the provider whether the credential is valid, unexpired or unrevoked, so ' +
+              'this is not a claim of connectivity and grants no capability.'
+            : report.reason,
       };
     },
   };
@@ -601,14 +638,18 @@ export interface AssessConnectionsOptions {
  *
  *   - a descriptor with no probe is `not_connected` and never verified;
  *   - a probe that throws yields `error`, not a silent omission;
- *   - a probe claiming `connected`/`local_only` on nothing more than
- *     configuration is DOWNGRADED to `configured` here (issue #200, Codex
- *     P1 #4). Credential presence is setup evidence; only a verifying method
- *     — the routing dispatch contract, or a live check — can support a claim
- *     of connectivity;
+ *   - a probe claiming `connected`/`local_only` is DOWNGRADED here unless a
+ *     live check actually established it (issue #200, Codex P1 #4 and round-3
+ *     P1 #3): to `dispatchable` when the routing dispatch contract was
+ *     satisfied, to `configured` otherwise. Credential presence is setup
+ *     evidence and dispatchability is a local inventory; neither asked the
+ *     provider anything, and only a check that did can support a claim of
+ *     connectivity;
  *   - `effectiveCapabilities` is emptied unless the state is genuinely usable
- *     AND was established by a verifying method, so an over-eager adapter
- *     cannot promote advertised capabilities into granted ones.
+ *     AND was established by a live check, so an over-eager adapter cannot
+ *     promote advertised capabilities into granted ones;
+ *   - `lastVerifiedAt` survives only a live check, so a page can never show a
+ *     "last verified" instant for something nothing verified.
  */
 export function assessConnections(
   env: SecretsEnv,
@@ -653,12 +694,19 @@ export function assessConnections(
     }
 
     // A claim of connectivity is only as good as the method behind it.
-    // Configuration (or nothing at all) cannot support one, so it is
-    // downgraded here rather than trusted — the invariant holds for every
-    // probe, including ones written later by somebody else.
+    // Neither configuration nor the routing dispatch contract asked the
+    // provider anything, so neither can support one: the claim is downgraded
+    // here rather than trusted — the invariant holds for every probe,
+    // including ones written later by somebody else — to the strongest state
+    // the method it DID use can honestly carry.
     const verifying = VERIFYING_METHODS.includes(evidence.verification);
+    const dispatchOnly = DISPATCH_METHODS.includes(evidence.verification);
     const claimsUsable = evidence.state === 'connected' || evidence.state === 'local_only';
-    const state: ConnectionState = claimsUsable && !verifying ? 'configured' : evidence.state;
+    const state: ConnectionState = claimsUsable && !verifying
+      ? dispatchOnly
+        ? 'dispatchable'
+        : 'configured'
+      : evidence.state;
     const usable = (state === 'connected' || state === 'local_only') && verifying;
     return {
       ...descriptor,
@@ -675,8 +723,10 @@ export function assessConnections(
       evidenceSource: evidence.evidenceSource,
       reason:
         claimsUsable && !verifying
-          ? `${evidence.reason} (Reported as CONFIGURED rather than connected: the claim rested on ` +
-            'configuration alone, which is not evidence of connectivity.)'
+          ? `${evidence.reason} (Reported as ${state.toUpperCase()} rather ` +
+            `than connected: the claim rested on ${
+              dispatchOnly ? 'the routing dispatch contract' : 'configuration'
+            } alone, which shows what is present here and never asks the provider itself.)`
           : evidence.reason,
       canRecheck: descriptor.recheckable && probe != null,
       canDisconnect: descriptor.revocable,
@@ -689,6 +739,7 @@ export function connectionSummary(statuses: readonly ConnectionStatus[]): Record
   const counts = {
     connected: 0,
     local_only: 0,
+    dispatchable: 0,
     configured: 0,
     not_connected: 0,
     expired: 0,

@@ -193,6 +193,30 @@ export function openHqDatabase(path: string = DEFAULT_HQ_DB_PATH): HqDatabase {
   return db;
 }
 
+/**
+ * Open the Headquarter database for READING ONLY (issue #200, Codex finding
+ * on the snapshot tool).
+ *
+ * `openHqDatabase` is a migrating open: it creates the file if it is missing,
+ * switches the journal to WAL, runs the full DDL and adds any missing columns.
+ * That is right for a process that owns the store, and wrong for one that only
+ * projects it — the snapshot CLI described itself as read-only while every run
+ * altered the Founder's schema, and pointing it at a typo'd path silently
+ * created an empty database and then reported it as LIVE HQ state.
+ *
+ * This open takes nothing on itself: SQLite refuses writes at the connection,
+ * so the guarantee is enforced by the engine rather than by the caller's good
+ * intentions, and a missing file is an error instead of a new empty database.
+ * Schema migration stays exclusively with the process that owns the store, so a
+ * database this connection cannot read is reported, never repaired.
+ */
+export function openHqDatabaseReadOnly(path: string = DEFAULT_HQ_DB_PATH): HqDatabase {
+  const db = new Database(path, { readonly: true, fileMustExist: true });
+  // A connection-scoped read setting; it writes nothing to the file.
+  db.pragma('foreign_keys = ON');
+  return db;
+}
+
 /** In-memory database for tests. */
 export function openMemoryHqDatabase(): HqDatabase {
   return openHqDatabase(':memory:');

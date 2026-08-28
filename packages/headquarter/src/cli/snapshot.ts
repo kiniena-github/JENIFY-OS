@@ -9,9 +9,15 @@
  *   npm run hq:snapshot --workspace @factoryos/headquarter -- \
  *     [--db <path>] [--out <file>]
  *
- * Read-only: every call it makes (`founderConsole`, the specialist directory,
- * the capability registry, the event log) is a read path. It cannot mutate
- * the control plane, and it refuses to write an artefact that
+ * Read-only, and enforced rather than asserted: the database is opened with
+ * `openHqDatabaseReadOnly`, so SQLite itself refuses every write on the
+ * connection. That matters because the ordinary open is a MIGRATING one — it
+ * creates the file when absent, switches the journal to WAL and applies DDL —
+ * so this tool used to alter the Founder's schema on every run while
+ * describing itself as read-only, and a typo in `--db` created an empty
+ * database that was then published as LIVE HQ state. Every call it makes
+ * (`founderConsole`, the specialist directory, the capability registry, the
+ * event log) is a read path, and it refuses to write an artefact that
  * `live/redaction.ts` cannot prove is free of credentials.
  *
  * Local only. No network, no deployment.
@@ -20,7 +26,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { openHqDatabase } from '../store/db.js';
+import { openHqDatabaseReadOnly } from '../store/db.js';
 import { HeadquarterOperations } from '../application/service.js';
 import { liveSnapshotFromOperations } from '../live/snapshot.js';
 import { CONNECTION_CATALOG } from '../live/connections.js';
@@ -57,7 +63,21 @@ function observeFacts(): SecretsEnv {
 const dbPath = flag('db');
 const outPath = flag('out') ?? join(packageRoot, 'dist', 'site', SNAPSHOT_FILENAME);
 
-const db = openHqDatabase(dbPath ?? undefined);
+// Read-only at the CONNECTION, not merely by convention: SQLite refuses every
+// write on this handle, and a missing database file is an error rather than a
+// new empty one silently reported as LIVE HQ state.
+let db;
+try {
+  db = openHqDatabaseReadOnly(dbPath ?? undefined);
+} catch (error) {
+  console.error(
+    `Could not open the Headquarter database read-only at ${dbPath ?? '(default path)'}: ` +
+      `${(error as Error).message}\n` +
+      'This tool only projects an existing store. Creating or migrating one is the job of the ' +
+      'process that owns it — run that first, or pass --db with the right path.',
+  );
+  process.exit(1);
+}
 const ops = new HeadquarterOperations(db);
 
 const snapshot = liveSnapshotFromOperations(ops, {

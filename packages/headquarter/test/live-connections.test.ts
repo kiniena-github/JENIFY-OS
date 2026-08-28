@@ -68,25 +68,31 @@ describe('nothing is connected merely by being catalogued', () => {
 });
 
 describe('evidence changes the verdict', () => {
-  it('reports Claude connected once its routine secrets are observed', () => {
+  it('reports Claude DISPATCHABLE once its routine secrets are observed, not connected', () => {
+    // Codex round-3 P1 #3: the routing dispatch contract is satisfied, so HQ
+    // would route work here — but nothing has asked Anthropic whether the
+    // token is still valid, so this is not connectivity and grants nothing.
     const status = statusFor('anthropic-claude', {
       CLAUDE_ROUTINE_URL: 'present',
       CLAUDE_ROUTINE_TOKEN: 'present',
     });
-    expect(status.state).toBe('connected');
-    expect(status.effectiveCapabilities).toContain('ai_task_execution');
-    expect(status.lastVerifiedAt).toBe(NOW);
+    expect(status.state).toBe('dispatchable');
+    expect(status.verification).toBe('routing_contract');
+    expect(status.outcome).toBe('not_attempted');
+    expect(status.effectiveCapabilities).toEqual([]);
+    expect(status.lastVerifiedAt).toBeNull();
   });
 
-  it('reports Codex as LOCAL-ONLY rather than connected, because it is a local CLI', () => {
-    // Flattening this into "connected" is exactly the lie that let the old
-    // bridge stall silently in CI.
+  it('reports Codex as dispatchable-and-local, never as connected', () => {
+    // Flattening the local/cloud difference into "connected" is exactly the
+    // lie that let the old bridge stall silently in CI; `locality` keeps it.
     const status = statusFor('openai-codex', {
       CODEX_CLI_PATH: '/usr/local/bin/codex',
       CODEX_AUTH_MODE: 'chatgpt',
     });
-    expect(status.state).toBe('local_only');
+    expect(status.state).toBe('dispatchable');
     expect(status.locality).toBe('local');
+    expect(status.effectiveCapabilities).toEqual([]);
   });
 
   it('reports a partially-configured integration as setup required, not connected', () => {
@@ -97,11 +103,104 @@ describe('evidence changes the verdict', () => {
     expect(status.effectiveCapabilities).toEqual([]);
   });
 
-  it('agrees with routing/providers.ts, so the page and the router cannot diverge', () => {
-    const connected = statusFor('google-gemini', { GEMINI_API_KEY: 'present' });
-    expect(connected.state).toBe('connected');
-    expect(connected.evidenceSource).toContain('providerConnectivity(GEMINI)');
+  it('agrees with routing/providers.ts about DISPATCHABILITY, so the page and the router cannot diverge', () => {
+    const routable = statusFor('google-gemini', { GEMINI_API_KEY: 'present' });
+    expect(routable.state).toBe('dispatchable');
+    expect(routable.evidenceSource).toContain('providerConnectivity(GEMINI)');
     expect(statusFor('google-gemini').state).toBe('not_connected');
+  });
+});
+
+describe('routing evidence is dispatchability, never verified connectivity', () => {
+  /**
+   * Codex round-3 P1 #3. `providerConnectivity` reads executor metadata and
+   * environment facts. It never contacts the provider, so an expired, revoked
+   * or rotated credential is indistinguishable from a working one — and the
+   * page previously reported all three as Connected, with the integration's
+   * advertised capabilities granted on the strength of it.
+   */
+  const ROUTABLE = {
+    CLAUDE_ROUTINE_URL: 'present',
+    CLAUDE_ROUTINE_TOKEN: 'revoked-yesterday',
+    GEMINI_API_KEY: 'rotated-last-week',
+    CODEX_CLI_PATH: '/usr/local/bin/codex',
+    CODEX_AUTH_MODE: 'chatgpt',
+  };
+
+  it('grants no capability and no verification timestamp to ANY routing-backed provider', () => {
+    for (const status of assessConnections(ROUTABLE, { now: NOW })) {
+      if (status.verification !== 'routing_contract') continue;
+      expect(status.state, `${status.id} must not claim connectivity from routing evidence`).not.toBe(
+        'connected',
+      );
+      expect(status.state).not.toBe('local_only');
+      expect(status.effectiveCapabilities).toEqual([]);
+      expect(status.lastVerifiedAt).toBeNull();
+      expect(status.outcome).toBe('not_attempted');
+    }
+  });
+
+  it('says in words that nothing asked the provider', () => {
+    const status = statusFor('anthropic-claude', ROUTABLE);
+    expect(status.reason.toLowerCase()).toContain('dispatch');
+    expect(status.reason).toMatch(/nothing has asked the provider/i);
+  });
+
+  it('downgrades a probe that claims connected on routing evidence alone', () => {
+    // Enforced centrally, so an adapter written later cannot restore the
+    // defect by claiming harder than its method supports.
+    const overclaiming: ConnectionProbe = {
+      id: 'anthropic-claude',
+      probe: () => ({
+        state: 'connected',
+        verification: 'routing_contract',
+        outcome: 'verified',
+        observedFacts: ['CLAUDE_ROUTINE_URL', 'CLAUDE_ROUTINE_TOKEN'],
+        missingFacts: [],
+        effectiveCapabilities: ['ai_task_execution'],
+        lastVerifiedAt: NOW,
+        evidenceSource: 'the router, optimistically',
+        reason: 'we can dispatch, so it must be up',
+      }),
+    };
+    const descriptor = CONNECTION_CATALOG.find((entry) => entry.id === 'anthropic-claude')!;
+    const [status] = assessConnections(ROUTABLE, {
+      now: NOW,
+      catalog: [descriptor],
+      probes: [overclaiming],
+    });
+    expect(status!.state).toBe('dispatchable');
+    expect(status!.effectiveCapabilities).toEqual([]);
+    expect(status!.lastVerifiedAt).toBeNull();
+    expect(status!.reason).toContain('DISPATCHABLE rather than connected');
+  });
+
+  it('reaches connected ONLY through a live check that actually succeeded', () => {
+    const descriptor = CONNECTION_CATALOG.find((entry) => entry.id === 'anthropic-claude')!;
+    const [status] = assessConnections(ROUTABLE, {
+      now: NOW,
+      catalog: [descriptor],
+      probes: [
+        verifiedProbe(descriptor, {
+          id: descriptor.id,
+          verify: () => ({
+            outcome: 'verified',
+            detail: 'asked the service and it answered',
+            capabilities: ['ai_task_execution'],
+          }),
+        }),
+      ],
+    });
+    expect(status!.state).toBe('connected');
+    expect(status!.verification).toBe('live_check');
+    expect(status!.effectiveCapabilities).toEqual(['ai_task_execution']);
+    expect(status!.lastVerifiedAt).toBe(NOW);
+    // And V1 ships no such verifier, so nothing in the shipped page is
+    // Connected on its own evidence.
+    expect(DEFAULT_CONNECTION_VERIFIERS).toEqual([]);
+    expect(
+      assessConnections(ROUTABLE, { now: NOW }).some((entry) => entry.state === 'connected'),
+    ).toBe(false);
   });
 });
 

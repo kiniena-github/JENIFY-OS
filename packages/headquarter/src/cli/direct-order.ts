@@ -96,6 +96,12 @@ Usage:
            absent. It never enables a capability that was disabled, and it
            never places an order.
 
+  hq:order ${LOCAL_ADMIN_ACK_FLAG} --declare-provider <workerId>=<PROVIDER>
+           --as <principalId> [--db <path>]
+           Configuration only: declares which provider a worker executes as, so
+           it may claim orders bound to that provider. The declaring principal
+           must hold approval authority; a worker can never declare one.
+
 ${LOCAL_ADMIN_INTERFACE_NOTICE}`);
   process.exit(2);
 }
@@ -143,6 +149,7 @@ function main(): void {
   const dbPath = flag(argv, 'db');
   const dryRun = argv.includes('--dry-run');
   const registerCapability = argv.includes('--register-capability');
+  const declareProvider = flag(argv, 'declare-provider');
 
   // Configuration and invocation are different commands wearing one name; they
   // are never performed in the same run.
@@ -162,6 +169,41 @@ function main(): void {
           'disabled; re-enabling it is its own explicit configuration decision.',
       );
     }
+    console.log('\nConfiguration only — no order was placed.');
+    return;
+  }
+
+  // Declaring which provider a worker executes as is the OTHER configuration
+  // action, and it goes through `HeadquarterOperations.declareWorkerProvider`
+  // — which resolves the actor and requires approval authority — never through
+  // a queue handle (issue #200, Codex round-3 P1 #1). Like registration, it is
+  // never performed in the same run as an order.
+  if (declareProvider) {
+    if (instruction) {
+      usage('--declare-provider is a configuration action and does not place an order.');
+    }
+    if (!requestedBy) {
+      usage('--declare-provider needs --as <principalId>: the declaring principal must hold approval authority.');
+    }
+    const [workerId, providerId] = declareProvider.split('=');
+    if (!workerId || !providerId) {
+      usage('--declare-provider expects <workerId>=<PROVIDER>, e.g. claude-worker=CLAUDE.');
+    }
+    const configDb = openHqDatabase(dbPath ?? undefined);
+    const configOps = new HeadquarterOperations(configDb);
+    const declared = configOps.declareWorkerProvider({
+      workerId: workerId!,
+      providerId: providerId!,
+      founderId: requestedBy!,
+    });
+    if (!declared.ok) {
+      console.error(`Declaration refused (${declared.error.code}): ${declared.error.message}`);
+      process.exit(1);
+    }
+    console.log(
+      `Worker ${declared.data.workerId} executes as ${declared.data.providerId} ` +
+        `(declared by ${declared.data.declaredBy} at ${declared.data.declaredAt}).`,
+    );
     console.log('\nConfiguration only — no order was placed.');
     return;
   }

@@ -45,10 +45,41 @@
  * payload, so it is inside the action digest a Founder approves: the provider
  * cannot be swapped between the approval and the execution without
  * invalidating the approval.
+ *
+ * ## Who may write the map (Codex round-3 P1 #1)
+ *
+ * The first version of this module hung one class off `OperatorQueue`, so
+ * `queue.workerProviders.declare('me', 'CLAUDE', 'me')` was reachable by
+ * anything holding a queue handle — including an execution worker, which could
+ * therefore redeclare itself as another provider immediately before claiming
+ * that provider's bound order. The binding was an authority whose own
+ * configuration was unguarded.
+ *
+ * The map is now split by direction. `WorkerProviderDirectory` (read) is what
+ * the queue holds and what execution consults. `WorkerProviderRegistrar`
+ * (write) is held only by `HeadquarterOperations`, whose
+ * `declareWorkerProvider`/`revokeWorkerProvider` resolve the actor against the
+ * human principal registry and require approval authority first — the same
+ * gate as the kill switch. Registered workers are refused that authority
+ * outright, so no worker can declare anything, its own identity least of all.
+ *
+ * ## Selection, not just refusal (Codex round-3 P1 #2)
+ *
+ * Enforcing the binding only as a refusal at the head of the queue meant a
+ * CODEX worker was handed the oldest task for its capability, found it
+ * CLAUDE-bound, and was refused — forever, while that task waited for a
+ * Founder or a CLAUDE worker. One bound task could head-of-line block every
+ * later task the refused worker WAS entitled to run. So the binding now takes
+ * part in candidate selection (`OperatorQueue.selectClaimable`): a worker is
+ * offered the oldest task COMPATIBLE with its declared provider. Skipping is
+ * not softening — an incompatible task is never claimable by that worker at
+ * any point, and when nothing compatible exists the refusal is still raised
+ * and evidenced rather than being flattened into "the queue is empty".
  */
 
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
+import { PROVIDERS, type ProviderId } from '../routing/providers.js';
 
 /** Reserved payload key carrying the provider a task is bound to. */
 export const EXECUTION_PROVIDER_KEY = 'executionProvider';
@@ -95,36 +126,29 @@ export interface WorkerProviderRecord {
 }
 
 /**
- * The declared worker → provider map.
+ * What the EXECUTION path may do with the worker → provider map: look up, and
+ * nothing else (issue #200, Codex round-3 P1 #1).
  *
- * Configuration, not invocation: writing to it is a deliberate act recorded
- * with who declared it and when. Reading it is what the execution boundary
- * does on every claim of a bound task.
+ * The queue exposes exactly this interface, and the object behind it is a
+ * `WorkerProviderDirectory` — an instance that has no write method at all, not
+ * merely one whose write methods a type hides. A worker holding a queue handle
+ * therefore cannot redeclare itself as another provider on its way to claiming
+ * a bound order; the map is something done TO workers, never BY them.
  */
-export class WorkerProviderDirectory {
-  constructor(private db: HqDatabase) {}
+export interface WorkerProviderLookup {
+  /** The provider this worker executes as, or null when none is declared. */
+  providerOf(workerId: string): string | null;
+  list(): WorkerProviderRecord[];
+}
 
-  /** Declare (or re-declare) which provider a worker executes as. */
-  declare(workerId: string, providerId: string, declaredBy: string): void {
-    if (!workerId || !providerId || !declaredBy) {
-      throw new Error('A provider declaration needs a worker, a provider and a declaring actor');
-    }
-    this.db
-      .prepare(
-        `INSERT INTO op_worker_providers (worker_id, provider_id, declared_by, declared_at)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(worker_id) DO UPDATE SET
-           provider_id = excluded.provider_id,
-           declared_by = excluded.declared_by,
-           declared_at = excluded.declared_at`,
-      )
-      .run(workerId, providerId, declaredBy, nowIso());
-  }
-
-  /** Remove a declaration. The worker can then claim no provider-bound task. */
-  revoke(workerId: string): void {
-    this.db.prepare(`DELETE FROM op_worker_providers WHERE worker_id = ?`).run(workerId);
-  }
+/**
+ * The declared worker → provider map, READ side.
+ *
+ * This is what the execution boundary consults on every claim of a bound task.
+ * It cannot write, so no execution path can move the map underneath itself.
+ */
+export class WorkerProviderDirectory implements WorkerProviderLookup {
+  constructor(protected db: HqDatabase) {}
 
   /** The provider this worker executes as, or null when none is declared. */
   providerOf(workerId: string): string | null {
@@ -144,6 +168,74 @@ export class WorkerProviderDirectory {
       declaredBy: row.declared_by as string,
       declaredAt: row.declared_at as string,
     }));
+  }
+}
+
+/** Raised when a provider declaration is refused before it is written. */
+export class ProviderDeclarationRejected extends Error {
+  constructor(
+    readonly reason: 'invalid_input' | 'unknown_provider',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ProviderDeclarationRejected';
+  }
+}
+
+/**
+ * The declared worker → provider map, WRITE side.
+ *
+ * Deliberately a separate class from the read side, and deliberately NOT
+ * reachable from `OperatorQueue`: declaring who executes as whom is a
+ * CONFIGURATION act, so it belongs with the other configuration acts behind
+ * `HeadquarterOperations`, where the actor is resolved against the human
+ * principal registry and must hold approval authority before a row moves. This
+ * class performs no authorization of its own — it is the mechanism, not the
+ * gate — which is exactly why nothing on the execution path is handed one.
+ *
+ * `providerId` is validated against the routing registry rather than accepted
+ * as free text: a typo (`CLAUDE ` , `claude`, `CLUADE`) would otherwise create
+ * a declaration that silently matches no order's binding, which reads as "the
+ * queue is empty" rather than as the configuration error it is. Deny by
+ * default on an unknown provider, like every other unknown tag in this system.
+ */
+export class WorkerProviderRegistrar extends WorkerProviderDirectory {
+  /** Declare (or re-declare) which provider a worker executes as. */
+  declare(workerId: string, providerId: string, declaredBy: string): WorkerProviderRecord {
+    if (!workerId?.trim() || !providerId?.trim() || !declaredBy?.trim()) {
+      throw new ProviderDeclarationRejected(
+        'invalid_input',
+        'A provider declaration needs a worker, a provider and a declaring actor',
+      );
+    }
+    if (!(PROVIDERS as readonly string[]).includes(providerId)) {
+      throw new ProviderDeclarationRejected(
+        'unknown_provider',
+        `Unknown execution provider: ${providerId}. Declarations are limited to the routing ` +
+          `registry (${PROVIDERS.join(', ')}), so a typo fails closed instead of creating a ` +
+          'declaration that matches nothing.',
+      );
+    }
+    const declaredAt = nowIso();
+    this.db
+      .prepare(
+        `INSERT INTO op_worker_providers (worker_id, provider_id, declared_by, declared_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(worker_id) DO UPDATE SET
+           provider_id = excluded.provider_id,
+           declared_by = excluded.declared_by,
+           declared_at = excluded.declared_at`,
+      )
+      .run(workerId, providerId, declaredBy, declaredAt);
+    return { workerId, providerId: providerId as ProviderId, declaredBy, declaredAt };
+  }
+
+  /** Remove a declaration. The worker can then claim no provider-bound task. */
+  revoke(workerId: string): boolean {
+    const result = this.db
+      .prepare(`DELETE FROM op_worker_providers WHERE worker_id = ?`)
+      .run(workerId);
+    return result.changes > 0;
   }
 }
 
