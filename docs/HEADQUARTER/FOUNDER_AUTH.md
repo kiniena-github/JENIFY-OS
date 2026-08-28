@@ -85,9 +85,16 @@ being registered and enabled — and from `mutationsEnabled`. These are
 independent registry fields, so being the mapped Founder proves none of them;
 the console must draw from this, never from "an account was mapped".
 
-A denial reason is bounded at 500 characters and scanned for credential-shaped
-content **before** the canonical write, because it is persisted to `op_tasks`,
-`hq_approvals` and the append-only evidence log.
+`GET /session` also reports `trustedOriginConfigured`, because with no usable
+`allowedOrigins` entry every state-changing request is refused — advertising
+the controls in that deployment would be the same false claim in another form.
+
+A denial reason and an approval note are each bounded at 500 characters and
+scanned for credential-shaped content **before** the canonical write. A denial
+reason is persisted to `op_tasks`, `hq_approvals` and the evidence log; an
+approval note is stored in `hq_approvals.decision_note` **and rendered into the
+generated console HTML**, and the approve path's evidence payload does not
+carry it, so the pre-write check is its only guard.
 
 Requests must be `application/json` and carry a trusted `Origin`. They must NOT
 carry `principalId`, `requestedBy`, `founderId`, `actorAuthentication` or any

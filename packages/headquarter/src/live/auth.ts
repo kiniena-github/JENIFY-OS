@@ -234,6 +234,20 @@ function normalizeOrigin(value: string): string | null {
  * The allow-list starting EMPTY is the point: a host that forgets to
  * configure origins gets no mutations at all.
  */
+/**
+ * The configured origins that actually parse as origins.
+ *
+ * Exported because two things must agree about it: the gate that refuses a
+ * mutation, and the availability answer that tells the console whether the
+ * button works. Deriving both from this one function is what stops them
+ * drifting (issue #200, Codex round 3 P2).
+ */
+export function normalizedTrustedOrigins(allowedOrigins: readonly string[]): string[] {
+  return allowedOrigins
+    .map((entry) => normalizeOrigin(entry))
+    .filter((entry): entry is string => entry !== null);
+}
+
 export function checkMutationOrigin(
   request: ControlRequest,
   allowedOrigins: readonly string[],
@@ -251,9 +265,7 @@ export function checkMutationOrigin(
     };
   }
 
-  const allowed = allowedOrigins
-    .map((entry) => normalizeOrigin(entry))
-    .filter((entry): entry is string => entry !== null);
+  const allowed = normalizedTrustedOrigins(allowedOrigins);
   if (allowed.length === 0) {
     return {
       ok: false,

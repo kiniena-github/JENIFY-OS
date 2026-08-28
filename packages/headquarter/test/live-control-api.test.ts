@@ -19,6 +19,7 @@ import { EXECUTION_PROVIDER_KEY } from '../src/operator/provider-binding.js';
 import {
   handleControlRequest,
   CONTROL_ROUTES,
+  MAX_APPROVAL_NOTE_LENGTH,
   MAX_DENIAL_REASON_LENGTH,
   type ControlApiDeps,
   type ControlResponse,
@@ -739,5 +740,132 @@ describe('advertised controls come from the principal grants (Codex round 2, P2)
     const controls = h.call({ method: 'GET', path: CONTROL_ROUTES.session }).body
       .controls as Record<string, unknown>;
     expect(controls).toMatchObject({ directOrder: false, approve: false, deny: false });
+  });
+});
+
+describe('an approval note is validated before it is stored (Codex round 3, P1)', () => {
+  function pendingFromOther(h: Harness): { taskId: string; digest: string } {
+    h.fixture.principals.register({
+      id: 'coo',
+      displayName: 'Chief Operating Officer',
+      originateCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+      approvalAuthority: true,
+      active: true,
+    });
+    const created = h.fixture.ops.createTask({
+      capabilityId: DIRECT_ORDER_CAPABILITY.id,
+      payload: { kind: 'direct_order', instruction: 'x', [EXECUTION_PROVIDER_KEY]: 'CLAUDE' },
+      idempotencyKey: 'coo-order-note',
+      requestedBy: 'coo',
+      title: 'COO order',
+    });
+    if (!created.ok) throw new Error(JSON.stringify(created.error));
+    const card = founderConsole(h.fixture.ops, NOW).approvals[0]!;
+    return { taskId: card.taskId, digest: card.actionDigest };
+  }
+
+  function storedNotes(h: Harness, taskId: string): unknown[] {
+    return h.fixture.db
+      .prepare('SELECT decision_note FROM hq_approvals WHERE task_id = ?')
+      .all(taskId);
+  }
+
+  it('refuses a credential-shaped note and approves nothing', () => {
+    // Worse than the denial case rather than merely similar: queue.approve's
+    // evidence payload carries the approval id, digest and expiry but NOT the
+    // note, so the evidence guard never sees it. Without this check the note
+    // was stored silently — and renderFounderApprovals publishes that column
+    // into the generated HTML.
+    const h = harness();
+    const { taskId, digest } = pendingFromOther(h);
+    const response = h.call({
+      path: CONTROL_ROUTES.approve,
+      body: { taskId, expectedActionDigest: digest, note: 'password: abcdefgh1234' },
+    });
+    expect(response.status).toBe(400);
+    expect((response.body.error as { code: string }).code).toBe('unsafe_note');
+    expect(h.fixture.ops.queue.get(taskId)!.status).toBe('needs_approval');
+    expect(storedNotes(h, taskId)).toHaveLength(0);
+  });
+
+  it('refuses it at the canonical layer too, so the CLI cannot store one either', () => {
+    const h = harness();
+    const { taskId, digest } = pendingFromOther(h);
+    const result = h.fixture.ops.approveTask({
+      taskId,
+      founderId: 'founder',
+      expectedActionDigest: digest,
+      note: 'api_key = abcdefgh1234',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('invalid_input');
+    expect(h.fixture.ops.queue.get(taskId)!.status).toBe('needs_approval');
+    expect(storedNotes(h, taskId)).toHaveLength(0);
+  });
+
+  it('bounds the note, since it is stored permanently and rendered', () => {
+    const h = harness();
+    const { taskId, digest } = pendingFromOther(h);
+    const response = h.call({
+      path: CONTROL_ROUTES.approve,
+      body: {
+        taskId,
+        expectedActionDigest: digest,
+        note: 'x'.repeat(MAX_APPROVAL_NOTE_LENGTH + 1),
+      },
+    });
+    expect(response.status).toBe(400);
+    expect((response.body.error as { code: string }).code).toBe('note_too_long');
+    expect(h.fixture.ops.queue.get(taskId)!.status).toBe('needs_approval');
+  });
+
+  it('still accepts an ordinary note, and stores it', () => {
+    const h = harness();
+    const { taskId, digest } = pendingFromOther(h);
+    const response = h.call({
+      path: CONTROL_ROUTES.approve,
+      body: { taskId, expectedActionDigest: digest, note: 'Agreed, proceed this week' },
+    });
+    expect(response.status).toBe(200);
+    expect(h.fixture.ops.queue.get(taskId)!.status).toBe('queued');
+    expect(storedNotes(h, taskId)).toEqual([{ decision_note: 'Agreed, proceed this week' }]);
+  });
+});
+
+describe('an unusable origin list disables the advertised controls (Codex round 3, P2)', () => {
+  it('advertises nothing writable when no origin is configured', () => {
+    // Every POST would be refused as origin_allowlist_empty, so telling the
+    // console the buttons work is the same lie in a third costume.
+    const h = harness({ origins: [] });
+    const controls = h.call({ method: 'GET', path: CONTROL_ROUTES.session }).body
+      .controls as Record<string, unknown>;
+    expect(controls).toMatchObject({
+      directOrder: false,
+      approve: false,
+      deny: false,
+      trustedOriginConfigured: false,
+    });
+  });
+
+  it('treats an unparseable origin list as no origin at all', () => {
+    // Derived from the same function the gate uses, so "usable" cannot mean
+    // one thing to the check and another to the advertisement.
+    const h = harness({ origins: ['not a url', 'https://hq.example/with/path', ''] });
+    const controls = h.call({ method: 'GET', path: CONTROL_ROUTES.session }).body
+      .controls as Record<string, unknown>;
+    expect(controls).toMatchObject({ approve: false, trustedOriginConfigured: false });
+  });
+
+  it('advertises the controls once one usable origin is configured', () => {
+    const h = harness({ origins: ['nonsense', ORIGIN] });
+    const controls = h.call({ method: 'GET', path: CONTROL_ROUTES.session }).body
+      .controls as Record<string, unknown>;
+    expect(controls).toMatchObject({
+      directOrder: true,
+      approve: true,
+      deny: true,
+      trustedOriginConfigured: true,
+    });
   });
 });

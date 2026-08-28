@@ -562,6 +562,27 @@ export class HeadquarterOperations {
       return fail('kill_switch_engaged', `Kill switch is engaged for ${task.capabilityId}`);
     }
 
+    // Validate the note BEFORE any write (issue #200, Codex round 3 P1).
+    //
+    // This one has no backstop at all, which makes it worse than the denial
+    // case rather than merely similar: `queue.approve`'s evidence payload
+    // carries the approval id, digest and expiry — NOT the note — so the
+    // evidence log's guard never sees it. A credential pasted into an approval
+    // note is therefore written to `hq_approvals.decision_note` with nothing
+    // objecting, and `renderFounderApprovals` publishes that column into
+    // generated HTML. Silent persistence plus publication, with no error
+    // anywhere.
+    if (input.note !== undefined) {
+      try {
+        assertNoSecretLikeContent({ note: input.note });
+      } catch {
+        return fail(
+          'invalid_input',
+          'The approval note looks like it contains a credential. Approval notes are stored ' +
+            'permanently and rendered in the Founder console, so nothing was approved.',
+        );
+      }
+    }
     const currentDigest = taskActionDigest(task);
     if (!input.expectedActionDigest || input.expectedActionDigest !== currentDigest) {
       this.queue.evidence.append({

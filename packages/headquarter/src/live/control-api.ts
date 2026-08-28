@@ -61,6 +61,7 @@ import { taskActionDigest } from '../operator/approvals.js';
 import type { SecretsEnv } from '../routing/providers.js';
 import {
   checkMutationOrigin,
+  normalizedTrustedOrigins,
   resolveFounderPrincipal,
   scanForClientIdentity,
   verifyStepUp,
@@ -90,6 +91,13 @@ export const CONTROL_API_PREFIX = '/api/hq/control';
  * the same reasoning as `MAX_TITLE_LENGTH` on an order.
  */
 export const MAX_DENIAL_REASON_LENGTH = 500;
+
+/**
+ * An approval note is stored permanently in `hq_approvals.decision_note` and
+ * rendered into the generated console HTML, so it is bounded and scanned on
+ * exactly the same terms as a denial reason.
+ */
+export const MAX_APPROVAL_NOTE_LENGTH = 500;
 
 export const CONTROL_ROUTES = {
   session: `${CONTROL_API_PREFIX}/session`,
@@ -350,9 +358,14 @@ function controlAvailability(
   deps: ControlApiDeps,
   founder: ResolvedFounder | null,
 ): Record<string, unknown> {
-  // Every write control is gated on the SAME flag that refuses the write, so
-  // the console can never be told a button works when the route will refuse it.
-  const writable = founder !== null && deps.mutationsEnabled !== false;
+  // Every write control is gated on the SAME conditions that refuse the write,
+  // so the console can never be told a button works when the route will refuse
+  // it. That means the origin allow-list too: with none configured, or only
+  // unparseable entries, `checkMutationOrigin` rejects every POST as
+  // `origin_allowlist_empty` — and derived from the same function it uses, so
+  // the two cannot disagree about what counts as a usable origin.
+  const originsUsable = normalizedTrustedOrigins(deps.allowedOrigins).length > 0;
+  const writable = founder !== null && deps.mutationsEnabled !== false && originsUsable;
   const principal = founder?.principal;
   const mayApprove = writable && principal?.approvalAuthority === true;
   const mayOriginate =
@@ -362,6 +375,7 @@ function controlAvailability(
     approve: mayApprove,
     deny: mayApprove,
     mutationsEnabled: deps.mutationsEnabled !== false,
+    trustedOriginConfigured: originsUsable,
     // Stated, not hidden: the canonical model has no third decision, so the
     // UI must not draw one. See the module docstring.
     askForChanges: false,
@@ -492,6 +506,30 @@ function approve(
       'invalid_input',
       'An approval needs a taskId and the action digest that was displayed.',
     );
+  }
+  // The note gets the same treatment as a denial reason, and for a stronger
+  // reason: it is not merely persisted, it is PUBLISHED — `renderFounderApprovals`
+  // writes `decision_note` into the generated HTML (issue #200, Codex round 3 P1).
+  if (note !== undefined) {
+    if (note.length > MAX_APPROVAL_NOTE_LENGTH) {
+      audit('refused', 'note_too_long', founder);
+      return refusal(
+        400,
+        'note_too_long',
+        `An approval note may be at most ${MAX_APPROVAL_NOTE_LENGTH} characters.`,
+      );
+    }
+    try {
+      assertBrowserSafe({ note }, 'approval');
+    } catch {
+      audit('refused', 'unsafe_note', founder);
+      return refusal(
+        400,
+        'unsafe_note',
+        'The approval note looks like it contains a credential. Approval notes are stored ' +
+          'permanently and rendered in the Founder console, so nothing was approved.',
+      );
+    }
   }
 
   // Step-up is decided from the CANONICAL capability of the task named in the
