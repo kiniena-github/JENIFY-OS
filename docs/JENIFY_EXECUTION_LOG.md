@@ -346,3 +346,11 @@ headquarter/server/shared/web, web bundle unchanged at 215.66 kB / 69.22 kB gzip
 evidence 48/48 at 1440/1024/414/390/360/320 px across all eight pages, archive interaction 8/8.
 The browser Founder-auth gate is unchanged and still open: the composer stays inert, approvals
 stay read-only, and issue #200 V1 is still NOT marked accepted.
+
+**Follow-up on the same correction round: freshness is not truthfulness.** The exact-match
+rule for LIVE left one case open. The static preview ships a `sample` snapshot whose
+`generatedAt` is by construction the render instant, so it matched exactly and the chip
+announced LIVE over demonstration data — next to a provenance chip correctly reading SAMPLE.
+`freshnessVerdict` now also reads the snapshot's own `mode`: a bundle that says it is
+`sample` or `reconstructed` is reported by that provenance, however exactly its timestamp
+matches. A snapshot that states no mode, and a genuinely `live` one, are unchanged.

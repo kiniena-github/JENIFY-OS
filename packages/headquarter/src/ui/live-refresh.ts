@@ -4,11 +4,15 @@
  * The rendered pages are static HTML: their content is whatever the build
  * projected. What this script adds is not new content but an honest answer to
  * "is what I am looking at still current?" — it polls the snapshot the build
- * wrote next to the pages and reports one of four states in the header:
+ * wrote next to the pages and reports one of six states in the header:
  *
- *   LIVE     the snapshot fetched, and its generatedAt is EXACTLY this
- *            render's timestamp — the page and the data behind it are the
- *            same instant
+ *   LIVE     the snapshot fetched, its generatedAt is EXACTLY this render's
+ *            timestamp, AND the snapshot's own provenance is `live` — the page
+ *            and the data behind it are the same instant of canonical state
+ *   SAMPLE / RECONSTRUCTED
+ *            the timestamps match, but the snapshot says its own data is not
+ *            live. Freshness is not truth: the static preview ships a sample
+ *            bundle, and it may not announce itself as LIVE
  *   UPDATED  the snapshot fetched, and it is NEWER than this render — the
  *            page you are reading is behind; reload to see it
  *   STALE    the snapshot fetched, and it is OLDER than this render — the
@@ -47,15 +51,24 @@ export const SNAPSHOT_FILENAME = 'hq-snapshot.json';
  * the rendered HTML for a label. There is one implementation, and it is the
  * one that ships.
  *
- * Returns `{ state, label, hint }`. The states are the five named above; the
- * only path to `live` is an exact string match between the snapshot's
- * `generatedAt` and the instant this page was rendered.
+ * Returns `{ state, label, hint }`. The only path to `live` is an exact string
+ * match between the snapshot's `generatedAt` and the instant this page was
+ * rendered, AND a snapshot that does not claim a non-live provenance of its
+ * own: freshness and truthfulness are separate questions, and a matching
+ * sample bundle must answer the second one honestly.
  */
-export const FRESHNESS_VERDICT_JS = `function freshnessVerdict(renderedAt, generatedAt) {
+export const FRESHNESS_VERDICT_JS = `function freshnessVerdict(renderedAt, generatedAt, mode) {
   if (typeof generatedAt !== 'string' || generatedAt === '') {
     return { state: 'error', label: 'ERROR — unreadable snapshot', hint: 'The snapshot carries no generatedAt timestamp, so its freshness cannot be established.' };
   }
   if (generatedAt === renderedAt) {
+    // Matching timestamps answer "is this current?", not "is this real". A
+    // snapshot whose own provenance is sample or reconstructed is reported by
+    // that provenance, however exactly its instant matches — otherwise the
+    // static preview, which ships a sample bundle, would announce LIVE.
+    if (typeof mode === 'string' && mode !== '' && mode !== 'live') {
+      return { state: 'not-live', label: String(mode).toUpperCase() + ' — not live data', hint: 'The snapshot next to this page matches this render (' + generatedAt + '), but its own provenance is ' + mode + ', not live.' };
+    }
     return { state: 'live', label: 'LIVE', hint: 'Snapshot matches this render exactly (' + generatedAt + ').' };
   }
   var fetched = Date.parse(generatedAt);
@@ -97,6 +110,7 @@ export function liveRefreshScript(renderedAt: string): string {
         : state === 'updated' ? 'warn'
         : state === 'stale' ? 'warn'
         : state === 'offline' ? 'neutral'
+        : state === 'not-live' ? 'neutral'
         : 'danger'
     );
     if (label) label.textContent = text;
@@ -112,7 +126,7 @@ export function liveRefreshScript(renderedAt: string): string {
       .then(function (snapshot) {
         // LIVE is the exact-match case only, and the decision is the shared
         // one above — nothing here may round in favour of LIVE.
-        var verdict = freshnessVerdict(RENDERED_AT, snapshot && snapshot.generatedAt);
+        var verdict = freshnessVerdict(RENDERED_AT, snapshot && snapshot.generatedAt, snapshot && snapshot.mode);
         set(verdict.state, verdict.label, verdict.hint);
       })
       .catch(function (error) {

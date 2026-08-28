@@ -46,10 +46,12 @@ const loaded = buildSite({ ...sample, env: LOADED_ENV });
 function freshnessVerdict(): (
   renderedAt: string,
   generatedAt: unknown,
+  mode?: unknown,
 ) => { state: string; label: string; hint: string } {
   return new Function(`${FRESHNESS_VERDICT_JS}; return freshnessVerdict;`)() as (
     renderedAt: string,
     generatedAt: unknown,
+    mode?: unknown,
   ) => { state: string; label: string; hint: string };
 }
 
@@ -255,6 +257,29 @@ describe('provenance and freshness are never overstated', () => {
     }
 
     expect(verdict(rendered, '2026-08-28T12:00:00.001Z').state).toBe('updated');
+  });
+
+  it('does not claim LIVE for a matching snapshot that says it is not live', () => {
+    // Freshness and truthfulness are different questions. The static preview
+    // ships a `sample` bundle whose generatedAt is by construction the render
+    // instant, so an exact-match-only rule would still have it announce LIVE.
+    const verdict = freshnessVerdict();
+    const rendered = '2026-08-28T12:00:00.000Z';
+    for (const mode of ['sample', 'reconstructed']) {
+      const result = verdict(rendered, rendered, mode);
+      expect(result.state, mode).toBe('not-live');
+      expect(result.label, mode).toContain(mode.toUpperCase());
+      expect(result.label, mode).not.toBe('LIVE');
+      expect(result.hint, mode).toContain('not live');
+    }
+    // A live snapshot, and a snapshot that states no mode at all, are unchanged.
+    expect(verdict(rendered, rendered, 'live').state).toBe('live');
+    expect(verdict(rendered, rendered, undefined).state).toBe('live');
+  });
+
+  it('reads the snapshot mode from the page, not only from the rule', () => {
+    // The wiring must pass the mode through, or the guard above is inert.
+    expect(bare.get('index.html')!).toContain('snapshot && snapshot.mode');
   });
 
   it('does not accept an equal instant written differently as an exact match', () => {
