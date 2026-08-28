@@ -520,7 +520,16 @@ export function verifiedProbe(
         effectiveCapabilities: verified
           ? [...(result.capabilities ?? descriptor.advertisedCapabilities)]
           : [],
-        lastVerifiedAt: now,
+        // Only a check that SUCCEEDED leaves a verification instant behind.
+        // This used to record `now` whatever the outcome, so an expired,
+        // revoked, malformed or unreachable credential was stamped with the
+        // moment it failed — and the Connection Center renders that field
+        // under the label "Last verified". The most recently broken
+        // credential then looked like the most recently checked healthy one,
+        // which is the presence-equals-connected defect wearing a timestamp.
+        // A failed check is still evidence, and it survives in `outcome` and
+        // `reason`; what it is not is verification.
+        lastVerifiedAt: verified ? now : null,
         evidenceSource: `verifier ${descriptor.id}`,
         reason: `${descriptor.displayName}: ${result.outcome} — ${result.detail}`,
       };
@@ -699,13 +708,34 @@ export function assessConnections(
     // here rather than trusted — the invariant holds for every probe,
     // including ones written later by somebody else — to the strongest state
     // the method it DID use can honestly carry.
-    const verifying = VERIFYING_METHODS.includes(evidence.verification);
+    //
+    // A live check that RAN is not the same as one that SUCCEEDED, and the
+    // method alone used to be enough here. `options.probes` accepts arbitrary
+    // adapters, so a probe could return `verification: 'live_check'` with
+    // `state: 'connected'` and an outcome of `failed`, `expired` or
+    // `unreachable`, and this layer — the one place the invariant is supposed
+    // to be enforced centrally — granted its capabilities and stamped it
+    // verified. The outcome is now part of the test: verification means a
+    // check ran AND came back verified. `verifiedProbe` already derived its
+    // own state from the outcome, so this changes nothing for it; it closes
+    // the door for every adapter written later, which is the point of
+    // enforcing it here rather than in each probe.
+    const verifiedOutcome = evidence.outcome === 'verified';
+    const checked = VERIFYING_METHODS.includes(evidence.verification);
+    const verifying = checked && verifiedOutcome;
     const dispatchOnly = DISPATCH_METHODS.includes(evidence.verification);
     const claimsUsable = evidence.state === 'connected' || evidence.state === 'local_only';
+    // A usable claim that no verified check supports is downgraded to the
+    // strongest honest state. When a check DID run and did not come back
+    // verified, the honest state is the one its own outcome implies —
+    // `expired` for expired/revoked, `error` for a named failure — not the
+    // `configured` that would suggest nothing had been tried.
     const state: ConnectionState = claimsUsable && !verifying
-      ? dispatchOnly
-        ? 'dispatchable'
-        : 'configured'
+      ? checked
+        ? stateForOutcome(evidence.outcome, descriptor.locality)
+        : dispatchOnly
+          ? 'dispatchable'
+          : 'configured'
       : evidence.state;
     const usable = (state === 'connected' || state === 'local_only') && verifying;
     return {
@@ -715,18 +745,25 @@ export function assessConnections(
       outcome: evidence.outcome,
       observedFacts: evidence.observedFacts,
       missingFacts: evidence.missingFacts,
-      // Advertised never becomes granted without a verifying method.
+      // Advertised never becomes granted without a check that came back
+      // verified.
       effectiveCapabilities: usable ? evidence.effectiveCapabilities : [],
-      // "Verified" means a verifying method ran. Configuration verifies
-      // nothing, so it leaves no verification timestamp behind.
+      // "Verified" means a check ran AND succeeded. Configuration verifies
+      // nothing, and a check that failed verified nothing either, so neither
+      // leaves a verification timestamp behind.
       lastVerifiedAt: verifying ? evidence.lastVerifiedAt : null,
       evidenceSource: evidence.evidenceSource,
       reason:
         claimsUsable && !verifying
           ? `${evidence.reason} (Reported as ${state.toUpperCase()} rather ` +
-            `than connected: the claim rested on ${
-              dispatchOnly ? 'the routing dispatch contract' : 'configuration'
-            } alone, which shows what is present here and never asks the provider itself.)`
+            `than connected: ${
+              checked
+                ? `a live check ran and came back ${evidence.outcome}, which establishes ` +
+                  'no connection'
+                : `the claim rested on ${
+                    dispatchOnly ? 'the routing dispatch contract' : 'configuration'
+                  } alone, which shows what is present here and never asks the provider itself`
+            }.)`
           : evidence.reason,
       canRecheck: descriptor.recheckable && probe != null,
       canDisconnect: descriptor.revocable,

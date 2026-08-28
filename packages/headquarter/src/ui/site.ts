@@ -35,6 +35,7 @@ import {
   type DirectOrderRouteAvailability,
 } from './render.js';
 import { assessConnections, type ConnectionStatus } from '../live/connections.js';
+import { assertBrowserSafe } from '../live/redaction.js';
 import { DIRECT_ORDER_ROUTES, resolveOrderRoute } from '../live/orders.js';
 import type { SourceMode } from '../live/provenance.js';
 import type { SecretsEnv } from '../routing/providers.js';
@@ -122,6 +123,17 @@ export function buildSite(data: HeadquarterData): Map<string, string> {
   // reports nothing connected.
   const env = data.env ?? {};
   const connections = data.connections ?? assessConnections(env, { now: nowIso });
+  // Guard the connections that are about to be RENDERED, not a recomputation
+  // of them. `build-site.ts` derives the snapshot's connections from `env`
+  // independently of this bundle, so when a caller supplies `data.connections`
+  // the snapshot guard inspects a different object entirely — and the HTML is
+  // written first. A credential that reached a verifier's `reason`,
+  // `evidenceSource` or fact list would therefore land in `connections.html`
+  // with nothing in the path having looked at it. Checked on both branches, so
+  // the invariant does not depend on which one a caller took: a computed
+  // bundle carries only fact NAMES and passes, and this throws rather than
+  // renders if that ever stops being true.
+  assertBrowserSafe(connections, 'site.connections');
   const orderRoutes: DirectOrderRouteAvailability[] = DIRECT_ORDER_ROUTES.map((route) => ({
     route,
     resolution: resolveOrderRoute(route, env),

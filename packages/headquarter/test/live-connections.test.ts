@@ -298,6 +298,41 @@ describe('credential presence is configuration, never connectivity', () => {
     }
   });
 
+  /**
+   * Codex exact-head finding on `5c767fa` (P2). `verifiedProbe` recorded the
+   * check instant whatever came back, so an expired, revoked, malformed or
+   * unreachable credential was stamped with the moment it FAILED — and the
+   * Connection Center renders that field under the label "Last verified". The
+   * most recently broken credential looked like the most recently confirmed
+   * healthy one. The failure is still evidence and still survives in `outcome`
+   * and `reason`; what it is not is verification.
+   */
+  it('leaves no last-verified instant behind when the check did not succeed', () => {
+    const descriptor = CONNECTION_CATALOG.find((entry) => entry.id === 'supabase')!;
+    for (const outcome of [
+      'expired',
+      'revoked',
+      'malformed',
+      'wrong_project',
+      'unreachable',
+      'failed',
+    ] as VerificationOutcome[]) {
+      const verifier: ConnectionVerifier = {
+        id: 'supabase',
+        verify: () => ({ outcome, detail: `the check reported ${outcome}` }),
+      };
+      const [status] = assessConnections(FULLY_SET, {
+        now: NOW,
+        catalog: [descriptor],
+        probes: [verifiedProbe(descriptor, verifier)],
+      });
+      expect(status!.lastVerifiedAt, outcome).toBeNull();
+      // The check is not erased — it is reported as what it was.
+      expect(status!.outcome, outcome).toBe(outcome);
+      expect(status!.reason, outcome).toContain(outcome);
+    }
+  });
+
   it('reaches connected only when a live check actually succeeds', () => {
     const descriptor = CONNECTION_CATALOG.find((entry) => entry.id === 'supabase')!;
     const verifier: ConnectionVerifier = {
@@ -386,6 +421,75 @@ describe('the probe seam cannot weaken the invariants', () => {
     expect(status!.state).toBe('not_connected');
     expect(status!.lastVerifiedAt).toBeNull();
     expect(status!.canRecheck).toBe(false);
+  });
+
+  /**
+   * Codex exact-head finding on `5c767fa` (P2). The method alone used to be
+   * the whole test: a probe returning `verification: 'live_check'` and
+   * `state: 'connected'` was treated as verified WHATEVER its outcome, so an
+   * adapter reporting a failed, expired or unreachable check kept the
+   * connected state, had its capabilities granted, and was stamped with a
+   * verification instant. `options.probes` takes arbitrary adapters and this
+   * layer is where the invariant is meant to hold centrally, so the outcome
+   * belongs in the test: a check that RAN is not a check that SUCCEEDED.
+   */
+  const claimingProbe = (outcome: VerificationOutcome): ConnectionProbe => ({
+    id: 'over-eager',
+    probe: () => ({
+      state: 'connected',
+      verification: 'live_check',
+      outcome,
+      observedFacts: ['NEVER_SET'],
+      missingFacts: [],
+      effectiveCapabilities: ['everything'],
+      lastVerifiedAt: NOW,
+      evidenceSource: 'adapter',
+      reason: `Over-eager Adapter: ${outcome}`,
+    }),
+  });
+
+  const assessClaim = (outcome: VerificationOutcome) =>
+    assessConnections(NOTHING, {
+      now: NOW,
+      catalog: [descriptor],
+      probes: [claimingProbe(outcome)],
+    })[0]!;
+
+  it('refuses a connected claim whose live check did not come back verified', () => {
+    for (const outcome of [
+      'failed',
+      'expired',
+      'revoked',
+      'malformed',
+      'wrong_project',
+      'unreachable',
+      'not_attempted',
+    ] as VerificationOutcome[]) {
+      const status = assessClaim(outcome);
+      expect(status.state, outcome).not.toBe('connected');
+      expect(status.effectiveCapabilities, outcome).toEqual([]);
+      expect(status.lastVerifiedAt, outcome).toBeNull();
+    }
+  });
+
+  it('downgrades a failed live check to what its own outcome means, not to configured', () => {
+    // "Configured" would say nothing had been tried. Something was tried and
+    // it came back badly; the row must keep saying so.
+    expect(assessClaim('expired').state).toBe('expired');
+    expect(assessClaim('revoked').state).toBe('expired');
+    expect(assessClaim('unreachable').state).toBe('error');
+    expect(assessClaim('malformed').state).toBe('error');
+    expect(assessClaim('wrong_project').state).toBe('error');
+    expect(assessClaim('failed').state).toBe('error');
+    // And the reason says a check ran, rather than blaming configuration.
+    expect(assessClaim('expired').reason).toContain('a live check ran and came back expired');
+  });
+
+  it('still grants a genuinely verified live check everything it earned', () => {
+    const status = assessClaim('verified');
+    expect(status.state).toBe('connected');
+    expect(status.effectiveCapabilities).toEqual(['everything']);
+    expect(status.lastVerifiedAt).toBe(NOW);
   });
 });
 
