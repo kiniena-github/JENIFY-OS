@@ -169,16 +169,24 @@ export interface DirectOrderRouteAvailability {
  * is a different trust domain entirely. A browser write here would therefore
  * have to either trust a client-supplied principal id (impersonation) or ship
  * a new auth boundary invented under automation, which the mission brief
- * explicitly gates. So the seam is built and tested server-side, the composer
- * shows exactly what it would submit, and the working path is the local CLI,
- * where the Founder's own OS session is the authentication.
+ * explicitly gates. So the seam is built and tested server-side and the
+ * composer shows exactly what it would submit.
+ *
+ * The CLI is named as the working path, and named honestly: it is a
+ * trusted-local-admin/maintenance interface which does not authenticate the
+ * Founder either — it asserts a principal id (see `live/local-trust.ts`). An
+ * earlier draft of this string claimed the OS session was the authentication;
+ * it is not, and HQ is therefore not yet Founder-operable in the browser.
  */
 export const DIRECT_ORDER_BLOCKER =
   'Submitting from the browser is BLOCKED: Headquarter has no authenticated Founder session, and ' +
   'creating a task requires a registered human principal that a browser cannot prove it is. No weak ' +
-  'auth boundary was invented for V1. The order path itself is real and tested — run it from the ' +
-  'Founder workstation with `npm run hq:order --workspace @factoryos/headquarter`, where the OS ' +
-  'session is the authentication.';
+  'auth boundary was invented for V1. The order path itself is real and tested — run it with ' +
+  '`npm run hq:order --workspace @factoryos/headquarter -- --local-admin`, which is a ' +
+  'TRUSTED-LOCAL-ADMIN maintenance interface: it does not authenticate the Founder either, it ' +
+  'asserts a principal id that deny-by-default authorization and the no-self-approval rule then ' +
+  'contain. Until a real HQ authentication boundary exists — a Founder-gated security decision — ' +
+  'HQ is NOT fully Founder-operable from a browser.';
 
 const ROUTE_STATE_PRESENTATION: Record<'ready' | 'blocked' | 'unknown', { label: string; tone: Tone }> = {
   ready: { label: 'Available', tone: 'accent' },

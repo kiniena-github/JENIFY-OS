@@ -1,27 +1,45 @@
 /**
- * Founder Direct Order CLI (issue #200, scope B — the working write path).
+ * Direct Order CLI — a TRUSTED-LOCAL-ADMIN / MAINTENANCE interface
+ * (issue #200, scope B; classification corrected after the PR #201 review).
  *
- * ## Why this is a CLI and not a browser button
+ * ## What this interface is, precisely
  *
- * `HeadquarterOperations.createTask` authorizes by resolving `requestedBy`
- * against the human-principal registry. Headquarter has no authenticated
- * browser session that can establish who the requester is, so a browser write
- * would have to trust a client-supplied principal id — impersonation — or
- * ship a new authentication boundary invented under automation, which the
- * mission's Founder-only gates cover. Neither is acceptable, so the composer
- * in the UI is inert and this is where an order is actually placed: here the
- * Founder's own OS session on their own workstation IS the authentication,
- * and the principal id is asserted by someone who already has the machine.
+ * It is the maintenance path by which someone who ALREADY holds full local
+ * trust over the Headquarter database opens a canonical, gated order. It is
+ * **not** an authenticated Founder-facing path, and it must never be described
+ * as one: `--as <id>` asserts a principal id and binds it to nothing — not the
+ * OS user, not the process owner, not a credential. The earlier claim that
+ * "the Founder's own OS session is the authentication" was an overclaim and
+ * has been removed.
  *
- * Everything after that point is the ordinary, unmodified control plane:
- * capability allow-list from the registry, `founder_gate` classification,
- * `needs_approval` with an action digest, hash-chained evidence.
+ * What the interface really establishes is that the caller can run a process
+ * against the HQ SQLite file. Anyone who can do that could already write that
+ * file directly, so this command adds no authority — and that is exactly why
+ * it may exist while browser writes may not, and equally why it may not claim
+ * to authenticate anybody. `live/local-trust.ts` holds the full reasoning, the
+ * fail-closed invocation rules and the vocabulary.
+ *
+ * Consequently issue #200 is NOT fully Founder-operable: a genuine HQ
+ * authentication boundary is a Founder-gated security decision that remains
+ * open, and until it exists both the browser composer and Founder approvals
+ * stay read-only.
+ *
+ * Everything after the assertion is the ordinary, unmodified control plane:
+ * deny-by-default authorization against the principal registry, capability
+ * allow-list from the registry, `founder_gate` classification, `needs_approval`
+ * with an action digest, hash-chained evidence — and the canonical
+ * no-self-approval rule, which means the asserted principal is precisely the
+ * one who cannot approve the order it just opened.
  *
  * ## Usage
  *
  *   npm run hq:order --workspace @factoryos/headquarter -- \
- *     --as founder --instruction "Draft the Q3 maintenance plan" \
+ *     --local-admin --as founder --instruction "Draft the Q3 maintenance plan" \
  *     [--project mesob] [--route AUTO|CLAUDE|CODEX] [--db path] [--dry-run]
+ *
+ * `--local-admin` is a required acknowledgement of the trust model above, so
+ * an unattended script cannot place principal-attributed orders by accident.
+ * The command refuses to run under CI entirely, with no override.
  *
  * `--dry-run` resolves and prints the route without creating anything, so
  * route availability can be checked without opening work.
@@ -39,6 +57,11 @@ import {
   submitDirectOrder,
   type DirectOrderRoute,
 } from '../live/orders.js';
+import {
+  LOCAL_ADMIN_ACK_FLAG,
+  LOCAL_ADMIN_INTERFACE_NOTICE,
+  resolveLocalAdminInvocation,
+} from '../live/local-trust.js';
 import { PROVIDER_REGISTRY, type SecretsEnv } from '../routing/providers.js';
 import { probeCodex } from '../providers/codex/probe.js';
 
@@ -52,9 +75,11 @@ function usage(message: string): never {
   console.error(`${message}
 
 Usage:
-  hq:order --as <principalId> --instruction "<what to do>"
+  hq:order ${LOCAL_ADMIN_ACK_FLAG} --as <principalId> --instruction "<what to do>"
            [--project <label>] [--route ${DIRECT_ORDER_ROUTES.join('|')}]
-           [--db <path>] [--dry-run]`);
+           [--db <path>] [--dry-run]
+
+${LOCAL_ADMIN_INTERFACE_NOTICE}`);
   process.exit(2);
 }
 
@@ -83,6 +108,17 @@ function observeFacts(): SecretsEnv {
 
 function main(): void {
   const argv = process.argv.slice(2);
+
+  // Fail closed BEFORE anything is parsed, opened or resolved: an interface
+  // that cannot authenticate its actor may only run where local trust is a
+  // real claim, and only when the operator has said so explicitly.
+  const invocation = resolveLocalAdminInvocation(argv, process.env);
+  if (!invocation.ok) {
+    console.error(invocation.message);
+    process.exit(2);
+  }
+  console.log(`${LOCAL_ADMIN_INTERFACE_NOTICE}\n`);
+
   const requestedBy = flag(argv, 'as');
   const instruction = flag(argv, 'instruction');
   const project = flag(argv, 'project') ?? undefined;
@@ -90,7 +126,9 @@ function main(): void {
   const dbPath = flag(argv, 'db');
   const dryRun = argv.includes('--dry-run');
 
-  if (!requestedBy) usage('--as <principalId> is required: an order must be attributable.');
+  if (!requestedBy) {
+    usage('--as <principalId> is required: an order must be attributable (attributable, not authenticated).');
+  }
   if (!instruction) usage('--instruction "<what to do>" is required.');
   if (!(DIRECT_ORDER_ROUTES as readonly string[]).includes(routeArg)) {
     usage(`--route must be one of ${DIRECT_ORDER_ROUTES.join(', ')}.`);
@@ -119,7 +157,20 @@ function main(): void {
   // for it. Registering it here is that explicit ask.
   registerDirectOrderCapability(ops);
 
-  const result = submitDirectOrder(ops, { instruction, project, route, requestedBy }, env);
+  const result = submitDirectOrder(
+    ops,
+    {
+      instruction,
+      project,
+      route,
+      requestedBy,
+      // Recorded on the canonical task, and therefore inside the action digest
+      // the approver echoes back: this attribution was asserted at a local
+      // maintenance interface, not proven.
+      actorAuthentication: 'unauthenticated_local_assertion',
+    },
+    env,
+  );
 
   if (!result.ok) {
     console.error(`Order refused (${result.error.code}): ${result.error.message}`);
@@ -133,9 +184,12 @@ function main(): void {
   console.log(`  status:      ${task.status}`);
   console.log(`  route:       ${resolution.requested} → ${resolution.resolved}`);
   console.log(`  idempotency: ${idempotencyKey}`);
+  console.log(`  actor:       ${requestedBy} (asserted locally, NOT authenticated)`);
   console.log(
     classification.requiresApproval
-      ? '\nThis order executes NOTHING until a Founder approves that exact action by digest.'
+      ? `\nThis order executes NOTHING until a Founder approves that exact action by digest.\n` +
+          `And ${requestedBy} cannot be that Founder: the canonical no-self-approval rule refuses ` +
+          `an approval by the principal the task was opened as.`
       : '\nThis order runs under standing policy.',
   );
 }

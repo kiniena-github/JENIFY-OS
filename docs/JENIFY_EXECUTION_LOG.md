@@ -260,7 +260,33 @@ actor against the human-principal registry. A browser write would have to trust 
 client-supplied principal id (impersonation) or ship a new auth boundary invented under
 automation. Neither was done. Approvals remain read-only, the Direct Order composer is drawn
 inert with the blocker stated in the UI itself, and the working write path is the local CLI
-`npm run hq:order`, where the Founder's own OS session is the authentication.
+`npm run hq:order` — a trusted-local-admin/maintenance interface, NOT an authenticated
+Founder path (see the correction below).
+
+**Correction after the PR #201 review (same day).** The review was right that the CLI
+overclaimed: `--as <id>` accepts a caller-supplied principal id bound to nothing — not the OS
+user, not the process owner, not a credential — so describing the OS session as "the
+authentication" was false. The interface is now classified for what it is, in code
+(`live/local-trust.ts`) rather than in prose that can drift: a trusted-local-admin /
+maintenance path for someone who already holds full local access to the HQ database, and who
+therefore gains no authority from it. Three fail-closed consequences: `ActorAuthentication`
+has NO value that claims authentication (only `unauthenticated` and
+`unauthenticated_local_assertion`), so no caller can assert one; the default is the weakest
+value; and the CLI refuses to run under CI at all — with no override — and otherwise requires
+an explicit `--local-admin` acknowledgement, so an unattended script cannot place
+principal-attributed orders. Every order now records its `actorAuthentication` in the payload,
+which puts it inside the action digest the approver echoes back. The containment for an
+impersonated assertion is the two canonical rules, both untouched and now hostile-tested:
+deny-by-default (an unregistered, ungranted, inactive or worker id opens NOTHING) and
+no-self-approval (the asserted principal is exactly the one barred from approving the order
+it opened, so a local assertion can never manufacture an approved action — a second, genuinely
+present approval-authorized human must decide it, seeing the recorded assertion).
+
+**Readiness, stated truthfully: issue #200 V1 is NOT fully accepted.** HQ is not
+Founder-operable from a browser while the composer is inert and approvals are read-only, and
+the CLI does not close that gap because it authenticates nobody either. A real HQ
+authentication boundary remains an open Founder-gated security decision; scopes A, B
+(server-side), C, the mobile/UX work, the tests and the preview-ready build are complete.
 
 Two real defects were found by the new tests and fixed. (1) The evidence log's secret
 heuristic missed quoted credentials in free text: it ran on the JSON encoding, where
@@ -270,7 +296,8 @@ first line, which published Founder-typed content to the browser as a side effec
 the instruction; the default is now a neutral `Direct order → <PROVIDER>` label, and a title
 is published only when its author deliberately chose one.
 
-878 headquarter tests green (was 787; +91), server 442 passed + 3 pre-existing skips,
+895 headquarter tests green (787 on main; +91 for V1, +17 for the actor-trust correction),
+server 442 passed + 3 pre-existing skips,
 `tsc --noEmit` clean in headquarter/server/shared/web, web bundle unchanged at 69.22 kB gzip.
 Browser evidence: 48/48 no-horizontal-overflow at 1440/1024/414/390/360/320 px across all
 eight pages, archive interaction 8/8. Local only — nothing deployed, no paid service enabled,

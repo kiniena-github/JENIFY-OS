@@ -37,10 +37,22 @@
  * connected; an explicit `CLAUDE` or `CODEX` never silently falls back to the
  * other one. This is the same failure that made the pre-registry bridge stall
  * silently, and the fix is to say so rather than to route around it.
+ *
+ * ## Who the requester is — asserted, never authenticated
+ *
+ * `requestedBy` is AUTHORIZED against the human-principal registry and is not
+ * AUTHENTICATED by anything: Headquarter has no mechanism that can prove a
+ * human's identity, in the browser or at a terminal. Every order therefore
+ * carries an `actorAuthentication` marker recording how little is known, and
+ * the containment is the pair of canonical rules that already exist — deny by
+ * default on an unregistered or ungranted id, and no self-approval, so the
+ * asserted principal is precisely the one who may not approve the order.
+ * See `live/local-trust.ts`.
  */
 
 import { createHash } from 'node:crypto';
 import { assertBrowserSafe } from './redaction.js';
+import { DEFAULT_ACTOR_AUTHENTICATION, type ActorAuthentication } from './local-trust.js';
 import type { TaskClassification } from '../application/classification.js';
 import type { HeadquarterOperations, OpsErrorCode } from '../application/service.js';
 import type { OperatorTask } from '../operator/queue.js';
@@ -170,8 +182,19 @@ export interface DirectOrderInput {
   /**
    * The human principal opening the work. Resolved against the principal
    * registry by `HeadquarterOperations` — an unregistered id can open nothing.
+   *
+   * Note what this is and is not: an ASSERTION of identity, authorized against
+   * the registry, never authenticated. See `actorAuthentication`.
    */
   requestedBy: string;
+  /**
+   * How much is actually known about the caller behind `requestedBy`.
+   *
+   * Recorded on the canonical task so an approver can see that the attribution
+   * was asserted rather than proven. Omitted → the weakest value; there is no
+   * value that claims authentication (see `live/local-trust.ts`).
+   */
+  actorAuthentication?: ActorAuthentication;
   /** Supply to make a retry explicit; otherwise derived deterministically. */
   idempotencyKey?: string;
 }
@@ -307,6 +330,11 @@ export function submitDirectOrder(
       project: input.project ?? null,
       requestedRoute: route.requested,
       resolvedProvider: route.resolved,
+      // Honesty travels with the action: the approver reading this task sees
+      // that `requestedBy` was asserted, not authenticated. It is part of the
+      // payload, so it is part of the action digest a Founder echoes back —
+      // the assertion cannot be edited away between rendering and approval.
+      actorAuthentication: input.actorAuthentication ?? DEFAULT_ACTOR_AUTHENTICATION,
     },
     idempotencyKey,
     requestedBy: input.requestedBy,
