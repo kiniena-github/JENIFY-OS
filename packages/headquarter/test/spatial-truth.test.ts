@@ -21,8 +21,8 @@ import type { ActivityEvent, ActivityStatus } from '../src/contracts/events.js';
 import type { WorkerDescriptor } from '../src/contracts/workers.js';
 import type { ConnectionState, ConnectionStatus } from '../src/live/connections.js';
 import { CONNECTION_CATALOG } from '../src/live/connections.js';
-import { latestTaskStates } from '../src/ui/model.js';
-import { founderDashboard, projectBoard, workerStatuses } from '../src/ui/views.js';
+import { latestTaskStates, type TaskState } from '../src/ui/model.js';
+import { founderDashboard, projectBoard, workerStatuses, type WorkerStatus } from '../src/ui/views.js';
 import { buildSite, type HeadquarterData } from '../src/ui/site.js';
 import { MOTION_LEGEND } from '../src/ui/spatial/page.js';
 import { THEME_CSS } from '../src/ui/theme.js';
@@ -249,6 +249,67 @@ describe('activity is a function of canonical status and nothing else', () => {
     const occupant = floor.zones.flatMap((zone) => zone.occupants).find((entry) => entry.id === 'waiting')!;
     expect(occupant.activity).toBe('queued');
     expect(occupant.evidence).toContain('accepted, not started');
+  });
+
+  it('gives every route through occupantActivity a self-consistent sentence', () => {
+    // Enumerated from the branches of the function, not from the cases I
+    // thought to test. That distinction found this: the completion branch read
+    // its count off the aggregate, so a known completed task with a zero
+    // aggregate produced "Last recorded outcome was a completion (0
+    // completed)" — a sentence asserting a completion and denying it at once.
+    const status = (over: Partial<WorkerStatus> = {}): WorkerStatus => ({
+      worker: 'w',
+      activeTask: null,
+      activeCount: 0,
+      blockedCount: 0,
+      completedCount: 0,
+      lastSeen: '2026-08-28T05:00:00Z',
+      ...over,
+    });
+    const task = (id: string, taskStatus: ActivityStatus): TaskState => ({
+      taskId: id,
+      project: 'P',
+      title: 'T',
+      worker: 'w',
+      status: taskStatus,
+      updatedAt: '2026-08-28T05:00:00Z',
+      history: [],
+    });
+    const active = worker('w', 'build_lead');
+    const inactive = worker('w', 'build_lead', false);
+
+    const routes: { name: string; result: ReturnType<typeof occupantActivity> }[] = [
+      { name: 'registry inactive', result: occupantActivity(inactive, status(), []) },
+      { name: 'never named', result: occupantActivity(active, null, []) },
+      {
+        name: 'active task',
+        result: occupantActivity(active, status({ activeTask: task('t1', 'running'), activeCount: 1 }), [
+          task('t1', 'running'),
+        ]),
+      },
+      { name: 'gated', result: occupantActivity(active, status(), [task('t2', 'needs_approval')]) },
+      { name: 'blocked task', result: occupantActivity(active, status(), [task('t3', 'blocked')]) },
+      { name: 'blocked via aggregate', result: occupantActivity(active, status({ blockedCount: 2 }), []) },
+      { name: 'queued', result: occupantActivity(active, status(), [task('t4', 'queued')]) },
+      { name: 'completed task, zero aggregate', result: occupantActivity(active, status(), [task('t5', 'completed')]) },
+      { name: 'completed via aggregate', result: occupantActivity(active, status({ completedCount: 3 }), []) },
+      { name: 'named, holds nothing', result: occupantActivity(active, status(), []) },
+    ];
+
+    for (const { name, result } of routes) {
+      expect(result.evidence.trim().length, `${name}: no evidence`).toBeGreaterThan(20);
+      // A sentence must never assert a thing and report none of it.
+      expect(result.evidence, `${name}: claims a completion and reports zero`).not.toMatch(/\(0 completed\)/);
+      expect(result.evidence, `${name}: reports zero of something it asserts`).not.toMatch(/\b0 task\(s\) recorded as/);
+      // The activity must be one the vocabulary knows.
+      expect(Object.keys(ACTIVITY_PRESENTATION)).toContain(result.activity);
+    }
+
+    // Every branch is exercised: all seven activities are reachable and the
+    // list above reaches each one that this function can produce.
+    expect(new Set(routes.map((route) => route.result.activity))).toEqual(
+      new Set(['offline', 'working', 'awaiting_founder', 'blocked', 'queued', 'complete']),
+    );
   });
 
   it('prefers an active task over a stale completion when both are recorded', () => {

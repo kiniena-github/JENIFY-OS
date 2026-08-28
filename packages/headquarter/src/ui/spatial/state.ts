@@ -276,7 +276,15 @@ export function occupantActivity(
 
   const completed = newestIn(['completed']);
   if (completed || (status && status.completedCount > 0)) {
-    const count = status?.completedCount ?? 1;
+    // Count the completions actually present, preferring the task states over
+    // the aggregate. Reading `status.completedCount` alone produced
+    // "Last recorded outcome was a completion (0 completed)" whenever a
+    // completed task was known but the aggregate said zero — a sentence that
+    // asserts a completion and denies it in the same breath. Found by
+    // enumerating every route through this function rather than by testing
+    // the routes I happened to think of.
+    const fromTasks = tasks.filter((task) => task.status === 'completed').length;
+    const count = fromTasks > 0 ? fromTasks : (status?.completedCount ?? 1);
     return {
       activity: 'complete',
       evidence: `Last recorded outcome was a completion (${count} completed); no task is active now.`,
