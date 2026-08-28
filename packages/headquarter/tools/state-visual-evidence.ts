@@ -43,6 +43,7 @@ import type { ConnectionState, ConnectionStatus } from '../src/live/connections.
 import { CONNECTION_CATALOG, CONNECTION_STATE_TONE } from '../src/live/connections.js';
 import { latestTaskStates } from '../src/ui/model.js';
 import { founderDashboard, projectBoard, workerStatuses } from '../src/ui/views.js';
+import { motionFailures, type FigureMotion } from './motion-verdict.js';
 import { buildSite } from '../src/ui/site.js';
 import { THEME_CSS } from '../src/ui/theme.js';
 import { renderScene } from '../src/ui/spatial/scene.js';
@@ -222,15 +223,6 @@ const CLASSES_THAT_MUST_MOVE: readonly string[] = ['working', 'reviewing'];
  * phases, the animation is not motion, whatever it is called. `moves` is that
  * measurement; `name` and `duration` are reported for the failure message.
  */
-interface FigureMotion {
-  name: string;
-  duration: number;
-  /** The figure's GEOMETRY changes across the animation's own timeline. */
-  movesGeometrically: boolean;
-  /** Anything at all changes — colour, opacity, geometry. */
-  changesAnything: boolean;
-}
-
 function readFigureMotion(stationId: string): FigureMotion[] {
   const station = document.querySelector(`[data-station="${stationId}"]`);
   const figure = station ? station.querySelector('.hq-figure') : null;
@@ -551,41 +543,11 @@ const main = async () => {
         probe === PROBE_OFFLINE ? 'offline' : ACTIVITY_PLAN_CLASS[probe],
       );
 
-      // The two directions take DIFFERENT signals, because the page makes two
-      // different promises and a single test cannot carry both.
-      //
-      // Positive: an active figure MOVES, so only a geometric change counts.
-      // Comparing every property let a keyframe set that pulses `fill` or
-      // `fill-opacity` register as motion while the figure stood
-      // geometrically still — the page's promise regressed and this passed
-      // (Codex review of `724d243`).
-      //
-      // Negative: a stalled figure must be still in every sense, so ANY
-      // animation is a failure — a colour pulse on a blocked worker still
-      // asserts something is happening.
-      if (expected && !animations.some((entry) => entry.movesGeometrically)) {
-        const detail =
-          animations.length === 0
-            ? 'no animation reaches it'
-            : `inert or non-geometric: ${animations
-                .map(
-                  (entry) =>
-                    `${entry.name} (duration ${entry.duration}ms, ` +
-                    `${entry.changesAnything ? 'changes only colour/opacity' : 'no change across phases'})`,
-                )
-                .join(', ')}`;
-        failures.push(
-          `activity: ${probe} is a class the floor promises to animate, but its figure does not ` +
-            `move geometrically in the browser — ${detail}`,
-        );
-      }
-      if (!expected && animations.length > 0) {
-        failures.push(
-          `activity: ${probe} is a stalled or idle state, but its figure carries an animation ` +
-            `(${animations.map((entry) => entry.name).join(', ')}) — any motion here asserts ` +
-            'work that is not happening',
-        );
-      }
+      // The verdict lives in `motion-verdict.ts` so it can be unit-tested:
+      // four consecutive review rounds found the RULE wrong, never the
+      // measurement, and a rule that only runs inside a browser tool outside
+      // CI is a rule nothing guards.
+      failures.push(...motionFailures(probe, expected, animations));
     }
   }
 
