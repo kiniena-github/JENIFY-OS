@@ -24,6 +24,7 @@ import {
   fixtureIsPositive,
   fixtureNeedsAttention,
   occupantIsPositive,
+  occupantNeedsAttention,
   type Fixture,
   type FloorState,
   type Occupant,
@@ -59,10 +60,17 @@ function polygon(points: Point[], className: string): string {
 }
 
 /**
- * An extruded cuboid standing on the floor: top face plus the two faces the
- * viewer can see. The three faces carry different classes so the stylesheet
- * can light them differently — that shading IS the depth cue, so it is drawn
- * rather than filtered.
+ * An extruded cuboid: top face plus the two faces the viewer can see. The
+ * three faces carry different classes so the stylesheet can light them
+ * differently — that shading IS the depth cue, so it is drawn rather than
+ * filtered.
+ *
+ * `baseZ` is where the extrusion STARTS. It defaults to 0, the floor, which
+ * is what every prop wants. Anything that must float — the fault marker —
+ * needs it: without it two shapes at the same x/y are both columns rising
+ * from the floor, so the shorter one is drawn entirely inside the taller and
+ * the pair reads as a single column rather than as two separated shapes
+ * (Codex review of `a455799`).
  */
 export function box(
   x: number,
@@ -71,17 +79,28 @@ export function box(
   depth: number,
   height: number,
   className: string,
+  baseZ = 0,
 ): string {
   const top = polygon(
     [iso(x, y, height), iso(x + width, y, height), iso(x + width, y + depth, height), iso(x, y + depth, height)],
     `${className} face-top`,
   );
   const east = polygon(
-    [iso(x + width, y, height), iso(x + width, y + depth, height), iso(x + width, y + depth), iso(x + width, y)],
+    [
+      iso(x + width, y, height),
+      iso(x + width, y + depth, height),
+      iso(x + width, y + depth, baseZ),
+      iso(x + width, y, baseZ),
+    ],
     `${className} face-east`,
   );
   const south = polygon(
-    [iso(x, y + depth, height), iso(x + width, y + depth, height), iso(x + width, y + depth), iso(x, y + depth)],
+    [
+      iso(x, y + depth, height),
+      iso(x + width, y + depth, height),
+      iso(x + width, y + depth, baseZ),
+      iso(x, y + depth, baseZ),
+    ],
     `${className} face-south`,
   );
   return `${top}${east}${south}`;
@@ -296,26 +315,50 @@ function prop(station: Station, zone: Zone, lit: boolean): string {
  * reader who cannot separate the red from the neutral: the stylesheet tints
  * these props as well, but the silhouette alone already differs.
  */
+/** Where the marker floats, per station kind: clear of that prop's own height. */
 const MARKER_HEIGHT: Record<string, number> = {
-  uplink: 2.0,
-  bench: 1.35,
-  bay: 1.15,
+  uplink: 1.95,
+  bench: 1.15,
+  bay: 1.05,
   console: 1.55,
   stack: 1.15,
-  table: 0.75,
+  table: 0.7,
+  // Kept just above head height (a figure's head tops out near z=1.41), not
+  // higher: a taller marker on a back-row desk rises over the room behind and
+  // reads as if it belonged there.
+  desk: 1.5,
+  review_bay: 1.5,
 };
 
-function faultMarker(station: Station, zone: Zone): string {
-  const x = zone.x + station.x + 0.25;
-  const y = zone.y + station.y + 0.25;
-  const base = MARKER_HEIGHT[station.kind] ?? 1.2;
-  return `<g class="fault-marker">${box(x, y, 0.12, 0.12, base + 0.52, 'fault-stem')}${box(
+/**
+ * The marker's own geometry, in floor units above `MARKER_HEIGHT`.
+ *
+ * The gap is the whole point: an "!" is a stroke ABOVE a separated dot, and
+ * the first version had neither separation nor lift — both shapes extruded
+ * from the floor at one footprint, so the dot was drawn inside the stem and
+ * the result was a single column skewering the prop it was meant to clarify.
+ * These are exported so the tests can assert the shapes stay disjoint rather
+ * than trusting the numbers to stay right.
+ */
+export const MARKER_GEOMETRY = {
+  size: 0.14,
+  dotBase: 0.0,
+  dotTop: 0.17,
+  stemBase: 0.32,
+  stemTop: 0.95,
+} as const;
+
+function faultMarker(x: number, y: number, kind: string): string {
+  const base = MARKER_HEIGHT[kind] ?? 1.2;
+  const { size, dotBase, dotTop, stemBase, stemTop } = MARKER_GEOMETRY;
+  return `<g class="fault-marker">${box(x, y, size, size, base + stemTop, 'fault-stem', base + stemBase)}${box(
     x,
     y,
-    0.12,
-    0.12,
-    base + 0.14,
+    size,
+    size,
+    base + dotTop,
     'fault-dot',
+    base + dotBase,
   )}</g>`;
 }
 
@@ -331,9 +374,17 @@ function faultMarker(station: Station, zone: Zone): string {
  * and perfectly still: the absence of motion is the honest signal, so it is
  * never decorated to look busy.
  */
+/** Where a worker stands, relative to their station. Shared so the fault
+ *  marker floats over the FIGURE rather than over the desk beside them. */
+function figureFootprint(station: Station, zone: Zone): { x: number; y: number } {
+  return {
+    x: zone.x + station.x + (station.facing === 'east' ? 0.95 : 0.18),
+    y: zone.y + station.y + (station.facing === 'east' ? 0.15 : -0.62),
+  };
+}
+
 function figure(occupant: Occupant, station: Station, zone: Zone): string {
-  const x = zone.x + station.x + (station.facing === 'east' ? 0.95 : 0.18);
-  const y = zone.y + station.y + (station.facing === 'east' ? 0.15 : -0.62);
+  const { x, y } = figureFootprint(station, zone);
   const head = iso(x + 0.19, y + 0.19, 1.18);
   const shadow = iso(x + 0.19, y + 0.19);
   return `<g class="hq-figure act-${occupant.activity}" data-worker="${escapeHtml(occupant.id)}">
@@ -453,14 +504,26 @@ function renderZone(zoneState: ZoneState): string {
         : fixture
           ? `${fixture.label}, ${fixture.detail}`
           : `empty ${station.kind.replaceAll('_', ' ')}`;
-      const attention = fixture != null && fixtureNeedsAttention(fixture);
+      // A worker who is WHY the room needs attention gets the same explicit
+      // marker a failing fixture does. Restricting it to fixtures left the
+      // blocked figure identifiable only by head colour — recreating, for
+      // occupants, exactly the colour-only gap the marker was introduced to
+      // close for fixtures (Codex review of `a455799`).
+      const fixtureAttention = fixture != null && fixtureNeedsAttention(fixture);
+      const occupantAttention = occupant != null && occupantNeedsAttention(occupant);
+      const attention = fixtureAttention || occupantAttention;
+      const markerAt = occupantAttention
+        ? figureFootprint(station, zone)
+        : { x: zone.x + station.x + 0.25, y: zone.y + station.y + 0.25 };
       return `<g class="hq-station" data-station="${escapeHtml(station.id)}" data-occupied="${
         occupant ? 'worker' : fixture ? 'fixture' : 'empty'
       }"${tone}${attention ? ' data-attention="yes"' : ''}><title>${escapeHtml(label)}</title>${prop(
         station,
         zone,
         lit,
-      )}${attention ? faultMarker(station, zone) : ''}${occupant ? figure(occupant, station, zone) : ''}</g>`;
+      )}${occupant ? figure(occupant, station, zone) : ''}${
+        attention ? faultMarker(markerAt.x, markerAt.y, station.kind) : ''
+      }</g>`;
     })
     .join('');
 

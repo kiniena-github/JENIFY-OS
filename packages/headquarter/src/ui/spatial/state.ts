@@ -377,19 +377,51 @@ function uplinkFixtures(connections: readonly ConnectionStatus[]): Fixture[] {
   });
 }
 
+/**
+ * One plinth per project on the board.
+ *
+ * `detail` and `evidence` must NAME the condition that set the tone. A bay
+ * flagged danger while its text reported only "4 open · 1 done" told the
+ * Founder something was wrong and not what: a blocked project and a healthy
+ * one with identical counts differed by styling and a generic marker alone,
+ * in both the station title and the room panel (Codex review of `a455799`).
+ * The marker says LOOK HERE; the words have to say why.
+ */
 function projectFixtures(projects: readonly ProjectBoardCard[]): Fixture[] {
-  return projects.map((project) => ({
-    id: `bay-${project.project}`,
-    label: project.project,
-    detail: `${project.openCount} open · ${project.completedCount} done`,
-    lit: project.openCount > 0,
-    tone: project.blockedCount > 0 ? 'danger' : project.waitingForFounderCount > 0 ? 'warn' : project.openCount > 0 ? 'info' : 'neutral',
-    evidence:
-      project.openCount > 0
-        ? `${project.openCount} task(s) recorded open, last activity ${project.lastActivity}.`
-        : `No open tasks recorded; last activity ${project.lastActivity}.`,
-    stationId: null,
-  }));
+  return projects.map((project) => {
+    const counts: string[] = [];
+    if (project.blockedCount > 0) counts.push(`${project.blockedCount} blocked`);
+    if (project.waitingForFounderCount > 0) counts.push(`${project.waitingForFounderCount} waiting on Founder`);
+    counts.push(`${project.openCount} open`, `${project.completedCount} done`);
+
+    const cause =
+      project.blockedCount > 0
+        ? `${project.blockedCount} task(s) recorded as blocked or outcome_unknown. `
+        : project.waitingForFounderCount > 0
+          ? `${project.waitingForFounderCount} task(s) recorded as needs_approval — only the Founder can clear them. `
+          : '';
+
+    return {
+      id: `bay-${project.project}`,
+      label: project.project,
+      detail: counts.join(' · '),
+      lit: project.openCount > 0,
+      tone:
+        project.blockedCount > 0
+          ? 'danger'
+          : project.waitingForFounderCount > 0
+            ? 'warn'
+            : project.openCount > 0
+              ? 'info'
+              : 'neutral',
+      evidence:
+        cause +
+        (project.openCount > 0
+          ? `${project.openCount} task(s) recorded open, last activity ${project.lastActivity}.`
+          : `No open tasks recorded; last activity ${project.lastActivity}.`),
+      stationId: null,
+    };
+  });
 }
 
 function approvalFixtures(dashboard: FounderDashboard, approvals: readonly ApprovalRequest[]): Fixture[] {

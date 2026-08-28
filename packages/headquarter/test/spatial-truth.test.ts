@@ -43,7 +43,7 @@ import {
   type FloorInput,
   type OccupantActivity,
 } from '../src/ui/spatial/state.js';
-import { iso, renderScene } from '../src/ui/spatial/scene.js';
+import { MARKER_GEOMETRY, box, iso, renderScene } from '../src/ui/spatial/scene.js';
 
 const samplePath = join(dirname(fileURLToPath(import.meta.url)), '..', 'sample-data', 'hq-sample.json');
 const sample = JSON.parse(readFileSync(samplePath, 'utf8')) as HeadquarterData;
@@ -813,6 +813,90 @@ describe('the floor never drops or invents people', () => {
     // vacuously satisfied by everything landing in one bucket.
     expect(new Set(fixtureClass.values()).size).toBe(3);
     expect(new Set(fixtureRender.values()).size).toBe(3);
+  });
+
+  it('builds the fault marker as two separated shapes floating above the prop', () => {
+    // Codex review of `a455799`. `box()` extruded from z=0 unconditionally, so
+    // the marker's stem and dot were two floor-standing columns sharing one
+    // footprint: the shorter drew entirely inside the taller and the pair read
+    // as a single spike through the prop it was meant to clarify.
+    const { dotBase, dotTop, stemBase, stemTop } = MARKER_GEOMETRY;
+    expect(dotTop).toBeGreaterThan(dotBase);
+    expect(stemTop).toBeGreaterThan(stemBase);
+    expect(stemBase, 'stem must start above the dot, leaving a visible gap').toBeGreaterThan(dotTop);
+
+    // And the shapes really do float: `box` with a base z must not reach the
+    // floor. This is the helper-level fix, asserted directly.
+    const floating = box(0, 0, 1, 1, 2, 'probe', 1);
+    const points = [...floating.matchAll(/points="([^"]+)"/g)].flatMap(([, data]) =>
+      data.split(' ').map((pair) => Number(pair.split(',')[1])),
+    );
+    // Screen y grows downward and z lifts, so the lowest drawn point must sit
+    // at z=1, not z=0. iso(1,1,1).sy = 1 - 1 = 0; iso(1,1,0).sy = 1.
+    expect(Math.max(...points), 'a floating box still touched the floor').toBeLessThan(iso(1, 1, 0).sy);
+  });
+
+  it('marks an attention-causing WORKER, not only a fixture', () => {
+    // Codex review of `a455799`. Restricting the marker to fixtures left a
+    // blocked figure identifiable only by head colour — recreating, for
+    // occupants, the colour-only gap the marker was introduced to close.
+    const floor = floorFrom(
+      [event('stuck', 't1', 'blocked'), event('busy', 't2', 'running')],
+      [worker('stuck', 'build_lead'), worker('busy', 'build_lead')],
+    );
+    const svg = renderScene(floor);
+    const zone = floor.zones.find((entry) => entry.zone.id === 'build-floor')!;
+    const stationOf = (id: string) => {
+      const occupant = zone.occupants.find((entry) => entry.id === id)!;
+      return svg
+        .split('<g class="hq-station"')
+        .find((fragment) => fragment.includes(`data-station="${occupant.stationId}"`))!;
+    };
+    expect(stationOf('stuck')).toContain('class="fault-marker"');
+    expect(stationOf('stuck')).toContain('data-attention="yes"');
+    expect(stationOf('busy')).not.toContain('fault-marker');
+  });
+
+  it('says in words why a project bay needs attention, not just that it does', () => {
+    // Codex review of `a455799`. The bay took a danger tone from its blocked
+    // count while its detail and evidence reported only open/completed work,
+    // so a blocked project and a healthy one with identical counts differed
+    // by styling and a generic marker alone — in the station title AND the
+    // room panel.
+    const floor = floorFrom(
+      [
+        event('a', 't1', 'blocked', { project: 'ALPHA' }),
+        event('b', 't2', 'running', { project: 'ALPHA' }),
+        event('c', 't3', 'needs_approval', { project: 'GAMMA' }),
+        event('d', 't4', 'running', { project: 'BETA' }),
+      ],
+      [],
+    );
+    const bays = floor.zones.find((zone) => zone.zone.id === 'project-bays')!.fixtures;
+    const bay = (project: string) => bays.find((fixture) => fixture.id === `bay-${project}`)!;
+
+    expect(bay('ALPHA').tone).toBe('danger');
+    expect(bay('ALPHA').detail).toContain('1 blocked');
+    expect(bay('ALPHA').evidence).toContain('blocked or outcome_unknown');
+
+    expect(bay('GAMMA').tone).toBe('warn');
+    expect(bay('GAMMA').detail).toContain('waiting on Founder');
+    expect(bay('GAMMA').evidence).toContain('needs_approval');
+
+    // A healthy bay says nothing about blockers, so the words stay a signal.
+    expect(bay('BETA').detail).not.toContain('blocked');
+    expect(bay('BETA').evidence).not.toContain('blocked');
+
+    // Every attention bay's cause reaches the station title, which is built
+    // from label + detail.
+    const svg = renderScene(floor);
+    for (const project of ['ALPHA', 'GAMMA']) {
+      const fixture = bay(project);
+      const station = svg
+        .split('<g class="hq-station"')
+        .find((fragment) => fragment.includes(`data-station="${fixture.stationId}"`))!;
+      expect(station).toContain(fixture.detail.split(' · ')[0]);
+    }
   });
 
   it('seats deterministically when several items tie on priority', () => {
