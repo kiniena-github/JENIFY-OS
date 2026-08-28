@@ -32,7 +32,10 @@ import {
   ATTENTION_ACTIVITIES,
   FIXTURE_STATION_KINDS,
   LIT_CONNECTION_STATES,
+  SEAT_PRIORITY,
   WORKER_STATION_KINDS,
+  fixtureSeatPriority,
+  occupantSeatPriority,
   STATUS_ACTIVITY,
   floorOccupants,
   floorState,
@@ -577,6 +580,75 @@ describe('the floor never drops or invents people', () => {
     const build = floor.zones.find((zone) => zone.zone.id === 'build-floor')!;
     for (const id of ['zz-blocked', 'zz-gated']) {
       expect(build.occupants.find((occupant) => occupant.id === id)!.stationId, `${id} unseated`).not.toBeNull();
+    }
+  });
+
+  it('decides a room’s word and its seating from the same rules', () => {
+    // The failure mode itself, rather than another instance of it.
+    //
+    // `liveness()` computes the room's word from all its contents; the seat
+    // priorities decide what the plan can draw. Four review findings on this
+    // file have been two individually-correct rules drifting apart, so this
+    // asserts the agreement directly: a room is 'attention' EXACTLY when it
+    // holds something the seater ranks as attention, and 'active' exactly
+    // when it holds something ranked positive and nothing ranked attention.
+    //
+    // Exercised over every activity and every fixture tone, so a future edit
+    // that changes one predicate and not the other fails here.
+    const activities = Object.keys(ACTIVITY_PRESENTATION) as OccupantActivity[];
+    const statuses: ActivityStatus[] = [
+      'queued',
+      'assigned',
+      'running',
+      'review_failed',
+      'review_passed',
+      'blocked',
+      'outcome_unknown',
+      'needs_approval',
+      'completed',
+    ];
+    const connectionStates: ConnectionState[] = [
+      'connected',
+      'local_only',
+      'configured',
+      'not_connected',
+      'expired',
+      'error',
+    ];
+
+    const floors = [
+      ...statuses.map((status) =>
+        floorFrom([event(`w-${status}`, `t-${status}`, status)], [worker(`w-${status}`, 'build_lead')]),
+      ),
+      ...connectionStates.map((state) => floorFrom([], [], [connectionWithState(state)])),
+      floorFrom(
+        statuses.map((status, index) => event(`m${index}`, `tm${index}`, status)),
+        statuses.map((status, index) => worker(`m${index}`, 'build_lead')),
+        connectionStates.map(connectionWithState),
+      ),
+    ];
+
+    expect(activities.length).toBeGreaterThan(0);
+    for (const floor of floors) {
+      for (const zone of floor.zones) {
+        const ranks = [
+          ...zone.occupants.map(occupantSeatPriority),
+          ...zone.fixtures.map(fixtureSeatPriority),
+        ];
+        const hasAttention = ranks.includes(SEAT_PRIORITY.attention);
+        const hasPositive = ranks.includes(SEAT_PRIORITY.positive);
+        if (zone.occupants.length === 0 && zone.fixtures.length === 0) {
+          expect(zone.liveness).toBe('unstaffed');
+          continue;
+        }
+        expect(
+          zone.liveness === 'attention',
+          `${zone.zone.id}: liveness=${zone.liveness} but seater ${hasAttention ? 'does' : 'does not'} rank something attention`,
+        ).toBe(hasAttention);
+        if (!hasAttention) {
+          expect(zone.liveness === 'active', `${zone.zone.id}: liveness=${zone.liveness}`).toBe(hasPositive);
+        }
+      }
     }
   });
 

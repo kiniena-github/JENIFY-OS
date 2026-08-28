@@ -514,16 +514,12 @@ function commandFixtures(dashboard: FounderDashboard, states: readonly TaskState
  */
 function liveness(occupants: readonly Occupant[], fixtures: readonly Fixture[]): ZoneLiveness {
   if (occupants.length === 0 && fixtures.length === 0) return 'unstaffed';
-  if (
-    occupants.some((occupant) => ATTENTION_ACTIVITIES.includes(occupant.activity)) ||
-    fixtures.some((fixture) => fixture.tone === 'warn' || fixture.tone === 'danger')
-  ) {
+  // Same predicates the seat priorities use, so the room's word and what the
+  // plan is able to draw can never be computed from different rules.
+  if (occupants.some(occupantNeedsAttention) || fixtures.some(fixtureNeedsAttention)) {
     return 'attention';
   }
-  if (
-    occupants.some((occupant) => ANIMATED_ACTIVITIES.includes(occupant.activity)) ||
-    fixtures.some((fixture) => fixture.lit)
-  ) {
+  if (occupants.some(occupantIsPositive) || fixtures.some(fixtureIsPositive)) {
     return 'active';
   }
   return 'quiet';
@@ -566,15 +562,44 @@ export const FIXTURE_STATION_KINDS = ['uplink', 'bay', 'stack', 'bench', 'consol
  */
 export const SEAT_PRIORITY = { attention: 0, positive: 1, ordinary: 2 } as const;
 
+/*
+ * The four predicates below are the SINGLE definition of "needs attention"
+ * and "is positive evidence" for each kind of thing on the floor.
+ *
+ * They exist as named functions rather than inline conditions because the
+ * same two rules are needed in two places — `liveness()`, which decides the
+ * room's word, and the seat priorities, which decide what the plan can draw —
+ * and those two must agree by construction. A room flagged by one rule and
+ * seated by the other is precisely the defect class that has now produced
+ * four review findings on this file: two individually-correct rules, written
+ * separately, drifting apart. Duplicating the predicate a fifth time would be
+ * betting that the next edit updates every copy.
+ */
+export function occupantNeedsAttention(occupant: Occupant): boolean {
+  return ATTENTION_ACTIVITIES.includes(occupant.activity);
+}
+
+export function occupantIsPositive(occupant: Occupant): boolean {
+  return ANIMATED_ACTIVITIES.includes(occupant.activity);
+}
+
+export function fixtureNeedsAttention(fixture: Fixture): boolean {
+  return fixture.tone === 'warn' || fixture.tone === 'danger';
+}
+
+export function fixtureIsPositive(fixture: Fixture): boolean {
+  return fixture.lit;
+}
+
 export function occupantSeatPriority(occupant: Occupant): number {
-  if (ATTENTION_ACTIVITIES.includes(occupant.activity)) return SEAT_PRIORITY.attention;
-  if (ANIMATED_ACTIVITIES.includes(occupant.activity)) return SEAT_PRIORITY.positive;
+  if (occupantNeedsAttention(occupant)) return SEAT_PRIORITY.attention;
+  if (occupantIsPositive(occupant)) return SEAT_PRIORITY.positive;
   return SEAT_PRIORITY.ordinary;
 }
 
 export function fixtureSeatPriority(fixture: Fixture): number {
-  if (fixture.tone === 'warn' || fixture.tone === 'danger') return SEAT_PRIORITY.attention;
-  return fixture.lit ? SEAT_PRIORITY.positive : SEAT_PRIORITY.ordinary;
+  if (fixtureNeedsAttention(fixture)) return SEAT_PRIORITY.attention;
+  return fixtureIsPositive(fixture) ? SEAT_PRIORITY.positive : SEAT_PRIORITY.ordinary;
 }
 
 /**
@@ -666,8 +691,8 @@ export function floorState(input: FloorInput): FloorState {
       FIXTURE_STATION_KINDS,
       fixtureSeatPriority,
     );
-    const active = zoneOccupants.filter((occupant) => ANIMATED_ACTIVITIES.includes(occupant.activity)).length;
-    const attention = zoneOccupants.filter((occupant) => ATTENTION_ACTIVITIES.includes(occupant.activity)).length;
+    const active = zoneOccupants.filter(occupantIsPositive).length;
+    const attention = zoneOccupants.filter(occupantNeedsAttention).length;
     const summaryParts: string[] = [];
     if (zoneOccupants.length > 0) {
       summaryParts.push(`${zoneOccupants.length} worker(s)`, `${active} active`, `${attention} needing attention`);
@@ -692,7 +717,7 @@ export function floorState(input: FloorInput): FloorState {
     zones,
     totals: {
       occupants: occupants.length,
-      active: occupants.filter((occupant) => ANIMATED_ACTIVITIES.includes(occupant.activity)).length,
+      active: occupants.filter(occupantIsPositive).length,
       blocked: occupants.filter((occupant) => occupant.activity === 'blocked').length,
       awaitingFounder: occupants.filter((occupant) => occupant.activity === 'awaiting_founder').length,
       offline: occupants.filter((occupant) => occupant.activity === 'offline').length,

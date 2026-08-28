@@ -20,7 +20,14 @@
 
 import { escapeHtml } from '../components.js';
 import { floorExtent, type Station, type Zone } from './world.js';
-import { ANIMATED_ACTIVITIES, type Fixture, type FloorState, type Occupant, type ZoneState } from './state.js';
+import {
+  fixtureIsPositive,
+  occupantIsPositive,
+  type Fixture,
+  type FloorState,
+  type Occupant,
+  type ZoneState,
+} from './state.js';
 
 /* ------------------------------------------------------------------ */
 /* Projection                                                          */
@@ -398,11 +405,10 @@ function renderZone(zoneState: ZoneState): string {
     .map((station) => {
       const occupant = occupantByStation.get(station.id) ?? null;
       const fixture = fixtureByStation.get(station.id) ?? null;
-      const lit = occupant
-        ? ANIMATED_ACTIVITIES.includes(occupant.activity)
-        : fixture
-          ? fixture.lit
-          : false;
+      // Same "is this positive evidence" predicates the state layer uses to
+      // compute the room's liveness, so a lit prop and a room's word can
+      // never be decided by different rules.
+      const lit = occupant ? occupantIsPositive(occupant) : fixture ? fixtureIsPositive(fixture) : false;
       const tone = fixture ? ` data-tone="${escapeHtml(fixture.tone)}"` : '';
       const label = occupant
         ? `${occupant.displayName}, ${occupant.activity}`
