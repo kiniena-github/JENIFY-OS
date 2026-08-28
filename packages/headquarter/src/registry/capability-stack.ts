@@ -32,6 +32,42 @@ export const HQ_CAPABILITY_DOMAINS = [
 ] as const;
 export type HqCapabilityDomain = (typeof HQ_CAPABILITY_DOMAINS)[number];
 
+/**
+ * Explicit, recorded assessment that a `compute_only` capability genuinely
+ * creates no new material spend (e.g. it runs on already-owned, already-powered
+ * hardware). Absence of this record means the Founder spend gate stays ON —
+ * open weights never imply free compute (cloud GPU, new capacity, hosting,
+ * electricity are all real spend).
+ */
+export interface HqCapabilityZeroComputeAssessment {
+  /** Must be literally `true`; anything else (or absence) keeps the spend gate on. */
+  zeroIncrementalCost: true;
+  /** Why this capability genuinely creates no new material spend. */
+  basis: string;
+  /** ISO date the assessment was recorded. */
+  recordedOn: string;
+}
+
+export type HqProvenanceReviewStatus = 'reviewed' | 'unreviewed';
+
+/**
+ * Recorded upstream provenance for a catalog entry. Never fabricated: an entry
+ * only counts as 'reviewed' when a real review recorded the exact ref and date.
+ * Everything else resolves fail-closed to 'unreviewed' / 'unknown' via
+ * `getHqCapabilityProvenance`. Provenance is about the upstream source of the
+ * catalogued software — it is NEVER evidence that anything is installed,
+ * enabled, authenticated, or connected.
+ */
+export interface HqCapabilityProvenance {
+  /** Upstream repository/site this entry was catalogued from, when genuinely known. */
+  upstream?: string;
+  /** Exact reviewed version/commit/tag — only when a real review recorded one. */
+  reviewedRef?: string;
+  /** ISO date of that review — only when a real review happened. */
+  reviewedOn?: string;
+  reviewStatus: HqProvenanceReviewStatus;
+}
+
 export interface HqCapabilityDescriptor {
   id: string;
   title: string;
@@ -47,6 +83,10 @@ export interface HqCapabilityDescriptor {
   community?: boolean;
   experimental?: boolean;
   reviewBeforeInstall?: boolean;
+  /** See HqCapabilityZeroComputeAssessment. Only meaningful for cost 'compute_only'. */
+  zeroComputeAssessment?: HqCapabilityZeroComputeAssessment;
+  /** See HqCapabilityProvenance. Absence means: upstream taken from `source` (or unknown), unreviewed. */
+  provenance?: HqCapabilityProvenance;
 }
 
 export const HQ_CAPABILITY_STACK = [
@@ -182,7 +222,14 @@ export const HQ_CAPABILITY_RECIPES: Readonly<Record<HqCapabilityIntent, readonly
     { name: 'visual-polish', capabilityIds: ['refactoring-ui'] },
     { name: 'usability', capabilityIds: ['ux-heuristics'] },
   ],
-  'research.deep': [{ name: 'source-grounding', capabilityIds: ['notebooklm-mcp'] }],
+  // NotebookLM is community/experimental/account-gated and is a normal state to
+  // be unavailable, so it is an optional enhancement — the ordinary approved
+  // research route (the routed coding/research worker) is the required stage,
+  // making the documented fallback reachable through the catalog itself.
+  'research.deep': [
+    { name: 'source-grounding', capabilityIds: ['notebooklm-mcp'], optional: true },
+    { name: 'approved-research', capabilityIds: ['claude-code'] },
+  ],
   'media.image': [{ name: 'generation', capabilityIds: ['nano-banana-2'] }],
   'media.video': [
     { name: 'edit', capabilityIds: ['chatcut'], optional: true },
@@ -197,12 +244,24 @@ export const HQ_CAPABILITY_RECIPES: Readonly<Record<HqCapabilityIntent, readonly
   'local_ai.evaluate': [{ name: 'candidates', capabilityIds: ['qwen-3-8', 'minimax-h3'], optional: true }],
 };
 
+/**
+ * Normalize a user-facing/display form ("Magic MCP", "Framer Motion",
+ * " 21st MCP ") to the catalog's slug key form before lookup: trim, lowercase,
+ * and collapse whitespace/underscores to single hyphens. There is no other
+ * normalization layer, so this is what keeps documented display-form legacy
+ * names resolvable instead of appearing unavailable.
+ */
+export function normalizeHqCapabilityKey(raw: string): string {
+  return raw.trim().toLowerCase().replace(/[\s_]+/g, '-');
+}
+
 export function resolveHqCapabilityId(idOrAlias: string): HqCapabilityId | null {
-  if (Object.prototype.hasOwnProperty.call(HQ_CAPABILITY_ALIASES, idOrAlias)) {
-    return HQ_CAPABILITY_ALIASES[idOrAlias as keyof typeof HQ_CAPABILITY_ALIASES];
+  const key = normalizeHqCapabilityKey(idOrAlias);
+  if (Object.prototype.hasOwnProperty.call(HQ_CAPABILITY_ALIASES, key)) {
+    return HQ_CAPABILITY_ALIASES[key as keyof typeof HQ_CAPABILITY_ALIASES];
   }
-  return HQ_CAPABILITY_STACK.some((capability) => capability.id === idOrAlias)
-    ? (idOrAlias as HqCapabilityId)
+  return HQ_CAPABILITY_STACK.some((capability) => capability.id === key)
+    ? (key as HqCapabilityId)
     : null;
 }
 
@@ -212,7 +271,43 @@ export function getHqCapability(idOrAlias: string): HqCapabilityDescriptor | nul
 }
 
 export function capabilityRequiresFounderSpendGate(capability: HqCapabilityDescriptor): boolean {
-  return ['paid_optional', 'usage_billed', 'mixed'].includes(capability.cost);
+  if (capability.cost === 'paid_optional' || capability.cost === 'usage_billed' || capability.cost === 'mixed') {
+    return true;
+  }
+  if (capability.cost === 'compute_only') {
+    // FAIL CLOSED: open weights are not free compute. A compute-only capability
+    // (cloud GPU rental, new capacity, hosting, electricity) still requires a
+    // Founder spend decision unless an explicit zero-cost/local assessment has
+    // been recorded on the entry. Absence of an assessment means "gated".
+    return capability.zeroComputeAssessment?.zeroIncrementalCost !== true;
+  }
+  return false;
+}
+
+/** Resolved, fail-closed provenance view. 'unknown' means genuinely not known — never invented. */
+export interface HqResolvedProvenance {
+  upstream: string;
+  reviewedRef: string;
+  reviewStatus: HqProvenanceReviewStatus;
+}
+
+/**
+ * Fail-closed provenance resolution: an entry reads as 'reviewed' only when a
+ * real review recorded BOTH the exact ref and the date; anything less resolves
+ * to 'unreviewed' with reviewedRef 'unknown'. Upstream falls back to the
+ * entry's `source` URL when genuinely known, else 'unknown'.
+ */
+export function getHqCapabilityProvenance(capability: HqCapabilityDescriptor): HqResolvedProvenance {
+  const recorded = capability.provenance;
+  const genuinelyReviewed =
+    recorded?.reviewStatus === 'reviewed' &&
+    typeof recorded.reviewedRef === 'string' && recorded.reviewedRef.trim().length > 0 &&
+    typeof recorded.reviewedOn === 'string' && recorded.reviewedOn.trim().length > 0;
+  return {
+    upstream: recorded?.upstream ?? capability.source ?? 'unknown',
+    reviewedRef: genuinelyReviewed ? recorded.reviewedRef!.trim() : 'unknown',
+    reviewStatus: genuinelyReviewed ? 'reviewed' : 'unreviewed',
+  };
 }
 
 /**
