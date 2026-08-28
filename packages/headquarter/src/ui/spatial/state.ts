@@ -162,6 +162,18 @@ export interface FloorState {
     blocked: number;
     awaitingFounder: number;
     offline: number;
+    /**
+     * EVERYTHING that puts a room into attention — workers and fixtures both.
+     *
+     * Not `blocked + awaitingFounder`: those count workers only, so a floor
+     * whose attention comes solely from a failing uplink or a pending approval
+     * request reported 0 in a positive tone while the rooms below it read
+     * "Needs attention". A page-level summary that contradicts its own floor
+     * is worse than no summary (Codex review of `fcdbd33`).
+     */
+    attention: number;
+    /** Fixtures in an attention state, the half the worker counts miss. */
+    attentionFixtures: number;
     litUplinks: number;
     uplinks: number;
   };
@@ -744,6 +756,8 @@ export function floorState(input: FloorInput): FloorState {
 
   const allFixtures = zones.flatMap((zone) => zone.fixtures);
   const uplinks = allFixtures.filter((fixture) => fixture.id.startsWith('uplink-'));
+  const attentionOccupants = occupants.filter(occupantNeedsAttention).length;
+  const attentionFixtures = allFixtures.filter(fixtureNeedsAttention).length;
 
   return {
     zones,
@@ -753,6 +767,8 @@ export function floorState(input: FloorInput): FloorState {
       blocked: occupants.filter((occupant) => occupant.activity === 'blocked').length,
       awaitingFounder: occupants.filter((occupant) => occupant.activity === 'awaiting_founder').length,
       offline: occupants.filter((occupant) => occupant.activity === 'offline').length,
+      attention: attentionOccupants + attentionFixtures,
+      attentionFixtures,
       litUplinks: uplinks.filter((fixture) => fixture.lit).length,
       uplinks: uplinks.length,
     },

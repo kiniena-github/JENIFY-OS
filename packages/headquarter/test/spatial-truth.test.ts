@@ -1158,6 +1158,58 @@ describe('the floor never drops or invents people', () => {
     }
   });
 
+  it('never lets the page summary contradict its own floor', () => {
+    // The KPI is a THIRD surface over the same state — after the plan and the
+    // room panels — and it was the one I never checked against them. Derived
+    // from worker counts alone, it reported 0 in a positive tone while a room
+    // below read "Needs attention" (Codex review of `fcdbd33`).
+    //
+    // Asserted as a biconditional over floors that put attention in workers
+    // only, fixtures only, both, and neither — because the fixtures-only case
+    // is the one the worker-derived version got wrong, and a test built from
+    // the mixed case alone would have passed.
+    const cases: { name: string; floor: ReturnType<typeof floorFrom> }[] = [
+      { name: 'nothing wrong', floor: floorFrom([], [], [connectionWithState('connected')]) },
+      { name: 'fixture only', floor: floorFrom([], [], [connectionWithState('error')]) },
+      {
+        name: 'worker only',
+        floor: floorFrom([event('stuck', 't1', 'blocked')], [worker('stuck', 'build_lead')], [
+          connectionWithState('connected'),
+        ]),
+      },
+      {
+        name: 'both',
+        floor: floorFrom([event('stuck', 't2', 'blocked')], [worker('stuck', 'build_lead')], [
+          connectionWithState('error'),
+        ]),
+      },
+    ];
+
+    for (const { name, floor } of cases) {
+      const roomsFlagged = floor.zones.filter((zone) => zone.liveness === 'attention');
+      expect(
+        floor.totals.attention > 0,
+        `${name}: ${roomsFlagged.length} room(s) read "Needs attention" but the summary says ${floor.totals.attention}`,
+      ).toBe(roomsFlagged.length > 0);
+
+      // And the total really is the sum of every cause the rooms hold.
+      const causes = floor.zones.reduce(
+        (count, zone) =>
+          count +
+          zone.occupants.filter((occupant) => ATTENTION_ACTIVITIES.includes(occupant.activity)).length +
+          zone.fixtures.filter((fixture) => fixture.tone === 'warn' || fixture.tone === 'danger').length,
+        0,
+      );
+      expect(floor.totals.attention, `${name}: summary and rooms disagree on the count`).toBe(causes);
+    }
+
+    // The fixtures-only case is the one that used to fail; make sure the
+    // fixture really is the sole cause, so this is not passing by accident.
+    const fixtureOnly = cases[1].floor;
+    expect(fixtureOnly.totals.blocked + fixtureOnly.totals.awaitingFounder).toBe(0);
+    expect(fixtureOnly.totals.attentionFixtures).toBeGreaterThan(0);
+  });
+
   it('counts totals from the occupants it actually holds', () => {
     const floor = floorFrom(
       [event('a', 't1', 'running'), event('b', 't2', 'blocked'), event('c', 't3', 'needs_approval')],

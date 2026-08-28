@@ -152,7 +152,10 @@ export interface FloorPageInput {
 
 export function spatialFloorBody({ floor, nowIso }: FloorPageInput): string {
   const { totals } = floor;
-  const attentionTone: Tone = totals.blocked + totals.awaitingFounder > 0 ? 'warn' : 'accent';
+  // Driven by `totals.attention`, which counts fixtures as well as workers.
+  // Deriving it from the worker counts alone made the page say 0-in-green
+  // while a room below read "Needs attention" (Codex review of `fcdbd33`).
+  const attentionTone: Tone = totals.attention > 0 ? 'warn' : 'accent';
 
   const kpis = kpiRow([
     {
@@ -169,8 +172,8 @@ export function spatialFloorBody({ floor, nowIso }: FloorPageInput): string {
     },
     {
       label: 'Needing attention',
-      value: totals.blocked + totals.awaitingFounder,
-      hint: `${totals.blocked} blocked · ${totals.awaitingFounder} waiting on the Founder`,
+      value: totals.attention,
+      hint: `${totals.blocked} blocked · ${totals.awaitingFounder} waiting on the Founder · ${totals.attentionFixtures} failing or gated fixture(s)`,
       tone: attentionTone,
     },
     {
