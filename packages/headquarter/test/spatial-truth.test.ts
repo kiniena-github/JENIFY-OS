@@ -715,6 +715,106 @@ describe('the floor never drops or invents people', () => {
     }
   });
 
+  it('renders two model states identically only when they mean the same thing', () => {
+    // The general form of the round-5 finding, which was a CROSS-CLASS
+    // collision: `error` and `not_connected` mean different things and drew
+    // byte-identically.
+    //
+    // Collisions as such are fine and intended — `assigned` and `running`
+    // both mean "working", `connected` and `local_only` are both lit. What
+    // must never happen is two states from DIFFERENT classes rendering the
+    // same. So this asserts the biconditional: identical render ⟺ same class.
+    //
+    // The <title> is stripped before comparing, because it is text a reader
+    // has to go looking for; the point of the finding was that the VISUAL
+    // rendering must carry the distinction.
+    //
+    // LIMIT OF THIS TEST, stated because it is the same limit that let the
+    // round-5 defect through: it compares MARKUP, and differing markup does
+    // not prove differing appearance. `data-tone="danger"` and
+    // `data-tone="neutral"` made the two fragments differ while no CSS rule
+    // keyed on them for an unlit prop, so the pillars looked identical. A
+    // markup check is therefore necessary and NOT sufficient. The measured
+    // check — computed fills read out of a real browser — lives in
+    // `tools/state-visual-evidence.ts`, following this package's convention
+    // that structural properties run in CI and measured ones are produced as
+    // PR evidence.
+    const stationFor = (floor: ReturnType<typeof floorFrom>, zoneId: string, stationId: string | null) => {
+      if (stationId === null) return 'UNSEATED';
+      return renderScene(floor)
+        .split('<g class="hq-station"')
+        .find((fragment) => fragment.includes(`data-station="${stationId}"`))!
+        .replace(/<title>[^<]*<\/title>/, '');
+    };
+
+    // Occupants: same class ⟺ same OccupantActivity.
+    const statuses: ActivityStatus[] = [
+      'queued',
+      'assigned',
+      'running',
+      'review_failed',
+      'review_passed',
+      'blocked',
+      'outcome_unknown',
+      'needs_approval',
+      'completed',
+    ];
+    const occupantRender = new Map<ActivityStatus, string>();
+    for (const status of statuses) {
+      const floor = floorFrom([event('w', 't1', status)], [worker('w', 'build_lead')]);
+      const zone = floor.zones.find((entry) => entry.zone.id === 'build-floor')!;
+      occupantRender.set(status, stationFor(floor, 'build-floor', zone.occupants[0].stationId));
+    }
+    for (const a of statuses) {
+      for (const b of statuses) {
+        const sameClass = STATUS_ACTIVITY[a] === STATUS_ACTIVITY[b];
+        const sameRender = occupantRender.get(a) === occupantRender.get(b);
+        expect(
+          sameRender,
+          `${a} and ${b} render ${sameRender ? 'identically' : 'differently'} but mean ` +
+            `${STATUS_ACTIVITY[a]} and ${STATUS_ACTIVITY[b]}`,
+        ).toBe(sameClass);
+      }
+    }
+
+    // Fixtures: same class ⟺ same (lit, causes-attention) pair.
+    const connectionStates: ConnectionState[] = [
+      'connected',
+      'local_only',
+      'dispatchable',
+      'configured',
+      'not_connected',
+      'expired',
+      'error',
+      'setup_required',
+    ];
+    const fixtureRender = new Map<ConnectionState, string>();
+    const fixtureClass = new Map<ConnectionState, string>();
+    for (const state of connectionStates) {
+      const floor = floorFrom([], [], [connectionWithState(state)]);
+      const zone = floor.zones.find((entry) => entry.zone.id === 'uplink-gallery')!;
+      const fixture = zone.fixtures[0];
+      fixtureRender.set(state, stationFor(floor, 'uplink-gallery', fixture.stationId));
+      fixtureClass.set(state, `${fixture.lit}/${fixture.tone === 'warn' || fixture.tone === 'danger'}`);
+    }
+    for (const a of connectionStates) {
+      for (const b of connectionStates) {
+        const sameClass = fixtureClass.get(a) === fixtureClass.get(b);
+        const sameRender = fixtureRender.get(a) === fixtureRender.get(b);
+        expect(
+          sameRender,
+          `${a} (${fixtureClass.get(a)}) and ${b} (${fixtureClass.get(b)}) render ` +
+            `${sameRender ? 'identically' : 'differently'}`,
+        ).toBe(sameClass);
+      }
+    }
+
+    // And the classes really are distinct, so the biconditional is not
+    // vacuously satisfied by everything landing in one bucket.
+    expect(new Set(fixtureClass.values()).size).toBe(3);
+    expect(new Set(fixtureRender.values()).size).toBe(3);
+  });
+
   it('seats deterministically when several items tie on priority', () => {
     const connections = Array.from({ length: 12 }, (_, index) => ({
       ...connectionWithState('connected'),
