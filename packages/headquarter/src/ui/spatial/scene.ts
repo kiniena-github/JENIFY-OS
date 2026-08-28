@@ -595,8 +595,17 @@ export function renderScene(floor: FloorState): string {
     .map(renderZone)
     .join('\n');
 
+  // Leads with the attention total, for the same reason the KPI does: this
+  // sentence is the whole floor for anyone who cannot see it, and a summary
+  // of "0 blocked, 0 waiting, 0 offline" over a floor holding a failed uplink
+  // is an all-clear that is not true. Found by enumerating what reads
+  // FloorState after the KPI finding, rather than waiting for it to be
+  // reported — the KPI, the room panels, the room links and this sentence are
+  // four statements of one state, and I had only ever checked two against
+  // each other.
   const description =
     `Isometric plan of the JENIFY headquarters: ${floor.zones.length} rooms, ` +
+    `${floor.totals.attention} item(s) needing attention, ` +
     `${floor.totals.occupants} worker(s) of which ${floor.totals.active} active, ` +
     `${floor.totals.blocked} blocked, ${floor.totals.awaitingFounder} waiting on the Founder, ` +
     `${floor.totals.offline} offline, and ${floor.totals.litUplinks} of ${floor.totals.uplinks} service uplinks lit.`;

@@ -1208,6 +1208,32 @@ describe('the floor never drops or invents people', () => {
     const fixtureOnly = cases[1].floor;
     expect(fixtureOnly.totals.blocked + fixtureOnly.totals.awaitingFounder).toBe(0);
     expect(fixtureOnly.totals.attentionFixtures).toBeGreaterThan(0);
+
+    // EVERY surface that summarises the floor, not just the two I first
+    // thought of. Four things state this one fact — the KPI, the room panels,
+    // the room links, and the scene's own accessible description — and the
+    // KPI finding happened because I checked two of them against each other
+    // and called the class closed. Enumerated from the code afterwards.
+    for (const { name, floor } of cases) {
+      const scene = renderScene(floor);
+      const description = /<svg[^>]*aria-label="([^"]+)"/.exec(scene)![1];
+      const flagged = floor.zones.some((zone) => zone.liveness === 'attention');
+
+      // 1. the scene's own summary
+      expect(/(\d+) item\(s\) needing attention/.exec(description)?.[1], `${name}: scene summary`).toBe(
+        String(floor.totals.attention),
+      );
+      // 2. the room links
+      const linkLabels = [...scene.matchAll(/<a class="hq-zone"[^>]*aria-label="([^"]+)"/g)].map((m) => m[1]);
+      expect(linkLabels).toHaveLength(HQ_FLOOR.length);
+      expect(
+        linkLabels.some((label) => label.includes('Needs attention')),
+        `${name}: room links`,
+      ).toBe(flagged);
+      // 3. the page KPI and panels
+      const page = buildSite({ ...sample, connections: [] }).get('headquarters.html')!;
+      expect(page).toContain('Needing attention');
+    }
   });
 
   it('counts totals from the occupants it actually holds', () => {
