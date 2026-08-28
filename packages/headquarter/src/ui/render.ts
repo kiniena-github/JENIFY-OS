@@ -56,6 +56,7 @@ import {
 } from './components.js';
 import { archiveSearchScript, type ArchiveSearchRow } from './archive-search.js';
 import { liveRefreshScript } from './live-refresh.js';
+import { controlConsoleScript, CONTROL_STATIC_NOTE } from './control-console.js';
 import {
   AUTH_MECHANISM_LABELS,
   CONNECTION_STATE_LABELS,
@@ -154,7 +155,7 @@ function freshnessChip(): string {
 }
 
 /* ------------------------------------------------------------------ */
-/* Direct Order composer (issue #200, scope B — UI half)               */
+/* Direct Order composer (issue #200, scope B — UI half, wired V1)     */
 /* ------------------------------------------------------------------ */
 
 /** One route the composer offers, with the verdict evidence actually gives it. */
@@ -164,33 +165,29 @@ export interface DirectOrderRouteAvailability {
 }
 
 /**
- * Why the composer is drawn but not wired, stated in the UI itself.
+ * How the composer becomes real, stated in the UI itself.
  *
- * This is not a TODO. `HeadquarterOperations.createTask` authorizes by
- * resolving `requestedBy` against the human-principal registry, and HQ has no
- * authenticated browser session that can establish who the requester is — the
- * FactoryOS Fastify server authenticates tenant users for the business app and
- * is a different trust domain entirely. A browser write here would therefore
- * have to either trust a client-supplied principal id (impersonation) or ship
- * a new auth boundary invented under automation, which the mission brief
- * explicitly gates. So the seam is built and tested server-side and the
- * composer shows exactly what it would submit.
+ * The history matters and is kept: an earlier build stated — correctly, then —
+ * that HQ had no authenticated Founder session and drew the composer inert.
+ * The Founder decision of 2026-08-28 created that boundary (`live/auth.ts` +
+ * `live/control-api.ts`): a live JENIFY OS session, mapped by explicit
+ * server-side configuration to a registered HQ principal. This static page
+ * still cannot know who is reading it, so it ships NO active control; the
+ * session-gated script (`ui/control-console.ts`) asks
+ * `GET /api/hq/control/session` and draws exactly the controls that session
+ * grants — or a truthful sentence about why there are none.
  *
- * The CLI is named as the working path, and named honestly: it is a
- * trusted-local-admin/maintenance interface which does not authenticate the
- * Founder either — it asserts a principal id (see `live/local-trust.ts`). An
- * earlier draft of this string claimed the OS session was the authentication;
- * it is not, and HQ is therefore not yet Founder-operable in the browser.
+ * The CLI remains available and remains honestly classified: a
+ * trusted-local-admin/maintenance interface that asserts a principal id and
+ * authenticates nobody (see `live/local-trust.ts`).
  */
-export const DIRECT_ORDER_BLOCKER =
-  'Submitting from the browser is BLOCKED: Headquarter has no authenticated Founder session, and ' +
-  'creating a task requires a registered human principal that a browser cannot prove it is. No weak ' +
-  'auth boundary was invented for V1. The order path itself is real and tested — run it with ' +
-  '`npm run hq:order --workspace @factoryos/headquarter -- --local-admin`, which is a ' +
-  'TRUSTED-LOCAL-ADMIN maintenance interface: it does not authenticate the Founder either, it ' +
-  'asserts a principal id that deny-by-default authorization and the no-self-approval rule then ' +
-  'contain. Until a real HQ authentication boundary exists — a Founder-gated security decision — ' +
-  'HQ is NOT fully Founder-operable from a browser.';
+export const DIRECT_ORDER_SESSION_NOTE =
+  'This composer is live only behind the authenticated HQ control API. ' + CONTROL_STATIC_NOTE +
+  ' Who is acting is decided by the server session and the configured Founder map only — this page ' +
+  'never sends an identity, and the API refuses any request that tries to name one. The ' +
+  'trusted-local-admin CLI (`npm run hq:order --workspace @factoryos/headquarter -- --local-admin`) ' +
+  'still exists for maintenance and still authenticates nobody: it asserts a principal id that ' +
+  'deny-by-default authorization and the no-self-approval rule then contain.';
 
 const ROUTE_STATE_PRESENTATION: Record<'ready' | 'blocked' | 'unknown', { label: string; tone: Tone }> = {
   ready: { label: 'Available', tone: 'accent' },
@@ -199,23 +196,14 @@ const ROUTE_STATE_PRESENTATION: Record<'ready' | 'blocked' | 'unknown', { label:
 };
 
 /**
- * The composer. Rendered entirely from inert elements — no `<form>`, no
- * `<button>`, no `<input>` — so the site-wide "nothing on any page executes
- * anything" invariant holds literally rather than by convention.
+ * The composer container. The static render carries no `<form>`, no
+ * `<button>`, no `<input>` — an active control would be a false claim for
+ * every viewer whose session does not grant it. `controlConsoleScript()`
+ * constructs the real form inside `[data-hq-order-composer]` only after
+ * `/session` grants `directOrder`; otherwise the status line carries the
+ * truthful reason and nothing interactive exists.
  */
 function directOrderComposer(routes: DirectOrderRouteAvailability[] | undefined): string {
-  const fields = [
-    ['Instruction', 'What you want done, in your own words. A brief for a worker — never a command to run.'],
-    ['Project (optional)', 'A label only. Labels are presentation, never authority.'],
-  ]
-    .map(
-      ([label, hint]) => `<div class="order-field">
-<p class="order-label">${escapeHtml(label)}</p>
-<span class="control-readonly" aria-disabled="true">${escapeHtml(hint)}</span>
-</div>`,
-    )
-    .join('\n');
-
   const routeChips = DIRECT_ORDER_ROUTES.map((route) => {
     const found = routes?.find((entry) => entry.route === route);
     const state = found == null ? 'unknown' : found.resolution.connected ? 'ready' : 'blocked';
@@ -227,16 +215,11 @@ function directOrderComposer(routes: DirectOrderRouteAvailability[] | undefined)
 </div>`;
   }).join('\n');
 
-  return `<div class="panel order-composer">
-<p class="readonly-note">${escapeHtml(DIRECT_ORDER_BLOCKER)}</p>
-${fields}
+  return `<div class="panel order-composer" data-hq-order-composer>
+<p class="readonly-note" data-hq-control-status>${escapeHtml(DIRECT_ORDER_SESSION_NOTE)}</p>
 <div class="order-field">
-<p class="order-label">Route</p>
+<p class="order-label">Route availability as observed at build time</p>
 <div class="grid grid-cards">${routeChips}</div>
-</div>
-<div class="decision-controls" role="group" aria-label="Direct order controls — not available in the browser">
-<span class="control-readonly" aria-disabled="true">Start Task</span>
-<span class="faint">not wired in the browser — see the note above</span>
 </div>
 <p class="muted">Every direct order is created as the Founder-gated capability <code>hq.direct_order</code>: it lands in <code>needs_approval</code> with an action digest and executes nothing until a Founder approves that exact action. An order for a provider that is not connected is refused outright — no other provider is ever substituted.</p>
 <p class="muted">The resolved provider is binding at execution, not a label: the order records it as <code>executionProvider</code>, and the Operator refuses to let any worker but one declared as that provider claim or start it. Because it sits in the payload, it is inside the digest the Founder approves — the provider cannot be swapped between approval and execution. <code>hq.direct_order</code> must also already be registered and enabled here: placing an order never registers it, and never re-enables one that was disabled.</p>
@@ -281,7 +264,7 @@ function shell({
 <header class="rail">
 <div class="brand"><span class="mark" aria-hidden="true">JQ</span><span class="wordmark"><b>JENIFY</b><span>Headquarter</span></span></div>
 <nav aria-label="Headquarter sections"><ul>${nav}</ul></nav>
-<p class="rail-foot">Read-only Founder view over the canonical activity log. No action on any page executes anything.</p>
+<p class="rail-foot">Founder view over the canonical activity log. Nothing here mutates except through the authenticated HQ control API — controls appear only when your signed-in session grants them; without that grant every page is read-only.</p>
 </header>
 <main id="hq-main">
 <div class="page-head">
@@ -528,7 +511,8 @@ ${section('DIRECT ORDER', directOrderComposer(orderRoutes), 'direct-order')}
 ${section('LIVE ACTIVITY', `<div class="panel">${activity}</div>`)}
 ${section('ACTIVE AI WORKFORCE', workforce)}
 </div>
-</div>`;
+</div>
+${controlConsoleScript()}`;
 
   return shell({
     title: 'Command Center',
@@ -896,13 +880,20 @@ ${
 const HIGH_RISK_CLASSES = ['founder_gate', 'destructive', 'production', 'payment', 'irreversible'];
 
 /**
- * Read-only Founder Approvals page (§6b): renders the D15 approval fields
- * (actionDigest, expiresAt, consumedAt, decidedBy) and offers NO
- * approve/reject actions — decisions stay in the operator control plane.
+ * Founder Approvals page (§6b, wired for issue #200 V1): renders the D15
+ * approval fields (actionDigest, expiresAt, consumedAt, decidedBy) read-only
+ * from the build-time bundle, plus a LIVE DECISIONS section that
+ * `controlConsoleScript()` fills only when `/session` grants approve/deny.
  *
- * The Approve / Reject / Ask for Changes affordances are drawn so the layout
- * is honest about where decisions will live, but they are inert spans, not
- * buttons or form controls, and each carries a visible "not wired" label.
+ * The static render still offers NO approve/deny control: the bundle's cards
+ * may be stale, and a decision must bind to a digest fetched live. When the
+ * session grants authority, the script fetches the live pending list from
+ * `GET /api/hq/control/approvals` and draws Approve/Deny per card, bound to
+ * that card's own digest — approve is withheld on a card the no-self-approval
+ * rule would refuse, and step-up is asked for exactly where the server
+ * requires it. "Ask for changes" is deliberately not offered anywhere: the
+ * canonical approval model records approve or deny only, and a third button
+ * would show the Founder a decision the Operator never saw.
  */
 export function renderFounderApprovals(
   waiting: TaskState[],
@@ -912,17 +903,14 @@ export function renderFounderApprovals(
   sourceMode?: SourceMode,
 ): string {
   const note =
-    'Read-only approval queue. Approve / Reject / Ask for changes are shown as disabled placeholders: this page never executes an action. Decisions happen in the Founder-gated operator control plane, which enforces the action digest, expiry and single-use nonce.';
+    'The cards below are the build-time record and are read-only. Live decisions happen in the ' +
+    'LIVE DECISIONS section, which draws Approve / Deny only when the authenticated control API ' +
+    'grants them to your session; every decision binds to the exact action digest fetched live, ' +
+    'and the Operator enforces digest match, expiry, single use and no self-approval server-side. ' +
+    'There is deliberately no "Ask for changes": the canonical model records approve or deny only.';
 
   const pending = approvals.filter((approval) => approval.decision === 'pending');
   const decided = approvals.filter((approval) => approval.decision !== 'pending');
-
-  const decisionControls = `<div class="decision-controls" role="group" aria-label="Decision controls — not available on this page">
-<span class="control-readonly" aria-disabled="true">Approve</span>
-<span class="control-readonly" aria-disabled="true">Reject</span>
-<span class="control-readonly" aria-disabled="true">Ask for changes</span>
-<span class="faint">not wired — read-only page</span>
-</div>`;
 
   function approvalCard(approval: ApprovalRequest): string {
     const highRisk = HIGH_RISK_CLASSES.includes(approval.riskClass);
@@ -944,7 +932,6 @@ ${approval.decisionNote ? `<p class="muted">Note: ${escapeHtml(approval.decision
       approval.consumedAt ? escapeHtml(approval.consumedAt) : '—'
     }</p>
 </div>
-${approval.decision === 'pending' ? decisionControls : ''}
 </article>`;
   }
 
@@ -969,9 +956,17 @@ ${kpiRow([
   { label: 'Decided', value: decided.length, hint: 'recorded decisions' },
   { label: 'Tasks waiting', value: waiting.length, hint: 'tasks in needs_approval' },
 ])}
-${section('PENDING DECISIONS', pendingHtml)}
+${section(
+  'LIVE DECISIONS',
+  `<div class="panel" data-hq-approvals>
+<p class="readonly-note" data-hq-control-status>${escapeHtml(CONTROL_STATIC_NOTE)}</p>
+</div>`,
+  'live-decisions',
+)}
+${section('PENDING DECISIONS (build-time record, read-only)', pendingHtml)}
 ${section('DECISION HISTORY', decidedHtml)}
-${section('TASKS WAITING FOR FOUNDER', taskRows(waiting, 'Tasks waiting for the Founder'))}`;
+${section('TASKS WAITING FOR FOUNDER', taskRows(waiting, 'Tasks waiting for the Founder'))}
+${controlConsoleScript()}`;
 
   return shell({
     title: 'Founder Approvals',

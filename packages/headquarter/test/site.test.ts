@@ -45,10 +45,10 @@ describe('buildSite', () => {
     expect(html).toContain('Fix Gemini 3.7 worker model routing'); // DONE TODAY from sample
   });
 
-  it('Founder Approvals renders the D15 fields read-only with no action controls', () => {
+  it('Founder Approvals renders the D15 fields read-only with no static action controls', () => {
     const html = site.get('approvals.html')!;
     expect(html).toContain('Universal Operator architecture proposal'); // waiting task
-    expect(html).toContain('operator control plane');
+    expect(html).toContain('build-time record and are read-only');
     // D15 approval fields (§6b): actionDigest, expiresAt, consumedAt, decidedBy
     expect(html).toContain('Action digest');
     expect(html).toContain('3f9a1c2b4d5e6f70'); // truncated digest rendered
@@ -59,14 +59,28 @@ describe('buildSite', () => {
     expect(html).not.toContain('<form');
   });
 
-  it('draws the decision controls as inert, explicitly-labelled placeholders', () => {
+  it('draws no decision control statically — live ones come only from a granted session', () => {
+    // Re-scoped invariant (issue #200 V1). The old rule was "nothing on any
+    // page can mutate anything", locked with inert Approve/Reject/Ask-for-
+    // changes placeholders. The control API now exists, so the honest rule is
+    // two-sided: the STATIC render still carries no form, no button and no
+    // inline handler — a drawn control would be a false claim for any viewer
+    // whose session does not grant it — and every live control is constructed
+    // at runtime from the `/session` verdict alone, which
+    // `control-console.test.ts` enforces by executing the shipped decision
+    // function. "Ask for changes" is not drawn by either half: the canonical
+    // model records approve or deny only.
     const html = site.get('approvals.html')!;
+    // The old inert placeholders are gone entirely — no dead control remains.
     for (const control of ['Approve', 'Reject', 'Ask for changes']) {
-      expect(html).toContain(`<span class="control-readonly" aria-disabled="true">${control}</span>`);
+      expect(html).not.toContain(
+        `<span class="control-readonly" aria-disabled="true">${control}</span>`,
+      );
     }
-    expect(html).toContain('not wired — read-only page');
-    // Nothing anywhere in the site may submit, navigate to a mutation, or run
-    // an inline handler.
+    expect(html).toContain('data-hq-approvals');
+    expect(html).toContain('data-hq-control-status');
+    // The absence of a third decision is stated, not silently dropped.
+    expect(html).toContain('no &quot;Ask for changes&quot;');
     for (const page of HQ_PAGES) {
       const pageHtml = site.get(page.file)!;
       expect(pageHtml).not.toContain('<form');

@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { HQ_PAGES, DIRECT_ORDER_BLOCKER } from '../src/ui/render.js';
+import { HQ_PAGES, DIRECT_ORDER_SESSION_NOTE } from '../src/ui/render.js';
 import { buildSite, type HeadquarterData } from '../src/ui/site.js';
 import {
   FRESHNESS_VERDICT_JS,
@@ -85,7 +85,15 @@ describe('the Connections page joins the site without disturbing it', () => {
     }
   });
 
-  it('holds the site-wide no-mutation invariant on the new pages too', () => {
+  it('ships no static mutation control on any page (re-scoped invariant, issue #200 V1)', () => {
+    // The invariant used to be "nothing on any page can ever mutate". Since
+    // the control API exists, the honest form is: the STATIC render — the one
+    // artefact every viewer shares — carries no form, no button and no inline
+    // handler, because an active control would be a false claim for any viewer
+    // whose session does not grant it. Real controls are constructed at
+    // runtime by the control console script, and only from a granted
+    // `/session` verdict — that half of the invariant is enforced by
+    // `control-console.test.ts`.
     for (const page of HQ_PAGES) {
       const html = bare.get(page.file)!;
       expect(html).not.toContain('<form');
@@ -94,10 +102,10 @@ describe('the Connections page joins the site without disturbing it', () => {
     }
   });
 
-  it('adds no input control on the two new surfaces', () => {
+  it('adds no static input control on the two new surfaces', () => {
     // The Archive page legitimately carries client-side filter inputs; the
-    // Direct Order composer and Connection Center carry none, so neither can
-    // look like something that submits.
+    // Direct Order composer and Connection Center ship none in the static
+    // render — order fields exist only after /session grants directOrder.
     expect(bare.get('connections.html')!).not.toContain('<input');
     expect(bare.get('index.html')!).not.toContain('<input');
   });
@@ -169,20 +177,25 @@ describe('Connections renders evidence, not descriptors', () => {
   });
 });
 
-describe('the Direct Order composer is truthful about being blocked', () => {
+describe('the Direct Order composer is truthful about when it is live', () => {
   const html = bare.get('index.html')!;
 
   it('appears on the Command Center', () => {
     expect(html).toContain('<h2>DIRECT ORDER</h2>');
     expect(html).toContain('id="direct-order"');
+    expect(html).toContain('data-hq-order-composer');
   });
 
-  it('states the actual blocker rather than showing a live-looking control', () => {
-    expect(html).toContain('Headquarter has no authenticated Founder session');
-    expect(html).toContain('No weak');
-    expect(DIRECT_ORDER_BLOCKER).toContain('hq:order');
-    // Start Task is drawn so its place is visible, and is inert.
-    expect(html).toContain('<span class="control-readonly" aria-disabled="true">Start Task</span>');
+  it('states the session gate rather than showing a live-looking control', () => {
+    // The static render ships NO control at all — active or inert. The old
+    // inert "Start Task" span was honest when no browser write path existed;
+    // now that one does, a dead control would be the lie in the other
+    // direction. The status note is the one claim true for every viewer.
+    expect(html).toContain('Controls are drawn on this page only after the HQ control API confirms');
+    expect(html).toContain('data-hq-control-status');
+    expect(html).not.toContain('>Start Task</span>');
+    expect(DIRECT_ORDER_SESSION_NOTE).toContain('hq:order');
+    expect(DIRECT_ORDER_SESSION_NOTE).toContain('refuses any request that tries to name one');
   });
 
   it('explains that an order is Founder-gated and executes nothing on creation', () => {

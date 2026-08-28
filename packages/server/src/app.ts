@@ -171,6 +171,17 @@ export interface AppOptions {
    * something a server acquires by upgrading.
    */
   headquarter?: HeadquarterControlPlane;
+  /**
+   * Serve the built static HQ site from THIS origin under `/hq/`, OFF unless
+   * a host passes it explicitly (issue #200 V1 integration).
+   *
+   * Same-origin serving is what makes the console's control-API fetches carry
+   * the `SameSite=Lax` session cookie; a site served from another origin
+   * would be read-only by construction. The caller (`hq-host.ts`) verifies
+   * the directory exists first and skips this option — with a truthful log —
+   * when it does not, so a missing build never crashes the server.
+   */
+  headquarterSite?: { root: string };
 }
 
 export function buildApp(opts: AppOptions): FastifyInstance {
@@ -184,6 +195,20 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   const brandingDir = path.join(path.dirname(defaultDbPath()), 'branding');
   fs.mkdirSync(brandingDir, { recursive: true });
   app.register(fastifyStatic, { root: brandingDir, prefix: '/branding/' });
+
+  // Optional same-origin HQ site mount (issue #200 V1). A second static
+  // registration must not redeclare the reply decorators the branding mount
+  // already added, hence `decorateReply: false`. The prefix is `/hq/`, which
+  // shadows nothing: `/branding/` and every `/api/*` route stay first-class.
+  if (opts.headquarterSite) {
+    app.register(fastifyStatic, {
+      root: opts.headquarterSite.root,
+      prefix: '/hq/',
+      decorateReply: false,
+    });
+    // Convenience only: `/hq` (no slash) lands on the console index.
+    app.get('/hq', async (_req, reply) => reply.redirect('/hq/', 302));
+  }
 
   app.decorateRequest('sessionUser', null);
 

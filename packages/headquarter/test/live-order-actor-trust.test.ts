@@ -31,7 +31,7 @@ import {
   registerDirectOrderCapability,
   submitDirectOrder,
 } from '../src/live/orders.js';
-import { DIRECT_ORDER_BLOCKER } from '../src/ui/render.js';
+import { DIRECT_ORDER_SESSION_NOTE } from '../src/ui/render.js';
 import { taskActionDigest } from '../src/operator/approvals.js';
 
 const CLAUDE_ONLY = { CLAUDE_ROUTINE_URL: 'present', CLAUDE_ROUTINE_TOKEN: 'present' };
@@ -265,7 +265,7 @@ describe('an impersonated assertion cannot reach execution', () => {
 });
 
 describe('no interface string claims the CLI authenticates the Founder', () => {
-  const strings = [LOCAL_ADMIN_INTERFACE_NOTICE, DIRECT_ORDER_BLOCKER];
+  const strings = [LOCAL_ADMIN_INTERFACE_NOTICE, DIRECT_ORDER_SESSION_NOTE];
 
   it('never repeats the corrected overclaim', () => {
     for (const text of strings) {
@@ -274,11 +274,18 @@ describe('no interface string claims the CLI authenticates the Founder', () => {
     }
   });
 
-  it('states the classification and the remaining gate instead', () => {
+  it('states the CLI classification, now next to the real browser boundary', () => {
+    // The browser boundary exists since the Founder decision of 2026-08-28,
+    // so the old "HQ is NOT fully Founder-operable from a browser" claim is
+    // itself the overclaim now — of the wrong kind. What must survive is the
+    // CLI's honest classification: a maintenance interface that asserts a
+    // principal id and authenticates nobody.
     expect(LOCAL_ADMIN_INTERFACE_NOTICE).toContain('TRUSTED-LOCAL-ADMIN');
     expect(LOCAL_ADMIN_INTERFACE_NOTICE).toContain('does not authenticate');
-    expect(DIRECT_ORDER_BLOCKER).toContain('TRUSTED-LOCAL-ADMIN');
-    expect(DIRECT_ORDER_BLOCKER).toContain('does not authenticate the Founder');
-    expect(DIRECT_ORDER_BLOCKER).toContain('NOT fully Founder-operable');
+    expect(DIRECT_ORDER_SESSION_NOTE.toLowerCase()).toContain('trusted-local-admin');
+    expect(DIRECT_ORDER_SESSION_NOTE).toContain('authenticates nobody');
+    // And the browser path is described as session-gated, never as open.
+    expect(DIRECT_ORDER_SESSION_NOTE).toContain('authenticated HQ control API');
+    expect(DIRECT_ORDER_SESSION_NOTE).toContain('never sends an identity');
   });
 });

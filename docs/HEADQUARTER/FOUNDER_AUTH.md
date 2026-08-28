@@ -23,6 +23,36 @@ HQ routes do not exist unless a host asks for them. An ordinary tenant
 deployment calls `buildApp({ db })` and has none of them — the Mesob pilot's
 shape is untouched.
 
+### The env-gated host path (issue #200 V1 integration)
+
+`packages/server/src/index.ts` wires a control plane only when
+`FACTORYOS_HQ_CONTROL=1` is set — off by default, and every knob under it
+fails closed on its own:
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `FACTORYOS_HQ_CONTROL` | Serve the HQ control routes at all | off |
+| `FACTORYOS_HQ_DB` | HQ SQLite path | `data/headquarter.sqlite` |
+| `FACTORYOS_HQ_FOUNDER_MAP` | JSON array of `{realmId, accountId, principalId}` | `[]` — nobody is the Founder |
+| `FACTORYOS_HQ_ORIGINS` | Comma-separated trusted origins | none — every mutation refused |
+| `FACTORYOS_HQ_MUTATIONS` | `0`/`false` serves reads only | writes allowed (still gated by all of the above) |
+| `FACTORYOS_HQ_SITE` | Directory of the built HQ site, served same-origin at `/hq/` | not served |
+
+A malformed `FACTORYOS_HQ_FOUNDER_MAP` is passed through raw and refused
+whole per request (`founder_map_malformed`) — the host never repairs an
+authority mapping. Enabling the plane also registers the `hq.direct_order`
+capability (registration never re-enables one an operator disabled); it
+registers **no principal and no binding**. The `(realmId, accountId)` pair is
+deployment configuration — find it with the SQL below, never guess it.
+
+Serve the console from `FACTORYOS_HQ_SITE` (build it with
+`npm run build:site --workspace @factoryos/headquarter`) so the pages share
+the API's origin: `fos_session` is `SameSite=Lax`, so the console's
+control-API calls carry the cookie only from the API's own origin, and
+`FACTORYOS_HQ_ORIGINS` must name exactly that origin. The pages themselves
+draw controls only after `GET /session` grants them — an un-granted or
+signed-out viewer sees a truthful read-only state.
+
 ```ts
 buildApp({
   db,
