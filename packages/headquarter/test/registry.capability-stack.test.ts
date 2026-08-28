@@ -32,10 +32,12 @@ describe('HQ approved capability catalog', () => {
 
   it('never auto-selects billable, mixed-cost, account-required, or review-first tools', () => {
     for (const capability of HQ_CAPABILITY_STACK) {
+      const reviewFirst =
+        'reviewBeforeInstall' in capability && capability.reviewBeforeInstall === true;
       if (
         capabilityRequiresFounderSpendGate(capability) ||
         capability.accountRequired ||
-        capability.reviewBeforeInstall
+        reviewFirst
       ) {
         expect(capabilityMayAutoSelect(capability), capability.id).toBe(false);
       }
