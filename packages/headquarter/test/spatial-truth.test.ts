@@ -1241,22 +1241,35 @@ describe('the floor never drops or invents people', () => {
     // only, fixtures only, both, and neither — because the fixtures-only case
     // is the one the worker-derived version got wrong, and a test built from
     // the mixed case alone would have passed.
-    const cases: { name: string; floor: ReturnType<typeof floorFrom> }[] = [
-      { name: 'nothing wrong', floor: floorFrom([], [], [connectionWithState('connected')]) },
-      { name: 'fixture only', floor: floorFrom([], [], [connectionWithState('error')]) },
-      {
-        name: 'worker only',
-        floor: floorFrom([event('stuck', 't1', 'blocked')], [worker('stuck', 'build_lead')], [
-          connectionWithState('connected'),
-        ]),
+    // One data object per case drives BOTH the floor and the page, so the two
+    // cannot be built from different inputs and silently agree.
+    const inputs: Record<string, { events: ActivityEvent[]; specialists: WorkerDescriptor[]; connections: ConnectionStatus[] }> = {
+      'nothing wrong': { events: [], specialists: [], connections: [connectionWithState('connected')] },
+      'fixture only': { events: [], specialists: [], connections: [connectionWithState('error')] },
+      'worker only': {
+        events: [event('stuck', 't1', 'blocked')],
+        specialists: [worker('stuck', 'build_lead')],
+        connections: [connectionWithState('connected')],
       },
-      {
-        name: 'both',
-        floor: floorFrom([event('stuck', 't2', 'blocked')], [worker('stuck', 'build_lead')], [
-          connectionWithState('error'),
-        ]),
+      both: {
+        events: [event('stuck', 't2', 'blocked')],
+        specialists: [worker('stuck', 'build_lead')],
+        connections: [connectionWithState('error')],
       },
-    ];
+    };
+    const dataFor = (name: string): HeadquarterData => ({
+      ...sample,
+      events: inputs[name].events,
+      specialists: inputs[name].specialists,
+      approvals: [],
+      archive: [],
+      chatMessages: [],
+      connections: inputs[name].connections,
+    });
+    const cases = Object.keys(inputs).map((name) => ({
+      name,
+      floor: floorFrom(inputs[name].events, inputs[name].specialists, inputs[name].connections),
+    }));
 
     for (const { name, floor } of cases) {
       const roomsFlagged = floor.zones.filter((zone) => zone.liveness === 'attention');
@@ -1303,9 +1316,22 @@ describe('the floor never drops or invents people', () => {
         linkLabels.some((label) => label.includes('Needs attention')),
         `${name}: room links`,
       ).toBe(flagged);
-      // 3. the page KPI and panels
-      const page = buildSite({ ...sample, connections: [] }).get('headquarters.html')!;
-      expect(page).toContain('Needing attention');
+      // 3. the page KPI — built from THIS case's inputs.
+      //
+      // This assertion used to rebuild the same sample page every iteration
+      // with `connections: []` and check only that the static label existed.
+      // It therefore asserted nothing about the case, and a regression making
+      // fixture-only attention render a zero in a positive tone — the exact
+      // contradiction this test claims to prevent — would have passed
+      // (Codex review of `5e9940c`). The page now comes from the same data
+      // the floor does.
+      const page = buildSite(dataFor(name)).get('headquarters.html')!;
+      const kpi = /<div class="card kpi tone-([a-z]+)">\s*<span class="kpi-label">Needing attention<\/span>\s*<span class="kpi-value">(\d+)<\/span>/.exec(
+        page,
+      );
+      expect(kpi, `${name}: the attention KPI is missing from the page`).not.toBeNull();
+      expect(kpi![2], `${name}: KPI value disagrees with the floor`).toBe(String(floor.totals.attention));
+      expect(kpi![1], `${name}: KPI tone`).toBe(flagged ? 'warn' : 'accent');
     }
   });
 

@@ -173,7 +173,12 @@ export function spatialFloorBody({ floor, nowIso }: FloorPageInput): string {
     {
       label: 'Needing attention',
       value: totals.attention,
-      hint: `${totals.blocked} blocked · ${totals.awaitingFounder} waiting on the Founder · ${totals.attentionFixtures} failing or gated fixture(s)`,
+      // "needing attention", not "failing": once `configured` and
+      // `setup_required` began contributing here, the old wording called an
+      // incomplete verification a failure — overstating what the canonical
+      // state and the Connections page both say, which is only that
+      // verification has not happened (Codex review of `5e9940c`).
+      hint: `${totals.blocked} blocked · ${totals.awaitingFounder} waiting on the Founder · ${totals.attentionFixtures} fixture(s) needing attention`,
       tone: attentionTone,
     },
     {
