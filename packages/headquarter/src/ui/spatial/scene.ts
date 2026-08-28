@@ -19,7 +19,7 @@
  */
 
 import { escapeHtml } from '../components.js';
-import { floorExtent, type Station, type Zone } from './world.js';
+import { floorExtent, type Station, type StationKind, type Zone } from './world.js';
 import {
   fixtureIsPositive,
   fixtureNeedsAttention,
@@ -315,8 +315,33 @@ function prop(station: Station, zone: Zone, lit: boolean): string {
  * reader who cannot separate the red from the neutral: the stylesheet tints
  * these props as well, but the silhouette alone already differs.
  */
+/**
+ * How tall each station's contents actually stand, in floor units.
+ *
+ * `desk` and `review_bay` are the height of a standing FIGURE (head top
+ * ~1.41), not of the furniture, because those two kinds only ever seat
+ * workers and their marker floats over the worker.
+ *
+ * Kept beside MARKER_HEIGHT so the required clearance is checkable rather
+ * than remembered: `test/spatial-truth.test.ts` asserts every kind's marker
+ * clears its contents, and that both records cover every StationKind.
+ */
+export const PROP_EXTENT: Record<StationKind, number> = {
+  desk: 1.41,
+  review_bay: 1.41,
+  console: 1.28,
+  bench: 0.9,
+  bay: 0.75,
+  uplink: 1.72,
+  stack: 0.9,
+  table: 0.42,
+};
+
+/** Minimum gap between the top of a station's contents and its marker. */
+export const MARKER_CLEARANCE = 0.05;
+
 /** Where the marker floats, per station kind: clear of that prop's own height. */
-const MARKER_HEIGHT: Record<string, number> = {
+export const MARKER_HEIGHT: Record<StationKind, number> = {
   uplink: 1.95,
   bench: 1.15,
   bay: 1.05,
@@ -348,8 +373,8 @@ export const MARKER_GEOMETRY = {
   stemTop: 0.95,
 } as const;
 
-function faultMarker(x: number, y: number, kind: string): string {
-  const base = MARKER_HEIGHT[kind] ?? 1.2;
+function faultMarker(x: number, y: number, kind: StationKind): string {
+  const base = MARKER_HEIGHT[kind];
   const { size, dotBase, dotTop, stemBase, stemTop } = MARKER_GEOMETRY;
   return `<g class="fault-marker">${box(x, y, size, size, base + stemTop, 'fault-stem', base + stemBase)}${box(
     x,

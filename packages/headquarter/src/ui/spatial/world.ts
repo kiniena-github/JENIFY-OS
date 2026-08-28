@@ -33,15 +33,24 @@ export type ZoneKind =
   | 'meeting';
 
 /** A piece of furniture an occupant or an artefact can be placed at. */
-export type StationKind =
-  | 'console' // mission-control console — screens, no seat
-  | 'desk' // a working desk with a monitor
-  | 'review_bay' // an isolated review booth
-  | 'bench' // the Founder approval bench
-  | 'bay' // a project bay plinth
-  | 'uplink' // a service uplink pillar
-  | 'stack' // an archive evidence stack
-  | 'table'; // the situation-room table
+export const STATION_KINDS = [
+  'console', // mission-control console — screens, no seat
+  'desk', // a working desk with a monitor
+  'review_bay', // an isolated review booth
+  'bench', // the Founder approval bench
+  'bay', // a project bay plinth
+  'uplink', // a service uplink pillar
+  'stack', // an archive evidence stack
+  'table', // the situation-room table
+] as const;
+
+/**
+ * Enumerable at run time, not only in the type system, so tests can assert
+ * that every kind is covered by the per-kind lookups the renderer keeps —
+ * a kind added later must fail a test rather than fall through a silent
+ * `??` fallback into a colliding marker height.
+ */
+export type StationKind = (typeof STATION_KINDS)[number];
 
 export interface Station {
   id: string;

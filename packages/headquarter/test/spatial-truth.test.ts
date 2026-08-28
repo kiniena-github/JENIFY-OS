@@ -25,7 +25,7 @@ import { latestTaskStates } from '../src/ui/model.js';
 import { founderDashboard, projectBoard, workerStatuses } from '../src/ui/views.js';
 import { buildSite, type HeadquarterData } from '../src/ui/site.js';
 import { THEME_CSS } from '../src/ui/theme.js';
-import { HQ_FLOOR, ROLE_ZONE, floorExtent } from '../src/ui/spatial/world.js';
+import { HQ_FLOOR, ROLE_ZONE, STATION_KINDS, floorExtent } from '../src/ui/spatial/world.js';
 import {
   ACTIVITY_PRESENTATION,
   ANIMATED_ACTIVITIES,
@@ -43,7 +43,15 @@ import {
   type FloorInput,
   type OccupantActivity,
 } from '../src/ui/spatial/state.js';
-import { MARKER_GEOMETRY, box, iso, renderScene } from '../src/ui/spatial/scene.js';
+import {
+  MARKER_CLEARANCE,
+  MARKER_GEOMETRY,
+  MARKER_HEIGHT,
+  PROP_EXTENT,
+  box,
+  iso,
+  renderScene,
+} from '../src/ui/spatial/scene.js';
 
 const samplePath = join(dirname(fileURLToPath(import.meta.url)), '..', 'sample-data', 'hq-sample.json');
 const sample = JSON.parse(readFileSync(samplePath, 'utf8')) as HeadquarterData;
@@ -836,6 +844,27 @@ describe('the floor never drops or invents people', () => {
     expect(Math.max(...points), 'a floating box still touched the floor').toBeLessThan(iso(1, 1, 0).sy);
   });
 
+  it('floats the marker clear of every station kind, with no silent fallback', () => {
+    // The geometry axis had per-case tests only — I checked desks and uplinks
+    // by eye and left the other six kinds to a `?? 1.2` fallback, which is
+    // exactly the shape of "a rule that holds where it was looked at". A kind
+    // added later must fail here rather than inherit a colliding height.
+    for (const kind of STATION_KINDS) {
+      expect(MARKER_HEIGHT[kind], `${kind} has no marker height`).toBeTypeOf('number');
+      expect(PROP_EXTENT[kind], `${kind} has no recorded extent`).toBeTypeOf('number');
+      expect(
+        MARKER_HEIGHT[kind] - PROP_EXTENT[kind],
+        `${kind}: marker at ${MARKER_HEIGHT[kind]} does not clear contents standing ${PROP_EXTENT[kind]} tall`,
+      ).toBeGreaterThanOrEqual(MARKER_CLEARANCE);
+    }
+    // Every kind the floor plan actually uses is covered.
+    for (const zone of HQ_FLOOR) {
+      for (const station of zone.stations) {
+        expect(STATION_KINDS).toContain(station.kind);
+      }
+    }
+  });
+
   it('marks an attention-causing WORKER, not only a fixture', () => {
     // Codex review of `a455799`. Restricting the marker to fixtures left a
     // blocked figure identifiable only by head colour — recreating, for
@@ -897,6 +926,60 @@ describe('the floor never drops or invents people', () => {
         .find((fragment) => fragment.includes(`data-station="${fixture.stationId}"`))!;
       expect(station).toContain(fixture.detail.split(' · ')[0]);
     }
+  });
+
+  it('never lets colour be the only difference between a flagged and a healthy fixture', () => {
+    // The general form of the project-bay finding, which was: "a blocked
+    // project and a healthy project with the same counts differ only by
+    // styling and the generic marker".
+    //
+    // The rule that catches that shape anywhere: within a room, no fixture
+    // that needs attention may carry the same words as one that does not.
+    // If two fixtures read identically and differ only in tone, colour is
+    // doing all the work — which is the failure mode, not a styling detail.
+    //
+    // ALPHA and BETA below are constructed to have IDENTICAL open/completed
+    // counts and differ only in that ALPHA has a blocked task, so the pair
+    // collides unless the words carry the condition.
+    const floor = floorFrom(
+      [
+        // ALPHA: one blocked task. BETA: one running task. Both therefore
+        // have openCount 1 and completedCount 0 — identical counts, so
+        // pre-fix both read "1 open · 0 done" and only the tone differed.
+        event('a', 't1', 'blocked', { project: 'ALPHA' }),
+        event('c', 't3', 'running', { project: 'BETA' }),
+        event('d', 't4', 'needs_approval', { project: 'GAMMA' }),
+      ],
+      [],
+      [connectionWithState('error'), connectionWithState('not_connected')],
+    );
+
+    for (const zone of floor.zones) {
+      const flagged = zone.fixtures.filter((fixture) => fixture.tone === 'warn' || fixture.tone === 'danger');
+      const healthy = zone.fixtures.filter((fixture) => fixture.tone !== 'warn' && fixture.tone !== 'danger');
+      for (const bad of flagged) {
+        for (const good of healthy) {
+          expect(
+            bad.detail === good.detail,
+            `${zone.zone.id}: "${bad.id}" needs attention and "${good.id}" does not, ` +
+              `yet both read "${bad.detail}" — only colour separates them`,
+          ).toBe(false);
+        }
+        // And its evidence must say something a healthy fixture's would not.
+        expect(bad.evidence.length, `${bad.id} has no evidence`).toBeGreaterThan(20);
+      }
+    }
+
+    // The construction really does collide on counts, so the test is not
+    // passing because the fixtures were trivially different anyway.
+    const bays = floor.zones.find((zone) => zone.zone.id === 'project-bays')!.fixtures;
+    const alpha = bays.find((fixture) => fixture.id === 'bay-ALPHA')!;
+    const beta = bays.find((fixture) => fixture.id === 'bay-BETA')!;
+    expect(alpha.tone).toBe('danger');
+    expect(beta.tone).not.toBe('danger');
+    expect(alpha.detail).toContain('1 open');
+    expect(beta.detail).toContain('1 open');
+    expect(alpha.detail).not.toBe(beta.detail);
   });
 
   it('seats deterministically when several items tie on priority', () => {
