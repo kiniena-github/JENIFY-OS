@@ -18,7 +18,9 @@ import {
   FRESHNESS_VERDICT_JS,
   SNAPSHOT_FILENAME,
   SNAPSHOT_POLL_INTERVAL_MS,
+  liveRefreshScript,
 } from '../src/ui/live-refresh.js';
+import { jsonForScript } from '../src/ui/components.js';
 import { CONNECTION_CATALOG } from '../src/live/connections.js';
 
 const samplePath = join(dirname(fileURLToPath(import.meta.url)), '..', 'sample-data', 'hq-sample.json');
@@ -331,5 +333,48 @@ describe('renders stay reproducible', () => {
     expect(buildSite({ ...sample, env: LOADED_ENV }).get('connections.html')).toBe(
       loaded.get('connections.html'),
     );
+  });
+});
+
+/**
+ * Codex exact-head finding on `1c5683f` (P1). `renderedAt` is interpolated into
+ * an inline `<script>` via `JSON.stringify`, which leaves `<` intact — and the
+ * HTML parser looks for `</script` before the JavaScript parser sees the string
+ * literal at all. `renderedAt` is `bundleAsOf(data)`, i.e. bundle content, which
+ * the rest of this UI already treats as untrusted and HTML-escapes. A timestamp
+ * beginning `z</script><script>…` (chosen to sort last, so `bundleAsOf` picks
+ * it) therefore closed the element from inside the string and became stored
+ * script execution on every generated page.
+ */
+describe('data interpolated into inline script cannot break out of it', () => {
+  const BREAKOUT = 'z</script><script>globalThis.__pwned = 1;</script>';
+
+  it('escapes the tag boundary so the script element is not terminated early', () => {
+    const script = liveRefreshScript(BREAKOUT);
+    // Exactly one closing tag: the one this function legitimately writes.
+    expect(script.match(/<\/script>/g) ?? []).toHaveLength(1);
+    expect(script).not.toContain('<script>globalThis');
+    expect(script).toContain('\\u003c');
+  });
+
+  it('keeps the value byte-identical at run time', () => {
+    // The escape is a JavaScript escape, so the program still sees the exact
+    // characters. Escaping that CHANGED the value would be its own defect.
+    for (const value of [BREAKOUT, '2026-08-26T10:30:00Z', 'a<b>c&d', 'x\u2028y\u2029z']) {
+      expect(new Function(`return ${jsonForScript(value)};`)()).toBe(value);
+    }
+  });
+
+  it('escapes the JavaScript line terminators that are legal inside JSON', () => {
+    expect(jsonForScript('a\u2028b')).toContain('\\u2028');
+    expect(jsonForScript('a\u2029b')).toContain('\\u2029');
+  });
+
+  it('holds end to end: a hostile bundle timestamp injects nothing into any page', () => {
+    const site = buildSite({ ...sample, generatedAt: BREAKOUT });
+    for (const [file, html] of site) {
+      expect(html, file).not.toContain('<script>globalThis');
+      expect(html, file).not.toContain('__pwned = 1;</script>');
+    }
   });
 });
