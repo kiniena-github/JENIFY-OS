@@ -29,6 +29,7 @@ import { HQ_FLOOR, ROLE_ZONE, floorExtent } from '../src/ui/spatial/world.js';
 import {
   ACTIVITY_PRESENTATION,
   ANIMATED_ACTIVITIES,
+  ATTENTION_ACTIVITIES,
   FIXTURE_STATION_KINDS,
   LIT_CONNECTION_STATES,
   WORKER_STATION_KINDS,
@@ -526,6 +527,69 @@ describe('the floor never drops or invents people', () => {
     expect(station).toContain('data-occupied="fixture"');
     expect(station).toContain('is-lit');
     expect(station).toContain('In flight');
+  });
+
+  it('always draws whatever puts a room into attention, even over capacity', () => {
+    // Codex review of `a123dbc`, P2, generalised.
+    //
+    // The room's liveness word is computed from ALL its contents; the plan can
+    // only draw what it seats. So when a room is over capacity, the thing that
+    // CAUSED the warning must be among the things drawn — otherwise the room
+    // says "Needs attention" while showing nothing but healthy pillars and
+    // busy people, and the warning has no visible referent.
+    //
+    // Codex reported the fixture half (8 healthy connections filling the
+    // Uplink Gallery, an errored one dropped). The occupant half was not
+    // reported and was equally real: 8 working builders filling the Build
+    // Floor, a blocked worker dropped. Both now run through one seater, so
+    // this asserts the invariant for both at once.
+    const connections = [
+      ...Array.from({ length: 8 }, (_, index) => ({ ...connectionWithState('connected'), id: `ok-${index}` })),
+      { ...connectionWithState('error'), id: 'broken' },
+    ];
+    const busy = Array.from({ length: 8 }, (_, index) => worker(`aa${index}`, 'build_lead'));
+    const floor = floorFrom(
+      [
+        ...busy.map((entry, index) => event(entry.id, `t${index}`, 'running')),
+        event('zz-blocked', 'tz', 'blocked'),
+        event('zz-gated', 'tg', 'needs_approval'),
+      ],
+      [...busy, worker('zz-blocked', 'build_lead'), worker('zz-gated', 'build_lead')],
+      connections,
+    );
+
+    for (const zone of floor.zones) {
+      if (zone.liveness !== 'attention') continue;
+      const causes = [
+        ...zone.occupants.filter((occupant) => ATTENTION_ACTIVITIES.includes(occupant.activity)),
+        ...zone.fixtures.filter((fixture) => fixture.tone === 'warn' || fixture.tone === 'danger'),
+      ];
+      expect(causes.length, `${zone.zone.id} is 'attention' with nothing causing it`).toBeGreaterThan(0);
+      expect(
+        causes.some((cause) => cause.stationId !== null),
+        `${zone.zone.id} needs attention but every cause is unseated, so the plan cannot show why`,
+      ).toBe(true);
+    }
+
+    // And specifically, at the two rooms the reproduction crowds.
+    const gallery = floor.zones.find((zone) => zone.zone.id === 'uplink-gallery')!;
+    expect(gallery.fixtures.find((fixture) => fixture.id === 'uplink-broken')!.stationId).not.toBeNull();
+    const build = floor.zones.find((zone) => zone.zone.id === 'build-floor')!;
+    for (const id of ['zz-blocked', 'zz-gated']) {
+      expect(build.occupants.find((occupant) => occupant.id === id)!.stationId, `${id} unseated`).not.toBeNull();
+    }
+  });
+
+  it('seats deterministically when several items tie on priority', () => {
+    const connections = Array.from({ length: 12 }, (_, index) => ({
+      ...connectionWithState('connected'),
+      id: `same-${index}`,
+    }));
+    const once = floorFrom([], [], connections);
+    const twice = floorFrom([], [], connections);
+    const seatsOf = (floor: typeof once) =>
+      floor.zones.flatMap((zone) => zone.fixtures.map((fixture) => `${fixture.id}@${fixture.stationId}`));
+    expect(seatsOf(once)).toEqual(seatsOf(twice));
   });
 
   it('never drops a LIT fixture while an unlit one holds a station', () => {

@@ -556,46 +556,74 @@ function liveness(occupants: readonly Occupant[], fixtures: readonly Fixture[]):
 export const WORKER_STATION_KINDS = ['desk', 'review_bay'] as const;
 export const FIXTURE_STATION_KINDS = ['uplink', 'bay', 'stack', 'bench', 'console', 'table'] as const;
 
-function seat<T extends { stationId: string | null }>(items: T[], zone: Zone, kinds: readonly string[]): T[] {
-  const stations = zone.stations.filter((station) => kinds.includes(station.kind));
-  return items.map((item, index) => ({
-    ...item,
-    stationId: index < stations.length ? stations[index].id : null,
-  }));
+/**
+ * How badly a thing needs one of a room's limited stations.
+ *
+ * 0 — it is WHY the room needs attention (a blocked or Founder-gated worker,
+ *     an errored or expired connection). Seat it first, always.
+ * 1 — it is positive evidence: active work, a lit fixture.
+ * 2 — everything else. Its absence from the plan asserts nothing.
+ */
+export const SEAT_PRIORITY = { attention: 0, positive: 1, ordinary: 2 } as const;
+
+export function occupantSeatPriority(occupant: Occupant): number {
+  if (ATTENTION_ACTIVITIES.includes(occupant.activity)) return SEAT_PRIORITY.attention;
+  if (ANIMATED_ACTIVITIES.includes(occupant.activity)) return SEAT_PRIORITY.positive;
+  return SEAT_PRIORITY.ordinary;
+}
+
+export function fixtureSeatPriority(fixture: Fixture): number {
+  if (fixture.tone === 'warn' || fixture.tone === 'danger') return SEAT_PRIORITY.attention;
+  return fixture.lit ? SEAT_PRIORITY.positive : SEAT_PRIORITY.ordinary;
 }
 
 /**
- * Seat fixtures, giving LIT ones the stations first.
+ * Seat items at a room's stations, most-needing-to-be-seen first.
  *
- * Rooms whose fixture count is data-driven — one uplink per connection, one
- * bay per project — can hold more fixtures than they have stations, and the
- * plain list order then decides who is drawn. That order is arbitrary with
- * respect to evidence, so an UNLIT fixture could take the last station and
- * push a LIT one off the plan: a real connection or a real gated task made
- * invisible, while something reporting "nothing here" occupies the floor.
+ * A room has finitely many stations and its occupant and fixture lists are
+ * data-driven, so over-capacity is normal and something must be left unseated.
+ * The question this function answers is WHICH — and the answer has to follow
+ * the evidence, because the room's liveness word is computed from ALL of its
+ * contents while the plan can only draw what it seats.
  *
- * Lit-first inverts that. The floor still never claims more than the evidence
- * supports — an unseated fixture is unlit, so its absence asserts nothing —
- * but a positive finding is never the one dropped. Returned in the caller's
- * original order so the panel and the plan stay in step.
+ * Two rounds of review walked this in:
  *
- * (Generalised from Codex's Founder Suite finding on `9c0e354`, which was the
- * fixed-capacity instance of this: that room simply needed another bench.)
+ *   · plain list order let an unlit fixture take the last station and push a
+ *     lit one off the plan (Codex on `9c0e354`);
+ *   · lit-first then let eight healthy connections fill the Uplink Gallery
+ *     and drop an ERRORED one — so the room read "Needs attention" while the
+ *     plan showed nothing but healthy pillars, hiding the very fixture that
+ *     caused the warning (Codex on `a123dbc`).
+ *
+ * The same hole existed for occupants and was not reported: eight working
+ * builders filled the Build Floor and a blocked worker went unseated, with
+ * the room again marked for attention and the plan showing only busy people.
+ * Both now run through this one function, so the rule cannot hold for one
+ * kind of claim and quietly lapse for the other.
+ *
+ * The invariant, asserted in `test/spatial-truth.test.ts`: whatever puts a
+ * room into `attention` is always among the things drawn in it. Items keep
+ * their caller order in the returned list, so the panel and the plan agree.
  */
-function seatFixtures(fixtures: Fixture[], zone: Zone): Fixture[] {
-  const stations = zone.stations.filter((station) =>
-    (FIXTURE_STATION_KINDS as readonly string[]).includes(station.kind),
+function seatByPriority<T extends { stationId: string | null }>(
+  items: T[],
+  zone: Zone,
+  kinds: readonly string[],
+  priority: (item: T) => number,
+): T[] {
+  const stations = zone.stations.filter((station) => kinds.includes(station.kind));
+  // Sort indices, not items: a stable order by (priority, original position)
+  // keeps the assignment deterministic when several items tie.
+  const order = [...items.keys()].sort(
+    (a, b) => priority(items[a]) - priority(items[b]) || a - b,
   );
-  const priority = [...fixtures.keys()].sort((a, b) => {
-    const lit = Number(fixtures[b].lit) - Number(fixtures[a].lit);
-    return lit !== 0 ? lit : a - b;
-  });
   const assigned = new Map<number, string>();
-  priority.forEach((fixtureIndex, rank) => {
-    if (rank < stations.length) assigned.set(fixtureIndex, stations[rank].id);
+  order.forEach((itemIndex, rank) => {
+    if (rank < stations.length) assigned.set(itemIndex, stations[rank].id);
   });
-  return fixtures.map((fixture, index) => ({ ...fixture, stationId: assigned.get(index) ?? null }));
+  return items.map((item, index) => ({ ...item, stationId: assigned.get(index) ?? null }));
 }
+
 
 export function floorState(input: FloorInput): FloorState {
   const occupants = floorOccupants(input.specialists, input.workers, input.states);
@@ -626,8 +654,18 @@ export function floorState(input: FloorInput): FloorState {
   };
 
   const zones: ZoneState[] = HQ_FLOOR.map((zone) => {
-    const zoneOccupants = seat(byZone.get(zone.id) ?? [], zone, WORKER_STATION_KINDS);
-    const zoneFixtures = seatFixtures(fixturesByZone[zone.id] ?? [], zone);
+    const zoneOccupants = seatByPriority(
+      byZone.get(zone.id) ?? [],
+      zone,
+      WORKER_STATION_KINDS,
+      occupantSeatPriority,
+    );
+    const zoneFixtures = seatByPriority(
+      fixturesByZone[zone.id] ?? [],
+      zone,
+      FIXTURE_STATION_KINDS,
+      fixtureSeatPriority,
+    );
     const active = zoneOccupants.filter((occupant) => ANIMATED_ACTIVITIES.includes(occupant.activity)).length;
     const attention = zoneOccupants.filter((occupant) => ATTENTION_ACTIVITIES.includes(occupant.activity)).length;
     const summaryParts: string[] = [];
