@@ -62,6 +62,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_op_tasks_idem
   ON op_tasks(capability_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_op_tasks_status ON op_tasks(status);
 
+-- Which provider a worker id genuinely executes as (issue #200, Codex P1 #1).
+-- Deliberately EXPLICIT and empty by default: nothing infers a worker's
+-- provider from a vendor string, a display name or a registry descriptor, and
+-- a worker with no row here can never claim a provider-bound task.
+CREATE TABLE IF NOT EXISTS op_worker_providers (
+  worker_id TEXT PRIMARY KEY,
+  provider_id TEXT NOT NULL,
+  declared_by TEXT NOT NULL,
+  declared_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS op_evidence (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   id TEXT NOT NULL UNIQUE,

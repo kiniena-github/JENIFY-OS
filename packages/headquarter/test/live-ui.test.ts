@@ -14,7 +14,11 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { HQ_PAGES, DIRECT_ORDER_BLOCKER } from '../src/ui/render.js';
 import { buildSite, type HeadquarterData } from '../src/ui/site.js';
-import { SNAPSHOT_FILENAME, SNAPSHOT_POLL_INTERVAL_MS } from '../src/ui/live-refresh.js';
+import {
+  FRESHNESS_VERDICT_JS,
+  SNAPSHOT_FILENAME,
+  SNAPSHOT_POLL_INTERVAL_MS,
+} from '../src/ui/live-refresh.js';
 import { CONNECTION_CATALOG } from '../src/live/connections.js';
 
 const samplePath = join(dirname(fileURLToPath(import.meta.url)), '..', 'sample-data', 'hq-sample.json');
@@ -30,6 +34,24 @@ const LOADED_ENV = Object.fromEntries(
 
 const bare = buildSite(sample);
 const loaded = buildSite({ ...sample, env: LOADED_ENV });
+
+/**
+ * The browser's own freshness rule, executed rather than grepped for.
+ *
+ * `FRESHNESS_VERDICT_JS` is the exact source embedded in every page, so these
+ * assertions run the shipped implementation — a label test would pass even if
+ * the branch behind the label were wrong, which is precisely the defect this
+ * covers (Codex P1 #3).
+ */
+function freshnessVerdict(): (
+  renderedAt: string,
+  generatedAt: unknown,
+) => { state: string; label: string; hint: string } {
+  return new Function(`${FRESHNESS_VERDICT_JS}; return freshnessVerdict;`)() as (
+    renderedAt: string,
+    generatedAt: unknown,
+  ) => { state: string; label: string; hint: string };
+}
 
 describe('the Connections page joins the site without disturbing it', () => {
   it('keeps all seven original pages and adds Connections as the eighth', () => {
@@ -206,6 +228,51 @@ describe('provenance and freshness are never overstated', () => {
     // And it can say the page is behind, which is the case a stale render must
     // be able to report.
     expect(html).toContain('UPDATED — reload');
+  });
+
+  it('ships exactly one freshness decision, and the page runs that one', () => {
+    // The tests below execute the same source the browser executes. If the
+    // page ever grew a second, divergent copy of the rule, this fails.
+    expect(bare.get('index.html')!).toContain(FRESHNESS_VERDICT_JS);
+  });
+
+  it('claims LIVE only for the exact matching snapshot timestamp', () => {
+    // Codex P1 #3: an earlier version treated everything "not newer" as LIVE,
+    // so an OLDER snapshot rendered as LIVE. Older is not current.
+    const verdict = freshnessVerdict();
+    const rendered = '2026-08-28T12:00:00.000Z';
+
+    expect(verdict(rendered, rendered).state).toBe('live');
+
+    for (const older of [
+      '2026-08-28T11:59:59.999Z',
+      '2026-08-28T11:00:00.000Z',
+      '2020-01-01T00:00:00.000Z',
+    ]) {
+      const result = verdict(rendered, older);
+      expect(result.state, `${older} must not read as live`).toBe('stale');
+      expect(result.label).not.toContain('LIVE');
+    }
+
+    expect(verdict(rendered, '2026-08-28T12:00:00.001Z').state).toBe('updated');
+  });
+
+  it('does not accept an equal instant written differently as an exact match', () => {
+    // Same moment, different text: not the snapshot this page was built from,
+    // so currency is unconfirmed rather than assumed.
+    const result = freshnessVerdict()('2026-08-28T12:00:00.000Z', '2026-08-28T12:00:00Z');
+    expect(result.state).toBe('stale');
+    expect(result.hint).toContain('does not match this render');
+  });
+
+  it('reports an unreadable snapshot as an error rather than as freshness', () => {
+    const verdict = freshnessVerdict();
+    const rendered = '2026-08-28T12:00:00.000Z';
+    for (const broken of [undefined, null, '', 42, {}, 'not-a-timestamp']) {
+      expect(verdict(rendered, broken).state, `${String(broken)} must not read as live`).toBe(
+        'error',
+      );
+    }
   });
 
   it('still states the build-time instant, which is true with or without scripting', () => {

@@ -37,6 +37,17 @@
  *     --local-admin --as founder --instruction "Draft the Q3 maintenance plan" \
  *     [--project mesob] [--route AUTO|CLAUDE|CODEX] [--db path] [--dry-run]
  *
+ * Configuration is a separate run and never happens as a side effect of an
+ * order (issue #200, Codex P1 #2):
+ *
+ *   npm run hq:order --workspace @factoryos/headquarter -- \
+ *     --local-admin --register-capability [--db path]
+ *
+ * That registers `hq.direct_order` when it is absent. It does NOT enable a
+ * capability someone disabled — disabling is a containment decision, and no
+ * invocation path may quietly undo it. Placing an order against a missing or
+ * disabled capability fails closed with that exact reason.
+ *
  * `--local-admin` is a required acknowledgement of the trust model above, so
  * an unattended script cannot place principal-attributed orders by accident.
  * The command refuses to run under CI entirely, with no override.
@@ -52,6 +63,7 @@ import { HeadquarterOperations } from '../application/service.js';
 import {
   DIRECT_ORDER_CAPABILITY,
   DIRECT_ORDER_ROUTES,
+  directOrderCapabilityState,
   registerDirectOrderCapability,
   resolveOrderRoute,
   submitDirectOrder,
@@ -78,6 +90,11 @@ Usage:
   hq:order ${LOCAL_ADMIN_ACK_FLAG} --as <principalId> --instruction "<what to do>"
            [--project <label>] [--route ${DIRECT_ORDER_ROUTES.join('|')}]
            [--db <path>] [--dry-run]
+
+  hq:order ${LOCAL_ADMIN_ACK_FLAG} --register-capability [--db <path>]
+           Configuration only: registers ${DIRECT_ORDER_CAPABILITY.id} if it is
+           absent. It never enables a capability that was disabled, and it
+           never places an order.
 
 ${LOCAL_ADMIN_INTERFACE_NOTICE}`);
   process.exit(2);
@@ -125,6 +142,29 @@ function main(): void {
   const routeArg = (flag(argv, 'route') ?? 'AUTO').toUpperCase();
   const dbPath = flag(argv, 'db');
   const dryRun = argv.includes('--dry-run');
+  const registerCapability = argv.includes('--register-capability');
+
+  // Configuration and invocation are different commands wearing one name; they
+  // are never performed in the same run.
+  if (registerCapability) {
+    if (instruction) {
+      usage('--register-capability is a configuration action and does not place an order.');
+    }
+    const configDb = openHqDatabase(dbPath ?? undefined);
+    const configOps = new HeadquarterOperations(configDb);
+    const before = directOrderCapabilityState(configOps);
+    registerDirectOrderCapability(configOps);
+    const after = directOrderCapabilityState(configOps);
+    console.log(`Capability ${DIRECT_ORDER_CAPABILITY.id}: ${before} → ${after}`);
+    if (after === 'disabled') {
+      console.log(
+        'It stays DISABLED. Registration does not enable a capability that was deliberately ' +
+          'disabled; re-enabling it is its own explicit configuration decision.',
+      );
+    }
+    console.log('\nConfiguration only — no order was placed.');
+    return;
+  }
 
   if (!requestedBy) {
     usage('--as <principalId> is required: an order must be attributable (attributable, not authenticated).');
@@ -153,9 +193,24 @@ function main(): void {
 
   const db = openHqDatabase(dbPath ?? undefined);
   const ops = new HeadquarterOperations(db);
-  // Deny by default: the capability does not exist until a deployment asks
-  // for it. Registering it here is that explicit ask.
-  registerDirectOrderCapability(ops);
+
+  // Registration is a SEPARATE, explicit action (issue #200, Codex P1 #2),
+  // handled above and never in the same run as an order. Placing an order must
+  // never register the capability as a side effect, and must never turn a
+  // disabled one back on: disabling `hq.direct_order` is how a deployment stops
+  // direct orders, and an invocation may not undo it.
+  const capabilityState = directOrderCapabilityState(ops);
+  if (capabilityState !== 'enabled') {
+    console.error(
+      `Order refused (capability_${capabilityState === 'missing' ? 'not_registered' : 'disabled'}): ` +
+        `${DIRECT_ORDER_CAPABILITY.id} is ${capabilityState} in this database. ` +
+        (capabilityState === 'missing'
+          ? `Register it deliberately with --register-capability.`
+          : `Re-enabling a disabled capability is an explicit configuration decision, not something ` +
+            `placing an order may do.`),
+    );
+    process.exit(1);
+  }
 
   const result = submitDirectOrder(
     ops,

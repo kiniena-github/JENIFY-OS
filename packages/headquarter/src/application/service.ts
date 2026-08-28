@@ -75,6 +75,7 @@ import { evaluatePolicy, type PolicyContext, type PolicyDecision } from '../oper
 import { taskActionDigest } from '../operator/approvals.js';
 import { assertNoSecretLikeContent } from '../operator/evidence.js';
 import { OperatorQueue, type OperatorTask, type ReconcileDecision } from '../operator/queue.js';
+import { ProviderBindingViolation } from '../operator/provider-binding.js';
 import { ensureApplicationSchema } from './db.js';
 import {
   SpecialistDirectoryAdapter,
@@ -110,6 +111,7 @@ export type OpsErrorCode =
   | 'action_digest_mismatch'
   | 'task_not_awaiting_approval'
   | 'assigned_to_other_worker'
+  | 'provider_binding_mismatch'
   | 'nothing_claimable'
   | 'unknown_principal'
   | 'humans_do_not_execute'
@@ -647,11 +649,23 @@ export class HeadquarterOperations {
         { taskId: head.id, assignedTo: intent.workerId },
       );
     }
-
+    // Provider binding (issue #200, Codex P1 #1) is deliberately NOT
+    // re-implemented here. It is enforced once, at the canonical execution
+    // boundary in `OperatorQueue.claim`, which is also where the refusal is
+    // written to the evidence log — so it holds for callers that never come
+    // through this layer, and it cannot be recorded twice or drift between two
+    // copies. This layer only translates the violation into a typed error.
     let claimed: OperatorTask | null;
     try {
       claimed = this.queue.claim(workerId, capabilityId, leaseMs);
     } catch (error) {
+      if (error instanceof ProviderBindingViolation) {
+        return fail('provider_binding_mismatch', error.message, {
+          taskId: error.taskId,
+          requiredProvider: error.requiredProvider,
+          workerProvider: error.workerProvider,
+        });
+      }
       return fail('operator_rejected', errorMessage(error), { capabilityId });
     }
     if (!claimed) return fail('nothing_claimable', `No claimable task for ${capabilityId}`);
@@ -674,6 +688,13 @@ export class HeadquarterOperations {
     try {
       return ok(this.queue.start(taskId, workerId, fence));
     } catch (error) {
+      if (error instanceof ProviderBindingViolation) {
+        return fail('provider_binding_mismatch', error.message, {
+          taskId: error.taskId,
+          requiredProvider: error.requiredProvider,
+          workerProvider: error.workerProvider,
+        });
+      }
       return fail('operator_rejected', errorMessage(error), { taskId });
     }
   }

@@ -38,6 +38,13 @@
  * other one. This is the same failure that made the pre-registry bridge stall
  * silently, and the fix is to say so rather than to route around it.
  *
+ * The resolved provider is then BINDING at execution, not a label on the task:
+ * it is written to the reserved `executionProvider` payload key, and
+ * `OperatorQueue.claim`/`start` refuse any worker not declared as that
+ * provider (`operator/provider-binding.ts`). Without that, no-substitution
+ * held only at creation — a worker for another provider could still have
+ * claimed the order out of the shared `hq.direct_order` queue.
+ *
  * ## Who the requester is — asserted, never authenticated
  *
  * `requestedBy` is AUTHORIZED against the human-principal registry and is not
@@ -53,6 +60,7 @@
 import { createHash } from 'node:crypto';
 import { assertBrowserSafe } from './redaction.js';
 import { DEFAULT_ACTOR_AUTHENTICATION, type ActorAuthentication } from './local-trust.js';
+import { EXECUTION_PROVIDER_KEY } from '../operator/provider-binding.js';
 import type { TaskClassification } from '../application/classification.js';
 import type { HeadquarterOperations, OpsErrorCode } from '../application/service.js';
 import type { OperatorTask } from '../operator/queue.js';
@@ -66,8 +74,8 @@ import {
  * The one narrow capability a Founder direct order creates.
  *
  * It is NOT registered automatically anywhere. A deployment that wants direct
- * orders calls `registerDirectOrderCapability` explicitly; until then
- * `submitDirectOrder` fails with `unknown_capability`, because deny-by-default
+ * orders calls `registerDirectOrderCapability` explicitly, as a CONFIGURATION
+ * action; until then `submitDirectOrder` fails closed, because deny-by-default
  * applies to this path exactly as it does to every other.
  */
 export const DIRECT_ORDER_CAPABILITY = {
@@ -80,9 +88,27 @@ export const DIRECT_ORDER_CAPABILITY = {
   idempotent: true,
 } as const;
 
-/** Register the direct-order capability on an operations facade. */
+/**
+ * Register the direct-order capability — a CONFIGURATION action, deliberately
+ * separate from placing an order (issue #200, Codex P1 #2).
+ *
+ * It never changes the enabled/disabled state of a capability that already
+ * exists: `CapabilityRegistry.register` leaves `enabled` alone unless a caller
+ * states it explicitly. Disabling `hq.direct_order` is a containment decision,
+ * and no invocation path — this function included — may quietly undo it.
+ * Re-enabling is its own explicit act (`capabilities.setEnabled`).
+ */
 export function registerDirectOrderCapability(ops: HeadquarterOperations): void {
   ops.queue.capabilities.register({ ...DIRECT_ORDER_CAPABILITY });
+}
+
+/** What the registry currently says about the direct-order capability. */
+export type DirectOrderCapabilityState = 'missing' | 'disabled' | 'enabled';
+
+export function directOrderCapabilityState(ops: HeadquarterOperations): DirectOrderCapabilityState {
+  const capability = ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id);
+  if (!capability) return 'missing';
+  return capability.enabled ? 'enabled' : 'disabled';
 }
 
 /** Routes the composer offers. Kept small on purpose. */
@@ -211,6 +237,7 @@ export interface DirectOrderReceipt {
 export type DirectOrderErrorCode =
   | OpsErrorCode
   | 'provider_not_connected'
+  | 'capability_not_registered'
   | 'empty_instruction'
   | 'instruction_too_long'
   | 'unsafe_instruction';
@@ -297,6 +324,27 @@ export function submitDirectOrder(
     return orderFail('invalid_input', `Unknown route: ${String(input.route)}`);
   }
 
+  // Fail closed on the capability's CURRENT configured state, and never touch
+  // it (issue #200, Codex P1 #2). Placing an order is an invocation; it does
+  // not register the capability, and it certainly does not re-enable one that
+  // someone disabled. The queue would refuse either way — this is here so the
+  // refusal names the actual reason instead of a generic policy denial.
+  const capabilityState = directOrderCapabilityState(ops);
+  if (capabilityState === 'missing') {
+    return orderFail(
+      'capability_not_registered',
+      `Capability ${DIRECT_ORDER_CAPABILITY.id} is not registered here. Registering it is a ` +
+        'separate, deliberate configuration action — placing an order never performs it.',
+    );
+  }
+  if (capabilityState === 'disabled') {
+    return orderFail(
+      'capability_disabled',
+      `Capability ${DIRECT_ORDER_CAPABILITY.id} is disabled. Re-enabling it is an explicit ` +
+        'configuration decision; an order will not do it silently.',
+    );
+  }
+
   // An order becomes hash-chained evidence the moment it is created. Refuse a
   // pasted credential here rather than letting the evidence log throw later,
   // when a task may already exist. `assertBrowserSafe` is the stricter of the
@@ -329,7 +377,12 @@ export function submitDirectOrder(
       instruction,
       project: input.project ?? null,
       requestedRoute: route.requested,
-      resolvedProvider: route.resolved,
+      // The reserved binding key, not a label: the queue refuses to let any
+      // worker but one declared as this provider claim or start the task
+      // (issue #200, Codex P1 #1 — `operator/provider-binding.ts`). It is in
+      // the payload, so it is inside the action digest a Founder approves:
+      // the provider cannot be swapped between approval and execution.
+      [EXECUTION_PROVIDER_KEY]: route.resolved,
       // Honesty travels with the action: the approver reading this task sees
       // that `requestedBy` was asserted, not authenticated. It is part of the
       // payload, so it is part of the action digest a Founder echoes back —

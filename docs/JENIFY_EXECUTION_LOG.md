@@ -302,3 +302,47 @@ server 442 passed + 3 pre-existing skips,
 Browser evidence: 48/48 no-horizontal-overflow at 1440/1024/414/390/360/320 px across all
 eight pages, archive interaction 8/8. Local only — nothing deployed, no paid service enabled,
 no migration, no credential change, no CI workflow touched.
+
+**Second correction round: four P1 findings from the Codex exact-head review of `90dd0b9`
+(same day).** All four were real, all four are fixed on the same PR branch, each with hostile
+regression coverage.
+
+1. **The resolved provider is now an execution authority, not payload metadata.** An order
+   routed to CLAUDE could still be claimed out of the shared `hq.direct_order` queue by a
+   CODEX worker: no-substitution held at creation and evaporated at the execution boundary.
+   New `operator/provider-binding.ts` defines the reserved `executionProvider` payload key and
+   a DECLARED worker→provider map (`op_worker_providers`); `OperatorQueue.claim` and `start`
+   both refuse any worker that is not declared as the bound provider, loudly and with an
+   evidence record. The mapping is declared, never inferred — a worker's `vendor` string says
+   who makes it, not which executor runs it, and guessing `openai → CODEX` would be an
+   invented business rule. Deny by default in both directions: an undeclared worker, and a
+   malformed binding, execute nothing. Because the key lives in the payload it is inside the
+   action digest, so the provider cannot be swapped between approval and execution.
+2. **Registration can no longer re-enable a disabled capability.** `CapabilityRegistry.register`
+   wrote `enabled = excluded.enabled` (default 1), and the CLI called it on the way to
+   submitting an order — so disabling `hq.direct_order`, the way a deployment stops direct
+   orders, was silently undone by the next order. `register` now leaves `enabled` alone unless
+   a caller states it explicitly; `hq:order` no longer registers anything, and registration is
+   a separate `--register-capability` run that also respects a disabled state. Invocation fails
+   closed with `capability_not_registered` / `capability_disabled`.
+3. **LIVE now requires an exact snapshot/render match.** The freshness chip treated everything
+   "not newer" as LIVE, so an OLDER snapshot rendered as LIVE. The decision is now one shared
+   piece of source embedded in the page and executed directly by the tests: exact match → LIVE,
+   newer → UPDATED, older or merely equal-but-differently-written → STALE, unreadable → ERROR.
+4. **Credential presence is configuration, not connectivity.** A generic integration with all
+   its facts present was reported `connected` and granted its advertised capabilities — a
+   descriptor-shaped claim wearing evidence's clothes. New `configured` state: presence is setup
+   evidence, grants nothing, and carries no verification timestamp. `connected` now requires a
+   verifying method — the routing lane's own dispatch contract for AI providers, or a real live
+   check — and `assessConnections` downgrades any probe that claims otherwise, so a third-party
+   adapter cannot restore the defect. Expired / revoked / malformed / wrong-project / unreachable
+   are representable through the `ConnectionVerifier` seam; V1 registers no verifiers, because
+   a real one would make a network call.
+
+925 headquarter tests green (895 before this round; +30 hostile tests across
+`test/provider-binding.test.ts`, `test/capability-registration.test.ts` and additions to the
+connections/UI suites), server 442 passed + 3 pre-existing skips, `tsc --noEmit` clean in
+headquarter/server/shared/web, web bundle unchanged at 215.66 kB / 69.22 kB gzip, browser
+evidence 48/48 at 1440/1024/414/390/360/320 px across all eight pages, archive interaction 8/8.
+The browser Founder-auth gate is unchanged and still open: the composer stays inert, approvals
+stay read-only, and issue #200 V1 is still NOT marked accepted.

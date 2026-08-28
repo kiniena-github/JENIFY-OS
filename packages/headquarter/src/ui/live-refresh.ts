@@ -6,12 +6,22 @@
  * "is what I am looking at still current?" — it polls the snapshot the build
  * wrote next to the pages and reports one of four states in the header:
  *
- *   LIVE     the snapshot fetched, and its generatedAt matches this render
+ *   LIVE     the snapshot fetched, and its generatedAt is EXACTLY this
+ *            render's timestamp — the page and the data behind it are the
+ *            same instant
  *   UPDATED  the snapshot fetched, and it is NEWER than this render — the
  *            page you are reading is behind; reload to see it
+ *   STALE    the snapshot fetched, and it is OLDER than this render — the
+ *            data file backing this page does not match it, so nothing here
+ *            can be claimed to be current
  *   OFFLINE  the snapshot could not be fetched (opened from file://, or the
  *            host is unreachable). The page still shows its build-time data.
  *   ERROR    the snapshot fetched but could not be parsed
+ *
+ * LIVE requires the exact match and nothing less (issue #200, Codex P1 #3). An
+ * earlier version treated every snapshot that was "not newer" as LIVE, which
+ * meant an OLDER snapshot — a rolled-back file, a page served from a newer
+ * build than the data next to it — rendered as LIVE. Older is not current.
  *
  * Polling rather than websockets is deliberate for V1: the brief asks for
  * simple reliable refresh, the artefact must stay a static build, and a
@@ -29,6 +39,40 @@ export const SNAPSHOT_POLL_INTERVAL_MS = 20_000;
 export const SNAPSHOT_FILENAME = 'hq-snapshot.json';
 
 /**
+ * The freshness decision itself, as browser-executable source.
+ *
+ * It lives here as one string, embedded verbatim in the page and executed
+ * directly by the tests (`new Function`), because a claim of LIVE is exactly
+ * the kind of thing that must be tested by running it rather than by grepping
+ * the rendered HTML for a label. There is one implementation, and it is the
+ * one that ships.
+ *
+ * Returns `{ state, label, hint }`. The states are the five named above; the
+ * only path to `live` is an exact string match between the snapshot's
+ * `generatedAt` and the instant this page was rendered.
+ */
+export const FRESHNESS_VERDICT_JS = `function freshnessVerdict(renderedAt, generatedAt) {
+  if (typeof generatedAt !== 'string' || generatedAt === '') {
+    return { state: 'error', label: 'ERROR — unreadable snapshot', hint: 'The snapshot carries no generatedAt timestamp, so its freshness cannot be established.' };
+  }
+  if (generatedAt === renderedAt) {
+    return { state: 'live', label: 'LIVE', hint: 'Snapshot matches this render exactly (' + generatedAt + ').' };
+  }
+  var fetched = Date.parse(generatedAt);
+  var rendered = Date.parse(renderedAt);
+  if (isNaN(fetched) || isNaN(rendered)) {
+    return { state: 'error', label: 'ERROR — unreadable snapshot', hint: 'The snapshot timestamp (' + generatedAt + ') is not a valid instant, so its freshness cannot be established.' };
+  }
+  if (fetched > rendered) {
+    return { state: 'updated', label: 'UPDATED — reload', hint: 'A newer snapshot exists (' + generatedAt + '). This page still shows the ' + renderedAt + ' render.' };
+  }
+  if (fetched < rendered) {
+    return { state: 'stale', label: 'STALE — not live', hint: 'The snapshot next to this page (' + generatedAt + ') is OLDER than the ' + renderedAt + ' render, so this page is not showing current data.' };
+  }
+  return { state: 'stale', label: 'STALE — not live', hint: 'The snapshot timestamp (' + generatedAt + ') does not match this render (' + renderedAt + ') exactly, so currency cannot be confirmed.' };
+}`;
+
+/**
  * Inline script wiring the header freshness chip.
  *
  * `renderedAt` is baked in at build time so the comparison is between two
@@ -44,10 +88,16 @@ export function liveRefreshScript(renderedAt: string): string {
   var label = chip.querySelector('[data-live-label]');
   var detail = document.querySelector('[data-live-detail]');
 
+  ${FRESHNESS_VERDICT_JS}
+
   function set(state, text, hint) {
     chip.setAttribute('data-live-state', state);
     chip.className = 'chip tone-' + (
-      state === 'live' ? 'accent' : state === 'updated' ? 'warn' : state === 'offline' ? 'neutral' : 'danger'
+      state === 'live' ? 'accent'
+        : state === 'updated' ? 'warn'
+        : state === 'stale' ? 'warn'
+        : state === 'offline' ? 'neutral'
+        : 'danger'
     );
     if (label) label.textContent = text;
     if (detail) detail.textContent = hint;
@@ -60,13 +110,10 @@ export function liveRefreshScript(renderedAt: string): string {
         return response.json();
       })
       .then(function (snapshot) {
-        var generatedAt = snapshot && snapshot.generatedAt;
-        if (typeof generatedAt !== 'string') throw new Error('snapshot has no generatedAt');
-        if (generatedAt > RENDERED_AT) {
-          set('updated', 'UPDATED — reload', 'A newer snapshot exists (' + generatedAt + '). This page still shows the ' + RENDERED_AT + ' render.');
-        } else {
-          set('live', 'LIVE', 'Snapshot confirmed current as of ' + generatedAt + '.');
-        }
+        // LIVE is the exact-match case only, and the decision is the shared
+        // one above — nothing here may round in favour of LIVE.
+        var verdict = freshnessVerdict(RENDERED_AT, snapshot && snapshot.generatedAt);
+        set(verdict.state, verdict.label, verdict.hint);
       })
       .catch(function (error) {
         set(

@@ -235,6 +235,7 @@ ${fields}
 <span class="faint">not wired in the browser — see the note above</span>
 </div>
 <p class="muted">Every direct order is created as the Founder-gated capability <code>hq.direct_order</code>: it lands in <code>needs_approval</code> with an action digest and executes nothing until a Founder approves that exact action. An order for a provider that is not connected is refused outright — no other provider is ever substituted.</p>
+<p class="muted">The resolved provider is binding at execution, not a label: the order records it as <code>executionProvider</code>, and the Operator refuses to let any worker but one declared as that provider claim or start it. Because it sits in the payload, it is inside the digest the Founder approves — the provider cannot be swapped between approval and execution. <code>hq.direct_order</code> must also already be registered and enabled here: placing an order never registers it, and never re-enables one that was disabled.</p>
 </div>`;
 }
 
@@ -987,6 +988,7 @@ ${section('TASKS WAITING FOR FOUNDER', taskRows(waiting, 'Tasks waiting for the 
 const CONNECTION_STATE_TONE: Record<ConnectionState, Tone> = {
   connected: 'accent',
   local_only: 'info',
+  configured: 'warn',
   not_connected: 'neutral',
   expired: 'warn',
   error: 'danger',
@@ -996,8 +998,10 @@ const CONNECTION_STATE_TONE: Record<ConnectionState, Tone> = {
 const CONNECTIONS_NOTE =
   'Every state on this page is derived from facts actually observed in this environment — not from ' +
   'the provider catalogue, not from a registered AI member, and not from a vendor descriptor. A name ' +
-  'appearing here means HQ knows what the integration would be, never that it is reachable. Only ' +
-  'secret PRESENCE is recorded anywhere in HQ; no credential value is read, stored, logged or rendered.';
+  'appearing here means HQ knows what the integration would be, never that it is reachable. ' +
+  'CONFIGURED means the credentials are present and nothing has checked them: it is not Connected, ' +
+  'and it grants no capability. Only secret PRESENCE is recorded anywhere in HQ; no credential value ' +
+  'is read, stored, logged or rendered.';
 
 export function renderConnections(
   statuses: ConnectionStatus[],
@@ -1013,7 +1017,11 @@ export function renderConnections(
       status.effectiveCapabilities.length > 0
         ? `<p class="row">${status.effectiveCapabilities.map((capability) => chip(capability, 'accent')).join('')}</p>`
         : `<p class="faint">No capability is available to HQ through this connection${
-            usable ? '.' : ' while it is not connected.'
+            usable
+              ? '.'
+              : status.state === 'configured'
+                ? ': its credentials are present, but nothing has verified them, and configuration alone grants nothing.'
+                : ' while it is not connected.'
           }</p>`;
 
     // Fact NAMES only. This is the presence-not-value convention that makes a
@@ -1060,6 +1068,7 @@ ${capabilities}
 <div class="record-meta">
 ${facts}
 <p class="faint">Evidence: ${escapeHtml(status.evidenceSource)}</p>
+<p class="faint">Verification: ${escapeHtml(status.verification.replace(/_/g, ' '))} — ${escapeHtml(status.outcome.replace(/_/g, ' '))}</p>
 <p class="faint">Last verified: ${status.lastVerifiedAt ? escapeHtml(status.lastVerifiedAt) : 'never'}</p>
 </div>
 ${controls}
@@ -1068,11 +1077,12 @@ ${controls}
 
   const body = `<p class="readonly-note">${escapeHtml(CONNECTIONS_NOTE)}</p>
 ${kpiRow([
-  { label: 'Connected', value: counts.connected, hint: 'reachable from anywhere HQ runs', tone: counts.connected > 0 ? 'accent' : 'neutral' },
+  { label: 'Connected', value: counts.connected, hint: 'verified reachable', tone: counts.connected > 0 ? 'accent' : 'neutral' },
   { label: 'Local-only', value: counts.local_only, hint: 'Founder workstation only', tone: counts.local_only > 0 ? 'info' : 'neutral' },
+  { label: 'Configured', value: counts.configured, hint: 'credentials present, never verified', tone: counts.configured > 0 ? 'warn' : 'neutral' },
   { label: 'Setup required', value: counts.setup_required, hint: 'partially configured', tone: counts.setup_required > 0 ? 'warn' : 'neutral' },
   { label: 'Not connected', value: counts.not_connected, hint: 'no required fact observed' },
-  { label: 'Error', value: counts.error, hint: 'the probe itself failed', tone: counts.error > 0 ? 'danger' : 'neutral' },
+  { label: 'Error', value: counts.error, hint: 'a check failed or the probe threw', tone: counts.error > 0 ? 'danger' : 'neutral' },
 ])}
 ${section(
   'CONNECTIONS',

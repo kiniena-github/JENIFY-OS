@@ -33,6 +33,12 @@ import { EvidenceLog, assertNoSecretLikeContent } from './evidence.js';
 // guard holds regardless of whether a HandoverStore was ever constructed.
 import { assertAssignable } from '../handover/replacement.js';
 import {
+  checkProviderBinding,
+  readProviderBinding,
+  WorkerProviderDirectory,
+  type ProviderBindingViolation,
+} from './provider-binding.js';
+import {
   DEFAULT_APPROVAL_TTL_MS,
   approvalExpiredAt,
   taskActionDigest,
@@ -97,6 +103,11 @@ const GLOBAL_SCOPE = '*';
 export class OperatorQueue {
   readonly capabilities: CapabilityRegistry;
   readonly evidence: EvidenceLog;
+  /**
+   * Declared worker → provider map. Read at the execution boundary; written
+   * only by a deliberate configuration action (issue #200, Codex P1 #1).
+   */
+  readonly workerProviders: WorkerProviderDirectory;
 
   constructor(
     private db: HqDatabase,
@@ -104,6 +115,40 @@ export class OperatorQueue {
   ) {
     this.capabilities = new CapabilityRegistry(db);
     this.evidence = new EvidenceLog(db);
+    this.workerProviders = new WorkerProviderDirectory(db);
+  }
+
+  /**
+   * Refuse a worker that does not match a task's declared execution provider.
+   *
+   * Called at BOTH execution boundaries — claim and start — so a task whose
+   * status was forced to `assigned` behind the queue's back still cannot be
+   * executed by the wrong provider. The refusal is loud (a throw) and
+   * evidenced, never a silent `null`: "this is not yours" and "the queue is
+   * empty" are different facts.
+   */
+  private assertProviderBinding(task: OperatorTask, workerId: string): void {
+    const binding = readProviderBinding(task.payload);
+    if (!binding.bound) return;
+    const workerProvider = this.workerProviders.providerOf(workerId);
+    const violation: ProviderBindingViolation | null = checkProviderBinding(
+      task.id,
+      workerId,
+      binding,
+      workerProvider,
+    );
+    if (!violation) return;
+    this.evidence.append({
+      taskId: task.id,
+      actor: workerId,
+      kind: 'provider_binding_rejected',
+      payload: {
+        requiredProvider: violation.requiredProvider,
+        workerProvider: violation.workerProvider,
+        reason: violation.message,
+      },
+    });
+    throw violation;
   }
 
   // ---- kill switch ----
@@ -303,6 +348,10 @@ export class OperatorQueue {
     // admitted only with a valid, unexpired, unconsumed approval bound to the
     // task's CURRENT digest — even if something forced its status to queued.
     const task = this.get(candidate.id)!;
+    // Provider binding, BEFORE any mutation and before the single-use approval
+    // nonce can be consumed: an order routed to one provider is never handed
+    // to another (issue #200, Codex P1 #1).
+    this.assertProviderBinding(task, workerId);
     const cap = this.capabilities.get(capabilityId);
     if (!cap || !cap.enabled) return null; // deny by default
     if (approvalRequired(cap, this.policyCtx)) {
@@ -381,6 +430,10 @@ export class OperatorQueue {
   start(taskId: string, workerId: string, fence: number): OperatorTask {
     this.assertFence(taskId, workerId, fence);
     const task = this.get(taskId)!;
+    // Re-checked here as well as at claim: a task forced into `assigned` never
+    // passed through claim's check, and provider binding is an execution
+    // authority, not a routing hint.
+    this.assertProviderBinding(task, workerId);
     const cap = this.capabilities.get(task.capabilityId);
     if (cap && approvalRequired(cap, this.policyCtx)) {
       const approval = this.getApprovalRecord(task.approvalId);

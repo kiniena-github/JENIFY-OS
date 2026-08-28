@@ -134,7 +134,8 @@ describe('a connected order becomes canonical, gated work', () => {
     expect(result.data.task.payload).toMatchObject({
       kind: 'direct_order',
       requestedRoute: 'AUTO',
-      resolvedProvider: 'CLAUDE',
+      // The reserved binding key — enforced at claim/start, not decorative.
+      executionProvider: 'CLAUDE',
     });
   });
 
@@ -240,7 +241,10 @@ describe('deny by default', () => {
     const result = submitDirectOrder(fixture.ops, { ...ORDER, requestedBy: 'founder2' }, CLAUDE_ONLY);
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.error.code).toBe('unknown_capability');
+    expect(result.error.code).toBe('capability_not_registered');
+    // Nothing was created, and — the point of the correction — nothing was
+    // registered on the way past either.
+    expect(fixture.ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id)).toBeNull();
   });
 
   it('refuses an unknown route rather than defaulting to one', () => {

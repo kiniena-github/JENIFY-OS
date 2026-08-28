@@ -14,9 +14,13 @@ import {
   CONNECTION_CATALOG,
   connectionSummary,
   defaultConnectionProbes,
-  factProbe,
+  configurationProbe,
+  DEFAULT_CONNECTION_VERIFIERS,
+  verifiedProbe,
   type ConnectionDescriptor,
   type ConnectionProbe,
+  type ConnectionVerifier,
+  type VerificationOutcome,
 } from '../src/live/connections.js';
 import { assertBrowserSafe } from '../src/live/redaction.js';
 
@@ -101,6 +105,137 @@ describe('evidence changes the verdict', () => {
   });
 });
 
+describe('credential presence is configuration, never connectivity', () => {
+  /**
+   * Codex P1 #4: setting `VERCEL_TOKEN` and `VERCEL_PROJECT_ID` says somebody
+   * configured Vercel. It says nothing about whether the token is valid,
+   * unexpired, unrevoked, well-formed or pointed at the right project — so it
+   * cannot mean Connected, and it cannot grant a capability.
+   */
+  const FULLY_SET = {
+    VERCEL_TOKEN: 'set',
+    VERCEL_PROJECT_ID: 'set',
+    SUPABASE_URL: 'set',
+    SUPABASE_ANON_KEY: 'set',
+    GITHUB_TOKEN: 'set',
+    GOOGLE_WORKSPACE_CLIENT_ID: 'set',
+    GOOGLE_WORKSPACE_REFRESH_TOKEN: 'set',
+  };
+
+  it('reports a fully-credentialed generic integration as CONFIGURED, not connected', () => {
+    for (const id of ['vercel', 'supabase', 'github', 'google-workspace']) {
+      const status = statusFor(id, FULLY_SET);
+      expect(status.state, `${id} must not claim connectivity from credential presence`).toBe(
+        'configured',
+      );
+      expect(status.effectiveCapabilities).toEqual([]);
+      expect(status.verification).toBe('configuration');
+      expect(status.outcome).toBe('not_attempted');
+      // Nothing was verified, so nothing may carry a verification timestamp.
+      expect(status.lastVerifiedAt).toBeNull();
+    }
+  });
+
+  it('grants no capability to any generic integration in V1, because none is verified', () => {
+    for (const status of assessConnections(FULLY_SET, { now: NOW })) {
+      if (status.verification === 'configuration') {
+        expect(status.effectiveCapabilities).toEqual([]);
+      }
+    }
+    expect(DEFAULT_CONNECTION_VERIFIERS).toEqual([]);
+  });
+
+  it('downgrades a probe that claims connected on configuration alone', () => {
+    // The invariant is enforced centrally, so a third-party adapter written
+    // later cannot restore the defect by claiming harder.
+    const overclaiming: ConnectionProbe = {
+      id: 'vercel',
+      probe: () => ({
+        state: 'connected',
+        verification: 'configuration',
+        outcome: 'verified',
+        observedFacts: ['VERCEL_TOKEN', 'VERCEL_PROJECT_ID'],
+        missingFacts: [],
+        effectiveCapabilities: ['preview_deployment'],
+        lastVerifiedAt: NOW,
+        evidenceSource: 'the environment, optimistically',
+        reason: 'the token is set, so surely it works',
+      }),
+    };
+    const descriptor = CONNECTION_CATALOG.find((entry) => entry.id === 'vercel')!;
+    const [status] = assessConnections(FULLY_SET, {
+      now: NOW,
+      catalog: [descriptor],
+      probes: [overclaiming],
+    });
+    expect(status!.state).toBe('configured');
+    expect(status!.effectiveCapabilities).toEqual([]);
+    expect(status!.reason).toContain('CONFIGURED rather than connected');
+  });
+
+  it('keeps expired, revoked, malformed and wrong-project truthfully representable', () => {
+    const descriptor = CONNECTION_CATALOG.find((entry) => entry.id === 'supabase')!;
+    const cases: { outcome: VerificationOutcome; state: string }[] = [
+      { outcome: 'expired', state: 'expired' },
+      { outcome: 'revoked', state: 'expired' },
+      { outcome: 'malformed', state: 'error' },
+      { outcome: 'wrong_project', state: 'error' },
+      { outcome: 'unreachable', state: 'error' },
+    ];
+    for (const { outcome, state } of cases) {
+      const verifier: ConnectionVerifier = {
+        id: 'supabase',
+        verify: () => ({ outcome, detail: `the check reported ${outcome}` }),
+      };
+      const [status] = assessConnections(FULLY_SET, {
+        now: NOW,
+        catalog: [descriptor],
+        probes: [verifiedProbe(descriptor, verifier)],
+      });
+      expect(status!.state).toBe(state);
+      expect(status!.outcome).toBe(outcome);
+      expect(status!.effectiveCapabilities).toEqual([]);
+      expect(status!.reason).toContain(outcome);
+    }
+  });
+
+  it('reaches connected only when a live check actually succeeds', () => {
+    const descriptor = CONNECTION_CATALOG.find((entry) => entry.id === 'supabase')!;
+    const verifier: ConnectionVerifier = {
+      id: 'supabase',
+      verify: () => ({ outcome: 'verified', detail: 'HTTP 200 from the project health endpoint' }),
+    };
+    const [status] = assessConnections(FULLY_SET, {
+      now: NOW,
+      catalog: [descriptor],
+      probes: [verifiedProbe(descriptor, verifier)],
+    });
+    expect(status!.state).toBe('connected');
+    expect(status!.verification).toBe('live_check');
+    expect(status!.effectiveCapabilities).toEqual([...descriptor.advertisedCapabilities]);
+    expect(status!.lastVerifiedAt).toBe(NOW);
+  });
+
+  it('does not ask a verifier about an integration nobody configured', () => {
+    const descriptor = CONNECTION_CATALOG.find((entry) => entry.id === 'supabase')!;
+    let asked = 0;
+    const verifier: ConnectionVerifier = {
+      id: 'supabase',
+      verify: () => {
+        asked += 1;
+        return { outcome: 'verified', detail: 'should never be reached' };
+      },
+    };
+    const [status] = assessConnections(NOTHING, {
+      now: NOW,
+      catalog: [descriptor],
+      probes: [verifiedProbe(descriptor, verifier)],
+    });
+    expect(asked).toBe(0);
+    expect(status!.state).toBe('not_connected');
+  });
+});
+
 describe('the probe seam cannot weaken the invariants', () => {
   const descriptor: ConnectionDescriptor = {
     id: 'over-eager',
@@ -120,6 +255,8 @@ describe('the probe seam cannot weaken the invariants', () => {
       id: 'over-eager',
       probe: () => ({
         state: 'not_connected',
+        verification: 'live_check',
+        outcome: 'failed',
         observedFacts: [],
         missingFacts: ['NEVER_SET'],
         effectiveCapabilities: ['everything'], // over-claim
@@ -200,7 +337,7 @@ describe('summary counts', () => {
 
   it('treats a blank fact as absent, so an empty env var cannot fake a connection', () => {
     const descriptor = CONNECTION_CATALOG.find((entry) => entry.id === 'supabase')!;
-    const evidence = factProbe(descriptor).probe(
+    const evidence = configurationProbe(descriptor).probe(
       { SUPABASE_URL: '   ', SUPABASE_ANON_KEY: '' },
       NOW,
     );

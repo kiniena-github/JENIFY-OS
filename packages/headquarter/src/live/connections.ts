@@ -19,6 +19,18 @@
  * no probe result is `not_connected` — deny by default, exactly like the rest
  * of the control plane.
  *
+ * ## Presence is configuration; connectivity has to be checked
+ *
+ * The second rule, added after the PR #201 review: observing that a
+ * credential-shaped environment variable is SET is evidence that somebody
+ * configured the integration, and nothing more. It does not establish that the
+ * credential is valid, unexpired, unrevoked, well-formed, or pointed at the
+ * right project. So a generic integration whose facts are all present is
+ * `configured`, not `connected`, and it grants no capability. Only a verifying
+ * method — the routing lane's dispatch contract, or a real live check — can
+ * support a claim of connectivity, and `assessConnections` downgrades any probe
+ * that claims otherwise.
+ *
  * ## Secret presence, never secret values
  *
  * Probes report fact NAMES (`CLAUDE_ROUTINE_TOKEN`), never fact values. This
@@ -42,15 +54,27 @@ import {
 } from '../routing/providers.js';
 
 /**
- * Connection state. `local_only` is load-bearing rather than cosmetic: a
- * Codex CLI holding a live subscription session on the Founder workstation is
- * genuinely usable there and genuinely unavailable to a GitHub-hosted runner
- * or a hosted preview, and flattening that into "connected" is exactly the
- * lie that made the old bridge stall silently.
+ * Connection state.
+ *
+ * `local_only` is load-bearing rather than cosmetic: a Codex CLI holding a live
+ * subscription session on the Founder workstation is genuinely usable there and
+ * genuinely unavailable to a GitHub-hosted runner or a hosted preview, and
+ * flattening that into "connected" is exactly the lie that made the old bridge
+ * stall silently.
+ *
+ * `configured` is the state this module was missing (issue #200, Codex P1 #4).
+ * Observing that `SUPABASE_URL` and `SUPABASE_ANON_KEY` are set says somebody
+ * configured Supabase; it does not say the credential is valid, unexpired,
+ * unrevoked, well-formed, or pointed at the right project. Reporting that as
+ * `connected` — and granting the integration's advertised capabilities on the
+ * strength of it — was a descriptor-shaped claim wearing evidence's clothes.
+ * Credential PRESENCE is setup evidence. `connected` now requires a
+ * provider-specific verification that actually succeeded.
  */
 export type ConnectionState =
   | 'connected'
   | 'local_only'
+  | 'configured'
   | 'not_connected'
   | 'expired'
   | 'error'
@@ -59,11 +83,42 @@ export type ConnectionState =
 export const CONNECTION_STATE_LABELS: Record<ConnectionState, string> = {
   connected: 'Connected',
   local_only: 'Local-only',
+  configured: 'Configured — unverified',
   not_connected: 'Not connected',
   expired: 'Expired',
   error: 'Error',
   setup_required: 'Setup required',
 };
+
+/**
+ * How a state was established. Carried on every status so a reader can see
+ * what kind of claim is being made, not just the word.
+ *
+ *   none            nothing was observed at all
+ *   configuration   required facts were observed present — setup evidence only
+ *   routing_contract the routing lane's own connectivity contract was
+ *                   satisfied: an executor genuinely exists AND every fact it
+ *                   needs to dispatch is present. This is the same computation
+ *                   the router uses to decide it may dispatch, so a page that
+ *                   disagreed with it would be the thing that is wrong.
+ *   live_check      a provider-specific check ran against the service and
+ *                   returned an answer
+ */
+export type VerificationMethod = 'none' | 'configuration' | 'routing_contract' | 'live_check';
+
+/** What a verification actually found. Precise words, not a boolean. */
+export type VerificationOutcome =
+  | 'verified'
+  | 'not_attempted'
+  | 'expired'
+  | 'revoked'
+  | 'malformed'
+  | 'wrong_project'
+  | 'unreachable'
+  | 'failed';
+
+/** Methods that may support a `connected`/`local_only` state and grant capabilities. */
+const VERIFYING_METHODS: readonly VerificationMethod[] = ['routing_contract', 'live_check'];
 
 /** How HQ would authenticate to the service, if it were connected. */
 export type AuthMechanism =
@@ -132,6 +187,10 @@ export interface ConnectionDescriptor {
 /** What a probe observed. Fact NAMES only — never fact values. */
 export interface ConnectionEvidence {
   state: ConnectionState;
+  /** How the state was established. `configuration` can never mean connected. */
+  verification: VerificationMethod;
+  /** What the verification found, in its own words. */
+  outcome: VerificationOutcome;
   /** Required fact names actually observed present. */
   observedFacts: string[];
   /** Required fact names observed absent. */
@@ -157,6 +216,8 @@ export interface ConnectionProbe {
 /** A descriptor and its evidence, merged for display. */
 export interface ConnectionStatus extends ConnectionDescriptor {
   state: ConnectionState;
+  verification: VerificationMethod;
+  outcome: VerificationOutcome;
   observedFacts: string[];
   missingFacts: string[];
   effectiveCapabilities: string[];
@@ -298,8 +359,14 @@ function splitFacts(env: SecretsEnv, facts: readonly string[]): { observed: stri
 }
 
 /**
- * The generic fact probe used by every catalogue entry that is not an AI
- * provider with its own routing definition.
+ * The generic CONFIGURATION probe used by every catalogue entry that is not an
+ * AI provider with its own routing definition.
+ *
+ * It answers exactly one question: has somebody supplied the facts this
+ * integration needs? Its strongest possible verdict is therefore `configured`
+ * — never `connected` — and it grants no capability at any state (issue #200,
+ * Codex P1 #4). Turning `configured` into `connected` takes a
+ * `ConnectionVerifier`: something that actually asks the service.
  *
  * `setup_required` is reserved for a *partially* configured integration —
  * some required facts present, others absent. That is a real, distinguishable
@@ -307,31 +374,38 @@ function splitFacts(env: SecretsEnv, facts: readonly string[]): { observed: stri
  * synonym for "not connected", which would overstate the state of an
  * integration nobody has touched.
  */
-export function factProbe(descriptor: ConnectionDescriptor): ConnectionProbe {
+export function configurationProbe(descriptor: ConnectionDescriptor): ConnectionProbe {
   return {
     id: descriptor.id,
     probe(env, now) {
       const { observed, missing } = splitFacts(env, descriptor.requiredFacts);
-      const source = `environment facts: ${descriptor.requiredFacts.join(', ')}`;
+      const source = `environment facts (presence only): ${descriptor.requiredFacts.join(', ')}`;
       if (missing.length === 0 && descriptor.requiredFacts.length > 0) {
-        const state: ConnectionState = descriptor.locality === 'local' ? 'local_only' : 'connected';
         return {
-          state,
+          state: 'configured',
+          verification: 'configuration',
+          outcome: 'not_attempted',
           observedFacts: observed,
           missingFacts: missing,
-          effectiveCapabilities: [...descriptor.advertisedCapabilities],
-          lastVerifiedAt: now,
+          effectiveCapabilities: [],
+          lastVerifiedAt: null,
           evidenceSource: source,
-          reason: `${descriptor.displayName}: every required fact was observed present.`,
+          reason:
+            `${descriptor.displayName}: every required fact is present, so it is CONFIGURED. ` +
+            'That is setup evidence, not connectivity: nothing here has checked whether the ' +
+            'credential is valid, unexpired, unrevoked or pointed at the right project, so no ' +
+            'capability is granted.',
         };
       }
       if (observed.length > 0) {
         return {
           state: 'setup_required',
+          verification: 'configuration',
+          outcome: 'not_attempted',
           observedFacts: observed,
           missingFacts: missing,
           effectiveCapabilities: [],
-          lastVerifiedAt: now,
+          lastVerifiedAt: null,
           evidenceSource: source,
           reason:
             `${descriptor.displayName}: partially configured — still missing ` +
@@ -340,12 +414,90 @@ export function factProbe(descriptor: ConnectionDescriptor): ConnectionProbe {
       }
       return {
         state: 'not_connected',
+        verification: 'configuration',
+        outcome: 'not_attempted',
         observedFacts: observed,
         missingFacts: missing,
         effectiveCapabilities: [],
-        lastVerifiedAt: now,
+        lastVerifiedAt: null,
         evidenceSource: source,
         reason: `${descriptor.displayName}: not connected — no required fact observed. ${descriptor.setupHint}`,
+      };
+    },
+  };
+}
+
+/**
+ * A provider-specific check that genuinely asks the service.
+ *
+ * V1 registers NONE of these: every real one would make a network call, and
+ * this mission neither deploys nor enables a paid service. The seam exists so
+ * that adding one is a new verifier plus a catalogue line — and so the
+ * unverified states above are visibly the *absence* of one, rather than a
+ * softened version of success.
+ */
+export interface ConnectionVerifier {
+  /** Matches `ConnectionDescriptor.id`. */
+  id: string;
+  verify(
+    env: SecretsEnv,
+    now: string,
+  ): {
+    outcome: VerificationOutcome;
+    /** What was checked and what came back. Never a credential value. */
+    detail: string;
+    /** Capabilities the check proved available. Ignored unless verified. */
+    capabilities?: readonly string[];
+  };
+}
+
+/** Outcome → state. Every non-verified outcome stays truthfully distinguishable. */
+function stateForOutcome(outcome: VerificationOutcome, locality: ConnectionLocality): ConnectionState {
+  switch (outcome) {
+    case 'verified':
+      return locality === 'local' ? 'local_only' : 'connected';
+    case 'expired':
+    case 'revoked':
+      return 'expired';
+    case 'not_attempted':
+      return 'configured';
+    default:
+      // malformed / wrong_project / unreachable / failed — a real, named
+      // failure, kept in `outcome` and spelled out in `reason`.
+      return 'error';
+  }
+}
+
+/**
+ * Compose a configuration probe with a verifier: configuration first (a
+ * verifier is not asked about an integration nobody has configured), then the
+ * verifier's own answer.
+ */
+export function verifiedProbe(
+  descriptor: ConnectionDescriptor,
+  verifier: ConnectionVerifier,
+): ConnectionProbe {
+  const configuration = configurationProbe(descriptor);
+  return {
+    id: descriptor.id,
+    probe(env, now) {
+      const configured = configuration.probe(env, now);
+      if (configured.state !== 'configured') return configured;
+      const result = verifier.verify(env, now);
+      const state = stateForOutcome(result.outcome, descriptor.locality);
+      const verified = result.outcome === 'verified';
+      return {
+        state,
+        verification: 'live_check',
+        outcome: result.outcome,
+        observedFacts: configured.observedFacts,
+        missingFacts: configured.missingFacts,
+        effectiveCapabilities: verified
+          ? [...(result.capabilities ?? descriptor.advertisedCapabilities)]
+          : [],
+        lastVerifiedAt: now,
+        evidenceSource: `verifier ${descriptor.id}`,
+        reason: `${descriptor.displayName}: ${result.outcome} — ${result.detail}`,
       };
     },
   };
@@ -355,6 +507,15 @@ export function factProbe(descriptor: ConnectionDescriptor): ConnectionProbe {
  * Probe backed by `routing/providers.ts`, so an AI provider's Connection
  * Center row and its actual routability can never disagree. Reuses the
  * existing connectivity computation rather than re-deriving it.
+ *
+ * This is the one place `connected` may be reached without a live check, and
+ * the reason is specific rather than convenient: `providerConnectivity` is not
+ * a credential-presence heuristic, it is the routing lane's own dispatch
+ * contract — an executor must exist AND every fact that executor needs must be
+ * present. It is the exact computation the router consults before dispatching,
+ * so a Connection Center that reported something weaker would be contradicting
+ * the thing HQ actually does. `verification: 'routing_contract'` records that
+ * distinction instead of letting it hide inside the word "connected".
  */
 export function routingProbe(descriptor: ConnectionDescriptor, provider: ProviderId): ConnectionProbe {
   return {
@@ -378,10 +539,12 @@ export function routingProbe(descriptor: ConnectionDescriptor, provider: Provide
       const usable = state === 'connected' || state === 'local_only';
       return {
         state,
+        verification: 'routing_contract',
+        outcome: usable ? 'verified' : 'not_attempted',
         observedFacts: observed,
         missingFacts: missing,
         effectiveCapabilities: usable ? [...descriptor.advertisedCapabilities] : [],
-        lastVerifiedAt: now,
+        lastVerifiedAt: usable ? now : null,
         evidenceSource: `routing/providers.ts providerConnectivity(${provider})`,
         reason: report.reason,
       };
@@ -396,13 +559,26 @@ const ROUTING_BACKED: Readonly<Record<string, ProviderId>> = {
   'google-gemini': 'GEMINI',
 };
 
+/**
+ * Verifiers registered in V1: none.
+ *
+ * Stated as an empty seam rather than left implicit — every generic
+ * integration therefore tops out at `configured`, which is the truth about
+ * what HQ has actually established.
+ */
+export const DEFAULT_CONNECTION_VERIFIERS: readonly ConnectionVerifier[] = [];
+
 /** Default probe set for the seeded catalogue. */
 export function defaultConnectionProbes(
   catalog: readonly ConnectionDescriptor[] = CONNECTION_CATALOG,
+  verifiers: readonly ConnectionVerifier[] = DEFAULT_CONNECTION_VERIFIERS,
 ): ConnectionProbe[] {
+  const byId = new Map(verifiers.map((verifier) => [verifier.id, verifier]));
   return catalog.map((descriptor) => {
     const provider = ROUTING_BACKED[descriptor.id];
-    return provider ? routingProbe(descriptor, provider) : factProbe(descriptor);
+    if (provider) return routingProbe(descriptor, provider);
+    const verifier = byId.get(descriptor.id);
+    return verifier ? verifiedProbe(descriptor, verifier) : configurationProbe(descriptor);
   });
 }
 
@@ -420,14 +596,19 @@ export interface AssessConnectionsOptions {
 /**
  * Merge catalogue and evidence into the displayable status list.
  *
- * Three invariants are enforced here rather than left to each probe, so a
+ * Four invariants are enforced here rather than left to each probe, so a
  * future third-party adapter cannot weaken them:
  *
  *   - a descriptor with no probe is `not_connected` and never verified;
  *   - a probe that throws yields `error`, not a silent omission;
- *   - `effectiveCapabilities` is emptied unless the state is genuinely usable,
- *     so an over-eager adapter cannot promote advertised capabilities into
- *     granted ones.
+ *   - a probe claiming `connected`/`local_only` on nothing more than
+ *     configuration is DOWNGRADED to `configured` here (issue #200, Codex
+ *     P1 #4). Credential presence is setup evidence; only a verifying method
+ *     — the routing dispatch contract, or a live check — can support a claim
+ *     of connectivity;
+ *   - `effectiveCapabilities` is emptied unless the state is genuinely usable
+ *     AND was established by a verifying method, so an over-eager adapter
+ *     cannot promote advertised capabilities into granted ones.
  */
 export function assessConnections(
   env: SecretsEnv,
@@ -442,6 +623,8 @@ export function assessConnections(
     if (!probe) {
       evidence = {
         state: 'not_connected',
+        verification: 'none',
+        outcome: 'not_attempted',
         observedFacts: [],
         missingFacts: [...descriptor.requiredFacts],
         effectiveCapabilities: [],
@@ -457,6 +640,8 @@ export function assessConnections(
       } catch (error) {
         evidence = {
           state: 'error',
+          verification: 'none',
+          outcome: 'failed',
           observedFacts: [],
           missingFacts: [...descriptor.requiredFacts],
           effectiveCapabilities: [],
@@ -467,17 +652,32 @@ export function assessConnections(
       }
     }
 
-    const usable = evidence.state === 'connected' || evidence.state === 'local_only';
+    // A claim of connectivity is only as good as the method behind it.
+    // Configuration (or nothing at all) cannot support one, so it is
+    // downgraded here rather than trusted — the invariant holds for every
+    // probe, including ones written later by somebody else.
+    const verifying = VERIFYING_METHODS.includes(evidence.verification);
+    const claimsUsable = evidence.state === 'connected' || evidence.state === 'local_only';
+    const state: ConnectionState = claimsUsable && !verifying ? 'configured' : evidence.state;
+    const usable = (state === 'connected' || state === 'local_only') && verifying;
     return {
       ...descriptor,
-      state: evidence.state,
+      state,
+      verification: evidence.verification,
+      outcome: evidence.outcome,
       observedFacts: evidence.observedFacts,
       missingFacts: evidence.missingFacts,
-      // Advertised never becomes granted without evidence.
+      // Advertised never becomes granted without a verifying method.
       effectiveCapabilities: usable ? evidence.effectiveCapabilities : [],
-      lastVerifiedAt: evidence.lastVerifiedAt,
+      // "Verified" means a verifying method ran. Configuration verifies
+      // nothing, so it leaves no verification timestamp behind.
+      lastVerifiedAt: verifying ? evidence.lastVerifiedAt : null,
       evidenceSource: evidence.evidenceSource,
-      reason: evidence.reason,
+      reason:
+        claimsUsable && !verifying
+          ? `${evidence.reason} (Reported as CONFIGURED rather than connected: the claim rested on ` +
+            'configuration alone, which is not evidence of connectivity.)'
+          : evidence.reason,
       canRecheck: descriptor.recheckable && probe != null,
       canDisconnect: descriptor.revocable,
     };
@@ -489,6 +689,7 @@ export function connectionSummary(statuses: readonly ConnectionStatus[]): Record
   const counts = {
     connected: 0,
     local_only: 0,
+    configured: 0,
     not_connected: 0,
     expired: 0,
     error: 0,
