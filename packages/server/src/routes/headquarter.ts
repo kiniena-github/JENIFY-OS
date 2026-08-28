@@ -56,7 +56,7 @@ import {
  */
 export type HeadquarterControlPlane = Pick<
   ControlApiDeps,
-  'ops' | 'principals' | 'founderMap' | 'allowedOrigins' | 'secretsEnv'
+  'ops' | 'founderMap' | 'allowedOrigins' | 'secretsEnv'
 > & {
   /**
    * Set false to expose the read routes without the write routes — the safe
@@ -163,7 +163,6 @@ export function registerHeadquarterRoutes(
     // cannot be reached by anything the caller sends.
     const deps: ControlApiDeps = {
       ops: plane.ops,
-      principals: plane.principals,
       founderMap: plane.founderMap,
       allowedOrigins: plane.allowedOrigins,
       secretsEnv: plane.secretsEnv,

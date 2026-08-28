@@ -81,7 +81,6 @@ import {
   DIRECT_ORDER_ROUTES,
   type DirectOrderRoute,
 } from './orders.js';
-import type { HumanPrincipalPort } from '../application/principals.js';
 
 export const CONTROL_API_PREFIX = '/api/hq/control';
 
@@ -113,8 +112,21 @@ export interface ControlResponse {
 }
 
 export interface ControlApiDeps {
+  /**
+   * The one authority. Identity is resolved from `ops.principals` and nowhere
+   * else (issue #200, Codex round 4 P1).
+   *
+   * This deliberately no longer takes a separate `principals` port. It used to,
+   * and that was a second source of truth for the same question: the boundary
+   * authenticated a mapped principal id against the supplied registry while
+   * `createTask`/`approveTask`/`denyTask` authorized that same string against
+   * `ops.principals`. A host that wired two registries — or two databases —
+   * would have had an account mapped to an innocuous principal here inherit an
+   * unrelated same-id principal's grants there. Detecting the divergence would
+   * have been possible; removing the field makes it unrepresentable, which is
+   * better.
+   */
   ops: HeadquarterOperations;
-  principals: HumanPrincipalPort;
   sessions: SessionResolverPort;
   /** RAW configured Founder map; parsed per request so a broken map fails closed. */
   founderMap: unknown;
@@ -235,24 +247,44 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     );
   }
 
+  // Auditing is best-effort BY CONTRACT, and the try/catch is what makes that
+  // true rather than merely intended (issue #200, Codex round 4 P2).
+  //
+  // Every `allowed` audit call happens AFTER its canonical write has
+  // committed. A throwing sink — an unreachable logging backend, say — would
+  // escape to `handleControlRequest`'s catch-all and become a 500, telling the
+  // client its order or approval failed when it had in fact succeeded. That is
+  // the same defect class as the round-2 denial partial commit: a response
+  // disagreeing with committed state, and a retry then hitting an
+  // already-created or no-longer-pending task.
+  //
+  // Swallowing the error is the lesser cost, and it is not a loss of the
+  // record: `op_evidence` is the authoritative, hash-chained log written
+  // inside the canonical operation. This port is a supplementary host-side
+  // sink, and a supplementary sink must never be able to misreport the
+  // outcome of the thing it is describing.
   const audit = (
     outcome: 'allowed' | 'refused',
     detail: string,
     founder?: ResolvedFounder,
   ): void => {
-    deps.audit?.record({
-      at: now().toISOString(),
-      route: `${method} ${path}`,
-      outcome,
-      detail,
-      ...(founder
-        ? {
-            accountId: founder.account.accountId,
-            realmId: founder.account.realmId,
-            principalId: founder.principal.id,
-          }
-        : {}),
-    });
+    try {
+      deps.audit?.record({
+        at: now().toISOString(),
+        route: `${method} ${path}`,
+        outcome,
+        detail,
+        ...(founder
+          ? {
+              accountId: founder.account.accountId,
+              realmId: founder.account.realmId,
+              principalId: founder.principal.id,
+            }
+          : {}),
+      });
+    } catch {
+      // Deliberately swallowed. See above.
+    }
   };
 
   const origin = checkMutationOrigin(request, deps.allowedOrigins);
@@ -275,7 +307,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
 
   const resolution = resolveFounderPrincipal(request, {
     sessions: deps.sessions,
-    principals: deps.principals,
+    // The SAME registry HeadquarterOperations authorizes against, never a
+    // second one supplied alongside it.
+    principals: deps.ops.principals,
     founderMap: deps.founderMap,
   });
 

@@ -63,7 +63,6 @@ function app(plane: Plane, overrides: Partial<NonNullable<AppOptions['headquarte
     db,
     headquarter: {
       ops: plane.ops,
-      principals: plane.principals,
       founderMap: [{ realmId: tenant.tenantId, accountId: founderUserId, principalId: 'founder' }],
       allowedOrigins: [ORIGIN],
       secretsEnv: SECRETS,

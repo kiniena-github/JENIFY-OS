@@ -27,12 +27,17 @@ shape is untouched.
 buildApp({
   db,
   headquarter: {
-    ops,           // HeadquarterOperations over the HQ database
-    principals,    // HumanPrincipalRegistry (the HQ human registry)
+    ops,           // HeadquarterOperations — the ONE authority for identity
+                   // AND grants; there is deliberately no second registry to
+                   // wire, so the two can never diverge
     founderMap: [{ realmId: '<tenant id>', accountId: '<user id>', principalId: 'founder' }],
     allowedOrigins: ['https://hq.example'],
     secretsEnv: process.env,
     mutationsEnabled: true,   // omit or set false to serve reads only
+    // Best-effort by contract: a throwing sink is swallowed, because every
+    // `allowed` record happens after the canonical write has committed and a
+    // failure here must never report that write as failed. The authoritative
+    // record is the hash-chained `op_evidence` log.
     audit: { record: (event) => log(event) },
   },
 });

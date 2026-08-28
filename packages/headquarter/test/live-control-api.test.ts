@@ -13,7 +13,6 @@
 
 import { describe, expect, it } from 'vitest';
 import { setupFixture, type Fixture } from './application.fixture.js';
-import { HumanPrincipalRegistry } from '../src/application/principals.js';
 import { founderConsole } from '../src/application/console.js';
 import { EXECUTION_PROVIDER_KEY } from '../src/operator/provider-binding.js';
 import {
@@ -72,7 +71,10 @@ function harness(
 ): Harness {
   const fixture = setupFixture();
   registerDirectOrderCapability(fixture.ops);
-  const principals = new HumanPrincipalRegistry(fixture.db);
+  // The ONE registry: identity resolution and authorization both read
+  // ops.principals, so the test cannot accidentally prove a property that a
+  // second, separately-wired registry would break.
+  const principals = fixture.principals;
   principals.register({
     id: 'founder',
     displayName: 'Founder',
@@ -93,7 +95,6 @@ function harness(
     options.account !== undefined ? options.account : FOUNDER_ACCOUNT;
   const deps: ControlApiDeps = {
     ops: fixture.ops,
-    principals,
     founderMap: options.founderMap ?? MAP,
     allowedOrigins: options.origins ?? [ORIGIN],
     secretsEnv: CLAUDE_ONLY,
@@ -698,14 +699,6 @@ describe('advertised controls come from the principal grants (Codex round 2, P2)
       active: true,
       ...principal,
     });
-    // The registry the API reads is the one built in the harness, so rebuild
-    // that principal there too.
-    (h.deps.principals as HumanPrincipalRegistry).register({
-      id: 'founder',
-      displayName: 'Founder',
-      active: true,
-      ...principal,
-    });
     return h.call({ method: 'GET', path: CONTROL_ROUTES.session }).body.controls as Record<
       string,
       unknown
@@ -867,5 +860,109 @@ describe('an unusable origin list disables the advertised controls (Codex round 
       deny: true,
       trustedOriginConfigured: true,
     });
+  });
+});
+
+describe('identity and authorization read ONE registry (Codex round 4, P1)', () => {
+  it('resolves the acting principal from ops.principals, not a second port', () => {
+    // Structural, not behavioural: the deps shape has no `principals` field at
+    // all, so a host cannot wire a registry for authentication that differs
+    // from the one HeadquarterOperations authorizes against. The divergence is
+    // unrepresentable rather than merely detected.
+    const h = harness();
+    expect(Object.keys(h.deps)).not.toContain('principals');
+  });
+
+  it('sees a grant change made through the ops registry immediately', () => {
+    // Proves the API reads the operations registry: revoking approval
+    // authority through the canonical human-principal table must change what
+    // the session route advertises, with no separate port to keep in sync.
+    const h = harness();
+    const before = h.call({ method: 'GET', path: CONTROL_ROUTES.session }).body
+      .controls as Record<string, unknown>;
+    expect(before.approve).toBe(true);
+
+    h.fixture.principals.register({
+      id: 'founder',
+      displayName: 'Founder',
+      originateCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+      approvalAuthority: false,
+      active: true,
+    });
+
+    const after = h.call({ method: 'GET', path: CONTROL_ROUTES.session }).body
+      .controls as Record<string, unknown>;
+    expect(after.approve).toBe(false);
+  });
+
+  it('refuses a Founder whose principal was deactivated in the ops registry', () => {
+    const h = harness();
+    h.fixture.principals.register({
+      id: 'founder',
+      displayName: 'Founder',
+      originateCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+      approvalAuthority: true,
+      active: false,
+    });
+    const response = h.call({ body: ORDER_BODY });
+    expect(response.status).toBe(403);
+    expect((response.body.error as { code: string }).code).toBe('principal_inactive');
+    expect(h.fixture.ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+  });
+});
+
+describe('a failing audit sink never misreports a committed write (Codex round 4, P2)', () => {
+  function exploding(h: Harness): void {
+    h.deps.audit = {
+      record: () => {
+        throw new Error('logging backend unavailable');
+      },
+    };
+  }
+
+  it('still reports success for an order that was actually created', () => {
+    // The audit call happens AFTER the canonical write. Letting it throw would
+    // escape to the catch-all and return 500 for a task that exists — telling
+    // the client to retry something already committed.
+    const h = harness();
+    exploding(h);
+    const response = h.call({ body: ORDER_BODY });
+    expect(response.status).toBe(201);
+    expect(h.fixture.ops.queue.listByStatus('needs_approval')).toHaveLength(1);
+  });
+
+  it('still reports success for an approval that was actually granted', () => {
+    const h = harness();
+    h.fixture.principals.register({
+      id: 'coo',
+      displayName: 'Chief Operating Officer',
+      originateCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+      approvalAuthority: true,
+      active: true,
+    });
+    const created = h.fixture.ops.createTask({
+      capabilityId: DIRECT_ORDER_CAPABILITY.id,
+      payload: { kind: 'direct_order', instruction: 'x', [EXECUTION_PROVIDER_KEY]: 'CLAUDE' },
+      idempotencyKey: 'coo-audit',
+      requestedBy: 'coo',
+      title: 'COO order',
+    });
+    if (!created.ok) throw new Error(JSON.stringify(created.error));
+    const card = founderConsole(h.fixture.ops, NOW).approvals[0]!;
+    exploding(h);
+    const response = h.call({
+      path: CONTROL_ROUTES.approve,
+      body: { taskId: card.taskId, expectedActionDigest: card.actionDigest },
+    });
+    expect(response.status).toBe(200);
+    expect(h.fixture.ops.queue.get(card.taskId)!.status).toBe('queued');
+  });
+
+  it('still refuses correctly when the sink throws on a refusal path', () => {
+    const h = harness({ account: null });
+    exploding(h);
+    const response = h.call({ body: ORDER_BODY });
+    expect(response.status).toBe(401);
+    expect((response.body.error as { code: string }).code).toBe('unauthenticated');
   });
 });
