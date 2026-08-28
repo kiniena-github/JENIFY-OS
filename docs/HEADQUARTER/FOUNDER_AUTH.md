@@ -78,6 +78,17 @@ Anything else under the prefix is a 404. There is no generic mutation endpoint,
 and no *ask for changes*: the canonical approval model records approve or deny
 only, so a third button would show a decision the Operator never saw.
 
+`GET /session` reports which controls are genuinely available, derived from the
+resolved principal's own grants — `approve`/`deny` from `approvalAuthority`,
+`directOrder` from the `hq.direct_order` origination grant plus the capability
+being registered and enabled — and from `mutationsEnabled`. These are
+independent registry fields, so being the mapped Founder proves none of them;
+the console must draw from this, never from "an account was mapped".
+
+A denial reason is bounded at 500 characters and scanned for credential-shaped
+content **before** the canonical write, because it is persisted to `op_tasks`,
+`hq_approvals` and the append-only evidence log.
+
 Requests must be `application/json` and carry a trusted `Origin`. They must NOT
 carry `principalId`, `requestedBy`, `founderId`, `actorAuthentication` or any
 other identity-shaped field — such a request is refused outright rather than
@@ -90,11 +101,16 @@ either a session established in the last five minutes, or the account's password
 re-entered as `stepUpPassword`. A long-lived cookie on an unattended machine is
 not consent to an irreversible action.
 
-Password attempts share the login failure budget (`ip|hq-stepup|account`,
-including its per-source ceiling), so a stolen stale session cannot be turned
-into a password oracle and repeated scrypt calls cannot exhaust the event loop.
-An exhausted budget answers `429 step_up_rate_limited` — deliberately distinct
-from a wrong password, which is `403 step_up_failed`.
+Password attempts run under the same failure budget as sign-in, keyed
+`ip|login|hq-stepup:<account>`. The middle component is what the limiter
+collapses to a per-source ceiling, so naming it `login` is what genuinely
+shares that ceiling with failed sign-ins — in both directions — while the
+`hq-stepup:` prefix keeps the per-account buckets distinct. A stolen stale
+session therefore cannot be turned into a password oracle, cannot buy a fresh
+allowance by moving between the two endpoints, and cannot exhaust the event
+loop with repeated scrypt calls. An exhausted budget answers
+`429 step_up_rate_limited` — deliberately distinct from a wrong password,
+which is `403 step_up_failed`.
 
 Creating an order does not require step-up — it executes nothing, it lands in
 `needs_approval` behind the digest gate. Neither does a denial: making it harder

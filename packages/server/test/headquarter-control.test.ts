@@ -461,3 +461,134 @@ describe('step-up password attempts are rate limited (Codex round 1, P1)', () =>
     _resetRateLimiter();
   });
 });
+
+describe('step-up shares the login source budget (Codex round 2, P2)', () => {
+  /** Age the session past the step-up window: the stolen-cookie position. */
+  function ageSession(cookie: string): void {
+    db.update(sessions)
+      .set({ createdAt: '2026-08-01T00:00:00.000Z' })
+      .where(eq(sessions.token, cookie.split('=')[1]!))
+      .run();
+  }
+
+  function pendingTaskId(plane: Plane): string {
+    plane.principals.register({
+      id: 'coo',
+      displayName: 'COO',
+      originateCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+      approvalAuthority: true,
+      active: true,
+    });
+    const created = plane.ops.createTask({
+      capabilityId: DIRECT_ORDER_CAPABILITY.id,
+      payload: { kind: 'direct_order', instruction: 'x', executionProvider: 'CLAUDE' },
+      idempotencyKey: `coo-${Math.random()}`,
+      requestedBy: 'coo',
+      title: 'COO order',
+    });
+    if (!created.ok) throw new Error(JSON.stringify(created.error));
+    return created.data.task.id;
+  }
+
+  it('lets failed sign-ins exhaust the budget that step-up then draws on', async () => {
+    // The defect this replaces: the key was `ip|hq-stepup|account`, and
+    // `sourceKeyOf` keeps the SECOND component — so step-up had its own
+    // `ip|hq-stepup|*` ceiling and an attacker who burned the login budget got
+    // a fresh allowance just by moving to this endpoint.
+    _resetRateLimiter();
+    const plane = hqPlane();
+    const instance = app(plane);
+    const founder = await signIn(instance, 'founder.salta');
+    ageSession(founder);
+    const taskId = pendingTaskId(plane);
+
+    // Burn the per-source ceiling on the LOGIN surface alone, varying the
+    // username so no single per-account bucket is what trips.
+    for (let i = 0; i < 31; i += 1) {
+      await instance.inject({
+        method: 'POST',
+        url: '/api/auth/login',
+        payload: { username: `nobody${i}.salta`, password: 'wrong' },
+      });
+    }
+
+    const stepUp = await instance.inject({
+      method: 'POST',
+      url: '/api/hq/control/approvals/approve',
+      headers: { ...JSON_HEADERS, cookie: founder },
+      payload: { taskId, expectedActionDigest: 'x'.repeat(64), stepUpPassword: 'wrong' },
+    });
+    expect(stepUp.statusCode).toBe(429);
+    expect(stepUp.json().error.code).toBe('step_up_rate_limited');
+    expect(plane.ops.queue.get(taskId)!.status).toBe('needs_approval');
+    _resetRateLimiter();
+  });
+
+  it('charges step-up failures into the SAME source bucket login draws on', async () => {
+    // The discriminating measurement. The per-account lockout fires at 10, so
+    // step-up alone can never reach the source ceiling of 30 — which is
+    // correct, not a gap. What must be true is that those 10 failures land in
+    // `ip|login|*` rather than a private bucket: with sharing, 10 step-up
+    // failures plus 20 login failures trip the ceiling; without it, 20 login
+    // failures alone leave the source at 20 and sign-in still works.
+    _resetRateLimiter();
+    const plane = hqPlane();
+    const instance = app(plane);
+    const founder = await signIn(instance, 'founder.salta');
+    ageSession(founder);
+    const taskId = pendingTaskId(plane);
+
+    for (let i = 0; i < 10; i += 1) {
+      await instance.inject({
+        method: 'POST',
+        url: '/api/hq/control/approvals/approve',
+        headers: { ...JSON_HEADERS, cookie: founder },
+        payload: { taskId, expectedActionDigest: 'x'.repeat(64), stepUpPassword: 'wrong' },
+      });
+    }
+    for (let i = 0; i < 20; i += 1) {
+      await instance.inject({
+        method: 'POST',
+        url: '/api/auth/login',
+        payload: { username: `nobody${i}.salta`, password: 'wrong' },
+      });
+    }
+
+    const login = await instance.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { username: 'staff.salta', password: 'test-password' },
+    });
+    expect(login.statusCode).toBe(429);
+    _resetRateLimiter();
+  });
+
+  it('keeps per-account buckets distinct, so step-up cannot lock a sign-in out alone', async () => {
+    // Sharing the SOURCE ceiling must not mean sharing the per-account bucket:
+    // a few wrong step-up guesses for the Founder should not stop an unrelated
+    // account signing in from the same host.
+    _resetRateLimiter();
+    const plane = hqPlane();
+    const instance = app(plane);
+    const founder = await signIn(instance, 'founder.salta');
+    ageSession(founder);
+    const taskId = pendingTaskId(plane);
+
+    for (let i = 0; i < 11; i += 1) {
+      await instance.inject({
+        method: 'POST',
+        url: '/api/hq/control/approvals/approve',
+        headers: { ...JSON_HEADERS, cookie: founder },
+        payload: { taskId, expectedActionDigest: 'x'.repeat(64), stepUpPassword: 'wrong' },
+      });
+    }
+
+    const login = await instance.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { username: 'staff.salta', password: 'test-password' },
+    });
+    expect(login.statusCode).toBe(200);
+    _resetRateLimiter();
+  });
+});

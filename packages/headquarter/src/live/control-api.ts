@@ -76,12 +76,20 @@ import { assertBrowserSafe } from './redaction.js';
 import {
   directOrderCapabilityState,
   submitDirectOrder,
+  DIRECT_ORDER_CAPABILITY,
   DIRECT_ORDER_ROUTES,
   type DirectOrderRoute,
 } from './orders.js';
 import type { HumanPrincipalPort } from '../application/principals.js';
 
 export const CONTROL_API_PREFIX = '/api/hq/control';
+
+/**
+ * A denial reason is persisted to `op_tasks`, `hq_approvals` and the evidence
+ * log, so it is bounded here rather than left to whatever a caller sends —
+ * the same reasoning as `MAX_TITLE_LENGTH` on an order.
+ */
+export const MAX_DENIAL_REASON_LENGTH = 500;
 
 export const CONTROL_ROUTES = {
   session: `${CONTROL_API_PREFIX}/session`,
@@ -278,7 +286,7 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
           founder: false,
           reason: resolution.reason,
           message: resolution.message,
-          controls: controlAvailability(deps, false),
+          controls: controlAvailability(deps, null),
         }),
       );
     }
@@ -291,7 +299,7 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         principalId: resolution.founder.principal.id,
         displayName: resolution.founder.principal.displayName,
         approvalAuthority: resolution.founder.principal.approvalAuthority,
-        controls: controlAvailability(deps, true),
+        controls: controlAvailability(deps, resolution.founder),
       }),
     );
   }
@@ -325,15 +333,34 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
 
 type Audit = (outcome: 'allowed' | 'refused', detail: string, founder?: ResolvedFounder) => void;
 
-/** What the UI may draw as live, derived from configuration rather than hope. */
-function controlAvailability(deps: ControlApiDeps, founder: boolean): Record<string, unknown> {
+/**
+ * What the UI may draw as live.
+ *
+ * Every control is derived from the thing that will actually decide the
+ * request — never from the weaker fact that an account was mapped. Being the
+ * Founder is not one authority but several independent ones, and the human
+ * principal registry is explicit that they do not imply each other: a mapped,
+ * active principal may hold `approvalAuthority: false`, or hold approval
+ * authority while lacking the origination grant for `hq.direct_order`. Reading
+ * only `founder` advertised buttons that `HeadquarterOperations` would then
+ * refuse — the same defect as the `mutationsEnabled` one, one layer further in
+ * (issue #200, Codex round 2 P2).
+ */
+function controlAvailability(
+  deps: ControlApiDeps,
+  founder: ResolvedFounder | null,
+): Record<string, unknown> {
   // Every write control is gated on the SAME flag that refuses the write, so
   // the console can never be told a button works when the route will refuse it.
-  const writable = founder && deps.mutationsEnabled !== false;
+  const writable = founder !== null && deps.mutationsEnabled !== false;
+  const principal = founder?.principal;
+  const mayApprove = writable && principal?.approvalAuthority === true;
+  const mayOriginate =
+    writable && principal?.originateCapabilities.includes(DIRECT_ORDER_CAPABILITY.id) === true;
   return {
-    directOrder: writable && directOrderCapabilityState(deps.ops) === 'enabled',
-    approve: writable,
-    deny: writable,
+    directOrder: mayOriginate && directOrderCapabilityState(deps.ops) === 'enabled',
+    approve: mayApprove,
+    deny: mayApprove,
     mutationsEnabled: deps.mutationsEnabled !== false,
     // Stated, not hidden: the canonical model has no third decision, so the
     // UI must not draw one. See the module docstring.
@@ -532,6 +559,32 @@ function deny(
   if (!taskId || !reason) {
     audit('refused', 'invalid_input', founder);
     return refusal(400, 'invalid_input', 'A denial needs a taskId and a reason.');
+  }
+  if (reason.length > MAX_DENIAL_REASON_LENGTH) {
+    audit('refused', 'reason_too_long', founder);
+    return refusal(
+      400,
+      'reason_too_long',
+      `A denial reason may be at most ${MAX_DENIAL_REASON_LENGTH} characters.`,
+    );
+  }
+  // Guard the reason before the canonical call, exactly as the order path
+  // guards an instruction (issue #200, Codex round 2 P1). `denyTask` now
+  // refuses a credential-shaped reason before its first write, so this is not
+  // what prevents the partial commit — it is what makes the browser's refusal
+  // specific instead of a generic `operator_rejected`, and it applies the
+  // stricter of the two guards, which also scans the raw string rather than
+  // only the JSON encoding.
+  try {
+    assertBrowserSafe({ reason }, 'denial');
+  } catch {
+    audit('refused', 'unsafe_reason', founder);
+    return refusal(
+      400,
+      'unsafe_reason',
+      'The denial reason looks like it contains a credential. Denials are recorded in the ' +
+        'append-only evidence log, so nothing was written.',
+    );
   }
   const result = deps.ops.denyTask({
     taskId,

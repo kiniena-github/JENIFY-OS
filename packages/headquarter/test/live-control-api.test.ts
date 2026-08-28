@@ -19,6 +19,7 @@ import { EXECUTION_PROVIDER_KEY } from '../src/operator/provider-binding.js';
 import {
   handleControlRequest,
   CONTROL_ROUTES,
+  MAX_DENIAL_REASON_LENGTH,
   type ControlApiDeps,
   type ControlResponse,
 } from '../src/live/control-api.js';
@@ -592,5 +593,151 @@ describe('an exhausted step-up budget is reported as 429', () => {
     expect(response.status).toBe(429);
     expect((response.body.error as { code: string }).code).toBe('step_up_rate_limited');
     expect(h.fixture.ops.queue.get(card.taskId)!.status).toBe('needs_approval');
+  });
+});
+
+describe('a denial reason is validated before any canonical write (Codex round 2, P1)', () => {
+  function pendingTask(h: Harness): { taskId: string; digest: string } {
+    h.fixture.principals.register({
+      id: 'coo',
+      displayName: 'Chief Operating Officer',
+      originateCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+      approvalAuthority: true,
+      active: true,
+    });
+    const created = h.fixture.ops.createTask({
+      capabilityId: DIRECT_ORDER_CAPABILITY.id,
+      payload: { kind: 'direct_order', instruction: 'x', [EXECUTION_PROVIDER_KEY]: 'CLAUDE' },
+      idempotencyKey: 'coo-order-deny',
+      requestedBy: 'coo',
+      title: 'COO order',
+    });
+    if (!created.ok) throw new Error(JSON.stringify(created.error));
+    const card = founderConsole(h.fixture.ops, NOW).approvals[0]!;
+    return { taskId: card.taskId, digest: card.actionDigest };
+  }
+
+  it('refuses a credential-shaped reason and leaves the task untouched', () => {
+    // The defect this replaces: queue.deny blocked the task, wrote
+    // block_reason and inserted the hq_approvals row, and only THEN appended
+    // evidence — which threw. The caller was told the denial failed while it
+    // had in fact committed and stored the credential in two tables.
+    const h = harness();
+    const { taskId, digest } = pendingTask(h);
+    const response = h.call({
+      path: CONTROL_ROUTES.deny,
+      body: { taskId, reason: 'token: abcdefgh1234', expectedActionDigest: digest },
+    });
+    expect(response.status).toBe(400);
+    expect((response.body.error as { code: string }).code).toBe('unsafe_reason');
+
+    const task = h.fixture.ops.queue.get(taskId)!;
+    expect(task.status).toBe('needs_approval');
+    expect(task.blockReason).toBeNull();
+    const approvals = h.fixture.db
+      .prepare('SELECT decision FROM hq_approvals WHERE task_id = ?')
+      .all(taskId);
+    expect(approvals).toHaveLength(0);
+  });
+
+  it('refuses it at the canonical layer too, so the CLI cannot commit one either', () => {
+    // Validating only at the browser boundary would leave the partial-commit
+    // hole open for every other caller of denyTask.
+    const h = harness();
+    const { taskId } = pendingTask(h);
+    const result = h.fixture.ops.denyTask({
+      taskId,
+      founderId: 'founder',
+      reason: 'api_key = abcdefgh1234',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('invalid_input');
+    const task = h.fixture.ops.queue.get(taskId)!;
+    expect(task.status).toBe('needs_approval');
+    expect(task.blockReason).toBeNull();
+    expect(
+      h.fixture.db.prepare('SELECT decision FROM hq_approvals WHERE task_id = ?').all(taskId),
+    ).toHaveLength(0);
+  });
+
+  it('bounds the reason, since it is persisted in three places', () => {
+    const h = harness();
+    const { taskId } = pendingTask(h);
+    const response = h.call({
+      path: CONTROL_ROUTES.deny,
+      body: { taskId, reason: 'x'.repeat(MAX_DENIAL_REASON_LENGTH + 1) },
+    });
+    expect(response.status).toBe(400);
+    expect((response.body.error as { code: string }).code).toBe('reason_too_long');
+    expect(h.fixture.ops.queue.get(taskId)!.status).toBe('needs_approval');
+  });
+
+  it('still accepts an ordinary reason', () => {
+    const h = harness();
+    const { taskId } = pendingTask(h);
+    const response = h.call({
+      path: CONTROL_ROUTES.deny,
+      body: { taskId, reason: 'Out of scope this quarter' },
+    });
+    expect(response.status).toBe(200);
+    expect(h.fixture.ops.queue.get(taskId)!.status).toBe('blocked');
+  });
+});
+
+describe('advertised controls come from the principal grants (Codex round 2, P2)', () => {
+  function controlsFor(principal: {
+    originateCapabilities: string[];
+    approvalAuthority: boolean;
+  }): Record<string, unknown> {
+    const h = harness();
+    h.fixture.principals.register({
+      id: 'founder',
+      displayName: 'Founder',
+      active: true,
+      ...principal,
+    });
+    // The registry the API reads is the one built in the harness, so rebuild
+    // that principal there too.
+    (h.deps.principals as HumanPrincipalRegistry).register({
+      id: 'founder',
+      displayName: 'Founder',
+      active: true,
+      ...principal,
+    });
+    return h.call({ method: 'GET', path: CONTROL_ROUTES.session }).body.controls as Record<
+      string,
+      unknown
+    >;
+  }
+
+  it('hides approve and deny from a principal with no approval authority', () => {
+    // approvalAuthority and originateCapabilities are independent registry
+    // fields, so being the mapped Founder proves neither.
+    const controls = controlsFor({
+      originateCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+      approvalAuthority: false,
+    });
+    expect(controls).toMatchObject({ approve: false, deny: false, directOrder: true });
+  });
+
+  it('hides direct order from a principal with no origination grant', () => {
+    const controls = controlsFor({ originateCapabilities: [], approvalAuthority: true });
+    expect(controls).toMatchObject({ directOrder: false, approve: true, deny: true });
+  });
+
+  it('shows every control to a principal holding both', () => {
+    const controls = controlsFor({
+      originateCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+      approvalAuthority: true,
+    });
+    expect(controls).toMatchObject({ directOrder: true, approve: true, deny: true });
+  });
+
+  it('advertises nothing to a caller who is not the Founder', () => {
+    const h = harness({ account: STAFF_ACCOUNT });
+    const controls = h.call({ method: 'GET', path: CONTROL_ROUTES.session }).body
+      .controls as Record<string, unknown>;
+    expect(controls).toMatchObject({ directOrder: false, approve: false, deny: false });
   });
 });

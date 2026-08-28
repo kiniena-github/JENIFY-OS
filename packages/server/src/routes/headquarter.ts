@@ -103,16 +103,30 @@ function sessionResolver(db: Db, token: string | undefined): SessionResolverPort
  * verifier is a denial-of-service surface as well as a guessing one. The
  * budget bounds both.
  *
- * The key is `ip|hq-stepup|account`, so it shares the limiter's per-source
- * ceiling with login: an attacker cannot spread guesses across accounts to
- * stay under the per-account limit, and cannot evade the login budget by
- * moving here. A correct password clears only its own bucket, exactly as a
- * successful sign-in does.
+ * ## Why the key says `login`
+ *
+ * `sourceKeyOf` collapses a key to `ip|<second component>|*`, so that second
+ * component — not the identifier — is what decides which failures share a
+ * per-source ceiling. An earlier version keyed this `ip|hq-stepup|account`
+ * and claimed to share login's budget; it did not. It produced its own
+ * `ip|hq-stepup|*` ceiling, so exhausting the login budget constrained
+ * step-up not at all and an attacker who ran out of login guesses got a fresh
+ * allowance simply by moving to this endpoint (issue #200, Codex round 2 P2).
+ *
+ * Naming the family `login` is what makes the shared ceiling real: failures
+ * here charge the same `ip|login|*` bucket that failed sign-ins do, in both
+ * directions. The `hq-stepup:` prefix on the identifier keeps the per-account
+ * buckets distinct, so a locked-out step-up account does not lock a different
+ * account's sign-in. A correct password clears only its own bucket, exactly as
+ * a successful sign-in does — the source ceiling is deliberately not cleared,
+ * so a spray in progress is not wiped by one success.
  */
+const STEP_UP_RATE_LIMIT_FAMILY = 'login';
+
 function credentialVerifier(db: Db, ip: string): CredentialVerifierPort {
   return {
     verify(account, password) {
-      const key = `${ip}|hq-stepup|${account.accountId}`;
+      const key = `${ip}|${STEP_UP_RATE_LIMIT_FAMILY}|hq-stepup:${account.accountId}`;
       try {
         assertNotRateLimited(key);
       } catch {
