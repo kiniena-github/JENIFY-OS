@@ -58,8 +58,12 @@ function freshnessVerdict(): (
 }
 
 describe('the Connections page joins the site without disturbing it', () => {
-  it('keeps all seven original pages and adds Connections as the eighth', () => {
-    expect(HQ_PAGES).toHaveLength(8);
+  it('keeps all seven original pages, Connections as the eighth, and the Headquarters Floor as the ninth', () => {
+    // The count is asserted so a page can never be added silently; the list
+    // below is the part that matters, and it is the original seven plus the
+    // two surfaces added by issue #200 — the Connection Center and the
+    // spatial Headquarters Floor.
+    expect(HQ_PAGES).toHaveLength(9);
     for (const file of [
       'index.html',
       'projects.html',
@@ -69,6 +73,7 @@ describe('the Connections page joins the site without disturbing it', () => {
       'approvals.html',
       'archive.html',
       'connections.html',
+      'headquarters.html',
     ]) {
       expect(bare.has(file)).toBe(true);
     }

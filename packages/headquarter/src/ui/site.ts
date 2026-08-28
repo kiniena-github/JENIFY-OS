@@ -32,8 +32,10 @@ import {
   renderFounderApprovals,
   renderConnections,
   renderArchive,
+  renderHeadquartersFloor,
   type DirectOrderRouteAvailability,
 } from './render.js';
+import { floorState } from './spatial/state.js';
 import { assessConnections, type ConnectionStatus } from '../live/connections.js';
 import { assertBrowserSafe } from '../live/redaction.js';
 import { DIRECT_ORDER_ROUTES, resolveOrderRoute } from '../live/orders.js';
@@ -152,6 +154,29 @@ export function buildSite(data: HeadquarterData): Map<string, string> {
       provenanceNote: data.note,
       sourceMode: data.sourceMode,
       orderRoutes,
+    }),
+  );
+  // The living headquarters. It is a projection of the read models already
+  // computed above — no extra data source, no second vocabulary — so a room
+  // can never show a state the rest of the site would contradict.
+  site.set(
+    'headquarters.html',
+    renderHeadquartersFloor({
+      floor: floorState({
+        states,
+        dashboard,
+        workers,
+        specialists: data.specialists,
+        projects: cards,
+        approvals: data.approvals,
+        connections,
+        archive: data.archive,
+        chatMessages: data.chatMessages,
+      }),
+      specialists: data.specialists,
+      nowIso,
+      provenanceNote: data.note,
+      sourceMode: data.sourceMode,
     }),
   );
   site.set('projects.html', renderProjects(cards, timelines, nowIso, data.note, data.sourceMode));

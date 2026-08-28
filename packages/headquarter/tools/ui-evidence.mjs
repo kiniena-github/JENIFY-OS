@@ -47,6 +47,7 @@ const outDir = flag('--out', join(packageRoot, 'dist', 'ui-evidence'));
 /** Pages in navigation order. Kept in sync with HQ_PAGES by name. */
 const PAGES = [
   ['index.html', 'command-center'],
+  ['headquarters.html', 'headquarters-floor'],
   ['projects.html', 'projects'],
   ['executive-room.html', 'executive-room'],
   ['direct-chats.html', 'direct-chats'],
