@@ -136,6 +136,25 @@ function connectionWithState(state: ConnectionState): ConnectionStatus {
   } as ConnectionStatus;
 }
 
+/**
+ * Escape a value before interpolating it into a `RegExp`.
+ *
+ * Worker and fixture ids are DATA — a fixture id is `bay-${project}` and the
+ * project name comes from a canonical event's `detail.project`. Interpolating
+ * one raw produced a test that threw on a project called `C++` (invalid
+ * regular expression) and, worse, silently failed to match its own markup for
+ * one called `x(y)`, reporting the fixture as missing from a panel it was in.
+ *
+ * The product was never affected — `escapeHtml` renders these correctly. This
+ * was the harness asserting on markup by pattern-matching strings it had built
+ * without escaping what it interpolated, and it mattered because the tests
+ * concerned are the ones asserting that the plan, the panels and the KPI
+ * agree: a test that fails on valid input is one somebody later weakens.
+ */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /* ------------------------------------------------------------------ */
 /* 1. Deny by default                                                  */
 /* ------------------------------------------------------------------ */
@@ -1452,6 +1471,41 @@ describe('the Headquarters Floor page joins the site under its rules', () => {
     { ...connectionWithState('connected'), id: 'probe-live', displayName: 'PROBE LIVE' },
   ];
 
+  it('survives project names that are regular-expression metacharacters', () => {
+    // The harness asserts on markup by building patterns from data-derived
+    // ids. Before escaping, a project called `C++` made these tests THROW and
+    // `x(y)` made them silently fail to match markup they had generated —
+    // reporting a fixture as missing from a panel it was in. The product was
+    // always fine; this guards the harness that checks it.
+    const hostile = ['C++', 'x(y)', 'a.b', 'a|b', 'back\\slash', 'Jenify Labs'];
+    const floor = floorFrom(
+      hostile.map((project, index) => event(`w${index}`, `t${index}`, 'running', { project })),
+      [],
+    );
+    const page = buildSite({
+      ...sample,
+      events: hostile.map((project, index) => event(`w${index}`, `tp${index}`, 'running', { project })),
+      specialists: [],
+      approvals: [],
+      archive: [],
+      chatMessages: [],
+      connections: [],
+    }).get('headquarters.html')!;
+
+    const bays = floor.zones.find((zone) => zone.zone.id === 'project-bays')!.fixtures;
+    expect(bays.length).toBe(hostile.length);
+
+    for (const fixture of bays) {
+      // Building the pattern must not throw, and must match the real markup.
+      const pattern = new RegExp(`data-fixture="${escapeRegExp(fixture.id)}" data-lit="(yes|no)"`);
+      expect(pattern.test(page), `${fixture.id} not found in the rendered panel`).toBe(true);
+    }
+
+    // And the names really do contain metacharacters, so this is not passing
+    // because the fixture was tame.
+    expect(bays.some((fixture) => /[.*+?^${}()|[\]\\]/.test(fixture.id))).toBe(true);
+  });
+
   it('makes the room panel and the plan agree about every station', () => {
     // Two surfaces, one truth — the shape of every finding on this PR so far.
     // `page.ts` and `scene.ts` each read the same FloorState, so they could
@@ -1480,14 +1534,14 @@ describe('the Headquarters Floor page joins the site under its rules', () => {
         // The panel lists EVERY occupant, seated or not — nothing is dropped
         // from the data just because the room ran out of desks.
         const entry = page.match(
-          new RegExp(`<li class="hq-occupant" data-worker="${occupant.id}" data-activity="([a-z_]+)"`),
+          new RegExp(`<li class="hq-occupant" data-worker="${escapeRegExp(occupant.id)}" data-activity="([a-z_]+)"`),
         );
         expect(entry, `${occupant.id} is missing from the ${zone.zone.id} panel`).not.toBeNull();
         expect(entry![1], `${occupant.id}: panel and state disagree about activity`).toBe(occupant.activity);
       }
 
       for (const fixture of zone.fixtures) {
-        const entry = page.match(new RegExp(`<li class="hq-fixture" data-fixture="${fixture.id}" data-lit="(yes|no)"`));
+        const entry = page.match(new RegExp(`<li class="hq-fixture" data-fixture="${escapeRegExp(fixture.id)}" data-lit="(yes|no)"`));
         expect(entry, `${fixture.id} is missing from the ${zone.zone.id} panel`).not.toBeNull();
         expect(entry![1] === 'yes', `${fixture.id}: panel and state disagree about lit`).toBe(fixture.lit);
 
