@@ -196,8 +196,55 @@ function known<T extends string>(vocabulary: Record<T, true>, value: unknown): v
  * a rendered page.
  */
 function quoteUnrecognised(value: unknown): string {
-  const encoded = JSON.stringify(value) ?? String(value);
+  let encoded: string;
+  try {
+    encoded = JSON.stringify(value) ?? String(value);
+  } catch {
+    // A circular or throwing-`toJSON` value is itself the answer.
+    encoded = Object.prototype.toString.call(value);
+  }
   return encoded.length > 60 ? `${encoded.slice(0, 60)}…` : encoded;
+}
+
+/**
+ * Everything wrong with one probe's answer, in the order a reader would want
+ * it. Empty means the answer is readable — not that it is true, which is what
+ * the invariants further down decide.
+ *
+ * Shape is checked as well as vocabulary because `options.probes` accepts
+ * arbitrary adapters, and every field here is read by the invariants or
+ * rendered by the Connection Center. A probe returning `null`, a string, or an
+ * object whose `observedFacts` is not an array used to reach the renderer and
+ * crash it — `.map is not a function`, `Cannot read properties of undefined` —
+ * from a stack naming `escapeHtml` rather than the adapter responsible.
+ */
+function unreadableParts(raw: unknown): string[] {
+  if (typeof raw !== 'object' || raw == null) {
+    return [`an answer that is not an object (${quoteUnrecognised(raw)})`];
+  }
+  const evidence = raw as Record<string, unknown>;
+  const parts: string[] = [];
+  if (!known(KNOWN_STATES, evidence.state)) parts.push(`state ${quoteUnrecognised(evidence.state)}`);
+  if (!known(KNOWN_METHODS, evidence.verification)) {
+    parts.push(`verification ${quoteUnrecognised(evidence.verification)}`);
+  }
+  if (!known(KNOWN_OUTCOMES, evidence.outcome)) {
+    parts.push(`outcome ${quoteUnrecognised(evidence.outcome)}`);
+  }
+  for (const field of ['observedFacts', 'missingFacts', 'effectiveCapabilities'] as const) {
+    const value = evidence[field];
+    if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+      parts.push(`${field} ${quoteUnrecognised(value)}`);
+    }
+  }
+  for (const field of ['evidenceSource', 'reason'] as const) {
+    if (typeof evidence[field] !== 'string') parts.push(`${field} ${quoteUnrecognised(evidence[field])}`);
+  }
+  const verifiedAt = evidence.lastVerifiedAt;
+  if (verifiedAt != null && typeof verifiedAt !== 'string') {
+    parts.push(`lastVerifiedAt ${quoteUnrecognised(verifiedAt)}`);
+  }
+  return parts;
 }
 
 /** How HQ would authenticate to the service, if it were connected. */
@@ -757,48 +804,52 @@ export function assessConnections(
       }
     }
 
-    // Answers outside the vocabulary are unknowns, and unknowns fail closed.
+    // An answer HQ cannot read is an unknown, and unknowns fail closed.
     //
     // Every invariant below reads `state`, `verification` and `outcome`, and
-    // all three arrive from an adapter this layer does not control. An
-    // unrecognised value used to be forwarded verbatim: a state of
-    // `'totally_fine'` reached the Connection Center, where it has no label
-    // and no tone, and rendering the page threw a TypeError naming
-    // `escapeHtml` rather than the adapter that caused it — so one bad probe
+    // the Connection Center renders the fact lists, the reason and the
+    // evidence source. All of it arrives from an adapter this layer does not
+    // control, and all of it used to be forwarded verbatim. A state of
+    // `'totally_fine'` therefore reached the page, where it has no label and
+    // no tone; an `observedFacts` that was not an array reached it too. Both
+    // threw a TypeError from a stack naming `escapeHtml` — so one bad probe
     // took down the whole site build with an error pointing at the wrong
-    // place. A malformed `outcome` did the same. Neither could forge a
-    // connection (an unknown state is not `connected`, and an unknown outcome
-    // is not `verified`), so this is honesty and robustness rather than an
-    // authority hole — but "fail closed on unknown" is the rule everywhere
-    // else in the control plane, and the one layer documented as enforcing
-    // the probe invariants centrally is where it belongs.
+    // place, and a probe returning `null` outright threw here before the row
+    // existed at all.
     //
-    // `error` and `failed` are the honest readings of a probe that answered
-    // in a language HQ does not speak, and the original value is preserved in
-    // `reason` so the adapter is nameable from the page itself.
-    if (!known(KNOWN_STATES, evidence.state) || !known(KNOWN_METHODS, evidence.verification) ||
-        !known(KNOWN_OUTCOMES, evidence.outcome)) {
-      const unrecognised = [
-        known(KNOWN_STATES, evidence.state) ? null : `state ${quoteUnrecognised(evidence.state)}`,
-        known(KNOWN_METHODS, evidence.verification)
-          ? null
-          : `verification ${quoteUnrecognised(evidence.verification)}`,
-        known(KNOWN_OUTCOMES, evidence.outcome)
-          ? null
-          : `outcome ${quoteUnrecognised(evidence.outcome)}`,
-      ].filter((part): part is string => part != null);
+    // None of it could forge a connection: an unknown state is not
+    // `connected` and an unknown outcome is not `verified`, so the security
+    // question already failed closed. This is the honesty and robustness
+    // half — "fail closed on unknown" is the rule everywhere else in this
+    // control plane, and an unknown that crashes the renderer is not failing
+    // closed, it is failing loudly in the wrong place. The one layer
+    // documented as enforcing the probe invariants centrally is where it
+    // belongs.
+    //
+    // Shape and vocabulary are one decision, not two: an answer that is
+    // unreadable in any respect is reported as `error` in full rather than
+    // part-repaired, because a half-understood answer is exactly the kind of
+    // thing that later reads as a claim. The offending values are quoted back
+    // — bounded, since they came from an adapter — so the page names the
+    // probe that did it. That text is published to the browser, so it passes
+    // through the boundary guard in front of the rendered connections: an
+    // unreadable answer carrying credential material makes the site refuse
+    // rather than publish.
+    const unreadable = unreadableParts(evidence);
+    if (unreadable.length > 0) {
       evidence = {
-        ...evidence,
         state: 'error',
         verification: 'none',
         outcome: 'failed',
+        observedFacts: [],
+        missingFacts: [...descriptor.requiredFacts],
         effectiveCapabilities: [],
         lastVerifiedAt: null,
-        evidenceSource: `probe ${descriptor.id} answered outside the vocabulary`,
+        evidenceSource: `probe ${descriptor.id} returned an answer HQ cannot read`,
         reason:
-          `${descriptor.displayName}: the connection probe returned ${unrecognised.join(' and ')}, ` +
-          'which HQ does not recognise. An unrecognised answer establishes nothing, so it is ' +
-          'reported as an error rather than shown as a connection.',
+          `${descriptor.displayName}: the connection probe returned ${unreadable.join(', ')}. ` +
+          'An answer HQ cannot read establishes nothing, so it is reported as an error rather ' +
+          'than shown as a connection.',
       };
     }
 

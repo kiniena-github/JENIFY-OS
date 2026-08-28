@@ -611,7 +611,7 @@ describe('a probe answering outside the vocabulary fails closed', () => {
     expect(status.lastVerifiedAt).toBeNull();
     // The offending answer is nameable from the page rather than swallowed.
     expect(status.reason).toContain('totally_fine');
-    expect(status.reason).toContain('does not recognise');
+    expect(status.reason).toContain('cannot read');
   });
 
   it('reports an unrecognised or malformed outcome as an error', () => {
@@ -657,6 +657,59 @@ describe('a probe answering outside the vocabulary fails closed', () => {
     expect(html).toContain('Error');
     expect(html).not.toContain('totally_fine</span>'); // never rendered as a state chip
     expect(html).not.toContain('undefined');
+  });
+
+  it('reports an answer that is not an object at all, without throwing', () => {
+    for (const answer of [null, undefined, 'nope', 42, []]) {
+      const status = assess(answer);
+      expect(status.state).toBe('error');
+      expect(status.effectiveCapabilities).toEqual([]);
+      expect(status.lastVerifiedAt).toBeNull();
+      expect(() => renderConnections([status], NOW, undefined, 'sample')).not.toThrow();
+    }
+  });
+
+  it('reports a fact list that is not a list of strings, however valid the vocabulary', () => {
+    // The vocabulary is impeccable here; the SHAPE is not. This used to pass
+    // straight through as `connected` and crash the renderer on `.map`.
+    for (const field of ['observedFacts', 'missingFacts', 'effectiveCapabilities']) {
+      const status = assess({ ...honest, [field]: 'oops' });
+      expect(status.state).toBe('error');
+      expect(status.effectiveCapabilities).toEqual([]);
+      expect(status.reason).toContain(field);
+      expect(() => renderConnections([status], NOW, undefined, 'sample')).not.toThrow();
+    }
+    const mixed = assess({ ...honest, observedFacts: ['ok', 7] });
+    expect(mixed.state).toBe('error');
+  });
+
+  it('reports a non-string reason, evidenceSource or lastVerifiedAt', () => {
+    for (const override of [{ reason: 5 }, { evidenceSource: null }, { lastVerifiedAt: 12345 }]) {
+      const status = assess({ ...honest, ...override });
+      expect(status.state).toBe('error');
+      expect(() => renderConnections([status], NOW, undefined, 'sample')).not.toThrow();
+    }
+    // null lastVerifiedAt is legitimate: it means "never".
+    expect(assess({ ...honest, lastVerifiedAt: null }).state).toBe('connected');
+  });
+
+  it('repairs nothing by halves — an unreadable answer is an error in full', () => {
+    // Part-repairing would leave a half-understood answer that later reads as
+    // a claim. Every field is replaced, and the fact list falls back to the
+    // descriptor's own requirements rather than to the probe's.
+    const status = assess({ ...honest, observedFacts: 'oops' });
+    expect(status.verification).toBe('none');
+    expect(status.outcome).toBe('failed');
+    expect(status.observedFacts).toEqual([]);
+    expect(status.evidenceSource).toContain('cannot read');
+  });
+
+  it('survives a value that cannot even be serialised', () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const status = assess({ ...honest, state: circular });
+    expect(status.state).toBe('error');
+    expect(() => renderConnections([status], NOW, undefined, 'sample')).not.toThrow();
   });
 
   it('an unrecognised answer carrying credential material still cannot be rendered', () => {
