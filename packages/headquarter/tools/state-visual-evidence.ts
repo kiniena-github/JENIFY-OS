@@ -46,7 +46,9 @@ import { founderDashboard, projectBoard, workerStatuses } from '../src/ui/views.
 import { buildSite } from '../src/ui/site.js';
 import { THEME_CSS } from '../src/ui/theme.js';
 import { renderScene } from '../src/ui/spatial/scene.js';
-import { STATUS_ACTIVITY, floorState, type FloorState } from '../src/ui/spatial/state.js';
+// NOTE: `STATUS_ACTIVITY` is deliberately NOT imported. This tool declares its
+// own ACTIVITY_PLAN_CLASS so the oracle cannot move with the renderer.
+import { floorState, type FloorState } from '../src/ui/spatial/state.js';
 
 async function loadPlaywright(): Promise<{ chromium: any }> {
   const override = process.env.PLAYWRIGHT_PATH;
@@ -146,6 +148,78 @@ const CONNECTION_MEANING: Record<ConnectionState, string> = {
 const APPROVED_EQUIVALENCES: readonly (readonly [ConnectionState, ConnectionState])[] = [
   ['connected', 'local_only'],
 ];
+
+/**
+ * What the plan is required to show for each activity status — declared HERE,
+ * deliberately duplicating the intent rather than importing it.
+ *
+ * This used to read `STATUS_ACTIVITY` from `spatial/state.ts`. That is the
+ * production mapping `floorState` uses to pick the rendered class, so the
+ * oracle moved with the renderer and could not disagree with it. Demonstrated
+ * by collapsing `review_passed` into `working` — a real semantic error, since
+ * a task that passed review is not a task being actively worked. The figure
+ * then animated as work, all 81 unit tests passed, and this tool reported OK
+ * (Codex review of `9d76eb4`).
+ *
+ * A duplicate is the point, not an accident: the value of this table is that
+ * it does NOT move when `STATUS_ACTIVITY` does. If the two disagree, the
+ * rendering stops matching this table and the run fails — which is the signal
+ * that something changed the floor's vocabulary. Do not "tidy" this by
+ * importing the production mapping; that is precisely the defect.
+ */
+const ACTIVITY_PLAN_CLASS: Record<ActivityStatus, string> = {
+  // In flight: handed to a worker, or executing. The floor draws one figure
+  // in motion for both, and the panel's status chip separates them.
+  assigned: 'working',
+  running: 'working',
+  // In the review loop — passed and failed alike. Same claim on the plan
+  // ("this worker is in review"), separated in the panel.
+  review_passed: 'reviewing',
+  review_failed: 'reviewing',
+  // Accepted and not started. Still, deliberately.
+  queued: 'queued',
+  // Stopped, and someone must act. `outcome_unknown` is grouped with
+  // `blocked` because an unknown outcome IS a blockage for the reader: the
+  // task cannot be advanced until someone establishes what happened.
+  blocked: 'blocked',
+  outcome_unknown: 'blocked',
+  // Stopped, and the Founder specifically must act.
+  needs_approval: 'awaiting_founder',
+  // Finished; nothing is in flight.
+  completed: 'complete',
+};
+
+/**
+ * Which plan classes the floor promises to put IN MOTION — declared here for
+ * the same reason as the table above, and measured rather than read off CSS.
+ *
+ * The page tells the reader, in words, that a figure moves only while a
+ * canonical event says its task is active. `spatial-truth.test.ts` asserts
+ * that from the stylesheet TEXT, which is necessary and not sufficient: a rule
+ * can be present and still never match, or be overridden by a later one, and
+ * the text assertion cannot tell. This tool claims to measure appearance, so
+ * it should be the one that catches a motion rule that exists but does not
+ * reach the element.
+ *
+ * It did not. Deleting BOTH figure animations left this tool reporting OK,
+ * because the activities stay distinguishable by colour and the biconditional
+ * only ever asked about distinguishability — never about the motion claim it
+ * advertises (Codex review of `9d76eb4`).
+ */
+const CLASSES_THAT_MUST_MOVE: readonly string[] = ['working', 'reviewing'];
+
+/** Every animation running anywhere inside this station's figure. */
+function readFigureMotion(stationId: string): string[] {
+  const station = document.querySelector(`[data-station="${stationId}"]`);
+  const figure = station ? station.querySelector('.hq-figure') : null;
+  if (!figure) return [];
+  const names: string[] = [];
+  for (const node of [figure, ...figure.querySelectorAll('*')]) {
+    const name = getComputedStyle(node).animationName;
+    if (name && name !== 'none') names.push(name);
+  }
+  return names;
+}
 
 function assertMeaningsAreHonest(): string[] {
   const problems: string[] = [];
@@ -259,22 +333,35 @@ function readSignature(stationId: string): string {
   const parts: string[] = [];
   const shapes = [...station.querySelectorAll('polygon, circle, ellipse, rect, line'), station];
   for (const shape of shapes) {
+    // ONE walk, collecting BOTH inherited-by-composition properties. Opacity
+    // multiplies; animation names accumulate. Recording the animation only at
+    // the leaf was the same blindness as reading opacity only at the leaf, and
+    // it had the same consequence one level up: `hq-work` and `hq-review` are
+    // applied to `.fig-body`, an intermediate GROUP, so with the animations
+    // frozen at an identical phase-zero transform, deleting BOTH figure
+    // animations left every captured signature unchanged and the tool still
+    // reported OK. Verified by deleting them (Codex review of `9d76eb4`).
     let opacity = 1;
+    const animations: string[] = [];
     let current: Element | null = shape;
     while (current) {
-      opacity *= Number.parseFloat(getComputedStyle(current).opacity) || 0;
+      const ancestor = getComputedStyle(current);
+      opacity *= Number.parseFloat(ancestor.opacity) || 0;
+      if (ancestor.animationName && ancestor.animationName !== 'none') {
+        animations.push(ancestor.animationName);
+      }
       if (current === station) break;
       current = current.parentElement;
     }
     // Rounded, because float multiplication of ancestor opacities is not
     // exact and a 1e-16 difference is not a visible one.
     const style = getComputedStyle(shape);
-    // `animationName` is recorded SYMBOLICALLY rather than sampled. Whether a
+    // Animations are recorded SYMBOLICALLY rather than sampled: whether a
     // thing moves is a real visual difference, and it is the one property here
     // that cannot be read off a single frame — see FREEZE_ANIMATIONS_CSS.
-    const label =
-      shape === station ? 'group' : `${style.fill}|${style.fillOpacity}|${style.stroke}|${style.animationName}`;
-    parts.push(`${label}|${opacity.toFixed(4)}`);
+    const motion = animations.length > 0 ? animations.join('+') : 'still';
+    const label = shape === station ? 'group' : `${style.fill}|${style.fillOpacity}|${style.stroke}`;
+    parts.push(`${label}|${motion}|${opacity.toFixed(4)}`);
   }
   return parts.join(';');
 }
@@ -405,6 +492,27 @@ const main = async () => {
       failures.push(`${PROBE_OFFLINE}: expected an offline occupant, got '${occupant.activity}'`);
     }
     occupantLook.set(probe, await signatureFor(floor, 'build-floor', occupant.stationId));
+
+    // The motion claim, measured in the browser rather than read off the
+    // stylesheet. `signatureFor` has just loaded this state's page.
+    if (occupant.stationId !== null) {
+      const moving = await page.evaluate(readFigureMotion, occupant.stationId);
+      const expected = CLASSES_THAT_MUST_MOVE.includes(
+        probe === PROBE_OFFLINE ? 'offline' : ACTIVITY_PLAN_CLASS[probe],
+      );
+      if (expected && moving.length === 0) {
+        failures.push(
+          `activity: ${probe} is a class the floor promises to animate, but no animation ` +
+            'reaches its figure in the browser',
+        );
+      }
+      if (!expected && moving.length > 0) {
+        failures.push(
+          `activity: ${probe} is a stalled or idle state, but its figure animates ` +
+            `(${moving.join(', ')}) — motion here asserts work that is not happening`,
+        );
+      }
+    }
   }
 
   function compare<T extends string>(
@@ -431,9 +539,10 @@ const main = async () => {
   }
 
   // Activities: the plan alone carries the whole distinction, so the plain
-  // biconditional is the right claim.
+  // biconditional is the right claim — but the oracle is this file's OWN
+  // declaration, never the production mapping. See ACTIVITY_PLAN_CLASS.
   compare('activity', ACTIVITY_PROBES, occupantLook, (probe) =>
-    probe === PROBE_OFFLINE ? 'offline' : STATUS_ACTIVITY[probe],
+    probe === PROBE_OFFLINE ? 'offline' : ACTIVITY_PLAN_CLASS[probe],
   );
 
   /* ---- connections: three rules, because one was not enough ----------- */
