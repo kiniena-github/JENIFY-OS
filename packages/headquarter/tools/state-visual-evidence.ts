@@ -208,17 +208,58 @@ const ACTIVITY_PLAN_CLASS: Record<ActivityStatus, string> = {
  */
 const CLASSES_THAT_MUST_MOVE: readonly string[] = ['working', 'reviewing'];
 
-/** Every animation running anywhere inside this station's figure. */
-function readFigureMotion(stationId: string): string[] {
+/**
+ * Every animation inside this station's figure that DEMONSTRABLY moves it.
+ *
+ * An animation name is not motion. `animationName` stays non-`none` when the
+ * keyframes are flattened to identical values, or when the duration is
+ * overridden to `0s` — and in both cases the figure stands perfectly still
+ * while the name still reads `hq-work`. Verified both ways: each left this
+ * tool AND all 81 unit tests passing (Codex review of `981cedf`).
+ *
+ * So each animation is seeked to distinct phases through the Web Animations
+ * API and the resulting computed style compared. If nothing changes between
+ * phases, the animation is not motion, whatever it is called. `moves` is that
+ * measurement; `name` and `duration` are reported for the failure message.
+ */
+interface FigureMotion {
+  name: string;
+  duration: number;
+  moves: boolean;
+}
+
+function readFigureMotion(stationId: string): FigureMotion[] {
   const station = document.querySelector(`[data-station="${stationId}"]`);
   const figure = station ? station.querySelector('.hq-figure') : null;
   if (!figure) return [];
-  const names: string[] = [];
+  const found: FigureMotion[] = [];
   for (const node of [figure, ...figure.querySelectorAll('*')]) {
     const name = getComputedStyle(node).animationName;
-    if (name && name !== 'none') names.push(name);
+    if (!name || name === 'none') continue;
+    let duration = 0;
+    let moves = false;
+    // NOTE: written inline, no helper functions — this is serialised into the
+    // browser, where the build's `keepNames` helper does not exist.
+    for (const animation of node.getAnimations()) {
+      const timing = animation.effect ? animation.effect.getComputedTiming() : null;
+      const span = timing ? Number(timing.duration) || 0 : 0;
+      if (span > duration) duration = span;
+      if (span <= 0) continue;
+      const seen: string[] = [];
+      const resume = animation.currentTime;
+      for (const fraction of [0, 0.25, 0.5, 0.75]) {
+        animation.currentTime = span * fraction;
+        const at = getComputedStyle(node);
+        seen.push(`${at.transform}|${at.opacity}|${at.fillOpacity}|${at.fill}|${at.stroke}`);
+      }
+      animation.currentTime = resume;
+      for (const sample of seen) {
+        if (sample !== seen[0]) moves = true;
+      }
+    }
+    found.push({ name, duration, moves });
   }
-  return names;
+  return found;
 }
 
 function assertMeaningsAreHonest(): string[] {
@@ -496,20 +537,26 @@ const main = async () => {
     // The motion claim, measured in the browser rather than read off the
     // stylesheet. `signatureFor` has just loaded this state's page.
     if (occupant.stationId !== null) {
-      const moving = await page.evaluate(readFigureMotion, occupant.stationId);
+      const animations = await page.evaluate(readFigureMotion, occupant.stationId);
+      const moving = animations.filter((entry) => entry.moves);
       const expected = CLASSES_THAT_MUST_MOVE.includes(
         probe === PROBE_OFFLINE ? 'offline' : ACTIVITY_PLAN_CLASS[probe],
       );
       if (expected && moving.length === 0) {
+        // Distinguish "no rule reached it" from "a rule reached it and does
+        // nothing", because they are different bugs with the same symptom.
+        const inert = animations
+          .map((entry) => `${entry.name} (duration ${entry.duration}ms, no change across phases)`)
+          .join(', ');
         failures.push(
-          `activity: ${probe} is a class the floor promises to animate, but no animation ` +
-            'reaches its figure in the browser',
+          `activity: ${probe} is a class the floor promises to animate, but nothing moves its ` +
+            `figure in the browser — ${animations.length === 0 ? 'no animation reaches it' : `inert: ${inert}`}`,
         );
       }
       if (!expected && moving.length > 0) {
         failures.push(
           `activity: ${probe} is a stalled or idle state, but its figure animates ` +
-            `(${moving.join(', ')}) — motion here asserts work that is not happening`,
+            `(${moving.map((entry) => entry.name).join(', ')}) — motion here asserts work that is not happening`,
         );
       }
     }
