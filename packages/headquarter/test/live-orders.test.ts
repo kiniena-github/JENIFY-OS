@@ -218,12 +218,20 @@ describe('idempotency', () => {
     // tool that stripped or normalised control characters would have silently
     // changed EVERY idempotency key, breaking dedup of in-flight orders with
     // no visible diff. Same bytes at run time; escape in the source.
-    const source = readFileSync(
-      fileURLToPath(new URL('../src/live/orders.ts', import.meta.url)),
-      'utf8',
-    );
-    // eslint-disable-next-line no-control-regex
-    expect(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(source)).toBe(false);
+    //
+    // THIS FILE is covered too. The guard used to read only orders.ts, and the
+    // commit that cleaned orders.ts wrote three raw control bytes into the test
+    // beside it — two NULs and a 0x1f — so the guard passed while the file
+    // asserting it was itself `data` to file, grep and diff. That is not merely
+    // cosmetic here: a tool that stripped those bytes would quietly turn the
+    // collision case ('p\u0000q' vs 'q\u0000r') into an unrelated pair, and this
+    // suite would go on passing under a name that no longer described what it
+    // ran. A guard that does not cover the file it lives in is half a guard.
+    for (const file of ['../src/live/orders.ts', './live-orders.test.ts']) {
+      const source = readFileSync(fileURLToPath(new URL(file, import.meta.url)), 'utf8');
+      // eslint-disable-next-line no-control-regex
+      expect(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(source), file).toBe(false);
+    }
   });
 
   it('ignores surrounding whitespace, so a stray newline is not a new order', () => {
@@ -316,10 +324,10 @@ describe('idempotency', () => {
   it('cannot have one field imitate a boundary in another', () => {
     const base = { route: 'AUTO' as const, requestedBy: 'founder' };
     expect(
-      directOrderIdempotencyKey({ ...base, project: 'p q', instruction: 'r' }),
-    ).not.toBe(directOrderIdempotencyKey({ ...base, project: 'p', instruction: 'q r' }));
+      directOrderIdempotencyKey({ ...base, project: 'p\u0000q', instruction: 'r' }),
+    ).not.toBe(directOrderIdempotencyKey({ ...base, project: 'p', instruction: 'q\u0000r' }));
     // The same holds for any separator anyone might reach for next.
-    for (const hostile of ['|', ':', '', '2:', '7:founder']) {
+    for (const hostile of ['|', ':', '\u001f', '2:', '7:founder']) {
       expect(
         directOrderIdempotencyKey({ ...base, project: `p${hostile}q`, instruction: 'r' }),
         hostile,
