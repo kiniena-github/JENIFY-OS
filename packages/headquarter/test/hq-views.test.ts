@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import type { ActivityEvent } from '../src/contracts/events.js';
+import type { WorkerDescriptor } from '../src/contracts/workers.js';
 import { latestTaskStates } from '../src/ui/model.js';
-import { founderDashboard, workerStatuses, projectCards, projectTimeline } from '../src/ui/views.js';
+import {
+  founderDashboard,
+  workerStatuses,
+  projectCards,
+  projectTimeline,
+  projectBoard,
+  founderAttentionQueue,
+  activityFeed,
+  specialistProfiles,
+} from '../src/ui/views.js';
 
 let seq = 0;
 function event(
@@ -91,5 +101,91 @@ describe('projectCards and timeline', () => {
     expect(os).toMatchObject({ openCount: 6, blockedCount: 2, waitingForFounderCount: 1, completedCount: 1 });
     const timeline = projectTimeline(EVENTS, 'QOS');
     expect(timeline.map((timelineEvent) => timelineEvent.id)).toEqual(['e9']);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Issue #138 — executive read models                                  */
+/* ------------------------------------------------------------------ */
+
+describe('projectBoard', () => {
+  const board = projectBoard(latestTaskStates(EVENTS));
+  const os = board.find((card) => card.project === 'JENIFY-OS')!;
+  const qos = board.find((card) => card.project === 'QOS')!;
+
+  it('reports health from recorded state, blockers winning over Founder gates', () => {
+    expect(os.health).toBe('blocked'); // t-blocked + t-unknown
+    expect(qos.health).toBe('idle'); // only a completed task
+  });
+
+  it('reports the completed share of RECORDED tasks, never an invented percentage', () => {
+    expect(os.totalCount).toBe(7);
+    expect(os.completedCount).toBe(1);
+    expect(os.completedShare).toBeCloseTo(1 / 7);
+    expect(qos.completedShare).toBe(1);
+  });
+
+  it('surfaces active workers, the first blocker, the latest win and the next queued item', () => {
+    expect(os.activeWorkers).toEqual(['claude']);
+    expect(os.blockers.map((state) => state.taskId)).toEqual(['t-unknown', 't-blocked']);
+    expect(os.latestCompleted?.taskId).toBe('t-done-today');
+    expect(os.nextQueued?.taskId).toBe('t-queued');
+    expect(os.latestUpdate?.taskId).toBe('t-rework');
+  });
+
+  it('leaves a field null rather than guessing when nothing is recorded', () => {
+    expect(qos.nextQueued).toBeNull();
+    expect(qos.blockers).toEqual([]);
+    expect(qos.activeWorkers).toEqual([]);
+  });
+});
+
+describe('founderAttentionQueue', () => {
+  const queue = founderAttentionQueue(founderDashboard(latestTaskStates(EVENTS), '2026-08-26'));
+
+  it('puts approval gates ahead of blockers and the oldest item first in each group', () => {
+    expect(queue.map((item) => [item.state.taskId, item.reason])).toEqual([
+      ['t-approval', 'needs_approval'],
+      ['t-blocked', 'blocked'],
+      ['t-unknown', 'outcome_unknown'],
+    ]);
+  });
+
+  it('is empty when nothing needs a human', () => {
+    expect(founderAttentionQueue({ now: [], doneToday: [], blocked: [], waitingForFounder: [], next: [] })).toEqual([]);
+  });
+});
+
+describe('activityFeed', () => {
+  it('returns newest-first by canonical seq and includes annotation events', () => {
+    const feed = activityFeed(EVENTS, 3);
+    expect(feed.map((event) => event.id)).toEqual(['e11', 'e10', 'e9']);
+    expect(feed.some((event) => event.status === null)).toBe(true);
+  });
+
+  it('never returns more than asked for, and tolerates a zero limit', () => {
+    expect(activityFeed(EVENTS, 0)).toHaveLength(0);
+    expect(activityFeed(EVENTS, 999)).toHaveLength(EVENTS.length);
+  });
+});
+
+describe('specialistProfiles', () => {
+  const registered: WorkerDescriptor[] = [
+    { id: 'claude', displayName: 'Claude', vendor: 'Anthropic', role: 'build_lead', allowedCapabilities: [], active: true },
+    { id: 'nobody', displayName: 'Idle Tool', vendor: 'Vendor', role: 'specialist_tool', allowedCapabilities: [], active: true },
+  ];
+
+  it('joins registered specialists with the workload derived from events', () => {
+    const profiles = specialistProfiles(registered, workerStatuses(latestTaskStates(EVENTS)));
+    expect(profiles.map((profile) => profile.descriptor.id)).toEqual(['claude', 'nobody']);
+    expect(profiles[0].status?.activeCount).toBe(2);
+    // A registered specialist with no recorded activity gets null, not zeroes
+    // presented as if they were measured.
+    expect(profiles[1].status).toBeNull();
+  });
+
+  it('does not invent a specialist for a worker that only appears in events', () => {
+    const profiles = specialistProfiles(registered, workerStatuses(latestTaskStates(EVENTS)));
+    expect(profiles.some((profile) => profile.descriptor.id === 'jules')).toBe(false);
   });
 });
