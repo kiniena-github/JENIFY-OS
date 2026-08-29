@@ -1026,7 +1026,7 @@ export class HeadquarterOperations {
 
   /** Every declaration currently in force. A read, available to any caller. */
   workerProviderDeclarations(): WorkerProviderRecord[] {
-    return this.queue.workerProviders.list();
+    return this.queue.listWorkerProviders();
   }
 
   // ---- worker replacement ----

@@ -38,6 +38,7 @@ import {
   WorkerProviderDirectory,
   type ProviderBindingViolation,
   type WorkerProviderLookup,
+  type WorkerProviderRecord,
 } from './provider-binding.js';
 import {
   DEFAULT_APPROVAL_TTL_MS,
@@ -111,7 +112,24 @@ export class OperatorQueue {
    * `HeadquarterOperations`, so nothing on the execution path — which is what
    * holds a queue — can move its own provider identity.
    */
-  readonly workerProviders: WorkerProviderLookup;
+  /**
+   * ECMAScript `#private`, and read through a method rather than exposed.
+   *
+   * It was a public `readonly` reference, and `readonly` is compile-time only:
+   * a worker holding the queue could run
+   * `queue.workerProviders.providerOf = () => 'CLAUDE'`, or replace the object
+   * outright, and both `selectClaimable` and `assertProviderBinding` would
+   * consult the patched lookup — so a CLAUDE-bound task could be claimed with
+   * no database write and no visit to `declareWorkerProvider` at all (issue
+   * #200, Codex exact-head finding on `6cdb3dc`). The FIFTH mechanism at this
+   * boundary, and the first that never touches the data.
+   *
+   * The object-graph test added the round before missed it because it searched
+   * for database-shaped objects; the danger here is a mutable collaborator,
+   * not a reachable database. Both the reference and its methods are now out of
+   * reach.
+   */
+  readonly #workerProviders: WorkerProviderLookup;
 
   /**
    * ECMAScript `#private`. TypeScript `private` erases to a public property, so
@@ -132,7 +150,7 @@ export class OperatorQueue {
     this.#policyCtx = policyCtx;
     this.capabilities = new CapabilityRegistry(db);
     this.evidence = new EvidenceLog(db);
-    this.workerProviders = new WorkerProviderDirectory(db);
+    this.#workerProviders = new WorkerProviderDirectory(db);
   }
 
   /**
@@ -147,7 +165,7 @@ export class OperatorQueue {
   private assertProviderBinding(task: OperatorTask, workerId: string): void {
     const binding = readProviderBinding(task.payload);
     if (!binding.bound) return;
-    const workerProvider = this.workerProviders.providerOf(workerId);
+    const workerProvider = this.#workerProviders.providerOf(workerId);
     const violation: ProviderBindingViolation | null = checkProviderBinding(
       task.id,
       workerId,
@@ -202,7 +220,7 @@ export class OperatorQueue {
     workerId: string,
     capabilityId: string,
   ): { task: OperatorTask | null; refusal: ProviderBindingViolation | null } {
-    const workerProvider = this.workerProviders.providerOf(workerId);
+    const workerProvider = this.#workerProviders.providerOf(workerId);
     // Queued depth per capability is small in HQ; ids and payloads only.
     const rows = this.#db
       .prepare(
@@ -408,6 +426,18 @@ export class OperatorQueue {
    * than a silent `null` so a frozen worker cannot mistake "you are being
    * replaced" for "the queue is empty".
    */
+  /**
+   * Read-only view of the declared worker→provider map.
+   *
+   * A method rather than a property: what it returns is a copied array of plain
+   * records, so a caller can read the declarations without holding the object
+   * the binding checks consult. Patching this method on one queue instance
+   * changes what that caller sees and nothing about what `claim` enforces.
+   */
+  listWorkerProviders(): WorkerProviderRecord[] {
+    return this.#workerProviders.list();
+  }
+
   claim(workerId: string, capabilityId: string, leaseMs = 5 * 60_000): OperatorTask | null {
     // Deny-by-default, and FIRST: before any read, any state mutation, and
     // crucially before the single-use approval nonce is consumed below, so a

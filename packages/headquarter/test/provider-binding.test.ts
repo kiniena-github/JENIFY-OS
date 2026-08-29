@@ -41,6 +41,15 @@ const BOTH_PROVIDERS = {
  * providers. This is exactly the shape the finding describes: one shared
  * capability, two providers, one queue.
  */
+
+/**
+ * Read a declaration the way a caller legitimately can now: through the copied
+ * listing, not by holding the lookup object the binding checks consult.
+ */
+function providerOfVia(fx: Fixture, workerId: string): string | null {
+  return fx.ops.queue.listWorkerProviders().find((r) => r.workerId === workerId)?.providerId ?? null;
+}
+
 function bindingFixture(): Fixture {
   const fixture = setupFixture();
   registerDirectOrderCapability(fixture.ops);
@@ -183,7 +192,7 @@ describe('deny by default: an undeclared worker holds no provider', () => {
     }
     // And a revoked declaration takes effect immediately.
     expectOk(fx.ops.revokeWorkerProvider({ workerId: 'claude-worker', founderId: 'founder' }));
-    expect(fx.ops.queue.workerProviders.providerOf('claude-worker')).toBeNull();
+    expect(providerOfVia(fx, 'claude-worker')).toBeNull();
   });
 
   it('leaves an unbound task alone — the binding narrows, it never widens', () => {
@@ -244,16 +253,61 @@ describe('the binding holds at start, not only at claim', () => {
 });
 
 describe('the provider map is configuration, not something a worker can move', () => {
-  it('offers no write path at all from a queue handle', () => {
-    // The hostile shape from the finding: a worker holds a queue, so anything
-    // reachable from a queue is reachable by a worker. There must be nothing
-    // there to reach — not a guarded method, no method.
+  it('offers no write path, and no lookup OBJECT, from a queue handle', () => {
+    // The hostile shape: a worker holds a queue, so anything reachable from a
+    // queue is reachable by a worker. This used to assert that the reachable
+    // lookup had `providerOf` but not `declare` — which passed while the
+    // lookup itself was patchable (Codex on `6cdb3dc`). The stronger property
+    // is that there is no lookup object to reach at all.
     const fx = bindingFixture();
-    const lookup = fx.ops.queue.workerProviders as unknown as Record<string, unknown>;
-    expect(typeof lookup.providerOf).toBe('function');
-    expect(lookup.declare).toBeUndefined();
-    expect(lookup.revoke).toBeUndefined();
-    expect(Object.getPrototypeOf(lookup)).not.toHaveProperty('declare');
+    const queue = fx.ops.queue as unknown as Record<string, unknown>;
+    expect(queue.workerProviders).toBeUndefined();
+    expect(queue.declare).toBeUndefined();
+    expect(queue.revoke).toBeUndefined();
+    expect(Object.getPrototypeOf(queue)).not.toHaveProperty('declare');
+    // Reading declarations is still possible, through a copy.
+    expect(typeof queue.listWorkerProviders).toBe('function');
+  });
+
+  /**
+   * Codex exact-head finding on `6cdb3dc` (P1) — the FIFTH mechanism, and the
+   * first that never touches the data. `readonly` is compile-time only, so a
+   * worker could patch `providerOf` or replace the lookup wholesale, and both
+   * `selectClaimable` and `assertProviderBinding` would consult the patched
+   * object. The previous round's object-graph test missed it because it
+   * searched for database-shaped objects; the hazard here is a mutable
+   * collaborator, so this test attempts the attack rather than describing it.
+   */
+  it('cannot be made to lie by patching anything a worker can reach', () => {
+    const fx = bindingFixture();
+    const queue = fx.ops.queue as unknown as Record<string, unknown>;
+
+    // Every documented shape of the attack, attempted for real.
+    try {
+      (queue.workerProviders as Record<string, unknown>).providerOf = () => 'CLAUDE';
+    } catch {
+      /* nothing to patch is the outcome under test */
+    }
+    try {
+      queue.workerProviders = { providerOf: () => 'CLAUDE', list: () => [] };
+    } catch {
+      /* frozen or absent — also fine */
+    }
+    try {
+      queue.listWorkerProviders = () => [
+        { workerId: 'codex-worker', providerId: 'CLAUDE', declaredBy: 'me', declaredAt: 'now' },
+      ];
+    } catch {
+      /* also fine */
+    }
+
+    // A CODEX worker still cannot claim a CLAUDE-bound task.
+    const taskId = queuedClaudeOrder(fx);
+    expect(() => fx.ops.queue.claim('codex-worker', DIRECT_ORDER_CAPABILITY.id)).toThrow(
+      ProviderBindingViolation,
+    );
+    expect(fx.ops.queue.get(taskId)!.claimedBy).toBeNull();
+    expect(fx.ops.queue.get(taskId)!.status).toBe('queued');
   });
 
   it('refuses a declaration from a worker, including one about itself', () => {
@@ -266,7 +320,7 @@ describe('the provider map is configuration, not something a worker can move', (
       founderId: 'codex-worker',
     });
     expect(escalation.ok).toBe(false);
-    expect(fx.ops.queue.workerProviders.providerOf('codex-worker')).toBe('CODEX');
+    expect(providerOfVia(fx, 'codex-worker')).toBe('CODEX');
 
     // And the order it was after is still refused.
     queuedClaudeOrder(fx);
@@ -284,7 +338,7 @@ describe('the provider map is configuration, not something a worker can move', (
       });
       expect(result.ok).toBe(false);
     }
-    expect(fx.ops.queue.workerProviders.providerOf('claude-worker')).toBe('CLAUDE');
+    expect(providerOfVia(fx, 'claude-worker')).toBe('CLAUDE');
   });
 
   it('fails closed on a provider id the routing registry does not know', () => {
@@ -297,7 +351,7 @@ describe('the provider map is configuration, not something a worker can move', (
       });
       expect(result.ok).toBe(false);
     }
-    expect(fx.ops.queue.workerProviders.providerOf('new-worker')).toBeNull();
+    expect(providerOfVia(fx, 'new-worker')).toBeNull();
   });
 
   it('records the authorized declaration, attributed to the resolved principal', () => {
