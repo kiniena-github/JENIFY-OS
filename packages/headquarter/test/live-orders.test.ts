@@ -20,6 +20,7 @@ import { DEFAULT_ACTOR_AUTHENTICATION } from '../src/live/local-trust.js';
 import {
   AUTO_ROUTE_PREFERENCE,
   DIRECT_ORDER_CAPABILITY,
+  directOrderCapabilityState,
   directOrderIdempotencyKey,
   MAX_INSTRUCTION_LENGTH,
   MAX_TITLE_LENGTH,
@@ -284,6 +285,63 @@ describe('idempotency', () => {
    * findings before it: a receipt naming a task that does not carry what the
    * caller asked for.
    */
+  /**
+   * Codex exact-head findings on `5a19350`. Three separate ways an order could
+   * be created on a weaker footing than it claimed.
+   */
+  it('refuses a trust marker outside the vocabulary', () => {
+    const { ops } = ordersFixture();
+    // `ActorAuthentication` has no `authenticated` member on purpose, but a
+    // union constrains TypeScript callers only — a JSON caller could previously
+    // persist this straight into the approval digest.
+    const result = submitDirectOrder(
+      ops,
+      { ...ORDER, actorAuthentication: 'authenticated' as never },
+      CLAUDE_ONLY,
+    );
+    if (result.ok) throw new Error('expected refusal');
+    expect(result.error.code).toBe('invalid_input');
+    expect(result.error.message).toContain('authenticate nobody');
+    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+  });
+
+  it('still accepts both markers the vocabulary can actually mean', () => {
+    for (const marker of ['unauthenticated', 'unauthenticated_local_assertion'] as const) {
+      const { ops } = ordersFixture();
+      const result = submitDirectOrder(ops, { ...ORDER, actorAuthentication: marker }, CLAUDE_ONLY);
+      if (!result.ok) throw new Error(`expected ok for ${marker}`);
+      expect(result.data.task.payload.actorAuthentication).toBe(marker);
+    }
+  });
+
+  it('refuses to ride on a capability whose definition has drifted', () => {
+    const { ops } = ordersFixture();
+    // Classification follows the REGISTERED definition, not this module's
+    // constant, so a drifted row would let a free-text instruction skip the
+    // Founder gate entirely.
+    ops.queue.capabilities.register({
+      ...DIRECT_ORDER_CAPABILITY,
+      riskClass: 'reversible',
+    } as never);
+    expect(directOrderCapabilityState(ops)).toBe('drifted');
+    const result = submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
+    if (result.ok) throw new Error('expected refusal');
+    expect(result.error.code).toBe('capability_definition_drifted');
+    expect(result.error.message).toContain('riskClass');
+    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+    expect(ops.queue.listByStatus('queued')).toHaveLength(0);
+  });
+
+  it('reports an intact definition as enabled, and does not repair a drifted one', () => {
+    const { ops } = ordersFixture();
+    expect(directOrderCapabilityState(ops)).toBe('enabled');
+    ops.queue.capabilities.register({ ...DIRECT_ORDER_CAPABILITY, idempotent: false } as never);
+    expect(directOrderCapabilityState(ops)).toBe('drifted');
+    submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
+    // Invocation refuses; it never quietly re-registers the definition.
+    expect(directOrderCapabilityState(ops)).toBe('drifted');
+  });
+
   it('treats a different title as a different order', () => {
     const { ops } = ordersFixture();
     const first = submitDirectOrder(ops, { ...ORDER, title: 'Q3 plan' }, CLAUDE_ONLY);
@@ -607,5 +665,51 @@ describe('the published title is part of what makes an order the same order', ()
     expect(directOrderIdempotencyKey({ ...base, title: 'One', instruction: 'do a thing' })).not.toBe(
       directOrderIdempotencyKey({ ...base, title: '', instruction: 'Onedo a thing' }),
     );
+  });
+});
+
+/**
+ * Codex exact-head finding on `5a19350` (P1). The trust marker lived only in
+ * the task payload, and the console read model excludes payload fields by
+ * design — so the second human whose approval is the containment for an
+ * unauthenticated `--as` assertion could not see what they were containing.
+ */
+describe('an approver can see how much is known about the requester', () => {
+  it('projects the marker into the canonical approval read model', () => {
+    const { ops } = ordersFixture();
+    const created = submitDirectOrder(
+      ops,
+      { ...ORDER, actorAuthentication: 'unauthenticated_local_assertion' },
+      CLAUDE_ONLY,
+    );
+    if (!created.ok) throw new Error('expected ok');
+    const card = founderConsole(ops).approvals.find((a) => a.taskId === created.data.task.id);
+    expect(card).toBeDefined();
+    expect(card!.requesterAuthentication).toBe('unauthenticated_local_assertion');
+  });
+
+  it('defaults to the weakest marker rather than to silence', () => {
+    const { ops } = ordersFixture();
+    const created = submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
+    if (!created.ok) throw new Error('expected ok');
+    const card = founderConsole(ops).approvals.find((a) => a.taskId === created.data.task.id);
+    expect(card!.requesterAuthentication).toBe(DEFAULT_ACTOR_AUTHENTICATION);
+  });
+
+  it('never publishes a marker it does not recognise', () => {
+    // Belt and braces: submission refuses an unknown marker, but the read model
+    // is published, so it whitelists independently rather than trusting that.
+    const { ops, db } = ordersFixture();
+    const created = submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
+    if (!created.ok) throw new Error('expected ok');
+    const task = ops.queue.get(created.data.task.id)!;
+    db
+      .prepare(`UPDATE op_tasks SET payload = ? WHERE id = ?`)
+      .run(
+        JSON.stringify({ ...task.payload, actorAuthentication: 'authenticated by nobody' }),
+        task.id,
+      );
+    const card = founderConsole(ops).approvals.find((a) => a.taskId === task.id);
+    expect(card!.requesterAuthentication).toBe('unrecognised_marker');
   });
 });

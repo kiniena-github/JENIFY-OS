@@ -78,7 +78,8 @@ import { OperatorQueue, type OperatorTask, type ReconcileDecision } from '../ope
 import {
   ProviderBindingViolation,
   ProviderDeclarationRejected,
-  WorkerProviderRegistrar,
+  createWorkerProviderRegistrar,
+  type WorkerProviderRegistrar,
   type WorkerProviderRecord,
 } from '../operator/provider-binding.js';
 import { ensureApplicationSchema } from './db.js';
@@ -291,7 +292,7 @@ export class HeadquarterOperations {
     // (issue #200, Codex round-3 P1 #1). It is private: the only ways in are
     // `declareWorkerProvider`/`revokeWorkerProvider`, which resolve the actor
     // and require approval authority first.
-    this.workerProviderRegistrar = new WorkerProviderRegistrar(db);
+    this.workerProviderRegistrar = createWorkerProviderRegistrar(db);
     this.workers =
       options.workers ?? narrowByRegistry(new SpecialistDirectoryAdapter(this.store), options.memberRegistry);
     this.principals = options.humanPrincipals ?? new HumanPrincipalRegistry(db);

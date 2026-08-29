@@ -174,7 +174,7 @@ export class WorkerProviderDirectory implements WorkerProviderLookup {
 /** Raised when a provider declaration is refused before it is written. */
 export class ProviderDeclarationRejected extends Error {
   constructor(
-    readonly reason: 'invalid_input' | 'unknown_provider',
+    readonly reason: 'invalid_input' | 'unknown_provider' | 'not_permitted',
     message: string,
   ) {
     super(message);
@@ -199,7 +199,42 @@ export class ProviderDeclarationRejected extends Error {
  * queue is empty" rather than as the configuration error it is. Deny by
  * default on an unknown provider, like every other unknown tag in this system.
  */
+const REGISTRAR_CONSTRUCTION_KEY: unique symbol = Symbol('worker-provider-registrar');
+
+/**
+ * Hand the registrar to the authorized service boundary, and to nothing else.
+ *
+ * Removing the registrar from the queue's property was not enough (issue #200,
+ * Codex exact-head finding on `5a19350`): the class stayed publicly
+ * constructible and `operator/index.ts` re-exported it, so any worker or plugin
+ * holding an `HqDatabase` could build one, redeclare itself as the provider a
+ * queued order is bound to, and walk straight past
+ * `HeadquarterOperations.declareWorkerProvider` — the method that actually
+ * resolves the actor and checks approval authority. An authority boundary you
+ * can go around is decoration.
+ *
+ * ESM has no package-private class, so reachability alone cannot carry this.
+ * The construction key can: it is module-local, exported to nobody, and the
+ * constructor refuses without it. `operator/index.ts` no longer re-exports this
+ * module either, so the public surface does not even offer the name.
+ */
+export function createWorkerProviderRegistrar(db: HqDatabase): WorkerProviderRegistrar {
+  return new WorkerProviderRegistrar(db, REGISTRAR_CONSTRUCTION_KEY);
+}
+
 export class WorkerProviderRegistrar extends WorkerProviderDirectory {
+  constructor(db: HqDatabase, key: symbol) {
+    if (key !== REGISTRAR_CONSTRUCTION_KEY) {
+      throw new ProviderDeclarationRejected(
+        'not_permitted',
+        'The worker→provider registrar is the write mechanism behind an authority gate, not a ' +
+          'public class. Declare a provider through HeadquarterOperations.declareWorkerProvider, ' +
+          'which resolves the actor and requires approval authority.',
+      );
+    }
+    super(db);
+  }
+
   /** Declare (or re-declare) which provider a worker executes as. */
   declare(workerId: string, providerId: string, declaredBy: string): WorkerProviderRecord {
     if (!workerId?.trim() || !providerId?.trim() || !declaredBy?.trim()) {

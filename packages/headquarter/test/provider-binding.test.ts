@@ -19,10 +19,14 @@ import { founderConsole } from '../src/application/console.js';
 import { taskActionDigest } from '../src/operator/approvals.js';
 import {
   checkProviderBinding,
+  createWorkerProviderRegistrar,
   EXECUTION_PROVIDER_KEY,
   ProviderBindingViolation,
+  ProviderDeclarationRejected,
   readProviderBinding,
+  WorkerProviderRegistrar,
 } from '../src/operator/provider-binding.js';
+import { openMemoryHqDatabase } from '../src/store/db.js';
 import {
   DIRECT_ORDER_CAPABILITY,
   registerDirectOrderCapability,
@@ -412,5 +416,46 @@ describe('the bound provider is part of the approved action', () => {
       payload: { ...task.payload, [EXECUTION_PROVIDER_KEY]: 'CODEX' },
     };
     expect(taskActionDigest(swapped)).not.toBe(taskActionDigest(task));
+  });
+});
+
+/**
+ * Codex exact-head finding on `5a19350` (P1). Removing the registrar from the
+ * queue's property was not enough: the class stayed publicly constructible and
+ * `operator/index.ts` re-exported the whole module, so a worker or plugin
+ * holding an `HqDatabase` could build one and redeclare itself as the provider
+ * a queued order is bound to — walking straight past the authority gate in
+ * `HeadquarterOperations.declareWorkerProvider`.
+ */
+describe('the provider write mechanism is not reachable around the authority gate', () => {
+  it('refuses to be constructed without the module-local key', () => {
+    const db = openMemoryHqDatabase();
+    // The deep import still resolves — ESM has no package-private class — but
+    // the constructor is the gate, so reachability alone buys nothing.
+    expect(() => new WorkerProviderRegistrar(db, Symbol('forged'))).toThrow(
+      ProviderDeclarationRejected,
+    );
+    try {
+      new WorkerProviderRegistrar(db, Symbol('forged'));
+    } catch (error) {
+      expect((error as ProviderDeclarationRejected).reason).toBe('not_permitted');
+      expect((error as Error).message).toContain('declareWorkerProvider');
+    }
+  });
+
+  it('is not offered on the operator package surface at all', async () => {
+    const operatorSurface = await import('../src/operator/index.js');
+    expect('WorkerProviderRegistrar' in operatorSurface).toBe(false);
+    expect('createWorkerProviderRegistrar' in operatorSurface).toBe(false);
+    // The read side stays public — the queue needs it and it grants nothing.
+    expect('WorkerProviderDirectory' in operatorSurface).toBe(true);
+  });
+
+  it('still works for the authorized service boundary', () => {
+    const db = openMemoryHqDatabase();
+    const registrar = createWorkerProviderRegistrar(db);
+    const record = registrar.declare('w1', 'CLAUDE', 'founder');
+    expect(record.providerId).toBe('CLAUDE');
+    expect(registrar.providerOf('w1')).toBe('CLAUDE');
   });
 });

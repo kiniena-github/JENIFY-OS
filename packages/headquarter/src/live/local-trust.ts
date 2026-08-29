@@ -69,6 +69,30 @@ export type ActorAuthentication =
 export const DEFAULT_ACTOR_AUTHENTICATION: ActorAuthentication = 'unauthenticated';
 
 /**
+ * The vocabulary, as a runtime value rather than only a compile-time union.
+ *
+ * The type above says there is no `authenticated` member, and that was enforced
+ * by TypeScript alone — which enforces nothing on a JSON or plain-JavaScript
+ * caller (issue #200, Codex exact-head finding on `5a19350`). Such a caller
+ * could pass `actorAuthentication: 'authenticated'` and have it persisted
+ * verbatim inside the approval digest, manufacturing exactly the trust claim
+ * this module exists to make unsayable. An invariant that holds only at compile
+ * time does not hold at the boundary where untrusted callers arrive.
+ */
+const KNOWN_ACTOR_AUTHENTICATION: Record<ActorAuthentication, true> = {
+  unauthenticated_local_assertion: true,
+  unauthenticated: true,
+};
+
+/** Whether a caller-supplied marker is one this system can actually mean. */
+export function isKnownActorAuthentication(value: unknown): value is ActorAuthentication {
+  return (
+    typeof value === 'string' &&
+    Object.prototype.hasOwnProperty.call(KNOWN_ACTOR_AUTHENTICATION, value)
+  );
+}
+
+/**
  * One-line classification of the CLI, quoted by the CLI itself and by the UI
  * so the two can never drift into different claims.
  */

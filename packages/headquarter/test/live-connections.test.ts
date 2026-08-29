@@ -413,7 +413,14 @@ describe('the probe seam cannot weaken the invariants', () => {
     };
     const [status] = assessConnections(NOTHING, { now: NOW, catalog: [descriptor], probes: [broken] });
     expect(status!.state).toBe('error');
-    expect(status!.reason).toContain('probe exploded');
+    // NOTE: this assertion used to read `toContain('probe exploded')` — it
+    // asserted that the thrown MESSAGE was echoed into `reason`. Codex's
+    // exact-head finding on `5a19350` showed that is a publication path for
+    // anything an adapter puts in an exception, so the contract changed and
+    // this test changed with it. The row must still say the probe threw; it
+    // must no longer repeat what the probe said.
+    expect(status!.reason).toContain('threw an Error');
+    expect(status!.reason).not.toContain('probe exploded');
     expect(status!.effectiveCapabilities).toEqual([]);
   });
 
@@ -820,6 +827,70 @@ describe('a probe answering outside the vocabulary fails closed', () => {
     // not the bound, the exit is.
     const reason = assess({ ...honest, outcome: '\\'.repeat(500) }).reason;
     expect(reason.length).toBeLessThan(400);
+  });
+
+  /**
+   * Codex exact-head finding on `5a19350` (P1). The thrown error's MESSAGE was
+   * interpolated verbatim into `reason`, which is rendered and published — so
+   * `throw new Error('credential: …')` published the credential. The
+   * browser-safety patterns cannot catch it for the same reason as the two
+   * describer findings before this one: the key exists only inside a flattened
+   * string. This was the THIRD path by which adapter text reached `reason`.
+   */
+  it('never echoes what a throwing probe said', () => {
+    const hostile: ConnectionProbe = {
+      id: 'alien',
+      probe: () => {
+        throw new Error('credential: abcdefghijklmnop');
+      },
+    };
+    const [status] = assessConnections(NOTHING, {
+      now: NOW,
+      catalog: [descriptor],
+      probes: [hostile],
+    });
+    expect(status!.reason).not.toContain('abcdefghijklmnop');
+    expect(status!.reason).not.toContain('credential');
+    expect(status!.reason).toContain('threw an Error');
+    expect(status!.state).toBe('error');
+  });
+
+  it('does not echo an adapter-chosen error class name either', () => {
+    class CredentialLeak extends Error {}
+    const named = new CredentialLeak('nope');
+    Object.defineProperty(named.constructor, 'name', { value: 'token sk-abcdefghijklmnop' });
+    const hostile: ConnectionProbe = {
+      id: 'alien',
+      probe: () => {
+        throw named;
+      },
+    };
+    const [status] = assessConnections(NOTHING, {
+      now: NOW,
+      catalog: [descriptor],
+      probes: [hostile],
+    });
+    // A custom class name is adapter-controlled, so only built-in kinds are
+    // ever named; anything else is reported as a plain Error.
+    expect(status!.reason).not.toContain('sk-abcdefghijklmnop');
+    expect(status!.reason).toContain('threw an Error');
+  });
+
+  it('names a built-in error kind, and survives a thrown non-Error', () => {
+    const thrower = (value: unknown): ConnectionProbe => ({
+      id: 'alien',
+      probe: () => {
+        throw value;
+      },
+    });
+    const reasonFor = (value: unknown) =>
+      assessConnections(NOTHING, { now: NOW, catalog: [descriptor], probes: [thrower(value)] })[0]!
+        .reason;
+    expect(reasonFor(new TypeError('x'))).toContain('threw a TypeError');
+    // `(error as Error).message` threw outright on these, taking down the
+    // fail-closed path it was part of.
+    expect(reasonFor(null)).toContain('threw a non-Error value of type object');
+    expect(reasonFor('a string')).toContain('threw a non-Error value of type string');
   });
 
   it('still refuses to publish a credential hidden inside a structured answer', () => {

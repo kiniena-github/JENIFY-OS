@@ -241,6 +241,48 @@ function describeUnrecognised(value: unknown): string {
   return described.length > MAX_DESCRIPTION ? `${described.slice(0, MAX_DESCRIPTION)}…` : described;
 }
 
+/**
+ * Describe a thrown probe value WITHOUT echoing anything the adapter authored.
+ *
+ * This used to interpolate `(error as Error).message` straight into `reason`,
+ * which is rendered on the Connections page and written to the snapshot — so
+ * `throw new Error('credential: …')` published the credential (issue #200,
+ * Codex exact-head finding on `5a19350`). The browser-safety patterns do not
+ * save it: the credential-holder key exists only inside a flattened string, so
+ * the key walk cannot see it, exactly as in the two describer findings before
+ * this one. This is the THIRD way adapter text reached `reason`.
+ *
+ * So nothing adapter-authored is echoed at all — not the message, and not the
+ * constructor name either, since a hostile adapter controls both. Only the
+ * built-in error kind is named, from a fixed list, because that much is a fact
+ * about the JavaScript runtime rather than a string somebody chose. Anything
+ * else is reported by type.
+ *
+ * `(error as Error).message` also threw outright on `throw null`, taking down
+ * the fail-closed path it was part of; reading no property of the thrown value
+ * removes that too.
+ */
+const BUILT_IN_ERRORS: readonly string[] = [
+  'Error',
+  'TypeError',
+  'RangeError',
+  'SyntaxError',
+  'ReferenceError',
+  'EvalError',
+  'URIError',
+];
+
+function describeThrown(error: unknown): string {
+  if (error instanceof Error) {
+    // `constructor.name` is adapter-controlled for a custom subclass, so it is
+    // used only to RECOGNISE a built-in, never rendered as free text.
+    const name = error.constructor?.name;
+    if (typeof name !== 'string' || !BUILT_IN_ERRORS.includes(name)) return 'an Error';
+    return /^[AEIOU]/.test(name) ? `an ${name}` : `a ${name}`;
+  }
+  return `a non-Error value of type ${typeof error}`;
+}
+
 function describeRaw(value: unknown): string {
   if (typeof value === 'string') {
     // Truncated BEFORE quoting so the common case stays validly quoted; the
@@ -855,7 +897,7 @@ export function assessConnections(
           effectiveCapabilities: [],
           lastVerifiedAt: options.now,
           evidenceSource: `probe ${descriptor.id} threw`,
-          reason: `${descriptor.displayName}: connection probe failed (${(error as Error).message}).`,
+          reason: `${descriptor.displayName}: connection probe threw ${describeThrown(error)}.`,
         };
       }
     }

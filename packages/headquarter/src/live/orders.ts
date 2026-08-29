@@ -69,7 +69,11 @@
 
 import { createHash } from 'node:crypto';
 import { assertBrowserSafe } from './redaction.js';
-import { DEFAULT_ACTOR_AUTHENTICATION, type ActorAuthentication } from './local-trust.js';
+import {
+  DEFAULT_ACTOR_AUTHENTICATION,
+  isKnownActorAuthentication,
+  type ActorAuthentication,
+} from './local-trust.js';
 import { EXECUTION_PROVIDER_KEY } from '../operator/provider-binding.js';
 import type { TaskClassification } from '../application/classification.js';
 import type { HeadquarterOperations, OpsErrorCode } from '../application/service.js';
@@ -112,13 +116,46 @@ export function registerDirectOrderCapability(ops: HeadquarterOperations): void 
   ops.queue.capabilities.register({ ...DIRECT_ORDER_CAPABILITY });
 }
 
-/** What the registry currently says about the direct-order capability. */
-export type DirectOrderCapabilityState = 'missing' | 'disabled' | 'enabled';
+/**
+ * What the registry currently says about the direct-order capability.
+ *
+ * `drifted` is the state this was missing (issue #200, Codex exact-head
+ * finding on `5a19350`). Checking only missing/disabled/enabled read the
+ * capability's SWITCH and never its DEFINITION — and `createTask` classifies
+ * against whatever the canonical registry row says, not against the constant
+ * in this file. An existing database whose `hq.direct_order` row had drifted
+ * to `riskClass: 'reversible'` (an older schema, a hand-edit, a collision with
+ * a differently-defined capability of the same id) would therefore let a
+ * free-text instruction go straight to `queued`, skipping the Founder gate this
+ * capability exists to impose.
+ *
+ * The previous round deliberately stopped invocation from re-registering, so
+ * nothing re-asserts the definition on the way past — which makes verifying it
+ * here the other half of that decision rather than a new rule. Registration
+ * stays a separate, explicit configuration act; invocation now refuses to ride
+ * on a definition that no longer promises what the order is relying on.
+ */
+export type DirectOrderCapabilityState = 'missing' | 'disabled' | 'drifted' | 'enabled';
+
+/** The definitional promises an order depends on. Drift in any is fail-closed. */
+const REQUIRED_CAPABILITY_INVARIANTS = ['riskClass', 'sideEffect', 'idempotent'] as const;
 
 export function directOrderCapabilityState(ops: HeadquarterOperations): DirectOrderCapabilityState {
   const capability = ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id);
   if (!capability) return 'missing';
-  return capability.enabled ? 'enabled' : 'disabled';
+  if (!capability.enabled) return 'disabled';
+  return driftedCapabilityInvariants(capability).length > 0 ? 'drifted' : 'enabled';
+}
+
+/** Which definitional promises the registered row no longer keeps. */
+export function driftedCapabilityInvariants(capability: {
+  riskClass?: unknown;
+  sideEffect?: unknown;
+  idempotent?: unknown;
+}): string[] {
+  return REQUIRED_CAPABILITY_INVARIANTS.filter(
+    (key) => capability[key] !== DIRECT_ORDER_CAPABILITY[key],
+  );
 }
 
 /** Routes the composer offers. Kept small on purpose. */
@@ -262,6 +299,7 @@ export type DirectOrderErrorCode =
   | 'empty_instruction'
   | 'instruction_too_long'
   | 'title_too_long'
+  | 'capability_definition_drifted'
   | 'unsafe_instruction';
 
 export type DirectOrderResult =
@@ -442,6 +480,22 @@ export function submitDirectOrder(
     return orderFail('invalid_input', `Unknown route: ${String(input.route)}`);
   }
 
+  // The trust marker is a claim about the caller, and it is persisted inside
+  // the approval digest — so an unknown one is refused here rather than
+  // recorded (issue #200, Codex finding on `5a19350`). `ActorAuthentication`
+  // deliberately has no `authenticated` member, but a union enforces that on
+  // TypeScript callers only: a JSON or plain-JavaScript caller could pass
+  // `'authenticated'` and manufacture the exact trust claim the vocabulary
+  // exists to make unsayable. Deny by default, like every other unknown here.
+  if (input.actorAuthentication !== undefined && !isKnownActorAuthentication(input.actorAuthentication)) {
+    return orderFail(
+      'invalid_input',
+      'Unknown actorAuthentication marker. Headquarter can authenticate nobody, so the ' +
+        'vocabulary has no value that claims it did; a marker outside the vocabulary is ' +
+        'refused rather than persisted into the approval digest.',
+    );
+  }
+
   // Fail closed on the capability's CURRENT configured state, and never touch
   // it (issue #200, Codex P1 #2). Placing an order is an invocation; it does
   // not register the capability, and it certainly does not re-enable one that
@@ -460,6 +514,19 @@ export function submitDirectOrder(
       'capability_disabled',
       `Capability ${DIRECT_ORDER_CAPABILITY.id} is disabled. Re-enabling it is an explicit ` +
         'configuration decision; an order will not do it silently.',
+    );
+  }
+  if (capabilityState === 'drifted') {
+    const registered = ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id);
+    const drifted = registered ? driftedCapabilityInvariants(registered) : [];
+    return orderFail(
+      'capability_definition_drifted',
+      `Capability ${DIRECT_ORDER_CAPABILITY.id} is registered with a definition that no longer ` +
+        `promises what a direct order depends on (${drifted.join(', ')}). Classification follows ` +
+        'the registered definition, not this module, so an order placed against a drifted row ' +
+        'could skip the Founder gate entirely. Re-registering it is a deliberate configuration ' +
+        'act; an order will not perform it.',
+      { drifted },
     );
   }
 
