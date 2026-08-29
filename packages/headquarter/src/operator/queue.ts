@@ -188,16 +188,34 @@ export class OperatorQueue {
   selectClaimable(
     workerId: string,
     capabilityId: string,
+    onlyTaskId?: string,
   ): { task: OperatorTask | null; refusal: ProviderBindingViolation | null } {
     const workerProvider = this.workerProviders.providerOf(workerId);
     // Queued depth per capability is small in HQ; ids and payloads only.
-    const rows = this.db
-      .prepare(
-        `SELECT id, payload FROM op_tasks
-         WHERE capability_id = ? AND status = 'queued'
-         ORDER BY created_at`,
-      )
-      .all(capabilityId) as { id: string; payload: string }[];
+    //
+    // `onlyTaskId` narrows the candidate set to ONE task (issue #224, Founder
+    // decision approving option 1). It can only ever remove candidates, never
+    // add one: every gate below still applies to whatever survives, so a
+    // targeted claim is strictly weaker than the open one. It exists because
+    // the dispatch lane must claim the SPECIFIC task it is about to publish —
+    // claiming "whatever is next" would let a handoff seize an unrelated task.
+    const rows = (
+      onlyTaskId
+        ? this.db
+            .prepare(
+              `SELECT id, payload FROM op_tasks
+               WHERE capability_id = ? AND status = 'queued' AND id = ?
+               ORDER BY created_at`,
+            )
+            .all(capabilityId, onlyTaskId)
+        : this.db
+            .prepare(
+              `SELECT id, payload FROM op_tasks
+               WHERE capability_id = ? AND status = 'queued'
+               ORDER BY created_at`,
+            )
+            .all(capabilityId)
+    ) as { id: string; payload: string }[];
     let firstRefusal: ProviderBindingViolation | null = null;
     for (const row of rows) {
       let payload: Record<string, unknown>;
@@ -395,7 +413,12 @@ export class OperatorQueue {
    * than a silent `null` so a frozen worker cannot mistake "you are being
    * replaced" for "the queue is empty".
    */
-  claim(workerId: string, capabilityId: string, leaseMs = 5 * 60_000): OperatorTask | null {
+  claim(
+    workerId: string,
+    capabilityId: string,
+    leaseMs = 5 * 60_000,
+    onlyTaskId?: string,
+  ): OperatorTask | null {
     // Deny-by-default, and FIRST: before any read, any state mutation, and
     // crucially before the single-use approval nonce is consumed below, so a
     // rejected claim can never burn an approval or inflate a fencing token.
@@ -406,7 +429,7 @@ export class OperatorQueue {
     // offered the oldest task compatible with its declared provider, and an
     // order routed to one provider is never handed to another (issue #200,
     // Codex P1 #1 and round-3 P1 #2).
-    const { task: selected, refusal } = this.selectClaimable(workerId, capabilityId);
+    const { task: selected, refusal } = this.selectClaimable(workerId, capabilityId, onlyTaskId);
     if (!selected) {
       // Nothing compatible. If incompatible work exists, say so loudly and
       // evidence it — "not yours" is not "the queue is empty".
@@ -542,6 +565,45 @@ export class OperatorQueue {
       }
     }
     return this.transition(taskId, 'running', workerId, 'Execution started');
+  }
+
+  /**
+   * Release a claim that was taken but will not be executed (issue #224,
+   * Founder decision approving option 1).
+   *
+   * The Claude handoff claims the canonical task before publishing to GitHub,
+   * so the same approved action cannot also be claimed by a queue worker. When
+   * that publication then fails cleanly — nothing was created — the claim must
+   * not strand the task `assigned` to a worker that never ran it and never
+   * will.
+   *
+   * The task returns to `needs_approval`, not to `queued`, and that is the
+   * honest destination rather than a cautious one: the claim CONSUMED the
+   * single-use approval, so the task genuinely does need a fresh Founder
+   * decision before anything may run it again. It is the same edge the
+   * execution boundary already uses when an approval expires between claim and
+   * start (`assigned -> needs_approval`), for the same reason.
+   *
+   * Fenced like every other post-claim write, so only the holder of the current
+   * claim can release it — a stale fence cannot dislodge somebody else's work.
+   * It grants nothing: releasing a claim only ever REMOVES a worker's hold.
+   */
+  releaseClaim(taskId: string, workerId: string, fence: number, reason: string): OperatorTask {
+    this.assertFence(taskId, workerId, fence);
+    this.evidence.append({
+      taskId,
+      actor: workerId,
+      kind: 'claim_released',
+      payload: { reason },
+    });
+    const released = this.transition(taskId, 'needs_approval', workerId, `Claim released: ${reason}`);
+    this.db
+      .prepare(
+        `UPDATE op_tasks SET claimed_by = NULL, lease_expires_at = NULL, claim_nonce = NULL,
+           approval_id = NULL WHERE id = ?`,
+      )
+      .run(taskId);
+    return this.get(taskId) ?? released;
   }
 
   /** Extend the lease mid-execution. Fence must match. */

@@ -117,8 +117,8 @@ export type DispatchRefusalCode =
   | 'provider_not_bound'
   | 'provider_mismatch'
   | 'task_not_eligible'
-  /** A queue worker for this provider could claim the task we are about to publish. */
-  | 'queue_worker_conflict'
+  /** The designated executor worker is missing, inactive, misdeclared or refused. */
+  | 'executor_not_claimable'
   | 'approval_invalid'
   | 'invalid_target'
   /** Already dispatched somewhere else than the target this call names. */
@@ -260,47 +260,6 @@ export function claudeDispatchEligibility(
         `Task ${taskId} is ${task.status}, not queued for execution. Dispatch happens only for work ` +
         'the canonical control plane has already cleared to run.',
       details: { status: task.status },
-    };
-  }
-
-  // Two executors for one task is the hazard this refuses (issue #224, Codex
-  // P1 on `172026f`).
-  //
-  // Publishing the issue hands the instruction to the GitHub workflow, but it
-  // does NOT claim the canonical task: it stays `queued` with its approval
-  // nonce unconsumed. So if a worker declared as CLAUDE is also polling this
-  // capability, `OperatorQueue.claim` can hand it the same task, and the work
-  // runs twice — once inside the Operator with a fence and a consumed approval,
-  // once on GitHub bound to neither.
-  //
-  // This lane's whole premise is that CLAUDE's only real executor is that
-  // workflow, so in the intended configuration no such worker exists and this
-  // never fires. Where one DOES exist, the configuration is ambiguous about who
-  // executes CLAUDE work, and the safe answer is to refuse loudly rather than
-  // publish into a race.
-  //
-  // Deliberately narrow: it removes a dispatch, never adds one, and it invents
-  // no worker identity and no new status. It does NOT fully close the finding —
-  // binding an external execution to a queue fence and a consumed approval is a
-  // design question about how non-worker executors join the Operator model, and
-  // that is raised on the PR rather than decided here.
-  const claudeWorkers = ops.queue.workerProviders
-    .list()
-    .filter((record) => record.providerId === DISPATCH_PROVIDER)
-    .map((record) => record.workerId);
-  if (claudeWorkers.length > 0) {
-    return {
-      eligible: false,
-      code: 'queue_worker_conflict',
-      message:
-        `Task ${taskId} is bound to ${DISPATCH_PROVIDER}, and ${claudeWorkers.length} worker(s) ` +
-        `declared as ${DISPATCH_PROVIDER} can claim it from the queue ` +
-        `(${claudeWorkers.join(', ')}). Publishing it to the GitHub workflow would leave the task ` +
-        'still claimable, so the same approved action could execute twice — once through the ' +
-        'Operator with a fence and a consumed approval, once on GitHub bound to neither. Nothing ' +
-        'was published. Decide which lane executes CLAUDE work: revoke the worker declaration to ' +
-        'use this transport, or let that worker run the task and do not dispatch.',
-      details: { workers: claudeWorkers },
     };
   }
 
@@ -591,11 +550,70 @@ function answerAlreadyDispatched(
   };
 }
 
+/**
+ * How long the claim taken at handoff is leased for.
+ *
+ * A GitHub-hosted AI task runs for far longer than the queue's 5-minute worker
+ * default, and an expired lease on a side-effect task becomes `outcome_unknown`
+ * — the canonical "we handed it out and never heard back" state. That is the
+ * correct destination for an external execution nobody reported on, so the
+ * lease is long enough not to fire spuriously and short enough that a silent
+ * handoff does not sit claimed forever.
+ */
+export const DEFAULT_EXECUTION_LEASE_MS = 6 * 60 * 60_000;
+
+/**
+ * Release the claim taken at handoff when nothing was published after all
+ * (issue #224, Founder decision approving option 1).
+ *
+ * Claiming before publishing is what stops a second executor taking the task —
+ * and it means a handoff that then fails cleanly would otherwise leave the task
+ * `assigned` to a worker that is not running it, invisible to any later
+ * dispatch. So a CLOSED, nothing-was-published outcome releases the claim
+ * through the canonical `fail` boundary: the task returns to
+ * `needs_approval`, which is where a task whose approval was consumed honestly
+ * belongs.
+ *
+ * It deliberately does NOT return the task to `queued`. The claim consumed the
+ * single-use approval, so re-dispatching genuinely does need a fresh Founder
+ * decision — that is the honest cost of binding the external execution to an
+ * approval, not an oversight. Nor does it fire for an UNCERTAIN outcome: there
+ * the task stays claimed and its lease expires into `outcome_unknown`, the
+ * canonical "handed out, never heard back" state.
+ *
+ * Best-effort by contract: the publication outcome is already recorded, and a
+ * release that cannot be written must not turn a recorded outcome into an
+ * unrecorded one.
+ */
+function releaseHandoffClaim(ops: HeadquarterOperations, taskId: string, reason: string): void {
+  try {
+    const task = ops.queue.get(taskId);
+    if (!task || task.claimedBy == null) return;
+    if (task.status !== 'assigned' && task.status !== 'running') return;
+    ops.queue.releaseClaim(taskId, task.claimedBy, task.fence, reason);
+  } catch {
+    // Deliberately swallowed. See above.
+  }
+}
+
 export interface DispatchOptions {
   taskId: string;
   /** Explicit repository. There is no default: dispatch publishes an instruction. */
   target: GitHubTarget;
   transport: GitHubIssueTransport;
+  /**
+   * The registered worker the canonical claim is taken for (issue #224,
+   * Founder decision approving option 1).
+   *
+   * REQUIRED, and never defaulted: dispatch must not mint, guess, impersonate
+   * or silently assume a worker identity. Registering this worker and declaring
+   * it as CLAUDE are explicit, Founder-gated configuration acts that happen
+   * elsewhere; if it is missing, inactive, misdeclared or lacks the capability,
+   * the dispatch fails closed and publishes nothing.
+   */
+  executorWorkerId: string;
+  /** Lease for the claim taken at handoff. Defaults to DEFAULT_EXECUTION_LEASE_MS. */
+  leaseMs?: number;
   /** Role tag put in the issue title. Defaults to BUILDER. */
   role?: Role;
   /** Labels to apply, if the repository defines them. Empty by default. */
@@ -652,13 +670,17 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
     return refuseAndRecordBestEffort('invalid_role', `Unknown role: ${String(role)}. Refusing to guess a role.`);
   }
 
-  const eligibility = claudeDispatchEligibility(ops, taskId, now());
-  if (!eligibility.eligible) {
-    return refuseAndRecordBestEffort(eligibility.code, eligibility.message, eligibility.details);
-  }
-
-  // Already done, or already uncertain. Checked before the transport is touched:
-  // a duplicate public issue is not undone by a later refusal.
+  // "Have I already done this?" is asked FIRST, before eligibility (issue #224,
+  // Founder decision approving option 1).
+  //
+  // The order matters now and did not before. Since the handoff takes the
+  // canonical claim, a dispatched task is `assigned` rather than `queued`, so
+  // asking eligibility first would refuse a REPEAT with `task_not_eligible`
+  // instead of answering it from evidence — turning the duplicate-dispatch
+  // guard into a generic refusal and, worse, making a caller that retries on
+  // refusal believe nothing had been published. Whether an issue already exists
+  // is a fact about the world; whether the task may run is a question that only
+  // arises if it does not.
   const history = dispatchHistory(ops, taskId);
   if (history.state === 'dispatched') {
     return answerAlreadyDispatched(taskId, options.target, history, refuseAndRecordBestEffort);
@@ -672,6 +694,11 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
         'outcome is never blindly retried.',
       { attemptedAt: history.at },
     );
+  }
+
+  const eligibility = claudeDispatchEligibility(ops, taskId, now());
+  if (!eligibility.eligible) {
+    return refuseAndRecordBestEffort(eligibility.code, eligibility.message, eligibility.details);
   }
 
   const status = options.transport.status();
@@ -748,9 +775,27 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
   // of a minute-old answer would put out work that is no longer authorised. The
   // re-check runs inside the same transaction as the reservation, so nothing can
   // change between "still eligible" and "claimed".
+  //
+  // The CLAIM happens here too (issue #224, Founder decision approving option
+  // 1). Publishing used to leave the task `queued` with its approval nonce
+  // unconsumed, so a worker declared as CLAUDE could claim and execute the same
+  // approved action while the workflow executed the published copy — bound to
+  // no fence and no consumed approval. The handoff now takes the canonical
+  // claim for the designated executor worker in the SAME transaction as the
+  // reservation, so after publication the task is no longer independently
+  // claimable, and the external execution is answerable to a real fence and a
+  // consumed approval like any internal one.
+  //
+  // It goes through `HeadquarterOperations.claimNext`, not a table write: that
+  // is the path carrying human-execution rejection, assignability, the
+  // capability allow-list, the kill switch, assignment intent, provider binding
+  // and approval consumption. Dispatch never mints, guesses or assumes a worker
+  // identity — the caller names one, and registering it is a separate,
+  // Founder-gated configuration act.
   type Reservation =
-    | { kind: 'reserved' }
+    | { kind: 'reserved'; claimed: OperatorTask }
     | { kind: 'history'; history: DispatchHistory }
+    | { kind: 'claim_refused'; code: string; message: string }
     | { kind: 'ineligible'; verdict: Extract<EligibilityVerdict, { eligible: false }> };
   let reserved: Reservation;
   try {
@@ -759,6 +804,33 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
       if (current.state !== 'none') return { kind: 'history', history: current };
       const recheck = claudeDispatchEligibility(ops, taskId, now());
       if (!recheck.eligible) return { kind: 'ineligible', verdict: recheck };
+      // Claim THIS task — never "whatever is next", which would let a handoff
+      // seize an unrelated order.
+      let claimed;
+      try {
+        claimed = ops.claimNext(
+          options.executorWorkerId,
+          recheck.task.capabilityId,
+          options.leaseMs ?? DEFAULT_EXECUTION_LEASE_MS,
+          taskId,
+        );
+      } catch (error) {
+        // A provider-binding violation or an approval replay throws. Fail
+        // closed; the transaction rolls the whole reservation back.
+        return { kind: 'claim_refused', code: 'threw', message: errorText(error) };
+      }
+      if (!claimed.ok) {
+        return { kind: 'claim_refused', code: claimed.error.code, message: claimed.error.message };
+      }
+      // Paranoia, cheap: the narrowed claim must have taken the task we are
+      // about to publish and nothing else.
+      if (claimed.data.id !== taskId) {
+        return {
+          kind: 'claim_refused',
+          code: 'wrong_task',
+          message: `The claim took task ${claimed.data.id}, not ${taskId}.`,
+        };
+      }
       ops.queue.evidence.append({
         taskId,
         actor: DISPATCH_ACTOR,
@@ -770,9 +842,11 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
           account: status.account,
           role,
           dispatchedAt,
+          executorWorkerId: options.executorWorkerId,
+          fence: claimed.data.fence,
         },
       });
-      return { kind: 'reserved' };
+      return { kind: 'reserved', claimed: claimed.data };
     });
   } catch (error) {
     return refuseAndRecordBestEffort(
@@ -780,6 +854,21 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
       'The dispatch attempt could not be recorded in the append-only evidence log ' +
         `(${errorText(error)}), so nothing was published. The evidence entry is what stops a ` +
         'second run from opening a duplicate issue; without it the guard does not exist.',
+    );
+  }
+  // The designated executor could not take the canonical claim. Nothing was
+  // published and the transaction rolled back, so the task is exactly as it
+  // was: still queued, still approved, still nobody's.
+  if (reserved.kind === 'claim_refused') {
+    return refuseAndRecordBestEffort(
+      'executor_not_claimable',
+      `The designated executor worker ${options.executorWorkerId} could not claim task ${taskId} ` +
+        `(${reserved.code}: ${reserved.message}). Nothing was published. The handoff takes the ` +
+        'canonical claim before publishing precisely so an external execution is answerable to a ' +
+        'fence and a consumed approval; without the claim there is nothing to publish into. ' +
+        'Register and declare the executor worker as an explicit configuration act, or fix why ' +
+        'it is not assignable.',
+      { executorWorkerId: options.executorWorkerId, reason: reserved.code },
     );
   }
   // The task stopped being eligible while the transport was being checked.
@@ -872,6 +961,13 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
         { kind: created.kind },
       );
     }
+    releaseHandoffClaim(
+      ops,
+      taskId,
+      `The GitHub handoff was claimed but the issue was not created (${created.kind}). Nothing ` +
+        'was published. The single-use approval was consumed by the claim, so re-dispatching ' +
+        'needs a fresh Founder approval.',
+    );
     return refuse('transport_failed', `The GitHub transport did not create the issue. ${created.message}`, {
       kind: created.kind,
     });
@@ -1007,10 +1103,20 @@ export function resolveUnknownDispatch(
       });
     });
     if (claimed) return claimed;
+    // Nothing was published, and the attempt is now closed — so the claim the
+    // handoff took must not keep the task assigned to a worker that never ran
+    // it (issue #224, Founder decision approving option 1).
+    releaseHandoffClaim(
+      ops,
+      input.taskId,
+      `Reconciled as NOT dispatched by ${input.resolvedBy}: no GitHub issue was created for the ` +
+        'handoff, so the claim it took is released.',
+    );
     return refuse(
       'transport_failed',
-      `Task ${input.taskId}: the uncertain attempt was reconciled as NOT dispatched. A fresh ` +
-        'dispatch is now a first dispatch.',
+      `Task ${input.taskId}: the uncertain attempt was reconciled as NOT dispatched. Nothing was ` +
+        'published and the handoff claim is released. The claim consumed the single-use approval, ' +
+        'so a fresh dispatch needs a fresh Founder approval as well as a re-queue.',
     );
   }
   if (!isValidTarget(input.target) || !Number.isInteger(input.issueNumber) || input.issueNumber <= 0) {

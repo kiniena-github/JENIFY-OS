@@ -50,12 +50,18 @@ behalf.
 
 ```
 npm run hq:dispatch-claude --workspace @factoryos/headquarter -- \
-  --local-admin --task <taskId> --repo <owner>/<name> \
+  --local-admin --task <taskId> --repo <owner>/<name> --as-worker <workerId> \
   [--role BUILDER|REVIEWER|MANAGER|RESEARCHER] [--db <path>] [--check-only]
 ```
 
+`--as-worker` is **required** to dispatch (issue #224, Founder decision
+approving option 1). The handoff claims the canonical task for that registered
+worker before publishing, so the external execution is answerable to a real
+fence and a consumed approval instead of leaving the task independently
+claimable.
+
 `--check-only` prints eligibility, dispatch history and the observed transport
-state, and publishes nothing. Run it first.
+state, publishes nothing, and needs no worker. Run it first.
 
 There is deliberately **no default repository**: dispatching publishes the
 order's instruction into a repository, so the repository is always chosen
@@ -93,6 +99,42 @@ The trade, stated plainly: the binding is fixed once written, because it lives
 inside the digest a Founder approves. An order blocked on the first preference
 stays blocked on it even if a later preference connects first; the Founder then
 places an explicit order for the provider that is up.
+
+## The handoff claims the task (issue #224)
+
+Publishing used to hand the instruction to the GitHub workflow **without**
+claiming the canonical task: it stayed `queued` with its single-use approval
+unconsumed. A worker declared as CLAUDE could therefore claim and execute the
+same approved action while the workflow executed the published copy — bound to
+no fence and no consumed approval. Two executions of one Founder-approved
+action.
+
+The handoff now takes the canonical claim for an explicitly **designated
+executor worker**, inside the same transaction as the dispatch reservation:
+
+- **Dispatch never mints, guesses, impersonates or assumes a worker identity.**
+  The caller names one with `--as-worker`. Creating that worker and declaring it
+  as CLAUDE are separate, Founder-gated configuration acts.
+- The claim goes through `HeadquarterOperations.claimNext` — the path carrying
+  human-execution rejection, assignability, the capability allow-list, the kill
+  switch, assignment intent, provider binding and approval consumption. No table
+  write, no second copy of any gate.
+- It claims **that specific task**, never "whatever is next", so a handoff can
+  never seize an unrelated order.
+- Every way the claim can fail — worker missing, inactive, misdeclared, lacking
+  the capability, refused by binding, approval unusable — **publishes nothing**
+  and rolls the reservation back, leaving the task exactly as it was.
+
+Two consequences worth knowing before operating it:
+
+1. **A clean publication failure releases the claim to `needs_approval`**, not
+   to `queued`. The claim consumed the single-use approval, so re-dispatching
+   genuinely needs a fresh Founder decision. That is the honest cost of binding
+   an external execution to an approval, not an oversight.
+2. **An UNCERTAIN outcome leaves the task claimed.** Its lease (6 hours by
+   default) expires into `outcome_unknown` — the canonical "handed out, never
+   heard back" state — which is exactly where a silent external execution
+   belongs.
 
 ## What has to be true before anything is published
 

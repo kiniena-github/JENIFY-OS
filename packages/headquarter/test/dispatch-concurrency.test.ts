@@ -12,19 +12,19 @@
  * issues, and contradictory terminal evidence in an append-only log that cannot
  * be edited to sort it out afterwards.
  *
- * ## B — a queue worker that could claim what was just published
+ * ## B — a published task that stayed independently claimable
  *
- * Publishing hands the instruction to the GitHub workflow but does NOT claim
- * the canonical task: it stays `queued` with its approval nonce unconsumed. A
- * worker declared as CLAUDE polling the same capability can therefore claim and
- * execute the same approved action, while the workflow executes the published
- * copy bound to no fence and no consumed approval.
+ * Publishing used to hand the instruction to the GitHub workflow WITHOUT
+ * claiming the canonical task: it stayed `queued` with its approval nonce
+ * unconsumed, so a worker declared as CLAUDE could claim and execute the same
+ * approved action while the workflow executed the published copy, bound to no
+ * fence and no consumed approval.
  *
- * The guard here refuses the dispatch in that configuration rather than
- * publishing into the race. It is deliberately narrow — it removes a dispatch,
- * never adds one, and invents no worker identity and no status. It does not
- * close the underlying design question (how a non-worker executor binds to a
- * queue fence), which is raised on the PR instead.
+ * Per the Founder decision approving option 1, the handoff now takes the
+ * canonical claim for an explicitly designated, separately registered executor
+ * worker, inside the same transaction as the dispatch reservation. Dispatch
+ * never mints, guesses or assumes that identity — it is named by the caller and
+ * registered elsewhere — and every way the claim can fail publishes nothing.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -69,6 +69,20 @@ const ORDER = {
   requestedBy: 'founder',
 };
 
+/** The designated executor: two explicit configuration acts, never minted by dispatch. */
+const EXECUTOR = 'claude-executor';
+function registerExecutor(fixture: Fixture): void {
+  fixture.store.upsertSpecialist({
+    id: EXECUTOR,
+    displayName: 'Claude GitHub workflow',
+    vendor: 'anthropic',
+    role: 'build_lead',
+    allowedCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+    active: true,
+  });
+  fixture.ops.declareWorkerProvider({ workerId: EXECUTOR, providerId: 'CLAUDE', founderId: 'chair' });
+}
+
 function ordersFixture(): Fixture {
   const fixture = setupFixture();
   registerDirectOrderCapability(fixture.ops);
@@ -86,6 +100,7 @@ function ordersFixture(): Fixture {
     approvalAuthority: true,
     active: true,
   });
+  registerExecutor(fixture);
   return fixture;
 }
 
@@ -110,7 +125,7 @@ function taskWithUnknownDispatch(fixture: Fixture): string {
       throw new Error('killed mid-flight');
     },
   };
-  dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport: throwing });
+  dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: throwing });
   expect(dispatchHistory(fixture.ops, taskId).state).toBe('unknown');
   return taskId;
 }
@@ -251,31 +266,87 @@ describe('exactly one reconciliation of an uncertain attempt wins', () => {
   });
 });
 
-describe('a task a queue worker could claim is not published into the race', () => {
-  it('refuses dispatch when a worker is declared as CLAUDE', () => {
+describe('the handoff claims the canonical task before publishing', () => {
+  it('leaves the task assigned to the designated executor, not independently claimable', () => {
     const fixture = ordersFixture();
     const taskId = approvedTask(fixture);
-    fixture.ops.declareWorkerProvider({
-      workerId: 'claude-worker',
-      providerId: 'CLAUDE',
-      founderId: 'chair',
-    });
+    const transport: GitHubIssueTransport = {
+      id: 'stub-gh',
+      status: (): GitHubTransportStatus => AUTHENTICATED,
+      createIssue: (): GitHubIssueResult => ({ ok: true, issueNumber: ISSUE, issueUrl: GOOD_URL }),
+    };
+    expect(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }).ok).toBe(true);
 
-    const verdict = claudeDispatchEligibility(fixture.ops, taskId);
-    expect(verdict.eligible).toBe(false);
-    if (verdict.eligible) throw new Error('unreachable');
-    expect(verdict.code).toBe('queue_worker_conflict');
-    expect(verdict.message).toContain('claude-worker');
-    // And it names the actual hazard rather than a generic refusal.
-    expect(verdict.message).toContain('execute twice');
+    const task = fixture.ops.queue.get(taskId)!;
+    expect(task.status).toBe('assigned');
+    expect(task.claimedBy).toBe(EXECUTOR);
+    // The defect this closes: another worker could previously claim and execute
+    // the same approved action while the workflow ran the published copy.
+    expect(fixture.ops.queue.selectClaimable(EXECUTOR, task.capabilityId).task).toBeNull();
+    expect(fixture.ops.queue.claim(EXECUTOR, task.capabilityId)).toBeNull();
   });
 
-  it('publishes nothing in that configuration', () => {
+  it('consumes the single-use approval, so the published action cannot run twice', () => {
     const fixture = ordersFixture();
     const taskId = approvedTask(fixture);
+    const transport: GitHubIssueTransport = {
+      id: 'stub-gh',
+      status: (): GitHubTransportStatus => AUTHENTICATED,
+      createIssue: (): GitHubIssueResult => ({ ok: true, issueNumber: ISSUE, issueUrl: GOOD_URL }),
+    };
+    dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    const approval = fixture.ops.queue.approvalFor(taskId);
+    // Bound to this claim, and spent: the external execution is answerable to
+    // the same approval an internal one would have been.
+    expect(approval?.consumedAt).not.toBeNull();
+  });
+
+  it('publishes nothing when the designated executor cannot claim', () => {
+    const fixture = ordersFixture();
+    const taskId = approvedTask(fixture);
+    const calls: unknown[] = [];
+    const transport: GitHubIssueTransport = {
+      id: 'stub-gh',
+      status: (): GitHubTransportStatus => AUTHENTICATED,
+      createIssue: (request): GitHubIssueResult => {
+        calls.push(request);
+        return { ok: true, issueNumber: ISSUE, issueUrl: GOOD_URL };
+      },
+    };
+    const result = dispatchClaudeTask(fixture.ops, {
+      executorWorkerId: 'nobody-registered',
+      taskId,
+      target: TARGET,
+      transport,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('executor_not_claimable');
+    expect(calls).toHaveLength(0);
+    // The transaction rolled back: the task is exactly as it was.
+    const task = fixture.ops.queue.get(taskId)!;
+    expect(task.status).toBe('queued');
+    expect(task.claimedBy).toBeNull();
+    expect(dispatchHistory(fixture.ops, taskId).state).toBe('none');
+  });
+
+  it('refuses a worker that is not declared as this provider, and publishes nothing', () => {
+    // Dispatch never assumes an identity: a registered worker that is not
+    // CLAUDE cannot carry a CLAUDE-bound task, and provider binding says so at
+    // the canonical boundary.
+    const fixture = ordersFixture();
+    const taskId = approvedTask(fixture);
+    fixture.store.upsertSpecialist({
+      id: 'codex-worker',
+      displayName: 'Codex',
+      vendor: 'openai',
+      role: 'build_lead',
+      allowedCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+      active: true,
+    });
     fixture.ops.declareWorkerProvider({
-      workerId: 'claude-worker',
-      providerId: 'CLAUDE',
+      workerId: 'codex-worker',
+      providerId: 'CODEX',
       founderId: 'chair',
     });
     const calls: unknown[] = [];
@@ -287,64 +358,80 @@ describe('a task a queue worker could claim is not published into the race', () 
         return { ok: true, issueNumber: ISSUE, issueUrl: GOOD_URL };
       },
     };
-    const result = dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport });
+    const result = dispatchClaudeTask(fixture.ops, {
+      executorWorkerId: 'codex-worker',
+      taskId,
+      target: TARGET,
+      transport,
+    });
     expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('executor_not_claimable');
     expect(calls).toHaveLength(0);
-    expect(dispatchHistory(fixture.ops, taskId).state).toBe('none');
-    // The task is untouched and still the worker's to claim, which is the
-    // other half of "decide which lane executes this".
     expect(fixture.ops.queue.get(taskId)!.status).toBe('queued');
   });
 
-  it('is not triggered by a worker declared as another provider', () => {
-    // The guard must be about THIS provider's queue lane, not about workers in
-    // general — a CODEX worker can never claim a CLAUDE-bound task anyway.
+  it('refuses an inactive executor, and publishes nothing', () => {
     const fixture = ordersFixture();
     const taskId = approvedTask(fixture);
-    fixture.ops.declareWorkerProvider({
-      workerId: 'codex-worker',
-      providerId: 'CODEX',
-      founderId: 'chair',
+    fixture.store.upsertSpecialist({
+      id: EXECUTOR,
+      displayName: 'Claude GitHub workflow',
+      vendor: 'anthropic',
+      role: 'build_lead',
+      allowedCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+      active: false,
     });
-    expect(claudeDispatchEligibility(fixture.ops, taskId).eligible).toBe(true);
+    const calls: unknown[] = [];
+    const transport: GitHubIssueTransport = {
+      id: 'stub-gh',
+      status: (): GitHubTransportStatus => AUTHENTICATED,
+      createIssue: (request): GitHubIssueResult => {
+        calls.push(request);
+        return { ok: true, issueNumber: ISSUE, issueUrl: GOOD_URL };
+      },
+    };
+    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    expect(result.ok).toBe(false);
+    expect(calls).toHaveLength(0);
+    expect(fixture.ops.queue.get(taskId)!.status).toBe('queued');
   });
 
-  it('dispatches normally when no CLAUDE worker is declared — the intended setup', () => {
+  it('claims THIS task, never whatever happens to be next in the queue', () => {
+    // A handoff that seized an unrelated order would be the same class of
+    // defect wearing different clothes.
     const fixture = ordersFixture();
-    const taskId = approvedTask(fixture);
+    const first = approvedTask(fixture);
+    const second = submitDirectOrder(
+      fixture.ops,
+      { ...ORDER, instruction: 'A second, different order.' },
+      CLAUDE_ROUTING,
+    );
+    if (!second.ok) throw new Error('expected ok');
+    fixture.ops.approveTask({
+      taskId: second.data.task.id,
+      founderId: 'chair',
+      expectedActionDigest: taskActionDigest(second.data.task),
+    });
+
     const transport: GitHubIssueTransport = {
       id: 'stub-gh',
       status: (): GitHubTransportStatus => AUTHENTICATED,
       createIssue: (): GitHubIssueResult => ({ ok: true, issueNumber: ISSUE, issueUrl: GOOD_URL }),
     };
-    const result = dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport });
-    expect(result.ok).toBe(true);
-  });
+    // Dispatch the SECOND one while the first is older and also claimable.
+    expect(
+      dispatchClaudeTask(fixture.ops, {
+        executorWorkerId: EXECUTOR,
+        taskId: second.data.task.id,
+        target: TARGET,
+        transport,
+      }).ok,
+    ).toBe(true);
 
-  it('refuses again if the declaration appears between eligibility and publication', () => {
-    // Eligibility is re-asked inside the reservation, so the guard travels with
-    // it rather than being a one-time check at the top.
-    const fixture = ordersFixture();
-    const taskId = approvedTask(fixture);
-    const transport: GitHubIssueTransport = {
-      id: 'stub-gh',
-      status: (): GitHubTransportStatus => {
-        // The declaration lands during the (slow) transport check.
-        fixture.ops.declareWorkerProvider({
-          workerId: 'claude-worker',
-          providerId: 'CLAUDE',
-          founderId: 'chair',
-        });
-        return AUTHENTICATED;
-      },
-      createIssue: (): GitHubIssueResult => {
-        throw new Error('must not publish');
-      },
-    };
-    const result = dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport });
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error('unreachable');
-    expect(result.error.code).toBe('queue_worker_conflict');
-    expect(dispatchHistory(fixture.ops, taskId).state).toBe('none');
+    expect(fixture.ops.queue.get(second.data.task.id)!.status).toBe('assigned');
+    // The older one is untouched.
+    expect(fixture.ops.queue.get(first)!.status).toBe('queued');
+    expect(fixture.ops.queue.get(first)!.claimedBy).toBeNull();
   });
 });

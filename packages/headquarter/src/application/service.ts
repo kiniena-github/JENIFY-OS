@@ -673,7 +673,12 @@ export class HeadquarterOperations {
    * intent is advisory routing, and every real authority — allow-list,
    * approval binding, fence, independent review — is unaffected.
    */
-  claimNext(workerId: string, capabilityId: string, leaseMs?: number): OpsResult<OperatorTask> {
+  claimNext(
+    workerId: string,
+    capabilityId: string,
+    leaseMs?: number,
+    onlyTaskId?: string,
+  ): OpsResult<OperatorTask> {
     const cap = this.queue.capabilities.get(capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${capabilityId} is disabled`);
@@ -700,7 +705,7 @@ export class HeadquarterOperations {
     // the head-of-line block back in this layer: a CLAUDE-bound order sitting
     // in front would make every later CODEX-compatible task unreachable
     // through the assignment-intent check below.
-    const peek = this.queue.selectClaimable(workerId, capabilityId);
+    const peek = this.queue.selectClaimable(workerId, capabilityId, onlyTaskId);
     if (!peek.task && !peek.refusal) {
       return fail('nothing_claimable', `No queued task for ${capabilityId}`);
     }
@@ -726,7 +731,7 @@ export class HeadquarterOperations {
     // copies. This layer only translates the violation into a typed error.
     let claimed: OperatorTask | null;
     try {
-      claimed = this.queue.claim(workerId, capabilityId, leaseMs);
+      claimed = this.queue.claim(workerId, capabilityId, leaseMs, onlyTaskId);
     } catch (error) {
       if (error instanceof ProviderBindingViolation) {
         return fail('provider_binding_mismatch', error.message, {

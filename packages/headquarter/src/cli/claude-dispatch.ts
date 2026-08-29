@@ -105,6 +105,20 @@ function main(): void {
   console.log(`${LOCAL_ADMIN_INTERFACE_NOTICE}\n`);
 
   const taskId = flag(argv, 'task');
+
+  // The registered worker the canonical claim is taken for (issue #224,
+
+  // Founder decision approving option 1). REQUIRED and never defaulted: the
+
+  // handoff claims the task before publishing so the external execution is
+
+  // answerable to a fence and a consumed approval, and dispatch must never
+
+  // mint, guess or assume an identity. Registering and declaring this worker
+
+  // are separate, Founder-gated configuration acts.
+
+  const executorWorkerId = flag(argv, 'as-worker');
   const target = parseTarget(flag(argv, 'repo'));
   const roleArg = (flag(argv, 'role') ?? DEFAULT_DISPATCH_ROLE).toUpperCase();
   const dbPath = flag(argv, 'db');
@@ -142,7 +156,15 @@ function main(): void {
     return;
   }
 
-  const result = dispatchClaudeTask(ops, { taskId, target, transport, role });
+  if (!executorWorkerId) {
+    usage(
+      '--as-worker <workerId> is required to dispatch: the handoff claims the canonical task for ' +
+        'that registered worker before publishing, so the external execution is bound to a fence ' +
+        'and a consumed approval. Register and declare it as an explicit configuration act first; ' +
+        'this command will not invent one. (--check-only needs no worker: it publishes nothing.)',
+    );
+  }
+  const result = dispatchClaudeTask(ops, { taskId, target, transport, role, executorWorkerId });
   if (!result.ok) {
     console.error(`Dispatch refused (${result.error.code}): ${result.error.message}`);
     process.exit(1);

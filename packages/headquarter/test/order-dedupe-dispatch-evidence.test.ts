@@ -78,6 +78,20 @@ function transport(): GitHubIssueTransport {
   };
 }
 
+/** The designated executor: two explicit configuration acts, never minted by dispatch. */
+const EXECUTOR = 'claude-executor';
+function registerExecutor(fixture: Fixture): void {
+  fixture.store.upsertSpecialist({
+    id: EXECUTOR,
+    displayName: 'Claude GitHub workflow',
+    vendor: 'anthropic',
+    role: 'build_lead',
+    allowedCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+    active: true,
+  });
+  fixture.ops.declareWorkerProvider({ workerId: EXECUTOR, providerId: 'CLAUDE', founderId: 'chair' });
+}
+
 function ordersFixture(): Fixture {
   const fixture = setupFixture();
   registerDirectOrderCapability(fixture.ops);
@@ -97,6 +111,7 @@ function ordersFixture(): Fixture {
     approvalAuthority: true,
     active: true,
   });
+  registerExecutor(fixture);
   return fixture;
 }
 
@@ -114,6 +129,7 @@ function dispatchedOrder(fixture: Fixture): string {
   expect(approved.ok).toBe(true);
 
   const sent = dispatchClaudeTask(fixture.ops, {
+    executorWorkerId: EXECUTOR,
     taskId: placed.data.task.id,
     target: TARGET,
     transport: transport(),
@@ -205,7 +221,7 @@ describe('the fix does not turn every blocked order into a clear one', () => {
       },
     };
     expect(
-      dispatchClaudeTask(fixture.ops, { taskId: placed.data.task.id, target: TARGET, transport: throwing }).ok,
+      dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId: placed.data.task.id, target: TARGET, transport: throwing }).ok,
     ).toBe(false);
     expect(dispatchHistory(fixture.ops, placed.data.task.id).state).toBe('unknown');
 
