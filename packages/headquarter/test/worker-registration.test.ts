@@ -148,6 +148,26 @@ describe('registration is create-only and deny-by-default', () => {
     const fixture = fixtureWithFounder();
     expect(register(fixture, { workerId: '   ' }).ok).toBe(false);
   });
+
+  it('refuses an id that is already a HUMAN principal', () => {
+    const fixture = fixtureWithFounder();
+    const result = register(fixture, { workerId: 'chair' });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('not_permitted');
+    expect(fixture.store.getSpecialist('chair')).toBeNull();
+
+    // Both consequences the refusal exists to prevent, asserted rather than
+    // described. Had the registration succeeded, `chair` would be a human that
+    // may execute — `rejectHumanExecution` waves through any id the worker
+    // directory knows — and, at the same moment, a Founder locked out of the
+    // approval authority they still hold, because `assertApprovalAuthority`
+    // refuses every registered worker. Registration is create-only and has no
+    // revoke, so undoing it would mean opening the database: exactly the
+    // boundary this method exists to remove.
+    expect(fixture.ops.workers.isRegistered('chair')).toBe(false);
+    expect(fixture.ops.engageKillSwitch('containment', 'chair', 'still authorized').ok).toBe(true);
+  });
 });
 
 describe('registration is atomic and evidenced', () => {

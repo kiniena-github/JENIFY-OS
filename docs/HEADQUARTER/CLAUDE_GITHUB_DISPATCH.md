@@ -88,6 +88,13 @@ overwritten, because overwriting would silently rewrite a capability allow-list
 — and it grants no provider identity, so neither act alone makes a worker able
 to claim CLAUDE-bound work. Both are atomic with their evidence.
 
+An id that already belongs to a **human principal** is refused too. Worker and
+human identity are separate registries on purpose: an id in both would be a
+human that may execute, and at the same moment a Founder stripped of approval
+authority (every registered worker is refused it). Since registration is
+create-only and has no revoke, that would be undoable only by opening the
+database — the boundary this command exists to remove.
+
 There is deliberately **no default repository**: dispatching publishes the
 order's instruction into a repository, so the repository is always chosen
 explicitly.

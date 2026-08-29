@@ -1016,6 +1016,30 @@ export class HeadquarterOperations {
 
     const workerId = input.workerId.trim();
     if (!workerId) return fail('invalid_input', 'A worker id is required.');
+    // Worker identity and HUMAN identity are separate registries, and an id in
+    // both is the one combination neither registry can express safely. It is
+    // refused here because both consequences are silent and neither is
+    // recoverable through this command:
+    //
+    //   - `rejectHumanExecution` waves an id through the moment it is a
+    //     registered WORKER, so the human principal becomes executable;
+    //   - `assertApprovalAuthority` refuses any registered worker, so that
+    //     human INSTANTLY loses approval authority — an approver locked out of
+    //     the kill switch and every approval, by a registration that reported
+    //     success.
+    //
+    // Registration is create-only and there is no revoke path, so undoing it
+    // would mean dropping to the data layer: exactly the boundary this method
+    // exists to remove.
+    if (this.principals.get(workerId) != null) {
+      return fail(
+        'not_permitted',
+        `${workerId} is already registered as a HUMAN principal. Worker identity and human ` +
+          'identity are deliberately separate: an id in both would be a human that may execute, ' +
+          'and would silently strip that human of approval authority. Choose a distinct worker id.',
+        { workerId },
+      );
+    }
     if (this.store.getSpecialist(workerId)) {
       return fail(
         'invalid_input',
