@@ -158,20 +158,22 @@ export function loadHeadquarterHost(
   // question. A host with no transport observes nothing and returns null, so
   // the routing contract answers exactly as it did before — this adds a
   // verdict where one can be observed, and never invents one.
-  const transport = claude.ghCliTransport();
-  const TRANSPORT_TTL_MS = 60_000;
-  let cached: { at: number; dispatchable: boolean } | null = null;
-  const dispatchAvailability = (provider: ProviderId): boolean | null => {
-    if (provider !== 'CLAUDE') return null;
-    const now = Date.now();
-    if (cached == null || now - cached.at > TRANSPORT_TTL_MS) {
-      const status = transport.status();
-      cached = { at: now, dispatchable: status.available && status.authenticated };
-    }
-    // Only an observed, authenticated session is an answer. Anything weaker
-    // defers rather than claiming the provider cannot dispatch.
-    return cached.dispatchable ? true : null;
-  };
+  // The shared, reviewed derivation rather than a second copy of it
+  // (issue #224, Codex P2 on `66d34cc`). The hand-rolled version this replaces
+  // collapsed EVERY negative to null, including a live one: `gh auth status`
+  // calls the API, so a non-zero exit means the session is missing, expired or
+  // revoked. Discarding that made route resolution fall back to `secretsEnv`,
+  // and a host that happens to carry `CLAUDE_ROUTINE_*` then reported the
+  // composer and the submitted order READY while the only real transport would
+  // have refused them as unauthenticated — a surface more confident than its
+  // evidence, which is the defect this whole issue is about.
+  //
+  // `transportRouteAvailability` answers `false` for an observed live negative,
+  // `true` only for an observed authenticated session, and `null` for genuine
+  // ignorance (no `gh`, or a probe that could not run or threw). It carries the
+  // same caching this used to implement by hand.
+  const dispatchAvailability =
+    claude.transportRouteAvailability(claude.ghCliTransport()).providerDispatchable;
 
   return {
     plane: {

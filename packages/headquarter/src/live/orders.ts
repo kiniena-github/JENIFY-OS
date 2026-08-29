@@ -91,6 +91,7 @@ import { createHash } from 'node:crypto';
 import { assertBrowserSafe } from './redaction.js';
 import { DEFAULT_ACTOR_AUTHENTICATION, type ActorAuthentication } from './local-trust.js';
 import { EXECUTION_PROVIDER_KEY, readProviderBinding } from '../operator/provider-binding.js';
+import { dispatchHistory } from '../providers/claude/dispatch.js';
 import type { TaskClassification } from '../application/classification.js';
 import type { HeadquarterOperations, OpsErrorCode } from '../application/service.js';
 import type { Capability } from '../operator/capabilities.js';
@@ -744,7 +745,10 @@ export function submitDirectOrder(
       candidates: route.candidates,
     });
   }
-  const dispatchBlocked = !route.connected;
+  // What the ROUTE says at submission. Used only for the historical evidence
+  // entry below; the state the caller is told is derived from the task that
+  // actually exists — see after `createTask`.
+  const routeBlocked = !route.connected;
 
   // Always derived, never adopted, and derived AFTER the route resolves so the
   // key names the provider the order actually carries — see
@@ -793,7 +797,7 @@ export function submitDirectOrder(
   // the digest an approver echoes back stays a description of the ACTION and
   // the block stays a description of the WORLD — which can change while the
   // order waits. Fact NAMES only, never values.
-  if (dispatchBlocked && !created.data.deduplicated) {
+  if (routeBlocked && !created.data.deduplicated) {
     try {
       ops.queue.evidence.append({
         taskId: created.data.task.id,
@@ -813,6 +817,32 @@ export function submitDirectOrder(
       // this entry was copied from.
     }
   }
+
+  // Derived from the TASK that now exists, through the one canonical
+  // derivation, rather than from the route variable above (issue #224, Codex P2
+  // on `66d34cc`).
+  //
+  // The defect this closes: `!route.connected` describes the environment right
+  // now and knows nothing about what already happened. A deduplicated order
+  // returns the ORIGINAL task, which may have been dispatched days ago, so an
+  // order whose issue is sitting open on GitHub was reported BLOCKED the moment
+  // the transport went away — and the CLI receipt said, in as many words, that
+  // nothing was running. The approvals view and the snapshot already applied
+  // the evidence-first rule (`isDispatchBlocked` in `live/control-api.ts`), so
+  // the submission path was the one surface still disagreeing with the other
+  // two about the same task.
+  //
+  // Now all three ask `directOrderDispatchBlocked` with the same two inputs:
+  // what HQ has already published, and what a host that holds the real
+  // transport observes. Evidence outranks inference on every path or on none.
+  //
+  // For a task created by THIS call the answer is unchanged — there is no
+  // dispatch history yet, and the binding is the provider the route just
+  // resolved — so this is strictly a correction to the deduplicated case.
+  const dispatchBlocked = directOrderDispatchBlocked(created.data.task, env, {
+    alreadyDispatched: dispatchHistory(ops, created.data.task.id).state === 'dispatched',
+    providerDispatchable: availability?.providerDispatchable,
+  });
 
   return {
     ok: true,
