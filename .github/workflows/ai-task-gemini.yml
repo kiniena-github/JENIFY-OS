@@ -87,6 +87,11 @@ jobs:
             printf '%s' "$issue" | jq -r '.title'
             echo "JENIFY_EOF_7f3a"
             echo "DISPATCH_AUTHOR=$(printf '%s' "$issue" | jq -r '.user.login')"
+            # The body too, so a manual dispatch of an HQ-dispatched issue is
+            # refused by the same routing rule as a comment re-trigger (#224).
+            echo "DISPATCH_BODY<<JENIFY_EOF_7f3a"
+            printf '%s' "$issue" | jq -r '.body // ""'
+            echo "JENIFY_EOF_7f3a"
           } >> "$GITHUB_ENV"
 
       # ---- AUTHORITATIVE ROUTING DECISION (unit-tested module) ------------
@@ -100,6 +105,13 @@ jobs:
           ACTOR: ${{ github.event.comment.user.login || github.event.issue.user.login || github.actor }}
           ACTOR_TYPE: ${{ github.event.comment.user.type || github.event.issue.user.type || 'User' }}
           COMMENT_BODY: ${{ github.event.comment.body }}
+          # The ISSUE body, so this workflow applies the SAME single-use guard as
+          # the Claude lane (#224, Codex P1 on `0961cde`). Without it this bridge
+          # sees an empty body, misses the guard entirely, and an owner comment
+          # `<!-- jenify-run: GEMINI -->` on an HQ-dispatched CLAUDE issue routes
+          # here — a second execution AND a provider substitution, through the
+          # one workflow the guard had not been wired into.
+          ISSUE_BODY: ${{ github.event.issue.body || env.DISPATCH_BODY }}
           REPO_OWNER: ${{ github.repository_owner }}
           TARGET_PROVIDER: GEMINI
           DEDUPE_KEY: ${{ github.event.issue.number }}-${{ github.event.comment.id || github.event.action || 'dispatch' }}
