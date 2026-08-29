@@ -288,7 +288,12 @@ Three things make that guard real rather than nominal:
 ## Reporting back
 
 The issue body carries a machine-readable correlation block naming the HQ task,
-its capability and its approved action digest. `correlateClaudeResult` verifies
+its capability and its approved action digest. That block is bracketed by
+explicit `jenify-hq-dispatch:begin` / `:end` sentinels and is located by them —
+never by being "the first JSON fence in the body". The Founder's instruction is
+rendered above it and may legitimately contain JSON examples; one of those used
+to shadow the canonical block, which refused the owner's genuine report as
+malformed and silently broke the return leg for an ordinary class of orders. `correlateClaudeResult` verifies
 that HQ really dispatched *that* issue in *that* repository, that the reporting
 provider is CLAUDE, and that the body still names the same task — then records
 the correlation on the canonical task. `hq:ingest-claude` (above) is what calls

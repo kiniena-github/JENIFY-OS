@@ -393,9 +393,14 @@ export function renderDispatchIssue(input: RenderIssueInput): RenderedIssue {
     'HQ task id above so the result reconciles to the canonical task. State the model actually',
     'executing; never claim another provider.',
     '',
+    // Bracketed so the canonical block is found by DELIMITER, never by being
+    // the first JSON fence in the body — the Founder's instruction sits above
+    // it and may legitimately contain JSON of its own.
+    CORRELATION_BLOCK_BEGIN,
     '```json',
     JSON.stringify(correlation, null, 2),
     '```',
+    CORRELATION_BLOCK_END,
   ].join('\n');
 
   return { title, body };
@@ -418,13 +423,62 @@ export interface DispatchCorrelation {
  * id yields null and the caller refuses. Guessing a task id from a body would be
  * how a foreign issue's result gets stapled onto somebody's canonical task.
  */
+/**
+ * Sentinels bracketing the canonical correlation block (issue #224, ChatGPT P2
+ * on `07fd9fd`).
+ *
+ * The block used to be found as "the first ```json fence in the body" — but the
+ * Founder's free-text instruction is rendered ABOVE it, and engineering
+ * instructions routinely contain JSON examples. One such fence shadowed the
+ * canonical block: the parser read the instruction's JSON, found no HQ marker,
+ * and returned null, so the owner's genuine report was refused as
+ * `malformed_correlation`. That fails closed rather than forging authority, but
+ * it silently broke the whole feedback leg for an ordinary class of orders —
+ * and the more careful the instruction, the more likely it was to break.
+ *
+ * The block is now delimited explicitly, so finding it never depends on what
+ * else the body happens to contain.
+ */
+export const CORRELATION_BLOCK_BEGIN = `<!-- ${DISPATCH_MARKER}:begin -->`;
+export const CORRELATION_BLOCK_END = `<!-- ${DISPATCH_MARKER}:end -->`;
+
+/**
+ * The region of the body that holds the canonical block.
+ *
+ * The LAST begin sentinel wins, and the end sentinel is sought after it: HQ
+ * appends its block at the very bottom, so an instruction that contains
+ * sentinel-looking text of its own cannot shadow the real one by appearing
+ * first. Without sentinels at all — a body rendered by an older build — the
+ * whole body is searched, and the marker check below still decides.
+ */
+function correlationRegion(body: string): string {
+  const begin = body.lastIndexOf(CORRELATION_BLOCK_BEGIN);
+  if (begin === -1) return body;
+  const from = begin + CORRELATION_BLOCK_BEGIN.length;
+  const end = body.indexOf(CORRELATION_BLOCK_END, from);
+  return end === -1 ? body.slice(from) : body.slice(from, end);
+}
+
 export function parseDispatchCorrelation(body: string | null | undefined): DispatchCorrelation | null {
   if (typeof body !== 'string' || !body.includes(DISPATCH_MARKER)) return null;
-  const fence = /```json\s*([\s\S]*?)```/.exec(body);
-  if (!fence?.[1]) return null;
+  // EVERY json fence in the region, newest first — not just the first one in
+  // the body. With sentinels the region holds exactly the canonical block;
+  // without them this still finds it among an instruction's own examples, and
+  // a fence that is not an HQ block is skipped rather than ending the search.
+  const fences = [...correlationRegion(body).matchAll(/```json\s*([\s\S]*?)```/g)];
+  for (let i = fences.length - 1; i >= 0; i -= 1) {
+    const candidate = readCorrelationRecord(fences[i]?.[1]);
+    if (candidate != null) return candidate;
+  }
+  return null;
+}
+
+/** One fence's contents as a correlation record, or null if it is not one. */
+function readCorrelationRecord(json: string | undefined): DispatchCorrelation | null {
+  if (json == null) return null;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(fence[1]);
+    parsed = JSON.parse(json);
   } catch {
     return null;
   }
