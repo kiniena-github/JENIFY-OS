@@ -102,6 +102,7 @@ import {
   resolveApprover,
   resolvePrincipal,
   type HumanPrincipalPort,
+  type HumanPrincipal,
 } from './principals.js';
 import {
   detectActionLanguage,
@@ -342,6 +343,25 @@ type ResolvedRequester =
   | { kind: 'worker'; allowedCapabilities: readonly string[] }
   | { kind: 'human'; allowedCapabilities: readonly string[] };
 
+/**
+ * A defensive, frozen copy of a policy context.
+ *
+ * `PolicyContext` carries a `ReadonlySet` — readonly in TYPE only. The service
+ * and the queue both retained the caller's object, and `ops.policyContext`
+ * handed it to anyone, so `ops.policyContext.preApprovedCapabilities.add(...)`
+ * granted a standing pre-approval for an `external_side_effect` capability and
+ * `#enqueue`, `claim` and `start` all then skipped the Founder gate (issue
+ * #200, Codex exact-head finding on `063c7d3`).
+ *
+ * A new `Set` per copy, and the object frozen, so neither the caller's original
+ * nor a value handed out later is the one enforcement reads.
+ */
+function freezePolicyContext(ctx: PolicyContext | undefined): PolicyContext {
+  return Object.freeze({
+    preApprovedCapabilities: Object.freeze(new Set(ctx?.preApprovedCapabilities ?? [])) as ReadonlySet<string>,
+  });
+}
+
 export class HeadquarterOperations {
   readonly queue: OperatorQueue;
   /**
@@ -380,6 +400,27 @@ export class HeadquarterOperations {
    * default: nobody is a principal until a Founder registers them.
    */
   readonly #principals: HumanPrincipalPort;
+  /**
+   * ENFORCEMENT lookups, as prototype-free closures captured at construction.
+   *
+   * Making `#principals` and `#workers` `#private` hid the instance references
+   * and nothing else: the default instances are a `HumanPrincipalRegistry` and
+   * a `SpecialistDirectoryAdapter`/`NarrowingWorkerDirectory`, all exported
+   * classes, and every call resolved its method through those mutable
+   * prototypes. A same-realm worker or plugin could set
+   * `HumanPrincipalRegistry.prototype.get = () => ({ approvalAuthority: true, ... })`
+   * and forge the Founder gate, or patch the directory prototype and forge a
+   * least-privilege grant (issue #200, Codex exact-head findings on `063c7d3`).
+   *
+   * This is the same defect the queue's provider lookup had in round 42, and
+   * the same remedy: read the DATABASE through a closure, so no object an
+   * attacker can reach participates in the answer. A CUSTOM port supplied by
+   * the composer is used as given — that object is the composer's own choice at
+   * construction, the same trust level as the privileged grant itself.
+   */
+  readonly #principalOf: (id: string) => HumanPrincipal | null;
+  readonly #grantOf: (workerId: string) => readonly string[];
+  readonly #isRegisteredWorker: (workerId: string) => boolean;
   readonly #nominationSources: readonly NominationSourcePort[];
   readonly #policyCtx: PolicyContext;
   /** Write side of the worker → provider map. Private by design — see below. */
@@ -450,13 +491,13 @@ export class HeadquarterOperations {
       options.queue ??
       new OperatorQueue(
         db,
-        options.policyCtx ?? {},
+        freezePolicyContext(options.policyCtx),
         (api) => {
           granted = api;
         },
         // Lazily evaluated: `#workers` is composed below, and a claim can only
         // happen after this constructor returns.
-        (workerId) => this.#workers.allowedCapabilities(workerId),
+        (workerId) => this.#grantOf(workerId),
       );
     this.#queuePrivileged = granted;
     // The WRITE side of the worker → provider map lives here and nowhere else
@@ -468,7 +509,47 @@ export class HeadquarterOperations {
       options.workers ?? narrowByRegistry(new SpecialistDirectoryAdapter(this.#store), options.memberRegistry);
     this.#principals = options.humanPrincipals ?? new HumanPrincipalRegistry(db);
     this.#nominationSources = options.nominationSources ?? [];
-    this.#policyCtx = options.policyCtx ?? {};
+    // Defensive, frozen copy. The caller's object (and the `Set` inside it)
+    // stayed reachable through `ops.policyContext`, so a worker could add a
+    // standing pre-approval for an `external_side_effect` capability and skip
+    // the Founder gate at enqueue, claim and start alike.
+    this.#policyCtx = freezePolicyContext(options.policyCtx);
+    // Prototype-free by construction: `db.prepare` is the only dispatch, and
+    // the row mapping is inline rather than delegated to an exported class.
+    this.#principalOf = options.humanPrincipals
+      ? (id: string) => this.#principals.get(id)
+      : (id: string) => {
+          const row = db
+            .prepare(`SELECT * FROM hq_human_principals WHERE id = ?`)
+            .get(id) as Record<string, unknown> | undefined;
+          if (!row) return null;
+          return {
+            id: row.id as string,
+            displayName: row.display_name as string,
+            originateCapabilities: JSON.parse(row.originate_capabilities as string) as string[],
+            approvalAuthority: !!row.approval_authority,
+            active: !!row.active,
+          };
+        };
+    this.#grantOf =
+      options.workers || options.memberRegistry
+        ? (workerId: string) => this.#workers.allowedCapabilities(workerId)
+        : (workerId: string) => {
+            const row = db
+              .prepare(`SELECT allowed_capabilities FROM hq_specialists WHERE id = ?`)
+              .get(workerId) as { allowed_capabilities: string } | undefined;
+            if (!row) return [];
+            try {
+              const parsed: unknown = JSON.parse(row.allowed_capabilities);
+              return Array.isArray(parsed) ? parsed.filter((c): c is string => typeof c === 'string') : [];
+            } catch {
+              return [];
+            }
+          };
+    this.#isRegisteredWorker = options.workers
+      ? (workerId: string) => this.#workers.isRegistered(workerId)
+      : (workerId: string) =>
+          db.prepare(`SELECT 1 FROM hq_specialists WHERE id = ?`).get(workerId) !== undefined;
     this.directory = {
       listSpecialists: () => this.#store.listSpecialists(),
       latestStatusPerSubject: () => this.#store.latestStatusPerSubject(),
@@ -482,7 +563,9 @@ export class HeadquarterOperations {
 
   /** Standing pre-approval set the policy engine is evaluated against. */
   get policyContext(): PolicyContext {
-    return this.#policyCtx;
+    // A fresh copy per read: handing out the enforcement object let a caller
+    // mutate the policy every gate is evaluated against.
+    return freezePolicyContext(this.#policyCtx);
   }
 
   /** Every engaged kill-switch scope, for the console's alarm section. */
@@ -821,7 +904,7 @@ export class HeadquarterOperations {
     if (!assignability.assignable) {
       return this.#rejectNotAssignable(workerId, assignability, 'claim');
     }
-    if (!this.#workers.allowedCapabilities(workerId).includes(capabilityId)) {
+    if (!this.#grantOf(workerId).includes(capabilityId)) {
       return fail(
         'not_permitted',
         `Worker ${workerId} is not allowed capability ${capabilityId} (least privilege)`,
@@ -1500,7 +1583,7 @@ export class HeadquarterOperations {
       }
       return ok({ kind: 'worker', allowedCapabilities: this.#workers.allowedCapabilities(actor) });
     }
-    const human = resolvePrincipal(this.#principals, actor);
+    const human = resolvePrincipal({ get: (id: string) => this.#principalOf(id) }, actor);
     if (!human.ok) {
       this.#requirePrivilegedQueue().appendEvidence({
         actor: 'system',
@@ -1535,14 +1618,16 @@ export class HeadquarterOperations {
     if (actor === 'system') {
       return fail('not_permitted', `'system' cannot ${action}: a human principal is required`);
     }
-    if (this.#workers.isRegistered(actor)) {
+    if (this.#isRegisteredWorker(actor)) {
       return fail(
         'not_permitted',
         `Registered worker ${actor} cannot ${action}: worker identity never carries approval authority`,
         { actor },
       );
     }
-    const approver = resolveApprover(this.#principals, actor);
+    // `{ get: … }` rather than the port itself: an own-property closure has no
+    // prototype for a same-realm plugin to patch.
+    const approver = resolveApprover({ get: (id: string) => this.#principalOf(id) }, actor);
     if (!approver.ok) {
       this.#requirePrivilegedQueue().appendEvidence({
         actor: 'system',
@@ -1564,8 +1649,8 @@ export class HeadquarterOperations {
    * worker-directory lookup with a confusing "unknown worker".
    */
   #rejectHumanExecution(actorId: string, action: string): OpsResult<never> | null {
-    if (this.#workers.isRegistered(actorId)) return null;
-    if (!this.#principals.get(actorId)) return null;
+    if (this.#isRegisteredWorker(actorId)) return null;
+    if (!this.#principalOf(actorId)) return null;
     this.#requirePrivilegedQueue().appendEvidence({
       actor: 'system',
       kind: 'human_execution_refused',

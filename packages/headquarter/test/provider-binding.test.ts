@@ -22,6 +22,12 @@ import { openMemoryHqDatabase } from '../src/store/db.js';
 import { HeadquarterStore } from '../src/store/headquarter.js';
 import { HeadquarterOperations } from '../src/application/service.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
+import { HumanPrincipalRegistry } from '../src/application/principals.js';
+import { SpecialistDirectoryAdapter } from '../src/application/ports.js';
+import {
+  NarrowingWorkerDirectory,
+  RegistryWorkerDirectory,
+} from '../src/application/registry-directory.js';
 import {
   checkProviderBinding,
   EXECUTION_PROVIDER_KEY,
@@ -1230,5 +1236,221 @@ describe('HOSTILE: task origination is not reachable from a queue handle', () =>
       requestedBy: 'nobody-at-all',
     });
     expect(forged.ok).toBe(false);
+  });
+});
+
+/**
+ * Codex exact-head review of `063c7d3` — three P1s, all ONE mechanism:
+ * enforcement dispatching through an EXPORTED, mutable class prototype.
+ *
+ * Making a collaborator `#private` hides the reference. It does not stop the
+ * method resolving through `SomeExportedClass.prototype` on every call, which a
+ * same-realm plugin can replace. This is the same defect the queue's provider
+ * lookup had (round 42) and the same remedy: read the database through a
+ * closure, so nothing an attacker can reach participates in the answer.
+ *
+ * The last test here is deliberately GENERAL rather than one-per-finding. Three
+ * named prototypes were reported; enumerating them is what has failed twenty
+ * times. It patches every exported class on the path at once.
+ */
+describe('HOSTILE: enforcement never dispatches through an exported prototype', () => {
+  /** Patch a prototype method, run the body, always restore. */
+  function withPatched<T>(
+    proto: object,
+    name: string,
+    replacement: unknown,
+    body: () => T,
+  ): T {
+    const had = Object.prototype.hasOwnProperty.call(proto, name);
+    const saved = (proto as Record<string, unknown>)[name];
+    (proto as Record<string, unknown>)[name] = replacement;
+    try {
+      return body();
+    } finally {
+      // Restore by DELETING when there was no own property, rather than
+      // assigning undefined — assigning would leave the name defined and
+      // patchable for every later test. (My own attack test made exactly that
+      // mistake in an earlier round and leaked four enforcement names.)
+      if (had) (proto as Record<string, unknown>)[name] = saved;
+      else delete (proto as Record<string, unknown>)[name];
+    }
+  }
+
+  it('cannot forge approval authority by patching the principal registry prototype', () => {
+    const fx = bindingFixture();
+    const result = submitDirectOrder(
+      fx.ops,
+      { instruction: 'Approve me.', project: 'mesob', route: 'CLAUDE', requestedBy: 'founder' },
+      CLAUDE_ONLY,
+    );
+    if (!result.ok) throw new Error('expected an order');
+    const taskId = result.data.task.id;
+    const card = founderConsole(fx.ops).approvals.find((a) => a.taskId === taskId)!;
+
+    // The approver must NOT be a registered worker: that rule fires first and
+    // would refuse before the principal lookup ran, so the test would pass
+    // without ever exercising the patched prototype. (It did, on my first
+    // attempt — caught by proving it red against the pre-fix head.)
+    const forged = withPatched(
+      HumanPrincipalRegistry.prototype,
+      'get',
+      () => ({
+        id: 'ghost-approver',
+        displayName: 'x',
+        originateCapabilities: [],
+        approvalAuthority: true,
+        active: true,
+      }),
+      () =>
+        fx.ops.approveTask({
+          taskId,
+          founderId: 'ghost-approver',
+          expectedActionDigest: card.actionDigest,
+        }),
+    );
+    expect(forged.ok).toBe(false);
+    expect(fx.ops.queue.get(taskId)!.status).toBe('needs_approval');
+  });
+
+  it('cannot forge a least-privilege grant by patching the directory prototype', () => {
+    const fx = bindingFixture();
+    const taskId = queuedClaudeOrder(fx);
+    // An active, CLAUDE-declared worker that is NOT granted the capability.
+    fx.store.upsertSpecialist({
+      id: 'ungranted-2',
+      displayName: 'ungranted-2',
+      vendor: 'test',
+      role: 'parallel_implementer',
+      allowedCapabilities: [CAPS.readStatus],
+      active: true,
+    });
+    expectOk(
+      fx.ops.declareWorkerProvider({
+        workerId: 'ungranted-2',
+        providerId: 'CLAUDE',
+        founderId: 'founder',
+      }),
+    );
+
+    withPatched(
+      SpecialistDirectoryAdapter.prototype,
+      'allowedCapabilities',
+      () => [DIRECT_ORDER_CAPABILITY.id],
+      () => {
+        expect(() => fx.ops.queue.claim('ungranted-2', DIRECT_ORDER_CAPABILITY.id)).toThrow(
+          /least privilege/i,
+        );
+      },
+    );
+    const task = fx.ops.queue.get(taskId)!;
+    expect(task.status).toBe('queued');
+    expect(task.claimedBy).toBeNull();
+  });
+
+  it('cannot grant itself a standing pre-approval through the policy context', () => {
+    const fx = bindingFixture();
+    // The getter used to hand out the very object enforcement reads.
+    const view = fx.ops.policyContext;
+    expect(view).not.toBe(fx.ops.policyContext); // a fresh copy per read
+    expect(Object.isFrozen(view)).toBe(true);
+
+    // Attempt the mutation both ways: on the returned Set, and by replacing it.
+    try {
+      (view.preApprovedCapabilities as Set<string>).add(DIRECT_ORDER_CAPABILITY.id);
+    } catch {
+      /* frozen Set rejects in strict mode; either outcome is fine */
+    }
+    try {
+      (view as { preApprovedCapabilities?: unknown }).preApprovedCapabilities = new Set([
+        DIRECT_ORDER_CAPABILITY.id,
+      ]);
+    } catch {
+      /* frozen object */
+    }
+
+    // The Founder gate still applies: the order parks in needs_approval.
+    const result = submitDirectOrder(
+      fx.ops,
+      { instruction: 'Run without asking.', project: 'mesob', route: 'CLAUDE', requestedBy: 'founder' },
+      CLAUDE_ONLY,
+    );
+    if (!result.ok) throw new Error('expected an order');
+    expect(fx.ops.queue.get(result.data.task.id)!.status).toBe('needs_approval');
+    expect([...fx.ops.policyContext.preApprovedCapabilities!]).not.toContain(
+      DIRECT_ORDER_CAPABILITY.id,
+    );
+  });
+
+  /**
+   * The general form. Three prototypes were reported; this patches every
+   * exported class on the path, because enumerating the named ones is exactly
+   * the method that has been wrong six times.
+   */
+  it('holds with EVERY exported directory/registry prototype patched at once', () => {
+    const fx = bindingFixture();
+    const taskId = queuedClaudeOrder(fx);
+    // A CLAUDE-declared worker, so the provider binding PASSES and the only
+    // thing standing between it and the task is the least-privilege grant.
+    // Using a CODEX worker here would throw on the binding whatever the
+    // prototypes said, and prove nothing.
+    fx.store.upsertSpecialist({
+      id: 'ungranted-3',
+      displayName: 'ungranted-3',
+      vendor: 'test',
+      role: 'parallel_implementer',
+      allowedCapabilities: [CAPS.readStatus],
+      active: true,
+    });
+    expectOk(
+      fx.ops.declareWorkerProvider({
+        workerId: 'ungranted-3',
+        providerId: 'CLAUDE',
+        founderId: 'founder',
+      }),
+    );
+
+    const protos: Array<[object, string, unknown]> = [
+      [HumanPrincipalRegistry.prototype, 'get', () => ({
+        id: 'codex-worker',
+        displayName: 'x',
+        originateCapabilities: [],
+        approvalAuthority: true,
+        active: true,
+      })],
+      [SpecialistDirectoryAdapter.prototype, 'allowedCapabilities', () => [DIRECT_ORDER_CAPABILITY.id]],
+      [SpecialistDirectoryAdapter.prototype, 'isRegistered', () => false],
+      [NarrowingWorkerDirectory.prototype, 'allowedCapabilities', () => [DIRECT_ORDER_CAPABILITY.id]],
+      [RegistryWorkerDirectory.prototype, 'allowedCapabilities', () => [DIRECT_ORDER_CAPABILITY.id]],
+    ];
+    const saved = protos.map(([proto, name]) => [
+      proto,
+      name,
+      Object.prototype.hasOwnProperty.call(proto, name),
+      (proto as Record<string, unknown>)[name],
+    ] as const);
+    for (const [proto, name, replacement] of protos) {
+      (proto as Record<string, unknown>)[name] = replacement;
+    }
+    try {
+      // Every prototype now says this worker is granted the capability. The
+      // enforced answer must not move.
+      expect(() => fx.ops.queue.claim('ungranted-3', DIRECT_ORDER_CAPABILITY.id)).toThrow(
+        /least privilege/i,
+      );
+      // ...and the task is untouched.
+      const task = fx.ops.queue.get(taskId)!;
+      expect(task.status).toBe('queued');
+      expect(task.claimedBy).toBeNull();
+      expect(task.fence).toBe(0);
+    } finally {
+      for (const [proto, name, had, value] of saved) {
+        if (had) (proto as Record<string, unknown>)[name] = value;
+        else delete (proto as Record<string, unknown>)[name];
+      }
+    }
+
+    // And the restore actually restored: the legitimate worker still works.
+    const claimed = expectOk(fx.ops.claimNext('claude-worker', DIRECT_ORDER_CAPABILITY.id));
+    expect(claimed.id).toBe(taskId);
   });
 });
