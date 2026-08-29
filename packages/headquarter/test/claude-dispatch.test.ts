@@ -43,6 +43,7 @@ import {
   unavailableTransport,
   type GitHubIssueRequest,
   type GitHubIssueResult,
+  type DispatchCapableTransport,
   type GitHubIssueTransport,
   type GitHubTransportStatus,
 } from '../src/providers/claude/transport.js';
@@ -59,10 +60,11 @@ const TARGET = { owner: 'kiniena-github', repo: 'JENIFY-OS' } as const;
 function stubTransport(options: {
   status?: Partial<GitHubTransportStatus>;
   result?: GitHubIssueResult;
-}): GitHubIssueTransport & { calls: GitHubIssueRequest[] } {
+}): DispatchCapableTransport & { calls: GitHubIssueRequest[] } {
   const calls: GitHubIssueRequest[] = [];
   return {
     id: 'stub',
+    ensureLabel: () => ({ ok: true, created: false }),
     calls,
     status: () => ({
       available: true,
@@ -563,7 +565,7 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
     // Simulate the interleaving: the other process completes its whole dispatch
     // between this one's fast-path history read and its reservation.
     let raced = false;
-    const racingTransport: GitHubIssueTransport & { calls: GitHubIssueRequest[] } = {
+    const racingTransport: DispatchCapableTransport & { calls: GitHubIssueRequest[] } = {
       ...second,
       status: () => {
         if (!raced) {
@@ -586,7 +588,7 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
     // including after GitHub accepted the creation.
     const fixture = orderFixture();
     const taskId = placeOrder(fixture);
-    const throwing: GitHubIssueTransport = {
+    const throwing: DispatchCapableTransport = {
       ...stubTransport({}),
       createIssue: () => {
         throw new Error('EROFS: read-only file system');
@@ -614,7 +616,7 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
     const fixture = orderFixture();
     const taskId = placeOrder(fixture);
     const inner = stubTransport({});
-    const slowTransport: GitHubIssueTransport & { calls: GitHubIssueRequest[] } = {
+    const slowTransport: DispatchCapableTransport & { calls: GitHubIssueRequest[] } = {
       ...inner,
       status: () => {
         // Whatever happens during the live check: here, containment.
@@ -637,7 +639,7 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
     const fixture = orderFixture();
     const taskId = placeOrder(fixture);
     const inner = stubTransport({});
-    const slowTransport: GitHubIssueTransport & { calls: GitHubIssueRequest[] } = {
+    const slowTransport: DispatchCapableTransport & { calls: GitHubIssueRequest[] } = {
       ...inner,
       status: () => {
         // The Founder approval is time-boxed; expire it mid-flight.

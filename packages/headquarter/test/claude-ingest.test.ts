@@ -39,7 +39,7 @@ import type {
   GitHubIssueReadResult,
   GitHubIssueRequest,
   GitHubIssueResult,
-  GitHubIssueTransport,
+  DispatchCapableTransport,
   GitHubTransportStatus,
 } from '../src/providers/claude/transport.js';
 
@@ -80,9 +80,10 @@ function comment(overrides: Partial<GitHubIssueComment> = {}): GitHubIssueCommen
 /** A transport that publishes, and reports whatever comments the test supplies. */
 function transport(options: { comments?: GitHubIssueComment[]; body?: string; read?: GitHubIssueReadResult } = {}) {
   const reads: number[] = [];
-  const stub: GitHubIssueTransport & { reads: number[] } = {
+  const stub: DispatchCapableTransport & { reads: number[] } = {
     id: 'stub-gh',
     reads,
+    ensureLabel: () => ({ ok: true, created: false }),
     status: (): GitHubTransportStatus => AUTHENTICATED,
     createIssue: (request: GitHubIssueRequest): GitHubIssueResult => ({
       ok: true,
@@ -152,8 +153,9 @@ function dispatched(fixture: Fixture): { taskId: string; body: string } {
     expectedActionDigest: taskActionDigest(placed.data.task),
   });
   let published = '';
-  const publisher: GitHubIssueTransport = {
+  const publisher: DispatchCapableTransport = {
     id: 'stub-gh',
+    ensureLabel: () => ({ ok: true, created: false }),
     status: (): GitHubTransportStatus => AUTHENTICATED,
     createIssue: (request: GitHubIssueRequest): GitHubIssueResult => {
       published = request.body;
@@ -394,8 +396,9 @@ describe('it refuses to look where it should not', () => {
       founderId: 'chair',
       expectedActionDigest: taskActionDigest(placed.data.task),
     });
-    const killed: GitHubIssueTransport = {
+    const killed: DispatchCapableTransport = {
       id: 'stub-gh',
+      ensureLabel: () => ({ ok: true, created: false }),
       status: (): GitHubTransportStatus => AUTHENTICATED,
       createIssue: (): GitHubIssueResult => {
         throw new Error('killed mid-flight');
@@ -421,8 +424,9 @@ describe('it refuses to look where it should not', () => {
   it('fails closed when the transport cannot read at all', () => {
     const fixture = ordersFixture();
     const { taskId } = dispatched(fixture);
-    const writeOnly: GitHubIssueTransport = {
+    const writeOnly: DispatchCapableTransport = {
       id: 'write-only',
+      ensureLabel: () => ({ ok: true, created: false }),
       status: (): GitHubTransportStatus => AUTHENTICATED,
       createIssue: (): GitHubIssueResult => ({ ok: true, issueNumber: ISSUE, issueUrl: ISSUE_URL }),
     };
@@ -651,6 +655,7 @@ describe('an instruction containing JSON does not break the feedback leg', () =>
       transport: {
         id: 'stub-gh',
         status: (): GitHubTransportStatus => AUTHENTICATED,
+        ensureLabel: () => ({ ok: true, created: false }),
         createIssue: (request: GitHubIssueRequest): GitHubIssueResult => {
           published = request.body;
           return { ok: true, issueNumber: ISSUE, issueUrl: ISSUE_URL };

@@ -28,11 +28,11 @@
 import { describe, expect, it } from 'vitest';
 import { dispatchClaudeTask, dispatchHistory } from '../src/providers/claude/dispatch.js';
 import { HQ_DISPATCH_LABEL, HQ_DISPATCH_MARKER } from '../src/routing/providers.js';
-import { DISPATCH_HOST, ghCliTransport } from '../src/providers/claude/transport.js';
+import { classifyExitFailure, DISPATCH_HOST, ghCliTransport } from '../src/providers/claude/transport.js';
 import type {
   GitHubIssueRequest,
   GitHubIssueResult,
-  GitHubIssueTransport,
+  DispatchCapableTransport,
   GitHubLabelResult,
   GitHubTarget,
   GitHubTransportStatus,
@@ -101,12 +101,12 @@ interface Recorder {
 }
 
 function stub(options: {
-  label?: GitHubLabelResult | 'throw' | 'absent';
+  label?: GitHubLabelResult | 'throw';
   result?: GitHubIssueResult;
   status?: Partial<GitHubTransportStatus>;
-}): GitHubIssueTransport & { rec: Recorder } {
+}): DispatchCapableTransport & { rec: Recorder } {
   const rec: Recorder = { issues: [], labels: [], order: [] };
-  const transport: GitHubIssueTransport & { rec: Recorder } = {
+  const transport: DispatchCapableTransport & { rec: Recorder } = {
     id: 'stub',
     rec,
     status: () => ({
@@ -130,16 +130,16 @@ function stub(options: {
         }
       );
     },
-  };
-  if (options.label !== 'absent') {
-    transport.ensureLabel = (target, label, description) => {
+    // Not assigned afterwards: a publishing transport must carry this from the
+    // moment it exists, which is what `DispatchCapableTransport` now enforces.
+    ensureLabel: (target, label, description) => {
       rec.labels.push({ target, label, description });
       rec.order.push('ensureLabel');
       if (options.label === 'throw') throw new Error('gh exploded');
-      if (options.label == null || options.label === 'absent') return { ok: true, created: true };
+      if (options.label == null) return { ok: true, created: true };
       return options.label;
-    };
-  }
+    },
+  };
   return transport;
 }
 
@@ -260,17 +260,29 @@ describe('a durable record that cannot be established publishes nothing', () => 
     expect(transport.rec.issues[0]!.labels).toContain(HQ_DISPATCH_LABEL);
   });
 
-  it('still publishes through a transport that cannot prepare labels at all', () => {
-    // `ensureLabel` is optional, and its absence is not a hole: the guarantee
-    // that matters — the issue CARRIES the label — belongs to `createIssue` and
-    // is unconditional. All the preparation removes is a setup failure mode, so
-    // a transport without it either succeeds with the label or fails to create
-    // the issue. Unlabelled publication is the one outcome no path produces.
-    const { ops, taskId } = dispatchFixture();
-    const transport = stub({ label: 'absent' });
+  it('cannot be handed a transport that is unable to prepare the label', () => {
+    // This test REPLACES one asserting the opposite (issue #224, ChatGPT P1 on
+    // `72e4322`). `ensureLabel` used to be optional, on the argument that a
+    // repository lacking the label would make `createIssue` fail rather than
+    // publish unlabelled — so a transport without it was "not a hole".
+    //
+    // That argument assumed `gh` resolves labels BEFORE submitting the
+    // creation, which is precisely what `classifyExitFailure` refuses to
+    // assume. If any version applies them after, the "clean" failure had
+    // already published an issue carrying only the erasable body marker, and
+    // the retry it permitted published a second one.
+    //
+    // The guarantee is now structural: `DispatchCapableTransport` requires
+    // `ensureLabel`, so the configuration the old test exercised does not
+    // type-check. Asserted here as a runtime shape check, because a type
+    // deleted later would otherwise take its own test with it.
+    const transport = stub({});
+    expect(typeof transport.ensureLabel).toBe('function');
 
+    const { ops, taskId } = dispatchFixture();
     expect(dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }).ok).toBe(true);
-    expect(transport.rec.labels).toHaveLength(0);
+    // Prepared FIRST, then the issue carries it. Both, not either.
+    expect(transport.rec.labels).toHaveLength(1);
     expect(transport.rec.issues[0]!.labels).toContain(HQ_DISPATCH_LABEL);
   });
 });
@@ -425,5 +437,86 @@ describe('the gh adapter prepares the label host-qualified and non-destructively
     expect(transport.ensureLabel!({ owner: 'a/b', repo: 'c' }, HQ_DISPATCH_LABEL, 'why').ok).toBe(false);
     expect(transport.ensureLabel!(TARGET, '  ', 'why').ok).toBe(false);
     expect(seen).toHaveLength(0);
+  });
+});
+
+/**
+ * A label failure never licenses a retry (issue #224, ChatGPT P1 on `72e4322`).
+ *
+ * ## The defect
+ *
+ * `ensureLabel` was optional, on the argument that a repository lacking the
+ * label would make `createIssue` FAIL rather than publish an unlabelled issue.
+ * That argument assumed `gh` resolves labels BEFORE submitting the creation.
+ *
+ * This module already refuses that assumption elsewhere: `classifyExitFailure`
+ * was written so that only failures PROVEN to precede submission are terminal,
+ * precisely because whether `gh` validates a label before or after creating the
+ * issue is version-dependent. But `gh` reports a missing label as
+ * `could not add label: 'x' not found`, and the generic `/\bnot found\b/i` in
+ * `PROVEN_NOT_SUBMITTED` matched it — so the label case classified as
+ * `rejected`, a terminal failure that closes the attempt and permits a retry.
+ *
+ * If any `gh` version applies labels after creating the issue, that retry
+ * publishes a SECOND public issue while the first exists carrying only the
+ * erasable body marker — the exact artefact the label was added to prevent, and
+ * the exact duplicate the outcome-unknown design exists to prevent.
+ *
+ * ## What is asserted
+ *
+ * A label failure is outcome-UNKNOWN, and an attempt left unknown blocks the
+ * next dispatch instead of letting it publish again.
+ */
+describe('a label failure is never proven-not-submitted', () => {
+  const LABEL_FAILURES = [
+    "could not add label: 'jenify-hq-dispatch' not found",
+    "HTTP 422: could not add label: 'jenify-hq-dispatch' not found",
+    'could not resolve label jenify-hq-dispatch',
+    "label 'jenify-hq-dispatch' not found",
+  ];
+
+  it('classifies every shape of it as outcome-unknown, not rejected', () => {
+    for (const detail of LABEL_FAILURES) {
+      const verdict = classifyExitFailure(1, detail);
+      expect(verdict.kind, detail).toBe('unreadable_response');
+    }
+  });
+
+  it('still classifies a genuinely-not-submitted failure as rejected', () => {
+    // The guard must not become "everything is unknown", which would strand
+    // every real rejection as an attempt needing human reconciliation.
+    expect(classifyExitFailure(1, 'GraphQL: Could not resolve to a Repository with the name').kind).toBe(
+      'rejected',
+    );
+    expect(classifyExitFailure(1, 'HTTP 404: Not Found').kind).toBe('rejected');
+  });
+
+  it('leaves the attempt OPEN, so the next dispatch cannot publish a duplicate', () => {
+    // The whole point, driven end to end rather than asserted on the classifier:
+    // the issue may already exist, so the next dispatch must refuse rather than
+    // create a second one.
+    const { ops, taskId } = dispatchFixture();
+    const failing = stub({
+      result: {
+        ok: false,
+        kind: 'unreadable_response',
+        message: "The GitHub CLI exited 1. could not add label: 'jenify-hq-dispatch' not found",
+      },
+    });
+
+    const first = dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: failing });
+    expect(first.ok).toBe(false);
+
+    // The attempt is outstanding, NOT failed — nothing proved the issue absent.
+    expect(dispatchHistory(ops, taskId).state).toBe('unknown');
+
+    const second = stub({});
+    const retry = dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: second });
+
+    expect(retry.ok).toBe(false);
+    if (retry.ok) throw new Error('unreachable');
+    expect(retry.error.code).toBe('dispatch_outcome_unknown');
+    // Nothing was published the second time. That is the duplicate that is not.
+    expect(second.rec.issues).toHaveLength(0);
   });
 });

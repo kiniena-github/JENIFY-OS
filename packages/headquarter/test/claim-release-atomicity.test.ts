@@ -30,7 +30,7 @@ import { DIRECT_ORDER_CAPABILITY, registerDirectOrderCapability, submitDirectOrd
 import { dispatchClaudeTask } from '../src/providers/claude/dispatch.js';
 import type {
   GitHubIssueResult,
-  GitHubIssueTransport,
+  DispatchCapableTransport,
   GitHubTransportStatus,
 } from '../src/providers/claude/transport.js';
 
@@ -59,8 +59,9 @@ const AUTHENTICATED: GitHubTransportStatus = {
  * A CLEAN failure: the process never started, so nothing was created. That is
  * the outcome that releases the claim — an UNCERTAIN one deliberately does not.
  */
-const NOTHING_PUBLISHED: GitHubIssueTransport = {
+const NOTHING_PUBLISHED: DispatchCapableTransport = {
   id: 'stub-gh',
+  ensureLabel: () => ({ ok: true, created: false }),
   status: (): GitHubTransportStatus => AUTHENTICATED,
   createIssue: (): GitHubIssueResult => ({
     ok: false,
@@ -259,8 +260,9 @@ describe('the happy path still releases, and says so', () => {
     // externally must not be handed to anyone else.
     const fixture = ordersFixture();
     const taskId = approvedOrder(fixture);
-    const killed: GitHubIssueTransport = {
+    const killed: DispatchCapableTransport = {
       id: 'stub-gh',
+      ensureLabel: () => ({ ok: true, created: false }),
       status: (): GitHubTransportStatus => AUTHENTICATED,
       createIssue: (): GitHubIssueResult => {
         throw new Error('killed mid-flight');

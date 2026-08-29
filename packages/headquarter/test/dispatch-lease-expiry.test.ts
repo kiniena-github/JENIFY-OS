@@ -42,7 +42,7 @@ import { DIRECT_ORDER_CAPABILITY, registerDirectOrderCapability, submitDirectOrd
 import { dispatchClaudeTask, dispatchHistory } from '../src/providers/claude/dispatch.js';
 import type {
   GitHubIssueResult,
-  GitHubIssueTransport,
+  DispatchCapableTransport,
   GitHubTransportStatus,
 } from '../src/providers/claude/transport.js';
 
@@ -61,8 +61,9 @@ const AUTHENTICATED: GitHubTransportStatus = {
   reason: 'The GitHub CLI is installed and an authenticated github.com session was observed.',
 };
 
-const PUBLISHES: GitHubIssueTransport = {
+const PUBLISHES: DispatchCapableTransport = {
   id: 'stub-gh',
+  ensureLabel: () => ({ ok: true, created: false }),
   status: (): GitHubTransportStatus => AUTHENTICATED,
   createIssue: (): GitHubIssueResult => ({ ok: true, issueNumber: 42, issueUrl: ISSUE_URL }),
 };
@@ -153,8 +154,9 @@ describe('a published handoff is a started execution', () => {
     const taskId = approvedOrder(f);
 
     let statusAtPublication: string | null = null;
-    const observing: GitHubIssueTransport = {
+    const observing: DispatchCapableTransport = {
       id: 'stub-gh',
+      ensureLabel: () => ({ ok: true, created: false }),
       status: (): GitHubTransportStatus => AUTHENTICATED,
       createIssue: (): GitHubIssueResult => {
         statusAtPublication = f.ops.queue.get(taskId)?.status ?? null;
@@ -183,8 +185,9 @@ describe('a published handoff is a started execution', () => {
     const taskId = approvedOrder(f);
 
     let published = 0;
-    const counting: GitHubIssueTransport = {
+    const counting: DispatchCapableTransport = {
       id: 'stub-gh',
+      ensureLabel: () => ({ ok: true, created: false }),
       status: (): GitHubTransportStatus => AUTHENTICATED,
       createIssue: (): GitHubIssueResult => {
         published += 1;

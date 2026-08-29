@@ -37,7 +37,7 @@ import {
 } from '../src/providers/claude/dispatch.js';
 import type {
   GitHubIssueResult,
-  GitHubIssueTransport,
+  DispatchCapableTransport,
   GitHubTransportStatus,
 } from '../src/providers/claude/transport.js';
 
@@ -108,8 +108,9 @@ function taskWithUnknownDispatch(fixture: Fixture): string {
     founderId: 'chair',
     expectedActionDigest: taskActionDigest(placed.data.task),
   });
-  const throwing: GitHubIssueTransport = {
+  const throwing: DispatchCapableTransport = {
     id: 'stub-gh',
+    ensureLabel: () => ({ ok: true, created: false }),
     status: (): GitHubTransportStatus => AUTHENTICATED,
     createIssue: (): GitHubIssueResult => {
       throw new Error('killed mid-flight');

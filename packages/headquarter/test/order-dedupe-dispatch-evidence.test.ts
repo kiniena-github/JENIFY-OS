@@ -38,7 +38,7 @@ import { dispatchClaudeTask, dispatchHistory } from '../src/providers/claude/dis
 import type {
   GitHubIssueRequest,
   GitHubIssueResult,
-  GitHubIssueTransport,
+  DispatchCapableTransport,
   GitHubTransportStatus,
 } from '../src/providers/claude/transport.js';
 
@@ -66,9 +66,10 @@ const AUTHENTICATED: GitHubTransportStatus = {
   reason: 'The GitHub CLI is installed and an authenticated github.com session was observed.',
 };
 
-function transport(): GitHubIssueTransport {
+function transport(): DispatchCapableTransport {
   return {
     id: 'stub-gh',
+    ensureLabel: () => ({ ok: true, created: false }),
     status: (): GitHubTransportStatus => AUTHENTICATED,
     createIssue: (request: GitHubIssueRequest): GitHubIssueResult => ({
       ok: true,
@@ -214,8 +215,9 @@ describe('the fix does not turn every blocked order into a clear one', () => {
       founderId: 'chair',
       expectedActionDigest: taskActionDigest(placed.data.task),
     });
-    const throwing: GitHubIssueTransport = {
+    const throwing: DispatchCapableTransport = {
       id: 'stub-gh',
+      ensureLabel: () => ({ ok: true, created: false }),
       status: (): GitHubTransportStatus => AUTHENTICATED,
       createIssue: (): GitHubIssueResult => {
         throw new Error('killed mid-flight');

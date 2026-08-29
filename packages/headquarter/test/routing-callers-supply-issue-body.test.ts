@@ -31,11 +31,17 @@
  */
 
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { HQ_DISPATCH_MARKER } from '../src/routing/providers.js';
 
-const REPO_ROOT = join(process.cwd(), '..', '..');
+// Resolved from THIS FILE, not `process.cwd()`. The suite is normally run from
+// `packages/headquarter`, but `vitest` invoked at the repository root would
+// otherwise look for `.github/` two levels above the root and report twelve
+// failures for a guard that is intact — a false alarm on the one test whose
+// whole job is to be believed.
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const WORKFLOWS = join(REPO_ROOT, '.github', 'workflows');
 const EVIDENCE_ACTION = join(REPO_ROOT, '.github', 'actions', 'hq-dispatch-evidence', 'action.yml');
 

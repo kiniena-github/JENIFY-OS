@@ -43,7 +43,7 @@ import {
 } from '../src/providers/claude/dispatch.js';
 import type {
   GitHubIssueResult,
-  GitHubIssueTransport,
+  DispatchCapableTransport,
   GitHubTransportStatus,
 } from '../src/providers/claude/transport.js';
 
@@ -119,8 +119,9 @@ function approvedTask(fixture: Fixture): string {
 
 function taskWithUnknownDispatch(fixture: Fixture): string {
   const taskId = approvedTask(fixture);
-  const throwing: GitHubIssueTransport = {
+  const throwing: DispatchCapableTransport = {
     id: 'stub-gh',
+    ensureLabel: () => ({ ok: true, created: false }),
     status: (): GitHubTransportStatus => AUTHENTICATED,
     createIssue: (): GitHubIssueResult => {
       throw new Error('killed mid-flight');
@@ -271,8 +272,9 @@ describe('the handoff claims the canonical task before publishing', () => {
   it('leaves the task assigned to the designated executor, not independently claimable', () => {
     const fixture = ordersFixture();
     const taskId = approvedTask(fixture);
-    const transport: GitHubIssueTransport = {
+    const transport: DispatchCapableTransport = {
       id: 'stub-gh',
+      ensureLabel: () => ({ ok: true, created: false }),
       status: (): GitHubTransportStatus => AUTHENTICATED,
       createIssue: (): GitHubIssueResult => ({ ok: true, issueNumber: ISSUE, issueUrl: GOOD_URL }),
     };
@@ -298,8 +300,9 @@ describe('the handoff claims the canonical task before publishing', () => {
   it('consumes the single-use approval, so the published action cannot run twice', () => {
     const fixture = ordersFixture();
     const taskId = approvedTask(fixture);
-    const transport: GitHubIssueTransport = {
+    const transport: DispatchCapableTransport = {
       id: 'stub-gh',
+      ensureLabel: () => ({ ok: true, created: false }),
       status: (): GitHubTransportStatus => AUTHENTICATED,
       createIssue: (): GitHubIssueResult => ({ ok: true, issueNumber: ISSUE, issueUrl: GOOD_URL }),
     };
@@ -314,8 +317,9 @@ describe('the handoff claims the canonical task before publishing', () => {
     const fixture = ordersFixture();
     const taskId = approvedTask(fixture);
     const calls: unknown[] = [];
-    const transport: GitHubIssueTransport = {
+    const transport: DispatchCapableTransport = {
       id: 'stub-gh',
+      ensureLabel: () => ({ ok: true, created: false }),
       status: (): GitHubTransportStatus => AUTHENTICATED,
       createIssue: (request): GitHubIssueResult => {
         calls.push(request);
@@ -359,8 +363,9 @@ describe('the handoff claims the canonical task before publishing', () => {
       founderId: 'chair',
     });
     const calls: unknown[] = [];
-    const transport: GitHubIssueTransport = {
+    const transport: DispatchCapableTransport = {
       id: 'stub-gh',
+      ensureLabel: () => ({ ok: true, created: false }),
       status: (): GitHubTransportStatus => AUTHENTICATED,
       createIssue: (request): GitHubIssueResult => {
         calls.push(request);
@@ -392,8 +397,9 @@ describe('the handoff claims the canonical task before publishing', () => {
       active: false,
     });
     const calls: unknown[] = [];
-    const transport: GitHubIssueTransport = {
+    const transport: DispatchCapableTransport = {
       id: 'stub-gh',
+      ensureLabel: () => ({ ok: true, created: false }),
       status: (): GitHubTransportStatus => AUTHENTICATED,
       createIssue: (request): GitHubIssueResult => {
         calls.push(request);
@@ -423,8 +429,9 @@ describe('the handoff claims the canonical task before publishing', () => {
       expectedActionDigest: taskActionDigest(second.data.task),
     });
 
-    const transport: GitHubIssueTransport = {
+    const transport: DispatchCapableTransport = {
       id: 'stub-gh',
+      ensureLabel: () => ({ ok: true, created: false }),
       status: (): GitHubTransportStatus => AUTHENTICATED,
       createIssue: (): GitHubIssueResult => ({ ok: true, issueNumber: ISSUE, issueUrl: GOOD_URL }),
     };

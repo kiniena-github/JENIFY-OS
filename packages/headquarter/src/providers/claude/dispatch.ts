@@ -93,6 +93,7 @@ import {
   sameRepository,
   targetSlug,
   type GitHubIssueResult,
+  type DispatchCapableTransport,
   type GitHubIssueTransport,
   type GitHubLabelResult,
   type GitHubTarget,
@@ -826,7 +827,8 @@ export interface DispatchOptions {
   taskId: string;
   /** Explicit repository. There is no default: dispatch publishes an instruction. */
   target: GitHubTarget;
-  transport: GitHubIssueTransport;
+  /** Must be able to guarantee the durable label exists before publishing. */
+  transport: DispatchCapableTransport;
   /**
    * The registered worker the canonical claim is taken for (issue #224,
    * Founder decision approving option 1).
@@ -1005,38 +1007,49 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
   // no session, wrong account, a credential in the rendered body) must cost no
   // write at all.
   //
-  // `ensureLabel` is OPTIONAL, and its absence is not a hole. The guarantee that
-  // matters — the published issue CARRIES the label — is `createIssue`'s, and it
-  // is unconditional a few lines below. All `ensureLabel` removes is a setup
-  // failure mode: `gh` refuses a label it cannot resolve, so without it a
-  // repository that has never defined `jenify-hq-dispatch` would fail the
-  // creation instead of succeeding. Both outcomes are fail-closed; only one of
-  // them needs a human to go and create a label by hand.
-  const ensure = options.transport.ensureLabel;
-  if (ensure != null) {
-    let labelReady: GitHubLabelResult;
-    try {
-      labelReady = ensure.call(options.transport, options.target, HQ_DISPATCH_LABEL, HQ_DISPATCH_LABEL_DESCRIPTION);
-    } catch (error) {
-      // Safe to treat as a clean failure, unlike `createIssue`: creating a label
-      // twice is harmless, so an ambiguous outcome here costs a retry rather
-      // than a duplicate public artefact.
-      return refuseAndRecordBestEffort(
-        'dispatch_label_unavailable',
-        `The GitHub transport threw while ensuring the \`${HQ_DISPATCH_LABEL}\` label exists ` +
-          `(${errorText(error)}). Nothing was published.`,
-        { transport: options.transport.id, label: HQ_DISPATCH_LABEL },
-      );
-    }
-    if (!labelReady.ok) {
-      return refuseAndRecordBestEffort(
-        'dispatch_label_unavailable',
-        `The \`${HQ_DISPATCH_LABEL}\` label could not be made to exist in ${targetSlug(options.target)} ` +
-          `(${labelReady.message}). That label is the durable record that stops an HQ-dispatched issue ` +
-          'being re-triggered once its body has been edited, so nothing was published.',
-        { transport: options.transport.id, label: HQ_DISPATCH_LABEL },
-      );
-    }
+  // `ensureLabel` is REQUIRED of a publishing transport — the type says so
+  // (`DispatchCapableTransport`), so there is no absent case to reason about
+  // here (issue #224, ChatGPT P1 on `72e4322`).
+  //
+  // It was optional, on the argument that a repository lacking the label would
+  // make `createIssue` FAIL rather than publish unlabelled. That argument
+  // assumed `gh` resolves labels before submitting the creation — the very
+  // assumption `classifyExitFailure` refuses to make, because whether `gh`
+  // validates a label before or after creating the issue is version-dependent.
+  // If it applies them after, the "clean" failure had already published an
+  // issue carrying only the erasable body marker, and the retry that failure
+  // permitted published a second one.
+  //
+  // Both halves of that are now closed: the label is guaranteed to exist before
+  // publication (here, by the type), and a label failure that reaches
+  // `createIssue` anyway is classified outcome-UNKNOWN rather than a clean
+  // rejection, so it never licenses a retry.
+  let labelReady: GitHubLabelResult;
+  try {
+    labelReady = options.transport.ensureLabel(
+      options.target,
+      HQ_DISPATCH_LABEL,
+      HQ_DISPATCH_LABEL_DESCRIPTION,
+    );
+  } catch (error) {
+    // Safe to treat as a clean failure, unlike `createIssue`: creating a label
+    // twice is harmless, so an ambiguous outcome here costs a retry rather
+    // than a duplicate public artefact.
+    return refuseAndRecordBestEffort(
+      'dispatch_label_unavailable',
+      `The GitHub transport threw while ensuring the \`${HQ_DISPATCH_LABEL}\` label exists ` +
+        `(${errorText(error)}). Nothing was published.`,
+      { transport: options.transport.id, label: HQ_DISPATCH_LABEL },
+    );
+  }
+  if (!labelReady.ok) {
+    return refuseAndRecordBestEffort(
+      'dispatch_label_unavailable',
+      `The \`${HQ_DISPATCH_LABEL}\` label could not be made to exist in ${targetSlug(options.target)} ` +
+        `(${labelReady.message}). That label is the durable record that stops an HQ-dispatched issue ` +
+        'being re-triggered once its body has been edited, so nothing was published.',
+      { transport: options.transport.id, label: HQ_DISPATCH_LABEL },
+    );
   }
 
   // ---- the reservation: the last thing before the irreversible act ---------

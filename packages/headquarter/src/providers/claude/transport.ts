@@ -208,16 +208,42 @@ export interface GitHubIssueTransport {
    * of "HQ dispatched this issue". The body marker is the other half, and it is
    * erasable by the account the single-use boundary binds.
    *
-   * OPTIONAL for the same reason `readIssue` is: every existing write-only stub
-   * stays valid. A transport without it is not a hole — `createIssue` still
-   * carries the label, so a repository that does not define it makes the
-   * creation FAIL and nothing is published. Unlabelled publication is the one
-   * outcome no path produces.
+   * Optional HERE, and REQUIRED to dispatch — see `DispatchCapableTransport`.
+   * The consumers that only ask a transport for its `status` (the Connection
+   * Center, route availability) have no business promising a repository write,
+   * so the base contract does not demand one.
+   *
+   * It was once optional for publication too, on the argument that a repository
+   * lacking the label would make `createIssue` fail rather than publish
+   * unlabelled. That argument assumed `gh` resolves labels before submitting,
+   * which is exactly what `classifyExitFailure` refuses to assume.
    *
    * Idempotent and non-destructive: it creates the label if absent and leaves an
    * existing one alone. It never renames, recolours or deletes.
    */
   ensureLabel?(target: GitHubTarget, label: string, description: string): GitHubLabelResult;
+}
+
+/**
+ * A transport that may PUBLISH, which is strictly more than one that may be
+ * asked its status (issue #224, ChatGPT P1 on `72e4322`).
+ *
+ * `ensureLabel` is REQUIRED here. The dispatched issue's durable identity is
+ * the `jenify-hq-dispatch` label and the undeletable timeline entry that
+ * applying it writes; the body marker is the erasable half. So a transport that
+ * cannot guarantee the label exists before publication cannot guarantee the
+ * issue it publishes is identifiable afterwards — and an HQ issue whose only
+ * identity is the erasable one is precisely the defect the label was added to
+ * fix.
+ *
+ * Making it a TYPE rather than a runtime check is deliberate. The previous
+ * version left it optional and argued the absence was harmless; the compiler
+ * now refuses the configuration instead of a comment arguing about it, which is
+ * how the other defects of this shape in issue #224 were closed — assert over
+ * the set, not the instance.
+ */
+export interface DispatchCapableTransport extends GitHubIssueTransport {
+  ensureLabel(target: GitHubTarget, label: string, description: string): GitHubLabelResult;
 }
 
 /**
@@ -333,6 +359,35 @@ const PROVEN_NOT_SUBMITTED: readonly RegExp[] = [
   /accepts \d+ arg|requires at least/i,
 ];
 
+/**
+ * Failures involving the LABEL, which are never proven-not-submitted (issue
+ * #224, ChatGPT P1 on `72e4322`).
+ *
+ * `gh` reports a label it cannot resolve as `could not add label: 'x' not
+ * found`. That text matches the generic `/\bnot found\b/i` in
+ * `PROVEN_NOT_SUBMITTED` below, so it used to classify as `rejected` — a
+ * terminal failure that closes the attempt and permits a retry.
+ *
+ * Whether `gh` resolves labels BEFORE submitting the creation or applies them
+ * after is a version-dependent detail. This module already refused to assume
+ * that once, when the ambiguous-exit rule was written; the generic pattern then
+ * swallowed the label case anyway, which no one decided. If any version applies
+ * the label after creating the issue, the retry publishes a SECOND public
+ * issue, and the first exists without the durable label identity the single-use
+ * guard depends on.
+ *
+ * So a label failure is `unreadable_response`: the attempt stays outcome-unknown
+ * and the next dispatch refuses until a human reconciles it. Checked BEFORE
+ * `PROVEN_NOT_SUBMITTED`, because the whole point is that the generic pattern
+ * must not reach it first.
+ */
+const LABEL_FAILURE: readonly RegExp[] = [
+  /could not add label/i,
+  /\blabels?\b[^\n]{0,80}?\bnot found\b/i,
+  /\bnot found\b[^\n]{0,80}?\blabels?\b/i,
+  /could not (resolve|find) label/i,
+];
+
 const PROVEN_UNAUTHENTICATED: readonly RegExp[] = [
   /must be authenticated/i,
   /not logged in|gh auth login/i,
@@ -351,6 +406,17 @@ export function classifyExitFailure(
   const prefix = `The GitHub CLI exited ${status}.`;
   if (PROVEN_UNAUTHENTICATED.some((pattern) => pattern.test(detail))) {
     return { kind: 'unauthenticated', message: `${prefix} ${detail}` };
+  }
+  // BEFORE the proven-not-submitted list: a missing label reads as "not found",
+  // which that list would otherwise treat as a clean rejection. See LABEL_FAILURE.
+  if (LABEL_FAILURE.some((pattern) => pattern.test(detail))) {
+    return {
+      kind: 'unreadable_response',
+      message:
+        `${prefix} The failure concerns the \`jenify-hq-dispatch\` label, and nothing in it ` +
+        'proves the issue was not created first — `gh` may apply labels after submitting the ' +
+        `creation — so the outcome is UNKNOWN rather than a clean rejection. ${detail}`,
+    };
   }
   if (PROVEN_NOT_SUBMITTED.some((pattern) => pattern.test(detail))) {
     return { kind: 'rejected', message: `${prefix} ${detail}` };
@@ -395,7 +461,7 @@ function resolveGh(explicit?: string | null): string | null {
  * it means HQ never has to be given a credential at all. The session already
  * exists, `gh` owns it, and this adapter only asks it to do one thing.
  */
-export function ghCliTransport(options: GhCliTransportOptions = {}): GitHubIssueTransport {
+export function ghCliTransport(options: GhCliTransportOptions = {}): DispatchCapableTransport {
   const spawn = options.spawnImpl ?? defaultSpawn;
   const timeoutMs = options.timeoutMs ?? 60_000;
   const ghPath = resolveGh(options.ghPath);
@@ -722,7 +788,7 @@ export function parseIssueView(stdout: string, expectedNumber: number): GitHubIs
  * one then travel the same, single, tested refusal path instead of one of them
  * being a special case somebody forgets.
  */
-export function unavailableTransport(reason: string): GitHubIssueTransport {
+export function unavailableTransport(reason: string): DispatchCapableTransport {
   return {
     id: 'none',
     status: () => ({
@@ -735,5 +801,9 @@ export function unavailableTransport(reason: string): GitHubIssueTransport {
       reason,
     }),
     createIssue: () => ({ ok: false, kind: 'unavailable', message: reason }),
+    // Dispatch-capable in TYPE, refusing in every ANSWER. A transport that
+    // cannot reach GitHub cannot prepare a label either, and the status check
+    // refuses long before this is reached.
+    ensureLabel: () => ({ ok: false, message: reason }),
   };
 }
