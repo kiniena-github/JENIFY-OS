@@ -286,7 +286,7 @@ export function liveSnapshotFromOperations(
       },
     },
     workforce: {
-      data: ops.store.listSpecialists(),
+      data: ops.directory.listSpecialists(),
       provenance: provenanceFor('hq_specialists via HeadquarterStore.listSpecialists'),
     },
     capabilities: {
@@ -294,7 +294,7 @@ export function liveSnapshotFromOperations(
       provenance: provenanceFor('op_capabilities via CapabilityRegistry.list'),
     },
     activity: {
-      data: ops.store.latestStatusPerSubject(),
+      data: ops.directory.latestStatusPerSubject(),
       provenance: provenanceFor('hq_events via HeadquarterStore.latestStatusPerSubject'),
     },
   });

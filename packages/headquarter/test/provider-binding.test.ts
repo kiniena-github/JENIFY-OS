@@ -18,6 +18,10 @@ import { CAPS, expectOk, setupFixture, type Fixture } from './application.fixtur
 import { founderConsole } from '../src/application/console.js';
 import { taskActionDigest } from '../src/operator/approvals.js';
 import { OperatorQueue } from '../src/operator/queue.js';
+import { openMemoryHqDatabase } from '../src/store/db.js';
+import { HeadquarterStore } from '../src/store/headquarter.js';
+import { HeadquarterOperations } from '../src/application/service.js';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import {
   checkProviderBinding,
   EXECUTION_PROVIDER_KEY,
@@ -618,7 +622,7 @@ describe('the provider write mechanism is not reachable around the authority gat
   /**
    * Codex exact-head finding on `135ae58` (P1) — the FOURTH route, and the
    * first one BELOW the mechanism rather than beside it. `private db` erases
-   * too, so `ops.db`, `ops.queue.db` and `ops.store.db` handed a writable
+   * too, so `ops.db`, `ops.queue.db` and `store.db` handed a writable
    * database to any JavaScript caller holding the operations object. From
    * there `op_worker_providers` can be upserted directly: the provider check
    * then passes, and `declareWorkerProvider`, its principal/approval gate and
@@ -699,11 +703,21 @@ describe('the provider write mechanism is not reachable around the authority gat
      */
     const PUBLIC_SURFACE = new Set([
       'constructor',
-      // Worker execution operations. Each is fence-guarded against the claim
-      // the caller actually holds, so a caller can only drive its OWN task
-      // through its own lifecycle — it resolves no identity because it asserts
-      // one it already proved by claiming.
-      'enqueue',
+      // Worker execution operations.
+      //
+      // `enqueue` WAS on this list, described as "fence-guarded against the
+      // claim the caller actually holds". That was false: it holds no fence and
+      // takes both the requester identity and its `allowedCapabilities` from
+      // the caller, which the policy engine then trusts. It originated tasks
+      // under a fabricated actor with a fabricated grant. Sixth wrong entry,
+      // written in the same commit that restated the criterion (issue #200,
+      // Codex exact-head finding on `f91563f`). It is `#enqueue` now.
+      //
+      // What is left is genuinely fence-guarded: each asserts a claim the
+      // caller already proved by claiming, so it can only drive its OWN task
+      // through its own lifecycle. `claim` itself resolves assignability, the
+      // provider binding and the effective least-privilege grant before it
+      // writes anything.
       'claim',
       'start',
       'heartbeat',
@@ -1063,5 +1077,158 @@ describe('HOSTILE: the service authority check is not patchable either', () => {
     });
     expect(forged.ok).toBe(false);
     expect(fx.ops.queue.get(taskId)!.status).toBe('needs_approval');
+  });
+});
+
+/**
+ * Codex exact-head review of `f91563f` — four more P1s, and a sweep of the
+ * class turned up five more the review did not name (`resolveRequester`,
+ * `rejectHumanExecution`, `rejectNotAssignable`, `policyCtx`, `store`).
+ *
+ * The lesson of this round is not any single route. It is that hiding a
+ * MUTATION is worthless while the CHECK in front of it, or the REGISTRY that
+ * check resolves through, stays reachable. Round 19 made `queue.approve`
+ * private; round 20 found you could patch `ops.assertApprovalAuthority`. That
+ * became `#private`; this round found you could patch `ops.principals.get`
+ * instead and forge approval authority one layer further down.
+ */
+describe('HOSTILE: the authority chain is private at every layer, not just the last one', () => {
+  it('cannot forge approval authority by replacing the principal registry', () => {
+    const fx = bindingFixture();
+    const ops = fx.ops as unknown as Record<string, unknown>;
+
+    expect(
+      ops.principals,
+      'the principal registry was a public collaborator, so `ops.principals.get = () => ' +
+        '({ approvalAuthority: true, active: true, ... })` forged the Founder gate itself — ' +
+        'making the authority METHOD private bought nothing while its registry stayed patchable.',
+    ).toBeUndefined();
+
+    // Attempt it anyway: assigning a new own property must not affect the
+    // private registry the authority check actually resolves through.
+    ops.principals = {
+      get: () => ({
+        id: 'codex-worker',
+        displayName: 'x',
+        originateCapabilities: [],
+        approvalAuthority: true,
+        active: true,
+      }),
+    };
+
+    const result = submitDirectOrder(
+      fx.ops,
+      { instruction: 'Approve me.', project: 'mesob', route: 'CLAUDE', requestedBy: 'founder' },
+      CLAUDE_ONLY,
+    );
+    if (!result.ok) throw new Error('expected an order');
+    const taskId = result.data.task.id;
+    const card = founderConsole(fx.ops).approvals.find((a) => a.taskId === taskId)!;
+    const forged = fx.ops.approveTask({
+      taskId,
+      founderId: 'codex-worker',
+      expectedActionDigest: card.actionDigest,
+    });
+    expect(forged.ok).toBe(false);
+    expect(fx.ops.queue.get(taskId)!.status).toBe('needs_approval');
+  });
+
+  it('cannot forge a reviewer by replacing the actor resolver', () => {
+    const fx = bindingFixture();
+    const ops = fx.ops as unknown as Record<string, unknown>;
+    expect(
+      ops.resolveActor,
+      'resolveActor was TypeScript-private, so patching it reached the privileged reviewPass ' +
+        'with an invented reviewer — recreating the invented-reviewer route one layer up.',
+    ).toBeUndefined();
+    // The same sweep covers the siblings the review did not name.
+    expect(ops.resolveRequester).toBeUndefined();
+    expect(ops.rejectHumanExecution).toBeUndefined();
+    expect(ops.rejectNotAssignable).toBeUndefined();
+    expect(ops.policyCtx, 'patching the policy context adds standing pre-approvals').toBeUndefined();
+  });
+
+  it('cannot grant itself a capability through the worker or specialist store', () => {
+    const fx = bindingFixture();
+    const ops = fx.ops as unknown as Record<string, unknown>;
+    // `store` carries upsertSpecialist: holding it means granting yourself
+    // anything, which satisfies every check above it. Not named by the review.
+    expect(ops.store).toBeUndefined();
+
+    // The public directory view is READS only — no write method to find.
+    const workers = fx.ops.workers as unknown as Record<string, unknown>;
+    expect(workers.upsertSpecialist).toBeUndefined();
+    expect(typeof workers.allowedCapabilities).toBe('function');
+  });
+
+  it('reads the EFFECTIVE grant, so a registry-revoked worker cannot claim through the queue', () => {
+    // My previous fix enforced a grant — the WRONG one. It read `hq_specialists`
+    // directly, while `HeadquarterOperations` composes that adapter with
+    // `narrowByRegistry(...)`. A member registry that revokes a capability the
+    // legacy row still shows was invisible to the queue, so a revoked worker
+    // could bypass `claimNext` and claim through its own handle.
+    const db = openMemoryHqDatabase();
+    const store = new HeadquarterStore(db);
+    // The LEGACY row still grants it — that is the whole point.
+    store.upsertSpecialist({
+      id: 'revoked-worker',
+      displayName: 'revoked-worker',
+      vendor: 'test',
+      role: 'parallel_implementer',
+      allowedCapabilities: [CAPS.readStatus],
+      active: true,
+    });
+    // The registry narrows it to nothing.
+    const ops = new HeadquarterOperations(db, {
+      store,
+      // The registry KNOWS this worker and grants it nothing. (A registry that
+      // does not know a worker deliberately does not narrow it — narrowing
+      // applies to members it has an opinion about.)
+      memberRegistry: {
+        get: (id: string) =>
+          id === 'revoked-worker'
+            ? ({
+                id,
+                displayName: 'revoked-worker',
+                status: 'active',
+                enabled: true,
+                effectiveCapabilities: [],
+              } as never)
+            : null,
+        listAssignments: () => [],
+      },
+    });
+    new CapabilityRegistry(db).register({
+      id: CAPS.readStatus,
+      description: 'Read repo/CI status',
+      riskClass: 'read_only',
+      sideEffect: false,
+      idempotent: true,
+    });
+
+    // The effective directory says no...
+    expect([...ops.workers.allowedCapabilities('revoked-worker')]).toEqual([]);
+    // ...and so, now, does the canonical queue boundary.
+    expect(() => ops.queue.claim('revoked-worker', CAPS.readStatus)).toThrow(/least privilege/i);
+  });
+});
+
+describe('HOSTILE: task origination is not reachable from a queue handle', () => {
+  it('cannot enqueue under a fabricated actor with a fabricated grant', () => {
+    const fx = bindingFixture();
+    const queue = fx.ops.queue as unknown as Record<string, unknown>;
+    expect(
+      queue.enqueue,
+      'enqueue took the requester identity AND its allowedCapabilities from the caller, which ' +
+        'evaluatePolicy trusted — an arbitrary task under a forged actor with a forged grant.',
+    ).toBeUndefined();
+
+    // Origination through the service still resolves the requester.
+    const forged = fx.ops.createTask({
+      capabilityId: DIRECT_ORDER_CAPABILITY.id,
+      payload: { instruction: 'x' },
+      requestedBy: 'nobody-at-all',
+    });
+    expect(forged.ok).toBe(false);
   });
 });

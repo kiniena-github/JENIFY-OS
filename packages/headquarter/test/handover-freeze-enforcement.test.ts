@@ -114,7 +114,7 @@ function setup(): Ctx {
 }
 
 function enqueueRead(ctx: Ctx, by = claude): string {
-  const enq = ctx.queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: by });
+  const enq = ctx.queueApprovals.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: by });
   if (!enq.accepted) throw new Error(`enqueue failed: ${enq.reason}`);
   return enq.task.id;
 }
@@ -236,7 +236,7 @@ describe('canonical freeze enforcement at the assignment boundary', () => {
       sideEffect: true,
       idempotent: false,
     });
-    const enq = queue.enqueue({
+    const enq = queueApprovals.enqueue({
       capabilityId: 'github.merge_pr',
       payload: { pr: 127 },
       idempotencyKey: 'merge-127',
@@ -613,7 +613,7 @@ describe('freeze survives process restart', () => {
 
     // ---- process 1: enqueue work and freeze the worker ----
     const first = wire(openHqDatabase(path));
-    const enq = first.queue.enqueue({
+    const enq = first.queueApprovals.enqueue({
       capabilityId: 'repo.read_status',
       payload: {},
       requestedBy: claude,

@@ -71,7 +71,7 @@ describe('handover / replacement lifecycle', () => {
   // Spec C item 1
   it('worker replacement with active tasks: inventory captures them, verify fails while still claimed, passes after completion', () => {
     const { queue, memory, handovers } = ctx;
-    const enq = queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claude });
+    const enq = ctx.queueApprovals.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claude });
     if (!enq.accepted) throw new Error('enqueue failed');
     const claimed = queue.claim('claude', 'repo.read_status')!;
     expect(claimed.status).toBe('assigned');
@@ -126,7 +126,7 @@ describe('handover / replacement lifecycle', () => {
   // Spec C item 3
   it('an outcome_unknown task blocks verify with a reconciliation-required error and is never flipped by the handover flow', () => {
     const { queue, memory, handovers } = ctx;
-    const enq = queue.enqueue({ capabilityId: 'github.open_pr', payload: { pr: 1 }, idempotencyKey: 'pr-1', requestedBy: claude });
+    const enq = ctx.queueApprovals.enqueue({ capabilityId: 'github.open_pr', payload: { pr: 1 }, idempotencyKey: 'pr-1', requestedBy: claude });
     if (!enq.accepted) throw new Error('enqueue failed');
     // Already-expired lease so the very next sweep marks it outcome_unknown.
     const claimed = queue.claim('claude', 'github.open_pr', -1000)!;
@@ -251,7 +251,7 @@ describe('handover / replacement lifecycle', () => {
   // still catches it rather than trusting upstream filtering alone.
   it('rejects secret-like content surfacing in a handover package as a defense-in-depth backstop', () => {
     const { db, queue, memory } = ctx;
-    const enq = queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claude });
+    const enq = ctx.queueApprovals.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claude });
     if (!enq.accepted) throw new Error('enqueue failed');
     const claimed = queue.claim('claude', 'repo.read_status')!;
     db.prepare('UPDATE op_tasks SET result = ? WHERE id = ?').run(

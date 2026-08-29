@@ -82,8 +82,8 @@ function makeQueue(db: HqDatabase): { queue: OperatorQueue; approvals: Privilege
 }
 
 /** Enqueue a founder-gated task; returns its id (status: needs_approval). */
-function enqueueGated(queue: OperatorQueue, key = 'risky-1', payload: Record<string, unknown> = { target: 'x' }): string {
-  const res = queue.enqueue({
+function enqueueGated(privileged: PrivilegedQueueApi, key = 'risky-1', payload: Record<string, unknown> = { target: 'x' }): string {
+  const res = privileged.enqueue({
     capabilityId: 'ops.risky',
     payload,
     idempotencyKey: key,
@@ -120,7 +120,7 @@ describe('correction A: approval binds to the exact immutable action', () => {
   });
 
   it('approve() stores a digest-bound, time-boxed, single-use approval and admits the unmodified task', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id);
     const approved = queue.get(id)!;
     expect(approved.status).toBe('queued');
@@ -142,7 +142,7 @@ describe('correction A: approval binds to the exact immutable action', () => {
   });
 
   it('HOSTILE: payload mutated after approval is rejected and the task is blocked', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id);
     // Attacker rewrites the payload after the Founder approved it.
     db.prepare(`UPDATE op_tasks SET payload = ? WHERE id = ?`).run(
@@ -158,7 +158,7 @@ describe('correction A: approval binds to the exact immutable action', () => {
   });
 
   it('HOSTILE: capability swapped after approval is rejected and the task is blocked', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id);
     db.prepare(`UPDATE op_tasks SET capability_id = 'archive.index_document' WHERE id = ?`).run(id);
     expect(queue.claim('claude', 'archive.index_document')).toBeNull();
@@ -166,7 +166,7 @@ describe('correction A: approval binds to the exact immutable action', () => {
   });
 
   it('HOSTILE: payload mutated between claim and start invalidates the approval at start()', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky')!;
     db.prepare(`UPDATE op_tasks SET payload = ? WHERE id = ?`).run(JSON.stringify({ target: 'evil' }), id);
@@ -175,14 +175,14 @@ describe('correction A: approval binds to the exact immutable action', () => {
   });
 
   it('an expired approval never admits execution; the task returns to needs_approval', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id, 'founder', { ttlMs: -1000 });
     expect(queue.claim('claude', 'ops.risky')).toBeNull();
     expect(queue.get(id)!.status).toBe('needs_approval');
   });
 
   it('HOSTILE: replaying a consumed approval is rejected; a fresh Founder approval is required', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky')!;
     const approvalId = db.prepare(`SELECT approval_id FROM op_tasks WHERE id = ?`).get(id) as {
@@ -197,15 +197,15 @@ describe('correction A: approval binds to the exact immutable action', () => {
   });
 
   it('HOSTILE: forcing a gated task to queued without any approval record is rejected', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     db.prepare(`UPDATE op_tasks SET status = 'queued' WHERE id = ?`).run(id);
     expect(queue.claim('claude', 'ops.risky')).toBeNull();
     expect(queue.get(id)!.status).toBe('needs_approval');
   });
 
   it("HOSTILE: task B cannot ride on task A's approval (digest binds the task id)", () => {
-    const a = enqueueGated(queue, 'risky-a', { same: 'payload' });
-    const b = enqueueGated(queue, 'risky-b', { same: 'payload' });
+    const a = enqueueGated(queueApprovals, 'risky-a', { same: 'payload' });
+    const b = enqueueGated(queueApprovals, 'risky-b', { same: 'payload' });
     queueApprovals.approve(a);
     const approvalOfA = queue.get(a)!.approvalId!;
     db.prepare(`UPDATE op_tasks SET status = 'queued', approval_id = ? WHERE id = ?`).run(approvalOfA, b);
@@ -218,20 +218,20 @@ describe('correction A: approval binds to the exact immutable action', () => {
   });
 
   it('the requesting worker cannot approve its own action', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     expect(() => queueApprovals.approve(id, 'claude')).toThrow(/may not approve its own/);
     expect(() => queueApprovals.approve(id, 'system')).toThrow(/may not approve/);
     expect(queue.get(id)!.status).toBe('needs_approval');
   });
 
   it('approve() refuses a task that is not awaiting approval', () => {
-    const res = queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
+    const res = queueApprovals.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
     if (!res.accepted) throw new Error('enqueue failed');
     expect(() => queueApprovals.approve(res.task.id)).toThrow(/not awaiting approval/);
   });
 
   it('denials are recorded immutably with the decider', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.deny(id, 'not this wave');
     const row = db
       .prepare(`SELECT decision, decided_by, decision_note FROM hq_approvals WHERE task_id = ?`)
@@ -259,7 +259,7 @@ describe('issue #71: approval expiry is revalidated at actual execution start', 
   });
 
   it('HOSTILE: approval valid at claim but expired before start() never executes; task returns to needs_approval with evidence', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id, 'founder', { ttlMs: 60_000 }); // expires 00:01:00.000Z
     const t = queue.claim('claude', 'ops.risky')!; // valid at claim; nonce consumed here
     expect(t.status).toBe('assigned');
@@ -291,7 +291,7 @@ describe('issue #71: approval expiry is revalidated at actual execution start', 
   });
 
   it('boundary: start() exactly AT expires_at is rejected (expiry is inclusive: now >= expires_at)', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id, 'founder', { ttlMs: 60_000 }); // expires 00:01:00.000Z
     const t = queue.claim('claude', 'ops.risky')!;
     vi.setSystemTime(new Date('2026-01-01T00:01:00.000Z'));
@@ -300,7 +300,7 @@ describe('issue #71: approval expiry is revalidated at actual execution start', 
   });
 
   it('boundary: start() strictly before expires_at (expiry minus 1ms) still executes', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id, 'founder', { ttlMs: 60_000 }); // expires 00:01:00.000Z
     const t = queue.claim('claude', 'ops.risky')!;
     vi.setSystemTime(new Date('2026-01-01T00:00:59.999Z'));
@@ -308,7 +308,7 @@ describe('issue #71: approval expiry is revalidated at actual execution start', 
   });
 
   it('HOSTILE: approval expiry wiped via direct SQL between claim and start never admits execution', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id, 'founder', { ttlMs: 60_000 });
     const t = queue.claim('claude', 'ops.risky')!;
     // Attacker strips the time-box entirely; an unbound expiry must never admit.
@@ -329,7 +329,7 @@ describe('issue #77: approval consumption binds to the legitimate claim', () => 
   });
 
   it('a legitimate claim records the full consumption binding and still starts before expiry', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky')!;
     expect(t.claimNonce).toBeTruthy();
@@ -352,7 +352,7 @@ describe('issue #77: approval consumption binds to the legitimate claim', () => 
   });
 
   it('HOSTILE: an approval consumed by worker A cannot be reattached to a forced assigned state for worker B', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky')!; // legitimately consumed by claude's claim
     // Attacker hands the assigned task (with its consumed approval still
@@ -367,7 +367,7 @@ describe('issue #77: approval consumption binds to the legitimate claim', () => 
   });
 
   it('HOSTILE: a forced assigned state that skipped the claim path (approval never consumed) cannot start', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id); // approved and queued; nonce NOT consumed — no claim happened
     db.prepare(
       `UPDATE op_tasks SET status = 'assigned', claimed_by = 'claude', fence = 1,
@@ -378,7 +378,7 @@ describe('issue #77: approval consumption binds to the legitimate claim', () => 
   });
 
   it('HOSTILE: a stale/forged claim nonce on the task row cannot start execution', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky')!;
     // Attacker overwrites the task's per-claim nonce (e.g. while restoring a forced state).
@@ -388,7 +388,7 @@ describe('issue #77: approval consumption binds to the legitimate claim', () => 
   });
 
   it('HOSTILE: a released claim cannot be force-restored onto its old consumed approval', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky', -1)!; // lease already expired while assigned
     queue.sweepExpiredLeases(); // safely re-queued; claim released, nonce cleared
@@ -408,7 +408,7 @@ describe('issue #77: approval consumption binds to the legitimate claim', () => 
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
-      const id = enqueueGated(queue);
+      const id = enqueueGated(queueApprovals);
       queueApprovals.approve(id, 'founder', { ttlMs: 60_000 });
       const t = queue.claim('claude', 'ops.risky')!; // binding intact, legitimately consumed
       vi.setSystemTime(new Date('2026-01-01T00:01:00.001Z'));
@@ -433,7 +433,7 @@ describe('issue #79: consumption also pins the exact task (cross-task riding fai
   });
 
   it('a legitimate claim records the exact task id in the consumption record', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky')!;
     const row = db
@@ -446,8 +446,8 @@ describe('issue #79: consumption also pins the exact task (cross-task riding fai
   });
 
   it("HOSTILE: task B forged into assigned state cannot ride task A's consumed approval even with a forged digest and a copied claim nonce", () => {
-    const a = enqueueGated(queue, 'risky-a', { same: 'payload' });
-    const b = enqueueGated(queue, 'risky-b', { same: 'payload' });
+    const a = enqueueGated(queueApprovals, 'risky-a', { same: 'payload' });
+    const b = enqueueGated(queueApprovals, 'risky-b', { same: 'payload' });
     queueApprovals.approve(a);
     const claimedA = queue.claim('claude', 'ops.risky')!; // consumes A's approval legitimately
     // Attacker copies EVERYTHING observable from A's legitimate claim onto B
@@ -477,7 +477,7 @@ describe('issue #79: consumption also pins the exact task (cross-task riding fai
   });
 
   it('HOSTILE: wiping the consumed task id via direct SQL fails closed at start()', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky')!;
     db.prepare(`UPDATE hq_approvals SET consumed_task_id = NULL WHERE id = ?`).run(t.approvalId);
@@ -493,7 +493,7 @@ describe('correction B: executor can never self-complete a review-required actio
 
   /** Approved + claimed + running side-effect task, executed by claude. */
   function runningGatedTask(): { id: string; fence: number } {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky')!;
     queue.start(id, 'claude', t.fence);
@@ -554,7 +554,7 @@ describe('correction B: executor can never self-complete a review-required actio
   });
 
   it('a review-pending task is never swept into outcome_unknown', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky', -1)!; // lease already expired
     queue.start(id, 'claude', t.fence);
@@ -565,7 +565,7 @@ describe('correction B: executor can never self-complete a review-required actio
   });
 
   it('HOSTILE: the executing worker cannot reconcile its own outcome_unknown task', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky', -1)!;
     queue.start(id, 'claude', t.fence);
@@ -579,7 +579,7 @@ describe('correction B: executor can never self-complete a review-required actio
   });
 
   it('read-only capabilities still complete directly (no review theater for safe reads)', () => {
-    const res = queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
+    const res = queueApprovals.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
     if (!res.accepted) throw new Error('enqueue failed');
     const t = queue.claim('claude', 'repo.read_status')!;
     queue.start(t.id, 'claude', t.fence);

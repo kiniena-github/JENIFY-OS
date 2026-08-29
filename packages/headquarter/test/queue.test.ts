@@ -88,12 +88,12 @@ describe('operator queue', () => {
   });
 
   it('enqueues an allowed read-only task as queued', () => {
-    const res = queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
+    const res = queueApprovals.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
     expect(res.accepted && res.task.status).toBe('queued');
   });
 
   it('denies enqueue for a capability outside the worker allow-list', () => {
-    const res = queue.enqueue({
+    const res = queueApprovals.enqueue({
       capabilityId: 'repo.read_status',
       payload: {},
       requestedBy: { workerId: 'stranger', allowedCapabilities: [] },
@@ -102,19 +102,19 @@ describe('operator queue', () => {
   });
 
   it('requires an idempotency key for side-effect capabilities', () => {
-    const res = queue.enqueue({ capabilityId: 'github.open_pr', payload: {}, requestedBy: claudeWorker });
+    const res = queueApprovals.enqueue({ capabilityId: 'github.open_pr', payload: {}, requestedBy: claudeWorker });
     expect(res.accepted).toBe(false);
     if (!res.accepted) expect(res.reason).toMatch(/idempotency/);
   });
 
   it('deduplicates on idempotency key instead of double-enqueueing', () => {
-    const a = queue.enqueue({
+    const a = queueApprovals.enqueue({
       capabilityId: 'github.open_pr',
       payload: { pr: 1 },
       idempotencyKey: 'pr-1',
       requestedBy: claudeWorker,
     });
-    const b = queue.enqueue({
+    const b = queueApprovals.enqueue({
       capabilityId: 'github.open_pr',
       payload: { pr: 1 },
       idempotencyKey: 'pr-1',
@@ -128,7 +128,7 @@ describe('operator queue', () => {
   });
 
   it('claim is atomic and increments the fencing token', () => {
-    queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
+    queueApprovals.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
     const t1 = queue.claim('claude', 'repo.read_status');
     expect(t1?.status).toBe('assigned');
     expect(t1?.fence).toBe(1);
@@ -137,7 +137,7 @@ describe('operator queue', () => {
   });
 
   it('rejects writes with a stale fence', () => {
-    queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
+    queueApprovals.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
     const t = queue.claim('claude', 'repo.read_status')!;
     queue.start(t.id, 'claude', t.fence);
     expect(() => queue.complete(t.id, 'claude', t.fence - 1, {})).toThrow(/Stale fence/);
@@ -145,7 +145,7 @@ describe('operator queue', () => {
   });
 
   it('completes a task with evidence and records the event trail', () => {
-    queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
+    queueApprovals.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
     const t = queue.claim('claude', 'repo.read_status')!;
     queue.start(t.id, 'claude', t.fence);
     const done = queue.complete(t.id, 'claude', t.fence, { ok: true }, ['https://example.test/run/1']);
@@ -155,7 +155,7 @@ describe('operator queue', () => {
   });
 
   it('kill switch blocks new claims globally and per capability', () => {
-    queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
+    queueApprovals.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
     queueApprovals.engageKillSwitch('*', 'founder', 'emergency stop');
     expect(queue.claim('claude', 'repo.read_status')).toBeNull();
     queueApprovals.releaseKillSwitch('*');
@@ -166,7 +166,7 @@ describe('operator queue', () => {
   });
 
   it('expired lease on a running side-effect task becomes outcome_unknown, never a retry', () => {
-    queue.enqueue({
+    queueApprovals.enqueue({
       capabilityId: 'github.open_pr',
       payload: {},
       idempotencyKey: 'pr-2',
@@ -180,7 +180,7 @@ describe('operator queue', () => {
   });
 
   it('expired lease on a read-only task is safely re-queued', () => {
-    queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
+    queueApprovals.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
     const t = queue.claim('claude', 'repo.read_status', -1)!;
     const swept = queue.sweepExpiredLeases();
     expect(swept.requeued).toContain(t.id);
@@ -191,7 +191,7 @@ describe('operator queue', () => {
   });
 
   it('reconciles outcome_unknown: confirmed_done -> completed', () => {
-    queue.enqueue({ capabilityId: 'github.open_pr', payload: {}, idempotencyKey: 'pr-3', requestedBy: claudeWorker });
+    queueApprovals.enqueue({ capabilityId: 'github.open_pr', payload: {}, idempotencyKey: 'pr-3', requestedBy: claudeWorker });
     const t = queue.claim('claude', 'github.open_pr', -1)!;
     queue.start(t.id, 'claude', t.fence);
     queue.sweepExpiredLeases();
@@ -200,7 +200,7 @@ describe('operator queue', () => {
   });
 
   it('reconcile confirmed_not_executed re-queues only idempotent capabilities', () => {
-    queue.enqueue({
+    queueApprovals.enqueue({
       capabilityId: 'archive.index_document',
       payload: {},
       idempotencyKey: 'doc-1',
@@ -217,7 +217,7 @@ describe('operator queue', () => {
   });
 
   it('needs_approval flows through founder approve/deny', () => {
-    const res = queue.enqueue({
+    const res = queueApprovals.enqueue({
       capabilityId: 'archive.index_document',
       payload: {},
       idempotencyKey: 'doc-2',
@@ -232,7 +232,7 @@ describe('operator queue', () => {
 
   it('rejects payloads containing secret-like content', () => {
     const res = () =>
-      queue.enqueue({
+      queueApprovals.enqueue({
         capabilityId: 'repo.read_status',
         payload: { note: 'api_key: sk-1234567890abcdef' },
         requestedBy: claudeWorker,

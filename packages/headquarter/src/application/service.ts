@@ -344,15 +344,44 @@ type ResolvedRequester =
 
 export class HeadquarterOperations {
   readonly queue: OperatorQueue;
-  readonly store: HeadquarterStore;
-  readonly workers: WorkerDirectoryPort;
+  /**
+   * `#private`: `HeadquarterStore` carries `upsertSpecialist`, so a holder
+   * could grant itself any capability and satisfy every check above it. The
+   * two reads the snapshot seam legitimately needs are exposed as a read-only
+   * view instead. Not named by the review; found by sweeping the class rather
+   * than the findings.
+   */
+  readonly #store: HeadquarterStore;
+  /** Reads the live snapshot needs. No write method to find. */
+  readonly directory: { listSpecialists: () => ReturnType<HeadquarterStore['listSpecialists']>; latestStatusPerSubject: () => ReturnType<HeadquarterStore['latestStatusPerSubject']> };
+  /**
+   * Effective worker directory. `#private`: it was a public collaborator, so
+   * `ops.workers.allowedCapabilities = () => [cap]` forged a least-privilege
+   * grant, and `ops.principals.get = () => ({ approvalAuthority: true, ... })`
+   * forged the Founder gate itself — making the authority METHOD `#private`
+   * bought nothing while the registry it resolves through stayed patchable
+   * (issue #200, Codex exact-head finding on `f91563f`).
+   */
+  readonly #workers: WorkerDirectoryPort;
+  /**
+   * READS of the effective directory, as own-property closures. Callers and
+   * tests legitimately ask what a worker is granted; enforcement resolves
+   * through `#workers` and never through this, so patching it changes what the
+   * patcher sees and nothing about what is enforced — the same split already
+   * used for `queue.get` and `queue.capabilities`.
+   */
+  readonly workers: {
+    allowedCapabilities: (workerId: string) => readonly string[];
+    isRegistered: (workerId: string) => boolean;
+    assignability: (workerId: string) => ReturnType<WorkerDirectoryPort['assignability']>;
+  };
   /**
    * Human identity, deliberately separate from worker identity. Empty by
    * default: nobody is a principal until a Founder registers them.
    */
-  readonly principals: HumanPrincipalPort;
-  private readonly nominationSources: readonly NominationSourcePort[];
-  private readonly policyCtx: PolicyContext;
+  readonly #principals: HumanPrincipalPort;
+  readonly #nominationSources: readonly NominationSourcePort[];
+  readonly #policyCtx: PolicyContext;
   /** Write side of the worker → provider map. Private by design — see below. */
   /**
    * ECMAScript `#private`, not TypeScript `private`.
@@ -410,7 +439,7 @@ export class HeadquarterOperations {
   constructor(db: HqDatabase, options: HeadquarterOperationsOptions = {}) {
     this.#db = db;
     ensureApplicationSchema(db);
-    this.store = options.store ?? new HeadquarterStore(db);
+    this.#store = options.store ?? new HeadquarterStore(db);
     // The approval mutations are handed to whoever CONSTRUCTS the queue and to
     // nobody else, so they are unreachable from a queue handle a worker holds.
     // When a queue is supplied (tests, composition), no grant arrives and this
@@ -419,25 +448,41 @@ export class HeadquarterOperations {
     let granted: PrivilegedQueueApi | undefined;
     this.queue =
       options.queue ??
-      new OperatorQueue(db, options.policyCtx ?? {}, (api) => {
-        granted = api;
-      });
+      new OperatorQueue(
+        db,
+        options.policyCtx ?? {},
+        (api) => {
+          granted = api;
+        },
+        // Lazily evaluated: `#workers` is composed below, and a claim can only
+        // happen after this constructor returns.
+        (workerId) => this.#workers.allowedCapabilities(workerId),
+      );
     this.#queuePrivileged = granted;
     // The WRITE side of the worker → provider map lives here and nowhere else
     // (issue #200, Codex round-3 P1 #1). It is private: the only ways in are
     // `declareWorkerProvider`/`revokeWorkerProvider`, which resolve the actor
     // and require approval authority first.
     this.#workerProviderRegistrar = new WorkerProviderRegistrar(db);
-    this.workers =
-      options.workers ?? narrowByRegistry(new SpecialistDirectoryAdapter(this.store), options.memberRegistry);
-    this.principals = options.humanPrincipals ?? new HumanPrincipalRegistry(db);
-    this.nominationSources = options.nominationSources ?? [];
-    this.policyCtx = options.policyCtx ?? {};
+    this.#workers =
+      options.workers ?? narrowByRegistry(new SpecialistDirectoryAdapter(this.#store), options.memberRegistry);
+    this.#principals = options.humanPrincipals ?? new HumanPrincipalRegistry(db);
+    this.#nominationSources = options.nominationSources ?? [];
+    this.#policyCtx = options.policyCtx ?? {};
+    this.directory = {
+      listSpecialists: () => this.#store.listSpecialists(),
+      latestStatusPerSubject: () => this.#store.latestStatusPerSubject(),
+    };
+    this.workers = {
+      allowedCapabilities: (workerId: string) => this.#workers.allowedCapabilities(workerId),
+      isRegistered: (workerId: string) => this.#workers.isRegistered(workerId),
+      assignability: (workerId: string) => this.#workers.assignability(workerId),
+    };
   }
 
   /** Standing pre-approval set the policy engine is evaluated against. */
   get policyContext(): PolicyContext {
-    return this.policyCtx;
+    return this.#policyCtx;
   }
 
   /** Every engaged kill-switch scope, for the console's alarm section. */
@@ -466,7 +511,7 @@ export class HeadquarterOperations {
   classify(capabilityId: string): OpsResult<TaskClassification> {
     const cap = this.queue.capabilities.get(capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${capabilityId}`);
-    return ok(classifyCapability(cap, this.policyCtx));
+    return ok(classifyCapability(cap, this.#policyCtx));
   }
 
   // ---- create ----
@@ -488,10 +533,10 @@ export class HeadquarterOperations {
     if (!cap) return fail('unknown_capability', `Unknown capability: ${input.capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${cap.id} is disabled`);
 
-    const requester = this.resolveRequester(input.requestedBy, 'create_task');
+    const requester = this.#resolveRequester(input.requestedBy, 'create_task');
     if (!requester.ok) return requester;
 
-    const result = this.queue.enqueue({
+    const result = this.#requirePrivilegedQueue().enqueue({
       capabilityId: input.capabilityId,
       payload: input.payload,
       idempotencyKey: input.idempotencyKey,
@@ -505,11 +550,11 @@ export class HeadquarterOperations {
       return fail('enqueue_rejected', result.reason, { capabilityId: input.capabilityId });
     }
     if (!result.deduplicated) {
-      this.upsertMeta(result.task.id, { project: input.project, title: input.title });
+      this.#upsertMeta(result.task.id, { project: input.project, title: input.title });
     }
     return ok({
       task: result.task,
-      classification: classifyCapability(cap, this.policyCtx),
+      classification: classifyCapability(cap, this.#policyCtx),
       deduplicated: result.deduplicated,
     });
   }
@@ -529,7 +574,7 @@ export class HeadquarterOperations {
     if (!cap) return fail('unknown_capability', `Unknown capability: ${task.capabilityId}`);
 
     const merged = new Map<string, { sources: string[]; rationales: string[] }>();
-    for (const source of this.nominationSources) {
+    for (const source of this.#nominationSources) {
       let nominations: readonly { workerId: string; rationale?: string }[] = [];
       try {
         nominations = source.nominate({
@@ -559,11 +604,11 @@ export class HeadquarterOperations {
 
     const nominations: EvaluatedNomination[] = [...merged.entries()]
       .map(([workerId, entry]) => {
-        const assignability = this.workers.assignability(workerId);
+        const assignability = this.#workers.assignability(workerId);
         const operatorDecision = evaluatePolicy(
           cap,
-          { workerId, allowedCapabilities: [...this.workers.allowedCapabilities(workerId)] },
-          this.policyCtx,
+          { workerId, allowedCapabilities: [...this.#workers.allowedCapabilities(workerId)] },
+          this.#policyCtx,
         );
         return {
           workerId,
@@ -594,7 +639,7 @@ export class HeadquarterOperations {
     return ok({
       taskId: task.id,
       capabilityId: task.capabilityId,
-      classification: classifyCapability(cap, this.policyCtx),
+      classification: classifyCapability(cap, this.#policyCtx),
       nominations,
     });
   }
@@ -622,24 +667,24 @@ export class HeadquarterOperations {
 
     // The actor RECORDING the intent must be someone: this writes an
     // actor-attributed annotation event and evidence entry.
-    const actor = this.resolveActor(assignedBy, 'record an assignment intent');
+    const actor = this.#resolveActor(assignedBy, 'record an assignment intent');
     if (!actor.ok) return actor;
 
-    const assignability = this.workers.assignability(workerId);
+    const assignability = this.#workers.assignability(workerId);
     if (!assignability.assignable) {
-      return this.rejectNotAssignable(workerId, assignability, 'assign_task');
+      return this.#rejectNotAssignable(workerId, assignability, 'assign_task');
     }
     const decision = evaluatePolicy(
       cap,
-      { workerId, allowedCapabilities: [...this.workers.allowedCapabilities(workerId)] },
-      this.policyCtx,
+      { workerId, allowedCapabilities: [...this.#workers.allowedCapabilities(workerId)] },
+      this.#policyCtx,
     );
     if (decision.outcome === 'deny') {
       return fail('not_permitted', decision.reason, { workerId, capabilityId: cap.id });
     }
 
     const at = nowIso();
-    this.upsertMeta(taskId, {
+    this.#upsertMeta(taskId, {
       assignedWorkerId: workerId,
       assignedBy,
       assignedAt: at,
@@ -647,7 +692,7 @@ export class HeadquarterOperations {
     });
     // Annotation only (status null): history records the routing decision
     // without pretending the task changed state.
-    this.store.appendEvent({
+    this.#store.appendEvent({
       subjectKind: 'task',
       subjectId: taskId,
       status: null,
@@ -770,13 +815,13 @@ export class HeadquarterOperations {
     if (!cap) return fail('unknown_capability', `Unknown capability: ${capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${capabilityId} is disabled`);
 
-    const human = this.rejectHumanExecution(workerId, 'claim work');
+    const human = this.#rejectHumanExecution(workerId, 'claim work');
     if (human) return human;
-    const assignability = this.workers.assignability(workerId);
+    const assignability = this.#workers.assignability(workerId);
     if (!assignability.assignable) {
-      return this.rejectNotAssignable(workerId, assignability, 'claim');
+      return this.#rejectNotAssignable(workerId, assignability, 'claim');
     }
-    if (!this.workers.allowedCapabilities(workerId).includes(capabilityId)) {
+    if (!this.#workers.allowedCapabilities(workerId).includes(capabilityId)) {
       return fail(
         'not_permitted',
         `Worker ${workerId} is not allowed capability ${capabilityId} (least privilege)`,
@@ -840,11 +885,11 @@ export class HeadquarterOperations {
    * `OperatorQueue.start()`.
    */
   startTask(taskId: string, workerId: string, fence: number): OpsResult<OperatorTask> {
-    const human = this.rejectHumanExecution(workerId, 'start work');
+    const human = this.#rejectHumanExecution(workerId, 'start work');
     if (human) return human;
-    const assignability = this.workers.assignability(workerId);
+    const assignability = this.#workers.assignability(workerId);
     if (!assignability.assignable) {
-      return this.rejectNotAssignable(workerId, assignability, 'start', { taskId });
+      return this.#rejectNotAssignable(workerId, assignability, 'start', { taskId });
     }
     try {
       return ok(this.queue.start(taskId, workerId, fence));
@@ -932,7 +977,7 @@ export class HeadquarterOperations {
     if (verdict === 'fail' && !note) {
       return fail('invalid_input', 'A failed review requires a reason');
     }
-    const reviewer = this.resolveActor(reviewerId, 'review');
+    const reviewer = this.#resolveActor(reviewerId, 'review');
     if (!reviewer.ok) return reviewer;
     try {
       return ok(
@@ -958,7 +1003,7 @@ export class HeadquarterOperations {
     note: string,
   ): OpsResult<OperatorTask> {
     if (!note) return fail('invalid_input', 'Reconciliation requires a note');
-    const reconciler = this.resolveActor(by, 'reconcile');
+    const reconciler = this.#resolveActor(by, 'reconcile');
     if (!reconciler.ok) return reconciler;
     try {
       return ok(this.#requirePrivilegedQueue().reconcile(taskId, decision, by, note));
@@ -1143,9 +1188,9 @@ export class HeadquarterOperations {
     if (!input.threadId || !input.author) {
       return fail('invalid_input', 'threadId and author are required');
     }
-    const actor = this.resolveActor(input.author, 'post to a group room');
+    const actor = this.#resolveActor(input.author, 'post to a group room');
     if (!actor.ok) return actor;
-    const message = this.store.postMessage(input);
+    const message = this.#store.postMessage(input);
     return ok({
       messageId: message.id,
       // Advisory decoration for human readers only.
@@ -1170,7 +1215,7 @@ export class HeadquarterOperations {
       return fail('invalid_input', 'threadId, capabilityId and proposedBy are required');
     }
     // Inert, but it enters the evidence chain under this actor's name.
-    const actor = this.resolveActor(input.proposedBy, 'raise a mission proposal');
+    const actor = this.#resolveActor(input.proposedBy, 'raise a mission proposal');
     if (!actor.ok) return actor;
     try {
       assertNoSecretLikeContent(input.payload);
@@ -1270,7 +1315,7 @@ export class HeadquarterOperations {
          WHERE id = ? AND status = 'proposed'`,
       )
       .run(created.data.task.id, input.promotedBy, nowIso(), proposal.id);
-    this.upsertMeta(created.data.task.id, { sourceProposalId: proposal.id });
+    this.#upsertMeta(created.data.task.id, { sourceProposalId: proposal.id });
     this.#requirePrivilegedQueue().appendEvidence({
       taskId: created.data.task.id,
       actor: input.promotedBy,
@@ -1302,7 +1347,7 @@ export class HeadquarterOperations {
       return fail('proposal_not_open', `Proposal ${proposalId} is already ${proposal.status}`);
     }
     if (!note) return fail('invalid_input', 'Rejecting a proposal requires a note');
-    const actor = this.resolveActor(by, 'reject a mission proposal');
+    const actor = this.#resolveActor(by, 'reject a mission proposal');
     if (!actor.ok) return actor;
     this.#db
       .prepare(
@@ -1377,7 +1422,7 @@ export class HeadquarterOperations {
     };
   }
 
-  private upsertMeta(
+  #upsertMeta(
     taskId: string,
     patch: {
       project?: string | null;
@@ -1435,27 +1480,27 @@ export class HeadquarterOperations {
    * (enforced by the queue) rather than permission to act on a capability.
    * Deny by default: an unknown id is nobody and can do neither.
    */
-  private resolveActor(actor: string, action: string): OpsResult<ResolvedRequester> {
+  #resolveActor(actor: string, action: string): OpsResult<ResolvedRequester> {
     if (!actor) return fail('invalid_input', `An actor is required to ${action}`);
     if (actor === 'system') {
       return fail('not_permitted', `'system' cannot ${action}`);
     }
-    return this.resolveRequester(actor, action);
+    return this.#resolveRequester(actor, action);
   }
 
   /**
    * Resolve who is opening work. A worker must be assignable; a human must be
    * a registered, active principal. Neither can supply its own allow-list.
    */
-  private resolveRequester(actor: string, action: string): OpsResult<ResolvedRequester> {
-    if (this.workers.isRegistered(actor)) {
-      const assignability = this.workers.assignability(actor);
+  #resolveRequester(actor: string, action: string): OpsResult<ResolvedRequester> {
+    if (this.#workers.isRegistered(actor)) {
+      const assignability = this.#workers.assignability(actor);
       if (!assignability.assignable) {
-        return this.rejectNotAssignable(actor, assignability, action);
+        return this.#rejectNotAssignable(actor, assignability, action);
       }
-      return ok({ kind: 'worker', allowedCapabilities: this.workers.allowedCapabilities(actor) });
+      return ok({ kind: 'worker', allowedCapabilities: this.#workers.allowedCapabilities(actor) });
     }
-    const human = resolvePrincipal(this.principals, actor);
+    const human = resolvePrincipal(this.#principals, actor);
     if (!human.ok) {
       this.#requirePrivilegedQueue().appendEvidence({
         actor: 'system',
@@ -1490,14 +1535,14 @@ export class HeadquarterOperations {
     if (actor === 'system') {
       return fail('not_permitted', `'system' cannot ${action}: a human principal is required`);
     }
-    if (this.workers.isRegistered(actor)) {
+    if (this.#workers.isRegistered(actor)) {
       return fail(
         'not_permitted',
         `Registered worker ${actor} cannot ${action}: worker identity never carries approval authority`,
         { actor },
       );
     }
-    const approver = resolveApprover(this.principals, actor);
+    const approver = resolveApprover(this.#principals, actor);
     if (!approver.ok) {
       this.#requirePrivilegedQueue().appendEvidence({
         actor: 'system',
@@ -1518,9 +1563,9 @@ export class HeadquarterOperations {
    * `startTask()` refuse it explicitly rather than letting it fall through the
    * worker-directory lookup with a confusing "unknown worker".
    */
-  private rejectHumanExecution(actorId: string, action: string): OpsResult<never> | null {
-    if (this.workers.isRegistered(actorId)) return null;
-    if (!this.principals.get(actorId)) return null;
+  #rejectHumanExecution(actorId: string, action: string): OpsResult<never> | null {
+    if (this.#workers.isRegistered(actorId)) return null;
+    if (!this.#principals.get(actorId)) return null;
     this.#requirePrivilegedQueue().appendEvidence({
       actor: 'system',
       kind: 'human_execution_refused',
@@ -1533,7 +1578,7 @@ export class HeadquarterOperations {
     );
   }
 
-  private rejectNotAssignable(
+  #rejectNotAssignable(
     workerId: string,
     assignability: WorkerAssignability,
     action: string,

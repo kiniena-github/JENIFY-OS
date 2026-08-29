@@ -66,6 +66,20 @@ export interface PrivilegedQueueApi {
    */
   reconcile(taskId: string, decision: ReconcileDecision, by: string, note: string): OperatorTask;
   /**
+   * Task ORIGINATION. I classified this as a worker execution operation and
+   * wrote that each such operation is "fence-guarded against the claim the
+   * caller actually holds". That was simply false for `enqueue`: it holds no
+   * fence, and it takes BOTH the requester identity and its
+   * `allowedCapabilities` from the caller, which `evaluatePolicy` then trusts.
+   * A worker could enqueue an arbitrary task under a fabricated actor with a
+   * fabricated grant, and a standing-preapproved side effect became
+   * immediately claimable (issue #200, Codex exact-head finding on `f91563f`).
+   *
+   * The sixth wrong entry on that allowlist, written in the same commit that
+   * restated the criterion it was supposed to satisfy.
+   */
+  enqueue(req: EnqueueRequest): EnqueueResult;
+  /**
    * The evidence WRITER. Appending is what makes the audit chain authoritative;
    * a holder can forge entries under any actor whose hashes still pass
    * `verifyChain`. Reads stay public on `queue.evidence`.
@@ -338,6 +352,23 @@ export class OperatorQueue {
      * afterwards has no way to obtain it.
      */
     grantPrivileged?: (api: PrivilegedQueueApi) => void,
+    /**
+     * The EFFECTIVE least-privilege grant for a worker.
+     *
+     * The previous round added this check but read the legacy `hq_specialists`
+     * row directly. `HeadquarterOperations` composes that adapter with
+     * `narrowByRegistry(...)`, so a member registry can narrow or revoke a
+     * grant the legacy row still shows — and a worker whose registry grant was
+     * removed could bypass `claimNext` and claim through its queue handle
+     * anyway (issue #200, Codex exact-head finding on `f91563f`). My fix
+     * enforced a grant; it enforced the wrong one.
+     *
+     * Injected as a closure, evaluated at claim time, so the service's
+     * composed directory is the authority. A queue constructed without one
+     * falls back to the legacy row, which is the only grant that exists in
+     * that composition.
+     */
+    grantLookup?: (workerId: string) => readonly string[],
   ) {
     this.#db = db;
     this.#policyCtx = policyCtx;
@@ -354,6 +385,7 @@ export class OperatorQueue {
       reviewPass: (taskId, reviewerId, note) => this.#reviewPass(taskId, reviewerId, note),
       reviewFail: (taskId, reviewerId, reason) => this.#reviewFail(taskId, reviewerId, reason),
       reconcile: (taskId, decision, by, note) => this.#reconcile(taskId, decision, by, note),
+      enqueue: (req) => this.#enqueue(req),
       appendEvidence: (entry) => this.#evidence.append(entry),
     });
     this.capabilities = {
@@ -393,7 +425,9 @@ export class OperatorQueue {
         .get(workerId) as { provider_id: string } | undefined;
       return row?.provider_id ?? null;
     };
-    this.#grantedCapabilities = (workerId: string): string[] => {
+    this.#grantedCapabilities = grantLookup
+      ? (workerId: string): string[] => [...grantLookup(workerId)]
+      : (workerId: string): string[] => {
       const row = db
         .prepare(`SELECT allowed_capabilities FROM hq_specialists WHERE id = ?`)
         .get(workerId) as { allowed_capabilities: string } | undefined;
@@ -406,7 +440,7 @@ export class OperatorQueue {
       } catch {
         return [];
       }
-    };
+        };
     this.#listProviders = (): WorkerProviderRecord[] => {
       const rows = db
         .prepare(
@@ -579,7 +613,7 @@ export class OperatorQueue {
 
   // ---- enqueue ----
 
-  enqueue(req: EnqueueRequest): EnqueueResult {
+  #enqueue(req: EnqueueRequest): EnqueueResult {
     assertNoSecretLikeContent(req.payload);
     const cap = this.#capabilityOf(req.capabilityId);
     const decision = evaluatePolicy(cap, req.requestedBy, this.#policyCtx);
