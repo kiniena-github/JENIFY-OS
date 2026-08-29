@@ -941,18 +941,39 @@ export function resolveUnknownDispatch(
   // counts as this repository's issue URL. Requiring the parsed number to equal
   // the supplied one closes the remaining gap: a URL for issue 7 recorded as
   // issue 9 would otherwise pass the parser.
-  const parsed = parseIssueUrl(input.issueUrl ?? '', input.target);
-  if (parsed == null || parsed.number !== input.issueNumber) {
+  //
+  // But the parser SEARCHES rather than anchors, because on the live path it
+  // reads arbitrary `gh` stdout (issue #224, Codex P2 on `d8ef4ca`). So
+  // `"https://github.com/o/r/issues/4242 trailing garbage"` parses fine, and
+  // the first version of this check then persisted the caller's whole string —
+  // closing the attempt while recording an invalid authoritative URL that every
+  // deduplicated receipt would hand back. Two guards, because they answer
+  // different halves:
+  //
+  //   - the trimmed input must EQUAL the URL that parsed, so a reconciliation
+  //     carrying anything else refuses instead of being silently trimmed. This
+  //     is a human typing the URL of an issue they just looked at; extra text
+  //     means they pasted something other than what they think they did, and
+  //     guessing which part they meant is exactly the leniency this lane
+  //     refuses everywhere else.
+  //   - and what is PERSISTED is `parsed.url`, never caller text, so nothing
+  //     but a parser-validated string can ever reach the evidence log even if a
+  //     future edit loosens the comparison above.
+  const supplied = (input.issueUrl ?? '').trim();
+  const parsed = parseIssueUrl(supplied, input.target);
+  if (parsed == null || parsed.number !== input.issueNumber || supplied !== parsed.url) {
     return refuse(
       'invalid_target',
-      `The issue URL does not match the reconciliation it is being recorded for. It must be a ` +
-        `github.com issue URL for ${targetSlug(input.target)} numbered ${input.issueNumber}. ` +
-        'Nothing was recorded: this URL would become the authoritative dispatch evidence and the ' +
-        'receipt every later duplicate dispatch is answered with, so a mismatched one is refused ' +
-        'rather than stored.',
+      `The issue URL does not match the reconciliation it is being recorded for. It must be ` +
+        `exactly a github.com issue URL for ${targetSlug(input.target)} numbered ` +
+        `${input.issueNumber}, with nothing else around it. Nothing was recorded: this URL would ` +
+        'become the authoritative dispatch evidence and the receipt every later duplicate ' +
+        'dispatch is answered with, so a mismatched or padded one is refused rather than stored.',
       { issueNumber: input.issueNumber, repository: targetSlug(input.target) },
     );
   }
+  // From here on the PARSED url is the one recorded and returned.
+  const issueUrl = parsed.url;
   const at = new Date().toISOString();
   ops.queue.evidence.append({
     taskId: input.taskId,
@@ -963,7 +984,7 @@ export function resolveUnknownDispatch(
       repository: targetSlug(input.target),
       transport: 'reconciled',
       issueNumber: input.issueNumber,
-      issueUrl: input.issueUrl,
+      issueUrl,
       resolvedBy: input.resolvedBy,
       dispatchedAt: at,
     },
@@ -975,7 +996,7 @@ export function resolveUnknownDispatch(
       provider: DISPATCH_PROVIDER,
       target: input.target,
       issueNumber: input.issueNumber,
-      issueUrl: input.issueUrl,
+      issueUrl,
       deduplicated: true,
       dispatchedAt: at,
     },

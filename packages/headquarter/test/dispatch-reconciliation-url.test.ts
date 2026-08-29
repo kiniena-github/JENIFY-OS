@@ -178,6 +178,80 @@ describe('a reconciliation records only a URL that matches what it claims', () =
     });
   }
 
+  /**
+   * Codex P2 on `d8ef4ca` — a flaw in the first version of this very guard.
+   *
+   * `parseIssueUrl` SEARCHES rather than anchors, because on the live path it
+   * reads arbitrary `gh` stdout. So a padded input parsed fine, passed the
+   * check, and the caller's whole string was then persisted verbatim: the
+   * attempt closed while recording an invalid authoritative URL that every
+   * deduplicated receipt would hand back.
+   */
+  const padded: Array<{ name: string; url: string }> = [
+    { name: 'trailing text after the URL', url: `${GOOD_URL} trailing garbage` },
+    { name: 'leading text before the URL', url: `see ${GOOD_URL}` },
+    { name: 'surrounding markdown', url: `[the issue](${GOOD_URL})` },
+    { name: 'a second URL for a different issue', url: `${GOOD_URL} and https://github.com/${TARGET.owner}/${TARGET.repo}/issues/9999` },
+  ];
+
+  for (const attempt of padded) {
+    it(`refuses ${attempt.name} rather than silently trimming it`, () => {
+      const fixture = ordersFixture();
+      const taskId = taskWithUnknownDispatch(fixture);
+      const resolved = resolveUnknownDispatch(fixture.ops, {
+        taskId,
+        outcome: 'found',
+        target: TARGET,
+        issueNumber: ISSUE,
+        issueUrl: attempt.url,
+        resolvedBy: 'chair',
+      });
+      expect(resolved.ok, attempt.name).toBe(false);
+      expect(dispatchHistory(fixture.ops, taskId).state, attempt.name).toBe('unknown');
+    });
+  }
+
+  it('tolerates surrounding whitespace, which is paste noise rather than ambiguity', () => {
+    const fixture = ordersFixture();
+    const taskId = taskWithUnknownDispatch(fixture);
+    const resolved = resolveUnknownDispatch(fixture.ops, {
+      taskId,
+      outcome: 'found',
+      target: TARGET,
+      issueNumber: ISSUE,
+      issueUrl: `  ${GOOD_URL}\n`,
+      resolvedBy: 'chair',
+    });
+    if (!resolved.ok) throw new Error(`expected ok: ${resolved.error.code}`);
+    // Trimmed on the way in, and the PARSED url is what is stored.
+    expect(resolved.data.issueUrl).toBe(GOOD_URL);
+    const history = dispatchHistory(fixture.ops, taskId);
+    if (history.state !== 'dispatched') throw new Error('unreachable');
+    expect(history.issueUrl).toBe(GOOD_URL);
+  });
+
+  it('persists the PARSED url, never the caller’s string', () => {
+    // The structural half of the fix: even if the comparison above were ever
+    // loosened, nothing but a parser-validated string can reach the evidence
+    // log. Asserted through the value a later duplicate dispatch would be
+    // answered with.
+    const fixture = ordersFixture();
+    const taskId = taskWithUnknownDispatch(fixture);
+    resolveUnknownDispatch(fixture.ops, {
+      taskId,
+      outcome: 'found',
+      target: TARGET,
+      issueNumber: ISSUE,
+      issueUrl: GOOD_URL,
+      resolvedBy: 'chair',
+    });
+    const entry = fixture.ops.queue.evidence
+      .list(taskId)
+      .find((item) => item.kind === 'claude_github_dispatch_succeeded');
+    expect(entry?.payload.issueUrl).toBe(GOOD_URL);
+    expect(String(entry?.payload.issueUrl)).not.toContain(' ');
+  });
+
   it('leaves a refused reconciliation reconcilable, with the right URL', () => {
     // The refusal must not poison the attempt: a human who mistyped can still
     // close it correctly.
