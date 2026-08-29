@@ -113,23 +113,25 @@ export class OperatorQueue {
    * holds a queue — can move its own provider identity.
    */
   /**
-   * ECMAScript `#private`, and read through a method rather than exposed.
+   * The enforcement lookup is a CLOSURE, not an instance of an exported class.
    *
-   * It was a public `readonly` reference, and `readonly` is compile-time only:
-   * a worker holding the queue could run
-   * `queue.workerProviders.providerOf = () => 'CLAUDE'`, or replace the object
-   * outright, and both `selectClaimable` and `assertProviderBinding` would
-   * consult the patched lookup — so a CLAUDE-bound task could be claimed with
-   * no database write and no visit to `declareWorkerProvider` at all (issue
-   * #200, Codex exact-head finding on `6cdb3dc`). The FIFTH mechanism at this
-   * boundary, and the first that never touches the data.
+   * It was a public `readonly` reference to a `WorkerProviderDirectory`, then a
+   * `#private` one — and neither was enough, because dispatch still went
+   * through that class's prototype. `WorkerProviderDirectory` is exported, so a
+   * worker sharing this realm could assign
+   * `WorkerProviderDirectory.prototype.providerOf = () => 'CLAUDE'` and both
+   * `selectClaimable` and `assertProviderBinding` would call the patched method
+   * on the private instance (issue #200, Codex exact-head finding on
+   * `67b5937`). The SIXTH mechanism at this boundary: making the reference
+   * private protected the reference and left the method lookup mutable.
    *
-   * The object-graph test added the round before missed it because it searched
-   * for database-shaped objects; the danger here is a mutable collaborator,
-   * not a reachable database. Both the reference and its methods are now out of
-   * reach.
+   * A closure created here has no prototype in its dispatch path and no
+   * exported identity to patch. `#providerOf` is an own field holding a
+   * function defined in this module over `#db`; calling it resolves nothing
+   * through any prototype an attacker can reach.
    */
-  readonly #workerProviders: WorkerProviderLookup;
+  readonly #providerOf: (workerId: string) => string | null;
+  readonly #listProviders: () => WorkerProviderRecord[];
 
   /**
    * ECMAScript `#private`. TypeScript `private` erases to a public property, so
@@ -150,7 +152,29 @@ export class OperatorQueue {
     this.#policyCtx = policyCtx;
     this.capabilities = new CapabilityRegistry(db);
     this.evidence = new EvidenceLog(db);
-    this.#workerProviders = new WorkerProviderDirectory(db);
+    // Built here rather than delegated to the exported class, so no prototype
+    // an attacker can reach participates in the enforcement path. The SQL is
+    // the same as `WorkerProviderDirectory`'s; the read side of that class
+    // stays exported for callers who legitimately want an object.
+    this.#providerOf = (workerId: string): string | null => {
+      const row = db
+        .prepare(`SELECT provider_id FROM op_worker_providers WHERE worker_id = ?`)
+        .get(workerId) as { provider_id: string } | undefined;
+      return row?.provider_id ?? null;
+    };
+    this.#listProviders = (): WorkerProviderRecord[] => {
+      const rows = db
+        .prepare(
+          `SELECT worker_id, provider_id, declared_by, declared_at FROM op_worker_providers ORDER BY worker_id`,
+        )
+        .all() as Record<string, unknown>[];
+      return rows.map((row) => ({
+        workerId: String(row.worker_id),
+        providerId: String(row.provider_id) as WorkerProviderRecord['providerId'],
+        declaredBy: String(row.declared_by),
+        declaredAt: String(row.declared_at),
+      }));
+    };
   }
 
   /**
@@ -165,7 +189,7 @@ export class OperatorQueue {
   private assertProviderBinding(task: OperatorTask, workerId: string): void {
     const binding = readProviderBinding(task.payload);
     if (!binding.bound) return;
-    const workerProvider = this.#workerProviders.providerOf(workerId);
+    const workerProvider = this.#providerOf(workerId);
     const violation: ProviderBindingViolation | null = checkProviderBinding(
       task.id,
       workerId,
@@ -220,7 +244,7 @@ export class OperatorQueue {
     workerId: string,
     capabilityId: string,
   ): { task: OperatorTask | null; refusal: ProviderBindingViolation | null } {
-    const workerProvider = this.#workerProviders.providerOf(workerId);
+    const workerProvider = this.#providerOf(workerId);
     // Queued depth per capability is small in HQ; ids and payloads only.
     const rows = this.#db
       .prepare(
@@ -435,7 +459,7 @@ export class OperatorQueue {
    * changes what that caller sees and nothing about what `claim` enforces.
    */
   listWorkerProviders(): WorkerProviderRecord[] {
-    return this.#workerProviders.list();
+    return this.#listProviders();
   }
 
   claim(workerId: string, capabilityId: string, leaseMs = 5 * 60_000): OperatorTask | null {

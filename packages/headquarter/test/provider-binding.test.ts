@@ -22,6 +22,7 @@ import {
   EXECUTION_PROVIDER_KEY,
   ProviderBindingViolation,
   readProviderBinding,
+  WorkerProviderDirectory,
 } from '../src/operator/provider-binding.js';
 import {
   DIRECT_ORDER_CAPABILITY,
@@ -301,13 +302,27 @@ describe('the provider map is configuration, not something a worker can move', (
       /* also fine */
     }
 
-    // A CODEX worker still cannot claim a CLAUDE-bound task.
-    const taskId = queuedClaudeOrder(fx);
-    expect(() => fx.ops.queue.claim('codex-worker', DIRECT_ORDER_CAPABILITY.id)).toThrow(
-      ProviderBindingViolation,
-    );
-    expect(fx.ops.queue.get(taskId)!.claimedBy).toBeNull();
-    expect(fx.ops.queue.get(taskId)!.status).toBe('queued');
+    // Codex on `67b5937`: the enforcement lookup must not dispatch through any
+    // prototype an attacker can reach. `WorkerProviderDirectory` is exported,
+    // so patching its prototype used to reach the private instance. The two
+    // attempts above patch the INSTANCE; these patch the CLASS and the base
+    // object every JavaScript value inherits from.
+    const original = WorkerProviderDirectory.prototype.providerOf;
+    try {
+      WorkerProviderDirectory.prototype.providerOf = () => 'CLAUDE';
+      (Object.prototype as unknown as Record<string, unknown>).providerOf = () => 'CLAUDE';
+
+      // A CODEX worker still cannot claim a CLAUDE-bound task.
+      const taskId = queuedClaudeOrder(fx);
+      expect(() => fx.ops.queue.claim('codex-worker', DIRECT_ORDER_CAPABILITY.id)).toThrow(
+        ProviderBindingViolation,
+      );
+      expect(fx.ops.queue.get(taskId)!.claimedBy).toBeNull();
+      expect(fx.ops.queue.get(taskId)!.status).toBe('queued');
+    } finally {
+      WorkerProviderDirectory.prototype.providerOf = original;
+      delete (Object.prototype as unknown as Record<string, unknown>).providerOf;
+    }
   });
 
   it('refuses a declaration from a worker, including one about itself', () => {
