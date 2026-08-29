@@ -62,6 +62,7 @@ import type { SecretsEnv } from '../routing/providers.js';
 import {
   checkMutationOrigin,
   normalizedTrustedOrigins,
+  requestOriginContext,
   resolveFounderPrincipal,
   scanForClientIdentity,
   verifyStepUp,
@@ -329,11 +330,12 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
           founder: false,
           reason: resolution.reason,
           message: resolution.message,
-          controls: controlAvailability(deps, null),
+          controls: controlAvailability(deps, null, request),
         }),
       );
     }
     audit('allowed', 'session', resolution.founder);
+    const founderControls = controlAvailability(deps, resolution.founder, request);
     return safe(
       json(200, {
         ok: true,
@@ -342,7 +344,21 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         principalId: resolution.founder.principal.id,
         displayName: resolution.founder.principal.displayName,
         approvalAuthority: resolution.founder.principal.approvalAuthority,
-        controls: controlAvailability(deps, resolution.founder),
+        // The console renders `message` as its own reason for showing no
+        // control, so the one case a Founder could not otherwise explain gets
+        // said plainly: the page's origin is not on this deployment's trusted
+        // list, so a write from here would be refused. The untrusted origin
+        // itself is deliberately NOT echoed back — a reason must not become a
+        // reflection channel for a header the caller controls.
+        ...(founderControls.requestOriginAllowed === false
+          ? {
+              message:
+                'This page was not served from an origin that is trusted for HQ browser ' +
+                'control, so every state-changing request from it would be refused. Add this ' +
+                "deployment's exact origin to the HQ trusted-origin configuration.",
+            }
+          : {}),
+        controls: founderControls,
         // Live route availability for the composer, derived from the same
         // observed evidence that will decide the order — never from the
         // provider catalogue. Founder-only: which providers this host can
@@ -399,6 +415,7 @@ type Audit = (outcome: 'allowed' | 'refused', detail: string, founder?: Resolved
 function controlAvailability(
   deps: ControlApiDeps,
   founder: ResolvedFounder | null,
+  request: ControlRequest,
 ): Record<string, unknown> {
   // Every write control is gated on the SAME conditions that refuse the write,
   // so the console can never be told a button works when the route will refuse
@@ -407,7 +424,18 @@ function controlAvailability(
   // `origin_allowlist_empty` — and derived from the same function it uses, so
   // the two cannot disagree about what counts as a usable origin.
   const originsUsable = normalizedTrustedOrigins(deps.allowedOrigins).length > 0;
-  const writable = founder !== null && deps.mutationsEnabled !== false && originsUsable;
+  // A configured allow-list is necessary and NOT sufficient. What decides a
+  // POST is whether THIS page's origin is on it, so that is what decides the
+  // advertisement too (issue #219 correction round, Codex P2). A console
+  // reached at a preview hostname nobody added to the list is told the
+  // controls are off, with the reason, instead of drawing buttons whose every
+  // POST returns `origin_not_allowed`.
+  const requestOrigin = requestOriginContext(request, deps.allowedOrigins);
+  const writable =
+    founder !== null &&
+    deps.mutationsEnabled !== false &&
+    originsUsable &&
+    requestOrigin.allowed === true;
   const principal = founder?.principal;
   const mayApprove = writable && principal?.approvalAuthority === true;
   const mayOriginate =
@@ -418,6 +446,13 @@ function controlAvailability(
     deny: mayApprove,
     mutationsEnabled: deps.mutationsEnabled !== false,
     trustedOriginConfigured: originsUsable,
+    // Stated separately from `trustedOriginConfigured`, because they answer
+    // different questions and a deployment can pass the first and fail the
+    // second. `requestOriginSource` names how the requesting origin was
+    // established — `host` is a hostname match with no scheme, `none` means it
+    // could not be established at all and the answer is therefore no.
+    requestOriginAllowed: requestOrigin.allowed,
+    requestOriginSource: requestOrigin.source,
     // Stated, not hidden: the canonical model has no third decision, so the
     // UI must not draw one. See the module docstring.
     askForChanges: false,

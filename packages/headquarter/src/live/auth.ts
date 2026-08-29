@@ -268,6 +268,111 @@ export function normalizedTrustedOrigins(allowedOrigins: readonly string[]): str
     .filter((entry): entry is string => entry !== null);
 }
 
+/**
+ * Where the answer about the requesting origin came from.
+ *
+ * `host` is the weakest and is named so the caller can say so: the Host header
+ * carries no scheme, so a match on it proves the request arrived at a trusted
+ * HOSTNAME, not that the page's full origin is trusted.
+ */
+export type RequestOriginSource = 'origin' | 'referer' | 'host' | 'none';
+
+export interface RequestOriginContext {
+  /** The requesting page's normalized origin, when one could be determined. */
+  origin: string | null;
+  source: RequestOriginSource;
+  /**
+   * True only when a state-changing request FROM THIS REQUEST'S ORIGIN would
+   * survive `checkMutationOrigin`. False whenever it would be refused —
+   * including when the origin cannot be determined at all.
+   */
+  allowed: boolean;
+}
+
+/** The origin part of a Referer URL, under the same scheme restriction. */
+function refererOrigin(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (!ORIGIN_SCHEMES.includes(url.protocol)) return null;
+    if (url.origin === 'null') return null;
+    return url.origin.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/** The host component of an already-normalized origin (host + port, no scheme). */
+function originHost(origin: string): string | null {
+  try {
+    return new URL(origin).host.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Would a write from the page that made THIS request be accepted?
+ *
+ * The availability answer used to be "is the allow-list non-empty", which is a
+ * different question and a weaker one. A console served at a preview hostname
+ * that is not on the list — a redeployed preview, a renamed project, a second
+ * host pointed at the same server — was told `directOrder`/`approve`/`deny`
+ * were available, and every POST it then made was refused `origin_not_allowed`.
+ * That is the same class of defect as the `mutationsEnabled` and
+ * `origin_allowlist_empty` ones before it: the console drawing a button the
+ * route will refuse.
+ *
+ * The requesting origin is resolved from headers a page cannot set for itself,
+ * in decreasing order of strength:
+ *
+ * 1. **`Origin`** — sent on every cross-origin fetch and on every mutation.
+ *    Present-but-unparseable is decided here and NOT re-asked of the weaker
+ *    sources, because that is exactly what the POST gate would refuse.
+ * 2. **`Referer`** — the same-origin console fetch carries the `/hq/` page URL
+ *    under the browser default referrer policy, and same-origin GETs send no
+ *    `Origin`. Only the origin component is read.
+ * 3. **`Host`** — last resort, for a deployment that strips the referrer. It
+ *    proves the hostname the request arrived at, so it is matched against the
+ *    HOSTS of the trusted origins; the scheme is unknown and `source` says so.
+ *
+ * With none of the three, the origin is unknown and the answer is `false`:
+ * unknown must never advertise a control, since the write itself would be
+ * refused for a missing `Origin` header anyway.
+ *
+ * This is an ADVERTISEMENT decision, never an authorization one. Nothing here
+ * admits a write: `checkMutationOrigin` still gates every mutation on the
+ * `Origin` header alone, so a forged `Host` or `Referer` can at most make the
+ * console draw a button whose POST is then refused — never the reverse.
+ */
+export function requestOriginContext(
+  request: ControlRequest,
+  allowedOrigins: readonly string[],
+): RequestOriginContext {
+  const allowed = normalizedTrustedOrigins(allowedOrigins);
+  const headers = request.headers ?? {};
+
+  const rawOrigin = headers.origin;
+  if (rawOrigin !== undefined && rawOrigin !== null && rawOrigin.trim() !== '') {
+    const origin = normalizeOrigin(rawOrigin.trim());
+    return { origin, source: 'origin', allowed: origin !== null && allowed.includes(origin) };
+  }
+
+  const rawReferer = headers.referer;
+  if (rawReferer !== undefined && rawReferer !== null && rawReferer.trim() !== '') {
+    const origin = refererOrigin(rawReferer.trim());
+    return { origin, source: 'referer', allowed: origin !== null && allowed.includes(origin) };
+  }
+
+  const rawHost = headers.host;
+  if (rawHost !== undefined && rawHost !== null && rawHost.trim() !== '') {
+    const host = rawHost.trim().toLowerCase();
+    const match = allowed.find((entry) => originHost(entry) === host) ?? null;
+    return { origin: match, source: 'host', allowed: match !== null };
+  }
+
+  return { origin: null, source: 'none', allowed: false };
+}
+
 export function checkMutationOrigin(
   request: ControlRequest,
   allowedOrigins: readonly string[],

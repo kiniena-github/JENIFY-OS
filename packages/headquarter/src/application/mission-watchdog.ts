@@ -1,14 +1,38 @@
 /**
- * Mission control loop — the watchdog that stops an AI task from quietly
- * stopping half-finished (issue #219).
+ * Mission control decision rules — an UNWIRED library (issue #219).
  *
- * The failure this module exists to prevent is specific and was observed:
- * a worker session ends, the branch exists, some tests passed, a dispatch
- * comment was posted — and every one of those looks like progress, so nobody
- * re-triggers. The mission then sits indefinitely in a state that is neither
- * finished nor escalated. "Dispatched", "branch exists", "some tests passed"
- * and "the worker session ended" are NOT completion, and this module refuses
- * to read them as completion.
+ * ## Status, stated first because it is the thing most easily overclaimed
+ *
+ * **Nothing in this repository calls these functions at runtime.** They are
+ * exported and unit-tested; no workflow, service, route, script or scheduled
+ * job invokes them. `MISSION_WATCHDOG_RUNTIME_CONSUMERS` records that, and
+ * `mission-watchdog.wiring-truth.test.ts` fails if a consumer appears while
+ * this notice still says there is none.
+ *
+ * The consequence, said plainly rather than left to be inferred: **the quiet
+ * stop is not fixed by this module existing.** A mission can still stall
+ * unnoticed today, because the only thing that dispatches a worker is an owner
+ * comment carrying `<!-- jenify-run -->` (`.github/workflows/ai-task-trigger.yml`),
+ * and nothing on that path consults these rules. What is delivered here is the
+ * decision — which state a mission is in and what follows from it — and proof
+ * that the decision is fail-closed. What is NOT delivered is anything that
+ * observes a mission, keeps a heartbeat, or acts on the answer.
+ *
+ * Wiring it needs three things this module deliberately does not have: a real
+ * heartbeat source, a durable idempotent dispatch-key store, and — for
+ * automatic resume — the authority to dispatch a worker without an owner
+ * comment. The last is a widening of execution authority and a Founder
+ * decision, so it is left as one, rather than taken quietly here.
+ *
+ * ## What the rules encode
+ *
+ * The failure the rules describe is specific and was observed: a worker
+ * session ends, the branch exists, some tests passed, a dispatch comment was
+ * posted — and every one of those looks like progress, so nobody re-triggers.
+ * The mission then sits indefinitely in a state that is neither finished nor
+ * escalated. "Dispatched", "branch exists", "some tests passed" and "the
+ * worker session ended" are NOT completion, and these rules refuse to read
+ * them as completion.
  *
  * Three deliberate properties:
  *
@@ -26,6 +50,28 @@
  * This module is pure: no clock, no I/O, no network. Callers pass `now`. It
  * decides and explains; it never dispatches, and it never widens authority.
  */
+
+/**
+ * Every runtime caller of the decision functions below, outside tests and the
+ * `application/index.ts` barrel re-export.
+ *
+ * It is empty, and the empty list IS the claim: this library is not wired to
+ * anything. It exists as a value rather than as prose so the accompanying
+ * wiring-truth test can check the claim against the source tree instead of
+ * asking a reader to take the docstring's word for it. A future change that
+ * genuinely wires the watchdog must list its consumers here and rewrite the
+ * status notice above; a change that wires it and leaves this alone fails.
+ */
+export const MISSION_WATCHDOG_RUNTIME_CONSUMERS: readonly string[] = [];
+
+/**
+ * What this module actually delivers, in one machine-checkable word.
+ *
+ * `decision_rules_only` — the states, the precedence and the dispatch
+ * preconditions, with tests. NOT an operating watchdog: see the status section
+ * at the top of this file.
+ */
+export const MISSION_WATCHDOG_STATUS = 'decision_rules_only' as const;
 
 export const MISSION_CONTROL_STATES = [
   'running',

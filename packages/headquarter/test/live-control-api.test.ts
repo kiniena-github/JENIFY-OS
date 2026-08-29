@@ -121,7 +121,15 @@ function harness(
       const method = request.method ?? 'POST';
       const headers: Record<string, string | undefined> =
         request.headers ??
-        (method === 'GET' ? {} : { origin: ORIGIN, 'content-type': 'application/json' });
+        (method === 'GET'
+          ? // What a browser actually sends on the console's same-origin
+            // session fetch: no `Origin` (same-origin GETs carry none) and the
+            // `/hq/` page URL as `Referer` under the default referrer policy.
+            // The advertised controls are derived from the REQUESTING origin
+            // now, so a test that sends no origin evidence at all is testing
+            // an unknown-origin request, not an ordinary console load.
+            { referer: `${ORIGIN}/hq/command-center.html`, host: 'hq.example' }
+          : { origin: ORIGIN, 'content-type': 'application/json' });
       return handleControlRequest(
         { method, path: request.path ?? CONTROL_ROUTES.orders, headers, body: request.body },
         deps,
@@ -859,6 +867,177 @@ describe('an unusable origin list disables the advertised controls (Codex round 
       approve: true,
       deny: true,
       trustedOriginConfigured: true,
+    });
+  });
+});
+
+describe('the advertised controls follow the REQUESTING origin (issue #219, Codex P2)', () => {
+  const PREVIEW = 'https://jenify-hq-preview-42.vercel.app';
+
+  /** A console page load from `origin`: no Origin header, Referer and Host set. */
+  function pageLoad(origin: string): Record<string, string> {
+    const url = new URL(origin);
+    return { referer: `${origin}/hq/command-center.html`, host: url.host };
+  }
+
+  function sessionControls(h: Harness, headers: Record<string, string | undefined>) {
+    return h.call({ method: 'GET', path: CONTROL_ROUTES.session, headers }).body
+      .controls as Record<string, unknown>;
+  }
+
+  it('hides every write control when the page origin is not the trusted one', () => {
+    // The regression itself. The allow-list is non-empty and perfectly valid —
+    // it just names a DIFFERENT host than the one this preview is served from,
+    // which is the ordinary consequence of a preview being redeployed or
+    // renamed. Advertising the controls here told the console to draw buttons
+    // whose every POST returns `origin_not_allowed`.
+    const h = harness({ origins: [ORIGIN] });
+    const controls = sessionControls(h, pageLoad(PREVIEW));
+    expect(controls).toMatchObject({
+      directOrder: false,
+      approve: false,
+      deny: false,
+      // Non-empty and usable: the old, weaker question still answers yes.
+      trustedOriginConfigured: true,
+      requestOriginAllowed: false,
+      requestOriginSource: 'referer',
+    });
+  });
+
+  it('says why, in the Founder session answer the console renders', () => {
+    const h = harness({ origins: [ORIGIN] });
+    const body = h.call({
+      method: 'GET',
+      path: CONTROL_ROUTES.session,
+      headers: pageLoad(PREVIEW),
+    }).body;
+    expect(body.founder).toBe(true);
+    expect(String(body.message)).toContain('not served from an origin that is trusted');
+    // A reason must not become a reflection channel for a header the caller
+    // controls: the untrusted origin is never echoed back into the page.
+    expect(String(body.message)).not.toContain('vercel.app');
+  });
+
+  it('states nothing extra when the page origin IS trusted', () => {
+    const h = harness({ origins: [ORIGIN] });
+    const response = h.call({
+      method: 'GET',
+      path: CONTROL_ROUTES.session,
+      headers: pageLoad(ORIGIN),
+    });
+    expect(response.body.message).toBeUndefined();
+    expect(response.body.controls).toMatchObject({
+      approve: true,
+      requestOriginAllowed: true,
+      requestOriginSource: 'referer',
+    });
+  });
+
+  it('advertises exactly what the POST gate will accept, host by host', () => {
+    // The property that matters, checked as a pair rather than asserted: for
+    // each candidate origin, what the session route CLAIMS and what the order
+    // route DOES must agree. A future change that loosens one and not the
+    // other fails here.
+    const cases = [
+      { label: 'the configured origin', origin: ORIGIN, accepted: true },
+      { label: 'a different preview hostname', origin: PREVIEW, accepted: false },
+      { label: 'the same host over http', origin: 'http://hq.example', accepted: false },
+      { label: 'the same host on another port', origin: 'https://hq.example:8443', accepted: false },
+      { label: 'a lookalike suffix host', origin: 'https://hq.example.evil.test', accepted: false },
+    ];
+    for (const scenario of cases) {
+      const h = harness({ origins: [ORIGIN] });
+      const advertised = sessionControls(h, pageLoad(scenario.origin)).directOrder === true;
+      const post = h.call({
+        headers: { origin: scenario.origin, 'content-type': 'application/json' },
+        body: ORDER_BODY,
+      });
+      const accepted = post.status === 201;
+      expect(accepted, `${scenario.label}: POST outcome`).toBe(scenario.accepted);
+      expect(advertised, `${scenario.label}: advertisement must match the POST`).toBe(accepted);
+      if (!accepted) {
+        expect((post.body.error as { code: string }).code).toBe('origin_not_allowed');
+      }
+    }
+  });
+
+  it('never lets a trusted Referer rescue an untrusted Origin header', () => {
+    // A cross-origin GET carries the attacker's Origin. If the weaker sources
+    // were consulted after a present-but-disallowed Origin, a forged Referer
+    // would decide the answer — so a present Origin is decided on alone.
+    const h = harness({ origins: [ORIGIN] });
+    const controls = sessionControls(h, {
+      origin: PREVIEW,
+      referer: `${ORIGIN}/hq/command-center.html`,
+      host: 'hq.example',
+    });
+    expect(controls).toMatchObject({
+      approve: false,
+      requestOriginAllowed: false,
+      requestOriginSource: 'origin',
+    });
+  });
+
+  it('refuses an opaque or unparseable origin rather than reading past it', () => {
+    const h = harness({ origins: [ORIGIN] });
+    for (const origin of ['null', 'not a url', 'file://', 'chrome-extension://abcdef']) {
+      const controls = sessionControls(h, { origin, host: 'hq.example' });
+      expect(controls.approve, origin).toBe(false);
+      expect(controls.requestOriginAllowed, origin).toBe(false);
+    }
+  });
+
+  it('falls back to the arrival Host only when the browser sent no origin evidence', () => {
+    // A deployment that strips the referrer still has a usable answer: the
+    // hostname the request actually arrived at. `requestOriginSource` says so,
+    // because a host match carries no scheme.
+    const h = harness({ origins: [ORIGIN] });
+    expect(sessionControls(h, { host: 'hq.example' })).toMatchObject({
+      approve: true,
+      requestOriginAllowed: true,
+      requestOriginSource: 'host',
+    });
+    expect(sessionControls(h, { host: 'jenify-hq-preview-42.vercel.app' })).toMatchObject({
+      approve: false,
+      requestOriginAllowed: false,
+      requestOriginSource: 'host',
+    });
+  });
+
+  it('advertises nothing when the requesting origin cannot be established at all', () => {
+    // Unknown is not permission. A write from such a request would be refused
+    // `origin_missing` anyway, so claiming the control works is the same lie.
+    const h = harness({ origins: [ORIGIN] });
+    expect(sessionControls(h, {})).toMatchObject({
+      directOrder: false,
+      approve: false,
+      deny: false,
+      requestOriginAllowed: false,
+      requestOriginSource: 'none',
+    });
+  });
+
+  it('keeps a non-Founder session answer consistent too', () => {
+    // The same computation serves the unmapped-session answer, so a signed-in
+    // non-Founder on an untrusted preview is not told a different story.
+    const h = harness({ founderMap: [], origins: [ORIGIN] });
+    const controls = sessionControls(h, pageLoad(PREVIEW));
+    expect(controls).toMatchObject({
+      approve: false,
+      deny: false,
+      requestOriginAllowed: false,
+      trustedOriginConfigured: true,
+    });
+  });
+
+  it('still reports an empty allow-list as the unconfigured deployment it is', () => {
+    // The two facts stay separable: nothing configured, and this page not
+    // trusted. A deployment reading the answer can tell which one it has.
+    const h = harness({ origins: [] });
+    expect(sessionControls(h, pageLoad(ORIGIN))).toMatchObject({
+      approve: false,
+      trustedOriginConfigured: false,
+      requestOriginAllowed: false,
     });
   });
 });

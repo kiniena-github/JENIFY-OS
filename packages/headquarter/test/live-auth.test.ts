@@ -18,6 +18,7 @@ import {
   checkMutationOrigin,
   loadFounderBindings,
   normalizedTrustedOrigins,
+  requestOriginContext,
   resolveFounderPrincipal,
   scanForClientIdentity,
   verifyStepUp,
@@ -519,5 +520,119 @@ describe('opaque-scheme origins never collapse into one (Codex round 5, P2)', ()
       'https://hq.example',
       'http://localhost:3001',
     ]);
+  });
+});
+
+describe('the requesting origin decides what may be advertised (issue #219, Codex P2)', () => {
+  const ALLOWED = ['https://hq.example'];
+
+  /** A GET the way a browser sends it: no Origin, a Referer, a Host. */
+  function get(headers: Record<string, string | undefined>): ControlRequest {
+    return { method: 'GET', path: '/api/hq/control/session', headers };
+  }
+
+  it('reads the Origin header first, and decides on it alone when present', () => {
+    expect(requestOriginContext(get({ origin: 'https://hq.example' }), ALLOWED)).toEqual({
+      origin: 'https://hq.example',
+      source: 'origin',
+      allowed: true,
+    });
+    // A trusted Referer alongside an untrusted Origin must not rescue it: the
+    // Origin is what the POST gate will read, so it is what this reads too.
+    expect(
+      requestOriginContext(
+        get({ origin: 'https://evil.test', referer: 'https://hq.example/hq/x.html' }),
+        ALLOWED,
+      ),
+    ).toMatchObject({ source: 'origin', allowed: false });
+  });
+
+  it('reads the Referer origin when no Origin was sent, ignoring path and query', () => {
+    expect(
+      requestOriginContext(get({ referer: 'https://hq.example/hq/approvals.html?tab=open' }), ALLOWED),
+    ).toEqual({ origin: 'https://hq.example', source: 'referer', allowed: true });
+  });
+
+  it('treats a scheme, port or suffix difference as a different origin', () => {
+    for (const referer of [
+      'http://hq.example/hq/x.html',
+      'https://hq.example:8443/hq/x.html',
+      'https://hq.example.evil.test/hq/x.html',
+      'https://preview-42.vercel.app/hq/x.html',
+    ]) {
+      expect(requestOriginContext(get({ referer }), ALLOWED).allowed, referer).toBe(false);
+    }
+  });
+
+  it('never matches on an opaque or unparseable value', () => {
+    for (const value of ['null', 'not a url', 'file:///hq/x.html', 'foo://hq.example/x']) {
+      expect(requestOriginContext(get({ origin: value }), ALLOWED).allowed, value).toBe(false);
+      expect(requestOriginContext(get({ referer: value }), ALLOWED).allowed, value).toBe(false);
+    }
+  });
+
+  it('falls back to the arrival Host, and says that is what it used', () => {
+    expect(requestOriginContext(get({ host: 'hq.example' }), ALLOWED)).toEqual({
+      origin: 'https://hq.example',
+      source: 'host',
+      allowed: true,
+    });
+    expect(requestOriginContext(get({ host: 'preview-42.vercel.app' }), ALLOWED)).toMatchObject({
+      source: 'host',
+      allowed: false,
+    });
+    // Host carries a port when there is one, and it is part of the match.
+    expect(requestOriginContext(get({ host: 'localhost:3001' }), ['http://localhost:3001'])).toMatchObject({
+      source: 'host',
+      allowed: true,
+    });
+    expect(requestOriginContext(get({ host: 'localhost:5173' }), ['http://localhost:3001'])).toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it('answers no when the origin cannot be established at all', () => {
+    expect(requestOriginContext(get({}), ALLOWED)).toEqual({
+      origin: null,
+      source: 'none',
+      allowed: false,
+    });
+    // Blank headers are absent headers, not empty matches.
+    expect(requestOriginContext(get({ origin: '   ', referer: '', host: '' }), ALLOWED)).toEqual({
+      origin: null,
+      source: 'none',
+      allowed: false,
+    });
+  });
+
+  it('answers no for every source when no usable origin is configured', () => {
+    for (const headers of [
+      { origin: 'https://hq.example' },
+      { referer: 'https://hq.example/hq/x.html' },
+      { host: 'hq.example' },
+      {},
+    ]) {
+      expect(requestOriginContext(get(headers), []).allowed).toBe(false);
+      expect(requestOriginContext(get(headers), ['foo://opaque']).allowed).toBe(false);
+    }
+  });
+
+  it('agrees with the POST gate on every origin it is asked about', () => {
+    // One rule, two readers. Whatever `checkMutationOrigin` would accept from
+    // an origin, `requestOriginContext` advertises — and nothing more.
+    for (const origin of [
+      'https://hq.example',
+      'http://hq.example',
+      'https://hq.example:8443',
+      'https://evil.test',
+      'https://hq.example.evil.test',
+    ]) {
+      const gate = checkMutationOrigin(
+        request({ headers: { origin, 'content-type': 'application/json' } }),
+        ALLOWED,
+      );
+      const advertised = requestOriginContext(get({ origin }), ALLOWED);
+      expect(advertised.allowed, origin).toBe(gate.ok);
+    }
   });
 });
