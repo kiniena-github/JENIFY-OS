@@ -17,6 +17,7 @@ import { describe, expect, it } from 'vitest';
 import { CAPS, expectOk, setupFixture, type Fixture } from './application.fixture.js';
 import { founderConsole } from '../src/application/console.js';
 import { taskActionDigest } from '../src/operator/approvals.js';
+import { OperatorQueue } from '../src/operator/queue.js';
 import {
   checkProviderBinding,
   EXECUTION_PROVIDER_KEY,
@@ -282,6 +283,7 @@ describe('the provider map is configuration, not something a worker can move', (
   it('cannot be made to lie by patching anything a worker can reach', () => {
     const fx = bindingFixture();
     const queue = fx.ops.queue as unknown as Record<string, unknown>;
+    const peekTaskId = queuedClaudeOrder(fx);
 
     // Every documented shape of the attack, attempted for real.
     try {
@@ -307,13 +309,47 @@ describe('the provider map is configuration, not something a worker can move', (
     // so patching its prototype used to reach the private instance. The two
     // attempts above patch the INSTANCE; these patch the CLASS and the base
     // object every JavaScript value inherits from.
+    // Codex on `e578112`: `claim` dispatched through ORDINARY methods, so
+    // patching `selectClaimable`/`assertProviderBinding` on the instance or the
+    // class prototype walked a CODEX worker to the conditional update. The
+    // previous version of this test patched the directory and `Object.prototype`
+    // and never these. Every enforcement method `claim` and `start` touch is
+    // patched here, on the instance AND on `OperatorQueue.prototype`.
+    const ENFORCEMENT = [
+      'selectClaimable',
+      'assertProviderBinding',
+      'killSwitchEngaged',
+      'recordBindingRefusal',
+      'validateTaskApproval',
+      'rejectAtExecutionBoundary',
+    ] as const;
+    const queueProto = OperatorQueue.prototype as unknown as Record<string, unknown>;
+    const savedProto = new Map<string, unknown>();
     const original = WorkerProviderDirectory.prototype.providerOf;
     try {
       WorkerProviderDirectory.prototype.providerOf = () => 'CLAUDE';
       (Object.prototype as unknown as Record<string, unknown>).providerOf = () => 'CLAUDE';
+      for (const name of ENFORCEMENT) {
+        savedProto.set(name, queueProto[name]);
+        // Permissive stubs: "yes, claimable", "no violation", "not killed".
+        queueProto[name] = () => undefined;
+        try {
+          queue[name] = () => undefined;
+        } catch {
+          /* non-writable is a pass */
+        }
+      }
+      // And the one shape that returns a value the caller acts on.
+      const permissive = () => ({ task: fx.ops.queue.get(peekTaskId), refusal: null });
+      queueProto.selectClaimable = permissive;
+      try {
+        queue.selectClaimable = permissive;
+      } catch {
+        /* also fine */
+      }
 
       // A CODEX worker still cannot claim a CLAUDE-bound task.
-      const taskId = queuedClaudeOrder(fx);
+      const taskId = peekTaskId;
       expect(() => fx.ops.queue.claim('codex-worker', DIRECT_ORDER_CAPABILITY.id)).toThrow(
         ProviderBindingViolation,
       );
@@ -322,6 +358,7 @@ describe('the provider map is configuration, not something a worker can move', (
     } finally {
       WorkerProviderDirectory.prototype.providerOf = original;
       delete (Object.prototype as unknown as Record<string, unknown>).providerOf;
+      for (const [name, value] of savedProto) queueProto[name] = value;
     }
   });
 

@@ -186,7 +186,7 @@ export class OperatorQueue {
    * evidenced, never a silent `null`: "this is not yours" and "the queue is
    * empty" are different facts.
    */
-  private assertProviderBinding(task: OperatorTask, workerId: string): void {
+  #assertProviderBinding(task: OperatorTask, workerId: string): void {
     const binding = readProviderBinding(task.payload);
     if (!binding.bound) return;
     const workerProvider = this.#providerOf(workerId);
@@ -197,11 +197,11 @@ export class OperatorQueue {
       workerProvider,
     );
     if (!violation) return;
-    this.recordBindingRefusal(violation, workerId);
+    this.#recordBindingRefusal(violation, workerId);
     throw violation;
   }
 
-  private recordBindingRefusal(violation: ProviderBindingViolation, workerId: string): void {
+  #recordBindingRefusal(violation: ProviderBindingViolation, workerId: string): void {
     this.evidence.append({
       taskId: violation.taskId,
       actor: workerId,
@@ -240,7 +240,7 @@ export class OperatorQueue {
    * The worker's declared provider is read ONCE, before the scan, so the
    * comparison cannot drift mid-scan and no query runs inside the row walk.
    */
-  selectClaimable(
+  #selectClaimableInternal(
     workerId: string,
     capabilityId: string,
   ): { task: OperatorTask | null; refusal: ProviderBindingViolation | null } {
@@ -290,7 +290,37 @@ export class OperatorQueue {
     this.evidence.append({ actor: by, kind: 'kill_switch_released', payload: { scope } });
   }
 
+  /**
+   * Read-only delegates for callers OUTSIDE the queue.
+   *
+   * Enforcement never dispatches through these. `claim` and `start` call the
+   * `#private` methods directly, so patching either of these on an instance or
+   * on `OperatorQueue.prototype` changes what the PATCHER sees and nothing
+   * about what the queue enforces.
+   *
+   * They exist because `HeadquarterOperations` legitimately needs to peek at
+   * the same selection and kill-switch state; that is a read, and a caller who
+   * lies to itself about a read harms only itself. It was not always so: both
+   * were ordinary methods that `claim` itself dispatched through, so
+   * `queue.selectClaimable = () => ({ task, refusal: null })` combined with
+   * `queue.assertProviderBinding = () => {}` walked a CODEX worker straight
+   * through to the conditional update and approval consumption of a
+   * CLAUDE-bound task (issue #200, Codex exact-head finding on `e578112` — the
+   * seventh mechanism at this boundary, and the third found in my tests rather
+   * than my code).
+   */
   killSwitchEngaged(capabilityId?: string): boolean {
+    return this.#killSwitchEngagedInternal(capabilityId);
+  }
+
+  selectClaimable(
+    workerId: string,
+    capabilityId: string,
+  ): { task: OperatorTask | null; refusal: ProviderBindingViolation | null } {
+    return this.#selectClaimableInternal(workerId, capabilityId);
+  }
+
+  #killSwitchEngagedInternal(capabilityId?: string): boolean {
     const scopes = [GLOBAL_SCOPE, ...(capabilityId ? [capabilityId] : [])];
     const row = this.#db
       .prepare(
@@ -467,18 +497,18 @@ export class OperatorQueue {
     // crucially before the single-use approval nonce is consumed below, so a
     // rejected claim can never burn an approval or inflate a fencing token.
     assertAssignable(this.#db, workerId);
-    if (this.killSwitchEngaged(capabilityId)) return null;
+    if (this.#killSwitchEngagedInternal(capabilityId)) return null;
     // Provider binding participates in SELECTION, before any mutation and
     // before the single-use approval nonce can be consumed: the worker is
     // offered the oldest task compatible with its declared provider, and an
     // order routed to one provider is never handed to another (issue #200,
     // Codex P1 #1 and round-3 P1 #2).
-    const { task: selected, refusal } = this.selectClaimable(workerId, capabilityId);
+    const { task: selected, refusal } = this.#selectClaimableInternal(workerId, capabilityId);
     if (!selected) {
       // Nothing compatible. If incompatible work exists, say so loudly and
       // evidence it — "not yours" is not "the queue is empty".
       if (refusal) {
-        this.recordBindingRefusal(refusal, workerId);
+        this.#recordBindingRefusal(refusal, workerId);
         throw refusal;
       }
       return null;
@@ -491,13 +521,13 @@ export class OperatorQueue {
     // Belt and braces: the selected task is compatible by construction, and
     // this re-derives that from the task row itself rather than trusting the
     // scan, on the path that is about to consume an approval.
-    this.assertProviderBinding(task, workerId);
+    this.#assertProviderBinding(task, workerId);
     const cap = this.capabilities.get(capabilityId);
     if (!cap || !cap.enabled) return null; // deny by default
     if (approvalRequired(cap, this.#policyCtx)) {
-      const rejection = this.validateTaskApproval(task);
+      const rejection = this.#validateTaskApproval(task);
       if (rejection) {
-        this.rejectAtExecutionBoundary(task, rejection);
+        this.#rejectAtExecutionBoundary(task, rejection);
         return null;
       }
     }
@@ -573,18 +603,18 @@ export class OperatorQueue {
     // Re-checked here as well as at claim: a task forced into `assigned` never
     // passed through claim's check, and provider binding is an execution
     // authority, not a routing hint.
-    this.assertProviderBinding(task, workerId);
+    this.#assertProviderBinding(task, workerId);
     const cap = this.capabilities.get(task.capabilityId);
     if (cap && approvalRequired(cap, this.#policyCtx)) {
       const approval = this.getApprovalRecord(task.approvalId);
       if (!approval?.actionDigest || approval.actionDigest !== taskActionDigest(task)) {
-        this.rejectAtExecutionBoundary(task, 'approval_digest_mismatch');
+        this.#rejectAtExecutionBoundary(task, 'approval_digest_mismatch');
         throw new Error(
           `Task ${taskId}: action changed after Founder approval; approval invalidated`,
         );
       }
       if (approval.decision !== 'approved') {
-        this.rejectAtExecutionBoundary(task, 'approval_not_approved');
+        this.#rejectAtExecutionBoundary(task, 'approval_not_approved');
         throw new Error(
           `Task ${taskId}: approval record is not an approval; fresh Founder approval required`,
         );
@@ -596,13 +626,13 @@ export class OperatorQueue {
         claimNonce: task.claimNonce,
       });
       if (bindingRejection) {
-        this.rejectAtExecutionBoundary(task, bindingRejection);
+        this.#rejectAtExecutionBoundary(task, bindingRejection);
         throw new Error(
           `Task ${taskId}: approval was not consumed by this claim (worker/task/fence/nonce binding mismatch); execution rejected`,
         );
       }
       if (approvalExpiredAt(approval)) {
-        this.rejectAtExecutionBoundary(task, 'approval_expired');
+        this.#rejectAtExecutionBoundary(task, 'approval_expired');
         throw new Error(
           `Task ${taskId}: Founder approval expired before execution start; fresh approval required`,
         );
@@ -859,7 +889,7 @@ export class OperatorQueue {
     };
   }
 
-  private validateTaskApproval(task: OperatorTask): ApprovalRejection | null {
+  #validateTaskApproval(task: OperatorTask): ApprovalRejection | null {
     return validateApproval(this.getApprovalRecord(task.approvalId), taskActionDigest(task));
   }
 
@@ -873,7 +903,7 @@ export class OperatorQueue {
    * needs_approval for a fresh Founder decision. The stale approval binding
    * is cleared either way; approvals themselves are immutable records.
    */
-  private rejectAtExecutionBoundary(task: OperatorTask, rejection: ApprovalRejection): void {
+  #rejectAtExecutionBoundary(task: OperatorTask, rejection: ApprovalRejection): void {
     this.evidence.append({
       taskId: task.id,
       actor: 'system',
