@@ -13,7 +13,9 @@ import { describe, expect, it } from 'vitest';
 import { setupFixture, CAPS, type Fixture } from './application.fixture.js';
 import {
   DIRECT_ORDER_CAPABILITY,
+  DIRECT_ORDER_RESERVED_CONTRACT,
   directOrderCapabilityState,
+  directOrderContractDrift,
   registerDirectOrderCapability,
   submitDirectOrder,
 } from '../src/live/orders.js';
@@ -164,5 +166,156 @@ describe('placing an order honours the capability state and never changes it', (
     expect(directOrderCapabilityState(bare.ops)).toBe('enabled');
     bare.ops.queue.capabilities.setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
     expect(directOrderCapabilityState(bare.ops)).toBe('disabled');
+  });
+});
+
+/**
+ * The id is not the guarantee — the row is (issue #219, Codex P1 on `49da330`).
+ *
+ * `CapabilityRegistry.register` updates the definition of a capability that
+ * already exists, by design. So anything that can register can re-register
+ * `hq.direct_order` with `riskClass: 'read_only', sideEffect: false`, and the
+ * policy engine — which reads risk from the registry and never from the
+ * payload — then stops routing a direct order into `needs_approval`. Reading
+ * only the id and the enabled flag, `directOrderCapabilityState` said
+ * `enabled`, `submitDirectOrder` accepted arbitrary free-text work, and it was
+ * queued for execution with no Founder approval, through the one path whose
+ * entire justification is that it is Founder-gated.
+ *
+ * The host deliberately consumes an existing registration rather than
+ * restoring the definition at startup, so the check lives at the read: fail
+ * closed while the row does not match the reserved contract.
+ */
+describe('a weakened direct-order definition fails closed', () => {
+  /** Re-register the reserved id with a different definition. */
+  function reregister(fx: Fixture, definition: Record<string, unknown>): void {
+    fx.ops.queue.capabilities.register({
+      id: DIRECT_ORDER_CAPABILITY.id,
+      description: DIRECT_ORDER_CAPABILITY.description,
+      riskClass: DIRECT_ORDER_CAPABILITY.riskClass,
+      sideEffect: DIRECT_ORDER_CAPABILITY.sideEffect,
+      idempotent: DIRECT_ORDER_CAPABILITY.idempotent,
+      ...definition,
+    } as Parameters<typeof fx.ops.queue.capabilities.register>[0]);
+  }
+
+  // The reason this matters, proved rather than asserted: with the weakened
+  // row in place, the canonical create path really does queue the work outright
+  // instead of holding it for approval. The refusal below is what stands
+  // between that row and an executed order.
+  it('would genuinely lose the approval gate — the danger is real, not theoretical', () => {
+    const fx = ordersFixture();
+    const gated = fx.ops.createTask({
+      capabilityId: DIRECT_ORDER_CAPABILITY.id,
+      payload: { kind: 'direct_order', instruction: 'before' },
+      idempotencyKey: 'before',
+      requestedBy: 'founder',
+    });
+    expect(gated.ok).toBe(true);
+    expect(gated.ok && gated.data.task.status).toBe('needs_approval');
+
+    reregister(fx, { riskClass: 'read_only', sideEffect: false });
+    const ungated = fx.ops.createTask({
+      capabilityId: DIRECT_ORDER_CAPABILITY.id,
+      payload: { kind: 'direct_order', instruction: 'after' },
+      idempotencyKey: 'after',
+      requestedBy: 'founder',
+    });
+    expect(ungated.ok).toBe(true);
+    expect(ungated.ok && ungated.data.task.status).toBe('queued');
+  });
+
+  it('reports `altered` for every single-field drift in the reserved contract', () => {
+    for (const [field, definition] of [
+      ['riskClass', { riskClass: 'external_side_effect' }],
+      ['sideEffect', { sideEffect: false }],
+      ['idempotent', { idempotent: false }],
+    ] as const) {
+      const fx = ordersFixture();
+      expect(directOrderCapabilityState(fx.ops)).toBe('enabled');
+      reregister(fx, definition);
+      expect(directOrderCapabilityState(fx.ops), field).toBe('altered');
+      expect(directOrderContractDrift(fx.ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id)!))
+        .toEqual([field]);
+    }
+  });
+
+  it('refuses the order, names the drifted fields, and creates nothing', () => {
+    const fx = ordersFixture();
+    reregister(fx, { riskClass: 'read_only', sideEffect: false });
+
+    const result = submitDirectOrder(fx.ops, ORDER, CLAUDE_ONLY);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('capability_definition_altered');
+    expect(result.error.details?.drift).toEqual(['riskClass', 'sideEffect']);
+    expect(fx.ops.queue.listByStatus('needs_approval')).toEqual([]);
+    expect(fx.ops.queue.listByStatus('queued')).toEqual([]);
+  });
+
+  // Detecting the drift is not the same as fixing it. An invocation path that
+  // quietly restored the reserved definition would be the same mistake as one
+  // that quietly re-enables a disabled capability.
+  it('does not repair the definition, however many orders are attempted', () => {
+    const fx = ordersFixture();
+    reregister(fx, { riskClass: 'read_only', sideEffect: false });
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      submitDirectOrder(fx.ops, { ...ORDER, instruction: `attempt ${attempt}` }, CLAUDE_ONLY);
+    }
+    const capability = fx.ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id)!;
+    expect(capability.riskClass).toBe('read_only');
+    expect(directOrderCapabilityState(fx.ops)).toBe('altered');
+  });
+
+  // `altered` is read before `enabled`, so re-enabling a weakened row is not
+  // the moment the weakened contract silently takes effect.
+  it('stays `altered` whether the weakened row is enabled or disabled', () => {
+    const fx = ordersFixture();
+    reregister(fx, { riskClass: 'read_only', sideEffect: false });
+    expect(directOrderCapabilityState(fx.ops)).toBe('altered');
+    fx.ops.queue.capabilities.setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
+    expect(directOrderCapabilityState(fx.ops)).toBe('altered');
+    fx.ops.queue.capabilities.setEnabled(DIRECT_ORDER_CAPABILITY.id, true);
+    expect(directOrderCapabilityState(fx.ops)).toBe('altered');
+  });
+
+  // The deliberate configuration action is what repairs it — and it is still
+  // not allowed to re-enable a capability someone disabled on purpose.
+  it('is repaired only by the explicit registration action', () => {
+    const fx = ordersFixture();
+    reregister(fx, { riskClass: 'read_only', sideEffect: false });
+    registerDirectOrderCapability(fx.ops);
+    expect(directOrderCapabilityState(fx.ops)).toBe('enabled');
+    const result = submitDirectOrder(fx.ops, ORDER, CLAUDE_ONLY);
+    expect(result.ok).toBe(true);
+
+    const disabled = ordersFixture();
+    disabled.ops.queue.capabilities.setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
+    reregister(disabled, { riskClass: 'read_only', sideEffect: false });
+    registerDirectOrderCapability(disabled.ops);
+    expect(directOrderCapabilityState(disabled.ops)).toBe('disabled');
+  });
+
+  // Prose is not the contract. A reworded description must not start refusing
+  // orders, or the check becomes something deployments learn to work around.
+  it('ignores description drift, which changes no guarantee', () => {
+    const fx = ordersFixture();
+    reregister(fx, { description: 'Founder direct order (reworded for the console).' });
+    expect(directOrderCapabilityState(fx.ops)).toBe('enabled');
+    expect(submitDirectOrder(fx.ops, ORDER, CLAUDE_ONLY).ok).toBe(true);
+  });
+
+  // The reserved contract is read from the constant, so the two can never
+  // disagree about what "unaltered" means.
+  it('accepts exactly the reserved definition', () => {
+    const fx = ordersFixture();
+    expect(
+      directOrderContractDrift(fx.ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id)!),
+    ).toEqual([]);
+    expect(DIRECT_ORDER_RESERVED_CONTRACT).toEqual({
+      riskClass: 'founder_gate',
+      sideEffect: true,
+      idempotent: true,
+    });
   });
 });

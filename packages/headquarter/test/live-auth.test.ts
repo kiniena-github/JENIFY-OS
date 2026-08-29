@@ -571,24 +571,71 @@ describe('the requesting origin decides what may be advertised (issue #219, Code
     }
   });
 
-  it('falls back to the arrival Host, and says that is what it used', () => {
+  // Issue #219, Codex P2 on `49da330`. An earlier version matched the arrival
+  // Host against the HOSTS of the trusted origins and answered yes. The Host
+  // header carries no scheme, and the scheme is exactly what the POST gate
+  // decides on: with only `https://hq.example` trusted, a page loaded over
+  // `http://hq.example` sends the same `Host: hq.example` and its POST is then
+  // refused `origin_not_allowed` — the advertisement/refusal disagreement this
+  // whole function exists to close, reopened one header lower down.
+  it('never advertises on the arrival Host alone, whatever it names', () => {
+    for (const host of ['hq.example', 'preview-42.vercel.app', 'localhost:3001', '']) {
+      expect(requestOriginContext(get({ host }), ALLOWED), host).toMatchObject({
+        origin: null,
+        allowed: false,
+      });
+    }
+    // A Host that names a trusted hostname is still only evidence of the
+    // hostname, and no origin is reported, because none was established.
     expect(requestOriginContext(get({ host: 'hq.example' }), ALLOWED)).toEqual({
-      origin: 'https://hq.example',
-      source: 'host',
-      allowed: true,
-    });
-    expect(requestOriginContext(get({ host: 'preview-42.vercel.app' }), ALLOWED)).toMatchObject({
+      origin: null,
       source: 'host',
       allowed: false,
     });
-    // Host carries a port when there is one, and it is part of the match.
-    expect(requestOriginContext(get({ host: 'localhost:3001' }), ['http://localhost:3001'])).toMatchObject({
-      source: 'host',
-      allowed: true,
-    });
-    expect(requestOriginContext(get({ host: 'localhost:5173' }), ['http://localhost:3001'])).toMatchObject({
-      allowed: false,
-    });
+    expect(
+      requestOriginContext(get({ host: 'localhost:3001' }), ['http://localhost:3001']),
+    ).toEqual({ origin: null, source: 'host', allowed: false });
+  });
+
+  // The finding's exact scenario, as a standing regression: same Host, wrong
+  // scheme, and the two answers must agree.
+  it('does not advertise for an http page on a Host whose https origin is trusted', () => {
+    const advertised = requestOriginContext(get({ host: 'hq.example' }), ALLOWED);
+    expect(advertised.allowed).toBe(false);
+    const post = checkMutationOrigin(
+      request({
+        headers: {
+          origin: 'http://hq.example',
+          host: 'hq.example',
+          'content-type': 'application/json',
+        },
+      }),
+      ALLOWED,
+    );
+    expect(post).toMatchObject({ ok: false, reason: 'origin_not_allowed' });
+  });
+
+  // `source` still distinguishes the two ways of answering no, so a deployment
+  // that strips the referrer can be told what is missing rather than being
+  // told its configuration is wrong.
+  it('still names Host as the source, so the reason can be accurate', () => {
+    expect(requestOriginContext(get({ host: 'hq.example' }), ALLOWED).source).toBe('host');
+    expect(requestOriginContext(get({}), ALLOWED).source).toBe('none');
+  });
+
+  // A header the caller sets cannot become the scheme evidence either: only a
+  // scheme the host itself observed could safely widen this, and
+  // `ControlRequest` carries no such field.
+  it('does not believe a forwarded-protocol header', () => {
+    for (const proto of ['https', 'http', 'https, http']) {
+      expect(
+        requestOriginContext(
+          get({ host: 'hq.example', 'x-forwarded-proto': proto, 'x-forwarded-protocol': proto }),
+          ALLOWED,
+        ).allowed,
+        proto,
+      ).toBe(false);
+    }
   });
 
   it('answers no when the origin cannot be established at all', () => {

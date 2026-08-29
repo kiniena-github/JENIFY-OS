@@ -492,6 +492,33 @@ describe('what the console is told about itself', () => {
     expect((response.body.controls as Record<string, unknown>).directOrder).toBe(false);
   });
 
+  it('reports it off — and refuses the POST — when the definition was weakened', () => {
+    // Issue #219, Codex P1 on `49da330`. Re-registering the reserved id with a
+    // weaker definition takes the Founder gate off the capability the whole
+    // path depends on, and reading only the id and the enabled flag could not
+    // see it. Both readers must answer the same way here too.
+    const h = harness();
+    h.fixture.ops.queue.capabilities.register({
+      id: DIRECT_ORDER_CAPABILITY.id,
+      description: DIRECT_ORDER_CAPABILITY.description,
+      riskClass: 'read_only',
+      sideEffect: false,
+      idempotent: true,
+    });
+    const controls = h.call({ method: 'GET', path: CONTROL_ROUTES.session }).body
+      .controls as Record<string, unknown>;
+    expect(controls.directOrder).toBe(false);
+    const post = h.call({ body: ORDER_BODY });
+    expect(post.status).not.toBe(201);
+    expect((post.body.error as { code: string }).code).toBe('capability_definition_altered');
+    // Refused before anything was created, and the weakened row is left for a
+    // deliberate configuration action to repair — not quietly rewritten here.
+    expect(h.fixture.ops.queue.listByStatus('queued')).toEqual([]);
+    expect(h.fixture.ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id)!.riskClass).toBe(
+      'read_only',
+    );
+  });
+
   it('marks an approval the Founder may not give, before they try', () => {
     const h = harness();
     h.call({ body: ORDER_BODY });
@@ -987,14 +1014,19 @@ describe('the advertised controls follow the REQUESTING origin (issue #219, Code
     }
   });
 
-  it('falls back to the arrival Host only when the browser sent no origin evidence', () => {
-    // A deployment that strips the referrer still has a usable answer: the
-    // hostname the request actually arrived at. `requestOriginSource` says so,
-    // because a host match carries no scheme.
+  it('advertises nothing on the arrival Host alone, even a trusted hostname', () => {
+    // Issue #219, Codex P2 on `49da330`. Matching the Host against the trusted
+    // HOSTS answered yes for a page that might have been loaded over http,
+    // whose POST the gate then refuses on the scheme. Host is evidence of the
+    // hostname that answered, never of the page's origin, so it advertises
+    // nothing — and `requestOriginSource` still says `host`, so the deployment
+    // can be told what is missing rather than that its config is wrong.
     const h = harness({ origins: [ORIGIN] });
     expect(sessionControls(h, { host: 'hq.example' })).toMatchObject({
-      approve: true,
-      requestOriginAllowed: true,
+      directOrder: false,
+      approve: false,
+      deny: false,
+      requestOriginAllowed: false,
       requestOriginSource: 'host',
     });
     expect(sessionControls(h, { host: 'jenify-hq-preview-42.vercel.app' })).toMatchObject({
@@ -1002,6 +1034,44 @@ describe('the advertised controls follow the REQUESTING origin (issue #219, Code
       requestOriginAllowed: false,
       requestOriginSource: 'host',
     });
+  });
+
+  it('does not advertise for an http page whose host is trusted over https', () => {
+    // The finding's exact scenario end to end: `https://hq.example` trusted, a
+    // page served at `http://hq.example`, referrer stripped. Host-only would
+    // have drawn the buttons; the POST from that page is refused.
+    const h = harness({ origins: [ORIGIN] });
+    expect(sessionControls(h, { host: 'hq.example' }).approve).toBe(false);
+    const post = h.call({
+      headers: {
+        origin: 'http://hq.example',
+        host: 'hq.example',
+        'content-type': 'application/json',
+      },
+      body: ORDER_BODY,
+    });
+    expect(post.status).not.toBe(201);
+    expect((post.body.error as { code: string }).code).toBe('origin_not_allowed');
+  });
+
+  it('explains a Host-only refusal as missing evidence, not a wrong configuration', () => {
+    // Two different situations produce the same `false`, and sending a Founder
+    // to edit an allow-list that is already correct wastes the one explanation
+    // the console gets to give.
+    const h = harness({ origins: [ORIGIN] });
+    const hostOnly = h.call({
+      method: 'GET',
+      path: CONTROL_ROUTES.session,
+      headers: { host: 'hq.example' },
+    }).body;
+    expect(String(hostOnly.message)).toContain('no evidence of the origin');
+    expect(String(hostOnly.message)).not.toContain('not served from an origin that is trusted');
+    const untrusted = h.call({
+      method: 'GET',
+      path: CONTROL_ROUTES.session,
+      headers: pageLoad(PREVIEW),
+    }).body;
+    expect(String(untrusted.message)).toContain('not served from an origin that is trusted');
   });
 
   it('advertises nothing when the requesting origin cannot be established at all', () => {

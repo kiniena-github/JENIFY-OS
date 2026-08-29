@@ -346,16 +346,26 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         approvalAuthority: resolution.founder.principal.approvalAuthority,
         // The console renders `message` as its own reason for showing no
         // control, so the one case a Founder could not otherwise explain gets
-        // said plainly: the page's origin is not on this deployment's trusted
-        // list, so a write from here would be refused. The untrusted origin
-        // itself is deliberately NOT echoed back — a reason must not become a
-        // reflection channel for a header the caller controls.
+        // said plainly. Two different situations produce the same `false`, and
+        // conflating them would send a Founder to edit a configuration that is
+        // already correct, so they are worded apart: the page's origin is not
+        // on the trusted list, versus the request carried no evidence of its
+        // origin at all (a stripped referrer, leaving only a scheme-blind
+        // Host). The untrusted origin itself is deliberately NOT echoed back —
+        // a reason must not become a reflection channel for a header the
+        // caller controls.
         ...(founderControls.requestOriginAllowed === false
           ? {
               message:
-                'This page was not served from an origin that is trusted for HQ browser ' +
-                'control, so every state-changing request from it would be refused. Add this ' +
-                "deployment's exact origin to the HQ trusted-origin configuration.",
+                founderControls.requestOriginSource === 'origin' ||
+                founderControls.requestOriginSource === 'referer'
+                  ? 'This page was not served from an origin that is trusted for HQ browser ' +
+                    'control, so every state-changing request from it would be refused. Add ' +
+                    "this deployment's exact origin to the HQ trusted-origin configuration."
+                  : 'This request carried no evidence of the origin that made it — no Origin ' +
+                    'and no Referer — so the controls stay off rather than being advertised on ' +
+                    'a guess. A Host header alone cannot say whether the page was loaded over ' +
+                    'http or https, which is exactly what a write is checked against.',
             }
           : {}),
         controls: founderControls,
@@ -449,8 +459,9 @@ function controlAvailability(
     // Stated separately from `trustedOriginConfigured`, because they answer
     // different questions and a deployment can pass the first and fail the
     // second. `requestOriginSource` names how the requesting origin was
-    // established — `host` is a hostname match with no scheme, `none` means it
-    // could not be established at all and the answer is therefore no.
+    // established — `origin`/`referer` carry a scheme and can answer yes;
+    // `host` carries none and `none` is no evidence at all, and both of those
+    // answer no rather than guess a scheme the POST gate would decide on.
     requestOriginAllowed: requestOrigin.allowed,
     requestOriginSource: requestOrigin.source,
     // Stated, not hidden: the canonical model has no third decision, so the

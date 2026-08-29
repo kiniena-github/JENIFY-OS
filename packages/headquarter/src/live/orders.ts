@@ -73,6 +73,7 @@ import { DEFAULT_ACTOR_AUTHENTICATION, type ActorAuthentication } from './local-
 import { EXECUTION_PROVIDER_KEY } from '../operator/provider-binding.js';
 import type { TaskClassification } from '../application/classification.js';
 import type { HeadquarterOperations, OpsErrorCode } from '../application/service.js';
+import type { Capability } from '../operator/capabilities.js';
 import type { OperatorTask } from '../operator/queue.js';
 import {
   providerConnectivity,
@@ -112,12 +113,67 @@ export function registerDirectOrderCapability(ops: HeadquarterOperations): void 
   ops.queue.capabilities.register({ ...DIRECT_ORDER_CAPABILITY });
 }
 
-/** What the registry currently says about the direct-order capability. */
-export type DirectOrderCapabilityState = 'missing' | 'disabled' | 'enabled';
+/**
+ * The parts of the reserved definition that CARRY the Founder gate.
+ *
+ * `riskClass` is what `operator/policy.ts` reads to refuse a standing
+ * pre-approval, and `sideEffect` is what marks the action as reaching outside
+ * the control plane; `idempotent` is what makes replaying an approved digest
+ * safe. Those three are the contract — the description is prose and may drift
+ * without changing what the system will do.
+ */
+export const DIRECT_ORDER_RESERVED_CONTRACT = {
+  riskClass: DIRECT_ORDER_CAPABILITY.riskClass,
+  sideEffect: DIRECT_ORDER_CAPABILITY.sideEffect,
+  idempotent: DIRECT_ORDER_CAPABILITY.idempotent,
+} as const;
 
+/**
+ * Which contract fields the registry's CURRENT row disagrees with, if any.
+ *
+ * Exported so a refusal can name them: "altered" is useless to a Founder who
+ * cannot see which guarantee was dropped.
+ */
+export function directOrderContractDrift(capability: Capability): string[] {
+  const drift: string[] = [];
+  if (capability.riskClass !== DIRECT_ORDER_RESERVED_CONTRACT.riskClass) drift.push('riskClass');
+  if (capability.sideEffect !== DIRECT_ORDER_RESERVED_CONTRACT.sideEffect) drift.push('sideEffect');
+  if (capability.idempotent !== DIRECT_ORDER_RESERVED_CONTRACT.idempotent) drift.push('idempotent');
+  return drift;
+}
+
+/** What the registry currently says about the direct-order capability. */
+export type DirectOrderCapabilityState = 'missing' | 'altered' | 'disabled' | 'enabled';
+
+/**
+ * Read the registry, and believe the ROW rather than the id (issue #219,
+ * Codex P1 on `49da330`).
+ *
+ * `id` plus `enabled` used to be the whole answer, which trusted a name to
+ * carry a guarantee that actually lives in the row's columns.
+ * `CapabilityRegistry.register` updates the definition of an existing
+ * capability by design, so anything that can register can re-register
+ * `hq.direct_order` as `riskClass: 'read_only', sideEffect: false` — and then
+ * the policy engine, which reads risk from the registry, no longer routes a
+ * direct order into `needs_approval`. The order would be queued and executed
+ * with no Founder approval, through a path whose entire justification is that
+ * it is Founder-gated.
+ *
+ * The host deliberately consumes an existing registration instead of restoring
+ * the definition at startup (re-registering on the way to using a capability is
+ * how a disabled one used to get silently re-enabled), so the check belongs
+ * here: fail closed while the row does not match the reserved contract, and let
+ * the explicit configuration action — `registerDirectOrderCapability` — be what
+ * repairs it. Detecting the drift is not the same as fixing it, and an
+ * invocation path must not do the second.
+ */
 export function directOrderCapabilityState(ops: HeadquarterOperations): DirectOrderCapabilityState {
   const capability = ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id);
   if (!capability) return 'missing';
+  // Checked before `enabled`, because a weakened definition is a fact about
+  // the row whether or not the row is switched on, and re-enabling it must not
+  // be the moment the weakened contract silently takes effect.
+  if (directOrderContractDrift(capability).length > 0) return 'altered';
   return capability.enabled ? 'enabled' : 'disabled';
 }
 
@@ -259,6 +315,7 @@ export type DirectOrderErrorCode =
   | OpsErrorCode
   | 'provider_not_connected'
   | 'capability_not_registered'
+  | 'capability_definition_altered'
   | 'empty_instruction'
   | 'instruction_too_long'
   | 'title_too_long'
@@ -453,6 +510,23 @@ export function submitDirectOrder(
       'capability_not_registered',
       `Capability ${DIRECT_ORDER_CAPABILITY.id} is not registered here. Registering it is a ` +
         'separate, deliberate configuration action — placing an order never performs it.',
+    );
+  }
+  if (capabilityState === 'altered') {
+    // Named fields, not a vague "altered": the Founder needs to know which
+    // guarantee the row stopped making. Nothing is repaired here — putting the
+    // reserved definition back is the explicit registration action, and an
+    // invocation path that quietly restored it would be the same mistake as
+    // one that quietly re-enables a disabled capability.
+    const capability = ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id);
+    const drift = capability ? directOrderContractDrift(capability) : [];
+    return orderFail(
+      'capability_definition_altered',
+      `Capability ${DIRECT_ORDER_CAPABILITY.id} is registered with a definition that no longer ` +
+        `matches its reserved contract (${drift.join(', ')}), so the Founder gate it exists to ` +
+        'enforce is not the one the registry would apply. The order is refused. Restoring the ' +
+        'reserved definition is a deliberate configuration action; placing an order will not do it.',
+      { drift },
     );
   }
   if (capabilityState === 'disabled') {

@@ -67,6 +67,7 @@ import {
   registerDirectOrderCapability,
   resolveOrderRoute,
   submitDirectOrder,
+  type DirectOrderCapabilityState,
   type DirectOrderRoute,
 } from '../live/orders.js';
 import {
@@ -163,6 +164,12 @@ function main(): void {
     registerDirectOrderCapability(configOps);
     const after = directOrderCapabilityState(configOps);
     console.log(`Capability ${DIRECT_ORDER_CAPABILITY.id}: ${before} → ${after}`);
+    if (before === 'altered') {
+      console.log(
+        'Its definition had drifted from the reserved Founder-gated contract and has been ' +
+          'restored. Worth asking what re-registered it with a weaker one.',
+      );
+    }
     if (after === 'disabled') {
       console.log(
         'It stays DISABLED. Registration does not enable a capability that was deliberately ' +
@@ -243,13 +250,31 @@ function main(): void {
   // direct orders, and an invocation may not undo it.
   const capabilityState = directOrderCapabilityState(ops);
   if (capabilityState !== 'enabled') {
+    // One refusal per state, each naming the state's own remedy. `altered`
+    // (issue #219, Codex P1) is the one that is not about the on/off switch:
+    // the row exists and may well be enabled, but its risk/side-effect
+    // definition no longer carries the Founder gate this path depends on.
+    const REFUSALS: Record<Exclude<DirectOrderCapabilityState, 'enabled'>, [string, string]> = {
+      missing: [
+        'capability_not_registered',
+        'Register it deliberately with --register-capability.',
+      ],
+      altered: [
+        'capability_definition_altered',
+        'Its registered definition no longer matches the reserved Founder-gated contract ' +
+          '(risk class, side effect, idempotency), so the approval gate the order relies on ' +
+          'would not be applied. Restore it deliberately with --register-capability.',
+      ],
+      disabled: [
+        'capability_disabled',
+        'Re-enabling a disabled capability is an explicit configuration decision, not something ' +
+          'placing an order may do.',
+      ],
+    };
+    const [code, remedy] = REFUSALS[capabilityState];
     console.error(
-      `Order refused (capability_${capabilityState === 'missing' ? 'not_registered' : 'disabled'}): ` +
-        `${DIRECT_ORDER_CAPABILITY.id} is ${capabilityState} in this database. ` +
-        (capabilityState === 'missing'
-          ? `Register it deliberately with --register-capability.`
-          : `Re-enabling a disabled capability is an explicit configuration decision, not something ` +
-            `placing an order may do.`),
+      `Order refused (${code}): ${DIRECT_ORDER_CAPABILITY.id} is ${capabilityState} in this ` +
+        `database. ${remedy}`,
     );
     process.exit(1);
   }

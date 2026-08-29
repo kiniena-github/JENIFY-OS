@@ -271,9 +271,9 @@ export function normalizedTrustedOrigins(allowedOrigins: readonly string[]): str
 /**
  * Where the answer about the requesting origin came from.
  *
- * `host` is the weakest and is named so the caller can say so: the Host header
- * carries no scheme, so a match on it proves the request arrived at a trusted
- * HOSTNAME, not that the page's full origin is trusted.
+ * `host` is named so the caller can say so, and it is never an answer of YES:
+ * the Host header carries no scheme, so a match on it proves the request
+ * arrived at a trusted HOSTNAME and nothing about the page's full origin.
  */
 export type RequestOriginSource = 'origin' | 'referer' | 'host' | 'none';
 
@@ -301,15 +301,6 @@ function refererOrigin(value: string): string | null {
   }
 }
 
-/** The host component of an already-normalized origin (host + port, no scheme). */
-function originHost(origin: string): string | null {
-  try {
-    return new URL(origin).host.toLowerCase();
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Would a write from the page that made THIS request be accepted?
  *
@@ -331,13 +322,32 @@ function originHost(origin: string): string | null {
  * 2. **`Referer`** — the same-origin console fetch carries the `/hq/` page URL
  *    under the browser default referrer policy, and same-origin GETs send no
  *    `Origin`. Only the origin component is read.
- * 3. **`Host`** — last resort, for a deployment that strips the referrer. It
- *    proves the hostname the request arrived at, so it is matched against the
- *    HOSTS of the trusted origins; the scheme is unknown and `source` says so.
+ * 3. **`Host`** — evidence of the hostname the request arrived at, and NOT an
+ *    origin. It carries no scheme, and the scheme is exactly what the POST
+ *    gate distinguishes: with only `https://hq.example` trusted, a page loaded
+ *    over `http://hq.example` sends the same `Host: hq.example` yet its POST
+ *    carries `Origin: http://hq.example` and is refused `origin_not_allowed`.
+ *    An earlier version of this function matched the Host against the HOSTS of
+ *    the trusted origins and answered yes, which reintroduced the very
+ *    advertisement/refusal disagreement it exists to close (issue #219, Codex
+ *    P2 on `49da330`). `x-forwarded-proto` is not a substitute: it is a header
+ *    the caller can set, so believing it would let a page choose its own
+ *    answer. So Host-only evidence answers `false` and says `source: 'host'`,
+ *    which is a truthful "the scheme could not be established here", not a
+ *    claim that the origin is untrusted.
  *
- * With none of the three, the origin is unknown and the answer is `false`:
- * unknown must never advertise a control, since the write itself would be
- * refused for a missing `Origin` header anyway.
+ * With no usable evidence at all, the origin is unknown and the answer is
+ * `false` likewise: unknown must never advertise a control, since the write
+ * itself would be refused for a missing `Origin` header anyway.
+ *
+ * The cost of that is stated rather than engineered around: a deployment that
+ * strips the referrer from same-origin GETs shows a Founder the controls off
+ * with a reason, even though its POSTs would in fact be accepted. Under-
+ * advertising is recoverable — the deployment can send a referrer, or the
+ * Founder can read the reason — while over-advertising hands out buttons that
+ * fail. Only a scheme the host itself observed (TLS termination, not a header)
+ * could safely widen this, and `ControlRequest` deliberately carries no such
+ * field today.
  *
  * This is an ADVERTISEMENT decision, never an authorization one. Nothing here
  * admits a write: `checkMutationOrigin` still gates every mutation on the
@@ -365,9 +375,10 @@ export function requestOriginContext(
 
   const rawHost = headers.host;
   if (rawHost !== undefined && rawHost !== null && rawHost.trim() !== '') {
-    const host = rawHost.trim().toLowerCase();
-    const match = allowed.find((entry) => originHost(entry) === host) ?? null;
-    return { origin: match, source: 'host', allowed: match !== null };
+    // Named, never believed: the Host proves which hostname answered, and the
+    // scheme — the thing `checkMutationOrigin` decides on — stays unknown. No
+    // origin is reported either, because none was established.
+    return { origin: null, source: 'host', allowed: false };
   }
 
   return { origin: null, source: 'none', allowed: false };
