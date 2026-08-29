@@ -187,7 +187,7 @@ npm run hq:ingest-claude --workspace @factoryos/headquarter -- \
 It reads **the issue HQ itself opened** for that task — the recorded repository
 decides, not the argument, which is verified against it — finds the comment
 carrying CLAUDE's own result marker (`jenify-claude-result`, a registry fact),
-and hands it to `correlateClaudeResult`.
+and hands it to the correlation writer that is private to `ingest.ts`.
 
 What that does and does not mean:
 
@@ -293,11 +293,19 @@ explicit `jenify-hq-dispatch:begin` / `:end` sentinels and is located by them �
 never by being "the first JSON fence in the body". The Founder's instruction is
 rendered above it and may legitimately contain JSON examples; one of those used
 to shadow the canonical block, which refused the owner's genuine report as
-malformed and silently broke the return leg for an ordinary class of orders. `correlateClaudeResult` verifies
-that HQ really dispatched *that* issue in *that* repository, that the reporting
-provider is CLAUDE, and that the body still names the same task — then records
-the correlation on the canonical task. `hq:ingest-claude` (above) is what calls
-it in the real flow.
+malformed and silently broke the return leg for an ordinary class of orders.
+
+The **last** begin sentinel is the one read, and HQ appends its block at the
+very bottom — so instruction text that writes the sentinels verbatim cannot
+shadow the canonical block by appearing first. That is what makes a delimiter
+safe to trust in a body HQ does not solely author, and it is held by a test
+rather than by this paragraph.
+
+`ingestClaudeResult` verifies that HQ really dispatched *that* issue in *that*
+repository, that the reporting provider is CLAUDE, and that the body still names
+the same task — then records the correlation on the canonical task through a
+writer private to `ingest.ts`. `hq:ingest-claude` (above) is what calls it in
+the real flow.
 
 It records that a report **arrived**. It does not review, pass, or complete the
 task: the party that did the work is never the party that declares it done.
