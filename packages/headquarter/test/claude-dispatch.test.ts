@@ -517,6 +517,32 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
     expect(second.calls).toHaveLength(0);
   });
 
+  it('treats a transport that throws as outcome-unknown, not as a crash or a clean failure', () => {
+    // The transport is an injected interface, so it can throw at any point —
+    // including after GitHub accepted the creation.
+    const fixture = orderFixture();
+    const taskId = placeOrder(fixture);
+    const throwing: GitHubIssueTransport = {
+      ...stubTransport({}),
+      createIssue: () => {
+        throw new Error('EROFS: read-only file system');
+      },
+    };
+
+    const result = dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport: throwing });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('transport_failed');
+    expect(result.error.message).toContain('UNKNOWN');
+    // The attempt is left open, so the next dispatch refuses rather than
+    // risking a duplicate of an issue that may exist.
+    expect(dispatchHistory(fixture.ops, taskId).state).toBe('unknown');
+    const retry = dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport: stubTransport({}) });
+    expect(retry.ok).toBe(false);
+    if (retry.ok) throw new Error('unreachable');
+    expect(retry.error.code).toBe('dispatch_outcome_unknown');
+  });
+
   it('re-checks eligibility immediately before publishing, not only at the start', () => {
     // `transport.status()` makes a live call and can take a minute. In that
     // window an approval can expire or the kill switch can be engaged, and

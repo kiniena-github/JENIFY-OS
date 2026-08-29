@@ -84,6 +84,7 @@ import {
   isValidTarget,
   sameRepository,
   targetSlug,
+  type GitHubIssueResult,
   type GitHubIssueTransport,
   type GitHubTarget,
 } from './transport.js';
@@ -761,12 +762,32 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
     );
   }
 
-  const created = options.transport.createIssue({
-    target: options.target,
-    title: issue.title,
-    body: issue.body,
-    labels: options.labels ?? [],
-  });
+  // A transport that THROWS is an unknown outcome, not a clean failure.
+  //
+  // Found by sweeping for siblings of the three ambiguity findings rather than
+  // by a review: `createIssue` is an injected interface, so it can throw at any
+  // point — including after GitHub accepted the creation. Letting the exception
+  // escape crashed the caller with a reservation already written, and a caller
+  // that turns exceptions into a generic error (a host route, say) would have
+  // reported something indistinguishable from "nothing happened". The attempt
+  // stays OPEN, exactly as for `unreadable_response`, and the refusal says so.
+  let created: GitHubIssueResult;
+  try {
+    created = options.transport.createIssue({
+      target: options.target,
+      title: issue.title,
+      body: issue.body,
+      labels: options.labels ?? [],
+    });
+  } catch (error) {
+    return refuse(
+      'transport_failed',
+      `The GitHub transport threw while creating the issue (${errorText(error)}). Nothing proves ` +
+        'the request never reached GitHub, so the outcome is UNKNOWN: the attempt is left OPEN ' +
+        'and the next dispatch refuses until it is reconciled.',
+      { kind: 'threw' },
+    );
+  }
 
   if (!created.ok) {
     // `unreadable_response` is deliberately NOT recorded as a failure. The
