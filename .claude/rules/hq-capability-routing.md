@@ -11,6 +11,12 @@ Apply this rule only to capability/tool selection. It does not replace the canon
 - Treat community skills/MCPs/installers as untrusted external code until reviewed.
 - Never auto-spend, enable a paid plan, use separately metered API billing, or purchase credits. Stop at the applicable Founder spend gate.
 
+### Actual enablement and provenance (recorded honestly)
+
+- The catalog lists roughly 30 approved capabilities, but only **four plugins are actually enabled at project scope** in `.claude/settings.json`: `example-skills@anthropic-agent-skills`, `ux-design@wondelai-skills`, `product-innovation@wondelai-skills`, and `gsap-skills@gsap-skills`. Catalog listing is not enablement, and enablement is not connection or authentication.
+- `autoUpdate` is not relied on at project scope (no `autoUpdate` setting exists in `.claude/settings.json`); refreshing the known marketplaces is a manual action.
+- No catalog entry currently carries a reviewed upstream ref, so `getHqCapabilityProvenance` resolves every entry to `unreviewed` / `unknown` by design. That stays true until a real review records the exact ref and date on the entry — never backfill or invent one.
+
 ## Premium website/UI work
 
 When the task is material website/UI design and the capabilities are genuinely available, prefer this sequence:
