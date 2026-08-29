@@ -509,7 +509,9 @@ describe('what the console is told about itself', () => {
       .controls as Record<string, unknown>;
     expect(controls.directOrder).toBe(false);
     const post = h.call({ body: ORDER_BODY });
-    expect(post.status).not.toBe(201);
+    // 403, not 400 (issue #219, Codex P2 on `6e5f054`). The order itself is
+    // well formed; what refuses it is the server's own registry row.
+    expect(post.status).toBe(403);
     expect((post.body.error as { code: string }).code).toBe('capability_definition_altered');
     // Refused before anything was created, and the weakened row is left for a
     // deliberate configuration action to repair — not quietly rewritten here.
@@ -517,6 +519,83 @@ describe('what the console is told about itself', () => {
     expect(h.fixture.ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id)!.riskClass).toBe(
       'read_only',
     );
+  });
+
+  // Issue #219, Codex P2 on `6e5f054`. `capability_definition_altered` was
+  // missing from the 403 branch, so it fell through to the 400 default and a
+  // valid order was reported to the console as MALFORMED. The three
+  // capability-state refusals all answer the same question — may this
+  // capability be invoked here as it is configured — and none of them is
+  // something the caller can fix by editing the request, so all three must
+  // land on the same side of the 400/403 line. A genuinely bad request must
+  // still be a 400, or the fix would have bought consistency by erasing a
+  // distinction the console needs.
+  it('answers every capability-state refusal with 403, and a bad request still with 400', () => {
+    const altered = harness();
+    altered.fixture.ops.queue.capabilities.register({
+      id: DIRECT_ORDER_CAPABILITY.id,
+      description: DIRECT_ORDER_CAPABILITY.description,
+      riskClass: 'read_only',
+      sideEffect: false,
+      idempotent: true,
+    });
+    const alteredPost = altered.call({ body: ORDER_BODY });
+    expect(alteredPost.status).toBe(403);
+    expect((alteredPost.body.error as { code: string }).code).toBe(
+      'capability_definition_altered',
+    );
+
+    const disabled = harness();
+    disabled.fixture.ops.queue.capabilities.setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
+    const disabledPost = disabled.call({ body: ORDER_BODY });
+    expect(disabledPost.status).toBe(403);
+    expect((disabledPost.body.error as { code: string }).code).toBe('capability_disabled');
+
+    // The distinction is still real: this order IS malformed, and the caller
+    // can fix it by resending a valid one.
+    const wellFormed = harness();
+    const badRoute = wellFormed.call({ body: { ...ORDER_BODY, route: 'NOT_A_ROUTE' } });
+    expect(badRoute.status).toBe(400);
+    expect((badRoute.body.error as { code: string }).code).toBe('invalid_input');
+  });
+
+  it('stays fail-closed on the altered definition: nothing created, nothing repaired, refusal audited', () => {
+    const h = harness();
+    h.fixture.ops.queue.capabilities.register({
+      id: DIRECT_ORDER_CAPABILITY.id,
+      description: DIRECT_ORDER_CAPABILITY.description,
+      riskClass: 'read_only',
+      sideEffect: false,
+      idempotent: true,
+    });
+
+    // Repeated attempts must not wear the refusal down, and the 403 must not
+    // have become a "retry and it will work" hint.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const post = h.call({ body: ORDER_BODY });
+      expect(post.status).toBe(403);
+      expect(post.body.ok).toBe(false);
+      // The refusal names the drifted fields rather than the values of
+      // anything the caller sent.
+      expect(String((post.body.error as { message: string }).message)).toContain('riskClass');
+    }
+
+    expect(h.fixture.ops.queue.listByStatus('queued')).toEqual([]);
+    expect(h.fixture.ops.queue.listByStatus('needs_approval')).toEqual([]);
+    // Not repaired by being invoked: restoring the reserved contract stays the
+    // explicit registration action.
+    const row = h.fixture.ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id)!;
+    expect(row.riskClass).toBe('read_only');
+    expect(row.sideEffect).toBe(false);
+    // Every refusal is evidence, attributed to the mapped principal.
+    expect(h.audit.map((event) => event.detail)).toEqual([
+      'capability_definition_altered',
+      'capability_definition_altered',
+      'capability_definition_altered',
+    ]);
+    for (const event of h.audit) {
+      expect(event).toMatchObject({ outcome: 'refused', principalId: 'founder' });
+    }
   });
 
   it('marks an approval the Founder may not give, before they try', () => {

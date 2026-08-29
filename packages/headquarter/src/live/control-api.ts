@@ -532,11 +532,23 @@ function createOrder(
     // idempotency key) cannot occur on a path that always derives one. So it
     // belongs with the 403s, and a browser is told "not allowed" rather than
     // "malformed", which is what the caller would otherwise try to fix.
+    //
+    // `capability_definition_altered` belongs there for the same reason
+    // (issue #219, Codex P2 on `6e5f054`). The three capability-state
+    // refusals answer one question — may this capability be invoked here,
+    // as it is currently configured — and the answer is a property of the
+    // SERVER's registry row, not of the submitted order. A 400 tells the
+    // console the order was malformed and invites the Founder to edit and
+    // resend an order that was already valid; the drifted row would refuse
+    // every retry. All three now say 403: refused, and nothing you can
+    // change in this request will help. Restoring the reserved definition
+    // stays the explicit registration action, exactly as before.
     const status =
       result.error.code === 'provider_not_connected'
         ? 409
         : result.error.code === 'capability_not_registered' ||
             result.error.code === 'capability_disabled' ||
+            result.error.code === 'capability_definition_altered' ||
             result.error.code === 'unknown_principal' ||
             result.error.code === 'not_permitted' ||
             result.error.code === 'enqueue_rejected' ||
