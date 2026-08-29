@@ -30,8 +30,9 @@
  *   — the rule `routing/route.ts` already applies to every comment carrying
  *   authority over an AI task, and the same account dispatch had to be
  *   authenticated as to publish. See `findResultComment`.
- * - **It does not substitute a provider.** A report that is not CLAUDE's is
- *   refused by `correlateClaudeResult`, not re-attributed.
+ * - **It does not substitute a provider.** The lane's provider is a constant
+ *   here, so nothing is re-attributed: a report is correlated as CLAUDE's or
+ *   not at all.
  * - **It reads one issue**, the one recorded for this task, in the repository
  *   recorded beside it. A caller naming a different repository is refused rather
  *   than followed.
@@ -255,6 +256,13 @@ function recordCorrelation(
     /** REQUIRED: the body carrying the anti-drift contract. */
     issueBody: string;
     reportUrl: string | null;
+    /**
+     * The login `findResultComment` verified to be the repository owner, three
+     * lines from the only call site. Recorded so the evidence says WHO filed the
+     * report and not merely that one arrived — which is what the operator doc
+     * has always claimed this entry contains.
+     */
+    reportAuthor: string;
   },
 ): { ok: true } | { ok: false; code: CorrelationRefusal; message: string } {
   const repository = targetSlug(input.target);
@@ -363,6 +371,10 @@ function recordCorrelation(
       repository,
       issueNumber: input.issueNumber,
       reportUrl: input.reportUrl,
+      // The VERIFIED origin. A public login, never a secret, and the one fact
+      // that makes "arrived from the repository owner" checkable in the log
+      // rather than only asserted by the note beside it.
+      reportAuthor: input.reportAuthor.trim(),
       note:
         'Result correlated to the canonical task. This records that a report arrived from the ' +
         'repository owner; it does not review, pass or complete the task.',
@@ -485,6 +497,7 @@ export function ingestClaudeResult(ops: HeadquarterOperations, options: IngestOp
     issueNumber,
     issueBody: read.issue.body,
     reportUrl,
+    reportAuthor: report.author,
   });
   if (!correlation.ok) {
     return refuse(

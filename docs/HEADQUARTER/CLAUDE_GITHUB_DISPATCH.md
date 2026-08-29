@@ -196,7 +196,10 @@ What that does and does not mean:
   never declares it done.
 - The report text is never stored. What is recorded is the issue, the comment
   URL **only when that URL verifiably points at this issue**, and the login it
-  was posted under.
+  was posted under — the verified one, in the evidence payload itself, so
+  "arrived from the repository owner" is a checkable fact in the log rather
+  than a claim in the note beside it. A login is public attribution, never a
+  secret.
 - **A report is accepted only from the repository owner.** The marker is public
   text sitting on every dispatched issue, so it says a comment is *shaped* like
   a report — never that its author was entitled to file one. Without the owner

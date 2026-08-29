@@ -191,6 +191,26 @@ describe('a report on the dispatched issue reaches the canonical task', () => {
     expect(correlations(fixture, taskId)).toHaveLength(1);
   });
 
+  it('records the verified login in the evidence, not only in the note', () => {
+    // The operator doc says the evidence carries "the login it was posted
+    // under", and it did not: the payload had no author field, so "arrived from
+    // the repository owner" was asserted by prose beside the entry rather than
+    // being a fact in it. A log that describes itself inaccurately is the one
+    // record a human or a later automation would trust.
+    const fixture = ordersFixture();
+    const { taskId, body } = dispatched(fixture);
+
+    expect(
+      ingestClaudeResult(fixture.ops, {
+        taskId,
+        target: TARGET,
+        transport: transport({ body, comments: [comment({ author: `  ${TARGET.owner}  ` })] }),
+      }).ok,
+    ).toBe(true);
+
+    expect(correlations(fixture, taskId)[0]!.payload['reportAuthor']).toBe(TARGET.owner);
+  });
+
   it('reports "no result yet" as a success, not an error', () => {
     // This is meant to be run while work is outstanding. A poll that finds
     // nothing has not failed, and must not look like a failure.
