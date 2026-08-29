@@ -211,6 +211,20 @@ What that does and does not mean:
 - A marked comment from anyone else is **refused and reported** — never
   correlated, never written to the evidence log, and never silently dropped:
   the CLI names the logins that tried.
+- **The check is inseparable from the write.** There is no exported
+  correlation API. The function that appends `claude_github_result_correlated`
+  is private to `ingest.ts` and unreachable except through the path above, so
+  no caller can produce that evidence without an owner-authored report having
+  been read from the issue. An exported writer would have moved the provenance
+  failure one layer inward rather than closing it — which is worse, because it
+  looks closed. `parseDispatchCorrelation` stays exported; it is a pure parser
+  and writes nothing.
+- **The anti-drift fields are enforced, not merely carried.** The correlation
+  block's `capabilityId`, `executionProvider` and `actionDigest` are each
+  compared against the canonical task, and any mismatch — or any *absent*
+  field — refuses. That is the whole reason the block holds more than a task
+  id: an edited body could otherwise keep the task id and repository while
+  describing a different approved action. "Not stated" is not "not violated".
 - Running it repeatedly is safe. "No report yet" is a success, not an error, and
   a report already correlated is not recorded twice.
 - A transport that cannot read fails closed (`transport_cannot_read`), and a

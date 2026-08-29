@@ -23,7 +23,13 @@ import { describe, expect, it } from 'vitest';
 import { setupFixture, type Fixture } from './application.fixture.js';
 import { taskActionDigest } from '../src/operator/approvals.js';
 import { DIRECT_ORDER_CAPABILITY, registerDirectOrderCapability, submitDirectOrder } from '../src/live/orders.js';
-import { CLAUDE_DISPATCH_EVIDENCE, dispatchClaudeTask } from '../src/providers/claude/dispatch.js';
+import {
+  CLAUDE_DISPATCH_EVIDENCE,
+  DISPATCH_MARKER,
+  dispatchClaudeTask,
+  parseDispatchCorrelation,
+} from '../src/providers/claude/dispatch.js';
+import * as claudeLane from '../src/providers/claude/index.js';
 import { CLAUDE_RESULT_MARKER, findResultComment, ingestClaudeResult } from '../src/providers/claude/ingest.js';
 import { parseIssueView } from '../src/providers/claude/transport.js';
 import type {
@@ -97,6 +103,11 @@ function transport(options: { comments?: GitHubIssueComment[]; body?: string; re
     },
   };
   return stub;
+}
+
+/** Everything the Claude provider lane exports to application code. */
+function laneNamespace(): Record<string, unknown> {
+  return claudeLane as unknown as Record<string, unknown>;
 }
 
 function ordersFixture(): Fixture {
@@ -414,6 +425,178 @@ describe('it refuses to look where it should not', () => {
 
     if (result.ok) throw new Error('expected a refusal');
     expect(result.error.code).toBe('read_failed');
+  });
+});
+
+describe('no exported surface can append correlation evidence without a trusted report', () => {
+  it('exposes no evidence-writing correlation API at all', async () => {
+    // The P1 on `7542f16`: `correlateClaudeResult` was exported from
+    // `dispatch.ts` and re-exported by the provider index, and it appended
+    // `claude_github_result_correlated` from caller-supplied provider/body/URL.
+    // The owner check therefore lived in the CALLER, and any other caller could
+    // skip it — the provenance failure moved one layer inward rather than being
+    // closed.
+    //
+    // This enumerates what application code can actually reach, so the guard
+    // cannot be re-opened by re-exporting a write helper later. It is a
+    // structural assertion on purpose: a behavioural test can only cover the
+    // surfaces someone remembered to call.
+    const lane = await import('../src/providers/claude/index.js');
+    const dispatch = await import('../src/providers/claude/dispatch.js');
+    const ingest = await import('../src/providers/claude/ingest.js');
+
+    for (const mod of [lane, dispatch, ingest]) {
+      expect(Object.keys(mod)).not.toContain('correlateClaudeResult');
+    }
+    // And nothing else correlation-shaped crept back in beside it. The rule is
+    // not "no correlation exports" — `parseDispatchCorrelation` is a pure
+    // parser and belongs in the namespace — it is that no exported correlation
+    // function WRITES. So this is an explicit allow-list: a new name appearing
+    // here has to be looked at, which is the point.
+    const correlationish = Object.keys(lane)
+      .filter((name) => /correlat/i.test(name) && typeof (lane as Record<string, unknown>)[name] === 'function')
+      .sort();
+    expect(correlationish).toEqual(['parseDispatchCorrelation']);
+    // The parser is pure: given a body it returns data and touches nothing.
+    // (The next test proves it, and everything else exported, appends nothing.)
+    expect(parseDispatchCorrelation('not a correlation block')).toBeNull();
+  });
+
+  it('cannot be reached by calling every exported function in the lane', () => {
+    // Belt and braces: call everything callable in the provider namespace with
+    // the ops handle and plausible correlation-shaped arguments, and prove none
+    // of it appended correlation evidence. Anything that throws is fine — a
+    // refusal is the desired outcome; a WRITE is not.
+    const fixture = ordersFixture();
+    const { taskId, body } = dispatched(fixture);
+    const before = correlations(fixture, taskId).length;
+
+    const lane = laneNamespace();
+    const args = {
+      taskId,
+      target: TARGET,
+      issueNumber: ISSUE,
+      issueBody: body,
+      reportedProvider: 'CLAUDE',
+      reportUrl: `${ISSUE_URL}#issuecomment-1`,
+      attestedModel: 'whatever-it-claims',
+    };
+    for (const [name, value] of Object.entries(lane)) {
+      if (typeof value !== 'function') continue;
+      if (name === 'ingestClaudeResult') continue; // the legitimate path, tested above
+      try {
+        (value as (...a: unknown[]) => unknown)(fixture.ops, args);
+      } catch {
+        // Refusing loudly is a correct outcome for a hostile call.
+      }
+    }
+    expect(correlations(fixture, taskId)).toHaveLength(before);
+  });
+
+  it('still correlates through the one legitimate path', () => {
+    // The guard must not have been implemented by removing the feature.
+    const fixture = ordersFixture();
+    const { taskId, body } = dispatched(fixture);
+    const result = ingestClaudeResult(fixture.ops, {
+      taskId,
+      target: TARGET,
+      transport: transport({ body, comments: [comment()] }),
+    });
+    if (!result.ok) throw new Error(`expected ok: ${result.error.code}`);
+    expect(result.data.correlated).toBe(true);
+    expect(correlations(fixture, taskId)).toHaveLength(1);
+  });
+});
+
+describe('the correlation block’s anti-drift fields are enforced', () => {
+  /** Rebuild a correlation block with one field altered. */
+  function bodyWith(original: string, overrides: Record<string, unknown>): string {
+    const parsed = parseDispatchCorrelation(original);
+    if (parsed == null) throw new Error('expected the dispatched body to carry a block');
+    const block = {
+      marker: DISPATCH_MARKER,
+      hqTaskId: parsed.hqTaskId,
+      capabilityId: parsed.capabilityId,
+      actionDigest: parsed.actionDigest,
+      executionProvider: parsed.executionProvider,
+      repository: parsed.repository,
+      ...overrides,
+    };
+    return [`<!-- ${DISPATCH_MARKER}: ${parsed.hqTaskId} -->`, '```json', JSON.stringify(block), '```'].join('\n');
+  }
+
+  function ingestWithBody(fixture: Fixture, taskId: string, issueBody: string) {
+    return ingestClaudeResult(fixture.ops, {
+      taskId,
+      target: TARGET,
+      transport: transport({ body: issueBody, comments: [comment()] }),
+    });
+  }
+
+  it('refuses a body whose capability was changed', () => {
+    // These three fields are why the block carries more than a task id. They
+    // were parsed and then ignored, so an edited body could keep the task id
+    // and repository while describing a different approved action.
+    const fixture = ordersFixture();
+    const { taskId, body } = dispatched(fixture);
+    const result = ingestWithBody(fixture, taskId, bodyWith(body, { capabilityId: 'infra.drop_index' }));
+    if (result.ok) throw new Error('expected a refusal');
+    expect(result.error.code).toBe('correlation_refused');
+    expect(result.error.message).toContain('capability');
+    expect(correlations(fixture, taskId)).toHaveLength(0);
+  });
+
+  it('refuses a body whose execution provider was changed', () => {
+    const fixture = ordersFixture();
+    const { taskId, body } = dispatched(fixture);
+    const result = ingestWithBody(fixture, taskId, bodyWith(body, { executionProvider: 'CODEX' }));
+    if (result.ok) throw new Error('expected a refusal');
+    expect(result.error.message).toContain('execution provider');
+    expect(correlations(fixture, taskId)).toHaveLength(0);
+  });
+
+  it('refuses a body whose approved action digest was changed', () => {
+    const fixture = ordersFixture();
+    const { taskId, body } = dispatched(fixture);
+    const result = ingestWithBody(fixture, taskId, bodyWith(body, { actionDigest: 'deadbeef'.repeat(8) }));
+    if (result.ok) throw new Error('expected a refusal');
+    expect(result.error.message).toContain('digest');
+    expect(correlations(fixture, taskId)).toHaveLength(0);
+  });
+
+  it('refuses a body that simply omits each anti-drift field', () => {
+    // "Not stated" must not read as "not violated" — that is how a contract
+    // becomes decorative. Deleting the field has to fail exactly like changing it.
+    const fixture = ordersFixture();
+    const { taskId, body } = dispatched(fixture);
+    for (const field of ['capabilityId', 'executionProvider', 'actionDigest']) {
+      const result = ingestWithBody(fixture, taskId, bodyWith(body, { [field]: undefined }));
+      if (result.ok) throw new Error(`expected a refusal for a body missing ${field}`);
+      expect(result.error.message).toContain('(absent)');
+    }
+    expect(correlations(fixture, taskId)).toHaveLength(0);
+  });
+
+  it('refuses a body naming a different task, and an unreadable one', () => {
+    const fixture = ordersFixture();
+    const { taskId } = dispatched(fixture);
+    const foreign = [
+      `<!-- ${DISPATCH_MARKER}: other -->`,
+      '```json',
+      JSON.stringify({ marker: DISPATCH_MARKER, hqTaskId: 'some-other-task' }),
+      '```',
+    ].join('\n');
+    expect(ingestWithBody(fixture, taskId, foreign).ok).toBe(false);
+    expect(ingestWithBody(fixture, taskId, 'a body somebody edited').ok).toBe(false);
+    expect(correlations(fixture, taskId)).toHaveLength(0);
+  });
+
+  it('accepts the body HQ actually published, unaltered', () => {
+    const fixture = ordersFixture();
+    const { taskId, body } = dispatched(fixture);
+    const result = ingestWithBody(fixture, taskId, body);
+    if (!result.ok) throw new Error(`expected ok: ${result.error.message}`);
+    expect(result.data.correlated).toBe(true);
   });
 });
 

@@ -38,12 +38,14 @@
  */
 
 import type { HeadquarterOperations } from '../../application/service.js';
+import { taskActionDigest } from '../../operator/approvals.js';
 import { PROVIDER_REGISTRY } from '../../routing/providers.js';
 import {
   CLAUDE_DISPATCH_EVIDENCE,
+  DISPATCH_ACTOR,
   DISPATCH_PROVIDER,
-  correlateClaudeResult,
   dispatchHistory,
+  parseDispatchCorrelation,
 } from './dispatch.js';
 import {
   isValidTarget,
@@ -204,6 +206,171 @@ function alreadyCorrelated(
     );
 }
 
+/* ------------------------------------------------------------------ */
+/* The correlation write — private, and reachable only from below      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Record that a report arrived, on the canonical task (issue #224, ChatGPT P1
+ * on `7542f16`).
+ *
+ * ## Why this is not exported
+ *
+ * It used to be `correlateClaudeResult`, exported from `dispatch.ts` and
+ * re-exported by the provider index — an evidence-WRITING function taking
+ * caller-supplied `reportedProvider`, `issueBody`, `reportUrl` and
+ * `attestedModel`. So the owner check added one round earlier lived in the
+ * CALLER, and any other caller could skip it: application code could append
+ * `claude_github_result_correlated` without a single owner-authored comment
+ * ever having been observed. The provenance failure had not been closed, only
+ * moved one layer inward, which is worse — it looks closed.
+ *
+ * The guard is now inseparable from the write: this function is module-private,
+ * and the only exported path that reaches it is `ingestClaudeResult`, which
+ * cannot get here without having READ the issue through a transport and found a
+ * result comment authored by the repository owner. There is no `reportedProvider`
+ * parameter to assert, because there is no caller left who could assert one —
+ * the provider is this lane's constant.
+ *
+ * `attestedModel` is gone with it. It was caller-supplied text nothing could
+ * verify, and ingestion has nothing truthful to put there; recording a field HQ
+ * cannot stand behind is worse than not recording it.
+ *
+ * The issue body is REQUIRED rather than optional, closing the other quiet
+ * bypass: an optional body meant a caller could simply omit it and skip every
+ * correlation-block check below.
+ */
+type CorrelationRefusal =
+  | 'unknown_dispatch'
+  | 'malformed_correlation'
+  | 'repository_mismatch'
+  | 'correlation_drift';
+
+function recordCorrelation(
+  ops: HeadquarterOperations,
+  input: {
+    taskId: string;
+    target: GitHubTarget;
+    issueNumber: number;
+    /** REQUIRED: the body carrying the anti-drift contract. */
+    issueBody: string;
+    reportUrl: string | null;
+  },
+): { ok: true } | { ok: false; code: CorrelationRefusal; message: string } {
+  const repository = targetSlug(input.target);
+
+  // The authority for "which task is this issue?" is what HQ itself wrote when
+  // it dispatched — never a task id supplied by a caller or read from a body.
+  const match = ops.queue.evidence
+    .list()
+    .find(
+      (entry) =>
+        entry.kind === CLAUDE_DISPATCH_EVIDENCE.succeeded &&
+        entry.payload['issueNumber'] === input.issueNumber &&
+        typeof entry.payload['repository'] === 'string' &&
+        sameRepository(entry.payload['repository'] as string, repository),
+    );
+  if (!match?.taskId || match.taskId !== input.taskId) {
+    return {
+      ok: false,
+      code: 'unknown_dispatch',
+      message:
+        `HQ has no record of dispatching issue #${input.issueNumber} in ${repository} for task ` +
+        `${input.taskId}. An unrecognised issue is never attached to a task by guesswork.`,
+    };
+  }
+
+  const task = ops.queue.get(input.taskId);
+  if (!task) {
+    return { ok: false, code: 'unknown_dispatch', message: `Task ${input.taskId} no longer exists.` };
+  }
+
+  const correlation = parseDispatchCorrelation(input.issueBody);
+  if (correlation == null) {
+    return {
+      ok: false,
+      code: 'malformed_correlation',
+      message:
+        'The issue body carries no readable HQ correlation block. The result is not attached: an ' +
+        'unreadable correlation is an unknown, and unknowns fail closed.',
+    };
+  }
+  if (correlation.hqTaskId !== task.id) {
+    return {
+      ok: false,
+      code: 'malformed_correlation',
+      message:
+        `The issue body names HQ task ${correlation.hqTaskId}, but HQ dispatched this issue for ` +
+        `task ${task.id}. Refusing to attach a result to a task the evidence disagrees about.`,
+    };
+  }
+  if (correlation.repository != null && !sameRepository(correlation.repository, repository)) {
+    return {
+      ok: false,
+      code: 'repository_mismatch',
+      message: `The issue body names repository ${correlation.repository}, not ${repository}.`,
+    };
+  }
+
+  // The ANTI-DRIFT contract, actually enforced (issue #224, ChatGPT P2 on
+  // `7542f16`). These three fields are why the block carries more than a task
+  // id, and they were parsed and then ignored — so an edited body could keep
+  // the task id and repository while changing the approved digest, the bound
+  // provider or the capability, and still correlate. A report is about ONE
+  // approved action; a body that describes a different one is describing
+  // different work, and attaching it would be the drift the block exists to
+  // catch.
+  //
+  // Compared against the CANONICAL task as it stands now, not against the body:
+  // if the action changed after dispatch, the current digest no longer matches
+  // what was published, and refusing is right — the report may be about the
+  // action that was approved, but HQ can no longer say the task still is.
+  //
+  // Absent fields fail closed. A block missing its anti-drift fields is not the
+  // contract, and treating "not stated" as "not violated" is how a contract
+  // becomes decorative.
+  const drift: string[] = [];
+  if (correlation.capabilityId !== task.capabilityId) {
+    drift.push(
+      `capability ${correlation.capabilityId ?? '(absent)'} ≠ ${task.capabilityId}`,
+    );
+  }
+  if (correlation.executionProvider !== DISPATCH_PROVIDER) {
+    drift.push(
+      `execution provider ${correlation.executionProvider ?? '(absent)'} ≠ ${DISPATCH_PROVIDER}`,
+    );
+  }
+  const digest = taskActionDigest(task);
+  if (correlation.actionDigest !== digest) {
+    drift.push(`approved action digest ${correlation.actionDigest ?? '(absent)'} ≠ ${digest}`);
+  }
+  if (drift.length > 0) {
+    return {
+      ok: false,
+      code: 'correlation_drift',
+      message:
+        `The issue body's correlation block no longer describes this task's approved action: ` +
+        `${drift.join('; ')}. The result is not attached.`,
+    };
+  }
+
+  ops.queue.evidence.append({
+    taskId: task.id,
+    actor: DISPATCH_ACTOR,
+    kind: CLAUDE_DISPATCH_EVIDENCE.correlated,
+    payload: {
+      provider: DISPATCH_PROVIDER,
+      repository,
+      issueNumber: input.issueNumber,
+      reportUrl: input.reportUrl,
+      note:
+        'Result correlated to the canonical task. This records that a report arrived from the ' +
+        'repository owner; it does not review, pass or complete the task.',
+    },
+  });
+  return { ok: true };
+}
+
 export interface IngestOptions {
   taskId: string;
   /** The repository the caller believes the task was dispatched to. Verified. */
@@ -312,24 +479,25 @@ export function ingestClaudeResult(ops: HeadquarterOperations, options: IngestOp
     };
   }
 
-  const correlation = correlateClaudeResult(ops, {
+  const correlation = recordCorrelation(ops, {
+    taskId,
     target: options.target,
     issueNumber,
-    reportedProvider: DISPATCH_PROVIDER,
     issueBody: read.issue.body,
-    reportUrl: reportUrl ?? undefined,
+    reportUrl,
   });
   if (!correlation.ok) {
     return refuse(
       'correlation_refused',
-      `A report was found on issue #${issueNumber} but was not attached: ${correlation.error.message}`,
+      `A report from the repository owner was found on issue #${issueNumber} but was not ` +
+        `attached: ${correlation.message}`,
     );
   }
 
   return {
     ok: true,
     data: {
-      taskId: correlation.data.taskId,
+      taskId,
       issueNumber,
       repository,
       correlated: true,

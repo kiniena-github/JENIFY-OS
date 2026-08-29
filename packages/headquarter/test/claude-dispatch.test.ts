@@ -25,7 +25,6 @@ import {
   CLAUDE_DISPATCH_EVIDENCE,
   DISPATCH_MARKER,
   claudeDispatchEligibility,
-  correlateClaudeResult,
   dispatchClaudeTask,
   dispatchHistory,
   parseDispatchCorrelation,
@@ -831,100 +830,18 @@ describe('the rendered issue is the contract ai-task-trigger.yml actually routes
   });
 });
 
-describe('a result correlates back to its canonical task, or is refused', () => {
-  function dispatched(): { fixture: Fixture; taskId: string; body: string } {
-    const fixture = orderFixture();
-    const taskId = placeOrder(fixture);
-    const transport = stubTransport({});
-    expectOk(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }));
-    return { fixture, taskId, body: transport.calls[0]!.body };
-  }
-
-  it('records the correlation on the canonical task without completing it', () => {
-    const { fixture, taskId, body } = dispatched();
-    const receipt = expectOk(
-      correlateClaudeResult(fixture.ops, {
-        target: TARGET,
-        issueNumber: 4242,
-        reportedProvider: 'CLAUDE',
-        issueBody: body,
-        attestedModel: 'attested-by-the-worker',
-        reportUrl: `https://github.com/${TARGET.owner}/${TARGET.repo}/issues/4242#issuecomment-1`,
-      }),
-    );
-    expect(receipt.taskId).toBe(taskId);
-
-    const correlated = fixture.ops.queue.evidence
-      .list(taskId)
-      .filter((entry) => entry.kind === CLAUDE_DISPATCH_EVIDENCE.correlated);
-    expect(correlated).toHaveLength(1);
-    expect(correlated[0]!.payload['attestedModel']).toBe('attested-by-the-worker');
-    // A report is not a review: the task is still exactly where the dispatch
-    // left it — `assigned` to the executor since the handoff claims it (issue
-    // #224), and emphatically not completed or review-passed by a report.
-    const task = fixture.ops.queue.get(taskId)!;
-    expect(task.status).toBe('assigned');
-    expect(task.reviewState).toBe('none');
-  });
-
-  it('refuses a result reported by another provider', () => {
-    const { fixture, body } = dispatched();
-    const result = correlateClaudeResult(fixture.ops, {
-      target: TARGET,
-      issueNumber: 4242,
-      reportedProvider: 'CODEX',
-      issueBody: body,
-    });
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error('unreachable');
-    expect(result.error.code).toBe('provider_mismatch');
-  });
-
-  it('refuses an issue HQ never dispatched', () => {
-    const { fixture, body } = dispatched();
-    const result = correlateClaudeResult(fixture.ops, {
-      target: TARGET,
-      issueNumber: 777,
-      reportedProvider: 'CLAUDE',
-      issueBody: body,
-    });
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error('unreachable');
-    expect(result.error.code).toBe('unknown_dispatch');
-  });
-
-  it('refuses a body whose correlation block names a different task', () => {
-    const { fixture } = dispatched();
-    const foreign = [
-      `<!-- ${DISPATCH_MARKER}: other -->`,
-      '```json',
-      JSON.stringify({ marker: DISPATCH_MARKER, hqTaskId: 'some-other-task' }),
-      '```',
-    ].join('\n');
-    const result = correlateClaudeResult(fixture.ops, {
-      target: TARGET,
-      issueNumber: 4242,
-      reportedProvider: 'CLAUDE',
-      issueBody: foreign,
-    });
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error('unreachable');
-    expect(result.error.code).toBe('malformed_correlation');
-  });
-
-  it('refuses an unreadable correlation block rather than attaching on the issue number alone', () => {
-    const { fixture } = dispatched();
-    const result = correlateClaudeResult(fixture.ops, {
-      target: TARGET,
-      issueNumber: 4242,
-      reportedProvider: 'CLAUDE',
-      issueBody: 'a comment somebody edited the body into',
-    });
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error('unreachable');
-    expect(result.error.code).toBe('malformed_correlation');
-  });
-});
+/*
+ * The result-correlation tests that lived here have moved to
+ * `claude-ingest.test.ts` (issue #224, ChatGPT P1 on `7542f16`).
+ *
+ * They called `correlateClaudeResult` directly — which was the defect: an
+ * exported, evidence-WRITING correlation API taking a caller-supplied provider
+ * and body meant the repository-owner check lived in the caller and any other
+ * caller could skip it. The write is now module-private to `ingest.ts` and
+ * reachable only through `ingestClaudeResult`, so the behaviours those tests
+ * covered are asserted through that path instead — which is the only path that
+ * exists.
+ */
 
 describe('no secret ever reaches the published issue or the evidence log', () => {
   it('refuses to publish an issue that looks like it carries a credential', () => {
