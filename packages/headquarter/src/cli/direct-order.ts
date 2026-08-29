@@ -78,6 +78,8 @@ import {
 import { PROVIDER_REGISTRY, type SecretsEnv } from '../routing/providers.js';
 import { probeCodex } from '../providers/codex/probe.js';
 import { formatOrderReceipt } from './order-receipt.js';
+import { transportRouteAvailability } from '../providers/claude/dispatch-availability.js';
+import { ghCliTransport } from '../providers/claude/transport.js';
 
 function flag(argv: string[], name: string): string | null {
   const index = argv.indexOf(`--${name}`);
@@ -227,8 +229,20 @@ function main(): void {
 
   const env = observeFacts();
 
+  // The transport-backed verdict, observed HERE (issue #224, Codex P1 on
+  // `66d34cc`). This command runs on the Founder workstation, which is the one
+  // machine that can actually see the `gh` session — so it is the caller with
+  // the least excuse for inferring dispatchability from `CLAUDE_ROUTINE_*`,
+  // which are GitHub Actions secrets and are deliberately absent here. Without
+  // it a CLAUDE or AUTO order reported `BLOCKED — NOT CONNECTED` on precisely
+  // the workstation where it was dispatchable.
+  //
+  // One instance for the whole run, because the object is the unit of caching
+  // and the dry-run path resolves three routes.
+  const availability = transportRouteAvailability(ghCliTransport());
+
   if (dryRun) {
-    const resolution = resolveOrderRoute(route, env);
+    const resolution = resolveOrderRoute(route, env, availability);
     console.log(`Route ${route}: ${resolution.connected ? `→ ${resolution.resolved}` : 'BLOCKED'}`);
     console.log(resolution.reason);
     for (const candidate of resolution.candidates) {
@@ -293,6 +307,9 @@ function main(): void {
       actorAuthentication: 'unauthenticated_local_assertion',
     },
     env,
+    // The same verdict the dry run reported, so `--dry-run` and the real
+    // submission can never disagree about whether the route is dispatchable.
+    availability,
   );
 
   if (!result.ok) {
