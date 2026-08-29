@@ -679,29 +679,40 @@ describe('the provider write mechanism is not reachable around the authority gat
    * participates in deciding whether a claim is allowed.
    */
   it('exposes only its allowlisted public surface, so nothing new becomes patchable', () => {
-    // Each entry was checked against `claim` and `start`: none of them is
-    // dispatched through on the path that decides whether a claim is allowed.
-    // That is the criterion for being allowed to stay public, not "it exists".
+    /**
+     * THE CRITERION, restated after it was wrong five times.
+     *
+     * It was "checked against `claim` and `start`" — applied by grepping those
+     * two method bodies for names, which never asked what the private helpers
+     * call. It let `get` and `capabilities` stay, and both were on the
+     * enforcement path.
+     *
+     * Then it was "an operation the service drives". It let `approve` stay, and
+     * `queue.approve(id, 'fake-founder')` forged the Founder gate. `reviewPass`,
+     * `reconcile` and `releaseKillSwitch` all passed that same test and all
+     * three terminate or unblock work under an unresolved name.
+     *
+     * The criterion is now: **what does it WRITE, and who CHECKED?** A method
+     * stays public only if it is a read, or if the queue itself resolves the
+     * authority for what it writes. Everything else is `#private` and handed to
+     * the constructor's caller through `PrivilegedQueueApi`.
+     */
     const PUBLIC_SURFACE = new Set([
       'constructor',
-      // lifecycle operations a worker or the service legitimately drives
+      // Worker execution operations. Each is fence-guarded against the claim
+      // the caller actually holds, so a caller can only drive its OWN task
+      // through its own lifecycle — it resolves no identity because it asserts
+      // one it already proved by claiming.
       'enqueue',
       'claim',
       'start',
       'heartbeat',
-      'reviewPass',
-      'reviewFail',
-      'fail',
       'complete',
-      'cancel',
-      'reconcile',
-      'approve',
-      'deny',
+      'fail',
+      // Lease maintenance: writes no decision, attributes nothing to an actor.
       'sweepExpiredLeases',
-      'engageKillSwitch',
-      'releaseKillSwitch',
-      // reads; enforcement never dispatches through these, and a caller who
-      // patches a read lies only to itself
+      // Reads. Enforcement never dispatches through these, so a caller who
+      // patches one lies only to itself.
       'get',
       'listByStatus',
       'killSwitchEngaged',
@@ -713,8 +724,25 @@ describe('the provider write mechanism is not reachable around the authority gat
     expect(
       unexpected,
       `New public method(s) on OperatorQueue: ${unexpected.join(', ')}. A public method is a ` +
-        'patchable one. If it participates in deciding whether a claim is allowed it must be ' +
-        '#private; if it is genuinely a read, add it to the allowlist deliberately.',
+        'patchable one. Ask what it WRITES and who CHECKED: if it writes something an ' +
+        'authority check is meant to gate and the queue resolves no authority for it, it ' +
+        'belongs on PrivilegedQueueApi, not here.',
+    ).toEqual([]);
+
+    /**
+     * And the other direction, which this test did NOT assert and should have.
+     *
+     * It was a subset check, so an entry that stopped existing simply sat
+     * there. `approve` and `deny` became `#private` in `821c836` and remained
+     * allowlisted afterwards — a stale permission for exactly the method that
+     * had forged Founder approvals, ready to re-authorise it if anyone ever put
+     * it back. An allowlist that cannot go stale has to be checked both ways.
+     */
+    const stale = [...PUBLIC_SURFACE].filter((name) => !actual.includes(name));
+    expect(
+      stale,
+      `Allowlist entries that no longer exist on OperatorQueue: ${stale.join(', ')}. Remove ` +
+        'them: a stale entry silently re-permits the name if it ever comes back.',
     ).toEqual([]);
   });
 
@@ -851,5 +879,189 @@ describe('the provider write mechanism is not reachable around the authority gat
       founderId: 'claude-worker',
     });
     expect(refused.ok).toBe(false);
+  });
+});
+
+/**
+ * Codex exact-head review of `821c836` — five P1s, all the same question asked
+ * in five more places, plus two more of the same shape the review did not name.
+ *
+ * The question, which took eighteen mechanisms to state properly: a worker is
+ * handed an `OperatorQueue`. What can it WRITE through that handle that an
+ * authority check was supposed to gate?
+ *
+ * Every test here is the attack, run against the real queue a worker actually
+ * receives. Each one passed — that is, the attack SUCCEEDED — on `821c836`.
+ */
+describe('HOSTILE: a worker holding the queue cannot reach any authority-bearing write', () => {
+  /** The object a worker is handed. Nothing here is a test double. */
+  function workerQueue(fx: Fixture) {
+    return fx.ops.queue;
+  }
+
+  it('cannot forge, suppress, or attribute an evidence entry', () => {
+    const fx = bindingFixture();
+    const queue = workerQueue(fx);
+
+    // 1. There is no writer to call. `queue.evidence` used to be the whole
+    //    EvidenceLog, so `append` was one property access away.
+    expect((queue.evidence as unknown as Record<string, unknown>).append).toBeUndefined();
+
+    // 2. And there is no writer to REPLACE. Every refusal this file promises to
+    //    evidence is appended through a #private writer, so assigning here
+    //    changes what the assigner sees and nothing about what is recorded.
+    const before = queue.evidence.list().length;
+    (queue.evidence as unknown as Record<string, unknown>).append = () => {
+      throw new Error('suppressed');
+    };
+    (queue.evidence as unknown as Record<string, unknown>).list = () => [];
+
+    const taskId = queuedClaudeOrder(fx);
+    expect(() => queue.claim('codex-worker', DIRECT_ORDER_CAPABILITY.id)).toThrow(
+      ProviderBindingViolation,
+    );
+
+    // Read the log through a channel the attacker did not patch: a fresh queue
+    // over the same database. (Calling the patched closure with a different
+    // `this` proves nothing — a closure ignores it.)
+    const truth = new OperatorQueue(fx.db).evidence.list();
+    expect(truth.length).toBeGreaterThan(before);
+    expect(truth.map((e) => e.kind)).toContain('provider_binding_rejected');
+  });
+
+  it('cannot release the kill switch, so a safety stop it did not set stays set', () => {
+    const fx = bindingFixture();
+    const queue = workerQueue(fx);
+    expectOk(fx.ops.engageKillSwitch('*', 'founder', 'Founder stopped the line'));
+    expect(queue.killSwitchEngaged()).toBe(true);
+
+    expect(
+      (queue as unknown as Record<string, unknown>).releaseKillSwitch,
+      'releaseKillSwitch performed no principal or approval-authority check at all: a worker ' +
+        'holding the queue could clear a Founder safety stop and resume claiming.',
+    ).toBeUndefined();
+    expect((queue as unknown as Record<string, unknown>).engageKillSwitch).toBeUndefined();
+
+    // The stop holds, and the service still requires approval authority to lift it.
+    expect(queue.killSwitchEngaged()).toBe(true);
+    const forged = fx.ops.releaseKillSwitch('*', 'codex-worker');
+    expect(forged.ok).toBe(false);
+    expect(queue.killSwitchEngaged()).toBe(true);
+  });
+
+  it('cannot pass its own work through independent review under an invented reviewer', () => {
+    const fx = bindingFixture();
+    const queue = workerQueue(fx);
+
+    expect(
+      (queue as unknown as Record<string, unknown>).reviewPass,
+      'reviewPass compared the supplied string against the requester/executor strings and ' +
+        'never resolved it, so an invented name walked a task to terminal completed.',
+    ).toBeUndefined();
+    expect((queue as unknown as Record<string, unknown>).reviewFail).toBeUndefined();
+
+    // The service path still resolves the reviewer, so the invented one is refused.
+    const taskId = queuedClaudeOrder(fx);
+    const refused = fx.ops.reviewTask(taskId, 'invented-reviewer', 'pass', 'looks fine');
+    expect(refused.ok).toBe(false);
+    expect(fx.ops.queue.get(taskId)!.status).not.toBe('completed');
+  });
+
+  it('cannot reconcile an uncertain outcome to completed — the route the review did not name', () => {
+    const fx = bindingFixture();
+    const queue = workerQueue(fx);
+    expect(
+      (queue as unknown as Record<string, unknown>).reconcile,
+      'reconcile terminates an outcome_unknown task as completed behind the same unresolved ' +
+        'string guard as review. It was found by re-reading the surface against the rule, not ' +
+        'by a review finding.',
+    ).toBeUndefined();
+  });
+
+  it('cannot claim a capability it was never granted, even calling the queue directly', () => {
+    const fx = bindingFixture();
+    const queue = workerQueue(fx);
+    // An active worker, correctly declared as CLAUDE, but granted only readStatus.
+    fx.store.upsertSpecialist({
+      id: 'ungranted-worker',
+      displayName: 'ungranted-worker',
+      vendor: 'test',
+      role: 'parallel_implementer',
+      allowedCapabilities: [CAPS.readStatus],
+      active: true,
+    });
+    expectOk(
+      fx.ops.declareWorkerProvider({
+        workerId: 'ungranted-worker',
+        providerId: 'CLAUDE',
+        founderId: 'founder',
+      }),
+    );
+    const taskId = queuedClaudeOrder(fx);
+
+    // Least privilege was checked in HeadquarterOperations.claimNext and NOT at
+    // the canonical boundary, so going straight to the queue skipped it.
+    expect(() => queue.claim('ungranted-worker', DIRECT_ORDER_CAPABILITY.id)).toThrow(
+      /least privilege/i,
+    );
+    const task = fx.ops.queue.get(taskId)!;
+    expect(task.status).toBe('queued');
+    expect(task.claimedBy).toBeNull();
+    expect(task.fence).toBe(0);
+  });
+
+  it('an unregistered worker holds no grant at all, so it claims nothing', () => {
+    const fx = bindingFixture();
+    const queue = workerQueue(fx);
+    queuedClaudeOrder(fx);
+    // assertAssignable tolerates a worker with no directory row; the grant
+    // check must not, or "deny by default" would mean "deny only the known".
+    expect(() => queue.claim('ghost-worker', DIRECT_ORDER_CAPABILITY.id)).toThrow(
+      /least privilege/i,
+    );
+  });
+});
+
+/**
+ * The service is the other half: making the queue method private is worth
+ * nothing if the delegate in front of it can have its authority check removed.
+ */
+describe('HOSTILE: the service authority check is not patchable either', () => {
+  it('cannot be replaced to approve a task with an invented Founder', () => {
+    const fx = bindingFixture();
+    const ops = fx.ops as unknown as Record<string, unknown>;
+
+    // TypeScript `private` erases to an ordinary writable prototype method —
+    // the same erasure that has now been the defect three separate times.
+    expect(
+      ops.assertApprovalAuthority,
+      'assertApprovalAuthority was TypeScript-private, so `ops.assertApprovalAuthority = () => ' +
+        'null` reached the privileged grant and recorded a valid approval under an invented ' +
+        'Founder id, with the queue method itself still hidden.',
+    ).toBeUndefined();
+
+    ops.assertApprovalAuthority = () => null;
+
+    const result = submitDirectOrder(
+      fx.ops,
+      {
+        instruction: 'Ship it without asking anyone.',
+        project: 'mesob',
+        route: 'CLAUDE',
+        requestedBy: 'founder',
+      },
+      CLAUDE_ONLY,
+    );
+    if (!result.ok) throw new Error('expected an order');
+    const taskId = result.data.task.id;
+    const card = founderConsole(fx.ops).approvals.find((a) => a.taskId === taskId)!;
+
+    const forged = fx.ops.approveTask({
+      taskId,
+      founderId: 'codex-worker',
+      expectedActionDigest: card.actionDigest,
+    });
+    expect(forged.ok).toBe(false);
+    expect(fx.ops.queue.get(taskId)!.status).toBe('needs_approval');
   });
 });

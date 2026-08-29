@@ -36,7 +36,7 @@ function queueWithApprovals(
 
 const claude = { workerId: 'claude', allowedCapabilities: ['repo.read_status', 'github.open_pr'] };
 
-function setup(): { db: HqDatabase; hq: HeadquarterStore; queue: OperatorQueue; memory: MemoryStore; handovers: HandoverStore } {
+function setup(): { db: HqDatabase; hq: HeadquarterStore; queue: OperatorQueue; queueApprovals: PrivilegedQueueApi; memory: MemoryStore; handovers: HandoverStore } {
   const db = openMemoryHqDatabase();
   const hq = new HeadquarterStore(db);
   const { queue: queue, privileged: queueApprovals } = queueWithApprovals(db, { preApprovedCapabilities: new Set(['github.open_pr']) });
@@ -58,7 +58,7 @@ function setup(): { db: HqDatabase; hq: HeadquarterStore; queue: OperatorQueue; 
   hq.upsertSpecialist({ id: 'jules', displayName: 'Jules', vendor: 'google', role: 'parallel_implementer', allowedCapabilities: ['repo.read_status'], active: true });
   const memory = new MemoryStore(db, (e) => hq.appendEvent(e));
   const handovers = new HandoverStore(db);
-  return { db, hq, queue, memory, handovers };
+  return { db, hq, queue, queueApprovals, memory, handovers };
 }
 
 describe('handover / replacement lifecycle', () => {
@@ -148,7 +148,7 @@ describe('handover / replacement lifecycle', () => {
     expect(queue.get(claimed.id)!.status).toBe('outcome_unknown');
 
     // Once genuinely reconciled through the operator queue, verify succeeds.
-    queue.reconcile(claimed.id, 'confirmed_done', 'reviewer', 'checked GitHub, PR exists');
+    ctx.queueApprovals.reconcile(claimed.id, 'confirmed_done', 'reviewer', 'checked GitHub, PR exists');
     expect(handovers.verify(h.id, 'founder').state).toBe('verified');
   });
 

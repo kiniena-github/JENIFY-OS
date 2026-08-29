@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { HeadquarterStore } from '../src/store/headquarter.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { openMemoryHqDatabase, type HqDatabase } from '../src/store/db.js';
 import { OperatorQueue } from '../src/operator/queue.js';
@@ -32,6 +33,26 @@ const claudeWorker = {
 
 function makeQueue(db: HqDatabase): { queue: OperatorQueue; approvals: PrivilegedQueueApi } {
   const { queue: q, privileged: qApprovals } = queueWithApprovals(db, { preApprovedCapabilities: new Set(['github.open_pr']) });
+  // `claim` enforces the least-privilege grant at the queue boundary, not only
+  // in the service, so a worker must hold a directory row that grants the
+  // capability. Deny-by-default: an unregistered worker has no grants at all.
+  const directory = new HeadquarterStore(db);
+  directory.upsertSpecialist({
+    id: 'claude',
+    displayName: 'Claude',
+    vendor: 'anthropic',
+    role: 'build_lead',
+    allowedCapabilities: [...claudeWorker.allowedCapabilities],
+    active: true,
+  });
+  directory.upsertSpecialist({
+    id: 'jules',
+    displayName: 'Jules',
+    vendor: 'google',
+    role: 'parallel_implementer',
+    allowedCapabilities: ['repo.read_status', 'github.open_pr', 'archive.index_document'],
+    active: true,
+  });
   new CapabilityRegistry(db).register({
     id: 'repo.read_status',
     description: 'Read repo/CI status',
@@ -135,12 +156,12 @@ describe('operator queue', () => {
 
   it('kill switch blocks new claims globally and per capability', () => {
     queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
-    queue.engageKillSwitch('*', 'founder', 'emergency stop');
+    queueApprovals.engageKillSwitch('*', 'founder', 'emergency stop');
     expect(queue.claim('claude', 'repo.read_status')).toBeNull();
-    queue.releaseKillSwitch('*');
-    queue.engageKillSwitch('repo.read_status', 'founder', 'capability paused');
+    queueApprovals.releaseKillSwitch('*');
+    queueApprovals.engageKillSwitch('repo.read_status', 'founder', 'capability paused');
     expect(queue.claim('claude', 'repo.read_status')).toBeNull();
-    queue.releaseKillSwitch('repo.read_status');
+    queueApprovals.releaseKillSwitch('repo.read_status');
     expect(queue.claim('claude', 'repo.read_status')).not.toBeNull();
   });
 
@@ -174,7 +195,7 @@ describe('operator queue', () => {
     const t = queue.claim('claude', 'github.open_pr', -1)!;
     queue.start(t.id, 'claude', t.fence);
     queue.sweepExpiredLeases();
-    const done = queue.reconcile(t.id, 'confirmed_done', 'codex', 'PR exists on GitHub');
+    const done = queueApprovals.reconcile(t.id, 'confirmed_done', 'codex', 'PR exists on GitHub');
     expect(done.status).toBe('completed');
   });
 
@@ -190,7 +211,7 @@ describe('operator queue', () => {
     const t = queue.claim('claude', 'archive.index_document', -1)!;
     queue.start(t.id, 'claude', t.fence);
     queue.sweepExpiredLeases();
-    expect(() => queue.reconcile(t.id, 'confirmed_not_executed', 'codex', 'not sure')).toThrow(
+    expect(() => queueApprovals.reconcile(t.id, 'confirmed_not_executed', 'codex', 'not sure')).toThrow(
       /not idempotent/,
     );
   });

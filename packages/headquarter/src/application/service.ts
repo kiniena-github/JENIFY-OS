@@ -541,7 +541,7 @@ export class HeadquarterOperations {
       } catch {
         // A misbehaving nomination source must never break routing; it simply
         // nominates nobody. Recorded, then ignored.
-        this.queue.evidence.append({
+        this.#requirePrivilegedQueue().appendEvidence({
           taskId: task.id,
           actor: 'system',
           kind: 'nomination_source_failed',
@@ -576,7 +576,7 @@ export class HeadquarterOperations {
       })
       .sort((a, b) => a.workerId.localeCompare(b.workerId));
 
-    this.queue.evidence.append({
+    this.#requirePrivilegedQueue().appendEvidence({
       taskId: task.id,
       actor: 'system',
       kind: 'routing_evaluated',
@@ -655,7 +655,7 @@ export class HeadquarterOperations {
       summary: `Assignment intent recorded for ${workerId}`,
       detail: { workerId, advisory: true, rationale: rationale ?? null },
     });
-    this.queue.evidence.append({
+    this.#requirePrivilegedQueue().appendEvidence({
       taskId,
       actor: assignedBy,
       kind: 'assignment_intent_recorded',
@@ -680,7 +680,7 @@ export class HeadquarterOperations {
   approveTask(input: ApproveTaskInput): OpsResult<OperatorTask> {
     const task = this.queue.get(input.taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${input.taskId}`);
-    const principal = this.assertApprovalAuthority(input.founderId, 'approve');
+    const principal = this.#assertApprovalAuthority(input.founderId, 'approve');
     if (principal) return principal;
     if (task.status !== 'needs_approval') {
       return fail(
@@ -700,7 +700,7 @@ export class HeadquarterOperations {
 
     const currentDigest = taskActionDigest(task);
     if (!input.expectedActionDigest || input.expectedActionDigest !== currentDigest) {
-      this.queue.evidence.append({
+      this.#requirePrivilegedQueue().appendEvidence({
         taskId: task.id,
         actor: input.founderId,
         kind: 'approval_refused_action_changed',
@@ -726,14 +726,14 @@ export class HeadquarterOperations {
   denyTask(input: DenyTaskInput): OpsResult<OperatorTask> {
     const task = this.queue.get(input.taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${input.taskId}`);
-    const principal = this.assertApprovalAuthority(input.founderId, 'deny');
+    const principal = this.#assertApprovalAuthority(input.founderId, 'deny');
     if (principal) return principal;
     if (!input.reason) return fail('invalid_input', 'A denial requires a reason');
     const currentDigest = taskActionDigest(task);
     if (input.expectedActionDigest && input.expectedActionDigest !== currentDigest) {
       // A denial is never an authorization, so a stale digest does not block
       // it — but the divergence is recorded.
-      this.queue.evidence.append({
+      this.#requirePrivilegedQueue().appendEvidence({
         taskId: task.id,
         actor: input.founderId,
         kind: 'denial_digest_divergence',
@@ -937,8 +937,8 @@ export class HeadquarterOperations {
     try {
       return ok(
         verdict === 'pass'
-          ? this.queue.reviewPass(taskId, reviewerId, note)
-          : this.queue.reviewFail(taskId, reviewerId, note),
+          ? this.#requirePrivilegedQueue().reviewPass(taskId, reviewerId, note)
+          : this.#requirePrivilegedQueue().reviewFail(taskId, reviewerId, note),
       );
     } catch (error) {
       return fail('operator_rejected', errorMessage(error), { taskId });
@@ -961,7 +961,7 @@ export class HeadquarterOperations {
     const reconciler = this.resolveActor(by, 'reconcile');
     if (!reconciler.ok) return reconciler;
     try {
-      return ok(this.queue.reconcile(taskId, decision, by, note));
+      return ok(this.#requirePrivilegedQueue().reconcile(taskId, decision, by, note));
     } catch (error) {
       return fail('operator_rejected', errorMessage(error), { taskId });
     }
@@ -970,16 +970,16 @@ export class HeadquarterOperations {
   // ---- kill switch (Founder only) ----
 
   engageKillSwitch(scope: string, founderId: string, reason: string): OpsResult<null> {
-    const principal = this.assertApprovalAuthority(founderId, 'engage the kill switch');
+    const principal = this.#assertApprovalAuthority(founderId, 'engage the kill switch');
     if (principal) return principal;
-    this.queue.engageKillSwitch(scope, founderId, reason);
+    this.#requirePrivilegedQueue().engageKillSwitch(scope, founderId, reason);
     return ok(null);
   }
 
   releaseKillSwitch(scope: string, founderId: string): OpsResult<null> {
-    const principal = this.assertApprovalAuthority(founderId, 'release the kill switch');
+    const principal = this.#assertApprovalAuthority(founderId, 'release the kill switch');
     if (principal) return principal;
-    this.queue.releaseKillSwitch(scope, founderId);
+    this.#requirePrivilegedQueue().releaseKillSwitch(scope, founderId);
     return ok(null);
   }
 
@@ -1023,7 +1023,7 @@ export class HeadquarterOperations {
     providerId: string;
     founderId: string;
   }): OpsResult<WorkerProviderRecord> {
-    const principal = this.assertApprovalAuthority(
+    const principal = this.#assertApprovalAuthority(
       input.founderId,
       'declare a worker execution provider',
     );
@@ -1034,7 +1034,7 @@ export class HeadquarterOperations {
         input.providerId,
         input.founderId,
       );
-      this.queue.evidence.append({
+      this.#requirePrivilegedQueue().appendEvidence({
         actor: input.founderId,
         kind: 'worker_provider_declared',
         payload: {
@@ -1062,14 +1062,14 @@ export class HeadquarterOperations {
    * no provider-bound task at all.
    */
   revokeWorkerProvider(input: { workerId: string; founderId: string }): OpsResult<boolean> {
-    const principal = this.assertApprovalAuthority(
+    const principal = this.#assertApprovalAuthority(
       input.founderId,
       'revoke a worker execution provider',
     );
     if (principal) return principal;
     const removed = this.#workerProviderRegistrar.revoke(input.workerId);
     if (removed) {
-      this.queue.evidence.append({
+      this.#requirePrivilegedQueue().appendEvidence({
         actor: input.founderId,
         kind: 'worker_provider_revoked',
         payload: { workerId: input.workerId },
@@ -1207,7 +1207,7 @@ export class HeadquarterOperations {
         input.proposedBy,
         at,
       );
-    this.queue.evidence.append({
+    this.#requirePrivilegedQueue().appendEvidence({
       actor: input.proposedBy,
       kind: 'mission_proposed',
       payload: {
@@ -1271,7 +1271,7 @@ export class HeadquarterOperations {
       )
       .run(created.data.task.id, input.promotedBy, nowIso(), proposal.id);
     this.upsertMeta(created.data.task.id, { sourceProposalId: proposal.id });
-    this.queue.evidence.append({
+    this.#requirePrivilegedQueue().appendEvidence({
       taskId: created.data.task.id,
       actor: input.promotedBy,
       kind: 'mission_promoted_to_task',
@@ -1310,7 +1310,7 @@ export class HeadquarterOperations {
          WHERE id = ? AND status = 'proposed'`,
       )
       .run(by, nowIso(), note, proposalId);
-    this.queue.evidence.append({
+    this.#requirePrivilegedQueue().appendEvidence({
       actor: by,
       kind: 'mission_proposal_rejected',
       payload: { proposalId, note },
@@ -1457,7 +1457,7 @@ export class HeadquarterOperations {
     }
     const human = resolvePrincipal(this.principals, actor);
     if (!human.ok) {
-      this.queue.evidence.append({
+      this.#requirePrivilegedQueue().appendEvidence({
         actor: 'system',
         kind: 'principal_rejected',
         payload: { actorId: actor, action, reason: human.reason },
@@ -1485,7 +1485,7 @@ export class HeadquarterOperations {
    * All of this sits on top of — never instead of — the queue's own
    * self-approval guards, which still stop a requester approving its own action.
    */
-  private assertApprovalAuthority(actor: string, action: string): OpsResult<never> | null {
+  #assertApprovalAuthority(actor: string, action: string): OpsResult<never> | null {
     if (!actor) return fail('invalid_input', `An actor is required to ${action}`);
     if (actor === 'system') {
       return fail('not_permitted', `'system' cannot ${action}: a human principal is required`);
@@ -1499,7 +1499,7 @@ export class HeadquarterOperations {
     }
     const approver = resolveApprover(this.principals, actor);
     if (!approver.ok) {
-      this.queue.evidence.append({
+      this.#requirePrivilegedQueue().appendEvidence({
         actor: 'system',
         kind: 'approval_authority_refused',
         payload: { actorId: actor, action, reason: approver.reason },
@@ -1521,7 +1521,7 @@ export class HeadquarterOperations {
   private rejectHumanExecution(actorId: string, action: string): OpsResult<never> | null {
     if (this.workers.isRegistered(actorId)) return null;
     if (!this.principals.get(actorId)) return null;
-    this.queue.evidence.append({
+    this.#requirePrivilegedQueue().appendEvidence({
       actor: 'system',
       kind: 'human_execution_refused',
       payload: { actorId, action },
@@ -1540,7 +1540,7 @@ export class HeadquarterOperations {
     details: Record<string, unknown> = {},
   ): OpsResult<never> {
     const reason = assignability.assignable ? 'unknown' : assignability.reason;
-    this.queue.evidence.append({
+    this.#requirePrivilegedQueue().appendEvidence({
       actor: 'system',
       kind: 'worker_not_assignable',
       payload: { workerId, action, reason },

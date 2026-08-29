@@ -23,12 +23,59 @@ import { assertTransition, type ActivityStatus } from '../contracts/events.js';
 import { CapabilityRegistry, type Capability } from './capabilities.js';
 
 /**
- * Approval mutations, handed only to the constructor's caller. Not exported on
- * any object a worker can reach.
+ * Every AUTHORITY-BEARING mutation on the queue, handed only to the
+ * constructor's caller. Not exported on any object a worker can reach.
+ *
+ * The membership rule, learned the hard way over eighteen mechanisms at this
+ * boundary: a method belongs here when it WRITES something an authority check
+ * is supposed to gate, and the queue itself performs no such check. It does
+ * NOT belong here merely because "the service drives it" — that was the
+ * reasoning that left `approve` public and let a worker forge the Founder gate.
+ *
+ * Each of these takes an actor NAME and does nothing to resolve it. The
+ * resolution lives in `HeadquarterOperations`, which constructs the queue and
+ * therefore receives this object; a worker handed the queue afterwards cannot
+ * reach any of it.
  */
 export interface PrivilegedQueueApi {
+  /** Founder approval. Unchecked here: only the service resolves the principal. */
   approve(taskId: string, by?: string, opts?: { ttlMs?: number; note?: string }): OperatorTask;
   deny(taskId: string, reason: string, by?: string): OperatorTask;
+  /**
+   * Kill-switch control. `release` clears a safety stop; the queue compares no
+   * identity at all, so a worker holding it could clear the stop and resume
+   * claiming (issue #200, Codex exact-head finding on `821c836`). `engage` is
+   * the fail-SAFE direction, but it still writes an attributed evidence entry
+   * under a name nobody verified, so it moves behind the same gate.
+   */
+  engageKillSwitch(scope?: string, by?: string, reason?: string): void;
+  releaseKillSwitch(scope?: string, by?: string): void;
+  /**
+   * Independent-review decisions. `reviewPass` walks a task through
+   * `review_passed` to terminal `completed`. The queue's guard compares the
+   * supplied string against the requester/executor strings and never resolves
+   * the reviewer, so an invented name satisfied it.
+   */
+  reviewPass(taskId: string, reviewerId: string, note?: string): OperatorTask;
+  reviewFail(taskId: string, reviewerId: string, reason: string): OperatorTask;
+  /**
+   * Reconciliation of an `outcome_unknown` task — can terminate it as
+   * `completed`. Same unresolved-string guard as review. Not named by the
+   * review that found the other six; found by re-reading the surface against
+   * the rule above rather than against the findings.
+   */
+  reconcile(taskId: string, decision: ReconcileDecision, by: string, note: string): OperatorTask;
+  /**
+   * The evidence WRITER. Appending is what makes the audit chain authoritative;
+   * a holder can forge entries under any actor whose hashes still pass
+   * `verifyChain`. Reads stay public on `queue.evidence`.
+   */
+  appendEvidence(entry: {
+    taskId?: string | null;
+    actor: string;
+    kind: string;
+    payload: Record<string, unknown>;
+  }): EvidenceEntry;
 }
 
 /** Reads only. The write side is a configuration act behind the service. */
@@ -36,8 +83,18 @@ export interface CapabilityReadOnly {
   get(id: string): Capability | null;
   list(): Capability[];
 }
+
+/**
+ * Reads only. Enforcement appends through a `#private` writer, so replacing
+ * anything reachable here changes what the patcher sees and nothing about what
+ * the queue records.
+ */
+export interface EvidenceReadOnly {
+  list(taskId?: string): EvidenceEntry[];
+  verifyChain(): number | null;
+}
 import { approvalRequired, evaluatePolicy, type PolicyContext } from './policy.js';
-import { EvidenceLog, assertNoSecretLikeContent } from './evidence.js';
+import { EvidenceLog, assertNoSecretLikeContent, type EvidenceEntry } from './evidence.js';
 // Worker-assignability guard. The handover module owns the freeze/replacement
 // state, so the queue consults IT rather than re-deriving "is this worker
 // frozen?" from its own copy of that logic — one source of truth, per the
@@ -168,7 +225,22 @@ export class OperatorQueue {
    * prototype to patch and no write method to find.
    */
   readonly capabilities: CapabilityReadOnly;
-  readonly evidence: EvidenceLog;
+  /**
+   * Evidence READS. The writer is `#evidence` and is handed out only through
+   * `PrivilegedQueueApi.appendEvidence`.
+   *
+   * This was a full `EvidenceLog` — a public collaborator carrying `append`,
+   * which every enforcement path in this file dispatched through. A worker
+   * holding the queue could replace `queue.evidence.append` to SUPPRESS the
+   * refusal entries this file promises to write, or call it directly to forge
+   * entries under any actor, with hashes that still pass `verifyChain` because
+   * the chain attests order and integrity, never authority (issue #200, Codex
+   * exact-head finding on `821c836` — the twelfth mechanism here, and the
+   * first aimed at the audit record itself rather than at a decision).
+   */
+  readonly evidence: EvidenceReadOnly;
+  /** The writer. Never reachable from anything a worker is handed. */
+  readonly #evidence: EvidenceLog;
   /**
    * Declared worker → provider map, LOOKUP ONLY (issue #200, Codex round-3
    * P1 #1). The object behind this handle has no write method at all: writing
@@ -215,6 +287,19 @@ export class OperatorQueue {
   readonly #getTask: (taskId: string) => OperatorTask | null;
   readonly #capabilityOf: (capabilityId: string) => Capability | null;
   readonly #providerOf: (workerId: string) => string | null;
+  /**
+   * Least-privilege grant for a worker, read from `hq_specialists` through a
+   * closure over `db` for the same reason every other enforcement lookup is:
+   * nothing on an object a worker holds participates in the answer.
+   *
+   * `HeadquarterOperations.claimNext` checked this and `OperatorQueue.claim`
+   * did not, so a worker calling the canonical boundary directly could claim an
+   * approved order for a capability it was never granted, as long as it named
+   * an active worker id with the right declared provider (issue #200, Codex
+   * exact-head finding on `821c836`). The queue is the boundary that must hold
+   * for callers who never touch the service, so the check belongs here too.
+   */
+  readonly #grantedCapabilities: (workerId: string) => string[];
   readonly #listProviders: () => WorkerProviderRecord[];
 
   /**
@@ -257,15 +342,30 @@ export class OperatorQueue {
     this.#db = db;
     this.#policyCtx = policyCtx;
     const registry = new CapabilityRegistry(db);
+    // Initialised BEFORE the grant is handed out: the callback receives closures
+    // that dereference `#evidence`, and a caller is free to use them the moment
+    // it is handed them. A `#private` field read before initialisation throws.
+    this.#evidence = new EvidenceLog(db);
     grantPrivileged?.({
       approve: (taskId, by, opts) => this.#approve(taskId, by, opts),
       deny: (taskId, reason, by) => this.#deny(taskId, reason, by),
+      engageKillSwitch: (scope, by, reason) => this.#engageKillSwitch(scope, by, reason),
+      releaseKillSwitch: (scope, by) => this.#releaseKillSwitch(scope, by),
+      reviewPass: (taskId, reviewerId, note) => this.#reviewPass(taskId, reviewerId, note),
+      reviewFail: (taskId, reviewerId, reason) => this.#reviewFail(taskId, reviewerId, reason),
+      reconcile: (taskId, decision, by, note) => this.#reconcile(taskId, decision, by, note),
+      appendEvidence: (entry) => this.#evidence.append(entry),
     });
     this.capabilities = {
       get: (id: string) => registry.get(id),
       list: () => registry.list(),
     };
-    this.evidence = new EvidenceLog(db);
+    // Own-property closures over the writer, so there is no prototype to patch
+    // and no `append` to find on anything the queue exposes.
+    this.evidence = {
+      list: (taskId?: string) => this.#evidence.list(taskId),
+      verifyChain: () => this.#evidence.verifyChain(),
+    };
     // Built here rather than delegated to the exported class, so no prototype
     // an attacker can reach participates in the enforcement path. The SQL is
     // the same as `WorkerProviderDirectory`'s; the read side of that class
@@ -292,6 +392,20 @@ export class OperatorQueue {
         .prepare(`SELECT provider_id FROM op_worker_providers WHERE worker_id = ?`)
         .get(workerId) as { provider_id: string } | undefined;
       return row?.provider_id ?? null;
+    };
+    this.#grantedCapabilities = (workerId: string): string[] => {
+      const row = db
+        .prepare(`SELECT allowed_capabilities FROM hq_specialists WHERE id = ?`)
+        .get(workerId) as { allowed_capabilities: string } | undefined;
+      if (!row) return [];
+      // Deny by default: an unparseable or non-array grant column grants
+      // nothing rather than throwing, so a malformed row cannot become a claim.
+      try {
+        const parsed: unknown = JSON.parse(row.allowed_capabilities);
+        return Array.isArray(parsed) ? parsed.filter((c): c is string => typeof c === 'string') : [];
+      } catch {
+        return [];
+      }
     };
     this.#listProviders = (): WorkerProviderRecord[] => {
       const rows = db
@@ -333,7 +447,7 @@ export class OperatorQueue {
   }
 
   #recordBindingRefusal(violation: ProviderBindingViolation, workerId: string): void {
-    this.evidence.append({
+    this.#evidence.append({
       taskId: violation.taskId,
       actor: workerId,
       kind: 'provider_binding_rejected',
@@ -404,7 +518,7 @@ export class OperatorQueue {
 
   // ---- kill switch ----
 
-  engageKillSwitch(scope: string = GLOBAL_SCOPE, by = 'founder', reason = ''): void {
+  #engageKillSwitch(scope: string = GLOBAL_SCOPE, by = 'founder', reason = ''): void {
     this.#db
       .prepare(
         `INSERT INTO op_kill_switch (scope, engaged, reason, engaged_by, engaged_at)
@@ -413,12 +527,12 @@ export class OperatorQueue {
            engaged_by = excluded.engaged_by, engaged_at = excluded.engaged_at`,
       )
       .run(scope, reason, by, nowIso());
-    this.evidence.append({ actor: by, kind: 'kill_switch_engaged', payload: { scope, reason } });
+    this.#evidence.append({ actor: by, kind: 'kill_switch_engaged', payload: { scope, reason } });
   }
 
-  releaseKillSwitch(scope: string = GLOBAL_SCOPE, by = 'founder'): void {
+  #releaseKillSwitch(scope: string = GLOBAL_SCOPE, by = 'founder'): void {
     this.#db.prepare(`UPDATE op_kill_switch SET engaged = 0 WHERE scope = ?`).run(scope);
-    this.evidence.append({ actor: by, kind: 'kill_switch_released', payload: { scope } });
+    this.#evidence.append({ actor: by, kind: 'kill_switch_released', payload: { scope } });
   }
 
   /**
@@ -470,7 +584,7 @@ export class OperatorQueue {
     const cap = this.#capabilityOf(req.capabilityId);
     const decision = evaluatePolicy(cap, req.requestedBy, this.#policyCtx);
     if (decision.outcome === 'deny') {
-      this.evidence.append({
+      this.#evidence.append({
         actor: req.requestedBy.workerId,
         kind: 'enqueue_denied',
         payload: { capabilityId: req.capabilityId, reason: decision.reason },
@@ -501,7 +615,7 @@ export class OperatorQueue {
       )
       .run(id, req.capabilityId, JSON.stringify(req.payload), req.idempotencyKey ?? null, status, req.requestedBy.workerId, at, at);
     this.#recordEvent(id, status, req.requestedBy.workerId, `Task enqueued for ${req.capabilityId}`);
-    this.evidence.append({
+    this.#evidence.append({
       taskId: id,
       actor: req.requestedBy.workerId,
       kind: 'enqueued',
@@ -558,7 +672,7 @@ export class OperatorQueue {
         expiresAt,
       );
     this.#db.prepare(`UPDATE op_tasks SET approval_id = ? WHERE id = ?`).run(approvalId, taskId);
-    this.evidence.append({
+    this.#evidence.append({
       taskId,
       actor: by,
       kind: 'founder_approved',
@@ -592,7 +706,7 @@ export class OperatorQueue {
         reason,
         taskActionDigest(before),
       );
-    this.evidence.append({ taskId, actor: by, kind: 'founder_denied', payload: { reason } });
+    this.#evidence.append({ taskId, actor: by, kind: 'founder_denied', payload: { reason } });
     return this.#getTask(taskId) ?? task;
   }
 
@@ -628,6 +742,14 @@ export class OperatorQueue {
     // crucially before the single-use approval nonce is consumed below, so a
     // rejected claim can never burn an approval or inflate a fencing token.
     assertAssignable(this.#db, workerId);
+    // Least privilege, at the canonical boundary rather than only at the
+    // service. Before selection, before any mutation, and before the
+    // single-use approval nonce can be consumed.
+    if (!this.#grantedCapabilities(workerId).includes(capabilityId)) {
+      throw new Error(
+        `Worker ${workerId} is not allowed capability ${capabilityId} (least privilege)`,
+      );
+    }
     if (this.#killSwitchEngagedInternal(capabilityId)) return null;
     // Provider binding participates in SELECTION, before any mutation and
     // before the single-use approval nonce can be consumed: the worker is
@@ -690,7 +812,7 @@ export class OperatorQueue {
         // Nonce raced/replayed: undo nothing destructive — surface loudly.
         throw new Error(`Approval nonce ${task.approvalId} was already consumed (replay rejected)`);
       }
-      this.evidence.append({
+      this.#evidence.append({
         taskId: candidate.id,
         actor: workerId,
         kind: 'approval_consumed',
@@ -704,7 +826,7 @@ export class OperatorQueue {
       });
     }
     this.#recordEvent(candidate.id, 'assigned', workerId, `Claimed by ${workerId}`);
-    this.evidence.append({
+    this.#evidence.append({
       taskId: candidate.id,
       actor: workerId,
       kind: 'claimed',
@@ -814,7 +936,7 @@ export class OperatorQueue {
         )
         .run(workerId, nowIso(), nowIso(), taskId);
       this.#recordEvent(taskId, 'running', workerId, 'Result submitted; awaiting independent review');
-      this.evidence.append({
+      this.#evidence.append({
         taskId,
         actor: workerId,
         kind: 'execution_result_submitted_for_review',
@@ -823,7 +945,7 @@ export class OperatorQueue {
       return this.#getTask(taskId)!;
     }
     this.#db.prepare(`UPDATE op_tasks SET result = ? WHERE id = ?`).run(JSON.stringify(result), taskId);
-    this.evidence.append({
+    this.#evidence.append({
       taskId,
       actor: workerId,
       kind: 'execution_result',
@@ -838,9 +960,9 @@ export class OperatorQueue {
    * The reviewer must be independent: not the executing worker, not the
    * submitter, not the task's requester, and not 'system'.
    */
-  reviewPass(taskId: string, reviewerId: string, note = ''): OperatorTask {
+  #reviewPass(taskId: string, reviewerId: string, note = ''): OperatorTask {
     this.#requirePendingReview(taskId, reviewerId);
-    this.evidence.append({
+    this.#evidence.append({
       taskId,
       actor: reviewerId,
       kind: 'review_passed',
@@ -852,9 +974,9 @@ export class OperatorQueue {
   }
 
   /** Independent reviewer rejects a submitted result; the task goes to review_failed for rework. */
-  reviewFail(taskId: string, reviewerId: string, reason: string): OperatorTask {
+  #reviewFail(taskId: string, reviewerId: string, reason: string): OperatorTask {
     this.#requirePendingReview(taskId, reviewerId);
-    this.evidence.append({
+    this.#evidence.append({
       taskId,
       actor: reviewerId,
       kind: 'review_failed',
@@ -866,7 +988,7 @@ export class OperatorQueue {
 
   fail(taskId: string, workerId: string, fence: number, reason: string): OperatorTask {
     this.#assertFence(taskId, workerId, fence);
-    this.evidence.append({ taskId, actor: workerId, kind: 'execution_failed', payload: { reason } });
+    this.#evidence.append({ taskId, actor: workerId, kind: 'execution_failed', payload: { reason } });
     return this.#transition(taskId, 'review_failed', workerId, `Execution failed: ${reason}`);
   }
 
@@ -911,7 +1033,7 @@ export class OperatorQueue {
    * non-idempotent ones it is refused and the task must be resolved as done
    * or failed after further investigation.
    */
-  reconcile(taskId: string, decision: ReconcileDecision, by: string, note: string): OperatorTask {
+  #reconcile(taskId: string, decision: ReconcileDecision, by: string, note: string): OperatorTask {
     const task = this.#getTask(taskId);
     if (!task) throw new Error(`Unknown task: ${taskId}`);
     if (task.status !== 'outcome_unknown') {
@@ -922,7 +1044,7 @@ export class OperatorQueue {
         `Actor ${by} cannot reconcile task ${taskId}: reconciliation requires an independent reviewer`,
       );
     }
-    this.evidence.append({ taskId, actor: by, kind: 'reconciliation', payload: { decision, note } });
+    this.#evidence.append({ taskId, actor: by, kind: 'reconciliation', payload: { decision, note } });
     if (decision === 'confirmed_done') {
       return this.#transition(taskId, 'completed', by, `Reconciled done: ${note}`);
     }
@@ -1017,7 +1139,7 @@ export class OperatorQueue {
    * is cleared either way; approvals themselves are immutable records.
    */
   #rejectAtExecutionBoundary(task: OperatorTask, rejection: ApprovalRejection): void {
-    this.evidence.append({
+    this.#evidence.append({
       taskId: task.id,
       actor: 'system',
       kind: 'approval_rejected_at_execution',

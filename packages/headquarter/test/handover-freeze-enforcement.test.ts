@@ -252,6 +252,19 @@ describe('canonical freeze enforcement at the assignment boundary', () => {
     handovers.initiate('claude', 'founder');
     expect(() => queue.claim('claude', 'github.merge_pr')).toThrow(/active handover/i);
 
+    // The successor must actually HOLD the capability it is taking over: the
+    // queue enforces the least-privilege grant at its own boundary now, not
+    // only in the service. "The nonce survived" can only be demonstrated by a
+    // claim that is legitimate in every other respect.
+    ctx.hq.upsertSpecialist({
+      id: 'jules',
+      displayName: 'Jules',
+      vendor: 'google',
+      role: 'parallel_implementer',
+      allowedCapabilities: ['repo.read_status', 'github.merge_pr'],
+      active: true,
+    });
+
     // The nonce survived: the successor can still legitimately claim AND
     // start it. If the rejected claim had consumed the approval, start()
     // would reject at the execution boundary.

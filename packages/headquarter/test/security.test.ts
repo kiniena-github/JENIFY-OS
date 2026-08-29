@@ -12,6 +12,7 @@
  * bypass the public API.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { HeadquarterStore } from '../src/store/headquarter.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { openMemoryHqDatabase, type HqDatabase } from '../src/store/db.js';
 import { OperatorQueue } from '../src/operator/queue.js';
@@ -46,6 +47,16 @@ const claudeWorker = {
 
 function makeQueue(db: HqDatabase): { queue: OperatorQueue; approvals: PrivilegedQueueApi } {
   const { queue: q, privileged: qApprovals } = queueWithApprovals(db);
+  // See queue.test.ts: the least-privilege grant is enforced at the queue
+  // boundary now, so the claiming worker needs a directory row.
+  new HeadquarterStore(db).upsertSpecialist({
+    id: 'claude',
+    displayName: 'Claude',
+    vendor: 'anthropic',
+    role: 'build_lead',
+    allowedCapabilities: [...claudeWorker.allowedCapabilities],
+    active: true,
+  });
   new CapabilityRegistry(db).register({
     id: 'repo.read_status',
     description: 'Read repo/CI status',
@@ -508,16 +519,16 @@ describe('correction B: executor can never self-complete a review-required actio
   it('HOSTILE: the executing worker cannot pass review on its own execution', () => {
     const { id, fence } = runningGatedTask();
     queue.complete(id, 'claude', fence, { done: true });
-    expect(() => queue.reviewPass(id, 'claude')).toThrow(/builder != final reviewer/);
-    expect(() => queue.reviewFail(id, 'claude', 'x')).toThrow(/builder != final reviewer/);
-    expect(() => queue.reviewPass(id, 'system')).toThrow(/builder != final reviewer/);
+    expect(() => queueApprovals.reviewPass(id, 'claude')).toThrow(/builder != final reviewer/);
+    expect(() => queueApprovals.reviewFail(id, 'claude', 'x')).toThrow(/builder != final reviewer/);
+    expect(() => queueApprovals.reviewPass(id, 'system')).toThrow(/builder != final reviewer/);
     expect(queue.get(id)!.status).toBe('running');
   });
 
   it('only an independent reviewer decision reaches terminal completed', () => {
     const { id, fence } = runningGatedTask();
     queue.complete(id, 'claude', fence, { done: true });
-    const done = queue.reviewPass(id, 'codex', 'verified against the real side effect');
+    const done = queueApprovals.reviewPass(id, 'codex', 'verified against the real side effect');
     expect(done.status).toBe('completed');
     expect(done.reviewState).toBe('passed');
     // The full audited path is on record: review_passed then completed.
@@ -532,14 +543,14 @@ describe('correction B: executor can never self-complete a review-required actio
   it('an independent reviewer can fail the result; the task goes to review_failed for rework', () => {
     const { id, fence } = runningGatedTask();
     queue.complete(id, 'claude', fence, { done: true });
-    const failed = queue.reviewFail(id, 'codex', 'side effect not observed');
+    const failed = queueApprovals.reviewFail(id, 'codex', 'side effect not observed');
     expect(failed.status).toBe('review_failed');
     expect(failed.reviewState).toBe('failed');
   });
 
   it('review decisions require a result actually awaiting review', () => {
     const { id } = runningGatedTask();
-    expect(() => queue.reviewPass(id, 'codex')).toThrow(/no result awaiting review/);
+    expect(() => queueApprovals.reviewPass(id, 'codex')).toThrow(/no result awaiting review/);
   });
 
   it('a review-pending task is never swept into outcome_unknown', () => {
@@ -560,10 +571,10 @@ describe('correction B: executor can never self-complete a review-required actio
     queue.start(id, 'claude', t.fence);
     queue.sweepExpiredLeases();
     expect(queue.get(id)!.status).toBe('outcome_unknown');
-    expect(() => queue.reconcile(id, 'confirmed_done', 'claude', 'trust me')).toThrow(
+    expect(() => queueApprovals.reconcile(id, 'confirmed_done', 'claude', 'trust me')).toThrow(
       /independent reviewer/,
     );
-    const done = queue.reconcile(id, 'confirmed_done', 'codex', 'verified externally');
+    const done = queueApprovals.reconcile(id, 'confirmed_done', 'codex', 'verified externally');
     expect(done.status).toBe('completed');
   });
 
