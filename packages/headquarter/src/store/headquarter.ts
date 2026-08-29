@@ -23,7 +23,16 @@ import type {
 import type { WorkerDescriptor } from '../contracts/workers.js';
 
 export class HeadquarterStore {
-  constructor(private db: HqDatabase) {}
+  /**
+   * ECMAScript `#private`: TypeScript `private` erases, and `ops.store` is a
+   * public property, so `ops.store.db` was a writable database handle for any
+   * JavaScript caller (issue #200, Codex exact-head finding on `135ae58`).
+   */
+  readonly #db: HqDatabase;
+
+  constructor(db: HqDatabase) {
+    this.#db = db;
+  }
 
   // ---- canonical event log ----
 
@@ -33,7 +42,7 @@ export class HeadquarterStore {
     }
     const id = uuid();
     const at = nowIso();
-    const res = this.db
+    const res = this.#db
       .prepare(
         `INSERT INTO hq_events (id, at, subject_kind, subject_id, status, actor, summary, detail, refs)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -53,7 +62,7 @@ export class HeadquarterStore {
   }
 
   eventsFor(subjectKind: string, subjectId: string): ActivityEvent[] {
-    const rows = this.db
+    const rows = this.#db
       .prepare(`SELECT * FROM hq_events WHERE subject_kind = ? AND subject_id = ? ORDER BY seq`)
       .all(subjectKind, subjectId) as Record<string, unknown>[];
     return rows.map(rowToEvent);
@@ -61,7 +70,7 @@ export class HeadquarterStore {
 
   /** Latest event per subject — the basis of every status dashboard. */
   latestStatusPerSubject(): ActivityEvent[] {
-    const rows = this.db
+    const rows = this.#db
       .prepare(
         `SELECT e.* FROM hq_events e
          JOIN (SELECT subject_kind, subject_id, MAX(seq) AS seq FROM hq_events
@@ -128,7 +137,7 @@ export class HeadquarterStore {
 
   upsertProject(p: Omit<ProjectRecord, 'createdAt' | 'updatedAt'>): ProjectRecord {
     const at = nowIso();
-    this.db
+    this.#db
       .prepare(
         `INSERT INTO hq_projects (id, name, stream, summary, status, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -140,7 +149,7 @@ export class HeadquarterStore {
   }
 
   getProject(id: string): ProjectRecord | null {
-    const r = this.db.prepare(`SELECT * FROM hq_projects WHERE id = ?`).get(id) as
+    const r = this.#db.prepare(`SELECT * FROM hq_projects WHERE id = ?`).get(id) as
       | Record<string, unknown>
       | undefined;
     if (!r) return null;
@@ -156,7 +165,7 @@ export class HeadquarterStore {
   }
 
   listProjects(): ProjectRecord[] {
-    const rows = this.db.prepare(`SELECT id FROM hq_projects ORDER BY name`).all() as { id: string }[];
+    const rows = this.#db.prepare(`SELECT id FROM hq_projects ORDER BY name`).all() as { id: string }[];
     return rows.map((r) => this.getProject(r.id)!);
   }
 
@@ -170,7 +179,7 @@ export class HeadquarterStore {
     requestedBy: string;
   }): ApprovalRequest {
     const id = uuid();
-    this.db
+    this.#db
       .prepare(
         `INSERT INTO hq_approvals (id, task_id, project_id, ask, risk_class, requested_by, requested_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -192,7 +201,7 @@ export class HeadquarterStore {
     if (decidedBy === existing.requestedBy || decidedBy === 'system') {
       throw new Error(`Actor ${decidedBy} cannot decide an approval it requested itself`);
     }
-    this.db
+    this.#db
       .prepare(
         `UPDATE hq_approvals SET decision = ?, decided_at = ?, decided_by = ?, decision_note = ? WHERE id = ?`,
       )
@@ -201,7 +210,7 @@ export class HeadquarterStore {
   }
 
   getApproval(id: string): ApprovalRequest | null {
-    const r = this.db.prepare(`SELECT * FROM hq_approvals WHERE id = ?`).get(id) as
+    const r = this.#db.prepare(`SELECT * FROM hq_approvals WHERE id = ?`).get(id) as
       | Record<string, unknown>
       | undefined;
     if (!r) return null;
@@ -228,7 +237,7 @@ export class HeadquarterStore {
   }
 
   pendingApprovals(): ApprovalRequest[] {
-    const rows = this.db
+    const rows = this.#db
       .prepare(`SELECT id FROM hq_approvals WHERE decision = 'pending' ORDER BY requested_at`)
       .all() as { id: string }[];
     return rows.map((r) => this.getApproval(r.id)!);
@@ -239,7 +248,7 @@ export class HeadquarterStore {
   postMessage(msg: { threadId: string; author: string; body: string; refs?: string[] }): ChatMessage {
     const id = uuid();
     const at = nowIso();
-    this.db
+    this.#db
       .prepare(
         `INSERT INTO hq_chat_messages (id, thread_id, author, at, body, refs) VALUES (?, ?, ?, ?, ?, ?)`,
       )
@@ -248,7 +257,7 @@ export class HeadquarterStore {
   }
 
   thread(threadId: string): ChatMessage[] {
-    const rows = this.db
+    const rows = this.#db
       .prepare(`SELECT * FROM hq_chat_messages WHERE thread_id = ? ORDER BY at, id`)
       .all(threadId) as Record<string, unknown>[];
     return rows.map((r) => ({
@@ -264,7 +273,7 @@ export class HeadquarterStore {
   // ---- Specialist Directory ----
 
   upsertSpecialist(w: WorkerDescriptor): void {
-    this.db
+    this.#db
       .prepare(
         `INSERT INTO hq_specialists (id, display_name, vendor, role, allowed_capabilities, active)
          VALUES (?, ?, ?, ?, ?, ?)
@@ -275,7 +284,7 @@ export class HeadquarterStore {
   }
 
   getSpecialist(id: string): WorkerDescriptor | null {
-    const r = this.db.prepare(`SELECT * FROM hq_specialists WHERE id = ?`).get(id) as
+    const r = this.#db.prepare(`SELECT * FROM hq_specialists WHERE id = ?`).get(id) as
       | Record<string, unknown>
       | undefined;
     if (!r) return null;
@@ -290,7 +299,7 @@ export class HeadquarterStore {
   }
 
   listSpecialists(): WorkerDescriptor[] {
-    const rows = this.db.prepare(`SELECT id FROM hq_specialists ORDER BY id`).all() as { id: string }[];
+    const rows = this.#db.prepare(`SELECT id FROM hq_specialists ORDER BY id`).all() as { id: string }[];
     return rows.map((r) => this.getSpecialist(r.id)!);
   }
 
@@ -299,7 +308,7 @@ export class HeadquarterStore {
   addArchiveRef(ref: { title: string; locator: string; projectId?: string | null }): ArchiveRef {
     const id = uuid();
     const at = nowIso();
-    this.db
+    this.#db
       .prepare(`INSERT INTO hq_archive_refs (id, title, locator, project_id, added_at) VALUES (?, ?, ?, ?, ?)`)
       .run(id, ref.title, ref.locator, ref.projectId ?? null, at);
     return { id, title: ref.title, locator: ref.locator, projectId: ref.projectId ?? null, addedAt: at };
@@ -308,8 +317,8 @@ export class HeadquarterStore {
   listArchiveRefs(projectId?: string): ArchiveRef[] {
     const rows = (
       projectId
-        ? this.db.prepare(`SELECT * FROM hq_archive_refs WHERE project_id = ? ORDER BY added_at`).all(projectId)
-        : this.db.prepare(`SELECT * FROM hq_archive_refs ORDER BY added_at`).all()
+        ? this.#db.prepare(`SELECT * FROM hq_archive_refs WHERE project_id = ? ORDER BY added_at`).all(projectId)
+        : this.#db.prepare(`SELECT * FROM hq_archive_refs ORDER BY added_at`).all()
     ) as Record<string, unknown>[];
     return rows.map((r) => ({
       id: r.id as string,

@@ -82,12 +82,22 @@ export function ensurePrincipalSchema(db: HqDatabase): void {
  * explicitly registers someone.
  */
 export class HumanPrincipalRegistry implements HumanPrincipalPort {
-  constructor(private db: HqDatabase) {
+  /**
+   * ECMAScript `#private`. TypeScript `private` erases to a public property, so
+   * this database was reachable from the exported operations object and could
+   * be written directly — bypassing every authority gate above it (issue #200,
+   * Codex exact-head finding on `135ae58`, plus three further routes the
+   * object-graph test found that the review did not name).
+   */
+  readonly #db: HqDatabase;
+
+  constructor(db: HqDatabase) {
+    this.#db = db;
     ensurePrincipalSchema(db);
   }
 
   register(principal: HumanPrincipal): void {
-    this.db
+    this.#db
       .prepare(
         `INSERT INTO hq_human_principals (id, display_name, originate_capabilities, approval_authority, active)
          VALUES (?, ?, ?, ?, ?)
@@ -107,7 +117,7 @@ export class HumanPrincipalRegistry implements HumanPrincipalPort {
   }
 
   get(id: string): HumanPrincipal | null {
-    const row = this.db.prepare(`SELECT * FROM hq_human_principals WHERE id = ?`).get(id) as
+    const row = this.#db.prepare(`SELECT * FROM hq_human_principals WHERE id = ?`).get(id) as
       | Record<string, unknown>
       | undefined;
     if (!row) return null;
@@ -121,14 +131,14 @@ export class HumanPrincipalRegistry implements HumanPrincipalPort {
   }
 
   setActive(id: string, active: boolean): void {
-    const res = this.db
+    const res = this.#db
       .prepare(`UPDATE hq_human_principals SET active = ? WHERE id = ?`)
       .run(active ? 1 : 0, id);
     if (res.changes === 0) throw new Error(`Unknown human principal: ${id}`);
   }
 
   list(): HumanPrincipal[] {
-    const rows = this.db.prepare(`SELECT id FROM hq_human_principals ORDER BY id`).all() as {
+    const rows = this.#db.prepare(`SELECT id FROM hq_human_principals ORDER BY id`).all() as {
       id: string;
     }[];
     return rows.map((r) => this.get(r.id)!);

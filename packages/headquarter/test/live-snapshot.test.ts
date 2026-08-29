@@ -332,6 +332,24 @@ describe('a static build cannot claim live operational provenance', () => {
     'utf8',
   );
 
+  it('forces every SYNTHETIC section non-live, not just the console one', () => {
+    // The rule is about provenance, not about one section: data that came out
+    // of the bundle may carry the bundle's mode; data fabricated here may not.
+    // The capability section is `data: []` and was missed the first time.
+    const capabilityBlock = buildSiteScript.slice(
+      buildSiteScript.indexOf('  capabilities: {'),
+      buildSiteScript.indexOf('  activity: {'),
+    );
+    expect(capabilityBlock).toContain('staticSectionMode(data.sourceMode)');
+    expect(capabilityBlock).not.toContain("mode: data.sourceMode ?? 'sample'");
+    // And the sections that ARE the bundle's data keep the bundle's claim.
+    const workforceBlock = buildSiteScript.slice(
+      buildSiteScript.indexOf('  workforce: {'),
+      buildSiteScript.indexOf('  capabilities: {'),
+    );
+    expect(workforceBlock).toContain("mode: data.sourceMode ?? 'sample'");
+  });
+
   it('never passes a bundle-declared live mode through to the console section', () => {
     // Scoped to the CONSOLE block, which is the section that is empty by
     // construction. The other sections genuinely are the bundle's own data, so
@@ -342,21 +360,21 @@ describe('a static build cannot claim live operational provenance', () => {
       buildSiteScript.indexOf('  console: {'),
       buildSiteScript.indexOf('  connections: {'),
     );
-    expect(consoleBlock).toContain('staticConsoleMode(data.sourceMode)');
+    expect(consoleBlock).toContain('staticSectionMode(data.sourceMode)');
     expect(consoleBlock).not.toContain("mode: data.sourceMode ?? 'sample'");
     expect(consoleBlock).toContain('emptyFounderConsole');
   });
 
   it('downgrades live to sample and preserves reconstructed', () => {
     // Executed rather than grepped: the shipped mapping is the tested one.
-    const body = buildSiteScript.slice(buildSiteScript.indexOf('function staticConsoleMode'));
+    const body = buildSiteScript.slice(buildSiteScript.indexOf('function staticSectionMode'));
     const source = body.slice(0, body.indexOf('\n}') + 2);
-    const staticConsoleMode = new Function(
-      `${source.replace(/: SourceMode \| undefined/, '').replace(/: SourceMode/, '')}; return staticConsoleMode;`,
+    const staticSectionMode = new Function(
+      `${source.replace(/: SourceMode \| undefined/, '').replace(/: SourceMode/, '')}; return staticSectionMode;`,
     )() as (m: string | undefined) => string;
-    expect(staticConsoleMode('live')).toBe('sample');
-    expect(staticConsoleMode(undefined)).toBe('sample');
-    expect(staticConsoleMode('sample')).toBe('sample');
-    expect(staticConsoleMode('reconstructed')).toBe('reconstructed');
+    expect(staticSectionMode('live')).toBe('sample');
+    expect(staticSectionMode(undefined)).toBe('sample');
+    expect(staticSectionMode('sample')).toBe('sample');
+    expect(staticSectionMode('reconstructed')).toBe('reconstructed');
   });
 });

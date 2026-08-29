@@ -258,6 +258,19 @@ export interface ReplacementPlan {
  * nothing and the queue needs it.
  */
 class WorkerProviderRegistrar extends WorkerProviderDirectory {
+  /**
+   * Its own `#private` handle rather than an inherited `protected` one. The
+   * base class's database is `#private` now too, and `protected` would have
+   * erased to a public property on this subclass — reintroducing, one level
+   * down, exactly the route this class exists behind a gate to prevent.
+   */
+  readonly #db: HqDatabase;
+
+  constructor(db: HqDatabase) {
+    super(db);
+    this.#db = db;
+  }
+
   /** Declare (or re-declare) which provider a worker executes as. */
   declare(workerId: string, providerId: string, declaredBy: string): WorkerProviderRecord {
     if (!workerId?.trim() || !providerId?.trim() || !declaredBy?.trim()) {
@@ -275,7 +288,7 @@ class WorkerProviderRegistrar extends WorkerProviderDirectory {
       );
     }
     const declaredAt = nowIso();
-    this.db
+    this.#db
       .prepare(
         `INSERT INTO op_worker_providers (worker_id, provider_id, declared_by, declared_at)
          VALUES (?, ?, ?, ?)
@@ -290,7 +303,7 @@ class WorkerProviderRegistrar extends WorkerProviderDirectory {
 
   /** Remove a declaration. The worker can then claim no provider-bound task. */
   revoke(workerId: string): boolean {
-    const result = this.db.prepare(`DELETE FROM op_worker_providers WHERE worker_id = ?`).run(workerId);
+    const result = this.#db.prepare(`DELETE FROM op_worker_providers WHERE worker_id = ?`).run(workerId);
     return result.changes > 0;
   }
 }
@@ -354,10 +367,21 @@ export class HeadquarterOperations {
    */
   readonly #workerProviderRegistrar: WorkerProviderRegistrar;
 
-  constructor(
-    private db: HqDatabase,
-    options: HeadquarterOperationsOptions = {},
-  ) {
+  /**
+   * ECMAScript `#private`. TypeScript `private` erases to a public property, so
+   * `ops.db` handed a writable database to any JavaScript caller holding the
+   * exported operations object — and from there `op_worker_providers` can be
+   * upserted directly, satisfying the provider binding check while bypassing
+   * `declareWorkerProvider`, its principal/approval-authority gate and its
+   * evidence record entirely (issue #200, Codex exact-head finding on
+   * `135ae58`). This was the FOURTH distinct route to that boundary, and the
+   * first one below the mechanism rather than beside it: making the registrar
+   * `#private` closed the named property and left its substrate public.
+   */
+  readonly #db: HqDatabase;
+
+  constructor(db: HqDatabase, options: HeadquarterOperationsOptions = {}) {
+    this.#db = db;
     ensureApplicationSchema(db);
     this.store = options.store ?? new HeadquarterStore(db);
     this.queue = options.queue ?? new OperatorQueue(db, options.policyCtx ?? {});
@@ -385,7 +409,7 @@ export class HeadquarterOperations {
     engagedBy: string | null;
     engagedAt: string | null;
   }[] {
-    return this.db
+    return this.#db
       .prepare(
         `SELECT scope, reason, engaged_by AS engagedBy, engaged_at AS engagedAt
          FROM op_kill_switch WHERE engaged = 1 ORDER BY scope`,
@@ -1015,7 +1039,7 @@ export class HeadquarterOperations {
    * task needs reconciliation, before it can be safely replaced.
    */
   replacementPlan(workerId: string): OpsResult<ReplacementPlan> {
-    const rows = this.db
+    const rows = this.#db
       .prepare(
         `SELECT id, status, capability_id FROM op_tasks
          WHERE claimed_by = ? AND status IN ('assigned', 'running', 'outcome_unknown')
@@ -1111,7 +1135,7 @@ export class HeadquarterOperations {
       payload: input.payload,
       idempotencyKey,
     });
-    this.db
+    this.#db
       .prepare(
         `INSERT INTO hq_mission_proposals
            (id, thread_id, source_message_id, capability_id, payload, idempotency_key, digest,
@@ -1185,7 +1209,7 @@ export class HeadquarterOperations {
     });
     if (!created.ok) return created;
 
-    this.db
+    this.#db
       .prepare(
         `UPDATE hq_mission_proposals
          SET status = 'promoted', task_id = ?, decided_by = ?, decided_at = ?
@@ -1226,7 +1250,7 @@ export class HeadquarterOperations {
     if (!note) return fail('invalid_input', 'Rejecting a proposal requires a note');
     const actor = this.resolveActor(by, 'reject a mission proposal');
     if (!actor.ok) return actor;
-    this.db
+    this.#db
       .prepare(
         `UPDATE hq_mission_proposals SET status = 'rejected', decided_by = ?, decided_at = ?, decision_note = ?
          WHERE id = ? AND status = 'proposed'`,
@@ -1241,7 +1265,7 @@ export class HeadquarterOperations {
   }
 
   getProposal(id: string): MissionProposal | null {
-    const row = this.db.prepare(`SELECT * FROM hq_mission_proposals WHERE id = ?`).get(id) as
+    const row = this.#db.prepare(`SELECT * FROM hq_mission_proposals WHERE id = ?`).get(id) as
       | Record<string, unknown>
       | undefined;
     if (!row) return null;
@@ -1266,10 +1290,10 @@ export class HeadquarterOperations {
   listProposals(status?: MissionProposalStatus): MissionProposal[] {
     const rows = (
       status
-        ? this.db
+        ? this.#db
             .prepare(`SELECT id FROM hq_mission_proposals WHERE status = ? ORDER BY proposed_at`)
             .all(status)
-        : this.db.prepare(`SELECT id FROM hq_mission_proposals ORDER BY proposed_at`).all()
+        : this.#db.prepare(`SELECT id FROM hq_mission_proposals ORDER BY proposed_at`).all()
     ) as { id: string }[];
     return rows.map((r) => this.getProposal(r.id)!);
   }
@@ -1277,7 +1301,7 @@ export class HeadquarterOperations {
   // ---- task metadata (console labels + advisory assignment) ----
 
   readMeta(taskId: string): TaskMeta | null {
-    const row = this.db.prepare(`SELECT * FROM hq_op_task_meta WHERE task_id = ?`).get(taskId) as
+    const row = this.#db.prepare(`SELECT * FROM hq_op_task_meta WHERE task_id = ?`).get(taskId) as
       | Record<string, unknown>
       | undefined;
     if (!row) return null;
@@ -1322,7 +1346,7 @@ export class HeadquarterOperations {
       assignmentRationale:
         patch.assignmentRationale ?? existing?.assignment?.rationale ?? null,
     };
-    this.db
+    this.#db
       .prepare(
         `INSERT INTO hq_op_task_meta
            (task_id, project, title, source_proposal_id, assigned_worker_id, assigned_by, assigned_at, assignment_rationale)

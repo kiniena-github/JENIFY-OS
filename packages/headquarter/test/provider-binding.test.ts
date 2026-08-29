@@ -502,6 +502,55 @@ describe('the provider write mechanism is not reachable around the authority gat
     }
   });
 
+  /**
+   * Codex exact-head finding on `135ae58` (P1) — the FOURTH route, and the
+   * first one BELOW the mechanism rather than beside it. `private db` erases
+   * too, so `ops.db`, `ops.queue.db` and `ops.store.db` handed a writable
+   * database to any JavaScript caller holding the operations object. From
+   * there `op_worker_providers` can be upserted directly: the provider check
+   * then passes, and `declareWorkerProvider`, its principal/approval gate and
+   * its evidence record are never reached. Making the registrar `#private`
+   * closed the named property and left its substrate public.
+   *
+   * This test does not check the three names Codex listed. It walks the object
+   * graph a worker can actually reach and asserts that NOTHING on it exposes a
+   * database — because naming the known routes is what let three previous
+   * attempts pass while a hole stood open.
+   */
+  it('exposes no writable database anywhere a worker can reach', () => {
+    const { ops } = bindingFixture();
+    const looksLikeDatabase = (value: unknown): boolean =>
+      typeof value === 'object' &&
+      value !== null &&
+      typeof (value as { prepare?: unknown }).prepare === 'function';
+
+    const seen = new Set<unknown>();
+    const offenders: string[] = [];
+    const walk = (value: unknown, path: string, depth: number): void => {
+      if (depth > 4 || value === null || typeof value !== 'object') return;
+      // Databases are checked BEFORE the visited-set short-circuit: every
+      // holder shares one database object, so deduplicating by identity would
+      // report the first route and hide the rest.
+      if (looksLikeDatabase(value)) {
+        offenders.push(path);
+        return;
+      }
+      if (seen.has(value)) return;
+      seen.add(value);
+      for (const key of Object.getOwnPropertyNames(value)) {
+        let child: unknown;
+        try {
+          child = (value as Record<string, unknown>)[key];
+        } catch {
+          continue; // a throwing getter is not a reachable database
+        }
+        walk(child, `${path}.${key}`, depth + 1);
+      }
+    };
+    walk(ops, 'ops', 0);
+    expect(offenders, `writable database reachable at: ${offenders.join(', ')}`).toEqual([]);
+  });
+
   it('still lets the authorized service boundary declare, and still gates it', () => {
     const fx = bindingFixture();
     // Through the gate: works.

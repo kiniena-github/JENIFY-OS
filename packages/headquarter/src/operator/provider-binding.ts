@@ -148,18 +148,29 @@ export interface WorkerProviderLookup {
  * It cannot write, so no execution path can move the map underneath itself.
  */
 export class WorkerProviderDirectory implements WorkerProviderLookup {
-  constructor(protected db: HqDatabase) {}
+  /**
+   * ECMAScript `#private`. TypeScript `private` erases to a public property, so
+   * this database was reachable from the exported operations object and could
+   * be written directly — bypassing every authority gate above it (issue #200,
+   * Codex exact-head finding on `135ae58`, plus three further routes the
+   * object-graph test found that the review did not name).
+   */
+  readonly #db: HqDatabase;
+
+  constructor(db: HqDatabase) {
+    this.#db = db;
+  }
 
   /** The provider this worker executes as, or null when none is declared. */
   providerOf(workerId: string): string | null {
-    const row = this.db
+    const row = this.#db
       .prepare(`SELECT provider_id FROM op_worker_providers WHERE worker_id = ?`)
       .get(workerId) as { provider_id: string } | undefined;
     return row?.provider_id ?? null;
   }
 
   list(): WorkerProviderRecord[] {
-    const rows = this.db
+    const rows = this.#db
       .prepare(`SELECT * FROM op_worker_providers ORDER BY worker_id`)
       .all() as Record<string, unknown>[];
     return rows.map((row) => ({

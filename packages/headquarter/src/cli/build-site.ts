@@ -75,13 +75,21 @@ for (const [file, html] of site) {
  * build never said where its data came from".
  */
 /**
- * The strongest provenance a STATIC build may claim for its operational
- * section. Never `live`: this command opens no database, so nothing here was
- * read from the canonical store. A bundle claiming `live` is reporting on
- * itself, not on the empty section rendered below, and is downgraded rather
- * than believed.
+ * The strongest provenance a SYNTHETIC section may claim in a static build.
+ *
+ * The rule, stated once so both call sites share it: a section whose data came
+ * out of the bundle may carry the bundle's own mode, because that claim is
+ * about the bundle and its author is entitled to make it. A section whose data
+ * is fabricated here — `emptyFounderConsole`, a hard-coded `[]` — may not,
+ * because the bundle never supplied it and cannot vouch for it.
+ *
+ * Never `live` either way: this command opens no database, so nothing in it was
+ * read from the canonical store. Only `hq:snapshot`, which does open the store,
+ * can establish live provenance (issue #200, Codex exact-head findings on
+ * `f221826` and `135ae58` — the console section first, then the capability
+ * section, which had the same shape and was missed the first time).
  */
-function staticConsoleMode(declared: SourceMode | undefined): SourceMode {
+function staticSectionMode(declared: SourceMode | undefined): SourceMode {
   if (declared === 'reconstructed') return 'reconstructed';
   return 'sample';
 }
@@ -108,7 +116,7 @@ const snapshot = buildHqSnapshot({
     // provenance may say LIVE, and only `hq:snapshot` — which does open the
     // store — can establish it.
     provenance: {
-      mode: staticConsoleMode(data.sourceMode),
+      mode: staticSectionMode(data.sourceMode),
       source: `static bundle ${dataPath} (no HQ database was opened by this build)`,
       asOf,
       note:
@@ -131,9 +139,13 @@ const snapshot = buildHqSnapshot({
     provenance: { mode: data.sourceMode ?? 'sample', source: `bundle.specialists (${dataPath})`, asOf },
   },
   capabilities: {
+    // Synthetic, exactly like the console section: always the hard-coded empty
+    // array, and the source line beside it says no registry was opened. A
+    // bundle declaring `live` was telling section consumers that zero
+    // capabilities is live canonical state.
     data: [],
     provenance: {
-      mode: data.sourceMode ?? 'sample',
+      mode: staticSectionMode(data.sourceMode),
       source: 'no capability registry is open in a static build',
       asOf,
     },
