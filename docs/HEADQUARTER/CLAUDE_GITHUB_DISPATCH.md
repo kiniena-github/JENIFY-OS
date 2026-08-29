@@ -176,9 +176,17 @@ Two consequences worth knowing before operating it:
    lease used to land the task in `queued`, which reads as *waiting to run*,
    carrying an approval already consumed: unclaimable (no usable approval) and
    un-re-approvable (`approveTask` refuses anything not `needs_approval`). A
-   silent dead end. No second execution was ever reachable — the consumed
-   approval refuses every ordering, and there are tests for each — but the state
-   was wrong and misleading, and now it is neither.
+   silent dead end.
+
+   It was also a genuine second execution, which this paragraph previously
+   denied. The independent review of `2638796` named the step the earlier probe
+   skipped: on the re-queued task a CLAUDE worker's claim is refused, but that
+   FAILED claim runs `rejectAtExecutionBoundary`, which moves the task to
+   `needs_approval` — where a fresh Founder approval, a second claim and a
+   second `start` are all accepted, while the first execution may still be
+   running on GitHub. Starting at publication closes the chain at its first
+   step: `outcome_unknown` is not claimable. The sequence is now a regression
+   test rather than an argument.
 
 The release itself is atomic and never silent: the fence check, the evidence
 append, the transition and the claim-field clear run in one transaction, so a
@@ -186,6 +194,29 @@ failure mid-release leaves the claim wholly intact rather than half-removed —
 and the refusal then SAYS the task is still claimed, instead of reporting a
 clean "nothing was published" while a worker that will never run it holds the
 task.
+
+## A dispatched issue runs once (issue #224)
+
+The issue HQ publishes is an ordinary `[AI TASK]` issue, and
+`ai-task-trigger.yml` re-fires an AI task on an owner `<!-- jenify-run -->`
+comment, on a `labeled` event and on a manual `workflow_dispatch`. None of those
+passes through the canonical claim, the single-use approval, the fence or the
+dispatch history — so, left alone, one Founder approval would have authorised an
+unbounded number of sequential executions. And because a comment directive may
+NAME a provider, `<!-- jenify-run: GEMINI -->` on a CLAUDE-bound task was
+provider substitution through the one door that never checked the binding.
+
+`decideRouting` therefore refuses any trigger other than the `opened` event on
+an issue whose body carries HQ's dispatch marker. The rule is written as *allow
+the dispatch*, not as *deny these triggers*: the first version of it denied the
+comment and the manual dispatch that review had named, and the label event —
+reachable by removing and re-adding `ai-task` — still routed. A trigger added to
+the workflow later is refused on an HQ issue by default.
+
+Operationally: **to run a dispatched task again, approve it again.** A fresh
+Founder approval and a fresh `hq:dispatch-claude`, which publishes a new issue
+with its own claim and fence. Ordinary AI tasks that a human opened are
+untouched and stay re-triggerable by comment, label and manual dispatch.
 
 ## Reading the result back (issue #224)
 

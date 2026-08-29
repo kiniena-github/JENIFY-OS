@@ -303,19 +303,26 @@ export function decideRouting(req: RoutingRequest): RoutingDecision {
   // one door that does not check the binding — the exact thing this lane refuses
   // everywhere else.
   //
-  // So a RE-trigger of an HQ-dispatched issue is refused here. `opened` is
-  // untouched: that is the dispatch itself, and it is the only run HQ authorised.
-  // Re-running such a task is a canonical act — a fresh Founder approval and a
-  // fresh `hq:dispatch-claude` — never a comment.
+  // The rule is therefore stated as ALLOW `issue_opened`, not as DENY the two
+  // triggers that were named. Codex named the comment and the manual dispatch;
+  // `ai-task-trigger.yml` also wakes on `issues: labeled`, and `issue_labeled`
+  // on an HQ-dispatched issue ROUTED — the same unbounded re-execution through a
+  // third door, reachable by the owner removing and re-adding the `ai-task`
+  // label. Enumerating the doors leaves the next one open, so anything that is
+  // not the dispatch itself is refused.
+  //
+  // `opened` is untouched: that IS the dispatch, and it is the only run HQ
+  // authorised. Re-running such a task is a canonical act — a fresh Founder
+  // approval and a fresh `hq:dispatch-claude` — never an event on the issue.
   const hqDispatched = typeof req.issueBody === 'string' && req.issueBody.includes(HQ_DISPATCH_MARKER);
-  if (hqDispatched && (req.trigger === 'issue_comment' || req.trigger === 'manual_dispatch')) {
+  if (hqDispatched && req.trigger !== 'issue_opened') {
     return {
       ...base,
       outcome: 'IGNORE',
       reason:
         'This issue was dispatched by JENIFY HQ for a canonical task. Its execution authority is ' +
-        'the HQ claim, single-use approval and fence, which a comment or manual dispatch does not ' +
-        'pass through — so re-triggering it here is refused. Re-run it with a fresh Founder ' +
+        'the HQ claim, single-use approval and fence, which a comment, a label or a manual dispatch ' +
+        'does not pass through — so re-triggering it here is refused. Re-run it with a fresh Founder ' +
         'approval and a fresh HQ dispatch.',
     };
   }

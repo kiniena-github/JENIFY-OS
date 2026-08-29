@@ -16,6 +16,12 @@
  * CLAUDE-bound canonical task is provider substitution arriving through the one
  * door that never checked the binding.
  *
+ * There is a THIRD door, which the first version of this guard left open: the
+ * workflow also wakes on `issues: labeled`, so removing and re-adding the
+ * `ai-task` label re-fired the routine on an HQ-dispatched issue just as a
+ * comment did. The guard is now stated as ALLOW `issue_opened` rather than as a
+ * list of denied triggers, and that shape is itself asserted below.
+ *
  * ## What is asserted
  *
  * Re-triggers of an HQ-dispatched issue are refused; the dispatch itself is
@@ -78,6 +84,36 @@ describe('a re-trigger of an HQ-dispatched issue is refused', () => {
     expect(decision.dispatchTo).toEqual([]);
   });
 
+  it('ignores a LABEL event on it', () => {
+    // The door the first version of this guard left open. `ai-task-trigger.yml`
+    // wakes on `issues: [opened, labeled]`, so the owner removing and re-adding
+    // the `ai-task` label re-fires the routine on an HQ-dispatched issue —
+    // unbounded sequential executions of one Founder-approved action, exactly
+    // the P1, arriving through a third door rather than the two Codex named.
+    // Before the fix this asserted ROUTE / ['CLAUDE'].
+    const decision = decideRouting(request({ trigger: 'issue_labeled', commentBody: undefined }));
+    expect(decision.outcome).toBe('IGNORE');
+    expect(decision.dispatchTo).toEqual([]);
+    expect(decision.reason).toContain('JENIFY HQ');
+  });
+
+  it('refuses every trigger that is not the dispatch itself', () => {
+    // The rule is ALLOW `issue_opened`, not DENY a list — so a TriggerKind added
+    // later is refused on an HQ issue by default instead of silently becoming a
+    // fourth door. This test fails if the guard is ever rewritten as an
+    // enumeration that misses one.
+    const everyTrigger: RoutingRequest['trigger'][] = [
+      'issue_opened',
+      'issue_labeled',
+      'issue_comment',
+      'manual_dispatch',
+    ];
+    const routed = everyTrigger.filter(
+      (trigger) => decideRouting(request({ trigger })).outcome === 'ROUTE',
+    );
+    expect(routed).toEqual(['issue_opened']);
+  });
+
   it('does not fire for the dispatch itself', () => {
     // `opened` IS the dispatch — the one run HQ authorised. Refusing it would
     // break the lane rather than guard it.
@@ -90,6 +126,16 @@ describe('a re-trigger of an HQ-dispatched issue is refused', () => {
 describe('the guard is narrow', () => {
   it('leaves an ordinary AI task fully re-triggerable', () => {
     const decision = decideRouting(request({ issueBody: PLAIN_BODY }));
+    expect(decision.outcome).toBe('ROUTE');
+    expect(decision.dispatchTo).toContain('CLAUDE');
+  });
+
+  it('leaves an ordinary AI task label event working', () => {
+    // Widening the guard to every non-`opened` trigger must not freeze the
+    // label path for issues a human opened by hand.
+    const decision = decideRouting(
+      request({ trigger: 'issue_labeled', issueBody: PLAIN_BODY, commentBody: undefined }),
+    );
     expect(decision.outcome).toBe('ROUTE');
     expect(decision.dispatchTo).toContain('CLAUDE');
   });
