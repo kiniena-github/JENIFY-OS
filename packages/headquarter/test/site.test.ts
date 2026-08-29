@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest';
 import { escapeHtml } from '../src/ui/components.js';
 import { HQ_PAGES, renderSourceRef } from '../src/ui/render.js';
 import { buildSite, bundleAsOf, type HeadquarterData } from '../src/ui/site.js';
+import { BrowserSafetyError } from '../src/live/redaction.js';
+import type { ConnectionStatus } from '../src/live/connections.js';
 
 const samplePath = join(dirname(fileURLToPath(import.meta.url)), '..', 'sample-data', 'hq-sample.json');
 const sample = JSON.parse(readFileSync(samplePath, 'utf8')) as HeadquarterData;
@@ -43,10 +45,10 @@ describe('buildSite', () => {
     expect(html).toContain('Fix Gemini 3.7 worker model routing'); // DONE TODAY from sample
   });
 
-  it('Founder Approvals renders the D15 fields read-only with no action controls', () => {
+  it('Founder Approvals renders the D15 fields read-only with no static action controls', () => {
     const html = site.get('approvals.html')!;
     expect(html).toContain('Universal Operator architecture proposal'); // waiting task
-    expect(html).toContain('operator control plane');
+    expect(html).toContain('control API');
     // D15 approval fields (§6b): actionDigest, expiresAt, consumedAt, decidedBy
     expect(html).toContain('Action digest');
     expect(html).toContain('3f9a1c2b4d5e6f70'); // truncated digest rendered
@@ -57,14 +59,19 @@ describe('buildSite', () => {
     expect(html).not.toContain('<form');
   });
 
-  it('draws the decision controls as inert, explicitly-labelled placeholders', () => {
+  it('draws the build-time decision controls as inert, explicitly-labelled placeholders', () => {
     const html = site.get('approvals.html')!;
     for (const control of ['Approve', 'Reject', 'Ask for changes']) {
       expect(html).toContain(`<span class="control-readonly" aria-disabled="true">${control}</span>`);
     }
-    expect(html).toContain('not wired — read-only page');
-    // Nothing anywhere in the site may submit, navigate to a mutation, or run
-    // an inline handler.
+    expect(html).toContain('inert build-time card');
+    // The site-wide invariant, RE-SCOPED with the live control plane (issue
+    // #200, integration lane) but still load-bearing: the STATIC markup of
+    // every page carries no form, no button and no inline handler — a working
+    // control may exist only as a DOM node the control-console scripts create
+    // AFTER `/session` granted it, and no mutation may go anywhere but the
+    // control API (that half is asserted, script by script, in
+    // `control-console.test.ts`).
     for (const page of HQ_PAGES) {
       const pageHtml = site.get(page.file)!;
       expect(pageHtml).not.toContain('<form');
@@ -264,5 +271,81 @@ describe('buildSite', () => {
     expect(html).toContain('Blocked'); // Jenify Labs is blocked
     expect(html).toContain('Latest achievement:');
     expect(html).toContain('Recent update:');
+  });
+});
+
+/**
+ * Codex exact-head finding on `5c767fa` (P1). A caller-supplied `connections`
+ * bundle went straight to the renderer with nothing having scanned it, and the
+ * snapshot guard could not cover for that: `build-site.ts` recomputes the
+ * snapshot's connections from `env`, independently of the bundle, and the HTML
+ * is written first. A credential that reached a verifier's `reason`,
+ * `evidenceSource` or fact list therefore landed in `connections.html` with no
+ * boundary in the path having looked at it.
+ *
+ * The guard now runs on the connections that are actually RENDERED, on both
+ * branches, so the invariant does not depend on which one a caller took.
+ */
+describe('rendered connections cross the browser boundary through the guard', () => {
+  const poisoned = (overrides: Partial<ConnectionStatus>): HeadquarterData => ({
+    ...sample,
+    connections: [
+      {
+        id: 'supabase',
+        displayName: 'Supabase',
+        category: 'infrastructure',
+        authMechanism: 'api_key',
+        locality: 'cloud',
+        advertisedCapabilities: [],
+        requiredFacts: [],
+        setupHint: 'n/a',
+        recheckable: false,
+        revocable: false,
+        state: 'configured',
+        verification: 'configuration',
+        outcome: 'not_attempted',
+        observedFacts: [],
+        missingFacts: [],
+        effectiveCapabilities: [],
+        lastVerifiedAt: null,
+        evidenceSource: 'test',
+        reason: 'test',
+        canRecheck: false,
+        canDisconnect: false,
+        ...overrides,
+      } as ConnectionStatus,
+    ],
+  });
+
+  it('throws rather than rendering a credential a verifier put in its reason', () => {
+    expect(() =>
+      buildSite(poisoned({ reason: 'Supabase: verified — using sk-abcdefghijklmnopqrstuvwxyz012345' })),
+    ).toThrow(BrowserSafetyError);
+  });
+
+  it('throws rather than rendering one carried in evidenceSource or a fact list', () => {
+    expect(() =>
+      buildSite(poisoned({ evidenceSource: 'token ghp_abcdefghijklmnopqrstuvwxyz0123456789' })),
+    ).toThrow(BrowserSafetyError);
+    expect(() =>
+      buildSite(poisoned({ observedFacts: ['sk-abcdefghijklmnopqrstuvwxyz012345'] })),
+    ).toThrow(BrowserSafetyError);
+  });
+
+  it('never writes the page when it refuses', () => {
+    // The throw has to come BEFORE any HTML exists, not after: the real build
+    // writes each page to disk as it goes.
+    let site: Map<string, string> | undefined;
+    try {
+      site = buildSite(poisoned({ reason: 'sk-abcdefghijklmnopqrstuvwxyz012345' }));
+    } catch {
+      site = undefined;
+    }
+    expect(site).toBeUndefined();
+  });
+
+  it('lets an honest bundle through untouched', () => {
+    const html = buildSite(poisoned({})).get('connections.html')!;
+    expect(html).toContain('Supabase');
   });
 });

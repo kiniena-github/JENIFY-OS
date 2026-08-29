@@ -8,13 +8,21 @@
 
 import type { ActivityStatus } from './events.js';
 
-/** Broad role a worker plays in the org. Informational, not a permission. */
-export type WorkerRole =
-  | 'build_lead'
-  | 'parallel_implementer'
-  | 'reviewer_gatekeeper'
-  | 'specialist_tool'
-  | 'mission_director';
+/**
+ * Broad role a worker plays in the org. Informational, not a permission.
+ *
+ * Listed as a runtime array so a CLI can validate what an operator typed
+ * against the same source the type comes from — one list, not two that drift.
+ */
+export const WORKER_ROLES = [
+  'build_lead',
+  'parallel_implementer',
+  'reviewer_gatekeeper',
+  'specialist_tool',
+  'mission_director',
+] as const;
+
+export type WorkerRole = (typeof WORKER_ROLES)[number];
 
 export interface WorkerDescriptor {
   /** Stable id, e.g. 'claude', 'codex', 'jules', 'google-notebooklm'. */

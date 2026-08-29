@@ -1,0 +1,153 @@
+name: Resolve HQ dispatch evidence
+description: >-
+  Decide, from records ordinary issue editing cannot erase — GitHub's immutable
+  issue edit history and the issue's label timeline — whether JENIFY HQ
+  dispatched this issue for a canonical task. Fails closed to `unknown`.
+
+# Why this exists (issue #224, Codex P1 on `2dc86e8`)
+# ---------------------------------------------------
+# The routing module refuses to re-trigger an issue that HQ dispatched, because
+# such a task's execution authority is HQ's claim, single-use approval and
+# fence — not a comment on the issue. The first version of that guard read HQ's
+# marker out of the issue's CURRENT body.
+#
+# An issue body is editable, and the account that can edit it is the repository
+# owner: the only account this workflow accepts triggers from in the first
+# place. So the guard was erasable by exactly the actor it constrains. Delete
+# the marker, comment `jenify-run: GEMINI`, and both the unbounded re-execution
+# and the provider substitution are back.
+#
+# `userContentEdits` is GitHub's own record of every earlier version of the
+# body. Editing the body ADDS to it; nothing an issue author can do removes an
+# entry. Deriving the fact from there is what makes the guard hold against the
+# owner rather than merely against a stranger.
+#
+# This is a COMPOSITE ACTION rather than a step copied into each workflow on
+# purpose. Issue #224 has already produced four defects of one shape — a guard
+# correct where it was wired and absent where it was not — including this
+# lane's own `ISSUE_BODY`, which reached one of the two router-calling
+# workflows. One implementation, called by every lane, is the structural answer
+# to that.
+
+inputs:
+  issue-number:
+    description: The issue to resolve. Empty is treated as an unestablished lookup.
+    required: false
+    default: ''
+  github-token:
+    description: Token used for the read-only GraphQL query.
+    required: true
+
+outputs:
+  evidence:
+    description: dispatched | never_dispatched | unknown
+    value: ${{ steps.resolve.outputs.evidence }}
+
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        ISSUE_NUMBER_IN: ${{ inputs.issue-number }}
+      run: |
+        # No `-e`: EVERY failure below has to land on `unknown`, which the
+        # routing module refuses on, rather than crash the job into a state
+        # where the guard simply never ran.
+        set -uo pipefail
+
+        # Must stay identical to HQ_DISPATCH_MARKER in
+        # packages/headquarter/src/routing/providers.ts. A test asserts it.
+        marker='jenify-hq-dispatch'
+        verdict=unknown
+
+        owner="${GITHUB_REPOSITORY%%/*}"
+        repo="${GITHUB_REPOSITORY#*/}"
+
+        if [ -z "${ISSUE_NUMBER_IN:-}" ]; then
+          echo "No issue number supplied: the durable lookup cannot be established."
+        else
+          query='query($owner:String!,$repo:String!,$number:Int!){
+            repository(owner:$owner,name:$repo){
+              issue(number:$number){
+                body
+                userContentEdits(first:100){ totalCount nodes{ diff } }
+              }
+            }
+          }'
+          if resp=$(gh api graphql -f query="$query" -F owner="$owner" -F repo="$repo" -F number="$ISSUE_NUMBER_IN" 2>/dev/null); then
+            # Read as: the marker is in the body now, or in the diff of any
+            # earlier version of it, or we could not see enough to say.
+            #
+            # `unknown` is returned whenever the answer is not PROVEN, which
+            # includes: the issue could not be read; `totalCount` was not a
+            # number; more edits exist than the 100 fetched; any single diff
+            # came back null because the token cannot see it. A partial view of
+            # the history cannot clear an issue.
+            verdict=$(printf '%s' "$resp" | jq -r --arg m "$marker" '
+              (.data.repository.issue // null) as $i
+              | if $i == null then "unknown"
+                elif (($i.body // "") | contains($m)) then "dispatched"
+                else
+                  (($i.userContentEdits // null) as $e
+                   | if $e == null or (($e.totalCount | type) != "number") then "unknown"
+                     elif $e.totalCount == 0 then "never_dispatched"
+                     else
+                       (($e.nodes // []) as $n
+                        | if ($n | length) != $e.totalCount then "unknown"
+                          elif ($n | any(.diff == null)) then "unknown"
+                          elif ($n | any((.diff // "") | contains($m))) then "dispatched"
+                          else "never_dispatched"
+                          end)
+                     end)
+                end' 2>/dev/null) || verdict=unknown
+          else
+            echo "The issue edit-history lookup failed; failing closed."
+          fi
+        fi
+
+        # ---- SECOND DURABLE SOURCE: the issue's label timeline --------------
+        #
+        # The edit history above is immutable, but it is not always LEGIBLE:
+        # `UserContentEdit.diff` comes back null for a revision whose content the
+        # author deleted, and for a token that cannot see it. The rule above
+        # correctly calls that `unknown` and refuses — which is safe, and which
+        # would also permanently freeze re-triggering for an ORDINARY AI task
+        # whose body happens to have been edited once. Fail-closed on the wrong
+        # population is still a cost.
+        #
+        # So HQ also stamps every issue it dispatches with the
+        # `jenify-hq-dispatch` LABEL, and applying a label writes an entry into
+        # the issue timeline that no repository permission can delete — removing
+        # the label afterwards only appends `unlabeled` beside it. That entry is
+        # read over plain REST, with no diff and no visibility caveat.
+        #
+        # It is consulted ONLY to say `dispatched`, never to clear an issue: the
+        # absence of the label proves nothing about an issue dispatched before HQ
+        # stamped one. So this can only ever make the verdict stricter, and it
+        # runs whenever the edit history did not already answer `dispatched`.
+        if [ -n "${ISSUE_NUMBER_IN:-}" ] && [ "$verdict" != "dispatched" ]; then
+          if events=$(gh api --paginate "repos/$owner/$repo/issues/$ISSUE_NUMBER_IN/timeline" 2>/dev/null); then
+            hits=$(printf '%s' "$events" | jq -s -r --arg m "$marker" \
+              'add // [] | map(select(.label != null and .label.name == $m)) | length' 2>/dev/null) || hits=''
+            if [ "${hits:-0}" != "0" ] && [ -n "$hits" ]; then
+              echo "The issue carries HQ's dispatch label in its timeline."
+              verdict=dispatched
+            fi
+          else
+            # A failed read here cannot CLEAR anything — this source only ever
+            # tightens — so a `never_dispatched` the edit history PROVED stands.
+            echo "The label-timeline lookup failed; the edit-history verdict stands."
+          fi
+        fi
+
+        # Anything the pipeline did not produce cleanly is `unknown`. The
+        # routing module normalises again on its side; both ends fail closed.
+        case "$verdict" in
+          dispatched|never_dispatched|unknown) ;;
+          *) verdict=unknown ;;
+        esac
+
+        echo "HQ dispatch evidence: $verdict"
+        echo "evidence=$verdict" >> "$GITHUB_OUTPUT"

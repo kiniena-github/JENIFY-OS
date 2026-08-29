@@ -71,10 +71,17 @@ import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
 import { HeadquarterStore } from '../store/headquarter.js';
 import type { ActivityStatus } from '../contracts/events.js';
+import type { WorkerDescriptor, WorkerRole } from '../contracts/workers.js';
 import { evaluatePolicy, type PolicyContext, type PolicyDecision } from '../operator/policy.js';
 import { taskActionDigest } from '../operator/approvals.js';
 import { assertNoSecretLikeContent } from '../operator/evidence.js';
 import { OperatorQueue, type OperatorTask, type ReconcileDecision } from '../operator/queue.js';
+import {
+  ProviderBindingViolation,
+  ProviderDeclarationRejected,
+  WorkerProviderRegistrar,
+  type WorkerProviderRecord,
+} from '../operator/provider-binding.js';
 import { ensureApplicationSchema } from './db.js';
 import {
   SpecialistDirectoryAdapter,
@@ -110,6 +117,8 @@ export type OpsErrorCode =
   | 'action_digest_mismatch'
   | 'task_not_awaiting_approval'
   | 'assigned_to_other_worker'
+  | 'provider_binding_mismatch'
+  | 'unknown_provider'
   | 'nothing_claimable'
   | 'unknown_principal'
   | 'humans_do_not_execute'
@@ -269,6 +278,8 @@ export class HeadquarterOperations {
   readonly principals: HumanPrincipalPort;
   private readonly nominationSources: readonly NominationSourcePort[];
   private readonly policyCtx: PolicyContext;
+  /** Write side of the worker → provider map. Private by design — see below. */
+  private readonly workerProviderRegistrar: WorkerProviderRegistrar;
 
   constructor(
     private db: HqDatabase,
@@ -277,6 +288,11 @@ export class HeadquarterOperations {
     ensureApplicationSchema(db);
     this.store = options.store ?? new HeadquarterStore(db);
     this.queue = options.queue ?? new OperatorQueue(db, options.policyCtx ?? {});
+    // The WRITE side of the worker → provider map lives here and nowhere else
+    // (issue #200, Codex round-3 P1 #1). It is private: the only ways in are
+    // `declareWorkerProvider`/`revokeWorkerProvider`, which resolve the actor
+    // and require approval authority first.
+    this.workerProviderRegistrar = new WorkerProviderRegistrar(db);
     this.workers =
       options.workers ?? narrowByRegistry(new SpecialistDirectoryAdapter(this.store), options.memberRegistry);
     this.principals = options.humanPrincipals ?? new HumanPrincipalRegistry(db);
@@ -547,6 +563,27 @@ export class HeadquarterOperations {
       return fail('kill_switch_engaged', `Kill switch is engaged for ${task.capabilityId}`);
     }
 
+    // Validate the note BEFORE any write (issue #200, Codex round 3 P1).
+    //
+    // This one has no backstop at all, which makes it worse than the denial
+    // case rather than merely similar: `queue.approve`'s evidence payload
+    // carries the approval id, digest and expiry — NOT the note — so the
+    // evidence log's guard never sees it. A credential pasted into an approval
+    // note is therefore written to `hq_approvals.decision_note` with nothing
+    // objecting, and `renderFounderApprovals` publishes that column into
+    // generated HTML. Silent persistence plus publication, with no error
+    // anywhere.
+    if (input.note !== undefined) {
+      try {
+        assertNoSecretLikeContent({ note: input.note });
+      } catch {
+        return fail(
+          'invalid_input',
+          'The approval note looks like it contains a credential. Approval notes are stored ' +
+            'permanently and rendered in the Founder console, so nothing was approved.',
+        );
+      }
+    }
     const currentDigest = taskActionDigest(task);
     if (!input.expectedActionDigest || input.expectedActionDigest !== currentDigest) {
       this.queue.evidence.append({
@@ -578,6 +615,29 @@ export class HeadquarterOperations {
     const principal = this.assertApprovalAuthority(input.founderId, 'deny');
     if (principal) return principal;
     if (!input.reason) return fail('invalid_input', 'A denial requires a reason');
+    // Validate the reason BEFORE anything is written, with the SAME guard the
+    // evidence log applies at the end (issue #200, Codex round 2 P1).
+    //
+    // `queue.deny` transitions the task to `blocked`, writes `block_reason`
+    // and inserts the `hq_approvals` row, and only then appends evidence — so
+    // a reason the evidence log refuses used to throw AFTER those three writes
+    // had committed. This method caught that late throw and reported
+    // `operator_rejected`, which meant the caller was told the denial failed
+    // while the task was in fact blocked and the offending text was persisted
+    // in two tables. Checking here makes the refusal precede the first write.
+    //
+    // Deliberately the same function the log uses, not a stricter or looser
+    // one: a different guard would reopen the gap from the other side, where
+    // this check passes and the append still throws.
+    try {
+      assertNoSecretLikeContent({ reason: input.reason });
+    } catch {
+      return fail(
+        'invalid_input',
+        'The denial reason looks like it contains a credential. A reason is recorded in the ' +
+          'append-only evidence log, so nothing was written.',
+      );
+    }
     const currentDigest = taskActionDigest(task);
     if (input.expectedActionDigest && input.expectedActionDigest !== currentDigest) {
       // A denial is never an authorization, so a stale digest does not block
@@ -614,7 +674,12 @@ export class HeadquarterOperations {
    * intent is advisory routing, and every real authority — allow-list,
    * approval binding, fence, independent review — is unaffected.
    */
-  claimNext(workerId: string, capabilityId: string, leaseMs?: number): OpsResult<OperatorTask> {
+  claimNext(
+    workerId: string,
+    capabilityId: string,
+    leaseMs?: number,
+    onlyTaskId?: string,
+  ): OpsResult<OperatorTask> {
     const cap = this.queue.capabilities.get(capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${capabilityId} is disabled`);
@@ -635,23 +700,47 @@ export class HeadquarterOperations {
       return fail('kill_switch_engaged', `Kill switch is engaged for ${capabilityId}`);
     }
 
-    const head = this.queue
-      .listByStatus('queued')
-      .find((candidate) => candidate.capabilityId === capabilityId);
-    if (!head) return fail('nothing_claimable', `No queued task for ${capabilityId}`);
-    const intent = this.readMeta(head.id)?.assignment;
-    if (intent && intent.workerId !== workerId) {
+    // Peek at the task this worker would actually be offered — the oldest one
+    // COMPATIBLE with its declared execution provider, not merely the oldest
+    // one (issue #200, Codex round-3 P1 #2). Peeking at the raw head would put
+    // the head-of-line block back in this layer: a CLAUDE-bound order sitting
+    // in front would make every later CODEX-compatible task unreachable
+    // through the assignment-intent check below.
+    const peek = this.queue.selectClaimable(workerId, capabilityId, onlyTaskId);
+    if (!peek.task && !peek.refusal) {
+      return fail('nothing_claimable', `No queued task for ${capabilityId}`);
+    }
+    // A refusal (queued work exists, none of it this worker's) is deliberately
+    // NOT answered here: it is raised and written to the evidence log once, by
+    // the canonical boundary in `OperatorQueue.claim` below, and translated to
+    // a typed error in the catch. Answering it here would record it twice or
+    // not at all, depending on the caller.
+    const head = peek.task;
+    const intent = head ? this.readMeta(head.id)?.assignment : null;
+    if (head && intent && intent.workerId !== workerId) {
       return fail(
         'assigned_to_other_worker',
         `Task ${head.id} is assigned to ${intent.workerId}`,
         { taskId: head.id, assignedTo: intent.workerId },
       );
     }
-
+    // Provider binding (issue #200, Codex P1 #1) is deliberately NOT
+    // re-implemented here. It is enforced once, at the canonical execution
+    // boundary in `OperatorQueue.claim`, which is also where the refusal is
+    // written to the evidence log — so it holds for callers that never come
+    // through this layer, and it cannot be recorded twice or drift between two
+    // copies. This layer only translates the violation into a typed error.
     let claimed: OperatorTask | null;
     try {
-      claimed = this.queue.claim(workerId, capabilityId, leaseMs);
+      claimed = this.queue.claim(workerId, capabilityId, leaseMs, onlyTaskId);
     } catch (error) {
+      if (error instanceof ProviderBindingViolation) {
+        return fail('provider_binding_mismatch', error.message, {
+          taskId: error.taskId,
+          requiredProvider: error.requiredProvider,
+          workerProvider: error.workerProvider,
+        });
+      }
       return fail('operator_rejected', errorMessage(error), { capabilityId });
     }
     if (!claimed) return fail('nothing_claimable', `No claimable task for ${capabilityId}`);
@@ -674,6 +763,13 @@ export class HeadquarterOperations {
     try {
       return ok(this.queue.start(taskId, workerId, fence));
     } catch (error) {
+      if (error instanceof ProviderBindingViolation) {
+        return fail('provider_binding_mismatch', error.message, {
+          taskId: error.taskId,
+          requiredProvider: error.requiredProvider,
+          workerProvider: error.workerProvider,
+        });
+      }
       return fail('operator_rejected', errorMessage(error), { taskId });
     }
   }
@@ -799,6 +895,233 @@ export class HeadquarterOperations {
     if (principal) return principal;
     this.queue.releaseKillSwitch(scope, founderId);
     return ok(null);
+  }
+
+  // ---- execution-provider declarations (Founder only) ----
+
+  /**
+   * Declare which provider a worker genuinely executes as (issue #200, Codex
+   * round-3 P1 #1).
+   *
+   * This is the ONLY authorized way the worker → provider map is written. It
+   * sits here, beside the kill switch, because it is the same kind of act: a
+   * configuration decision that changes who may execute what. It therefore
+   * carries the same gate — a registered, active human principal holding
+   * approval authority. Registered workers are refused that authority
+   * outright (`principals.ts`), so no execution worker can declare a provider,
+   * its own least of all: the queue it holds exposes lookup only.
+   *
+   * `declaredBy` is the RESOLVED principal, not a caller-supplied string, so
+   * the recorded attribution cannot differ from the identity that was checked.
+   * The declaration narrows only — it decides which bound tasks a worker may
+   * take, never which capabilities it holds, which stay with the directory.
+   */
+  declareWorkerProvider(input: {
+    workerId: string;
+    providerId: string;
+    founderId: string;
+  }): OpsResult<WorkerProviderRecord> {
+    const principal = this.assertApprovalAuthority(
+      input.founderId,
+      'declare a worker execution provider',
+    );
+    if (principal) return principal;
+    try {
+      // The mapping write and its evidence commit together or not at all
+      // (issue #224, Codex P1 on `9fd1f1c`). They used to be two statements: if
+      // the append failed — another process holding the SQLite write lock, a
+      // full disk — the provider mapping stayed CHANGED while this method
+      // caught the error and told the caller the declaration had failed. That
+      // is the worst shape for this particular write: an execution-authority
+      // change live in the database, with no record of who made it, and an
+      // operator who believes it did not happen.
+      //
+      // `reserve` is an IMMEDIATE write transaction, so a throwing append rolls
+      // the declaration back with it. The refusal the caller then sees is true.
+      const record = this.queue.evidence.reserve(() => {
+        const declared = this.workerProviderRegistrar.declare(
+          input.workerId,
+          input.providerId,
+          input.founderId,
+        );
+        this.queue.evidence.append({
+          actor: input.founderId,
+          kind: 'worker_provider_declared',
+          payload: {
+            workerId: declared.workerId,
+            providerId: declared.providerId,
+            declaredAt: declared.declaredAt,
+          },
+        });
+        return declared;
+      });
+      return ok(record);
+    } catch (error) {
+      if (error instanceof ProviderDeclarationRejected) {
+        return fail(
+          error.reason === 'unknown_provider' ? 'unknown_provider' : 'invalid_input',
+          error.message,
+          { workerId: input.workerId, providerId: input.providerId },
+        );
+      }
+      return fail('operator_rejected', errorMessage(error), { workerId: input.workerId });
+    }
+  }
+
+  // ---- worker registration (Founder only) ----
+
+  /**
+   * Register an external execution worker (issue #224, ChatGPT P1 on `83e146b`).
+   *
+   * The Claude handoff requires a named, registered, CLAUDE-declared worker
+   * before it will publish anything — and until now nothing canonical could
+   * CREATE one. `upsertSpecialist` lives on the store, reachable only by code
+   * holding the raw database, and the tests built their executor by calling it
+   * directly. So the documented Founder-gated boundary ("registering this worker
+   * is an explicit configuration act") had no implementation on the one machine
+   * that dispatches: the real answer was "drop to the data layer", which is not
+   * a gate at all.
+   *
+   * This is that act, and it is deliberately narrow:
+   *
+   * - **Founder-gated**, the same check as `declareWorkerProvider` and the kill
+   *   switch: a registered, active human principal holding approval authority.
+   *   Workers are refused that authority outright, so no execution worker can
+   *   register a worker — itself included.
+   * - **Create-only.** An existing id is REFUSED rather than overwritten.
+   *   `upsertSpecialist` replaces the whole row, so allowing re-registration
+   *   here would make a capability allow-list — an authority — silently
+   *   editable through a "bootstrap" command. Changing or retiring a worker
+   *   stays with the paths that own those decisions (handover, deactivation).
+   * - **Deny-by-default on capabilities.** Every requested capability must
+   *   already exist in the registry; a typo grants nothing and is refused
+   *   loudly rather than registering a worker that can claim nothing.
+   * - **Atomic**, for the same reason the declaration is: a registration whose
+   *   evidence cannot be written must not survive as an unrecorded grant.
+   *
+   * It grants no provider identity. Registration and declaration stay two
+   * separate acts, so neither one alone makes a worker able to take
+   * CLAUDE-bound work.
+   */
+  registerExecutionWorker(input: {
+    workerId: string;
+    displayName: string;
+    vendor: string;
+    role: WorkerRole;
+    allowedCapabilities: readonly string[];
+    founderId: string;
+  }): OpsResult<WorkerDescriptor> {
+    const principal = this.assertApprovalAuthority(input.founderId, 'register an execution worker');
+    if (principal) return principal;
+
+    const workerId = input.workerId.trim();
+    if (!workerId) return fail('invalid_input', 'A worker id is required.');
+    // Worker identity and HUMAN identity are separate registries, and an id in
+    // both is the one combination neither registry can express safely. It is
+    // refused here because both consequences are silent and neither is
+    // recoverable through this command:
+    //
+    //   - `rejectHumanExecution` waves an id through the moment it is a
+    //     registered WORKER, so the human principal becomes executable;
+    //   - `assertApprovalAuthority` refuses any registered worker, so that
+    //     human INSTANTLY loses approval authority — an approver locked out of
+    //     the kill switch and every approval, by a registration that reported
+    //     success.
+    //
+    // Registration is create-only and there is no revoke path, so undoing it
+    // would mean dropping to the data layer: exactly the boundary this method
+    // exists to remove.
+    if (this.principals.get(workerId) != null) {
+      return fail(
+        'not_permitted',
+        `${workerId} is already registered as a HUMAN principal. Worker identity and human ` +
+          'identity are deliberately separate: an id in both would be a human that may execute, ' +
+          'and would silently strip that human of approval authority. Choose a distinct worker id.',
+        { workerId },
+      );
+    }
+    if (this.store.getSpecialist(workerId)) {
+      return fail(
+        'invalid_input',
+        `Worker ${workerId} is already registered. Registration is create-only: it will not ` +
+          'overwrite an existing worker, because that would silently rewrite its capability ' +
+          'allow-list.',
+        { workerId },
+      );
+    }
+    if (input.allowedCapabilities.length === 0) {
+      return fail(
+        'invalid_input',
+        'A worker registered with no capabilities could claim nothing. Name the capabilities it ' +
+          'is allowed, explicitly.',
+        { workerId },
+      );
+    }
+    const unknown = input.allowedCapabilities.filter((id) => this.queue.capabilities.get(id) == null);
+    if (unknown.length > 0) {
+      return fail(
+        'unknown_capability',
+        `Unknown capabilit${unknown.length === 1 ? 'y' : 'ies'}: ${unknown.join(', ')}. A worker is ` +
+          'never granted a capability the registry does not define.',
+        { workerId, unknown },
+      );
+    }
+
+    const descriptor: WorkerDescriptor = {
+      id: workerId,
+      displayName: input.displayName.trim() || workerId,
+      vendor: input.vendor.trim(),
+      role: input.role,
+      allowedCapabilities: [...input.allowedCapabilities],
+      active: true,
+    };
+    try {
+      return ok(
+        this.queue.evidence.reserve(() => {
+          this.store.upsertSpecialist(descriptor);
+          this.queue.evidence.append({
+            actor: input.founderId,
+            kind: 'execution_worker_registered',
+            payload: {
+              workerId: descriptor.id,
+              vendor: descriptor.vendor,
+              role: descriptor.role,
+              allowedCapabilities: descriptor.allowedCapabilities,
+            },
+          });
+          return descriptor;
+        }),
+      );
+    } catch (error) {
+      return fail('operator_rejected', errorMessage(error), { workerId });
+    }
+  }
+
+  /**
+   * Withdraw a worker's execution-provider declaration. Same authority as
+   * declaring one, and strictly narrowing in effect: the worker can then claim
+   * no provider-bound task at all.
+   */
+  revokeWorkerProvider(input: { workerId: string; founderId: string }): OpsResult<boolean> {
+    const principal = this.assertApprovalAuthority(
+      input.founderId,
+      'revoke a worker execution provider',
+    );
+    if (principal) return principal;
+    const removed = this.workerProviderRegistrar.revoke(input.workerId);
+    if (removed) {
+      this.queue.evidence.append({
+        actor: input.founderId,
+        kind: 'worker_provider_revoked',
+        payload: { workerId: input.workerId },
+      });
+    }
+    return ok(removed);
+  }
+
+  /** Every declaration currently in force. A read, available to any caller. */
+  workerProviderDeclarations(): WorkerProviderRecord[] {
+    return this.queue.workerProviders.list();
   }
 
   // ---- worker replacement ----
