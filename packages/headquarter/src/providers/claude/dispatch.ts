@@ -117,6 +117,8 @@ export type DispatchRefusalCode =
   | 'provider_not_bound'
   | 'provider_mismatch'
   | 'task_not_eligible'
+  /** A queue worker for this provider could claim the task we are about to publish. */
+  | 'queue_worker_conflict'
   | 'approval_invalid'
   | 'invalid_target'
   /** Already dispatched somewhere else than the target this call names. */
@@ -258,6 +260,47 @@ export function claudeDispatchEligibility(
         `Task ${taskId} is ${task.status}, not queued for execution. Dispatch happens only for work ` +
         'the canonical control plane has already cleared to run.',
       details: { status: task.status },
+    };
+  }
+
+  // Two executors for one task is the hazard this refuses (issue #224, Codex
+  // P1 on `172026f`).
+  //
+  // Publishing the issue hands the instruction to the GitHub workflow, but it
+  // does NOT claim the canonical task: it stays `queued` with its approval
+  // nonce unconsumed. So if a worker declared as CLAUDE is also polling this
+  // capability, `OperatorQueue.claim` can hand it the same task, and the work
+  // runs twice — once inside the Operator with a fence and a consumed approval,
+  // once on GitHub bound to neither.
+  //
+  // This lane's whole premise is that CLAUDE's only real executor is that
+  // workflow, so in the intended configuration no such worker exists and this
+  // never fires. Where one DOES exist, the configuration is ambiguous about who
+  // executes CLAUDE work, and the safe answer is to refuse loudly rather than
+  // publish into a race.
+  //
+  // Deliberately narrow: it removes a dispatch, never adds one, and it invents
+  // no worker identity and no new status. It does NOT fully close the finding —
+  // binding an external execution to a queue fence and a consumed approval is a
+  // design question about how non-worker executors join the Operator model, and
+  // that is raised on the PR rather than decided here.
+  const claudeWorkers = ops.queue.workerProviders
+    .list()
+    .filter((record) => record.providerId === DISPATCH_PROVIDER)
+    .map((record) => record.workerId);
+  if (claudeWorkers.length > 0) {
+    return {
+      eligible: false,
+      code: 'queue_worker_conflict',
+      message:
+        `Task ${taskId} is bound to ${DISPATCH_PROVIDER}, and ${claudeWorkers.length} worker(s) ` +
+        `declared as ${DISPATCH_PROVIDER} can claim it from the queue ` +
+        `(${claudeWorkers.join(', ')}). Publishing it to the GitHub workflow would leave the task ` +
+        'still claimable, so the same approved action could execute twice — once through the ' +
+        'Operator with a fence and a consumed approval, once on GitHub bound to neither. Nothing ' +
+        'was published. Decide which lane executes CLAUDE work: revoke the worker declaration to ' +
+        'use this transport, or let that worker run the task and do not dispatch.',
+      details: { workers: claudeWorkers },
     };
   }
 
@@ -888,35 +931,82 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
  * records a failure (so a fresh dispatch is a first dispatch). There is no
  * "assume it worked" and no "assume it didn't".
  */
+/**
+ * Run one reconciliation's terminal write under the SAME serialization dispatch
+ * uses (issue #224, Codex P1 on `172026f`).
+ *
+ * The defect this closes: the unknown-state check and the terminal append were
+ * two separate steps, so two operators reconciling the same attempt could both
+ * pass the check. A `not_dispatched` resolution then appended `failed`, which
+ * licenses a fresh dispatch to reserve and publish a SECOND issue, while the
+ * concurrent `found` resolution recorded the original issue as succeeded — one
+ * task, two published issues, and contradictory terminal evidence in an
+ * append-only log that cannot be edited to sort it out afterwards.
+ *
+ * `EvidenceLog.reserve` is the same IMMEDIATE write transaction the dispatch
+ * reservation takes, so the second caller blocks at BEGIN and then sees the
+ * state the first one left. Re-reading the history INSIDE the transaction is
+ * what makes that matter: without it the second caller would still be acting on
+ * the answer it read before waiting.
+ *
+ * Returns a refusal when this caller lost the race, or null when it won and the
+ * write is committed.
+ */
+function claimReconciliation(
+  ops: HeadquarterOperations,
+  taskId: string,
+  write: () => void,
+): DispatchResult | null {
+  return ops.queue.evidence.reserve<DispatchResult | null>(() => {
+    const current = dispatchHistory(ops, taskId);
+    if (current.state !== 'unknown') {
+      return refuse(
+        'task_not_eligible',
+        `Task ${taskId} has no unresolved dispatch attempt (${current.state}); there is nothing ` +
+          'to reconcile. Another reconciliation resolved it first — exactly one may win, so this ' +
+          'one wrote nothing rather than adding a second, contradictory terminal record.',
+        { state: current.state },
+      );
+    }
+    write();
+    return null;
+  });
+}
+
 export function resolveUnknownDispatch(
   ops: HeadquarterOperations,
   input:
     | { taskId: string; outcome: 'found'; target: GitHubTarget; issueNumber: number; issueUrl: string; resolvedBy: string; note?: string }
     | { taskId: string; outcome: 'not_dispatched'; resolvedBy: string; note?: string },
 ): DispatchResult {
-  const history = dispatchHistory(ops, input.taskId);
-  if (history.state !== 'unknown') {
+  // Read-only pre-checks first. Nothing below writes until the reservation, so
+  // a refusal here cannot leave a half-resolved attempt behind.
+  const preview = dispatchHistory(ops, input.taskId);
+  if (preview.state !== 'unknown') {
     return refuse(
       'task_not_eligible',
-      `Task ${input.taskId} has no unresolved dispatch attempt (${history.state}); there is nothing to reconcile.`,
-      { state: history.state },
+      `Task ${input.taskId} has no unresolved dispatch attempt (${preview.state}); there is nothing to reconcile.`,
+      { state: preview.state },
     );
   }
   if (!input.resolvedBy?.trim()) {
     return refuse('task_not_eligible', 'A dispatch reconciliation must record who decided it.');
   }
   if (input.outcome === 'not_dispatched') {
-    ops.queue.evidence.append({
-      taskId: input.taskId,
-      actor: DISPATCH_ACTOR,
-      kind: CLAUDE_DISPATCH_EVIDENCE.failed,
-      payload: {
-        provider: DISPATCH_PROVIDER,
-        kind: 'reconciled_not_dispatched',
-        resolvedBy: input.resolvedBy,
-        message: input.note ?? 'Reconciled: no issue was created for this attempt.',
-      },
+    const claimed = claimReconciliation(ops, input.taskId, () => {
+      ops.queue.evidence.append({
+        taskId: input.taskId,
+        actor: DISPATCH_ACTOR,
+        kind: CLAUDE_DISPATCH_EVIDENCE.failed,
+        payload: {
+          provider: DISPATCH_PROVIDER,
+          kind: 'reconciled_not_dispatched',
+          resolvedBy: input.resolvedBy,
+          message: input.note ?? 'Reconciled: no issue was created for this attempt.',
+        },
+      });
     });
+    if (claimed) return claimed;
     return refuse(
       'transport_failed',
       `Task ${input.taskId}: the uncertain attempt was reconciled as NOT dispatched. A fresh ` +
@@ -975,20 +1065,23 @@ export function resolveUnknownDispatch(
   // From here on the PARSED url is the one recorded and returned.
   const issueUrl = parsed.url;
   const at = new Date().toISOString();
-  ops.queue.evidence.append({
-    taskId: input.taskId,
-    actor: DISPATCH_ACTOR,
-    kind: CLAUDE_DISPATCH_EVIDENCE.succeeded,
-    payload: {
-      provider: DISPATCH_PROVIDER,
-      repository: targetSlug(input.target),
-      transport: 'reconciled',
-      issueNumber: input.issueNumber,
-      issueUrl,
-      resolvedBy: input.resolvedBy,
-      dispatchedAt: at,
-    },
+  const claimed = claimReconciliation(ops, input.taskId, () => {
+    ops.queue.evidence.append({
+      taskId: input.taskId,
+      actor: DISPATCH_ACTOR,
+      kind: CLAUDE_DISPATCH_EVIDENCE.succeeded,
+      payload: {
+        provider: DISPATCH_PROVIDER,
+        repository: targetSlug(input.target),
+        transport: 'reconciled',
+        issueNumber: input.issueNumber,
+        issueUrl,
+        resolvedBy: input.resolvedBy,
+        dispatchedAt: at,
+      },
+    });
   });
+  if (claimed) return claimed;
   return {
     ok: true,
     data: {
