@@ -83,6 +83,20 @@ export function qualifiedTargetSlug(target: GitHubTarget): string {
   return `${DISPATCH_HOST}/${targetSlug(target)}`;
 }
 
+/**
+ * Do two `owner/repo` slugs name the SAME repository (issue #221, Codex P2 on
+ * `1d78038`)?
+ *
+ * GitHub repository identity is case-insensitive, and the CLI accepts either
+ * spelling, so a byte comparison would read `owner/JENIFY-OS` and
+ * `owner/jenify-os` as two different publication targets — turning a genuine
+ * repeat of the same dispatch into a refusal. Identity is compared here;
+ * DISPLAY always uses the recorded spelling.
+ */
+export function sameRepository(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
 export function isValidTarget(target: GitHubTarget | null | undefined): boolean {
   if (target == null) return false;
   return (
@@ -223,6 +237,68 @@ export function parseIssueUrl(output: string, target: GitHubTarget): { url: stri
   const number = Number(match[1]);
   if (!Number.isInteger(number) || number <= 0) return null;
   return { url: match[0], number };
+}
+
+/**
+ * Signatures that PROVE the issue was never created (issue #221, Codex P1 on
+ * `1d78038`).
+ *
+ * The previous rule was the wrong way round: anything that was not an auth
+ * message was called `rejected`, which is a TERMINAL answer — dispatch records a
+ * failure and a retry becomes legitimate. But an exit code cannot tell "GitHub
+ * refused this request" from "GitHub accepted it and the connection died before
+ * `gh` could print the URL". In the second case the issue exists, and a licensed
+ * retry publishes a duplicate.
+ *
+ * So the burden of proof is inverted. A failure is retryable only when the text
+ * shows the request was rejected or never submitted — an unresolvable
+ * repository, a 4xx from the API, a missing session, a malformed invocation.
+ * Everything else, a bare network error above all, is `unreadable_response`:
+ * outcome unknown, attempt left open, reconciled by a human. The cost is an
+ * occasional manual reconciliation; the cost of the other default is a duplicate
+ * public issue nobody can withdraw.
+ *
+ * Deliberately NOT on this list: label errors. Whether `gh` validates a label
+ * before or after creating the issue is a version-dependent implementation
+ * detail, and an assumption that would be wrong in one direction only — the
+ * expensive one.
+ */
+const PROVEN_NOT_SUBMITTED: readonly RegExp[] = [
+  /could not resolve to (a|an) [a-z]+/i,
+  /\bHTTP 4(00|01|03|04|10|22)\b/,
+  /\bnot found\b/i,
+  /unknown (flag|shorthand flag|command)/i,
+  /accepts \d+ arg|requires at least/i,
+];
+
+const PROVEN_UNAUTHENTICATED: readonly RegExp[] = [
+  /must be authenticated/i,
+  /not logged in|gh auth login/i,
+  /authentication (failed|token)/i,
+  /bad credentials/i,
+];
+
+/**
+ * Classify a non-zero `gh` exit that printed no issue URL. Exported so the
+ * fail-closed default is a tested property rather than a claim.
+ */
+export function classifyExitFailure(
+  status: number | null,
+  detail: string,
+): { kind: IssueFailureKind; message: string } {
+  const prefix = `The GitHub CLI exited ${status}.`;
+  if (PROVEN_UNAUTHENTICATED.some((pattern) => pattern.test(detail))) {
+    return { kind: 'unauthenticated', message: `${prefix} ${detail}` };
+  }
+  if (PROVEN_NOT_SUBMITTED.some((pattern) => pattern.test(detail))) {
+    return { kind: 'rejected', message: `${prefix} ${detail}` };
+  }
+  return {
+    kind: 'unreadable_response',
+    message:
+      `${prefix} Nothing in that failure proves the request never reached GitHub — an issue may ` +
+      `have been created before the command failed — so the outcome is UNKNOWN. ${detail}`,
+  };
 }
 
 export interface GhCliTransportOptions {
@@ -398,8 +474,7 @@ export function ghCliTransport(options: GhCliTransportOptions = {}): GitHubIssue
                 `repository (${parsed.url}). The outcome is UNKNOWN. ${detail}`,
             };
           }
-          const kind: IssueFailureKind = /auth|login|credential/i.test(detail) ? 'unauthenticated' : 'rejected';
-          return { ok: false, kind, message: `The GitHub CLI exited ${result.status}. ${detail}` };
+          return { ok: false, ...classifyExitFailure(result.status, detail) };
         }
         if (parsed == null) {
           return {

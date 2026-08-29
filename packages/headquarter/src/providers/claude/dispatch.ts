@@ -82,6 +82,7 @@ import { assertBrowserSafe } from '../../live/redaction.js';
 import { isRole, type ProviderId, type Role } from '../../routing/providers.js';
 import {
   isValidTarget,
+  sameRepository,
   targetSlug,
   type GitHubIssueTransport,
   type GitHubTarget,
@@ -516,7 +517,10 @@ function answerAlreadyDispatched(
   refuseWith: (code: DispatchRefusalCode, message: string, details?: Record<string, unknown>) => DispatchResult,
 ): DispatchResult {
   const requestedSlug = targetSlug(requested);
-  if (history.repository !== requestedSlug) {
+  // Identity, not spelling: GitHub repository names are case-insensitive and the
+  // CLI accepts either, so a byte comparison would turn a genuine repeat into a
+  // refusal (Codex P2 on `1d78038`).
+  if (!sameRepository(history.repository, requestedSlug)) {
     return refuseWith(
       'target_mismatch',
       `Task ${taskId} was already dispatched to ${history.repository} (issue #${history.issueNumber}), ` +
@@ -525,14 +529,15 @@ function answerAlreadyDispatched(
       { dispatchedTo: history.repository, requested: requestedSlug, issueNumber: history.issueNumber },
     );
   }
+  const [recordedOwner, recordedRepo] = history.repository.split('/');
   return {
     ok: true,
     data: {
       taskId,
       provider: DISPATCH_PROVIDER,
       // The RECORDED target, so the receipt cannot disagree with the issue it
-      // points at.
-      target: requested,
+      // points at — including its spelling.
+      target: { owner: recordedOwner ?? requested.owner, repo: recordedRepo ?? requested.repo },
       issueNumber: history.issueNumber,
       issueUrl: history.issueUrl,
       deduplicated: true,
@@ -689,11 +694,26 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
   // could not be recorded is a guard that does not exist, and the cost of
   // stopping is a retry while the cost of continuing is a duplicate public
   // issue that cannot be withdrawn.
-  let reserved: DispatchHistory;
+  //
+  // Eligibility is re-asked HERE as well, not only at the top (Codex P1 on
+  // `1d78038`). The first check happens before `transport.status()`, which makes
+  // a live call and may take up to a minute; in that window a time-boxed
+  // approval can expire, the kill switch can be engaged, the capability can be
+  // disabled, or another worker can claim the task. Publishing on the strength
+  // of a minute-old answer would put out work that is no longer authorised. The
+  // re-check runs inside the same transaction as the reservation, so nothing can
+  // change between "still eligible" and "claimed".
+  type Reservation =
+    | { kind: 'reserved' }
+    | { kind: 'history'; history: DispatchHistory }
+    | { kind: 'ineligible'; verdict: Extract<EligibilityVerdict, { eligible: false }> };
+  let reserved: Reservation;
   try {
-    reserved = ops.queue.evidence.reserve<DispatchHistory>(() => {
+    reserved = ops.queue.evidence.reserve<Reservation>(() => {
       const current = dispatchHistory(ops, taskId);
-      if (current.state !== 'none') return current;
+      if (current.state !== 'none') return { kind: 'history', history: current };
+      const recheck = claudeDispatchEligibility(ops, taskId, now());
+      if (!recheck.eligible) return { kind: 'ineligible', verdict: recheck };
       ops.queue.evidence.append({
         taskId,
         actor: DISPATCH_ACTOR,
@@ -707,7 +727,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
           dispatchedAt,
         },
       });
-      return { state: 'none' };
+      return { kind: 'reserved' };
     });
   } catch (error) {
     return refuseAndRecordBestEffort(
@@ -717,17 +737,27 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
         'second run from opening a duplicate issue; without it the guard does not exist.',
     );
   }
+  // The task stopped being eligible while the transport was being checked.
+  if (reserved.kind === 'ineligible') {
+    return refuseAndRecordBestEffort(
+      reserved.verdict.code,
+      `${reserved.verdict.message} (Re-checked immediately before publication: the task was ` +
+        'eligible when this dispatch started and is not any more, so nothing was published.)',
+      reserved.verdict.details,
+    );
+  }
   // Another process won the race between the fast-path check and the
   // reservation, or resolved an attempt in between. Its answer is authoritative.
-  if (reserved.state === 'dispatched') {
-    return answerAlreadyDispatched(taskId, options.target, reserved, refuseAndRecordBestEffort);
+  if (reserved.kind === 'history' && reserved.history.state === 'dispatched') {
+    return answerAlreadyDispatched(taskId, options.target, reserved.history, refuseAndRecordBestEffort);
   }
-  if (reserved.state === 'unknown') {
+  if (reserved.kind === 'history' && reserved.history.state === 'unknown') {
+    const at = reserved.history.at;
     return refuseAndRecordBestEffort(
       'dispatch_outcome_unknown',
-      `A dispatch of task ${taskId} was attempted at ${reserved.at} and its outcome was never ` +
-        'recorded, so HQ does not know whether a GitHub issue exists. Nothing was published.',
-      { attemptedAt: reserved.at },
+      `A dispatch of task ${taskId} was attempted at ${at} and its outcome was never recorded, ` +
+        'so HQ does not know whether a GitHub issue exists. Nothing was published.',
+      { attemptedAt: at },
     );
   }
 
@@ -981,7 +1011,8 @@ export function correlateClaudeResult(
       (entry) =>
         entry.kind === CLAUDE_DISPATCH_EVIDENCE.succeeded &&
         entry.payload['issueNumber'] === input.issueNumber &&
-        entry.payload['repository'] === repository,
+        typeof entry.payload['repository'] === 'string' &&
+        sameRepository(entry.payload['repository'], repository),
     );
   if (!match?.taskId) {
     return {
@@ -1021,7 +1052,7 @@ export function correlateClaudeResult(
         },
       };
     }
-    if (correlation.repository != null && correlation.repository !== repository) {
+    if (correlation.repository != null && !sameRepository(correlation.repository, repository)) {
       return {
         ok: false,
         error: {

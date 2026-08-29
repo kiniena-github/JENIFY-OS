@@ -35,6 +35,7 @@ import {
 } from '../src/providers/claude/dispatch.js';
 import {
   DISPATCH_HOST,
+  classifyExitFailure,
   ghCliTransport,
   parseAuthAccount,
   parseIssueUrl,
@@ -352,6 +353,24 @@ describe('dispatch is idempotent, and an uncertain outcome is never blindly retr
     expect(second.calls).toHaveLength(0);
   });
 
+  it('compares repository identity case-insensitively, as GitHub does', () => {
+    // `JENIFY-OS` and `jenify-os` are the same repository; the CLI accepts both.
+    // A byte comparison would turn a genuine repeat into a target_mismatch.
+    const fixture = orderFixture();
+    const taskId = placeOrder(fixture);
+    const transport = stubTransport({});
+    const first = expectOk(dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport }));
+
+    const otherCasing = { owner: TARGET.owner.toUpperCase(), repo: TARGET.repo.toLowerCase() };
+    const again = expectOk(dispatchClaudeTask(fixture.ops, { taskId, target: otherCasing, transport }));
+    expect(again.deduplicated).toBe(true);
+    expect(again.issueUrl).toBe(first.issueUrl);
+    // The receipt carries the RECORDED spelling, so it cannot disagree with the
+    // issue it points at.
+    expect(targetSlug(again.target)).toBe(`${TARGET.owner}/${TARGET.repo}`);
+    expect(transport.calls).toHaveLength(1);
+  });
+
   it('answers a repeat for the SAME repository with the recorded issue', () => {
     const fixture = orderFixture();
     const taskId = placeOrder(fixture);
@@ -498,6 +517,55 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
     expect(second.calls).toHaveLength(0);
   });
 
+  it('re-checks eligibility immediately before publishing, not only at the start', () => {
+    // `transport.status()` makes a live call and can take a minute. In that
+    // window an approval can expire or the kill switch can be engaged, and
+    // publishing on a minute-old answer would put out unauthorised work.
+    const fixture = orderFixture();
+    const taskId = placeOrder(fixture);
+    const inner = stubTransport({});
+    const slowTransport: GitHubIssueTransport & { calls: GitHubIssueRequest[] } = {
+      ...inner,
+      status: () => {
+        // Whatever happens during the live check: here, containment.
+        expectOk(fixture.ops.engageKillSwitch(DIRECT_ORDER_CAPABILITY.id, 'coo', 'engaged mid-dispatch'));
+        return inner.status();
+      },
+    };
+
+    const result = dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport: slowTransport });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('kill_switch_engaged');
+    expect(result.error.message).toContain('immediately before publication');
+    expect(inner.calls).toHaveLength(0);
+    // And no attempt was reserved, so a later legitimate dispatch is a first one.
+    expect(dispatchHistory(fixture.ops, taskId).state).toBe('none');
+  });
+
+  it('also catches an approval that expires during the transport check', () => {
+    const fixture = orderFixture();
+    const taskId = placeOrder(fixture);
+    const inner = stubTransport({});
+    const slowTransport: GitHubIssueTransport & { calls: GitHubIssueRequest[] } = {
+      ...inner,
+      status: () => {
+        // The Founder approval is time-boxed; expire it mid-flight.
+        fixture.db
+          .prepare(`UPDATE hq_approvals SET expires_at = ? WHERE task_id = ?`)
+          .run('2020-01-01T00:00:00.000Z', taskId);
+        return inner.status();
+      },
+    };
+
+    const result = dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport: slowTransport });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('approval_invalid');
+    expect(result.error.details?.rejection).toBe('approval_expired');
+    expect(inner.calls).toHaveLength(0);
+  });
+
   it('treats a create that was started and then killed as outcome-unknown', () => {
     // `spawnSync` reports ETIMEDOUT after the process ran, so the issue may
     // already exist. Calling that a failure is what licenses a duplicate.
@@ -528,6 +596,25 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.kind).toBe('unavailable');
+  });
+
+  it('keeps an ambiguous non-zero exit outcome-unknown rather than retryable', () => {
+    // GitHub may have accepted the creation and the connection died before `gh`
+    // printed the URL. Nothing in that text proves the request never landed.
+    expect(classifyExitFailure(1, 'Post "https://api.github.com/...": EOF').kind).toBe('unreadable_response');
+    expect(classifyExitFailure(1, 'error connecting to api.github.com: connection reset by peer').kind).toBe(
+      'unreadable_response',
+    );
+    expect(classifyExitFailure(null, '').kind).toBe('unreadable_response');
+  });
+
+  it('calls a failure retryable only when the text proves nothing was created', () => {
+    expect(classifyExitFailure(1, 'GraphQL: Could not resolve to a Repository with the name').kind).toBe('rejected');
+    expect(classifyExitFailure(1, 'HTTP 404: Not Found').kind).toBe('rejected');
+    expect(classifyExitFailure(1, 'HTTP 422: Validation Failed').kind).toBe('rejected');
+    expect(classifyExitFailure(1, 'unknown flag: --nope').kind).toBe('rejected');
+    expect(classifyExitFailure(1, 'You must be authenticated to use this command').kind).toBe('unauthenticated');
+    expect(classifyExitFailure(1, 'gh auth login required').kind).toBe('unauthenticated');
   });
 
   it('treats a non-zero exit that still printed an issue URL as unknown', () => {
