@@ -728,7 +728,18 @@ export function verifiedProbe(
         // `reason`; what it is not is verification.
         lastVerifiedAt: verified ? now : null,
         evidenceSource: `verifier ${descriptor.id}`,
-        reason: `${descriptor.displayName}: ${result.outcome} — ${result.detail}`,
+        // `result.detail` is VERIFIER-AUTHORED free text and this row is
+        // published — serialised into the snapshot and rendered on the
+        // Connections page. `assertBrowserSafe` recognises credential SHAPES
+        // and `key: value` syntax; an opaque session secret matches neither, so
+        // forwarding the adapter's text published it (issue #200, Codex
+        // exact-head finding on `6dde073`). Same defect as the round-25 and
+        // round-29 diagnostics, in the one place that still echoed an adapter.
+        //
+        // `outcome` is a closed vocabulary this module defines and normalises,
+        // so it is safe to render; the free text is not, and is dropped rather
+        // than bounded — a bound on length does not make a secret safe.
+        reason: `${descriptor.displayName}: ${result.outcome}`,
       };
     },
   };

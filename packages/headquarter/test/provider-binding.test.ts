@@ -1454,3 +1454,74 @@ describe('HOSTILE: enforcement never dispatches through an exported prototype', 
     expect(claimed.id).toBe(taskId);
   });
 });
+
+/**
+ * Codex exact-head finding on `6dde073`.
+ *
+ * The replacement for the exported principal-registry prototype still called
+ * `db.prepare(...)` at enforcement time, and `.get(...)` on what it returned.
+ * Both resolve on mutable THIRD-PARTY prototypes (`Database.prototype`,
+ * `Statement.prototype`), so a same-realm caller could intercept only the
+ * principals query, return a forged approval-authority row, and pass every
+ * other statement through to the original.
+ *
+ * Statements are prepared and their `get` bound at construction now, so the
+ * enforcement call path has no prototype lookup at all.
+ *
+ * NOTE ON WHAT THIS DOES NOT PROVE. This test patches AFTER construction,
+ * because that is the window the fix closes. An attacker executing BEFORE the
+ * operations object is built — a plugin imported earlier — still wins, and no
+ * in-process measure changes that. The honest boundary is a separate process or
+ * realm. This asserts the narrowing, not a guarantee.
+ */
+describe('HOSTILE: enforcement does not dispatch through the sqlite prototypes', () => {
+  it('cannot forge approval authority by patching Database.prototype.prepare', () => {
+    const fx = bindingFixture();
+    const result = submitDirectOrder(
+      fx.ops,
+      { instruction: 'Approve me.', project: 'mesob', route: 'CLAUDE', requestedBy: 'founder' },
+      CLAUDE_ONLY,
+    );
+    if (!result.ok) throw new Error('expected an order');
+    const taskId = result.data.task.id;
+    const card = founderConsole(fx.ops).approvals.find((a) => a.taskId === taskId)!;
+
+    const proto = Object.getPrototypeOf(fx.db) as Record<string, unknown>;
+    const realPrepare = proto.prepare as (this: unknown, sql: string) => unknown;
+    proto.prepare = function patched(this: unknown, sql: string) {
+      // Intercept ONLY the principals lookup; everything else behaves normally,
+      // so the rest of the system keeps working while the gate is attacked.
+      if (sql.includes('hq_human_principals')) {
+        return {
+          get: () => ({
+            id: 'ghost-approver',
+            display_name: 'x',
+            originate_capabilities: '[]',
+            approval_authority: 1,
+            active: 1,
+          }),
+          all: () => [],
+          run: () => ({ changes: 0 }),
+        };
+      }
+      return realPrepare.call(this, sql);
+    };
+    try {
+      const forged = fx.ops.approveTask({
+        taskId,
+        founderId: 'ghost-approver',
+        expectedActionDigest: card.actionDigest,
+      });
+      expect(forged.ok).toBe(false);
+      expect(fx.ops.queue.get(taskId)!.status).toBe('needs_approval');
+    } finally {
+      proto.prepare = realPrepare;
+    }
+
+    // The restore worked: a legitimate approval still succeeds.
+    expectOk(
+      fx.ops.approveTask({ taskId, founderId: 'coo', expectedActionDigest: card.actionDigest }),
+    );
+    expect(fx.ops.queue.get(taskId)!.status).toBe('queued');
+  });
+});

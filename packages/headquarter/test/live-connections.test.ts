@@ -1153,3 +1153,41 @@ describe('every description is bounded, whatever branch produced it', () => {
     expect(status.reason.length).toBeLessThan(400);
   });
 });
+
+/**
+ * Codex exact-head finding on `6dde073`.
+ *
+ * `reason` interpolated the verifier's free-form `detail` verbatim, and this
+ * row is published — serialised into the snapshot and rendered on the
+ * Connections page. `assertBrowserSafe` recognises credential SHAPES and
+ * `key: value` syntax; an opaque session secret matches neither.
+ *
+ * This is the same defect as the round-25 and round-29 diagnostics, in the last
+ * place that still echoed adapter-authored text.
+ */
+describe('a verifier cannot publish its own text', () => {
+  it('does not copy verifier detail into the published reason', () => {
+    const descriptor = CONNECTION_CATALOG.find((entry) => entry.id === 'supabase')!;
+    const secret = 'ordinary-secret-value';
+    const verifier: ConnectionVerifier = {
+      id: 'supabase',
+      // A plausible verifier that echoes a provider response containing a
+      // session secret with no recognisable credential shape.
+      verify: () => ({ outcome: 'failed', detail: `upstream said ${secret}` }),
+    };
+    const env = Object.fromEntries(descriptor.requiredFacts.map((f) => [f, 'set']));
+    const [status] = assessConnections(env, {
+      now: NOW,
+      catalog: [descriptor],
+      probes: [verifiedProbe(descriptor, verifier)],
+    });
+
+    expect(status!.reason).not.toContain(secret);
+    expect(status!.reason).not.toContain('upstream said');
+    // The closed-vocabulary outcome is still reported, so the row stays useful.
+    expect(status!.reason).toContain('failed');
+    expect(status!.outcome).toBe('failed');
+    // And nothing else on the published row carries it either.
+    expect(JSON.stringify(status)).not.toContain(secret);
+  });
+});

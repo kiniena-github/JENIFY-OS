@@ -362,6 +362,22 @@ function freezePolicyContext(ctx: PolicyContext | undefined): PolicyContext {
   });
 }
 
+/**
+ * Prepare a statement once and return its `get` already bound.
+ *
+ * Enforcement then calls a closure directly: no `db.prepare` lookup on
+ * `Database.prototype` and no `.get` lookup on `Statement.prototype` at call
+ * time, both of which are mutable third-party prototypes a same-realm caller
+ * can replace.
+ *
+ * This is a narrowing, not a guarantee — see the note at the call site.
+ */
+function bindGet(db: HqDatabase, sql: string): (...params: unknown[]) => unknown {
+  const stmt = db.prepare(sql);
+  const get = stmt.get.bind(stmt) as (...params: unknown[]) => unknown;
+  return get;
+}
+
 export class HeadquarterOperations {
   readonly queue: OperatorQueue;
   /**
@@ -514,14 +530,31 @@ export class HeadquarterOperations {
     // standing pre-approval for an `external_side_effect` capability and skip
     // the Founder gate at enqueue, claim and start alike.
     this.#policyCtx = freezePolicyContext(options.policyCtx);
-    // Prototype-free by construction: `db.prepare` is the only dispatch, and
-    // the row mapping is inline rather than delegated to an exported class.
+    // Statements PREPARED and their `get` BOUND here, once, so the call path
+    // at enforcement time is a direct closure invocation with no property
+    // lookup on any prototype.
+    //
+    // My previous comment here read "prototype-free by construction: `db.prepare`
+    // is the only dispatch" — naming the remaining dispatch in the same sentence
+    // that called it prototype-free. `db.prepare` resolves on
+    // `Database.prototype` and the returned statement's `.get` on
+    // `Statement.prototype`, both mutable and both third-party. A same-realm
+    // caller could patch `prepare` to intercept just the principals query,
+    // return a forged approval-authority row, and delegate everything else to
+    // the original (issue #200, Codex exact-head finding on `6dde073`).
+    //
+    // LIMIT, stated rather than implied: this narrows the window, it does not
+    // close it. An attacker who executes BEFORE this constructor — a plugin
+    // imported earlier — can still patch what these lines capture. In a
+    // same-realm threat model there is no in-process fix for that; the boundary
+    // that actually holds is a separate process or realm. See the PR discussion.
+    const principalGet = bindGet(db, `SELECT * FROM hq_human_principals WHERE id = ?`);
+    const grantGet = bindGet(db, `SELECT allowed_capabilities FROM hq_specialists WHERE id = ?`);
+    const specialistGet = bindGet(db, `SELECT 1 FROM hq_specialists WHERE id = ?`);
     this.#principalOf = options.humanPrincipals
       ? (id: string) => this.#principals.get(id)
       : (id: string) => {
-          const row = db
-            .prepare(`SELECT * FROM hq_human_principals WHERE id = ?`)
-            .get(id) as Record<string, unknown> | undefined;
+          const row = principalGet(id) as Record<string, unknown> | undefined;
           if (!row) return null;
           return {
             id: row.id as string,
@@ -535,9 +568,7 @@ export class HeadquarterOperations {
       options.workers || options.memberRegistry
         ? (workerId: string) => this.#workers.allowedCapabilities(workerId)
         : (workerId: string) => {
-            const row = db
-              .prepare(`SELECT allowed_capabilities FROM hq_specialists WHERE id = ?`)
-              .get(workerId) as { allowed_capabilities: string } | undefined;
+            const row = grantGet(workerId) as { allowed_capabilities: string } | undefined;
             if (!row) return [];
             try {
               const parsed: unknown = JSON.parse(row.allowed_capabilities);
@@ -548,8 +579,7 @@ export class HeadquarterOperations {
           };
     this.#isRegisteredWorker = options.workers
       ? (workerId: string) => this.#workers.isRegistered(workerId)
-      : (workerId: string) =>
-          db.prepare(`SELECT 1 FROM hq_specialists WHERE id = ?`).get(workerId) !== undefined;
+      : (workerId: string) => specialistGet(workerId) !== undefined;
     this.directory = {
       listSpecialists: () => this.#store.listSpecialists(),
       latestStatusPerSubject: () => this.#store.latestStatusPerSubject(),
