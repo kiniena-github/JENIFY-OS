@@ -820,9 +820,10 @@ describe('an instruction containing JSON does not break the feedback leg', () =>
     expect(result.data.refusedAuthors).toEqual(['drive-by-commenter']);
     expect(correlations(fixture, taskId)).toHaveLength(0);
 
-    // And the task is still exactly where the dispatch left it.
+    // And the task is still exactly where the dispatch left it — `running`,
+    // because publication started an execution (issue #224).
     const task = fixture.ops.queue.get(taskId)!;
-    expect(task.status).toBe('assigned');
+    expect(task.status).toBe('running');
     expect(task.reviewState).toBe('none');
   });
 });

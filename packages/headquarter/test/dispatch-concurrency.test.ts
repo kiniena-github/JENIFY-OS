@@ -279,7 +279,15 @@ describe('the handoff claims the canonical task before publishing', () => {
     expect(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }).ok).toBe(true);
 
     const task = fixture.ops.queue.get(taskId)!;
-    expect(task.status).toBe('assigned');
+    // `running`, not `assigned` (issue #224, dispositioning the double-execution
+    // limitation). The claim alone left it `assigned`, and `sweepExpiredLeases`
+    // sends a side-effect task to `outcome_unknown` only from `running` — from
+    // `assigned` it RE-QUEUES. So an expired handoff lease landed the task in
+    // `queued` carrying a consumed approval: unclaimable, un-re-approvable, and
+    // reading as "waiting to run". Publication really has started an execution,
+    // so `start` says the true thing and the sweep then does what the docs
+    // already promised.
+    expect(task.status).toBe('running');
     expect(task.claimedBy).toBe(EXECUTOR);
     // The defect this closes: another worker could previously claim and execute
     // the same approved action while the workflow ran the published copy.
@@ -430,7 +438,7 @@ describe('the handoff claims the canonical task before publishing', () => {
       }).ok,
     ).toBe(true);
 
-    expect(fixture.ops.queue.get(second.data.task.id)!.status).toBe('assigned');
+    expect(fixture.ops.queue.get(second.data.task.id)!.status).toBe('running');
     // The older one is untouched.
     expect(fixture.ops.queue.get(first)!.status).toBe('queued');
     expect(fixture.ops.queue.get(first)!.claimedBy).toBeNull();

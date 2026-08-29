@@ -168,6 +168,18 @@ Two consequences worth knowing before operating it:
    heard back" state — which is exactly where a silent external execution
    belongs.
 
+   That is now true rather than merely intended (issue #224). Publication
+   **starts** the execution: the handoff calls the canonical `start` boundary
+   once the issue exists, so the task is `running`, not `assigned`. It matters
+   because `sweepExpiredLeases` sends a side-effect task to `outcome_unknown`
+   only from `running` — from `assigned` it RE-QUEUES. So an expired handoff
+   lease used to land the task in `queued`, which reads as *waiting to run*,
+   carrying an approval already consumed: unclaimable (no usable approval) and
+   un-re-approvable (`approveTask` refuses anything not `needs_approval`). A
+   silent dead end. No second execution was ever reachable — the consumed
+   approval refuses every ordering, and there are tests for each — but the state
+   was wrong and misleading, and now it is neither.
+
 The release itself is atomic and never silent: the fence check, the evidence
 append, the transition and the claim-field clear run in one transaction, so a
 failure mid-release leaves the claim wholly intact rather than half-removed —

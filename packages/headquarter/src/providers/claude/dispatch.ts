@@ -144,6 +144,18 @@ export interface DispatchReceipt {
   /** True when this call matched an existing dispatch rather than making one. */
   deduplicated: boolean;
   dispatchedAt: string;
+  /**
+   * Whether the canonical task was moved to `running` after publication
+   * (issue #224). Absent on a deduplicated receipt, which started nothing.
+   *
+   * False means the issue EXISTS and is recorded, but the task was left
+   * `assigned` — so an expiring lease re-queues it into a state nothing can
+   * claim or re-approve, rather than into `outcome_unknown`. Reported so that
+   * is visible rather than silent.
+   */
+  executionStarted?: boolean;
+  /** Why the start failed, when it did. */
+  startFailure?: string;
 }
 
 export type DispatchResult =
@@ -1086,6 +1098,17 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
       { attemptedAt: at },
     );
   }
+  if (reserved.kind !== 'reserved') {
+    // Unreachable: `reserve` returns `history` only for a state the two checks
+    // above both answer. Stated as a refusal rather than a cast, so a future
+    // history state cannot silently fall through into publication.
+    return refuseAndRecordBestEffort(
+      'dispatch_outcome_unknown',
+      `Task ${taskId}: the dispatch reservation returned a state this adapter does not handle. ` +
+        'Nothing was published.',
+    );
+  }
+  const claimedTask = reserved.claimed;
 
   // A transport that THROWS is an unknown outcome, not a clean failure.
   //
@@ -1197,6 +1220,43 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
     );
   }
 
+  // The published handoff has STARTED an execution (issue #224, dispositioning
+  // the double-execution limitation the coordinator asked not to accept by
+  // implication).
+  //
+  // The claim alone left the task `assigned`, and `assigned` is the wrong state
+  // for work that is now genuinely running on somebody else's machine — because
+  // of what `sweepExpiredLeases` does with it. Its rule sends a side-effect task
+  // to `outcome_unknown` only from `running`; from `assigned` it RE-QUEUES,
+  // clearing the claim. So a handoff whose 6-hour lease expired did not become
+  // the "handed out, never heard back" record this lane documents. It became a
+  // task sitting in `queued` — which reads as *waiting to run* — carrying an
+  // approval already consumed, so nothing could ever claim it and nothing could
+  // re-approve it (`approveTask` refuses a task that is not `needs_approval`).
+  // A silent dead end that looked like a queue entry.
+  //
+  // Verified empirically before changing anything, both the hazard and its
+  // absence: no second CLAUDE worker can execute the task in any of these
+  // orderings — the consumed single-use approval refuses them all — so this is
+  // not a double-execution hole. It is the STATE being wrong and misleading.
+  //
+  // `start` is the canonical "execution began" boundary and re-checks provider
+  // binding, approval decision, digest, claim binding and expiry against the
+  // fence this handoff holds. Calling it says the true thing, and the existing
+  // sweep rule then does exactly what the documentation already promised.
+  //
+  // Best-effort by contract, like the release: the issue exists and is
+  // recorded, so a failure here must not turn a recorded success into a
+  // refusal. It is reported instead of swallowed.
+  let executionStarted = true;
+  let startFailure = '';
+  try {
+    ops.queue.start(taskId, options.executorWorkerId, claimedTask.fence);
+  } catch (error) {
+    executionStarted = false;
+    startFailure = errorText(error);
+  }
+
   return {
     ok: true,
     data: {
@@ -1207,6 +1267,8 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
       issueUrl: created.issueUrl,
       deduplicated: false,
       dispatchedAt,
+      executionStarted,
+      ...(executionStarted ? {} : { startFailure }),
     },
   };
 }
