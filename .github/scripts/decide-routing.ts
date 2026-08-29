@@ -14,6 +14,8 @@
  *   ACTOR            login that caused this event
  *   ACTOR_TYPE       User | Bot
  *   COMMENT_BODY     body of the triggering comment (issue_comment only)
+ *   ISSUE_BODY       body of the issue itself, so an HQ-dispatched issue is
+ *                    recognised and cannot be re-triggered from here (#224)
  *   REPO_OWNER       repository owner login
  *   TARGET_PROVIDER  provider this workflow can execute (CLAUDE | GEMINI | '')
  *   DEDUPE_KEY       stable id for duplicate suppression
@@ -88,6 +90,7 @@ const decision = decideRouting({
   repositoryOwner: env('REPO_OWNER'),
   actorIsBot: env('ACTOR_TYPE') === 'Bot' || env('ACTOR').endsWith('[bot]'),
   commentBody: env('COMMENT_BODY'),
+  issueBody: env('ISSUE_BODY'),
   dedupeKey: env('DEDUPE_KEY') || undefined,
   secrets: secretsFromFlags(),
 });

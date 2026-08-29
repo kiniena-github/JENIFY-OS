@@ -79,7 +79,7 @@ import type { OperatorTask } from '../../operator/queue.js';
 import type { HeadquarterOperations } from '../../application/service.js';
 import { classifyCapability } from '../../application/classification.js';
 import { assertBrowserSafe } from '../../live/redaction.js';
-import { isRole, type ProviderId, type Role } from '../../routing/providers.js';
+import { HQ_DISPATCH_MARKER, isRole, type ProviderId, type Role } from '../../routing/providers.js';
 import {
   isValidTarget,
   parseIssueUrl,
@@ -304,7 +304,7 @@ export function claudeDispatchEligibility(
  * deliberately NOT any provider's `jenify-*-result` marker (which must never
  * appear on something that could wake a worker).
  */
-export const DISPATCH_MARKER = 'jenify-hq-dispatch';
+export const DISPATCH_MARKER = HQ_DISPATCH_MARKER;
 
 /** Roles this adapter will put in a title. Anything else is refused, not guessed. */
 export const DEFAULT_DISPATCH_ROLE: Role = 'BUILDER';

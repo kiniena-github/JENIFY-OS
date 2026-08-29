@@ -196,6 +196,45 @@ describe('no second CLAUDE identity can execute the same approved action', () =>
     expect(f.ops.queue.get(taskId)!.status).toBe('outcome_unknown');
   });
 
+  it('closes the full claim-then-reapprove chain Codex described', () => {
+    // The exploit as a sequence, because each step alone looks harmless and I
+    // got this wrong by probing one step in isolation: approving the re-queued
+    // task directly IS refused, which is what made it look safe.
+    //
+    // Before the fix, on the pre-`start` behaviour, this ran end to end:
+    //   1. publish the handoff            → task `assigned`, GitHub issue live
+    //   2. 6-hour lease expires, sweep    → RE-QUEUED to `queued`
+    //   3. any CLAUDE worker attempts a claim → refused, BUT
+    //      `rejectAtExecutionBoundary` moves the task to `needs_approval`
+    //   4. a Founder supplies a fresh approval → `queued`
+    //   5. a second worker claims (fence 2) and starts → `running`
+    // — a second execution of one Founder-approved action while the first may
+    // still be running on GitHub. Step 3 is the hinge: the failed claim is what
+    // unlocks re-approval.
+    const f = fixture();
+    declareWorker(f, EXECUTOR);
+    declareWorker(f, SECOND);
+    const taskId = approvedOrder(f);
+    dispatchedAndExpired(f, taskId);
+    f.ops.queue.sweepExpiredLeases();
+
+    // Step 3 cannot move it: `outcome_unknown` is not a claimable state and the
+    // execution boundary is never reached, so nothing re-opens approval.
+    expect(f.ops.claimNext(SECOND, DIRECT_ORDER_CAPABILITY.id).ok).toBe(false);
+    expect(f.ops.queue.get(taskId)!.status).toBe('outcome_unknown');
+
+    // Step 4 therefore refuses, and step 5 has nothing to claim.
+    expect(
+      f.ops.approveTask({
+        taskId,
+        founderId: 'chair',
+        expectedActionDigest: taskActionDigest(f.ops.queue.get(taskId)!),
+      }).ok,
+    ).toBe(false);
+    expect(f.ops.claimNext(SECOND, DIRECT_ORDER_CAPABILITY.id).ok).toBe(false);
+    expect(f.ops.queue.get(taskId)!.claimedBy).toBe(EXECUTOR);
+  });
+
   it('refuses to re-approve the timed-out task into a second execution', () => {
     // Re-approval is the one route that could make it claimable again, so it is
     // the one that has to refuse while the external execution may still be live.

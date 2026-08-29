@@ -1,5 +1,6 @@
 import {
   ALL_RESULT_MARKERS,
+  HQ_DISPATCH_MARKER,
   PROVIDERS,
   PROVIDER_REGISTRY,
   isProviderId,
@@ -157,6 +158,17 @@ export interface RoutingRequest {
   actorIsBot?: boolean;
   /** comment body, for trigger === 'issue_comment' */
   commentBody?: string;
+  /**
+   * The ISSUE body, when the caller can supply it (issue #224, Codex P1 on
+   * `2638796`).
+   *
+   * Read for one purpose only: to recognise an issue that HQ itself dispatched.
+   * Such an issue carries a canonical task behind it, and the authority to run
+   * that task lives in HQ's claim/approval/fence — not in this workflow. Absent,
+   * the rule below simply does not fire, so callers that cannot supply a body
+   * keep today's behaviour.
+   */
+  issueBody?: string;
   /** stable id used for duplicate suppression */
   dedupeKey?: string;
   secrets: SecretsEnv;
@@ -274,6 +286,38 @@ export function decideRouting(req: RoutingRequest): RoutingDecision {
   }
   if (req.trigger === 'issue_comment' && req.actorLogin !== req.repositoryOwner) {
     return { ...base, outcome: 'IGNORE', reason: 'Only the repository owner may re-trigger a task by comment.' };
+  }
+
+  // ---- 2b. an HQ-dispatched issue is not re-triggerable from here ---------
+  //
+  // Issue #224, Codex P1 on `2638796`. HQ's dispatch adapter publishes an
+  // ordinary `[AI TASK]` issue, so once it exists this workflow keeps accepting
+  // owner `jenify-run` comments and manual dispatches for it — forever. Every
+  // one of those would start work that never passed through the canonical
+  // boundary the whole lane exists to enforce: the claim, the single-use
+  // approval, the fence, the dispatch history. One Founder approval could
+  // authorise an unbounded number of sequential executions.
+  //
+  // Worse, a comment directive may name a provider, so `jenify-run: GEMINI` on
+  // a CLAUDE-BOUND canonical task is provider substitution arriving through the
+  // one door that does not check the binding — the exact thing this lane refuses
+  // everywhere else.
+  //
+  // So a RE-trigger of an HQ-dispatched issue is refused here. `opened` is
+  // untouched: that is the dispatch itself, and it is the only run HQ authorised.
+  // Re-running such a task is a canonical act — a fresh Founder approval and a
+  // fresh `hq:dispatch-claude` — never a comment.
+  const hqDispatched = typeof req.issueBody === 'string' && req.issueBody.includes(HQ_DISPATCH_MARKER);
+  if (hqDispatched && (req.trigger === 'issue_comment' || req.trigger === 'manual_dispatch')) {
+    return {
+      ...base,
+      outcome: 'IGNORE',
+      reason:
+        'This issue was dispatched by JENIFY HQ for a canonical task. Its execution authority is ' +
+        'the HQ claim, single-use approval and fence, which a comment or manual dispatch does not ' +
+        'pass through — so re-triggering it here is refused. Re-run it with a fresh Founder ' +
+        'approval and a fresh HQ dispatch.',
+    };
   }
 
   // ---- 3. comment triggers need an explicit directive --------------------

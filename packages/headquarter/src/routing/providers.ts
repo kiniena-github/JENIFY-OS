@@ -28,6 +28,17 @@
  * never enter routing: presence is all routing needs.
  */
 
+/**
+ * The marker JENIFY HQ stamps into an issue it dispatched for a canonical task
+ * (issue #224).
+ *
+ * It lives here, in the leaf module both the routing decision and the dispatch
+ * adapter already depend on, so there is ONE spelling of it. A second copy that
+ * drifted would silently stop the routing guard from recognising HQ's own
+ * issues, which is the failure that guard exists to prevent.
+ */
+export const HQ_DISPATCH_MARKER = 'jenify-hq-dispatch';
+
 export const PROVIDERS = [
   'CLAUDE',
   'GEMINI',
