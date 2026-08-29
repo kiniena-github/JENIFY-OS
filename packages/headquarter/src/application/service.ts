@@ -921,19 +921,33 @@ export class HeadquarterOperations {
     );
     if (principal) return principal;
     try {
-      const record = this.workerProviderRegistrar.declare(
-        input.workerId,
-        input.providerId,
-        input.founderId,
-      );
-      this.queue.evidence.append({
-        actor: input.founderId,
-        kind: 'worker_provider_declared',
-        payload: {
-          workerId: record.workerId,
-          providerId: record.providerId,
-          declaredAt: record.declaredAt,
-        },
+      // The mapping write and its evidence commit together or not at all
+      // (issue #224, Codex P1 on `9fd1f1c`). They used to be two statements: if
+      // the append failed — another process holding the SQLite write lock, a
+      // full disk — the provider mapping stayed CHANGED while this method
+      // caught the error and told the caller the declaration had failed. That
+      // is the worst shape for this particular write: an execution-authority
+      // change live in the database, with no record of who made it, and an
+      // operator who believes it did not happen.
+      //
+      // `reserve` is an IMMEDIATE write transaction, so a throwing append rolls
+      // the declaration back with it. The refusal the caller then sees is true.
+      const record = this.queue.evidence.reserve(() => {
+        const declared = this.workerProviderRegistrar.declare(
+          input.workerId,
+          input.providerId,
+          input.founderId,
+        );
+        this.queue.evidence.append({
+          actor: input.founderId,
+          kind: 'worker_provider_declared',
+          payload: {
+            workerId: declared.workerId,
+            providerId: declared.providerId,
+            declaredAt: declared.declaredAt,
+          },
+        });
+        return declared;
       });
       return ok(record);
     } catch (error) {

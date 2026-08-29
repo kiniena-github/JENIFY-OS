@@ -31,17 +31,29 @@ import { HeadquarterOperations } from '../application/service.js';
 import { liveSnapshotFromOperations } from '../live/snapshot.js';
 import { CONNECTION_CATALOG } from '../live/connections.js';
 import { SNAPSHOT_FILENAME } from '../ui/live-refresh.js';
-import { PROVIDER_REGISTRY, type ProviderId, type SecretsEnv } from '../routing/providers.js';
+import { PROVIDER_REGISTRY, type SecretsEnv } from '../routing/providers.js';
 import { probeCodex } from '../providers/codex/probe.js';
 import { connectionProbesWithGitHubDispatch } from '../providers/claude/connection.js';
 import { ghCliTransport } from '../providers/claude/transport.js';
+import { transportRouteAvailability } from '../providers/claude/dispatch-availability.js';
+import { missingFlagValueMessage, readFlag } from './flags.js';
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 function flag(name: string, fallback: string | null = null): string | null {
-  const argv = process.argv.slice(2);
-  const index = argv.indexOf(`--${name}`);
-  return index === -1 || index + 1 >= argv.length ? fallback : (argv[index + 1] ?? fallback);
+  // The same three-outcome rule the other local-admin CLIs use (issue #224,
+  // Codex P2 on `f9383dc`). Not flagged for this file, but it is the identical
+  // parser and the identical hazard: a trailing `--db` used to fall back to the
+  // DEFAULT database silently, so a mistyped path published a snapshot of a
+  // store nobody meant to read. Leaving one of three CLIs on the known-bad
+  // parser would be the same "wired one caller" mistake this round already
+  // corrected twice.
+  const reading = readFlag(process.argv.slice(2), name);
+  if (reading.kind === 'missing_value') {
+    console.error(missingFlagValueMessage(name));
+    process.exit(2);
+  }
+  return reading.kind === 'value' ? reading.value : fallback;
 }
 
 /** Observe fact PRESENCE only — the same convention routing already uses. */
@@ -94,23 +106,27 @@ const ops = new HeadquarterOperations(db);
 // build-time render keeps its honest configuration-only answer.
 const transport = ghCliTransport();
 
-// What CLAUDE dispatchability actually depends on HERE (issue #224, Codex P1).
+// What CLAUDE dispatchability actually depends on HERE (issue #224).
 //
 // `CLAUDE_ROUTINE_*` are GitHub Actions secrets the workflow needs; they are
 // deliberately absent on the Founder workstation, where dispatch happens
-// through the authenticated `gh` transport instead. Deriving the live verdict
-// from their absence would report a successfully dispatched order as blocked
-// forever, in exactly the environment this lane is built for. So CLAUDE is
-// answered from the transport that would really carry it, and every other
-// provider returns null — "this host does not know" — leaving the routing
-// contract to answer as before.
-const dispatchAvailability = (provider: ProviderId): boolean | null => {
-  if (provider !== 'CLAUDE') return null;
-  const status = transport.status();
-  // Only an observed, authenticated session is an answer. Anything weaker is
-  // not evidence of dispatchability, so it defers rather than claiming false.
-  return status.available && status.authenticated ? true : null;
-};
+// through the authenticated `gh` transport instead. Deriving the verdict from
+// their absence would report a successfully dispatched order as blocked
+// forever, in exactly the environment this lane is built for.
+//
+// The shared, reviewed derivation — the same one the server host uses
+// (issue #224, Codex P2 on `9fd1f1c`). The inline version this replaces
+// collapsed every negative to null, including a LIVE one: `gh auth status`
+// calls the API, so a non-zero exit means the session is missing, expired or
+// revoked. Discarding that let `directOrderDispatchBlocked` fall back to
+// environment inference, and a workstation that happens to carry
+// `CLAUDE_ROUTINE_*` then wrote a snapshot reporting CLAUDE orders as ready
+// while the only real transport would refuse them.
+//
+// Fixing the server host and leaving this one was the same mistake in
+// miniature that the earlier round already caught here: adding a shared seam
+// and wiring one caller is not wiring it.
+const dispatchAvailability = transportRouteAvailability(transport).providerDispatchable;
 
 const snapshot = liveSnapshotFromOperations(ops, {
   now: new Date().toISOString(),
