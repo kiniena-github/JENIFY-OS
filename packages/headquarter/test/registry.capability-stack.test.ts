@@ -6,10 +6,40 @@ import {
   capabilityMayAutoSelect,
   capabilityRequiresFounderSpendGate,
   getHqCapability,
+  getHqCapabilityProvenance,
   normalizeHqCapabilityKey,
   resolveHqCapabilityId,
   type HqCapabilityDescriptor,
 } from '../src/registry/capability-stack.js';
+
+/**
+ * Synthetic, otherwise auto-selectable compute_only entry. Malformed
+ * assessments are cast through `unknown` on purpose: the descriptor can be
+ * populated from untyped config, and the fail-closed rule must hold for
+ * shapes the type system would normally reject.
+ */
+function computeOnlyEntry(zeroComputeAssessment?: unknown): HqCapabilityDescriptor {
+  const entry = {
+    id: 'synthetic-local-model',
+    title: 'Synthetic Local Model',
+    kind: 'model',
+    priority: 'core',
+    domains: ['local_ai'],
+    purpose: 'Synthetic compute-only entry for spend-gate regression tests.',
+    cost: 'compute_only',
+    mode: 'local_model',
+    installRequired: true,
+    accountRequired: false,
+    ...(arguments.length > 0 ? { zeroComputeAssessment } : {}),
+  };
+  return entry as unknown as HqCapabilityDescriptor;
+}
+
+const COMPLETE_ASSESSMENT = {
+  zeroIncrementalCost: true,
+  basis: 'Runs on already-owned, already-powered local HQ hardware.',
+  recordedOn: '2026-08-29',
+} as const;
 
 describe('HQ approved capability catalog', () => {
   it('uses unique stable ids', () => {
@@ -92,157 +122,282 @@ describe('HQ approved capability catalog', () => {
   });
 });
 
-describe('compute_only Founder spend gate (hostile zeroComputeAssessment inputs)', () => {
-  // A compute_only entry that would otherwise auto-select (core priority,
-  // non-reference kind, no account, no review gate) — so the ONLY thing standing
-  // between it and auto-selection is the zero-compute assessment. Hostile inputs
-  // are cast through `as unknown as` on purpose: they model untyped/config-sourced
-  // records the compiler would otherwise reject, which is exactly what the
-  // runtime gate must survive.
-  const computeOnly = (assessment?: unknown): HqCapabilityDescriptor =>
-    ({
-      id: 'hostile-local-model', title: 'Hostile Local Model', kind: 'model', priority: 'core',
-      domains: ['local_ai'], purpose: 'Hostile fixture: compute_only with a suspect assessment.',
-      cost: 'compute_only', mode: 'local_model', installRequired: true, accountRequired: false,
-      ...(assessment === undefined ? {} : { zeroComputeAssessment: assessment }),
-    }) as unknown as HqCapabilityDescriptor;
+describe('compute_only Founder spend gate (fail closed)', () => {
+  const hostileCases: readonly [label: string, entry: HqCapabilityDescriptor][] = [
+    ['no zeroComputeAssessment at all', computeOnlyEntry()],
+    ['zeroComputeAssessment: {}', computeOnlyEntry({})],
+    ['zeroComputeAssessment: null', computeOnlyEntry(null)],
+    ['zeroComputeAssessment: undefined value', computeOnlyEntry(undefined)],
+    [
+      'zeroIncrementalCost missing',
+      computeOnlyEntry({ basis: 'local hardware', recordedOn: '2026-08-29' }),
+    ],
+    [
+      'zeroIncrementalCost: false',
+      computeOnlyEntry({ ...COMPLETE_ASSESSMENT, zeroIncrementalCost: false }),
+    ],
+    [
+      "zeroIncrementalCost: the string 'true'",
+      computeOnlyEntry({ ...COMPLETE_ASSESSMENT, zeroIncrementalCost: 'true' }),
+    ],
+    [
+      'zeroIncrementalCost: 1',
+      computeOnlyEntry({ ...COMPLETE_ASSESSMENT, zeroIncrementalCost: 1 }),
+    ],
+    [
+      'zeroIncrementalCost: truthy object, not literal true',
+      computeOnlyEntry({ ...COMPLETE_ASSESSMENT, zeroIncrementalCost: { assessed: true } }),
+    ],
+    [
+      'basis missing',
+      computeOnlyEntry({ zeroIncrementalCost: true, recordedOn: '2026-08-29' }),
+    ],
+    ['basis: empty string', computeOnlyEntry({ ...COMPLETE_ASSESSMENT, basis: '' })],
+    ['basis: whitespace only', computeOnlyEntry({ ...COMPLETE_ASSESSMENT, basis: '   ' })],
+    [
+      'recordedOn missing',
+      computeOnlyEntry({ zeroIncrementalCost: true, basis: 'local hardware' }),
+    ],
+    ['recordedOn: empty string', computeOnlyEntry({ ...COMPLETE_ASSESSMENT, recordedOn: '' })],
+    [
+      'recordedOn: whitespace only',
+      computeOnlyEntry({ ...COMPLETE_ASSESSMENT, recordedOn: ' \t ' }),
+    ],
+  ];
 
-  const expectGated = (capability: HqCapabilityDescriptor, label: string) => {
-    expect(capabilityRequiresFounderSpendGate(capability), `${label} must stay spend-gated`).toBe(true);
-    expect(capabilityMayAutoSelect(capability), `${label} must not auto-select`).toBe(false);
-  };
-
-  it('stays gated with no assessment at all', () => {
-    expectGated(computeOnly(), 'missing assessment');
+  it.each(hostileCases)('stays gated and never auto-selects with %s', (_label, entry) => {
+    expect(capabilityRequiresFounderSpendGate(entry)).toBe(true);
+    expect(capabilityMayAutoSelect(entry)).toBe(false);
   });
 
-  it('stays gated with a completely empty assessment object', () => {
-    expectGated(computeOnly({}), 'empty assessment');
-  });
-
-  it('stays gated when zeroIncrementalCost is missing, false, or truthy-but-not-true', () => {
-    const rest = { basis: 'runs on already-owned HQ hardware', recordedOn: '2026-08-29' };
-    expectGated(computeOnly({ ...rest }), 'zeroIncrementalCost missing');
-    expectGated(computeOnly({ zeroIncrementalCost: false, ...rest }), 'zeroIncrementalCost false');
-    // Truthy values that are not literally `true` must not pass an `=== true` gate.
-    expectGated(computeOnly({ zeroIncrementalCost: 1, ...rest }), 'zeroIncrementalCost 1');
-    expectGated(computeOnly({ zeroIncrementalCost: 'true', ...rest }), "zeroIncrementalCost 'true'");
-  });
-
-  it('stays gated when basis is missing or blank', () => {
-    const rest = { zeroIncrementalCost: true, recordedOn: '2026-08-29' };
-    expectGated(computeOnly({ ...rest }), 'basis missing');
-    expectGated(computeOnly({ ...rest, basis: '' }), 'basis empty');
-    expectGated(computeOnly({ ...rest, basis: '   ' }), 'basis whitespace-only');
-  });
-
-  it('stays gated when recordedOn is missing or blank', () => {
-    const rest = { zeroIncrementalCost: true, basis: 'runs on already-owned HQ hardware' };
-    expectGated(computeOnly({ ...rest }), 'recordedOn missing');
-    expectGated(computeOnly({ ...rest, recordedOn: '' }), 'recordedOn empty');
-    expectGated(computeOnly({ ...rest, recordedOn: '   ' }), 'recordedOn whitespace-only');
-  });
-
-  it('positive control: a complete assessment lifts the spend gate only', () => {
-    const assessed = computeOnly({
-      zeroIncrementalCost: true,
-      basis: 'runs on already-owned, already-powered HQ hardware',
-      recordedOn: '2026-08-29',
-    });
+  it('releases the gate only for a genuinely complete assessment (positive control)', () => {
+    const assessed = computeOnlyEntry(COMPLETE_ASSESSMENT);
     expect(capabilityRequiresFounderSpendGate(assessed)).toBe(false);
-    // NOTE: passing the spend gate does NOT imply auto-select on its own —
-    // auto-select additionally requires core priority, a non-reference kind,
-    // no accountRequired and no reviewBeforeInstall. Same assessment plus an
-    // account gate still cannot auto-select:
-    const accountGated = { ...assessed, accountRequired: true } as HqCapabilityDescriptor;
-    expect(capabilityMayAutoSelect(accountGated)).toBe(false);
+    expect(capabilityMayAutoSelect(assessed)).toBe(true);
   });
 
-  it('gates every real compute_only catalog entry, since none carries an assessment', () => {
-    const computeOnlyEntries = HQ_CAPABILITY_STACK.filter((capability) => capability.cost === 'compute_only');
-    // Pin the current membership so a new compute_only entry re-triggers scrutiny here.
-    expect(computeOnlyEntries.map((capability) => capability.id).sort()).toEqual(['minimax-h3', 'qwen-3-8']);
-    for (const capability of computeOnlyEntries) {
-      expect('zeroComputeAssessment' in capability, capability.id).toBe(false);
-      expect(capabilityRequiresFounderSpendGate(capability), capability.id).toBe(true);
-      expect(capabilityMayAutoSelect(capability), capability.id).toBe(false);
-    }
+  it('does not let a complete assessment bypass the account or review gates', () => {
+    const accountGated = {
+      ...computeOnlyEntry(COMPLETE_ASSESSMENT),
+      accountRequired: true,
+    } as HqCapabilityDescriptor;
+    expect(capabilityRequiresFounderSpendGate(accountGated)).toBe(false);
+    expect(capabilityMayAutoSelect(accountGated)).toBe(false);
+
+    const reviewGated = {
+      ...computeOnlyEntry(COMPLETE_ASSESSMENT),
+      reviewBeforeInstall: true,
+    } as HqCapabilityDescriptor;
+    expect(capabilityRequiresFounderSpendGate(reviewGated)).toBe(false);
+    expect(capabilityMayAutoSelect(reviewGated)).toBe(false);
   });
 });
 
-describe('alias and display-form normalization', () => {
-  it('normalizes documented display forms to slug keys', () => {
+describe('capability provenance resolution (fail closed)', () => {
+  const base = (): HqCapabilityDescriptor => computeOnlyEntry();
+
+  it('resolves absent provenance to unreviewed with upstream from source', () => {
+    const withSource = {
+      ...base(),
+      source: 'https://example.invalid/upstream',
+    } as HqCapabilityDescriptor;
+    expect(getHqCapabilityProvenance(withSource)).toEqual({
+      upstream: 'https://example.invalid/upstream',
+      reviewedRef: 'unknown',
+      reviewStatus: 'unreviewed',
+    });
+  });
+
+  it("resolves absent provenance and absent source to 'unknown'", () => {
+    expect(getHqCapabilityProvenance(base())).toEqual({
+      upstream: 'unknown',
+      reviewedRef: 'unknown',
+      reviewStatus: 'unreviewed',
+    });
+  });
+
+  it("never reads 'reviewed' from a partial or blank review record", () => {
+    const partials: readonly unknown[] = [
+      { reviewStatus: 'reviewed' },
+      { reviewStatus: 'reviewed', reviewedRef: 'v1.2.3' },
+      { reviewStatus: 'reviewed', reviewedOn: '2026-08-29' },
+      { reviewStatus: 'reviewed', reviewedRef: '', reviewedOn: '2026-08-29' },
+      { reviewStatus: 'reviewed', reviewedRef: '   ', reviewedOn: '2026-08-29' },
+      { reviewStatus: 'reviewed', reviewedRef: 'v1.2.3', reviewedOn: '' },
+      { reviewStatus: 'reviewed', reviewedRef: 'v1.2.3', reviewedOn: '  ' },
+    ];
+    for (const provenance of partials) {
+      const entry = { ...base(), provenance } as unknown as HqCapabilityDescriptor;
+      const resolved = getHqCapabilityProvenance(entry);
+      expect(resolved.reviewStatus, JSON.stringify(provenance)).toBe('unreviewed');
+      expect(resolved.reviewedRef, JSON.stringify(provenance)).toBe('unknown');
+    }
+  });
+
+  it('prefers a recorded upstream over the source fallback', () => {
+    const entry = {
+      ...base(),
+      source: 'https://example.invalid/source',
+      provenance: { upstream: 'https://example.invalid/real-upstream', reviewStatus: 'unreviewed' },
+    } as HqCapabilityDescriptor;
+    expect(getHqCapabilityProvenance(entry).upstream).toBe('https://example.invalid/real-upstream');
+  });
+
+  it("reads 'reviewed' only from a genuinely complete record, trimming the ref", () => {
+    const entry = {
+      ...base(),
+      provenance: {
+        upstream: 'https://example.invalid/upstream',
+        reviewStatus: 'reviewed',
+        reviewedRef: '  v1.2.3  ',
+        reviewedOn: '2026-08-29',
+      },
+    } as HqCapabilityDescriptor;
+    expect(getHqCapabilityProvenance(entry)).toEqual({
+      upstream: 'https://example.invalid/upstream',
+      reviewedRef: 'v1.2.3',
+      reviewStatus: 'reviewed',
+    });
+  });
+
+  it('never presents provenance as install/connection evidence', () => {
+    const entry = {
+      ...base(),
+      provenance: {
+        reviewStatus: 'reviewed',
+        reviewedRef: 'v1.2.3',
+        reviewedOn: '2026-08-29',
+        connected: true,
+        enabled: true,
+      },
+    } as unknown as HqCapabilityDescriptor;
+    const resolved = getHqCapabilityProvenance(entry);
+    expect(Object.keys(resolved).sort()).toEqual(['reviewStatus', 'reviewedRef', 'upstream']);
+    expect('connected' in resolved).toBe(false);
+    expect('enabled' in resolved).toBe(false);
+    expect('installed' in resolved).toBe(false);
+  });
+});
+
+describe('display-form alias normalization', () => {
+  it('resolves documented display forms to the current catalog ids', () => {
+    expect(getHqCapability('Magic MCP')?.id).toBe('21st-mcp');
+    expect(resolveHqCapabilityId('Framer Motion')).toBe('motion');
+  });
+
+  it('resolves spacing, underscore and case variants', () => {
+    for (const variant of ['magic_mcp', '  MAGIC   MCP  ', 'Magic_MCP', 'MAGIC-MCP']) {
+      expect(resolveHqCapabilityId(variant), variant).toBe('21st-mcp');
+    }
+    for (const variant of ['framer_motion', 'FRAMER  MOTION', ' Framer_Motion ']) {
+      expect(resolveHqCapabilityId(variant), variant).toBe('motion');
+    }
+    expect(resolveHqCapabilityId('21st MCP')).toBe('21st-mcp');
+    expect(getHqCapability(' 21ST_MCP ')?.id).toBe('21st-mcp');
+  });
+});
+
+describe('research.deep recipe reachability', () => {
+  it('keeps the account-gated NotebookLM stage optional', () => {
+    const stages = HQ_CAPABILITY_RECIPES['research.deep'];
+    const notebookStages = stages.filter((stage) =>
+      stage.capabilityIds.includes('notebooklm-mcp'),
+    );
+    expect(notebookStages.length).toBeGreaterThan(0);
+    for (const stage of notebookStages) expect(stage.optional).toBe(true);
+  });
+
+  it('keeps an approved fallback reachable through a non-optional stage', () => {
+    const stages = HQ_CAPABILITY_RECIPES['research.deep'];
+    // At least one required stage must be usable through already-approved
+    // means: no Founder spend gate, no review-before-install, not
+    // experimental/community, and not the account-gated NotebookLM path.
+    const reachableFallbacks = stages.filter(
+      (stage) =>
+        stage.optional !== true &&
+        stage.capabilityIds.length > 0 &&
+        stage.capabilityIds.every((id) => {
+          const capability = getHqCapability(id);
+          return (
+            capability !== null &&
+            id !== 'notebooklm-mcp' &&
+            !capabilityRequiresFounderSpendGate(capability) &&
+            capability.reviewBeforeInstall !== true &&
+            capability.experimental !== true &&
+            capability.community !== true
+          );
+        }),
+    );
+    expect(reachableFallbacks.length).toBeGreaterThan(0);
+  });
+});
+
+// The blocks above pin the corrected behaviours themselves. These pin the
+// catalog's own integrity — the assumptions those blocks rest on, which would
+// otherwise drift silently as entries are added.
+
+describe('catalog integrity the corrections rest on', () => {
+  it('normalizes display forms to slug keys at the key layer, not just via lookup', () => {
+    // There is no other normalization layer, so this function IS the contract
+    // for documented display-form names.
     expect(normalizeHqCapabilityKey('Magic MCP')).toBe('magic-mcp');
-    expect(normalizeHqCapabilityKey('Framer Motion')).toBe('framer-motion');
     expect(normalizeHqCapabilityKey(' 21st MCP ')).toBe('21st-mcp');
     expect(normalizeHqCapabilityKey('framer_motion')).toBe('framer-motion');
-    expect(normalizeHqCapabilityKey('FRAMER-Motion')).toBe('framer-motion');
-    // Extra internal whitespace collapses to a single hyphen.
-    expect(normalizeHqCapabilityKey('Magic \t  MCP')).toBe('magic-mcp');
+    expect(normalizeHqCapabilityKey('FRAMER \t Motion')).toBe('framer-motion');
   });
 
-  it('resolves documented display/legacy forms to real catalog ids', () => {
-    expect(resolveHqCapabilityId('Magic MCP')).toBe('21st-mcp');
-    expect(resolveHqCapabilityId('Framer Motion')).toBe('motion');
-    expect(resolveHqCapabilityId(' 21st MCP ')).toBe('21st-mcp');
-    expect(resolveHqCapabilityId('framer_motion')).toBe('motion');
-    expect(resolveHqCapabilityId('CLAUDE CODE')).toBe('claude-code');
-  });
-
-  it('resolves unknown names to null instead of fabricating a capability', () => {
+  it('resolves an unknown name to null instead of fabricating a capability', () => {
+    // Fail-closed at the lookup boundary: a name HQ does not know must not
+    // resolve to a neighbouring entry or an empty descriptor.
     for (const unknown of ['Photoshop', 'totally-unknown-tool', '', '   ']) {
       expect(resolveHqCapabilityId(unknown), JSON.stringify(unknown)).toBeNull();
       expect(getHqCapability(unknown), JSON.stringify(unknown)).toBeNull();
     }
   });
 
-  it('keeps every alias pointed at a real catalog id', () => {
+  it('keeps every alias pointed at a real id, and never shadowing one', () => {
     const ids = new Set<string>(HQ_CAPABILITY_STACK.map((capability) => capability.id));
     for (const [alias, target] of Object.entries(HQ_CAPABILITY_ALIASES)) {
       expect(ids.has(target), `${alias} -> ${target}`).toBe(true);
-      // Aliases map away from stale names — an alias key must not shadow a real id.
+      // An alias maps AWAY from a stale name; if it also named a real entry the
+      // alias branch would silently win over the real one.
       expect(ids.has(alias), alias).toBe(false);
     }
   });
-});
 
-describe('recipe fallback reachability', () => {
-  it('keeps research.deep runnable without the community/experimental NotebookLM MCP', () => {
-    const stages = HQ_CAPABILITY_RECIPES['research.deep'];
-    const required = stages.filter((stage) => stage.optional !== true);
-    expect(required.length).toBeGreaterThan(0);
-    // NotebookLM may only ever appear in optional stages — the documented
-    // fallback (the ordinary approved research route) must be reachable
-    // through the catalog even when NotebookLM is unavailable.
-    for (const stage of stages) {
-      if (stage.capabilityIds.includes('notebooklm-mcp')) {
-        expect(stage.optional, stage.name).toBe(true);
-      }
-    }
-    for (const stage of required) {
-      expect(stage.capabilityIds).not.toContain('notebooklm-mcp');
+  it('pins which entries are compute_only, and that none yet carries an assessment', () => {
+    // A new compute_only entry must re-trigger scrutiny here rather than
+    // inheriting the gate silently.
+    const computeOnly = HQ_CAPABILITY_STACK.filter((capability) => capability.cost === 'compute_only');
+    expect(computeOnly.map((capability) => capability.id).sort()).toEqual(['minimax-h3', 'qwen-3-8']);
+    for (const capability of computeOnly) {
+      expect('zeroComputeAssessment' in capability, capability.id).toBe(false);
+      expect(capabilityRequiresFounderSpendGate(capability), capability.id).toBe(true);
     }
   });
 
-  it('never makes a required stage depend solely on a review-first/experimental/community-account capability', () => {
-    // "Gated" here means the capability is a normal state to be unavailable:
-    // review-before-install, experimental, or a community tool behind an
-    // account. (First-party account-gated core tools like claude-code are the
-    // routed workers themselves, not the fallback concern.) Every required
-    // stage containing such a capability must offer an ungated alternative in
-    // the same stage, so the recipe stays reachable without it.
+  it('never leaves any recipe depending solely on a normally-unavailable capability', () => {
+    // Generalizes the research.deep property to the whole catalog. "Gated"
+    // means it is a normal state to be unavailable: review-before-install,
+    // experimental, or a community tool behind an account. (First-party
+    // account-gated core tools like claude-code are the routed workers
+    // themselves, not the fallback concern.) Every required stage holding one
+    // must offer an ungated alternative in the same stage.
     const isGated = (capability: HqCapabilityDescriptor) =>
       capability.reviewBeforeInstall === true ||
       capability.experimental === true ||
-      (capability.community === true && capability.accountRequired);
+      (capability.community === true && capability.accountRequired === true);
+
     for (const [intent, stages] of Object.entries(HQ_CAPABILITY_RECIPES)) {
       for (const stage of stages) {
         if (stage.optional === true) continue;
-        const capabilities = stage.capabilityIds.map((id) => getHqCapability(id)!);
-        if (!capabilities.some(isGated)) continue;
+        const resolved = stage.capabilityIds
+          .map((id) => getHqCapability(id))
+          .filter((capability): capability is HqCapabilityDescriptor => capability !== null);
+        if (!resolved.some(isGated)) continue;
         expect(
-          capabilities.some((capability) => !isGated(capability)),
-          `${intent}/${stage.name} requires a gated capability with no ungated alternative`,
+          resolved.some((capability) => !isGated(capability)),
+          `${intent}/${stage.name} has no ungated alternative`,
         ).toBe(true);
       }
     }
