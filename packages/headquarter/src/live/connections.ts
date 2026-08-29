@@ -262,25 +262,22 @@ function describeUnrecognised(value: unknown): string {
  * the fail-closed path it was part of; reading no property of the thrown value
  * removes that too.
  */
-const BUILT_IN_ERRORS: readonly string[] = [
-  'Error',
-  'TypeError',
-  'RangeError',
-  'SyntaxError',
-  'ReferenceError',
-  'EvalError',
-  'URIError',
-];
-
 function describeThrown(error: unknown): string {
-  if (error instanceof Error) {
-    // `constructor.name` is adapter-controlled for a custom subclass, so it is
-    // used only to RECOGNISE a built-in, never rendered as free text.
-    const name = error.constructor?.name;
-    if (typeof name !== 'string' || !BUILT_IN_ERRORS.includes(name)) return 'an Error';
-    return /^[AEIOU]/.test(name) ? `an ${name}` : `a ${name}`;
-  }
-  return `a non-Error value of type ${typeof error}`;
+  // `typeof` is the ONLY inspection here, because it is the only one an
+  // adversary cannot intervene in. The previous version read `instanceof Error`
+  // and `error.constructor?.name` to name the error kind — and an adapter
+  // controls both (issue #200, Codex exact-head finding on `03a7104`): an own
+  // `constructor` getter that throws raises a second exception INSIDE the catch
+  // handler, so `assessConnections` aborts and snapshot and site generation
+  // fail outright instead of producing the fail-closed error row this code
+  // exists to produce. A Proxy can do the same to `instanceof` via
+  // `Symbol.hasInstance`, and can hang rather than throw, which no try/catch
+  // would contain.
+  //
+  // Naming `TypeError` versus `Error` was worth having and is not worth that.
+  // `evidenceSource` already names the probe that threw, which is what an
+  // operator needs to find the adapter.
+  return `a thrown value of type ${typeof error}`;
 }
 
 function describeRaw(value: unknown): string {

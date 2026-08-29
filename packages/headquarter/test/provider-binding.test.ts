@@ -19,14 +19,10 @@ import { founderConsole } from '../src/application/console.js';
 import { taskActionDigest } from '../src/operator/approvals.js';
 import {
   checkProviderBinding,
-  createWorkerProviderRegistrar,
   EXECUTION_PROVIDER_KEY,
   ProviderBindingViolation,
-  ProviderDeclarationRejected,
   readProviderBinding,
-  WorkerProviderRegistrar,
 } from '../src/operator/provider-binding.js';
-import { openMemoryHqDatabase } from '../src/store/db.js';
 import {
   DIRECT_ORDER_CAPABILITY,
   registerDirectOrderCapability,
@@ -428,34 +424,71 @@ describe('the bound provider is part of the approved action', () => {
  * `HeadquarterOperations.declareWorkerProvider`.
  */
 describe('the provider write mechanism is not reachable around the authority gate', () => {
-  it('refuses to be constructed without the module-local key', () => {
-    const db = openMemoryHqDatabase();
-    // The deep import still resolves — ESM has no package-private class — but
-    // the constructor is the gate, so reachability alone buys nothing.
-    expect(() => new WorkerProviderRegistrar(db, Symbol('forged'))).toThrow(
-      ProviderDeclarationRejected,
-    );
-    try {
-      new WorkerProviderRegistrar(db, Symbol('forged'));
-    } catch (error) {
-      expect((error as ProviderDeclarationRejected).reason).toBe('not_permitted');
-      expect((error as Error).message).toContain('declareWorkerProvider');
+  /**
+   * Two attempts failed before this one, and the second failed in a way worth
+   * keeping visible. Removing the registrar from the queue's property left the
+   * class publicly constructible (Codex on `5a19350`). A module-local
+   * construction key then left an exported FACTORY holding that key, so a deep
+   * import still reached it (Codex on `03a7104`) — the first mistake one level
+   * up. Omitting a name from `operator/index.ts` never stopped a deep import.
+   *
+   * So the test is no longer "the gate refuses the wrong caller". It is "there
+   * is no exported path to the write mechanism at all": it lives unexported
+   * inside `application/service.ts`, and the only way to it is through
+   * `HeadquarterOperations`, which resolves the actor and requires approval
+   * authority.
+   */
+  it('exports no write mechanism from the operator module, deep import included', async () => {
+    const deep = await import('../src/operator/provider-binding.js');
+    for (const name of [
+      'WorkerProviderRegistrar',
+      'createWorkerProviderRegistrar',
+      'REGISTRAR_CONSTRUCTION_KEY',
+    ]) {
+      expect(name in deep, `deep import must not offer ${name}`).toBe(false);
     }
+    // The read side stays: the queue needs it and it grants nothing.
+    expect('WorkerProviderDirectory' in deep).toBe(true);
   });
 
-  it('is not offered on the operator package surface at all', async () => {
-    const operatorSurface = await import('../src/operator/index.js');
-    expect('WorkerProviderRegistrar' in operatorSurface).toBe(false);
-    expect('createWorkerProviderRegistrar' in operatorSurface).toBe(false);
-    // The read side stays public — the queue needs it and it grants nothing.
-    expect('WorkerProviderDirectory' in operatorSurface).toBe(true);
+  it('exports none of it from the operator package surface either', async () => {
+    const surface = await import('../src/operator/index.js');
+    for (const name of ['WorkerProviderRegistrar', 'createWorkerProviderRegistrar']) {
+      expect(name in surface, `surface must not offer ${name}`).toBe(false);
+    }
+    expect('WorkerProviderDirectory' in surface).toBe(true);
   });
 
-  it('still works for the authorized service boundary', () => {
-    const db = openMemoryHqDatabase();
-    const registrar = createWorkerProviderRegistrar(db);
-    const record = registrar.declare('w1', 'CLAUDE', 'founder');
-    expect(record.providerId).toBe('CLAUDE');
-    expect(registrar.providerOf('w1')).toBe('CLAUDE');
+  it('offers no write method on the read-side directory a worker can build', async () => {
+    const { WorkerProviderDirectory } = await import('../src/operator/provider-binding.js');
+    const { openMemoryHqDatabase } = await import('../src/store/db.js');
+    const readOnly = new WorkerProviderDirectory(openMemoryHqDatabase()) as unknown as Record<
+      string,
+      unknown
+    >;
+    // A worker that builds the read side gets lookup and nothing else.
+    expect(typeof readOnly.providerOf).toBe('function');
+    expect(readOnly.declare).toBeUndefined();
+    expect(readOnly.revoke).toBeUndefined();
+  });
+
+  it('still lets the authorized service boundary declare, and still gates it', () => {
+    const fx = bindingFixture();
+    // Through the gate: works.
+    expectOk(
+      fx.ops.declareWorkerProvider({
+        workerId: 'another-worker',
+        providerId: 'CLAUDE',
+        founderId: 'founder',
+      }),
+    );
+    // An actor without approval authority is still refused — moving the
+    // mechanism did not move the gate.
+    const refused = fx.ops.declareWorkerProvider({
+      workerId: 'another-worker',
+      providerId: 'CODEX',
+      founderId: 'claude-worker',
+    });
+    expect(refused.ok).toBe(false);
   });
 });

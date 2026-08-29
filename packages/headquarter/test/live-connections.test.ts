@@ -419,7 +419,7 @@ describe('the probe seam cannot weaken the invariants', () => {
     // anything an adapter puts in an exception, so the contract changed and
     // this test changed with it. The row must still say the probe threw; it
     // must no longer repeat what the probe said.
-    expect(status!.reason).toContain('threw an Error');
+    expect(status!.reason).toContain('threw a thrown value of type object');
     expect(status!.reason).not.toContain('probe exploded');
     expect(status!.effectiveCapabilities).toEqual([]);
   });
@@ -851,7 +851,7 @@ describe('a probe answering outside the vocabulary fails closed', () => {
     });
     expect(status!.reason).not.toContain('abcdefghijklmnop');
     expect(status!.reason).not.toContain('credential');
-    expect(status!.reason).toContain('threw an Error');
+    expect(status!.reason).toContain('threw a thrown value of type object');
     expect(status!.state).toBe('error');
   });
 
@@ -870,13 +870,12 @@ describe('a probe answering outside the vocabulary fails closed', () => {
       catalog: [descriptor],
       probes: [hostile],
     });
-    // A custom class name is adapter-controlled, so only built-in kinds are
-    // ever named; anything else is reported as a plain Error.
+    // The class name is adapter-controlled, so it is never read at all.
     expect(status!.reason).not.toContain('sk-abcdefghijklmnop');
-    expect(status!.reason).toContain('threw an Error');
+    expect(status!.reason).toContain('threw a thrown value of type object');
   });
 
-  it('names a built-in error kind, and survives a thrown non-Error', () => {
+  it('inspects nothing but typeof, and survives any thrown value', () => {
     const thrower = (value: unknown): ConnectionProbe => ({
       id: 'alien',
       probe: () => {
@@ -886,11 +885,63 @@ describe('a probe answering outside the vocabulary fails closed', () => {
     const reasonFor = (value: unknown) =>
       assessConnections(NOTHING, { now: NOW, catalog: [descriptor], probes: [thrower(value)] })[0]!
         .reason;
-    expect(reasonFor(new TypeError('x'))).toContain('threw a TypeError');
+    expect(reasonFor(new TypeError('x'))).toContain('threw a thrown value of type object');
     // `(error as Error).message` threw outright on these, taking down the
     // fail-closed path it was part of.
-    expect(reasonFor(null)).toContain('threw a non-Error value of type object');
-    expect(reasonFor('a string')).toContain('threw a non-Error value of type string');
+    expect(reasonFor(null)).toContain('threw a thrown value of type object');
+    expect(reasonFor('a string')).toContain('threw a thrown value of type string');
+  });
+
+  /**
+   * Codex exact-head finding on `03a7104` (P2). My own previous fix read
+   * `instanceof Error` and `error.constructor?.name` to name the error kind —
+   * both of which an adapter controls. A throwing `constructor` getter raised a
+   * SECOND exception inside the catch handler, so `assessConnections` aborted
+   * and snapshot and site generation failed outright, instead of producing the
+   * fail-closed error row the catch exists to produce. The hostile probe took
+   * down the whole build by being inspected.
+   */
+  it('survives a thrown value engineered to explode when inspected', () => {
+    const hostile = new Error('boom');
+    Object.defineProperty(hostile, 'constructor', {
+      get() {
+        throw new Error('inspecting me throws');
+      },
+    });
+    const probe: ConnectionProbe = {
+      id: 'alien',
+      probe: () => {
+        throw hostile;
+      },
+    };
+    // The whole point: this returns a row rather than propagating.
+    const [status] = assessConnections(NOTHING, { now: NOW, catalog: [descriptor], probes: [probe] });
+    expect(status!.state).toBe('error');
+    expect(status!.effectiveCapabilities).toEqual([]);
+    expect(status!.reason).toContain('threw a thrown value of type object');
+  });
+
+  it('survives a Proxy that intervenes in instanceof', () => {
+    const hostile = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('no reading me');
+        },
+        getPrototypeOf() {
+          throw new Error('no instanceof either');
+        },
+      },
+    );
+    const probe: ConnectionProbe = {
+      id: 'alien',
+      probe: () => {
+        throw hostile;
+      },
+    };
+    const [status] = assessConnections(NOTHING, { now: NOW, catalog: [descriptor], probes: [probe] });
+    expect(status!.state).toBe('error');
+    expect(status!.reason).toContain('threw a thrown value of type object');
   });
 
   it('still refuses to publish a credential hidden inside a structured answer', () => {

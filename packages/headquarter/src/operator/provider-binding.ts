@@ -199,80 +199,26 @@ export class ProviderDeclarationRejected extends Error {
  * queue is empty" rather than as the configuration error it is. Deny by
  * default on an unknown provider, like every other unknown tag in this system.
  */
-const REGISTRAR_CONSTRUCTION_KEY: unique symbol = Symbol('worker-provider-registrar');
-
-/**
- * Hand the registrar to the authorized service boundary, and to nothing else.
+/*
+ * The WRITE side deliberately does not live in this module any more.
  *
- * Removing the registrar from the queue's property was not enough (issue #200,
- * Codex exact-head finding on `5a19350`): the class stayed publicly
- * constructible and `operator/index.ts` re-exported it, so any worker or plugin
- * holding an `HqDatabase` could build one, redeclare itself as the provider a
- * queued order is bound to, and walk straight past
- * `HeadquarterOperations.declareWorkerProvider` — the method that actually
- * resolves the actor and checks approval authority. An authority boundary you
- * can go around is decoration.
+ * Two rounds tried to keep it here and gate it. Removing it from the queue's
+ * property left the class publicly constructible. A module-local construction
+ * key then left an exported FACTORY holding that key — so any caller able to
+ * deep-import this file could ask the factory for a registrar and declare
+ * itself as the provider a queued order is bound to, walking past
+ * `HeadquarterOperations.declareWorkerProvider` exactly as before (issue #200,
+ * Codex exact-head findings on `5a19350` and `03a7104`). The second attempt was
+ * the first mistake one level up: omitting a name from `operator/index.ts` does
+ * not stop a deep import.
  *
- * ESM has no package-private class, so reachability alone cannot carry this.
- * The construction key can: it is module-local, exported to nobody, and the
- * constructor refuses without it. `operator/index.ts` no longer re-exports this
- * module either, so the public surface does not even offer the name.
+ * ESM has no package-private class, so no gate placed in a module that
+ * untrusted code can import will hold. The write mechanism is therefore defined
+ * inside `application/service.ts`, unexported, where the only way to reach it is
+ * through `HeadquarterOperations` — which resolves the actor and requires
+ * approval authority. What is exported from here is the READ side, which grants
+ * nothing.
  */
-export function createWorkerProviderRegistrar(db: HqDatabase): WorkerProviderRegistrar {
-  return new WorkerProviderRegistrar(db, REGISTRAR_CONSTRUCTION_KEY);
-}
-
-export class WorkerProviderRegistrar extends WorkerProviderDirectory {
-  constructor(db: HqDatabase, key: symbol) {
-    if (key !== REGISTRAR_CONSTRUCTION_KEY) {
-      throw new ProviderDeclarationRejected(
-        'not_permitted',
-        'The worker→provider registrar is the write mechanism behind an authority gate, not a ' +
-          'public class. Declare a provider through HeadquarterOperations.declareWorkerProvider, ' +
-          'which resolves the actor and requires approval authority.',
-      );
-    }
-    super(db);
-  }
-
-  /** Declare (or re-declare) which provider a worker executes as. */
-  declare(workerId: string, providerId: string, declaredBy: string): WorkerProviderRecord {
-    if (!workerId?.trim() || !providerId?.trim() || !declaredBy?.trim()) {
-      throw new ProviderDeclarationRejected(
-        'invalid_input',
-        'A provider declaration needs a worker, a provider and a declaring actor',
-      );
-    }
-    if (!(PROVIDERS as readonly string[]).includes(providerId)) {
-      throw new ProviderDeclarationRejected(
-        'unknown_provider',
-        `Unknown execution provider: ${providerId}. Declarations are limited to the routing ` +
-          `registry (${PROVIDERS.join(', ')}), so a typo fails closed instead of creating a ` +
-          'declaration that matches nothing.',
-      );
-    }
-    const declaredAt = nowIso();
-    this.db
-      .prepare(
-        `INSERT INTO op_worker_providers (worker_id, provider_id, declared_by, declared_at)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(worker_id) DO UPDATE SET
-           provider_id = excluded.provider_id,
-           declared_by = excluded.declared_by,
-           declared_at = excluded.declared_at`,
-      )
-      .run(workerId, providerId, declaredBy, declaredAt);
-    return { workerId, providerId: providerId as ProviderId, declaredBy, declaredAt };
-  }
-
-  /** Remove a declaration. The worker can then claim no provider-bound task. */
-  revoke(workerId: string): boolean {
-    const result = this.db
-      .prepare(`DELETE FROM op_worker_providers WHERE worker_id = ?`)
-      .run(workerId);
-    return result.changes > 0;
-  }
-}
 
 /**
  * Decide whether `workerId` may act on a task bound to `binding`.

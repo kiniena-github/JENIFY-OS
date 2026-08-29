@@ -78,10 +78,10 @@ import { OperatorQueue, type OperatorTask, type ReconcileDecision } from '../ope
 import {
   ProviderBindingViolation,
   ProviderDeclarationRejected,
-  createWorkerProviderRegistrar,
-  type WorkerProviderRegistrar,
+  WorkerProviderDirectory,
   type WorkerProviderRecord,
 } from '../operator/provider-binding.js';
+import { PROVIDERS, type ProviderId } from '../routing/providers.js';
 import { ensureApplicationSchema } from './db.js';
 import {
   SpecialistDirectoryAdapter,
@@ -239,6 +239,62 @@ export interface ReplacementPlan {
   blockers: ReplacementBlocker[];
 }
 
+/**
+ * The worker→provider WRITE mechanism, defined here and exported to nobody.
+ *
+ * It lived in `operator/provider-binding.ts` for two rounds and could not be
+ * held there. Removing it from the queue's property left the class publicly
+ * constructible; a module-local construction key then left an exported factory
+ * holding that key, so a deep import still reached it — the same mistake one
+ * level up (issue #200, Codex exact-head findings on `5a19350` and `03a7104`).
+ * Omitting a name from `operator/index.ts` never stopped a deep import, and ESM
+ * offers no package-private class, so no gate in an importable module can hold.
+ *
+ * Defining it here does hold, because there is no exported path to it at all:
+ * reaching this mechanism means going through `HeadquarterOperations`, whose
+ * `declareWorkerProvider`/`revokeWorkerProvider` resolve the actor against the
+ * human-principal registry and require approval authority — the same gate as
+ * the kill switch. The read side stays in the operator module, where it grants
+ * nothing and the queue needs it.
+ */
+class WorkerProviderRegistrar extends WorkerProviderDirectory {
+  /** Declare (or re-declare) which provider a worker executes as. */
+  declare(workerId: string, providerId: string, declaredBy: string): WorkerProviderRecord {
+    if (!workerId?.trim() || !providerId?.trim() || !declaredBy?.trim()) {
+      throw new ProviderDeclarationRejected(
+        'invalid_input',
+        'A provider declaration needs a worker, a provider and a declaring actor',
+      );
+    }
+    if (!(PROVIDERS as readonly string[]).includes(providerId)) {
+      throw new ProviderDeclarationRejected(
+        'unknown_provider',
+        `Unknown execution provider: ${providerId}. Declarations are limited to the routing ` +
+          `registry (${PROVIDERS.join(', ')}), so a typo fails closed instead of creating a ` +
+          'declaration that matches nothing.',
+      );
+    }
+    const declaredAt = nowIso();
+    this.db
+      .prepare(
+        `INSERT INTO op_worker_providers (worker_id, provider_id, declared_by, declared_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(worker_id) DO UPDATE SET
+           provider_id = excluded.provider_id,
+           declared_by = excluded.declared_by,
+           declared_at = excluded.declared_at`,
+      )
+      .run(workerId, providerId, declaredBy, declaredAt);
+    return { workerId, providerId: providerId as ProviderId, declaredBy, declaredAt };
+  }
+
+  /** Remove a declaration. The worker can then claim no provider-bound task. */
+  revoke(workerId: string): boolean {
+    const result = this.db.prepare(`DELETE FROM op_worker_providers WHERE worker_id = ?`).run(workerId);
+    return result.changes > 0;
+  }
+}
+
 export interface HeadquarterOperationsOptions {
   policyCtx?: PolicyContext;
   workers?: WorkerDirectoryPort;
@@ -292,7 +348,7 @@ export class HeadquarterOperations {
     // (issue #200, Codex round-3 P1 #1). It is private: the only ways in are
     // `declareWorkerProvider`/`revokeWorkerProvider`, which resolve the actor
     // and require approval authority first.
-    this.workerProviderRegistrar = createWorkerProviderRegistrar(db);
+    this.workerProviderRegistrar = new WorkerProviderRegistrar(db);
     this.workers =
       options.workers ?? narrowByRegistry(new SpecialistDirectoryAdapter(this.store), options.memberRegistry);
     this.principals = options.humanPrincipals ?? new HumanPrincipalRegistry(db);
