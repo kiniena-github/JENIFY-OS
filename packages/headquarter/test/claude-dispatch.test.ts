@@ -39,6 +39,7 @@ import {
   parseAuthAccount,
   parseIssueUrl,
   qualifiedTargetSlug,
+  targetSlug,
   unavailableTransport,
   type GitHubIssueRequest,
   type GitHubIssueResult,
@@ -327,6 +328,39 @@ describe('dispatch is idempotent, and an uncertain outcome is never blindly retr
     expect(second.deduplicated).toBe(true);
     expect(second.issueNumber).toBe(first.issueNumber);
     expect(transport.calls).toHaveLength(1);
+  });
+
+  it('refuses a repeat that names a different repository, rather than answering with the first', () => {
+    // The receipt must describe one publication. Returning repository A's issue
+    // while echoing back the caller's repository B is a contradiction, and a
+    // silent refusal of an explicit publication target that never says so.
+    const fixture = orderFixture();
+    const taskId = placeOrder(fixture);
+    const first = stubTransport({});
+    expectOk(dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport: first }));
+
+    const elsewhere = { owner: TARGET.owner, repo: 'some-other-repo' };
+    const second = stubTransport({});
+    const result = dispatchClaudeTask(fixture.ops, { taskId, target: elsewhere, transport: second });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('target_mismatch');
+    expect(result.error.details?.dispatchedTo).toBe(`${TARGET.owner}/${TARGET.repo}`);
+    expect(result.error.details?.requested).toBe(`${TARGET.owner}/some-other-repo`);
+    // Nothing was published to the second repository either.
+    expect(second.calls).toHaveLength(0);
+  });
+
+  it('answers a repeat for the SAME repository with the recorded issue', () => {
+    const fixture = orderFixture();
+    const taskId = placeOrder(fixture);
+    const transport = stubTransport({});
+    const first = expectOk(dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport }));
+    const again = expectOk(dispatchClaudeTask(fixture.ops, { taskId, target: { ...TARGET }, transport }));
+    expect(again.deduplicated).toBe(true);
+    expect(again.issueUrl).toBe(first.issueUrl);
+    expect(targetSlug(again.target)).toBe(`${TARGET.owner}/${TARGET.repo}`);
   });
 
   it('refuses after an attempt whose outcome was never learned', () => {

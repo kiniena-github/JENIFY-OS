@@ -116,6 +116,8 @@ export type DispatchRefusalCode =
   | 'task_not_eligible'
   | 'approval_invalid'
   | 'invalid_target'
+  /** Already dispatched somewhere else than the target this call names. */
+  | 'target_mismatch'
   | 'invalid_role'
   | 'transport_unavailable'
   | 'transport_unauthenticated'
@@ -491,6 +493,54 @@ export function dispatchHistory(ops: HeadquarterOperations, taskId: string): Dis
   return { state: 'none' };
 }
 
+/**
+ * Answer a repeat dispatch from what was ALREADY dispatched (issue #221, Codex
+ * P2 on `1d5b3bf`).
+ *
+ * The receipt must describe one publication, not two halves of different ones.
+ * The first version returned the recorded issue while echoing back the CALLER's
+ * target, so a task dispatched to repository A and re-dispatched at repository B
+ * got a receipt naming B and pointing at A's issue — a contradiction, and a
+ * silent refusal of an explicit publication target that never says so.
+ *
+ * A differing target is therefore refused rather than deduplicated. It is not a
+ * repeat of the same order: nothing was published where the caller asked, and
+ * choosing the repository is the guard on the irreversible act. Publishing to B
+ * as well would be the other wrong answer — one canonical task, one dispatch —
+ * so the refusal names both repositories and leaves the decision with a human.
+ */
+function answerAlreadyDispatched(
+  taskId: string,
+  requested: GitHubTarget,
+  history: Extract<DispatchHistory, { state: 'dispatched' }>,
+  refuseWith: (code: DispatchRefusalCode, message: string, details?: Record<string, unknown>) => DispatchResult,
+): DispatchResult {
+  const requestedSlug = targetSlug(requested);
+  if (history.repository !== requestedSlug) {
+    return refuseWith(
+      'target_mismatch',
+      `Task ${taskId} was already dispatched to ${history.repository} (issue #${history.issueNumber}), ` +
+        `but this call names ${requestedSlug}. Nothing was published: one canonical task has one ` +
+        'dispatch, and an explicit publication target is never silently swapped for another.',
+      { dispatchedTo: history.repository, requested: requestedSlug, issueNumber: history.issueNumber },
+    );
+  }
+  return {
+    ok: true,
+    data: {
+      taskId,
+      provider: DISPATCH_PROVIDER,
+      // The RECORDED target, so the receipt cannot disagree with the issue it
+      // points at.
+      target: requested,
+      issueNumber: history.issueNumber,
+      issueUrl: history.issueUrl,
+      deduplicated: true,
+      dispatchedAt: history.at,
+    },
+  };
+}
+
 export interface DispatchOptions {
   taskId: string;
   /** Explicit repository. There is no default: dispatch publishes an instruction. */
@@ -561,18 +611,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
   // a duplicate public issue is not undone by a later refusal.
   const history = dispatchHistory(ops, taskId);
   if (history.state === 'dispatched') {
-    return {
-      ok: true,
-      data: {
-        taskId,
-        provider: DISPATCH_PROVIDER,
-        target: options.target,
-        issueNumber: history.issueNumber,
-        issueUrl: history.issueUrl,
-        deduplicated: true,
-        dispatchedAt: history.at,
-      },
-    };
+    return answerAlreadyDispatched(taskId, options.target, history, refuseAndRecordBestEffort);
   }
   if (history.state === 'unknown') {
     return refuseAndRecordBestEffort(
@@ -681,18 +720,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
   // Another process won the race between the fast-path check and the
   // reservation, or resolved an attempt in between. Its answer is authoritative.
   if (reserved.state === 'dispatched') {
-    return {
-      ok: true,
-      data: {
-        taskId,
-        provider: DISPATCH_PROVIDER,
-        target: options.target,
-        issueNumber: reserved.issueNumber,
-        issueUrl: reserved.issueUrl,
-        deduplicated: true,
-        dispatchedAt: reserved.at,
-      },
-    };
+    return answerAlreadyDispatched(taskId, options.target, reserved, refuseAndRecordBestEffort);
   }
   if (reserved.state === 'unknown') {
     return refuseAndRecordBestEffort(
