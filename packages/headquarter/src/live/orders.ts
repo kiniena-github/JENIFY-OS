@@ -237,13 +237,50 @@ export interface RouteResolution {
   candidates: RouteCandidate[];
 }
 
-function candidate(provider: ProviderId, env: SecretsEnv): RouteCandidate {
+/**
+ * How a host that holds the real transport answers for a provider (issue #224,
+ * Codex P1 on `4225d78`).
+ *
+ * The routing contract asks whether the facts a provider's executor needs are
+ * present in THIS process. For CLAUDE on the Founder workstation that is the
+ * wrong question and gives the wrong answer: `CLAUDE_ROUTINE_*` are GitHub
+ * Actions secrets, deliberately absent locally, while the order actually
+ * travels through the authenticated `gh` transport. Reporting NOT CONNECTED
+ * there made the composer contradict both the live snapshot and the transport
+ * that would really carry the work.
+ *
+ * `null` means "this host does not know", and the routing contract answers as
+ * before. Only a host that genuinely observes a transport should say `true`.
+ */
+export interface RouteAvailability {
+  providerDispatchable?: (provider: ProviderId) => boolean | null;
+}
+
+function candidate(
+  provider: ProviderId,
+  env: SecretsEnv,
+  availability?: RouteAvailability,
+): RouteCandidate {
   const report = providerConnectivity(provider, env);
+  const observed = availability?.providerDispatchable?.(provider) ?? null;
+  if (observed === null) {
+    return {
+      provider,
+      connected: report.connected,
+      reason: report.reason,
+      missingFacts: [...report.missingSecrets, ...report.missingLocalFacts],
+    };
+  }
   return {
     provider,
-    connected: report.connected,
-    reason: report.reason,
-    missingFacts: [...report.missingSecrets, ...report.missingLocalFacts],
+    connected: observed,
+    // Truthful about WHERE the verdict came from, and never silently louder
+    // than the routing contract it overrode.
+    reason: observed
+      ? `${provider} is dispatchable from this host: the transport that would carry it was ` +
+        `observed available. (Routing-contract view of this process: ${report.reason})`
+      : report.reason,
+    missingFacts: observed ? [] : [...report.missingSecrets, ...report.missingLocalFacts],
   };
 }
 
@@ -254,9 +291,13 @@ function candidate(provider: ProviderId, env: SecretsEnv): RouteCandidate {
  * either that provider or null. There is no code path in which asking for
  * CODEX yields CLAUDE.
  */
-export function resolveOrderRoute(route: DirectOrderRoute, env: SecretsEnv): RouteResolution {
+export function resolveOrderRoute(
+  route: DirectOrderRoute,
+  env: SecretsEnv,
+  availability?: RouteAvailability,
+): RouteResolution {
   if (route === 'AUTO') {
-    const candidates = AUTO_ROUTE_PREFERENCE.map((provider) => candidate(provider, env));
+    const candidates = AUTO_ROUTE_PREFERENCE.map((provider) => candidate(provider, env, availability));
     const first = candidates.find((entry) => entry.connected) ?? null;
     return {
       requested: route,
@@ -270,7 +311,7 @@ export function resolveOrderRoute(route: DirectOrderRoute, env: SecretsEnv): Rou
     };
   }
 
-  const only = candidate(route as ProviderId, env);
+  const only = candidate(route as ProviderId, env, availability);
   return {
     requested: route,
     resolved: only.connected ? only.provider : null,
@@ -559,6 +600,7 @@ export function submitDirectOrder(
   ops: HeadquarterOperations,
   input: DirectOrderInput,
   env: SecretsEnv,
+  availability?: RouteAvailability,
 ): DirectOrderResult {
   const instruction = (input.instruction ?? '').trim();
   if (instruction.length === 0) {
@@ -647,7 +689,7 @@ export function submitDirectOrder(
     );
   }
 
-  const route = resolveOrderRoute(input.route, env);
+  const route = resolveOrderRoute(input.route, env, availability);
   // Which provider the order is BOUND to, and whether it can dispatch today.
   //
   // These are two different questions, and conflating them was the #200 gap

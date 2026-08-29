@@ -62,7 +62,7 @@ import {
  */
 export type HeadquarterControlPlane = Pick<
   ControlApiDeps,
-  'ops' | 'founderMap' | 'allowedOrigins' | 'secretsEnv'
+  'ops' | 'founderMap' | 'allowedOrigins' | 'secretsEnv' | 'dispatchAvailability'
 > & {
   /**
    * Set false to expose the read routes without the write routes — the safe
@@ -179,6 +179,10 @@ export function registerHeadquarterRoutes(
       founderMap: plane.founderMap,
       allowedOrigins: plane.allowedOrigins,
       secretsEnv: plane.secretsEnv,
+      // A host that genuinely observes the transport answers for its provider,
+      // so the composer, the approvals view and the order itself cannot
+      // disagree about whether a provider can dispatch from here.
+      dispatchAvailability: plane.dispatchAvailability,
       // The flag is passed through rather than enforced here, so the layer that
       // refuses a write is the same one that tells the console whether the
       // button works. Enforcing it in this adapter left the two disagreeing.

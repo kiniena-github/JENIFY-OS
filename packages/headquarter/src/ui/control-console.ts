@@ -274,12 +274,23 @@ export function directOrderConsoleScript(): string {
           if (body.ok === true) {
             var kind = body.deduplicated === true ? 'deduplicated' : 'created';
             idempotencyKey = orderKeyAfterSubmit(kind, idempotencyKey, freshOrderKey());
+            // A recorded-but-blocked order must READ as blocked. Reporting only
+            // the resolved route printed an arrow to null and called it an
+            // ordinary pending approval, which is neither the binding the API
+            // returned nor the state the Founder needs to see.
+            var bound = body.boundProvider ? String(body.boundProvider) : null;
+            var routeLine = (body.route && body.route.requested) +
+              (bound ? ' \\u2192 ' + bound : '');
+            var blockedNote = body.dispatchBlocked === true
+              ? ' BLOCKED \\u2014 NOT CONNECTED: it is recorded and gated, but ' + (bound || 'its provider') +
+                ' cannot dispatch from here yet, so nothing is running. It stays this exact task and ' +
+                'becomes ready once the provider is reachable.'
+              : '';
             outcome.textContent = kind === 'created'
               ? 'Order created as task ' + body.taskId + ' (risk ' + body.riskClass + ', route ' +
-                (body.route && body.route.requested) + ' \\u2192 ' + (body.route && body.route.resolved) +
-                '). It awaits Founder approval and executes nothing until then.'
+                routeLine + '). It awaits Founder approval and executes nothing until then.' + blockedNote
               : 'This exact order already exists as task ' + body.taskId +
-                ' \\u2014 deduplicated; no second task was created.';
+                ' \\u2014 deduplicated; no second task was created.' + blockedNote;
             return;
           }
           var error = body.error || {};

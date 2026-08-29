@@ -74,6 +74,15 @@ describe('the composer offers a route that will be RECORDED and BLOCKED (issue #
     expect(composer).toContain("row.className = 'row order-route-blocked'");
   });
 
+  it('shows the bound provider and the blocked outcome after submitting', () => {
+    // Reporting only the resolved route printed an arrow to null and read as
+    // an ordinary pending approval.
+    expect(composer).toContain('body.boundProvider');
+    expect(composer).toContain('body.dispatchBlocked === true');
+    expect(composer).toContain('BLOCKED');
+    expect(composer).toContain('nothing is running');
+  });
+
   it('renders the blocked state on an approval card', () => {
     expect(approvals).toContain('card.dispatchBlocked === true');
     expect(approvals).toContain('BLOCKED');

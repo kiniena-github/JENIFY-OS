@@ -268,6 +268,29 @@ describe('a mapped Founder creates a canonical order, and only through the facad
     expect(approvals[0]!.dispatchBlocked).toBe(false);
   });
 
+  it('reports a route as connected when the host observes the real transport', () => {
+    // The composer must not contradict the transport that will actually carry
+    // the order: on the Founder workstation CLAUDE_ROUTINE_* is deliberately
+    // absent while `gh` is authenticated.
+    const h = harness();
+    h.deps.secretsEnv = {};
+    h.deps.dispatchAvailability = (provider) => (provider === 'CLAUDE' ? true : null);
+
+    const session = h.call({ method: 'GET', path: CONTROL_ROUTES.session, body: undefined });
+    const routes = session.body.routes as Array<Record<string, unknown>>;
+    const claude = routes.find((entry) => entry.requested === 'CLAUDE')!;
+    expect(claude.connected).toBe(true);
+    expect(String(claude.reason)).toContain('dispatchable from this host');
+    // AUTO resolves to it, rather than reporting nothing available.
+    const auto = routes.find((entry) => entry.requested === 'AUTO')!;
+    expect(auto.resolved).toBe('CLAUDE');
+
+    // And the order agrees with what the composer was told.
+    const response = h.call({ body: ORDER_BODY });
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({ dispatchBlocked: false, boundProvider: 'CLAUDE' });
+  });
+
   it('leaks no instruction text into the blocked response', () => {
     const h = harness();
     h.deps.secretsEnv = {};

@@ -51,7 +51,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { HeadquarterOperations } from '@factoryos/headquarter/application';
 import { openHqDatabase, HeadquarterStore } from '@factoryos/headquarter/store';
-import { PROVIDER_REGISTRY, type SecretsEnv } from '@factoryos/headquarter/routing';
+import { PROVIDER_REGISTRY, type ProviderId, type SecretsEnv } from '@factoryos/headquarter/routing';
+import { claude } from '@factoryos/headquarter/providers';
 import type { ControlAuditEvent } from '@factoryos/headquarter/live';
 import type { HeadquarterControlPlane } from '../routes/headquarter.js';
 
@@ -145,12 +146,40 @@ export function loadHeadquarterHost(
       }, site=${siteRoot ?? 'not served'}`,
   );
 
+  // What CLAUDE dispatchability actually depends on where this host runs.
+  //
+  // `CLAUDE_ROUTINE_*` are GitHub Actions secrets the workflow needs; on the
+  // Founder workstation they are deliberately absent while the order travels
+  // through the authenticated `gh` transport. Answering the composer from their
+  // absence made the browser contradict both the live snapshot and the
+  // transport that would really carry the work (issue #224).
+  //
+  // Cached, because `/session` is polled and the underlying check asks GitHub a
+  // question. A host with no transport observes nothing and returns null, so
+  // the routing contract answers exactly as it did before — this adds a
+  // verdict where one can be observed, and never invents one.
+  const transport = claude.ghCliTransport();
+  const TRANSPORT_TTL_MS = 60_000;
+  let cached: { at: number; dispatchable: boolean } | null = null;
+  const dispatchAvailability = (provider: ProviderId): boolean | null => {
+    if (provider !== 'CLAUDE') return null;
+    const now = Date.now();
+    if (cached == null || now - cached.at > TRANSPORT_TTL_MS) {
+      const status = transport.status();
+      cached = { at: now, dispatchable: status.available && status.authenticated };
+    }
+    // Only an observed, authenticated session is an answer. Anything weaker
+    // defers rather than claiming the provider cannot dispatch.
+    return cached.dispatchable ? true : null;
+  };
+
   return {
     plane: {
       ops,
       founderMap,
       allowedOrigins,
       secretsEnv,
+      dispatchAvailability,
       mutationsEnabled,
       audit: {
         // A supplementary host-side sink. The authoritative record is the

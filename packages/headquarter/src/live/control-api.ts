@@ -416,7 +416,12 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         // dispatch to is deployment knowledge an unmapped session has no
         // business reading. Candidate verdicts name missing FACTS, never
         // values, and `safe()` walks this on the way out like everything else.
-        routes: DIRECT_ORDER_ROUTES.map((route) => resolveOrderRoute(route, deps.secretsEnv)),
+        // The composer's route verdicts come from the same place the order's
+        // own verdict will: a host holding the real transport answers for its
+        // provider, so the browser cannot contradict what dispatch will do.
+        routes: DIRECT_ORDER_ROUTES.map((route) =>
+          resolveOrderRoute(route, deps.secretsEnv, { providerDispatchable: deps.dispatchAvailability }),
+        ),
       }),
     );
   }
@@ -564,6 +569,7 @@ function createOrder(
       idempotencyKey: clientKey,
     },
     deps.secretsEnv,
+    { providerDispatchable: deps.dispatchAvailability },
   );
 
   if (!result.ok) {
