@@ -12,11 +12,18 @@ import { buildSite, bundleAsOf, type HeadquarterData } from '../ui/site.js';
 import { SNAPSHOT_FILENAME } from '../ui/live-refresh.js';
 import type { ArchiveRecord } from '../archive/schema.js';
 import { assessConnections, CONNECTION_CATALOG } from '../live/connections.js';
-import { buildHqSnapshot, emptyFounderConsole } from '../live/snapshot.js';
+import { buildHqSnapshot, emptyFounderConsole, portableSourceLabel } from '../live/snapshot.js';
 import { PROVIDER_REGISTRY, type SecretsEnv } from '../routing/providers.js';
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const repoRoot = join(packageRoot, '..', '..');
 const dataPath = process.argv[2] ?? join(packageRoot, 'sample-data', 'hq-sample.json');
+// The label the snapshot's provenance carries. NEVER the resolved absolute
+// path: the snapshot is served to the browser, so an absolute path would leak
+// the build machine's filesystem layout — and it made the artefact differ
+// byte-for-byte per checkout location, breaking reproducible builds
+// (issue #200, integration-lane coordinator finding).
+const dataPathLabel = portableSourceLabel(dataPath, repoRoot);
 const data = JSON.parse(readFileSync(dataPath, 'utf8')) as HeadquarterData;
 
 // If the inventory pipeline has produced reconstructed records, merge them in
@@ -81,7 +88,7 @@ const snapshot = buildHqSnapshot({
     data: emptyFounderConsole(asOf),
     provenance: {
       mode: data.sourceMode ?? 'sample',
-      source: `static bundle ${dataPath} (no HQ database was opened by this build)`,
+      source: `static bundle ${dataPathLabel} (no HQ database was opened by this build)`,
       asOf,
       note: 'Operational sections are rendered from the bundle, not read from op_tasks.',
     },
@@ -98,7 +105,7 @@ const snapshot = buildHqSnapshot({
   },
   workforce: {
     data: data.specialists,
-    provenance: { mode: data.sourceMode ?? 'sample', source: `bundle.specialists (${dataPath})`, asOf },
+    provenance: { mode: data.sourceMode ?? 'sample', source: `bundle.specialists (${dataPathLabel})`, asOf },
   },
   capabilities: {
     data: [],
@@ -110,7 +117,7 @@ const snapshot = buildHqSnapshot({
   },
   activity: {
     data: data.events,
-    provenance: { mode: data.sourceMode ?? 'sample', source: `bundle.events (${dataPath})`, asOf },
+    provenance: { mode: data.sourceMode ?? 'sample', source: `bundle.events (${dataPathLabel})`, asOf },
   },
 });
 

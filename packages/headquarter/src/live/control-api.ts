@@ -76,6 +76,7 @@ import {
 import { assertBrowserSafe } from './redaction.js';
 import {
   directOrderCapabilityState,
+  resolveOrderRoute,
   submitDirectOrder,
   DIRECT_ORDER_CAPABILITY,
   DIRECT_ORDER_ROUTES,
@@ -342,6 +343,13 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         displayName: resolution.founder.principal.displayName,
         approvalAuthority: resolution.founder.principal.approvalAuthority,
         controls: controlAvailability(deps, resolution.founder),
+        // Live route availability for the composer, derived from the same
+        // observed evidence that will decide the order — never from the
+        // provider catalogue. Founder-only: which providers this host can
+        // dispatch to is deployment knowledge an unmapped session has no
+        // business reading. Candidate verdicts name missing FACTS, never
+        // values, and `safe()` walks this on the way out like everything else.
+        routes: DIRECT_ORDER_ROUTES.map((route) => resolveOrderRoute(route, deps.secretsEnv)),
       }),
     );
   }

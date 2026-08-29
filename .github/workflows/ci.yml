@@ -2,7 +2,10 @@ name: JENIFY CI
 
 on:
   pull_request:
-    branches: [main]
+    # Not just [main]: the HQ work is a stack of PRs whose base is another
+    # feature branch, so a main-only filter meant every "green" run on those
+    # PRs had to be dispatched by hand. Run on every pull request instead.
+    branches: ['**']
   push:
     branches: [main]
   workflow_dispatch:
@@ -35,6 +38,19 @@ jobs:
 
       - name: Run server tests
         run: npm test
+
+      # Root `npm test` covers @factoryos/server only and root `npm run build`
+      # covers shared + server + web only, so until now nothing in CI ever
+      # executed or built @factoryos/headquarter. Every HQ green tick was a
+      # hand-run local claim. These three steps make CI say what it means.
+      - name: Run headquarter tests
+        run: npm run test:hq
+
+      - name: Typecheck headquarter
+        run: npm run typecheck --workspace @factoryos/headquarter
+
+      - name: Build headquarter site
+        run: npm run build:site --workspace @factoryos/headquarter
 
       - name: Build all workspaces
         run: npm run build
