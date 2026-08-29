@@ -8,6 +8,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { setupFixture, CAPS, expectOk } from './application.fixture.js';
@@ -102,7 +103,7 @@ describe('shape and provenance', () => {
 describe('what the snapshot must never contain', () => {
   it('never carries a task payload — an order instruction stays server-side', () => {
     const fixture = setupFixture();
-    registerDirectOrderCapability(fixture.ops);
+    registerDirectOrderCapability(fixture.db);
     fixture.principals.register({
       id: 'founder',
       displayName: 'Founder',
@@ -131,7 +132,7 @@ describe('what the snapshot must never contain', () => {
 
   it('publishes a title only when its author deliberately chose one', () => {
     const fixture = setupFixture();
-    registerDirectOrderCapability(fixture.ops);
+    registerDirectOrderCapability(fixture.db);
     fixture.principals.register({
       id: 'founder',
       displayName: 'Founder',
@@ -294,7 +295,7 @@ describe('projecting the store never writes to it', () => {
     const path = tmp();
     const writable = openHqDatabase(path);
     const seeded = new HeadquarterOperations(writable);
-    seeded.registerCapability({
+    new CapabilityRegistry(writable).register({
       id: 'repo.read_status',
       description: 'Read repo/CI status',
       riskClass: 'read_only',

@@ -75,6 +75,8 @@ import {
   type ActorAuthentication,
 } from './local-trust.js';
 import { EXECUTION_PROVIDER_KEY } from '../operator/provider-binding.js';
+import { CapabilityRegistry } from '../operator/capabilities.js';
+import type { HqDatabase } from '../store/db.js';
 import type { TaskClassification } from '../application/classification.js';
 import type { HeadquarterOperations, OpsErrorCode } from '../application/service.js';
 import type { OperatorTask } from '../operator/queue.js';
@@ -112,8 +114,8 @@ export const DIRECT_ORDER_CAPABILITY = {
  * and no invocation path — this function included — may quietly undo it.
  * Re-enabling is its own explicit act (`capabilities.setEnabled`).
  */
-export function registerDirectOrderCapability(ops: HeadquarterOperations): void {
-  ops.registerCapability({ ...DIRECT_ORDER_CAPABILITY });
+export function registerDirectOrderCapability(db: HqDatabase): void {
+  new CapabilityRegistry(db).register({ ...DIRECT_ORDER_CAPABILITY });
 }
 
 /**

@@ -3,8 +3,12 @@ import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { openMemoryHqDatabase, type HqDatabase } from '../src/store/db.js';
 import { HeadquarterStore } from '../src/store/headquarter.js';
 import { OperatorQueue } from '../src/operator/queue.js';
+import type { PrivilegedQueueApi } from '../src/operator/queue.js';
+import type { PolicyContext } from '../src/operator/policy.js';
 import { MemoryStore } from '../src/memory/index.js';
 import {
+
+
   assertAssignable,
   assertHandoverTransition,
   generateHandoverPackage,
@@ -12,12 +16,30 @@ import {
   type HandoverState,
 } from '../src/handover/index.js';
 
+/**
+ * A queue plus its approval grant. The grant reaches only the constructor's
+ * caller (issue #200, Codex finding on `d575c89`), so a test that legitimately
+ * drives approvals captures it here rather than reaching for `queue.approve`,
+ * which no longer exists on the public surface.
+ */
+function queueWithApprovals(
+  db: HqDatabase,
+  policyCtx: PolicyContext = {},
+): { queue: OperatorQueue; privileged: PrivilegedQueueApi } {
+  let privileged: PrivilegedQueueApi | undefined;
+  const queue = new OperatorQueue(db, policyCtx, (api) => {
+    privileged = api;
+  });
+  return { queue, privileged: privileged! };
+}
+
+
 const claude = { workerId: 'claude', allowedCapabilities: ['repo.read_status', 'github.open_pr'] };
 
 function setup(): { db: HqDatabase; hq: HeadquarterStore; queue: OperatorQueue; memory: MemoryStore; handovers: HandoverStore } {
   const db = openMemoryHqDatabase();
   const hq = new HeadquarterStore(db);
-  const queue = new OperatorQueue(db, { preApprovedCapabilities: new Set(['github.open_pr']) });
+  const { queue: queue, privileged: queueApprovals } = queueWithApprovals(db, { preApprovedCapabilities: new Set(['github.open_pr']) });
   new CapabilityRegistry(db).register({
     id: 'repo.read_status',
     description: 'Read repo/CI status',

@@ -6,6 +6,7 @@
  */
 
 import { openMemoryHqDatabase, type HqDatabase } from '../src/store/db.js';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { HeadquarterStore } from '../src/store/headquarter.js';
 import { HeadquarterOperations } from '../src/application/service.js';
 import type { NominationSourcePort, WorkerNomination } from '../src/application/ports.js';
@@ -41,28 +42,28 @@ export function setupFixture(
     nominationSources: options.nominationSources,
   });
 
-  ops.registerCapability({
+  new CapabilityRegistry(db).register({
     id: CAPS.readStatus,
     description: 'Read repo/CI status',
     riskClass: 'read_only',
     sideEffect: false,
     idempotent: true,
   });
-  ops.registerCapability({
+  new CapabilityRegistry(db).register({
     id: CAPS.openPr,
     description: 'Open a branch-isolated PR',
     riskClass: 'external_side_effect',
     sideEffect: true,
     idempotent: true,
   });
-  ops.registerCapability({
+  new CapabilityRegistry(db).register({
     id: CAPS.indexDoc,
     description: 'Index a document into the archive',
     riskClass: 'external_side_effect',
     sideEffect: true,
     idempotent: false,
   });
-  ops.registerCapability({
+  new CapabilityRegistry(db).register({
     id: CAPS.dropIndex,
     description: 'Drop a search index',
     riskClass: 'destructive',

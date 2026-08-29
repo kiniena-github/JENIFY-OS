@@ -12,6 +12,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { setupFixture, type Fixture } from './application.fixture.js';
@@ -37,7 +38,7 @@ const NOTHING = {};
 
 function ordersFixture(): Fixture {
   const fixture = setupFixture();
-  registerDirectOrderCapability(fixture.ops);
+  registerDirectOrderCapability(fixture.db);
   // The Founder must be granted origination for the direct-order capability,
   // exactly like any other. The grant lives in the registry, never in the
   // caller — that is the whole point of resolveRequester().
@@ -315,11 +316,13 @@ describe('idempotency', () => {
   });
 
   it('refuses to ride on a capability whose definition has drifted', () => {
-    const { ops } = ordersFixture();
+    const fx = ordersFixture();
+    const { ops } = fx;
     // Classification follows the REGISTERED definition, not this module's
     // constant, so a drifted row would let a free-text instruction skip the
-    // Founder gate entirely.
-    ops.registerCapability({
+    // Founder gate entirely. Rewriting it needs the DATABASE — which is the
+    // point: an execution caller holding ops or a queue cannot do this.
+    new CapabilityRegistry(fx.db).register({
       ...DIRECT_ORDER_CAPABILITY,
       riskClass: 'reversible',
     } as never);
@@ -333,9 +336,10 @@ describe('idempotency', () => {
   });
 
   it('reports an intact definition as enabled, and does not repair a drifted one', () => {
-    const { ops } = ordersFixture();
+    const fx = ordersFixture();
+    const { ops } = fx;
     expect(directOrderCapabilityState(ops)).toBe('enabled');
-    ops.registerCapability({ ...DIRECT_ORDER_CAPABILITY, idempotent: false } as never);
+    new CapabilityRegistry(fx.db).register({ ...DIRECT_ORDER_CAPABILITY, idempotent: false } as never);
     expect(directOrderCapabilityState(ops)).toBe('drifted');
     submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
     // Invocation refuses; it never quietly re-registers the definition.

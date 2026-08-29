@@ -38,7 +38,7 @@ const CLAUDE_ONLY = { CLAUDE_ROUTINE_URL: 'present', CLAUDE_ROUTINE_TOKEN: 'pres
 
 function ordersFixture(): Fixture {
   const fixture = setupFixture();
-  registerDirectOrderCapability(fixture.ops);
+  registerDirectOrderCapability(fixture.db);
   fixture.principals.register({
     id: 'founder',
     displayName: 'Founder',

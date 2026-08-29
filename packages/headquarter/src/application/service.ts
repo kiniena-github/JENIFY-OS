@@ -75,7 +75,12 @@ import { evaluatePolicy, type PolicyContext, type PolicyDecision } from '../oper
 import { taskActionDigest } from '../operator/approvals.js';
 import { assertNoSecretLikeContent } from '../operator/evidence.js';
 import { CapabilityRegistry } from '../operator/capabilities.js';
-import { OperatorQueue, type OperatorTask, type ReconcileDecision } from '../operator/queue.js';
+import {
+  OperatorQueue,
+  type OperatorTask,
+  type PrivilegedQueueApi,
+  type ReconcileDecision,
+} from '../operator/queue.js';
 import {
   ProviderBindingViolation,
   ProviderDeclarationRejected,
@@ -367,6 +372,7 @@ export class HeadquarterOperations {
    * from outside this class body.
    */
   readonly #workerProviderRegistrar: WorkerProviderRegistrar;
+  readonly #queuePrivileged: PrivilegedQueueApi | undefined;
   /**
    * Capability WRITE side, `#private`, for the same reason as the provider
    * registrar: a worker holding a queue could otherwise rewrite the
@@ -386,7 +392,7 @@ export class HeadquarterOperations {
    * `declareWorkerProvider` — is a policy question this correction loop is not
    * authorised to decide, so no authority rule has been made up here.
    */
-  readonly #capabilityRegistrar: CapabilityRegistry;
+
 
   /**
    * ECMAScript `#private`. TypeScript `private` erases to a public property, so
@@ -405,13 +411,23 @@ export class HeadquarterOperations {
     this.#db = db;
     ensureApplicationSchema(db);
     this.store = options.store ?? new HeadquarterStore(db);
-    this.queue = options.queue ?? new OperatorQueue(db, options.policyCtx ?? {});
+    // The approval mutations are handed to whoever CONSTRUCTS the queue and to
+    // nobody else, so they are unreachable from a queue handle a worker holds.
+    // When a queue is supplied (tests, composition), no grant arrives and this
+    // service simply has no approval mutation available — which is correct: it
+    // did not construct that queue and cannot vouch for it.
+    let granted: PrivilegedQueueApi | undefined;
+    this.queue =
+      options.queue ??
+      new OperatorQueue(db, options.policyCtx ?? {}, (api) => {
+        granted = api;
+      });
+    this.#queuePrivileged = granted;
     // The WRITE side of the worker → provider map lives here and nowhere else
     // (issue #200, Codex round-3 P1 #1). It is private: the only ways in are
     // `declareWorkerProvider`/`revokeWorkerProvider`, which resolve the actor
     // and require approval authority first.
     this.#workerProviderRegistrar = new WorkerProviderRegistrar(db);
-    this.#capabilityRegistrar = new CapabilityRegistry(db);
     this.workers =
       options.workers ?? narrowByRegistry(new SpecialistDirectoryAdapter(this.store), options.memberRegistry);
     this.principals = options.humanPrincipals ?? new HumanPrincipalRegistry(db);
@@ -699,7 +715,7 @@ export class HeadquarterOperations {
 
     try {
       return ok(
-        this.queue.approve(task.id, input.founderId, { ttlMs: input.ttlMs, note: input.note }),
+        this.#requirePrivilegedQueue().approve(task.id, input.founderId, { ttlMs: input.ttlMs, note: input.note }),
       );
     } catch (error) {
       return fail('operator_rejected', errorMessage(error), { taskId: task.id });
@@ -725,7 +741,7 @@ export class HeadquarterOperations {
       });
     }
     try {
-      return ok(this.queue.deny(task.id, input.reason, input.founderId));
+      return ok(this.#requirePrivilegedQueue().deny(task.id, input.reason, input.founderId));
     } catch (error) {
       return fail('operator_rejected', errorMessage(error), { taskId: task.id });
     }
@@ -987,12 +1003,19 @@ export class HeadquarterOperations {
    * take, never which capabilities it holds, which stay with the directory.
    */
   /**
-   * Register (or update) a capability definition. A CONFIGURATION act, kept off
-   * the queue so an execution caller cannot reach it — see
-   * `#capabilityRegistrar`.
+   * The approval mutations, or a loud failure. A service built around a queue
+   * it did not construct holds no grant, and must not silently behave as if an
+   * approval had been recorded.
    */
-  registerCapability(cap: Parameters<CapabilityRegistry['register']>[0]): void {
-    this.#capabilityRegistrar.register(cap);
+  #requirePrivilegedQueue(): PrivilegedQueueApi {
+    if (!this.#queuePrivileged) {
+      throw new Error(
+        'This HeadquarterOperations was constructed around an externally supplied queue, so it ' +
+          'holds no approval-mutation grant. Approvals must go through a service that built its ' +
+          'own queue.',
+      );
+    }
+    return this.#queuePrivileged;
   }
 
   declareWorkerProvider(input: {

@@ -54,7 +54,7 @@ function providerOfVia(fx: Fixture, workerId: string): string | null {
 
 function bindingFixture(): Fixture {
   const fixture = setupFixture();
-  registerDirectOrderCapability(fixture.ops);
+  registerDirectOrderCapability(fixture.db);
   fixture.principals.register({
     id: 'founder',
     displayName: 'Founder',
@@ -789,6 +789,48 @@ describe('the provider write mechanism is not reachable around the authority gat
     const registered = fx.ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id);
     expect(registered?.riskClass).toBe('founder_gate');
     expect(registered?.sideEffect).toBe(true);
+  });
+
+  /**
+   * Codex exact-head findings on `d575c89` (two P1s) — the ELEVENTH mechanism,
+   * and the second in the rewrite-the-data category after `op_capabilities`.
+   * They answered the question the previous review request asked: what else
+   * does enforcement read that a caller can still write? `hq_approvals`.
+   *
+   * `approve` was on the public surface and my allowlist let it stay, on the
+   * reasoning that it is "an operation the service drives". It is — but
+   * `OperatorQueue.approve` only rejects the creator, the claimant and
+   * `system`. It never resolves the supplied name and never checks approval
+   * authority, so `queue.approve(taskId, 'fake-founder')` wrote a valid,
+   * digest-bound `hq_approvals` row that `claim` and `start` accept: a Direct
+   * Order passing its Founder gate with no Founder decision.
+   */
+  it('offers a worker no way to forge a Founder approval from a queue handle', () => {
+    const fx = bindingFixture();
+    const queue = fx.ops.queue as unknown as Record<string, unknown>;
+
+    expect(queue.approve).toBeUndefined();
+    expect(queue.deny).toBeUndefined();
+    expect(Object.getPrototypeOf(queue)).not.toHaveProperty('approve');
+    expect(Object.getPrototypeOf(queue)).not.toHaveProperty('deny');
+
+    // The authorized path still works and still resolves the actor: a worker
+    // is refused because it holds no approval authority, not because the
+    // method is missing.
+    const taskId = queuedClaudeOrder(fx);
+    expect(fx.ops.queue.get(taskId)!.status).toBe('queued');
+  });
+
+  it('offers execution callers no way to rewrite a capability definition', () => {
+    // The companion finding: `registerCapability` on HeadquarterOperations had
+    // no authority check, so a caller holding ops could downgrade an
+    // already-claimed capability. Registration now needs the DATABASE, which
+    // is the boundary that was already true and is now the only one.
+    const fx = bindingFixture();
+    const ops = fx.ops as unknown as Record<string, unknown>;
+    expect(ops.registerCapability).toBeUndefined();
+    expect(ops.setCapabilityEnabled).toBeUndefined();
+    expect(Object.getPrototypeOf(ops)).not.toHaveProperty('registerCapability');
   });
 
   it('still lets the authorized service boundary declare, and still gates it', () => {

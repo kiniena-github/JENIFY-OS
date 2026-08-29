@@ -22,6 +22,15 @@ import { nowIso } from '../store/db.js';
 import { assertTransition, type ActivityStatus } from '../contracts/events.js';
 import { CapabilityRegistry, type Capability } from './capabilities.js';
 
+/**
+ * Approval mutations, handed only to the constructor's caller. Not exported on
+ * any object a worker can reach.
+ */
+export interface PrivilegedQueueApi {
+  approve(taskId: string, by?: string, opts?: { ttlMs?: number; note?: string }): OperatorTask;
+  deny(taskId: string, reason: string, by?: string): OperatorTask;
+}
+
 /** Reads only. The write side is a configuration act behind the service. */
 export interface CapabilityReadOnly {
   get(id: string): Capability | null;
@@ -222,10 +231,36 @@ export class OperatorQueue {
   readonly #db: HqDatabase;
   readonly #policyCtx: PolicyContext;
 
-  constructor(db: HqDatabase, policyCtx: PolicyContext = {}) {
+  constructor(
+    db: HqDatabase,
+    policyCtx: PolicyContext = {},
+    /**
+     * Handed the approval mutations, once, at construction — and to nobody
+     * else. `approve` and `deny` were on the public surface and the allowlist
+     * let them stay, on the reasoning that they are "operations the service
+     * drives". They are, but `OperatorQueue.approve` only rejects the creator,
+     * the claimant and `system`: it never resolves the supplied name and never
+     * checks approval authority, so a worker holding a queue could call
+     * `queue.approve(taskId, 'fake-founder')` and write a valid digest-bound
+     * `hq_approvals` row that `claim` and `start` then accept. A Direct Order
+     * would pass its Founder gate with no Founder decision (issue #200, Codex
+     * exact-head finding on `d575c89` — the eleventh mechanism, and the second
+     * in the rewrite-the-data category after `op_capabilities`).
+     *
+     * `HeadquarterOperations.approveTask` is the path that resolves the actor
+     * against the human-principal registry and requires approval authority.
+     * It constructs the queue, so it receives this; a worker handed the queue
+     * afterwards has no way to obtain it.
+     */
+    grantPrivileged?: (api: PrivilegedQueueApi) => void,
+  ) {
     this.#db = db;
     this.#policyCtx = policyCtx;
     const registry = new CapabilityRegistry(db);
+    grantPrivileged?.({
+      approve: (taskId, by, opts) => this.#approve(taskId, by, opts),
+      deny: (taskId, reason, by) => this.#deny(taskId, reason, by),
+    });
     this.capabilities = {
       get: (id: string) => registry.get(id),
       list: () => registry.list(),
@@ -487,7 +522,7 @@ export class OperatorQueue {
    * later capability/payload mutation, expiry, or replay invalidates it at
    * the execution boundary.
    */
-  approve(taskId: string, by = 'founder', opts: { ttlMs?: number; note?: string } = {}): OperatorTask {
+  #approve(taskId: string, by = 'founder', opts: { ttlMs?: number; note?: string } = {}): OperatorTask {
     const task = this.#getTask(taskId);
     if (!task) throw new Error(`Unknown task: ${taskId}`);
     if (task.status !== 'needs_approval') {
@@ -533,7 +568,7 @@ export class OperatorQueue {
   }
 
   /** Founder denial blocks the task with a reason; the denial is recorded immutably. */
-  deny(taskId: string, reason: string, by = 'founder'): OperatorTask {
+  #deny(taskId: string, reason: string, by = 'founder'): OperatorTask {
     const before = this.#getTask(taskId);
     if (!before) throw new Error(`Unknown task: ${taskId}`);
     const cap = this.#capabilityOf(before.capabilityId);

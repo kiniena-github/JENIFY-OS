@@ -2,14 +2,36 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { openMemoryHqDatabase, type HqDatabase } from '../src/store/db.js';
 import { OperatorQueue } from '../src/operator/queue.js';
+import type { PrivilegedQueueApi } from '../src/operator/queue.js';
+import type { PolicyContext } from '../src/operator/policy.js';
+
+/**
+ * A queue plus its approval grant. The grant reaches only the constructor's
+ * caller (issue #200, Codex finding on `d575c89`), so a test that legitimately
+ * drives approvals captures it here rather than reaching for `queue.approve`,
+ * which no longer exists on the public surface.
+ */
+function queueWithApprovals(
+  db: HqDatabase,
+  policyCtx: PolicyContext = {},
+): { queue: OperatorQueue; privileged: PrivilegedQueueApi } {
+  let privileged: PrivilegedQueueApi | undefined;
+  const queue = new OperatorQueue(db, policyCtx, (api) => {
+    privileged = api;
+  });
+  return { queue, privileged: privileged! };
+}
+
+
+
 
 const claudeWorker = {
   workerId: 'claude',
   allowedCapabilities: ['repo.read_status', 'github.open_pr', 'archive.index_document'],
 };
 
-function makeQueue(db: HqDatabase): OperatorQueue {
-  const q = new OperatorQueue(db, { preApprovedCapabilities: new Set(['github.open_pr']) });
+function makeQueue(db: HqDatabase): { queue: OperatorQueue; approvals: PrivilegedQueueApi } {
+  const { queue: q, privileged: qApprovals } = queueWithApprovals(db, { preApprovedCapabilities: new Set(['github.open_pr']) });
   new CapabilityRegistry(db).register({
     id: 'repo.read_status',
     description: 'Read repo/CI status',
@@ -31,16 +53,17 @@ function makeQueue(db: HqDatabase): OperatorQueue {
     sideEffect: true,
     idempotent: false,
   });
-  return q;
+  return { queue: q, approvals: qApprovals };
 }
 
 describe('operator queue', () => {
   let db: HqDatabase;
   let queue: OperatorQueue;
+  let queueApprovals: PrivilegedQueueApi;
 
   beforeEach(() => {
     db = openMemoryHqDatabase();
-    queue = makeQueue(db);
+    ({ queue, approvals: queueApprovals } = makeQueue(db));
   });
 
   it('enqueues an allowed read-only task as queued', () => {
@@ -163,7 +186,7 @@ describe('operator queue', () => {
       requestedBy: claudeWorker,
     });
     const approved = queue.listByStatus('needs_approval')[0];
-    queue.approve(approved.id);
+    queueApprovals.approve(approved.id);
     const t = queue.claim('claude', 'archive.index_document', -1)!;
     queue.start(t.id, 'claude', t.fence);
     queue.sweepExpiredLeases();
@@ -181,7 +204,7 @@ describe('operator queue', () => {
     });
     expect(res.accepted && res.task.status).toBe('needs_approval');
     if (!res.accepted) return;
-    const denied = queue.deny(res.task.id, 'not this wave');
+    const denied = queueApprovals.deny(res.task.id, 'not this wave');
     expect(denied.status).toBe('blocked');
     expect(denied.blockReason).toBe('not this wave');
   });

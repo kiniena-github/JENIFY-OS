@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
 
 import {
   HeadquarterOperations,
@@ -272,7 +273,7 @@ describe('HeadquarterOperations wiring', () => {
     registerSpecialist('w1', ['docs.write', 'deploy.run']);
     registerMember('w1', ['docs.write']);
     const ops = new HeadquarterOperations(db, { memberRegistry: registry });
-    ops.registerCapability({
+    new CapabilityRegistry(db).register({
       id: 'deploy.run',
       description: 'Run a deployment',
       riskClass: 'read_only',
@@ -297,7 +298,7 @@ describe('HeadquarterOperations wiring', () => {
     registerSpecialist('w2', ['docs.write']);
     registerMember('w2', ['docs.write']);
     const ops = new HeadquarterOperations(db, { memberRegistry: registry });
-    ops.registerCapability({
+    new CapabilityRegistry(db).register({
       id: 'docs.write',
       description: 'Write docs',
       riskClass: 'read_only',

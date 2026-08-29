@@ -160,7 +160,7 @@ function main(): void {
     const configDb = openHqDatabase(dbPath ?? undefined);
     const configOps = new HeadquarterOperations(configDb);
     const before = directOrderCapabilityState(configOps);
-    registerDirectOrderCapability(configOps);
+    registerDirectOrderCapability(configDb);
     const after = directOrderCapabilityState(configOps);
     console.log(`Capability ${DIRECT_ORDER_CAPABILITY.id}: ${before} → ${after}`);
     if (after === 'disabled') {
