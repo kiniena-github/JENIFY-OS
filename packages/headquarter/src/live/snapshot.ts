@@ -37,8 +37,9 @@ import type { Capability } from '../operator/capabilities.js';
 import { classifyCapability, type TaskClassification } from '../application/classification.js';
 import { founderConsole, type FounderConsole } from '../application/console.js';
 import { directOrderDispatchBlocked } from './orders.js';
+import { dispatchHistory } from '../providers/claude/dispatch.js';
 import type { HeadquarterOperations } from '../application/service.js';
-import type { SecretsEnv } from '../routing/providers.js';
+import type { ProviderId, SecretsEnv } from '../routing/providers.js';
 import { assessConnections, type ConnectionProbe, type ConnectionStatus } from './connections.js';
 import { assertBrowserSafe, assertNoFabricatedFields } from './redaction.js';
 import {
@@ -260,6 +261,14 @@ export interface LiveSnapshotOptions {
    * there instead of a generic environment-variable inventory.
    */
   connectionProbes?: readonly ConnectionProbe[];
+  /**
+   * Transport-backed dispatchability for a provider — true/false when the host
+   * genuinely knows, null when it does not (issue #224, Codex P1 on
+   * `faf4fda`). Supplied by the local snapshot CLI, which holds the real GitHub
+   * transport; omitted by CI and static builds, which hold nothing and fall
+   * back to the routing contract.
+   */
+  dispatchAvailability?: (provider: ProviderId) => boolean | null;
 }
 
 /**
@@ -286,11 +295,20 @@ function withDispatchBlocked(
   data: FounderConsole,
   ops: HeadquarterOperations,
   env: SecretsEnv,
+  providerDispatchable?: (provider: ProviderId) => boolean | null,
 ): FounderConsole {
   const mark = <T extends { taskId: string }>(card: T): T => {
     const task = ops.queue.get(card.taskId);
     if (!task) return card;
-    return { ...card, dispatchBlocked: directOrderDispatchBlocked(task, env) };
+    return {
+      ...card,
+      dispatchBlocked: directOrderDispatchBlocked(task, env, {
+        // Evidence first: an order HQ has already published is not blocked,
+        // whatever the environment looks like now.
+        alreadyDispatched: dispatchHistory(ops, card.taskId).state === 'dispatched',
+        providerDispatchable,
+      }),
+    };
   };
   return {
     ...data,
@@ -318,7 +336,7 @@ export function liveSnapshotFromOperations(
     policyContext: ops.policyContext,
     activityLimit: options.activityLimit,
     console: {
-      data: withDispatchBlocked(founderConsole(ops, new Date(at)), ops, env),
+      data: withDispatchBlocked(founderConsole(ops, new Date(at)), ops, env, options.dispatchAvailability),
       provenance: provenanceFor('op_tasks / hq_approvals via application/console.founderConsole'),
     },
     connections: {

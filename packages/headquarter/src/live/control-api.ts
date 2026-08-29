@@ -58,7 +58,8 @@
 import { founderConsole, type ApprovalCard } from '../application/console.js';
 import type { HeadquarterOperations } from '../application/service.js';
 import { taskActionDigest } from '../operator/approvals.js';
-import type { SecretsEnv } from '../routing/providers.js';
+import type { ProviderId, SecretsEnv } from '../routing/providers.js';
+import { dispatchHistory } from '../providers/claude/dispatch.js';
 import {
   checkMutationOrigin,
   normalizedTrustedOrigins,
@@ -77,6 +78,7 @@ import {
 import { assertBrowserSafe } from './redaction.js';
 import {
   directOrderCapabilityState,
+  directOrderDispatchBlocked,
   resolveOrderRoute,
   submitDirectOrder,
   DIRECT_ORDER_CAPABILITY,
@@ -136,6 +138,12 @@ export interface ControlApiDeps {
   allowedOrigins: readonly string[];
   /** Provider facts for route resolution. Names only ever leave here, never values. */
   secretsEnv: SecretsEnv;
+  /**
+   * Transport-backed dispatchability for a provider — true/false when the host
+   * genuinely knows, null when it does not. A host running where the real
+   * transport lives supplies it; without one the routing contract answers.
+   */
+  dispatchAvailability?: (provider: ProviderId) => boolean | null;
   credentials?: CredentialVerifierPort;
   audit?: ControlAuditPort;
   now?: () => Date;
@@ -183,9 +191,20 @@ interface ApprovalView {
   stepUpRequired: boolean;
   /** True when the canonical no-self-approval rule already refuses this Founder. */
   selfApproval: boolean;
+  /**
+   * True when this is a direct order whose bound provider cannot dispatch right
+   * now (issue #224). The live approvals view is what the browser console
+   * actually renders, so the blocked state has to travel HERE — a field only on
+   * the polled snapshot was a promise nothing kept.
+   */
+  dispatchBlocked: boolean;
 }
 
-function approvalView(card: ApprovalCard, founderId: string): ApprovalView {
+function approvalView(
+  card: ApprovalCard,
+  founderId: string,
+  dispatchBlocked: boolean,
+): ApprovalView {
   return {
     taskId: card.taskId,
     capabilityId: card.capabilityId,
@@ -198,6 +217,7 @@ function approvalView(card: ApprovalCard, founderId: string): ApprovalView {
     ask: card.ask,
     stepUpRequired: STEP_UP_RISK_CLASSES.includes(card.classification.riskClass),
     selfApproval: card.createdBy === founderId,
+    dispatchBlocked,
   };
 }
 
@@ -222,6 +242,27 @@ export function handleControlRequest(
   } catch {
     return refusal(500, 'internal', 'The request could not be completed.');
   }
+}
+
+/**
+ * Is this approval card a direct order whose provider cannot dispatch right now?
+ *
+ * Asked here, per card, because this route is what the live console renders —
+ * the polled snapshot carries the same field but nothing in the browser reads
+ * it, so a block that lived only there was invisible (issue #224, Codex P1 on
+ * `faf4fda`). Evidence outranks inference: an order HQ has already published is
+ * not blocked, whatever the environment now looks like.
+ *
+ * `dispatchAvailability` lets a host that holds the real transport answer for
+ * its provider; without one, the routing contract answers, as it did before.
+ */
+function isDispatchBlocked(deps: ControlApiDeps, taskId: string): boolean {
+  const task = deps.ops.queue.get(taskId);
+  if (!task) return false;
+  return directOrderDispatchBlocked(task, deps.secretsEnv, {
+    alreadyDispatched: dispatchHistory(deps.ops, taskId).state === 'dispatched',
+    providerDispatchable: deps.dispatchAvailability,
+  });
 }
 
 function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
@@ -397,7 +438,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
       json(200, {
         ok: true,
         generatedAt: console_.generatedAt,
-        approvals: console_.approvals.map((card) => approvalView(card, founder.principal.id)),
+        approvals: console_.approvals.map((card) =>
+          approvalView(card, founder.principal.id, isDispatchBlocked(deps, card.taskId)),
+        ),
       }),
     );
   }

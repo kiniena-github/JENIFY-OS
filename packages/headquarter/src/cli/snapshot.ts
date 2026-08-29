@@ -31,7 +31,7 @@ import { HeadquarterOperations } from '../application/service.js';
 import { liveSnapshotFromOperations } from '../live/snapshot.js';
 import { CONNECTION_CATALOG } from '../live/connections.js';
 import { SNAPSHOT_FILENAME } from '../ui/live-refresh.js';
-import { PROVIDER_REGISTRY, type SecretsEnv } from '../routing/providers.js';
+import { PROVIDER_REGISTRY, type ProviderId, type SecretsEnv } from '../routing/providers.js';
 import { probeCodex } from '../providers/codex/probe.js';
 import { connectionProbesWithGitHubDispatch } from '../providers/claude/connection.js';
 import { ghCliTransport } from '../providers/claude/transport.js';
@@ -92,11 +92,32 @@ const ops = new HeadquarterOperations(db);
 // than the Founder's machine, and where a build must not make provider calls.
 // So the page's live refresh tells the truth about the transport, and the
 // build-time render keeps its honest configuration-only answer.
+const transport = ghCliTransport();
+
+// What CLAUDE dispatchability actually depends on HERE (issue #224, Codex P1).
+//
+// `CLAUDE_ROUTINE_*` are GitHub Actions secrets the workflow needs; they are
+// deliberately absent on the Founder workstation, where dispatch happens
+// through the authenticated `gh` transport instead. Deriving the live verdict
+// from their absence would report a successfully dispatched order as blocked
+// forever, in exactly the environment this lane is built for. So CLAUDE is
+// answered from the transport that would really carry it, and every other
+// provider returns null — "this host does not know" — leaving the routing
+// contract to answer as before.
+const dispatchAvailability = (provider: ProviderId): boolean | null => {
+  if (provider !== 'CLAUDE') return null;
+  const status = transport.status();
+  // Only an observed, authenticated session is an answer. Anything weaker is
+  // not evidence of dispatchability, so it defers rather than claiming false.
+  return status.available && status.authenticated ? true : null;
+};
+
 const snapshot = liveSnapshotFromOperations(ops, {
   now: new Date().toISOString(),
   env: observeFacts(),
   mode: 'live',
-  connectionProbes: connectionProbesWithGitHubDispatch(ghCliTransport()),
+  connectionProbes: connectionProbesWithGitHubDispatch(transport),
+  dispatchAvailability,
 });
 
 mkdirSync(dirname(outPath), { recursive: true });

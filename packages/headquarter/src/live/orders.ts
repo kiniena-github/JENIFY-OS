@@ -299,16 +299,46 @@ export function resolveOrderRoute(route: DirectOrderRoute, env: SecretsEnv): Rou
  * Payload-blind about everything else: it reads only the reserved
  * `executionProvider` binding, never the instruction.
  */
+export interface DispatchBlockedContext {
+  /**
+   * True when HQ has already published this order. Evidence outranks
+   * inference: an order that demonstrably reached its executor is not blocked,
+   * whatever the environment looks like now.
+   */
+  alreadyDispatched?: boolean;
+  /**
+   * A transport-backed verdict for a provider: true/false when the caller
+   * genuinely knows, null when it does not and the routing contract should
+   * answer instead.
+   *
+   * This exists because "can HQ dispatch to CLAUDE from here?" and "are the
+   * workflow's routine secrets visible in this process?" are different
+   * questions, and only the first one is the one being asked. On the Founder
+   * workstation CLAUDE is dispatched through the authenticated `gh` transport
+   * while `CLAUDE_ROUTINE_*` is deliberately absent — those are GitHub Actions
+   * secrets, and `providers/claude/dispatch.ts` warns that setting them locally
+   * would manufacture connectivity. Deriving the live verdict from their
+   * absence would report a successfully dispatched order as blocked forever, in
+   * exactly the environment this lane is built for.
+   */
+  providerDispatchable?: (provider: ProviderId) => boolean | null;
+}
+
 export function directOrderDispatchBlocked(
   task: { capabilityId: string; payload: Record<string, unknown> },
   env: SecretsEnv,
+  context: DispatchBlockedContext = {},
 ): boolean {
   if (task.capabilityId !== DIRECT_ORDER_CAPABILITY.id) return false;
+  // What actually happened outranks what the environment suggests.
+  if (context.alreadyDispatched) return false;
   const binding = readProviderBinding(task.payload);
   if (!binding.bound) return false;
   // A binding HQ cannot read is not dispatchable by anyone, which is the
   // strongest truthful answer available.
   if (binding.provider == null || !isProviderId(binding.provider)) return true;
+  const observed = context.providerDispatchable?.(binding.provider) ?? null;
+  if (observed !== null) return !observed;
   return !providerConnectivity(binding.provider, env).connected;
 }
 
@@ -512,8 +542,8 @@ export function directOrderIdempotencyKey(
  * choosing one is a deliberate act. What must not happen is content reaching
  * the browser as a side effect of writing the instruction.
  */
-function defaultTitle(route: RouteResolution): string {
-  return `Direct order → ${route.resolved}`;
+function defaultTitle(boundProvider: ProviderId): string {
+  return `Direct order → ${boundProvider}`;
 }
 
 /**
@@ -709,7 +739,7 @@ export function submitDirectOrder(
     idempotencyKey,
     requestedBy: input.requestedBy,
     project: input.project,
-    title: title || defaultTitle(route),
+    title: title || defaultTitle(boundProvider),
   });
 
   if (!created.ok) {

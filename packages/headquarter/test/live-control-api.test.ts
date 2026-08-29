@@ -240,6 +240,34 @@ describe('a mapped Founder creates a canonical order, and only through the facad
     expect(h.fixture.ops.queue.listByStatus('queued')).toHaveLength(0);
   });
 
+  it('carries the blocked state on the live approvals route the console renders', () => {
+    // A field that lived only on the polled snapshot was a promise nothing
+    // kept: the console fetches GET /approvals, which goes through
+    // `approvalView`.
+    const h = harness();
+    h.deps.secretsEnv = {};
+    expect(h.call({ body: ORDER_BODY }).status).toBe(201);
+
+    const listed = h.call({ method: 'GET', path: CONTROL_ROUTES.approvals, body: undefined });
+    expect(listed.status).toBe(200);
+    const approvals = listed.body.approvals as Array<Record<string, unknown>>;
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]!.dispatchBlocked).toBe(true);
+  });
+
+  it('stops reporting the block once a host says the provider is dispatchable', () => {
+    const h = harness();
+    h.deps.secretsEnv = {};
+    // A host holding the real transport answers for its provider, even with no
+    // routine secrets in this process.
+    h.deps.dispatchAvailability = () => true;
+    expect(h.call({ body: ORDER_BODY }).status).toBe(201);
+
+    const listed = h.call({ method: 'GET', path: CONTROL_ROUTES.approvals, body: undefined });
+    const approvals = listed.body.approvals as Array<Record<string, unknown>>;
+    expect(approvals[0]!.dispatchBlocked).toBe(false);
+  });
+
   it('leaks no instruction text into the blocked response', () => {
     const h = harness();
     h.deps.secretsEnv = {};

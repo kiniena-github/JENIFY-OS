@@ -19,6 +19,7 @@ import { founderConsole } from '../src/application/console.js';
 import { DEFAULT_ACTOR_AUTHENTICATION } from '../src/live/local-trust.js';
 import {
   AUTO_ROUTE_PREFERENCE,
+  directOrderDispatchBlocked,
   DIRECT_ORDER_CAPABILITY,
   directOrderIdempotencyKey,
   MAX_INSTRUCTION_LENGTH,
@@ -119,6 +120,44 @@ describe('an unavailable provider blocks the order without losing it (issue #224
     // Bound to the provider that was ASKED for, so no other provider's worker
     // can claim it even though that provider cannot dispatch today.
     expect(result.data.task.payload).toMatchObject({ executionProvider: 'CLAUDE' });
+  });
+
+  it('titles a blocked order after the provider it is bound to, never "null"', () => {
+    // `defaultTitle` used to format `route.resolved`, which is null for a
+    // blocked order, so the canonical task was stored as "Direct order → null".
+    const { ops } = ordersFixture();
+    const result = submitDirectOrder(ops, ORDER, NOTHING);
+    if (!result.ok) throw new Error('expected ok');
+    expect(ops.readMeta(result.data.task.id)?.title).toBe('Direct order → CLAUDE');
+  });
+
+  it('stops reporting a block once the order has actually been dispatched', () => {
+    // Evidence outranks inference. On the Founder workstation CLAUDE dispatches
+    // through the `gh` transport while CLAUDE_ROUTINE_* is deliberately absent,
+    // so an environment-only verdict would call a published order blocked
+    // forever.
+    const { ops } = ordersFixture();
+    const result = submitDirectOrder(ops, ORDER, NOTHING);
+    if (!result.ok) throw new Error('expected ok');
+    const task = ops.queue.get(result.data.task.id)!;
+
+    expect(directOrderDispatchBlocked(task, NOTHING)).toBe(true);
+    expect(directOrderDispatchBlocked(task, NOTHING, { alreadyDispatched: true })).toBe(false);
+  });
+
+  it('lets a host that holds the real transport answer for its provider', () => {
+    const { ops } = ordersFixture();
+    const result = submitDirectOrder(ops, ORDER, NOTHING);
+    if (!result.ok) throw new Error('expected ok');
+    const task = ops.queue.get(result.data.task.id)!;
+
+    // A host that knows CLAUDE is dispatchable says so, even with no routine
+    // secrets in this process.
+    expect(directOrderDispatchBlocked(task, NOTHING, { providerDispatchable: () => true })).toBe(false);
+    // A host that does not know defers to the routing contract rather than
+    // inventing an answer.
+    expect(directOrderDispatchBlocked(task, NOTHING, { providerDispatchable: () => null })).toBe(true);
+    expect(directOrderDispatchBlocked(task, CLAUDE_ONLY, { providerDispatchable: () => null })).toBe(false);
   });
 
   it('records the block as append-only evidence, naming missing facts and no values', () => {

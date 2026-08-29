@@ -214,26 +214,31 @@ export function directOrderConsoleScript(): string {
           }
         }
         var connected = found != null && found.connected === true;
-        if (connected || found == null) {
-          var radio = document.createElement('input');
-          radio.type = 'radio';
-          radio.name = 'hq-order-route';
-          radio.value = name;
-          radio.id = 'hq-order-route-' + name;
-          radio.addEventListener('change', function () { chosen = name; });
-          var label = document.createElement('label');
-          label.setAttribute('for', radio.id);
-          label.textContent = found == null
-            ? name + ' \\u2014 availability was not evaluated by this server; an unavailable provider is refused at submit, never substituted.'
-            : name + ' \\u2014 ' + found.reason;
-          row.appendChild(radio);
-          row.appendChild(label);
+        // EVERY route is offered now (issue #224). It used to be that a
+        // disconnected route was stated but not selectable, because the server
+        // would certainly refuse it and a control that cannot work is a control
+        // pretending to work. The server no longer refuses: a valid order is
+        // recorded and reported BLOCKED, so refusing to offer it here would be
+        // the browser withholding the very flow the correction exists to give
+        // the Founder — and only API and CLI callers would benefit.
+        var radio = document.createElement('input');
+        radio.type = 'radio';
+        radio.name = 'hq-order-route';
+        radio.value = name;
+        radio.id = 'hq-order-route-' + name;
+        radio.addEventListener('change', function () { chosen = name; });
+        var label = document.createElement('label');
+        label.setAttribute('for', radio.id);
+        if (found == null) {
+          label.textContent = name + ' \\u2014 availability was not evaluated by this server; the order is recorded either way, and no provider is ever substituted.';
+        } else if (connected) {
+          label.textContent = name + ' \\u2014 ' + found.reason;
         } else {
-          // A blocked route is stated, not offered: drawing a control that the
-          // server will certainly refuse would be a control pretending to work.
           row.className = 'row order-route-blocked';
-          row.textContent = name + ' \\u2014 BLOCKED, not connected: ' + found.reason;
+          label.textContent = name + ' \\u2014 NOT CONNECTED: the order will be RECORDED and BLOCKED, not started. ' + found.reason;
         }
+        row.appendChild(radio);
+        row.appendChild(label);
         routeBox.appendChild(row);
       })(routeNames[i]);
     }
@@ -371,6 +376,17 @@ export function approvalsConsoleScript(): string {
       ' \\u00b7 raised by ' + card.createdBy));
     var digestLine = el('p', 'faint', 'Action digest: ' + String(card.actionDigest).slice(0, 16) + '\\u2026 \\u2014 the decision binds to exactly this action.');
     box.appendChild(digestLine);
+
+    // A recorded order whose provider cannot dispatch is shown as BLOCKED, not
+    // as an ordinary pending approval. It is still approvable — approving it is
+    // what makes it ready the moment the provider is back — so this states the
+    // situation rather than disabling the decision.
+    if (card.dispatchBlocked === true) {
+      box.appendChild(el('p', 'order-route-blocked',
+        'BLOCKED \\u2014 NOT CONNECTED: this order is recorded and gated, but its provider ' +
+        'cannot dispatch from here yet. Approving it changes nothing until the provider is ' +
+        'reachable; nothing is running.'));
+    }
 
     var status = el('p', 'muted', '');
     status.setAttribute('role', 'status');

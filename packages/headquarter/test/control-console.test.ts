@@ -26,6 +26,8 @@ import {
   CONTROL_FETCH_TARGETS,
   CONTROL_GRANT_JS,
   ORDER_KEY_JS,
+  approvalsConsoleScript,
+  directOrderConsoleScript,
 } from '../src/ui/control-console.js';
 import { HQ_PAGES } from '../src/ui/render.js';
 import { buildSite, type HeadquarterData } from '../src/ui/site.js';
@@ -50,6 +52,33 @@ const site = buildSite(sample);
 function scriptsOf(html: string): string {
   return [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!).join('\n');
 }
+
+describe('the composer offers a route that will be RECORDED and BLOCKED (issue #224)', () => {
+  // The server no longer refuses a disconnected explicit route: the order is
+  // recorded and reported BLOCKED. A composer that still hid the control would
+  // withhold the exact flow the correction exists to give the Founder, leaving
+  // only API and CLI callers able to use it.
+  const composer = directOrderConsoleScript();
+  const approvals = approvalsConsoleScript();
+
+  it('creates the radio control on every route, connected or not', () => {
+    // One creation site, reached by all three routes — there is no longer a
+    // branch that renders inert text instead of a control.
+    expect(composer.match(/radio\.name = 'hq-order-route'/g)).toHaveLength(1);
+    expect(composer).not.toContain('row.textContent = name');
+  });
+
+  it('says plainly what submitting a disconnected route will do', () => {
+    expect(composer).toContain('NOT CONNECTED: the order will be RECORDED and BLOCKED, not started.');
+    // And still marks the row, so it does not read as an available route.
+    expect(composer).toContain("row.className = 'row order-route-blocked'");
+  });
+
+  it('renders the blocked state on an approval card', () => {
+    expect(approvals).toContain('card.dispatchBlocked === true');
+    expect(approvals).toContain('BLOCKED');
+  });
+});
 
 describe('every page script speaks only to the control API and the snapshot', () => {
   it('allow-lists every fetch call site on every page', () => {
