@@ -718,6 +718,50 @@ describe('the provider write mechanism is not reachable around the authority gat
     ).toEqual([]);
   });
 
+  /**
+   * Codex exact-head findings on `7d77766` (two P1s), both attacking the
+   * allowlist rather than a fix — which is what the previous review request
+   * asked for, and both were right.
+   *
+   * `get` was allowlisted as a "read" and is not one: `start`, `#assertFence`
+   * and `#transition` all dispatched through it, so a patched `get` returning a
+   * task with a non-gated `capabilityId` made `start` skip the approval block.
+   * And the surface assertion inspected only the PROTOTYPE, never the queue's
+   * reachable own fields — so the public, mutable `capabilities` collaborator
+   * that claim and start both consult was invisible to it:
+   * `queue.capabilities.get = () => undefined` made `cap` absent and skipped
+   * every approval check.
+   *
+   * A prototype allowlist alone cannot express this. The assertion that can is
+   * behavioural: patch the reachable collaborators and require the enforced
+   * outcome to be unchanged.
+   */
+  it('ignores patched public reads and collaborators on the enforcement path', () => {
+    const fx = bindingFixture();
+    const taskId = queuedClaudeOrder(fx);
+    const queue = fx.ops.queue as unknown as Record<string, unknown>;
+    const real = fx.ops.queue.get(taskId)!;
+
+    // 1. A patched public `get` that reports a non-gated capability.
+    queue.get = () => ({ ...real, capabilityId: 'not.gated' });
+    // 2. A patched capability registry that reports the capability absent.
+    const caps = fx.ops.queue.capabilities as unknown as Record<string, unknown>;
+    caps.get = () => undefined;
+
+    // Enforcement is unmoved: the CODEX worker still cannot claim a
+    // CLAUDE-bound task, and the real row is untouched.
+    expect(() => fx.ops.queue.claim('codex-worker', DIRECT_ORDER_CAPABILITY.id)).toThrow(
+      ProviderBindingViolation,
+    );
+
+    // The legitimate worker still claims, and the row really moves — proving
+    // the closures read the database rather than the patched surfaces.
+    const claimed = fx.ops.queue.claim('claude-worker', DIRECT_ORDER_CAPABILITY.id);
+    expect(claimed).not.toBeNull();
+    expect(claimed!.id).toBe(taskId);
+    expect(claimed!.capabilityId).toBe(DIRECT_ORDER_CAPABILITY.id);
+  });
+
   it('still lets the authorized service boundary declare, and still gates it', () => {
     const fx = bindingFixture();
     // Through the gate: works.

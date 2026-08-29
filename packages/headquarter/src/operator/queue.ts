@@ -20,7 +20,7 @@ import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
 import { assertTransition, type ActivityStatus } from '../contracts/events.js';
-import { CapabilityRegistry } from './capabilities.js';
+import { CapabilityRegistry, type Capability } from './capabilities.js';
 import { approvalRequired, evaluatePolicy, type PolicyContext } from './policy.js';
 import { EvidenceLog, assertNoSecretLikeContent } from './evidence.js';
 // Worker-assignability guard. The handover module owns the freeze/replacement
@@ -102,6 +102,35 @@ export type ReconcileDecision = 'confirmed_done' | 'confirmed_failed' | 'confirm
 
 const GLOBAL_SCOPE = '*';
 
+
+/**
+ * One row → task mapping, used by the enforcement closure and by the public
+ * `get` alike, so the two cannot drift while only one of them is trusted.
+ */
+function rowToTask(row: Record<string, unknown> | undefined): OperatorTask | null {
+  if (!row) return null;
+  return {
+    id: row.id as string,
+    capabilityId: row.capability_id as string,
+    payload: JSON.parse(row.payload as string),
+    idempotencyKey: (row.idempotency_key as string | null) ?? null,
+    status: row.status as ActivityStatus,
+    fence: row.fence as number,
+    claimedBy: (row.claimed_by as string | null) ?? null,
+    leaseExpiresAt: (row.lease_expires_at as string | null) ?? null,
+    claimNonce: (row.claim_nonce as string | null) ?? null,
+    approvalId: (row.approval_id as string | null) ?? null,
+    reviewState: (row.review_state as ReviewState | null) ?? 'none',
+    submittedBy: (row.submitted_by as string | null) ?? null,
+    submittedAt: (row.submitted_at as string | null) ?? null,
+    createdBy: row.created_by as string,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    result: row.result ? JSON.parse(row.result as string) : null,
+    blockReason: (row.block_reason as string | null) ?? null,
+  };
+}
+
 export class OperatorQueue {
   readonly capabilities: CapabilityRegistry;
   readonly evidence: EvidenceLog;
@@ -130,6 +159,26 @@ export class OperatorQueue {
    * function defined in this module over `#db`; calling it resolves nothing
    * through any prototype an attacker can reach.
    */
+  /**
+   * Enforcement reads, as closures. Neither `claim`/`start` nor the private
+   * helpers they call may dispatch through anything a worker can replace.
+   *
+   * `get` was allowlisted as a "read" and it is not: `start`, `#assertFence`
+   * and `#transition` all dispatch through it, so patching it returns a task
+   * with a non-gated `capabilityId` and `start` skips the approval block
+   * entirely. `capabilities` is worse — a public, mutable collaborator that
+   * claim and start both consult, where `queue.capabilities.get = () =>
+   * undefined` makes `cap` absent and every approval check is skipped (issue
+   * #200, Codex exact-head findings on `7d77766`, attacking the allowlist
+   * itself exactly as asked).
+   *
+   * Both public members stay, because the service, the console and the order
+   * seam legitimately use them — but enforcement no longer goes near them. A
+   * caller who patches the public `get` or `capabilities` changes what IT sees
+   * and nothing about what the queue enforces.
+   */
+  readonly #getTask: (taskId: string) => OperatorTask | null;
+  readonly #capabilityOf: (capabilityId: string) => Capability | null;
   readonly #providerOf: (workerId: string) => string | null;
   readonly #listProviders: () => WorkerProviderRecord[];
 
@@ -156,6 +205,23 @@ export class OperatorQueue {
     // an attacker can reach participates in the enforcement path. The SQL is
     // the same as `WorkerProviderDirectory`'s; the read side of that class
     // stays exported for callers who legitimately want an object.
+    this.#getTask = (taskId: string): OperatorTask | null => rowToTask(
+      db.prepare(`SELECT * FROM op_tasks WHERE id = ?`).get(taskId) as Record<string, unknown> | undefined,
+    );
+    this.#capabilityOf = (capabilityId: string): Capability | null => {
+      const row = db.prepare(`SELECT * FROM op_capabilities WHERE id = ?`).get(capabilityId) as
+        | Record<string, unknown>
+        | undefined;
+      if (!row) return null;
+      return {
+        id: row.id as string,
+        description: row.description as string,
+        riskClass: row.risk_class as Capability['riskClass'],
+        sideEffect: !!row.side_effect,
+        idempotent: !!row.idempotent,
+        enabled: !!row.enabled,
+      };
+    };
     this.#providerOf = (workerId: string): string | null => {
       const row = db
         .prepare(`SELECT provider_id FROM op_worker_providers WHERE worker_id = ?`)
@@ -265,7 +331,7 @@ export class OperatorQueue {
       }
       const binding = readProviderBinding(payload);
       const violation = checkProviderBinding(row.id, workerId, binding, workerProvider);
-      if (!violation) return { task: this.get(row.id), refusal: null };
+      if (!violation) return { task: this.#getTask(row.id), refusal: null };
       firstRefusal ??= violation;
     }
     return { task: null, refusal: firstRefusal };
@@ -336,7 +402,7 @@ export class OperatorQueue {
 
   enqueue(req: EnqueueRequest): EnqueueResult {
     assertNoSecretLikeContent(req.payload);
-    const cap = this.capabilities.get(req.capabilityId);
+    const cap = this.#capabilityOf(req.capabilityId);
     const decision = evaluatePolicy(cap, req.requestedBy, this.#policyCtx);
     if (decision.outcome === 'deny') {
       this.evidence.append({
@@ -357,7 +423,7 @@ export class OperatorQueue {
         .prepare(`SELECT id FROM op_tasks WHERE capability_id = ? AND idempotency_key = ?`)
         .get(req.capabilityId, req.idempotencyKey) as { id: string } | undefined;
       if (existing) {
-        return { accepted: true, task: this.get(existing.id)!, deduplicated: true };
+        return { accepted: true, task: this.#getTask(existing.id)!, deduplicated: true };
       }
     }
     const id = uuid();
@@ -380,7 +446,7 @@ export class OperatorQueue {
         policyReason: decision.outcome === 'needs_approval' ? decision.reason : 'auto-allowed',
       },
     });
-    return { accepted: true, task: this.get(id)!, deduplicated: false };
+    return { accepted: true, task: this.#getTask(id)!, deduplicated: false };
   }
 
   /**
@@ -392,7 +458,7 @@ export class OperatorQueue {
    * the execution boundary.
    */
   approve(taskId: string, by = 'founder', opts: { ttlMs?: number; note?: string } = {}): OperatorTask {
-    const task = this.get(taskId);
+    const task = this.#getTask(taskId);
     if (!task) throw new Error(`Unknown task: ${taskId}`);
     if (task.status !== 'needs_approval') {
       throw new Error(`Task ${taskId} is not awaiting approval (status: ${task.status})`);
@@ -406,7 +472,7 @@ export class OperatorQueue {
     const approvalId = uuid();
     const at = nowIso();
     const expiresAt = new Date(Date.now() + (opts.ttlMs ?? DEFAULT_APPROVAL_TTL_MS)).toISOString();
-    const cap = this.capabilities.get(task.capabilityId);
+    const cap = this.#capabilityOf(task.capabilityId);
     this.#db
       .prepare(
         `INSERT INTO hq_approvals (id, task_id, ask, risk_class, requested_by, requested_at,
@@ -438,9 +504,9 @@ export class OperatorQueue {
 
   /** Founder denial blocks the task with a reason; the denial is recorded immutably. */
   deny(taskId: string, reason: string, by = 'founder'): OperatorTask {
-    const before = this.get(taskId);
+    const before = this.#getTask(taskId);
     if (!before) throw new Error(`Unknown task: ${taskId}`);
-    const cap = this.capabilities.get(before.capabilityId);
+    const cap = this.#capabilityOf(before.capabilityId);
     const task = this.#transition(taskId, 'blocked', by, `Founder denied: ${reason}`);
     this.#db.prepare(`UPDATE op_tasks SET block_reason = ? WHERE id = ?`).run(reason, taskId);
     this.#db
@@ -462,7 +528,7 @@ export class OperatorQueue {
         taskActionDigest(before),
       );
     this.evidence.append({ taskId, actor: by, kind: 'founder_denied', payload: { reason } });
-    return this.get(taskId) ?? task;
+    return this.#getTask(taskId) ?? task;
   }
 
   // ---- claim / execute lifecycle ----
@@ -522,7 +588,7 @@ export class OperatorQueue {
     // this re-derives that from the task row itself rather than trusting the
     // scan, on the path that is about to consume an approval.
     this.#assertProviderBinding(task, workerId);
-    const cap = this.capabilities.get(capabilityId);
+    const cap = this.#capabilityOf(capabilityId);
     if (!cap || !cap.enabled) return null; // deny by default
     if (approvalRequired(cap, this.#policyCtx)) {
       const rejection = this.#validateTaskApproval(task);
@@ -579,7 +645,7 @@ export class OperatorQueue {
       kind: 'claimed',
       payload: { fence: candidate.fence + 1, leaseExpires },
     });
-    return this.get(candidate.id)!;
+    return this.#getTask(candidate.id)!;
   }
 
   /**
@@ -599,12 +665,12 @@ export class OperatorQueue {
    */
   start(taskId: string, workerId: string, fence: number): OperatorTask {
     this.#assertFence(taskId, workerId, fence);
-    const task = this.get(taskId)!;
+    const task = this.#getTask(taskId)!;
     // Re-checked here as well as at claim: a task forced into `assigned` never
     // passed through claim's check, and provider binding is an execution
     // authority, not a routing hint.
     this.#assertProviderBinding(task, workerId);
-    const cap = this.capabilities.get(task.capabilityId);
+    const cap = this.#capabilityOf(task.capabilityId);
     if (cap && approvalRequired(cap, this.#policyCtx)) {
       const approval = this.#getApprovalRecord(task.approvalId);
       if (!approval?.actionDigest || approval.actionDigest !== taskActionDigest(task)) {
@@ -669,8 +735,8 @@ export class OperatorQueue {
   ): OperatorTask {
     this.#assertFence(taskId, workerId, fence);
     assertNoSecretLikeContent(result);
-    const task = this.get(taskId)!;
-    const cap = this.capabilities.get(task.capabilityId);
+    const task = this.#getTask(taskId)!;
+    const cap = this.#capabilityOf(task.capabilityId);
     if (cap?.sideEffect) {
       if (task.status !== 'running') {
         throw new Error(`Task ${taskId} is not running (status: ${task.status})`);
@@ -689,7 +755,7 @@ export class OperatorQueue {
         kind: 'execution_result_submitted_for_review',
         payload: { result, refs: evidenceRefs },
       });
-      return this.get(taskId)!;
+      return this.#getTask(taskId)!;
     }
     this.#db.prepare(`UPDATE op_tasks SET result = ? WHERE id = ?`).run(JSON.stringify(result), taskId);
     this.evidence.append({
@@ -781,7 +847,7 @@ export class OperatorQueue {
    * or failed after further investigation.
    */
   reconcile(taskId: string, decision: ReconcileDecision, by: string, note: string): OperatorTask {
-    const task = this.get(taskId);
+    const task = this.#getTask(taskId);
     if (!task) throw new Error(`Unknown task: ${taskId}`);
     if (task.status !== 'outcome_unknown') {
       throw new Error(`Task ${taskId} is not outcome_unknown`);
@@ -798,7 +864,7 @@ export class OperatorQueue {
     if (decision === 'confirmed_failed') {
       return this.#transition(taskId, 'review_failed', by, `Reconciled failed: ${note}`);
     }
-    const cap = this.capabilities.get(task.capabilityId)!;
+    const cap = this.#capabilityOf(task.capabilityId)!;
     if (!cap.idempotent) {
       throw new Error(
         `Capability ${cap.id} is not idempotent; cannot safely re-queue an uncertain execution`,
@@ -808,43 +874,25 @@ export class OperatorQueue {
     this.#db
       .prepare(`UPDATE op_tasks SET claimed_by = NULL, lease_expires_at = NULL, claim_nonce = NULL WHERE id = ?`)
       .run(taskId);
-    return this.get(taskId) ?? requeued;
+    return this.#getTask(taskId) ?? requeued;
   }
 
   // ---- reads / internals ----
 
+  /**
+   * Public read. Enforcement does NOT dispatch through this — `claim`, `start`
+   * and their private helpers use `#getTask` — so patching it changes what the
+   * patcher sees and nothing about what the queue enforces.
+   */
   get(id: string): OperatorTask | null {
-    const row = this.#db.prepare(`SELECT * FROM op_tasks WHERE id = ?`).get(id) as
-      | Record<string, unknown>
-      | undefined;
-    if (!row) return null;
-    return {
-      id: row.id as string,
-      capabilityId: row.capability_id as string,
-      payload: JSON.parse(row.payload as string),
-      idempotencyKey: (row.idempotency_key as string | null) ?? null,
-      status: row.status as ActivityStatus,
-      fence: row.fence as number,
-      claimedBy: (row.claimed_by as string | null) ?? null,
-      leaseExpiresAt: (row.lease_expires_at as string | null) ?? null,
-      claimNonce: (row.claim_nonce as string | null) ?? null,
-      approvalId: (row.approval_id as string | null) ?? null,
-      reviewState: (row.review_state as ReviewState | null) ?? 'none',
-      submittedBy: (row.submitted_by as string | null) ?? null,
-      submittedAt: (row.submitted_at as string | null) ?? null,
-      createdBy: row.created_by as string,
-      createdAt: row.created_at as string,
-      updatedAt: row.updated_at as string,
-      result: row.result ? JSON.parse(row.result as string) : null,
-      blockReason: (row.block_reason as string | null) ?? null,
-    };
+    return this.#getTask(id);
   }
 
   listByStatus(status: ActivityStatus): OperatorTask[] {
     const rows = this.#db
       .prepare(`SELECT id FROM op_tasks WHERE status = ? ORDER BY created_at`)
       .all(status) as { id: string }[];
-    return rows.map((r) => this.get(r.id)!);
+    return rows.map((r) => this.#getTask(r.id)!);
   }
 
   /** Read a hq_approvals row in the shape validateApproval()/validateApprovalClaimBinding() need. */
@@ -935,7 +983,7 @@ export class OperatorQueue {
 
   /** Shared guard for reviewPass/reviewFail: pending review + independent reviewer. */
   #requirePendingReview(taskId: string, reviewerId: string): OperatorTask {
-    const task = this.get(taskId);
+    const task = this.#getTask(taskId);
     if (!task) throw new Error(`Unknown task: ${taskId}`);
     if (task.reviewState !== 'pending') {
       throw new Error(`Task ${taskId} has no result awaiting review (reviewState: ${task.reviewState})`);
@@ -954,7 +1002,7 @@ export class OperatorQueue {
   }
 
   #assertFence(taskId: string, workerId: string, fence: number): void {
-    const task = this.get(taskId);
+    const task = this.#getTask(taskId);
     if (!task) throw new Error(`Unknown task: ${taskId}`);
     if (task.claimedBy !== workerId || task.fence !== fence) {
       throw new Error(
@@ -964,14 +1012,14 @@ export class OperatorQueue {
   }
 
   #transition(taskId: string, to: ActivityStatus, actor: string, summary: string): OperatorTask {
-    const task = this.get(taskId);
+    const task = this.#getTask(taskId);
     if (!task) throw new Error(`Unknown task: ${taskId}`);
     assertTransition(task.status, to);
     this.#db
       .prepare(`UPDATE op_tasks SET status = ?, updated_at = ? WHERE id = ?`)
       .run(to, nowIso(), taskId);
     this.#recordEvent(taskId, to, actor, summary);
-    return this.get(taskId)!;
+    return this.#getTask(taskId)!;
   }
 
   #recordEvent(taskId: string, status: ActivityStatus, actor: string, summary: string): void {
