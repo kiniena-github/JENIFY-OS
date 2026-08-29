@@ -278,8 +278,15 @@ export function capabilityRequiresFounderSpendGate(capability: HqCapabilityDescr
     // FAIL CLOSED: open weights are not free compute. A compute-only capability
     // (cloud GPU rental, new capacity, hosting, electricity) still requires a
     // Founder spend decision unless an explicit zero-cost/local assessment has
-    // been recorded on the entry. Absence of an assessment means "gated".
-    return capability.zeroComputeAssessment?.zeroIncrementalCost !== true;
+    // been recorded on the entry. Absence of an assessment means "gated", and a
+    // partial/malformed record (zeroIncrementalCost not literally true, or a
+    // missing/blank basis or recordedOn, e.g. from untyped config) gates too.
+    const assessment = capability.zeroComputeAssessment;
+    const genuinelyAssessed =
+      assessment?.zeroIncrementalCost === true &&
+      typeof assessment.basis === 'string' && assessment.basis.trim().length > 0 &&
+      typeof assessment.recordedOn === 'string' && assessment.recordedOn.trim().length > 0;
+    return !genuinelyAssessed;
   }
   return false;
 }
