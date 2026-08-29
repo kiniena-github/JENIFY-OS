@@ -29,6 +29,7 @@
     "build:site": "tsx src/cli/build-site.ts",
     "hq:order": "tsx src/cli/direct-order.ts",
     "hq:snapshot": "tsx src/cli/snapshot.ts",
+    "hq:dispatch-claude": "tsx src/cli/claude-dispatch.ts",
     "codex:review": "tsx src/cli/codex-review.ts",
     "codex:probe": "tsx src/cli/codex-review.ts --probe-only",
     "evidence:ui": "node tools/ui-evidence.mjs",

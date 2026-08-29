@@ -750,6 +750,38 @@ export class OperatorQueue {
     return rows.map((r) => this.get(r.id)!);
   }
 
+  /**
+   * The approval currently bound to a task, READ ONLY (issue #221).
+   *
+   * Added so a pre-execution caller — the Claude GitHub dispatch adapter — can
+   * ask the canonical question "is this exact action approved right now?" using
+   * the SAME row and the same `validateApproval` the execution boundary uses,
+   * rather than re-deriving an answer from `status === 'queued'` alone. A second
+   * derivation of "approved" is precisely how two layers end up disagreeing.
+   *
+   * It grants nothing: there is no write here, the single-use nonce is neither
+   * consumed nor observed as consumable, and reading an approval never admits a
+   * task to execution. `claim()`/`start()` remain the only places an approval is
+   * spent.
+   */
+  approvalFor(taskId: string): {
+    decision: string;
+    actionDigest: string | null;
+    expiresAt: string | null;
+    consumedAt: string | null;
+  } | null {
+    const task = this.get(taskId);
+    if (!task) return null;
+    const record = this.getApprovalRecord(task.approvalId);
+    if (!record) return null;
+    return {
+      decision: record.decision,
+      actionDigest: record.actionDigest,
+      expiresAt: record.expiresAt,
+      consumedAt: record.consumedAt,
+    };
+  }
+
   /** Read a hq_approvals row in the shape validateApproval()/validateApprovalClaimBinding() need. */
   private getApprovalRecord(approvalId: string | null): {
     decision: string;

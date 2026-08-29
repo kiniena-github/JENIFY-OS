@@ -16,3 +16,4 @@ export * from './known.js';
 export * from './mock.js';
 
 export * as codex from './codex/index.js';
+export * as claude from './claude/index.js';
