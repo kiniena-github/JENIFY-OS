@@ -146,6 +146,20 @@ export function parseRunDirective(body: string | undefined | null): ParsedDirect
 
 export type TriggerKind = 'issue_opened' | 'issue_labeled' | 'issue_comment' | 'manual_dispatch';
 
+/**
+ * Durable verdict on whether JENIFY HQ dispatched an issue. See
+ * `RoutingRequest.hqDispatchEvidence` for how each value is established and why
+ * anything other than `never_dispatched` refuses a re-trigger.
+ */
+export type HqDispatchEvidence = 'dispatched' | 'never_dispatched' | 'unknown';
+
+/** Narrow an untrusted string (an env var, a CLI flag) to the union above. */
+export function parseHqDispatchEvidence(raw: string | undefined | null): HqDispatchEvidence {
+  // Anything unrecognised is `unknown`, never `never_dispatched`: a typo, an
+  // empty string or a renamed env var must not read as a clean bill of health.
+  return raw === 'dispatched' || raw === 'never_dispatched' ? raw : 'unknown';
+}
+
 export interface RoutingRequest {
   trigger: TriggerKind;
   issueTitle: string;
@@ -164,11 +178,38 @@ export interface RoutingRequest {
    *
    * Read for one purpose only: to recognise an issue that HQ itself dispatched.
    * Such an issue carries a canonical task behind it, and the authority to run
-   * that task lives in HQ's claim/approval/fence — not in this workflow. Absent,
-   * the rule below simply does not fire, so callers that cannot supply a body
-   * keep today's behaviour.
+   * that task lives in HQ's claim/approval/fence — not in this workflow.
+   *
+   * COMPATIBILITY EVIDENCE ONLY. The body is mutable, so on its own it cannot
+   * carry this rule — see `hqDispatchEvidence`.
    */
   issueBody?: string;
+  /**
+   * DURABLE evidence of whether this issue was dispatched by JENIFY HQ (issue
+   * #224, Codex P1 on `2dc86e8`).
+   *
+   * The marker in the body is not authority: an issue body is editable, and the
+   * repository owner — the only account this workflow accepts triggers from
+   * anyway — can delete the marker and then re-trigger the issue freely. The
+   * guard was therefore erasable by the very actor it constrains.
+   *
+   * So the fact is derived instead from something ordinary editing cannot
+   * erase: GitHub's immutable issue edit history (`userContentEdits`), which
+   * retains the diff of every body version. The caller resolves it and passes
+   * the verdict in; `decideRouting` stays pure.
+   *
+   *   `dispatched`       durable evidence shows the HQ marker in the current
+   *                      body or in ANY earlier version of it.
+   *   `never_dispatched` durable evidence shows the marker was never present in
+   *                      any version of the body.
+   *   `unknown`          the durable lookup could not be established.
+   *
+   * ABSENT AND `unknown` BOTH FAIL CLOSED — the re-trigger is refused. This is
+   * deliberate and is the whole point: if omitting the input were permissive,
+   * omitting the input would itself be the bypass, which is exactly the defect
+   * class this issue has already produced four times.
+   */
+  hqDispatchEvidence?: HqDispatchEvidence;
   /** stable id used for duplicate suppression */
   dedupeKey?: string;
   secrets: SecretsEnv;
@@ -314,16 +355,45 @@ export function decideRouting(req: RoutingRequest): RoutingDecision {
   // `opened` is untouched: that IS the dispatch, and it is the only run HQ
   // authorised. Re-running such a task is a canonical act — a fresh Founder
   // approval and a fresh `hq:dispatch-claude` — never an event on the issue.
-  const hqDispatched = typeof req.issueBody === 'string' && req.issueBody.includes(HQ_DISPATCH_MARKER);
+  //
+  // WHERE THE FACT COMES FROM (Codex P1 on `2dc86e8`). The first version read
+  // the marker out of the CURRENT body, and an issue body is editable by the
+  // repository owner — the only account that can trigger this workflow at all.
+  // So the guard was erasable by exactly the actor it constrains: delete the
+  // marker, comment `jenify-run: GEMINI`, and both the second execution and the
+  // provider substitution are back. A mutable field cannot carry a rule about
+  // authority.
+  //
+  // The evidence is therefore the caller-resolved DURABLE fact — GitHub's
+  // immutable issue edit history, which keeps every earlier body version — and
+  // the current-body marker survives only as compatibility evidence for an
+  // issue whose durable lookup is unavailable. The two are combined so that
+  // either one alone is enough to refuse, and only a POSITIVE durable
+  // `never_dispatched` permits the re-trigger:
+  //
+  //   marker in body now          -> refuse (compatibility path)
+  //   durable `dispatched`        -> refuse (marker was edited out)
+  //   durable `unknown` or absent -> refuse (fail closed; see the type)
+  //   durable `never_dispatched`  -> allow  (ordinary AI task, unchanged)
+  const evidence = req.hqDispatchEvidence ?? 'unknown';
+  const markerInCurrentBody = typeof req.issueBody === 'string' && req.issueBody.includes(HQ_DISPATCH_MARKER);
+  const hqDispatched = markerInCurrentBody || evidence !== 'never_dispatched';
   if (hqDispatched && req.trigger !== 'issue_opened') {
+    const cause = markerInCurrentBody
+      ? 'This issue was dispatched by JENIFY HQ for a canonical task.'
+      : evidence === 'dispatched'
+          ? "This issue's edit history shows it was dispatched by JENIFY HQ for a canonical task, " +
+            'even though its body no longer says so.'
+          : 'Whether JENIFY HQ dispatched this issue could not be established from its edit history, ' +
+            'and an unestablished answer is treated as dispatched.';
     return {
       ...base,
       outcome: 'IGNORE',
       reason:
-        'This issue was dispatched by JENIFY HQ for a canonical task. Its execution authority is ' +
-        'the HQ claim, single-use approval and fence, which a comment, a label or a manual dispatch ' +
-        'does not pass through — so re-triggering it here is refused. Re-run it with a fresh Founder ' +
-        'approval and a fresh HQ dispatch.',
+        `${cause} Execution authority for such a task is the HQ claim, single-use approval and ` +
+        'fence, which a comment, a label or a manual dispatch does not pass through — so ' +
+        're-triggering it here is refused. Re-run it with a fresh Founder approval and a fresh HQ ' +
+        'dispatch.',
     };
   }
 

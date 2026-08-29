@@ -94,6 +94,17 @@ jobs:
             echo "JENIFY_EOF_7f3a"
           } >> "$GITHUB_ENV"
 
+      # The DURABLE half of the single-use guard: whether HQ dispatched this
+      # issue, read from GitHub's immutable edit history rather than from the
+      # body, which the repository owner can edit (#224, Codex P1 on `2dc86e8`).
+      # Fails closed to `unknown`, which the routing module refuses on.
+      - name: Resolve HQ dispatch evidence
+        id: hq_evidence
+        uses: ./.github/actions/hq-dispatch-evidence
+        with:
+          issue-number: ${{ github.event.issue.number || inputs.issue_number }}
+          github-token: ${{ github.token }}
+
       # ---- AUTHORITATIVE ROUTING DECISION (unit-tested module) ------------
       - name: Decide routing
         id: routing
@@ -112,6 +123,10 @@ jobs:
           # here — a second execution AND a provider substitution, through the
           # one workflow the guard had not been wired into.
           ISSUE_BODY: ${{ github.event.issue.body || env.DISPATCH_BODY }}
+          # The body above is only COMPATIBILITY evidence — it is erasable. This
+          # is the authority: a verdict derived from the issue's immutable edit
+          # history. Absent or `unknown` refuses the re-trigger.
+          HQ_DISPATCH_EVIDENCE: ${{ steps.hq_evidence.outputs.evidence }}
           REPO_OWNER: ${{ github.repository_owner }}
           TARGET_PROVIDER: GEMINI
           DEDUPE_KEY: ${{ github.event.issue.number }}-${{ github.event.comment.id || github.event.action || 'dispatch' }}

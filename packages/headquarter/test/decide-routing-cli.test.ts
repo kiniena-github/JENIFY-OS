@@ -65,6 +65,10 @@ function decide(env: Record<string, string>): Outputs {
       ACTOR: OWNER,
       ACTOR_TYPE: 'User',
       COMMENT_BODY: '',
+      // An ordinary human-opened AI task: the durable lookup came back clean.
+      // Stated because the single-use guard fails CLOSED without it (#224) —
+      // that refusal is asserted on its own further down this file.
+      HQ_DISPATCH_EVIDENCE: 'never_dispatched',
       ...env,
       GITHUB_OUTPUT: outFile,
     },
@@ -327,5 +331,91 @@ describe('decide-routing.ts — blocked reporting wiring', () => {
     expect(r.outcome).toBe('BLOCKED');
     expect(r.should_run).toBe('false');
     expect(r.dispatch_to).toBe('');
+  });
+});
+
+/**
+ * The durable HQ-dispatch fact, at the WIRING boundary (issue #224, Codex P1 on
+ * `2dc86e8`).
+ *
+ * `hq-dispatched-issue-retrigger.test.ts` proves the rule. This proves that the
+ * script the workflows actually run reads the env var the composite action
+ * writes, and that every way of NOT reading it lands on a refusal rather than on
+ * a permissive default. A rule that fails closed in the module and opens up in
+ * the entry point is not a rule.
+ */
+describe('decide-routing.ts fails closed on the durable HQ-dispatch fact', () => {
+  const COMMENT = {
+    EVENT_NAME: 'issue_comment',
+    EVENT_ACTION: 'created',
+    ISSUE_TITLE: '[AI TASK][CLAUDE] x',
+    COMMENT_BODY: '<!-- jenify-run -->',
+    TARGET_PROVIDER: 'CLAUDE',
+  };
+
+  it('refuses a re-trigger when the variable is UNSET', () => {
+    // The whole point of the shape: a workflow that forgets to wire the
+    // variable loses re-triggering, it does not lose the guard.
+    const r = decide({ ...COMMENT, HQ_DISPATCH_EVIDENCE: '' });
+    expect(r.outcome).toBe('IGNORE');
+    expect(r.should_run).toBe('false');
+  });
+
+  it('refuses a re-trigger on an unestablished lookup', () => {
+    const r = decide({ ...COMMENT, HQ_DISPATCH_EVIDENCE: 'unknown' });
+    expect(r.outcome).toBe('IGNORE');
+    expect(r.should_run).toBe('false');
+  });
+
+  it('refuses when the history says dispatched, even with a body scrubbed clean', () => {
+    // The attack the durable fact exists for: the owner edits HQ's marker out
+    // of the body and re-triggers. The body here is deliberately innocent.
+    const r = decide({
+      ...COMMENT,
+      ISSUE_BODY: 'An ordinary looking instruction with no marker in it.',
+      HQ_DISPATCH_EVIDENCE: 'dispatched',
+    });
+    expect(r.outcome).toBe('IGNORE');
+    expect(r.should_run).toBe('false');
+    expect(r.reason).toContain('edit history');
+  });
+
+  it('refuses the PROVIDER SUBSTITUTION that a scrubbed body was hiding', () => {
+    const r = decide({
+      ...COMMENT,
+      COMMENT_BODY: '<!-- jenify-run: GEMINI -->',
+      ISSUE_BODY: 'An ordinary looking instruction with no marker in it.',
+      HQ_DISPATCH_EVIDENCE: 'dispatched',
+      TARGET_PROVIDER: 'GEMINI',
+    });
+    expect(r.outcome).toBe('IGNORE');
+    expect(r.should_run).toBe('false');
+    expect(r.dispatch_to).toBe('');
+  });
+
+  it('treats an unrecognised value as unknown rather than as a clean answer', () => {
+    for (const raw of ['NEVER_DISPATCHED', 'never-dispatched', 'true', 'yes']) {
+      const r = decide({ ...COMMENT, HQ_DISPATCH_EVIDENCE: raw });
+      expect(r.outcome, `value ${raw}`).toBe('IGNORE');
+    }
+  });
+
+  it('allows the re-trigger only on a positive never_dispatched', () => {
+    const r = decide({ ...COMMENT, HQ_DISPATCH_EVIDENCE: 'never_dispatched' });
+    expect(r.outcome).toBe('ROUTE');
+    expect(r.should_run).toBe('true');
+  });
+
+  it('never blocks the dispatch itself, whatever the lookup said', () => {
+    // An unresolvable lookup must not brick the lane it is guarding.
+    const r = decide({
+      EVENT_NAME: 'issues',
+      EVENT_ACTION: 'opened',
+      ISSUE_TITLE: '[AI TASK][CLAUDE] x',
+      TARGET_PROVIDER: 'CLAUDE',
+      HQ_DISPATCH_EVIDENCE: 'unknown',
+    });
+    expect(r.outcome).toBe('ROUTE');
+    expect(r.should_run).toBe('true');
   });
 });

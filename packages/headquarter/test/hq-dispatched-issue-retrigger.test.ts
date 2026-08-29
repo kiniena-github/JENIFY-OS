@@ -30,7 +30,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { decideRouting, type RoutingRequest } from '../src/routing/route.js';
+import { decideRouting, parseHqDispatchEvidence, type RoutingRequest } from '../src/routing/route.js';
 import { HQ_DISPATCH_MARKER } from '../src/routing/providers.js';
 
 const OWNER = 'kiniena-github';
@@ -56,10 +56,16 @@ function request(overrides: Partial<RoutingRequest> = {}): RoutingRequest {
     repositoryOwner: OWNER,
     commentBody: '<!-- jenify-run -->',
     issueBody: HQ_BODY,
+    // The realistic HQ case: the marker is in the body AND the issue's
+    // immutable edit history agrees. The tests below separate the two.
+    hqDispatchEvidence: 'dispatched',
     secrets: CONNECTED,
     ...overrides,
   };
 }
+
+/** An ordinary AI task: no marker, and the edit history proves there never was one. */
+const ORDINARY = { issueBody: PLAIN_BODY, hqDispatchEvidence: 'never_dispatched' } as const;
 
 describe('a re-trigger of an HQ-dispatched issue is refused', () => {
   it('ignores an owner jenify-run comment on it', () => {
@@ -125,7 +131,7 @@ describe('a re-trigger of an HQ-dispatched issue is refused', () => {
 
 describe('the guard is narrow', () => {
   it('leaves an ordinary AI task fully re-triggerable', () => {
-    const decision = decideRouting(request({ issueBody: PLAIN_BODY }));
+    const decision = decideRouting(request(ORDINARY));
     expect(decision.outcome).toBe('ROUTE');
     expect(decision.dispatchTo).toContain('CLAUDE');
   });
@@ -134,21 +140,119 @@ describe('the guard is narrow', () => {
     // Widening the guard to every non-`opened` trigger must not freeze the
     // label path for issues a human opened by hand.
     const decision = decideRouting(
-      request({ trigger: 'issue_labeled', issueBody: PLAIN_BODY, commentBody: undefined }),
+      request({ ...ORDINARY, trigger: 'issue_labeled', commentBody: undefined }),
     );
     expect(decision.outcome).toBe('ROUTE');
     expect(decision.dispatchTo).toContain('CLAUDE');
   });
 
-  it('keeps today’s behaviour when no issue body is available at all', () => {
-    // Callers that cannot supply a body must not silently lose re-triggering.
-    const decision = decideRouting(request({ issueBody: undefined }));
-    expect(decision.outcome).toBe('ROUTE');
-  });
-
   it('still refuses a non-owner commenter, HQ issue or not', () => {
     // The pre-existing rule is unchanged and still checked first.
-    expect(decideRouting(request({ actorLogin: 'someone-else', issueBody: PLAIN_BODY })).outcome).toBe('IGNORE');
+    expect(decideRouting(request({ ...ORDINARY, actorLogin: 'someone-else' })).outcome).toBe('IGNORE');
     expect(decideRouting(request({ actorLogin: 'someone-else' })).outcome).toBe('IGNORE');
+  });
+});
+
+// ===========================================================================
+// The DURABLE fact (Codex P1 on `2dc86e8`)
+// ===========================================================================
+
+/**
+ * The correction this block exists for.
+ *
+ * The guard above originally read HQ's marker out of the issue's CURRENT body,
+ * and an issue body is editable — by the repository owner, which is the only
+ * account allowed to trigger this workflow at all. So the guard was erasable by
+ * exactly the actor it constrains: delete the marker, comment
+ * `jenify-run: GEMINI`, and both the unbounded re-execution and the provider
+ * substitution come straight back.
+ *
+ * The authority is now a caller-resolved verdict derived from GitHub's
+ * immutable issue edit history, which retains every earlier version of the
+ * body. The current-body marker survives only as compatibility evidence.
+ */
+describe('editing the body cannot reopen an HQ-dispatched issue', () => {
+  /** The attack: the marker deleted from the body, the history still holding it. */
+  const ERASED = { issueBody: PLAIN_BODY, hqDispatchEvidence: 'dispatched' } as const;
+
+  it('refuses a re-trigger when the marker was edited out of the body', () => {
+    const decision = decideRouting(request(ERASED));
+    expect(decision.outcome).toBe('IGNORE');
+    expect(decision.dispatchTo).toEqual([]);
+    expect(decision.reason).toContain('edit history');
+  });
+
+  it('refuses the erased-marker attack through EVERY non-dispatch trigger', () => {
+    const everyTrigger: RoutingRequest['trigger'][] = [
+      'issue_opened',
+      'issue_labeled',
+      'issue_comment',
+      'manual_dispatch',
+    ];
+    const routed = everyTrigger.filter(
+      (trigger) => decideRouting(request({ ...ERASED, trigger })).outcome === 'ROUTE',
+    );
+    expect(routed).toEqual(['issue_opened']);
+  });
+
+  it('refuses the PROVIDER SUBSTITUTION the erased marker was hiding', () => {
+    // The sharper half of the attack: an erased marker plus a directive naming
+    // a different vendor ran GEMINI against a CLAUDE-bound Founder approval.
+    const decision = decideRouting(
+      request({ ...ERASED, commentBody: '<!-- jenify-run: GEMINI -->' }),
+    );
+    expect(decision.outcome).toBe('IGNORE');
+    expect(decision.dispatchTo).toEqual([]);
+  });
+});
+
+describe('an unestablished durable answer fails closed', () => {
+  it('refuses when the lookup could not be established', () => {
+    const decision = decideRouting(request({ issueBody: PLAIN_BODY, hqDispatchEvidence: 'unknown' }));
+    expect(decision.outcome).toBe('IGNORE');
+    expect(decision.reason).toContain('could not be established');
+  });
+
+  it('refuses when the caller supplies no durable evidence AT ALL', () => {
+    // The point of the whole shape. If omitting the field were permissive,
+    // omitting the field would itself be the bypass — which is precisely the
+    // defect class issue #224 has already produced four times (a guard correct
+    // where it was wired and absent where it was not). An earlier version of
+    // this file asserted the OPPOSITE here, on the reasoning that callers
+    // unable to supply the fact should keep working; that reasoning was wrong,
+    // because a caller unable to supply it is exactly the caller that cannot
+    // prove the issue is safe to re-run.
+    const decision = decideRouting(request({ issueBody: PLAIN_BODY, hqDispatchEvidence: undefined }));
+    expect(decision.outcome).toBe('IGNORE');
+    expect(decision.dispatchTo).toEqual([]);
+  });
+
+  it('still allows the dispatch itself, so an unresolvable lookup cannot brick the lane', () => {
+    const decision = decideRouting(
+      request({ trigger: 'issue_opened', hqDispatchEvidence: 'unknown', commentBody: undefined }),
+    );
+    expect(decision.outcome).toBe('ROUTE');
+  });
+});
+
+describe('the body marker remains COMPATIBILITY evidence, never overridden', () => {
+  it('refuses on the marker even when the durable lookup says never dispatched', () => {
+    // Contradictory inputs resolve toward refusal. A stale or wrong
+    // `never_dispatched` must not clear an issue that currently SAYS it is an
+    // HQ dispatch — which is also what keeps issues dispatched before this
+    // change guarded.
+    const decision = decideRouting(request({ hqDispatchEvidence: 'never_dispatched' }));
+    expect(decision.outcome).toBe('IGNORE');
+    expect(decision.reason).toContain('JENIFY HQ');
+  });
+});
+
+describe('parseHqDispatchEvidence never invents a clean bill of health', () => {
+  it('maps only the two exact positive strings, everything else to unknown', () => {
+    expect(parseHqDispatchEvidence('dispatched')).toBe('dispatched');
+    expect(parseHqDispatchEvidence('never_dispatched')).toBe('never_dispatched');
+    for (const raw of [undefined, null, '', ' never_dispatched', 'NEVER_DISPATCHED', 'never-dispatched', 'true', 'no']) {
+      expect(parseHqDispatchEvidence(raw)).toBe('unknown');
+    }
   });
 });

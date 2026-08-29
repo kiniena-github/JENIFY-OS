@@ -1,6 +1,8 @@
 /**
- * Every workflow that calls the shared router must hand it the issue body
- * (issue #224, Codex P1 on `0961cde`).
+ * Every workflow that calls the shared router must hand it the inputs the
+ * single-use guard runs on: the issue body (issue #224, Codex P1 on `0961cde`)
+ * and, since `2dc86e8`, the DURABLE HQ-dispatch verdict that replaced it as the
+ * authority.
  *
  * ## The defect
  *
@@ -31,8 +33,11 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { HQ_DISPATCH_MARKER } from '../src/routing/providers.js';
 
-const WORKFLOWS = join(process.cwd(), '..', '..', '.github', 'workflows');
+const REPO_ROOT = join(process.cwd(), '..', '..');
+const WORKFLOWS = join(REPO_ROOT, '.github', 'workflows');
+const EVIDENCE_ACTION = join(REPO_ROOT, '.github', 'actions', 'hq-dispatch-evidence', 'action.yml');
 
 /** Every workflow file that invokes the shared routing decision. */
 function routerCallers(): { name: string; body: string }[] {
@@ -69,5 +74,85 @@ describe('the single-use guard cannot be bypassed by a caller that omits the bod
       .filter((c) => !c.body.includes('DISPATCH_BODY'))
       .map((c) => c.name);
     expect(missing).toEqual([]);
+  });
+});
+
+/**
+ * The DURABLE half of the same guard (issue #224, Codex P1 on `2dc86e8`).
+ *
+ * The body is erasable by the repository owner, so it cannot be the authority
+ * for a rule that constrains the repository owner. The authority is a verdict
+ * derived from GitHub's immutable issue edit history, and — exactly as with
+ * `ISSUE_BODY` one round earlier — it is worth nothing in the lane that forgot
+ * to wire it. So it is asserted over the workflow directory, and over the ONE
+ * shared implementation every lane must call rather than copy.
+ */
+describe('every router caller resolves the durable HQ-dispatch fact', () => {
+  it('requires EVERY one of them to supply HQ_DISPATCH_EVIDENCE', () => {
+    const missing = routerCallers()
+      .filter((c) => !/^\s*HQ_DISPATCH_EVIDENCE:/m.test(c.body))
+      .map((c) => c.name);
+    expect(missing).toEqual([]);
+  });
+
+  it('requires each to take it from the SHARED action, not a hand-rolled copy', () => {
+    // A per-workflow copy is how the previous four defects of this shape
+    // happened: the derivation drifts in one lane and nobody notices, because
+    // each lane's own tests still pass.
+    const wrong = routerCallers()
+      .filter(
+        (c) =>
+          !c.body.includes('uses: ./.github/actions/hq-dispatch-evidence') ||
+          !c.body.includes('HQ_DISPATCH_EVIDENCE: ${{ steps.hq_evidence.outputs.evidence }}') ||
+          !/^\s*id: hq_evidence$/m.test(c.body),
+      )
+      .map((c) => c.name);
+    expect(wrong).toEqual([]);
+  });
+
+  it('requires each to resolve it for the manual path as well as the event path', () => {
+    // `github.event.issue.number` is empty on `workflow_dispatch`. A lane that
+    // passed only that would resolve `unknown` for every manual run — which
+    // fails closed, but by accident rather than by design, and it would silently
+    // disable the manual lane instead of guarding it.
+    const missing = routerCallers()
+      .filter((c) => c.body.includes('workflow_dispatch'))
+      .filter((c) => !c.body.includes('issue-number: ${{ github.event.issue.number || inputs.issue_number }}'))
+      .map((c) => c.name);
+    expect(missing).toEqual([]);
+  });
+});
+
+describe('the shared resolver derives the fact from something the owner cannot erase', () => {
+  const action = (): string => readFileSync(EVIDENCE_ACTION, 'utf8');
+
+  it('reads GitHub’s immutable issue edit history', () => {
+    // The whole correction in one assertion: if this ever reduces to reading
+    // the current body, the guard is erasable again by the only actor that can
+    // trigger the workflow.
+    expect(action()).toContain('userContentEdits');
+  });
+
+  it('looks for the same marker the routing module knows', () => {
+    // The shell cannot import the TypeScript constant, so the literal is
+    // duplicated. This is what stops the two drifting apart into a resolver
+    // that always answers `never_dispatched`.
+    expect(action()).toContain(`marker='${HQ_DISPATCH_MARKER}'`);
+  });
+
+  it('defaults to unknown and normalises anything else to unknown', () => {
+    const body = action();
+    expect(body).toContain('verdict=unknown');
+    // The final normalisation: only the three known verdicts survive.
+    expect(body).toMatch(/case "\$verdict" in\s*\n\s*dispatched\|never_dispatched\|unknown\) ;;\s*\n\s*\*\) verdict=unknown ;;/);
+  });
+
+  it('does not let a failed lookup crash the job instead of failing closed', () => {
+    // `set -e` here would abort the step, the workflow would fail, and nobody
+    // would learn whether the issue was HQ-dispatched. The guard has to REACH
+    // the routing module with `unknown`.
+    const body = action();
+    expect(body).toContain('set -uo pipefail');
+    expect(body).not.toContain('set -e');
   });
 });

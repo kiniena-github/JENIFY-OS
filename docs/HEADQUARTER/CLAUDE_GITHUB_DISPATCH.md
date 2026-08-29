@@ -215,11 +215,47 @@ NAME a provider, `<!-- jenify-run: GEMINI -->` on a CLAUDE-bound task was
 provider substitution through the one door that never checked the binding.
 
 `decideRouting` therefore refuses any trigger other than the `opened` event on
-an issue whose body carries HQ's dispatch marker. The rule is written as *allow
-the dispatch*, not as *deny these triggers*: the first version of it denied the
-comment and the manual dispatch that review had named, and the label event —
-reachable by removing and re-adding `ai-task` — still routed. A trigger added to
-the workflow later is refused on an HQ issue by default.
+an issue HQ dispatched. The rule is written as *allow the dispatch*, not as
+*deny these triggers*: the first version of it denied the comment and the manual
+dispatch that review had named, and the label event — reachable by removing and
+re-adding `ai-task` — still routed. A trigger added to the workflow later is
+refused on an HQ issue by default.
+
+### Where "HQ dispatched this" comes from
+
+Not from the issue body. The body carries HQ's marker, but a body is editable,
+and the account that can edit it is the repository owner — the only account this
+workflow accepts triggers from in the first place. Reading the marker out of the
+current body made the guard erasable by exactly the actor it constrains: delete
+the marker, comment `<!-- jenify-run: GEMINI -->`, and both the unbounded
+re-execution and the provider substitution are back.
+
+The fact is therefore derived from GitHub's **immutable issue edit history**
+(`userContentEdits`), which retains the diff of every earlier version of the
+body. Editing the body adds to that record; nothing an issue author can do
+removes an entry. `.github/actions/hq-dispatch-evidence` resolves one of three
+verdicts and every router-calling workflow passes it in as
+`HQ_DISPATCH_EVIDENCE`:
+
+| Verdict | Established when | Effect on a re-trigger |
+| --- | --- | --- |
+| `dispatched` | the marker is in the body now, or in the diff of any earlier version | refused |
+| `never_dispatched` | the full history was readable and no version ever carried the marker | allowed (ordinary AI task) |
+| `unknown` | the lookup failed, the history was truncated past 100 edits, or any single diff was not visible | refused |
+
+`unknown` **and an absent value both fail closed.** That is the point of the
+shape: if omitting the input were permissive, omitting the input would itself be
+the bypass — the defect class this issue produced four separate times. The
+resolver never aborts the job on an API failure; it reaches the routing module
+with `unknown`, which refuses. The body marker survives only as compatibility
+evidence, and it can only ever add a refusal, never clear one: an issue whose
+body says HQ dispatched it is refused even if the durable verdict says
+`never_dispatched`.
+
+The resolver is one composite action called by every lane rather than a step
+copied into each, and a structural test asserts that — because the previous
+round of this same guard reached one of the two router-calling workflows and was
+silently absent from the other.
 
 Operationally: **to run a dispatched task again, approve it again.** A fresh
 Founder approval and a fresh `hq:dispatch-claude`, which publishes a new issue
