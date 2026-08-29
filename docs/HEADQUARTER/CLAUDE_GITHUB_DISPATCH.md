@@ -60,8 +60,33 @@ worker before publishing, so the external execution is answerable to a real
 fence and a consumed approval instead of leaving the task independently
 claimable.
 
-`--check-only` prints eligibility, dispatch history and the observed transport
-state, publishes nothing, and needs no worker. Run it first.
+`--check-only` prints eligibility, dispatch history, the observed transport
+state and — when `--as-worker` is given — whether that executor could actually
+claim the task. It publishes nothing, claims nothing and consumes no approval.
+Run it first, **with `--as-worker`**: without it the executor gate is not
+checked, and a task can be ELIGIBLE while the dispatch would fail instantly
+because the worker is missing, inactive, uncapable or undeclared.
+
+### Setting up the executor worker (Founder-gated, once)
+
+The worker `--as-worker` names is created by two explicit configuration acts,
+both requiring a principal with approval authority, and neither performed by
+dispatch:
+
+```
+npm run hq:order --workspace @factoryos/headquarter -- \
+  --local-admin --as <founderId> \
+  --register-worker <workerId>=hq.direct_order \
+  [--worker-name "Claude GitHub workflow"] [--worker-vendor anthropic]
+
+npm run hq:order --workspace @factoryos/headquarter -- \
+  --local-admin --as <founderId> --declare-provider <workerId>=CLAUDE
+```
+
+Registration is **create-only** — an existing worker is refused, never
+overwritten, because overwriting would silently rewrite a capability allow-list
+— and it grants no provider identity, so neither act alone makes a worker able
+to claim CLAUDE-bound work. Both are atomic with their evidence.
 
 There is deliberately **no default repository**: dispatching publishes the
 order's instruction into a repository, so the repository is always chosen
@@ -136,6 +161,42 @@ Two consequences worth knowing before operating it:
    heard back" state — which is exactly where a silent external execution
    belongs.
 
+The release itself is atomic and never silent: the fence check, the evidence
+append, the transition and the claim-field clear run in one transaction, so a
+failure mid-release leaves the claim wholly intact rather than half-removed —
+and the refusal then SAYS the task is still claimed, instead of reporting a
+clean "nothing was published" while a worker that will never run it holds the
+task.
+
+## Reading the result back (issue #224)
+
+Dispatch is one leg. The other is `hq:ingest-claude`:
+
+```
+npm run hq:ingest-claude --workspace @factoryos/headquarter -- \
+  --local-admin --task <taskId> --repo <owner>/<name> [--db <path>]
+```
+
+It reads **the issue HQ itself opened** for that task — the recorded repository
+decides, not the argument, which is verified against it — finds the comment
+carrying CLAUDE's own result marker (`jenify-claude-result`, a registry fact),
+and hands it to `correlateClaudeResult`.
+
+What that does and does not mean:
+
+- It records that a report **arrived**. It does not review it, pass it, fail it
+  or complete the task, and it moves no status. The party that did the work
+  never declares it done.
+- The report text is never stored. What is recorded is the issue, the comment
+  URL **only when that URL verifiably points at this issue**, and the login it
+  was posted under — attested by GitHub, not authenticated by HQ.
+- The marker is the contract, not the author: a login is attribution HQ cannot
+  verify. Provider identity is enforced canonically inside the correlation.
+- Running it repeatedly is safe. "No report yet" is a success, not an error, and
+  a report already correlated is not recorded twice.
+- A transport that cannot read fails closed (`transport_cannot_read`), and a
+  failed read is reported as a failed read — never as "no result".
+
 ## What has to be true before anything is published
 
 In order, and any "no" refuses without creating an issue:
@@ -194,7 +255,8 @@ The issue body carries a machine-readable correlation block naming the HQ task,
 its capability and its approved action digest. `correlateClaudeResult` verifies
 that HQ really dispatched *that* issue in *that* repository, that the reporting
 provider is CLAUDE, and that the body still names the same task — then records
-the correlation on the canonical task.
+the correlation on the canonical task. `hq:ingest-claude` (above) is what calls
+it in the real flow.
 
 It records that a report **arrived**. It does not review, pass, or complete the
 task: the party that did the work is never the party that declares it done.

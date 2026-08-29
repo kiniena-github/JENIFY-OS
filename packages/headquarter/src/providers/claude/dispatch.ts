@@ -562,6 +562,108 @@ function answerAlreadyDispatched(
  */
 export const DEFAULT_EXECUTION_LEASE_MS = 6 * 60 * 60_000;
 
+/* ------------------------------------------------------------------ */
+/* Executor readiness (read-only)                                      */
+/* ------------------------------------------------------------------ */
+
+export interface ExecutorReadiness {
+  workerId: string;
+  /** True when nothing here would refuse the claim. Not a promise it will succeed. */
+  ready: boolean;
+  registered: boolean;
+  active: boolean;
+  /** The provider this worker is DECLARED as, or null if it has no declaration. */
+  declaredProvider: string | null;
+  /** Whether the worker's allow-list contains the task's capability. */
+  hasCapability: boolean;
+  /** Why it would be refused, in the operator's words. Empty when ready. */
+  problems: string[];
+}
+
+/**
+ * Can the designated executor actually claim this task? (issue #224, ChatGPT P2
+ * on `83e146b`.)
+ *
+ * `--check-only` is the first step of the approved local proof, and it used to
+ * answer a question that had stopped being the whole question: it reported task
+ * eligibility, dispatch history and transport state, and never looked at the
+ * executor. So it could print ELIGIBLE for a dispatch that fails instantly
+ * because the worker is missing, deactivated, lacks `hq.direct_order`, or was
+ * never declared as CLAUDE — the exact gates the claim added.
+ *
+ * STRICTLY READ-ONLY, and that is the point: it takes no claim, consumes no
+ * approval, mints no nonce, moves no status. It re-asks the same questions the
+ * claim will ask, from the same sources, and reports them. A `ready: true` here
+ * is therefore not a reservation and cannot be treated as one — the real gates
+ * still run inside the dispatch transaction, where they are atomic.
+ *
+ * It deliberately does NOT re-implement the claim's logic. Each fact is read
+ * from the module that owns it: the specialist directory for registration and
+ * the capability allow-list, the declared-provider lookup for identity, and
+ * `assertAssignable` for the handover freeze.
+ */
+export function executorReadiness(
+  ops: HeadquarterOperations,
+  workerId: string,
+  capabilityId: string | null,
+): ExecutorReadiness {
+  const problems: string[] = [];
+  const specialist = ops.store.getSpecialist(workerId);
+  const declaredProvider = ops.queue.workerProviders.providerOf(workerId);
+
+  if (!specialist) {
+    problems.push(
+      `Worker ${workerId} is not registered. Registering it is an explicit Founder-gated ` +
+        'configuration act; dispatch will not invent it.',
+    );
+  } else if (!specialist.active) {
+    problems.push(`Worker ${workerId} is registered but INACTIVE, so it cannot be assigned work.`);
+  }
+
+  const hasCapability =
+    specialist != null && capabilityId != null && specialist.allowedCapabilities.includes(capabilityId);
+  if (specialist && capabilityId != null && !hasCapability) {
+    problems.push(
+      `Worker ${workerId} is not allowed the capability ${capabilityId}. Permissions live in the ` +
+        'specialist record and the capability registry, never in the worker itself.',
+    );
+  } else if (capabilityId == null) {
+    // "Not checked" must not read as "checked and false": there is no task to
+    // take a capability from, so the allow-list question has not been asked.
+    problems.push(
+      'The task capability is unknown here, so the worker allow-list was NOT checked. That is an ' +
+        'unanswered question, not a pass.',
+    );
+  }
+
+  if (declaredProvider == null) {
+    problems.push(
+      `Worker ${workerId} has no declared provider, so it cannot claim a CLAUDE-bound task. ` +
+        'Declaring it is a separate Founder-gated configuration act.',
+    );
+  } else if (declaredProvider !== DISPATCH_PROVIDER) {
+    problems.push(
+      `Worker ${workerId} is declared as ${declaredProvider}, not ${DISPATCH_PROVIDER}. Dispatch ` +
+        'refuses rather than substituting a provider.',
+    );
+  }
+
+  if (specialist) {
+    const assignability = ops.queue.assignabilityProblem(workerId);
+    if (assignability != null) problems.push(assignability);
+  }
+
+  return {
+    workerId,
+    ready: problems.length === 0,
+    registered: specialist != null,
+    active: specialist?.active ?? false,
+    declaredProvider,
+    hasCapability,
+    problems,
+  };
+}
+
 /**
  * Release the claim taken at handoff when nothing was published after all
  * (issue #224, Founder decision approving option 1).
@@ -583,17 +685,53 @@ export const DEFAULT_EXECUTION_LEASE_MS = 6 * 60 * 60_000;
  *
  * Best-effort by contract: the publication outcome is already recorded, and a
  * release that cannot be written must not turn a recorded outcome into an
- * unrecorded one.
+ * unrecorded one. `OperatorQueue.releaseClaim` is atomic, so a failure here
+ * leaves the claim wholly intact rather than half-removed.
+ *
+ * But best-effort is not SILENT (issue #224, ChatGPT P2 on `83e146b`). Swallowing
+ * the error told the caller "nothing was published" while the task stayed
+ * `assigned` to a worker that will never run it — true, and materially
+ * incomplete. The outcome is returned so the refusal can say which of the two
+ * states the task is actually in.
  */
-function releaseHandoffClaim(ops: HeadquarterOperations, taskId: string, reason: string): void {
+type ClaimReleaseOutcome =
+  | { kind: 'released' }
+  /** Nothing to release: never claimed, or already moved on. */
+  | { kind: 'not_held' }
+  | { kind: 'failed'; message: string; claimedBy: string };
+
+function releaseHandoffClaim(
+  ops: HeadquarterOperations,
+  taskId: string,
+  reason: string,
+): ClaimReleaseOutcome {
+  let claimedBy = 'unknown';
   try {
     const task = ops.queue.get(taskId);
-    if (!task || task.claimedBy == null) return;
-    if (task.status !== 'assigned' && task.status !== 'running') return;
+    if (!task || task.claimedBy == null) return { kind: 'not_held' };
+    if (task.status !== 'assigned' && task.status !== 'running') return { kind: 'not_held' };
+    claimedBy = task.claimedBy;
     ops.queue.releaseClaim(taskId, task.claimedBy, task.fence, reason);
-  } catch {
-    // Deliberately swallowed. See above.
+    return { kind: 'released' };
+  } catch (error) {
+    return { kind: 'failed', message: errorText(error), claimedBy };
   }
+}
+
+/**
+ * What to append to a refusal so the operator knows where the task was left.
+ *
+ * A release that failed is not a footnote: the task is still claimed, so the
+ * next dispatch will refuse and the lease will eventually expire into
+ * `outcome_unknown` unless somebody acts.
+ */
+function releaseNote(outcome: ClaimReleaseOutcome, taskId: string): string {
+  if (outcome.kind !== 'failed') return '';
+  return (
+    ` WARNING: the canonical claim could NOT be released (${outcome.message}). Task ${taskId} is ` +
+    `still claimed by ${outcome.claimedBy} and no dispatch will succeed until that is resolved; ` +
+    'its lease will otherwise expire into `outcome_unknown`.'
+  );
 }
 
 export interface DispatchOptions {
@@ -961,16 +1099,18 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
         { kind: created.kind },
       );
     }
-    releaseHandoffClaim(
+    const release = releaseHandoffClaim(
       ops,
       taskId,
       `The GitHub handoff was claimed but the issue was not created (${created.kind}). Nothing ` +
         'was published. The single-use approval was consumed by the claim, so re-dispatching ' +
         'needs a fresh Founder approval.',
     );
-    return refuse('transport_failed', `The GitHub transport did not create the issue. ${created.message}`, {
-      kind: created.kind,
-    });
+    return refuse(
+      'transport_failed',
+      `The GitHub transport did not create the issue. ${created.message}${releaseNote(release, taskId)}`,
+      { kind: created.kind, claimReleased: release.kind },
+    );
   }
 
   try {
@@ -1106,7 +1246,7 @@ export function resolveUnknownDispatch(
     // Nothing was published, and the attempt is now closed — so the claim the
     // handoff took must not keep the task assigned to a worker that never ran
     // it (issue #224, Founder decision approving option 1).
-    releaseHandoffClaim(
+    const release = releaseHandoffClaim(
       ops,
       input.taskId,
       `Reconciled as NOT dispatched by ${input.resolvedBy}: no GitHub issue was created for the ` +
@@ -1115,8 +1255,10 @@ export function resolveUnknownDispatch(
     return refuse(
       'transport_failed',
       `Task ${input.taskId}: the uncertain attempt was reconciled as NOT dispatched. Nothing was ` +
-        'published and the handoff claim is released. The claim consumed the single-use approval, ' +
-        'so a fresh dispatch needs a fresh Founder approval as well as a re-queue.',
+        `published${release.kind === 'failed' ? '' : ' and the handoff claim is released'}. The claim ` +
+        'consumed the single-use approval, so a fresh dispatch needs a fresh Founder approval as ' +
+        `well as a re-queue.${releaseNote(release, input.taskId)}`,
+      { claimReleased: release.kind },
     );
   }
   if (!isValidTarget(input.target) || !Number.isInteger(input.issueNumber) || input.issueNumber <= 0) {

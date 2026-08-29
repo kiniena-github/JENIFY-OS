@@ -27,11 +27,13 @@
  * ## Usage
  *
  *   npm run hq:dispatch-claude --workspace @factoryos/headquarter -- \
- *     --local-admin --task <taskId> --repo <owner>/<name> \
+ *     --local-admin --task <taskId> --repo <owner>/<name> --as-worker <workerId> \
  *     [--role BUILDER|REVIEWER|MANAGER|RESEARCHER] [--db <path>] [--check-only]
  *
- * `--check-only` reports eligibility and the observed transport state and
- * publishes nothing — the safe way to see whether a dispatch would work.
+ * `--check-only` reports task eligibility, dispatch history, the observed
+ * transport state and — when `--as-worker` is given — whether the designated
+ * executor could actually claim the task. It publishes nothing, claims nothing
+ * and consumes no approval: the safe way to see whether a dispatch would work.
  */
 
 import { openHqDatabase } from '../store/db.js';
@@ -46,6 +48,7 @@ import {
   claudeDispatchEligibility,
   dispatchClaudeTask,
   dispatchHistory,
+  executorReadiness,
   DEFAULT_DISPATCH_ROLE,
 } from '../providers/claude/dispatch.js';
 import { ghCliTransport, isValidTarget, type GitHubTarget } from '../providers/claude/transport.js';
@@ -66,10 +69,18 @@ function usage(message: string): never {
 
 Usage:
   hq:dispatch-claude ${LOCAL_ADMIN_ACK_FLAG} --task <taskId> --repo <owner>/<name>
+                     --as-worker <workerId>
                      [--role ${ROLES.join('|')}] [--db <path>] [--check-only]
 
 The task must already be canonical, CLAUDE-bound and cleared to execute. This
-command creates no task, approves nothing, and substitutes no provider.
+command creates no task, approves nothing, registers no worker, and substitutes
+no provider.
+
+--as-worker names the registered CLAUDE worker the handoff claims the task for.
+It is required to dispatch, and optional with --check-only, where it is only
+READ (nothing is claimed). Register and declare it first with
+  hq:order ${LOCAL_ADMIN_ACK_FLAG} --as <founderId> --register-worker <workerId>=<capability>
+  hq:order ${LOCAL_ADMIN_ACK_FLAG} --as <founderId> --declare-provider <workerId>=CLAUDE
 
 ${LOCAL_ADMIN_INTERFACE_NOTICE}`);
   process.exit(2);
@@ -106,18 +117,13 @@ function main(): void {
 
   const taskId = flag(argv, 'task');
 
-  // The registered worker the canonical claim is taken for (issue #224,
-
-  // Founder decision approving option 1). REQUIRED and never defaulted: the
-
-  // handoff claims the task before publishing so the external execution is
-
-  // answerable to a fence and a consumed approval, and dispatch must never
-
-  // mint, guess or assume an identity. Registering and declaring this worker
-
-  // are separate, Founder-gated configuration acts.
-
+  // The registered worker the canonical claim is taken for (issue #224, Founder
+  // decision approving option 1). REQUIRED to dispatch and never defaulted: the
+  // handoff claims the task before publishing, so the external execution is
+  // answerable to a fence and a consumed approval, and dispatch must never mint,
+  // guess or assume an identity. Registering and declaring this worker are
+  // separate, Founder-gated configuration acts (`hq:order --register-worker`,
+  // `hq:order --declare-provider`).
   const executorWorkerId = flag(argv, 'as-worker');
   const target = parseTarget(flag(argv, 'repo'));
   const roleArg = (flag(argv, 'role') ?? DEFAULT_DISPATCH_ROLE).toUpperCase();
@@ -152,7 +158,36 @@ function main(): void {
       }`,
     );
     console.log(`               ${status.reason}`);
-    console.log('\nCheck only — nothing was published.');
+
+    // The executor gate is part of "would this dispatch work?" (issue #224,
+    // ChatGPT P2 on `83e146b`). Without it this command could print ELIGIBLE
+    // for a dispatch that fails instantly because the designated worker is
+    // missing, inactive, uncapable or undeclared — and this is the first step
+    // of the approved local proof, so that answer would be believed.
+    //
+    // Read-only: it reports the same facts the claim will check, and takes no
+    // claim and consumes no approval. Passing `--as-worker` here therefore
+    // publishes and reserves nothing.
+    if (executorWorkerId) {
+      const capabilityId = ops.queue.get(taskId)?.capabilityId ?? null;
+      const readiness = executorReadiness(ops, executorWorkerId, capabilityId);
+      console.log(
+        `  executor:    ${executorWorkerId} — ${
+          readiness.ready ? 'CLAIMABLE (read-only check; nothing was reserved)' : 'WOULD REFUSE'
+        }`,
+      );
+      console.log(
+        `               registered=${readiness.registered} active=${readiness.active} ` +
+          `capability=${readiness.hasCapability} declared=${readiness.declaredProvider ?? 'none'}`,
+      );
+      for (const problem of readiness.problems) console.log(`               - ${problem}`);
+    } else {
+      console.log(
+        '  executor:    NOT CHECKED — pass --as-worker <workerId> to verify the designated ' +
+          'executor too. Eligibility above says nothing about whether that worker can claim.',
+      );
+    }
+    console.log('\nCheck only — nothing was published, claimed or approved.');
     return;
   }
 

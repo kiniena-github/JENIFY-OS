@@ -59,6 +59,7 @@
  */
 
 import { openHqDatabase } from '../store/db.js';
+import { WORKER_ROLES, type WorkerRole } from '../contracts/workers.js';
 import { HeadquarterOperations } from '../application/service.js';
 import {
   DIRECT_ORDER_CAPABILITY,
@@ -111,6 +112,14 @@ Usage:
            it may claim orders bound to that provider. The declaring principal
            must hold approval authority; a worker can never declare one.
 
+  hq:order ${LOCAL_ADMIN_ACK_FLAG} --register-worker <workerId>=<capability>[,<capability>…]
+           --as <principalId> [--worker-name "<display name>"] [--worker-vendor <vendor>]
+           [--worker-role <role>] [--db <path>]
+           Configuration only: registers an execution worker — for instance the
+           external Claude GitHub workflow the dispatch handoff claims tasks for.
+           Create-only (an existing worker is refused, never overwritten), and it
+           grants no provider identity: declare that separately.
+
 ${LOCAL_ADMIN_INTERFACE_NOTICE}`);
   process.exit(2);
 }
@@ -159,6 +168,7 @@ function main(): void {
   const dryRun = argv.includes('--dry-run');
   const registerCapability = argv.includes('--register-capability');
   const declareProvider = flag(argv, 'declare-provider');
+  const registerWorker = flag(argv, 'register-worker');
 
   // Configuration and invocation are different commands wearing one name; they
   // are never performed in the same run.
@@ -218,6 +228,65 @@ function main(): void {
     console.log(
       `Worker ${declared.data.workerId} executes as ${declared.data.providerId} ` +
         `(declared by ${declared.data.declaredBy} at ${declared.data.declaredAt}).`,
+    );
+    console.log('\nConfiguration only — no order was placed.');
+    return;
+  }
+
+  // Registering the worker an external execution lane runs as is the THIRD
+  // configuration action (issue #224, ChatGPT P1 on `83e146b`). The Claude
+  // handoff requires a registered, declared worker before it publishes anything,
+  // and nothing canonical could create one: `upsertSpecialist` is a store method,
+  // so the real instruction on the Founder workstation was "open the database",
+  // which is not a Founder gate. It goes through
+  // `HeadquarterOperations.registerExecutionWorker`, which resolves the actor,
+  // requires approval authority, refuses an existing id and refuses unknown
+  // capabilities. Never performed in the same run as an order.
+  if (registerWorker) {
+    if (instruction) {
+      usage('--register-worker is a configuration action and does not place an order.');
+    }
+    if (!requestedBy) {
+      usage('--register-worker needs --as <principalId>: the registering principal must hold approval authority.');
+    }
+    const [workerId, capabilityList] = registerWorker.split('=');
+    if (!workerId || !capabilityList) {
+      usage(
+        '--register-worker expects <workerId>=<capability>[,<capability>…], e.g. ' +
+          `claude-github-workflow=${DIRECT_ORDER_CAPABILITY.id}.`,
+      );
+    }
+    const allowedCapabilities = capabilityList!
+      .split(',')
+      .map((id) => id.trim())
+      .filter((id) => id !== '');
+    const roleArg = flag(argv, 'worker-role') ?? 'build_lead';
+    if (!(WORKER_ROLES as readonly string[]).includes(roleArg)) {
+      usage(`--worker-role must be one of ${WORKER_ROLES.join(', ')}.`);
+    }
+    const configDb = openHqDatabase(dbPath ?? undefined);
+    const configOps = new HeadquarterOperations(configDb);
+    const registered = configOps.registerExecutionWorker({
+      workerId: workerId!,
+      displayName: flag(argv, 'worker-name') ?? workerId!,
+      vendor: flag(argv, 'worker-vendor') ?? 'unspecified',
+      role: roleArg as WorkerRole,
+      allowedCapabilities,
+      founderId: requestedBy!,
+    });
+    if (!registered.ok) {
+      console.error(`Registration refused (${registered.error.code}): ${registered.error.message}`);
+      process.exit(1);
+    }
+    console.log(
+      `Worker ${registered.data.id} registered (${registered.data.role}, vendor ` +
+        `${registered.data.vendor}) by ${requestedBy}.`,
+    );
+    console.log(`  capabilities: ${registered.data.allowedCapabilities.join(', ')}`);
+    console.log(
+      '\nIt has NO provider identity yet, so it cannot claim a provider-bound order. Declare it ' +
+        `separately:\n  hq:order ${LOCAL_ADMIN_ACK_FLAG} --as ${requestedBy} ` +
+        `--declare-provider ${registered.data.id}=<PROVIDER>`,
     );
     console.log('\nConfiguration only — no order was placed.');
     return;

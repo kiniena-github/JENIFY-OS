@@ -413,6 +413,29 @@ export class OperatorQueue {
    * than a silent `null` so a frozen worker cannot mistake "you are being
    * replaced" for "the queue is empty".
    */
+  /**
+   * The same assignability question `claim` asks, ANSWERED instead of thrown
+   * (issue #224, ChatGPT P2 on `83e146b`).
+   *
+   * A read-only preflight — `hq:dispatch-claude --check-only` — needs to report
+   * whether a worker could be assigned work without attempting an assignment.
+   * It reads through `assertAssignable`, so there is one source of truth for
+   * the freeze/deactivation rule and no second copy to drift; this method only
+   * decides whether the answer is returned or raised.
+   *
+   * Read-only, and grants nothing: `claim` still calls `assertAssignable`
+   * itself, inside the write path, so a worker that became unassignable between
+   * this call and a claim is still refused there.
+   */
+  assignabilityProblem(workerId: string): string | null {
+    try {
+      assertAssignable(this.db, workerId);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   claim(
     workerId: string,
     capabilityId: string,
@@ -587,23 +610,37 @@ export class OperatorQueue {
    * Fenced like every other post-claim write, so only the holder of the current
    * claim can release it — a stale fence cannot dislodge somebody else's work.
    * It grants nothing: releasing a claim only ever REMOVES a worker's hold.
+   *
+   * ALL OF IT, OR NONE OF IT (issue #224, ChatGPT P2 on `83e146b`). A release is
+   * a fence check, an evidence append, a transition and a claim-field clear, and
+   * a failure between any two of them used to leave a task the documented states
+   * do not describe: released in the log but still `assigned`, or transitioned
+   * to `needs_approval` while `claimed_by` still names a worker. The caller of a
+   * failed release sees only its own transport error, so nobody would go looking.
+   *
+   * So the whole sequence runs inside one IMMEDIATE transaction. The fence read
+   * moves inside it too: reading the fence outside the write lock is a
+   * check-then-act, and a concurrent claim between the two would let a release
+   * fire against a fence that is no longer current.
    */
   releaseClaim(taskId: string, workerId: string, fence: number, reason: string): OperatorTask {
-    this.assertFence(taskId, workerId, fence);
-    this.evidence.append({
-      taskId,
-      actor: workerId,
-      kind: 'claim_released',
-      payload: { reason },
+    return this.evidence.reserve(() => {
+      this.assertFence(taskId, workerId, fence);
+      this.evidence.append({
+        taskId,
+        actor: workerId,
+        kind: 'claim_released',
+        payload: { reason },
+      });
+      const released = this.transition(taskId, 'needs_approval', workerId, `Claim released: ${reason}`);
+      this.db
+        .prepare(
+          `UPDATE op_tasks SET claimed_by = NULL, lease_expires_at = NULL, claim_nonce = NULL,
+             approval_id = NULL WHERE id = ?`,
+        )
+        .run(taskId);
+      return this.get(taskId) ?? released;
     });
-    const released = this.transition(taskId, 'needs_approval', workerId, `Claim released: ${reason}`);
-    this.db
-      .prepare(
-        `UPDATE op_tasks SET claimed_by = NULL, lease_expires_at = NULL, claim_nonce = NULL,
-           approval_id = NULL WHERE id = ?`,
-      )
-      .run(taskId);
-    return this.get(taskId) ?? released;
   }
 
   /** Extend the lease mid-execution. Fence must match. */

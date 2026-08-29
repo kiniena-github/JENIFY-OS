@@ -71,6 +71,7 @@ import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
 import { HeadquarterStore } from '../store/headquarter.js';
 import type { ActivityStatus } from '../contracts/events.js';
+import type { WorkerDescriptor, WorkerRole } from '../contracts/workers.js';
 import { evaluatePolicy, type PolicyContext, type PolicyDecision } from '../operator/policy.js';
 import { taskActionDigest } from '../operator/approvals.js';
 import { assertNoSecretLikeContent } from '../operator/evidence.js';
@@ -964,6 +965,111 @@ export class HeadquarterOperations {
         );
       }
       return fail('operator_rejected', errorMessage(error), { workerId: input.workerId });
+    }
+  }
+
+  // ---- worker registration (Founder only) ----
+
+  /**
+   * Register an external execution worker (issue #224, ChatGPT P1 on `83e146b`).
+   *
+   * The Claude handoff requires a named, registered, CLAUDE-declared worker
+   * before it will publish anything — and until now nothing canonical could
+   * CREATE one. `upsertSpecialist` lives on the store, reachable only by code
+   * holding the raw database, and the tests built their executor by calling it
+   * directly. So the documented Founder-gated boundary ("registering this worker
+   * is an explicit configuration act") had no implementation on the one machine
+   * that dispatches: the real answer was "drop to the data layer", which is not
+   * a gate at all.
+   *
+   * This is that act, and it is deliberately narrow:
+   *
+   * - **Founder-gated**, the same check as `declareWorkerProvider` and the kill
+   *   switch: a registered, active human principal holding approval authority.
+   *   Workers are refused that authority outright, so no execution worker can
+   *   register a worker — itself included.
+   * - **Create-only.** An existing id is REFUSED rather than overwritten.
+   *   `upsertSpecialist` replaces the whole row, so allowing re-registration
+   *   here would make a capability allow-list — an authority — silently
+   *   editable through a "bootstrap" command. Changing or retiring a worker
+   *   stays with the paths that own those decisions (handover, deactivation).
+   * - **Deny-by-default on capabilities.** Every requested capability must
+   *   already exist in the registry; a typo grants nothing and is refused
+   *   loudly rather than registering a worker that can claim nothing.
+   * - **Atomic**, for the same reason the declaration is: a registration whose
+   *   evidence cannot be written must not survive as an unrecorded grant.
+   *
+   * It grants no provider identity. Registration and declaration stay two
+   * separate acts, so neither one alone makes a worker able to take
+   * CLAUDE-bound work.
+   */
+  registerExecutionWorker(input: {
+    workerId: string;
+    displayName: string;
+    vendor: string;
+    role: WorkerRole;
+    allowedCapabilities: readonly string[];
+    founderId: string;
+  }): OpsResult<WorkerDescriptor> {
+    const principal = this.assertApprovalAuthority(input.founderId, 'register an execution worker');
+    if (principal) return principal;
+
+    const workerId = input.workerId.trim();
+    if (!workerId) return fail('invalid_input', 'A worker id is required.');
+    if (this.store.getSpecialist(workerId)) {
+      return fail(
+        'invalid_input',
+        `Worker ${workerId} is already registered. Registration is create-only: it will not ` +
+          'overwrite an existing worker, because that would silently rewrite its capability ' +
+          'allow-list.',
+        { workerId },
+      );
+    }
+    if (input.allowedCapabilities.length === 0) {
+      return fail(
+        'invalid_input',
+        'A worker registered with no capabilities could claim nothing. Name the capabilities it ' +
+          'is allowed, explicitly.',
+        { workerId },
+      );
+    }
+    const unknown = input.allowedCapabilities.filter((id) => this.queue.capabilities.get(id) == null);
+    if (unknown.length > 0) {
+      return fail(
+        'unknown_capability',
+        `Unknown capabilit${unknown.length === 1 ? 'y' : 'ies'}: ${unknown.join(', ')}. A worker is ` +
+          'never granted a capability the registry does not define.',
+        { workerId, unknown },
+      );
+    }
+
+    const descriptor: WorkerDescriptor = {
+      id: workerId,
+      displayName: input.displayName.trim() || workerId,
+      vendor: input.vendor.trim(),
+      role: input.role,
+      allowedCapabilities: [...input.allowedCapabilities],
+      active: true,
+    };
+    try {
+      return ok(
+        this.queue.evidence.reserve(() => {
+          this.store.upsertSpecialist(descriptor);
+          this.queue.evidence.append({
+            actor: input.founderId,
+            kind: 'execution_worker_registered',
+            payload: {
+              workerId: descriptor.id,
+              vendor: descriptor.vendor,
+              role: descriptor.role,
+              allowedCapabilities: descriptor.allowedCapabilities,
+            },
+          });
+          return descriptor;
+        }),
+      );
+    } catch (error) {
+      return fail('operator_rejected', errorMessage(error), { workerId });
     }
   }
 

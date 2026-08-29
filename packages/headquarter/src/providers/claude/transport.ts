@@ -154,8 +154,28 @@ export type GitHubIssueResult =
   | { ok: true; issueNumber: number; issueUrl: string }
   | { ok: false; kind: IssueFailureKind; message: string };
 
+/** One comment as GitHub reports it. All fields are UNTRUSTED external text. */
+export interface GitHubIssueComment {
+  /** Login of the comment's author, as reported. Attribution, not authentication. */
+  author: string;
+  body: string;
+  url: string;
+  createdAt: string;
+}
+
+export interface GitHubIssueView {
+  issueNumber: number;
+  body: string;
+  comments: GitHubIssueComment[];
+}
+
+export type GitHubIssueReadResult =
+  | { ok: true; issue: GitHubIssueView }
+  | { ok: false; kind: IssueFailureKind; message: string };
+
 /**
- * The one capability HQ needs from GitHub to reach the Claude workflow.
+ * The capabilities HQ needs from GitHub to reach the Claude workflow, and to
+ * observe what it reported back.
  *
  * An interface, not a class, because `dispatch.ts` must be exhaustively testable
  * without a network, a `gh` install, or a real issue being opened. Production
@@ -168,6 +188,17 @@ export interface GitHubIssueTransport {
   status(): GitHubTransportStatus;
   /** Create ONE issue. Never retries on its own — retry is a caller's decision. */
   createIssue(request: GitHubIssueRequest): GitHubIssueResult;
+  /**
+   * Read one issue and its comments (issue #224, ChatGPT P1 on `83e146b`).
+   *
+   * OPTIONAL, so every existing write-only stub and adapter stays valid and a
+   * transport that cannot read fails closed at the ingestion path rather than
+   * silently reporting "no result yet".
+   *
+   * Strictly a READ. It is how a result gets back to HQ at all: the workflow
+   * reports by commenting on the issue HQ opened, and nothing was watching.
+   */
+  readIssue?(target: GitHubTarget, issueNumber: number): GitHubIssueReadResult;
 }
 
 /* ------------------------------------------------------------------ */
@@ -495,6 +526,111 @@ export function ghCliTransport(options: GhCliTransportOptions = {}): GitHubIssue
         }
       }
     },
+
+    /**
+     * Read one issue and its comments — the return path (issue #224, ChatGPT P1
+     * on `83e146b`).
+     *
+     * A READ, and only a read: `gh issue view` cannot create, comment, close or
+     * label anything, and no argument here could make it. It is host-qualified
+     * for the same reason the write is — a bare owner/repo would resolve against
+     * `GH_HOST`, and reading the wrong host's issue would attach a stranger's
+     * text to a canonical task.
+     *
+     * Failure classification is simpler than the write's, because there is no
+     * side effect whose occurrence could be in doubt: a read either produced
+     * usable JSON or it did not, and "did not" is never an outcome-unknown.
+     */
+    readIssue(target: GitHubTarget, issueNumber: number): GitHubIssueReadResult {
+      if (ghPath == null) {
+        return { ok: false, kind: 'unavailable', message: 'No GitHub CLI (`gh`) is available here.' };
+      }
+      if (!isValidTarget(target)) {
+        return { ok: false, kind: 'rejected', message: 'The target is not a valid owner/repo pair.' };
+      }
+      if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
+        return { ok: false, kind: 'rejected', message: 'An issue number must be a positive integer.' };
+      }
+      const result = spawn(
+        ghPath,
+        [
+          'issue',
+          'view',
+          String(issueNumber),
+          '--repo',
+          qualifiedTargetSlug(target),
+          '--json',
+          'number,body,comments',
+        ],
+        timeoutMs,
+      );
+      if (result.error != null) {
+        return {
+          ok: false,
+          kind: 'unavailable',
+          message: `The GitHub CLI could not be run: ${result.error.message}`,
+        };
+      }
+      const combined = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+      if (result.status !== 0) {
+        const detail = combined.split(/\r?\n/).filter((line) => line.trim() !== '').slice(-5).join(' ').trim();
+        return { ok: false, ...classifyExitFailure(result.status, detail) };
+      }
+      const view = parseIssueView(result.stdout ?? '', issueNumber);
+      if (view == null) {
+        return {
+          ok: false,
+          kind: 'unreadable_response',
+          message:
+            'The GitHub CLI exited cleanly but its output could not be read as an issue. Nothing ' +
+            'is inferred from unreadable output.',
+        };
+      }
+      return { ok: true, issue: view };
+    },
+  };
+}
+
+/**
+ * Parse `gh issue view --json number,body,comments` output.
+ *
+ * Defensive by construction: every field is external text, so anything missing
+ * or of the wrong type becomes an empty string rather than a thrown error or an
+ * `undefined` that travels onward. A comment whose shape is unrecognisable is
+ * dropped, not guessed at.
+ */
+export function parseIssueView(stdout: string, expectedNumber: number): GitHubIssueView | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed == null) return null;
+  const record = parsed as Record<string, unknown>;
+  // The issue GitHub answered with must be the one that was asked for; a
+  // mismatch means the read cannot be trusted to describe the dispatched issue.
+  if (typeof record['number'] !== 'number' || record['number'] !== expectedNumber) return null;
+  const rawComments = Array.isArray(record['comments']) ? record['comments'] : [];
+  const comments: GitHubIssueComment[] = [];
+  for (const entry of rawComments) {
+    if (typeof entry !== 'object' || entry == null) continue;
+    const comment = entry as Record<string, unknown>;
+    const author = comment['author'];
+    comments.push({
+      author:
+        typeof author === 'object' && author != null && typeof (author as Record<string, unknown>)['login'] === 'string'
+          ? ((author as Record<string, unknown>)['login'] as string)
+          : '',
+      body: typeof comment['body'] === 'string' ? comment['body'] : '',
+      url: typeof comment['url'] === 'string' ? comment['url'] : '',
+      createdAt: typeof comment['createdAt'] === 'string' ? comment['createdAt'] : '',
+    });
+  }
+  return {
+    issueNumber: expectedNumber,
+    body: typeof record['body'] === 'string' ? record['body'] : '',
+    comments,
   };
 }
 

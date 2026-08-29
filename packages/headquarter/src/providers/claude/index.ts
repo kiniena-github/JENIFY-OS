@@ -15,3 +15,4 @@ export * from './transport.js';
 export * from './dispatch.js';
 export * from './connection.js';
 export * from './dispatch-availability.js';
+export * from './ingest.js';

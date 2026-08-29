@@ -72,14 +72,15 @@ const ORDER = {
 /** The designated executor: two explicit configuration acts, never minted by dispatch. */
 const EXECUTOR = 'claude-executor';
 function registerExecutor(fixture: Fixture): void {
-  fixture.store.upsertSpecialist({
-    id: EXECUTOR,
+  const registered = fixture.ops.registerExecutionWorker({
+    workerId: EXECUTOR,
     displayName: 'Claude GitHub workflow',
     vendor: 'anthropic',
     role: 'build_lead',
     allowedCapabilities: [DIRECT_ORDER_CAPABILITY.id],
-    active: true,
+    founderId: 'chair',
   });
+  if (!registered.ok) throw new Error(`expected registration: ${registered.error.code}`);
   fixture.ops.declareWorkerProvider({ workerId: EXECUTOR, providerId: 'CLAUDE', founderId: 'chair' });
 }
 
