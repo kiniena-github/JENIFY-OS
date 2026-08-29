@@ -790,6 +790,45 @@ describe('the rendered issue is the contract ai-task-trigger.yml actually routes
     expect(decision.dispatchTo).toEqual(['CLAUDE']);
   });
 
+  it('is recognised by the router as HQ-dispatched, and so runs exactly once', () => {
+    // The seam between the two halves of the single-use rule (issue #224). The
+    // guard in `decideRouting` fires on HQ's marker being present in the issue
+    // BODY; the body is produced here. Every other test of that guard hands the
+    // router a hand-written body, so a renderer that stopped stamping the marker
+    // would silently unlock unbounded re-execution with all of them still green.
+    // This one feeds the router HQ's own real output.
+    const fixture = orderFixture();
+    const taskId = placeOrder(fixture, { title: 'Maintenance plan' });
+    const task = fixture.ops.queue.get(taskId)!;
+    const issue = renderDispatchIssue({
+      task,
+      title: 'Maintenance plan',
+      project: 'mesob',
+      target: TARGET,
+      role: 'BUILDER',
+      dispatchedAt: '2026-08-29T12:00:00.000Z',
+    });
+
+    const route = (trigger: 'issue_opened' | 'issue_labeled' | 'issue_comment') =>
+      decideRouting({
+        trigger,
+        issueTitle: issue.title,
+        issueBody: issue.body,
+        actorLogin: TARGET.owner,
+        issueAuthorLogin: TARGET.owner,
+        repositoryOwner: TARGET.owner,
+        commentBody: '<!-- jenify-run -->',
+        secrets: CLAUDE_ONLY,
+      });
+
+    // The dispatch itself: the one run HQ authorised.
+    expect(route('issue_opened').outcome).toBe('ROUTE');
+    // Every later event on the same issue: refused, because the authority to run
+    // that task is the HQ claim, approval and fence, not an event on the issue.
+    expect(route('issue_comment').outcome).toBe('IGNORE');
+    expect(route('issue_labeled').outcome).toBe('IGNORE');
+  });
+
   it('never lets a Founder title become a routing tag', () => {
     // `[URGENT] ship it` would otherwise parse as an unknown routing tag and
     // block the whole task at the far end, for a reason unrelated to routing.
