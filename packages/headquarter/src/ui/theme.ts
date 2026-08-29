@@ -19,7 +19,9 @@
  *    `prefers-reduced-motion`.
  */
 
-export const THEME_CSS = `
+import { SPATIAL_CSS } from './spatial/theme.js';
+
+const BASE_CSS = `
 :root {
   color-scheme: dark;
   --bg: #070a11;
@@ -530,6 +532,52 @@ details.record[open] { background: var(--surface-2); border-color: var(--line-st
 }
 .order-route { min-width: 0; }
 .order-route p { min-width: 0; overflow-wrap: anywhere; }
+
+/* Session-granted live controls (issue #200 V1). These rules style elements
+   that exist ONLY after the control console script draws them from a granted
+   /session verdict — the static markup never carries them. */
+.hq-live-form { display: grid; gap: 0.6rem; min-width: 0; }
+.hq-live-form textarea,
+.hq-live-form input,
+.hq-live-form select {
+  width: 100%;
+  max-width: 100%;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.6rem;
+  font: inherit;
+  font-size: 0.9rem;
+}
+.hq-live-form textarea { resize: vertical; }
+.hq-live-form ::placeholder, .hq-live-approval ::placeholder { color: var(--text-faint); }
+.hq-live-form button,
+.hq-live-approval button {
+  padding: 0.45rem 0.95rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(53,223,168,0.4);
+  background: rgba(53,223,168,0.12);
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.hq-live-form button:disabled,
+.hq-live-approval button:disabled { opacity: 0.5; cursor: wait; }
+.hq-live-approval input {
+  width: 100%;
+  max-width: 100%;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.6rem;
+  font: inherit;
+  font-size: 0.85rem;
+}
+.hq-live-result { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
 [data-connection] .record-meta code { overflow-wrap: anywhere; }
 [data-live-detail] { margin: 0.25rem 0 0; min-width: 0; overflow-wrap: anywhere; }
 
@@ -546,3 +594,14 @@ footer[data-provenance] {
   * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }
 `;
+
+/**
+ * The one stylesheet every HQ page carries.
+ *
+ * The spatial rules are concatenated here rather than shipped as a separate
+ * sheet so that the responsive/accessibility invariants which parse
+ * `THEME_CSS` cover the living Headquarters too. The reduced-motion block in
+ * `BASE_CSS` uses `!important`, so it disables the spatial animations
+ * regardless of the order the two halves appear in.
+ */
+export const THEME_CSS = `${BASE_CSS}${SPATIAL_CSS}`;

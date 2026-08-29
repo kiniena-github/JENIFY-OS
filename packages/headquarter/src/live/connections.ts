@@ -121,6 +121,30 @@ export const CONNECTION_STATE_LABELS: Record<ConnectionState, string> = {
  *   live_check      a provider-specific check ran against the service and
  *                   returned an answer
  */
+/**
+ * How each state should READ, wherever it is shown.
+ *
+ * One mapping, exported, because there is more than one surface: the
+ * Connections page and the Headquarters Floor both present these states, and
+ * they each had their own table. They disagreed on four of the eight —
+ * `configured` and `setup_required` warned on one page and were silent on the
+ * other, so a half-finished integration raised a flag in one place and left
+ * the floor reading "Quiet" (Codex review of `9a3e892`).
+ *
+ * Tone is a presentation fact, not a connectivity claim: `LIT_CONNECTION_STATES`
+ * still decides what may be drawn as live, and a warned pillar stays unlit.
+ */
+export const CONNECTION_STATE_TONE: Record<ConnectionState, 'accent' | 'info' | 'warn' | 'danger' | 'neutral'> = {
+  connected: 'accent',
+  local_only: 'info',
+  dispatchable: 'info',
+  configured: 'warn',
+  not_connected: 'neutral',
+  expired: 'warn',
+  error: 'danger',
+  setup_required: 'warn',
+};
+
 export type VerificationMethod = 'none' | 'configuration' | 'routing_contract' | 'live_check';
 
 /** What a verification actually found. Precise words, not a boolean. */

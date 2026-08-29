@@ -122,12 +122,52 @@ export function logout(db: Db, token: string): void {
 }
 
 export function resolveSession(db: Db, token: string): SessionUser | null {
+  return resolveSessionRecord(db, token)?.user ?? null;
+}
+
+/**
+ * The session behind a token, WITH the timestamps that bound it.
+ *
+ * `resolveSession` answers "who is this" and is all the tenant app needs.
+ * Headquarter's Founder boundary additionally needs to know how OLD the
+ * session is, because a long-lived cookie on an unattended machine is not
+ * consent to an irreversible action — see `verifyStepUp` in
+ * `@factoryos/headquarter`'s `live/auth.ts`.
+ *
+ * Deliberately the single implementation of session validity, with
+ * `resolveSession` delegating to it: expiry and revocation are checked in
+ * exactly one place, so the two callers cannot drift into different answers
+ * about whether a session is still good.
+ */
+export interface SessionRecord {
+  user: SessionUser;
+  /** When this session was established. */
+  establishedAt: string;
+  expiresAt: string;
+}
+
+export function resolveSessionRecord(db: Db, token: string): SessionRecord | null {
   const session = db.select().from(sessions).where(eq(sessions.token, token)).get();
   if (!session || session.revokedAt) return null;
   if (session.expiresAt < nowIso()) return null;
   const user = buildSessionUser(db, session.userId);
   if (!user) return null;
-  return user;
+  return { user, establishedAt: session.createdAt, expiresAt: session.expiresAt };
+}
+
+/**
+ * Re-verify a signed-in account's own password, for step-up confirmation.
+ *
+ * Not a login: it mints no session, extends nothing, and is never reachable
+ * without an already-authenticated session — it only answers whether the
+ * person at the keyboard still knows the password. A deactivated account
+ * fails closed even if its session has not yet expired.
+ */
+export function verifyAccountPassword(db: Db, userId: string, password: string): boolean {
+  if (!password) return false;
+  const user = db.select().from(users).where(eq(users.id, userId)).get();
+  if (!user || !user.active) return false;
+  return verifyPassword(password, user.passwordHash);
 }
 
 /** Load user + role + latest permission matrix. Permissions re-evaluate on every request. */

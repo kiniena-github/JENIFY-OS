@@ -826,6 +826,27 @@ export class HeadquarterOperations {
       return fail('kill_switch_engaged', `Kill switch is engaged for ${task.capabilityId}`);
     }
 
+    // Validate the note BEFORE any write (issue #200, Codex round 3 P1).
+    //
+    // This one has no backstop at all, which makes it worse than the denial
+    // case rather than merely similar: `queue.approve`'s evidence payload
+    // carries the approval id, digest and expiry — NOT the note — so the
+    // evidence log's guard never sees it. A credential pasted into an approval
+    // note is therefore written to `hq_approvals.decision_note` with nothing
+    // objecting, and `renderFounderApprovals` publishes that column into
+    // generated HTML. Silent persistence plus publication, with no error
+    // anywhere.
+    if (input.note !== undefined) {
+      try {
+        assertNoSecretLikeContent({ note: input.note });
+      } catch {
+        return fail(
+          'invalid_input',
+          'The approval note looks like it contains a credential. Approval notes are stored ' +
+            'permanently and rendered in the Founder console, so nothing was approved.',
+        );
+      }
+    }
     const currentDigest = taskActionDigest(task);
     if (!input.expectedActionDigest || input.expectedActionDigest !== currentDigest) {
       this.#requirePrivilegedQueue().appendEvidence({
@@ -857,6 +878,29 @@ export class HeadquarterOperations {
     const principal = this.#assertApprovalAuthority(input.founderId, 'deny');
     if (principal) return principal;
     if (!input.reason) return fail('invalid_input', 'A denial requires a reason');
+    // Validate the reason BEFORE anything is written, with the SAME guard the
+    // evidence log applies at the end (issue #200, Codex round 2 P1).
+    //
+    // `queue.deny` transitions the task to `blocked`, writes `block_reason`
+    // and inserts the `hq_approvals` row, and only then appends evidence — so
+    // a reason the evidence log refuses used to throw AFTER those three writes
+    // had committed. This method caught that late throw and reported
+    // `operator_rejected`, which meant the caller was told the denial failed
+    // while the task was in fact blocked and the offending text was persisted
+    // in two tables. Checking here makes the refusal precede the first write.
+    //
+    // Deliberately the same function the log uses, not a stricter or looser
+    // one: a different guard would reopen the gap from the other side, where
+    // this check passes and the append still throws.
+    try {
+      assertNoSecretLikeContent({ reason: input.reason });
+    } catch {
+      return fail(
+        'invalid_input',
+        'The denial reason looks like it contains a credential. A reason is recorded in the ' +
+          'append-only evidence log, so nothing was written.',
+      );
+    }
     const currentDigest = taskActionDigest(task);
     if (input.expectedActionDigest && input.expectedActionDigest !== currentDigest) {
       // A denial is never an authorization, so a stale digest does not block
