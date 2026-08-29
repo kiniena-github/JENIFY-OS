@@ -6,6 +6,7 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import type { SourceMode } from '../live/provenance.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSite, bundleAsOf, type HeadquarterData } from '../ui/site.js';
@@ -73,17 +74,46 @@ for (const [file, html] of site) {
  * does not state a mode is treated as `sample`: the safest reading of "this
  * build never said where its data came from".
  */
+/**
+ * The strongest provenance a STATIC build may claim for its operational
+ * section. Never `live`: this command opens no database, so nothing here was
+ * read from the canonical store. A bundle claiming `live` is reporting on
+ * itself, not on the empty section rendered below, and is downgraded rather
+ * than believed.
+ */
+function staticConsoleMode(declared: SourceMode | undefined): SourceMode {
+  if (declared === 'reconstructed') return 'reconstructed';
+  return 'sample';
+}
+
 const asOf = bundleAsOf(data);
 const snapshot = buildHqSnapshot({
   generatedAt: asOf,
   note: data.note,
   console: {
     data: emptyFounderConsole(asOf),
+    // This section can NEVER be live, whatever the bundle claims about itself.
+    //
+    // It is `emptyFounderConsole` — this command does not open the HQ store, by
+    // design. A bundle setting `sourceMode: 'live'` therefore used to stamp
+    // LIVE provenance on a deliberately empty operational section, and since
+    // the emitted snapshot shares the HTML's `asOf`, the freshness poll then
+    // reported LIVE over state that was fabricated rather than read (issue
+    // #200, Codex exact-head finding on `f221826`). The bundle's own mode is a
+    // claim about the bundle; it cannot vouch for a section whose contents
+    // nothing produced.
+    //
+    // `live` is refused rather than trusted here, which is the same rule the
+    // browser applies at the other end of this pipeline: only positive live
+    // provenance may say LIVE, and only `hq:snapshot` — which does open the
+    // store — can establish it.
     provenance: {
-      mode: data.sourceMode ?? 'sample',
+      mode: staticConsoleMode(data.sourceMode),
       source: `static bundle ${dataPath} (no HQ database was opened by this build)`,
       asOf,
-      note: 'Operational sections are rendered from the bundle, not read from op_tasks.',
+      note:
+        'Operational sections are rendered from the bundle, not read from op_tasks. A static ' +
+        'build cannot report live operational state; run `npm run hq:snapshot` for that.',
     },
   },
   connections: {

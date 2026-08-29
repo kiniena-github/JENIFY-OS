@@ -7,6 +7,8 @@
  * to the weakest section rather than to the most flattering one.
  */
 
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { setupFixture, CAPS, expectOk } from './application.fixture.js';
 import { founderConsole } from '../src/application/console.js';
@@ -309,5 +311,52 @@ describe('projecting the store never writes to it', () => {
     expect(snapshot.mode).toBe('live');
     expect(snapshot.capabilities.data.map((c) => c.id)).toContain('repo.read_status');
     ro.close();
+  });
+});
+
+/**
+ * Codex exact-head finding on `f221826` (P1). `build-site.ts` renders a data
+ * file and never opens the HQ store, so its operational section is
+ * `emptyFounderConsole`. A bundle setting `sourceMode: 'live'` nonetheless
+ * stamped LIVE provenance on that empty section — and because the emitted
+ * snapshot shares the HTML's `asOf`, the browser freshness poll then reported
+ * LIVE over state nothing had read.
+ *
+ * The rule enforced here is the same one the browser applies at the far end of
+ * the pipeline: only positive live provenance may say LIVE, and only a build
+ * that actually opened the store can establish it.
+ */
+describe('a static build cannot claim live operational provenance', () => {
+  const buildSiteScript = readFileSync(
+    fileURLToPath(new URL('../src/cli/build-site.ts', import.meta.url)),
+    'utf8',
+  );
+
+  it('never passes a bundle-declared live mode through to the console section', () => {
+    // Scoped to the CONSOLE block, which is the section that is empty by
+    // construction. The other sections genuinely are the bundle's own data, so
+    // the bundle's own mode is the right claim for them — and the overall
+    // snapshot mode degrades to the weakest section regardless, so forcing this
+    // one is what stops the bundle announcing LIVE.
+    const consoleBlock = buildSiteScript.slice(
+      buildSiteScript.indexOf('  console: {'),
+      buildSiteScript.indexOf('  connections: {'),
+    );
+    expect(consoleBlock).toContain('staticConsoleMode(data.sourceMode)');
+    expect(consoleBlock).not.toContain("mode: data.sourceMode ?? 'sample'");
+    expect(consoleBlock).toContain('emptyFounderConsole');
+  });
+
+  it('downgrades live to sample and preserves reconstructed', () => {
+    // Executed rather than grepped: the shipped mapping is the tested one.
+    const body = buildSiteScript.slice(buildSiteScript.indexOf('function staticConsoleMode'));
+    const source = body.slice(0, body.indexOf('\n}') + 2);
+    const staticConsoleMode = new Function(
+      `${source.replace(/: SourceMode \| undefined/, '').replace(/: SourceMode/, '')}; return staticConsoleMode;`,
+    )() as (m: string | undefined) => string;
+    expect(staticConsoleMode('live')).toBe('sample');
+    expect(staticConsoleMode(undefined)).toBe('sample');
+    expect(staticConsoleMode('sample')).toBe('sample');
+    expect(staticConsoleMode('reconstructed')).toBe('reconstructed');
   });
 });

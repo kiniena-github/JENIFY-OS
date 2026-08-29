@@ -713,3 +713,32 @@ describe('an approver can see how much is known about the requester', () => {
     expect(card!.requesterAuthentication).toBe('unrecognised_marker');
   });
 });
+
+/**
+ * Codex exact-head finding on `f221826` (P2). The CLI folded every non-enabled
+ * capability state into "disabled", so an operator hitting the newly-added
+ * `drifted` state was told to re-enable a capability that was already ENABLED
+ * — remediation that cannot work, for a diagnosis that was not the problem.
+ * The drifted state was introduced one commit earlier; this is the other half
+ * of that change reaching the CLI.
+ */
+describe('each capability refusal names what would actually fix it', () => {
+  const cli = readFileSync(
+    fileURLToPath(new URL('../src/cli/direct-order.ts', import.meta.url)),
+    'utf8',
+  );
+
+  it('has a branch for every non-enabled state, drifted included', () => {
+    for (const state of ['missing', 'disabled', 'drifted']) {
+      expect(cli, state).toContain(`${state}: [`);
+    }
+    // The two-way fold that produced the wrong advice is gone.
+    expect(cli).not.toContain("capabilityState === 'missing' ? 'not_registered' : 'disabled'");
+  });
+
+  it('does not tell an operator to re-enable a capability that is enabled', () => {
+    const drifted = cli.slice(cli.indexOf('drifted: ['), cli.indexOf('};', cli.indexOf('drifted: [')));
+    expect(drifted).toContain('--register-capability');
+    expect(drifted).toContain('not disabled');
+  });
+});

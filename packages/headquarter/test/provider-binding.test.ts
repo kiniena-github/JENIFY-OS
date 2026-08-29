@@ -472,6 +472,36 @@ describe('the provider write mechanism is not reachable around the authority gat
     expect(readOnly.revoke).toBeUndefined();
   });
 
+  /**
+   * Codex exact-head finding on `f221826` (P1) — the THIRD time this boundary
+   * was bypassed, and the third distinct mechanism. Moving the class into
+   * `service.ts` left the INSTANCE on a TypeScript `private` field, which is a
+   * compile-time annotation that erases to an ordinary public JavaScript
+   * property: `ops.workerProviderRegistrar.declare(...)` was reachable from any
+   * JavaScript caller holding the exported operations object. Each previous
+   * attempt moved the signpost and left the path.
+   *
+   * `#private` is enforced by the runtime, so this test reaches for it the way
+   * a plain JavaScript worker would rather than the way TypeScript would let it.
+   */
+  it('does not expose the registrar on the operations object at runtime', () => {
+    const { ops } = bindingFixture();
+    const asAny = ops as unknown as Record<string, unknown>;
+    expect(asAny.workerProviderRegistrar).toBeUndefined();
+    // Not reachable by any enumeration either — `#` fields are not properties.
+    expect(Object.keys(asAny)).not.toContain('workerProviderRegistrar');
+    expect(Object.getOwnPropertyNames(asAny)).not.toContain('workerProviderRegistrar');
+    const proto = Object.getPrototypeOf(ops) as object;
+    expect(Object.getOwnPropertyNames(proto)).not.toContain('workerProviderRegistrar');
+    // And nothing else on the object offers a raw declare/revoke either.
+    for (const key of Object.getOwnPropertyNames(asAny)) {
+      const value = asAny[key] as Record<string, unknown> | null;
+      if (value && typeof value === 'object') {
+        expect(typeof value.declare, `${key}.declare must not be callable`).not.toBe('function');
+      }
+    }
+  });
+
   it('still lets the authorized service boundary declare, and still gates it', () => {
     const fx = bindingFixture();
     // Through the gate: works.

@@ -241,15 +241,36 @@ function main(): void {
   // never register the capability as a side effect, and must never turn a
   // disabled one back on: disabling `hq.direct_order` is how a deployment stops
   // direct orders, and an invocation may not undo it.
+  // Each refusal names what is actually wrong and what would actually fix it.
+  // A two-way branch used to fold every non-enabled state into "disabled",
+  // which sent an operator to re-enable an already-ENABLED capability whose
+  // DEFINITION had drifted — remediation that cannot work, for a diagnosis that
+  // was not the problem (issue #200, Codex exact-head finding on `f221826`).
+  // The drifted state was introduced one commit earlier; this is the other half
+  // of that change reaching the CLI.
   const capabilityState = directOrderCapabilityState(ops);
   if (capabilityState !== 'enabled') {
+    const refusal: Record<Exclude<typeof capabilityState, 'enabled'>, [string, string]> = {
+      missing: [
+        'capability_not_registered',
+        'Register it deliberately with --register-capability.',
+      ],
+      disabled: [
+        'capability_disabled',
+        'Re-enabling a disabled capability is an explicit configuration decision, not something ' +
+          'placing an order may do.',
+      ],
+      drifted: [
+        'capability_definition_drifted',
+        'It is registered and enabled, but its definition no longer promises what a direct order ' +
+          'depends on, and classification follows the registered definition. Repair it with ' +
+          '--register-capability; enabling it again would change nothing, because it is not disabled.',
+      ],
+    };
+    const [code, remedy] = refusal[capabilityState];
     console.error(
-      `Order refused (capability_${capabilityState === 'missing' ? 'not_registered' : 'disabled'}): ` +
-        `${DIRECT_ORDER_CAPABILITY.id} is ${capabilityState} in this database. ` +
-        (capabilityState === 'missing'
-          ? `Register it deliberately with --register-capability.`
-          : `Re-enabling a disabled capability is an explicit configuration decision, not something ` +
-            `placing an order may do.`),
+      `Order refused (${code}): ${DIRECT_ORDER_CAPABILITY.id} is ${capabilityState} in this ` +
+        `database. ${remedy}`,
     );
     process.exit(1);
   }

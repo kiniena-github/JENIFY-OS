@@ -335,7 +335,24 @@ export class HeadquarterOperations {
   private readonly nominationSources: readonly NominationSourcePort[];
   private readonly policyCtx: PolicyContext;
   /** Write side of the worker → provider map. Private by design — see below. */
-  private readonly workerProviderRegistrar: WorkerProviderRegistrar;
+  /**
+   * ECMAScript `#private`, not TypeScript `private`.
+   *
+   * TypeScript's `private` is a compile-time annotation and erases to an
+   * ordinary public property, so `ops.workerProviderRegistrar.declare(...)` was
+   * reachable from any JavaScript caller holding the exported
+   * `HeadquarterOperations` — the authority gate bypassed for the third time in
+   * three attempts (issue #200, Codex exact-head findings on `5a19350`,
+   * `03a7104` and `f221826`). The first attempt removed it from the queue's
+   * property; the second added a construction key and exported the factory
+   * holding it; the third moved the class here and left the INSTANCE on a
+   * public field. Each time the signpost moved and the path did not.
+   *
+   * `#` is enforced by the runtime: the field is not a property, does not
+   * appear on the object, and cannot be reached by name, index or reflection
+   * from outside this class body.
+   */
+  readonly #workerProviderRegistrar: WorkerProviderRegistrar;
 
   constructor(
     private db: HqDatabase,
@@ -348,7 +365,7 @@ export class HeadquarterOperations {
     // (issue #200, Codex round-3 P1 #1). It is private: the only ways in are
     // `declareWorkerProvider`/`revokeWorkerProvider`, which resolve the actor
     // and require approval authority first.
-    this.workerProviderRegistrar = new WorkerProviderRegistrar(db);
+    this.#workerProviderRegistrar = new WorkerProviderRegistrar(db);
     this.workers =
       options.workers ?? narrowByRegistry(new SpecialistDirectoryAdapter(this.store), options.memberRegistry);
     this.principals = options.humanPrincipals ?? new HumanPrincipalRegistry(db);
@@ -934,7 +951,7 @@ export class HeadquarterOperations {
     );
     if (principal) return principal;
     try {
-      const record = this.workerProviderRegistrar.declare(
+      const record = this.#workerProviderRegistrar.declare(
         input.workerId,
         input.providerId,
         input.founderId,
@@ -972,7 +989,7 @@ export class HeadquarterOperations {
       'revoke a worker execution provider',
     );
     if (principal) return principal;
-    const removed = this.workerProviderRegistrar.revoke(input.workerId);
+    const removed = this.#workerProviderRegistrar.revoke(input.workerId);
     if (removed) {
       this.queue.evidence.append({
         actor: input.founderId,
