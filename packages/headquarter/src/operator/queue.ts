@@ -369,7 +369,7 @@ export class OperatorQueue {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(id, req.capabilityId, JSON.stringify(req.payload), req.idempotencyKey ?? null, status, req.requestedBy.workerId, at, at);
-    this.recordEvent(id, status, req.requestedBy.workerId, `Task enqueued for ${req.capabilityId}`);
+    this.#recordEvent(id, status, req.requestedBy.workerId, `Task enqueued for ${req.capabilityId}`);
     this.evidence.append({
       taskId: id,
       actor: req.requestedBy.workerId,
@@ -433,7 +433,7 @@ export class OperatorQueue {
       kind: 'founder_approved',
       payload: { approvalId, actionDigest: digest, expiresAt },
     });
-    return this.transition(taskId, 'queued', by, 'Founder approved (digest-bound, single-use)');
+    return this.#transition(taskId, 'queued', by, 'Founder approved (digest-bound, single-use)');
   }
 
   /** Founder denial blocks the task with a reason; the denial is recorded immutably. */
@@ -441,7 +441,7 @@ export class OperatorQueue {
     const before = this.get(taskId);
     if (!before) throw new Error(`Unknown task: ${taskId}`);
     const cap = this.capabilities.get(before.capabilityId);
-    const task = this.transition(taskId, 'blocked', by, `Founder denied: ${reason}`);
+    const task = this.#transition(taskId, 'blocked', by, `Founder denied: ${reason}`);
     this.#db.prepare(`UPDATE op_tasks SET block_reason = ? WHERE id = ?`).run(reason, taskId);
     this.#db
       .prepare(
@@ -572,7 +572,7 @@ export class OperatorQueue {
         },
       });
     }
-    this.recordEvent(candidate.id, 'assigned', workerId, `Claimed by ${workerId}`);
+    this.#recordEvent(candidate.id, 'assigned', workerId, `Claimed by ${workerId}`);
     this.evidence.append({
       taskId: candidate.id,
       actor: workerId,
@@ -598,7 +598,7 @@ export class OperatorQueue {
    * path at all, is rejected as hostile.
    */
   start(taskId: string, workerId: string, fence: number): OperatorTask {
-    this.assertFence(taskId, workerId, fence);
+    this.#assertFence(taskId, workerId, fence);
     const task = this.get(taskId)!;
     // Re-checked here as well as at claim: a task forced into `assigned` never
     // passed through claim's check, and provider binding is an execution
@@ -606,7 +606,7 @@ export class OperatorQueue {
     this.#assertProviderBinding(task, workerId);
     const cap = this.capabilities.get(task.capabilityId);
     if (cap && approvalRequired(cap, this.#policyCtx)) {
-      const approval = this.getApprovalRecord(task.approvalId);
+      const approval = this.#getApprovalRecord(task.approvalId);
       if (!approval?.actionDigest || approval.actionDigest !== taskActionDigest(task)) {
         this.#rejectAtExecutionBoundary(task, 'approval_digest_mismatch');
         throw new Error(
@@ -638,12 +638,12 @@ export class OperatorQueue {
         );
       }
     }
-    return this.transition(taskId, 'running', workerId, 'Execution started');
+    return this.#transition(taskId, 'running', workerId, 'Execution started');
   }
 
   /** Extend the lease mid-execution. Fence must match. */
   heartbeat(taskId: string, workerId: string, fence: number, leaseMs = 5 * 60_000): void {
-    this.assertFence(taskId, workerId, fence);
+    this.#assertFence(taskId, workerId, fence);
     this.#db
       .prepare(`UPDATE op_tasks SET lease_expires_at = ?, updated_at = ? WHERE id = ?`)
       .run(new Date(Date.now() + leaseMs).toISOString(), nowIso(), taskId);
@@ -667,7 +667,7 @@ export class OperatorQueue {
     result: Record<string, unknown>,
     evidenceRefs: string[] = [],
   ): OperatorTask {
-    this.assertFence(taskId, workerId, fence);
+    this.#assertFence(taskId, workerId, fence);
     assertNoSecretLikeContent(result);
     const task = this.get(taskId)!;
     const cap = this.capabilities.get(task.capabilityId);
@@ -682,7 +682,7 @@ export class OperatorQueue {
              lease_expires_at = NULL, updated_at = ? WHERE id = ?`,
         )
         .run(workerId, nowIso(), nowIso(), taskId);
-      this.recordEvent(taskId, 'running', workerId, 'Result submitted; awaiting independent review');
+      this.#recordEvent(taskId, 'running', workerId, 'Result submitted; awaiting independent review');
       this.evidence.append({
         taskId,
         actor: workerId,
@@ -698,7 +698,7 @@ export class OperatorQueue {
       kind: 'execution_result',
       payload: { result, refs: evidenceRefs },
     });
-    return this.transition(taskId, 'completed', workerId, 'Execution completed');
+    return this.#transition(taskId, 'completed', workerId, 'Execution completed');
   }
 
   /**
@@ -708,7 +708,7 @@ export class OperatorQueue {
    * submitter, not the task's requester, and not 'system'.
    */
   reviewPass(taskId: string, reviewerId: string, note = ''): OperatorTask {
-    this.requirePendingReview(taskId, reviewerId);
+    this.#requirePendingReview(taskId, reviewerId);
     this.evidence.append({
       taskId,
       actor: reviewerId,
@@ -716,13 +716,13 @@ export class OperatorQueue {
       payload: { note },
     });
     this.#db.prepare(`UPDATE op_tasks SET review_state = 'passed' WHERE id = ?`).run(taskId);
-    this.transition(taskId, 'review_passed', reviewerId, `Independent review passed${note ? `: ${note}` : ''}`);
-    return this.transition(taskId, 'completed', reviewerId, 'Completed by independent reviewer decision');
+    this.#transition(taskId, 'review_passed', reviewerId, `Independent review passed${note ? `: ${note}` : ''}`);
+    return this.#transition(taskId, 'completed', reviewerId, 'Completed by independent reviewer decision');
   }
 
   /** Independent reviewer rejects a submitted result; the task goes to review_failed for rework. */
   reviewFail(taskId: string, reviewerId: string, reason: string): OperatorTask {
-    this.requirePendingReview(taskId, reviewerId);
+    this.#requirePendingReview(taskId, reviewerId);
     this.evidence.append({
       taskId,
       actor: reviewerId,
@@ -730,13 +730,13 @@ export class OperatorQueue {
       payload: { reason },
     });
     this.#db.prepare(`UPDATE op_tasks SET review_state = 'failed' WHERE id = ?`).run(taskId);
-    return this.transition(taskId, 'review_failed', reviewerId, `Independent review failed: ${reason}`);
+    return this.#transition(taskId, 'review_failed', reviewerId, `Independent review failed: ${reason}`);
   }
 
   fail(taskId: string, workerId: string, fence: number, reason: string): OperatorTask {
-    this.assertFence(taskId, workerId, fence);
+    this.#assertFence(taskId, workerId, fence);
     this.evidence.append({ taskId, actor: workerId, kind: 'execution_failed', payload: { reason } });
-    return this.transition(taskId, 'review_failed', workerId, `Execution failed: ${reason}`);
+    return this.#transition(taskId, 'review_failed', workerId, `Execution failed: ${reason}`);
   }
 
   // ---- lease expiry / OUTCOME_UNKNOWN ----
@@ -761,10 +761,10 @@ export class OperatorQueue {
     const outcomeUnknown: string[] = [];
     for (const row of rows) {
       if (row.side_effect && row.status === 'running') {
-        this.transition(row.id, 'outcome_unknown', 'system', 'Lease expired mid-execution of a side-effect task');
+        this.#transition(row.id, 'outcome_unknown', 'system', 'Lease expired mid-execution of a side-effect task');
         outcomeUnknown.push(row.id);
       } else {
-        this.transition(row.id, 'queued', 'system', 'Lease expired; task re-queued');
+        this.#transition(row.id, 'queued', 'system', 'Lease expired; task re-queued');
         this.#db
           .prepare(`UPDATE op_tasks SET claimed_by = NULL, lease_expires_at = NULL, claim_nonce = NULL WHERE id = ?`)
           .run(row.id);
@@ -793,10 +793,10 @@ export class OperatorQueue {
     }
     this.evidence.append({ taskId, actor: by, kind: 'reconciliation', payload: { decision, note } });
     if (decision === 'confirmed_done') {
-      return this.transition(taskId, 'completed', by, `Reconciled done: ${note}`);
+      return this.#transition(taskId, 'completed', by, `Reconciled done: ${note}`);
     }
     if (decision === 'confirmed_failed') {
-      return this.transition(taskId, 'review_failed', by, `Reconciled failed: ${note}`);
+      return this.#transition(taskId, 'review_failed', by, `Reconciled failed: ${note}`);
     }
     const cap = this.capabilities.get(task.capabilityId)!;
     if (!cap.idempotent) {
@@ -804,7 +804,7 @@ export class OperatorQueue {
         `Capability ${cap.id} is not idempotent; cannot safely re-queue an uncertain execution`,
       );
     }
-    const requeued = this.transition(taskId, 'queued', by, `Reconciled not-executed: ${note}`);
+    const requeued = this.#transition(taskId, 'queued', by, `Reconciled not-executed: ${note}`);
     this.#db
       .prepare(`UPDATE op_tasks SET claimed_by = NULL, lease_expires_at = NULL, claim_nonce = NULL WHERE id = ?`)
       .run(taskId);
@@ -848,7 +848,7 @@ export class OperatorQueue {
   }
 
   /** Read a hq_approvals row in the shape validateApproval()/validateApprovalClaimBinding() need. */
-  private getApprovalRecord(approvalId: string | null): {
+  #getApprovalRecord(approvalId: string | null): {
     decision: string;
     actionDigest: string | null;
     expiresAt: string | null;
@@ -890,7 +890,7 @@ export class OperatorQueue {
   }
 
   #validateTaskApproval(task: OperatorTask): ApprovalRejection | null {
-    return validateApproval(this.getApprovalRecord(task.approvalId), taskActionDigest(task));
+    return validateApproval(this.#getApprovalRecord(task.approvalId), taskActionDigest(task));
   }
 
   /**
@@ -917,13 +917,13 @@ export class OperatorQueue {
           ? 'Approval invalidated: action payload/capability changed after Founder approval'
           : 'Approval invalidated: approval was not consumed by the current legitimate claim (reattach/replay rejected)';
       if (task.status !== 'blocked') {
-        this.transition(task.id, 'blocked', 'system', reason);
+        this.#transition(task.id, 'blocked', 'system', reason);
       }
       this.#db.prepare(`UPDATE op_tasks SET block_reason = ? WHERE id = ?`).run(reason, task.id);
       return;
     }
     if (task.status !== 'needs_approval') {
-      this.transition(task.id, 'needs_approval', 'system', `Fresh Founder approval required (${rejection})`);
+      this.#transition(task.id, 'needs_approval', 'system', `Fresh Founder approval required (${rejection})`);
     }
     // A claim voided at the execution boundary (issue #71: e.g. expiry
     // between claim and start) releases the worker and its lease; the stale
@@ -934,7 +934,7 @@ export class OperatorQueue {
   }
 
   /** Shared guard for reviewPass/reviewFail: pending review + independent reviewer. */
-  private requirePendingReview(taskId: string, reviewerId: string): OperatorTask {
+  #requirePendingReview(taskId: string, reviewerId: string): OperatorTask {
     const task = this.get(taskId);
     if (!task) throw new Error(`Unknown task: ${taskId}`);
     if (task.reviewState !== 'pending') {
@@ -953,7 +953,7 @@ export class OperatorQueue {
     return task;
   }
 
-  private assertFence(taskId: string, workerId: string, fence: number): void {
+  #assertFence(taskId: string, workerId: string, fence: number): void {
     const task = this.get(taskId);
     if (!task) throw new Error(`Unknown task: ${taskId}`);
     if (task.claimedBy !== workerId || task.fence !== fence) {
@@ -963,18 +963,18 @@ export class OperatorQueue {
     }
   }
 
-  private transition(taskId: string, to: ActivityStatus, actor: string, summary: string): OperatorTask {
+  #transition(taskId: string, to: ActivityStatus, actor: string, summary: string): OperatorTask {
     const task = this.get(taskId);
     if (!task) throw new Error(`Unknown task: ${taskId}`);
     assertTransition(task.status, to);
     this.#db
       .prepare(`UPDATE op_tasks SET status = ?, updated_at = ? WHERE id = ?`)
       .run(to, nowIso(), taskId);
-    this.recordEvent(taskId, to, actor, summary);
+    this.#recordEvent(taskId, to, actor, summary);
     return this.get(taskId)!;
   }
 
-  private recordEvent(taskId: string, status: ActivityStatus, actor: string, summary: string): void {
+  #recordEvent(taskId: string, status: ActivityStatus, actor: string, summary: string): void {
     this.#db
       .prepare(
         `INSERT INTO hq_events (id, at, subject_kind, subject_id, status, actor, summary)

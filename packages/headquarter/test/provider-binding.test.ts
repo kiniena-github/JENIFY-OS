@@ -358,7 +358,14 @@ describe('the provider map is configuration, not something a worker can move', (
     } finally {
       WorkerProviderDirectory.prototype.providerOf = original;
       delete (Object.prototype as unknown as Record<string, unknown>).providerOf;
-      for (const [name, value] of savedProto) queueProto[name] = value;
+      // Restore by DELETING what was never there, rather than assigning
+      // undefined — which would leave the property defined and leak a
+      // patchable name onto the prototype for every later test. The allowlist
+      // test caught exactly that.
+      for (const [name, value] of savedProto) {
+        if (value === undefined) delete queueProto[name];
+        else queueProto[name] = value;
+      }
     }
   });
 
@@ -655,6 +662,60 @@ describe('the provider write mechanism is not reachable around the authority gat
     };
     walk(ops, 'ops', 0);
     expect(offenders, `writable database reachable at: ${offenders.join(', ')}`).toEqual([]);
+  });
+
+  /**
+   * Codex exact-head finding on `cd058ed` (P1) — the EIGHTH mechanism, and the
+   * same shape one level lower: `#validateTaskApproval` was runtime-private,
+   * but it DELEGATED to `getApprovalRecord`, which was TypeScript-private and
+   * therefore an ordinary writable property. Patch that and an approval which
+   * expired while queued passes the claim check.
+   *
+   * Enumerating patchable methods has now failed eight times, so this test does
+   * not enumerate. It asserts the queue's public surface against an ALLOWLIST:
+   * anything not on the list is a method a worker can patch, and adding one
+   * fails here rather than waiting for a review to find it. The list is
+   * deliberately the operations a caller legitimately performs — nothing that
+   * participates in deciding whether a claim is allowed.
+   */
+  it('exposes only its allowlisted public surface, so nothing new becomes patchable', () => {
+    // Each entry was checked against `claim` and `start`: none of them is
+    // dispatched through on the path that decides whether a claim is allowed.
+    // That is the criterion for being allowed to stay public, not "it exists".
+    const PUBLIC_SURFACE = new Set([
+      'constructor',
+      // lifecycle operations a worker or the service legitimately drives
+      'enqueue',
+      'claim',
+      'start',
+      'heartbeat',
+      'reviewPass',
+      'reviewFail',
+      'fail',
+      'complete',
+      'cancel',
+      'reconcile',
+      'approve',
+      'deny',
+      'sweepExpiredLeases',
+      'engageKillSwitch',
+      'releaseKillSwitch',
+      // reads; enforcement never dispatches through these, and a caller who
+      // patches a read lies only to itself
+      'get',
+      'listByStatus',
+      'killSwitchEngaged',
+      'selectClaimable',
+      'listWorkerProviders',
+    ]);
+    const actual = Object.getOwnPropertyNames(OperatorQueue.prototype);
+    const unexpected = actual.filter((name) => !PUBLIC_SURFACE.has(name));
+    expect(
+      unexpected,
+      `New public method(s) on OperatorQueue: ${unexpected.join(', ')}. A public method is a ` +
+        'patchable one. If it participates in deciding whether a claim is allowed it must be ' +
+        '#private; if it is genuinely a read, add it to the allowlist deliberately.',
+    ).toEqual([]);
   });
 
   it('still lets the authorized service boundary declare, and still gates it', () => {
