@@ -201,7 +201,20 @@ describe('the Direct Order composer is truthful about when it works', () => {
   it('explains that an order is Founder-gated and executes nothing on creation', () => {
     expect(html).toContain('hq.direct_order');
     expect(html).toContain('needs_approval');
-    expect(html).toContain('no other provider is ever substituted');
+    expect(html).toContain('No other provider is ever substituted');
+  });
+
+  /**
+   * Issue #224, the static half. This paragraph still said an order for an
+   * unconnected provider "is refused outright" after the behaviour changed
+   * underneath it, so the one page the composer lives on described the
+   * opposite of what submitting would do — the same misreport the issue exists
+   * to close, on a surface the correction had not reached.
+   */
+  it('says what a disconnected provider actually produces, not the old refusal', () => {
+    expect(html).toContain('RECORDED and BLOCKED');
+    expect(html).toContain('never started and never lost');
+    expect(html).not.toContain('refused outright');
   });
 
   it('reports each route’s real availability', () => {

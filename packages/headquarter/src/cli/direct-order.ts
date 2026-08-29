@@ -77,6 +77,7 @@ import {
 } from '../live/local-trust.js';
 import { PROVIDER_REGISTRY, type SecretsEnv } from '../routing/providers.js';
 import { probeCodex } from '../providers/codex/probe.js';
+import { formatOrderReceipt } from './order-receipt.js';
 
 function flag(argv: string[], name: string): string | null {
   const index = argv.indexOf(`--${name}`);
@@ -299,21 +300,15 @@ function main(): void {
     process.exit(1);
   }
 
-  const { task, classification, deduplicated, route: resolution, idempotencyKey } = result.data;
-  console.log(deduplicated ? 'Matched an existing identical order.' : 'Order created.');
-  console.log(`  task:        ${task.id}`);
-  console.log(`  capability:  ${DIRECT_ORDER_CAPABILITY.id} (${classification.riskClass})`);
-  console.log(`  status:      ${task.status}`);
-  console.log(`  route:       ${resolution.requested} → ${resolution.resolved}`);
-  console.log(`  idempotency: ${idempotencyKey}`);
-  console.log(`  actor:       ${requestedBy} (asserted locally, NOT authenticated)`);
-  console.log(
-    classification.requiresApproval
-      ? `\nThis order executes NOTHING until a Founder approves that exact action by digest.\n` +
-          `And ${requestedBy} cannot be that Founder: the canonical no-self-approval rule refuses ` +
-          `an approval by the principal the task was opened as.`
-      : '\nThis order runs under standing policy.',
-  );
+  // The wording lives in `cli/order-receipt.ts` so it can be executed by a
+  // test: this file calls main() at import time, so nothing in it is testable,
+  // and the receipt is exactly where a surface quietly starts misreporting.
+  for (const line of formatOrderReceipt(result.data, {
+    capabilityId: DIRECT_ORDER_CAPABILITY.id,
+    requestedBy,
+  })) {
+    console.log(line);
+  }
 }
 
 main();
