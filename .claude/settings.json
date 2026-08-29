@@ -7,22 +7,19 @@
       "source": {
         "source": "github",
         "repo": "anthropics/skills"
-      },
-      "autoUpdate": true
+      }
     },
     "wondelai-skills": {
       "source": {
         "source": "github",
         "repo": "wondelai/skills"
-      },
-      "autoUpdate": false
+      }
     },
     "gsap-skills": {
       "source": {
         "source": "github",
         "repo": "greensock/gsap-skills"
-      },
-      "autoUpdate": false
+      }
     }
   },
   "enabledPlugins": {

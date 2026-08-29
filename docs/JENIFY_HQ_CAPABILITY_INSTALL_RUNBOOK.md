@@ -4,13 +4,15 @@ This is the execution runbook for the Founder-approved capability stack. It deli
 
 ## Already configured in the repository
 
-`.claude/settings.json` registers and enables these project plugin collections:
+`.claude/settings.json` declares 3 plugin marketplaces and enables 4 plugin collections — a small slice of the much larger approved capability catalog, not the catalog itself:
 
 - Anthropic `anthropics/skills` → `example-skills` (includes Frontend Design and Skill Creator)
 - WondelAI `wondelai/skills` → `ux-design` and `product-innovation`
 - GreenSock `greensock/gsap-skills` → `gsap-skills`
 
-When Claude Code trusts the repository, it may still require the normal local marketplace/plugin trust/install step. That local state must be verified on the actual machine.
+Declaring/enabling here is project configuration only. It is NOT evidence of local install, trust, authentication, or availability. When Claude Code trusts the repository, it may still require the normal local marketplace/plugin trust/install step; that local state must be verified on the actual machine.
+
+Earlier revisions also set `autoUpdate` on these marketplace entries. Those keys were removed: project-scope auto-update is not a supported/enforced setting here, so keeping them would have implied an update policy nothing actually enforces.
 
 ## Local-only install candidates
 
