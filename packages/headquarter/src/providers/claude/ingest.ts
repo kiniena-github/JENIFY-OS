@@ -24,6 +24,12 @@
  *   whoever could comment on that issue. It is never executed, never stored as
  *   evidence, and never allowed to name the task it attaches to — the authority
  *   for "which task is this issue?" is what HQ wrote when it dispatched.
+ * - **It does not trust the MARKER either** (issue #224, ChatGPT P1 on
+ *   `a2758f46`). The result marker is public, so it says only "this comment is
+ *   shaped like a report". A report is accepted only from the repository owner
+ *   — the rule `routing/route.ts` already applies to every comment carrying
+ *   authority over an AI task, and the same account dispatch had to be
+ *   authenticated as to publish. See `findResultComment`.
  * - **It does not substitute a provider.** A report that is not CLAUDE's is
  *   refused by `correlateClaudeResult`, not re-attributed.
  * - **It reads one issue**, the one recorded for this task, in the repository
@@ -71,8 +77,15 @@ export interface IngestOutcome {
   alreadyCorrelated: boolean;
   /** The report's URL, only when it verifiably belongs to this issue. */
   reportUrl: string | null;
-  /** Login the report was posted under, as GitHub reported it. Attested, not authenticated. */
+  /** Login the report was posted under — verified to be the repository owner. */
   attestedAuthor: string | null;
+  /**
+   * Logins that posted a result-MARKED comment they are not entitled to post
+   * (issue #224, ChatGPT P1 on `a2758f46`). Never correlated, never written to
+   * the evidence log — but reported, because a stranger using the result marker
+   * is something an operator should see rather than something silently dropped.
+   */
+  refusedAuthors: string[];
 }
 
 export type IngestResult =
@@ -83,24 +96,77 @@ function refuse(code: IngestRefusalCode, message: string): IngestResult {
   return { ok: false, error: { code, message } };
 }
 
+export interface ResultSelection {
+  /** The trusted report, or null when none of the marked comments qualified. */
+  report: GitHubIssueComment | null;
+  /**
+   * Marked comments REFUSED because their author is not the trusted origin.
+   * Surfaced rather than dropped: someone posting a result marker they are not
+   * entitled to post is worth an operator seeing, and silence would hide it.
+   */
+  refused: GitHubIssueComment[];
+}
+
 /**
- * The report among these comments, or null.
+ * The trusted report among these comments (issue #224, ChatGPT P1 on `a2758f46`).
  *
- * The LAST marked comment wins: a worker that posted a correction after its
- * first report meant the correction. Selection is by the provider's marker
- * alone — not by author login, which is attribution GitHub reports rather than
- * a fact HQ can verify, and not by position.
+ * ## The defect this closes
+ *
+ * Selection used to be by the result MARKER alone, explicitly ignoring the
+ * author — and the marker is public, documented, and sitting in plain text on
+ * every dispatched issue. So anyone able to comment on that issue could paste
+ * it and make HQ append canonical `claude_github_result_correlated` evidence
+ * saying a CLAUDE report had arrived. Correlation neither reviews nor completes,
+ * which bounds the damage, but false canonical provenance in an append-only log
+ * is still an authority failure: it is exactly the record a human or a later
+ * automation would trust.
+ *
+ * The reasoning that produced it was inverted. "A login is attribution GitHub
+ * reports rather than something HQ can verify" is an argument for failing
+ * CLOSED on origin, not for accepting every origin.
+ *
+ * ## The rule, and why this one
+ *
+ * The comment author must be the **repository owner**. That is not a new
+ * identity or a new trust root — it is the rule this lane already runs on,
+ * unit-tested in `routing/route.ts`: an AI task must be opened by the repository
+ * owner, a bot may never trigger AI work, and *"only the repository owner may
+ * re-trigger a task by comment."* A comment that carries authority over an AI
+ * task has always had to come from the owner; a result comment is such a
+ * comment, and was the one that had been exempted.
+ *
+ * It also matches the write side: dispatch refuses unless the authenticated
+ * transport account owns the target repository. Same account, both directions.
+ *
+ * No second Claude identity is invented, no provider text from the body is
+ * trusted, and the body is still never authority — the marker says "this is
+ * shaped like a report", and the owner check says "this is from the party
+ * entitled to file one". A bot login can never equal the owner's, so the
+ * routing module's bot rule is satisfied by the same comparison.
+ *
+ * The LAST qualifying comment wins: a correction posted after a first report is
+ * what its author meant.
  */
-export function findResultComment(comments: readonly GitHubIssueComment[]): GitHubIssueComment | null {
+export function findResultComment(
+  comments: readonly GitHubIssueComment[],
+  trustedAuthor: string,
+): ResultSelection {
   // No marker means there is no way to tell a report from any other comment, so
   // nothing is a report. Fail closed rather than correlating on a guess.
-  if (CLAUDE_RESULT_MARKER == null) return null;
+  if (CLAUDE_RESULT_MARKER == null) return { report: null, refused: [] };
   const marker = CLAUDE_RESULT_MARKER;
-  let found: GitHubIssueComment | null = null;
+  // GitHub logins are case-insensitive, so the comparison is too — but it is
+  // still an EXACT match, never a prefix or a contains.
+  const trusted = trustedAuthor.trim().toLowerCase();
+  let report: GitHubIssueComment | null = null;
+  const refused: GitHubIssueComment[] = [];
   for (const comment of comments) {
-    if (comment.body.includes(marker)) found = comment;
+    if (!comment.body.includes(marker)) continue;
+    // An empty trusted author would otherwise match an empty/unknown author.
+    if (trusted !== '' && comment.author.trim().toLowerCase() === trusted) report = comment;
+    else refused.push(comment);
   }
-  return found;
+  return { report, refused };
 }
 
 /**
@@ -205,7 +271,12 @@ export function ingestClaudeResult(ops: HeadquarterOperations, options: IngestOp
     );
   }
 
-  const report = findResultComment(read.issue.comments);
+  // The trusted origin is the repository owner recorded for this dispatch —
+  // the same account the transport had to be authenticated as to publish, and
+  // the same party `routing/route.ts` already requires for any comment that
+  // carries authority over an AI task.
+  const { report, refused } = findResultComment(read.issue.comments, options.target.owner);
+  const refusedAuthors = [...new Set(refused.map((c) => c.author.trim()).filter((a) => a !== ''))];
   const repository = targetSlug(options.target);
   if (report == null) {
     return {
@@ -218,6 +289,7 @@ export function ingestClaudeResult(ops: HeadquarterOperations, options: IngestOp
         alreadyCorrelated: false,
         reportUrl: null,
         attestedAuthor: null,
+        refusedAuthors,
       },
     };
   }
@@ -235,6 +307,7 @@ export function ingestClaudeResult(ops: HeadquarterOperations, options: IngestOp
         alreadyCorrelated: true,
         reportUrl,
         attestedAuthor,
+        refusedAuthors,
       },
     };
   }
@@ -263,6 +336,7 @@ export function ingestClaudeResult(ops: HeadquarterOperations, options: IngestOp
       alreadyCorrelated: false,
       reportUrl,
       attestedAuthor,
+      refusedAuthors,
     },
   };
 }

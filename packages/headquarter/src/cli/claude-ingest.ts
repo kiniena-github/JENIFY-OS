@@ -108,7 +108,8 @@ function main(): void {
     process.exit(1);
   }
 
-  const { issueNumber, repository, correlated, alreadyCorrelated, reportUrl, attestedAuthor } = result.data;
+  const { issueNumber, repository, correlated, alreadyCorrelated, reportUrl, attestedAuthor, refusedAuthors } =
+    result.data;
   console.log(`task ${result.data.taskId}`);
   console.log(`  issue:   #${issueNumber} in ${repository}`);
   if (correlated) {
@@ -116,10 +117,27 @@ function main(): void {
   } else if (alreadyCorrelated) {
     console.log('  result:  already correlated — nothing was recorded twice.');
   } else {
-    console.log('  result:  none yet. The workflow has not posted a report on that issue.');
+    console.log('  result:  none yet. No report from the repository owner on that issue.');
   }
   if (reportUrl) console.log(`  report:  ${reportUrl}`);
-  if (attestedAuthor) console.log(`  posted by: ${attestedAuthor} (attested by GitHub, not authenticated by HQ)`);
+  if (attestedAuthor) console.log(`  posted by: ${attestedAuthor} (verified: the repository owner)`);
+
+  // Loud, because somebody using the result marker they are not entitled to use
+  // is either a mistake worth correcting or an attempt worth knowing about
+  // (issue #224, ChatGPT P1 on `a2758f46`). Nothing was correlated for these and
+  // nothing was written to the evidence log.
+  if (refusedAuthors.length > 0) {
+    console.log(
+      `\n  ⚠ REFUSED ${refusedAuthors.length} result-marked comment(s) from: ${refusedAuthors.join(', ')}`,
+    );
+    console.log(
+      '    A result marker is public text; it says a comment is SHAPED like a report, not that it',
+    );
+    console.log(
+      '    is one. Only the repository owner may file a result, so these were ignored entirely —',
+    );
+    console.log('    not correlated, and not recorded in the evidence log.');
+  }
 
   if (correlated) {
     console.log(

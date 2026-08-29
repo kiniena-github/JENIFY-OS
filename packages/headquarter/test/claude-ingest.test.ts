@@ -450,14 +450,132 @@ describe('parsing `gh issue view` output', () => {
 });
 
 describe('finding the report', () => {
+  const OWNER = TARGET.owner;
+
   it('ignores comments without the marker', () => {
-    expect(findResultComment([comment({ body: 'nice work' })])).toBeNull();
+    expect(findResultComment([comment({ body: 'nice work' })], OWNER).report).toBeNull();
   });
 
-  it('does not require the report to come from any particular login', () => {
-    // Author is attribution GitHub reports, not a fact HQ can verify, so the
-    // marker is the contract. Provider identity is enforced canonically, in
-    // `correlateClaudeResult`, not by trusting a login string.
-    expect(findResultComment([comment({ author: 'someone-else' })])).not.toBeNull();
+  it('accepts a marked report from the repository owner', () => {
+    expect(findResultComment([comment({ author: OWNER })], OWNER).report).not.toBeNull();
+  });
+
+  it('REFUSES a marked report from any other login', () => {
+    // This assertion replaces one that asserted the opposite. The marker is
+    // public text: it says a comment is SHAPED like a report, never that its
+    // author was entitled to file one. "A login is attribution rather than
+    // something HQ can verify" argues for failing CLOSED on origin — it is not
+    // a licence to accept every origin.
+    const selection = findResultComment([comment({ author: 'someone-else' })], OWNER);
+    expect(selection.report).toBeNull();
+    expect(selection.refused.map((c) => c.author)).toEqual(['someone-else']);
+  });
+
+  it('refuses a bot, including one whose name contains the owner login', () => {
+    // The comparison is EXACT, not a prefix or a contains — and a bot login can
+    // never equal the owner's, which is how `routing/route.ts`'s "bots may never
+    // trigger AI work" rule is satisfied by the same check.
+    const selection = findResultComment(
+      [comment({ author: 'github-actions[bot]' }), comment({ author: `${OWNER}-bot` }), comment({ author: `x${OWNER}` })],
+      OWNER,
+    );
+    expect(selection.report).toBeNull();
+    expect(selection.refused).toHaveLength(3);
+  });
+
+  it('matches the owner case-insensitively, as GitHub logins are', () => {
+    expect(findResultComment([comment({ author: OWNER.toUpperCase() })], OWNER).report).not.toBeNull();
+  });
+
+  it('takes the owner’s report even when an impostor commented later', () => {
+    // "Last marked comment wins" must not become "last impostor wins".
+    const real = comment({ author: OWNER, url: `${ISSUE_URL}#issuecomment-1` });
+    const fake = comment({ author: 'someone-else', url: `${ISSUE_URL}#issuecomment-9` });
+    const selection = findResultComment([real, fake], OWNER);
+    expect(selection.report?.url).toBe(real.url);
+    expect(selection.refused).toHaveLength(1);
+  });
+
+  it('trusts nobody when the trusted author is empty', () => {
+    // An unknown owner must not match an unknown author. Fail closed.
+    expect(findResultComment([comment({ author: '' })], '').report).toBeNull();
+    expect(findResultComment([comment({ author: OWNER })], '   ').report).toBeNull();
+  });
+});
+
+describe('result provenance cannot be spoofed through the ingestion path', () => {
+  it('does not correlate a marked comment from an unrelated login', () => {
+    // The whole defect, end to end: anyone who can comment on the dispatched
+    // issue could paste the public marker and make HQ append canonical evidence
+    // that a CLAUDE report had arrived.
+    const fixture = ordersFixture();
+    const { taskId, body } = dispatched(fixture);
+
+    const result = ingestClaudeResult(fixture.ops, {
+      taskId,
+      target: TARGET,
+      transport: transport({ body, comments: [comment({ author: 'drive-by-commenter' })] }),
+    });
+
+    if (!result.ok) throw new Error(`expected ok: ${result.error.code}`);
+    expect(result.data.correlated).toBe(false);
+    expect(result.data.attestedAuthor).toBeNull();
+    expect(correlations(fixture, taskId)).toHaveLength(0);
+  });
+
+  it('reports the refusal rather than silently saying "no result yet"', () => {
+    // Someone using the result marker they are not entitled to use is worth an
+    // operator seeing; dropping it silently would hide the attempt.
+    const fixture = ordersFixture();
+    const { taskId, body } = dispatched(fixture);
+
+    const result = ingestClaudeResult(fixture.ops, {
+      taskId,
+      target: TARGET,
+      transport: transport({ body, comments: [comment({ author: 'drive-by-commenter' })] }),
+    });
+
+    if (!result.ok) throw new Error('expected ok');
+    expect(result.data.refusedAuthors).toEqual(['drive-by-commenter']);
+  });
+
+  it('still correlates the legitimate owner-authored report', () => {
+    // The fix must not close the path it was added to open.
+    const fixture = ordersFixture();
+    const { taskId, body } = dispatched(fixture);
+
+    const result = ingestClaudeResult(fixture.ops, {
+      taskId,
+      target: TARGET,
+      transport: transport({
+        body,
+        comments: [comment({ author: 'drive-by-commenter' }), comment({ author: TARGET.owner })],
+      }),
+    });
+
+    if (!result.ok) throw new Error('expected ok');
+    expect(result.data.correlated).toBe(true);
+    expect(result.data.attestedAuthor).toBe(TARGET.owner);
+    expect(result.data.refusedAuthors).toEqual(['drive-by-commenter']);
+    expect(correlations(fixture, taskId)).toHaveLength(1);
+  });
+
+  it('writes nothing to the evidence log for a refused report', () => {
+    // The strongest form of the requirement: an untrusted commenter must not be
+    // able to cause ANY append, not merely an incorrect correlation.
+    const fixture = ordersFixture();
+    const { taskId, body } = dispatched(fixture);
+    const before = fixture.ops.queue.evidence.list(taskId).length;
+
+    ingestClaudeResult(fixture.ops, {
+      taskId,
+      target: TARGET,
+      transport: transport({
+        body,
+        comments: [comment({ author: 'a' }), comment({ author: 'b' }), comment({ author: 'c' })],
+      }),
+    });
+
+    expect(fixture.ops.queue.evidence.list(taskId).length).toBe(before);
   });
 });

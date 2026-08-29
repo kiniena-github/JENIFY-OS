@@ -196,9 +196,21 @@ What that does and does not mean:
   never declares it done.
 - The report text is never stored. What is recorded is the issue, the comment
   URL **only when that URL verifiably points at this issue**, and the login it
-  was posted under — attested by GitHub, not authenticated by HQ.
-- The marker is the contract, not the author: a login is attribution HQ cannot
-  verify. Provider identity is enforced canonically inside the correlation.
+  was posted under.
+- **A report is accepted only from the repository owner.** The marker is public
+  text sitting on every dispatched issue, so it says a comment is *shaped* like
+  a report — never that its author was entitled to file one. Without the owner
+  check, anyone able to comment could paste the marker and make HQ record
+  canonical evidence that a CLAUDE report had arrived. This is not a new trust
+  root: `routing/route.ts` already requires the repository owner for every
+  comment carrying authority over an AI task ("only the repository owner may
+  re-trigger a task by comment"), and dispatch already refuses unless the
+  authenticated transport account owns the target. Same account, both
+  directions. A bot login can never equal the owner's, so the routing module's
+  "bots may never trigger AI work" rule holds through the same comparison.
+- A marked comment from anyone else is **refused and reported** — never
+  correlated, never written to the evidence log, and never silently dropped:
+  the CLI names the logins that tried.
 - Running it repeatedly is safe. "No report yet" is a success, not an error, and
   a report already correlated is not recorded twice.
 - A transport that cannot read fails closed (`transport_cannot_read`), and a
