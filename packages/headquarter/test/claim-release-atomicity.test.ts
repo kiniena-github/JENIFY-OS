@@ -8,8 +8,8 @@
  * append `claim_released`, transition to `needs_approval`, clear the claim
  * fields — with no transaction around them. A failure between any two left the
  * task in a state none of the documentation describes: released in the log but
- * still `assigned`, or moved to `needs_approval` while `claimed_by` still named
- * a worker and a lease was still running.
+ * still claimed, or moved to `needs_approval` while `claimed_by` still named a
+ * worker and a lease was still running.
  *
  * `releaseHandoffClaim` then swallowed the error entirely, so the caller was
  * told only that the transport failed. Nothing anywhere said the canonical task
@@ -128,6 +128,27 @@ function releaseEntries(fixture: Fixture, taskId: string): number {
   return fixture.ops.queue.evidence.list(taskId).filter((e) => e.kind === 'claim_released').length;
 }
 
+/**
+ * Break the RELEASE's transition and nothing else.
+ *
+ * The dispatch takes the claim and starts the execution in one transaction
+ * before publishing (issue #224), and `start` transitions too — so failing
+ * every transition refuses the dispatch before a release is ever attempted,
+ * which is a different (and already tested) property. The release is the only
+ * transition to `needs_approval` in this flow.
+ */
+function failReleaseTransition(fixture: Fixture) {
+  return vi
+    .spyOn(fixture.ops.queue as unknown as { transition: (...a: unknown[]) => unknown }, 'transition')
+    .mockImplementation(function (this: unknown, ...args: unknown[]) {
+      if (args[1] === 'needs_approval') throw new Error('disk full');
+      const real = Object.getPrototypeOf(fixture.ops.queue) as {
+        transition: (...a: unknown[]) => unknown;
+      };
+      return real.transition.apply(fixture.ops.queue, args);
+    });
+}
+
 describe('a release that fails leaves the claim wholly intact', () => {
   it('rolls back the evidence append when the transition fails', () => {
     const fixture = ordersFixture();
@@ -135,12 +156,13 @@ describe('a release that fails leaves the claim wholly intact', () => {
 
     // Fail the step AFTER the evidence append. Without the transaction the
     // `claim_released` entry survives, so the log says the claim was released
-    // while the task is still assigned — the log lying about the queue.
-    const transition = vi
-      .spyOn(fixture.ops.queue as unknown as { transition: (...a: unknown[]) => unknown }, 'transition')
-      .mockImplementation(() => {
-        throw new Error('disk full');
-      });
+    // while the task is still claimed — the log lying about the queue.
+    //
+    // Only the RELEASE's transition is broken. The dispatch now starts the
+    // execution inside the reservation, before publishing (issue #224), so a
+    // blanket `transition` failure would refuse the dispatch there and this
+    // scenario would never be reached.
+    const transition = failReleaseTransition(fixture);
 
     const result = dispatchClaudeTask(fixture.ops, {
       executorWorkerId: EXECUTOR,
@@ -151,8 +173,8 @@ describe('a release that fails leaves the claim wholly intact', () => {
     transition.mockRestore();
 
     expect(result.ok).toBe(false);
-    // The claim is untouched: still assigned, still held, still leased.
-    expect(claimState(fixture, taskId)).toMatchObject({ status: 'assigned', claimedBy: EXECUTOR, leased: true });
+    // The claim is untouched: still running, still held, still leased.
+    expect(claimState(fixture, taskId)).toMatchObject({ status: 'running', claimedBy: EXECUTOR, leased: true });
     // And no half-truth was left in the append-only log.
     expect(releaseEntries(fixture, taskId)).toBe(0);
   });
@@ -179,18 +201,14 @@ describe('a release that fails leaves the claim wholly intact', () => {
     prepare.mockRestore();
 
     expect(result.ok).toBe(false);
-    expect(claimState(fixture, taskId)).toMatchObject({ status: 'assigned', claimedBy: EXECUTOR, leased: true });
+    expect(claimState(fixture, taskId)).toMatchObject({ status: 'running', claimedBy: EXECUTOR, leased: true });
     expect(releaseEntries(fixture, taskId)).toBe(0);
   });
 
   it('reports the failed release instead of claiming nothing was published', () => {
     const fixture = ordersFixture();
     const taskId = approvedOrder(fixture);
-    const transition = vi
-      .spyOn(fixture.ops.queue as unknown as { transition: (...a: unknown[]) => unknown }, 'transition')
-      .mockImplementation(() => {
-        throw new Error('disk full');
-      });
+    const transition = failReleaseTransition(fixture);
 
     const result = dispatchClaudeTask(fixture.ops, {
       executorWorkerId: EXECUTOR,
@@ -257,7 +275,7 @@ describe('the happy path still releases, and says so', () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(claimState(fixture, taskId)).toMatchObject({ status: 'assigned', claimedBy: EXECUTOR });
+    expect(claimState(fixture, taskId)).toMatchObject({ status: 'running', claimedBy: EXECUTOR });
     expect(releaseEntries(fixture, taskId)).toBe(0);
   });
 });

@@ -145,22 +145,30 @@ export interface DispatchReceipt {
   deduplicated: boolean;
   dispatchedAt: string;
   /**
-   * Whether the canonical task was moved to `running` after publication
-   * (issue #224). Absent on a deduplicated receipt, which started nothing.
+   * True when this call moved the canonical task to `running` (issue #224).
+   * Absent on a deduplicated receipt, which started nothing.
    *
-   * False means the issue EXISTS and is recorded, but the task was left
-   * `assigned` — so an expiring lease re-queues it into a state nothing can
-   * claim or re-approve, rather than into `outcome_unknown`. Reported so that
-   * is visible rather than silent.
+   * It is only ever `true` or absent: the start happens INSIDE the reservation,
+   * before the issue is published, so a start that refuses rolls the whole
+   * reservation back and publishes nothing — there is no successful dispatch
+   * whose task was left `assigned`.
    */
   executionStarted?: boolean;
-  /** Why the start failed, when it did. */
-  startFailure?: string;
 }
 
 export type DispatchResult =
   | { ok: true; data: DispatchReceipt }
   | { ok: false; error: { code: DispatchRefusalCode; message: string; details?: Record<string, unknown> } };
+
+/**
+ * The canonical `start` refused inside the dispatch reservation (issue #224).
+ *
+ * A sentinel rather than a returned value because it must ROLL THE RESERVATION
+ * BACK: returning would commit the claim and `start`'s own rejection while
+ * nothing was published, which is exactly the half-state the reservation
+ * exists to prevent.
+ */
+class StartRefused extends Error {}
 
 /** Message text from an unknown throwable, bounded — it reaches a refusal reason. */
 function errorText(error: unknown): string {
@@ -1035,6 +1043,43 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
           message: `The claim took task ${claimed.data.id}, not ${taskId}.`,
         };
       }
+      // START HERE, not after publication (issue #224). Publication is what
+      // makes an execution real, so the canonical start/fence state has to be
+      // secured BEFORE the issue exists, in the transaction that reserves it.
+      //
+      // Started afterwards, there is a window — the process dying between the
+      // recorded publication and the start call — where the issue is live and
+      // the task is still `assigned`. `sweepExpiredLeases` re-queues an expired
+      // `assigned` task instead of sending it to `outcome_unknown`, and a
+      // re-queued task is the first step of the chain the review named: the
+      // refused claim runs `rejectAtExecutionBoundary`, which unlocks a fresh
+      // approval and a second execution while the first may still be running.
+      // Starting here removes the window rather than narrowing it: after this
+      // transaction commits the task is `running`, so EVERY later ambiguity —
+      // crash, lost outcome, expired lease — lands in `outcome_unknown`.
+      //
+      // It is also strictly more fail-closed. A start that refuses now refuses
+      // BEFORE anything is published and rolls the whole reservation back,
+      // including the rejection `start` itself records; afterwards it left a
+      // live issue behind a task moved to `needs_approval`, which is the same
+      // second-execution door.
+      //
+      // A clean publication failure below releases the claim exactly as before:
+      // `running -> needs_approval` is an allowed transition, and the release
+      // path is unchanged.
+      try {
+        ops.queue.start(taskId, options.executorWorkerId, claimed.data.fence);
+      } catch (error) {
+        // THROWN, not returned. Returning a refusal COMMITS this transaction,
+        // which would leave the task claimed (and `start`'s own rejection
+        // recorded) with nothing published — the half-state the reservation
+        // exists to prevent. Throwing rolls all of it back; the outer catch
+        // recognises this sentinel and answers with the same refusal a claim
+        // failure gives, because from the caller's side it is the same fact:
+        // the designated executor does not hold an executable claim on this
+        // task, and nothing was published.
+        throw new StartRefused(errorText(error));
+      }
       ops.queue.evidence.append({
         taskId,
         actor: DISPATCH_ACTOR,
@@ -1053,6 +1098,16 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
       return { kind: 'reserved', claimed: claimed.data };
     });
   } catch (error) {
+    if (error instanceof StartRefused) {
+      return refuseAndRecordBestEffort(
+        'executor_not_claimable',
+        `The designated executor worker ${options.executorWorkerId} could not START task ${taskId} ` +
+          `(${error.message}). Nothing was published, and the claim was rolled back with it. The ` +
+          'handoff claims AND starts the canonical task before publishing, precisely so a live ' +
+          'issue can never sit behind a task the lease sweep would return to the queue.',
+        { executorWorkerId: options.executorWorkerId, reason: 'start_refused' },
+      );
+    }
     return refuseAndRecordBestEffort(
       'evidence_unavailable',
       'The dispatch attempt could not be recorded in the append-only evidence log ' +
@@ -1220,43 +1275,10 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
     );
   }
 
-  // The published handoff has STARTED an execution (issue #224, dispositioning
-  // the double-execution limitation the coordinator asked not to accept by
-  // implication).
-  //
-  // The claim alone left the task `assigned`, and `assigned` is the wrong state
-  // for work that is now genuinely running on somebody else's machine — because
-  // of what `sweepExpiredLeases` does with it. Its rule sends a side-effect task
-  // to `outcome_unknown` only from `running`; from `assigned` it RE-QUEUES,
-  // clearing the claim. So a handoff whose 6-hour lease expired did not become
-  // the "handed out, never heard back" record this lane documents. It became a
-  // task sitting in `queued` — which reads as *waiting to run* — carrying an
-  // approval already consumed, so nothing could ever claim it and nothing could
-  // re-approve it (`approveTask` refuses a task that is not `needs_approval`).
-  // A silent dead end that looked like a queue entry.
-  //
-  // Verified empirically before changing anything, both the hazard and its
-  // absence: no second CLAUDE worker can execute the task in any of these
-  // orderings — the consumed single-use approval refuses them all — so this is
-  // not a double-execution hole. It is the STATE being wrong and misleading.
-  //
-  // `start` is the canonical "execution began" boundary and re-checks provider
-  // binding, approval decision, digest, claim binding and expiry against the
-  // fence this handoff holds. Calling it says the true thing, and the existing
-  // sweep rule then does exactly what the documentation already promised.
-  //
-  // Best-effort by contract, like the release: the issue exists and is
-  // recorded, so a failure here must not turn a recorded success into a
-  // refusal. It is reported instead of swallowed.
-  let executionStarted = true;
-  let startFailure = '';
-  try {
-    ops.queue.start(taskId, options.executorWorkerId, claimedTask.fence);
-  } catch (error) {
-    executionStarted = false;
-    startFailure = errorText(error);
-  }
-
+  // The execution is already `running` — started inside the reservation above,
+  // before this issue existed, so there is no window in which a live issue sits
+  // behind a task the lease sweep would re-queue. Reported on the receipt
+  // because an operator reading it should see the canonical state, not infer it.
   return {
     ok: true,
     data: {
@@ -1267,8 +1289,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
       issueUrl: created.issueUrl,
       deduplicated: false,
       dispatchedAt,
-      executionStarted,
-      ...(executionStarted ? {} : { startFailure }),
+      executionStarted: true,
     },
   };
 }

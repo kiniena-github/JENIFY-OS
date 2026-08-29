@@ -20,9 +20,13 @@
  * nothing could re-approve it (`approveTask` refuses a task that is not
  * `needs_approval`). A silent dead end wearing the costume of a queue entry.
  *
- * Publication really does start an execution, so the handoff now calls `start`.
- * That is the canonical boundary, it re-checks binding/approval/digest/fence,
- * and the existing sweep rule then does exactly what the documentation promised.
+ * Publication really does start an execution, so the handoff now calls `start`
+ * — inside the reservation, BEFORE the issue is published. That is the canonical
+ * boundary, it re-checks binding/approval/digest/fence, and the existing sweep
+ * rule then does exactly what the documentation promised. The ordering is part
+ * of the property: started afterwards, a process dying between the recorded
+ * publication and the start leaves a live issue behind an `assigned` task, which
+ * is the same defect with a smaller window.
  *
  * ## What is asserted
  *
@@ -31,7 +35,7 @@
  * queue) — the second being the one that was only ever prose.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { setupFixture, type Fixture } from './application.fixture.js';
 import { taskActionDigest } from '../src/operator/approvals.js';
 import { DIRECT_ORDER_CAPABILITY, registerDirectOrderCapability, submitDirectOrder } from '../src/live/orders.js';
@@ -135,6 +139,80 @@ describe('a published handoff is a started execution', () => {
     // still never declares it done.
     expect(task.reviewState).toBe('none');
     expect(task.result).toBeNull();
+  });
+
+  it('is already running when the issue is published, not after', () => {
+    // The ordering IS the property. Started after publication, there is a
+    // window — the process dying between the recorded publication and the start
+    // — where a live issue sits behind an `assigned` task, and an expiring
+    // lease re-queues that into the first step of the double-execution chain.
+    // Observed from inside the transport: at the moment the issue is created,
+    // the canonical task is `running`.
+    const f = fixture();
+    declareWorker(f, EXECUTOR);
+    const taskId = approvedOrder(f);
+
+    let statusAtPublication: string | null = null;
+    const observing: GitHubIssueTransport = {
+      id: 'stub-gh',
+      status: (): GitHubTransportStatus => AUTHENTICATED,
+      createIssue: (): GitHubIssueResult => {
+        statusAtPublication = f.ops.queue.get(taskId)?.status ?? null;
+        return { ok: true, issueNumber: 42, issueUrl: ISSUE_URL };
+      },
+    };
+
+    const sent = dispatchClaudeTask(f.ops, {
+      executorWorkerId: EXECUTOR,
+      taskId,
+      target: TARGET,
+      transport: observing,
+    });
+    expect(sent.ok).toBe(true);
+    expect(statusAtPublication).toBe('running');
+  });
+
+  it('publishes nothing when the canonical start refuses', () => {
+    // The other half of that ordering: because the start is inside the
+    // reservation, a start that refuses rolls the claim, its evidence and its
+    // own rejection back, and no issue is ever created. Started afterwards, the
+    // same refusal left a live issue behind a task moved to `needs_approval` —
+    // where a fresh approval buys a second execution of work already running.
+    const f = fixture();
+    declareWorker(f, EXECUTOR);
+    const taskId = approvedOrder(f);
+
+    let published = 0;
+    const counting: GitHubIssueTransport = {
+      id: 'stub-gh',
+      status: (): GitHubTransportStatus => AUTHENTICATED,
+      createIssue: (): GitHubIssueResult => {
+        published += 1;
+        return { ok: true, issueNumber: 42, issueUrl: ISSUE_URL };
+      },
+    };
+    const start = vi
+      .spyOn(f.ops.queue, 'start')
+      .mockImplementation(() => {
+        throw new Error('approval expired before execution start');
+      });
+
+    const sent = dispatchClaudeTask(f.ops, {
+      executorWorkerId: EXECUTOR,
+      taskId,
+      target: TARGET,
+      transport: counting,
+    });
+    start.mockRestore();
+
+    expect(sent.ok).toBe(false);
+    expect(published).toBe(0);
+    // Rolled all the way back: still queued, still approved, still nobody's,
+    // and no dispatch history to deduplicate a later honest attempt onto.
+    const task = f.ops.queue.get(taskId)!;
+    expect(task.status).toBe('queued');
+    expect(task.claimedBy).toBeNull();
+    expect(dispatchHistory(f.ops, taskId).state).toBe('none');
   });
 
   it('expires into outcome_unknown, never back into the queue', () => {

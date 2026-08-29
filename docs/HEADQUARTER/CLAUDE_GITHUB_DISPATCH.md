@@ -170,7 +170,15 @@ Two consequences worth knowing before operating it:
 
    That is now true rather than merely intended (issue #224). Publication
    **starts** the execution: the handoff calls the canonical `start` boundary
-   once the issue exists, so the task is `running`, not `assigned`. It matters
+   inside the reservation, in the same transaction as the claim and **before**
+   the issue is published, so the task is `running`, not `assigned`, from the
+   moment anything exists at GitHub. Ordering matters as much as the call: with
+   the start afterwards, a process that died between the recorded publication
+   and the start left a live issue behind an `assigned` task — the window this
+   whole paragraph is about, merely narrowed. It also means a `start` that
+   refuses rolls the claim, its evidence and its own rejection back and
+   publishes nothing, instead of leaving a live issue behind a task moved to
+   `needs_approval`. It matters
    because `sweepExpiredLeases` sends a side-effect task to `outcome_unknown`
    only from `running` — from `assigned` it RE-QUEUES. So an expired handoff
    lease used to land the task in `queued`, which reads as *waiting to run*,
