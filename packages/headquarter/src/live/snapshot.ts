@@ -36,6 +36,7 @@ import type { WorkerDescriptor } from '../contracts/workers.js';
 import type { Capability } from '../operator/capabilities.js';
 import { classifyCapability, type TaskClassification } from '../application/classification.js';
 import { founderConsole, type FounderConsole } from '../application/console.js';
+import { directOrderDispatchBlocked } from './orders.js';
 import type { HeadquarterOperations } from '../application/service.js';
 import type { SecretsEnv } from '../routing/providers.js';
 import { assessConnections, type ConnectionProbe, type ConnectionStatus } from './connections.js';
@@ -268,6 +269,40 @@ export interface LiveSnapshotOptions {
  * capability registry and the event log are all read paths. Nothing on this
  * code path can write.
  */
+/**
+ * Mark direct orders whose bound provider cannot dispatch right now (issue
+ * #224), so the Founder console shows BLOCKED / NOT CONNECTED rather than an
+ * ordinary pending approval.
+ *
+ * Done HERE rather than inside `founderConsole`, deliberately. The console is
+ * env-blind by design — it copies canonical status and never infers — and
+ * connectivity is not canonical state: it is an observation of the world that
+ * changes without any task changing. The snapshot layer is the one place that
+ * already holds both, so this is the narrowest seam that can answer the
+ * question truthfully, and it adds a derived FIELD without touching the
+ * canonical `status` a task carries.
+ */
+function withDispatchBlocked(
+  data: FounderConsole,
+  ops: HeadquarterOperations,
+  env: SecretsEnv,
+): FounderConsole {
+  const mark = <T extends { taskId: string }>(card: T): T => {
+    const task = ops.queue.get(card.taskId);
+    if (!task) return card;
+    return { ...card, dispatchBlocked: directOrderDispatchBlocked(task, env) };
+  };
+  return {
+    ...data,
+    approvals: data.approvals.map(mark),
+    pendingReviews: data.pendingReviews.map(mark),
+    outcomeUnknown: data.outcomeUnknown.map(mark),
+    blocked: data.blocked.map(mark),
+    inFlight: data.inFlight.map(mark),
+    queued: data.queued.map(mark),
+  };
+}
+
 export function liveSnapshotFromOperations(
   ops: HeadquarterOperations,
   options: LiveSnapshotOptions,
@@ -283,7 +318,7 @@ export function liveSnapshotFromOperations(
     policyContext: ops.policyContext,
     activityLimit: options.activityLimit,
     console: {
-      data: founderConsole(ops, new Date(at)),
+      data: withDispatchBlocked(founderConsole(ops, new Date(at)), ops, env),
       provenance: provenanceFor('op_tasks / hq_approvals via application/console.founderConsole'),
     },
     connections: {

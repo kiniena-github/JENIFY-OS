@@ -61,6 +61,34 @@ There is deliberately **no default repository**: dispatching publishes the
 order's instruction into a repository, so the repository is always chosen
 explicitly.
 
+## A blocked order is remembered, not lost (issue #224)
+
+Placing an order and dispatching it are separate acts, and #200's sequence is
+create-then-report. So an **explicit** order to a provider that cannot dispatch
+today is still CREATED: it lands in `needs_approval` under the same
+`founder_gate` class, carries the same digest, executes nothing, and is bound to
+the provider that was asked for — so only a worker declared as that provider
+could ever claim it. The submission response says `dispatchBlocked: true` with
+the missing fact NAMES, and the Founder console marks the card BLOCKED.
+
+That block is derived live, never stored on the task: it is a fact about the
+world, not about the action, so an order placed while `CLAUDE_ROUTINE_*` was
+absent stops reading as blocked the moment those secrets exist — with no write
+to the task and no change to the digest an approver echoes back. The creation
+is additionally recorded as a `direct_order_dispatch_blocked` evidence entry.
+
+Because the order's idempotency key is derived from the **bound** provider
+rather than the resolved one, the same order placed again once the provider is
+back deduplicates onto the same canonical task. One order, one task, whether or
+not the provider was reachable when it was written down.
+
+**`AUTO` with nothing connected still creates nothing**, and the reason is
+identity rather than caution: AUTO asks HQ to pick a *connected* provider, so
+when none is connected there is no provider to bind the order to. Binding
+nothing would widen who could claim it, binding an unresolvable value would
+create a task that can never dispatch even after a provider returns, and
+inventing one would be substitution.
+
 ## What has to be true before anything is published
 
 In order, and any "no" refuses without creating an issue:

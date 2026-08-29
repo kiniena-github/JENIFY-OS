@@ -48,6 +48,7 @@ import {
   type GitHubTransportStatus,
 } from '../src/providers/claude/transport.js';
 import { connectionProbesWithGitHubDispatch, githubDispatchProbe } from '../src/providers/claude/connection.js';
+import { liveSnapshotFromOperations } from '../src/live/snapshot.js';
 import { CONNECTION_CATALOG, assessConnections } from '../src/live/connections.js';
 
 const CLAUDE_ONLY = { CLAUDE_ROUTINE_URL: 'present', CLAUDE_ROUTINE_TOKEN: 'present' };
@@ -1025,5 +1026,82 @@ describe('eligibility is readable on its own, for a check that publishes nothing
     if (verdict.eligible) throw new Error('unreachable');
     expect(verdict.code).toBe('task_not_eligible');
     expect(verdict.message).toContain('needs_approval');
+  });
+});
+
+describe('a blocked order survives to be dispatched later (issue #224)', () => {
+  /** An order placed while CLAUDE cannot dispatch: created, gated, blocked. */
+  function blockedOrder(fixture: Fixture): string {
+    const receipt = expectOk(
+      submitDirectOrder(
+        fixture.ops,
+        {
+          instruction: 'Draft the Q3 maintenance plan for the Mesob line.',
+          project: 'mesob',
+          route: 'CLAUDE',
+          requestedBy: 'founder',
+        },
+        // Nothing observed: CLAUDE_ROUTINE_* deliberately absent, exactly the
+        // local truth the Founder workstation has.
+        {},
+      ),
+    );
+    expect(receipt.dispatchBlocked).toBe(true);
+    expect(receipt.boundProvider).toBe('CLAUDE');
+    return receipt.task.id;
+  }
+
+  it('is the same canonical task that later dispatches — no second task, no substitution', () => {
+    const fixture = orderFixture();
+    const taskId = blockedOrder(fixture);
+
+    // Approved by the second Founder-authority human, as any other order.
+    const task = fixture.ops.queue.get(taskId)!;
+    expectOk(
+      fixture.ops.approveTask({ taskId, founderId: 'coo', expectedActionDigest: taskActionDigest(task) }),
+    );
+
+    // The GitHub transport is a different thing from the workflow's routine
+    // secrets: it is authenticated on the workstation even while
+    // CLAUDE_ROUTINE_* is absent. That is exactly the #224 case.
+    const transport = stubTransport({});
+    const receipt = expectOk(dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport }));
+
+    expect(receipt.taskId).toBe(taskId);
+    expect(receipt.provider).toBe('CLAUDE');
+    expect(transport.calls).toHaveLength(1);
+    // Exactly one canonical task existed throughout.
+    expect(fixture.ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+    expect(fixture.db.prepare('SELECT COUNT(*) AS n FROM op_tasks').get()).toMatchObject({ n: 1 });
+  });
+
+  it('cannot be dispatched while it is still waiting for approval', () => {
+    const fixture = orderFixture();
+    const taskId = blockedOrder(fixture);
+    const transport = stubTransport({});
+    const result = dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('task_not_eligible');
+    expect(transport.calls).toHaveLength(0);
+  });
+
+  it('shows BLOCKED in the browser read model, and stops showing it once the provider connects', () => {
+    const fixture = orderFixture();
+    const taskId = blockedOrder(fixture);
+    const at = '2026-08-29T12:00:00.000Z';
+
+    const blocked = liveSnapshotFromOperations(fixture.ops, { now: at, env: {}, mode: 'live' });
+    const card = blocked.operations.data.approvals.find((entry) => entry.taskId === taskId);
+    expect(card).toBeDefined();
+    expect((card as unknown as Record<string, unknown>).dispatchBlocked).toBe(true);
+
+    // Derived live: the same task, unchanged, once the secrets are configured.
+    const connected = liveSnapshotFromOperations(fixture.ops, { now: at, env: CLAUDE_ONLY, mode: 'live' });
+    const same = connected.operations.data.approvals.find((entry) => entry.taskId === taskId);
+    expect((same as unknown as Record<string, unknown>).dispatchBlocked).toBe(false);
+
+    // And the instruction never reaches the browser, blocked or not.
+    expect(JSON.stringify(blocked)).not.toContain('Q3 maintenance plan');
   });
 });

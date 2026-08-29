@@ -30,13 +30,30 @@
  * read, never a command line. There is deliberately still no capability in
  * this system whose payload is executed as a shell command.
  *
- * ## Fail closed, never substitute
+ * ## Never substitute — and, since issue #224, never forget either
  *
- * If the requested provider is not genuinely dispatchable the order is REFUSED
- * and nothing is created. `AUTO` picks only from providers evidence shows are
- * dispatchable; an explicit `CLAUDE` or `CODEX` never silently falls back to
- * the other one. This is the same failure that made the pre-registry bridge
- * stall silently, and the fix is to say so rather than to route around it.
+ * An explicit `CLAUDE` or `CODEX` never silently falls back to the other one,
+ * and `AUTO` picks only from providers evidence shows are dispatchable. That
+ * has not changed and is the whole point of the routing lane.
+ *
+ * What HAS changed is what happens when the named provider cannot dispatch
+ * today. The order used to be refused with nothing created, so a Founder order
+ * placed while `CLAUDE_ROUTINE_*` was absent left `op_tasks` empty — the order
+ * was lost rather than blocked, and HQ had no canonical thing to report a
+ * truthful BLOCKED state about. #200's sequence is create-then-report, so an
+ * explicit order is now CREATED, bound to the provider that was asked for, and
+ * recorded as dispatch-blocked. It is gated exactly as any other order: it
+ * lands in `needs_approval`, carries the same digest, executes nothing, and —
+ * because the binding names the requested provider — can only ever be claimed
+ * by a worker declared as that provider. A blocked order is a remembered
+ * order, not a permitted one.
+ *
+ * `AUTO` with nothing connected still refuses, and the reason is identity
+ * rather than caution: AUTO asks HQ to pick a connected provider, so when none
+ * is connected there is no provider to bind the order to. Binding nothing
+ * would widen who could claim it; binding an unresolvable value would create a
+ * task that can never dispatch even after a provider returns; inventing one
+ * would be the substitution this module exists to prevent.
  *
  * A note on the word, because two modules use it differently on purpose.
  * `providerConnectivity().connected` is the ROUTING lane's dispatch contract:
@@ -70,12 +87,13 @@
 import { createHash } from 'node:crypto';
 import { assertBrowserSafe } from './redaction.js';
 import { DEFAULT_ACTOR_AUTHENTICATION, type ActorAuthentication } from './local-trust.js';
-import { EXECUTION_PROVIDER_KEY } from '../operator/provider-binding.js';
+import { EXECUTION_PROVIDER_KEY, readProviderBinding } from '../operator/provider-binding.js';
 import type { TaskClassification } from '../application/classification.js';
 import type { HeadquarterOperations, OpsErrorCode } from '../application/service.js';
 import type { Capability } from '../operator/capabilities.js';
 import type { OperatorTask } from '../operator/queue.js';
 import {
+  isProviderId,
   providerConnectivity,
   type ProviderId,
   type SecretsEnv,
@@ -262,6 +280,35 @@ export function resolveOrderRoute(route: DirectOrderRoute, env: SecretsEnv): Rou
   };
 }
 
+
+/**
+ * Is this canonical task a direct order whose bound provider cannot dispatch
+ * RIGHT NOW (issue #224)?
+ *
+ * Derived live rather than read from a stored flag, and that is the point. A
+ * block is a fact about the world, not about the action: an order placed while
+ * `CLAUDE_ROUTINE_*` was absent stops being blocked the moment the secrets are
+ * configured, with no write to the task and no change to the digest an approver
+ * echoes back. A payload flag frozen at creation would go stale in exactly the
+ * direction that misleads — showing BLOCKED for an order that is now fine, or
+ * the reverse.
+ *
+ * Payload-blind about everything else: it reads only the reserved
+ * `executionProvider` binding, never the instruction.
+ */
+export function directOrderDispatchBlocked(
+  task: { capabilityId: string; payload: Record<string, unknown> },
+  env: SecretsEnv,
+): boolean {
+  if (task.capabilityId !== DIRECT_ORDER_CAPABILITY.id) return false;
+  const binding = readProviderBinding(task.payload);
+  if (!binding.bound) return false;
+  // A binding HQ cannot read is not dispatchable by anyone, which is the
+  // strongest truthful answer available.
+  if (binding.provider == null || !isProviderId(binding.provider)) return true;
+  return !providerConnectivity(binding.provider, env).connected;
+}
+
 /* ------------------------------------------------------------------ */
 /* Submission                                                          */
 /* ------------------------------------------------------------------ */
@@ -309,6 +356,20 @@ export interface DirectOrderReceipt {
   deduplicated: boolean;
   route: RouteResolution;
   idempotencyKey: string;
+  /**
+   * The provider this order is BOUND to — what `executionProvider` carries and
+   * what the queue will enforce at claim time. For an explicit route this is
+   * the requested provider whether or not it can dispatch today; for AUTO it is
+   * the provider the route resolved to.
+   */
+  boundProvider: ProviderId;
+  /**
+   * True when the order was created but its provider cannot dispatch right now
+   * (issue #224). The canonical task exists, is gated exactly as any other, and
+   * executes nothing; the browser must show BLOCKED / NOT CONNECTED rather than
+   * success. `route.reason` says why, in the routing lane's own words.
+   */
+  dispatchBlocked: boolean;
 }
 
 export type DirectOrderErrorCode =
@@ -554,13 +615,43 @@ export function submitDirectOrder(
   }
 
   const route = resolveOrderRoute(input.route, env);
-  if (!route.connected || route.resolved == null) {
-    // Fail closed: nothing is created, and no other provider is substituted.
+  // Which provider the order is BOUND to, and whether it can dispatch today.
+  //
+  // These are two different questions, and conflating them was the #200 gap
+  // this corrects (issue #224). The old code answered "can it dispatch?" first
+  // and refused before creating anything, so a Founder order to CLAUDE placed
+  // while `CLAUDE_ROUTINE_*` is absent left `op_tasks` empty: the order was
+  // lost, not blocked, and HQ had nothing to show a truthful BLOCKED state
+  // about. #200's sequence is create-then-report: the canonical task is the
+  // record of what the Founder asked for, and dispatchability is a live
+  // property of the provider that HQ reports rather than a precondition of
+  // remembering the request.
+  //
+  // Nothing about the gates changes. The task is created through the same
+  // `createTask`, lands in `needs_approval` under the same `founder_gate`
+  // class, carries the same digest, and — because `executionProvider` binds it
+  // to the requested provider — can still only ever be claimed by a worker
+  // declared as that provider. A blocked order is a REMEMBERED order, not a
+  // permitted one.
+  //
+  // AUTO is the one route that still refuses, and for a reason that is about
+  // identity rather than caution: AUTO asks HQ to pick a CONNECTED provider,
+  // so when none is connected there is no provider to bind the order to. A
+  // task bound to nothing could be claimed by any eligible worker; a task
+  // bound to an unresolvable value could never be dispatched at all, even
+  // after a provider comes back. Neither is a canonical order worth keeping,
+  // and inventing a provider for it would be the substitution this whole
+  // module exists to prevent. An explicit route names its provider, which is
+  // exactly what makes the blocked order recordable.
+  const boundProvider: ProviderId | null =
+    route.resolved ?? (input.route === 'AUTO' ? null : (input.route as ProviderId));
+  if (boundProvider == null) {
     return orderFail('provider_not_connected', route.reason, {
       requested: route.requested,
       candidates: route.candidates,
     });
   }
+  const dispatchBlocked = !route.connected;
 
   // Always derived, never adopted, and derived AFTER the route resolves so the
   // key names the provider the order actually carries — see
@@ -568,7 +659,11 @@ export function submitDirectOrder(
   const idempotencyKey = directOrderIdempotencyKey({
     ...input,
     instruction,
-    resolvedProvider: route.resolved,
+    // The BOUND provider, not the resolved one: an explicit order placed while
+    // its provider is unreachable and the same order placed once it is back
+    // are the same order, and must dedupe onto the same canonical task rather
+    // than creating a second one (issue #224).
+    resolvedProvider: boundProvider,
     actorAuthentication: input.actorAuthentication ?? DEFAULT_ACTOR_AUTHENTICATION,
   });
   const created = ops.createTask({
@@ -583,7 +678,7 @@ export function submitDirectOrder(
       // (issue #200, Codex P1 #1 — `operator/provider-binding.ts`). It is in
       // the payload, so it is inside the action digest a Founder approves:
       // the provider cannot be swapped between approval and execution.
-      [EXECUTION_PROVIDER_KEY]: route.resolved,
+      [EXECUTION_PROVIDER_KEY]: boundProvider,
       // Honesty travels with the action: the approver reading this task sees
       // that `requestedBy` was asserted, not authenticated. It is part of the
       // payload, so it is part of the action digest a Founder echoes back —
@@ -599,6 +694,33 @@ export function submitDirectOrder(
   if (!created.ok) {
     return { ok: false, error: created.error };
   }
+
+  // Evidence-derived, per the correction brief: the block is recorded as an
+  // append-only fact about this order rather than baked into the payload, so
+  // the digest an approver echoes back stays a description of the ACTION and
+  // the block stays a description of the WORLD — which can change while the
+  // order waits. Fact NAMES only, never values.
+  if (dispatchBlocked && !created.data.deduplicated) {
+    try {
+      ops.queue.evidence.append({
+        taskId: created.data.task.id,
+        actor: 'system',
+        kind: 'direct_order_dispatch_blocked',
+        payload: {
+          provider: boundProvider,
+          requestedRoute: route.requested,
+          reason: route.reason,
+          missingFacts: route.candidates.flatMap((candidate) => candidate.missingFacts),
+        },
+      });
+    } catch {
+      // The order is already canonical and correctly gated; a lost diagnostic
+      // must not turn a created order into a reported failure. The block is
+      // still derivable live from `providerConnectivity`, which is the source
+      // this entry was copied from.
+    }
+  }
+
   return {
     ok: true,
     data: {
@@ -607,6 +729,8 @@ export function submitDirectOrder(
       deduplicated: created.data.deduplicated,
       route,
       idempotencyKey,
+      boundProvider,
+      dispatchBlocked,
     },
   };
 }

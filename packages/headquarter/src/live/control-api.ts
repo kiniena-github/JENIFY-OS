@@ -566,7 +566,17 @@ function createOrder(
     );
   }
 
-  audit('allowed', result.data.deduplicated ? 'order_deduplicated' : 'order_created', founder);
+  audit(
+    'allowed',
+    result.data.dispatchBlocked
+      ? result.data.deduplicated
+        ? 'order_deduplicated_blocked'
+        : 'order_created_blocked'
+      : result.data.deduplicated
+        ? 'order_deduplicated'
+        : 'order_created',
+    founder,
+  );
   const task = result.data.task;
   return safe(
     json(result.data.deduplicated ? 200 : 201, {
@@ -577,10 +587,22 @@ function createOrder(
       capabilityId: task.capabilityId,
       riskClass: result.data.classification.riskClass,
       requiresFounderApproval: task.status === 'needs_approval',
+      // The order exists AND cannot be dispatched right now (issue #224). Both
+      // halves are true and the browser must show both: this is a created,
+      // gated, remembered order in a BLOCKED / NOT CONNECTED state — never a
+      // success it can present as running, and never a failure that suggests
+      // nothing was recorded.
+      dispatchBlocked: result.data.dispatchBlocked,
+      boundProvider: result.data.boundProvider,
       route: {
         requested: result.data.route.requested,
         resolved: result.data.route.resolved,
         reason: result.data.route.reason,
+        // Names of the facts that are missing, never their values — the shape
+        // `routing/providers.ts` already guarantees.
+        missingFacts: result.data.dispatchBlocked
+          ? result.data.route.candidates.flatMap((candidate) => candidate.missingFacts)
+          : [],
       },
       // Bound at creation so the browser can present the exact action it will
       // later be asked to approve.

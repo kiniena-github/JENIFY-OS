@@ -193,21 +193,54 @@ describe('a mapped Founder creates a canonical order, and only through the facad
     expect(h.fixture.ops.queue.listByStatus('needs_approval')).toHaveLength(1);
   });
 
-  it('refuses an unconnected provider and creates nothing', () => {
+  it('creates the order and reports it BLOCKED when the provider cannot dispatch (issue #224)', () => {
+    // The browser used to get 409 with op_tasks empty: the order was lost, not
+    // blocked. #200's sequence is create-then-report.
     const h = harness();
     h.deps.secretsEnv = {};
     const response = h.call({ body: ORDER_BODY });
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({
+      ok: true,
+      dispatchBlocked: true,
+      boundProvider: 'CLAUDE',
+      status: 'needs_approval',
+      requiresFounderApproval: true,
+    });
+    // Truthful about WHY, in fact names only — never values.
+    const route = response.body.route as Record<string, unknown>;
+    expect(route.resolved).toBeNull();
+    expect(route.missingFacts).toEqual(['CLAUDE_ROUTINE_URL', 'CLAUDE_ROUTINE_TOKEN']);
+    expect(h.fixture.ops.queue.listByStatus('needs_approval')).toHaveLength(1);
+    expect(h.fixture.ops.queue.listByStatus('queued')).toHaveLength(0);
+  });
+
+  it('never substitutes one provider for another', () => {
+    const h = harness();
+    // Codex asked for explicitly; only Claude is connected. The order is
+    // recorded — bound to CODEX, blocked — and never routed to Claude.
+    const response = h.call({ body: { ...ORDER_BODY, route: 'CODEX' } });
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({ ok: true, dispatchBlocked: true, boundProvider: 'CODEX' });
+    const created = h.fixture.ops.queue.listByStatus('needs_approval');
+    expect(created).toHaveLength(1);
+    expect(created[0]!.payload).toMatchObject({ executionProvider: 'CODEX' });
+  });
+
+  it('still refuses AUTO with nothing connected, because no provider can be bound', () => {
+    const h = harness();
+    h.deps.secretsEnv = {};
+    const response = h.call({ body: { ...ORDER_BODY, route: 'AUTO' } });
     expect(response.status).toBe(409);
     expect(response.body).toMatchObject({ ok: false, error: { code: 'provider_not_connected' } });
     expect(h.fixture.ops.queue.listByStatus('needs_approval')).toHaveLength(0);
   });
 
-  it('never substitutes one provider for another', () => {
+  it('leaks no instruction text into the blocked response', () => {
     const h = harness();
-    // Codex asked for explicitly; only Claude is connected.
-    const response = h.call({ body: { ...ORDER_BODY, route: 'CODEX' } });
-    expect(response.status).toBe(409);
-    expect(h.fixture.ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+    h.deps.secretsEnv = {};
+    const response = h.call({ body: ORDER_BODY });
+    expect(JSON.stringify(response.body)).not.toContain(ORDER_BODY.instruction);
   });
 
   it('still obeys deny-by-default when the principal holds no origination grant', () => {

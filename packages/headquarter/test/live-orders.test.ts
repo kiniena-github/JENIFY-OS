@@ -95,22 +95,113 @@ describe('route resolution is truthful and never substitutes', () => {
   });
 });
 
-describe('an unavailable provider creates nothing at all', () => {
-  it('refuses the order and leaves the queue empty', () => {
+describe('an unavailable provider blocks the order without losing it (issue #224)', () => {
+  it('creates exactly one canonical, gated, blocked task for an explicit route', () => {
+    // #200's sequence is create-then-report. The old contract refused before
+    // creating anything, so an order placed while CLAUDE_ROUTINE_* was absent
+    // left op_tasks empty: the order was lost rather than blocked.
     const { ops } = ordersFixture();
     const result = submitDirectOrder(ops, ORDER, NOTHING);
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error('unreachable');
-    expect(result.error.code).toBe('provider_not_connected');
-    // The proof that matters: no canonical task was written.
-    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unreachable');
+
+    expect(result.data.dispatchBlocked).toBe(true);
+    expect(result.data.boundProvider).toBe('CLAUDE');
+    expect(result.data.route.resolved).toBeNull();
+    expect(result.data.route.reason).toContain('NOT CONNECTED');
+
+    // Exactly one, and gated exactly as any other order.
+    const parked = ops.queue.listByStatus('needs_approval');
+    expect(parked).toHaveLength(1);
+    expect(parked[0]!.id).toBe(result.data.task.id);
     expect(ops.queue.listByStatus('queued')).toHaveLength(0);
+    expect(result.data.classification.riskClass).toBe('founder_gate');
+    // Bound to the provider that was ASKED for, so no other provider's worker
+    // can claim it even though that provider cannot dispatch today.
+    expect(result.data.task.payload).toMatchObject({ executionProvider: 'CLAUDE' });
+  });
+
+  it('records the block as append-only evidence, naming missing facts and no values', () => {
+    const { ops } = ordersFixture();
+    const result = submitDirectOrder(ops, ORDER, NOTHING);
+    if (!result.ok) throw new Error('expected ok');
+    const blocked = ops.queue.evidence
+      .list(result.data.task.id)
+      .filter((entry) => entry.kind === 'direct_order_dispatch_blocked');
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]!.payload.provider).toBe('CLAUDE');
+    expect(blocked[0]!.payload.missingFacts).toEqual(['CLAUDE_ROUTINE_URL', 'CLAUDE_ROUTINE_TOKEN']);
+    expect(ops.queue.evidence.verifyChain()).toBeNull();
+  });
+
+  it('dedupes a repeat of a blocked order onto the same canonical task', () => {
+    const { ops } = ordersFixture();
+    const first = submitDirectOrder(ops, ORDER, NOTHING);
+    const second = submitDirectOrder(ops, ORDER, NOTHING);
+    if (!first.ok || !second.ok) throw new Error('expected ok');
+    expect(second.data.deduplicated).toBe(true);
+    expect(second.data.task.id).toBe(first.data.task.id);
+    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(1);
+  });
+
+  it('is the SAME task once the provider becomes connected — never a second one', () => {
+    // The idempotency key is derived from the BOUND provider, not the resolved
+    // one, so the order survives the provider coming back.
+    const { ops } = ordersFixture();
+    const blocked = submitDirectOrder(ops, ORDER, NOTHING);
+    const later = submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
+    if (!blocked.ok || !later.ok) throw new Error('expected ok');
+    expect(blocked.data.dispatchBlocked).toBe(true);
+    expect(later.data.dispatchBlocked).toBe(false);
+    expect(later.data.deduplicated).toBe(true);
+    expect(later.data.task.id).toBe(blocked.data.task.id);
+    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(1);
   });
 
   it('never routes an explicitly-requested blocked provider to a connected one', () => {
+    // The no-substitution rule is unchanged: CODEX asked for, CODEX bound,
+    // even with CLAUDE sitting right there and connected.
     const { ops } = ordersFixture();
     const result = submitDirectOrder(ops, { ...ORDER, route: 'CODEX' }, CLAUDE_ONLY);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unreachable');
+    expect(result.data.boundProvider).toBe('CODEX');
+    expect(result.data.dispatchBlocked).toBe(true);
+    expect(result.data.route.resolved).toBeNull();
+    expect(result.data.task.payload).toMatchObject({ executionProvider: 'CODEX' });
+  });
+
+  it('a blocked order cannot be claimed, started or executed', () => {
+    const { ops, store } = ordersFixture();
+    const result = submitDirectOrder(ops, ORDER, NOTHING);
+    if (!result.ok) throw new Error('expected ok');
+
+    // A worker that holds the capability AND executes as the bound provider is
+    // still refused: the task is parked in needs_approval, which is not
+    // claimable at all.
+    store.upsertSpecialist({
+      id: 'claude-worker',
+      displayName: 'Claude Worker',
+      vendor: 'anthropic',
+      role: 'build_lead',
+      allowedCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+      active: true,
+    });
+    const claimed = ops.claimNext('claude-worker', DIRECT_ORDER_CAPABILITY.id);
+    expect(claimed.ok).toBe(false);
+    if (claimed.ok) throw new Error('unreachable');
+    expect(claimed.error.code).toBe('nothing_claimable');
+    expect(ops.queue.get(result.data.task.id)!.status).toBe('needs_approval');
+  });
+
+  it('AUTO with nothing connected still creates nothing, because there is no provider to bind', () => {
+    // AUTO asks HQ to pick a CONNECTED provider. With none connected there is
+    // no provider identity to record, and inventing one would be substitution.
+    const { ops } = ordersFixture();
+    const result = submitDirectOrder(ops, { ...ORDER, route: 'AUTO' }, NOTHING);
     expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('provider_not_connected');
     expect(ops.queue.listByStatus('needs_approval')).toHaveLength(0);
   });
 });
