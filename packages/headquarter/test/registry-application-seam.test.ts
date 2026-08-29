@@ -272,7 +272,7 @@ describe('HeadquarterOperations wiring', () => {
     registerSpecialist('w1', ['docs.write', 'deploy.run']);
     registerMember('w1', ['docs.write']);
     const ops = new HeadquarterOperations(db, { memberRegistry: registry });
-    ops.queue.capabilities.register({
+    ops.registerCapability({
       id: 'deploy.run',
       description: 'Run a deployment',
       riskClass: 'read_only',
@@ -297,7 +297,7 @@ describe('HeadquarterOperations wiring', () => {
     registerSpecialist('w2', ['docs.write']);
     registerMember('w2', ['docs.write']);
     const ops = new HeadquarterOperations(db, { memberRegistry: registry });
-    ops.queue.capabilities.register({
+    ops.registerCapability({
       id: 'docs.write',
       description: 'Write docs',
       riskClass: 'read_only',

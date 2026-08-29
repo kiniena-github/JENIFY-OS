@@ -122,7 +122,7 @@ function makeOps(withRegistry = true): HeadquarterOperations {
     ...(withRegistry ? { memberRegistry: registry } : {}),
   });
   for (const id of CAPS) {
-    ops.queue.capabilities.register({
+    ops.registerCapability({
       id,
       description: id,
       riskClass: 'read_only',
@@ -245,7 +245,7 @@ describe('a Registry-only member gains NOTHING from the Registry being enabled',
         },
       ],
     });
-    ops.queue.capabilities.register({
+    ops.registerCapability({
       id: 'deploy.run',
       description: 'deploy.run',
       riskClass: 'read_only',

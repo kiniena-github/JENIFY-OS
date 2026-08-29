@@ -319,7 +319,7 @@ describe('idempotency', () => {
     // Classification follows the REGISTERED definition, not this module's
     // constant, so a drifted row would let a free-text instruction skip the
     // Founder gate entirely.
-    ops.queue.capabilities.register({
+    ops.registerCapability({
       ...DIRECT_ORDER_CAPABILITY,
       riskClass: 'reversible',
     } as never);
@@ -335,7 +335,7 @@ describe('idempotency', () => {
   it('reports an intact definition as enabled, and does not repair a drifted one', () => {
     const { ops } = ordersFixture();
     expect(directOrderCapabilityState(ops)).toBe('enabled');
-    ops.queue.capabilities.register({ ...DIRECT_ORDER_CAPABILITY, idempotent: false } as never);
+    ops.registerCapability({ ...DIRECT_ORDER_CAPABILITY, idempotent: false } as never);
     expect(directOrderCapabilityState(ops)).toBe('drifted');
     submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
     // Invocation refuses; it never quietly re-registers the definition.

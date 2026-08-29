@@ -74,6 +74,7 @@ import type { ActivityStatus } from '../contracts/events.js';
 import { evaluatePolicy, type PolicyContext, type PolicyDecision } from '../operator/policy.js';
 import { taskActionDigest } from '../operator/approvals.js';
 import { assertNoSecretLikeContent } from '../operator/evidence.js';
+import { CapabilityRegistry } from '../operator/capabilities.js';
 import { OperatorQueue, type OperatorTask, type ReconcileDecision } from '../operator/queue.js';
 import {
   ProviderBindingViolation,
@@ -366,6 +367,26 @@ export class HeadquarterOperations {
    * from outside this class body.
    */
   readonly #workerProviderRegistrar: WorkerProviderRegistrar;
+  /**
+   * Capability WRITE side, `#private`, for the same reason as the provider
+   * registrar: a worker holding a queue could otherwise rewrite the
+   * `op_capabilities` row that enforcement reads and downgrade an already
+   * claimed task's risk class (issue #200, Codex exact-head finding on
+   * `653bdb8`). Reads stay on `queue.capabilities`.
+   *
+   * No enable/disable method is exposed here. One was drafted and removed: an
+   * existing security test forbids `set*Capability*` on this surface, and it was
+   * right to. No production path disables a capability — only tests do, and a
+   * test holding the database can build its own registry. A method that exists
+   * only to satisfy tests is surface an attacker gets for free.
+   *
+   * NOTE, flagged rather than invented: this makes registration unreachable
+   * from a queue handle, which is what the finding requires. WHO may register a
+   * capability — whether it should require approval authority like
+   * `declareWorkerProvider` — is a policy question this correction loop is not
+   * authorised to decide, so no authority rule has been made up here.
+   */
+  readonly #capabilityRegistrar: CapabilityRegistry;
 
   /**
    * ECMAScript `#private`. TypeScript `private` erases to a public property, so
@@ -390,6 +411,7 @@ export class HeadquarterOperations {
     // `declareWorkerProvider`/`revokeWorkerProvider`, which resolve the actor
     // and require approval authority first.
     this.#workerProviderRegistrar = new WorkerProviderRegistrar(db);
+    this.#capabilityRegistrar = new CapabilityRegistry(db);
     this.workers =
       options.workers ?? narrowByRegistry(new SpecialistDirectoryAdapter(this.store), options.memberRegistry);
     this.principals = options.humanPrincipals ?? new HumanPrincipalRegistry(db);
@@ -964,6 +986,15 @@ export class HeadquarterOperations {
    * The declaration narrows only — it decides which bound tasks a worker may
    * take, never which capabilities it holds, which stay with the directory.
    */
+  /**
+   * Register (or update) a capability definition. A CONFIGURATION act, kept off
+   * the queue so an execution caller cannot reach it — see
+   * `#capabilityRegistrar`.
+   */
+  registerCapability(cap: Parameters<CapabilityRegistry['register']>[0]): void {
+    this.#capabilityRegistrar.register(cap);
+  }
+
   declareWorkerProvider(input: {
     workerId: string;
     providerId: string;

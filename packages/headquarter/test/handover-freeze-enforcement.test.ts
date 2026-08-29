@@ -27,6 +27,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -50,14 +51,14 @@ interface Ctx {
 function wire(db: HqDatabase): Ctx {
   const hq = new HeadquarterStore(db);
   const queue = new OperatorQueue(db, { preApprovedCapabilities: new Set(['github.open_pr']) });
-  queue.capabilities.register({
+  new CapabilityRegistry(db).register({
     id: 'repo.read_status',
     description: 'Read repo/CI status',
     riskClass: 'read_only',
     sideEffect: false,
     idempotent: true,
   });
-  queue.capabilities.register({
+  new CapabilityRegistry(db).register({
     id: 'github.open_pr',
     description: 'Open a branch-isolated PR',
     riskClass: 'external_side_effect',
@@ -205,7 +206,7 @@ describe('canonical freeze enforcement at the assignment boundary', () => {
     const { queue, handovers } = ctx;
     // A genuinely approval-gated capability (NOT pre-approved), so the task
     // carries a real single-use approval nonce that claim() would consume.
-    queue.capabilities.register({
+    new CapabilityRegistry(ctx.db).register({
       id: 'github.merge_pr',
       description: 'Merge a pull request',
       riskClass: 'external_side_effect',

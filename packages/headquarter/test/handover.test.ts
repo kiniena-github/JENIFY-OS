@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { openMemoryHqDatabase, type HqDatabase } from '../src/store/db.js';
 import { HeadquarterStore } from '../src/store/headquarter.js';
 import { OperatorQueue } from '../src/operator/queue.js';
@@ -17,14 +18,14 @@ function setup(): { db: HqDatabase; hq: HeadquarterStore; queue: OperatorQueue; 
   const db = openMemoryHqDatabase();
   const hq = new HeadquarterStore(db);
   const queue = new OperatorQueue(db, { preApprovedCapabilities: new Set(['github.open_pr']) });
-  queue.capabilities.register({
+  new CapabilityRegistry(db).register({
     id: 'repo.read_status',
     description: 'Read repo/CI status',
     riskClass: 'read_only',
     sideEffect: false,
     idempotent: true,
   });
-  queue.capabilities.register({
+  new CapabilityRegistry(db).register({
     id: 'github.open_pr',
     description: 'Open a branch-isolated PR',
     riskClass: 'external_side_effect',

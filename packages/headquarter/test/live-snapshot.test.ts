@@ -294,7 +294,7 @@ describe('projecting the store never writes to it', () => {
     const path = tmp();
     const writable = openHqDatabase(path);
     const seeded = new HeadquarterOperations(writable);
-    seeded.queue.capabilities.register({
+    seeded.registerCapability({
       id: 'repo.read_status',
       description: 'Read repo/CI status',
       riskClass: 'read_only',

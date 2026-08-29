@@ -21,6 +21,12 @@ import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
 import { assertTransition, type ActivityStatus } from '../contracts/events.js';
 import { CapabilityRegistry, type Capability } from './capabilities.js';
+
+/** Reads only. The write side is a configuration act behind the service. */
+export interface CapabilityReadOnly {
+  get(id: string): Capability | null;
+  list(): Capability[];
+}
 import { approvalRequired, evaluatePolicy, type PolicyContext } from './policy.js';
 import { EvidenceLog, assertNoSecretLikeContent } from './evidence.js';
 // Worker-assignability guard. The handover module owns the freeze/replacement
@@ -132,7 +138,27 @@ function rowToTask(row: Record<string, unknown> | undefined): OperatorTask | nul
 }
 
 export class OperatorQueue {
-  readonly capabilities: CapabilityRegistry;
+  /**
+   * READ-ONLY capability view for callers holding a queue.
+   *
+   * It was the full `CapabilityRegistry`, write side included, so a worker
+   * could call `queue.capabilities.register(...)` and rewrite the very
+   * `op_capabilities` row that `#capabilityOf` reads: setting an already
+   * claimed `hq.direct_order` to `riskClass: 'read_only', sideEffect: false`
+   * makes `start` skip an expired Founder approval and `complete` skip
+   * independent review (issue #200, Codex exact-head finding on `653bdb8`).
+   *
+   * The previous round moved enforcement to read the DATABASE instead of a
+   * patchable object. That is worth nothing while the caller can write the row
+   * the database returns — the tenth mechanism here, and the first that changes
+   * the data rather than the code path.
+   *
+   * Registration and enable/disable are configuration acts and now live behind
+   * `HeadquarterOperations`, like provider declaration. This view exposes reads
+   * only, as own-property closures rather than a class instance, so there is no
+   * prototype to patch and no write method to find.
+   */
+  readonly capabilities: CapabilityReadOnly;
   readonly evidence: EvidenceLog;
   /**
    * Declared worker → provider map, LOOKUP ONLY (issue #200, Codex round-3
@@ -199,7 +225,11 @@ export class OperatorQueue {
   constructor(db: HqDatabase, policyCtx: PolicyContext = {}) {
     this.#db = db;
     this.#policyCtx = policyCtx;
-    this.capabilities = new CapabilityRegistry(db);
+    const registry = new CapabilityRegistry(db);
+    this.capabilities = {
+      get: (id: string) => registry.get(id),
+      list: () => registry.list(),
+    };
     this.evidence = new EvidenceLog(db);
     // Built here rather than delegated to the exported class, so no prototype
     // an attacker can reach participates in the enforcement path. The SQL is

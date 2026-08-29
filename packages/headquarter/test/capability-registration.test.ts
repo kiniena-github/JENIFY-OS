@@ -10,6 +10,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { setupFixture, CAPS, type Fixture } from './application.fixture.js';
 import {
   DIRECT_ORDER_CAPABILITY,
@@ -43,8 +44,8 @@ function ordersFixture(): Fixture {
 describe('re-registering a capability never re-enables it', () => {
   it('leaves a disabled capability disabled', () => {
     const fx = setupFixture();
-    fx.ops.queue.capabilities.setEnabled(CAPS.openPr, false);
-    fx.ops.queue.capabilities.register({
+    new CapabilityRegistry(fx.db).setEnabled(CAPS.openPr, false);
+    fx.ops.registerCapability({
       id: CAPS.openPr,
       description: 'Open a branch-isolated PR',
       riskClass: 'external_side_effect',
@@ -56,8 +57,8 @@ describe('re-registering a capability never re-enables it', () => {
 
   it('still updates the definition — only the enabled state is left alone', () => {
     const fx = setupFixture();
-    fx.ops.queue.capabilities.setEnabled(CAPS.openPr, false);
-    fx.ops.queue.capabilities.register({
+    new CapabilityRegistry(fx.db).setEnabled(CAPS.openPr, false);
+    fx.ops.registerCapability({
       id: CAPS.openPr,
       description: 'Open a PR (revised wording)',
       riskClass: 'destructive',
@@ -72,8 +73,8 @@ describe('re-registering a capability never re-enables it', () => {
 
   it('enables one only when a caller says so explicitly', () => {
     const fx = setupFixture();
-    fx.ops.queue.capabilities.setEnabled(CAPS.openPr, false);
-    fx.ops.queue.capabilities.register({
+    new CapabilityRegistry(fx.db).setEnabled(CAPS.openPr, false);
+    fx.ops.registerCapability({
       id: CAPS.openPr,
       description: 'Open a branch-isolated PR',
       riskClass: 'external_side_effect',
@@ -86,7 +87,7 @@ describe('re-registering a capability never re-enables it', () => {
 
   it('still defaults a brand-new capability to enabled', () => {
     const fx = setupFixture();
-    fx.ops.queue.capabilities.register({
+    fx.ops.registerCapability({
       id: 'brand.new',
       description: 'A capability nobody has seen before',
       riskClass: 'read_only',
@@ -98,7 +99,7 @@ describe('re-registering a capability never re-enables it', () => {
 
   it('honours an explicit disabled registration for a new capability', () => {
     const fx = setupFixture();
-    fx.ops.queue.capabilities.register({
+    fx.ops.registerCapability({
       id: 'brand.new',
       description: 'Registered, deliberately off',
       riskClass: 'read_only',
@@ -113,7 +114,7 @@ describe('re-registering a capability never re-enables it', () => {
 describe('placing an order honours the capability state and never changes it', () => {
   it('fails closed on a DISABLED capability, and leaves it disabled', () => {
     const fx = ordersFixture();
-    fx.ops.queue.capabilities.setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
+    new CapabilityRegistry(fx.db).setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
     const result = submitDirectOrder(fx.ops, ORDER, CLAUDE_ONLY);
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
@@ -143,7 +144,7 @@ describe('placing an order honours the capability state and never changes it', (
 
   it('does not resurrect a disabled capability however many orders are attempted', () => {
     const fx = ordersFixture();
-    fx.ops.queue.capabilities.setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
+    new CapabilityRegistry(fx.db).setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
     for (let attempt = 0; attempt < 5; attempt += 1) {
       submitDirectOrder(fx.ops, { ...ORDER, instruction: `attempt ${attempt}` }, CLAUDE_ONLY);
     }
@@ -152,7 +153,7 @@ describe('placing an order honours the capability state and never changes it', (
 
   it('registration is the one deliberate act that re-registers — and it too respects disabled', () => {
     const fx = ordersFixture();
-    fx.ops.queue.capabilities.setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
+    new CapabilityRegistry(fx.db).setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
     registerDirectOrderCapability(fx.ops);
     expect(directOrderCapabilityState(fx.ops)).toBe('disabled');
   });
@@ -162,7 +163,7 @@ describe('placing an order honours the capability state and never changes it', (
     expect(directOrderCapabilityState(bare.ops)).toBe('missing');
     registerDirectOrderCapability(bare.ops);
     expect(directOrderCapabilityState(bare.ops)).toBe('enabled');
-    bare.ops.queue.capabilities.setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
+    new CapabilityRegistry(bare.db).setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
     expect(directOrderCapabilityState(bare.ops)).toBe('disabled');
   });
 });

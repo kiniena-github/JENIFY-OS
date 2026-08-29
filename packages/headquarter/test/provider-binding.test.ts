@@ -762,6 +762,35 @@ describe('the provider write mechanism is not reachable around the authority gat
     expect(claimed!.capabilityId).toBe(DIRECT_ORDER_CAPABILITY.id);
   });
 
+  /**
+   * Codex exact-head finding on `653bdb8` (P1) — the TENTH mechanism, and the
+   * first that changes the DATA rather than the code path. The previous round
+   * moved enforcement to read the database instead of a patchable object;
+   * that is worth nothing while the caller can write the row the database
+   * returns. `queue.capabilities.register(...)` was public, so an already
+   * claimed `hq.direct_order` could be rewritten to
+   * `riskClass: 'read_only', sideEffect: false`, after which `start` skips an
+   * expired Founder approval and `complete` skips independent review.
+   */
+  it('offers workers no way to rewrite the capability row enforcement reads', () => {
+    const fx = bindingFixture();
+    const caps = fx.ops.queue.capabilities as unknown as Record<string, unknown>;
+
+    // Reads remain, because the console and the service need them.
+    expect(typeof caps.get).toBe('function');
+    expect(typeof caps.list).toBe('function');
+    // Writes are gone from anything a queue handle can reach.
+    expect(caps.register).toBeUndefined();
+    expect(caps.setEnabled).toBeUndefined();
+    expect(Object.getPrototypeOf(caps)).not.toHaveProperty('register');
+
+    // And the definition enforcement uses is the real one, not a downgrade a
+    // caller supplied: the gate still holds after an attempted rewrite.
+    const registered = fx.ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id);
+    expect(registered?.riskClass).toBe('founder_gate');
+    expect(registered?.sideEffect).toBe(true);
+  });
+
   it('still lets the authorized service boundary declare, and still gates it', () => {
     const fx = bindingFixture();
     // Through the gate: works.

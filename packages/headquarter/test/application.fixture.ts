@@ -41,28 +41,28 @@ export function setupFixture(
     nominationSources: options.nominationSources,
   });
 
-  ops.queue.capabilities.register({
+  ops.registerCapability({
     id: CAPS.readStatus,
     description: 'Read repo/CI status',
     riskClass: 'read_only',
     sideEffect: false,
     idempotent: true,
   });
-  ops.queue.capabilities.register({
+  ops.registerCapability({
     id: CAPS.openPr,
     description: 'Open a branch-isolated PR',
     riskClass: 'external_side_effect',
     sideEffect: true,
     idempotent: true,
   });
-  ops.queue.capabilities.register({
+  ops.registerCapability({
     id: CAPS.indexDoc,
     description: 'Index a document into the archive',
     riskClass: 'external_side_effect',
     sideEffect: true,
     idempotent: false,
   });
-  ops.queue.capabilities.register({
+  ops.registerCapability({
     id: CAPS.dropIndex,
     description: 'Drop a search index',
     riskClass: 'destructive',

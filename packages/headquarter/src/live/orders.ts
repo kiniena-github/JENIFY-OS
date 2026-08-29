@@ -113,7 +113,7 @@ export const DIRECT_ORDER_CAPABILITY = {
  * Re-enabling is its own explicit act (`capabilities.setEnabled`).
  */
 export function registerDirectOrderCapability(ops: HeadquarterOperations): void {
-  ops.queue.capabilities.register({ ...DIRECT_ORDER_CAPABILITY });
+  ops.registerCapability({ ...DIRECT_ORDER_CAPABILITY });
 }
 
 /**
