@@ -59,15 +59,19 @@ import { liveRefreshScript } from './live-refresh.js';
 import {
   AUTH_MECHANISM_LABELS,
   CONNECTION_STATE_LABELS,
+  CONNECTION_STATE_TONE,
   connectionSummary,
   type ConnectionState,
   type ConnectionStatus,
 } from '../live/connections.js';
 import { DIRECT_ORDER_ROUTES, type RouteResolution } from '../live/orders.js';
 import { SOURCE_MODE_LABELS, type SourceMode } from '../live/provenance.js';
+import type { FloorState } from './spatial/state.js';
+import { spatialFloorBody } from './spatial/page.js';
 
 export const HQ_PAGES = [
   { file: 'index.html', title: 'Command Center', glyph: '◈' },
+  { file: 'headquarters.html', title: 'Headquarters Floor', glyph: '⬡' },
   { file: 'projects.html', title: 'Projects', glyph: '▤' },
   { file: 'executive-room.html', title: 'Executive Room', glyph: '◎' },
   { file: 'direct-chats.html', title: 'Direct Chats', glyph: '✉' },
@@ -985,17 +989,6 @@ ${section('TASKS WAITING FOR FOUNDER', taskRows(waiting, 'Tasks waiting for the 
 /* Page 7 — Connections (issue #200, scope C)                          */
 /* ------------------------------------------------------------------ */
 
-const CONNECTION_STATE_TONE: Record<ConnectionState, Tone> = {
-  connected: 'accent',
-  local_only: 'info',
-  dispatchable: 'info',
-  configured: 'warn',
-  not_connected: 'neutral',
-  expired: 'warn',
-  error: 'danger',
-  setup_required: 'warn',
-};
-
 const CONNECTIONS_NOTE =
   'Every state on this page is derived from facts actually observed in this environment — not from ' +
   'the provider catalogue, not from a registered AI member, and not from a vendor descriptor. A name ' +
@@ -1303,6 +1296,42 @@ ${archiveSearchScript(searchRows)}`;
     lede: 'Every reconstructed record, searchable and filterable, with its lifecycle state and a link to the preserved original.',
     asOf: nowIso,
     body,
+    provenanceNote,
+    sourceMode,
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Page 9 — Headquarters Floor (issue #200, spatial HQ mission)        */
+/*                                                                     */
+/* The living headquarters: the same canonical read models the other    */
+/* eight pages render, projected into a room-and-desk plan the Founder  */
+/* can walk. It adds no data source and no authority — every room links */
+/* back to the read-only page that holds its full detail.               */
+/* ------------------------------------------------------------------ */
+
+export interface HeadquartersFloorInput {
+  floor: FloorState;
+  specialists: WorkerDescriptor[];
+  nowIso: string;
+  provenanceNote?: string;
+  sourceMode?: SourceMode;
+}
+
+export function renderHeadquartersFloor({
+  floor,
+  specialists,
+  nowIso,
+  provenanceNote,
+  sourceMode,
+}: HeadquartersFloorInput): string {
+  return shell({
+    title: 'Headquarters Floor',
+    activeFile: 'headquarters.html',
+    eyebrow: 'The living headquarters',
+    lede: 'The whole company as one floor: who is at work, what is blocked, what waits on you, and which uplinks are lit — drawn only from canonical state.',
+    asOf: nowIso,
+    body: spatialFloorBody({ floor, nowIso, specialists }),
     provenanceNote,
     sourceMode,
   });
