@@ -122,6 +122,10 @@ export type DispatchRefusalCode =
   | 'transport_actor_mismatch'
   | 'transport_failed'
   | 'dispatch_outcome_unknown'
+  /** The guard itself could not be written, so nothing was published. */
+  | 'evidence_unavailable'
+  /** Something happened at GitHub that HQ could not record. Fail closed, loudly. */
+  | 'dispatch_unrecorded'
   | 'unsafe_issue';
 
 export interface DispatchReceipt {
@@ -138,6 +142,12 @@ export interface DispatchReceipt {
 export type DispatchResult =
   | { ok: true; data: DispatchReceipt }
   | { ok: false; error: { code: DispatchRefusalCode; message: string; details?: Record<string, unknown> } };
+
+/** Message text from an unknown throwable, bounded — it reaches a refusal reason. */
+function errorText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.length > 200 ? `${message.slice(0, 200)}…` : message;
+}
 
 function refuse(
   code: DispatchRefusalCode,
@@ -506,26 +516,31 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
   const now = options.now ?? (() => new Date());
   const taskId = options.taskId;
 
-  const record = (kind: string, payload: Record<string, unknown>): void => {
+  // Best-effort ONLY for records whose loss cannot cost anything: a refusal
+  // created nothing, so a refusal that goes unlogged is a lost diagnostic, not a
+  // lost fact about the world. Everything that GUARDS the irreversible act — the
+  // attempt reservation and the terminal outcome — is written through the
+  // mandatory path below (issue #221, Codex P1 on `1d5b3bf`). The first version
+  // of this swallowed every failure alike, so a busy or full database could let
+  // a public issue exist while `dispatchHistory` still said `none` — and the
+  // next run would publish a second one.
+  const recordBestEffort = (kind: string, payload: Record<string, unknown>): void => {
     try {
       ops.queue.evidence.append({ taskId, actor: DISPATCH_ACTOR, kind, payload });
     } catch {
-      // The evidence guard refuses secret-like payloads. Nothing this module
-      // writes carries a credential, but a refusal here must not be able to
-      // masquerade as a dispatch failure — or as a success.
+      // Deliberately swallowed. See above.
     }
   };
-  const refuseAndRecord = (
+  const refuseAndRecordBestEffort = (
     code: DispatchRefusalCode,
     message: string,
     details?: Record<string, unknown>,
   ): DispatchResult => {
-    record(CLAUDE_DISPATCH_EVIDENCE.refused, { code, message, ...(details ?? {}) });
+    recordBestEffort(CLAUDE_DISPATCH_EVIDENCE.refused, { code, message, ...(details ?? {}) });
     return refuse(code, message, details);
   };
-
   if (!isValidTarget(options.target)) {
-    return refuseAndRecord(
+    return refuseAndRecordBestEffort(
       'invalid_target',
       'A dispatch target must be an explicit owner/repo pair. There is no default target: ' +
         'dispatching publishes the order to a repository, so the repository is always chosen ' +
@@ -534,12 +549,12 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
   }
   const role = options.role ?? DEFAULT_DISPATCH_ROLE;
   if (!isRole(role)) {
-    return refuseAndRecord('invalid_role', `Unknown role: ${String(role)}. Refusing to guess a role.`);
+    return refuseAndRecordBestEffort('invalid_role', `Unknown role: ${String(role)}. Refusing to guess a role.`);
   }
 
   const eligibility = claudeDispatchEligibility(ops, taskId, now());
   if (!eligibility.eligible) {
-    return refuseAndRecord(eligibility.code, eligibility.message, eligibility.details);
+    return refuseAndRecordBestEffort(eligibility.code, eligibility.message, eligibility.details);
   }
 
   // Already done, or already uncertain. Checked before the transport is touched:
@@ -560,7 +575,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
     };
   }
   if (history.state === 'unknown') {
-    return refuseAndRecord(
+    return refuseAndRecordBestEffort(
       'dispatch_outcome_unknown',
       `A dispatch of task ${taskId} was attempted at ${history.at} and its outcome was never ` +
         'recorded, so HQ does not know whether a GitHub issue exists. Re-sending could open a ' +
@@ -572,13 +587,13 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
 
   const status = options.transport.status();
   if (!status.available) {
-    return refuseAndRecord('transport_unavailable', `NOT CONNECTED / SETUP REQUIRED. ${status.reason}`, {
+    return refuseAndRecordBestEffort('transport_unavailable', `NOT CONNECTED / SETUP REQUIRED. ${status.reason}`, {
       transport: options.transport.id,
       missingFacts: status.missingFacts,
     });
   }
   if (!status.authenticated || status.account == null) {
-    return refuseAndRecord(
+    return refuseAndRecordBestEffort(
       'transport_unauthenticated',
       `NOT CONNECTED / SETUP REQUIRED. ${status.reason}`,
       { transport: options.transport.id, missingFacts: status.missingFacts },
@@ -590,7 +605,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
   // will ever run, while HQ recorded a successful dispatch — a task-side fake
   // success with a real artefact attached. Refuse instead.
   if (status.account.toLowerCase() !== options.target.owner.toLowerCase()) {
-    return refuseAndRecord(
+    return refuseAndRecordBestEffort(
       'transport_actor_mismatch',
       `The authenticated GitHub account (${status.account}) is not the owner of ` +
         `${targetSlug(options.target)}. The Claude workflow only routes AI tasks opened by the ` +
@@ -617,21 +632,76 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
   try {
     assertBrowserSafe({ title: issue.title, body: issue.body }, 'dispatch_issue');
   } catch {
-    return refuseAndRecord(
+    return refuseAndRecordBestEffort(
       'unsafe_issue',
       'The rendered issue looks like it contains a credential. Nothing was published: a dispatch ' +
         'writes the order into a repository, where it cannot be unpublished.',
     );
   }
 
-  record(CLAUDE_DISPATCH_EVIDENCE.attempted, {
-    provider: DISPATCH_PROVIDER,
-    repository: targetSlug(options.target),
-    transport: options.transport.id,
-    account: status.account,
-    role,
-    dispatchedAt,
-  });
+  // ---- the reservation: the last thing before the irreversible act ---------
+  //
+  // Read-then-append as ONE atomic step (issue #221, Codex P1 on `1d5b3bf`).
+  // Two local dispatch processes could otherwise both read `none` above and both
+  // publish. It happens here, after every check that can refuse, so a refused
+  // dispatch never leaves an unresolved attempt behind blocking the next one.
+  //
+  // If the reservation cannot be WRITTEN, nothing is published. A guard that
+  // could not be recorded is a guard that does not exist, and the cost of
+  // stopping is a retry while the cost of continuing is a duplicate public
+  // issue that cannot be withdrawn.
+  let reserved: DispatchHistory;
+  try {
+    reserved = ops.queue.evidence.reserve<DispatchHistory>(() => {
+      const current = dispatchHistory(ops, taskId);
+      if (current.state !== 'none') return current;
+      ops.queue.evidence.append({
+        taskId,
+        actor: DISPATCH_ACTOR,
+        kind: CLAUDE_DISPATCH_EVIDENCE.attempted,
+        payload: {
+          provider: DISPATCH_PROVIDER,
+          repository: targetSlug(options.target),
+          transport: options.transport.id,
+          account: status.account,
+          role,
+          dispatchedAt,
+        },
+      });
+      return { state: 'none' };
+    });
+  } catch (error) {
+    return refuseAndRecordBestEffort(
+      'evidence_unavailable',
+      'The dispatch attempt could not be recorded in the append-only evidence log ' +
+        `(${errorText(error)}), so nothing was published. The evidence entry is what stops a ` +
+        'second run from opening a duplicate issue; without it the guard does not exist.',
+    );
+  }
+  // Another process won the race between the fast-path check and the
+  // reservation, or resolved an attempt in between. Its answer is authoritative.
+  if (reserved.state === 'dispatched') {
+    return {
+      ok: true,
+      data: {
+        taskId,
+        provider: DISPATCH_PROVIDER,
+        target: options.target,
+        issueNumber: reserved.issueNumber,
+        issueUrl: reserved.issueUrl,
+        deduplicated: true,
+        dispatchedAt: reserved.at,
+      },
+    };
+  }
+  if (reserved.state === 'unknown') {
+    return refuseAndRecordBestEffort(
+      'dispatch_outcome_unknown',
+      `A dispatch of task ${taskId} was attempted at ${reserved.at} and its outcome was never ` +
+        'recorded, so HQ does not know whether a GitHub issue exists. Nothing was published.',
+      { attemptedAt: reserved.at },
+    );
+  }
 
   const created = options.transport.createIssue({
     target: options.target,
@@ -646,29 +716,73 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
     // "failed" would close the attempt and license a retry that duplicates a
     // public issue. Leaving the `attempted` entry unresolved is what makes the
     // next dispatch refuse with `dispatch_outcome_unknown` until somebody looks.
-    if (created.kind !== 'unreadable_response') {
-      record(CLAUDE_DISPATCH_EVIDENCE.failed, {
-        provider: DISPATCH_PROVIDER,
-        repository: targetSlug(options.target),
-        transport: options.transport.id,
-        kind: created.kind,
-        message: created.message,
+    if (created.kind === 'unreadable_response') {
+      return refuse(
+        'transport_failed',
+        `The GitHub transport could not confirm the outcome. ${created.message} The attempt is ` +
+          'left OPEN, so the next dispatch refuses until it is reconciled.',
+        { kind: created.kind },
+      );
+    }
+    try {
+      ops.queue.evidence.append({
+        taskId,
+        actor: DISPATCH_ACTOR,
+        kind: CLAUDE_DISPATCH_EVIDENCE.failed,
+        payload: {
+          provider: DISPATCH_PROVIDER,
+          repository: targetSlug(options.target),
+          transport: options.transport.id,
+          kind: created.kind,
+          message: created.message,
+        },
       });
+    } catch (error) {
+      // The failure is real but unrecorded, so the attempt stays open and the
+      // next dispatch refuses. Fail-closed, and said plainly rather than
+      // reported as an ordinary retryable failure.
+      return refuse(
+        'dispatch_unrecorded',
+        `The GitHub transport did not create the issue (${created.message}), and that outcome ` +
+          `could not be recorded either (${errorText(error)}). The attempt is left OPEN and must ` +
+          'be reconciled before another dispatch.',
+        { kind: created.kind },
+      );
     }
     return refuse('transport_failed', `The GitHub transport did not create the issue. ${created.message}`, {
       kind: created.kind,
     });
   }
 
-  record(CLAUDE_DISPATCH_EVIDENCE.succeeded, {
-    provider: DISPATCH_PROVIDER,
-    repository: targetSlug(options.target),
-    transport: options.transport.id,
-    issueNumber: created.issueNumber,
-    issueUrl: created.issueUrl,
-    role,
-    dispatchedAt,
-  });
+  try {
+    ops.queue.evidence.append({
+      taskId,
+      actor: DISPATCH_ACTOR,
+      kind: CLAUDE_DISPATCH_EVIDENCE.succeeded,
+      payload: {
+        provider: DISPATCH_PROVIDER,
+        repository: targetSlug(options.target),
+        transport: options.transport.id,
+        issueNumber: created.issueNumber,
+        issueUrl: created.issueUrl,
+        role,
+        dispatchedAt,
+      },
+    });
+  } catch (error) {
+    // The worst case, and the one that must never be reported as success: the
+    // issue EXISTS and HQ could not record it. Saying "dispatched" would leave a
+    // receipt no evidence supports; saying "failed" would invite a duplicate.
+    // The attempt stays open, so the next dispatch refuses, and the operator is
+    // handed the URL they need to reconcile it.
+    return refuse(
+      'dispatch_unrecorded',
+      `The issue WAS created (${created.issueUrl}) but the dispatch could not be recorded in the ` +
+        `evidence log (${errorText(error)}). HQ is not claiming a successful dispatch it cannot ` +
+        'evidence. Reconcile the open attempt with that issue before dispatching again.',
+      { issueNumber: created.issueNumber, issueUrl: created.issueUrl },
+    );
+  }
 
   return {
     ok: true,

@@ -33,6 +33,8 @@ import { CONNECTION_CATALOG } from '../live/connections.js';
 import { SNAPSHOT_FILENAME } from '../ui/live-refresh.js';
 import { PROVIDER_REGISTRY, type SecretsEnv } from '../routing/providers.js';
 import { probeCodex } from '../providers/codex/probe.js';
+import { connectionProbesWithGitHubDispatch } from '../providers/claude/connection.js';
+import { ghCliTransport } from '../providers/claude/transport.js';
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -80,10 +82,21 @@ try {
 }
 const ops = new HeadquarterOperations(db);
 
+// The GitHub row is answered by the REAL transport here, and only here
+// (issue #221, Codex P2 on `1d5b3bf`).
+//
+// This CLI is the one production path that runs on the Founder workstation —
+// the machine that actually holds the `gh` session — and it is what refreshes
+// the Connection Center's live data. The static site build deliberately does
+// NOT do this: it runs in CI, where spawning `gh` would observe a runner rather
+// than the Founder's machine, and where a build must not make provider calls.
+// So the page's live refresh tells the truth about the transport, and the
+// build-time render keeps its honest configuration-only answer.
 const snapshot = liveSnapshotFromOperations(ops, {
   now: new Date().toISOString(),
   env: observeFacts(),
   mode: 'live',
+  connectionProbes: connectionProbesWithGitHubDispatch(ghCliTransport()),
 });
 
 mkdirSync(dirname(outPath), { recursive: true });

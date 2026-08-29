@@ -70,9 +70,20 @@ ${LOCAL_ADMIN_INTERFACE_NOTICE}`);
   process.exit(2);
 }
 
+/**
+ * Parse `owner/repo`, and reject anything that is not exactly that (issue #221,
+ * Codex P2 on `1d5b3bf`).
+ *
+ * Destructuring alone silently DISCARDED extra segments, so `--repo a/b/extra`
+ * validated as `a/b` and published there. Choosing the repository is the guard
+ * on an irreversible act, so unexpected input is refused rather than trimmed
+ * into something plausible.
+ */
 function parseTarget(slug: string | null): GitHubTarget | null {
   if (!slug) return null;
-  const [owner, repo] = slug.split('/');
+  const segments = slug.split('/');
+  if (segments.length !== 2) return null;
+  const [owner, repo] = segments;
   if (!owner || !repo) return null;
   const target = { owner, repo };
   return isValidTarget(target) ? target : null;

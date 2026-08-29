@@ -44,6 +44,24 @@ import { join } from 'node:path';
 /** `owner/repo`, the only repository identity this module accepts. */
 export const REPO_SLUG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
+/**
+ * The ONE host this lane will publish to (issue #221, Codex P1 on `1d5b3bf`).
+ *
+ * `gh` resolves a hostless `--repo owner/repo` against `GH_HOST`, so on a
+ * workstation configured for GitHub Enterprise the instruction would have been
+ * published — irreversibly — to that host instead. Worse, the failure was
+ * silent-ish: `parseIssueUrl` would reject the enterprise URL and leave the
+ * attempt outcome-unknown, so HQ would know only that something had happened
+ * somewhere. Every `gh` invocation here is therefore host-qualified, and the
+ * authentication check asks about this same host, so the session that is
+ * observed is the session that will be used.
+ *
+ * A deployment that genuinely wants an enterprise host would change this
+ * constant deliberately, in review, alongside the workflow that reads the issue
+ * — not inherit it from an environment variable.
+ */
+export const DISPATCH_HOST = 'github.com';
+
 /** A GitHub login. Used to compare the session's account against a repo owner. */
 const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 
@@ -55,6 +73,14 @@ export interface GitHubTarget {
 /** `owner/repo` for a validated target. Constructed, never taken verbatim. */
 export function targetSlug(target: GitHubTarget): string {
   return `${target.owner}/${target.repo}`;
+}
+
+/**
+ * `host/owner/repo` — what is actually handed to `gh`, so the host can never be
+ * supplied by the environment. See `DISPATCH_HOST`.
+ */
+export function qualifiedTargetSlug(target: GitHubTarget): string {
+  return `${DISPATCH_HOST}/${targetSlug(target)}`;
 }
 
 export function isValidTarget(target: GitHubTarget | null | undefined): boolean {
@@ -257,7 +283,10 @@ export function ghCliTransport(options: GhCliTransportOptions = {}): GitHubIssue
             'CLI and run `gh auth login` once on the Founder workstation.',
         );
       }
-      const auth = spawn(ghPath, ['auth', 'status'], timeoutMs);
+      // `--hostname` pins the question to the host we will actually publish to.
+      // Without it, a workstation configured for an enterprise host answers
+      // about THAT session, and the session observed is not the session used.
+      const auth = spawn(ghPath, ['auth', 'status', '--hostname', DISPATCH_HOST], timeoutMs);
       if (auth.error != null) {
         return {
           ...unavailable(`The GitHub CLI at ${ghPath} could not be run: ${auth.error.message}`),
@@ -279,9 +308,10 @@ export function ghCliTransport(options: GhCliTransportOptions = {}): GitHubIssue
           observedFacts: ['GH_CLI_PATH'],
           missingFacts: ['GH_AUTH_ACCOUNT'],
           reason:
-            'The GitHub CLI is installed but no authenticated GitHub session was observed ' +
-            '(`gh auth status` did not report a logged-in account). Run `gh auth login` on the ' +
-            'Founder workstation; HQ will not dispatch without a session it can see.',
+            `The GitHub CLI is installed but no authenticated ${DISPATCH_HOST} session was ` +
+            'observed (`gh auth status` did not report a logged-in account for that host). Run ' +
+            `\`gh auth login --hostname ${DISPATCH_HOST}\` on the Founder workstation; HQ will ` +
+            'not dispatch without a session it can see.',
         };
       }
       return {
@@ -292,9 +322,9 @@ export function ghCliTransport(options: GhCliTransportOptions = {}): GitHubIssue
         observedFacts: ['GH_CLI_PATH', 'GH_AUTH_ACCOUNT'],
         missingFacts: [],
         reason:
-          `An authenticated GitHub CLI session was observed for account ${account}. This is a ` +
-          'live answer from GitHub about the session itself; no repository-level permission was ' +
-          'checked, so no repository capability is claimed from it.',
+          `An authenticated GitHub CLI session was observed for account ${account} on ` +
+          `${DISPATCH_HOST}. This is a live answer from GitHub about the session itself; no ` +
+          'repository-level permission was checked, so no repository capability is claimed from it.',
       };
     },
 
@@ -319,8 +349,10 @@ export function ghCliTransport(options: GhCliTransportOptions = {}): GitHubIssue
         const args = [
           'issue',
           'create',
+          // HOST-QUALIFIED: `gh` would otherwise resolve a bare owner/repo
+          // against GH_HOST and publish to an enterprise host (Codex P1).
           '--repo',
-          targetSlug(request.target),
+          qualifiedTargetSlug(request.target),
           '--title',
           request.title,
           '--body-file',
@@ -329,15 +361,46 @@ export function ghCliTransport(options: GhCliTransportOptions = {}): GitHubIssue
         for (const label of request.labels ?? []) args.push('--label', label);
         const result = spawn(ghPath, args, timeoutMs);
         if (result.error != null) {
-          return { ok: false, kind: 'unavailable', message: `The GitHub CLI failed to run: ${result.error.message}` };
+          // WHEN the failure happened decides what may be claimed (Codex P1).
+          //
+          // A spawn that never started the process created nothing, so it is
+          // `unavailable` and a retry is legitimate. Anything else — a timeout
+          // above all — killed a process that may already have created the
+          // issue, and calling that "nothing happened" is what licenses a
+          // duplicate. Those are `unreadable_response`: the outcome is UNKNOWN,
+          // and the caller leaves the attempt unresolved rather than retrying.
+          const code = (result.error as NodeJS.ErrnoException).code;
+          const neverStarted = code === 'ENOENT' || code === 'EACCES' || code === 'EPERM';
+          return neverStarted
+            ? { ok: false, kind: 'unavailable', message: `The GitHub CLI could not be started: ${result.error.message}` }
+            : {
+                ok: false,
+                kind: 'unreadable_response',
+                message:
+                  `The GitHub CLI was started and then failed (${code ?? result.error.name}: ` +
+                  `${result.error.message}). It may have created the issue before it stopped, so ` +
+                  'the outcome is UNKNOWN and is recorded as such rather than as a failure.',
+              };
         }
         const combined = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+        const parsed = parseIssueUrl(combined, request.target);
         if (result.status !== 0) {
           const detail = combined.split(/\r?\n/).filter((line) => line.trim() !== '').slice(-5).join(' ').trim();
+          // A non-zero exit that nonetheless printed an issue URL for this
+          // repository is not a clean "nothing happened": something was created
+          // and then something else went wrong. Unknown, not failed.
+          if (parsed != null) {
+            return {
+              ok: false,
+              kind: 'unreadable_response',
+              message:
+                `The GitHub CLI exited ${result.status} but printed an issue URL for this ` +
+                `repository (${parsed.url}). The outcome is UNKNOWN. ${detail}`,
+            };
+          }
           const kind: IssueFailureKind = /auth|login|credential/i.test(detail) ? 'unauthenticated' : 'rejected';
           return { ok: false, kind, message: `The GitHub CLI exited ${result.status}. ${detail}` };
         }
-        const parsed = parseIssueUrl(combined, request.target);
         if (parsed == null) {
           return {
             ok: false,

@@ -96,6 +96,23 @@ not happen is visible rather than silent.
   issue, `not_dispatched` records a failure so a fresh dispatch is a first one.
   There is no "assume it worked" and no "assume it didn't".
 
+Three things make that guard real rather than nominal:
+
+- **The reservation is atomic.** The "already dispatched?" read and the
+  `attempted` append happen inside one IMMEDIATE write transaction
+  (`EvidenceLog.reserve`), so two dispatch processes on the same database cannot
+  both see `none` and both publish.
+- **A guard that cannot be written stops the dispatch.** If the reservation
+  cannot be recorded, nothing is published (`evidence_unavailable`). If the
+  issue was created and the `succeeded` entry cannot be recorded, HQ refuses
+  with `dispatch_unrecorded` and hands over the issue URL rather than claiming a
+  success it cannot evidence — and the attempt stays open, so the next dispatch
+  refuses.
+- **Timing decides what may be claimed.** A `gh` process that never started
+  created nothing (`unavailable`, retryable). One that started and was then
+  killed — a timeout above all — may already have created the issue, so it is
+  `unreadable_response`: outcome unknown, attempt left open.
+
 ## Reporting back
 
 The issue body carries a machine-readable correlation block naming the HQ task,
@@ -126,12 +143,26 @@ issue in any particular repository. So the row grants **no** effective
 capability, and repository-level authority is settled where it matters — at
 dispatch, which refuses when the account does not own the target.
 
+**Which surfaces show it.** `npm run hq:snapshot` — the local CLI that refreshes
+the Connection Center's live data on the Founder workstation — wires the real
+transport, so the page's live refresh reports the observed state. The static
+site build (`build:site`) deliberately does not: it runs in CI, where spawning
+`gh` would observe a runner rather than the Founder's machine, so the
+build-time render keeps its honest configuration-only answer. A host wiring its
+own surface uses `connectionProbesWithGitHubDispatch(transport)`.
+
 ## Credentials
 
 Nothing in this lane reads, renders, logs, copies or transmits a token value.
 The Founder's existing `gh` session is reused as-is; what HQ reports is presence
-and identity — a binary was found, a live check succeeded, the account is
-`<login>`. There is no code path that accepts a token as an argument.
+and identity — a binary was found, a live check succeeded, the account is the
+observed login. There is no code path that accepts a token as an argument.
+
+Every `gh` invocation is **host-qualified to `github.com`** (`DISPATCH_HOST`),
+for both the auth check and the issue creation. A bare `owner/repo` would
+otherwise resolve against `GH_HOST`, so a workstation configured for GitHub
+Enterprise would have published the instruction — irreversibly — to that host
+instead.
 
 ## Publication is a real consequence
 

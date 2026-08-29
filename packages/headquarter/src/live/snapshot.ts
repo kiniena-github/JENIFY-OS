@@ -38,7 +38,7 @@ import { classifyCapability, type TaskClassification } from '../application/clas
 import { founderConsole, type FounderConsole } from '../application/console.js';
 import type { HeadquarterOperations } from '../application/service.js';
 import type { SecretsEnv } from '../routing/providers.js';
-import { assessConnections, type ConnectionStatus } from './connections.js';
+import { assessConnections, type ConnectionProbe, type ConnectionStatus } from './connections.js';
 import { assertBrowserSafe, assertNoFabricatedFields } from './redaction.js';
 import {
   section,
@@ -248,6 +248,17 @@ export interface LiveSnapshotOptions {
    */
   mode?: SourceMode;
   activityLimit?: number;
+  /**
+   * Connection probes to assess with (issue #221, Codex P2 on `1d5b3bf`).
+   *
+   * Omitted, the default catalogue probes are used, exactly as before — which is
+   * the right answer for a CI or static-site build, where nothing may spawn a
+   * process or call a provider. A caller that runs ON the machine holding an
+   * integration (the local `hq:snapshot` CLI) passes a probe set that can
+   * genuinely observe it, so the Connection Center shows what is actually true
+   * there instead of a generic environment-variable inventory.
+   */
+  connectionProbes?: readonly ConnectionProbe[];
 }
 
 /**
@@ -278,7 +289,7 @@ export function liveSnapshotFromOperations(
     connections: {
       // Connection state is evidence-derived on every build; it is never
       // inherited from the snapshot's own mode.
-      data: assessConnections(env, { now: at }),
+      data: assessConnections(env, { now: at, probes: options.connectionProbes }),
       provenance: {
         mode,
         source: 'live/connections.assessConnections over observed environment facts',

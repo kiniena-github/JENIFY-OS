@@ -80,6 +80,30 @@ export class EvidenceLog {
     };
   }
 
+  /**
+   * Run `fn` inside an IMMEDIATE write transaction (issue #221, Codex P1 on
+   * `1d5b3bf`).
+   *
+   * For a caller that must READ the log and then APPEND to it as one indivisible
+   * decision — "has this already been done? if not, claim it" — the two halves
+   * cannot be separate statements. Two processes holding the same database file
+   * both read "not done", both append, and both go on to perform an irreversible
+   * side effect. That is not hypothetical for the dispatch lane: the side effect
+   * is a public GitHub issue, and the CLI has no process-level exclusion.
+   *
+   * IMMEDIATE, not deferred: the write lock is taken at BEGIN rather than at the
+   * first write, so the second caller blocks BEFORE its read instead of reading
+   * a stale answer and discovering the conflict too late to matter. A caller
+   * that cannot acquire the lock gets SQLITE_BUSY — an exception, which is the
+   * fail-closed outcome — rather than a duplicate.
+   *
+   * The log itself is unchanged: still append-only, still hash-chained. This
+   * only decides when the append happens relative to a read.
+   */
+  reserve<T>(fn: () => T): T {
+    return this.db.transaction(fn).immediate();
+  }
+
   list(taskId?: string): EvidenceEntry[] {
     const rows = (
       taskId

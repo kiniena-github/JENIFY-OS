@@ -34,9 +34,11 @@ import {
   sanitizeIssueTitleText,
 } from '../src/providers/claude/dispatch.js';
 import {
+  DISPATCH_HOST,
   ghCliTransport,
   parseAuthAccount,
   parseIssueUrl,
+  qualifiedTargetSlug,
   unavailableTransport,
   type GitHubIssueRequest,
   type GitHubIssueResult,
@@ -378,6 +380,168 @@ describe('dispatch is idempotent, and an uncertain outcome is never blindly retr
     const again = expectOk(dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport: stubTransport({}) }));
     expect(again.deduplicated).toBe(true);
     expect(again.issueNumber).toBe(99);
+  });
+});
+
+describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf)', () => {
+  it('publishes nothing when the attempt reservation cannot be recorded', () => {
+    // A guard that could not be written is a guard that does not exist. If the
+    // `attempted` entry is lost, a created issue would be invisible to
+    // `dispatchHistory` and the next run would open a second one.
+    const fixture = orderFixture();
+    const taskId = placeOrder(fixture);
+    const transport = stubTransport({});
+    const evidence = fixture.ops.queue.evidence as unknown as { append: (entry: unknown) => unknown };
+    const realAppend = evidence.append.bind(fixture.ops.queue.evidence);
+    evidence.append = (entry: unknown) => {
+      if ((entry as { kind: string }).kind === CLAUDE_DISPATCH_EVIDENCE.attempted) {
+        throw new Error('database is locked');
+      }
+      return realAppend(entry);
+    };
+
+    const result = dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('evidence_unavailable');
+    expect(transport.calls).toHaveLength(0);
+  });
+
+  it('never reports success for an issue it could not record', () => {
+    const fixture = orderFixture();
+    const taskId = placeOrder(fixture);
+    const transport = stubTransport({});
+    const evidence = fixture.ops.queue.evidence as unknown as { append: (entry: unknown) => unknown };
+    const realAppend = evidence.append.bind(fixture.ops.queue.evidence);
+    evidence.append = (entry: unknown) => {
+      if ((entry as { kind: string }).kind === CLAUDE_DISPATCH_EVIDENCE.succeeded) {
+        throw new Error('disk full');
+      }
+      return realAppend(entry);
+    };
+
+    const result = dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('dispatch_unrecorded');
+    // The operator is handed what they need to reconcile it by hand.
+    expect(result.error.details?.issueUrl).toContain('/issues/4242');
+    // And the attempt is left OPEN, so a retry refuses instead of duplicating.
+    evidence.append = realAppend;
+    expect(dispatchHistory(fixture.ops, taskId).state).toBe('unknown');
+    const retry = dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport: stubTransport({}) });
+    expect(retry.ok).toBe(false);
+    if (retry.ok) throw new Error('unreachable');
+    expect(retry.error.code).toBe('dispatch_outcome_unknown');
+  });
+
+  it('reserves the dispatch atomically, so a concurrent winner is honoured', () => {
+    // The race Codex found: two processes both read `none` and both publish.
+    // The reservation re-reads inside its own write transaction, so a dispatch
+    // that landed after the fast-path check is seen before anything is created.
+    const fixture = orderFixture();
+    const taskId = placeOrder(fixture);
+    const first = stubTransport({});
+    const second = stubTransport({});
+    // Simulate the interleaving: the other process completes its whole dispatch
+    // between this one's fast-path history read and its reservation.
+    let raced = false;
+    const racingTransport: GitHubIssueTransport & { calls: GitHubIssueRequest[] } = {
+      ...second,
+      status: () => {
+        if (!raced) {
+          raced = true;
+          expectOk(dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport: first }));
+        }
+        return second.status();
+      },
+    };
+
+    const result = expectOk(dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport: racingTransport }));
+    expect(result.deduplicated).toBe(true);
+    expect(first.calls).toHaveLength(1);
+    // The loser published nothing.
+    expect(second.calls).toHaveLength(0);
+  });
+
+  it('treats a create that was started and then killed as outcome-unknown', () => {
+    // `spawnSync` reports ETIMEDOUT after the process ran, so the issue may
+    // already exist. Calling that a failure is what licenses a duplicate.
+    const transport = ghCliTransport({
+      ghPath: '/usr/bin/gh',
+      spawnImpl: () => {
+        const error: NodeJS.ErrnoException = new Error('spawnSync gh ETIMEDOUT');
+        error.code = 'ETIMEDOUT';
+        return { status: null, stdout: '', stderr: '', error };
+      },
+    });
+    const result = transport.createIssue({ target: TARGET, title: 't', body: 'b' });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.kind).toBe('unreadable_response');
+  });
+
+  it('still calls a never-started process unavailable, so that stays retryable', () => {
+    const transport = ghCliTransport({
+      ghPath: '/usr/bin/gh',
+      spawnImpl: () => {
+        const error: NodeJS.ErrnoException = new Error('spawnSync gh ENOENT');
+        error.code = 'ENOENT';
+        return { status: null, stdout: '', stderr: '', error };
+      },
+    });
+    const result = transport.createIssue({ target: TARGET, title: 't', body: 'b' });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.kind).toBe('unavailable');
+  });
+
+  it('treats a non-zero exit that still printed an issue URL as unknown', () => {
+    const transport = ghCliTransport({
+      ghPath: '/usr/bin/gh',
+      spawnImpl: () => ({
+        status: 1,
+        stdout: `https://github.com/${TARGET.owner}/${TARGET.repo}/issues/7\n`,
+        stderr: 'something went wrong afterwards',
+      }),
+    });
+    const result = transport.createIssue({ target: TARGET, title: 't', body: 'b' });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.kind).toBe('unreadable_response');
+  });
+});
+
+describe('the transport is pinned to github.com, whatever GH_HOST says', () => {
+  it('host-qualifies the repository it creates the issue in', () => {
+    const seen: string[][] = [];
+    const transport = ghCliTransport({
+      ghPath: '/usr/bin/gh',
+      spawnImpl: (_command, args) => {
+        seen.push(args);
+        return {
+          status: 0,
+          stdout: `https://github.com/${TARGET.owner}/${TARGET.repo}/issues/9\n`,
+          stderr: '',
+        };
+      },
+    });
+    expect(transport.createIssue({ target: TARGET, title: 't', body: 'b' }).ok).toBe(true);
+    const repoArg = seen[0]![seen[0]!.indexOf('--repo') + 1];
+    expect(repoArg).toBe(`${DISPATCH_HOST}/${TARGET.owner}/${TARGET.repo}`);
+    expect(qualifiedTargetSlug(TARGET)).toBe('github.com/kiniena-github/JENIFY-OS');
+  });
+
+  it('asks about the session on that same host', () => {
+    const seen: string[][] = [];
+    ghCliTransport({
+      ghPath: '/usr/bin/gh',
+      spawnImpl: (_command, args) => {
+        seen.push(args);
+        return { status: 0, stdout: '', stderr: 'Logged in to github.com account kiniena-github (keyring)' };
+      },
+    }).status();
+    expect(seen[0]).toEqual(['auth', 'status', '--hostname', DISPATCH_HOST]);
   });
 });
 
