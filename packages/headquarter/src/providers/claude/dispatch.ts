@@ -82,6 +82,7 @@ import { assertBrowserSafe } from '../../live/redaction.js';
 import { isRole, type ProviderId, type Role } from '../../routing/providers.js';
 import {
   isValidTarget,
+  parseIssueUrl,
   sameRepository,
   targetSlug,
   type GitHubIssueResult,
@@ -924,6 +925,33 @@ export function resolveUnknownDispatch(
   }
   if (!isValidTarget(input.target) || !Number.isInteger(input.issueNumber) || input.issueNumber <= 0) {
     return refuse('invalid_target', 'Reconciling a found dispatch needs a valid owner/repo and issue number.');
+  }
+  // The URL has to AGREE with the target and number it is recorded beside
+  // (issue #224, Codex P2 on `f9383dc`). It used to be taken verbatim while
+  // only the separately-supplied pair was checked, so a reconciliation could
+  // close an uncertain attempt with a URL pointing at another repository or
+  // another issue entirely — and that URL becomes the authoritative
+  // `succeeded` evidence, which every later deduplicated dispatch hands back as
+  // its receipt. A wrong link there is not cosmetic: it is what an operator
+  // opens to confirm the work, and what `answerAlreadyDispatched` returns
+  // instead of publishing again.
+  //
+  // `parseIssueUrl` is the same target-scoped parser the transport uses on a
+  // real creation, so the reconciliation path and the live path agree on what
+  // counts as this repository's issue URL. Requiring the parsed number to equal
+  // the supplied one closes the remaining gap: a URL for issue 7 recorded as
+  // issue 9 would otherwise pass the parser.
+  const parsed = parseIssueUrl(input.issueUrl ?? '', input.target);
+  if (parsed == null || parsed.number !== input.issueNumber) {
+    return refuse(
+      'invalid_target',
+      `The issue URL does not match the reconciliation it is being recorded for. It must be a ` +
+        `github.com issue URL for ${targetSlug(input.target)} numbered ${input.issueNumber}. ` +
+        'Nothing was recorded: this URL would become the authoritative dispatch evidence and the ' +
+        'receipt every later duplicate dispatch is answered with, so a mismatched one is refused ' +
+        'rather than stored.',
+      { issueNumber: input.issueNumber, repository: targetSlug(input.target) },
+    );
   }
   const at = new Date().toISOString();
   ops.queue.evidence.append({

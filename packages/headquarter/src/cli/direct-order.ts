@@ -80,11 +80,16 @@ import { probeCodex } from '../providers/codex/probe.js';
 import { formatOrderReceipt } from './order-receipt.js';
 import { transportRouteAvailability } from '../providers/claude/dispatch-availability.js';
 import { ghCliTransport } from '../providers/claude/transport.js';
+import { readFlag, missingFlagValueMessage } from './flags.js';
 
 function flag(argv: string[], name: string): string | null {
-  const index = argv.indexOf(`--${name}`);
-  if (index === -1 || index + 1 >= argv.length) return null;
-  return argv[index + 1] ?? null;
+  // Three outcomes, not two (issue #224, Codex P2 on `f9383dc`). A flag given
+  // without a value REFUSES rather than falling back to a default nobody chose
+  // or swallowing the next option as its value — this command writes to the HQ
+  // database, so a malformed invocation must not mutate anything.
+  const reading = readFlag(argv, name);
+  if (reading.kind === 'missing_value') usage(missingFlagValueMessage(name));
+  return reading.kind === 'value' ? reading.value : null;
 }
 
 function usage(message: string): never {
