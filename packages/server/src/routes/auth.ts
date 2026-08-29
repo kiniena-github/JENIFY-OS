@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { Db } from '../db/index.js';
-import { SESSION_COOKIE, requireCtx } from '../app.js';
+import { SESSION_COOKIE, requireCtx, sessionCookieOptions } from '../app.js';
 import { login, logout } from '../services/auth.js';
 import { getTenant } from '../services/provisioning.js';
 import { getBundle, listLanguages } from '../services/translations.js';
@@ -66,9 +66,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
     }
     clearAuthFailures(rlKey);
     reply.setCookie(SESSION_COOKIE, result.token, {
-      path: '/',
-      httpOnly: true,
-      sameSite: 'lax',
+      ...sessionCookieOptions(req),
       expires: new Date(result.expiresAt),
     });
     const tenant = getTenant(db, result.user.tenantId);
@@ -78,7 +76,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
   app.post('/api/auth/logout', async (req, reply) => {
     const token = req.cookies?.[SESSION_COOKIE];
     if (token) logout(db, token);
-    reply.clearCookie(SESSION_COOKIE, { path: '/' });
+    reply.clearCookie(SESSION_COOKIE, sessionCookieOptions(req));
     return { ok: true };
   });
 
