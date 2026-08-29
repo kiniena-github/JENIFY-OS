@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -65,12 +65,10 @@ function decide(env: Record<string, string>): Outputs {
       ACTOR: OWNER,
       ACTOR_TYPE: 'User',
       COMMENT_BODY: '',
-      // The durable HQ-dispatch record the script now REQUIRES (#224, Codex P1
-      // on `2dc86e8`). The default is the ordinary case — a hand-opened issue,
-      // whose timeline carries no `jenify-hq-dispatch` label event. Cases that
-      // exercise the guard override it, and `refuses to run without` below pins
-      // that omitting it entirely is a hard failure rather than this default.
-      HQ_DISPATCH_PROVENANCE: 'not_dispatched',
+      // An ordinary human-opened AI task: the durable lookup came back clean.
+      // Stated because the single-use guard fails CLOSED without it (#224) —
+      // that refusal is asserted on its own further down this file.
+      HQ_DISPATCH_EVIDENCE: 'never_dispatched',
       ...env,
       GITHUB_OUTPUT: outFile,
     },
@@ -337,107 +335,86 @@ describe('decide-routing.ts — blocked reporting wiring', () => {
 });
 
 /**
- * The durable HQ-dispatch record is a REQUIRED input of this script (#224,
- * Codex P1 on `2dc86e8`).
+ * The durable HQ-dispatch fact, at the WIRING boundary (issue #224, Codex P1 on
+ * `2dc86e8`).
  *
- * `decideRouting` treats an absent value as "this caller did not look", which
- * keeps the pure function composable. A WORKFLOW that did not look is a
- * different thing: it is a workflow silently running the pre-fix guard, where
- * the only evidence left is the issue body — a surface the account being guarded
- * can edit. Issue #224 has produced that exact defect four times (a guard
- * correct where it was wired, absent where it was not), so the requirement is
- * enforced at the one seam every workflow goes through instead of being trusted.
+ * `hq-dispatched-issue-retrigger.test.ts` proves the rule. This proves that the
+ * script the workflows actually run reads the env var the composite action
+ * writes, and that every way of NOT reading it lands on a refusal rather than on
+ * a permissive default. A rule that fails closed in the module and opens up in
+ * the entry point is not a rule.
  */
-describe('decide-routing.ts — the durable HQ-dispatch record is required', () => {
-  /** Run the script and capture the failure instead of letting it throw. */
-  function attempt(env: Record<string, string>): { status: number; stderr: string } {
-    counter += 1;
-    const outFile = path.join(workDir, `req-${counter}.txt`);
-    writeFileSync(outFile, '');
-    const result = spawnSync(process.execPath, [tsxCli, script], {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        ...REAL_SECRETS,
-        EVENT_NAME: 'issues',
-        EVENT_ACTION: 'opened',
-        REPO_OWNER: OWNER,
-        ISSUE_AUTHOR: OWNER,
-        ACTOR: OWNER,
-        ACTOR_TYPE: 'User',
-        COMMENT_BODY: '',
-        ISSUE_TITLE: '[AI TASK][CLAUDE] x',
-        TARGET_PROVIDER: 'CLAUDE',
-        ...env,
-        GITHUB_OUTPUT: outFile,
-      },
-      encoding: 'utf8',
-    });
-    return { status: result.status ?? -1, stderr: `${result.stderr ?? ''}${readFileSync(outFile, 'utf8')}` };
-  }
-
-  it('refuses to run when the record is missing', () => {
-    const r = attempt({ HQ_DISPATCH_PROVENANCE: '' });
-    expect(r.status).toBe(1);
-    expect(r.stderr).toContain('HQ_DISPATCH_PROVENANCE');
-    // Nothing was decided: a caller reading the outputs must find none rather
-    // than a stale or defaulted answer.
-    expect(r.stderr).not.toContain('outcome=');
-  });
-
-  it('refuses a value it does not recognise rather than guessing one', () => {
-    // Including the plausible near-miss. A typo must not degrade to the
-    // permissive answer.
-    for (const value of ['true', 'false', 'NOT_DISPATCHED', 'yes', 'dispatched ']) {
-      const r = attempt({ HQ_DISPATCH_PROVENANCE: value });
-      if (value === 'dispatched ') {
-        // Surrounding whitespace is paste noise, not ambiguity: trimmed and
-        // accepted, like every other flag reader in this repo.
-        expect(r.status).toBe(0);
-      } else {
-        expect(r.status, `value ${JSON.stringify(value)} must be refused`).toBe(1);
-      }
-    }
-  });
-
-  it('accepts each of the three values it documents', () => {
-    for (const value of ['dispatched', 'not_dispatched', 'unverified']) {
-      expect(attempt({ HQ_DISPATCH_PROVENANCE: value }).status, value).toBe(0);
-    }
-  });
-});
-
-describe('decide-routing.ts — the durable record decides re-triggerability', () => {
-  const RETRIGGER = {
+describe('decide-routing.ts fails closed on the durable HQ-dispatch fact', () => {
+  const COMMENT = {
     EVENT_NAME: 'issue_comment',
     EVENT_ACTION: 'created',
+    ISSUE_TITLE: '[AI TASK][CLAUDE] x',
     COMMENT_BODY: '<!-- jenify-run -->',
-    ISSUE_TITLE: '[AI TASK][CLAUDE][BUILDER] HQ order task-1',
     TARGET_PROVIDER: 'CLAUDE',
   };
 
-  it('refuses a re-trigger when the durable record says HQ dispatched it, even with the body edited clean', () => {
-    // The exact attack: the owner edits their own issue body to remove HQ's
-    // marker, then comments. Before the fix this ROUTEd.
+  it('refuses a re-trigger when the variable is UNSET', () => {
+    // The whole point of the shape: a workflow that forgets to wire the
+    // variable loses re-triggering, it does not lose the guard.
+    const r = decide({ ...COMMENT, HQ_DISPATCH_EVIDENCE: '' });
+    expect(r.outcome).toBe('IGNORE');
+    expect(r.should_run).toBe('false');
+  });
+
+  it('refuses a re-trigger on an unestablished lookup', () => {
+    const r = decide({ ...COMMENT, HQ_DISPATCH_EVIDENCE: 'unknown' });
+    expect(r.outcome).toBe('IGNORE');
+    expect(r.should_run).toBe('false');
+  });
+
+  it('refuses when the history says dispatched, even with a body scrubbed clean', () => {
+    // The attack the durable fact exists for: the owner edits HQ's marker out
+    // of the body and re-triggers. The body here is deliberately innocent.
     const r = decide({
-      ...RETRIGGER,
-      ISSUE_BODY: 'I have rewritten this issue by hand. Nothing here mentions HQ.',
-      HQ_DISPATCH_PROVENANCE: 'dispatched',
+      ...COMMENT,
+      ISSUE_BODY: 'An ordinary looking instruction with no marker in it.',
+      HQ_DISPATCH_EVIDENCE: 'dispatched',
+    });
+    expect(r.outcome).toBe('IGNORE');
+    expect(r.should_run).toBe('false');
+    expect(r.reason).toContain('edit history');
+  });
+
+  it('refuses the PROVIDER SUBSTITUTION that a scrubbed body was hiding', () => {
+    const r = decide({
+      ...COMMENT,
+      COMMENT_BODY: '<!-- jenify-run: GEMINI -->',
+      ISSUE_BODY: 'An ordinary looking instruction with no marker in it.',
+      HQ_DISPATCH_EVIDENCE: 'dispatched',
+      TARGET_PROVIDER: 'GEMINI',
     });
     expect(r.outcome).toBe('IGNORE');
     expect(r.should_run).toBe('false');
     expect(r.dispatch_to).toBe('');
-    expect(r.reason).toContain('JENIFY HQ');
   });
 
-  it('refuses a re-trigger it could not verify', () => {
-    const r = decide({ ...RETRIGGER, ISSUE_BODY: 'edited clean', HQ_DISPATCH_PROVENANCE: 'unverified' });
-    expect(r.outcome).toBe('BLOCKED');
-    expect(r.should_run).toBe('false');
+  it('treats an unrecognised value as unknown rather than as a clean answer', () => {
+    for (const raw of ['NEVER_DISPATCHED', 'never-dispatched', 'true', 'yes']) {
+      const r = decide({ ...COMMENT, HQ_DISPATCH_EVIDENCE: raw });
+      expect(r.outcome, `value ${raw}`).toBe('IGNORE');
+    }
   });
 
-  it('leaves an ordinary AI task re-triggerable', () => {
-    const r = decide({ ...RETRIGGER, ISSUE_BODY: 'A human wrote this.', HQ_DISPATCH_PROVENANCE: 'not_dispatched' });
+  it('allows the re-trigger only on a positive never_dispatched', () => {
+    const r = decide({ ...COMMENT, HQ_DISPATCH_EVIDENCE: 'never_dispatched' });
+    expect(r.outcome).toBe('ROUTE');
+    expect(r.should_run).toBe('true');
+  });
+
+  it('never blocks the dispatch itself, whatever the lookup said', () => {
+    // An unresolvable lookup must not brick the lane it is guarding.
+    const r = decide({
+      EVENT_NAME: 'issues',
+      EVENT_ACTION: 'opened',
+      ISSUE_TITLE: '[AI TASK][CLAUDE] x',
+      TARGET_PROVIDER: 'CLAUDE',
+      HQ_DISPATCH_EVIDENCE: 'unknown',
+    });
     expect(r.outcome).toBe('ROUTE');
     expect(r.should_run).toBe('true');
   });

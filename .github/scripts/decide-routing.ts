@@ -16,16 +16,11 @@
  *   COMMENT_BODY     body of the triggering comment (issue_comment only)
  *   ISSUE_BODY       body of the issue itself, so an HQ-dispatched issue is
  *                    recognised and cannot be re-triggered from here (#224)
- *   HQ_DISPATCH_PROVENANCE
- *                    REQUIRED. `dispatched` | `not_dispatched` | `unverified`,
- *                    read from the issue's DURABLE label timeline — the record
- *                    an issue-body edit cannot erase (#224, Codex P1 on
- *                    `2dc86e8`). Missing or unrecognised is a hard failure, not
- *                    a default: a caller that forgets to wire it would
- *                    otherwise silently get the pre-fix behaviour, which is the
- *                    exact shape of defect this issue has already produced four
- *                    times. Report a read that failed as `unverified`; never as
- *                    `not_dispatched`.
+ *   HQ_DISPATCH_EVIDENCE
+ *                    durable verdict from the issue's immutable edit history:
+ *                    dispatched | never_dispatched | unknown. Anything else,
+ *                    including absent, is read as `unknown` and FAILS CLOSED —
+ *                    the body marker alone is erasable by the owner (#224)
  *   REPO_OWNER       repository owner login
  *   TARGET_PROVIDER  provider this workflow can execute (CLAUDE | GEMINI | '')
  *   DEDUPE_KEY       stable id for duplicate suppression
@@ -46,10 +41,8 @@ import { appendFileSync } from 'node:fs';
 import {
   decideRouting,
   blockedHeadline,
-  isHqDispatchProvenance,
-  HQ_DISPATCH_PROVENANCE_VALUES,
+  parseHqDispatchEvidence,
   PROVIDER_REGISTRY,
-  type HqDispatchProvenance,
   type ProviderId,
   type SecretsEnv,
   type TriggerKind,
@@ -95,32 +88,7 @@ function setOutput(key: string, value: string): void {
 
 const target = env('TARGET_PROVIDER').toUpperCase();
 
-/**
- * The durable HQ-dispatch record, as the calling workflow observed it.
- *
- * REQUIRED, and refused rather than defaulted. `decideRouting` treats an absent
- * value as "this caller did not look", which keeps the pure function composable
- * for unit tests — but a WORKFLOW that did not look is a workflow running the
- * pre-fix guard, and it would do so silently with every test green. Issue #224
- * has produced that exact defect four times (a guard correct where it was wired
- * and absent where it was not), so the wiring is enforced HERE, at the one seam
- * every workflow goes through, instead of being trusted.
- */
-function hqDispatchProvenance(): HqDispatchProvenance {
-  const raw = env('HQ_DISPATCH_PROVENANCE').trim();
-  if (isHqDispatchProvenance(raw)) return raw;
-  console.error(
-    `[routing] HQ_DISPATCH_PROVENANCE must be one of ${HQ_DISPATCH_PROVENANCE_VALUES.join(' | ')}; got ` +
-      `${raw === '' ? '<empty>' : JSON.stringify(raw)}. This is the durable record that decides whether an ` +
-      'issue JENIFY HQ dispatched may be re-triggered from GitHub; the editable issue body cannot answer ' +
-      'that on its own. Read it from the issue label timeline and report a failed read as `unverified`. ' +
-      'No routing decision was made.',
-  );
-  process.exit(1);
-}
-
 const decision = decideRouting({
-  hqDispatchProvenance: hqDispatchProvenance(),
   trigger: triggerKind(),
   issueTitle: env('ISSUE_TITLE'),
   actorLogin: env('ACTOR'),
@@ -129,6 +97,9 @@ const decision = decideRouting({
   actorIsBot: env('ACTOR_TYPE') === 'Bot' || env('ACTOR').endsWith('[bot]'),
   commentBody: env('COMMENT_BODY'),
   issueBody: env('ISSUE_BODY'),
+  // Normalised here rather than trusted: an unset or misspelled value must read
+  // as `unknown` (refuse), never as a clean `never_dispatched`.
+  hqDispatchEvidence: parseHqDispatchEvidence(process.env.HQ_DISPATCH_EVIDENCE),
   dedupeKey: env('DEDUPE_KEY') || undefined,
   secrets: secretsFromFlags(),
 });
@@ -177,8 +148,7 @@ setOutput('blocked_report', blockedReport);
 setOutput('blocked_marker', decision.blockedReportKey == null ? '' : `<!-- jenify-routing-blocked:${decision.blockedReportKey} -->`);
 setOutput('should_report_blocked', shouldReportBlocked ? 'true' : 'false');
 
-console.log(
-  `[routing] trigger=${triggerKind()} target=${target || '<none>'} hqDispatchRecord=${env('HQ_DISPATCH_PROVENANCE').trim()}`,
-);
+console.log(`[routing] trigger=${triggerKind()} target=${target || '<none>'}`);
+console.log(`[routing] hqDispatchEvidence=${parseHqDispatchEvidence(process.env.HQ_DISPATCH_EVIDENCE)}`);
 console.log(`[routing] outcome=${decision.outcome} dispatchTo=[${decision.dispatchTo.join(', ')}] shouldRun=${shouldRun}`);
 console.log(`[routing] ${decision.reason}`);

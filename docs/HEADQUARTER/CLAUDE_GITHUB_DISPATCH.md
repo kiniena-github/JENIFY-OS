@@ -215,54 +215,97 @@ NAME a provider, `<!-- jenify-run: GEMINI -->` on a CLAUDE-bound task was
 provider substitution through the one door that never checked the binding.
 
 `decideRouting` therefore refuses any trigger other than the `opened` event on
-an issue whose body carries HQ's dispatch marker. The rule is written as *allow
-the dispatch*, not as *deny these triggers*: the first version of it denied the
-comment and the manual dispatch that review had named, and the label event —
-reachable by removing and re-adding `ai-task` — still routed. A trigger added to
-the workflow later is refused on an HQ issue by default.
+an issue HQ dispatched. The rule is written as *allow the dispatch*, not as
+*deny these triggers*: the first version of it denied the comment and the manual
+dispatch that review had named, and the label event — reachable by removing and
+re-adding `ai-task` — still routed. A trigger added to the workflow later is
+refused on an HQ issue by default.
+
+### Where "HQ dispatched this" comes from
+
+Not from the issue body. The body carries HQ's marker, but a body is editable,
+and the account that can edit it is the repository owner — the only account this
+workflow accepts triggers from in the first place. Reading the marker out of the
+current body made the guard erasable by exactly the actor it constrains: delete
+the marker, comment `<!-- jenify-run: GEMINI -->`, and both the unbounded
+re-execution and the provider substitution are back.
+
+The fact is therefore derived from GitHub's **immutable issue edit history**
+(`userContentEdits`), which retains the diff of every earlier version of the
+body. Editing the body adds to that record; nothing an issue author can do
+removes an entry. `.github/actions/hq-dispatch-evidence` resolves one of three
+verdicts and every router-calling workflow passes it in as
+`HQ_DISPATCH_EVIDENCE`:
+
+| Verdict | Established when | Effect on a re-trigger |
+| --- | --- | --- |
+| `dispatched` | the marker is in the body now, or in the diff of any earlier version | refused |
+| `never_dispatched` | the full history was readable and no version ever carried the marker | allowed (ordinary AI task) |
+| `unknown` | the lookup failed, the history was truncated past 100 edits, or any single diff was not visible | refused |
+
+`unknown` **and an absent value both fail closed.** That is the point of the
+shape: if omitting the input were permissive, omitting the input would itself be
+the bypass — the defect class this issue produced four separate times. The
+resolver never aborts the job on an API failure; it reaches the routing module
+with `unknown`, which refuses. The body marker survives only as compatibility
+evidence, and it can only ever add a refusal, never clear one: an issue whose
+body says HQ dispatched it is refused even if the durable verdict says
+`never_dispatched`.
+
+The resolver is one composite action called by every lane rather than a step
+copied into each, and a structural test asserts that — because the previous
+round of this same guard reached one of the two router-calling workflows and was
+silently absent from the other.
+
+### A second durable source: the dispatch label
+
+The edit history is immutable, but it is not always **legible**.
+`UserContentEdit.diff` comes back null for a revision whose content the author
+deleted, and for a token that cannot see it — so the resolver correctly answers
+`unknown` and refuses. Safe, and it would also permanently freeze re-triggering
+for an ORDINARY AI task whose body happens to have been edited once. Failing
+closed on the wrong population is still a cost.
+
+So HQ stamps every issue it dispatches with the `jenify-hq-dispatch` **label**,
+and `hq:dispatch-claude` applies it unconditionally — the caller cannot opt out,
+because an issue whose only HQ identity is the erasable one is the defect this
+identity exists to prevent. Applying a label writes an entry into the issue
+timeline that no repository permission can delete; removing the label afterwards
+only appends `unlabeled` beside it. The resolver reads it over plain REST, with
+no diff and no visibility caveat.
+
+That second source is consulted **only to say `dispatched`**, never to clear an
+issue: the absence of the label proves nothing about an issue dispatched before
+HQ stamped one. It can therefore only make the verdict stricter, and a failed
+read of it leaves a `never_dispatched` the edit history proved standing on its
+own.
+
+| Edit history says | Label timeline says | Verdict |
+| --- | --- | --- |
+| `dispatched` | (not consulted) | `dispatched` |
+| `never_dispatched` | no label event | `never_dispatched` |
+| `never_dispatched` | label event | `dispatched` |
+| `unknown` | no label event, or unreadable | `unknown` |
+| `unknown` | label event | `dispatched` |
+
+The label must exist in the target repository before `gh` will apply it, so
+dispatch creates it if it is missing (`gh label create`, never `--force`: this is
+not a licence to edit repository configuration somebody else set up). That step
+runs **last of the checks and immediately before the reservation**, because it is
+the first repository WRITE the dispatch path makes — every refusal above it
+(ineligible task, no session, wrong account, a credential in the rendered body)
+must cost no write at all. If the label cannot be made to exist, the dispatch
+refuses with `dispatch_label_unavailable`, publishes nothing, consumes no
+approval, and a retry is still a first dispatch.
+
+`--check-only` reports this as NOT CHECKED, deliberately: the only way to
+establish whether the label exists is to create it, and that command writes
+nothing.
 
 Operationally: **to run a dispatched task again, approve it again.** A fresh
 Founder approval and a fresh `hq:dispatch-claude`, which publishes a new issue
 with its own claim and fence. Ordinary AI tasks that a human opened are
 untouched and stay re-triggerable by comment, label and manual dispatch.
-
-### The identity has to survive an edit
-
-The marker lives in the issue BODY, and HQ's issue is authored by the repository
-OWNER — the same account this boundary binds. An author may edit their own issue
-body, so removing the marker turned the issue back into an ordinary `[AI TASK]`
-one and every door above reopened. A note the guarded actor can erase is not an
-identity.
-
-So the identity has a **durable half**: the `jenify-hq-dispatch` **label**, which
-`hq:dispatch-claude` applies when it opens the issue. Applying a label writes an
-entry into the issue's timeline that no repository permission can delete;
-removing the label afterwards only appends `unlabeled` beside it. Editing the
-body cannot reach either.
-
-Both workflows read that timeline before routing and hand `decideRouting` one of
-three answers:
-
-| The workflow observed | It reports | The router |
-|---|---|---|
-| a `jenify-hq-dispatch` label event on the issue | `dispatched` | refuses every trigger but `opened` |
-| the timeline, with no such event | `not_dispatched` | routes exactly as before |
-| nothing — the read failed | `unverified` | refuses every trigger but `opened` |
-
-The third row is the point of having three. A failed read is **not** a "no": if
-the durable record cannot be seen, the only evidence left is the surface the
-guarded actor controls, so a re-trigger is refused rather than guessed. Opening
-a NEW task is unaffected — the guard fails closed on the guarded act, not on the
-lane.
-
-The two sources are a **union**. An issue dispatched before the label existed
-carries only the body marker, and it is still recognised.
-
-`.github/scripts/decide-routing.ts` **refuses to run** without
-`HQ_DISPATCH_PROVENANCE`, so a workflow that forgets to wire it fails loudly
-instead of silently running the pre-fix guard, and
-`test/routing-callers-supply-issue-body.test.ts` asserts over the whole workflow
-directory that every caller supplies and observes it.
 
 ## Reading the result back (issue #224)
 
@@ -338,15 +381,16 @@ In order, and any "no" refuses without creating an issue:
    the target repository** — the workflow only routes AI tasks opened by the
    repository owner, so an issue opened as anyone else would be a public
    artefact no worker ever runs;
-7. the `jenify-hq-dispatch` **label can be made to exist** in the target
+7. the rendered issue passes the same credential guard the browser boundary uses;
+8. the `jenify-hq-dispatch` **label can be made to exist** in the target
    repository — it is the durable half of the HQ identity, and publishing an
    issue whose only identity is the erasable body marker would ship the defect
    that identity exists to prevent. The transport creates the label if it is
    missing and leaves an existing one untouched (never `--force`: this is not a
-   licence to edit repository configuration). A failure here refuses before the
+   licence to edit repository configuration). It is LAST because it is the first
+   repository write, so nothing above it costs one; a failure refuses before the
    reservation, so the approval is not consumed and a retry is still a first
-   dispatch;
-8. the rendered issue passes the same credential guard the browser boundary uses.
+   dispatch.
 
 Every refusal is written to the append-only evidence log, so a dispatch that did
 not happen is visible rather than silent.

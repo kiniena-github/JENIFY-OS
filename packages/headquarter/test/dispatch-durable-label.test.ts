@@ -275,6 +275,18 @@ describe('a durable record that cannot be established publishes nothing', () => 
   });
 });
 
+describe('the durable identity has one spelling', () => {
+  it('uses the same string as the body marker', () => {
+    // A second name for the same fact is how the marker check and the label
+    // check would drift apart, and a drifted guard is one that recognises HQ's
+    // issues on one path and not the other. The shared evidence action greps for
+    // this one string in BOTH the edit history and the label timeline, and
+    // `routing-callers-supply-issue-body.test.ts` ties the shell literal to this
+    // constant.
+    expect(HQ_DISPATCH_LABEL).toBe(HQ_DISPATCH_MARKER);
+  });
+});
+
 describe('the label step does not disturb the refusal ordering', () => {
   it('an ineligible task is refused before the label is even considered', () => {
     // Preparing a label is a repository WRITE. A task that was never going to be

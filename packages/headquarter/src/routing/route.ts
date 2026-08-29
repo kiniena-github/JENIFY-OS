@@ -147,21 +147,17 @@ export function parseRunDirective(body: string | undefined | null): ParsedDirect
 export type TriggerKind = 'issue_opened' | 'issue_labeled' | 'issue_comment' | 'manual_dispatch';
 
 /**
- * What the caller observed in the DURABLE HQ-dispatch record — the issue's
- * label timeline, which issue-body editing cannot reach. See
- * `RoutingRequest.hqDispatchProvenance` for why the third value exists.
+ * Durable verdict on whether JENIFY HQ dispatched an issue. See
+ * `RoutingRequest.hqDispatchEvidence` for how each value is established and why
+ * anything other than `never_dispatched` refuses a re-trigger.
  */
-export type HqDispatchProvenance = 'dispatched' | 'not_dispatched' | 'unverified';
+export type HqDispatchEvidence = 'dispatched' | 'never_dispatched' | 'unknown';
 
-/** The three values a caller may state, for validating untyped (env) input. */
-export const HQ_DISPATCH_PROVENANCE_VALUES: readonly HqDispatchProvenance[] = [
-  'dispatched',
-  'not_dispatched',
-  'unverified',
-];
-
-export function isHqDispatchProvenance(value: unknown): value is HqDispatchProvenance {
-  return typeof value === 'string' && (HQ_DISPATCH_PROVENANCE_VALUES as readonly string[]).includes(value);
+/** Narrow an untrusted string (an env var, a CLI flag) to the union above. */
+export function parseHqDispatchEvidence(raw: string | undefined | null): HqDispatchEvidence {
+  // Anything unrecognised is `unknown`, never `never_dispatched`: a typo, an
+  // empty string or a renamed env var must not read as a clean bill of health.
+  return raw === 'dispatched' || raw === 'never_dispatched' ? raw : 'unknown';
 }
 
 export interface RoutingRequest {
@@ -182,42 +178,38 @@ export interface RoutingRequest {
    *
    * Read for one purpose only: to recognise an issue that HQ itself dispatched.
    * Such an issue carries a canonical task behind it, and the authority to run
-   * that task lives in HQ's claim/approval/fence — not in this workflow. Absent,
-   * the rule below simply does not fire, so callers that cannot supply a body
-   * keep today's behaviour.
+   * that task lives in HQ's claim/approval/fence — not in this workflow.
+   *
+   * COMPATIBILITY EVIDENCE ONLY. The body is mutable, so on its own it cannot
+   * carry this rule — see `hqDispatchEvidence`.
    */
   issueBody?: string;
   /**
-   * The DURABLE observation of the same fact (issue #224, Codex P1 on
-   * `2dc86e8`).
+   * DURABLE evidence of whether this issue was dispatched by JENIFY HQ (issue
+   * #224, Codex P1 on `2dc86e8`).
    *
-   * `issueBody` is mutable by the repository owner, so a marker in it is not an
-   * identity — it is a note the guarded actor can erase. This field carries what
-   * the caller observed in a record that ORDINARY ISSUE EDITING CANNOT REACH:
-   * the issue's label timeline (see `HQ_DISPATCH_LABEL`).
+   * The marker in the body is not authority: an issue body is editable, and the
+   * repository owner — the only account this workflow accepts triggers from
+   * anyway — can delete the marker and then re-trigger the issue freely. The
+   * guard was therefore erasable by the very actor it constrains.
    *
-   * Three-valued on purpose, and the middle value is the point:
+   * So the fact is derived instead from something ordinary editing cannot
+   * erase: GitHub's immutable issue edit history (`userContentEdits`), which
+   * retains the diff of every body version. The caller resolves it and passes
+   * the verdict in; `decideRouting` stays pure.
    *
-   * | Observation                                            | Value             |
-   * |--------------------------------------------------------|-------------------|
-   * | the durable record says HQ dispatched this issue        | `dispatched`      |
-   * | the durable record was read and says it did not         | `not_dispatched`  |
-   * | the caller tried to read it and could not               | `unverified`      |
+   *   `dispatched`       durable evidence shows the HQ marker in the current
+   *                      body or in ANY earlier version of it.
+   *   `never_dispatched` durable evidence shows the marker was never present in
+   *                      any version of the body.
+   *   `unknown`          the durable lookup could not be established.
    *
-   * `unverified` REFUSES every trigger but the dispatch itself. A guard that
-   * cannot see its evidence is not a guard, and the cost of stopping is one
-   * re-run while the cost of continuing is a second execution of a Founder
-   * approval that was single-use.
-   *
-   * Absent (`undefined`) means the caller did not look at all, and keeps
-   * today's behaviour — the same contract `issueBody` already has, so the pure
-   * function stays composable. Real callers are not allowed to be in that
-   * state: `.github/scripts/decide-routing.ts` REFUSES TO RUN without
-   * `HQ_DISPATCH_PROVENANCE`, and
-   * `test/routing-callers-supply-issue-body.test.ts` asserts over the workflow
-   * directory that every caller of the shared router supplies it.
+   * ABSENT AND `unknown` BOTH FAIL CLOSED — the re-trigger is refused. This is
+   * deliberate and is the whole point: if omitting the input were permissive,
+   * omitting the input would itself be the bypass, which is exactly the defect
+   * class this issue has already produced four times.
    */
-  hqDispatchProvenance?: HqDispatchProvenance;
+  hqDispatchEvidence?: HqDispatchEvidence;
   /** stable id used for duplicate suppression */
   dedupeKey?: string;
   secrets: SecretsEnv;
@@ -364,64 +356,44 @@ export function decideRouting(req: RoutingRequest): RoutingDecision {
   // authorised. Re-running such a task is a canonical act — a fresh Founder
   // approval and a fresh `hq:dispatch-claude` — never an event on the issue.
   //
-  // The identity is read from TWO sources, and the durable one is why this
-  // paragraph exists (Codex P1 on `2dc86e8`). The first version derived it from
-  // `req.issueBody` alone. The HQ-dispatched issue is authored by the repository
-  // OWNER — the very actor this boundary binds — and an issue body is editable
-  // by its author. Strip the marker and the router sees an ordinary `[AI TASK]`
-  // issue again: the owner may then comment, re-label or manually dispatch it
-  // and get another execution without a fresh HQ claim or approval, and
-  // `jenify-run: GEMINI` substitutes a provider on a CLAUDE-bound task. The
-  // guard was defeated by an ordinary edit.
+  // WHERE THE FACT COMES FROM (Codex P1 on `2dc86e8`). The first version read
+  // the marker out of the CURRENT body, and an issue body is editable by the
+  // repository owner — the only account that can trigger this workflow at all.
+  // So the guard was erasable by exactly the actor it constrains: delete the
+  // marker, comment `jenify-run: GEMINI`, and both the second execution and the
+  // provider substitution are back. A mutable field cannot carry a rule about
+  // authority.
   //
-  // So the body marker is now the CONVENIENT source, not the authority. The
-  // durable source is `hqDispatchProvenance`: what the caller read out of the
-  // issue's label timeline, a record no repository permission can delete and no
-  // body edit can touch. Either one saying "HQ dispatched this" is enough —
-  // union, not intersection, because each closes a case the other does not (a
-  // body edit defeats the marker; an issue predating the label has only the
-  // marker).
-  const bodyMarker = typeof req.issueBody === 'string' && req.issueBody.includes(HQ_DISPATCH_MARKER);
-  const hqDispatched = bodyMarker || req.hqDispatchProvenance === 'dispatched';
+  // The evidence is therefore the caller-resolved DURABLE fact — GitHub's
+  // immutable issue edit history, which keeps every earlier body version — and
+  // the current-body marker survives only as compatibility evidence for an
+  // issue whose durable lookup is unavailable. The two are combined so that
+  // either one alone is enough to refuse, and only a POSITIVE durable
+  // `never_dispatched` permits the re-trigger:
+  //
+  //   marker in body now          -> refuse (compatibility path)
+  //   durable `dispatched`        -> refuse (marker was edited out)
+  //   durable `unknown` or absent -> refuse (fail closed; see the type)
+  //   durable `never_dispatched`  -> allow  (ordinary AI task, unchanged)
+  const evidence = req.hqDispatchEvidence ?? 'unknown';
+  const markerInCurrentBody = typeof req.issueBody === 'string' && req.issueBody.includes(HQ_DISPATCH_MARKER);
+  const hqDispatched = markerInCurrentBody || evidence !== 'never_dispatched';
   if (hqDispatched && req.trigger !== 'issue_opened') {
+    const cause = markerInCurrentBody
+      ? 'This issue was dispatched by JENIFY HQ for a canonical task.'
+      : evidence === 'dispatched'
+          ? "This issue's edit history shows it was dispatched by JENIFY HQ for a canonical task, " +
+            'even though its body no longer says so.'
+          : 'Whether JENIFY HQ dispatched this issue could not be established from its edit history, ' +
+            'and an unestablished answer is treated as dispatched.';
     return {
       ...base,
       outcome: 'IGNORE',
       reason:
-        'This issue was dispatched by JENIFY HQ for a canonical task. Its execution authority is ' +
-        'the HQ claim, single-use approval and fence, which a comment, a label or a manual dispatch ' +
-        'does not pass through — so re-triggering it here is refused. Re-run it with a fresh Founder ' +
-        'approval and a fresh HQ dispatch.',
-    };
-  }
-
-  // ---- 2c. a durable record that could not be READ is not an absent one ----
-  //
-  // The whole point of moving the identity out of the issue body is that the
-  // body can be rewritten. If the caller could not read the durable record
-  // either, then the only remaining evidence is the surface an attacker
-  // controls — so "no marker in the body" proves nothing at all.
-  //
-  // Refusing here costs one re-run of a re-trigger. Routing here costs a second
-  // execution of a single-use Founder approval, on a task whose provider binding
-  // a comment directive can then override. Fail closed, and say which of the two
-  // it is rather than reporting the generic HQ refusal above, so an operator
-  // reads "I could not check" rather than "this is an HQ issue".
-  //
-  // `issue_opened` is exempt for the same reason it is exempt above: on an HQ
-  // issue that IS the dispatch, and on an ordinary issue there is nothing yet to
-  // re-trigger — freezing new AI tasks because a timeline read failed would turn
-  // a guard on one lane into an outage on all of them.
-  if (req.hqDispatchProvenance === 'unverified' && req.trigger !== 'issue_opened') {
-    return {
-      ...base,
-      outcome: 'BLOCKED',
-      reason:
-        'The durable JENIFY HQ dispatch record for this issue could not be read, so whether it ' +
-        'belongs to a canonical HQ task is UNKNOWN. The issue body alone cannot answer that — it ' +
-        'is editable by the same account that would be re-triggering — so this re-trigger is ' +
-        'refused rather than guessed. Retry once the record can be read; opening a NEW task is ' +
-        'unaffected.',
+        `${cause} Execution authority for such a task is the HQ claim, single-use approval and ` +
+        'fence, which a comment, a label or a manual dispatch does not pass through — so ' +
+        're-triggering it here is refused. Re-run it with a fresh Founder approval and a fresh HQ ' +
+        'dispatch.',
     };
   }
 
