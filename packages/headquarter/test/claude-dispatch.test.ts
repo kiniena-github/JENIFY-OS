@@ -1075,6 +1075,39 @@ describe('a blocked order survives to be dispatched later (issue #224)', () => {
     expect(fixture.db.prepare('SELECT COUNT(*) AS n FROM op_tasks').get()).toMatchObject({ n: 1 });
   });
 
+  it('an AUTO order blocked on nothing resumes through the normal gated path', () => {
+    // AUTO names no provider, so it is recorded against the declared first
+    // preference and blocked on it. The required property is that the SAME
+    // canonical task later runs, without a second task being created.
+    const fixture = orderFixture();
+    const receipt = expectOk(
+      submitDirectOrder(
+        fixture.ops,
+        {
+          instruction: 'Draft the Q3 maintenance plan for the Mesob line.',
+          route: 'AUTO',
+          requestedBy: 'founder',
+        },
+        {},
+      ),
+    );
+    expect(receipt.dispatchBlocked).toBe(true);
+    expect(receipt.route.resolved).toBeNull();
+    expect(receipt.boundProvider).toBe('CLAUDE');
+
+    const taskId = receipt.task.id;
+    const task = fixture.ops.queue.get(taskId)!;
+    expectOk(
+      fixture.ops.approveTask({ taskId, founderId: 'coo', expectedActionDigest: taskActionDigest(task) }),
+    );
+    const transport = stubTransport({});
+    const dispatched = expectOk(dispatchClaudeTask(fixture.ops, { taskId, target: TARGET, transport }));
+
+    expect(dispatched.taskId).toBe(taskId);
+    expect(transport.calls).toHaveLength(1);
+    expect(fixture.db.prepare('SELECT COUNT(*) AS n FROM op_tasks').get()).toMatchObject({ n: 1 });
+  });
+
   it('cannot be dispatched while it is still waiting for approval', () => {
     const fixture = orderFixture();
     const taskId = blockedOrder(fixture);

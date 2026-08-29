@@ -48,12 +48,15 @@
  * by a worker declared as that provider. A blocked order is a remembered
  * order, not a permitted one.
  *
- * `AUTO` with nothing connected still refuses, and the reason is identity
- * rather than caution: AUTO asks HQ to pick a connected provider, so when none
- * is connected there is no provider to bind the order to. Binding nothing
- * would widen who could claim it; binding an unresolvable value would create a
- * task that can never dispatch even after a provider returns; inventing one
- * would be the substitution this module exists to prevent.
+ * `AUTO` with nothing connected is recorded too, against the first entry in the
+ * declared `AUTO_ROUTE_PREFERENCE`. That is not substitution — substitution
+ * means satisfying a request for one NAMED provider with a different one, and
+ * AUTO names none — and the preference order is a deterministic product
+ * decision rather than a guess. The receipt still says resolved: null, so
+ * nothing claims a provider was available. The trade, stated plainly: the
+ * binding is fixed once written, because it lives inside the digest a Founder
+ * approves, so an order blocked on the first preference stays blocked on it
+ * even if a later preference connects first.
  *
  * A note on the word, because two modules use it differently on purpose.
  * `providerConnectivity().connected` is the ROUTING lane's dispatch contract:
@@ -634,18 +637,36 @@ export function submitDirectOrder(
   // declared as that provider. A blocked order is a REMEMBERED order, not a
   // permitted one.
   //
-  // AUTO is the one route that still refuses, and for a reason that is about
-  // identity rather than caution: AUTO asks HQ to pick a CONNECTED provider,
-  // so when none is connected there is no provider to bind the order to. A
-  // task bound to nothing could be claimed by any eligible worker; a task
-  // bound to an unresolvable value could never be dispatched at all, even
-  // after a provider comes back. Neither is a canonical order worth keeping,
-  // and inventing a provider for it would be the substitution this whole
-  // module exists to prevent. An explicit route names its provider, which is
-  // exactly what makes the blocked order recordable.
+  // Which provider an unresolved order is recorded AGAINST.
+  //
+  // An explicit route names its own provider, so a blocked `CLAUDE` order is
+  // bound to CLAUDE. `AUTO` names none, and the first cut of this correction
+  // therefore kept refusing it — reasoning that there was no identity to bind,
+  // that binding nothing would widen who could claim it, and that binding an
+  // unresolvable value would create a task that could never dispatch.
+  //
+  // Both independent reviewers disagreed, and they were right: the identity
+  // problem has a truthful answer that I had ruled out too early. AUTO's
+  // preference order is a DECLARED, deterministic product decision
+  // (`AUTO_ROUTE_PREFERENCE`), not a guess — so an AUTO order that resolves to
+  // nothing is recorded against the first preference and blocked on it. That
+  // is not substitution: substitution means satisfying a request for one named
+  // provider with a different one, and AUTO names none. The receipt says
+  // exactly what happened — requested AUTO, resolved nothing, bound to the
+  // preferred candidate, BLOCKED — so nothing is claimed that is not true.
+  //
+  // The cost, stated rather than hidden: the binding is fixed once written,
+  // because it lives inside the digest a Founder approves. If the SECOND
+  // preference connects first, this order stays blocked on the first one and
+  // the Founder places an explicit order for the provider that is up. That is
+  // the honest trade for keeping the order canonical, resumable and
+  // non-claimable, none of which the old refusal delivered at all.
+  const preferred = AUTO_ROUTE_PREFERENCE[0];
   const boundProvider: ProviderId | null =
-    route.resolved ?? (input.route === 'AUTO' ? null : (input.route as ProviderId));
+    route.resolved ?? (input.route === 'AUTO' ? (preferred ?? null) : (input.route as ProviderId));
   if (boundProvider == null) {
+    // Only reachable if the preference order is emptied — a configuration
+    // error, not a connectivity one. Deny by default rather than invent.
     return orderFail('provider_not_connected', route.reason, {
       requested: route.requested,
       candidates: route.candidates,

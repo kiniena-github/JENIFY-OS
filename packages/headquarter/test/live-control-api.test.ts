@@ -227,13 +227,17 @@ describe('a mapped Founder creates a canonical order, and only through the facad
     expect(created[0]!.payload).toMatchObject({ executionProvider: 'CODEX' });
   });
 
-  it('still refuses AUTO with nothing connected, because no provider can be bound', () => {
+  it('records an AUTO order with nothing connected, blocked on the declared preference', () => {
     const h = harness();
     h.deps.secretsEnv = {};
     const response = h.call({ body: { ...ORDER_BODY, route: 'AUTO' } });
-    expect(response.status).toBe(409);
-    expect(response.body).toMatchObject({ ok: false, error: { code: 'provider_not_connected' } });
-    expect(h.fixture.ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({ ok: true, dispatchBlocked: true, status: 'needs_approval' });
+    // Truthful: nothing RESOLVED, even though the order is recorded against a
+    // provider — the browser must not read this as an available route.
+    expect((response.body.route as Record<string, unknown>).resolved).toBeNull();
+    expect(h.fixture.ops.queue.listByStatus('needs_approval')).toHaveLength(1);
+    expect(h.fixture.ops.queue.listByStatus('queued')).toHaveLength(0);
   });
 
   it('leaks no instruction text into the blocked response', () => {

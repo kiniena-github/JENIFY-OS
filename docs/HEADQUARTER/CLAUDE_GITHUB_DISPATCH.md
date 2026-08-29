@@ -82,12 +82,17 @@ rather than the resolved one, the same order placed again once the provider is
 back deduplicates onto the same canonical task. One order, one task, whether or
 not the provider was reachable when it was written down.
 
-**`AUTO` with nothing connected still creates nothing**, and the reason is
-identity rather than caution: AUTO asks HQ to pick a *connected* provider, so
-when none is connected there is no provider to bind the order to. Binding
-nothing would widen who could claim it, binding an unresolvable value would
-create a task that can never dispatch even after a provider returns, and
-inventing one would be substitution.
+**`AUTO` with nothing connected is recorded too**, against the first entry in
+the declared `AUTO_ROUTE_PREFERENCE`. That is not substitution — substitution
+means satisfying a request for one *named* provider with a different one, and
+AUTO names none — and the preference order is a deterministic product decision
+rather than a guess. The receipt still reports `resolved: null`, so nothing
+claims a provider was available.
+
+The trade, stated plainly: the binding is fixed once written, because it lives
+inside the digest a Founder approves. An order blocked on the first preference
+stays blocked on it even if a later preference connects first; the Founder then
+places an explicit order for the provider that is up.
 
 ## What has to be true before anything is published
 

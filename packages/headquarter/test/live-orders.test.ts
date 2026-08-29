@@ -194,15 +194,62 @@ describe('an unavailable provider blocks the order without losing it (issue #224
     expect(ops.queue.get(result.data.task.id)!.status).toBe('needs_approval');
   });
 
-  it('AUTO with nothing connected still creates nothing, because there is no provider to bind', () => {
-    // AUTO asks HQ to pick a CONNECTED provider. With none connected there is
-    // no provider identity to record, and inventing one would be substitution.
+  it('records an AUTO order against the declared first preference, blocked', () => {
+    // AUTO names no provider, so recording it against the DECLARED preference
+    // order is a deterministic product decision, not a guess and not a
+    // substitution. The receipt still reports resolved: null.
     const { ops } = ordersFixture();
     const result = submitDirectOrder(ops, { ...ORDER, route: 'AUTO' }, NOTHING);
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error('unreachable');
-    expect(result.error.code).toBe('provider_not_connected');
-    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unreachable');
+    expect(result.data.dispatchBlocked).toBe(true);
+    expect(result.data.route.resolved).toBeNull();
+    expect(result.data.boundProvider).toBe(AUTO_ROUTE_PREFERENCE[0]);
+    expect(result.data.task.payload).toMatchObject({
+      requestedRoute: 'AUTO',
+      executionProvider: AUTO_ROUTE_PREFERENCE[0],
+    });
+    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(1);
+  });
+
+  it('an AUTO order blocked on nothing dedupes rather than multiplying', () => {
+    const { ops } = ordersFixture();
+    const first = submitDirectOrder(ops, { ...ORDER, route: 'AUTO' }, NOTHING);
+    const second = submitDirectOrder(ops, { ...ORDER, route: 'AUTO' }, NOTHING);
+    if (!first.ok || !second.ok) throw new Error('expected ok');
+    expect(second.data.deduplicated).toBe(true);
+    expect(second.data.task.id).toBe(first.data.task.id);
+    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(1);
+  });
+
+  it('an AUTO order resumes on the same task once its bound provider connects', () => {
+    const { ops } = ordersFixture();
+    const blocked = submitDirectOrder(ops, { ...ORDER, route: 'AUTO' }, NOTHING);
+    const later = submitDirectOrder(ops, { ...ORDER, route: 'AUTO' }, CLAUDE_ONLY);
+    if (!blocked.ok || !later.ok) throw new Error('expected ok');
+    expect(blocked.data.dispatchBlocked).toBe(true);
+    expect(later.data.dispatchBlocked).toBe(false);
+    expect(later.data.route.resolved).toBe('CLAUDE');
+    expect(later.data.deduplicated).toBe(true);
+    expect(later.data.task.id).toBe(blocked.data.task.id);
+    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(1);
+  });
+
+  it('a blocked AUTO order executes nothing while it waits', () => {
+    const { ops, store } = ordersFixture();
+    const result = submitDirectOrder(ops, { ...ORDER, route: 'AUTO' }, NOTHING);
+    if (!result.ok) throw new Error('expected ok');
+    store.upsertSpecialist({
+      id: 'any-worker',
+      displayName: 'Any Worker',
+      vendor: 'anthropic',
+      role: 'build_lead',
+      allowedCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+      active: true,
+    });
+    const claimed = ops.claimNext('any-worker', DIRECT_ORDER_CAPABILITY.id);
+    expect(claimed.ok).toBe(false);
+    expect(ops.queue.get(result.data.task.id)!.status).toBe('needs_approval');
   });
 });
 
