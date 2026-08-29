@@ -226,6 +226,44 @@ Founder approval and a fresh `hq:dispatch-claude`, which publishes a new issue
 with its own claim and fence. Ordinary AI tasks that a human opened are
 untouched and stay re-triggerable by comment, label and manual dispatch.
 
+### The identity has to survive an edit
+
+The marker lives in the issue BODY, and HQ's issue is authored by the repository
+OWNER — the same account this boundary binds. An author may edit their own issue
+body, so removing the marker turned the issue back into an ordinary `[AI TASK]`
+one and every door above reopened. A note the guarded actor can erase is not an
+identity.
+
+So the identity has a **durable half**: the `jenify-hq-dispatch` **label**, which
+`hq:dispatch-claude` applies when it opens the issue. Applying a label writes an
+entry into the issue's timeline that no repository permission can delete;
+removing the label afterwards only appends `unlabeled` beside it. Editing the
+body cannot reach either.
+
+Both workflows read that timeline before routing and hand `decideRouting` one of
+three answers:
+
+| The workflow observed | It reports | The router |
+|---|---|---|
+| a `jenify-hq-dispatch` label event on the issue | `dispatched` | refuses every trigger but `opened` |
+| the timeline, with no such event | `not_dispatched` | routes exactly as before |
+| nothing — the read failed | `unverified` | refuses every trigger but `opened` |
+
+The third row is the point of having three. A failed read is **not** a "no": if
+the durable record cannot be seen, the only evidence left is the surface the
+guarded actor controls, so a re-trigger is refused rather than guessed. Opening
+a NEW task is unaffected — the guard fails closed on the guarded act, not on the
+lane.
+
+The two sources are a **union**. An issue dispatched before the label existed
+carries only the body marker, and it is still recognised.
+
+`.github/scripts/decide-routing.ts` **refuses to run** without
+`HQ_DISPATCH_PROVENANCE`, so a workflow that forgets to wire it fails loudly
+instead of silently running the pre-fix guard, and
+`test/routing-callers-supply-issue-body.test.ts` asserts over the whole workflow
+directory that every caller supplies and observes it.
+
 ## Reading the result back (issue #224)
 
 Dispatch is one leg. The other is `hq:ingest-claude`:
@@ -300,7 +338,15 @@ In order, and any "no" refuses without creating an issue:
    the target repository** — the workflow only routes AI tasks opened by the
    repository owner, so an issue opened as anyone else would be a public
    artefact no worker ever runs;
-7. the rendered issue passes the same credential guard the browser boundary uses.
+7. the `jenify-hq-dispatch` **label can be made to exist** in the target
+   repository — it is the durable half of the HQ identity, and publishing an
+   issue whose only identity is the erasable body marker would ship the defect
+   that identity exists to prevent. The transport creates the label if it is
+   missing and leaves an existing one untouched (never `--force`: this is not a
+   licence to edit repository configuration). A failure here refuses before the
+   reservation, so the approval is not consumed and a retry is still a first
+   dispatch;
+8. the rendered issue passes the same credential guard the browser boundary uses.
 
 Every refusal is written to the append-only evidence log, so a dispatch that did
 not happen is visible rather than silent.

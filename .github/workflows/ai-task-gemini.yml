@@ -94,6 +94,38 @@ jobs:
             echo "JENIFY_EOF_7f3a"
           } >> "$GITHUB_ENV"
 
+      # ---- THE DURABLE HQ-DISPATCH RECORD (#224, Codex P1 on `2dc86e8`) ----
+      #
+      # Identical to the Claude lane's step, and here for the same reason the
+      # body had to be wired here: this workflow calls the SAME shared router, so
+      # a guard present only in the other lane is a guard with an open door. An
+      # owner comment `<!-- jenify-run: GEMINI -->` on an HQ-dispatched
+      # CLAUDE-bound issue is both a second execution and a provider
+      # substitution, and it arrives here.
+      #
+      # The issue body is editable by the account this boundary binds; the
+      # issue's LABEL TIMELINE is not. A failed read reports `unverified`, never
+      # `not_dispatched`.
+      - name: Observe the durable HQ-dispatch record
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER_IN: ${{ github.event.issue.number || inputs.issue_number }}
+          HQ_LABEL: jenify-hq-dispatch
+        run: |
+          set -uo pipefail
+          verdict=unverified
+          if [ -n "${ISSUE_NUMBER_IN:-}" ]; then
+            if events=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER_IN/timeline"); then
+              hits=$(printf '%s' "$events" | jq -s -r --arg label "$HQ_LABEL" \
+                'add // [] | map(select(.label != null and .label.name == $label)) | length') || hits=""
+              if [ -n "$hits" ]; then
+                if [ "$hits" = "0" ]; then verdict=not_dispatched; else verdict=dispatched; fi
+              fi
+            fi
+          fi
+          echo "HQ_DISPATCH_PROVENANCE=$verdict" >> "$GITHUB_ENV"
+          echo "Durable HQ-dispatch record for issue #${ISSUE_NUMBER_IN:-<none>}: $verdict"
+
       # ---- AUTHORITATIVE ROUTING DECISION (unit-tested module) ------------
       - name: Decide routing
         id: routing
@@ -112,6 +144,9 @@ jobs:
           # here — a second execution AND a provider substitution, through the
           # one workflow the guard had not been wired into.
           ISSUE_BODY: ${{ github.event.issue.body || env.DISPATCH_BODY }}
+          # The DURABLE half of the same fact (see the step above). The shared
+          # script refuses to run without it.
+          HQ_DISPATCH_PROVENANCE: ${{ env.HQ_DISPATCH_PROVENANCE }}
           REPO_OWNER: ${{ github.repository_owner }}
           TARGET_PROVIDER: GEMINI
           DEDUPE_KEY: ${{ github.event.issue.number }}-${{ github.event.comment.id || github.event.action || 'dispatch' }}

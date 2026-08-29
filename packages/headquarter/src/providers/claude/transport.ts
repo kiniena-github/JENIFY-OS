@@ -199,7 +199,38 @@ export interface GitHubIssueTransport {
    * reports by commenting on the issue HQ opened, and nothing was watching.
    */
   readIssue?(target: GitHubTarget, issueNumber: number): GitHubIssueReadResult;
+  /**
+   * Make sure a label EXISTS in the repository, so `createIssue` can apply it
+   * (issue #224, Codex P1 on `2dc86e8`).
+   *
+   * The dispatched issue must carry `jenify-hq-dispatch`, because that label —
+   * and the undeletable timeline entry applying it writes — is the durable half
+   * of "HQ dispatched this issue". The body marker is the other half, and it is
+   * erasable by the account the single-use boundary binds.
+   *
+   * OPTIONAL for the same reason `readIssue` is: every existing write-only stub
+   * stays valid. A transport without it is not a hole — `createIssue` still
+   * carries the label, so a repository that does not define it makes the
+   * creation FAIL and nothing is published. Unlabelled publication is the one
+   * outcome no path produces.
+   *
+   * Idempotent and non-destructive: it creates the label if absent and leaves an
+   * existing one alone. It never renames, recolours or deletes.
+   */
+  ensureLabel?(target: GitHubTarget, label: string, description: string): GitHubLabelResult;
 }
+
+/**
+ * The outcome of ensuring a label exists.
+ *
+ * `ok` covers both "created it" and "it was already there" — the caller only
+ * needs to know that `createIssue` may now apply it. There is no
+ * outcome-unknown case: creating a label twice is harmless, so an ambiguous
+ * result can simply be retried, unlike publishing an issue.
+ */
+export type GitHubLabelResult =
+  | { ok: true; created: boolean }
+  | { ok: false; message: string };
 
 /* ------------------------------------------------------------------ */
 /* gh CLI adapter                                                      */
@@ -432,6 +463,55 @@ export function ghCliTransport(options: GhCliTransportOptions = {}): GitHubIssue
           `An authenticated GitHub CLI session was observed for account ${account} on ` +
           `${DISPATCH_HOST}. This is a live answer from GitHub about the session itself; no ` +
           'repository-level permission was checked, so no repository capability is claimed from it.',
+      };
+    },
+
+    /**
+     * Create the label if the repository does not already define it.
+     *
+     * `gh label create` exits non-zero with "already exists" when it does, which
+     * is a SUCCESS for this caller: the postcondition is "the label exists", not
+     * "I made it". `--force` is deliberately NOT used — it would overwrite an
+     * existing label's colour and description, and this method has no business
+     * editing repository configuration somebody else set up.
+     *
+     * Host-qualified for the same reason every other call here is: a bare
+     * owner/repo resolves against `GH_HOST`, and creating the label on the wrong
+     * host would leave the dispatch target still missing it.
+     */
+    ensureLabel(target: GitHubTarget, label: string, description: string): GitHubLabelResult {
+      if (ghPath == null) {
+        return { ok: false, message: 'No GitHub CLI (`gh`) is available here.' };
+      }
+      if (!isValidTarget(target)) {
+        return { ok: false, message: 'The dispatch target is not a valid owner/repo pair.' };
+      }
+      if (typeof label !== 'string' || label.trim() === '') {
+        return { ok: false, message: 'A label name is required.' };
+      }
+      const result = spawn(
+        ghPath,
+        [
+          'label',
+          'create',
+          label,
+          '--repo',
+          qualifiedTargetSlug(target),
+          '--description',
+          description,
+        ],
+        timeoutMs,
+      );
+      if (result.error != null) {
+        return { ok: false, message: `The GitHub CLI could not be run: ${result.error.message}` };
+      }
+      const combined = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+      if (result.status === 0) return { ok: true, created: true };
+      if (/already exists/i.test(combined)) return { ok: true, created: false };
+      const detail = combined.split(/\r?\n/).filter((line) => line.trim() !== '').slice(-3).join(' ').trim();
+      return {
+        ok: false,
+        message: `The GitHub CLI exited ${result.status} creating label "${label}". ${detail}`.trim(),
       };
     },
 

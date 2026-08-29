@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -65,6 +65,12 @@ function decide(env: Record<string, string>): Outputs {
       ACTOR: OWNER,
       ACTOR_TYPE: 'User',
       COMMENT_BODY: '',
+      // The durable HQ-dispatch record the script now REQUIRES (#224, Codex P1
+      // on `2dc86e8`). The default is the ordinary case — a hand-opened issue,
+      // whose timeline carries no `jenify-hq-dispatch` label event. Cases that
+      // exercise the guard override it, and `refuses to run without` below pins
+      // that omitting it entirely is a hard failure rather than this default.
+      HQ_DISPATCH_PROVENANCE: 'not_dispatched',
       ...env,
       GITHUB_OUTPUT: outFile,
     },
@@ -327,5 +333,112 @@ describe('decide-routing.ts — blocked reporting wiring', () => {
     expect(r.outcome).toBe('BLOCKED');
     expect(r.should_run).toBe('false');
     expect(r.dispatch_to).toBe('');
+  });
+});
+
+/**
+ * The durable HQ-dispatch record is a REQUIRED input of this script (#224,
+ * Codex P1 on `2dc86e8`).
+ *
+ * `decideRouting` treats an absent value as "this caller did not look", which
+ * keeps the pure function composable. A WORKFLOW that did not look is a
+ * different thing: it is a workflow silently running the pre-fix guard, where
+ * the only evidence left is the issue body — a surface the account being guarded
+ * can edit. Issue #224 has produced that exact defect four times (a guard
+ * correct where it was wired, absent where it was not), so the requirement is
+ * enforced at the one seam every workflow goes through instead of being trusted.
+ */
+describe('decide-routing.ts — the durable HQ-dispatch record is required', () => {
+  /** Run the script and capture the failure instead of letting it throw. */
+  function attempt(env: Record<string, string>): { status: number; stderr: string } {
+    counter += 1;
+    const outFile = path.join(workDir, `req-${counter}.txt`);
+    writeFileSync(outFile, '');
+    const result = spawnSync(process.execPath, [tsxCli, script], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        ...REAL_SECRETS,
+        EVENT_NAME: 'issues',
+        EVENT_ACTION: 'opened',
+        REPO_OWNER: OWNER,
+        ISSUE_AUTHOR: OWNER,
+        ACTOR: OWNER,
+        ACTOR_TYPE: 'User',
+        COMMENT_BODY: '',
+        ISSUE_TITLE: '[AI TASK][CLAUDE] x',
+        TARGET_PROVIDER: 'CLAUDE',
+        ...env,
+        GITHUB_OUTPUT: outFile,
+      },
+      encoding: 'utf8',
+    });
+    return { status: result.status ?? -1, stderr: `${result.stderr ?? ''}${readFileSync(outFile, 'utf8')}` };
+  }
+
+  it('refuses to run when the record is missing', () => {
+    const r = attempt({ HQ_DISPATCH_PROVENANCE: '' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('HQ_DISPATCH_PROVENANCE');
+    // Nothing was decided: a caller reading the outputs must find none rather
+    // than a stale or defaulted answer.
+    expect(r.stderr).not.toContain('outcome=');
+  });
+
+  it('refuses a value it does not recognise rather than guessing one', () => {
+    // Including the plausible near-miss. A typo must not degrade to the
+    // permissive answer.
+    for (const value of ['true', 'false', 'NOT_DISPATCHED', 'yes', 'dispatched ']) {
+      const r = attempt({ HQ_DISPATCH_PROVENANCE: value });
+      if (value === 'dispatched ') {
+        // Surrounding whitespace is paste noise, not ambiguity: trimmed and
+        // accepted, like every other flag reader in this repo.
+        expect(r.status).toBe(0);
+      } else {
+        expect(r.status, `value ${JSON.stringify(value)} must be refused`).toBe(1);
+      }
+    }
+  });
+
+  it('accepts each of the three values it documents', () => {
+    for (const value of ['dispatched', 'not_dispatched', 'unverified']) {
+      expect(attempt({ HQ_DISPATCH_PROVENANCE: value }).status, value).toBe(0);
+    }
+  });
+});
+
+describe('decide-routing.ts — the durable record decides re-triggerability', () => {
+  const RETRIGGER = {
+    EVENT_NAME: 'issue_comment',
+    EVENT_ACTION: 'created',
+    COMMENT_BODY: '<!-- jenify-run -->',
+    ISSUE_TITLE: '[AI TASK][CLAUDE][BUILDER] HQ order task-1',
+    TARGET_PROVIDER: 'CLAUDE',
+  };
+
+  it('refuses a re-trigger when the durable record says HQ dispatched it, even with the body edited clean', () => {
+    // The exact attack: the owner edits their own issue body to remove HQ's
+    // marker, then comments. Before the fix this ROUTEd.
+    const r = decide({
+      ...RETRIGGER,
+      ISSUE_BODY: 'I have rewritten this issue by hand. Nothing here mentions HQ.',
+      HQ_DISPATCH_PROVENANCE: 'dispatched',
+    });
+    expect(r.outcome).toBe('IGNORE');
+    expect(r.should_run).toBe('false');
+    expect(r.dispatch_to).toBe('');
+    expect(r.reason).toContain('JENIFY HQ');
+  });
+
+  it('refuses a re-trigger it could not verify', () => {
+    const r = decide({ ...RETRIGGER, ISSUE_BODY: 'edited clean', HQ_DISPATCH_PROVENANCE: 'unverified' });
+    expect(r.outcome).toBe('BLOCKED');
+    expect(r.should_run).toBe('false');
+  });
+
+  it('leaves an ordinary AI task re-triggerable', () => {
+    const r = decide({ ...RETRIGGER, ISSUE_BODY: 'A human wrote this.', HQ_DISPATCH_PROVENANCE: 'not_dispatched' });
+    expect(r.outcome).toBe('ROUTE');
+    expect(r.should_run).toBe('true');
   });
 });

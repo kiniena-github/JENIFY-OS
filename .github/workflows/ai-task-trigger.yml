@@ -96,6 +96,43 @@ jobs:
             echo "JENIFY_EOF_7f3a"
           } >> "$GITHUB_ENV"
 
+      # ---- THE DURABLE HQ-DISPATCH RECORD (#224, Codex P1 on `2dc86e8`) ----
+      #
+      # `ISSUE_BODY` below carries HQ's marker, but an issue body is EDITABLE by
+      # the repository owner — the same account this single-use boundary binds.
+      # Remove the marker and the router saw an ordinary `[AI TASK]` issue again,
+      # so a comment, a label event or a manual dispatch authorised another
+      # execution of one Founder approval, and `jenify-run: GEMINI` substituted a
+      # provider on a CLAUDE-bound task.
+      #
+      # The durable half of that identity is the issue's LABEL TIMELINE. Applying
+      # `jenify-hq-dispatch` writes a timeline entry that no repository
+      # permission can delete; removing the label afterwards only appends
+      # `unlabeled` beside it. Editing the body cannot reach either.
+      #
+      # A read that FAILS reports `unverified`, never `not_dispatched`: the
+      # router then refuses the re-trigger instead of falling back to the one
+      # surface the guarded actor controls.
+      - name: Observe the durable HQ-dispatch record
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER_IN: ${{ github.event.issue.number || inputs.issue_number }}
+          HQ_LABEL: jenify-hq-dispatch
+        run: |
+          set -uo pipefail
+          verdict=unverified
+          if [ -n "${ISSUE_NUMBER_IN:-}" ]; then
+            if events=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER_IN/timeline"); then
+              hits=$(printf '%s' "$events" | jq -s -r --arg label "$HQ_LABEL" \
+                'add // [] | map(select(.label != null and .label.name == $label)) | length') || hits=""
+              if [ -n "$hits" ]; then
+                if [ "$hits" = "0" ]; then verdict=not_dispatched; else verdict=dispatched; fi
+              fi
+            fi
+          fi
+          echo "HQ_DISPATCH_PROVENANCE=$verdict" >> "$GITHUB_ENV"
+          echo "Durable HQ-dispatch record for issue #${ISSUE_NUMBER_IN:-<none>}: $verdict"
+
       # ---- AUTHORITATIVE ROUTING DECISION (unit-tested module) ------------
       - name: Decide routing
         id: routing
@@ -112,6 +149,11 @@ jobs:
           # Re-running such a task needs a fresh Founder approval and a fresh HQ
           # dispatch, not a comment: this workflow is not its execution authority.
           ISSUE_BODY: ${{ github.event.issue.body || env.DISPATCH_BODY }}
+          # The DURABLE half of the same fact, read above from a record that
+          # editing the issue body cannot reach. The script REFUSES TO RUN
+          # without it, so a workflow that forgets this line fails loudly
+          # instead of silently running the pre-fix guard.
+          HQ_DISPATCH_PROVENANCE: ${{ env.HQ_DISPATCH_PROVENANCE }}
           REPO_OWNER: ${{ github.repository_owner }}
           TARGET_PROVIDER: CLAUDE
           DEDUPE_KEY: ${{ github.event.issue.number }}-${{ github.event.comment.id || github.event.action || 'dispatch' }}

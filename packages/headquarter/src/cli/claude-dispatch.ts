@@ -43,7 +43,7 @@ import {
   LOCAL_ADMIN_INTERFACE_NOTICE,
   resolveLocalAdminInvocation,
 } from '../live/local-trust.js';
-import { ROLES, type Role } from '../routing/providers.js';
+import { HQ_DISPATCH_LABEL, ROLES, type Role } from '../routing/providers.js';
 import {
   claudeDispatchEligibility,
   dispatchClaudeTask,
@@ -187,6 +187,18 @@ function main(): void {
           'executor too. Eligibility above says nothing about whether that worker can claim.',
       );
     }
+    // The durable HQ identity (issue #224, Codex P1 on `2dc86e8`). Stated
+    // rather than checked, deliberately: the only way this transport can
+    // establish whether the label exists is to create it, and this command
+    // promises to write nothing. So it says what dispatch will do and what
+    // happens if that fails, instead of printing a green line it did not earn.
+    console.log(
+      `  hq label:    NOT CHECKED — dispatch creates \`${HQ_DISPATCH_LABEL}\` in the target ` +
+        'repository if it is missing (never --force) and applies it to the issue. That label is ' +
+        'what keeps an HQ dispatch recognisable after its body has been edited. Checking it here ' +
+        'would mean creating it, and this command writes nothing. If it cannot be created, the ' +
+        'dispatch refuses with `dispatch_label_unavailable` and publishes nothing.',
+    );
     console.log('\nCheck only — nothing was published, claimed or approved.');
     return;
   }

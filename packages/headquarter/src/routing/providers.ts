@@ -39,6 +39,32 @@
  */
 export const HQ_DISPATCH_MARKER = 'jenify-hq-dispatch';
 
+/**
+ * The DURABLE half of that identity (issue #224, Codex P1 on `2dc86e8`).
+ *
+ * `HQ_DISPATCH_MARKER` lives in the issue BODY, and an issue body is editable by
+ * the repository owner — the same authorized actor the single-use boundary is
+ * meant to bind. Strip the marker and the router sees an ordinary `[AI TASK]`
+ * issue again, so an owner comment, a label event or a manual dispatch can
+ * authorise a second execution of one Founder-approved action, and
+ * `jenify-run: GEMINI` can substitute a provider on a CLAUDE-bound task.
+ *
+ * A LABEL cannot be erased by editing the body, and — the property that actually
+ * matters — applying one writes an entry into the issue TIMELINE that no
+ * repository permission can delete. Removing the label afterwards only appends
+ * an `unlabeled` entry beside it. So the fact "HQ dispatched this issue" becomes
+ * a record the router can read even after every editable surface has been
+ * rewritten.
+ *
+ * Same spelling as the marker, deliberately: one identity, one string, no
+ * second name to drift.
+ */
+export const HQ_DISPATCH_LABEL = HQ_DISPATCH_MARKER;
+
+/** Description written when this adapter has to create the label itself. */
+export const HQ_DISPATCH_LABEL_DESCRIPTION =
+  'Opened by JENIFY HQ for a canonical task. Not re-triggerable from GitHub.';
+
 export const PROVIDERS = [
   'CLAUDE',
   'GEMINI',

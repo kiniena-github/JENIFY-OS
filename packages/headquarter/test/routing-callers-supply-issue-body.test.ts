@@ -26,11 +26,25 @@
  * correct where it was wired and absent where it was not. So the rule is
  * asserted over the WORKFLOW DIRECTORY rather than over the two files that
  * happen to exist — the class, not the instance.
+ *
+ * ## And then the body turned out not to be an identity
+ *
+ * Codex P1 on `2dc86e8`: the HQ-dispatched issue is authored by the repository
+ * OWNER, and an author may edit their own issue body. Wiring the body into every
+ * caller made the guard consistent — and still removable with one edit, after
+ * which a comment, a label event or a manual dispatch authorised another
+ * execution of a single-use Founder approval.
+ *
+ * The identity therefore gained a DURABLE half, `HQ_DISPATCH_PROVENANCE`, read
+ * from the issue's label timeline — a record no repository permission deletes
+ * and no body edit touches. It is a second thing every caller must supply, so it
+ * is asserted here, over the same directory, for the same reason.
  */
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { HQ_DISPATCH_LABEL } from '../src/routing/providers.js';
 
 const WORKFLOWS = join(process.cwd(), '..', '..', '.github', 'workflows');
 
@@ -42,7 +56,7 @@ function routerCallers(): { name: string; body: string }[] {
     .filter((f) => f.body.includes('decide-routing'));
 }
 
-describe('the single-use guard cannot be bypassed by a caller that omits the body', () => {
+describe('the single-use guard cannot be bypassed by a caller that omits its evidence', () => {
   it('finds the workflows that call the shared router', () => {
     // Guards the guard: if the invocation is ever renamed, this test would
     // otherwise pass vacuously by finding nothing to check.
@@ -57,6 +71,47 @@ describe('the single-use guard cannot be bypassed by a caller that omits the bod
       .filter((c) => !/^\s*ISSUE_BODY:/m.test(c.body))
       .map((c) => c.name);
     expect(missing).toEqual([]);
+  });
+
+  it('requires EVERY one of them to supply the DURABLE record too', () => {
+    // Issue #224, Codex P1 on `2dc86e8`. `ISSUE_BODY` is not an identity: the
+    // HQ-dispatched issue is authored by the repository owner, and an author may
+    // edit their own body. Wiring the body into both callers made the guard
+    // consistent and still removable with one edit.
+    //
+    // `HQ_DISPATCH_PROVENANCE` is the durable half — what the caller read out of
+    // the issue's label timeline, which body editing cannot reach. Asserted over
+    // the directory for the same reason the body is: the class, not the two
+    // instances that happen to exist today.
+    const missing = routerCallers()
+      .filter((c) => !/^\s*HQ_DISPATCH_PROVENANCE:/m.test(c.body))
+      .map((c) => c.name);
+    expect(missing).toEqual([]);
+  });
+
+  it('requires every one of them to OBSERVE it, not just declare the variable', () => {
+    // Declaring `HQ_DISPATCH_PROVENANCE:` and never computing it would pass the
+    // test above while handing the router an empty string — which the script
+    // refuses, so it fails loudly rather than silently. This pins the intended
+    // wiring anyway: each caller reads the issue TIMELINE (the record that
+    // survives a body edit) and reports a failed read as `unverified`, never as
+    // `not_dispatched`.
+    for (const caller of routerCallers()) {
+      expect(caller.body, `${caller.name} must read the issue timeline`).toContain('/timeline');
+      // Tied to the CONSTANT, not to a literal repeated in this test: the label
+      // is spelled in YAML, which no type checker reads, so a rename in
+      // `routing/providers.ts` would otherwise leave both workflows searching
+      // the timeline for a label nothing applies any more — every unit test
+      // green, and the guard silently answering `not_dispatched` for every HQ
+      // issue.
+      expect(caller.body, `${caller.name} must look for the HQ label`).toContain(`HQ_LABEL: ${HQ_DISPATCH_LABEL}`);
+      expect(caller.body, `${caller.name} must default to unverified`).toContain('verdict=unverified');
+      // The substitution that would quietly restore the defect.
+      expect(
+        /verdict=not_dispatched\s*$/m.test(caller.body) && !/hits/.test(caller.body),
+        `${caller.name} must not report not_dispatched without reading the record`,
+      ).toBe(false);
+    }
   });
 
   it('requires every one of them to supply it for MANUAL dispatch too', () => {

@@ -79,7 +79,14 @@ import type { OperatorTask } from '../../operator/queue.js';
 import type { HeadquarterOperations } from '../../application/service.js';
 import { classifyCapability } from '../../application/classification.js';
 import { assertBrowserSafe } from '../../live/redaction.js';
-import { HQ_DISPATCH_MARKER, isRole, type ProviderId, type Role } from '../../routing/providers.js';
+import {
+  HQ_DISPATCH_LABEL,
+  HQ_DISPATCH_LABEL_DESCRIPTION,
+  HQ_DISPATCH_MARKER,
+  isRole,
+  type ProviderId,
+  type Role,
+} from '../../routing/providers.js';
 import {
   isValidTarget,
   parseIssueUrl,
@@ -87,6 +94,7 @@ import {
   targetSlug,
   type GitHubIssueResult,
   type GitHubIssueTransport,
+  type GitHubLabelResult,
   type GitHubTarget,
 } from './transport.js';
 
@@ -128,6 +136,12 @@ export type DispatchRefusalCode =
   | 'transport_unauthenticated'
   | 'transport_actor_mismatch'
   | 'transport_failed'
+  /**
+   * The durable HQ-dispatch label could not be made to exist, so a published
+   * issue would carry only the erasable body marker (#224, Codex P1 on
+   * `2dc86e8`).
+   */
+  | 'dispatch_label_unavailable'
   | 'dispatch_outcome_unknown'
   /** The guard itself could not be written, so nothing was published. */
   | 'evidence_unavailable'
@@ -967,6 +981,64 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
     );
   }
 
+  // ---- the durable identity must exist BEFORE the issue does --------------
+  //
+  // Issue #224, Codex P1 on `2dc86e8`. The single-use guard in `routing/route.ts`
+  // used to recognise an HQ-dispatched issue by a marker in its BODY. The issue
+  // is authored by the repository owner — the same account the guard binds — and
+  // an author may edit their own body, so removing the marker turned the issue
+  // back into an ordinary `[AI TASK]` one that a comment, a label event or a
+  // manual dispatch could run again, with `jenify-run: GEMINI` substituting a
+  // provider on a CLAUDE-bound task.
+  //
+  // The durable half of that identity is the `jenify-hq-dispatch` LABEL: applying
+  // it writes an issue-timeline entry that no repository permission deletes, and
+  // no body edit can touch. It is applied by `createIssue` below, which means the
+  // label must already exist in the target repository — `gh` refuses a label it
+  // cannot resolve.
+  //
+  // So it is ensured HERE, and a failure REFUSES: publishing an issue whose only
+  // HQ identity is the erasable one would ship exactly the defect this fixes,
+  // quietly. The position is deliberate — LAST of the checks and immediately
+  // before the reservation, because ensuring a label is the first REPOSITORY
+  // WRITE this function makes, and every refusal above it (ineligible task,
+  // no session, wrong account, a credential in the rendered body) must cost no
+  // write at all.
+  //
+  // `ensureLabel` is OPTIONAL, and its absence is not a hole. The guarantee that
+  // matters — the published issue CARRIES the label — is `createIssue`'s, and it
+  // is unconditional a few lines below. All `ensureLabel` removes is a setup
+  // failure mode: `gh` refuses a label it cannot resolve, so without it a
+  // repository that has never defined `jenify-hq-dispatch` would fail the
+  // creation instead of succeeding. Both outcomes are fail-closed; only one of
+  // them needs a human to go and create a label by hand.
+  const ensure = options.transport.ensureLabel;
+  if (ensure != null) {
+    let labelReady: GitHubLabelResult;
+    try {
+      labelReady = ensure.call(options.transport, options.target, HQ_DISPATCH_LABEL, HQ_DISPATCH_LABEL_DESCRIPTION);
+    } catch (error) {
+      // Safe to treat as a clean failure, unlike `createIssue`: creating a label
+      // twice is harmless, so an ambiguous outcome here costs a retry rather
+      // than a duplicate public artefact.
+      return refuseAndRecordBestEffort(
+        'dispatch_label_unavailable',
+        `The GitHub transport threw while ensuring the \`${HQ_DISPATCH_LABEL}\` label exists ` +
+          `(${errorText(error)}). Nothing was published.`,
+        { transport: options.transport.id, label: HQ_DISPATCH_LABEL },
+      );
+    }
+    if (!labelReady.ok) {
+      return refuseAndRecordBestEffort(
+        'dispatch_label_unavailable',
+        `The \`${HQ_DISPATCH_LABEL}\` label could not be made to exist in ${targetSlug(options.target)} ` +
+          `(${labelReady.message}). That label is the durable record that stops an HQ-dispatched issue ` +
+          'being re-triggered once its body has been edited, so nothing was published.',
+        { transport: options.transport.id, label: HQ_DISPATCH_LABEL },
+      );
+    }
+  }
+
   // ---- the reservation: the last thing before the irreversible act ---------
   //
   // Read-then-append as ONE atomic step (issue #221, Codex P1 on `1d5b3bf`).
@@ -1180,7 +1252,11 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
       target: options.target,
       title: issue.title,
       body: issue.body,
-      labels: options.labels ?? [],
+      // The durable HQ identity, ALWAYS, and never at the caller's discretion:
+      // it is what `routing/route.ts` reads once the body has been edited. Any
+      // caller-supplied labels are additional, and a duplicate is dropped rather
+      // than passed to `gh` twice.
+      labels: [HQ_DISPATCH_LABEL, ...(options.labels ?? []).filter((l) => l !== HQ_DISPATCH_LABEL)],
     });
   } catch (error) {
     return refuse(
