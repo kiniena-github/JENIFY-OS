@@ -33,6 +33,7 @@ import {
   SYSTEM_EVIDENCE_KINDS,
   CLAIM_BOUND_EVIDENCE_KINDS,
   DISPATCH_OUTCOME_EVIDENCE_KINDS,
+  writeDispatchOutcome,
 } from '../src/application/service.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { CLAUDE_DISPATCH_EVIDENCE, dispatchHistory } from '../src/providers/claude/dispatch.js';
@@ -169,7 +170,7 @@ describe('the system evidence writer cannot become the forging surface #200 clos
     // lane does not make a publication have happened.
     for (const kind of [CLAUDE_DISPATCH_EVIDENCE.succeeded, CLAUDE_DISPATCH_EVIDENCE.attempted]) {
       expect(() =>
-        fx.dispatchEvidence.appendDispatchOutcome({
+        writeDispatchOutcome(fx.ops, fx.dispatchEvidence, {
           taskId,
           actor: 'hq-claude-dispatch',
           kind,
@@ -189,7 +190,7 @@ describe('the system evidence writer cannot become the forging surface #200 clos
   it('refuses a publication record against a task that does not exist', () => {
     const fx = seamFixture();
     expect(() =>
-      fx.dispatchEvidence.appendDispatchOutcome({
+      writeDispatchOutcome(fx.ops, fx.dispatchEvidence, {
         taskId: 'no-such-task',
         actor: 'hq-claude-dispatch',
         kind: CLAUDE_DISPATCH_EVIDENCE.succeeded,

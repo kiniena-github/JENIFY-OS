@@ -76,8 +76,12 @@ import {
 } from '../../operator/approvals.js';
 import { EXECUTION_PROVIDER_KEY, readProviderBinding } from '../../operator/provider-binding.js';
 import type { OperatorTask } from '../../operator/queue.js';
-import { DispatchEvidenceGrant } from '../../application/service.js';
-import type { SystemEvidenceKind, HeadquarterOperations } from '../../application/service.js';
+import { assertDispatchEvidenceGrant, writeDispatchOutcome } from '../../application/service.js';
+import type {
+  DispatchEvidenceGrant,
+  SystemEvidenceKind,
+  HeadquarterOperations,
+} from '../../application/service.js';
 import { classifyCapability } from '../../application/classification.js';
 import { assertBrowserSafe } from '../../live/redaction.js';
 import {
@@ -918,7 +922,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
   // Deliberately placed above the target check too: order the refusals by what
   // they protect, not by how cheap they are.
   try {
-    DispatchEvidenceGrant.assertIssuedBy(ops, options.evidence);
+    assertDispatchEvidenceGrant(ops, options.evidence);
   } catch (error) {
     return refuseAndRecordBestEffort('evidence_grant_invalid', errorText(error));
   }
@@ -1202,7 +1206,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
         // task, and nothing was published.
         throw new StartRefused(errorText(error));
       }
-      options.evidence.appendDispatchOutcome({
+      writeDispatchOutcome(ops, options.evidence, {
         taskId,
         actor: DISPATCH_ACTOR,
         kind: CLAUDE_DISPATCH_EVIDENCE.attempted,
@@ -1333,7 +1337,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
       );
     }
     try {
-      options.evidence.appendDispatchOutcome({
+      writeDispatchOutcome(ops, options.evidence, {
         taskId,
         actor: DISPATCH_ACTOR,
         kind: CLAUDE_DISPATCH_EVIDENCE.failed,
@@ -1372,7 +1376,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
   }
 
   try {
-    options.evidence.appendDispatchOutcome({
+    writeDispatchOutcome(ops, options.evidence, {
       taskId,
       actor: DISPATCH_ACTOR,
       kind: CLAUDE_DISPATCH_EVIDENCE.succeeded,
@@ -1496,7 +1500,7 @@ export function resolveUnknownDispatch(
   // it is in `dispatchClaudeTask`: a counterfeit could swallow the terminal
   // write and report a reconciliation that never reached the evidence log.
   try {
-    DispatchEvidenceGrant.assertIssuedBy(ops, input.evidence);
+    assertDispatchEvidenceGrant(ops, input.evidence);
   } catch (error) {
     return refuse('evidence_grant_invalid', errorText(error));
   }
@@ -1535,7 +1539,7 @@ export function resolveUnknownDispatch(
   }
   if (input.outcome === 'not_dispatched') {
     const claimed = claimReconciliation(ops, input.taskId, () => {
-      input.evidence.appendDispatchOutcome({
+      writeDispatchOutcome(ops, input.evidence, {
         taskId: input.taskId,
         actor: DISPATCH_ACTOR,
         kind: CLAUDE_DISPATCH_EVIDENCE.failed,
@@ -1619,7 +1623,7 @@ export function resolveUnknownDispatch(
   const issueUrl = parsed.url;
   const at = new Date().toISOString();
   const claimed = claimReconciliation(ops, input.taskId, () => {
-    input.evidence.appendDispatchOutcome({
+    writeDispatchOutcome(ops, input.evidence, {
       taskId: input.taskId,
       actor: DISPATCH_ACTOR,
       kind: CLAUDE_DISPATCH_EVIDENCE.succeeded,

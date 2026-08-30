@@ -38,8 +38,8 @@
  *   than followed.
  */
 
-import { DispatchEvidenceGrant } from '../../application/service.js';
-import type { HeadquarterOperations } from '../../application/service.js';
+import { assertDispatchEvidenceGrant, writeDispatchOutcome } from '../../application/service.js';
+import type { DispatchEvidenceGrant, HeadquarterOperations } from '../../application/service.js';
 import { taskActionDigest } from '../../operator/approvals.js';
 import { PROVIDER_REGISTRY } from '../../routing/providers.js';
 import {
@@ -377,7 +377,7 @@ function recordCorrelation(
     };
   }
 
-  input.evidence.appendDispatchOutcome({
+  writeDispatchOutcome(ops, input.evidence, {
     taskId: task.id,
     actor: DISPATCH_ACTOR,
     kind: CLAUDE_DISPATCH_EVIDENCE.correlated,
@@ -427,7 +427,7 @@ export function ingestClaudeResult(ops: HeadquarterOperations, options: IngestOp
   // idempotency record `alreadyCorrelated` reads would never exist and the
   // report could be attached again and again.
   try {
-    DispatchEvidenceGrant.assertIssuedBy(ops, options.evidence);
+    assertDispatchEvidenceGrant(ops, options.evidence);
   } catch (error) {
     return refuse('evidence_grant_invalid', error instanceof Error ? error.message : String(error));
   }

@@ -158,135 +158,148 @@ export const DISPATCH_OUTCOME_EVIDENCE_KINDS = [
 export type DispatchOutcomeEvidenceKind = (typeof DISPATCH_OUTCOME_EVIDENCE_KINDS)[number];
 
 /**
- * Module-private construction key. Not exported, so `new
- * DispatchEvidenceGrant(...)` is unreachable from any other module: only the
- * code in THIS file can supply it, and only `HeadquarterOperations` does.
+ * The dispatch-only evidence capability, as an OPAQUE handle.
+ *
+ * A caller can hold one and hand it back to a dispatch lane. It has no
+ * methods, no prototype anyone can reach for, and no properties: everything it
+ * authorises happens inside this module, keyed off the object's identity.
+ *
+ * ## Why it has no methods, and why the class is gone
+ *
+ * Three rounds of review walked this boundary inward, and each round's fix was
+ * defeated one layer below it:
+ *
+ *   1. Kinds were closed by an ALLOWLIST → a caller could still write `failed`
+ *      through the generic surface.
+ *   2. Writes moved behind a constructor GRANT typed as an interface → a
+ *      TypeScript interface is erased, so a counterfeit `{ appendDispatchOutcome
+ *      () {} }` was accepted and silently swallowed the mandatory writes while a
+ *      real GitHub issue was published.
+ *   3. The grant became a CLASS with an ECMAScript private-field brand → the
+ *      brand held, but the class was exported, and an exported class object is
+ *      mutable. ChatGPT's blocking review of `26b3068` reported both routes and
+ *      both were reproduced end to end:
+ *
+ *        A. `DispatchEvidenceGrant.assertIssuedBy = () => {}` — a writable
+ *           static — then the same counterfeit from round 2:
+ *           issue published, canonical history `none`.
+ *        B. `DispatchEvidenceGrant.prototype.appendDispatchOutcome = () => {}`
+ *           — and the GENUINE grant then swallowed its own writes:
+ *           issue published, canonical history `none`.
+ *
+ * B is the instructive one: the private field protected the brand, and the call
+ * never went near it, because the call resolved through a mutable prototype.
+ * This repository has already been here — #200 replaced `WorkerProviderDirectory`
+ * dispatch with a closure for exactly this reason: "a closure created here has
+ * no prototype in its dispatch path and no exported identity to patch."
+ *
+ * So the capability is no longer a thing with behaviour. It is an inert token:
+ *
+ *   - `Object.freeze(Object.create(null))` — no methods to overwrite, no
+ *     prototype to poison, not even `Object.prototype` behind it;
+ *   - the writer and the issuer live in `ISSUED_GRANTS`, a module-private
+ *     `WeakMap` no other module can name;
+ *   - the two functions that consult it are exported as FUNCTION BINDINGS, not
+ *     properties of an exported object. An ES module binding is immutable from
+ *     the importing side: `import { writeDispatchOutcome }` cannot be reassigned
+ *     by anyone, which is precisely what a writable static could not promise.
+ *
+ * And `writeDispatchOutcome` re-checks the brand and the issuer itself rather
+ * than trusting that `assertDispatchEvidenceGrant` ran. There is deliberately no
+ * single choke point to disable: skipping the verifier does not reach the write.
  */
-const DISPATCH_GRANT_KEY = Symbol('dispatch-evidence-grant');
+declare const DISPATCH_GRANT_BRAND: unique symbol;
+export interface DispatchEvidenceGrant {
+  readonly [DISPATCH_GRANT_BRAND]: true;
+}
 
-/**
- * The dispatch-only evidence capability.
- *
- * Handed out once, at construction, through
- * `HeadquarterOperationsOptions.grantDispatchEvidence`. It carries no approval,
- * no capability, no execution right and no ability to write any other kind: it
- * is the single narrow power to record what the Claude dispatch/ingest lane
- * observed about an outcome.
- *
- * ## Why this is a class with a private brand and not an interface
- *
- * It WAS an interface, and that was a real vulnerability — ChatGPT's blocking
- * exact-head review of `ef88711`, and it was right. A TypeScript interface is
- * erased at runtime, so `dispatchClaudeTask(ops, { evidence, ... })` accepted
- * any object of the right SHAPE. An in-process caller holding `ops` could pass
- * a counterfeit:
- *
- *     { appendDispatchOutcome: () => fakeEntry }
- *
- * The lane called it, nothing threw, and "did not throw" was taken as proof the
- * mandatory evidence had been durably written. So the dispatch went on to take
- * the canonical claim, start the execution and PUBLISH A REAL GITHUB ISSUE,
- * while the counterfeit silently swallowed both `attempted` and `succeeded` —
- * leaving `dispatchHistory` at `none` beside a live public issue, and licensing
- * a later authorised dispatch to publish a second one.
- *
- * That is the same duplicate-publication class the grant exists to prevent,
- * reached from the other side: instead of forging evidence to erase a real
- * attempt, forge the WRITER so a real attempt is never recorded. The previous
- * round moved the authority from "what has this caller done" to "was this
- * caller handed the writer" — and then trusted the caller's word about the
- * second question.
- *
- * Two runtime facts close it, and both are needed:
- *
- *   1. **Unforgeable.** `#issuer` is an ECMAScript private field, so
- *      `#issuer in value` is a true brand check: it is only satisfied by an
- *      object this class body constructed. A structural clone, a `Proxy`, a
- *      subclass built without the key, and `Object.create(DispatchEvidenceGrant
- *      .prototype)` all fail it. The constructor additionally demands a
- *      module-private symbol, so the class being exported does not make it
- *      constructible.
- *   2. **Instance-bound.** The grant remembers WHICH `HeadquarterOperations`
- *      issued it, and the lanes assert it is the same one they were handed.
- *      Without this, someone who could construct a second service over the same
- *      database could mint a genuine grant and present it alongside a different
- *      `ops`. (Reaching the raw database is already game over for other
- *      reasons — but a capability that is checked should be checked properly,
- *      and the binding costs one comparison.)
- *
- * The lanes call `assertIssuedBy` BEFORE anything irreversible: before the
- * claim, before `start`, before the transport is asked to create anything.
- */
-export class DispatchEvidenceGrant {
-  readonly #issuer: HeadquarterOperations;
-  readonly #write: (entry: {
+/** What a genuine grant actually authorises. Unreachable outside this module. */
+interface IssuedGrant {
+  readonly issuer: HeadquarterOperations;
+  readonly write: (entry: {
     taskId?: string | null;
     actor: SystemEvidenceActor;
     kind: DispatchOutcomeEvidenceKind;
     payload: Record<string, unknown>;
   }) => EvidenceEntry;
+}
 
-  constructor(
-    key: symbol,
-    issuer: HeadquarterOperations,
-    write: (entry: {
-      taskId?: string | null;
-      actor: SystemEvidenceActor;
-      kind: DispatchOutcomeEvidenceKind;
-      payload: Record<string, unknown>;
-    }) => EvidenceEntry,
-  ) {
-    if (key !== DISPATCH_GRANT_KEY) {
-      throw new Error(
-        'DispatchEvidenceGrant is not publicly constructible. It is issued once, to whoever ' +
-          'constructs HeadquarterOperations, through grantDispatchEvidence.',
-      );
-    }
-    this.#issuer = issuer;
-    this.#write = write;
+/**
+ * The registry of issued capabilities. Module-private and weak: it names no
+ * grant a caller could forge, and holds no grant alive on its own.
+ */
+const ISSUED_GRANTS = new WeakMap<object, IssuedGrant>();
+
+/** Mint one. Called only by the `HeadquarterOperations` constructor. */
+function issueDispatchEvidenceGrant(issuer: HeadquarterOperations, write: IssuedGrant['write']): DispatchEvidenceGrant {
+  // `create(null)` so there is not even an inherited `Object.prototype` method
+  // in any lookup path, and `freeze` so nothing can be hung on it later.
+  const token = Object.freeze(Object.create(null) as object);
+  ISSUED_GRANTS.set(token, { issuer, write });
+  return token as unknown as DispatchEvidenceGrant;
+}
+
+/** The genuine record for this grant, or null. The single source of truth. */
+function resolveGrant(ops: HeadquarterOperations, grant: unknown): IssuedGrant | null {
+  if (typeof grant !== 'object' || grant === null) return null;
+  const issued = ISSUED_GRANTS.get(grant);
+  if (!issued || issued.issuer !== ops) return null;
+  return issued;
+}
+
+/**
+ * Throw unless `grant` is a genuine capability issued by exactly `ops`.
+ *
+ * Called by the provider lanes BEFORE anything irreversible, so a refusal
+ * happens before a claim, a start or a repository write. It is a function
+ * binding rather than a static method for the reason in the comment above.
+ */
+export function assertDispatchEvidenceGrant(
+  ops: HeadquarterOperations,
+  grant: unknown,
+): asserts grant is DispatchEvidenceGrant {
+  if (typeof grant !== 'object' || grant === null || !ISSUED_GRANTS.has(grant)) {
+    throw new Error(
+      'The dispatch evidence capability is not a genuine grant. An object of the right shape is ' +
+        'not the capability: a counterfeit could accept the mandatory outcome writes and discard ' +
+        'them, letting a real issue be published with no canonical record of it. Nothing was ' +
+        'claimed, started or published.',
+    );
   }
-
-  /**
-   * The brand test. `#issuer in value` is the ECMAScript private-field `in`
-   * check: true only for an object whose fields this class body installed.
-   */
-  static #isGenuine(value: unknown): value is DispatchEvidenceGrant {
-    return typeof value === 'object' && value !== null && #issuer in (value as DispatchEvidenceGrant);
+  if (ISSUED_GRANTS.get(grant)!.issuer !== ops) {
+    throw new Error(
+      'The dispatch evidence capability was issued by a different HeadquarterOperations than the ' +
+        'one this call was given. A capability is bound to the construction boundary that issued ' +
+        'it. Nothing was claimed, started or published.',
+    );
   }
+}
 
-  /**
-   * Throw unless `grant` is a genuine grant issued by exactly `ops`.
-   *
-   * Public because the provider lanes are separate modules and must be able to
-   * check what they were handed. It grants nothing and reveals nothing: it
-   * either returns or throws.
-   */
-  static assertIssuedBy(ops: HeadquarterOperations, grant: unknown): asserts grant is DispatchEvidenceGrant {
-    if (!DispatchEvidenceGrant.#isGenuine(grant)) {
-      throw new Error(
-        'The dispatch evidence capability is not a genuine DispatchEvidenceGrant. An object of the ' +
-          'right shape is not the capability: a counterfeit could accept the mandatory outcome ' +
-          'writes and discard them, letting a real issue be published with no canonical record of ' +
-          'it. Nothing was claimed, started or published.',
-      );
-    }
-    if (grant.#issuer !== ops) {
-      throw new Error(
-        'The dispatch evidence capability was issued by a different HeadquarterOperations than ' +
-          'the one this dispatch was given. A capability is bound to the construction boundary ' +
-          'that issued it. Nothing was claimed, started or published.',
-      );
-    }
-  }
-
-  appendDispatchOutcome(entry: {
+/**
+ * Write one dispatch outcome through a genuine grant.
+ *
+ * Re-verifies rather than trusting that the assertion above ran: the check and
+ * the write are the same indivisible step, so there is no arrangement of
+ * patched or skipped calls that publishes an issue without recording it.
+ */
+export function writeDispatchOutcome(
+  ops: HeadquarterOperations,
+  grant: DispatchEvidenceGrant,
+  entry: {
     taskId?: string | null;
     actor: SystemEvidenceActor;
     kind: DispatchOutcomeEvidenceKind;
     payload: Record<string, unknown>;
-  }): EvidenceEntry {
-    return this.#write(entry);
+  },
+): EvidenceEntry {
+  const issued = resolveGrant(ops, grant);
+  if (!issued) {
+    throw new Error(
+      'Refusing to record a dispatch outcome through a capability this HeadquarterOperations did ' +
+        'not issue. The write re-checks the grant rather than trusting an earlier assertion.',
+    );
   }
+  return issued.write(entry);
 }
 
 /**
@@ -897,7 +910,7 @@ export class HeadquarterOperations {
     // queue's own grant is handed out early for the mirror-image reason, after
     // `#evidence` and before nothing else it touches.)
     options.grantDispatchEvidence?.(
-      new DispatchEvidenceGrant(DISPATCH_GRANT_KEY, this, (entry) => this.#appendDispatchOutcome(entry)),
+      issueDispatchEvidenceGrant(this, (entry) => this.#appendDispatchOutcome(entry)),
     );
   }
 

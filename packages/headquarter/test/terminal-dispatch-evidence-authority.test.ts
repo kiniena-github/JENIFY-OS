@@ -36,7 +36,8 @@
 
 import { describe, expect, it } from 'vitest';
 import { setupFixture, expectOk, type Fixture } from './application.fixture.js';
-import { DispatchEvidenceGrant } from '../src/application/service.js';
+import * as service from '../src/application/service.js';
+import { writeDispatchOutcome } from '../src/application/service.js';
 import {
   DIRECT_ORDER_CAPABILITY,
   registerDirectOrderCapability,
@@ -324,23 +325,14 @@ describe('a counterfeit dispatch-evidence capability cannot stand in for the rea
       },
     );
 
-  /** Built on the REAL prototype — `instanceof` alone would pass this. */
-  const prototypeCounterfeit = () => {
-    const fake = Object.create(DispatchEvidenceGrant.prototype) as Record<string, unknown>;
-    fake.appendDispatchOutcome = () => ({ seq: 1, at: '', actor: 'hq-claude-dispatch', kind: 'x', payload: {}, hash: 'x', prevHash: null });
-    return fake;
-  };
+  /** A frozen null-prototype object — the same SHAPE the real token has. */
+  const lookalikeToken = () => Object.freeze(Object.create(null) as object);
 
   const counterfeits: ReadonlyArray<readonly [string, () => unknown]> = [
     ['a plain object of the right shape', plainCounterfeit],
     ['a Proxy that answers anything', proxyCounterfeit],
-    ['an object built on the real prototype', prototypeCounterfeit],
+    ['an object shaped exactly like the real opaque token', lookalikeToken],
   ];
-
-  it('is not constructible, so a caller cannot mint one', () => {
-    const Ctor = DispatchEvidenceGrant as unknown as new (...args: unknown[]) => unknown;
-    expect(() => new Ctor(Symbol('guess'), {}, () => undefined)).toThrow(/not publicly constructible/);
-  });
 
   for (const [label, make] of counterfeits) {
     it(`refuses ${label} before anything is claimed, started or published`, () => {
@@ -437,6 +429,112 @@ describe('a counterfeit dispatch-evidence capability cannot stand in for the rea
     expect(result.error.message).toMatch(/issued by a different HeadquarterOperations/);
     expect(stub.calls).toHaveLength(0);
     expect(dispatchHistory(victim.fixture.ops, victim.taskId).state).toBe('none');
+  });
+
+  /**
+   * ChatGPT's blocking review of `26b3068`: the runtime brand was real, but it
+   * lived behind an EXPORTED CLASS, and an exported class object is mutable.
+   * Both routes were reproduced end to end on that head before this fix:
+   *
+   *   A. `DispatchEvidenceGrant.assertIssuedBy = () => {}` (a writable static),
+   *      then the counterfeit from the previous round →
+   *      issue published (1 createIssue), canonical history `none`.
+   *   B. `DispatchEvidenceGrant.prototype.appendDispatchOutcome = () => {}`,
+   *      then the GENUINE grant swallowed its own mandatory writes →
+   *      issue published (1 createIssue), canonical history `none`.
+   *
+   * B is the one that matters most: the private-field brand was intact and
+   * irrelevant, because the call resolved through a mutable prototype and never
+   * went near it.
+   *
+   * These tests assert the attack SURFACES are gone rather than that a
+   * particular patch fails, because a surface that does not exist cannot be
+   * attacked in a way a future edit might slip past.
+   */
+  describe('the verifier and the writer are not patchable objects', () => {
+    it('exports no runtime value to patch — the capability type is type-only', () => {
+      // Attack A needed `DispatchEvidenceGrant.assertIssuedBy` to exist as a
+      // writable property on an exported object. There is no such export now:
+      // the class is gone and the type is erased.
+      expect('DispatchEvidenceGrant' in service).toBe(false);
+    });
+
+    it('exports the verifier and writer as immutable module bindings', () => {
+      // Attack A generalised: could an attacker replace what the provider lane
+      // calls? An ES module namespace is sealed and its bindings are read-only,
+      // which is exactly the guarantee a writable static could not give.
+      for (const name of ['assertDispatchEvidenceGrant', 'writeDispatchOutcome'] as const) {
+        const descriptor = Object.getOwnPropertyDescriptor(service, name);
+        expect(descriptor?.writable ?? false).toBe(false);
+        expect(() => {
+          (service as unknown as Record<string, unknown>)[name] = () => undefined;
+        }).toThrow();
+      }
+      // Not asserting `Object.isExtensible(service)`: whether the namespace
+      // object accepts NEW properties varies with the module wrapper the test
+      // runner uses, and it is not the property that matters. What matters is
+      // that the EXISTING bindings the provider lanes import cannot be
+      // replaced — which is what the two checks above pin.
+    });
+
+    it('hands out a token with no method and no prototype to poison', () => {
+      // Attack B needed a method in the call path. The token has none: no own
+      // properties, and a null prototype, so there is not even an inherited
+      // `Object.prototype` in any lookup.
+      const { fixture } = fixtureWithOrder();
+      const token = fixture.dispatchEvidence as unknown as object;
+      expect(Object.getPrototypeOf(token)).toBeNull();
+      expect(Reflect.ownKeys(token)).toHaveLength(0);
+      expect(Object.isFrozen(token)).toBe(true);
+    });
+
+    it('publishes and records normally even when a fake method is hung on the token', () => {
+      // Attack B, attempted directly: give the token an `appendDispatchOutcome`
+      // that swallows writes. It is frozen, so the assignment does not take —
+      // and the lane would not have called it either, because the write path
+      // does not dispatch through the token at all.
+      const { fixture, taskId } = fixtureWithOrder();
+      const token = fixture.dispatchEvidence as unknown as Record<string, unknown>;
+      try {
+        token.appendDispatchOutcome = () => undefined;
+      } catch {
+        // A frozen null-prototype object in strict mode: expected.
+      }
+      expect(token.appendDispatchOutcome).toBeUndefined();
+
+      const stub = transport();
+      const receipt = expectOk(
+        dispatchClaudeTask(fixture.ops, {
+          evidence: fixture.dispatchEvidence,
+          executorWorkerId: EXECUTOR,
+          taskId,
+          target: TARGET,
+          transport: stub,
+        }),
+      );
+
+      // The real writes landed: the issue exists AND the history records it.
+      expect(receipt.issueNumber).toBe(ISSUE);
+      expect(stub.calls).toHaveLength(1);
+      expect(dispatchHistory(fixture.ops, taskId)).toMatchObject({ state: 'dispatched', issueNumber: ISSUE });
+    });
+
+    it('re-checks the grant at the write, so skipping the verifier reaches nothing', () => {
+      // There is deliberately no single choke point to disable. Even a caller
+      // that never goes through `assertDispatchEvidenceGrant` cannot write an
+      // outcome with a capability this service did not issue.
+      const { fixture, taskId } = fixtureWithOrder();
+      const other = setupFixture();
+      expect(() =>
+        writeDispatchOutcome(fixture.ops, other.dispatchEvidence, {
+          taskId,
+          actor: 'hq-claude-dispatch',
+          kind: CLAUDE_DISPATCH_EVIDENCE.failed,
+          payload: { provider: 'CLAUDE', kind: 'rejected', message: 'cross-instance' },
+        }),
+      ).toThrow(/did not issue/);
+      expect(dispatchHistory(fixture.ops, taskId).state).toBe('none');
+    });
   });
 
   /**
