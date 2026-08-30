@@ -434,11 +434,11 @@ describe('lane F — every actor-attributed write resolves its actor', () => {
       expect(res.ok).toBe(false);
     }
     // Nothing was published under a trusted-looking name.
-    expect(fx.ops.store.thread('war-room-117')).toEqual([]);
+    expect(fx.store.thread('war-room-117')).toEqual([]);
     expectOk(
       fx.ops.postMissionMessage({ threadId: 'war-room-117', author: 'founder', body: 'hello' }),
     );
-    expect(fx.ops.store.thread('war-room-117')).toHaveLength(1);
+    expect(fx.store.thread('war-room-117')).toHaveLength(1);
   });
 
   it('refuses to record an assignment intent under an unresolvable name', () => {
@@ -455,7 +455,7 @@ describe('lane F — every actor-attributed write resolves its actor', () => {
       expect(res.ok).toBe(false);
     }
     // No annotation event and no advisory assignment was written.
-    expect(fx.ops.store.eventsFor('task', created.task.id).filter((e) => e.status === null)).toEqual(
+    expect(fx.store.eventsFor('task', created.task.id).filter((e) => e.status === null)).toEqual(
       [],
     );
     expect(fx.ops.readMeta(created.task.id)?.assignment ?? null).toBeNull();

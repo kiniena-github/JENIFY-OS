@@ -56,6 +56,23 @@ export interface ApprovalCard extends ConsoleTask {
   actionDigest: string;
   /** Plain-language reason the Founder is being asked at all. */
   ask: string;
+  /**
+   * What is known about the actor who REQUESTED this action — projected out of
+   * the task payload deliberately (issue #200, Codex exact-head finding on
+   * `5a19350`).
+   *
+   * The approval of a second human is the containment for an unauthenticated
+   * `--as` assertion at the trusted-local-admin CLI. That containment only
+   * works if the approver can see what they are containing, and this read model
+   * excludes payload fields by design, so the marker never reached them: the
+   * Approval Center showed a requester id and a digest, both of which look
+   * equally solid whether or not anyone authenticated anything.
+   *
+   * `null` means the task carries no marker — an ordinary internal task rather
+   * than a direct order. It is NOT a claim that the requester was
+   * authenticated; nothing in Headquarter can make that claim yet.
+   */
+  requesterAuthentication: string | null;
 }
 
 export interface ReviewCard extends ConsoleTask {
@@ -98,6 +115,28 @@ export interface FounderConsole {
 /** Statuses whose tasks the console lists as active work. */
 const IN_FLIGHT: readonly ActivityStatus[] = ['assigned', 'running'];
 
+/**
+ * The requester's trust marker, read from the task payload and whitelisted to
+ * a known vocabulary before it crosses into a browser-safe read model.
+ *
+ * Whitelisted rather than passed through: the payload is written by a caller,
+ * `ApprovalCard` is published, and an unrecognised value here would be both a
+ * publication path and a trust claim nobody can back. Anything outside the
+ * vocabulary is reported as unknown provenance, not as the string it contained.
+ */
+const KNOWN_REQUESTER_AUTHENTICATION: readonly string[] = [
+  'unauthenticated',
+  'unauthenticated_local_assertion',
+];
+
+function requesterAuthenticationOf(task: { payload?: Record<string, unknown> | null }): string | null {
+  const raw = task.payload?.actorAuthentication;
+  if (raw === undefined || raw === null) return null;
+  return typeof raw === 'string' && KNOWN_REQUESTER_AUTHENTICATION.includes(raw)
+    ? raw
+    : 'unrecognised_marker';
+}
+
 export function founderConsole(ops: HeadquarterOperations, now: Date = new Date()): FounderConsole {
   const toConsoleTask = (taskId: string): ConsoleTask | null => {
     const task = ops.queue.get(taskId);
@@ -139,6 +178,7 @@ export function founderConsole(ops: HeadquarterOperations, now: Date = new Date(
         ...base,
         actionDigest: taskActionDigest(task),
         ask: `Execute ${task.capabilityId} — ${base.classification.reason}`,
+        requesterAuthentication: requesterAuthenticationOf(task),
       },
     ];
   });

@@ -42,7 +42,18 @@ export function assertNoSecretLikeContent(payload: Record<string, unknown>): voi
 }
 
 export class EvidenceLog {
-  constructor(private db: HqDatabase) {}
+  /**
+   * ECMAScript `#private`. TypeScript `private` erases to a public property, so
+   * this database was reachable from the exported operations object and could
+   * be written directly — bypassing every authority gate above it (issue #200,
+   * Codex exact-head finding on `135ae58`, plus three further routes the
+   * object-graph test found that the review did not name).
+   */
+  readonly #db: HqDatabase;
+
+  constructor(db: HqDatabase) {
+    this.#db = db;
+  }
 
   append(entry: {
     taskId?: string | null;
@@ -51,7 +62,7 @@ export class EvidenceLog {
     payload: Record<string, unknown>;
   }): EvidenceEntry {
     assertNoSecretLikeContent(entry.payload);
-    const last = this.db
+    const last = this.#db
       .prepare(`SELECT hash FROM op_evidence ORDER BY seq DESC LIMIT 1`)
       .get() as { hash: string } | undefined;
     const prevHash = last?.hash ?? GENESIS_HASH;
@@ -61,7 +72,7 @@ export class EvidenceLog {
     const hash = createHash('sha256')
       .update([prevHash, id, at, entry.taskId ?? '', entry.actor, entry.kind, payloadJson].join('|'))
       .digest('hex');
-    const res = this.db
+    const res = this.#db
       .prepare(
         `INSERT INTO op_evidence (id, at, task_id, actor, kind, payload, prev_hash, hash)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -80,11 +91,35 @@ export class EvidenceLog {
     };
   }
 
+  /**
+   * Run `fn` inside an IMMEDIATE write transaction (issue #221, Codex P1 on
+   * `1d5b3bf`).
+   *
+   * For a caller that must READ the log and then APPEND to it as one indivisible
+   * decision — "has this already been done? if not, claim it" — the two halves
+   * cannot be separate statements. Two processes holding the same database file
+   * both read "not done", both append, and both go on to perform an irreversible
+   * side effect. That is not hypothetical for the dispatch lane: the side effect
+   * is a public GitHub issue, and the CLI has no process-level exclusion.
+   *
+   * IMMEDIATE, not deferred: the write lock is taken at BEGIN rather than at the
+   * first write, so the second caller blocks BEFORE its read instead of reading
+   * a stale answer and discovering the conflict too late to matter. A caller
+   * that cannot acquire the lock gets SQLITE_BUSY — an exception, which is the
+   * fail-closed outcome — rather than a duplicate.
+   *
+   * The log itself is unchanged: still append-only, still hash-chained. This
+   * only decides when the append happens relative to a read.
+   */
+  reserve<T>(fn: () => T): T {
+    return this.#db.transaction(fn).immediate();
+  }
+
   list(taskId?: string): EvidenceEntry[] {
     const rows = (
       taskId
-        ? this.db.prepare(`SELECT * FROM op_evidence WHERE task_id = ? ORDER BY seq`).all(taskId)
-        : this.db.prepare(`SELECT * FROM op_evidence ORDER BY seq`).all()
+        ? this.#db.prepare(`SELECT * FROM op_evidence WHERE task_id = ? ORDER BY seq`).all(taskId)
+        : this.#db.prepare(`SELECT * FROM op_evidence ORDER BY seq`).all()
     ) as Record<string, unknown>[];
     return rows.map((r) => ({
       seq: r.seq as number,

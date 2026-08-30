@@ -66,6 +66,11 @@ function req(over: Partial<RoutingRequest> = {}): RoutingRequest {
     issueAuthorLogin: OWNER,
     repositoryOwner: OWNER,
     secrets: CI_SECRETS,
+    // Ordinary issues, never dispatched by HQ. Stated explicitly because the
+    // single-use guard fails CLOSED without it: an unestablished answer refuses
+    // the re-trigger (issue #224). The refusal itself is asserted in
+    // test/hq-dispatched-issue-retrigger.test.ts.
+    hqDispatchEvidence: 'never_dispatched',
     ...over,
   };
 }

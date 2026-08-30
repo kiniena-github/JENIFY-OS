@@ -89,7 +89,23 @@ jobs:
             echo "JENIFY_EOF_7f3a"
             echo "DISPATCH_URL=$(printf '%s' "$issue" | jq -r '.html_url')"
             echo "DISPATCH_AUTHOR=$(printf '%s' "$issue" | jq -r '.user.login')"
+            # The body too, so a manual dispatch of an HQ-dispatched issue is
+            # refused by the same routing rule as a comment re-trigger (#224).
+            echo "DISPATCH_BODY<<JENIFY_EOF_7f3a"
+            printf '%s' "$issue" | jq -r '.body // ""'
+            echo "JENIFY_EOF_7f3a"
           } >> "$GITHUB_ENV"
+
+      # The DURABLE half of the single-use guard: whether HQ dispatched this
+      # issue, read from GitHub's immutable edit history rather than from the
+      # body, which the repository owner can edit (#224, Codex P1 on `2dc86e8`).
+      # Fails closed to `unknown`, which the routing module refuses on.
+      - name: Resolve HQ dispatch evidence
+        id: hq_evidence
+        uses: ./.github/actions/hq-dispatch-evidence
+        with:
+          issue-number: ${{ github.event.issue.number || inputs.issue_number }}
+          github-token: ${{ github.token }}
 
       # ---- AUTHORITATIVE ROUTING DECISION (unit-tested module) ------------
       - name: Decide routing
@@ -102,6 +118,15 @@ jobs:
           ACTOR: ${{ github.event.comment.user.login || github.event.issue.user.login || github.actor }}
           ACTOR_TYPE: ${{ github.event.comment.user.type || github.event.issue.user.type || 'User' }}
           COMMENT_BODY: ${{ github.event.comment.body }}
+          # The ISSUE body, so the routing module can recognise an issue JENIFY HQ
+          # dispatched for a canonical task and refuse to re-trigger it here (#224).
+          # Re-running such a task needs a fresh Founder approval and a fresh HQ
+          # dispatch, not a comment: this workflow is not its execution authority.
+          ISSUE_BODY: ${{ github.event.issue.body || env.DISPATCH_BODY }}
+          # The body above is only COMPATIBILITY evidence — it is erasable. This
+          # is the authority: a verdict derived from the issue's immutable edit
+          # history. Absent or `unknown` refuses the re-trigger.
+          HQ_DISPATCH_EVIDENCE: ${{ steps.hq_evidence.outputs.evidence }}
           REPO_OWNER: ${{ github.repository_owner }}
           TARGET_PROVIDER: CLAUDE
           DEDUPE_KEY: ${{ github.event.issue.number }}-${{ github.event.comment.id || github.event.action || 'dispatch' }}

@@ -18,7 +18,8 @@
     "./registry": "./src/registry/index.ts",
     "./providers": "./src/providers/index.ts",
     "./application": "./src/application/index.ts",
-    "./routing": "./src/routing/index.ts"
+    "./routing": "./src/routing/index.ts",
+    "./live": "./src/live/index.ts"
   },
   "scripts": {
     "test": "vitest run",
@@ -26,9 +27,14 @@
     "build": "tsc --noEmit",
     "inventory": "tsx src/cli/inventory.ts",
     "build:site": "tsx src/cli/build-site.ts",
+    "hq:order": "tsx src/cli/direct-order.ts",
+    "hq:snapshot": "tsx src/cli/snapshot.ts",
+    "hq:dispatch-claude": "tsx src/cli/claude-dispatch.ts",
+    "hq:ingest-claude": "tsx src/cli/claude-ingest.ts",
     "codex:review": "tsx src/cli/codex-review.ts",
     "codex:probe": "tsx src/cli/codex-review.ts --probe-only",
-    "evidence:ui": "node tools/ui-evidence.mjs"
+    "evidence:ui": "node tools/ui-evidence.mjs",
+    "evidence:states": "tsx tools/state-visual-evidence.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",
@@ -36,7 +42,9 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^22.0.0",
+    "jsdom": "^26.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^3.0.0"

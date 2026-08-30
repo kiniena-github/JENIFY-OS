@@ -1,5 +1,31 @@
 {
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "extraKnownMarketplaces": {
+    "anthropic-agent-skills": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/skills"
+      }
+    },
+    "wondelai-skills": {
+      "source": {
+        "source": "github",
+        "repo": "wondelai/skills"
+      }
+    },
+    "gsap-skills": {
+      "source": {
+        "source": "github",
+        "repo": "greensock/gsap-skills"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "example-skills@anthropic-agent-skills": true,
+    "ux-design@wondelai-skills": true,
+    "product-innovation@wondelai-skills": true,
+    "gsap-skills@gsap-skills": true
   }
 }

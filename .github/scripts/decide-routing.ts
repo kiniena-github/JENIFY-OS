@@ -14,6 +14,13 @@
  *   ACTOR            login that caused this event
  *   ACTOR_TYPE       User | Bot
  *   COMMENT_BODY     body of the triggering comment (issue_comment only)
+ *   ISSUE_BODY       body of the issue itself, so an HQ-dispatched issue is
+ *                    recognised and cannot be re-triggered from here (#224)
+ *   HQ_DISPATCH_EVIDENCE
+ *                    durable verdict from the issue's immutable edit history:
+ *                    dispatched | never_dispatched | unknown. Anything else,
+ *                    including absent, is read as `unknown` and FAILS CLOSED —
+ *                    the body marker alone is erasable by the owner (#224)
  *   REPO_OWNER       repository owner login
  *   TARGET_PROVIDER  provider this workflow can execute (CLAUDE | GEMINI | '')
  *   DEDUPE_KEY       stable id for duplicate suppression
@@ -34,6 +41,7 @@ import { appendFileSync } from 'node:fs';
 import {
   decideRouting,
   blockedHeadline,
+  parseHqDispatchEvidence,
   PROVIDER_REGISTRY,
   type ProviderId,
   type SecretsEnv,
@@ -88,6 +96,10 @@ const decision = decideRouting({
   repositoryOwner: env('REPO_OWNER'),
   actorIsBot: env('ACTOR_TYPE') === 'Bot' || env('ACTOR').endsWith('[bot]'),
   commentBody: env('COMMENT_BODY'),
+  issueBody: env('ISSUE_BODY'),
+  // Normalised here rather than trusted: an unset or misspelled value must read
+  // as `unknown` (refuse), never as a clean `never_dispatched`.
+  hqDispatchEvidence: parseHqDispatchEvidence(process.env.HQ_DISPATCH_EVIDENCE),
   dedupeKey: env('DEDUPE_KEY') || undefined,
   secrets: secretsFromFlags(),
 });
@@ -137,5 +149,6 @@ setOutput('blocked_marker', decision.blockedReportKey == null ? '' : `<!-- jenif
 setOutput('should_report_blocked', shouldReportBlocked ? 'true' : 'false');
 
 console.log(`[routing] trigger=${triggerKind()} target=${target || '<none>'}`);
+console.log(`[routing] hqDispatchEvidence=${parseHqDispatchEvidence(process.env.HQ_DISPATCH_EVIDENCE)}`);
 console.log(`[routing] outcome=${decision.outcome} dispatchTo=[${decision.dispatchTo.join(', ')}] shouldRun=${shouldRun}`);
 console.log(`[routing] ${decision.reason}`);

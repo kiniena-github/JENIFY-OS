@@ -12,44 +12,78 @@
  * bypass the public API.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { HeadquarterStore } from '../src/store/headquarter.js';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { openMemoryHqDatabase, type HqDatabase } from '../src/store/db.js';
 import { OperatorQueue } from '../src/operator/queue.js';
+import type { PrivilegedQueueApi } from '../src/operator/queue.js';
+import type { PolicyContext } from '../src/operator/policy.js';
 import { canonicalActionDigest, canonicalJson, taskActionDigest } from '../src/operator/approvals.js';
+
+/**
+ * A queue plus its approval grant. The grant reaches only the constructor's
+ * caller (issue #200, Codex finding on `d575c89`), so a test that legitimately
+ * drives approvals captures it here rather than reaching for `queue.approve`,
+ * which no longer exists on the public surface.
+ */
+function queueWithApprovals(
+  db: HqDatabase,
+  policyCtx: PolicyContext = {},
+): { queue: OperatorQueue; privileged: PrivilegedQueueApi } {
+  let privileged: PrivilegedQueueApi | undefined;
+  const queue = new OperatorQueue(db, policyCtx, (api) => {
+    privileged = api;
+  });
+  return { queue, privileged: privileged! };
+}
+
+
+
 
 const claudeWorker = {
   workerId: 'claude',
   allowedCapabilities: ['repo.read_status', 'ops.risky', 'archive.index_document'],
 };
 
-function makeQueue(db: HqDatabase): OperatorQueue {
-  const q = new OperatorQueue(db);
-  q.capabilities.register({
+function makeQueue(db: HqDatabase): { queue: OperatorQueue; approvals: PrivilegedQueueApi } {
+  const { queue: q, privileged: qApprovals } = queueWithApprovals(db);
+  // See queue.test.ts: the least-privilege grant is enforced at the queue
+  // boundary now, so the claiming worker needs a directory row.
+  new HeadquarterStore(db).upsertSpecialist({
+    id: 'claude',
+    displayName: 'Claude',
+    vendor: 'anthropic',
+    role: 'build_lead',
+    allowedCapabilities: [...claudeWorker.allowedCapabilities],
+    active: true,
+  });
+  new CapabilityRegistry(db).register({
     id: 'repo.read_status',
     description: 'Read repo/CI status',
     riskClass: 'read_only',
     sideEffect: false,
     idempotent: true,
   });
-  q.capabilities.register({
+  new CapabilityRegistry(db).register({
     id: 'ops.risky',
     description: 'Founder-gated side-effect action',
     riskClass: 'founder_gate',
     sideEffect: true,
     idempotent: true,
   });
-  q.capabilities.register({
+  new CapabilityRegistry(db).register({
     id: 'archive.index_document',
     description: 'External side effect without standing pre-approval',
     riskClass: 'external_side_effect',
     sideEffect: true,
     idempotent: true,
   });
-  return q;
+  return { queue: q, approvals: qApprovals };
 }
 
 /** Enqueue a founder-gated task; returns its id (status: needs_approval). */
-function enqueueGated(queue: OperatorQueue, key = 'risky-1', payload: Record<string, unknown> = { target: 'x' }): string {
-  const res = queue.enqueue({
+function enqueueGated(privileged: PrivilegedQueueApi, key = 'risky-1', payload: Record<string, unknown> = { target: 'x' }): string {
+  const res = privileged.enqueue({
     capabilityId: 'ops.risky',
     payload,
     idempotencyKey: key,
@@ -78,15 +112,16 @@ describe('canonical serialization', () => {
 describe('correction A: approval binds to the exact immutable action', () => {
   let db: HqDatabase;
   let queue: OperatorQueue;
+  let queueApprovals: PrivilegedQueueApi;
 
   beforeEach(() => {
     db = openMemoryHqDatabase();
-    queue = makeQueue(db);
+    ({ queue, approvals: queueApprovals } = makeQueue(db));
   });
 
   it('approve() stores a digest-bound, time-boxed, single-use approval and admits the unmodified task', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id);
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id);
     const approved = queue.get(id)!;
     expect(approved.status).toBe('queued');
     expect(approved.approvalId).not.toBeNull();
@@ -107,8 +142,8 @@ describe('correction A: approval binds to the exact immutable action', () => {
   });
 
   it('HOSTILE: payload mutated after approval is rejected and the task is blocked', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id);
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id);
     // Attacker rewrites the payload after the Founder approved it.
     db.prepare(`UPDATE op_tasks SET payload = ? WHERE id = ?`).run(
       JSON.stringify({ target: 'PRODUCTION-DELETE-EVERYTHING' }),
@@ -123,16 +158,16 @@ describe('correction A: approval binds to the exact immutable action', () => {
   });
 
   it('HOSTILE: capability swapped after approval is rejected and the task is blocked', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id);
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id);
     db.prepare(`UPDATE op_tasks SET capability_id = 'archive.index_document' WHERE id = ?`).run(id);
     expect(queue.claim('claude', 'archive.index_document')).toBeNull();
     expect(queue.get(id)!.status).toBe('blocked');
   });
 
   it('HOSTILE: payload mutated between claim and start invalidates the approval at start()', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id);
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky')!;
     db.prepare(`UPDATE op_tasks SET payload = ? WHERE id = ?`).run(JSON.stringify({ target: 'evil' }), id);
     expect(() => queue.start(id, 'claude', t.fence)).toThrow(/approval invalidated/i);
@@ -140,15 +175,15 @@ describe('correction A: approval binds to the exact immutable action', () => {
   });
 
   it('an expired approval never admits execution; the task returns to needs_approval', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id, 'founder', { ttlMs: -1000 });
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id, 'founder', { ttlMs: -1000 });
     expect(queue.claim('claude', 'ops.risky')).toBeNull();
     expect(queue.get(id)!.status).toBe('needs_approval');
   });
 
   it('HOSTILE: replaying a consumed approval is rejected; a fresh Founder approval is required', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id);
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky')!;
     const approvalId = db.prepare(`SELECT approval_id FROM op_tasks WHERE id = ?`).get(id) as {
       approval_id: string;
@@ -162,16 +197,16 @@ describe('correction A: approval binds to the exact immutable action', () => {
   });
 
   it('HOSTILE: forcing a gated task to queued without any approval record is rejected', () => {
-    const id = enqueueGated(queue);
+    const id = enqueueGated(queueApprovals);
     db.prepare(`UPDATE op_tasks SET status = 'queued' WHERE id = ?`).run(id);
     expect(queue.claim('claude', 'ops.risky')).toBeNull();
     expect(queue.get(id)!.status).toBe('needs_approval');
   });
 
   it("HOSTILE: task B cannot ride on task A's approval (digest binds the task id)", () => {
-    const a = enqueueGated(queue, 'risky-a', { same: 'payload' });
-    const b = enqueueGated(queue, 'risky-b', { same: 'payload' });
-    queue.approve(a);
+    const a = enqueueGated(queueApprovals, 'risky-a', { same: 'payload' });
+    const b = enqueueGated(queueApprovals, 'risky-b', { same: 'payload' });
+    queueApprovals.approve(a);
     const approvalOfA = queue.get(a)!.approvalId!;
     db.prepare(`UPDATE op_tasks SET status = 'queued', approval_id = ? WHERE id = ?`).run(approvalOfA, b);
     // Task A is claimable; hostile task B must be rejected even though its
@@ -183,21 +218,21 @@ describe('correction A: approval binds to the exact immutable action', () => {
   });
 
   it('the requesting worker cannot approve its own action', () => {
-    const id = enqueueGated(queue);
-    expect(() => queue.approve(id, 'claude')).toThrow(/may not approve its own/);
-    expect(() => queue.approve(id, 'system')).toThrow(/may not approve/);
+    const id = enqueueGated(queueApprovals);
+    expect(() => queueApprovals.approve(id, 'claude')).toThrow(/may not approve its own/);
+    expect(() => queueApprovals.approve(id, 'system')).toThrow(/may not approve/);
     expect(queue.get(id)!.status).toBe('needs_approval');
   });
 
   it('approve() refuses a task that is not awaiting approval', () => {
-    const res = queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
+    const res = queueApprovals.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
     if (!res.accepted) throw new Error('enqueue failed');
-    expect(() => queue.approve(res.task.id)).toThrow(/not awaiting approval/);
+    expect(() => queueApprovals.approve(res.task.id)).toThrow(/not awaiting approval/);
   });
 
   it('denials are recorded immutably with the decider', () => {
-    const id = enqueueGated(queue);
-    queue.deny(id, 'not this wave');
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.deny(id, 'not this wave');
     const row = db
       .prepare(`SELECT decision, decided_by, decision_note FROM hq_approvals WHERE task_id = ?`)
       .get(id) as Record<string, unknown>;
@@ -210,10 +245,11 @@ describe('correction A: approval binds to the exact immutable action', () => {
 describe('issue #71: approval expiry is revalidated at actual execution start', () => {
   let db: HqDatabase;
   let queue: OperatorQueue;
+  let queueApprovals: PrivilegedQueueApi;
 
   beforeEach(() => {
     db = openMemoryHqDatabase();
-    queue = makeQueue(db);
+    ({ queue, approvals: queueApprovals } = makeQueue(db));
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
   });
@@ -223,8 +259,8 @@ describe('issue #71: approval expiry is revalidated at actual execution start', 
   });
 
   it('HOSTILE: approval valid at claim but expired before start() never executes; task returns to needs_approval with evidence', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id, 'founder', { ttlMs: 60_000 }); // expires 00:01:00.000Z
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id, 'founder', { ttlMs: 60_000 }); // expires 00:01:00.000Z
     const t = queue.claim('claude', 'ops.risky')!; // valid at claim; nonce consumed here
     expect(t.status).toBe('assigned');
     // Clock advances beyond expires_at between claim and start.
@@ -247,7 +283,7 @@ describe('issue #71: approval expiry is revalidated at actual execution start', 
     // The old worker's stale fence can no longer act on the task.
     expect(() => queue.start(id, 'claude', t.fence)).toThrow(/stale fence/i);
     // Recovery is exactly the existing contract: a FRESH Founder approval.
-    queue.approve(id, 'founder', { ttlMs: 60_000 });
+    queueApprovals.approve(id, 'founder', { ttlMs: 60_000 });
     const t2 = queue.claim('claude', 'ops.risky')!;
     expect(t2.fence).toBeGreaterThan(t.fence);
     expect(t2.approvalId).not.toBe(t.approvalId);
@@ -255,8 +291,8 @@ describe('issue #71: approval expiry is revalidated at actual execution start', 
   });
 
   it('boundary: start() exactly AT expires_at is rejected (expiry is inclusive: now >= expires_at)', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id, 'founder', { ttlMs: 60_000 }); // expires 00:01:00.000Z
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id, 'founder', { ttlMs: 60_000 }); // expires 00:01:00.000Z
     const t = queue.claim('claude', 'ops.risky')!;
     vi.setSystemTime(new Date('2026-01-01T00:01:00.000Z'));
     expect(() => queue.start(id, 'claude', t.fence)).toThrow(/expired before execution start/i);
@@ -264,16 +300,16 @@ describe('issue #71: approval expiry is revalidated at actual execution start', 
   });
 
   it('boundary: start() strictly before expires_at (expiry minus 1ms) still executes', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id, 'founder', { ttlMs: 60_000 }); // expires 00:01:00.000Z
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id, 'founder', { ttlMs: 60_000 }); // expires 00:01:00.000Z
     const t = queue.claim('claude', 'ops.risky')!;
     vi.setSystemTime(new Date('2026-01-01T00:00:59.999Z'));
     expect(queue.start(id, 'claude', t.fence).status).toBe('running');
   });
 
   it('HOSTILE: approval expiry wiped via direct SQL between claim and start never admits execution', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id, 'founder', { ttlMs: 60_000 });
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id, 'founder', { ttlMs: 60_000 });
     const t = queue.claim('claude', 'ops.risky')!;
     // Attacker strips the time-box entirely; an unbound expiry must never admit.
     db.prepare(`UPDATE hq_approvals SET expires_at = NULL WHERE id = ?`).run(t.approvalId);
@@ -285,15 +321,16 @@ describe('issue #71: approval expiry is revalidated at actual execution start', 
 describe('issue #77: approval consumption binds to the legitimate claim', () => {
   let db: HqDatabase;
   let queue: OperatorQueue;
+  let queueApprovals: PrivilegedQueueApi;
 
   beforeEach(() => {
     db = openMemoryHqDatabase();
-    queue = makeQueue(db);
+    ({ queue, approvals: queueApprovals } = makeQueue(db));
   });
 
   it('a legitimate claim records the full consumption binding and still starts before expiry', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id);
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky')!;
     expect(t.claimNonce).toBeTruthy();
     const row = db
@@ -315,8 +352,8 @@ describe('issue #77: approval consumption binds to the legitimate claim', () => 
   });
 
   it('HOSTILE: an approval consumed by worker A cannot be reattached to a forced assigned state for worker B', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id);
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky')!; // legitimately consumed by claude's claim
     // Attacker hands the assigned task (with its consumed approval still
     // attached) to a different worker via direct SQL.
@@ -330,8 +367,8 @@ describe('issue #77: approval consumption binds to the legitimate claim', () => 
   });
 
   it('HOSTILE: a forced assigned state that skipped the claim path (approval never consumed) cannot start', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id); // approved and queued; nonce NOT consumed — no claim happened
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id); // approved and queued; nonce NOT consumed — no claim happened
     db.prepare(
       `UPDATE op_tasks SET status = 'assigned', claimed_by = 'claude', fence = 1,
          claim_nonce = 'forged', lease_expires_at = ? WHERE id = ?`,
@@ -341,8 +378,8 @@ describe('issue #77: approval consumption binds to the legitimate claim', () => 
   });
 
   it('HOSTILE: a stale/forged claim nonce on the task row cannot start execution', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id);
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky')!;
     // Attacker overwrites the task's per-claim nonce (e.g. while restoring a forced state).
     db.prepare(`UPDATE op_tasks SET claim_nonce = 'forged-nonce' WHERE id = ?`).run(id);
@@ -351,8 +388,8 @@ describe('issue #77: approval consumption binds to the legitimate claim', () => 
   });
 
   it('HOSTILE: a released claim cannot be force-restored onto its old consumed approval', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id);
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky', -1)!; // lease already expired while assigned
     queue.sweepExpiredLeases(); // safely re-queued; claim released, nonce cleared
     const released = queue.get(id)!;
@@ -371,8 +408,8 @@ describe('issue #77: approval consumption binds to the legitimate claim', () => 
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
-      const id = enqueueGated(queue);
-      queue.approve(id, 'founder', { ttlMs: 60_000 });
+      const id = enqueueGated(queueApprovals);
+      queueApprovals.approve(id, 'founder', { ttlMs: 60_000 });
       const t = queue.claim('claude', 'ops.risky')!; // binding intact, legitimately consumed
       vi.setSystemTime(new Date('2026-01-01T00:01:00.001Z'));
       // The legitimate claim's binding passes; only the time-box rejects — so
@@ -388,15 +425,16 @@ describe('issue #77: approval consumption binds to the legitimate claim', () => 
 describe('issue #79: consumption also pins the exact task (cross-task riding fails even behind a forged digest)', () => {
   let db: HqDatabase;
   let queue: OperatorQueue;
+  let queueApprovals: PrivilegedQueueApi;
 
   beforeEach(() => {
     db = openMemoryHqDatabase();
-    queue = makeQueue(db);
+    ({ queue, approvals: queueApprovals } = makeQueue(db));
   });
 
   it('a legitimate claim records the exact task id in the consumption record', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id);
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky')!;
     const row = db
       .prepare(`SELECT consumed_task_id FROM hq_approvals WHERE id = ?`)
@@ -408,9 +446,9 @@ describe('issue #79: consumption also pins the exact task (cross-task riding fai
   });
 
   it("HOSTILE: task B forged into assigned state cannot ride task A's consumed approval even with a forged digest and a copied claim nonce", () => {
-    const a = enqueueGated(queue, 'risky-a', { same: 'payload' });
-    const b = enqueueGated(queue, 'risky-b', { same: 'payload' });
-    queue.approve(a);
+    const a = enqueueGated(queueApprovals, 'risky-a', { same: 'payload' });
+    const b = enqueueGated(queueApprovals, 'risky-b', { same: 'payload' });
+    queueApprovals.approve(a);
     const claimedA = queue.claim('claude', 'ops.risky')!; // consumes A's approval legitimately
     // Attacker copies EVERYTHING observable from A's legitimate claim onto B
     // (worker, fence, claim nonce, consumed approval) and even rewrites the
@@ -439,8 +477,8 @@ describe('issue #79: consumption also pins the exact task (cross-task riding fai
   });
 
   it('HOSTILE: wiping the consumed task id via direct SQL fails closed at start()', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id);
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky')!;
     db.prepare(`UPDATE hq_approvals SET consumed_task_id = NULL WHERE id = ?`).run(t.approvalId);
     expect(() => queue.start(id, 'claude', t.fence)).toThrow(/not consumed by this claim/i);
@@ -451,11 +489,12 @@ describe('issue #79: consumption also pins the exact task (cross-task riding fai
 describe('correction B: executor can never self-complete a review-required action', () => {
   let db: HqDatabase;
   let queue: OperatorQueue;
+  let queueApprovals: PrivilegedQueueApi;
 
   /** Approved + claimed + running side-effect task, executed by claude. */
   function runningGatedTask(): { id: string; fence: number } {
-    const id = enqueueGated(queue);
-    queue.approve(id);
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky')!;
     queue.start(id, 'claude', t.fence);
     return { id, fence: t.fence };
@@ -463,7 +502,7 @@ describe('correction B: executor can never self-complete a review-required actio
 
   beforeEach(() => {
     db = openMemoryHqDatabase();
-    queue = makeQueue(db);
+    ({ queue, approvals: queueApprovals } = makeQueue(db));
   });
 
   it('side-effect complete() lands in the review-gated path, not in completed', () => {
@@ -480,16 +519,16 @@ describe('correction B: executor can never self-complete a review-required actio
   it('HOSTILE: the executing worker cannot pass review on its own execution', () => {
     const { id, fence } = runningGatedTask();
     queue.complete(id, 'claude', fence, { done: true });
-    expect(() => queue.reviewPass(id, 'claude')).toThrow(/builder != final reviewer/);
-    expect(() => queue.reviewFail(id, 'claude', 'x')).toThrow(/builder != final reviewer/);
-    expect(() => queue.reviewPass(id, 'system')).toThrow(/builder != final reviewer/);
+    expect(() => queueApprovals.reviewPass(id, 'claude')).toThrow(/builder != final reviewer/);
+    expect(() => queueApprovals.reviewFail(id, 'claude', 'x')).toThrow(/builder != final reviewer/);
+    expect(() => queueApprovals.reviewPass(id, 'system')).toThrow(/builder != final reviewer/);
     expect(queue.get(id)!.status).toBe('running');
   });
 
   it('only an independent reviewer decision reaches terminal completed', () => {
     const { id, fence } = runningGatedTask();
     queue.complete(id, 'claude', fence, { done: true });
-    const done = queue.reviewPass(id, 'codex', 'verified against the real side effect');
+    const done = queueApprovals.reviewPass(id, 'codex', 'verified against the real side effect');
     expect(done.status).toBe('completed');
     expect(done.reviewState).toBe('passed');
     // The full audited path is on record: review_passed then completed.
@@ -504,19 +543,19 @@ describe('correction B: executor can never self-complete a review-required actio
   it('an independent reviewer can fail the result; the task goes to review_failed for rework', () => {
     const { id, fence } = runningGatedTask();
     queue.complete(id, 'claude', fence, { done: true });
-    const failed = queue.reviewFail(id, 'codex', 'side effect not observed');
+    const failed = queueApprovals.reviewFail(id, 'codex', 'side effect not observed');
     expect(failed.status).toBe('review_failed');
     expect(failed.reviewState).toBe('failed');
   });
 
   it('review decisions require a result actually awaiting review', () => {
     const { id } = runningGatedTask();
-    expect(() => queue.reviewPass(id, 'codex')).toThrow(/no result awaiting review/);
+    expect(() => queueApprovals.reviewPass(id, 'codex')).toThrow(/no result awaiting review/);
   });
 
   it('a review-pending task is never swept into outcome_unknown', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id);
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky', -1)!; // lease already expired
     queue.start(id, 'claude', t.fence);
     queue.complete(id, 'claude', t.fence, { done: true });
@@ -526,21 +565,21 @@ describe('correction B: executor can never self-complete a review-required actio
   });
 
   it('HOSTILE: the executing worker cannot reconcile its own outcome_unknown task', () => {
-    const id = enqueueGated(queue);
-    queue.approve(id);
+    const id = enqueueGated(queueApprovals);
+    queueApprovals.approve(id);
     const t = queue.claim('claude', 'ops.risky', -1)!;
     queue.start(id, 'claude', t.fence);
     queue.sweepExpiredLeases();
     expect(queue.get(id)!.status).toBe('outcome_unknown');
-    expect(() => queue.reconcile(id, 'confirmed_done', 'claude', 'trust me')).toThrow(
+    expect(() => queueApprovals.reconcile(id, 'confirmed_done', 'claude', 'trust me')).toThrow(
       /independent reviewer/,
     );
-    const done = queue.reconcile(id, 'confirmed_done', 'codex', 'verified externally');
+    const done = queueApprovals.reconcile(id, 'confirmed_done', 'codex', 'verified externally');
     expect(done.status).toBe('completed');
   });
 
   it('read-only capabilities still complete directly (no review theater for safe reads)', () => {
-    const res = queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
+    const res = queueApprovals.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claudeWorker });
     if (!res.accepted) throw new Error('enqueue failed');
     const t = queue.claim('claude', 'repo.read_status')!;
     queue.start(t.id, 'claude', t.fence);
