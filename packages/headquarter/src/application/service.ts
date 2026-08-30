@@ -195,10 +195,13 @@ export type DispatchOutcomeEvidenceKind = (typeof DISPATCH_OUTCOME_EVIDENCE_KIND
  *
  * So the capability is no longer a thing with behaviour. It is an inert token:
  *
- *   - `Object.freeze(Object.create(null))` — no methods to overwrite, no
- *     prototype to poison, not even `Object.prototype` behind it;
- *   - the writer and the issuer live in `ISSUED_GRANTS`, a module-private
- *     `WeakMap` no other module can name;
+ *   - frozen, with its prototype severed — no methods to overwrite, no
+ *     prototype to poison, not even `Object.prototype` behind it, and no route
+ *     from a grant back to the class that made it;
+ *   - the writer and the issuer live in `#private` fields of a module-private,
+ *     frozen class, so the brand check is a syntactic slot test rather than a
+ *     lookup through any patchable object (see `IssuedGrant` below — a
+ *     `WeakMap` registry was NOT enough, and the measurement is recorded there);
  *   - the two functions that consult it are exported as FUNCTION BINDINGS, not
  *     properties of an exported object. An ES module binding is immutable from
  *     the importing side: `import { writeDispatchOutcome }` cannot be reassigned
@@ -213,38 +216,86 @@ export interface DispatchEvidenceGrant {
   readonly [DISPATCH_GRANT_BRAND]: true;
 }
 
-/** What a genuine grant actually authorises. Unreachable outside this module. */
-interface IssuedGrant {
-  readonly issuer: HeadquarterOperations;
-  readonly write: (entry: {
-    taskId?: string | null;
-    actor: SystemEvidenceActor;
-    kind: DispatchOutcomeEvidenceKind;
-    payload: Record<string, unknown>;
-  }) => EvidenceEntry;
-}
+/** The write a genuine grant authorises. Unreachable outside this module. */
+type DispatchOutcomeWrite = (entry: {
+  taskId?: string | null;
+  actor: SystemEvidenceActor;
+  kind: DispatchOutcomeEvidenceKind;
+  payload: Record<string, unknown>;
+}) => EvidenceEntry;
 
 /**
- * The registry of issued capabilities. Module-private and weak: it names no
- * grant a caller could forge, and holds no grant alive on its own.
+ * ## Why the brand is a private FIELD and not a `WeakMap` membership
+ *
+ * A module-private `WeakMap` is unnameable, which is what made it look
+ * sufficient — but reading it is a method call on a shared, mutable builtin.
+ * `WeakMap.prototype.get` and `.has` are writable, and an attacker does not
+ * even need to deep-import this file to reach them. Measured on the previous
+ * head, against the real lane and a counting transport:
+ *
+ *     const realGet = WeakMap.prototype.get;
+ *     const token = Object.freeze(Object.create(null));
+ *     WeakMap.prototype.has = function (k) { return k === token || realHas.call(this, k); };
+ *     WeakMap.prototype.get = function (k) { return k === token ? forged : realGet.call(this, k); };
+ *
+ *   → counterfeit token ACCEPTED, 1 `createIssue`, both mandatory writes
+ *     swallowed, `dispatchHistory` = `none`.
+ *
+ * Surgical rather than global — every other `WeakMap` in the process, the
+ * database driver's included, keeps working — so nothing gives the attack away.
+ * That is the same P1 the round before this one, reached through the last
+ * mutable object left in the check.
+ *
+ * A `#private` field has no such lookup. `#issuer in value` is a syntactic slot
+ * test the language performs directly: there is no property, prototype, builtin
+ * or binding anywhere in its path for an in-process caller to replace. The
+ * class carrying it is module-private, frozen, with a frozen prototype, so the
+ * class object is not reachable or patchable either — and the token severs its
+ * own prototype, so holding a genuine grant does not lead back to the class.
  */
-const ISSUED_GRANTS = new WeakMap<object, IssuedGrant>();
+class IssuedGrant {
+  readonly #issuer: HeadquarterOperations;
+  readonly #write: DispatchOutcomeWrite;
+
+  constructor(issuer: HeadquarterOperations, write: DispatchOutcomeWrite) {
+    this.#issuer = issuer;
+    this.#write = write;
+    // No prototype: `getPrototypeOf(grant).constructor` must not lead back to
+    // this class. Private fields are unaffected — a private-field brand check
+    // is a slot test, not a prototype lookup — and no lane calls a method on
+    // the token, so it needs no prototype at all.
+    Object.setPrototypeOf(this, null);
+    Object.freeze(this);
+  }
+
+  /** The genuine write for this grant, or null. The single source of truth. */
+  static resolve(ops: HeadquarterOperations, grant: unknown): DispatchOutcomeWrite | null {
+    if (typeof grant !== 'object' || grant === null || !(#issuer in (grant as IssuedGrant))) {
+      return null;
+    }
+    const issued = grant as IssuedGrant;
+    return issued.#issuer === ops ? issued.#write : null;
+  }
+
+  /** Whether this is a genuine grant at all, whoever issued it. */
+  static isGenuine(grant: unknown): boolean {
+    return typeof grant === 'object' && grant !== null && #issuer in (grant as IssuedGrant);
+  }
+}
+Object.freeze(IssuedGrant);
+Object.freeze(IssuedGrant.prototype);
 
 /** Mint one. Called only by the `HeadquarterOperations` constructor. */
-function issueDispatchEvidenceGrant(issuer: HeadquarterOperations, write: IssuedGrant['write']): DispatchEvidenceGrant {
-  // `create(null)` so there is not even an inherited `Object.prototype` method
-  // in any lookup path, and `freeze` so nothing can be hung on it later.
-  const token = Object.freeze(Object.create(null) as object);
-  ISSUED_GRANTS.set(token, { issuer, write });
-  return token as unknown as DispatchEvidenceGrant;
+function issueDispatchEvidenceGrant(
+  issuer: HeadquarterOperations,
+  write: DispatchOutcomeWrite,
+): DispatchEvidenceGrant {
+  return new IssuedGrant(issuer, write) as unknown as DispatchEvidenceGrant;
 }
 
 /** The genuine record for this grant, or null. The single source of truth. */
-function resolveGrant(ops: HeadquarterOperations, grant: unknown): IssuedGrant | null {
-  if (typeof grant !== 'object' || grant === null) return null;
-  const issued = ISSUED_GRANTS.get(grant);
-  if (!issued || issued.issuer !== ops) return null;
-  return issued;
+function resolveGrant(ops: HeadquarterOperations, grant: unknown): DispatchOutcomeWrite | null {
+  return IssuedGrant.resolve(ops, grant);
 }
 
 /**
@@ -258,7 +309,7 @@ export function assertDispatchEvidenceGrant(
   ops: HeadquarterOperations,
   grant: unknown,
 ): asserts grant is DispatchEvidenceGrant {
-  if (typeof grant !== 'object' || grant === null || !ISSUED_GRANTS.has(grant)) {
+  if (!IssuedGrant.isGenuine(grant)) {
     throw new Error(
       'The dispatch evidence capability is not a genuine grant. An object of the right shape is ' +
         'not the capability: a counterfeit could accept the mandatory outcome writes and discard ' +
@@ -266,7 +317,7 @@ export function assertDispatchEvidenceGrant(
         'claimed, started or published.',
     );
   }
-  if (ISSUED_GRANTS.get(grant)!.issuer !== ops) {
+  if (resolveGrant(ops, grant) === null) {
     throw new Error(
       'The dispatch evidence capability was issued by a different HeadquarterOperations than the ' +
         'one this call was given. A capability is bound to the construction boundary that issued ' +
@@ -292,14 +343,14 @@ export function writeDispatchOutcome(
     payload: Record<string, unknown>;
   },
 ): EvidenceEntry {
-  const issued = resolveGrant(ops, grant);
-  if (!issued) {
+  const write = resolveGrant(ops, grant);
+  if (!write) {
     throw new Error(
       'Refusing to record a dispatch outcome through a capability this HeadquarterOperations did ' +
         'not issue. The write re-checks the grant rather than trusting an earlier assertion.',
     );
   }
-  return issued.write(entry);
+  return write(entry);
 }
 
 /**

@@ -704,3 +704,146 @@ describe('the legitimate lanes are unchanged by the grant', () => {
     expect(correlations).toHaveLength(1);
   });
 });
+
+/**
+ * HOSTILE, one layer below the last fix: patch the BUILTIN the check reads
+ * through.
+ *
+ * The previous head moved the issuer and the writer into a module-private
+ * `WeakMap`. Unnameable is not the same as unreachable: reading a `WeakMap` is
+ * a method call on a shared, mutable builtin, and `WeakMap.prototype.get`/`has`
+ * are writable by anyone in the process — no deep import of the service module
+ * required at all.
+ *
+ * Measured against the real lane and a counting transport before this fix, with
+ * a SURGICAL patch that answers only for the attacker's own token so every
+ * other `WeakMap` in the process (the database driver's included) keeps
+ * working:
+ *
+ *     counterfeit token ACCEPTED → 1 createIssue → both mandatory writes
+ *     swallowed → dispatchHistory `none`
+ *
+ * The same duplicate-publication P1 as the two rounds before it, reached
+ * through the last mutable object left in the check. A `#private` field has no
+ * lookup to patch, which is why the brand is one now.
+ */
+describe('the grant brand does not read through a patchable builtin', () => {
+  it('refuses a counterfeit even while WeakMap.prototype is patched to vouch for it', () => {
+    const { fixture, taskId } = fixtureWithOrder();
+    const stub = transport();
+    const swallowed: unknown[] = [];
+    const token = Object.freeze(Object.create(null) as object);
+    const forged = {
+      issuer: fixture.ops,
+      write: (entry: unknown) => {
+        swallowed.push(entry);
+        return { seq: 1, at: '', actor: 'hq-claude-dispatch', kind: 'x', payload: {}, hash: 'x', prevHash: null };
+      },
+    };
+
+    const realHas = WeakMap.prototype.has;
+    const realGet = WeakMap.prototype.get;
+    let result: ReturnType<typeof dispatchClaudeTask>;
+    try {
+      WeakMap.prototype.has = function (this: WeakMap<object, unknown>, key: object) {
+        return key === token ? true : realHas.call(this, key);
+      };
+      WeakMap.prototype.get = function (this: WeakMap<object, unknown>, key: object) {
+        return key === token ? forged : realGet.call(this, key);
+      } as typeof realGet;
+
+      result = dispatchClaudeTask(fixture.ops, {
+        evidence: token as never,
+        executorWorkerId: EXECUTOR,
+        taskId,
+        target: TARGET,
+        transport: stub,
+      });
+    } finally {
+      // Restore before any assertion, so a failure here cannot leak a patched
+      // builtin into the rest of the suite.
+      WeakMap.prototype.has = realHas;
+      WeakMap.prototype.get = realGet;
+    }
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('evidence_grant_invalid');
+    // The three facts the exploit produced on the previous head, all absent:
+    expect(stub.calls).toHaveLength(0); // nothing published
+    expect(swallowed).toHaveLength(0); // no mandatory write went to the attacker
+    expect(dispatchHistory(fixture.ops, taskId).state).toBe('none');
+    expect(fixture.ops.queue.evidence.verifyChain()).toBeNull();
+  });
+
+  it('refuses the same patch at the write, not only at the door', () => {
+    const { fixture, taskId } = fixtureWithOrder();
+    const token = Object.freeze(Object.create(null) as object);
+    const forged = { issuer: fixture.ops, write: () => undefined };
+
+    const realHas = WeakMap.prototype.has;
+    const realGet = WeakMap.prototype.get;
+    let thrown: unknown;
+    try {
+      WeakMap.prototype.has = function (this: WeakMap<object, unknown>, key: object) {
+        return key === token ? true : realHas.call(this, key);
+      };
+      WeakMap.prototype.get = function (this: WeakMap<object, unknown>, key: object) {
+        return key === token ? forged : realGet.call(this, key);
+      } as typeof realGet;
+
+      try {
+        writeDispatchOutcome(fixture.ops, token as never, {
+          taskId,
+          actor: 'hq-claude-dispatch',
+          kind: CLAUDE_DISPATCH_EVIDENCE.succeeded as never,
+          payload: { issueNumber: 9999, issueUrl: 'https://github.com/attacker/evil/issues/9999', repository: 'attacker/evil' },
+        });
+      } catch (error) {
+        thrown = error;
+      }
+    } finally {
+      WeakMap.prototype.has = realHas;
+      WeakMap.prototype.get = realGet;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toMatch(/did not issue/);
+    expect(dispatchHistory(fixture.ops, taskId).state).toBe('none');
+  });
+
+  /**
+   * A Proxy wrapping a GENUINE grant. Identity, not shape, is what the brand
+   * tests, and a private-field check on a proxy is false however the handler
+   * answers — the proxy has no private slots of its own.
+   */
+  it('refuses a Proxy wrapping a genuine grant', () => {
+    const { fixture, taskId } = fixtureWithOrder();
+    const stub = transport();
+
+    const result = dispatchClaudeTask(fixture.ops, {
+      evidence: new Proxy(fixture.dispatchEvidence as object, {}) as never,
+      executorWorkerId: EXECUTOR,
+      taskId,
+      target: TARGET,
+      transport: stub,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('evidence_grant_invalid');
+    expect(stub.calls).toHaveLength(0);
+    expect(dispatchHistory(fixture.ops, taskId).state).toBe('none');
+  });
+
+  /** The token still leads nowhere: no prototype, no own key, frozen. */
+  it('hands out a token with no route back to the implementation class', () => {
+    const grant = setupFixture().dispatchEvidence as unknown as object;
+    expect(Object.getPrototypeOf(grant)).toBeNull();
+    expect(Reflect.ownKeys(grant)).toEqual([]);
+    expect(Object.isFrozen(grant)).toBe(true);
+    expect(() => {
+      (grant as Record<string, unknown>)['appendDispatchOutcome'] = () => undefined;
+    }).toThrow(TypeError);
+  });
+});
