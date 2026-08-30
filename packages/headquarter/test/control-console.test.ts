@@ -265,7 +265,7 @@ describe('the static markup stays inert with the consoles mounted', () => {
 
 function planeDeps(overrides: Partial<ControlApiDeps> = {}): ControlApiDeps {
   const fixture = setupFixture();
-  registerDirectOrderCapability(fixture.ops);
+  registerDirectOrderCapability(fixture.db);
   fixture.principals.register({
     id: 'founder',
     displayName: 'Founder',

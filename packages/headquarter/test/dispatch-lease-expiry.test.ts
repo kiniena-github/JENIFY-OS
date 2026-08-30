@@ -70,7 +70,7 @@ const PUBLISHES: DispatchCapableTransport = {
 
 function fixture(): Fixture {
   const f = setupFixture();
-  registerDirectOrderCapability(f.ops);
+  registerDirectOrderCapability(f.db);
   f.principals.register({
     id: 'founder',
     displayName: 'Founder',

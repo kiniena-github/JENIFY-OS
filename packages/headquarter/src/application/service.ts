@@ -74,14 +74,31 @@ import type { ActivityStatus } from '../contracts/events.js';
 import type { WorkerDescriptor, WorkerRole } from '../contracts/workers.js';
 import { evaluatePolicy, type PolicyContext, type PolicyDecision } from '../operator/policy.js';
 import { taskActionDigest } from '../operator/approvals.js';
-import { assertNoSecretLikeContent } from '../operator/evidence.js';
-import { OperatorQueue, type OperatorTask, type ReconcileDecision } from '../operator/queue.js';
+import { assertNoSecretLikeContent, type EvidenceEntry } from '../operator/evidence.js';
+import { CapabilityRegistry } from '../operator/capabilities.js';
+import {
+  OperatorQueue,
+  type OperatorTask,
+  type PrivilegedQueueApi,
+  type ReconcileDecision,
+} from '../operator/queue.js';
 import {
   ProviderBindingViolation,
   ProviderDeclarationRejected,
-  WorkerProviderRegistrar,
+  WorkerProviderDirectory,
   type WorkerProviderRecord,
 } from '../operator/provider-binding.js';
+import { PROVIDERS, type ProviderId } from '../routing/providers.js';
+
+/**
+ * The only actors an in-process system lane may append evidence under.
+ *
+ * Closed on purpose. Every name here denotes the SYSTEM recording its own act;
+ * none is, or may become, a human principal or a registered worker — that is
+ * enforced at the call, not merely intended. See `appendSystemEvidence`.
+ */
+export const SYSTEM_EVIDENCE_ACTORS = ['system', 'hq-claude-dispatch'] as const;
+export type SystemEvidenceActor = (typeof SYSTEM_EVIDENCE_ACTORS)[number];
 import { ensureApplicationSchema } from './db.js';
 import {
   SpecialistDirectoryAdapter,
@@ -96,6 +113,7 @@ import {
   resolveApprover,
   resolvePrincipal,
   type HumanPrincipalPort,
+  type HumanPrincipal,
 } from './principals.js';
 import {
   detectActionLanguage,
@@ -239,6 +257,75 @@ export interface ReplacementPlan {
   blockers: ReplacementBlocker[];
 }
 
+/**
+ * The worker→provider WRITE mechanism, defined here and exported to nobody.
+ *
+ * It lived in `operator/provider-binding.ts` for two rounds and could not be
+ * held there. Removing it from the queue's property left the class publicly
+ * constructible; a module-local construction key then left an exported factory
+ * holding that key, so a deep import still reached it — the same mistake one
+ * level up (issue #200, Codex exact-head findings on `5a19350` and `03a7104`).
+ * Omitting a name from `operator/index.ts` never stopped a deep import, and ESM
+ * offers no package-private class, so no gate in an importable module can hold.
+ *
+ * Defining it here does hold, because there is no exported path to it at all:
+ * reaching this mechanism means going through `HeadquarterOperations`, whose
+ * `declareWorkerProvider`/`revokeWorkerProvider` resolve the actor against the
+ * human-principal registry and require approval authority — the same gate as
+ * the kill switch. The read side stays in the operator module, where it grants
+ * nothing and the queue needs it.
+ */
+class WorkerProviderRegistrar extends WorkerProviderDirectory {
+  /**
+   * Its own `#private` handle rather than an inherited `protected` one. The
+   * base class's database is `#private` now too, and `protected` would have
+   * erased to a public property on this subclass — reintroducing, one level
+   * down, exactly the route this class exists behind a gate to prevent.
+   */
+  readonly #db: HqDatabase;
+
+  constructor(db: HqDatabase) {
+    super(db);
+    this.#db = db;
+  }
+
+  /** Declare (or re-declare) which provider a worker executes as. */
+  declare(workerId: string, providerId: string, declaredBy: string): WorkerProviderRecord {
+    if (!workerId?.trim() || !providerId?.trim() || !declaredBy?.trim()) {
+      throw new ProviderDeclarationRejected(
+        'invalid_input',
+        'A provider declaration needs a worker, a provider and a declaring actor',
+      );
+    }
+    if (!(PROVIDERS as readonly string[]).includes(providerId)) {
+      throw new ProviderDeclarationRejected(
+        'unknown_provider',
+        `Unknown execution provider: ${providerId}. Declarations are limited to the routing ` +
+          `registry (${PROVIDERS.join(', ')}), so a typo fails closed instead of creating a ` +
+          'declaration that matches nothing.',
+      );
+    }
+    const declaredAt = nowIso();
+    this.#db
+      .prepare(
+        `INSERT INTO op_worker_providers (worker_id, provider_id, declared_by, declared_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(worker_id) DO UPDATE SET
+           provider_id = excluded.provider_id,
+           declared_by = excluded.declared_by,
+           declared_at = excluded.declared_at`,
+      )
+      .run(workerId, providerId, declaredBy, declaredAt);
+    return { workerId, providerId: providerId as ProviderId, declaredBy, declaredAt };
+  }
+
+  /** Remove a declaration. The worker can then claim no provider-bound task. */
+  revoke(workerId: string): boolean {
+    const result = this.#db.prepare(`DELETE FROM op_worker_providers WHERE worker_id = ?`).run(workerId);
+    return result.changes > 0;
+  }
+}
+
 export interface HeadquarterOperationsOptions {
   policyCtx?: PolicyContext;
   workers?: WorkerDirectoryPort;
@@ -267,42 +354,286 @@ type ResolvedRequester =
   | { kind: 'worker'; allowedCapabilities: readonly string[] }
   | { kind: 'human'; allowedCapabilities: readonly string[] };
 
+/**
+ * A defensive, frozen copy of a policy context.
+ *
+ * `PolicyContext` carries a `ReadonlySet` — readonly in TYPE only. The service
+ * and the queue both retained the caller's object, and `ops.policyContext`
+ * handed it to anyone, so `ops.policyContext.preApprovedCapabilities.add(...)`
+ * granted a standing pre-approval for an `external_side_effect` capability and
+ * `#enqueue`, `claim` and `start` all then skipped the Founder gate (issue
+ * #200, Codex exact-head finding on `063c7d3`).
+ *
+ * A new `Set` per copy, and the object frozen, so neither the caller's original
+ * nor a value handed out later is the one enforcement reads.
+ */
+function freezePolicyContext(ctx: PolicyContext | undefined): PolicyContext {
+  return Object.freeze({
+    preApprovedCapabilities: Object.freeze(new Set(ctx?.preApprovedCapabilities ?? [])) as ReadonlySet<string>,
+  });
+}
+
+/**
+ * Prepare a statement once and return its `get` already bound.
+ *
+ * Enforcement then calls a closure directly: no `db.prepare` lookup on
+ * `Database.prototype` and no `.get` lookup on `Statement.prototype` at call
+ * time, both of which are mutable third-party prototypes a same-realm caller
+ * can replace.
+ *
+ * This is a narrowing, not a guarantee — see the note at the call site.
+ */
+function bindGet(db: HqDatabase, sql: string): (...params: unknown[]) => unknown {
+  const stmt = db.prepare(sql);
+  const get = stmt.get.bind(stmt) as (...params: unknown[]) => unknown;
+  return get;
+}
+
 export class HeadquarterOperations {
   readonly queue: OperatorQueue;
-  readonly store: HeadquarterStore;
-  readonly workers: WorkerDirectoryPort;
+  /**
+   * `#private`: `HeadquarterStore` carries `upsertSpecialist`, so a holder
+   * could grant itself any capability and satisfy every check above it. The
+   * two reads the snapshot seam legitimately needs are exposed as a read-only
+   * view instead. Not named by the review; found by sweeping the class rather
+   * than the findings.
+   */
+  readonly #store: HeadquarterStore;
+  /** Reads the live snapshot needs. No write method to find. */
+  readonly directory: {
+    listSpecialists: () => ReturnType<HeadquarterStore['listSpecialists']>;
+    latestStatusPerSubject: () => ReturnType<HeadquarterStore['latestStatusPerSubject']>;
+    getSpecialist: (workerId: string) => ReturnType<HeadquarterStore['getSpecialist']>;
+  };
+  /**
+   * Read-only principal LOOKUP — a method, never the registry object.
+   *
+   * #200 removed the public `principals` collaborator because it was patchable:
+   * `ops.principals.get = () => ({ approvalAuthority: true, ... })` forged the
+   * Founder gate one layer below the authority method. That property stays
+   * gone, and `test/provider-binding.test.ts` asserts it.
+   *
+   * #214's control API still has to resolve an authenticated account to the
+   * SAME principal `createTask`/`approveTask` authorize against — a second
+   * injected registry is the two-sources-of-truth bug #200 made unrepresentable
+   * on purpose, so re-adding one is not an option either.
+   *
+   * This is the narrow way through: it resolves via `#principalOf`, which the
+   * enforcement path calls DIRECTLY. Replacing this method changes what the
+   * replacer reads and nothing about what any gate decides — the same standard
+   * that keeps `selectClaimable` public and disqualified `get`.
+   */
+  lookupPrincipal(id: string): HumanPrincipal | null {
+    return this.#principalOf(id);
+  }
+  /**
+   * Effective worker directory. `#private`: it was a public collaborator, so
+   * `ops.workers.allowedCapabilities = () => [cap]` forged a least-privilege
+   * grant, and `ops.principals.get = () => ({ approvalAuthority: true, ... })`
+   * forged the Founder gate itself — making the authority METHOD `#private`
+   * bought nothing while the registry it resolves through stayed patchable
+   * (issue #200, Codex exact-head finding on `f91563f`).
+   */
+  readonly #workers: WorkerDirectoryPort;
+  /**
+   * READS of the effective directory, as own-property closures. Callers and
+   * tests legitimately ask what a worker is granted; enforcement resolves
+   * through `#workers` and never through this, so patching it changes what the
+   * patcher sees and nothing about what is enforced — the same split already
+   * used for `queue.get` and `queue.capabilities`.
+   */
+  readonly workers: {
+    allowedCapabilities: (workerId: string) => readonly string[];
+    isRegistered: (workerId: string) => boolean;
+    assignability: (workerId: string) => ReturnType<WorkerDirectoryPort['assignability']>;
+  };
   /**
    * Human identity, deliberately separate from worker identity. Empty by
    * default: nobody is a principal until a Founder registers them.
    */
-  readonly principals: HumanPrincipalPort;
-  private readonly nominationSources: readonly NominationSourcePort[];
-  private readonly policyCtx: PolicyContext;
+  readonly #principals: HumanPrincipalPort;
+  /**
+   * ENFORCEMENT lookups, as prototype-free closures captured at construction.
+   *
+   * Making `#principals` and `#workers` `#private` hid the instance references
+   * and nothing else: the default instances are a `HumanPrincipalRegistry` and
+   * a `SpecialistDirectoryAdapter`/`NarrowingWorkerDirectory`, all exported
+   * classes, and every call resolved its method through those mutable
+   * prototypes. A same-realm worker or plugin could set
+   * `HumanPrincipalRegistry.prototype.get = () => ({ approvalAuthority: true, ... })`
+   * and forge the Founder gate, or patch the directory prototype and forge a
+   * least-privilege grant (issue #200, Codex exact-head findings on `063c7d3`).
+   *
+   * This is the same defect the queue's provider lookup had in round 42, and
+   * the same remedy: read the DATABASE through a closure, so no object an
+   * attacker can reach participates in the answer. A CUSTOM port supplied by
+   * the composer is used as given — that object is the composer's own choice at
+   * construction, the same trust level as the privileged grant itself.
+   */
+  readonly #principalOf: (id: string) => HumanPrincipal | null;
+  readonly #grantOf: (workerId: string) => readonly string[];
+  readonly #isRegisteredWorker: (workerId: string) => boolean;
+  readonly #nominationSources: readonly NominationSourcePort[];
+  readonly #policyCtx: PolicyContext;
   /** Write side of the worker → provider map. Private by design — see below. */
-  private readonly workerProviderRegistrar: WorkerProviderRegistrar;
+  /**
+   * ECMAScript `#private`, not TypeScript `private`.
+   *
+   * TypeScript's `private` is a compile-time annotation and erases to an
+   * ordinary public property, so `ops.workerProviderRegistrar.declare(...)` was
+   * reachable from any JavaScript caller holding the exported
+   * `HeadquarterOperations` — the authority gate bypassed for the third time in
+   * three attempts (issue #200, Codex exact-head findings on `5a19350`,
+   * `03a7104` and `f221826`). The first attempt removed it from the queue's
+   * property; the second added a construction key and exported the factory
+   * holding it; the third moved the class here and left the INSTANCE on a
+   * public field. Each time the signpost moved and the path did not.
+   *
+   * `#` is enforced by the runtime: the field is not a property, does not
+   * appear on the object, and cannot be reached by name, index or reflection
+   * from outside this class body.
+   */
+  readonly #workerProviderRegistrar: WorkerProviderRegistrar;
+  readonly #queuePrivileged: PrivilegedQueueApi | undefined;
+  /**
+   * Capability WRITE side, `#private`, for the same reason as the provider
+   * registrar: a worker holding a queue could otherwise rewrite the
+   * `op_capabilities` row that enforcement reads and downgrade an already
+   * claimed task's risk class (issue #200, Codex exact-head finding on
+   * `653bdb8`). Reads stay on `queue.capabilities`.
+   *
+   * No enable/disable method is exposed here. One was drafted and removed: an
+   * existing security test forbids `set*Capability*` on this surface, and it was
+   * right to. No production path disables a capability — only tests do, and a
+   * test holding the database can build its own registry. A method that exists
+   * only to satisfy tests is surface an attacker gets for free.
+   *
+   * NOTE, flagged rather than invented: this makes registration unreachable
+   * from a queue handle, which is what the finding requires. WHO may register a
+   * capability — whether it should require approval authority like
+   * `declareWorkerProvider` — is a policy question this correction loop is not
+   * authorised to decide, so no authority rule has been made up here.
+   */
 
-  constructor(
-    private db: HqDatabase,
-    options: HeadquarterOperationsOptions = {},
-  ) {
+
+  /**
+   * ECMAScript `#private`. TypeScript `private` erases to a public property, so
+   * `ops.db` handed a writable database to any JavaScript caller holding the
+   * exported operations object — and from there `op_worker_providers` can be
+   * upserted directly, satisfying the provider binding check while bypassing
+   * `declareWorkerProvider`, its principal/approval-authority gate and its
+   * evidence record entirely (issue #200, Codex exact-head finding on
+   * `135ae58`). This was the FOURTH distinct route to that boundary, and the
+   * first one below the mechanism rather than beside it: making the registrar
+   * `#private` closed the named property and left its substrate public.
+   */
+  readonly #db: HqDatabase;
+
+  constructor(db: HqDatabase, options: HeadquarterOperationsOptions = {}) {
+    this.#db = db;
     ensureApplicationSchema(db);
-    this.store = options.store ?? new HeadquarterStore(db);
-    this.queue = options.queue ?? new OperatorQueue(db, options.policyCtx ?? {});
+    this.#store = options.store ?? new HeadquarterStore(db);
+    // The approval mutations are handed to whoever CONSTRUCTS the queue and to
+    // nobody else, so they are unreachable from a queue handle a worker holds.
+    // When a queue is supplied (tests, composition), no grant arrives and this
+    // service simply has no approval mutation available — which is correct: it
+    // did not construct that queue and cannot vouch for it.
+    let granted: PrivilegedQueueApi | undefined;
+    this.queue =
+      options.queue ??
+      new OperatorQueue(
+        db,
+        freezePolicyContext(options.policyCtx),
+        (api) => {
+          granted = api;
+        },
+        // Lazily evaluated: `#workers` is composed below, and a claim can only
+        // happen after this constructor returns.
+        (workerId) => this.#grantOf(workerId),
+      );
+    this.#queuePrivileged = granted;
     // The WRITE side of the worker → provider map lives here and nowhere else
     // (issue #200, Codex round-3 P1 #1). It is private: the only ways in are
     // `declareWorkerProvider`/`revokeWorkerProvider`, which resolve the actor
     // and require approval authority first.
-    this.workerProviderRegistrar = new WorkerProviderRegistrar(db);
-    this.workers =
-      options.workers ?? narrowByRegistry(new SpecialistDirectoryAdapter(this.store), options.memberRegistry);
-    this.principals = options.humanPrincipals ?? new HumanPrincipalRegistry(db);
-    this.nominationSources = options.nominationSources ?? [];
-    this.policyCtx = options.policyCtx ?? {};
+    this.#workerProviderRegistrar = new WorkerProviderRegistrar(db);
+    this.#workers =
+      options.workers ?? narrowByRegistry(new SpecialistDirectoryAdapter(this.#store), options.memberRegistry);
+    this.#principals = options.humanPrincipals ?? new HumanPrincipalRegistry(db);
+    this.#nominationSources = options.nominationSources ?? [];
+    // Defensive, frozen copy. The caller's object (and the `Set` inside it)
+    // stayed reachable through `ops.policyContext`, so a worker could add a
+    // standing pre-approval for an `external_side_effect` capability and skip
+    // the Founder gate at enqueue, claim and start alike.
+    this.#policyCtx = freezePolicyContext(options.policyCtx);
+    // Statements PREPARED and their `get` BOUND here, once, so the call path
+    // at enforcement time is a direct closure invocation with no property
+    // lookup on any prototype.
+    //
+    // My previous comment here read "prototype-free by construction: `db.prepare`
+    // is the only dispatch" — naming the remaining dispatch in the same sentence
+    // that called it prototype-free. `db.prepare` resolves on
+    // `Database.prototype` and the returned statement's `.get` on
+    // `Statement.prototype`, both mutable and both third-party. A same-realm
+    // caller could patch `prepare` to intercept just the principals query,
+    // return a forged approval-authority row, and delegate everything else to
+    // the original (issue #200, Codex exact-head finding on `6dde073`).
+    //
+    // LIMIT, stated rather than implied: this narrows the window, it does not
+    // close it. An attacker who executes BEFORE this constructor — a plugin
+    // imported earlier — can still patch what these lines capture. In a
+    // same-realm threat model there is no in-process fix for that; the boundary
+    // that actually holds is a separate process or realm. See the PR discussion.
+    const principalGet = bindGet(db, `SELECT * FROM hq_human_principals WHERE id = ?`);
+    const grantGet = bindGet(db, `SELECT allowed_capabilities FROM hq_specialists WHERE id = ?`);
+    const specialistGet = bindGet(db, `SELECT 1 FROM hq_specialists WHERE id = ?`);
+    this.#principalOf = options.humanPrincipals
+      ? (id: string) => this.#principals.get(id)
+      : (id: string) => {
+          const row = principalGet(id) as Record<string, unknown> | undefined;
+          if (!row) return null;
+          return {
+            id: row.id as string,
+            displayName: row.display_name as string,
+            originateCapabilities: JSON.parse(row.originate_capabilities as string) as string[],
+            approvalAuthority: !!row.approval_authority,
+            active: !!row.active,
+          };
+        };
+    this.#grantOf =
+      options.workers || options.memberRegistry
+        ? (workerId: string) => this.#workers.allowedCapabilities(workerId)
+        : (workerId: string) => {
+            const row = grantGet(workerId) as { allowed_capabilities: string } | undefined;
+            if (!row) return [];
+            try {
+              const parsed: unknown = JSON.parse(row.allowed_capabilities);
+              return Array.isArray(parsed) ? parsed.filter((c): c is string => typeof c === 'string') : [];
+            } catch {
+              return [];
+            }
+          };
+    this.#isRegisteredWorker = options.workers
+      ? (workerId: string) => this.#workers.isRegistered(workerId)
+      : (workerId: string) => specialistGet(workerId) !== undefined;
+    this.directory = {
+      listSpecialists: () => this.#store.listSpecialists(),
+      latestStatusPerSubject: () => this.#store.latestStatusPerSubject(),
+      getSpecialist: (workerId: string) => this.#store.getSpecialist(workerId),
+    };
+
+    this.workers = {
+      allowedCapabilities: (workerId: string) => this.#workers.allowedCapabilities(workerId),
+      isRegistered: (workerId: string) => this.#workers.isRegistered(workerId),
+      assignability: (workerId: string) => this.#workers.assignability(workerId),
+    };
   }
 
   /** Standing pre-approval set the policy engine is evaluated against. */
   get policyContext(): PolicyContext {
-    return this.policyCtx;
+    // A fresh copy per read: handing out the enforcement object let a caller
+    // mutate the policy every gate is evaluated against.
+    return freezePolicyContext(this.#policyCtx);
   }
 
   /** Every engaged kill-switch scope, for the console's alarm section. */
@@ -312,7 +643,7 @@ export class HeadquarterOperations {
     engagedBy: string | null;
     engagedAt: string | null;
   }[] {
-    return this.db
+    return this.#db
       .prepare(
         `SELECT scope, reason, engaged_by AS engagedBy, engaged_at AS engagedAt
          FROM op_kill_switch WHERE engaged = 1 ORDER BY scope`,
@@ -331,7 +662,7 @@ export class HeadquarterOperations {
   classify(capabilityId: string): OpsResult<TaskClassification> {
     const cap = this.queue.capabilities.get(capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${capabilityId}`);
-    return ok(classifyCapability(cap, this.policyCtx));
+    return ok(classifyCapability(cap, this.#policyCtx));
   }
 
   // ---- create ----
@@ -353,10 +684,10 @@ export class HeadquarterOperations {
     if (!cap) return fail('unknown_capability', `Unknown capability: ${input.capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${cap.id} is disabled`);
 
-    const requester = this.resolveRequester(input.requestedBy, 'create_task');
+    const requester = this.#resolveRequester(input.requestedBy, 'create_task');
     if (!requester.ok) return requester;
 
-    const result = this.queue.enqueue({
+    const result = this.#requirePrivilegedQueue().enqueue({
       capabilityId: input.capabilityId,
       payload: input.payload,
       idempotencyKey: input.idempotencyKey,
@@ -370,11 +701,11 @@ export class HeadquarterOperations {
       return fail('enqueue_rejected', result.reason, { capabilityId: input.capabilityId });
     }
     if (!result.deduplicated) {
-      this.upsertMeta(result.task.id, { project: input.project, title: input.title });
+      this.#upsertMeta(result.task.id, { project: input.project, title: input.title });
     }
     return ok({
       task: result.task,
-      classification: classifyCapability(cap, this.policyCtx),
+      classification: classifyCapability(cap, this.#policyCtx),
       deduplicated: result.deduplicated,
     });
   }
@@ -394,7 +725,7 @@ export class HeadquarterOperations {
     if (!cap) return fail('unknown_capability', `Unknown capability: ${task.capabilityId}`);
 
     const merged = new Map<string, { sources: string[]; rationales: string[] }>();
-    for (const source of this.nominationSources) {
+    for (const source of this.#nominationSources) {
       let nominations: readonly { workerId: string; rationale?: string }[] = [];
       try {
         nominations = source.nominate({
@@ -406,7 +737,7 @@ export class HeadquarterOperations {
       } catch {
         // A misbehaving nomination source must never break routing; it simply
         // nominates nobody. Recorded, then ignored.
-        this.queue.evidence.append({
+        this.#requirePrivilegedQueue().appendEvidence({
           taskId: task.id,
           actor: 'system',
           kind: 'nomination_source_failed',
@@ -424,11 +755,11 @@ export class HeadquarterOperations {
 
     const nominations: EvaluatedNomination[] = [...merged.entries()]
       .map(([workerId, entry]) => {
-        const assignability = this.workers.assignability(workerId);
+        const assignability = this.#workers.assignability(workerId);
         const operatorDecision = evaluatePolicy(
           cap,
-          { workerId, allowedCapabilities: [...this.workers.allowedCapabilities(workerId)] },
-          this.policyCtx,
+          { workerId, allowedCapabilities: [...this.#workers.allowedCapabilities(workerId)] },
+          this.#policyCtx,
         );
         return {
           workerId,
@@ -441,7 +772,7 @@ export class HeadquarterOperations {
       })
       .sort((a, b) => a.workerId.localeCompare(b.workerId));
 
-    this.queue.evidence.append({
+    this.#requirePrivilegedQueue().appendEvidence({
       taskId: task.id,
       actor: 'system',
       kind: 'routing_evaluated',
@@ -459,7 +790,7 @@ export class HeadquarterOperations {
     return ok({
       taskId: task.id,
       capabilityId: task.capabilityId,
-      classification: classifyCapability(cap, this.policyCtx),
+      classification: classifyCapability(cap, this.#policyCtx),
       nominations,
     });
   }
@@ -487,24 +818,24 @@ export class HeadquarterOperations {
 
     // The actor RECORDING the intent must be someone: this writes an
     // actor-attributed annotation event and evidence entry.
-    const actor = this.resolveActor(assignedBy, 'record an assignment intent');
+    const actor = this.#resolveActor(assignedBy, 'record an assignment intent');
     if (!actor.ok) return actor;
 
-    const assignability = this.workers.assignability(workerId);
+    const assignability = this.#workers.assignability(workerId);
     if (!assignability.assignable) {
-      return this.rejectNotAssignable(workerId, assignability, 'assign_task');
+      return this.#rejectNotAssignable(workerId, assignability, 'assign_task');
     }
     const decision = evaluatePolicy(
       cap,
-      { workerId, allowedCapabilities: [...this.workers.allowedCapabilities(workerId)] },
-      this.policyCtx,
+      { workerId, allowedCapabilities: [...this.#workers.allowedCapabilities(workerId)] },
+      this.#policyCtx,
     );
     if (decision.outcome === 'deny') {
       return fail('not_permitted', decision.reason, { workerId, capabilityId: cap.id });
     }
 
     const at = nowIso();
-    this.upsertMeta(taskId, {
+    this.#upsertMeta(taskId, {
       assignedWorkerId: workerId,
       assignedBy,
       assignedAt: at,
@@ -512,7 +843,7 @@ export class HeadquarterOperations {
     });
     // Annotation only (status null): history records the routing decision
     // without pretending the task changed state.
-    this.store.appendEvent({
+    this.#store.appendEvent({
       subjectKind: 'task',
       subjectId: taskId,
       status: null,
@@ -520,7 +851,7 @@ export class HeadquarterOperations {
       summary: `Assignment intent recorded for ${workerId}`,
       detail: { workerId, advisory: true, rationale: rationale ?? null },
     });
-    this.queue.evidence.append({
+    this.#requirePrivilegedQueue().appendEvidence({
       taskId,
       actor: assignedBy,
       kind: 'assignment_intent_recorded',
@@ -545,7 +876,7 @@ export class HeadquarterOperations {
   approveTask(input: ApproveTaskInput): OpsResult<OperatorTask> {
     const task = this.queue.get(input.taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${input.taskId}`);
-    const principal = this.assertApprovalAuthority(input.founderId, 'approve');
+    const principal = this.#assertApprovalAuthority(input.founderId, 'approve');
     if (principal) return principal;
     if (task.status !== 'needs_approval') {
       return fail(
@@ -586,7 +917,7 @@ export class HeadquarterOperations {
     }
     const currentDigest = taskActionDigest(task);
     if (!input.expectedActionDigest || input.expectedActionDigest !== currentDigest) {
-      this.queue.evidence.append({
+      this.#requirePrivilegedQueue().appendEvidence({
         taskId: task.id,
         actor: input.founderId,
         kind: 'approval_refused_action_changed',
@@ -601,7 +932,7 @@ export class HeadquarterOperations {
 
     try {
       return ok(
-        this.queue.approve(task.id, input.founderId, { ttlMs: input.ttlMs, note: input.note }),
+        this.#requirePrivilegedQueue().approve(task.id, input.founderId, { ttlMs: input.ttlMs, note: input.note }),
       );
     } catch (error) {
       return fail('operator_rejected', errorMessage(error), { taskId: task.id });
@@ -612,7 +943,7 @@ export class HeadquarterOperations {
   denyTask(input: DenyTaskInput): OpsResult<OperatorTask> {
     const task = this.queue.get(input.taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${input.taskId}`);
-    const principal = this.assertApprovalAuthority(input.founderId, 'deny');
+    const principal = this.#assertApprovalAuthority(input.founderId, 'deny');
     if (principal) return principal;
     if (!input.reason) return fail('invalid_input', 'A denial requires a reason');
     // Validate the reason BEFORE anything is written, with the SAME guard the
@@ -642,7 +973,7 @@ export class HeadquarterOperations {
     if (input.expectedActionDigest && input.expectedActionDigest !== currentDigest) {
       // A denial is never an authorization, so a stale digest does not block
       // it — but the divergence is recorded.
-      this.queue.evidence.append({
+      this.#requirePrivilegedQueue().appendEvidence({
         taskId: task.id,
         actor: input.founderId,
         kind: 'denial_digest_divergence',
@@ -650,7 +981,7 @@ export class HeadquarterOperations {
       });
     }
     try {
-      return ok(this.queue.deny(task.id, input.reason, input.founderId));
+      return ok(this.#requirePrivilegedQueue().deny(task.id, input.reason, input.founderId));
     } catch (error) {
       return fail('operator_rejected', errorMessage(error), { taskId: task.id });
     }
@@ -684,13 +1015,13 @@ export class HeadquarterOperations {
     if (!cap) return fail('unknown_capability', `Unknown capability: ${capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${capabilityId} is disabled`);
 
-    const human = this.rejectHumanExecution(workerId, 'claim work');
+    const human = this.#rejectHumanExecution(workerId, 'claim work');
     if (human) return human;
-    const assignability = this.workers.assignability(workerId);
+    const assignability = this.#workers.assignability(workerId);
     if (!assignability.assignable) {
-      return this.rejectNotAssignable(workerId, assignability, 'claim');
+      return this.#rejectNotAssignable(workerId, assignability, 'claim');
     }
-    if (!this.workers.allowedCapabilities(workerId).includes(capabilityId)) {
+    if (!this.#grantOf(workerId).includes(capabilityId)) {
       return fail(
         'not_permitted',
         `Worker ${workerId} is not allowed capability ${capabilityId} (least privilege)`,
@@ -754,11 +1085,11 @@ export class HeadquarterOperations {
    * `OperatorQueue.start()`.
    */
   startTask(taskId: string, workerId: string, fence: number): OpsResult<OperatorTask> {
-    const human = this.rejectHumanExecution(workerId, 'start work');
+    const human = this.#rejectHumanExecution(workerId, 'start work');
     if (human) return human;
-    const assignability = this.workers.assignability(workerId);
+    const assignability = this.#workers.assignability(workerId);
     if (!assignability.assignable) {
-      return this.rejectNotAssignable(workerId, assignability, 'start', { taskId });
+      return this.#rejectNotAssignable(workerId, assignability, 'start', { taskId });
     }
     try {
       return ok(this.queue.start(taskId, workerId, fence));
@@ -846,13 +1177,13 @@ export class HeadquarterOperations {
     if (verdict === 'fail' && !note) {
       return fail('invalid_input', 'A failed review requires a reason');
     }
-    const reviewer = this.resolveActor(reviewerId, 'review');
+    const reviewer = this.#resolveActor(reviewerId, 'review');
     if (!reviewer.ok) return reviewer;
     try {
       return ok(
         verdict === 'pass'
-          ? this.queue.reviewPass(taskId, reviewerId, note)
-          : this.queue.reviewFail(taskId, reviewerId, note),
+          ? this.#requirePrivilegedQueue().reviewPass(taskId, reviewerId, note)
+          : this.#requirePrivilegedQueue().reviewFail(taskId, reviewerId, note),
       );
     } catch (error) {
       return fail('operator_rejected', errorMessage(error), { taskId });
@@ -872,10 +1203,10 @@ export class HeadquarterOperations {
     note: string,
   ): OpsResult<OperatorTask> {
     if (!note) return fail('invalid_input', 'Reconciliation requires a note');
-    const reconciler = this.resolveActor(by, 'reconcile');
+    const reconciler = this.#resolveActor(by, 'reconcile');
     if (!reconciler.ok) return reconciler;
     try {
-      return ok(this.queue.reconcile(taskId, decision, by, note));
+      return ok(this.#requirePrivilegedQueue().reconcile(taskId, decision, by, note));
     } catch (error) {
       return fail('operator_rejected', errorMessage(error), { taskId });
     }
@@ -884,16 +1215,16 @@ export class HeadquarterOperations {
   // ---- kill switch (Founder only) ----
 
   engageKillSwitch(scope: string, founderId: string, reason: string): OpsResult<null> {
-    const principal = this.assertApprovalAuthority(founderId, 'engage the kill switch');
+    const principal = this.#assertApprovalAuthority(founderId, 'engage the kill switch');
     if (principal) return principal;
-    this.queue.engageKillSwitch(scope, founderId, reason);
+    this.#requirePrivilegedQueue().engageKillSwitch(scope, founderId, reason);
     return ok(null);
   }
 
   releaseKillSwitch(scope: string, founderId: string): OpsResult<null> {
-    const principal = this.assertApprovalAuthority(founderId, 'release the kill switch');
+    const principal = this.#assertApprovalAuthority(founderId, 'release the kill switch');
     if (principal) return principal;
-    this.queue.releaseKillSwitch(scope, founderId);
+    this.#requirePrivilegedQueue().releaseKillSwitch(scope, founderId);
     return ok(null);
   }
 
@@ -916,12 +1247,77 @@ export class HeadquarterOperations {
    * The declaration narrows only — it decides which bound tasks a worker may
    * take, never which capabilities it holds, which stay with the directory.
    */
+  /**
+   * The approval mutations, or a loud failure. A service built around a queue
+   * it did not construct holds no grant, and must not silently behave as if an
+   * approval had been recorded.
+   */
+  #requirePrivilegedQueue(): PrivilegedQueueApi {
+    if (!this.#queuePrivileged) {
+      throw new Error(
+        'This HeadquarterOperations was constructed around an externally supplied queue, so it ' +
+          'holds no approval-mutation grant. Approvals must go through a service that built its ' +
+          'own queue.',
+      );
+    }
+    return this.#queuePrivileged;
+  }
+
+  /**
+   * Evidence appended by an in-process SYSTEM lane, under a reserved system
+   * actor and nothing else (issue #219 integration of #200 with #223/#224).
+   *
+   * Issue #200 made the evidence writer privileged because "a holder can forge
+   * entries under any actor whose hashes still pass `verifyChain`" — the risk is
+   * ATTRIBUTION: an entry that appears to record a Founder approval or a
+   * worker's act. The dispatch and ingest lanes (#221/#223/#224) need to record
+   * what the SYSTEM did — a handoff published, a lease expired, a route
+   * blocked — and every one of their appends already names a reserved actor,
+   * never a human and never a worker.
+   *
+   * So the narrow surface is the actor, not the caller. `SYSTEM_EVIDENCE_ACTORS`
+   * is closed, and the runtime check below refuses any name that resolves to a
+   * registered human principal or worker — so this method cannot write the
+   * entries #200 took away, even if a reserved name were later reused as a
+   * principal id. It grants no approval, no capability and no execution right.
+   */
+  appendSystemEvidence(entry: {
+    taskId?: string | null;
+    actor: SystemEvidenceActor;
+    kind: string;
+    payload: Record<string, unknown>;
+  }): EvidenceEntry {
+    if (!SYSTEM_EVIDENCE_ACTORS.includes(entry.actor)) {
+      throw new Error(
+        `${String(entry.actor)} is not a reserved system evidence actor. System lanes record only ` +
+          'under their own reserved names; attributed evidence goes through the privileged queue.',
+      );
+    }
+    if (this.#principalOf(entry.actor) || this.#isRegisteredWorker(entry.actor)) {
+      throw new Error(
+        `${entry.actor} resolves to a registered principal or worker, so a system lane may not ` +
+          'append under it. Evidence attributed to a person or a worker is privileged.',
+      );
+    }
+    return this.#requirePrivilegedQueue().appendEvidence(entry);
+  }
+
+  /**
+   * Run `fn` in one IMMEDIATE write transaction. Atomicity, not authority: it
+   * writes nothing itself, and every gate inside `fn` still applies. Public
+   * because a read-then-append decision (#221's "has this already been
+   * dispatched?") is only correct when the two halves are indivisible.
+   */
+  reserveEvidence<T>(fn: () => T): T {
+    return this.#requirePrivilegedQueue().reserve(fn);
+  }
+
   declareWorkerProvider(input: {
     workerId: string;
     providerId: string;
     founderId: string;
   }): OpsResult<WorkerProviderRecord> {
-    const principal = this.assertApprovalAuthority(
+    const principal = this.#assertApprovalAuthority(
       input.founderId,
       'declare a worker execution provider',
     );
@@ -938,13 +1334,18 @@ export class HeadquarterOperations {
       //
       // `reserve` is an IMMEDIATE write transaction, so a throwing append rolls
       // the declaration back with it. The refusal the caller then sees is true.
-      const record = this.queue.evidence.reserve(() => {
-        const declared = this.workerProviderRegistrar.declare(
+      //
+      // Both halves run through the PRIVILEGED handle and the `#private`
+      // registrar (issue #200): the atomicity above is layered onto that
+      // hardening, not substituted for it.
+      const privileged = this.#requirePrivilegedQueue();
+      const record = privileged.reserve(() => {
+        const declared = this.#workerProviderRegistrar.declare(
           input.workerId,
           input.providerId,
           input.founderId,
         );
-        this.queue.evidence.append({
+        privileged.appendEvidence({
           actor: input.founderId,
           kind: 'worker_provider_declared',
           payload: {
@@ -1011,7 +1412,7 @@ export class HeadquarterOperations {
     allowedCapabilities: readonly string[];
     founderId: string;
   }): OpsResult<WorkerDescriptor> {
-    const principal = this.assertApprovalAuthority(input.founderId, 'register an execution worker');
+    const principal = this.#assertApprovalAuthority(input.founderId, 'register an execution worker');
     if (principal) return principal;
 
     const workerId = input.workerId.trim();
@@ -1031,7 +1432,7 @@ export class HeadquarterOperations {
     // Registration is create-only and there is no revoke path, so undoing it
     // would mean dropping to the data layer: exactly the boundary this method
     // exists to remove.
-    if (this.principals.get(workerId) != null) {
+    if (this.#principals.get(workerId) != null) {
       return fail(
         'not_permitted',
         `${workerId} is already registered as a HUMAN principal. Worker identity and human ` +
@@ -1040,7 +1441,7 @@ export class HeadquarterOperations {
         { workerId },
       );
     }
-    if (this.store.getSpecialist(workerId)) {
+    if (this.#store.getSpecialist(workerId)) {
       return fail(
         'invalid_input',
         `Worker ${workerId} is already registered. Registration is create-only: it will not ` +
@@ -1076,10 +1477,11 @@ export class HeadquarterOperations {
       active: true,
     };
     try {
+      const privileged = this.#requirePrivilegedQueue();
       return ok(
-        this.queue.evidence.reserve(() => {
-          this.store.upsertSpecialist(descriptor);
-          this.queue.evidence.append({
+        privileged.reserve(() => {
+          this.#store.upsertSpecialist(descriptor);
+          privileged.appendEvidence({
             actor: input.founderId,
             kind: 'execution_worker_registered',
             payload: {
@@ -1103,14 +1505,14 @@ export class HeadquarterOperations {
    * no provider-bound task at all.
    */
   revokeWorkerProvider(input: { workerId: string; founderId: string }): OpsResult<boolean> {
-    const principal = this.assertApprovalAuthority(
+    const principal = this.#assertApprovalAuthority(
       input.founderId,
       'revoke a worker execution provider',
     );
     if (principal) return principal;
-    const removed = this.workerProviderRegistrar.revoke(input.workerId);
+    const removed = this.#workerProviderRegistrar.revoke(input.workerId);
     if (removed) {
-      this.queue.evidence.append({
+      this.#requirePrivilegedQueue().appendEvidence({
         actor: input.founderId,
         kind: 'worker_provider_revoked',
         payload: { workerId: input.workerId },
@@ -1121,7 +1523,7 @@ export class HeadquarterOperations {
 
   /** Every declaration currently in force. A read, available to any caller. */
   workerProviderDeclarations(): WorkerProviderRecord[] {
-    return this.queue.workerProviders.list();
+    return this.queue.listWorkerProviders();
   }
 
   // ---- worker replacement ----
@@ -1134,7 +1536,7 @@ export class HeadquarterOperations {
    * task needs reconciliation, before it can be safely replaced.
    */
   replacementPlan(workerId: string): OpsResult<ReplacementPlan> {
-    const rows = this.db
+    const rows = this.#db
       .prepare(
         `SELECT id, status, capability_id FROM op_tasks
          WHERE claimed_by = ? AND status IN ('assigned', 'running', 'outcome_unknown')
@@ -1184,9 +1586,9 @@ export class HeadquarterOperations {
     if (!input.threadId || !input.author) {
       return fail('invalid_input', 'threadId and author are required');
     }
-    const actor = this.resolveActor(input.author, 'post to a group room');
+    const actor = this.#resolveActor(input.author, 'post to a group room');
     if (!actor.ok) return actor;
-    const message = this.store.postMessage(input);
+    const message = this.#store.postMessage(input);
     return ok({
       messageId: message.id,
       // Advisory decoration for human readers only.
@@ -1211,7 +1613,7 @@ export class HeadquarterOperations {
       return fail('invalid_input', 'threadId, capabilityId and proposedBy are required');
     }
     // Inert, but it enters the evidence chain under this actor's name.
-    const actor = this.resolveActor(input.proposedBy, 'raise a mission proposal');
+    const actor = this.#resolveActor(input.proposedBy, 'raise a mission proposal');
     if (!actor.ok) return actor;
     try {
       assertNoSecretLikeContent(input.payload);
@@ -1230,7 +1632,7 @@ export class HeadquarterOperations {
       payload: input.payload,
       idempotencyKey,
     });
-    this.db
+    this.#db
       .prepare(
         `INSERT INTO hq_mission_proposals
            (id, thread_id, source_message_id, capability_id, payload, idempotency_key, digest,
@@ -1248,7 +1650,7 @@ export class HeadquarterOperations {
         input.proposedBy,
         at,
       );
-    this.queue.evidence.append({
+    this.#requirePrivilegedQueue().appendEvidence({
       actor: input.proposedBy,
       kind: 'mission_proposed',
       payload: {
@@ -1304,15 +1706,15 @@ export class HeadquarterOperations {
     });
     if (!created.ok) return created;
 
-    this.db
+    this.#db
       .prepare(
         `UPDATE hq_mission_proposals
          SET status = 'promoted', task_id = ?, decided_by = ?, decided_at = ?
          WHERE id = ? AND status = 'proposed'`,
       )
       .run(created.data.task.id, input.promotedBy, nowIso(), proposal.id);
-    this.upsertMeta(created.data.task.id, { sourceProposalId: proposal.id });
-    this.queue.evidence.append({
+    this.#upsertMeta(created.data.task.id, { sourceProposalId: proposal.id });
+    this.#requirePrivilegedQueue().appendEvidence({
       taskId: created.data.task.id,
       actor: input.promotedBy,
       kind: 'mission_promoted_to_task',
@@ -1343,15 +1745,15 @@ export class HeadquarterOperations {
       return fail('proposal_not_open', `Proposal ${proposalId} is already ${proposal.status}`);
     }
     if (!note) return fail('invalid_input', 'Rejecting a proposal requires a note');
-    const actor = this.resolveActor(by, 'reject a mission proposal');
+    const actor = this.#resolveActor(by, 'reject a mission proposal');
     if (!actor.ok) return actor;
-    this.db
+    this.#db
       .prepare(
         `UPDATE hq_mission_proposals SET status = 'rejected', decided_by = ?, decided_at = ?, decision_note = ?
          WHERE id = ? AND status = 'proposed'`,
       )
       .run(by, nowIso(), note, proposalId);
-    this.queue.evidence.append({
+    this.#requirePrivilegedQueue().appendEvidence({
       actor: by,
       kind: 'mission_proposal_rejected',
       payload: { proposalId, note },
@@ -1360,7 +1762,7 @@ export class HeadquarterOperations {
   }
 
   getProposal(id: string): MissionProposal | null {
-    const row = this.db.prepare(`SELECT * FROM hq_mission_proposals WHERE id = ?`).get(id) as
+    const row = this.#db.prepare(`SELECT * FROM hq_mission_proposals WHERE id = ?`).get(id) as
       | Record<string, unknown>
       | undefined;
     if (!row) return null;
@@ -1385,10 +1787,10 @@ export class HeadquarterOperations {
   listProposals(status?: MissionProposalStatus): MissionProposal[] {
     const rows = (
       status
-        ? this.db
+        ? this.#db
             .prepare(`SELECT id FROM hq_mission_proposals WHERE status = ? ORDER BY proposed_at`)
             .all(status)
-        : this.db.prepare(`SELECT id FROM hq_mission_proposals ORDER BY proposed_at`).all()
+        : this.#db.prepare(`SELECT id FROM hq_mission_proposals ORDER BY proposed_at`).all()
     ) as { id: string }[];
     return rows.map((r) => this.getProposal(r.id)!);
   }
@@ -1396,7 +1798,7 @@ export class HeadquarterOperations {
   // ---- task metadata (console labels + advisory assignment) ----
 
   readMeta(taskId: string): TaskMeta | null {
-    const row = this.db.prepare(`SELECT * FROM hq_op_task_meta WHERE task_id = ?`).get(taskId) as
+    const row = this.#db.prepare(`SELECT * FROM hq_op_task_meta WHERE task_id = ?`).get(taskId) as
       | Record<string, unknown>
       | undefined;
     if (!row) return null;
@@ -1418,7 +1820,7 @@ export class HeadquarterOperations {
     };
   }
 
-  private upsertMeta(
+  #upsertMeta(
     taskId: string,
     patch: {
       project?: string | null;
@@ -1441,7 +1843,7 @@ export class HeadquarterOperations {
       assignmentRationale:
         patch.assignmentRationale ?? existing?.assignment?.rationale ?? null,
     };
-    this.db
+    this.#db
       .prepare(
         `INSERT INTO hq_op_task_meta
            (task_id, project, title, source_proposal_id, assigned_worker_id, assigned_by, assigned_at, assignment_rationale)
@@ -1476,29 +1878,29 @@ export class HeadquarterOperations {
    * (enforced by the queue) rather than permission to act on a capability.
    * Deny by default: an unknown id is nobody and can do neither.
    */
-  private resolveActor(actor: string, action: string): OpsResult<ResolvedRequester> {
+  #resolveActor(actor: string, action: string): OpsResult<ResolvedRequester> {
     if (!actor) return fail('invalid_input', `An actor is required to ${action}`);
     if (actor === 'system') {
       return fail('not_permitted', `'system' cannot ${action}`);
     }
-    return this.resolveRequester(actor, action);
+    return this.#resolveRequester(actor, action);
   }
 
   /**
    * Resolve who is opening work. A worker must be assignable; a human must be
    * a registered, active principal. Neither can supply its own allow-list.
    */
-  private resolveRequester(actor: string, action: string): OpsResult<ResolvedRequester> {
-    if (this.workers.isRegistered(actor)) {
-      const assignability = this.workers.assignability(actor);
+  #resolveRequester(actor: string, action: string): OpsResult<ResolvedRequester> {
+    if (this.#workers.isRegistered(actor)) {
+      const assignability = this.#workers.assignability(actor);
       if (!assignability.assignable) {
-        return this.rejectNotAssignable(actor, assignability, action);
+        return this.#rejectNotAssignable(actor, assignability, action);
       }
-      return ok({ kind: 'worker', allowedCapabilities: this.workers.allowedCapabilities(actor) });
+      return ok({ kind: 'worker', allowedCapabilities: this.#workers.allowedCapabilities(actor) });
     }
-    const human = resolvePrincipal(this.principals, actor);
+    const human = resolvePrincipal({ get: (id: string) => this.#principalOf(id) }, actor);
     if (!human.ok) {
-      this.queue.evidence.append({
+      this.#requirePrivilegedQueue().appendEvidence({
         actor: 'system',
         kind: 'principal_rejected',
         payload: { actorId: actor, action, reason: human.reason },
@@ -1526,21 +1928,23 @@ export class HeadquarterOperations {
    * All of this sits on top of — never instead of — the queue's own
    * self-approval guards, which still stop a requester approving its own action.
    */
-  private assertApprovalAuthority(actor: string, action: string): OpsResult<never> | null {
+  #assertApprovalAuthority(actor: string, action: string): OpsResult<never> | null {
     if (!actor) return fail('invalid_input', `An actor is required to ${action}`);
     if (actor === 'system') {
       return fail('not_permitted', `'system' cannot ${action}: a human principal is required`);
     }
-    if (this.workers.isRegistered(actor)) {
+    if (this.#isRegisteredWorker(actor)) {
       return fail(
         'not_permitted',
         `Registered worker ${actor} cannot ${action}: worker identity never carries approval authority`,
         { actor },
       );
     }
-    const approver = resolveApprover(this.principals, actor);
+    // `{ get: … }` rather than the port itself: an own-property closure has no
+    // prototype for a same-realm plugin to patch.
+    const approver = resolveApprover({ get: (id: string) => this.#principalOf(id) }, actor);
     if (!approver.ok) {
-      this.queue.evidence.append({
+      this.#requirePrivilegedQueue().appendEvidence({
         actor: 'system',
         kind: 'approval_authority_refused',
         payload: { actorId: actor, action, reason: approver.reason },
@@ -1559,10 +1963,10 @@ export class HeadquarterOperations {
    * `startTask()` refuse it explicitly rather than letting it fall through the
    * worker-directory lookup with a confusing "unknown worker".
    */
-  private rejectHumanExecution(actorId: string, action: string): OpsResult<never> | null {
-    if (this.workers.isRegistered(actorId)) return null;
-    if (!this.principals.get(actorId)) return null;
-    this.queue.evidence.append({
+  #rejectHumanExecution(actorId: string, action: string): OpsResult<never> | null {
+    if (this.#isRegisteredWorker(actorId)) return null;
+    if (!this.#principalOf(actorId)) return null;
+    this.#requirePrivilegedQueue().appendEvidence({
       actor: 'system',
       kind: 'human_execution_refused',
       payload: { actorId, action },
@@ -1574,14 +1978,14 @@ export class HeadquarterOperations {
     );
   }
 
-  private rejectNotAssignable(
+  #rejectNotAssignable(
     workerId: string,
     assignability: WorkerAssignability,
     action: string,
     details: Record<string, unknown> = {},
   ): OpsResult<never> {
     const reason = assignability.assignable ? 'unknown' : assignability.reason;
-    this.queue.evidence.append({
+    this.#requirePrivilegedQueue().appendEvidence({
       actor: 'system',
       kind: 'worker_not_assignable',
       payload: { workerId, action, reason },

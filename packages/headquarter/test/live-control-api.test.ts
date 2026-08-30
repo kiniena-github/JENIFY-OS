@@ -1,3 +1,4 @@
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
 /**
  * The narrow HQ browser-control API, end to end against the real canonical
  * machinery (issue #200, Founder decision of 2026-08-28).
@@ -70,7 +71,7 @@ function harness(
   } = {},
 ): Harness {
   const fixture = setupFixture();
-  registerDirectOrderCapability(fixture.ops);
+  registerDirectOrderCapability(fixture.db);
   // The ONE registry: identity resolution and authorization both read
   // ops.principals, so the test cannot accidentally prove a property that a
   // second, separately-wired registry would break.
@@ -575,7 +576,7 @@ describe('what the console is told about itself', () => {
 
   it('reports the direct-order control as off when the capability is not registered', () => {
     const h = harness();
-    h.fixture.ops.queue.capabilities.setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
+    new CapabilityRegistry(h.fixture.db).setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
     const response = h.call({ method: 'GET', path: CONTROL_ROUTES.session });
     expect((response.body.controls as Record<string, unknown>).directOrder).toBe(false);
   });
@@ -586,7 +587,7 @@ describe('what the console is told about itself', () => {
     // path depends on, and reading only the id and the enabled flag could not
     // see it. Both readers must answer the same way here too.
     const h = harness();
-    h.fixture.ops.queue.capabilities.register({
+    new CapabilityRegistry(h.fixture.db).register({
       id: DIRECT_ORDER_CAPABILITY.id,
       description: DIRECT_ORDER_CAPABILITY.description,
       riskClass: 'read_only',
@@ -620,7 +621,7 @@ describe('what the console is told about itself', () => {
   // distinction the console needs.
   it('answers every capability-state refusal with 403, and a bad request still with 400', () => {
     const altered = harness();
-    altered.fixture.ops.queue.capabilities.register({
+    new CapabilityRegistry(altered.fixture.db).register({
       id: DIRECT_ORDER_CAPABILITY.id,
       description: DIRECT_ORDER_CAPABILITY.description,
       riskClass: 'read_only',
@@ -634,7 +635,7 @@ describe('what the console is told about itself', () => {
     );
 
     const disabled = harness();
-    disabled.fixture.ops.queue.capabilities.setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
+    new CapabilityRegistry(disabled.fixture.db).setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
     const disabledPost = disabled.call({ body: ORDER_BODY });
     expect(disabledPost.status).toBe(403);
     expect((disabledPost.body.error as { code: string }).code).toBe('capability_disabled');
@@ -649,7 +650,7 @@ describe('what the console is told about itself', () => {
 
   it('stays fail-closed on the altered definition: nothing created, nothing repaired, refusal audited', () => {
     const h = harness();
-    h.fixture.ops.queue.capabilities.register({
+    new CapabilityRegistry(h.fixture.db).register({
       id: DIRECT_ORDER_CAPABILITY.id,
       description: DIRECT_ORDER_CAPABILITY.description,
       riskClass: 'read_only',

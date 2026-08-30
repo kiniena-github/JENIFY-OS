@@ -254,7 +254,11 @@ export function registerHeadquarterSite(
         { method: 'GET', path: req.url.split('?')[0]!, headers: {} },
         {
           sessions: sessionResolver(db, req.cookies?.[SESSION_COOKIE]),
-          principals: plane.ops.principals,
+          // The SAME registry the operations authorize against, reached through
+          // the narrow lookup rather than the registry object — `ops.principals`
+          // was removed in issue #200 because a public collaborator there was
+          // patchable into a forged Founder gate.
+          principals: { get: (id: string) => plane.ops.lookupPrincipal(id) },
           founderMap: plane.founderMap,
         },
       );

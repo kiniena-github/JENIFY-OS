@@ -12,6 +12,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { setupFixture, type Fixture } from './application.fixture.js';
@@ -21,6 +22,7 @@ import {
   AUTO_ROUTE_PREFERENCE,
   directOrderDispatchBlocked,
   DIRECT_ORDER_CAPABILITY,
+  directOrderCapabilityState,
   directOrderIdempotencyKey,
   MAX_INSTRUCTION_LENGTH,
   MAX_TITLE_LENGTH,
@@ -37,7 +39,7 @@ const NOTHING = {};
 
 function ordersFixture(): Fixture {
   const fixture = setupFixture();
-  registerDirectOrderCapability(fixture.ops);
+  registerDirectOrderCapability(fixture.db);
   // The Founder must be granted origination for the direct-order capability,
   // exactly like any other. The grant lives in the registry, never in the
   // caller — that is the whole point of resolveRequester().
@@ -461,6 +463,76 @@ describe('idempotency', () => {
    * findings before it: a receipt naming a task that does not carry what the
    * caller asked for.
    */
+  /**
+   * Codex exact-head findings on `5a19350`. Three separate ways an order could
+   * be created on a weaker footing than it claimed.
+   */
+  it('refuses a trust marker outside the vocabulary', () => {
+    const { ops } = ordersFixture();
+    // `ActorAuthentication` has no `authenticated` member on purpose, but a
+    // union constrains TypeScript callers only — a JSON caller could previously
+    // persist this straight into the approval digest.
+    const result = submitDirectOrder(
+      ops,
+      { ...ORDER, actorAuthentication: 'authenticated' as never },
+      CLAUDE_ONLY,
+    );
+    if (result.ok) throw new Error('expected refusal');
+    expect(result.error.code).toBe('invalid_input');
+    // The message no longer says "Headquarter can authenticate nobody": since
+    // #214 it can, through a JENIFY OS session, and a refusal that claims
+    // otherwise would be false. What must hold is that the marker is refused
+    // rather than persisted into the approval digest.
+    expect(result.error.message).toContain('refused rather ');
+    expect(result.error.message).toContain('approval digest');
+    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+  });
+
+  it('still accepts both markers the vocabulary can actually mean', () => {
+    for (const marker of ['unauthenticated', 'unauthenticated_local_assertion'] as const) {
+      const { ops } = ordersFixture();
+      const result = submitDirectOrder(ops, { ...ORDER, actorAuthentication: marker }, CLAUDE_ONLY);
+      if (!result.ok) throw new Error(`expected ok for ${marker}`);
+      expect(result.data.task.payload.actorAuthentication).toBe(marker);
+    }
+  });
+
+  it('refuses to ride on a capability whose definition has drifted', () => {
+    const fx = ordersFixture();
+    const { ops } = fx;
+    // Classification follows the REGISTERED definition, not this module's
+    // constant, so a drifted row would let a free-text instruction skip the
+    // Founder gate entirely. Rewriting it needs the DATABASE — which is the
+    // point: an execution caller holding ops or a queue cannot do this.
+    new CapabilityRegistry(fx.db).register({
+      ...DIRECT_ORDER_CAPABILITY,
+      riskClass: 'reversible',
+    } as never);
+    // Named `altered` in the integrated tree (issue #219): both lanes built
+    // this control independently and the #219 integration kept one name, the
+    // one the browser control API's 403 mapping and the CLI already use. The
+    // property asserted here — refuse, name the field, queue nothing — is
+    // unchanged.
+    expect(directOrderCapabilityState(ops)).toBe('altered');
+    const result = submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
+    if (result.ok) throw new Error('expected refusal');
+    expect(result.error.code).toBe('capability_definition_altered');
+    expect(result.error.message).toContain('riskClass');
+    expect(ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+    expect(ops.queue.listByStatus('queued')).toHaveLength(0);
+  });
+
+  it('reports an intact definition as enabled, and does not repair an altered one', () => {
+    const fx = ordersFixture();
+    const { ops } = fx;
+    expect(directOrderCapabilityState(ops)).toBe('enabled');
+    new CapabilityRegistry(fx.db).register({ ...DIRECT_ORDER_CAPABILITY, idempotent: false } as never);
+    expect(directOrderCapabilityState(ops)).toBe('altered');
+    submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
+    // Invocation refuses; it never quietly re-registers the definition.
+    expect(directOrderCapabilityState(ops)).toBe('altered');
+  });
+
   it('treats a different title as a different order', () => {
     const { ops } = ordersFixture();
     const first = submitDirectOrder(ops, { ...ORDER, title: 'Q3 plan' }, CLAUDE_ONLY);
@@ -784,5 +856,89 @@ describe('the published title is part of what makes an order the same order', ()
     expect(directOrderIdempotencyKey({ ...base, title: 'One', instruction: 'do a thing' })).not.toBe(
       directOrderIdempotencyKey({ ...base, title: '', instruction: 'Onedo a thing' }),
     );
+  });
+});
+
+/**
+ * Codex exact-head finding on `5a19350` (P1). The trust marker lived only in
+ * the task payload, and the console read model excludes payload fields by
+ * design — so the second human whose approval is the containment for an
+ * unauthenticated `--as` assertion could not see what they were containing.
+ */
+describe('an approver can see how much is known about the requester', () => {
+  it('projects the marker into the canonical approval read model', () => {
+    const { ops } = ordersFixture();
+    const created = submitDirectOrder(
+      ops,
+      { ...ORDER, actorAuthentication: 'unauthenticated_local_assertion' },
+      CLAUDE_ONLY,
+    );
+    if (!created.ok) throw new Error('expected ok');
+    const card = founderConsole(ops).approvals.find((a) => a.taskId === created.data.task.id);
+    expect(card).toBeDefined();
+    expect(card!.requesterAuthentication).toBe('unauthenticated_local_assertion');
+  });
+
+  it('defaults to the weakest marker rather than to silence', () => {
+    const { ops } = ordersFixture();
+    const created = submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
+    if (!created.ok) throw new Error('expected ok');
+    const card = founderConsole(ops).approvals.find((a) => a.taskId === created.data.task.id);
+    expect(card!.requesterAuthentication).toBe(DEFAULT_ACTOR_AUTHENTICATION);
+  });
+
+  it('never publishes a marker it does not recognise', () => {
+    // Belt and braces: submission refuses an unknown marker, but the read model
+    // is published, so it whitelists independently rather than trusting that.
+    const { ops, db } = ordersFixture();
+    const created = submitDirectOrder(ops, ORDER, CLAUDE_ONLY);
+    if (!created.ok) throw new Error('expected ok');
+    const task = ops.queue.get(created.data.task.id)!;
+    db
+      .prepare(`UPDATE op_tasks SET payload = ? WHERE id = ?`)
+      .run(
+        JSON.stringify({ ...task.payload, actorAuthentication: 'authenticated by nobody' }),
+        task.id,
+      );
+    const card = founderConsole(ops).approvals.find((a) => a.taskId === task.id);
+    expect(card!.requesterAuthentication).toBe('unrecognised_marker');
+  });
+});
+
+/**
+ * Codex exact-head finding on `f221826` (P2). The CLI folded every non-enabled
+ * capability state into "disabled", so an operator hitting the newly-added
+ * `drifted` state was told to re-enable a capability that was already ENABLED
+ * — remediation that cannot work, for a diagnosis that was not the problem.
+ * The drifted state was introduced one commit earlier; this is the other half
+ * of that change reaching the CLI.
+ */
+describe('each capability refusal names what would actually fix it', () => {
+  const cli = readFileSync(
+    fileURLToPath(new URL('../src/cli/direct-order.ts', import.meta.url)),
+    'utf8',
+  );
+
+  it('has a branch for every non-enabled state, the altered definition included', () => {
+    for (const state of ['missing', 'disabled', 'altered']) {
+      expect(cli, state).toContain(`${state}: [`);
+    }
+    // The two-way fold that produced the wrong advice is gone.
+    expect(cli).not.toContain("capabilityState === 'missing' ? 'not_registered' : 'disabled'");
+  });
+
+  it('does not tell an operator to re-enable a capability whose DEFINITION is wrong', () => {
+    // Just this entry: the slice must stop at its own closing bracket, or it
+    // runs on into `disabled:`, whose remedy says "Re-enabling" quite correctly.
+    const start = cli.indexOf('altered: [');
+    const altered = cli.slice(start, cli.indexOf('],', start));
+    // The remedy must be registration, and must say plainly that the on/off
+    // switch is not the problem. It deliberately no longer claims the row "is
+    // not disabled": in the integrated ordering a weakened row is reported as
+    // `altered` whether or not it is also switched off, so that claim would be
+    // false. What must not come back is advice to re-enable.
+    expect(altered).toContain('--register-capability');
+    expect(altered).toContain('toggling enabled would change nothing');
+    expect(altered).not.toContain('Re-enabling');
   });
 });

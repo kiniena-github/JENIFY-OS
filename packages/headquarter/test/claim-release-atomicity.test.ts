@@ -72,7 +72,7 @@ const NOTHING_PUBLISHED: DispatchCapableTransport = {
 
 function ordersFixture(): Fixture {
   const fixture = setupFixture();
-  registerDirectOrderCapability(fixture.ops);
+  registerDirectOrderCapability(fixture.db);
   fixture.principals.register({
     id: 'founder',
     displayName: 'Founder',
@@ -139,14 +139,25 @@ function releaseEntries(fixture: Fixture, taskId: string): number {
  * transition to `needs_approval` in this flow.
  */
 function failReleaseTransition(fixture: Fixture) {
+  // `#transition` is runtime-private since issue #200, so there is no method to
+  // spy on — which is the point of that hardening, not an obstacle to route
+  // around. The seam moves one layer down instead, to the statement the
+  // transition runs: the UPDATE is intercepted and made to throw only when it
+  // is setting `needs_approval`, which is exactly the release's transition and
+  // no other. Same scenario, same single failing step.
+  const realPrepare = fixture.db.prepare.bind(fixture.db);
   return vi
-    .spyOn(fixture.ops.queue as unknown as { transition: (...a: unknown[]) => unknown }, 'transition')
-    .mockImplementation(function (this: unknown, ...args: unknown[]) {
-      if (args[1] === 'needs_approval') throw new Error('disk full');
-      const real = Object.getPrototypeOf(fixture.ops.queue) as {
-        transition: (...a: unknown[]) => unknown;
+    .spyOn(fixture.db as unknown as { prepare: (sql: string) => unknown }, 'prepare')
+    .mockImplementation((sql: string) => {
+      const statement = realPrepare(sql) as { run: (...a: unknown[]) => unknown };
+      if (!sql.includes('UPDATE op_tasks SET status = ?')) return statement;
+      return {
+        ...statement,
+        run: (...args: unknown[]) => {
+          if (args[0] === 'needs_approval') throw new Error('disk full');
+          return statement.run(...args);
+        },
       };
-      return real.transition.apply(fixture.ops.queue, args);
     });
 }
 

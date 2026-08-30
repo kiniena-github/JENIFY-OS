@@ -96,6 +96,66 @@ export type ActorAuthentication =
 export const DEFAULT_ACTOR_AUTHENTICATION: ActorAuthentication = 'unauthenticated';
 
 /**
+ * The vocabulary, as a runtime value rather than only a compile-time union.
+ *
+ * The type above says there is no `authenticated` member, and that was enforced
+ * by TypeScript alone — which enforces nothing on a JSON or plain-JavaScript
+ * caller (issue #200, Codex exact-head finding on `5a19350`). Such a caller
+ * could pass `actorAuthentication: 'authenticated'` and have it persisted
+ * verbatim inside the approval digest, manufacturing exactly the trust claim
+ * this module exists to make unsayable. An invariant that holds only at compile
+ * time does not hold at the boundary where untrusted callers arrive.
+ */
+const KNOWN_ACTOR_AUTHENTICATION: Record<ActorAuthentication, true> = {
+  authenticated_os_session: true,
+  unauthenticated_local_assertion: true,
+  unauthenticated: true,
+};
+
+/** Whether a marker is one this system can actually mean. Vocabulary only. */
+export function isKnownActorAuthentication(value: unknown): value is ActorAuthentication {
+  return (
+    typeof value === 'string' &&
+    Object.prototype.hasOwnProperty.call(KNOWN_ACTOR_AUTHENTICATION, value)
+  );
+}
+
+/**
+ * The markers a CALLER may assert about itself — the vocabulary MINUS every
+ * value that has to be earned (issue #219, integrating #200's runtime guard
+ * with #214's authenticated browser path).
+ *
+ * Being a real member of the union is not permission to claim it. #200 closed
+ * the hole where a JSON or plain-JavaScript caller could pass a trust claim
+ * straight into the approval digest; #214 then added
+ * `authenticated_os_session`, which a caller must never be able to say. Both
+ * hold at once only if "is this a known value" and "may this caller assert it"
+ * are separate questions, so they are separate functions.
+ *
+ * `authenticated_os_session` is deliberately absent here. It is set by
+ * `live/control-api.ts` alone, and it reaches an order through a parameter that
+ * is structurally distinct from the caller-supplied input object — never by
+ * being deserialized out of a request body.
+ */
+const CALLER_ASSERTABLE_ACTOR_AUTHENTICATION: Record<
+  Exclude<ActorAuthentication, 'authenticated_os_session'>,
+  true
+> = {
+  unauthenticated_local_assertion: true,
+  unauthenticated: true,
+};
+
+/** Whether a caller-supplied marker is one that caller is entitled to assert. */
+export function isCallerAssertableActorAuthentication(
+  value: unknown,
+): value is Exclude<ActorAuthentication, 'authenticated_os_session'> {
+  return (
+    typeof value === 'string' &&
+    Object.prototype.hasOwnProperty.call(CALLER_ASSERTABLE_ACTOR_AUTHENTICATION, value)
+  );
+}
+
+/**
  * One-line classification of the CLI, quoted by the CLI itself and by the UI
  * so the two can never drift into different claims.
  */

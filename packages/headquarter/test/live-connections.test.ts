@@ -413,7 +413,14 @@ describe('the probe seam cannot weaken the invariants', () => {
     };
     const [status] = assessConnections(NOTHING, { now: NOW, catalog: [descriptor], probes: [broken] });
     expect(status!.state).toBe('error');
-    expect(status!.reason).toContain('probe exploded');
+    // NOTE: this assertion used to read `toContain('probe exploded')` — it
+    // asserted that the thrown MESSAGE was echoed into `reason`. Codex's
+    // exact-head finding on `5a19350` showed that is a publication path for
+    // anything an adapter puts in an exception, so the contract changed and
+    // this test changed with it. The row must still say the probe threw; it
+    // must no longer repeat what the probe said.
+    expect(status!.reason).toContain('threw a thrown value of type object');
+    expect(status!.reason).not.toContain('probe exploded');
     expect(status!.effectiveCapabilities).toEqual([]);
   });
 
@@ -822,6 +829,121 @@ describe('a probe answering outside the vocabulary fails closed', () => {
     expect(reason.length).toBeLessThan(400);
   });
 
+  /**
+   * Codex exact-head finding on `5a19350` (P1). The thrown error's MESSAGE was
+   * interpolated verbatim into `reason`, which is rendered and published — so
+   * `throw new Error('credential: …')` published the credential. The
+   * browser-safety patterns cannot catch it for the same reason as the two
+   * describer findings before this one: the key exists only inside a flattened
+   * string. This was the THIRD path by which adapter text reached `reason`.
+   */
+  it('never echoes what a throwing probe said', () => {
+    const hostile: ConnectionProbe = {
+      id: 'alien',
+      probe: () => {
+        throw new Error('credential: abcdefghijklmnop');
+      },
+    };
+    const [status] = assessConnections(NOTHING, {
+      now: NOW,
+      catalog: [descriptor],
+      probes: [hostile],
+    });
+    expect(status!.reason).not.toContain('abcdefghijklmnop');
+    expect(status!.reason).not.toContain('credential');
+    expect(status!.reason).toContain('threw a thrown value of type object');
+    expect(status!.state).toBe('error');
+  });
+
+  it('does not echo an adapter-chosen error class name either', () => {
+    class CredentialLeak extends Error {}
+    const named = new CredentialLeak('nope');
+    Object.defineProperty(named.constructor, 'name', { value: 'token sk-abcdefghijklmnop' });
+    const hostile: ConnectionProbe = {
+      id: 'alien',
+      probe: () => {
+        throw named;
+      },
+    };
+    const [status] = assessConnections(NOTHING, {
+      now: NOW,
+      catalog: [descriptor],
+      probes: [hostile],
+    });
+    // The class name is adapter-controlled, so it is never read at all.
+    expect(status!.reason).not.toContain('sk-abcdefghijklmnop');
+    expect(status!.reason).toContain('threw a thrown value of type object');
+  });
+
+  it('inspects nothing but typeof, and survives any thrown value', () => {
+    const thrower = (value: unknown): ConnectionProbe => ({
+      id: 'alien',
+      probe: () => {
+        throw value;
+      },
+    });
+    const reasonFor = (value: unknown) =>
+      assessConnections(NOTHING, { now: NOW, catalog: [descriptor], probes: [thrower(value)] })[0]!
+        .reason;
+    expect(reasonFor(new TypeError('x'))).toContain('threw a thrown value of type object');
+    // `(error as Error).message` threw outright on these, taking down the
+    // fail-closed path it was part of.
+    expect(reasonFor(null)).toContain('threw a thrown value of type object');
+    expect(reasonFor('a string')).toContain('threw a thrown value of type string');
+  });
+
+  /**
+   * Codex exact-head finding on `03a7104` (P2). My own previous fix read
+   * `instanceof Error` and `error.constructor?.name` to name the error kind —
+   * both of which an adapter controls. A throwing `constructor` getter raised a
+   * SECOND exception inside the catch handler, so `assessConnections` aborted
+   * and snapshot and site generation failed outright, instead of producing the
+   * fail-closed error row the catch exists to produce. The hostile probe took
+   * down the whole build by being inspected.
+   */
+  it('survives a thrown value engineered to explode when inspected', () => {
+    const hostile = new Error('boom');
+    Object.defineProperty(hostile, 'constructor', {
+      get() {
+        throw new Error('inspecting me throws');
+      },
+    });
+    const probe: ConnectionProbe = {
+      id: 'alien',
+      probe: () => {
+        throw hostile;
+      },
+    };
+    // The whole point: this returns a row rather than propagating.
+    const [status] = assessConnections(NOTHING, { now: NOW, catalog: [descriptor], probes: [probe] });
+    expect(status!.state).toBe('error');
+    expect(status!.effectiveCapabilities).toEqual([]);
+    expect(status!.reason).toContain('threw a thrown value of type object');
+  });
+
+  it('survives a Proxy that intervenes in instanceof', () => {
+    const hostile = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('no reading me');
+        },
+        getPrototypeOf() {
+          throw new Error('no instanceof either');
+        },
+      },
+    );
+    const probe: ConnectionProbe = {
+      id: 'alien',
+      probe: () => {
+        throw hostile;
+      },
+    };
+    const [status] = assessConnections(NOTHING, { now: NOW, catalog: [descriptor], probes: [probe] });
+    expect(status!.state).toBe('error');
+    expect(status!.reason).toContain('threw a thrown value of type object');
+  });
+
   it('still refuses to publish a credential hidden inside a structured answer', () => {
     // Belt and braces: the contents are not copied, so there is nothing for
     // the guard to catch — and the row is still an error carrying nothing.
@@ -1029,5 +1151,43 @@ describe('every description is bounded, whatever branch produced it', () => {
     expect(status.reason).toContain('100000');
     expect(status.reason).not.toContain('secret');
     expect(status.reason.length).toBeLessThan(400);
+  });
+});
+
+/**
+ * Codex exact-head finding on `6dde073`.
+ *
+ * `reason` interpolated the verifier's free-form `detail` verbatim, and this
+ * row is published — serialised into the snapshot and rendered on the
+ * Connections page. `assertBrowserSafe` recognises credential SHAPES and
+ * `key: value` syntax; an opaque session secret matches neither.
+ *
+ * This is the same defect as the round-25 and round-29 diagnostics, in the last
+ * place that still echoed adapter-authored text.
+ */
+describe('a verifier cannot publish its own text', () => {
+  it('does not copy verifier detail into the published reason', () => {
+    const descriptor = CONNECTION_CATALOG.find((entry) => entry.id === 'supabase')!;
+    const secret = 'ordinary-secret-value';
+    const verifier: ConnectionVerifier = {
+      id: 'supabase',
+      // A plausible verifier that echoes a provider response containing a
+      // session secret with no recognisable credential shape.
+      verify: () => ({ outcome: 'failed', detail: `upstream said ${secret}` }),
+    };
+    const env = Object.fromEntries(descriptor.requiredFacts.map((f) => [f, 'set']));
+    const [status] = assessConnections(env, {
+      now: NOW,
+      catalog: [descriptor],
+      probes: [verifiedProbe(descriptor, verifier)],
+    });
+
+    expect(status!.reason).not.toContain(secret);
+    expect(status!.reason).not.toContain('upstream said');
+    // The closed-vocabulary outcome is still reported, so the row stays useful.
+    expect(status!.reason).toContain('failed');
+    expect(status!.outcome).toBe('failed');
+    // And nothing else on the published row carries it either.
+    expect(JSON.stringify(status)).not.toContain(secret);
   });
 });

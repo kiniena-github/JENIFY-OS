@@ -265,6 +265,45 @@ function describeUnrecognised(value: unknown): string {
   return described.length > MAX_DESCRIPTION ? `${described.slice(0, MAX_DESCRIPTION)}…` : described;
 }
 
+/**
+ * Describe a thrown probe value WITHOUT echoing anything the adapter authored.
+ *
+ * This used to interpolate `(error as Error).message` straight into `reason`,
+ * which is rendered on the Connections page and written to the snapshot — so
+ * `throw new Error('credential: …')` published the credential (issue #200,
+ * Codex exact-head finding on `5a19350`). The browser-safety patterns do not
+ * save it: the credential-holder key exists only inside a flattened string, so
+ * the key walk cannot see it, exactly as in the two describer findings before
+ * this one. This is the THIRD way adapter text reached `reason`.
+ *
+ * So nothing adapter-authored is echoed at all — not the message, and not the
+ * constructor name either, since a hostile adapter controls both. Only the
+ * built-in error kind is named, from a fixed list, because that much is a fact
+ * about the JavaScript runtime rather than a string somebody chose. Anything
+ * else is reported by type.
+ *
+ * `(error as Error).message` also threw outright on `throw null`, taking down
+ * the fail-closed path it was part of; reading no property of the thrown value
+ * removes that too.
+ */
+function describeThrown(error: unknown): string {
+  // `typeof` is the ONLY inspection here, because it is the only one an
+  // adversary cannot intervene in. The previous version read `instanceof Error`
+  // and `error.constructor?.name` to name the error kind — and an adapter
+  // controls both (issue #200, Codex exact-head finding on `03a7104`): an own
+  // `constructor` getter that throws raises a second exception INSIDE the catch
+  // handler, so `assessConnections` aborts and snapshot and site generation
+  // fail outright instead of producing the fail-closed error row this code
+  // exists to produce. A Proxy can do the same to `instanceof` via
+  // `Symbol.hasInstance`, and can hang rather than throw, which no try/catch
+  // would contain.
+  //
+  // Naming `TypeError` versus `Error` was worth having and is not worth that.
+  // `evidenceSource` already names the probe that threw, which is what an
+  // operator needs to find the adapter.
+  return `a thrown value of type ${typeof error}`;
+}
+
 function describeRaw(value: unknown): string {
   if (typeof value === 'string') {
     // Truncated BEFORE quoting so the common case stays validly quoted; the
@@ -713,7 +752,18 @@ export function verifiedProbe(
         // `reason`; what it is not is verification.
         lastVerifiedAt: verified ? now : null,
         evidenceSource: `verifier ${descriptor.id}`,
-        reason: `${descriptor.displayName}: ${result.outcome} — ${result.detail}`,
+        // `result.detail` is VERIFIER-AUTHORED free text and this row is
+        // published — serialised into the snapshot and rendered on the
+        // Connections page. `assertBrowserSafe` recognises credential SHAPES
+        // and `key: value` syntax; an opaque session secret matches neither, so
+        // forwarding the adapter's text published it (issue #200, Codex
+        // exact-head finding on `6dde073`). Same defect as the round-25 and
+        // round-29 diagnostics, in the one place that still echoed an adapter.
+        //
+        // `outcome` is a closed vocabulary this module defines and normalises,
+        // so it is safe to render; the free text is not, and is dropped rather
+        // than bounded — a bound on length does not make a secret safe.
+        reason: `${descriptor.displayName}: ${result.outcome}`,
       };
     },
   };
@@ -879,7 +929,7 @@ export function assessConnections(
           effectiveCapabilities: [],
           lastVerifiedAt: options.now,
           evidenceSource: `probe ${descriptor.id} threw`,
-          reason: `${descriptor.displayName}: connection probe failed (${(error as Error).message}).`,
+          reason: `${descriptor.displayName}: connection probe threw ${describeThrown(error)}.`,
         };
       }
     }

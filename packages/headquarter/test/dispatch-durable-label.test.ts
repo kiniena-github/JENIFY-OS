@@ -53,7 +53,7 @@ const EXECUTOR = 'claude-executor';
  */
 function dispatchFixture(options: { approve?: boolean } = {}): { ops: Fixture['ops']; taskId: string } {
   const fixture = setupFixture();
-  registerDirectOrderCapability(fixture.ops);
+  registerDirectOrderCapability(fixture.db);
   fixture.principals.register({
     id: 'founder',
     displayName: 'Founder',

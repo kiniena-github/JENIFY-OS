@@ -697,8 +697,8 @@ export function executorReadiness(
   capabilityId: string | null,
 ): ExecutorReadiness {
   const problems: string[] = [];
-  const specialist = ops.store.getSpecialist(workerId);
-  const declaredProvider = ops.queue.workerProviders.providerOf(workerId);
+  const specialist = ops.directory.getSpecialist(workerId);
+  const declaredProvider = ops.queue.providerOf(workerId);
 
   if (!specialist) {
     problems.push(
@@ -872,7 +872,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
   // next run would publish a second one.
   const recordBestEffort = (kind: string, payload: Record<string, unknown>): void => {
     try {
-      ops.queue.evidence.append({ taskId, actor: DISPATCH_ACTOR, kind, payload });
+      ops.appendSystemEvidence({ taskId, actor: DISPATCH_ACTOR, kind, payload });
     } catch {
       // Deliberately swallowed. See above.
     }
@@ -1096,7 +1096,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
     | { kind: 'ineligible'; verdict: Extract<EligibilityVerdict, { eligible: false }> };
   let reserved: Reservation;
   try {
-    reserved = ops.queue.evidence.reserve<Reservation>(() => {
+    reserved = ops.reserveEvidence<Reservation>(() => {
       const current = dispatchHistory(ops, taskId);
       if (current.state !== 'none') return { kind: 'history', history: current };
       const recheck = claudeDispatchEligibility(ops, taskId, now());
@@ -1165,7 +1165,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
         // task, and nothing was published.
         throw new StartRefused(errorText(error));
       }
-      ops.queue.evidence.append({
+      ops.appendSystemEvidence({
         taskId,
         actor: DISPATCH_ACTOR,
         kind: CLAUDE_DISPATCH_EVIDENCE.attempted,
@@ -1296,7 +1296,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
       );
     }
     try {
-      ops.queue.evidence.append({
+      ops.appendSystemEvidence({
         taskId,
         actor: DISPATCH_ACTOR,
         kind: CLAUDE_DISPATCH_EVIDENCE.failed,
@@ -1335,7 +1335,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
   }
 
   try {
-    ops.queue.evidence.append({
+    ops.appendSystemEvidence({
       taskId,
       actor: DISPATCH_ACTOR,
       kind: CLAUDE_DISPATCH_EVIDENCE.succeeded,
@@ -1419,7 +1419,7 @@ function claimReconciliation(
   taskId: string,
   write: () => void,
 ): DispatchResult | null {
-  return ops.queue.evidence.reserve<DispatchResult | null>(() => {
+  return ops.reserveEvidence<DispatchResult | null>(() => {
     const current = dispatchHistory(ops, taskId);
     if (current.state !== 'unknown') {
       return refuse(
@@ -1456,7 +1456,7 @@ export function resolveUnknownDispatch(
   }
   if (input.outcome === 'not_dispatched') {
     const claimed = claimReconciliation(ops, input.taskId, () => {
-      ops.queue.evidence.append({
+      ops.appendSystemEvidence({
         taskId: input.taskId,
         actor: DISPATCH_ACTOR,
         kind: CLAUDE_DISPATCH_EVIDENCE.failed,
@@ -1540,7 +1540,7 @@ export function resolveUnknownDispatch(
   const issueUrl = parsed.url;
   const at = new Date().toISOString();
   const claimed = claimReconciliation(ops, input.taskId, () => {
-    ops.queue.evidence.append({
+    ops.appendSystemEvidence({
       taskId: input.taskId,
       actor: DISPATCH_ACTOR,
       kind: CLAUDE_DISPATCH_EVIDENCE.succeeded,

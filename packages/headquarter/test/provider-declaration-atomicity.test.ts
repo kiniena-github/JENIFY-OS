@@ -24,6 +24,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { setupFixture } from './application.fixture.js';
+import { EvidenceLog } from '../src/operator/evidence.js';
 
 function fixtureWithFounder() {
   const fixture = setupFixture();
@@ -46,7 +47,7 @@ describe('a declaration and its evidence commit together or not at all', () => {
       founderId: 'chair',
     });
     expect(declared.ok).toBe(true);
-    expect(fixture.ops.queue.workerProviders.providerOf('claude-worker')).toBe('CLAUDE');
+    expect(fixture.ops.queue.providerOf('claude-worker')).toBe('CLAUDE');
     expect(
       fixture.ops.queue.evidence.list().some((entry) => entry.kind === 'worker_provider_declared'),
     ).toBe(true);
@@ -58,14 +59,15 @@ describe('a declaration and its evidence commit together or not at all', () => {
    */
   it('rolls the mapping back when the evidence cannot be written', () => {
     const fixture = fixtureWithFounder();
-    const evidence = fixture.ops.queue.evidence as unknown as {
-      append: (entry: unknown) => unknown;
-    };
-    const realAppend = evidence.append.bind(evidence);
-    evidence.append = (entry: unknown) => {
+    // The evidence WRITER is `#private` on the queue since issue #200, so the
+    // injection point is the log's own prototype — the object `#evidence`
+    // actually dispatches through — rather than a public `append` that no
+    // longer exists. The scenario is identical: make this one append fail.
+    const realAppend = EvidenceLog.prototype.append;
+    EvidenceLog.prototype.append = function (this: EvidenceLog, entry: never) {
       const kind = (entry as { kind?: string }).kind;
       if (kind === 'worker_provider_declared') throw new Error('database is locked');
-      return realAppend(entry);
+      return realAppend.call(this, entry);
     };
 
     const declared = fixture.ops.declareWorkerProvider({
@@ -73,12 +75,12 @@ describe('a declaration and its evidence commit together or not at all', () => {
       providerId: 'CLAUDE',
       founderId: 'chair',
     });
-    evidence.append = realAppend;
+    EvidenceLog.prototype.append = realAppend;
 
     // The caller is told it failed...
     expect(declared.ok).toBe(false);
     // ...and that is now TRUE: no execution authority was granted.
-    expect(fixture.ops.queue.workerProviders.providerOf('claude-worker')).toBeNull();
+    expect(fixture.ops.queue.providerOf('claude-worker')).toBeNull();
     // And nothing claims it was.
     expect(
       fixture.ops.queue.evidence.list().some((entry) => entry.kind === 'worker_provider_declared'),
@@ -96,28 +98,29 @@ describe('a declaration and its evidence commit together or not at all', () => {
       providerId: 'CLAUDE',
       founderId: 'chair',
     });
-    expect(fixture.ops.queue.workerProviders.providerOf('worker-1')).toBe('CLAUDE');
+    expect(fixture.ops.queue.providerOf('worker-1')).toBe('CLAUDE');
 
-    const evidence = fixture.ops.queue.evidence as unknown as {
-      append: (entry: unknown) => unknown;
-    };
-    const realAppend = evidence.append.bind(evidence);
-    evidence.append = (entry: unknown) => {
+    // The evidence WRITER is `#private` on the queue since issue #200, so the
+    // injection point is the log's own prototype — the object `#evidence`
+    // actually dispatches through — rather than a public `append` that no
+    // longer exists. The scenario is identical: make this one append fail.
+    const realAppend = EvidenceLog.prototype.append;
+    EvidenceLog.prototype.append = function (this: EvidenceLog, entry: never) {
       if ((entry as { kind?: string }).kind === 'worker_provider_declared') {
         throw new Error('database is locked');
       }
-      return realAppend(entry);
+      return realAppend.call(this, entry);
     };
     const redeclared = fixture.ops.declareWorkerProvider({
       workerId: 'worker-1',
       providerId: 'CODEX',
       founderId: 'chair',
     });
-    evidence.append = realAppend;
+    EvidenceLog.prototype.append = realAppend;
 
     expect(redeclared.ok).toBe(false);
     // Still CLAUDE. The failed re-declaration moved nothing.
-    expect(fixture.ops.queue.workerProviders.providerOf('worker-1')).toBe('CLAUDE');
+    expect(fixture.ops.queue.providerOf('worker-1')).toBe('CLAUDE');
   });
 
   it('still refuses an unknown provider without writing anything', () => {
@@ -132,7 +135,7 @@ describe('a declaration and its evidence commit together or not at all', () => {
     expect(declared.ok).toBe(false);
     if (declared.ok) throw new Error('unreachable');
     expect(declared.error.code).toBe('unknown_provider');
-    expect(fixture.ops.queue.workerProviders.providerOf('worker-1')).toBeNull();
+    expect(fixture.ops.queue.providerOf('worker-1')).toBeNull();
   });
 
   it('still refuses a principal without approval authority, before any write', () => {
@@ -150,6 +153,6 @@ describe('a declaration and its evidence commit together or not at all', () => {
       founderId: 'analyst',
     });
     expect(declared.ok).toBe(false);
-    expect(fixture.ops.queue.workerProviders.providerOf('worker-1')).toBeNull();
+    expect(fixture.ops.queue.providerOf('worker-1')).toBeNull();
   });
 });

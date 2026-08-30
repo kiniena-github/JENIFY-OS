@@ -179,7 +179,7 @@ function main(): void {
     const configDb = openHqDatabase(dbPath ?? undefined);
     const configOps = new HeadquarterOperations(configDb);
     const before = directOrderCapabilityState(configOps);
-    registerDirectOrderCapability(configOps);
+    registerDirectOrderCapability(configDb);
     const after = directOrderCapabilityState(configOps);
     console.log(`Capability ${DIRECT_ORDER_CAPABILITY.id}: ${before} → ${after}`);
     if (before === 'altered') {
@@ -337,6 +337,13 @@ function main(): void {
   // never register the capability as a side effect, and must never turn a
   // disabled one back on: disabling `hq.direct_order` is how a deployment stops
   // direct orders, and an invocation may not undo it.
+  // Each refusal names what is actually wrong and what would actually fix it.
+  // A two-way branch used to fold every non-enabled state into "disabled",
+  // which sent an operator to re-enable an already-ENABLED capability whose
+  // DEFINITION had drifted — remediation that cannot work, for a diagnosis that
+  // was not the problem (issue #200, Codex exact-head finding on `f221826`).
+  // The drifted state was introduced one commit earlier; this is the other half
+  // of that change reaching the CLI.
   const capabilityState = directOrderCapabilityState(ops);
   if (capabilityState !== 'enabled') {
     // One refusal per state, each naming the state's own remedy. `altered`
@@ -352,7 +359,8 @@ function main(): void {
         'capability_definition_altered',
         'Its registered definition no longer matches the reserved Founder-gated contract ' +
           '(risk class, side effect, idempotency), so the approval gate the order relies on ' +
-          'would not be applied. Restore it deliberately with --register-capability.',
+          'would not be applied. Classification follows the registered definition, so repair it ' +
+          'deliberately with --register-capability; toggling enabled would change nothing.',
       ],
       disabled: [
         'capability_disabled',

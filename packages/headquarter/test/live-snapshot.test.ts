@@ -7,6 +7,9 @@
  * to the weakest section rather than to the most flattering one.
  */
 
+import { readFileSync } from 'node:fs';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { setupFixture, CAPS, expectOk } from './application.fixture.js';
 import { founderConsole } from '../src/application/console.js';
@@ -100,7 +103,7 @@ describe('shape and provenance', () => {
 describe('what the snapshot must never contain', () => {
   it('never carries a task payload — an order instruction stays server-side', () => {
     const fixture = setupFixture();
-    registerDirectOrderCapability(fixture.ops);
+    registerDirectOrderCapability(fixture.db);
     fixture.principals.register({
       id: 'founder',
       displayName: 'Founder',
@@ -129,7 +132,7 @@ describe('what the snapshot must never contain', () => {
 
   it('publishes a title only when its author deliberately chose one', () => {
     const fixture = setupFixture();
-    registerDirectOrderCapability(fixture.ops);
+    registerDirectOrderCapability(fixture.db);
     fixture.principals.register({
       id: 'founder',
       displayName: 'Founder',
@@ -292,7 +295,7 @@ describe('projecting the store never writes to it', () => {
     const path = tmp();
     const writable = openHqDatabase(path);
     const seeded = new HeadquarterOperations(writable);
-    seeded.queue.capabilities.register({
+    new CapabilityRegistry(writable).register({
       id: 'repo.read_status',
       description: 'Read repo/CI status',
       riskClass: 'read_only',
@@ -309,5 +312,70 @@ describe('projecting the store never writes to it', () => {
     expect(snapshot.mode).toBe('live');
     expect(snapshot.capabilities.data.map((c) => c.id)).toContain('repo.read_status');
     ro.close();
+  });
+});
+
+/**
+ * Codex exact-head finding on `f221826` (P1). `build-site.ts` renders a data
+ * file and never opens the HQ store, so its operational section is
+ * `emptyFounderConsole`. A bundle setting `sourceMode: 'live'` nonetheless
+ * stamped LIVE provenance on that empty section — and because the emitted
+ * snapshot shares the HTML's `asOf`, the browser freshness poll then reported
+ * LIVE over state nothing had read.
+ *
+ * The rule enforced here is the same one the browser applies at the far end of
+ * the pipeline: only positive live provenance may say LIVE, and only a build
+ * that actually opened the store can establish it.
+ */
+describe('a static build cannot claim live operational provenance', () => {
+  const buildSiteScript = readFileSync(
+    fileURLToPath(new URL('../src/cli/build-site.ts', import.meta.url)),
+    'utf8',
+  );
+
+  it('forces every SYNTHETIC section non-live, not just the console one', () => {
+    // The rule is about provenance, not about one section: data that came out
+    // of the bundle may carry the bundle's mode; data fabricated here may not.
+    // The capability section is `data: []` and was missed the first time.
+    const capabilityBlock = buildSiteScript.slice(
+      buildSiteScript.indexOf('  capabilities: {'),
+      buildSiteScript.indexOf('  activity: {'),
+    );
+    expect(capabilityBlock).toContain('staticSectionMode(data.sourceMode)');
+    expect(capabilityBlock).not.toContain("mode: data.sourceMode ?? 'sample'");
+    // And the sections that ARE the bundle's data keep the bundle's claim.
+    const workforceBlock = buildSiteScript.slice(
+      buildSiteScript.indexOf('  workforce: {'),
+      buildSiteScript.indexOf('  capabilities: {'),
+    );
+    expect(workforceBlock).toContain("mode: data.sourceMode ?? 'sample'");
+  });
+
+  it('never passes a bundle-declared live mode through to the console section', () => {
+    // Scoped to the CONSOLE block, which is the section that is empty by
+    // construction. The other sections genuinely are the bundle's own data, so
+    // the bundle's own mode is the right claim for them — and the overall
+    // snapshot mode degrades to the weakest section regardless, so forcing this
+    // one is what stops the bundle announcing LIVE.
+    const consoleBlock = buildSiteScript.slice(
+      buildSiteScript.indexOf('  console: {'),
+      buildSiteScript.indexOf('  connections: {'),
+    );
+    expect(consoleBlock).toContain('staticSectionMode(data.sourceMode)');
+    expect(consoleBlock).not.toContain("mode: data.sourceMode ?? 'sample'");
+    expect(consoleBlock).toContain('emptyFounderConsole');
+  });
+
+  it('downgrades live to sample and preserves reconstructed', () => {
+    // Executed rather than grepped: the shipped mapping is the tested one.
+    const body = buildSiteScript.slice(buildSiteScript.indexOf('function staticSectionMode'));
+    const source = body.slice(0, body.indexOf('\n}') + 2);
+    const staticSectionMode = new Function(
+      `${source.replace(/: SourceMode \| undefined/, '').replace(/: SourceMode/, '')}; return staticSectionMode;`,
+    )() as (m: string | undefined) => string;
+    expect(staticSectionMode('live')).toBe('sample');
+    expect(staticSectionMode(undefined)).toBe('sample');
+    expect(staticSectionMode('sample')).toBe('sample');
+    expect(staticSectionMode('reconstructed')).toBe('reconstructed');
   });
 });

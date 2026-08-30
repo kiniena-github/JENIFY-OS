@@ -46,7 +46,7 @@ interface Plane {
 function hqPlane(): Plane {
   const hqDb = openMemoryHqDatabase();
   const ops = new HeadquarterOperations(hqDb, { store: new HeadquarterStore(hqDb) });
-  registerDirectOrderCapability(ops);
+  registerDirectOrderCapability(hqDb);
   const principals = new HumanPrincipalRegistry(hqDb);
   principals.register({
     id: 'founder',

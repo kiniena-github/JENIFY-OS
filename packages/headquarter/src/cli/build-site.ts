@@ -6,6 +6,7 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import type { SourceMode } from '../live/provenance.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSite, bundleAsOf, type HeadquarterData } from '../ui/site.js';
@@ -80,17 +81,57 @@ for (const [file, html] of site) {
  * does not state a mode is treated as `sample`: the safest reading of "this
  * build never said where its data came from".
  */
+/**
+ * The strongest provenance a SYNTHETIC section may claim in a static build.
+ *
+ * The rule, stated once so both call sites share it: a section whose data came
+ * out of the bundle may carry the bundle's own mode, because that claim is
+ * about the bundle and its author is entitled to make it. A section whose data
+ * is fabricated here — `emptyFounderConsole`, a hard-coded `[]` — may not,
+ * because the bundle never supplied it and cannot vouch for it.
+ *
+ * Never `live` either way: this command opens no database, so nothing in it was
+ * read from the canonical store. Only `hq:snapshot`, which does open the store,
+ * can establish live provenance (issue #200, Codex exact-head findings on
+ * `f221826` and `135ae58` — the console section first, then the capability
+ * section, which had the same shape and was missed the first time).
+ */
+function staticSectionMode(declared: SourceMode | undefined): SourceMode {
+  if (declared === 'reconstructed') return 'reconstructed';
+  return 'sample';
+}
+
 const asOf = bundleAsOf(data);
 const snapshot = buildHqSnapshot({
   generatedAt: asOf,
   note: data.note,
   console: {
     data: emptyFounderConsole(asOf),
+    // This section can NEVER be live, whatever the bundle claims about itself.
+    //
+    // It is `emptyFounderConsole` — this command does not open the HQ store, by
+    // design. A bundle setting `sourceMode: 'live'` therefore used to stamp
+    // LIVE provenance on a deliberately empty operational section, and since
+    // the emitted snapshot shares the HTML's `asOf`, the freshness poll then
+    // reported LIVE over state that was fabricated rather than read (issue
+    // #200, Codex exact-head finding on `f221826`). The bundle's own mode is a
+    // claim about the bundle; it cannot vouch for a section whose contents
+    // nothing produced.
+    //
+    // `live` is refused rather than trusted here, which is the same rule the
+    // browser applies at the other end of this pipeline: only positive live
+    // provenance may say LIVE, and only `hq:snapshot` — which does open the
+    // store — can establish it.
     provenance: {
-      mode: data.sourceMode ?? 'sample',
+      // `staticSectionMode` (#200) refuses to let a static build claim live
+      // provenance; `dataPathLabel` (#219) keeps the builder's absolute path out
+      // of the emitted artifact. Both apply.
+      mode: staticSectionMode(data.sourceMode),
       source: `static bundle ${dataPathLabel} (no HQ database was opened by this build)`,
       asOf,
-      note: 'Operational sections are rendered from the bundle, not read from op_tasks.',
+      note:
+        'Operational sections are rendered from the bundle, not read from op_tasks. A static ' +
+        'build cannot report live operational state; run `npm run hq:snapshot` for that.',
     },
   },
   connections: {
@@ -108,9 +149,13 @@ const snapshot = buildHqSnapshot({
     provenance: { mode: data.sourceMode ?? 'sample', source: `bundle.specialists (${dataPathLabel})`, asOf },
   },
   capabilities: {
+    // Synthetic, exactly like the console section: always the hard-coded empty
+    // array, and the source line beside it says no registry was opened. A
+    // bundle declaring `live` was telling section consumers that zero
+    // capabilities is live canonical state.
     data: [],
     provenance: {
-      mode: data.sourceMode ?? 'sample',
+      mode: staticSectionMode(data.sourceMode),
       source: 'no capability registry is open in a static build',
       asOf,
     },

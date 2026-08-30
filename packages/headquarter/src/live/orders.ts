@@ -89,9 +89,15 @@
 
 import { createHash } from 'node:crypto';
 import { assertBrowserSafe } from './redaction.js';
-import { DEFAULT_ACTOR_AUTHENTICATION, type ActorAuthentication } from './local-trust.js';
+import {
+  DEFAULT_ACTOR_AUTHENTICATION,
+  isCallerAssertableActorAuthentication,
+  type ActorAuthentication,
+} from './local-trust.js';
 import { EXECUTION_PROVIDER_KEY, readProviderBinding } from '../operator/provider-binding.js';
 import { dispatchHistory } from '../providers/claude/dispatch.js';
+import { CapabilityRegistry } from '../operator/capabilities.js';
+import type { HqDatabase } from '../store/db.js';
 import type { TaskClassification } from '../application/classification.js';
 import type { HeadquarterOperations, OpsErrorCode } from '../application/service.js';
 import type { Capability } from '../operator/capabilities.js';
@@ -131,8 +137,8 @@ export const DIRECT_ORDER_CAPABILITY = {
  * and no invocation path — this function included — may quietly undo it.
  * Re-enabling is its own explicit act (`capabilities.setEnabled`).
  */
-export function registerDirectOrderCapability(ops: HeadquarterOperations): void {
-  ops.queue.capabilities.register({ ...DIRECT_ORDER_CAPABILITY });
+export function registerDirectOrderCapability(db: HqDatabase): void {
+  new CapabilityRegistry(db).register({ ...DIRECT_ORDER_CAPABILITY });
 }
 
 /**
@@ -143,6 +149,22 @@ export function registerDirectOrderCapability(ops: HeadquarterOperations): void 
  * the control plane; `idempotent` is what makes replaying an approved digest
  * safe. Those three are the contract — the description is prose and may drift
  * without changing what the system will do.
+ *
+ * Verifying them at all is the point issue #200's review made (Codex exact-head
+ * finding on `5a19350`): checking only missing/disabled/enabled reads the
+ * capability's SWITCH and never its DEFINITION, and `createTask` classifies
+ * against whatever the canonical registry row says, not against the constant in
+ * this file. An existing database whose `hq.direct_order` row had weakened to
+ * `riskClass: 'reversible'` (an older schema, a hand-edit, a collision with a
+ * differently-defined capability of the same id) would let a free-text
+ * instruction go straight to `queued`, skipping the Founder gate this
+ * capability exists to impose.
+ *
+ * Invocation deliberately does not re-register, so nothing re-asserts the
+ * definition on the way past — which makes verifying it here the other half of
+ * that decision rather than a new rule. Registration stays a separate, explicit
+ * configuration act; invocation refuses to ride on a definition that no longer
+ * promises what the order is relying on.
  */
 export const DIRECT_ORDER_RESERVED_CONTRACT = {
   riskClass: DIRECT_ORDER_CAPABILITY.riskClass,
@@ -194,7 +216,11 @@ export function directOrderCapabilityState(ops: HeadquarterOperations): DirectOr
   if (!capability) return 'missing';
   // Checked before `enabled`, because a weakened definition is a fact about
   // the row whether or not the row is switched on, and re-enabling it must not
-  // be the moment the weakened contract silently takes effect.
+  // be the moment the weakened contract silently takes effect. Issue #200's
+  // lane checked `enabled` first and reported a weakened-but-disabled row as
+  // plain `disabled`; both orderings refuse the order, but this one lets the
+  // operator learn about the drift before the switch hides it. Integration
+  // decision for #219 — see the PR body.
   if (directOrderContractDrift(capability).length > 0) return 'altered';
   return capability.enabled ? 'enabled' : 'disabled';
 }
@@ -255,6 +281,22 @@ export interface RouteResolution {
  */
 export interface RouteAvailability {
   providerDispatchable?: (provider: ProviderId) => boolean | null;
+  /**
+   * An actor-authentication marker the CALLING INTERFACE earned, rather than
+   * one the caller asserted (issue #219, integrating #200 with #214).
+   *
+   * It lives here, on the options object, and NOT on `DirectOrderInput`, for a
+   * structural reason rather than a stylistic one: `input` is the shape a
+   * request body is deserialized into, so anything reachable on it is
+   * assertable by whoever wrote that body. This parameter is not, and cannot
+   * be, part of a parsed payload. Only `live/control-api.ts` sets it, after
+   * `live/auth.ts` has resolved a live JENIFY OS session to a configured
+   * principal.
+   *
+   * When present it overrides `input.actorAuthentication`, which the caller
+   * may still only populate from the caller-assertable vocabulary.
+   */
+  resolvedActorAuthentication?: ActorAuthentication;
 }
 
 function candidate(
@@ -636,6 +678,34 @@ export function submitDirectOrder(
     return orderFail('invalid_input', `Unknown route: ${String(input.route)}`);
   }
 
+  // The trust marker is a claim about the caller, and it is persisted inside
+  // the approval digest — so an unknown one is refused here rather than
+  // recorded (issue #200, Codex finding on `5a19350`). `ActorAuthentication`
+  // deliberately has no `authenticated` member, but a union enforces that on
+  // TypeScript callers only: a JSON or plain-JavaScript caller could pass
+  // `'authenticated'` and manufacture the exact trust claim the vocabulary
+  // exists to make unsayable. Deny by default, like every other unknown here.
+  if (
+    input.actorAuthentication !== undefined &&
+    !isCallerAssertableActorAuthentication(input.actorAuthentication)
+  ) {
+    return orderFail(
+      'invalid_input',
+      'Unusable actorAuthentication marker. A marker outside the vocabulary is refused rather ' +
+        'than persisted into the approval digest, and a marker that must be EARNED — an ' +
+        'authenticated session — is refused from a caller asserting it about itself. The ' +
+        'authenticated value reaches an order only from the interface that resolved the ' +
+        'identity, through a parameter no request body can populate.',
+    );
+  }
+  // Earned beats asserted. `resolvedActorAuthentication` is set only by an
+  // interface that authenticated the principal itself, and is unreachable from
+  // a deserialized payload, so it wins over anything `input` carries.
+  const actorAuthentication: ActorAuthentication =
+    availability?.resolvedActorAuthentication ??
+    input.actorAuthentication ??
+    DEFAULT_ACTOR_AUTHENTICATION;
+
   // Fail closed on the capability's CURRENT configured state, and never touch
   // it (issue #200, Codex P1 #2). Placing an order is an invocation; it does
   // not register the capability, and it certainly does not re-enable one that
@@ -761,7 +831,7 @@ export function submitDirectOrder(
     // are the same order, and must dedupe onto the same canonical task rather
     // than creating a second one (issue #224).
     resolvedProvider: boundProvider,
-    actorAuthentication: input.actorAuthentication ?? DEFAULT_ACTOR_AUTHENTICATION,
+    actorAuthentication,
   });
   const created = ops.createTask({
     capabilityId: DIRECT_ORDER_CAPABILITY.id,
@@ -780,7 +850,7 @@ export function submitDirectOrder(
       // that `requestedBy` was asserted, not authenticated. It is part of the
       // payload, so it is part of the action digest a Founder echoes back —
       // the assertion cannot be edited away between rendering and approval.
-      actorAuthentication: input.actorAuthentication ?? DEFAULT_ACTOR_AUTHENTICATION,
+      actorAuthentication,
     },
     idempotencyKey,
     requestedBy: input.requestedBy,
@@ -799,7 +869,7 @@ export function submitDirectOrder(
   // order waits. Fact NAMES only, never values.
   if (routeBlocked && !created.data.deduplicated) {
     try {
-      ops.queue.evidence.append({
+      ops.appendSystemEvidence({
         taskId: created.data.task.id,
         actor: 'system',
         kind: 'direct_order_dispatch_blocked',

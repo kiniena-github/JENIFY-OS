@@ -362,7 +362,7 @@ function recordCorrelation(
     };
   }
 
-  ops.queue.evidence.append({
+  ops.appendSystemEvidence({
     taskId: task.id,
     actor: DISPATCH_ACTOR,
     kind: CLAUDE_DISPATCH_EVIDENCE.correlated,

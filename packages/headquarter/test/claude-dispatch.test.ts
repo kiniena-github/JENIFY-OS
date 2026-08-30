@@ -50,6 +50,7 @@ import {
 import { connectionProbesWithGitHubDispatch, githubDispatchProbe } from '../src/providers/claude/connection.js';
 import { liveSnapshotFromOperations } from '../src/live/snapshot.js';
 import { CONNECTION_CATALOG, assessConnections } from '../src/live/connections.js';
+import { EvidenceLog } from '../src/operator/evidence.js';
 
 const CLAUDE_ONLY = { CLAUDE_ROUTINE_URL: 'present', CLAUDE_ROUTINE_TOKEN: 'present' };
 const CODEX_ONLY = { CODEX_CLI_PATH: '/usr/local/bin/codex', CODEX_AUTH_MODE: 'chatgpt' };
@@ -92,7 +93,7 @@ export const EXECUTOR = 'claude-executor';
 
 function orderFixture(): Fixture {
   const fixture = setupFixture();
-  registerDirectOrderCapability(fixture.ops);
+  registerDirectOrderCapability(fixture.db);
   fixture.principals.register({
     id: 'founder',
     displayName: 'Founder',
@@ -510,16 +511,18 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
     const fixture = orderFixture();
     const taskId = placeOrder(fixture);
     const transport = stubTransport({});
-    const evidence = fixture.ops.queue.evidence as unknown as { append: (entry: unknown) => unknown };
-    const realAppend = evidence.append.bind(fixture.ops.queue.evidence);
-    evidence.append = (entry: unknown) => {
+    // Writer is `#private` since #200; patch the log prototype it dispatches
+    // through instead of a public `append` that no longer exists.
+    const realAppend = EvidenceLog.prototype.append;
+    EvidenceLog.prototype.append = function (this: EvidenceLog, entry: never) {
       if ((entry as { kind: string }).kind === CLAUDE_DISPATCH_EVIDENCE.attempted) {
         throw new Error('database is locked');
       }
-      return realAppend(entry);
+      return realAppend.call(this, entry);
     };
 
     const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    EvidenceLog.prototype.append = realAppend;
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.error.code).toBe('evidence_unavailable');
@@ -530,13 +533,14 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
     const fixture = orderFixture();
     const taskId = placeOrder(fixture);
     const transport = stubTransport({});
-    const evidence = fixture.ops.queue.evidence as unknown as { append: (entry: unknown) => unknown };
-    const realAppend = evidence.append.bind(fixture.ops.queue.evidence);
-    evidence.append = (entry: unknown) => {
+    // Writer is `#private` since #200; patch the log prototype it dispatches
+    // through instead of a public `append` that no longer exists.
+    const realAppend = EvidenceLog.prototype.append;
+    EvidenceLog.prototype.append = function (this: EvidenceLog, entry: never) {
       if ((entry as { kind: string }).kind === CLAUDE_DISPATCH_EVIDENCE.succeeded) {
         throw new Error('disk full');
       }
-      return realAppend(entry);
+      return realAppend.call(this, entry);
     };
 
     const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
@@ -546,7 +550,7 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
     // The operator is handed what they need to reconcile it by hand.
     expect(result.error.details?.issueUrl).toContain('/issues/4242');
     // And the attempt is left OPEN, so a retry refuses instead of duplicating.
-    evidence.append = realAppend;
+    EvidenceLog.prototype.append = realAppend;
     expect(dispatchHistory(fixture.ops, taskId).state).toBe('unknown');
     const retry = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: stubTransport({}) });
     expect(retry.ok).toBe(false);

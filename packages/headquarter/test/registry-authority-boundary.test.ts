@@ -23,6 +23,7 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
 
 import {
   HeadquarterOperations,
@@ -122,7 +123,7 @@ function makeOps(withRegistry = true): HeadquarterOperations {
     ...(withRegistry ? { memberRegistry: registry } : {}),
   });
   for (const id of CAPS) {
-    ops.queue.capabilities.register({
+    new CapabilityRegistry(db).register({
       id,
       description: id,
       riskClass: 'read_only',
@@ -245,7 +246,7 @@ describe('a Registry-only member gains NOTHING from the Registry being enabled',
         },
       ],
     });
-    ops.queue.capabilities.register({
+    new CapabilityRegistry(db).register({
       id: 'deploy.run',
       description: 'deploy.run',
       riskClass: 'read_only',

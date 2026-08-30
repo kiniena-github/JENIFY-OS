@@ -1,9 +1,14 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { openMemoryHqDatabase, type HqDatabase } from '../src/store/db.js';
 import { HeadquarterStore } from '../src/store/headquarter.js';
 import { OperatorQueue } from '../src/operator/queue.js';
+import type { PrivilegedQueueApi } from '../src/operator/queue.js';
+import type { PolicyContext } from '../src/operator/policy.js';
 import { MemoryStore } from '../src/memory/index.js';
 import {
+
+
   assertAssignable,
   assertHandoverTransition,
   generateHandoverPackage,
@@ -11,20 +16,38 @@ import {
   type HandoverState,
 } from '../src/handover/index.js';
 
+/**
+ * A queue plus its approval grant. The grant reaches only the constructor's
+ * caller (issue #200, Codex finding on `d575c89`), so a test that legitimately
+ * drives approvals captures it here rather than reaching for `queue.approve`,
+ * which no longer exists on the public surface.
+ */
+function queueWithApprovals(
+  db: HqDatabase,
+  policyCtx: PolicyContext = {},
+): { queue: OperatorQueue; privileged: PrivilegedQueueApi } {
+  let privileged: PrivilegedQueueApi | undefined;
+  const queue = new OperatorQueue(db, policyCtx, (api) => {
+    privileged = api;
+  });
+  return { queue, privileged: privileged! };
+}
+
+
 const claude = { workerId: 'claude', allowedCapabilities: ['repo.read_status', 'github.open_pr'] };
 
-function setup(): { db: HqDatabase; hq: HeadquarterStore; queue: OperatorQueue; memory: MemoryStore; handovers: HandoverStore } {
+function setup(): { db: HqDatabase; hq: HeadquarterStore; queue: OperatorQueue; queueApprovals: PrivilegedQueueApi; memory: MemoryStore; handovers: HandoverStore } {
   const db = openMemoryHqDatabase();
   const hq = new HeadquarterStore(db);
-  const queue = new OperatorQueue(db, { preApprovedCapabilities: new Set(['github.open_pr']) });
-  queue.capabilities.register({
+  const { queue: queue, privileged: queueApprovals } = queueWithApprovals(db, { preApprovedCapabilities: new Set(['github.open_pr']) });
+  new CapabilityRegistry(db).register({
     id: 'repo.read_status',
     description: 'Read repo/CI status',
     riskClass: 'read_only',
     sideEffect: false,
     idempotent: true,
   });
-  queue.capabilities.register({
+  new CapabilityRegistry(db).register({
     id: 'github.open_pr',
     description: 'Open a branch-isolated PR',
     riskClass: 'external_side_effect',
@@ -35,7 +58,7 @@ function setup(): { db: HqDatabase; hq: HeadquarterStore; queue: OperatorQueue; 
   hq.upsertSpecialist({ id: 'jules', displayName: 'Jules', vendor: 'google', role: 'parallel_implementer', allowedCapabilities: ['repo.read_status'], active: true });
   const memory = new MemoryStore(db, (e) => hq.appendEvent(e));
   const handovers = new HandoverStore(db);
-  return { db, hq, queue, memory, handovers };
+  return { db, hq, queue, queueApprovals, memory, handovers };
 }
 
 describe('handover / replacement lifecycle', () => {
@@ -48,7 +71,7 @@ describe('handover / replacement lifecycle', () => {
   // Spec C item 1
   it('worker replacement with active tasks: inventory captures them, verify fails while still claimed, passes after completion', () => {
     const { queue, memory, handovers } = ctx;
-    const enq = queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claude });
+    const enq = ctx.queueApprovals.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claude });
     if (!enq.accepted) throw new Error('enqueue failed');
     const claimed = queue.claim('claude', 'repo.read_status')!;
     expect(claimed.status).toBe('assigned');
@@ -103,7 +126,7 @@ describe('handover / replacement lifecycle', () => {
   // Spec C item 3
   it('an outcome_unknown task blocks verify with a reconciliation-required error and is never flipped by the handover flow', () => {
     const { queue, memory, handovers } = ctx;
-    const enq = queue.enqueue({ capabilityId: 'github.open_pr', payload: { pr: 1 }, idempotencyKey: 'pr-1', requestedBy: claude });
+    const enq = ctx.queueApprovals.enqueue({ capabilityId: 'github.open_pr', payload: { pr: 1 }, idempotencyKey: 'pr-1', requestedBy: claude });
     if (!enq.accepted) throw new Error('enqueue failed');
     // Already-expired lease so the very next sweep marks it outcome_unknown.
     const claimed = queue.claim('claude', 'github.open_pr', -1000)!;
@@ -125,7 +148,7 @@ describe('handover / replacement lifecycle', () => {
     expect(queue.get(claimed.id)!.status).toBe('outcome_unknown');
 
     // Once genuinely reconciled through the operator queue, verify succeeds.
-    queue.reconcile(claimed.id, 'confirmed_done', 'reviewer', 'checked GitHub, PR exists');
+    ctx.queueApprovals.reconcile(claimed.id, 'confirmed_done', 'reviewer', 'checked GitHub, PR exists');
     expect(handovers.verify(h.id, 'founder').state).toBe('verified');
   });
 
@@ -228,7 +251,7 @@ describe('handover / replacement lifecycle', () => {
   // still catches it rather than trusting upstream filtering alone.
   it('rejects secret-like content surfacing in a handover package as a defense-in-depth backstop', () => {
     const { db, queue, memory } = ctx;
-    const enq = queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claude });
+    const enq = ctx.queueApprovals.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: claude });
     if (!enq.accepted) throw new Error('enqueue failed');
     const claimed = queue.claim('claude', 'repo.read_status')!;
     db.prepare('UPDATE op_tasks SET result = ? WHERE id = ?').run(

@@ -27,20 +27,44 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openHqDatabase, openMemoryHqDatabase, type HqDatabase } from '../src/store/db.js';
 import { HeadquarterStore } from '../src/store/headquarter.js';
 import { OperatorQueue } from '../src/operator/queue.js';
+import type { PrivilegedQueueApi } from '../src/operator/queue.js';
+import type { PolicyContext } from '../src/operator/policy.js';
 import { MemoryStore } from '../src/memory/index.js';
 import { assertAssignable, HandoverStore } from '../src/handover/index.js';
+
+/**
+ * A queue plus its approval grant. The grant reaches only the constructor's
+ * caller (issue #200, Codex finding on `d575c89`), so a test that legitimately
+ * drives approvals captures it here rather than reaching for `queue.approve`,
+ * which no longer exists on the public surface.
+ */
+function queueWithApprovals(
+  db: HqDatabase,
+  policyCtx: PolicyContext = {},
+): { queue: OperatorQueue; privileged: PrivilegedQueueApi } {
+  let privileged: PrivilegedQueueApi | undefined;
+  const queue = new OperatorQueue(db, policyCtx, (api) => {
+    privileged = api;
+  });
+  return { queue, privileged: privileged! };
+}
+
+
+
 
 const claude = { workerId: 'claude', allowedCapabilities: ['repo.read_status', 'github.open_pr'] };
 const jules = { workerId: 'jules', allowedCapabilities: ['repo.read_status'] };
 
 interface Ctx {
   db: HqDatabase;
+  queueApprovals: PrivilegedQueueApi;
   hq: HeadquarterStore;
   queue: OperatorQueue;
   memory: MemoryStore;
@@ -49,15 +73,15 @@ interface Ctx {
 
 function wire(db: HqDatabase): Ctx {
   const hq = new HeadquarterStore(db);
-  const queue = new OperatorQueue(db, { preApprovedCapabilities: new Set(['github.open_pr']) });
-  queue.capabilities.register({
+  const { queue, privileged: queueApprovals } = queueWithApprovals(db, { preApprovedCapabilities: new Set(['github.open_pr']) });
+  new CapabilityRegistry(db).register({
     id: 'repo.read_status',
     description: 'Read repo/CI status',
     riskClass: 'read_only',
     sideEffect: false,
     idempotent: true,
   });
-  queue.capabilities.register({
+  new CapabilityRegistry(db).register({
     id: 'github.open_pr',
     description: 'Open a branch-isolated PR',
     riskClass: 'external_side_effect',
@@ -82,7 +106,7 @@ function wire(db: HqDatabase): Ctx {
   });
   const memory = new MemoryStore(db, (e) => hq.appendEvent(e));
   const handovers = new HandoverStore(db);
-  return { db, hq, queue, memory, handovers };
+  return { db, hq, queue, queueApprovals, memory, handovers };
 }
 
 function setup(): Ctx {
@@ -90,7 +114,7 @@ function setup(): Ctx {
 }
 
 function enqueueRead(ctx: Ctx, by = claude): string {
-  const enq = ctx.queue.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: by });
+  const enq = ctx.queueApprovals.enqueue({ capabilityId: 'repo.read_status', payload: {}, requestedBy: by });
   if (!enq.accepted) throw new Error(`enqueue failed: ${enq.reason}`);
   return enq.task.id;
 }
@@ -105,7 +129,7 @@ describe('canonical freeze enforcement at the assignment boundary', () => {
   // ---- Case 1: the reported defect ----
 
   it('case 1: a frozen worker cannot receive a new task through canonical assignment', () => {
-    const { queue, handovers } = ctx;
+    const { queue, queueApprovals, handovers } = ctx;
     const taskId = enqueueRead(ctx);
 
     handovers.initiate('claude', 'founder');
@@ -130,7 +154,7 @@ describe('canonical freeze enforcement at the assignment boundary', () => {
     // A different caller building its own OperatorQueue over the same DB —
     // the "alternate assignment path". The guard lives at the boundary, so
     // this instance is bound by it too.
-    const alternate = new OperatorQueue(db, { preApprovedCapabilities: new Set(['github.open_pr']) });
+    const { queue: alternate, privileged: alternateApprovals } = queueWithApprovals(db, { preApprovedCapabilities: new Set(['github.open_pr']) });
     expect(() => alternate.claim('claude', 'repo.read_status')).toThrow(/active handover/i);
     expect(alternate.get(taskId)!.status).toBe('queued');
   });
@@ -143,7 +167,7 @@ describe('canonical freeze enforcement at the assignment boundary', () => {
     // Simulates a process/module that only ever imports the operator queue
     // and knows nothing about the handover module. It must still be blocked:
     // the freeze is read from the database, not from an in-memory handle.
-    const bare = new OperatorQueue(db, { preApprovedCapabilities: new Set(['github.open_pr']) });
+    const { queue: bare, privileged: bareApprovals } = queueWithApprovals(db, { preApprovedCapabilities: new Set(['github.open_pr']) });
     expect(() => bare.claim('claude', 'repo.read_status')).toThrow(/cannot be assigned new work|active handover/i);
   });
 
@@ -168,7 +192,7 @@ describe('canonical freeze enforcement at the assignment boundary', () => {
   // ---- Case 4: reassignment during handover ----
 
   it('case 4: work released during a handover is reassignable to the successor, never back to the frozen worker', () => {
-    const { queue, handovers } = ctx;
+    const { queue, queueApprovals, handovers } = ctx;
     const taskId = enqueueRead(ctx);
     handovers.initiate('claude', 'founder');
 
@@ -186,7 +210,7 @@ describe('canonical freeze enforcement at the assignment boundary', () => {
   // ---- Case 5: concurrency ----
 
   it('case 5: repeated concurrent claim attempts during a freeze all fail safely and leave the task queued', () => {
-    const { queue, handovers } = ctx;
+    const { queue, queueApprovals, handovers } = ctx;
     const taskId = enqueueRead(ctx);
     handovers.initiate('claude', 'founder');
 
@@ -202,17 +226,17 @@ describe('canonical freeze enforcement at the assignment boundary', () => {
   });
 
   it('case 5b: a claim rejected by the freeze never burns the single-use Founder approval nonce', () => {
-    const { queue, handovers } = ctx;
+    const { queue, queueApprovals, handovers } = ctx;
     // A genuinely approval-gated capability (NOT pre-approved), so the task
     // carries a real single-use approval nonce that claim() would consume.
-    queue.capabilities.register({
+    new CapabilityRegistry(ctx.db).register({
       id: 'github.merge_pr',
       description: 'Merge a pull request',
       riskClass: 'external_side_effect',
       sideEffect: true,
       idempotent: false,
     });
-    const enq = queue.enqueue({
+    const enq = queueApprovals.enqueue({
       capabilityId: 'github.merge_pr',
       payload: { pr: 127 },
       idempotencyKey: 'merge-127',
@@ -221,12 +245,25 @@ describe('canonical freeze enforcement at the assignment boundary', () => {
     if (!enq.accepted) throw new Error(`enqueue failed: ${enq.reason}`);
     expect(enq.task.status).toBe('needs_approval');
 
-    const approved = queue.approve(enq.task.id, 'founder');
+    const approved = queueApprovals.approve(enq.task.id, 'founder');
     expect(approved.status).toBe('queued');
     expect(approved.approvalId).toBeTruthy();
 
     handovers.initiate('claude', 'founder');
     expect(() => queue.claim('claude', 'github.merge_pr')).toThrow(/active handover/i);
+
+    // The successor must actually HOLD the capability it is taking over: the
+    // queue enforces the least-privilege grant at its own boundary now, not
+    // only in the service. "The nonce survived" can only be demonstrated by a
+    // claim that is legitimate in every other respect.
+    ctx.hq.upsertSpecialist({
+      id: 'jules',
+      displayName: 'Jules',
+      vendor: 'google',
+      role: 'parallel_implementer',
+      allowedCapabilities: ['repo.read_status', 'github.merge_pr'],
+      active: true,
+    });
 
     // The nonce survived: the successor can still legitimately claim AND
     // start it. If the rejected claim had consumed the approval, start()
@@ -338,7 +375,7 @@ describe('canonical freeze enforcement at the assignment boundary', () => {
   });
 
   it('case 11b: an aborted handover correctly unfreezes a worker that was never deactivated', () => {
-    const { queue, handovers } = ctx;
+    const { queue, queueApprovals, handovers } = ctx;
     enqueueRead(ctx);
     const h = handovers.initiate('claude', 'founder');
     expect(() => queue.claim('claude', 'repo.read_status')).toThrow(/active handover/i);
@@ -397,7 +434,7 @@ describe('canonical freeze enforcement at the assignment boundary', () => {
   });
 
   it('boundary: a frozen worker may still enqueue work, but can never claim it back', () => {
-    const { queue, handovers } = ctx;
+    const { queue, queueApprovals, handovers } = ctx;
     handovers.initiate('claude', 'founder');
 
     // Enqueue is a request for work to be DONE, not an assignment to the
@@ -518,7 +555,7 @@ describe('canonical freeze enforcement at the assignment boundary', () => {
   });
 
   it('case 16b: an unrelated worker is unaffected by another worker being frozen', () => {
-    const { queue, handovers } = ctx;
+    const { queue, queueApprovals, handovers } = ctx;
     enqueueRead(ctx);
     handovers.initiate('claude', 'founder');
 
@@ -576,7 +613,7 @@ describe('freeze survives process restart', () => {
 
     // ---- process 1: enqueue work and freeze the worker ----
     const first = wire(openHqDatabase(path));
-    const enq = first.queue.enqueue({
+    const enq = first.queueApprovals.enqueue({
       capabilityId: 'repo.read_status',
       payload: {},
       requestedBy: claude,
@@ -598,7 +635,7 @@ describe('freeze survives process restart', () => {
 
     // And a queue built in the fresh process WITHOUT ever constructing a
     // HandoverStore is bound by it too.
-    const bare = new OperatorQueue(second.db, {
+    const { queue: bare, privileged: bareApprovals } = queueWithApprovals(second.db, {
       preApprovedCapabilities: new Set(['github.open_pr']),
     });
     expect(() => bare.claim('claude', 'repo.read_status')).toThrow(/active handover/i);

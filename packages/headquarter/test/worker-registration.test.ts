@@ -1,3 +1,5 @@
+import { EvidenceLog } from '../src/operator/evidence.js';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
 /**
  * Registering an execution worker is a Founder-gated canonical act (issue #224,
  * ChatGPT P1 on `83e146b`).
@@ -31,7 +33,7 @@ const WORKER = 'claude-github-workflow';
 
 function fixtureWithFounder(): Fixture {
   const fixture = setupFixture();
-  registerDirectOrderCapability(fixture.ops);
+  registerDirectOrderCapability(fixture.db);
   fixture.principals.register({
     id: 'chair',
     displayName: 'Chair',
@@ -190,7 +192,7 @@ describe('registration is atomic and evidenced', () => {
     // that survives without a record is the worst outcome, because the operator
     // is told it did not happen.
     const fixture = fixtureWithFounder();
-    const append = vi.spyOn(fixture.ops.queue.evidence, 'append').mockImplementation(() => {
+    const append = vi.spyOn(EvidenceLog.prototype, 'append').mockImplementation(() => {
       throw new Error('disk full');
     });
     const result = register(fixture);
@@ -208,12 +210,12 @@ describe('registration grants strictly less than dispatch needs', () => {
     // half-finished bootstrap leaves behind, and it must not be claimable.
     const fixture = fixtureWithFounder();
     expect(register(fixture).ok).toBe(true);
-    expect(fixture.ops.queue.workerProviders.providerOf(WORKER)).toBeNull();
+    expect(fixture.ops.queue.providerOf(WORKER)).toBeNull();
   });
 
   it('does not enable, alter or re-enable any capability', () => {
     const fixture = fixtureWithFounder();
-    fixture.ops.queue.capabilities.setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
+    new CapabilityRegistry(fixture.db).setEnabled(DIRECT_ORDER_CAPABILITY.id, false);
     expect(register(fixture).ok).toBe(true);
     expect(fixture.ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id)?.enabled).toBe(false);
   });

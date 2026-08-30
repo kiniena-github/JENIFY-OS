@@ -45,7 +45,7 @@ describe('lane F — a group-room message executes nothing', () => {
     expect(fx.ops.workers.allowedCapabilities('codex')).toEqual([CAPS.readStatus]);
     // The messages are all there, verbatim. (Sorted for comparison: several
     // posts can land in the same millisecond, and the thread tie-breaks on id.)
-    expect(fx.ops.store.thread('war-room-117').map((m) => m.body).sort()).toEqual(
+    expect(fx.store.thread('war-room-117').map((m) => m.body).sort()).toEqual(
       [...INJECTION].sort(),
     );
   });
@@ -243,7 +243,7 @@ describe('lane F — the console never invents state', () => {
     for (const card of cards) {
       const task = fx.ops.queue.get(card.taskId)!;
       expect(card.status).toBe(task.status);
-      const statuses = fx.ops.store
+      const statuses = fx.store
         .eventsFor('task', card.taskId)
         .filter((e) => e.status !== null)
         .map((e) => e.status);
@@ -359,7 +359,7 @@ describe('lane F — the console never invents state', () => {
     expect(card.assignedTo).toBe('jules');
     expect(card.claimedBy).toBeNull();
     // The advisory record lives in history as a non-status annotation.
-    const annotations = fx.ops.store
+    const annotations = fx.store
       .eventsFor('task', created.task.id)
       .filter((e) => e.status === null);
     expect(annotations).toHaveLength(1);

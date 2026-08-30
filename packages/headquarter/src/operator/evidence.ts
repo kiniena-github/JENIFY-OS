@@ -42,7 +42,18 @@ export function assertNoSecretLikeContent(payload: Record<string, unknown>): voi
 }
 
 export class EvidenceLog {
-  constructor(private db: HqDatabase) {}
+  /**
+   * ECMAScript `#private`. TypeScript `private` erases to a public property, so
+   * this database was reachable from the exported operations object and could
+   * be written directly — bypassing every authority gate above it (issue #200,
+   * Codex exact-head finding on `135ae58`, plus three further routes the
+   * object-graph test found that the review did not name).
+   */
+  readonly #db: HqDatabase;
+
+  constructor(db: HqDatabase) {
+    this.#db = db;
+  }
 
   append(entry: {
     taskId?: string | null;
@@ -51,7 +62,7 @@ export class EvidenceLog {
     payload: Record<string, unknown>;
   }): EvidenceEntry {
     assertNoSecretLikeContent(entry.payload);
-    const last = this.db
+    const last = this.#db
       .prepare(`SELECT hash FROM op_evidence ORDER BY seq DESC LIMIT 1`)
       .get() as { hash: string } | undefined;
     const prevHash = last?.hash ?? GENESIS_HASH;
@@ -61,7 +72,7 @@ export class EvidenceLog {
     const hash = createHash('sha256')
       .update([prevHash, id, at, entry.taskId ?? '', entry.actor, entry.kind, payloadJson].join('|'))
       .digest('hex');
-    const res = this.db
+    const res = this.#db
       .prepare(
         `INSERT INTO op_evidence (id, at, task_id, actor, kind, payload, prev_hash, hash)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -101,14 +112,14 @@ export class EvidenceLog {
    * only decides when the append happens relative to a read.
    */
   reserve<T>(fn: () => T): T {
-    return this.db.transaction(fn).immediate();
+    return this.#db.transaction(fn).immediate();
   }
 
   list(taskId?: string): EvidenceEntry[] {
     const rows = (
       taskId
-        ? this.db.prepare(`SELECT * FROM op_evidence WHERE task_id = ? ORDER BY seq`).all(taskId)
-        : this.db.prepare(`SELECT * FROM op_evidence ORDER BY seq`).all()
+        ? this.#db.prepare(`SELECT * FROM op_evidence WHERE task_id = ? ORDER BY seq`).all(taskId)
+        : this.#db.prepare(`SELECT * FROM op_evidence ORDER BY seq`).all()
     ) as Record<string, unknown>[];
     return rows.map((r) => ({
       seq: r.seq as number,

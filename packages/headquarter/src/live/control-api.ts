@@ -352,7 +352,7 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     sessions: deps.sessions,
     // The SAME registry HeadquarterOperations authorizes against, never a
     // second one supplied alongside it.
-    principals: deps.ops.principals,
+    principals: { get: (id: string) => deps.ops.lookupPrincipal(id) },
     founderMap: deps.founderMap,
   });
 
@@ -562,14 +562,22 @@ function createOrder(
       // The ONLY place the acting principal comes from. Not the body — the
       // body could not have carried it, the identity scan refuses it.
       requestedBy: founder.principal.id,
-      // Earned, not asserted: a server-resolved JENIFY OS session mapped by
-      // explicit configuration to this principal. This is the first interface
-      // in Headquarter entitled to say so.
-      actorAuthentication: 'authenticated_os_session',
       idempotencyKey: clientKey,
     },
     deps.secretsEnv,
-    { providerDispatchable: deps.dispatchAvailability },
+    {
+      providerDispatchable: deps.dispatchAvailability,
+      // Earned, not asserted: a server-resolved JENIFY OS session mapped by
+      // explicit configuration to this principal. This is the first interface
+      // in Headquarter entitled to say so.
+      //
+      // Passed HERE, on the options object, rather than on the order input:
+      // the input is what a request body deserializes into, and this value must
+      // never be reachable from a body. `submitDirectOrder` refuses it from a
+      // caller asserting it about itself (issue #219, integrating #200's
+      // runtime vocabulary guard with #214's authenticated path).
+      resolvedActorAuthentication: 'authenticated_os_session',
+    },
   );
 
   if (!result.ok) {
