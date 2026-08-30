@@ -474,6 +474,46 @@ describe('approval keeps every canonical rule it had before the browser', () => 
     expect(h.fixture.ops.queue.get(taskId)!.status).toBe('needs_approval');
   });
 
+  /**
+   * HOSTILE: Codex P1 on `2175fa2`.
+   *
+   * Whether a password is demanded was decided from
+   * `ops.queue.capabilities.get(...)` — the convenience surface #200 documents
+   * as patchable. A same-realm caller replacing it to report `read_only` drops
+   * the class out of `STEP_UP_RISK_CLASSES`, so `verifyStepUp` never runs and a
+   * STALE Founder session approves a `founder_gate` task with no fresh
+   * credential. Nothing downstream catches it: `approveTask` does not re-demand
+   * step-up, because step-up is decided here.
+   *
+   * The decision now reads the database row through `capabilityRowFor`, which
+   * is a module function binding over a private static — nothing on the path
+   * for a caller to replace.
+   */
+  it('still demands step-up when the patchable capability read reports read_only', () => {
+    const h = harness();
+    const { taskId, digest } = orderFromAnotherPrincipal(h);
+    const stale = { ...FOUNDER_ACCOUNT, authenticatedAt: STALE };
+
+    // The attack: report a risk class that needs no password, while the real
+    // `op_capabilities` row is untouched.
+    const caps = h.fixture.ops.queue.capabilities as unknown as Record<string, unknown>;
+    const realGet = caps.get as (id: string) => unknown;
+    caps.get = (id: string) => {
+      const row = realGet(id) as Record<string, unknown> | undefined;
+      return row ? { ...row, riskClass: 'read_only', sideEffect: false } : row;
+    };
+
+    const refused = h.call(
+      { path: CONTROL_ROUTES.approve, body: { taskId, expectedActionDigest: digest } },
+      stale,
+    );
+
+    expect(refused.status).toBe(401);
+    expect((refused.body.error as { code: string }).code).toBe('step_up_required');
+    // The fact the guard exists for: the task is NOT approved.
+    expect(h.fixture.ops.queue.get(taskId)!.status).toBe('needs_approval');
+  });
+
   it('demands step-up for a founder_gate approval on a stale session', () => {
     const h = harness();
     const { taskId, digest } = orderFromAnotherPrincipal(h);

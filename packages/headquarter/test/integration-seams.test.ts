@@ -235,6 +235,52 @@ describe('the system evidence writer cannot become the forging surface #200 clos
  * Founder-gated direct order went straight to `queued`.
  */
 describe('capability drift is decided on the database row, not a patchable read', () => {
+  /**
+   * HOSTILE: Codex P1 on `2175fa2`, and a defect in my own `173cd30` fix.
+   *
+   * `173cd30` moved this decision off `queue.capabilities` and onto
+   * `ops.capabilityRow(...)` — a PUBLIC prototype method, so the attack simply
+   * moved with it. Shadowing it on the instance, or replacing it on the
+   * prototype, made the drift check answer `enabled` while `#enqueue`
+   * classified the real weakened row: the Founder gate bypassed exactly as
+   * before, one layer up.
+   *
+   * The read is now `capabilityRowFor`, an exported module function binding
+   * over a `static {}`-published private closure. There is no method to shadow,
+   * so this test asserts the SURFACE is gone as well as the behaviour.
+   */
+  it('has no public capability-row method left to patch, and refuses anyway', () => {
+    const fx = seamFixture();
+    new CapabilityRegistry(fx.db).register({
+      ...DIRECT_ORDER_CAPABILITY,
+      riskClass: 'read_only',
+      sideEffect: false,
+    } as never);
+
+    // The surface Codex found is gone — on the instance and on the prototype.
+    const opsAsRecord = fx.ops as unknown as Record<string, unknown>;
+    expect(typeof opsAsRecord.capabilityRow).toBe('undefined');
+    expect(
+      typeof (Object.getPrototypeOf(fx.ops) as Record<string, unknown>).capabilityRow,
+    ).toBe('undefined');
+
+    // Adding one anyway must change nothing: the decision does not dispatch
+    // through any property of `ops`.
+    opsAsRecord.capabilityRow = () => ({ ...DIRECT_ORDER_CAPABILITY, enabled: true });
+
+    expect(directOrderCapabilityState(fx.ops)).toBe('altered');
+    const result = submitDirectOrder(
+      fx.ops,
+      { instruction: 'Do a thing.', project: 'mesob', route: 'CLAUDE', requestedBy: 'founder' },
+      CLAUDE_ONLY,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('capability_definition_altered');
+    expect(fx.ops.queue.listByStatus('queued')).toHaveLength(0);
+    expect(fx.ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+  });
+
   it('still refuses when the public capability read is replaced', () => {
     const fx = seamFixture();
     new CapabilityRegistry(fx.db).register({

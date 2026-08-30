@@ -686,6 +686,13 @@ function bindGet(db: HqDatabase, sql: string): (...params: unknown[]) => unknown
   return get;
 }
 
+/**
+ * Module-private. Assigned once by the class's static block below; unreachable
+ * and unassignable from any other module, which is what makes `capabilityRowFor`
+ * an enforcement-safe path rather than another patchable surface.
+ */
+let readCapabilityRow: (ops: HeadquarterOperations, capabilityId: string) => Capability | null;
+
 export class HeadquarterOperations {
   readonly queue: OperatorQueue;
   /**
@@ -1623,14 +1630,25 @@ export class HeadquarterOperations {
   }
 
   /**
-   * The canonical registry row for a capability, straight from the database.
+   * Publishes the canonical capability read to `capabilityRowFor`, and to
+   * nothing else (issue #219, Codex P1 on `2175fa2`).
    *
-   * For callers making an ENFORCEMENT decision about a capability's definition.
-   * `queue.capabilities` is the convenience read and is deliberately patchable;
-   * this is not routed through it.
+   * A `static {}` block is the only place outside an instance method that can
+   * touch `#capabilityFromStore`, so the reader is handed to a MODULE-PRIVATE
+   * `let` that no other module can name or reassign. Nothing is added to the
+   * class, the prototype or any instance — which is the difference from the
+   * public `capabilityRow(...)` method this replaces.
+   *
+   * That method was introduced in `173cd30` as the enforcement-safe
+   * alternative to `queue.capabilities`, and was itself patchable because a
+   * public method lives on the prototype: `ops.capabilityRow = () => reserved`
+   * made `directOrderCapabilityState` answer `enabled` while `#enqueue`
+   * classified the real weakened row — the exact Founder-gate bypass the
+   * original fix existed to close, reached one layer up.
    */
-  capabilityRow(capabilityId: string): Capability | null {
-    return this.#capabilityFromStore(capabilityId);
+  static {
+    readCapabilityRow = (ops: HeadquarterOperations, capabilityId: string): Capability | null =>
+      ops.#capabilityFromStore(capabilityId);
   }
 
   /**
@@ -2456,6 +2474,38 @@ export class HeadquarterOperations {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The canonical `op_capabilities` row for a capability, for callers making an
+ * ENFORCEMENT decision about its definition.
+ *
+ * A FUNCTION BINDING, not a method, and that is the whole point (issue #219,
+ * Codex P1 on `2175fa2`). Two surfaces have now been patched out from under
+ * this exact decision:
+ *
+ *   1. `queue.capabilities.get` — an own-property closure #200 documents as
+ *      patchable. Replaced to report the reserved definition, a weakened row
+ *      still classified the order and a Founder-gated direct order reached
+ *      `queued`.
+ *   2. `ops.capabilityRow(...)` — my replacement for (1), and a public
+ *      prototype method, so it could simply be shadowed or overwritten.
+ *      Same bypass, one layer up.
+ *
+ * An ES module binding cannot be reassigned by an importing module, and the
+ * private static it calls is not a property of the class or of any instance.
+ * So there is nothing on the path from this call to the database for a
+ * same-realm caller to replace.
+ *
+ * `queue.capabilities` stays exactly as it is: the convenience read,
+ * deliberately patchable, for callers that are DISPLAYING a capability rather
+ * than deciding on one.
+ */
+export function capabilityRowFor(
+  ops: HeadquarterOperations,
+  capabilityId: string,
+): Capability | null {
+  return readCapabilityRow(ops, capabilityId);
 }
 
 export function createHeadquarterOperations(

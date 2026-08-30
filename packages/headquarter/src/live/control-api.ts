@@ -56,6 +56,7 @@
  */
 
 import { founderConsole, type ApprovalCard } from '../application/console.js';
+import { capabilityRowFor } from '../application/service.js';
 import type { HeadquarterOperations } from '../application/service.js';
 import { taskActionDigest } from '../operator/approvals.js';
 import type { ProviderId, SecretsEnv } from '../routing/providers.js';
@@ -719,7 +720,15 @@ function approve(
     audit('refused', 'unknown_task', founder);
     return refusal(404, 'unknown_task', `Unknown task: ${taskId}`);
   }
-  const capability = deps.ops.queue.capabilities.get(task.capabilityId);
+  // The DATABASE row, never `queue.capabilities` (issue #219, Codex P1 on
+  // `2175fa2`). Whether a password is demanded is decided from `riskClass`, so
+  // this is enforcement, and it was reading the convenience surface #200
+  // documents as patchable: `queue.capabilities.get = () => ({ ...cap,
+  // riskClass: 'read_only' })` drops the class out of STEP_UP_RISK_CLASSES,
+  // `verifyStepUp` never runs, and a stale Founder session approves a
+  // `founder_gate` task with no fresh credential. `approveTask` does not
+  // re-demand one — step-up is decided here — so nothing downstream catches it.
+  const capability = capabilityRowFor(deps.ops, task.capabilityId);
   if (!capability) {
     audit('refused', 'unknown_capability', founder);
     return refusal(403, 'unknown_capability', `Unknown capability: ${task.capabilityId}`);

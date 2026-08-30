@@ -99,6 +99,7 @@ import { dispatchHistory } from '../providers/claude/dispatch.js';
 import { CapabilityRegistry } from '../operator/capabilities.js';
 import type { HqDatabase } from '../store/db.js';
 import type { TaskClassification } from '../application/classification.js';
+import { capabilityRowFor } from '../application/service.js';
 import type { HeadquarterOperations, OpsErrorCode } from '../application/service.js';
 import type { Capability } from '../operator/capabilities.js';
 import type { OperatorTask } from '../operator/queue.js';
@@ -217,7 +218,7 @@ export function directOrderCapabilityState(ops: HeadquarterOperations): DirectOr
   // patchable; replacing it to report the reserved definition made this
   // function answer `enabled` while the weakened row was still what `#enqueue`
   // classified against — a Founder-gated order straight to `queued`.
-  const capability = ops.capabilityRow(DIRECT_ORDER_CAPABILITY.id);
+  const capability = capabilityRowFor(ops, DIRECT_ORDER_CAPABILITY.id);
   if (!capability) return 'missing';
   // Checked before `enabled`, because a weakened definition is a fact about
   // the row whether or not the row is switched on, and re-enabling it must not
@@ -732,7 +733,7 @@ export function submitDirectOrder(
     // one that quietly re-enables a disabled capability.
     // The row again, for the same reason the state check reads it: the fields
     // named in the refusal must be the ones the registry actually holds.
-    const capability = ops.capabilityRow(DIRECT_ORDER_CAPABILITY.id);
+    const capability = capabilityRowFor(ops, DIRECT_ORDER_CAPABILITY.id);
     const drift = capability ? directOrderContractDrift(capability) : [];
     return orderFail(
       'capability_definition_altered',
