@@ -182,7 +182,15 @@ export const HQ_CAPABILITY_RECIPES: Readonly<Record<HqCapabilityIntent, readonly
     { name: 'visual-polish', capabilityIds: ['refactoring-ui'] },
     { name: 'usability', capabilityIds: ['ux-heuristics'] },
   ],
-  'research.deep': [{ name: 'source-grounding', capabilityIds: ['notebooklm-mcp'] }],
+  // NotebookLM is community/experimental and account-gated, so it can only ever
+  // be an optional enrichment. The approved research path is the non-optional
+  // stage, matching `.claude/rules/hq-capability-routing.md`: if NotebookLM is
+  // unavailable, use the normal approved research path rather than pretending
+  // NotebookLM participated.
+  'research.deep': [
+    { name: 'source-grounding', capabilityIds: ['notebooklm-mcp'], optional: true },
+    { name: 'approved-research', capabilityIds: ['claude-code'] },
+  ],
   'media.image': [{ name: 'generation', capabilityIds: ['nano-banana-2'] }],
   'media.video': [
     { name: 'edit', capabilityIds: ['chatcut'], optional: true },
@@ -197,13 +205,31 @@ export const HQ_CAPABILITY_RECIPES: Readonly<Record<HqCapabilityIntent, readonly
   'local_ai.evaluate': [{ name: 'candidates', capabilityIds: ['qwen-3-8', 'minimax-h3'], optional: true }],
 };
 
-export function resolveHqCapabilityId(idOrAlias: string): HqCapabilityId | null {
-  if (Object.prototype.hasOwnProperty.call(HQ_CAPABILITY_ALIASES, idOrAlias)) {
-    return HQ_CAPABILITY_ALIASES[idOrAlias as keyof typeof HQ_CAPABILITY_ALIASES];
+/**
+ * Capability names reach this catalog in the form a human wrote them — routing
+ * rules and Founder instructions say `Magic MCP` and `Framer Motion`, not
+ * `magic-mcp` and `framer-motion`. Ids and alias keys are lowercase slugs, so
+ * lookup normalizes both sides instead of demanding the slug form.
+ */
+export function normalizeHqCapabilityKey(raw: string): string {
+  return raw.trim().toLowerCase().replace(/[\s_]+/g, '-').replace(/-{2,}/g, '-');
+}
+
+const HQ_NORMALIZED_CAPABILITY_LOOKUP: ReadonlyMap<string, HqCapabilityId> = (() => {
+  const lookup = new Map<string, HqCapabilityId>();
+  // Aliases first, then real ids: a display-form alias can never shadow the
+  // capability id it would otherwise collide with.
+  for (const [alias, id] of Object.entries(HQ_CAPABILITY_ALIASES)) {
+    lookup.set(normalizeHqCapabilityKey(alias), id);
   }
-  return HQ_CAPABILITY_STACK.some((capability) => capability.id === idOrAlias)
-    ? (idOrAlias as HqCapabilityId)
-    : null;
+  for (const capability of HQ_CAPABILITY_STACK) {
+    lookup.set(normalizeHqCapabilityKey(capability.id), capability.id);
+  }
+  return lookup;
+})();
+
+export function resolveHqCapabilityId(idOrAlias: string): HqCapabilityId | null {
+  return HQ_NORMALIZED_CAPABILITY_LOOKUP.get(normalizeHqCapabilityKey(idOrAlias)) ?? null;
 }
 
 export function getHqCapability(idOrAlias: string): HqCapabilityDescriptor | null {
@@ -211,8 +237,21 @@ export function getHqCapability(idOrAlias: string): HqCapabilityDescriptor | nul
   return id ? HQ_CAPABILITY_STACK.find((capability) => capability.id === id) ?? null : null;
 }
 
+/**
+ * The only cost tiers that carry no Founder spend gate. Everything else gates,
+ * including `compute_only` — free or open weights do not mean free compute, and
+ * running MiniMax H3 or Qwen locally can still spend material GPU/cloud money.
+ *
+ * This is deliberately an allow-list rather than a list of gated tiers: an
+ * unrecognized or future cost tier must fail CLOSED into the gate, never fall
+ * through it.
+ */
+const HQ_COSTS_WITHOUT_FOUNDER_SPEND_GATE: readonly HqCapabilityCost[] = [
+  'free', 'free_tier', 'existing_subscription',
+];
+
 export function capabilityRequiresFounderSpendGate(capability: HqCapabilityDescriptor): boolean {
-  return ['paid_optional', 'usage_billed', 'mixed'].includes(capability.cost);
+  return !HQ_COSTS_WITHOUT_FOUNDER_SPEND_GATE.includes(capability.cost);
 }
 
 /**
