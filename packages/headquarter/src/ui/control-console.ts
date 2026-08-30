@@ -86,8 +86,23 @@ export const CONTROL_GRANT_JS = `function grantedControls(session) {
     directOrder: session.controls.directOrder === true,
     approve: session.controls.approve === true,
     deny: session.controls.deny === true,
-    reason: stated !== '' ? stated : 'A control the session did not grant as exactly true is not drawn.'
+    reason: stated !== '' ? stated : ungrantedReason(session.controls)
   };
+}
+function ungrantedReason(controls) {
+  if (controls.mutationsEnabled === false) {
+    return 'This deployment mounts HQ read-only \\u2014 browser writes are not enabled here, so the control API would refuse every one of them.';
+  }
+  if (controls.trustedOriginConfigured !== true) {
+    return 'No trusted origin is configured for HQ browser control, so a write from any page would be refused.';
+  }
+  if (controls.requestOriginAllowed !== true) {
+    return 'The origin of THIS page was not established as a trusted one (origin evidence: ' +
+      String(controls.requestOriginSource) + '), so a write from it would be refused.';
+  }
+  return 'This session is a mapped Founder and this page\\u2019s origin is trusted, but the server did not grant this ' +
+    'specific control \\u2014 the principal may not hold that authority, or the capability behind it is not registered ' +
+    'and enabled on this deployment. Nothing is wrong with the page; the grant itself was withheld.';
 }`;
 
 /**
@@ -164,19 +179,30 @@ export function directOrderConsoleScript(): string {
   var SESSION_PATH = ${jsonForScript(CONTROL_ROUTES.session)};
   var ORDERS_PATH = ${jsonForScript(CONTROL_ROUTES.orders)};
 
-  var note = el('p', 'faint', 'Checking with the control API whether this session grants the composer\\u2026');
+  // A bordered state panel, NOT another line of faint body text.
+  //
+  // This section is already dense with grey explanatory prose, and the console's
+  // own verdict used to be set in the same 0.8rem faint style inside it. A
+  // Founder scrolling Direct Order therefore read a real, specific refusal —
+  // "no Referer, so the controls stay off" — as more static sample copy, and
+  // reported the composer as simply absent (#219 correction round, the
+  // Founder-workstation blocker on PR #225). The console must be legible about
+  // whether it is live, checking, or off, and why.
+  var note = el('p', 'readonly-note console-state', 'Checking with the control API whether this session grants the composer\\u2026');
   note.setAttribute('data-order-console-state', 'checking');
   note.setAttribute('role', 'status');
   mount.appendChild(note);
 
   function stayOff(reason) {
     note.setAttribute('data-order-console-state', 'off');
-    note.textContent = 'Browser submission stays off: ' + reason +
+    note.className = 'readonly-note console-state console-state-off';
+    note.textContent = 'DIRECT ORDER CONTROL IS OFF \\u2014 ' + reason +
       ' The static composer above remains read-only, and nothing on this page submits.';
   }
 
   function buildComposer(session) {
     note.setAttribute('data-order-console-state', 'granted');
+    note.className = 'readonly-note console-state console-state-live';
     note.textContent = 'Live: this session is granted the direct-order control' +
       (typeof session.displayName === 'string' && session.displayName !== ''
         ? ' as ' + session.displayName + '.'
@@ -366,14 +392,17 @@ export function approvalsConsoleScript(): string {
   var APPROVE_PATH = ${jsonForScript(CONTROL_ROUTES.approve)};
   var DENY_PATH = ${jsonForScript(CONTROL_ROUTES.deny)};
 
-  var note = el('p', 'faint', 'Checking with the control API whether this session grants decision controls\\u2026');
+  // Same treatment as the Direct Order console, for the same reason: the
+  // console's verdict must not read as more static prose.
+  var note = el('p', 'readonly-note console-state', 'Checking with the control API whether this session grants decision controls\\u2026');
   note.setAttribute('data-approvals-console-state', 'checking');
   note.setAttribute('role', 'status');
   mount.appendChild(note);
 
   function stayOff(reason) {
     note.setAttribute('data-approvals-console-state', 'off');
-    note.textContent = 'Live decision controls stay off: ' + reason +
+    note.className = 'readonly-note console-state console-state-off';
+    note.textContent = 'DECISION CONTROLS ARE OFF \\u2014 ' + reason +
       ' The cards below remain read-only, and nothing on this page submits.';
   }
 
@@ -501,6 +530,7 @@ export function approvalsConsoleScript(): string {
 
   function buildConsole(grant) {
     note.setAttribute('data-approvals-console-state', 'granted');
+    note.className = 'readonly-note console-state console-state-live';
     note.textContent = 'Live decision console \\u2014 pending approvals fetched from the control API, not from this page\\u2019s build-time bundle.';
     jsonExchange(fetch(APPROVALS_PATH, { headers: { accept: 'application/json' } }))
       .then(function (result) {

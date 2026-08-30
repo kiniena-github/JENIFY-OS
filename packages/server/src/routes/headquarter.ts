@@ -277,6 +277,22 @@ export function registerHeadquarterSite(
     });
     scope.addHook('onSend', async (_req, reply) => {
       reply.header('cache-control', 'no-store');
+      // The same policy the pages pin for themselves (`REFERRER_POLICY_META`),
+      // stated by the host as well (#219 correction round).
+      //
+      // The console's `/session` probe is a GET, so it carries no `Origin` and
+      // its `Referer` is the ONLY evidence of the page's origin the control
+      // API can check against the trusted-origin list. A response header is
+      // the more reliable half of the pair: it applies to the document before
+      // any markup is parsed, and it covers a page this host serves even if a
+      // future build ever stops emitting the meta.
+      //
+      // `same-origin` is stricter than the browser default, never weaker — HQ
+      // pages only ever call this same origin, and a cross-origin request now
+      // carries no referrer at all. Nothing about what the gate ACCEPTS
+      // changes: the referrer's origin is still checked against the configured
+      // allow-list.
+      reply.header('referrer-policy', 'same-origin');
     });
     scope.register(fastifyStatic, {
       root,

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "JENIFY Headquarter foundation \u2014 canonical activity/event model, Headquarter module contracts, the Universal Operator control plane, and the Founder-facing UI/archive layer (documentation/archive schema, inventory/reconstruction pipeline, search foundations, static HQ site). Private internal MVP; no deployment target.",
+  "description": "JENIFY Headquarter foundation — canonical activity/event model, Headquarter module contracts, the Universal Operator control plane, and the Founder-facing UI/archive layer (documentation/archive schema, inventory/reconstruction pipeline, search foundations, static HQ site). Private internal MVP; no deployment target.",
   "exports": {
     ".": "./src/index.ts",
     "./contracts": "./src/contracts/index.ts",
@@ -42,7 +42,9 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^22.0.0",
+    "jsdom": "^26.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^3.0.0"

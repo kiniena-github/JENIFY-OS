@@ -495,6 +495,23 @@ details.record[open] { background: var(--surface-2); border-color: var(--line-st
   overflow-wrap: anywhere;
 }
 
+/* The control console's own verdict (issue #219 correction round). It reuses
+   .readonly-note's panel shape and only re-tones it, so it cannot widen a
+   narrow viewport; what it adds is that "off" and "live" are distinguishable
+   from the surrounding explanatory prose at a glance rather than being one
+   more faint paragraph inside a section full of them. */
+.console-state { font-weight: 500; }
+.console-state-off {
+  border-color: rgba(247,185,85,0.55);
+  background: rgba(247,185,85,0.1);
+  color: var(--warn);
+}
+.console-state-live {
+  border-color: rgba(53,223,168,0.5);
+  background: rgba(53,223,168,0.1);
+  color: var(--accent);
+}
+
 .decision-controls { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.6rem; }
 .control-readonly {
   display: inline-flex;

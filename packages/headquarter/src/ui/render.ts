@@ -245,6 +245,41 @@ ${fields}
 </div>`;
 }
 
+/**
+ * The referrer policy every HQ page pins for itself (#219 correction round —
+ * the Founder-workstation browser blocker on PR #225).
+ *
+ * ## Why a page needs an opinion about this at all
+ *
+ * `controlAvailability` grants a control only when the REQUEST'S OWN ORIGIN is
+ * on the trusted list, because that is what `checkMutationOrigin` will decide
+ * the eventual POST on. The console asks with `fetch(SESSION_PATH)` — a GET,
+ * and a browser sends NO `Origin` header on a GET. So `Referer` is the only
+ * evidence of the page's origin the request carries, and until now the pages
+ * simply inherited whatever referrer policy the user agent happened to apply.
+ *
+ * That made the composer's existence a property of the BROWSER rather than of
+ * the deployment: under a `no-referrer` document policy the identical, fully
+ * configured stack answers `requestOriginSource: 'none'` and
+ * `directOrder: false`, so the page correctly draws nothing — while a probe
+ * with a hand-set `Referer` (curl, an HTTP client, devtools) reports
+ * `directOrder: true` on the very same session. Reproduced in a real Chromium
+ * against the real server: `no-referrer` → no composer; `same-origin` →
+ * composer. That is exactly the shape of the reported blocker, and it is not
+ * something a Founder could diagnose from the page.
+ *
+ * ## Why `same-origin` specifically
+ *
+ * It is STRICTER than the browser default (`strict-origin-when-cross-origin`),
+ * never weaker: same-origin requests — the only kind any HQ page makes — carry
+ * the full referrer, and cross-origin requests carry none at all rather than
+ * the bare origin. So this widens nothing. It removes a dependency on a
+ * user-agent default, and it cannot make the gate accept an origin it would
+ * otherwise refuse: the server still checks the referrer's origin against the
+ * configured allow-list, exactly as before.
+ */
+export const REFERRER_POLICY_META = '<meta name="referrer" content="same-origin">';
+
 function provenanceBanner(note: string): string {
   return `<div class="provenance-banner" role="note" data-provenance-banner>
 <b>SOURCE NOTE</b><span>${escapeHtml(note)}</span>
@@ -274,6 +309,7 @@ function shell({
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
+${REFERRER_POLICY_META}
 <title>JENIFY HQ — ${escapeHtml(title)}</title>
 <style>${THEME_CSS}</style>
 </head>

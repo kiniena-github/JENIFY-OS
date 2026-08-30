@@ -280,6 +280,15 @@ describe('the /hq/ static site', () => {
     expect(page.statusCode).toBe(200);
     expect(page.body).toContain('JENIFY HQ');
     expect(page.headers['cache-control']).toBe('no-store');
+    // The console's `/session` probe is a GET, so it carries no `Origin` and
+    // its `Referer` is the only evidence of the page's origin the control API
+    // can check against the trusted-origin list. Under a `no-referrer` policy
+    // a fully configured deployment therefore draws no control at all, while a
+    // probe that sets its own `Referer` is granted one — the exact blocker
+    // reported on PR #225. The host states the policy rather than inheriting a
+    // user-agent default; `same-origin` is stricter than that default, so this
+    // widens nothing (issue #219 correction round).
+    expect(page.headers['referrer-policy']).toBe('same-origin');
 
     const snapshot = await instance.inject({
       method: 'GET',
@@ -289,5 +298,6 @@ describe('the /hq/ static site', () => {
     expect(snapshot.statusCode).toBe(200);
     expect(JSON.parse(snapshot.body).mode).toBe('sample');
     expect(snapshot.headers['cache-control']).toBe('no-store');
+    expect(snapshot.headers['referrer-policy']).toBe('same-origin');
   });
 });
