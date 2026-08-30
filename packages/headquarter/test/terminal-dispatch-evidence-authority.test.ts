@@ -36,6 +36,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { setupFixture, expectOk, type Fixture } from './application.fixture.js';
+import { DispatchEvidenceGrant } from '../src/application/service.js';
 import {
   DIRECT_ORDER_CAPABILITY,
   registerDirectOrderCapability,
@@ -276,6 +277,204 @@ describe('a terminal dispatch outcome is not writable by a caller holding ops', 
     });
 
     expect(resolved.ok).toBe(true);
+    expect(dispatchHistory(fixture.ops, taskId)).toMatchObject({ state: 'dispatched', issueNumber: ISSUE });
+  });
+});
+
+/**
+ * HOSTILE, from the other side: forge the WRITER rather than the evidence.
+ *
+ * ChatGPT's blocking exact-head review of `ef88711`. The first Option B
+ * implementation typed the capability as a TypeScript interface, which is
+ * erased at runtime — so the exported lanes accepted any object of the right
+ * shape and treated "the call did not throw" as proof the mandatory outcome had
+ * been durably written.
+ *
+ * That is worse than the hole it replaced. A counterfeit that simply returns
+ * lets `dispatchClaudeTask` take the canonical claim, START the execution and
+ * PUBLISH A REAL GITHUB ISSUE while swallowing both `attempted` and
+ * `succeeded`, leaving `dispatchHistory` at `none` beside a live public issue —
+ * and licensing a later, entirely authorised dispatch to publish a second one.
+ *
+ * The counterfeits below are deliberately varied: a plain object, a `Proxy`
+ * that answers anything, and an object built on the real prototype. All three
+ * satisfy the old interface; none carries the private field.
+ */
+describe('a counterfeit dispatch-evidence capability cannot stand in for the real grant', () => {
+  /** What the old interface required, and nothing more. */
+  const plainCounterfeit = () => {
+    const writes: unknown[] = [];
+    return {
+      writes,
+      appendDispatchOutcome(entry: unknown) {
+        // Swallows the mandatory write and reports success.
+        writes.push(entry);
+        return { seq: 1, at: new Date().toISOString(), actor: 'hq-claude-dispatch', kind: 'x', payload: {}, hash: 'x', prevHash: null };
+      },
+    };
+  };
+
+  /** Answers ANY property, so shape-based checks cannot distinguish it. */
+  const proxyCounterfeit = () =>
+    new Proxy(
+      {},
+      {
+        get: () => () => ({ seq: 1, at: '', actor: 'hq-claude-dispatch', kind: 'x', payload: {}, hash: 'x', prevHash: null }),
+        has: () => true,
+      },
+    );
+
+  /** Built on the REAL prototype — `instanceof` alone would pass this. */
+  const prototypeCounterfeit = () => {
+    const fake = Object.create(DispatchEvidenceGrant.prototype) as Record<string, unknown>;
+    fake.appendDispatchOutcome = () => ({ seq: 1, at: '', actor: 'hq-claude-dispatch', kind: 'x', payload: {}, hash: 'x', prevHash: null });
+    return fake;
+  };
+
+  const counterfeits: ReadonlyArray<readonly [string, () => unknown]> = [
+    ['a plain object of the right shape', plainCounterfeit],
+    ['a Proxy that answers anything', proxyCounterfeit],
+    ['an object built on the real prototype', prototypeCounterfeit],
+  ];
+
+  it('is not constructible, so a caller cannot mint one', () => {
+    const Ctor = DispatchEvidenceGrant as unknown as new (...args: unknown[]) => unknown;
+    expect(() => new Ctor(Symbol('guess'), {}, () => undefined)).toThrow(/not publicly constructible/);
+  });
+
+  for (const [label, make] of counterfeits) {
+    it(`refuses ${label} before anything is claimed, started or published`, () => {
+      const { fixture, taskId } = fixtureWithOrder();
+      const before = fixture.ops.queue.get(taskId)!;
+      const stub = transport();
+
+      const result = dispatchClaudeTask(fixture.ops, {
+        evidence: make() as never,
+        executorWorkerId: EXECUTOR,
+        taskId,
+        target: TARGET,
+        transport: stub,
+      });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error('unreachable');
+      expect(result.error.code).toBe('evidence_grant_invalid');
+
+      // The three facts that matter, none of them implied by the refusal alone.
+      expect(stub.calls).toHaveLength(0); // nothing published
+      expect(dispatchHistory(fixture.ops, taskId).state).toBe('none'); // history untouched
+      const after = fixture.ops.queue.get(taskId)!;
+      expect(after.status).toBe(before.status); // no claim, no start
+      expect(after.claimedBy).toBe(before.claimedBy);
+      expect(after.fence).toBe(before.fence);
+      expect(fixture.ops.queue.evidence.verifyChain()).toBeNull();
+    });
+  }
+
+  it('refuses a counterfeit at the reconciliation lane too', () => {
+    const { fixture, taskId } = taskWithUnknownDispatch();
+    const result = resolveUnknownDispatch(fixture.ops, {
+      evidence: plainCounterfeit() as never,
+      taskId,
+      outcome: 'not_dispatched',
+      resolvedBy: 'coo',
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('evidence_grant_invalid');
+    // The attempt is STILL unresolved — a counterfeit must not be able to
+    // report a reconciliation the evidence log never received.
+    expect(dispatchHistory(fixture.ops, taskId).state).toBe('unknown');
+  });
+
+  it('refuses a counterfeit at the ingest lane too', () => {
+    const { fixture, taskId } = fixtureWithOrder();
+    const stub = transport();
+    expectOk(
+      dispatchClaudeTask(fixture.ops, {
+        evidence: fixture.dispatchEvidence,
+        executorWorkerId: EXECUTOR,
+        taskId,
+        target: TARGET,
+        transport: stub,
+      }),
+    );
+
+    const result = ingestClaudeResult(fixture.ops, {
+      taskId,
+      target: TARGET,
+      evidence: plainCounterfeit() as never,
+      transport: { id: 'stub-read', status: () => ({ available: true, authenticated: true, account: TARGET.owner, depth: 'live', observedFacts: [], missingFacts: [], reason: 'stub' }), readIssue: () => { throw new Error('must not be reached'); } } as never,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('evidence_grant_invalid');
+  });
+
+  /**
+   * Instance binding. A GENUINE grant, but issued by a different service — so
+   * someone able to construct a second `HeadquarterOperations` cannot mint a
+   * real capability and present it alongside somebody else's `ops`.
+   */
+  it("refuses a genuine grant issued by a different HeadquarterOperations", () => {
+    const victim = fixtureWithOrder();
+    const other = setupFixture();
+    const stub = transport();
+
+    const result = dispatchClaudeTask(victim.fixture.ops, {
+      evidence: other.dispatchEvidence,
+      executorWorkerId: EXECUTOR,
+      taskId: victim.taskId,
+      target: TARGET,
+      transport: stub,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('evidence_grant_invalid');
+    expect(result.error.message).toMatch(/issued by a different HeadquarterOperations/);
+    expect(stub.calls).toHaveLength(0);
+    expect(dispatchHistory(victim.fixture.ops, victim.taskId).state).toBe('none');
+  });
+
+  /**
+   * The consequence, stated as the reviewer stated it: without this check the
+   * counterfeit path ends in a duplicate public issue. Here the first dispatch
+   * is refused outright, so the second — fully authorised, with the real grant —
+   * is a FIRST publication and there is exactly one.
+   */
+  it('never lets a counterfeit leave a published issue with no canonical record', () => {
+    const { fixture, taskId } = fixtureWithOrder();
+
+    const counterfeitRun = transport();
+    expect(
+      dispatchClaudeTask(fixture.ops, {
+        evidence: plainCounterfeit() as never,
+        executorWorkerId: EXECUTOR,
+        taskId,
+        target: TARGET,
+        transport: counterfeitRun,
+      }).ok,
+    ).toBe(false);
+    expect(counterfeitRun.calls).toHaveLength(0);
+
+    const genuineRun = transport();
+    const receipt = expectOk(
+      dispatchClaudeTask(fixture.ops, {
+        evidence: fixture.dispatchEvidence,
+        executorWorkerId: EXECUTOR,
+        taskId,
+        target: TARGET,
+        transport: genuineRun,
+      }),
+    );
+
+    expect(receipt.issueNumber).toBe(ISSUE);
+    expect(genuineRun.calls).toHaveLength(1);
+    // Exactly one publication in total, and it IS recorded.
+    expect(counterfeitRun.calls.length + genuineRun.calls.length).toBe(1);
     expect(dispatchHistory(fixture.ops, taskId)).toMatchObject({ state: 'dispatched', issueNumber: ISSUE });
   });
 });

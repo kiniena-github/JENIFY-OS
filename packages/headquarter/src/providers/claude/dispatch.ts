@@ -76,11 +76,8 @@ import {
 } from '../../operator/approvals.js';
 import { EXECUTION_PROVIDER_KEY, readProviderBinding } from '../../operator/provider-binding.js';
 import type { OperatorTask } from '../../operator/queue.js';
-import type {
-  DispatchEvidenceGrant,
-  SystemEvidenceKind,
-  HeadquarterOperations,
-} from '../../application/service.js';
+import { DispatchEvidenceGrant } from '../../application/service.js';
+import type { SystemEvidenceKind, HeadquarterOperations } from '../../application/service.js';
 import { classifyCapability } from '../../application/classification.js';
 import { assertBrowserSafe } from '../../live/redaction.js';
 import {
@@ -148,6 +145,12 @@ export type DispatchRefusalCode =
    */
   | 'dispatch_label_unavailable'
   | 'dispatch_outcome_unknown'
+  /**
+   * The supplied dispatch-evidence capability is not a genuine grant issued by
+   * this `HeadquarterOperations` (issue #219, ChatGPT blocking review of
+   * `ef88711`). Checked before anything is claimed, started or published.
+   */
+  | 'evidence_grant_invalid'
   /** The guard itself could not be written, so nothing was published. */
   | 'evidence_unavailable'
   /** Something happened at GitHub that HQ could not record. Fail closed, loudly. */
@@ -901,6 +904,24 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
     recordBestEffort(CLAUDE_DISPATCH_EVIDENCE.refused, { code, message, ...(details ?? {}) });
     return refuse(code, message, details);
   };
+  // FIRST, before any check that could claim, start or publish (issue #219,
+  // ChatGPT blocking review of `ef88711`).
+  //
+  // `options.evidence` is caller-supplied, and a TypeScript interface is not a
+  // runtime boundary: a counterfeit of the right shape used to be accepted,
+  // silently discard the mandatory `attempted`/`succeeded` writes, and let this
+  // function publish a real GitHub issue that `dispatchHistory` would then
+  // report as never having happened. The whole guard rests on the writes being
+  // real, so the writer is authenticated before the guard is relied on rather
+  // than after.
+  //
+  // Deliberately placed above the target check too: order the refusals by what
+  // they protect, not by how cheap they are.
+  try {
+    DispatchEvidenceGrant.assertIssuedBy(ops, options.evidence);
+  } catch (error) {
+    return refuseAndRecordBestEffort('evidence_grant_invalid', errorText(error));
+  }
   if (!isValidTarget(options.target)) {
     return refuseAndRecordBestEffort(
       'invalid_target',
@@ -1471,6 +1492,14 @@ export function resolveUnknownDispatch(
     evidence: DispatchEvidenceGrant;
   },
 ): DispatchResult {
+  // The capability is authenticated before anything else, for the same reason
+  // it is in `dispatchClaudeTask`: a counterfeit could swallow the terminal
+  // write and report a reconciliation that never reached the evidence log.
+  try {
+    DispatchEvidenceGrant.assertIssuedBy(ops, input.evidence);
+  } catch (error) {
+    return refuse('evidence_grant_invalid', errorText(error));
+  }
   // Read-only pre-checks first. Nothing below writes until the reservation, so
   // a refusal here cannot leave a half-resolved attempt behind.
   const preview = dispatchHistory(ops, input.taskId);

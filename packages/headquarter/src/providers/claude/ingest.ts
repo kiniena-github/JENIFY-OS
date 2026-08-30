@@ -38,7 +38,8 @@
  *   than followed.
  */
 
-import type { DispatchEvidenceGrant, HeadquarterOperations } from '../../application/service.js';
+import { DispatchEvidenceGrant } from '../../application/service.js';
+import type { HeadquarterOperations } from '../../application/service.js';
 import { taskActionDigest } from '../../operator/approvals.js';
 import { PROVIDER_REGISTRY } from '../../routing/providers.js';
 import {
@@ -68,7 +69,13 @@ export type IngestRefusalCode =
   | 'target_mismatch'
   | 'transport_cannot_read'
   | 'read_failed'
-  | 'correlation_refused';
+  | 'correlation_refused'
+  /**
+   * The supplied dispatch-evidence capability is not a genuine grant issued by
+   * this `HeadquarterOperations` (issue #219, ChatGPT blocking review of
+   * `ef88711`). Checked before the issue is read or anything is correlated.
+   */
+  | 'evidence_grant_invalid';
 
 export interface IngestOutcome {
   taskId: string;
@@ -415,6 +422,15 @@ export interface IngestOptions {
  */
 export function ingestClaudeResult(ops: HeadquarterOperations, options: IngestOptions): IngestResult {
   const { taskId } = options;
+  // Authenticated first, as in the dispatch lane. A counterfeit here would let
+  // this call REPORT a correlation the evidence log never received, so the
+  // idempotency record `alreadyCorrelated` reads would never exist and the
+  // report could be attached again and again.
+  try {
+    DispatchEvidenceGrant.assertIssuedBy(ops, options.evidence);
+  } catch (error) {
+    return refuse('evidence_grant_invalid', error instanceof Error ? error.message : String(error));
+  }
   if (!ops.queue.get(taskId)) return refuse('unknown_task', `No task ${taskId} exists.`);
   if (!isValidTarget(options.target)) {
     return refuse('target_mismatch', 'An ingestion target must be a valid owner/repo pair.');
