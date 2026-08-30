@@ -75,7 +75,7 @@ import type { WorkerDescriptor, WorkerRole } from '../contracts/workers.js';
 import { evaluatePolicy, type PolicyContext, type PolicyDecision } from '../operator/policy.js';
 import { taskActionDigest } from '../operator/approvals.js';
 import { assertNoSecretLikeContent, type EvidenceEntry } from '../operator/evidence.js';
-import { CapabilityRegistry } from '../operator/capabilities.js';
+import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import {
   OperatorQueue,
   type OperatorTask,
@@ -99,6 +99,48 @@ import { PROVIDERS, type ProviderId } from '../routing/providers.js';
  */
 export const SYSTEM_EVIDENCE_ACTORS = ['system', 'hq-claude-dispatch'] as const;
 export type SystemEvidenceActor = (typeof SYSTEM_EVIDENCE_ACTORS)[number];
+
+/**
+ * Every event kind a system lane may record. Closed, so a caller holding
+ * `HeadquarterOperations` cannot invent one (issue #219, Codex P1 on `9c2a474`).
+ */
+export const SYSTEM_EVIDENCE_KINDS = [
+  'claude_github_dispatch_refused',
+  'claude_github_dispatch_attempted',
+  'claude_github_dispatch_succeeded',
+  'claude_github_dispatch_failed',
+  'claude_github_result_correlated',
+  'direct_order_dispatch_blocked',
+] as const;
+export type SystemEvidenceKind = (typeof SYSTEM_EVIDENCE_KINDS)[number];
+
+/**
+ * The kinds that CLAIM A PUBLICATION HAPPENED, and therefore may only be
+ * written by something holding the claim under which it happened.
+ *
+ * `dispatchHistory` treats these as canonical: an `attempted` entry marks an
+ * unresolved attempt that blocks the next dispatch, and a `succeeded` entry
+ * reports the issue a task was published as. Restricting the ACTOR was not
+ * enough — the actor allowlist said who may speak, not what they may claim —
+ * so a caller could append a `succeeded` record naming an issue that was never
+ * created, and `dispatchClaudeTask` would then refuse to publish the real one
+ * and hand back the forged receipt. Verified by exploit before this fix.
+ *
+ * The real dispatch lane claims the task and starts the execution BEFORE it
+ * writes either kind (#224), so requiring an active claim costs it nothing and
+ * denies a caller that has not done the work. The kinds NOT listed here are
+ * the ones an operator lane legitimately writes without a claim —
+ * reconciliation of an unknown outcome, and result correlation.
+ *
+ * These strings are duplicated from `providers/claude/dispatch.ts` rather than
+ * imported, to keep the application layer from depending on a provider
+ * adapter. `test/integration-seams.test.ts` asserts the two agree, so a rename
+ * there fails loudly here instead of silently unbinding the rule.
+ */
+export const CLAIM_BOUND_EVIDENCE_KINDS = [
+  'claude_github_dispatch_attempted',
+  'claude_github_dispatch_succeeded',
+] as const;
 import { ensureApplicationSchema } from './db.js';
 import {
   SpecialistDirectoryAdapter,
@@ -529,8 +571,37 @@ export class HeadquarterOperations {
    */
   readonly #db: HqDatabase;
 
+  /**
+   * The capability ROW, read from the database (issue #219, Codex P1 on
+   * `9c2a474`).
+   *
+   * `queue.capabilities` is an own-property closure that #200 documents as
+   * patchable and that the queue's own tests patch — safe, because enforcement
+   * reads `#capabilityOf` from the database instead. A capability-drift
+   * decision is enforcement, so it may not read the convenience surface: with
+   * `queue.capabilities.get` replaced to report the reserved definition, the
+   * drift check said `enabled` while `#enqueue` classified the real weakened
+   * row, and a Founder-gated order reached `queued`. Verified by exploit, then
+   * closed here and regression-covered.
+   */
+  readonly #capabilityFromStore: (id: string) => Capability | null;
+
   constructor(db: HqDatabase, options: HeadquarterOperationsOptions = {}) {
     this.#db = db;
+    this.#capabilityFromStore = (capabilityId: string): Capability | null => {
+      const row = db.prepare(`SELECT * FROM op_capabilities WHERE id = ?`).get(capabilityId) as
+        | Record<string, unknown>
+        | undefined;
+      if (!row) return null;
+      return {
+        id: row.id as string,
+        description: row.description as string,
+        riskClass: row.risk_class as Capability['riskClass'],
+        sideEffect: !!row.side_effect,
+        idempotent: !!row.idempotent,
+        enabled: !!row.enabled,
+      };
+    };
     ensureApplicationSchema(db);
     this.#store = options.store ?? new HeadquarterStore(db);
     // The approval mutations are handed to whoever CONSTRUCTS the queue and to
@@ -1264,6 +1335,17 @@ export class HeadquarterOperations {
   }
 
   /**
+   * The canonical registry row for a capability, straight from the database.
+   *
+   * For callers making an ENFORCEMENT decision about a capability's definition.
+   * `queue.capabilities` is the convenience read and is deliberately patchable;
+   * this is not routed through it.
+   */
+  capabilityRow(capabilityId: string): Capability | null {
+    return this.#capabilityFromStore(capabilityId);
+  }
+
+  /**
    * Evidence appended by an in-process SYSTEM lane, under a reserved system
    * actor and nothing else (issue #219 integration of #200 with #223/#224).
    *
@@ -1284,7 +1366,7 @@ export class HeadquarterOperations {
   appendSystemEvidence(entry: {
     taskId?: string | null;
     actor: SystemEvidenceActor;
-    kind: string;
+    kind: SystemEvidenceKind;
     payload: Record<string, unknown>;
   }): EvidenceEntry {
     if (!SYSTEM_EVIDENCE_ACTORS.includes(entry.actor)) {
@@ -1298,6 +1380,29 @@ export class HeadquarterOperations {
         `${entry.actor} resolves to a registered principal or worker, so a system lane may not ` +
           'append under it. Evidence attributed to a person or a worker is privileged.',
       );
+    }
+    if (!SYSTEM_EVIDENCE_KINDS.includes(entry.kind)) {
+      throw new Error(
+        `${String(entry.kind)} is not a system evidence kind. The set is closed: a system lane ` +
+          'records the events it owns, and cannot invent one.',
+      );
+    }
+    // A claim of publication needs the claim it happened under.
+    if ((CLAIM_BOUND_EVIDENCE_KINDS as readonly string[]).includes(entry.kind)) {
+      const task = entry.taskId ? this.queue.get(entry.taskId) : null;
+      if (!task) {
+        throw new Error(
+          `${entry.kind} names no task that exists. A record of a publication is written against ` +
+            'the canonical task it published.',
+        );
+      }
+      if (!task.claimedBy) {
+        throw new Error(
+          `${entry.kind} may only be recorded while the task is claimed. Nothing holds an ` +
+            `execution claim on ${task.id}, so no publication can have happened under one — a ` +
+            'record written now would report work nobody did.',
+        );
+      }
     }
     return this.#requirePrivilegedQueue().appendEvidence(entry);
   }

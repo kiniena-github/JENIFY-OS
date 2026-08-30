@@ -76,7 +76,7 @@ import {
 } from '../../operator/approvals.js';
 import { EXECUTION_PROVIDER_KEY, readProviderBinding } from '../../operator/provider-binding.js';
 import type { OperatorTask } from '../../operator/queue.js';
-import type { HeadquarterOperations } from '../../application/service.js';
+import type { SystemEvidenceKind, HeadquarterOperations } from '../../application/service.js';
 import { classifyCapability } from '../../application/classification.js';
 import { assertBrowserSafe } from '../../live/redaction.js';
 import {
@@ -870,7 +870,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
   // of this swallowed every failure alike, so a busy or full database could let
   // a public issue exist while `dispatchHistory` still said `none` — and the
   // next run would publish a second one.
-  const recordBestEffort = (kind: string, payload: Record<string, unknown>): void => {
+  const recordBestEffort = (kind: SystemEvidenceKind, payload: Record<string, unknown>): void => {
     try {
       ops.appendSystemEvidence({ taskId, actor: DISPATCH_ACTOR, kind, payload });
     } catch {

@@ -28,7 +28,14 @@ import {
   registerDirectOrderCapability,
   submitDirectOrder,
 } from '../src/live/orders.js';
-import { SYSTEM_EVIDENCE_ACTORS } from '../src/application/service.js';
+import {
+  SYSTEM_EVIDENCE_ACTORS,
+  SYSTEM_EVIDENCE_KINDS,
+  CLAIM_BOUND_EVIDENCE_KINDS,
+} from '../src/application/service.js';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
+import { CLAUDE_DISPATCH_EVIDENCE, dispatchHistory } from '../src/providers/claude/dispatch.js';
+import { directOrderCapabilityState } from '../src/live/orders.js';
 import {
   isCallerAssertableActorAuthentication,
   isKnownActorAuthentication,
@@ -63,7 +70,7 @@ describe('the system evidence writer cannot become the forging surface #200 clos
       fx.ops.appendSystemEvidence({
         // The whole point: an attributed entry under a human's name.
         actor: 'founder' as never,
-        kind: 'founder_approved_everything',
+        kind: 'founder_approved_everything' as never,
         payload: {},
       }),
     ).toThrow(/reserved system evidence actor/);
@@ -82,7 +89,7 @@ describe('the system evidence writer cannot become the forging surface #200 clos
       active: true,
     });
     expect(() =>
-      fx.ops.appendSystemEvidence({ actor: 'system', kind: 'anything', payload: {} }),
+      fx.ops.appendSystemEvidence({ actor: 'system', kind: 'anything' as never, payload: {} }),
     ).toThrow(/registered principal or worker/);
   });
 
@@ -100,7 +107,7 @@ describe('the system evidence writer cannot become the forging surface #200 clos
     expect(() =>
       fx.ops.appendSystemEvidence({
         actor: 'hq-claude-dispatch',
-        kind: 'anything',
+        kind: 'anything' as never,
         payload: {},
       }),
     ).toThrow(/registered principal or worker/);
@@ -122,6 +129,118 @@ describe('the system evidence writer cannot become the forging surface #200 clos
     // A future edit that adds a human-shaped id here fails this rather than
     // being noticed in review, or not.
     expect([...SYSTEM_EVIDENCE_ACTORS]).toEqual(['system', 'hq-claude-dispatch']);
+  });
+
+  it('refuses a kind outside the closed set', () => {
+    const fx = seamFixture();
+    expect(() =>
+      fx.ops.appendSystemEvidence({
+        actor: 'hq-claude-dispatch',
+        kind: 'invented_kind' as never,
+        payload: {},
+      }),
+    ).toThrow(/not a system evidence kind/);
+  });
+
+  /**
+   * Codex P1 on `9c2a474`, verified by exploit before it was fixed.
+   *
+   * The actor allowlist said WHO may speak and never WHAT they may claim, so a
+   * caller holding `HeadquarterOperations` could append a `succeeded` record
+   * naming an issue that was never created. `dispatchHistory` took it as
+   * canonical, and the next `dispatchClaudeTask` then refused to publish the
+   * real issue and handed back the forged receipt — a suppressed dispatch with
+   * attacker-controlled evidence.
+   */
+  it('refuses a forged publication record when nothing holds the claim', () => {
+    const fx = seamFixture();
+    const receipt = submitDirectOrder(
+      fx.ops,
+      { instruction: 'Draft the plan.', project: 'mesob', route: 'CLAUDE', requestedBy: 'founder' },
+      CLAUDE_ONLY,
+    );
+    if (!receipt.ok) throw new Error('expected an order');
+    const taskId = receipt.data.task.id;
+
+    for (const kind of [CLAUDE_DISPATCH_EVIDENCE.succeeded, CLAUDE_DISPATCH_EVIDENCE.attempted]) {
+      expect(() =>
+        fx.ops.appendSystemEvidence({
+          taskId,
+          actor: 'hq-claude-dispatch',
+          kind,
+          payload: {
+            issueNumber: 9999,
+            issueUrl: 'https://github.com/attacker/evil/issues/9999',
+            repository: 'attacker/evil',
+          },
+        }),
+      ).toThrow(/only be recorded while the task is claimed/);
+    }
+
+    // Nothing was recorded, so the lane still reports no dispatch at all.
+    expect(dispatchHistory(fx.ops, taskId).state).toBe('none');
+  });
+
+  it('refuses a publication record against a task that does not exist', () => {
+    const fx = seamFixture();
+    expect(() =>
+      fx.ops.appendSystemEvidence({
+        taskId: 'no-such-task',
+        actor: 'hq-claude-dispatch',
+        kind: CLAUDE_DISPATCH_EVIDENCE.succeeded,
+        payload: {},
+      }),
+    ).toThrow(/names no task that exists/);
+  });
+
+  it('pins the duplicated kind strings to the adapter that owns them', () => {
+    // The application layer must not import a provider adapter, so these
+    // strings are duplicated. A rename there has to fail HERE rather than
+    // silently unbind the claim requirement.
+    expect([...CLAIM_BOUND_EVIDENCE_KINDS]).toEqual([
+      CLAUDE_DISPATCH_EVIDENCE.attempted,
+      CLAUDE_DISPATCH_EVIDENCE.succeeded,
+    ]);
+    for (const kind of Object.values(CLAUDE_DISPATCH_EVIDENCE)) {
+      expect(SYSTEM_EVIDENCE_KINDS).toContain(kind);
+    }
+  });
+});
+
+/**
+ * Codex P1 on `9c2a474`, verified by exploit before it was fixed.
+ *
+ * `queue.capabilities` is an own-property closure #200 documents as patchable —
+ * safe, because enforcement reads the database instead. The drift check was
+ * reading it anyway, so replacing it to report the reserved definition made the
+ * check answer `enabled` while `#enqueue` classified the real weakened row: a
+ * Founder-gated direct order went straight to `queued`.
+ */
+describe('capability drift is decided on the database row, not a patchable read', () => {
+  it('still refuses when the public capability read is replaced', () => {
+    const fx = seamFixture();
+    new CapabilityRegistry(fx.db).register({
+      ...DIRECT_ORDER_CAPABILITY,
+      riskClass: 'read_only',
+      sideEffect: false,
+    } as never);
+
+    // The attack: report the reserved definition from the convenience surface.
+    const caps = fx.ops.queue.capabilities as unknown as Record<string, unknown>;
+    caps.get = () => ({ ...DIRECT_ORDER_CAPABILITY, enabled: true });
+
+    expect(directOrderCapabilityState(fx.ops)).toBe('altered');
+    const result = submitDirectOrder(
+      fx.ops,
+      { instruction: 'Do a thing.', project: 'mesob', route: 'CLAUDE', requestedBy: 'founder' },
+      CLAUDE_ONLY,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.code).toBe('capability_definition_altered');
+    // The gate held: nothing reached the runnable state.
+    expect(fx.ops.queue.listByStatus('queued')).toHaveLength(0);
+    expect(fx.ops.queue.listByStatus('needs_approval')).toHaveLength(0);
   });
 });
 

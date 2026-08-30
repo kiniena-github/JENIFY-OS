@@ -212,7 +212,12 @@ export type DirectOrderCapabilityState = 'missing' | 'altered' | 'disabled' | 'e
  * invocation path must not do the second.
  */
 export function directOrderCapabilityState(ops: HeadquarterOperations): DirectOrderCapabilityState {
-  const capability = ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id);
+  // The DATABASE row, never `queue.capabilities` (issue #219, Codex P1 on
+  // `9c2a474`). That collaborator is an own-property closure #200 documents as
+  // patchable; replacing it to report the reserved definition made this
+  // function answer `enabled` while the weakened row was still what `#enqueue`
+  // classified against — a Founder-gated order straight to `queued`.
+  const capability = ops.capabilityRow(DIRECT_ORDER_CAPABILITY.id);
   if (!capability) return 'missing';
   // Checked before `enabled`, because a weakened definition is a fact about
   // the row whether or not the row is switched on, and re-enabling it must not
@@ -725,7 +730,9 @@ export function submitDirectOrder(
     // reserved definition back is the explicit registration action, and an
     // invocation path that quietly restored it would be the same mistake as
     // one that quietly re-enables a disabled capability.
-    const capability = ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id);
+    // The row again, for the same reason the state check reads it: the fields
+    // named in the refusal must be the ones the registry actually holds.
+    const capability = ops.capabilityRow(DIRECT_ORDER_CAPABILITY.id);
     const drift = capability ? directOrderContractDrift(capability) : [];
     return orderFail(
       'capability_definition_altered',
