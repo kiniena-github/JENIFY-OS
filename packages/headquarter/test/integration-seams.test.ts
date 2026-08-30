@@ -32,6 +32,7 @@ import {
   SYSTEM_EVIDENCE_ACTORS,
   SYSTEM_EVIDENCE_KINDS,
   CLAIM_BOUND_EVIDENCE_KINDS,
+  DISPATCH_OUTCOME_EVIDENCE_KINDS,
 } from '../src/application/service.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { CLAUDE_DISPATCH_EVIDENCE, dispatchHistory } from '../src/providers/claude/dispatch.js';
@@ -162,9 +163,13 @@ describe('the system evidence writer cannot become the forging surface #200 clos
     if (!receipt.ok) throw new Error('expected an order');
     const taskId = receipt.data.task.id;
 
+    // Through the GRANT, which is the only surface these kinds have at all
+    // now. The claim requirement is a second, independent rule and it still
+    // holds for a caller that legitimately holds the grant: being the dispatch
+    // lane does not make a publication have happened.
     for (const kind of [CLAUDE_DISPATCH_EVIDENCE.succeeded, CLAUDE_DISPATCH_EVIDENCE.attempted]) {
       expect(() =>
-        fx.ops.appendSystemEvidence({
+        fx.dispatchEvidence.appendDispatchOutcome({
           taskId,
           actor: 'hq-claude-dispatch',
           kind,
@@ -184,7 +189,7 @@ describe('the system evidence writer cannot become the forging surface #200 clos
   it('refuses a publication record against a task that does not exist', () => {
     const fx = seamFixture();
     expect(() =>
-      fx.ops.appendSystemEvidence({
+      fx.dispatchEvidence.appendDispatchOutcome({
         taskId: 'no-such-task',
         actor: 'hq-claude-dispatch',
         kind: CLAUDE_DISPATCH_EVIDENCE.succeeded,
@@ -201,9 +206,21 @@ describe('the system evidence writer cannot become the forging surface #200 clos
       CLAUDE_DISPATCH_EVIDENCE.attempted,
       CLAUDE_DISPATCH_EVIDENCE.succeeded,
     ]);
+    // Every kind the adapter writes is carried by exactly one of the two
+    // surfaces, and the split is the security boundary: an outcome-setting kind
+    // that drifted back onto the generic surface would silently reopen the
+    // forgery this fix closed.
     for (const kind of Object.values(CLAUDE_DISPATCH_EVIDENCE)) {
-      expect(SYSTEM_EVIDENCE_KINDS).toContain(kind);
+      const generic = (SYSTEM_EVIDENCE_KINDS as readonly string[]).includes(kind);
+      const gated = (DISPATCH_OUTCOME_EVIDENCE_KINDS as readonly string[]).includes(kind);
+      expect(generic !== gated).toBe(true);
     }
+    expect([...DISPATCH_OUTCOME_EVIDENCE_KINDS]).toEqual([
+      CLAUDE_DISPATCH_EVIDENCE.attempted,
+      CLAUDE_DISPATCH_EVIDENCE.succeeded,
+      CLAUDE_DISPATCH_EVIDENCE.failed,
+      CLAUDE_DISPATCH_EVIDENCE.correlated,
+    ]);
   });
 });
 

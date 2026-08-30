@@ -101,18 +101,79 @@ export const SYSTEM_EVIDENCE_ACTORS = ['system', 'hq-claude-dispatch'] as const;
 export type SystemEvidenceActor = (typeof SYSTEM_EVIDENCE_ACTORS)[number];
 
 /**
- * Every event kind a system lane may record. Closed, so a caller holding
- * `HeadquarterOperations` cannot invent one (issue #219, Codex P1 on `9c2a474`).
+ * Every event kind a system lane may record through the GENERIC surface.
+ * Closed, so a caller holding `HeadquarterOperations` cannot invent one (issue
+ * #219, Codex P1 on `9c2a474`).
+ *
+ * Deliberately excludes every kind that SETS a dispatch outcome. Those moved to
+ * `DISPATCH_OUTCOME_EVIDENCE_KINDS` and are unreachable from here — see the
+ * dispatch-evidence grant below.
  */
 export const SYSTEM_EVIDENCE_KINDS = [
   'claude_github_dispatch_refused',
+  'direct_order_dispatch_blocked',
+] as const;
+export type SystemEvidenceKind = (typeof SYSTEM_EVIDENCE_KINDS)[number];
+
+/**
+ * The dispatch facts that DECIDE an outcome, and are therefore writable only
+ * through the dispatch-only constructor grant (issue #219, Founder decision of
+ * 2026-08-30 approving Option B).
+ *
+ * What these four have in common is that something downstream READS them and
+ * acts on the answer:
+ *
+ *   - `attempted` opens an attempt, which is what makes the next dispatch
+ *     refuse rather than publish;
+ *   - `succeeded` closes it with the issue every later deduplicated dispatch is
+ *     answered with;
+ *   - `failed` closes it as "nothing was published", which RE-ENABLES a
+ *     dispatch;
+ *   - `correlated` is the ingest lane's idempotency record — `findResultComment`
+ *     reads it to decide a report was already attached.
+ *
+ * The previous round bound `attempted`/`succeeded` to an active execution claim
+ * and left `failed`/`correlated` on the generic surface, because reconciliation
+ * and ingest legitimately hold no claim. ChatGPT and Codex both reported the
+ * consequence on `89fb8ad`: any in-process holder of `HeadquarterOperations`
+ * could append a terminal `failed` directly, flipping `dispatchHistory` from
+ * `unknown` to `none` without going through `resolveUnknownDispatch` and its
+ * reconciliation-authority check. That was reproduced end-to-end before this
+ * fix — a forged `failed`, then a genuine re-approval taken on false evidence,
+ * then a second public issue.
+ *
+ * A claim requirement could not close it: the honest reason `failed` was
+ * unbound is that its legitimate writers hold no claim. So the rule changed
+ * axis — not "what has this caller done" but "was this caller handed the
+ * writer". The grant is handed to whoever CONSTRUCTS the service and to nobody
+ * else, exactly as `PrivilegedQueueApi` is handed to whoever constructs the
+ * queue, so it is not reachable from an `ops` object a worker holds.
+ */
+export const DISPATCH_OUTCOME_EVIDENCE_KINDS = [
   'claude_github_dispatch_attempted',
   'claude_github_dispatch_succeeded',
   'claude_github_dispatch_failed',
   'claude_github_result_correlated',
-  'direct_order_dispatch_blocked',
 ] as const;
-export type SystemEvidenceKind = (typeof SYSTEM_EVIDENCE_KINDS)[number];
+export type DispatchOutcomeEvidenceKind = (typeof DISPATCH_OUTCOME_EVIDENCE_KINDS)[number];
+
+/**
+ * The dispatch-only evidence capability.
+ *
+ * Handed out once, at construction, through
+ * `HeadquarterOperationsOptions.grantDispatchEvidence`. It carries no approval,
+ * no capability, no execution right and no ability to write any other kind: it
+ * is the single narrow power to record what the Claude dispatch/ingest lane
+ * observed about an outcome.
+ */
+export interface DispatchEvidenceGrant {
+  appendDispatchOutcome(entry: {
+    taskId?: string | null;
+    actor: SystemEvidenceActor;
+    kind: DispatchOutcomeEvidenceKind;
+    payload: Record<string, unknown>;
+  }): EvidenceEntry;
+}
 
 /**
  * The kinds that CLAIM A PUBLICATION HAPPENED, and therefore may only be
@@ -136,6 +197,11 @@ export type SystemEvidenceKind = (typeof SYSTEM_EVIDENCE_KINDS)[number];
  * imported, to keep the application layer from depending on a provider
  * adapter. `test/integration-seams.test.ts` asserts the two agree, so a rename
  * there fails loudly here instead of silently unbinding the rule.
+ *
+ * KEPT after the Option B grant, not replaced by it. The grant answers "may
+ * this caller write an outcome at all"; the claim answers "did the work this
+ * record describes actually happen". A holder of the grant that has not claimed
+ * still may not report a publication.
  */
 export const CLAIM_BOUND_EVIDENCE_KINDS = [
   'claude_github_dispatch_attempted',
@@ -389,6 +455,17 @@ export interface HeadquarterOperationsOptions {
    * is already a deliberate override of this whole resolution.
    */
   memberRegistry?: MemberDirectorySource;
+  /**
+   * Receives the dispatch-only evidence capability, once, at construction — and
+   * nobody else ever does (issue #219, Founder decision approving Option B).
+   *
+   * The same shape as `OperatorQueue`'s `grantPrivileged`, for the same reason:
+   * a power that must not be reachable from the object under attack is given to
+   * the code that BUILDS that object. A composition root (the dispatch CLI, the
+   * ingest CLI, a test fixture) captures the grant here and passes it into the
+   * dispatch lane; a worker handed the resulting `ops` has no way to obtain it.
+   */
+  grantDispatchEvidence?: (grant: DispatchEvidenceGrant) => void;
 }
 
 /** Who an actor turned out to be, once resolved against both registries. */
@@ -698,6 +775,16 @@ export class HeadquarterOperations {
       isRegistered: (workerId: string) => this.#workers.isRegistered(workerId),
       assignability: (workerId: string) => this.#workers.assignability(workerId),
     };
+
+    // LAST in the constructor, deliberately. The grant is a closure over `this`
+    // and the caller may use it the moment it is handed over, so every field it
+    // dereferences — the queue, the principal and worker lookups — is already
+    // initialised. (A `#private` field read before initialisation throws; the
+    // queue's own grant is handed out early for the mirror-image reason, after
+    // `#evidence` and before nothing else it touches.)
+    options.grantDispatchEvidence?.({
+      appendDispatchOutcome: (entry) => this.#appendDispatchOutcome(entry),
+    });
   }
 
   /** Standing pre-approval set the policy engine is evaluated against. */
@@ -1385,6 +1472,15 @@ export class HeadquarterOperations {
    * registered human principal or worker — so this method cannot write the
    * entries #200 took away, even if a reserved name were later reused as a
    * principal id. It grants no approval, no capability and no execution right.
+   *
+   * NARROWED AGAIN for Option B (issue #219). Restricting the actor and closing
+   * the kind set was still not enough for the kinds that DECIDE something: a
+   * caller holding `ops` could write a terminal `claude_github_dispatch_failed`
+   * here and flip an unresolved attempt to "nothing was published" without ever
+   * passing the reconciliation-authority check. Those kinds are gone from this
+   * surface entirely — see `DISPATCH_OUTCOME_EVIDENCE_KINDS` and
+   * `#appendDispatchOutcome`. What is left here is what a system lane may say
+   * without deciding anything: that it refused, and that a route was blocked.
    */
   appendSystemEvidence(entry: {
     taskId?: string | null;
@@ -1392,22 +1488,76 @@ export class HeadquarterOperations {
     kind: SystemEvidenceKind;
     payload: Record<string, unknown>;
   }): EvidenceEntry {
-    if (!SYSTEM_EVIDENCE_ACTORS.includes(entry.actor)) {
+    this.#assertSystemEvidenceActor(entry.actor);
+    // Named separately from the generic "not a system evidence kind" refusal.
+    // An outcome kind is not an unknown string — it is a real kind this surface
+    // deliberately no longer carries — and a caller that reaches here holding
+    // one is either the dispatch lane wired wrong (which should say where the
+    // writer lives) or a caller trying to forge an outcome (which should be
+    // told plainly that it cannot).
+    if ((DISPATCH_OUTCOME_EVIDENCE_KINDS as readonly string[]).includes(entry.kind)) {
       throw new Error(
-        `${String(entry.actor)} is not a reserved system evidence actor. System lanes record only ` +
-          'under their own reserved names; attributed evidence goes through the privileged queue.',
-      );
-    }
-    if (this.#principalOf(entry.actor) || this.#isRegisteredWorker(entry.actor)) {
-      throw new Error(
-        `${entry.actor} resolves to a registered principal or worker, so a system lane may not ` +
-          'append under it. Evidence attributed to a person or a worker is privileged.',
+        `${String(entry.kind)} decides a dispatch outcome, so it is not writable through the ` +
+          'generic system-evidence surface. Outcome facts are written only through the ' +
+          'dispatch-only grant handed to whoever constructs this service ' +
+          '(HeadquarterOperationsOptions.grantDispatchEvidence).',
       );
     }
     if (!SYSTEM_EVIDENCE_KINDS.includes(entry.kind)) {
       throw new Error(
         `${String(entry.kind)} is not a system evidence kind. The set is closed: a system lane ` +
           'records the events it owns, and cannot invent one.',
+      );
+    }
+    return this.#requirePrivilegedQueue().appendEvidence(entry);
+  }
+
+  /**
+   * The reserved-actor rule, shared by both evidence surfaces.
+   *
+   * `SYSTEM_EVIDENCE_ACTORS` is closed, and the runtime check refuses any name
+   * that resolves to a registered human principal or worker — so neither
+   * surface can write the attributed entries #200 took away, even if a reserved
+   * name were later reused as a principal id.
+   */
+  #assertSystemEvidenceActor(actor: SystemEvidenceActor): void {
+    if (!SYSTEM_EVIDENCE_ACTORS.includes(actor)) {
+      throw new Error(
+        `${String(actor)} is not a reserved system evidence actor. System lanes record only ` +
+          'under their own reserved names; attributed evidence goes through the privileged queue.',
+      );
+    }
+    if (this.#principalOf(actor) || this.#isRegisteredWorker(actor)) {
+      throw new Error(
+        `${actor} resolves to a registered principal or worker, so a system lane may not ` +
+          'append under it. Evidence attributed to a person or a worker is privileged.',
+      );
+    }
+  }
+
+  /**
+   * The write behind `DispatchEvidenceGrant`. Reachable ONLY through the grant
+   * object handed out at construction — it is a `#private` method, so it is not
+   * a property of `ops` and cannot be reached by name, index or reflection from
+   * a caller holding one.
+   *
+   * Every rule the generic surface applied still applies here; this method adds
+   * the outcome-kind allowlist and keeps the claim binding. What it does NOT do
+   * is decide reconciliation authority: that is `resolveUnknownDispatch`'s
+   * check, and it stays there because it is a question about WHO decided, which
+   * this layer cannot see.
+   */
+  #appendDispatchOutcome(entry: {
+    taskId?: string | null;
+    actor: SystemEvidenceActor;
+    kind: DispatchOutcomeEvidenceKind;
+    payload: Record<string, unknown>;
+  }): EvidenceEntry {
+    this.#assertSystemEvidenceActor(entry.actor);
+    if (!(DISPATCH_OUTCOME_EVIDENCE_KINDS as readonly string[]).includes(entry.kind)) {
+      throw new Error(
+        `${String(entry.kind)} is not a dispatch outcome kind. The grant is narrow on purpose: it ` +
+          'writes the outcome facts the dispatch and ingest lanes own, and nothing else.',
       );
     }
     // A claim of publication needs the claim it happened under.

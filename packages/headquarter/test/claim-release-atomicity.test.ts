@@ -177,6 +177,7 @@ describe('a release that fails leaves the claim wholly intact', () => {
     const transition = failReleaseTransition(fixture);
 
     const result = dispatchClaudeTask(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       executorWorkerId: EXECUTOR,
       taskId,
       target: TARGET,
@@ -205,6 +206,7 @@ describe('a release that fails leaves the claim wholly intact', () => {
     }) as typeof fixture.db.prepare);
 
     const result = dispatchClaudeTask(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       executorWorkerId: EXECUTOR,
       taskId,
       target: TARGET,
@@ -223,6 +225,7 @@ describe('a release that fails leaves the claim wholly intact', () => {
     const transition = failReleaseTransition(fixture);
 
     const result = dispatchClaudeTask(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       executorWorkerId: EXECUTOR,
       taskId,
       target: TARGET,
@@ -246,6 +249,7 @@ describe('the happy path still releases, and says so', () => {
     const taskId = approvedOrder(fixture);
 
     const result = dispatchClaudeTask(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       executorWorkerId: EXECUTOR,
       taskId,
       target: TARGET,
@@ -281,6 +285,7 @@ describe('the happy path still releases, and says so', () => {
     };
 
     const result = dispatchClaudeTask(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       executorWorkerId: EXECUTOR,
       taskId,
       target: TARGET,

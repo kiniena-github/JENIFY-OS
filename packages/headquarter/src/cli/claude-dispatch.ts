@@ -37,7 +37,7 @@
  */
 
 import { openHqDatabase } from '../store/db.js';
-import { HeadquarterOperations } from '../application/service.js';
+import { HeadquarterOperations, type DispatchEvidenceGrant } from '../application/service.js';
 import {
   LOCAL_ADMIN_ACK_FLAG,
   LOCAL_ADMIN_INTERFACE_NOTICE,
@@ -136,7 +136,17 @@ function main(): void {
   const role = roleArg as Role;
 
   const db = openHqDatabase(dbPath ?? undefined);
-  const ops = new HeadquarterOperations(db);
+  // The composition root: the dispatch-only evidence capability is issued here,
+  // captured in a local, and handed to the lane below (issue #219, Option B).
+  let evidence: DispatchEvidenceGrant | undefined;
+  const ops = new HeadquarterOperations(db, {
+    grantDispatchEvidence: (grant) => {
+      evidence = grant;
+    },
+  });
+  if (!evidence) {
+    throw new Error('The dispatch evidence grant was not issued; refusing to dispatch without it.');
+  }
   // Observed on THIS machine, which is the machine that would dispatch. No
   // token value is read: the transport reports presence and identity only.
   const transport = ghCliTransport();
@@ -211,7 +221,7 @@ function main(): void {
         'this command will not invent one. (--check-only needs no worker: it publishes nothing.)',
     );
   }
-  const result = dispatchClaudeTask(ops, { taskId, target, transport, role, executorWorkerId });
+  const result = dispatchClaudeTask(ops, { taskId, target, transport, role, executorWorkerId, evidence });
   if (!result.ok) {
     console.error(`Dispatch refused (${result.error.code}): ${result.error.message}`);
     process.exit(1);

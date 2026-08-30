@@ -161,7 +161,7 @@ describe('nothing dispatches that the canonical control plane has not cleared', 
     expect(fixture.ops.queue.get(taskId)!.status).toBe('needs_approval');
 
     const transport = stubTransport({});
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
@@ -178,7 +178,7 @@ describe('nothing dispatches that the canonical control plane has not cleared', 
       .prepare(`UPDATE op_tasks SET payload = ? WHERE id = ?`)
       .run(JSON.stringify({ ...fixture.ops.queue.get(taskId)!.payload, instruction: 'something else' }), taskId);
 
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: stubTransport({}) });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: stubTransport({}) });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.error.code).toBe('approval_invalid');
@@ -190,7 +190,7 @@ describe('nothing dispatches that the canonical control plane has not cleared', 
     const taskId = placeOrder(fixture);
     expectOk(fixture.ops.engageKillSwitch(DIRECT_ORDER_CAPABILITY.id, 'coo', 'containment drill'));
 
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: stubTransport({}) });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: stubTransport({}) });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.error.code).toBe('kill_switch_engaged');
@@ -198,7 +198,7 @@ describe('nothing dispatches that the canonical control plane has not cleared', 
 
   it('refuses an unknown task rather than inventing one', () => {
     const fixture = orderFixture();
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId: 'no-such-task', target: TARGET, transport: stubTransport({}) });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId: 'no-such-task', target: TARGET, transport: stubTransport({}) });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.error.code).toBe('unknown_task');
@@ -209,7 +209,7 @@ describe('nothing dispatches that the canonical control plane has not cleared', 
     const taskId = placeOrder(fixture);
     const transport = stubTransport({});
 
-    const receipt = expectOk(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }));
+    const receipt = expectOk(dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }));
     expect(receipt.provider).toBe('CLAUDE');
     expect(receipt.issueNumber).toBe(4242);
     expect(receipt.deduplicated).toBe(false);
@@ -243,7 +243,7 @@ describe('no provider substitution', () => {
     const taskId = placeOrder(fixture, { route: 'CODEX' });
     const transport = stubTransport({});
 
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.error.code).toBe('provider_mismatch');
@@ -266,7 +266,7 @@ describe('no provider substitution', () => {
       fixture.ops.approveTask({ taskId: task.id, founderId: 'coo', expectedActionDigest: taskActionDigest(task) }),
     );
 
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId: task.id, target: TARGET, transport: stubTransport({}) });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId: task.id, target: TARGET, transport: stubTransport({}) });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.error.code).toBe('provider_not_bound');
@@ -278,7 +278,7 @@ describe('an unavailable transport fails closed', () => {
     const fixture = orderFixture();
     const taskId = placeOrder(fixture);
 
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR,
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR,
       taskId,
       target: TARGET,
       transport: unavailableTransport('No GitHub CLI on this machine.'),
@@ -302,7 +302,7 @@ describe('an unavailable transport fails closed', () => {
       status: { authenticated: false, account: null, reason: 'no logged-in account' },
     });
 
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.error.code).toBe('transport_unauthenticated');
@@ -316,7 +316,7 @@ describe('an unavailable transport fails closed', () => {
     const taskId = placeOrder(fixture);
     const transport = stubTransport({ status: { account: 'somebody-else' } });
 
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.error.code).toBe('transport_actor_mismatch');
@@ -328,7 +328,7 @@ describe('an unavailable transport fails closed', () => {
     const taskId = placeOrder(fixture);
     const failing = stubTransport({ result: { ok: false, kind: 'rejected', message: 'HTTP 403' } });
 
-    const first = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: failing });
+    const first = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: failing });
     expect(first.ok).toBe(false);
     if (first.ok) throw new Error('unreachable');
     expect(first.error.code).toBe('transport_failed');
@@ -348,7 +348,7 @@ describe('an unavailable transport fails closed', () => {
     // honest cost of binding the external execution to an approval, stated
     // rather than papered over.
     const working = stubTransport({});
-    const retry = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: working });
+    const retry = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: working });
     expect(retry.ok).toBe(false);
     expect(working.calls).toHaveLength(0);
   });
@@ -356,7 +356,7 @@ describe('an unavailable transport fails closed', () => {
   it('refuses an explicit-target-less dispatch', () => {
     const fixture = orderFixture();
     const taskId = placeOrder(fixture);
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR,
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR,
       taskId,
       target: { owner: 'not a login', repo: '' },
       transport: stubTransport({}),
@@ -373,8 +373,8 @@ describe('dispatch is idempotent, and an uncertain outcome is never blindly retr
     const taskId = placeOrder(fixture);
     const transport = stubTransport({});
 
-    const first = expectOk(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }));
-    const second = expectOk(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }));
+    const first = expectOk(dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }));
+    const second = expectOk(dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }));
 
     expect(second.deduplicated).toBe(true);
     expect(second.issueNumber).toBe(first.issueNumber);
@@ -388,11 +388,11 @@ describe('dispatch is idempotent, and an uncertain outcome is never blindly retr
     const fixture = orderFixture();
     const taskId = placeOrder(fixture);
     const first = stubTransport({});
-    expectOk(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: first }));
+    expectOk(dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: first }));
 
     const elsewhere = { owner: TARGET.owner, repo: 'some-other-repo' };
     const second = stubTransport({});
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: elsewhere, transport: second });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: elsewhere, transport: second });
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
@@ -409,10 +409,10 @@ describe('dispatch is idempotent, and an uncertain outcome is never blindly retr
     const fixture = orderFixture();
     const taskId = placeOrder(fixture);
     const transport = stubTransport({});
-    const first = expectOk(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }));
+    const first = expectOk(dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }));
 
     const otherCasing = { owner: TARGET.owner.toUpperCase(), repo: TARGET.repo.toLowerCase() };
-    const again = expectOk(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: otherCasing, transport }));
+    const again = expectOk(dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: otherCasing, transport }));
     expect(again.deduplicated).toBe(true);
     expect(again.issueUrl).toBe(first.issueUrl);
     // The receipt carries the RECORDED spelling, so it cannot disagree with the
@@ -425,8 +425,8 @@ describe('dispatch is idempotent, and an uncertain outcome is never blindly retr
     const fixture = orderFixture();
     const taskId = placeOrder(fixture);
     const transport = stubTransport({});
-    const first = expectOk(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }));
-    const again = expectOk(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: { ...TARGET }, transport }));
+    const first = expectOk(dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }));
+    const again = expectOk(dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: { ...TARGET }, transport }));
     expect(again.deduplicated).toBe(true);
     expect(again.issueUrl).toBe(first.issueUrl);
     expect(targetSlug(again.target)).toBe(`${TARGET.owner}/${TARGET.repo}`);
@@ -439,11 +439,11 @@ describe('dispatch is idempotent, and an uncertain outcome is never blindly retr
       result: { ok: false, kind: 'unreadable_response', message: 'no issue URL printed' },
     });
 
-    const first = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: unreadable });
+    const first = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: unreadable });
     expect(first.ok).toBe(false);
     expect(dispatchHistory(fixture.ops, taskId).state).toBe('unknown');
 
-    const retry = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: stubTransport({}) });
+    const retry = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: stubTransport({}) });
     expect(retry.ok).toBe(false);
     if (retry.ok) throw new Error('unreachable');
     expect(retry.error.code).toBe('dispatch_outcome_unknown');
@@ -455,10 +455,11 @@ describe('dispatch is idempotent, and an uncertain outcome is never blindly retr
     const unreadable = stubTransport({
       result: { ok: false, kind: 'unreadable_response', message: 'no issue URL printed' },
     });
-    dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: unreadable });
+    dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: unreadable });
 
     // Somebody looked and found nothing: a fresh dispatch is a first dispatch.
     const cleared = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'not_dispatched',
       resolvedBy: 'coo',
@@ -474,9 +475,10 @@ describe('dispatch is idempotent, and an uncertain outcome is never blindly retr
     // simply be dispatched again in the same test (issue #224, Founder decision
     // approving option 1).
     const secondTaskId = placeOrder(fixture, { instruction: 'A second, different order.' });
-    dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId: secondTaskId, target: TARGET, transport: unreadable });
+    dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId: secondTaskId, target: TARGET, transport: unreadable });
     const found = expectOk(
       resolveUnknownDispatch(fixture.ops, {
+        evidence: fixture.dispatchEvidence,
         taskId: secondTaskId,
         outcome: 'found',
         target: TARGET,
@@ -492,6 +494,7 @@ describe('dispatch is idempotent, and an uncertain outcome is never blindly retr
     // eligibility (issue #224).
     const again = expectOk(
       dispatchClaudeTask(fixture.ops, {
+        evidence: fixture.dispatchEvidence,
         executorWorkerId: EXECUTOR,
         taskId: secondTaskId,
         target: TARGET,
@@ -521,7 +524,7 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
       return realAppend.call(this, entry);
     };
 
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
     EvidenceLog.prototype.append = realAppend;
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
@@ -543,7 +546,7 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
       return realAppend.call(this, entry);
     };
 
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.error.code).toBe('dispatch_unrecorded');
@@ -552,7 +555,7 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
     // And the attempt is left OPEN, so a retry refuses instead of duplicating.
     EvidenceLog.prototype.append = realAppend;
     expect(dispatchHistory(fixture.ops, taskId).state).toBe('unknown');
-    const retry = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: stubTransport({}) });
+    const retry = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: stubTransport({}) });
     expect(retry.ok).toBe(false);
     if (retry.ok) throw new Error('unreachable');
     expect(retry.error.code).toBe('dispatch_outcome_unknown');
@@ -574,13 +577,13 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
       status: () => {
         if (!raced) {
           raced = true;
-          expectOk(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: first }));
+          expectOk(dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: first }));
         }
         return second.status();
       },
     };
 
-    const result = expectOk(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: racingTransport }));
+    const result = expectOk(dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: racingTransport }));
     expect(result.deduplicated).toBe(true);
     expect(first.calls).toHaveLength(1);
     // The loser published nothing.
@@ -599,7 +602,7 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
       },
     };
 
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: throwing });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: throwing });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.error.code).toBe('transport_failed');
@@ -607,7 +610,7 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
     // The attempt is left open, so the next dispatch refuses rather than
     // risking a duplicate of an issue that may exist.
     expect(dispatchHistory(fixture.ops, taskId).state).toBe('unknown');
-    const retry = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: stubTransport({}) });
+    const retry = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: stubTransport({}) });
     expect(retry.ok).toBe(false);
     if (retry.ok) throw new Error('unreachable');
     expect(retry.error.code).toBe('dispatch_outcome_unknown');
@@ -629,7 +632,7 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
       },
     };
 
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: slowTransport });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: slowTransport });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.error.code).toBe('kill_switch_engaged');
@@ -654,7 +657,7 @@ describe('the guards that stop a duplicate public issue (Codex review of 1d5b3bf
       },
     };
 
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: slowTransport });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: slowTransport });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.error.code).toBe('approval_invalid');
@@ -919,7 +922,7 @@ describe('no secret ever reaches the published issue or the evidence log', () =>
     );
 
     const transport = stubTransport({});
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId: task.id, target: TARGET, transport });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId: task.id, target: TARGET, transport });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.error.code).toBe('unsafe_issue');
@@ -929,7 +932,7 @@ describe('no secret ever reaches the published issue or the evidence log', () =>
   it('keeps the evidence chain intact across a dispatch', () => {
     const fixture = orderFixture();
     const taskId = placeOrder(fixture);
-    expectOk(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: stubTransport({}) }));
+    expectOk(dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: stubTransport({}) }));
     expect(fixture.ops.queue.evidence.verifyChain()).toBeNull();
   });
 });
@@ -1095,7 +1098,7 @@ describe('a blocked order survives to be dispatched later (issue #224)', () => {
     // secrets: it is authenticated on the workstation even while
     // CLAUDE_ROUTINE_* is absent. That is exactly the #224 case.
     const transport = stubTransport({});
-    const receipt = expectOk(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }));
+    const receipt = expectOk(dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }));
 
     expect(receipt.taskId).toBe(taskId);
     expect(receipt.provider).toBe('CLAUDE');
@@ -1131,7 +1134,7 @@ describe('a blocked order survives to be dispatched later (issue #224)', () => {
       fixture.ops.approveTask({ taskId, founderId: 'coo', expectedActionDigest: taskActionDigest(task) }),
     );
     const transport = stubTransport({});
-    const dispatched = expectOk(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }));
+    const dispatched = expectOk(dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }));
 
     expect(dispatched.taskId).toBe(taskId);
     expect(transport.calls).toHaveLength(1);
@@ -1142,7 +1145,7 @@ describe('a blocked order survives to be dispatched later (issue #224)', () => {
     const fixture = orderFixture();
     const taskId = blockedOrder(fixture);
     const transport = stubTransport({});
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.error.code).toBe('task_not_eligible');

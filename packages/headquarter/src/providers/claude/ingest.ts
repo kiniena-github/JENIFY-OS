@@ -38,7 +38,7 @@
  *   than followed.
  */
 
-import type { HeadquarterOperations } from '../../application/service.js';
+import type { DispatchEvidenceGrant, HeadquarterOperations } from '../../application/service.js';
 import { taskActionDigest } from '../../operator/approvals.js';
 import { PROVIDER_REGISTRY } from '../../routing/providers.js';
 import {
@@ -263,6 +263,14 @@ function recordCorrelation(
      * has always claimed this entry contains.
      */
     reportAuthor: string;
+    /**
+     * The dispatch-only evidence capability (issue #219, Option B). The
+     * correlation entry is what `alreadyCorrelated` reads to decide a report was
+     * already attached, so forging one suppresses a legitimate ingest — the same
+     * class of harm as forging a terminal dispatch outcome, and closed the same
+     * way.
+     */
+    evidence: DispatchEvidenceGrant;
   },
 ): { ok: true } | { ok: false; code: CorrelationRefusal; message: string } {
   const repository = targetSlug(input.target);
@@ -362,7 +370,7 @@ function recordCorrelation(
     };
   }
 
-  ops.appendSystemEvidence({
+  input.evidence.appendDispatchOutcome({
     taskId: task.id,
     actor: DISPATCH_ACTOR,
     kind: CLAUDE_DISPATCH_EVIDENCE.correlated,
@@ -388,6 +396,11 @@ export interface IngestOptions {
   /** The repository the caller believes the task was dispatched to. Verified. */
   target: GitHubTarget;
   transport: GitHubIssueTransport;
+  /**
+   * The dispatch-only evidence capability (issue #219, Option B). Handed to
+   * whoever constructed the service; not reachable from `ops`.
+   */
+  evidence: DispatchEvidenceGrant;
 }
 
 /**
@@ -492,6 +505,7 @@ export function ingestClaudeResult(ops: HeadquarterOperations, options: IngestOp
   }
 
   const correlation = recordCorrelation(ops, {
+    evidence: options.evidence,
     taskId,
     target: options.target,
     issueNumber,

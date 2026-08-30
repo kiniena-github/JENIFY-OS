@@ -76,7 +76,11 @@ import {
 } from '../../operator/approvals.js';
 import { EXECUTION_PROVIDER_KEY, readProviderBinding } from '../../operator/provider-binding.js';
 import type { OperatorTask } from '../../operator/queue.js';
-import type { SystemEvidenceKind, HeadquarterOperations } from '../../application/service.js';
+import type {
+  DispatchEvidenceGrant,
+  SystemEvidenceKind,
+  HeadquarterOperations,
+} from '../../application/service.js';
 import { classifyCapability } from '../../application/classification.js';
 import { assertBrowserSafe } from '../../live/redaction.js';
 import {
@@ -847,6 +851,18 @@ export interface DispatchOptions {
   /** Labels to apply, if the repository defines them. Empty by default. */
   labels?: readonly string[];
   now?: () => Date;
+  /**
+   * The dispatch-only evidence capability (issue #219, Founder decision
+   * approving Option B).
+   *
+   * REQUIRED, and deliberately not derivable from `ops`. Holding a
+   * `HeadquarterOperations` no longer entitles a caller to write a dispatch
+   * outcome, so this lane must be HANDED the power by whoever constructed the
+   * service — the same composition-root handshake `OperatorQueue` uses for the
+   * approval mutations. That is the whole mechanism: if it could be fetched off
+   * `ops`, the caller forging a terminal `failed` could fetch it too.
+   */
+  evidence: DispatchEvidenceGrant;
 }
 
 /**
@@ -1165,7 +1181,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
         // task, and nothing was published.
         throw new StartRefused(errorText(error));
       }
-      ops.appendSystemEvidence({
+      options.evidence.appendDispatchOutcome({
         taskId,
         actor: DISPATCH_ACTOR,
         kind: CLAUDE_DISPATCH_EVIDENCE.attempted,
@@ -1296,7 +1312,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
       );
     }
     try {
-      ops.appendSystemEvidence({
+      options.evidence.appendDispatchOutcome({
         taskId,
         actor: DISPATCH_ACTOR,
         kind: CLAUDE_DISPATCH_EVIDENCE.failed,
@@ -1335,7 +1351,7 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
   }
 
   try {
-    ops.appendSystemEvidence({
+    options.evidence.appendDispatchOutcome({
       taskId,
       actor: DISPATCH_ACTOR,
       kind: CLAUDE_DISPATCH_EVIDENCE.succeeded,
@@ -1437,9 +1453,23 @@ function claimReconciliation(
 
 export function resolveUnknownDispatch(
   ops: HeadquarterOperations,
-  input:
+  input: (
     | { taskId: string; outcome: 'found'; target: GitHubTarget; issueNumber: number; issueUrl: string; resolvedBy: string; note?: string }
-    | { taskId: string; outcome: 'not_dispatched'; resolvedBy: string; note?: string },
+    | { taskId: string; outcome: 'not_dispatched'; resolvedBy: string; note?: string }
+  ) & {
+    /**
+     * The dispatch-only evidence capability (issue #219, Option B).
+     *
+     * Reconciliation is the ONE legitimate way to close an unresolved attempt
+     * without holding a claim, which is exactly why the terminal kinds are no
+     * longer on the generic surface: this function's authority check is the
+     * gate, and it can only be the gate if there is no way around it. The two
+     * requirements are independent and both hold — the grant says this code is
+     * the dispatch lane, `reconciliationAuthorityRefusal` says a principal with
+     * approval authority decided.
+     */
+    evidence: DispatchEvidenceGrant;
+  },
 ): DispatchResult {
   // Read-only pre-checks first. Nothing below writes until the reservation, so
   // a refusal here cannot leave a half-resolved attempt behind.
@@ -1476,7 +1506,7 @@ export function resolveUnknownDispatch(
   }
   if (input.outcome === 'not_dispatched') {
     const claimed = claimReconciliation(ops, input.taskId, () => {
-      ops.appendSystemEvidence({
+      input.evidence.appendDispatchOutcome({
         taskId: input.taskId,
         actor: DISPATCH_ACTOR,
         kind: CLAUDE_DISPATCH_EVIDENCE.failed,
@@ -1560,7 +1590,7 @@ export function resolveUnknownDispatch(
   const issueUrl = parsed.url;
   const at = new Date().toISOString();
   const claimed = claimReconciliation(ops, input.taskId, () => {
-    ops.appendSystemEvidence({
+    input.evidence.appendDispatchOutcome({
       taskId: input.taskId,
       actor: DISPATCH_ACTOR,
       kind: CLAUDE_DISPATCH_EVIDENCE.succeeded,

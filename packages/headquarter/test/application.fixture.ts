@@ -8,7 +8,7 @@
 import { openMemoryHqDatabase, type HqDatabase } from '../src/store/db.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { HeadquarterStore } from '../src/store/headquarter.js';
-import { HeadquarterOperations } from '../src/application/service.js';
+import { HeadquarterOperations, type DispatchEvidenceGrant } from '../src/application/service.js';
 import type { NominationSourcePort, WorkerNomination } from '../src/application/ports.js';
 import { HumanPrincipalRegistry } from '../src/application/principals.js';
 
@@ -29,6 +29,16 @@ export interface Fixture {
   ops: HeadquarterOperations;
   store: HeadquarterStore;
   principals: HumanPrincipalRegistry;
+  /**
+   * The dispatch-only evidence capability (issue #219, Option B).
+   *
+   * The fixture is the composition root for these tests, exactly as the CLI is
+   * for a real run, so it is the fixture that receives the grant. Tests pass it
+   * into the dispatch/ingest lanes the way a real composition root does — which
+   * is the point: a test that could reach it off `fixture.ops` would be testing
+   * a service that still had the hole.
+   */
+  dispatchEvidence: DispatchEvidenceGrant;
 }
 
 export function setupFixture(
@@ -36,11 +46,16 @@ export function setupFixture(
 ): Fixture {
   const db = openMemoryHqDatabase();
   const store = new HeadquarterStore(db);
+  let dispatchEvidence: DispatchEvidenceGrant | undefined;
   const ops = new HeadquarterOperations(db, {
     store,
     policyCtx: { preApprovedCapabilities: new Set<string>([CAPS.openPr]) },
     nominationSources: options.nominationSources,
+    grantDispatchEvidence: (grant) => {
+      dispatchEvidence = grant;
+    },
   });
+  if (!dispatchEvidence) throw new Error('fixture: the dispatch evidence grant was not issued');
 
   new CapabilityRegistry(db).register({
     id: CAPS.readStatus,
@@ -147,7 +162,7 @@ export function setupFixture(
     active: false,
   });
 
-  return { db, ops, store, principals };
+  return { db, ops, store, principals, dispatchEvidence };
 }
 
 /** Unwrap an expected-successful result, failing loudly otherwise. */

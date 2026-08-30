@@ -127,7 +127,7 @@ function taskWithUnknownDispatch(fixture: Fixture): string {
       throw new Error('killed mid-flight');
     },
   };
-  dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: throwing });
+  dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: throwing });
   expect(dispatchHistory(fixture.ops, taskId).state).toBe('unknown');
   return taskId;
 }
@@ -138,6 +138,7 @@ describe('exactly one reconciliation of an uncertain attempt wins', () => {
     const taskId = taskWithUnknownDispatch(fixture);
 
     const first = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'found',
       target: TARGET,
@@ -149,6 +150,7 @@ describe('exactly one reconciliation of an uncertain attempt wins', () => {
 
     // The contradictory one: "actually nothing was created".
     const second = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'not_dispatched',
       resolvedBy: 'founder',
@@ -174,6 +176,7 @@ describe('exactly one reconciliation of an uncertain attempt wins', () => {
     const taskId = taskWithUnknownDispatch(fixture);
 
     const first = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'not_dispatched',
       resolvedBy: 'chair',
@@ -184,6 +187,7 @@ describe('exactly one reconciliation of an uncertain attempt wins', () => {
     expect(dispatchHistory(fixture.ops, taskId).state).toBe('none');
 
     const second = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'found',
       target: TARGET,
@@ -226,6 +230,7 @@ describe('exactly one reconciliation of an uncertain attempt wins', () => {
         raced = true;
         (fixture.ops.queue.evidence as unknown as { list: typeof realList }).list = realList;
         resolveUnknownDispatch(fixture.ops, {
+          evidence: fixture.dispatchEvidence,
           taskId,
           outcome: 'not_dispatched',
           resolvedBy: 'founder',
@@ -235,6 +240,7 @@ describe('exactly one reconciliation of an uncertain attempt wins', () => {
     }) as typeof realList;
 
     const loser = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'found',
       target: TARGET,
@@ -256,6 +262,7 @@ describe('exactly one reconciliation of an uncertain attempt wins', () => {
     const fixture = ordersFixture();
     const taskId = taskWithUnknownDispatch(fixture);
     const resolved = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'found',
       target: TARGET,
@@ -278,7 +285,7 @@ describe('the handoff claims the canonical task before publishing', () => {
       status: (): GitHubTransportStatus => AUTHENTICATED,
       createIssue: (): GitHubIssueResult => ({ ok: true, issueNumber: ISSUE, issueUrl: GOOD_URL }),
     };
-    expect(dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }).ok).toBe(true);
+    expect(dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }).ok).toBe(true);
 
     const task = fixture.ops.queue.get(taskId)!;
     // `running`, not `assigned` (issue #224, dispositioning the double-execution
@@ -306,7 +313,7 @@ describe('the handoff claims the canonical task before publishing', () => {
       status: (): GitHubTransportStatus => AUTHENTICATED,
       createIssue: (): GitHubIssueResult => ({ ok: true, issueNumber: ISSUE, issueUrl: GOOD_URL }),
     };
-    dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
     const approval = fixture.ops.queue.approvalFor(taskId);
     // Bound to this claim, and spent: the external execution is answerable to
     // the same approval an internal one would have been.
@@ -327,6 +334,7 @@ describe('the handoff claims the canonical task before publishing', () => {
       },
     };
     const result = dispatchClaudeTask(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       executorWorkerId: 'nobody-registered',
       taskId,
       target: TARGET,
@@ -373,6 +381,7 @@ describe('the handoff claims the canonical task before publishing', () => {
       },
     };
     const result = dispatchClaudeTask(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       executorWorkerId: 'codex-worker',
       taskId,
       target: TARGET,
@@ -406,7 +415,7 @@ describe('the handoff claims the canonical task before publishing', () => {
         return { ok: true, issueNumber: ISSUE, issueUrl: GOOD_URL };
       },
     };
-    const result = dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    const result = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
     expect(result.ok).toBe(false);
     expect(calls).toHaveLength(0);
     expect(fixture.ops.queue.get(taskId)!.status).toBe('queued');
@@ -438,6 +447,7 @@ describe('the handoff claims the canonical task before publishing', () => {
     // Dispatch the SECOND one while the first is older and also claimable.
     expect(
       dispatchClaudeTask(fixture.ops, {
+        evidence: fixture.dispatchEvidence,
         executorWorkerId: EXECUTOR,
         taskId: second.data.task.id,
         target: TARGET,

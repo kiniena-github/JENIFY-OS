@@ -163,6 +163,7 @@ function dispatched(fixture: Fixture): { taskId: string; body: string } {
     },
   };
   const sent = dispatchClaudeTask(fixture.ops, {
+    evidence: fixture.dispatchEvidence,
     executorWorkerId: EXECUTOR,
     taskId: placed.data.task.id,
     target: TARGET,
@@ -184,6 +185,7 @@ describe('a report on the dispatched issue reaches the canonical task', () => {
     const { taskId, body } = dispatched(fixture);
 
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({ body, comments: [comment()] }),
@@ -206,6 +208,7 @@ describe('a report on the dispatched issue reaches the canonical task', () => {
 
     expect(
       ingestClaudeResult(fixture.ops, {
+        evidence: fixture.dispatchEvidence,
         taskId,
         target: TARGET,
         transport: transport({ body, comments: [comment({ author: `  ${TARGET.owner}  ` })] }),
@@ -222,6 +225,7 @@ describe('a report on the dispatched issue reaches the canonical task', () => {
     const { taskId, body } = dispatched(fixture);
 
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({ body, comments: [comment({ body: 'Looks good to me!' })] }),
@@ -238,8 +242,8 @@ describe('a report on the dispatched issue reaches the canonical task', () => {
     const { taskId, body } = dispatched(fixture);
     const stub = transport({ body, comments: [comment()] });
 
-    expect(ingestClaudeResult(fixture.ops, { taskId, target: TARGET, transport: stub }).ok).toBe(true);
-    const again = ingestClaudeResult(fixture.ops, { taskId, target: TARGET, transport: stub });
+    expect(ingestClaudeResult(fixture.ops, { evidence: fixture.dispatchEvidence, taskId, target: TARGET, transport: stub }).ok).toBe(true);
+    const again = ingestClaudeResult(fixture.ops, { evidence: fixture.dispatchEvidence, taskId, target: TARGET, transport: stub });
 
     if (!again.ok) throw new Error('expected ok');
     expect(again.data.correlated).toBe(false);
@@ -254,6 +258,7 @@ describe('a report on the dispatched issue reaches the canonical task', () => {
     const correction = comment({ url: `${ISSUE_URL}#issuecomment-9` });
 
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({ body, comments: [first, comment({ body: 'chatter' }), correction] }),
@@ -272,6 +277,7 @@ describe('correlation records arrival — nothing more', () => {
 
     expect(
       ingestClaudeResult(fixture.ops, {
+        evidence: fixture.dispatchEvidence,
         taskId,
         target: TARGET,
         transport: transport({ body, comments: [comment()] }),
@@ -294,6 +300,7 @@ describe('correlation records arrival — nothing more', () => {
 
     expect(
       ingestClaudeResult(fixture.ops, {
+        evidence: fixture.dispatchEvidence,
         taskId,
         target: TARGET,
         transport: transport({ body, comments: [comment({ body: secretish })] }),
@@ -313,6 +320,7 @@ describe('correlation records arrival — nothing more', () => {
     const foreign = comment({ url: 'https://github.com/someone/else/issues/1#issuecomment-5' });
 
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({ body, comments: [foreign] }),
@@ -334,6 +342,7 @@ describe('correlation records arrival — nothing more', () => {
     });
 
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({ body, comments: [wrongIssue] }),
@@ -352,6 +361,7 @@ describe('it refuses to look where it should not', () => {
     const stub = transport();
 
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId: placed.data.task.id,
       target: TARGET,
       transport: stub,
@@ -365,6 +375,7 @@ describe('it refuses to look where it should not', () => {
   it('refuses an unknown task', () => {
     const fixture = ordersFixture();
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId: 'no-such-task',
       target: TARGET,
       transport: transport(),
@@ -380,7 +391,7 @@ describe('it refuses to look where it should not', () => {
     const { taskId } = dispatched(fixture);
     const stub = transport({ comments: [comment()] });
 
-    const result = ingestClaudeResult(fixture.ops, { taskId, target: OTHER_TARGET, transport: stub });
+    const result = ingestClaudeResult(fixture.ops, { evidence: fixture.dispatchEvidence, taskId, target: OTHER_TARGET, transport: stub });
 
     if (result.ok) throw new Error('expected a refusal');
     expect(result.error.code).toBe('target_mismatch');
@@ -405,6 +416,7 @@ describe('it refuses to look where it should not', () => {
       },
     };
     dispatchClaudeTask(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       executorWorkerId: EXECUTOR,
       taskId: placed.data.task.id,
       target: TARGET,
@@ -412,6 +424,7 @@ describe('it refuses to look where it should not', () => {
     });
 
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId: placed.data.task.id,
       target: TARGET,
       transport: transport({ comments: [comment()] }),
@@ -431,7 +444,7 @@ describe('it refuses to look where it should not', () => {
       createIssue: (): GitHubIssueResult => ({ ok: true, issueNumber: ISSUE, issueUrl: ISSUE_URL }),
     };
 
-    const result = ingestClaudeResult(fixture.ops, { taskId, target: TARGET, transport: writeOnly });
+    const result = ingestClaudeResult(fixture.ops, { evidence: fixture.dispatchEvidence, taskId, target: TARGET, transport: writeOnly });
 
     if (result.ok) throw new Error('expected a refusal');
     expect(result.error.code).toBe('transport_cannot_read');
@@ -444,6 +457,7 @@ describe('it refuses to look where it should not', () => {
     const { taskId } = dispatched(fixture);
 
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({ read: { ok: false, kind: 'unavailable', message: 'no gh here' } }),
@@ -524,6 +538,7 @@ describe('no exported surface can append correlation evidence without a trusted 
     const fixture = ordersFixture();
     const { taskId, body } = dispatched(fixture);
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({ body, comments: [comment()] }),
@@ -553,6 +568,7 @@ describe('the correlation block’s anti-drift fields are enforced', () => {
 
   function ingestWithBody(fixture: Fixture, taskId: string, issueBody: string) {
     return ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({ body: issueBody, comments: [comment()] }),
@@ -649,6 +665,7 @@ describe('an instruction containing JSON does not break the feedback leg', () =>
     });
     let published = '';
     const sent = dispatchClaudeTask(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       executorWorkerId: EXECUTOR,
       taskId: placed.data.task.id,
       target: TARGET,
@@ -685,6 +702,7 @@ describe('an instruction containing JSON does not break the feedback leg', () =>
     expect(body.indexOf('"batchId"')).toBeLessThan(body.indexOf('"hqTaskId"'));
 
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({ body, comments: [comment()] }),
@@ -713,6 +731,7 @@ describe('an instruction containing JSON does not break the feedback leg', () =>
     const { taskId, body } = dispatchedWithInstruction(fixture, messy);
 
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({ body, comments: [comment()] }),
@@ -749,6 +768,7 @@ describe('an instruction containing JSON does not break the feedback leg', () =>
     expect(parsed?.executionProvider).toBe('CLAUDE');
 
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({ body, comments: [comment()] }),
@@ -799,6 +819,7 @@ describe('an instruction containing JSON does not break the feedback leg', () =>
     // And end to end: the owner's report still reaches the canonical task, and
     // nothing from the forged block reaches the evidence.
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({ body, comments: [comment()] }),
@@ -815,6 +836,7 @@ describe('an instruction containing JSON does not break the feedback leg', () =>
     const { taskId, body } = dispatchedWithInstruction(fixture, WITH_JSON_EXAMPLE);
 
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({ body, comments: [comment({ author: 'drive-by-commenter' })] }),
@@ -928,6 +950,7 @@ describe('result provenance cannot be spoofed through the ingestion path', () =>
     const { taskId, body } = dispatched(fixture);
 
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({ body, comments: [comment({ author: 'drive-by-commenter' })] }),
@@ -946,6 +969,7 @@ describe('result provenance cannot be spoofed through the ingestion path', () =>
     const { taskId, body } = dispatched(fixture);
 
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({ body, comments: [comment({ author: 'drive-by-commenter' })] }),
@@ -961,6 +985,7 @@ describe('result provenance cannot be spoofed through the ingestion path', () =>
     const { taskId, body } = dispatched(fixture);
 
     const result = ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({
@@ -984,6 +1009,7 @@ describe('result provenance cannot be spoofed through the ingestion path', () =>
     const before = fixture.ops.queue.evidence.list(taskId).length;
 
     ingestClaudeResult(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       target: TARGET,
       transport: transport({

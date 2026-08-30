@@ -118,7 +118,7 @@ function approvedOrder(f: Fixture): string {
 
 /** Publish the handoff, then age its lease exactly as six hours of clock would. */
 function dispatchedAndExpired(f: Fixture, taskId: string): void {
-  const sent = dispatchClaudeTask(f.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: PUBLISHES });
+  const sent = dispatchClaudeTask(f.ops, { evidence: f.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: PUBLISHES });
   if (!sent.ok) throw new Error(`expected a dispatch: ${sent.error.code}`);
   expect(sent.data.executionStarted).toBe(true);
   expect(dispatchHistory(f.ops, taskId).state).toBe('dispatched');
@@ -130,7 +130,7 @@ describe('a published handoff is a started execution', () => {
     const f = fixture();
     declareWorker(f, EXECUTOR);
     const taskId = approvedOrder(f);
-    const sent = dispatchClaudeTask(f.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: PUBLISHES });
+    const sent = dispatchClaudeTask(f.ops, { evidence: f.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: PUBLISHES });
     if (!sent.ok) throw new Error('expected a dispatch');
 
     const task = f.ops.queue.get(taskId)!;
@@ -165,6 +165,7 @@ describe('a published handoff is a started execution', () => {
     };
 
     const sent = dispatchClaudeTask(f.ops, {
+      evidence: f.dispatchEvidence,
       executorWorkerId: EXECUTOR,
       taskId,
       target: TARGET,
@@ -201,6 +202,7 @@ describe('a published handoff is a started execution', () => {
       });
 
     const sent = dispatchClaudeTask(f.ops, {
+      evidence: f.dispatchEvidence,
       executorWorkerId: EXECUTOR,
       taskId,
       target: TARGET,
@@ -254,7 +256,7 @@ describe('no second CLAUDE identity can execute the same approved action', () =>
     const f = fixture();
     declareWorker(f, EXECUTOR);
     const taskId = approvedOrder(f);
-    const sent = dispatchClaudeTask(f.ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: PUBLISHES });
+    const sent = dispatchClaudeTask(f.ops, { evidence: f.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: PUBLISHES });
     if (!sent.ok) throw new Error('expected a dispatch');
 
     // The exact ordering the PR's limitation note described.

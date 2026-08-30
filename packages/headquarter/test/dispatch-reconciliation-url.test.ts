@@ -116,7 +116,7 @@ function taskWithUnknownDispatch(fixture: Fixture): string {
       throw new Error('killed mid-flight');
     },
   };
-  dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId: placed.data.task.id, target: TARGET, transport: throwing });
+  dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId: placed.data.task.id, target: TARGET, transport: throwing });
   expect(dispatchHistory(fixture.ops, placed.data.task.id).state).toBe('unknown');
   return placed.data.task.id;
 }
@@ -126,6 +126,7 @@ describe('a reconciliation records only a URL that matches what it claims', () =
     const fixture = ordersFixture();
     const taskId = taskWithUnknownDispatch(fixture);
     const resolved = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'found',
       target: TARGET,
@@ -145,6 +146,7 @@ describe('a reconciliation records only a URL that matches what it claims', () =
     const fixture = ordersFixture();
     const taskId = taskWithUnknownDispatch(fixture);
     const resolved = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'found',
       target: TARGET,
@@ -179,6 +181,7 @@ describe('a reconciliation records only a URL that matches what it claims', () =
       const fixture = ordersFixture();
       const taskId = taskWithUnknownDispatch(fixture);
       const resolved = resolveUnknownDispatch(fixture.ops, {
+        evidence: fixture.dispatchEvidence,
         taskId,
         outcome: 'found',
         target: TARGET,
@@ -216,6 +219,7 @@ describe('a reconciliation records only a URL that matches what it claims', () =
       const fixture = ordersFixture();
       const taskId = taskWithUnknownDispatch(fixture);
       const resolved = resolveUnknownDispatch(fixture.ops, {
+        evidence: fixture.dispatchEvidence,
         taskId,
         outcome: 'found',
         target: TARGET,
@@ -232,6 +236,7 @@ describe('a reconciliation records only a URL that matches what it claims', () =
     const fixture = ordersFixture();
     const taskId = taskWithUnknownDispatch(fixture);
     const resolved = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'found',
       target: TARGET,
@@ -255,6 +260,7 @@ describe('a reconciliation records only a URL that matches what it claims', () =
     const fixture = ordersFixture();
     const taskId = taskWithUnknownDispatch(fixture);
     resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'found',
       target: TARGET,
@@ -275,6 +281,7 @@ describe('a reconciliation records only a URL that matches what it claims', () =
     const fixture = ordersFixture();
     const taskId = taskWithUnknownDispatch(fixture);
     resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'found',
       target: TARGET,
@@ -283,6 +290,7 @@ describe('a reconciliation records only a URL that matches what it claims', () =
       resolvedBy: 'chair',
     });
     const second = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'found',
       target: TARGET,
@@ -300,6 +308,7 @@ describe('a reconciliation records only a URL that matches what it claims', () =
     const fixture = ordersFixture();
     const taskId = taskWithUnknownDispatch(fixture);
     const resolved = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'not_dispatched',
       resolvedBy: 'chair',

@@ -41,7 +41,7 @@
  */
 
 import { openHqDatabase } from '../store/db.js';
-import { HeadquarterOperations } from '../application/service.js';
+import { HeadquarterOperations, type DispatchEvidenceGrant } from '../application/service.js';
 import {
   LOCAL_ADMIN_ACK_FLAG,
   LOCAL_ADMIN_INTERFACE_NOTICE,
@@ -100,8 +100,20 @@ function main(): void {
   if (!target) usage('--repo <owner>/<name> is required, and is verified against what HQ recorded.');
 
   const db = openHqDatabase(dbPath ?? undefined);
-  const ops = new HeadquarterOperations(db);
-  const result = ingestClaudeResult(ops, { taskId, target, transport: ghCliTransport() });
+  // This process is the composition root, so it is the one place the
+  // dispatch-only evidence capability is handed out (issue #219, Option B). It
+  // is captured in a local and passed straight into the lane; nothing reads it
+  // off `ops`, because nothing can.
+  let evidence: DispatchEvidenceGrant | undefined;
+  const ops = new HeadquarterOperations(db, {
+    grantDispatchEvidence: (grant) => {
+      evidence = grant;
+    },
+  });
+  if (!evidence) {
+    throw new Error('The dispatch evidence grant was not issued; refusing to ingest without it.');
+  }
+  const result = ingestClaudeResult(ops, { taskId, target, transport: ghCliTransport(), evidence });
 
   if (!result.ok) {
     console.error(`Ingestion refused (${result.error.code}): ${result.error.message}`);

@@ -122,6 +122,7 @@ function fixtureWithOrder(): { fixture: Fixture; taskId: string } {
 function taskWithUnknownDispatch(): { fixture: Fixture; taskId: string } {
   const { fixture, taskId } = fixtureWithOrder();
   dispatchClaudeTask(fixture.ops, {
+    evidence: fixture.dispatchEvidence,
     executorWorkerId: EXECUTOR,
     taskId,
     target: TARGET,
@@ -136,6 +137,7 @@ describe('an ambiguous dispatch outcome may only be decided by approval authorit
     const { fixture, taskId } = taskWithUnknownDispatch();
 
     const result = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'not_dispatched',
       resolvedBy: 'nobody-in-particular',
@@ -160,6 +162,7 @@ describe('an ambiguous dispatch outcome may only be decided by approval authorit
   it('refuses a registered principal who does not hold approval authority', () => {
     const { fixture, taskId } = taskWithUnknownDispatch();
     const result = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'not_dispatched',
       resolvedBy: 'observer',
@@ -171,6 +174,7 @@ describe('an ambiguous dispatch outcome may only be decided by approval authorit
   it('refuses the executing worker — worker identity never carries this', () => {
     const { fixture, taskId } = taskWithUnknownDispatch();
     const result = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'not_dispatched',
       resolvedBy: EXECUTOR,
@@ -182,6 +186,7 @@ describe('an ambiguous dispatch outcome may only be decided by approval authorit
   it("refuses 'system' — a human principal is required", () => {
     const { fixture, taskId } = taskWithUnknownDispatch();
     const result = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'not_dispatched',
       resolvedBy: 'system',
@@ -199,6 +204,7 @@ describe('an ambiguous dispatch outcome may only be decided by approval authorit
   it('leaves the next dispatch refusing, so no second issue is published', () => {
     const { fixture, taskId } = taskWithUnknownDispatch();
     resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'not_dispatched',
       resolvedBy: 'nobody-in-particular',
@@ -206,6 +212,7 @@ describe('an ambiguous dispatch outcome may only be decided by approval authorit
 
     const second = transport();
     const redispatch = dispatchClaudeTask(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       executorWorkerId: EXECUTOR,
       taskId,
       target: TARGET,
@@ -221,6 +228,7 @@ describe('an ambiguous dispatch outcome may only be decided by approval authorit
   it('still lets a genuine approval-authority principal reconcile', () => {
     const { fixture, taskId } = taskWithUnknownDispatch();
     const result = resolveUnknownDispatch(fixture.ops, {
+      evidence: fixture.dispatchEvidence,
       taskId,
       outcome: 'not_dispatched',
       resolvedBy: 'coo',

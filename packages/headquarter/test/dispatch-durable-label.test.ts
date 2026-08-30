@@ -51,7 +51,11 @@ const EXECUTOR = 'claude-executor';
  * plane rather than by writing rows, so every gate this file leaves alone is
  * genuinely in place.
  */
-function dispatchFixture(options: { approve?: boolean } = {}): { ops: Fixture['ops']; taskId: string } {
+function dispatchFixture(options: { approve?: boolean } = {}): {
+  ops: Fixture['ops'];
+  evidence: Fixture['dispatchEvidence'];
+  taskId: string;
+} {
   const fixture = setupFixture();
   registerDirectOrderCapability(fixture.db);
   fixture.principals.register({
@@ -90,7 +94,7 @@ function dispatchFixture(options: { approve?: boolean } = {}): { ops: Fixture['o
     const task = fixture.ops.queue.get(taskId)!;
     expectOk(fixture.ops.approveTask({ taskId, founderId: 'coo', expectedActionDigest: taskActionDigest(task) }));
   }
-  return { ops: fixture.ops, taskId };
+  return { ops: fixture.ops, evidence: fixture.dispatchEvidence, taskId };
 }
 
 interface Recorder {
@@ -145,10 +149,10 @@ function stub(options: {
 
 describe('every dispatched issue carries the durable HQ label', () => {
   it('applies it, without the caller asking for it', () => {
-    const { ops, taskId } = dispatchFixture();
+    const { ops, evidence, taskId } = dispatchFixture();
     const transport = stub({});
 
-    const result = dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    const result = dispatchClaudeTask(ops, { evidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
 
     expect(result.ok).toBe(true);
     expect(transport.rec.issues).toHaveLength(1);
@@ -159,10 +163,10 @@ describe('every dispatched issue carries the durable HQ label', () => {
     // Order is the property, not merely that both happened: `gh` refuses a label
     // it cannot resolve, so ensuring it after publication would be ensuring it
     // for an issue that was never created.
-    const { ops, taskId } = dispatchFixture();
+    const { ops, evidence, taskId } = dispatchFixture();
     const transport = stub({});
 
-    dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    dispatchClaudeTask(ops, { evidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
 
     expect(transport.rec.order).toEqual(['ensureLabel', 'createIssue']);
     expect(transport.rec.labels).toEqual([
@@ -171,10 +175,10 @@ describe('every dispatched issue carries the durable HQ label', () => {
   });
 
   it('keeps caller-supplied labels, and does not send the HQ one twice', () => {
-    const { ops, taskId } = dispatchFixture();
+    const { ops, evidence, taskId } = dispatchFixture();
     const transport = stub({});
 
-    dispatchClaudeTask(ops, {
+    dispatchClaudeTask(ops, { evidence,
       executorWorkerId: EXECUTOR,
       taskId,
       target: TARGET,
@@ -188,10 +192,10 @@ describe('every dispatched issue carries the durable HQ label', () => {
   it('still carries the body marker, because the two sources are a union', () => {
     // Issues dispatched before the label existed have only the marker, so
     // dropping it would un-guard everything already in flight.
-    const { ops, taskId } = dispatchFixture();
+    const { ops, evidence, taskId } = dispatchFixture();
     const transport = stub({});
 
-    dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    dispatchClaudeTask(ops, { evidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
 
     expect(transport.rec.issues[0]!.body).toContain(HQ_DISPATCH_MARKER);
   });
@@ -199,10 +203,10 @@ describe('every dispatched issue carries the durable HQ label', () => {
 
 describe('a durable record that cannot be established publishes nothing', () => {
   it('refuses when the repository cannot be prepared for the label', () => {
-    const { ops, taskId } = dispatchFixture();
+    const { ops, evidence, taskId } = dispatchFixture();
     const transport = stub({ label: { ok: false, message: 'HTTP 403: Resource not accessible' } });
 
-    const result = dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    const result = dispatchClaudeTask(ops, { evidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
@@ -214,10 +218,10 @@ describe('a durable record that cannot be established publishes nothing', () => 
   });
 
   it('refuses when the transport throws preparing it', () => {
-    const { ops, taskId } = dispatchFixture();
+    const { ops, evidence, taskId } = dispatchFixture();
     const transport = stub({ label: 'throw' });
 
-    const result = dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    const result = dispatchClaudeTask(ops, { evidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
@@ -230,10 +234,10 @@ describe('a durable record that cannot be established publishes nothing', () => 
     // The refusal happens before the reservation and before the claim, so the
     // Founder approval is NOT consumed and the task is still dispatchable once
     // the label problem is fixed.
-    const { ops, taskId } = dispatchFixture();
+    const { ops, evidence, taskId } = dispatchFixture();
     const before = ops.queue.get(taskId)!;
 
-    dispatchClaudeTask(ops, {
+    dispatchClaudeTask(ops, { evidence,
       executorWorkerId: EXECUTOR,
       taskId,
       target: TARGET,
@@ -246,17 +250,17 @@ describe('a durable record that cannot be established publishes nothing', () => 
 
     // ...and the retry, with the label problem fixed, publishes normally.
     const healthy = stub({});
-    expect(dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: healthy }).ok).toBe(
+    expect(dispatchClaudeTask(ops, { evidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: healthy }).ok).toBe(
       true,
     );
     expect(healthy.rec.issues[0]!.labels).toContain(HQ_DISPATCH_LABEL);
   });
 
   it('accepts a label that already existed', () => {
-    const { ops, taskId } = dispatchFixture();
+    const { ops, evidence, taskId } = dispatchFixture();
     const transport = stub({ label: { ok: true, created: false } });
 
-    expect(dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }).ok).toBe(true);
+    expect(dispatchClaudeTask(ops, { evidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }).ok).toBe(true);
     expect(transport.rec.issues[0]!.labels).toContain(HQ_DISPATCH_LABEL);
   });
 
@@ -279,8 +283,8 @@ describe('a durable record that cannot be established publishes nothing', () => 
     const transport = stub({});
     expect(typeof transport.ensureLabel).toBe('function');
 
-    const { ops, taskId } = dispatchFixture();
-    expect(dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }).ok).toBe(true);
+    const { ops, evidence, taskId } = dispatchFixture();
+    expect(dispatchClaudeTask(ops, { evidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport }).ok).toBe(true);
     // Prepared FIRST, then the issue carries it. Both, not either.
     expect(transport.rec.labels).toHaveLength(1);
     expect(transport.rec.issues[0]!.labels).toContain(HQ_DISPATCH_LABEL);
@@ -303,10 +307,10 @@ describe('the label step does not disturb the refusal ordering', () => {
   it('an ineligible task is refused before the label is even considered', () => {
     // Preparing a label is a repository WRITE. A task that was never going to be
     // dispatched must not cause one.
-    const { ops, taskId } = dispatchFixture({ approve: false });
+    const { ops, evidence, taskId } = dispatchFixture({ approve: false });
     const transport = stub({});
 
-    const result = dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    const result = dispatchClaudeTask(ops, { evidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
@@ -316,12 +320,12 @@ describe('the label step does not disturb the refusal ordering', () => {
   });
 
   it('an unauthenticated transport is refused before the label is considered', () => {
-    const { ops, taskId } = dispatchFixture();
+    const { ops, evidence, taskId } = dispatchFixture();
     const transport = stub({
       status: { authenticated: false, account: null, missingFacts: ['GH_AUTH_ACCOUNT'], reason: 'no session' },
     });
 
-    const result = dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    const result = dispatchClaudeTask(ops, { evidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
@@ -334,7 +338,7 @@ describe('the label step does not disturb the refusal ordering', () => {
     // it belongs after every check that can refuse — including the one that
     // reads the rendered body. A refusal must not leave a label behind for an
     // issue that was never going to exist.
-    const { ops } = dispatchFixture();
+    const { ops, evidence } = dispatchFixture();
     // `submitDirectOrder` refuses an obvious credential at creation, so the task
     // is written past that guard to reach the DISPATCH boundary's own check.
     const created = expectOk(
@@ -349,7 +353,7 @@ describe('the label step does not disturb the refusal ordering', () => {
     expectOk(ops.approveTask({ taskId: leaky.id, founderId: 'coo', expectedActionDigest: taskActionDigest(leaky) }));
     const transport = stub({});
 
-    const result = dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId: leaky.id, target: TARGET, transport });
+    const result = dispatchClaudeTask(ops, { evidence, executorWorkerId: EXECUTOR, taskId: leaky.id, target: TARGET, transport });
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
@@ -359,12 +363,12 @@ describe('the label step does not disturb the refusal ordering', () => {
   });
 
   it('a repeat dispatch is answered from evidence without preparing the label again', () => {
-    const { ops, taskId } = dispatchFixture();
+    const { ops, evidence, taskId } = dispatchFixture();
     const first = stub({});
-    dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: first });
+    dispatchClaudeTask(ops, { evidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: first });
 
     const second = stub({});
-    const repeat = dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: second });
+    const repeat = dispatchClaudeTask(ops, { evidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: second });
 
     expect(repeat.ok).toBe(true);
     expect(second.rec.issues).toHaveLength(0);
@@ -495,7 +499,7 @@ describe('a label failure is never proven-not-submitted', () => {
     // The whole point, driven end to end rather than asserted on the classifier:
     // the issue may already exist, so the next dispatch must refuse rather than
     // create a second one.
-    const { ops, taskId } = dispatchFixture();
+    const { ops, evidence, taskId } = dispatchFixture();
     const failing = stub({
       result: {
         ok: false,
@@ -504,14 +508,14 @@ describe('a label failure is never proven-not-submitted', () => {
       },
     });
 
-    const first = dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: failing });
+    const first = dispatchClaudeTask(ops, { evidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: failing });
     expect(first.ok).toBe(false);
 
     // The attempt is outstanding, NOT failed — nothing proved the issue absent.
     expect(dispatchHistory(ops, taskId).state).toBe('unknown');
 
     const second = stub({});
-    const retry = dispatchClaudeTask(ops, { executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: second });
+    const retry = dispatchClaudeTask(ops, { evidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport: second });
 
     expect(retry.ok).toBe(false);
     if (retry.ok) throw new Error('unreachable');

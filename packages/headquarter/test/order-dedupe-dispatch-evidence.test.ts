@@ -131,6 +131,7 @@ function dispatchedOrder(fixture: Fixture): string {
   expect(approved.ok).toBe(true);
 
   const sent = dispatchClaudeTask(fixture.ops, {
+    evidence: fixture.dispatchEvidence,
     executorWorkerId: EXECUTOR,
     taskId: placed.data.task.id,
     target: TARGET,
@@ -224,7 +225,7 @@ describe('the fix does not turn every blocked order into a clear one', () => {
       },
     };
     expect(
-      dispatchClaudeTask(fixture.ops, { executorWorkerId: EXECUTOR, taskId: placed.data.task.id, target: TARGET, transport: throwing }).ok,
+      dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId: placed.data.task.id, target: TARGET, transport: throwing }).ok,
     ).toBe(false);
     expect(dispatchHistory(fixture.ops, placed.data.task.id).state).toBe('unknown');
 
