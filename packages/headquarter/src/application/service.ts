@@ -1335,6 +1335,29 @@ export class HeadquarterOperations {
   }
 
   /**
+   * May `actor` decide an ambiguous external outcome? Returns the refusal
+   * reason, or null when they may (issue #219, ChatGPT blocking finding on
+   * `173cd30`).
+   *
+   * Reconciling an `unknown` dispatch is the act of declaring whether a public
+   * side effect happened. Getting it wrong in one direction publishes a second
+   * GitHub issue for work already dispatched, so it is a decision about an
+   * irreversible external act — the same class the Founder gate exists for, and
+   * it was previously taken on an unauthenticated caller-supplied string.
+   *
+   * This deliberately introduces NO new identity mechanism. It is the same
+   * boundary `approveTask`/`denyTask` already use: `'system'` is refused, a
+   * registered worker is refused because worker identity never carries approval
+   * authority, and the id must resolve to a principal holding it. A refusal is
+   * audited, exactly as an approval refusal is.
+   */
+  reconciliationAuthorityRefusal(actor: string): string | null {
+    const refusal = this.#assertApprovalAuthority(actor, 'reconcile an unknown dispatch outcome');
+    if (!refusal || refusal.ok) return null;
+    return refusal.error.message;
+  }
+
+  /**
    * The canonical registry row for a capability, straight from the database.
    *
    * For callers making an ENFORCEMENT decision about a capability's definition.

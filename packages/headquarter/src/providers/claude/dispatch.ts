@@ -1454,6 +1454,26 @@ export function resolveUnknownDispatch(
   if (!input.resolvedBy?.trim()) {
     return refuse('task_not_eligible', 'A dispatch reconciliation must record who decided it.');
   }
+  // AUTHENTICATE the decider, before anything is written (issue #219, ChatGPT
+  // blocking finding on `173cd30`).
+  //
+  // `resolvedBy` used to be recorded verbatim and checked only for being
+  // non-empty, so any string closed an `unknown` attempt. Closing one in the
+  // `not_dispatched` direction returns `dispatchHistory` to `none` and makes a
+  // later dispatch eligible as if nothing might already have been published —
+  // the duplicate-publication path #221/#224 hardened against everywhere else.
+  //
+  // Deciding whether an irreversible external side effect happened is the same
+  // class of judgement the Founder gate exists for, so it goes through the same
+  // boundary `approveTask` uses. No new identity mechanism: `'system'` and
+  // registered workers are refused, and the id must resolve to a principal
+  // holding approval authority.
+  const authorityRefusal = ops.reconciliationAuthorityRefusal(input.resolvedBy.trim());
+  if (authorityRefusal) {
+    return refuse('task_not_eligible', `Reconciliation refused: ${authorityRefusal}`, {
+      resolvedBy: input.resolvedBy.trim(),
+    });
+  }
   if (input.outcome === 'not_dispatched') {
     const claimed = claimReconciliation(ops, input.taskId, () => {
       ops.appendSystemEvidence({
