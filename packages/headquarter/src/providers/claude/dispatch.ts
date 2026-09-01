@@ -967,7 +967,57 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
 
   const eligibility = claudeDispatchEligibility(ops, taskId, now());
   if (!eligibility.eligible) {
-    return refuseAndRecordBestEffort(eligibility.code, eligibility.message, eligibility.details);
+    // A DEAD APPROVAL IS A REFUSAL AND A CONSEQUENCE, NOT JUST A REFUSAL
+    // (issue #226, the Founder-workstation blocker after PR #225).
+    //
+    // Everything above still holds: nothing is claimed, nothing is published,
+    // and no approval is consumed — an expired approval never dispatches. What
+    // was missing is what happens to the TASK afterwards.
+    //
+    // `claim()` has always applied the canonical consequence for an approval
+    // that no longer admits execution: record it, clear the stale binding, and
+    // send the task back to `needs_approval` for a fresh Founder decision. But
+    // this lane asks eligibility BEFORE it claims — deliberately, so a refusal
+    // costs no claim — so for a task whose approval expired while it sat
+    // `queued`, `claim()` was never reached and that consequence never ran. The
+    // task stayed `queued` with a dead approval, and `approveTask` accepts
+    // `needs_approval` only: a live order that could be neither authorised nor
+    // executed by any supported path.
+    //
+    // So the consequence is applied here instead of being skipped. It is the
+    // SAME canonical operation, not a dispatch-lane variant of it: the queue
+    // re-validates the approval itself and decides the destination itself, so
+    // the two hostile rejections still BLOCK for investigation rather than
+    // becoming re-approvable, and a still-valid approval is left untouched.
+    //
+    // Only on `approval_invalid`. Every other refusal describes something this
+    // lane has no business acting on — an unknown task, a disabled capability,
+    // an engaged kill switch, a task another worker already holds.
+    let applied: { rejection: string | null; status: string } | null = null;
+    if (eligibility.code === 'approval_invalid') {
+      const returned = ops.returnForFreshApproval(taskId);
+      if (returned.ok && returned.data.returned) {
+        applied = { rejection: returned.data.rejection, status: returned.data.status };
+      }
+    }
+    // The two destinations read differently because they ARE different, and
+    // saying "a fresh approval can be given" over a task the canonical layer
+    // just blocked for a mutated action would be the same class of untruth this
+    // correction round exists to remove.
+    const consequence = applied
+      ? applied.status === 'needs_approval'
+        ? ' The task has been returned to needs_approval, so a fresh Founder approval can be ' +
+          'given through the ordinary approval flow. Nothing was claimed, published or approved, ' +
+          'and the stale approval stays recorded as immutable evidence.'
+        : ` The task is now ${applied.status}: this rejection means the approved action itself no ` +
+          'longer matches, which is investigated rather than re-approved. Nothing was claimed or ' +
+          'published.'
+      : '';
+    return refuseAndRecordBestEffort(
+      eligibility.code,
+      `${eligibility.message}${consequence}`,
+      applied ? { ...(eligibility.details ?? {}), returnedForFreshApproval: applied } : eligibility.details,
+    );
   }
 
   const status = options.transport.status();

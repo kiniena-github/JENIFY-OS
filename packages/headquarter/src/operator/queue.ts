@@ -66,6 +66,36 @@ export interface PrivilegedQueueApi {
    */
   reconcile(taskId: string, decision: ReconcileDecision, by: string, note: string): OperatorTask;
   /**
+   * Re-evaluate an approval-gated task's approval and apply the SAME canonical
+   * consequence `claim()` applies when it no longer admits execution
+   * (issue #226).
+   *
+   * It exists because a caller can legitimately discover a dead approval
+   * WITHOUT reaching the claim: `providers/claude/dispatch.ts` asks
+   * `claudeDispatchEligibility` first, so an expired approval refused the
+   * dispatch before `claim()` — the only thing that runs the boundary
+   * recovery — was ever attempted. The task then sat `queued` with an expired
+   * approval forever: `approveTask` accepts `needs_approval` only, so no
+   * supported path could give it a fresh Founder decision.
+   *
+   * This grants NOTHING. It cannot approve, extend, or revive an approval, and
+   * it is a no-op whenever the approval still admits execution — so it can
+   * never be used to strip a valid one. What it does is exactly what the
+   * execution boundary would have done: record the rejection, clear the stale
+   * binding (the immutable `hq_approvals` row is never touched), and send the
+   * task back for a fresh Founder decision — or BLOCK it, unchanged, for the
+   * two hostile rejections (`approval_digest_mismatch`,
+   * `approval_claim_binding_mismatch`). That decision stays where it already
+   * lives; this never re-implements it.
+   *
+   * Privileged because it writes attributed evidence and moves a task between
+   * canonical states, and the queue resolves no identity of its own.
+   *
+   * Returns the rejection that was applied, or null when the approval is still
+   * good (or the capability needs none) and nothing was written.
+   */
+  returnForFreshApproval(taskId: string): ApprovalRejection | null;
+  /**
    * Task ORIGINATION. I classified this as a worker execution operation and
    * wrote that each such operation is "fence-guarded against the claim the
    * caller actually holds". That was simply false for `enqueue`: it holds no
@@ -397,6 +427,7 @@ export class OperatorQueue {
       reviewPass: (taskId, reviewerId, note) => this.#reviewPass(taskId, reviewerId, note),
       reviewFail: (taskId, reviewerId, reason) => this.#reviewFail(taskId, reviewerId, reason),
       reconcile: (taskId, decision, by, note) => this.#reconcile(taskId, decision, by, note),
+      returnForFreshApproval: (taskId) => this.#returnForFreshApproval(taskId),
       enqueue: (req) => this.#enqueue(req),
       appendEvidence: (entry) => this.#evidence.append(entry),
       reserve: (fn) => this.#evidence.reserve(fn),
@@ -1362,6 +1393,35 @@ export class OperatorQueue {
     this.#db
       .prepare(`UPDATE op_tasks SET claimed_by = NULL, lease_expires_at = NULL, claim_nonce = NULL WHERE id = ?`)
       .run(task.id);
+  }
+
+  /**
+   * Apply the execution-boundary consequence to a task whose approval a caller
+   * discovered is dead WITHOUT having reached the claim (issue #226).
+   *
+   * See `PrivilegedQueueApi.returnForFreshApproval` for why this is reachable at
+   * all. The whole method is deliberately a thin composition of the two
+   * functions `claim()` already uses — `#validateTaskApproval` then
+   * `#rejectAtExecutionBoundary` — so there is exactly one definition of "does
+   * this approval still admit execution" and exactly one definition of what
+   * happens when it does not. Re-deciding either here is how the two would
+   * drift, and a softer copy of the second is how an expired approval would
+   * eventually admit something.
+   *
+   * A capability that needs no approval, and an approval that is still good,
+   * both write NOTHING and return null.
+   */
+  #returnForFreshApproval(taskId: string): ApprovalRejection | null {
+    const task = this.#getTask(taskId);
+    if (!task) throw new Error(`Unknown task: ${taskId}`);
+    const cap = this.#capabilityOf(task.capabilityId);
+    // Deny-by-default has nothing to say here: an ungated capability has no
+    // approval to be stale, so there is no consequence to apply.
+    if (!cap || !approvalRequired(cap, this.#policyCtx)) return null;
+    const rejection = this.#validateTaskApproval(task);
+    if (!rejection) return null;
+    this.#rejectAtExecutionBoundary(task, rejection);
+    return rejection;
   }
 
   /** Shared guard for reviewPass/reviewFail: pending review + independent reviewer. */
