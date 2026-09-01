@@ -567,3 +567,125 @@ export function approvalsConsoleScript(): string {
 })();
 </script>`;
 }
+
+/**
+ * Connection Center: CLAUDE's live dispatch truth (issue #226, correction
+ * round on #225 — "two Founder-facing pages contradicting each other about
+ * the same real execution path").
+ *
+ * ## The defect this closes
+ *
+ * The `anthropic-claude` card on this page is otherwise rendered ENTIRELY at
+ * site-build time by `live/connections.assessConnections`, which asks the
+ * routing dispatch contract whether `CLAUDE_ROUTINE_URL`/`CLAUDE_ROUTINE_TOKEN`
+ * are present. Those are GitHub Actions workflow secrets, deliberately absent
+ * on the Founder workstation, where CLAUDE actually dispatches through the
+ * authenticated `gh` transport instead
+ * (`providers/claude/dispatch-availability.ts`). The build-time render
+ * therefore said CLAUDE was NOT CONNECTED on this page while the SAME
+ * transport observation, reused by `control-api.ts` as `dispatchAvailability`,
+ * already told the Command Center composer CLAUDE was dispatchable — two
+ * Founder-facing pages disagreeing about the same real execution path.
+ *
+ * ## Why this reads `/session`'s `routes`, and invents nothing of its own
+ *
+ * `GET /api/hq/control/session` already returns, for every resolved Founder,
+ * `routes: DIRECT_ORDER_ROUTES.map(route => resolveOrderRoute(route,
+ * secretsEnv, { providerDispatchable: deps.dispatchAvailability }))` — the
+ * EXACT seam the Command Center composer already reads to decide whether the
+ * CLAUDE radio is offered as connected. Reading the SAME field here, rather
+ * than adding a second endpoint or re-deriving a transport observation
+ * client-side, is what makes it structurally impossible for the two pages to
+ * disagree: they read one server computation, not two.
+ *
+ * `resolveOrderRoute` already carries the null-fallback this script relies
+ * on: when a host has no live transport observation for CLAUDE
+ * (`dispatchAvailability` returns null — a static preview, CI, or a host with
+ * no `gh` at all), its `connected` verdict falls back to the same
+ * routing-contract fact-presence check the build-time render already used, so
+ * this script's patch is then a same-truth no-op rather than an invented
+ * connection (issue #226 test: "unknown dispatch availability never invents
+ * a connected status").
+ *
+ * ## What it never does
+ *
+ * It touches ONE card (`anthropic-claude`) and the KPI tiles that count
+ * connection states. Every other catalogue row — Codex included — is left
+ * exactly as the static build rendered it: this correction is scoped to the
+ * demonstrated CLAUDE defect, never a general "trust the browser" rule. An
+ * unreachable control API (a static preview, a host with HQ control off, or a
+ * genuine network failure) leaves the build-time card exactly as it was.
+ */
+export function connectionsLiveScript(
+  dispatchable: { label: string; tone: string },
+  notConnected: { label: string; tone: string },
+): string {
+  return `<script>
+(function () {
+  if (typeof window.fetch !== 'function') return;
+  var card = document.querySelector('[data-connection="anthropic-claude"]');
+  if (!card) return;
+  var chipMount = card.querySelector('[data-connection-state-chip]');
+  var reasonEl = card.querySelector('[data-connection-reason]');
+  if (!chipMount || !reasonEl) return;
+
+  var SESSION_PATH = ${jsonForScript(CONTROL_ROUTES.session)};
+  var DISPATCHABLE = ${jsonForScript(dispatchable)};
+  var NOT_CONNECTED = ${jsonForScript(notConnected)};
+
+  function setChip(presentation) {
+    chipMount.textContent = '';
+    var span = document.createElement('span');
+    span.className = 'chip tone-' + presentation.tone;
+    var dot = document.createElement('span');
+    dot.className = 'dot';
+    dot.setAttribute('aria-hidden', 'true');
+    span.appendChild(dot);
+    span.appendChild(document.createTextNode(presentation.label));
+    chipMount.appendChild(span);
+  }
+
+  // Recomputed from every card's effective state rather than adjusted by
+  // delta, so the KPI row is always a true tally of what is actually drawn —
+  // self-correcting whatever the CLAUDE card's build-time state happened to
+  // be, with no assumption about which single bucket it came from.
+  function recomputeKpis() {
+    var buckets = { connected: 0, dispatchable: 0, configured: 0, setup_required: 0, not_connected: 0, error: 0 };
+    var cards = document.querySelectorAll('[data-connection]');
+    for (var i = 0; i < cards.length; i++) {
+      var state = cards[i].getAttribute('data-connection-live-state') || cards[i].getAttribute('data-connection-static-state');
+      if (state && Object.prototype.hasOwnProperty.call(buckets, state)) buckets[state] += 1;
+    }
+    for (var key in buckets) {
+      if (!Object.prototype.hasOwnProperty.call(buckets, key)) continue;
+      var tile = document.querySelector('[data-kpi="' + key + '"] .kpi-value');
+      if (tile) tile.textContent = String(buckets[key]);
+    }
+  }
+
+  fetch(SESSION_PATH, { headers: { accept: 'application/json' } })
+    .then(function (response) { return response.json(); })
+    .then(function (session) {
+      if (session == null || typeof session !== 'object' || !Array.isArray(session.routes)) return;
+      var entry = null;
+      for (var i = 0; i < session.routes.length; i++) {
+        var candidate = session.routes[i];
+        if (candidate && candidate.requested === 'CLAUDE') { entry = candidate; break; }
+      }
+      // An unreadable or absent CLAUDE entry is not this script's business to
+      // interpret — the build-time card stands rather than being guessed at.
+      if (entry == null || typeof entry.reason !== 'string') return;
+      var live = entry.connected === true ? DISPATCHABLE : NOT_CONNECTED;
+      setChip(live);
+      reasonEl.textContent = 'Live, from the same-origin control API just now: ' + entry.reason;
+      card.setAttribute('data-connection-live-state', entry.connected === true ? 'dispatchable' : 'not_connected');
+      recomputeKpis();
+    })
+    .catch(function () {
+      // The control API is not reachable from this page (a static preview, a
+      // host with HQ control off, or genuinely offline) — the build-time card
+      // stands, exactly as it did before this script existed.
+    });
+})();
+</script>`;
+}

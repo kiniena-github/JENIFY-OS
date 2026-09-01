@@ -56,7 +56,11 @@ import {
 } from './components.js';
 import { archiveSearchScript, type ArchiveSearchRow } from './archive-search.js';
 import { liveRefreshScript } from './live-refresh.js';
-import { directOrderConsoleScript, approvalsConsoleScript } from './control-console.js';
+import {
+  directOrderConsoleScript,
+  approvalsConsoleScript,
+  connectionsLiveScript,
+} from './control-console.js';
 import {
   AUTH_MECHANISM_LABELS,
   CONNECTION_STATE_LABELS,
@@ -1097,13 +1101,13 @@ ${
     )}</span>
 </div>`;
 
-    return `<article class="card" data-connection="${escapeHtml(status.id)}">
-<p class="row">${chip(CONNECTION_STATE_LABELS[status.state], CONNECTION_STATE_TONE[status.state], true)}${chip(
+    return `<article class="card" data-connection="${escapeHtml(status.id)}" data-connection-static-state="${escapeHtml(status.state)}">
+<p class="row"><span data-connection-state-chip>${chip(CONNECTION_STATE_LABELS[status.state], CONNECTION_STATE_TONE[status.state], true)}</span>${chip(
       AUTH_MECHANISM_LABELS[status.authMechanism],
       'neutral',
     )}${chip(status.locality === 'local' ? 'Local' : 'Cloud', 'neutral')}</p>
 <h3>${escapeHtml(status.displayName)}</h3>
-<p class="muted">${escapeHtml(status.reason)}</p>
+<p class="muted" data-connection-reason>${escapeHtml(status.reason)}</p>
 ${capabilities}
 <div class="record-meta">
 ${facts}
@@ -1117,18 +1121,22 @@ ${controls}
 
   const body = `<p class="readonly-note">${escapeHtml(CONNECTIONS_NOTE)}</p>
 ${kpiRow([
-  { label: 'Connected', value: counts.connected, hint: 'a live check succeeded', tone: counts.connected > 0 ? 'accent' : 'neutral' },
-  { label: 'Dispatchable', value: counts.dispatchable, hint: 'routable, never verified', tone: counts.dispatchable > 0 ? 'info' : 'neutral' },
-  { label: 'Configured', value: counts.configured, hint: 'credentials present, never verified', tone: counts.configured > 0 ? 'warn' : 'neutral' },
-  { label: 'Setup required', value: counts.setup_required, hint: 'partially configured', tone: counts.setup_required > 0 ? 'warn' : 'neutral' },
-  { label: 'Not connected', value: counts.not_connected, hint: 'no required fact observed' },
-  { label: 'Error', value: counts.error, hint: 'a check failed or the probe threw', tone: counts.error > 0 ? 'danger' : 'neutral' },
+  { id: 'connected', label: 'Connected', value: counts.connected, hint: 'a live check succeeded', tone: counts.connected > 0 ? 'accent' : 'neutral' },
+  { id: 'dispatchable', label: 'Dispatchable', value: counts.dispatchable, hint: 'routable, never verified', tone: counts.dispatchable > 0 ? 'info' : 'neutral' },
+  { id: 'configured', label: 'Configured', value: counts.configured, hint: 'credentials present, never verified', tone: counts.configured > 0 ? 'warn' : 'neutral' },
+  { id: 'setup_required', label: 'Setup required', value: counts.setup_required, hint: 'partially configured', tone: counts.setup_required > 0 ? 'warn' : 'neutral' },
+  { id: 'not_connected', label: 'Not connected', value: counts.not_connected, hint: 'no required fact observed' },
+  { id: 'error', label: 'Error', value: counts.error, hint: 'a check failed or the probe threw', tone: counts.error > 0 ? 'danger' : 'neutral' },
 ])}
 ${section(
   'CONNECTIONS',
   statuses.length === 0
     ? emptyState('No integration is catalogued.')
     : `<div class="grid grid-wide">${statuses.map(card).join('\n')}</div>`,
+)}
+${connectionsLiveScript(
+  { label: CONNECTION_STATE_LABELS.dispatchable, tone: CONNECTION_STATE_TONE.dispatchable },
+  { label: CONNECTION_STATE_LABELS.not_connected, tone: CONNECTION_STATE_TONE.not_connected },
 )}
 ${section(
   'ADDING A CONNECTION',
