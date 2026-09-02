@@ -58,11 +58,14 @@ export {
 } from './sso/contract.js';
 
 export {
+  backChannelUrl,
   checkBackChannelOrigin,
+  checkBackChannelUrl,
   describeBackChannelOriginRefusal,
   isLoopbackHostname,
   type BackChannelOriginCheck,
   type BackChannelOriginRefusal,
+  type BackChannelUrlCheck,
 } from './sso/origin.js';
 
 export {

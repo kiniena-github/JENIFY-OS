@@ -269,6 +269,45 @@ describe('the bridge refuses a cleartext back channel', () => {
     expect(new URL(res.headers.location as string).origin).toBe('https://app.example');
     await built!.close();
   });
+
+  /**
+   * Third correction round, Codex P2 — a path-mounted origin.
+   *
+   * `httpBackChannel` appended routes to the configured origin, so a prefix
+   * survived there; `beginHandoff` resolved the same routes against the origin's
+   * ROOT, so the prefix vanished from the browser redirect and from the
+   * `redirect_uri` that the identity host allow-lists. One value, two
+   * destinations, and a handoff that could not complete. Path mounting is not a
+   * requirement of A-4, so it is refused at boot rather than half supported.
+   */
+  it('REFUSES a path-mounted identity or HQ origin, at boot', async () => {
+    const cases: Record<string, string>[] = [
+      { HQ_SSO_IDENTITY_ORIGIN: 'https://app.example/identity' },
+      { HQ_SSO_HQ_ORIGIN: 'https://hq.example/hq' },
+      // Deceptive spellings: the route would be appended AFTER the query or the
+      // fragment, producing an address that reads like the real one.
+      { HQ_SSO_IDENTITY_ORIGIN: 'https://app.example?/api/sso/hq/authorize' },
+      { HQ_SSO_IDENTITY_ORIGIN: 'https://app.example#https://evil.example' },
+    ];
+    for (const overrides of cases) {
+      const log = await bridgeIsOff(overrides);
+      expect(log, JSON.stringify(overrides)).toContain('no path, query or fragment');
+      expect(log, JSON.stringify(overrides)).toContain('fail closed');
+    }
+  });
+
+  it('sends the browser to the route of the configured origin, root and all', async () => {
+    // With prefixes refused upstream, the two channels agree by construction:
+    // the redirect lands on the identity host's authorize route, and the
+    // redirect_uri is exactly this host's callback.
+    const built = await buildStandaloneHq({ env: env(SAFE), log: () => {} });
+    await built!.app.ready();
+    const res = await built!.app.inject({ method: 'GET', url: '/hq/index.html' });
+    const target = new URL(res.headers.location as string);
+    expect(target.pathname).toBe('/api/sso/hq/authorize');
+    expect(target.searchParams.get('redirect_uri')).toBe('https://hq.example/sso/callback');
+    await built!.close();
+  });
 });
 
 /* ------------------------------------------------------------------ */

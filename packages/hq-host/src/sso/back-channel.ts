@@ -18,7 +18,11 @@ import {
   type SsoRedeemResult,
   type SsoVerifyPasswordRequest,
 } from './contract.js';
-import { checkBackChannelOrigin, describeBackChannelOriginRefusal } from './origin.js';
+import {
+  backChannelUrl,
+  checkBackChannelOrigin,
+  describeBackChannelOriginRefusal,
+} from './origin.js';
 
 export interface IdentityBackChannel {
   /**
@@ -50,6 +54,11 @@ export interface IdentityBackChannel {
  * at construction, and not only in the environment loaders: a loader can be
  * bypassed by a future caller, a constructor cannot. The loaders still check
  * first, so an operator gets a boot-log explanation rather than a stack trace.
+ *
+ * That check also refuses a path-mounted origin (third correction round): this
+ * client appends route constants to `baseUrl`, so a prefix here was honoured
+ * while the browser redirect dropped it, and one configured value pointed the
+ * two channels at two different places.
  *
  * ## And it refuses to FOLLOW anything (second correction round)
  *
@@ -89,7 +98,7 @@ export function httpBackChannel(options: {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await doFetch(`${base}${path}`, {
+      const response = await doFetch(backChannelUrl(base, path), {
         method: 'POST',
         headers: {
           'content-type': 'application/json',

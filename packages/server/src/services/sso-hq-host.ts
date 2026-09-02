@@ -23,7 +23,9 @@
  *                                   e.g. https://hq.jenifylabs.com. Also where
  *                                   sign-out is announced, so it must be able
  *                                   to carry the service secret (TLS, or
- *                                   loopback).
+ *                                   loopback). An ORIGIN: no path, query or
+ *                                   fragment — the back-channel route is
+ *                                   appended to it.
  *   FACTORYOS_SSO_HQ_REDIRECT_URIS  comma-separated EXACT callback URLs. No
  *                                   prefixes, no wildcards, no defaults; empty
  *                                   ⇒ the bridge stays OFF rather than
@@ -41,14 +43,19 @@
  *
  * A plaintext non-loopback origin, anywhere: the audience receives the service
  * secret on the sign-out back channel, and a redirect URI receives a ticket.
- * `checkBackChannelOrigin` is the same rule the HQ half enforces, imported
- * rather than re-implemented so the two halves cannot drift apart.
+ * And, since the third correction round, an audience that is not an origin — a
+ * path, query or fragment on it addressed two different places depending on
+ * which channel was speaking. Both checks are the ones the HQ half enforces,
+ * imported rather than re-implemented so the two halves cannot drift apart:
+ * `checkBackChannelOrigin` for the audience, `checkBackChannelUrl` for the exact
+ * callback URLs, which carry a path legitimately.
  */
 
 import {
   SSO_HQ_ROUTES,
   SSO_SERVICE_AUTH_HEADER,
   checkBackChannelOrigin,
+  checkBackChannelUrl,
   describeBackChannelOriginRefusal,
 } from '@factoryos/hq-host';
 import { httpHqLogoutNotifier } from './sso-hq.js';
@@ -97,8 +104,13 @@ export function loadSsoHqPlane(
 
   // A redirect URI receives a ticket in its query string; over plaintext that
   // ticket is readable, and a ticket is a credential until it is consumed.
+  //
+  // `checkBackChannelUrl`, not `checkBackChannelOrigin`: a redirect URI is a
+  // whole address and carries `/sso/callback` legitimately. The origin check now
+  // refuses a path (third correction round), and applying it here would reject
+  // every correctly configured callback.
   for (const uri of redirectUris) {
-    const checked = checkBackChannelOrigin(uri);
+    const checked = checkBackChannelUrl(uri);
     if (!checked.ok) {
       log(describeBackChannelOriginRefusal('FACTORYOS_SSO_HQ_REDIRECT_URIS', uri, checked.reason));
       return null;

@@ -19,7 +19,8 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lte, or } from 'drizzle-orm';
+import { backChannelUrl } from '@factoryos/hq-host';
 import type { Db } from '../db/index.js';
 import { ssoHqTickets } from '../db/schema.js';
 import { newId } from '../util.js';
@@ -120,6 +121,19 @@ export function mintTicket(
       consumedAt: null,
     })
     .run();
+  // Housekeeping, on the ONE path that creates rows (third correction round).
+  // Opportunistic rather than scheduled: this server has no scheduler, and a
+  // timer would be a second lifecycle to own, to shut down cleanly and to keep
+  // from firing in tests. Pruning where the growth happens needs none of that,
+  // and the bound (`TICKET_PRUNE_BATCH`) is what keeps it cheap enough to sit on
+  // a sign-in path.
+  try {
+    pruneExpiredTickets(db, now);
+  } catch {
+    // Housekeeping must never fail a sign-in. The ticket above is already
+    // written and valid; a sweep that could not run leaves rows for the next
+    // mint to collect, which is the harmless failure of the two.
+  }
   return ticket;
 }
 
@@ -298,7 +312,7 @@ export function httpHqLogoutNotifier(options: {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 5_000);
       try {
-        const response = await doFetch(`${options.hqOrigin.replace(/\/+$/, '')}${options.path}`, {
+        const response = await doFetch(backChannelUrl(options.hqOrigin, options.path), {
           method: 'POST',
           headers: { 'content-type': 'application/json', [options.header]: options.serviceSecret },
           body: JSON.stringify({ originSessionId }),
@@ -330,16 +344,95 @@ export {
   type HqLogoutNotifier,
 } from './identity-revocation.js';
 
-/** Housekeeping: drop tickets that can no longer be redeemed. */
-export function pruneExpiredTickets(db: Db, now: Date = new Date()): number {
-  const rows = db.select().from(ssoHqTickets).all();
-  let removed = 0;
-  for (const row of rows) {
-    if (row.consumedAt != null || Date.parse(row.expiresAt) <= now.getTime()) {
-      db.delete(ssoHqTickets).where(eq(ssoHqTickets.id, row.id)).run();
-      removed += 1;
-    }
-  }
-  return removed;
+/**
+ * How many dead ticket rows one sweep may remove.
+ *
+ * The sweep runs on the mint path, so it must be bounded: a housekeeping pass
+ * that scales with the backlog would put an unbounded amount of work in front of
+ * a human's sign-in the first time it ran on a neglected table. One mint creates
+ * exactly one row and removes up to this many, so a backlog drains steadily
+ * across sign-ins instead of all at once, and steady state is reached after the
+ * first few.
+ */
+export const TICKET_PRUNE_BATCH = 200;
+
+/**
+ * How long a row stays after it stops being redeemable.
+ *
+ * Not zero, deliberately. A ticket that has just been consumed is exactly the
+ * row `redeemTicket` reads to answer `ticket_consumed`, which is the honest
+ * answer to a replay and the one an operator wants in the audit line. Deleting
+ * it the instant it is consumed would turn every replay into `ticket_unknown` —
+ * still refused, but no longer distinguishable from a typo. One ticket lifetime
+ * of grace keeps the precise answer for as long as a replay can plausibly be in
+ * flight, and costs at most one extra minute of rows.
+ */
+export const TICKET_PRUNE_RETENTION_MS = SSO_TICKET_TTL_MS;
+
+/**
+ * Housekeeping: drop tickets that can no longer be redeemed (third correction
+ * round, Codex P1).
+ *
+ * ## The defect this closes
+ *
+ * Every authorize INSERTS a row, and nothing ever deleted one: this function
+ * existed but had no caller, so consumed, invalidated and expired tickets grew
+ * without bound for the life of a deployment. Every one of those rows is dead
+ * weight on a table `redeemTicket` reads on the sign-in path, and the row
+ * carries `realm_id`, `account_id`, `display_name` and an identity session id —
+ * retaining them forever is a data-retention problem as well as a growth one.
+ *
+ * ## Why it is safe
+ *
+ * A row is removable only once it is BOTH un-redeemable and has been so for
+ * `retentionMs`. Un-redeemable means consumed (`consumed_at` set, by redemption
+ * or by trap E's invalidation) or past `expires_at` — exactly the two conditions
+ * `redeemTicket` refuses on, so nothing this deletes could have been redeemed by
+ * the next call. A live ticket matches neither and is never touched.
+ *
+ * The SQL filter narrows and bounds the read; the same test is then re-applied
+ * in JS against parsed instants before anything is deleted. That second pass is
+ * not redundant belt-and-braces for its own sake: the SQL comparison is
+ * lexicographic on ISO strings, and it must never be the only thing standing
+ * between a live sign-in ticket and a DELETE.
+ */
+export function pruneExpiredTickets(
+  db: Db,
+  now: Date = new Date(),
+  options: { limit?: number; retentionMs?: number } = {},
+): number {
+  const limit = options.limit ?? TICKET_PRUNE_BATCH;
+  const retentionMs = options.retentionMs ?? TICKET_PRUNE_RETENTION_MS;
+  if (limit <= 0) return 0;
+  const cutoffMs = now.getTime() - Math.max(0, retentionMs);
+  const cutoff = new Date(cutoffMs).toISOString();
+
+  const candidates = db
+    .select({
+      id: ssoHqTickets.id,
+      expiresAt: ssoHqTickets.expiresAt,
+      consumedAt: ssoHqTickets.consumedAt,
+    })
+    .from(ssoHqTickets)
+    // `lte` on a NULL `consumed_at` is NULL, never true, so an unconsumed ticket
+    // can only be selected by having expired.
+    .where(or(lte(ssoHqTickets.expiresAt, cutoff), lte(ssoHqTickets.consumedAt, cutoff)))
+    .limit(limit)
+    .all();
+
+  const doomed = candidates
+    .filter((row) => {
+      const expiredLongEnough = Date.parse(row.expiresAt) <= cutoffMs;
+      const consumedLongEnough =
+        row.consumedAt != null && Date.parse(row.consumedAt) <= cutoffMs;
+      // A timestamp this cannot parse yields NaN, every comparison is false, and
+      // the row survives. Keeping an unclassifiable row is the safe failure.
+      return expiredLongEnough || consumedLongEnough;
+    })
+    .map((row) => row.id);
+
+  if (doomed.length === 0) return 0;
+  db.delete(ssoHqTickets).where(inArray(ssoHqTickets.id, doomed)).run();
+  return doomed.length;
 }
 

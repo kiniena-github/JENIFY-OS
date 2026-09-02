@@ -17,7 +17,11 @@ import { describe, expect, it } from 'vitest';
 import Fastify from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import {
+  backChannelUrl,
+  beginHandoff,
   checkBackChannelOrigin,
+  checkBackChannelUrl,
+  describeBackChannelOriginRefusal,
   isLoopbackHostname,
   httpBackChannel,
   registerHqSsoRoutes,
@@ -25,6 +29,7 @@ import {
   HQ_SESSION_COOKIE,
   HQ_SSO_STATE_COOKIE,
   SSO_HQ_ROUTES,
+  SSO_IDENTITY_ROUTES,
   type IdentityBackChannel,
 } from '../src/index.js';
 import { openMemoryHqDatabase } from '@factoryos/headquarter/store';
@@ -34,7 +39,6 @@ describe('a back channel may not be cleartext to anywhere but loopback', () => {
     for (const origin of [
       'https://app.jenifylabs.com',
       'https://app.example:8443',
-      'https://app.example/identity',
       'https://127.0.0.1:3001',
     ]) {
       expect(checkBackChannelOrigin(origin), origin).toEqual({ ok: true, origin });
@@ -112,12 +116,19 @@ describe('a back channel may not be cleartext to anywhere but loopback', () => {
     }
   });
 
-  it('returns the origin unchanged except for trailing slashes', () => {
-    // A validator that silently rewrote a configured value would be its own
-    // hazard — a path-mounted identity host must keep working.
-    expect(checkBackChannelOrigin('https://app.example/identity/')).toEqual({
+  it('canonicalises an accepted origin and drops trailing slashes', () => {
+    // A narrowing, never a widening: only spellings of the SAME origin collapse.
+    expect(checkBackChannelOrigin('https://app.example/')).toEqual({
       ok: true,
-      origin: 'https://app.example/identity',
+      origin: 'https://app.example',
+    });
+    expect(checkBackChannelOrigin('  https://app.example  ')).toEqual({
+      ok: true,
+      origin: 'https://app.example',
+    });
+    expect(checkBackChannelOrigin('http://127.1:3001')).toEqual({
+      ok: true,
+      origin: 'http://127.0.0.1:3001',
     });
   });
 
@@ -225,5 +236,167 @@ describe('HQ sends the state on with the ticket (P1-1, HQ half)', () => {
     expect(called, 'a mismatched state must not even be sent onward').toBe(false);
     expect(res.cookies.find((c) => c.name === HQ_SESSION_COOKIE)).toBeUndefined();
     await app.close();
+  });
+});
+
+/**
+ * Third correction round, Codex P2: a configured origin must mean ONE thing.
+ *
+ * The back channel built its URL by concatenation, so a path prefix survived;
+ * the browser redirect used `new URL(route, origin)` against a route constant
+ * that starts with `/`, so the same prefix was silently dropped. One configured
+ * value, two destinations — and the `redirect_uri` HQ then sent matched no
+ * allow-list entry, so the handoff could not complete at all.
+ *
+ * Path mounting is not a requirement of A-4, so the ambiguity is refused rather
+ * than supported twice: an ORIGIN may not carry a path, a query or a fragment,
+ * and it is refused at boot with a message that says why.
+ */
+describe('a configured ORIGIN is an origin, not a mount point', () => {
+  it('REFUSES a path-mounted identity or HQ origin', () => {
+    for (const origin of [
+      'https://app.example/identity',
+      'https://app.example/identity/',
+      'https://hq.example/hq',
+      'http://127.0.0.1:3001/identity',
+    ]) {
+      expect(checkBackChannelOrigin(origin), origin).toEqual({
+        ok: false,
+        reason: 'path_mounted_origin',
+      });
+    }
+    // A bare root is NOT a path: it is the ordinary spelling of an origin.
+    expect(checkBackChannelOrigin('https://app.example/').ok).toBe(true);
+  });
+
+  it('REFUSES a query or a fragment, which are the deceptive spellings', () => {
+    for (const origin of [
+      'https://app.example?next=https://evil.example',
+      'https://app.example#https://evil.example',
+      'https://app.example/?x=1',
+      // The route would be appended AFTER the query, producing an address that
+      // reads as the real one and is not.
+      'https://app.example?/api/sso/hq/authorize',
+    ]) {
+      expect(checkBackChannelOrigin(origin), origin).toEqual({
+        ok: false,
+        reason: 'path_mounted_origin',
+      });
+    }
+  });
+
+  it('still refuses cleartext and userinfo before it looks at the path', () => {
+    // Order matters: the transport verdict is the more urgent one to report.
+    expect(checkBackChannelOrigin('http://app.example/identity')).toEqual({
+      ok: false,
+      reason: 'plaintext_not_loopback',
+    });
+    expect(checkBackChannelOrigin('http://localhost@evil.example/x')).toEqual({
+      ok: false,
+      reason: 'credentials_in_url',
+    });
+  });
+
+  it('explains the refusal in a line an operator can act on', () => {
+    const line = describeBackChannelOriginRefusal(
+      'HQ_SSO_IDENTITY_ORIGIN',
+      'https://app.example/identity',
+      'path_mounted_origin',
+    );
+    expect(line).toContain('HQ_SSO_IDENTITY_ORIGIN');
+    expect(line).toMatch(/no path, query or fragment/);
+    expect(line).toContain('fail closed');
+  });
+
+  it('the back channel refuses to be BUILT on a path-mounted origin', () => {
+    // Enforced at construction as well as in the loaders, exactly like the
+    // cleartext rule: a loader can be bypassed by a future caller.
+    expect(() =>
+      httpBackChannel({ baseUrl: 'https://app.example/identity', serviceSecret: 's' }),
+    ).toThrow(/no path, query or fragment/);
+  });
+
+  it('a redirect URI is a whole URL, so a path is still allowed there', () => {
+    // The other half of the design: `checkBackChannelUrl` keeps the transport
+    // rules for values that are complete addresses, and returns them unedited
+    // because the allow-list is matched byte for byte.
+    expect(checkBackChannelUrl('https://hq.example/sso/callback')).toEqual({
+      ok: true,
+      url: 'https://hq.example/sso/callback',
+    });
+    expect(checkBackChannelUrl('http://127.0.0.1:3200/sso/callback').ok).toBe(true);
+    expect(checkBackChannelUrl('http://hq.example/sso/callback')).toEqual({
+      ok: false,
+      reason: 'plaintext_not_loopback',
+    });
+    expect(checkBackChannelUrl('https://user:pw@hq.example/sso/callback')).toEqual({
+      ok: false,
+      reason: 'credentials_in_url',
+    });
+  });
+});
+
+describe('both channels build their URLs the same way', () => {
+  function fakeReply() {
+    const cookies: Record<string, string> = {};
+    return {
+      cookies,
+      setCookie(name: string, value: string) {
+        cookies[name] = value;
+        return this;
+      },
+    };
+  }
+
+  it('sends the browser to the authorize route of the configured origin', () => {
+    const reply = fakeReply();
+    const target = new URL(
+      beginHandoff(
+        {
+          identityOrigin: 'https://app.example',
+          hqOrigin: 'https://hq.example',
+        } as never,
+        reply as never,
+        '/hq/',
+      ),
+    );
+    expect(target.origin).toBe('https://app.example');
+    expect(target.pathname).toBe(SSO_IDENTITY_ROUTES.authorize);
+    // The redirect_uri must be exactly what the identity host allow-lists.
+    expect(target.searchParams.get('redirect_uri')).toBe(
+      `https://hq.example${SSO_HQ_ROUTES.callback}`,
+    );
+    expect(target.searchParams.get('state')).toBe(reply.cookies[HQ_SSO_STATE_COOKIE]);
+  });
+
+  it('joins an origin and a route identically for the browser and the back channel', async () => {
+    const seen: string[] = [];
+    const channel = httpBackChannel({
+      baseUrl: 'https://app.example',
+      serviceSecret: 's',
+      fetchImpl: (async (input: RequestInfo | URL) => {
+        seen.push(String(input));
+        return new Response(JSON.stringify({ ok: false, error: 'ticket_unknown' }), {
+          status: 400,
+          headers: { 'content-type': 'application/json' },
+        });
+      }) as unknown as typeof fetch,
+    });
+    await channel.redeem('t', 's');
+
+    const reply = fakeReply();
+    const browserTarget = new URL(
+      beginHandoff(
+        { identityOrigin: 'https://app.example', hqOrigin: 'https://hq.example' } as never,
+        reply as never,
+        '/hq/',
+      ),
+    );
+
+    // Same origin, same joining rule, whichever channel is speaking.
+    expect(seen).toEqual([backChannelUrl('https://app.example', SSO_IDENTITY_ROUTES.redeem)]);
+    expect(`${browserTarget.origin}${browserTarget.pathname}`).toBe(
+      backChannelUrl('https://app.example', SSO_IDENTITY_ROUTES.authorize),
+    );
   });
 });

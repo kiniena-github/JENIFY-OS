@@ -37,15 +37,21 @@ import {
   SSO_IDENTITY_ROUTES,
   SSO_SERVICE_AUTH_HEADER,
 } from './contract.js';
+import { backChannelUrl } from './origin.js';
 import type { IdentityBackChannel } from './back-channel.js';
 import type { HqSessionStore } from './session-store.js';
 
 export interface HqSsoOptions {
   store: HqSessionStore;
   backChannel: IdentityBackChannel;
-  /** Public origin of the identity host, e.g. https://app.jenifylabs.com */
+  /**
+   * Public origin of the identity host, e.g. https://app.jenifylabs.com
+   *
+   * An ORIGIN, not a mount point: scheme, host and optional port, with no path.
+   * `checkBackChannelOrigin` enforces that where it is configured.
+   */
   identityOrigin: string;
-  /** This host's own public origin, e.g. https://hq.jenifylabs.com */
+  /** This host's own public origin, e.g. https://hq.jenifylabs.com. Same rule. */
   hqOrigin: string;
   /** Shared service secret, for authenticating the identity host's calls IN. */
   serviceSecret: string;
@@ -108,6 +114,13 @@ function cookieOptions(secure: boolean, maxAgeSeconds?: number) {
  *
  * `redirect_uri` is this host's own callback, stated absolutely, so the
  * identity host can check it against its exact allow-list.
+ *
+ * Both addresses are built with `backChannelUrl`, the same join the back channel
+ * uses. `new URL(route, origin)` used to build them, and a route constant starts
+ * with `/`, so it resolved against the origin's ROOT and silently dropped any
+ * configured path prefix that the back channel was meanwhile honouring (third
+ * correction round). Path-mounted origins are now refused in configuration, and
+ * this join keeps the two channels agreeing regardless.
  */
 export function beginHandoff(
   options: HqSsoOptions,
@@ -116,8 +129,8 @@ export function beginHandoff(
 ): string {
   const state = randomBytes(24).toString('base64url');
   reply.setCookie(HQ_SSO_STATE_COOKIE, state, cookieOptions(options.secureCookies ?? true, 600));
-  const url = new URL(SSO_IDENTITY_ROUTES.authorize, options.identityOrigin);
-  url.searchParams.set('redirect_uri', new URL(SSO_HQ_ROUTES.callback, options.hqOrigin).toString());
+  const url = new URL(backChannelUrl(options.identityOrigin, SSO_IDENTITY_ROUTES.authorize));
+  url.searchParams.set('redirect_uri', backChannelUrl(options.hqOrigin, SSO_HQ_ROUTES.callback));
   url.searchParams.set('state', state);
   // Where to land afterwards, kept on THIS host's cookie rather than trusted
   // from the identity host's echo. A path only — never an absolute URL — so it

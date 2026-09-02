@@ -162,6 +162,38 @@ describe('an incomplete or unsafe configuration stays OFF, not half-open', () =>
     expect(plane!.audience).toBe('http://127.0.0.1:3200');
   });
 
+  it('refuses a PATH-MOUNTED audience, and says why (third round, Codex P2)', () => {
+    // The audience is an origin the back-channel route is appended to. A prefix
+    // here was honoured on that channel and dropped by HQ's browser redirect, so
+    // one configured value named two different addresses and the handoff could
+    // not complete. Refused at boot instead.
+    for (const audience of [
+      'https://hq.jenifylabs.com/hq',
+      'https://hq.jenifylabs.com/hq/',
+      'https://hq.jenifylabs.com?next=https://evil.example',
+      'https://hq.jenifylabs.com#/hq',
+    ]) {
+      const lines: string[] = [];
+      const plane = loadSsoHqPlane(
+        bridgeEnv({ FACTORYOS_SSO_HQ_AUDIENCE: audience }),
+        (l) => lines.push(l),
+      );
+      expect(plane, audience).toBeNull();
+      expect(lines.join('\n'), audience).toContain('FACTORYOS_SSO_HQ_AUDIENCE');
+      expect(lines.join('\n'), audience).toContain('no path, query or fragment');
+    }
+  });
+
+  it('still accepts a redirect URI that carries a path, because it is a whole URL', () => {
+    // The other half of the same decision: an ORIGIN may not carry a path, and a
+    // callback URL must. Applying one rule to both would refuse every correct
+    // configuration.
+    const plane = loadSsoHqPlane(bridgeEnv(), () => {});
+    expect(plane).not.toBeNull();
+    expect(plane!.allowedRedirectUris).toEqual([HQ_CALLBACK]);
+    expect(HQ_CALLBACK).toContain('/sso/callback');
+  });
+
   it('never invents a redirect allow-list from the audience', () => {
     // Exact URLs only. An audience is not permission to redirect anywhere
     // under it — that is how open redirects are built.
