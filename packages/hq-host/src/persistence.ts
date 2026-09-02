@@ -1,16 +1,9 @@
 /**
  * Provider-neutral persistence boundary for a hosted JENIFY HQ (Phase 2, Stage 3).
  *
- * The HQ core deliberately keeps its proven synchronous SQLite semantics in this
- * stage. Replacing the engine while also moving the process would change
- * transactions, idempotency, leases and fencing at the same time — exactly the
- * invariants Stage 3 is meant to preserve. Hosted mode therefore means one HQ
- * process using SQLite on an explicitly-attested durable mounted volume.
- *
- * No cloud vendor appears here. Choosing/provisioning the actual volume remains
- * a Founder gate. This module only makes the storage contract explicit and
- * refuses configurations that would quietly turn a hosted HQ into an ephemeral
- * one.
+ * Stage 3 deliberately preserves the proven synchronous SQLite semantics while
+ * requiring a hosted process to use one explicitly-attested durable mounted
+ * volume. Vendor selection remains a Founder gate.
  */
 
 import fs from 'node:fs';
@@ -26,14 +19,12 @@ import {
 export type HqRuntimeMode = 'local' | 'hosted';
 export type HqPersistenceMode = 'local-file' | 'durable-volume';
 
-/** Stage-3 topology. Horizontal/multi-writer rollout is a later explicit gate. */
 export const HQ_DURABLE_TOPOLOGY = 'single-process-single-writer' as const;
 
 export interface HqPersistenceConfig {
   runtime: HqRuntimeMode;
   mode: HqPersistenceMode;
   dbPath: string;
-  /** Present only for durable-volume mode. */
   durableRoot?: string;
   backupRoot: string;
   topology: typeof HQ_DURABLE_TOPOLOGY;
@@ -47,11 +38,8 @@ export interface HqBackupResult {
 export interface HqPersistence {
   db: HqDatabase;
   config: HqPersistenceConfig;
-  /** Force committed WAL pages toward the durable database file. */
   checkpoint(): void;
-  /** Create and integrity-check a point-in-time SQLite backup. */
   backup(name?: string): Promise<HqBackupResult>;
-  /** Integrity check of the live opened database. */
   healthy(): boolean;
   close(): void;
 }
@@ -78,35 +66,79 @@ function refuse(log: (line: string) => void, detail: string): null {
   return null;
 }
 
+function lstatIfPresent(candidate: string): fs.Stats | null {
+  try {
+    return fs.lstatSync(candidate);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function sameFile(a: fs.Stats, b: fs.Stats): boolean {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
 /**
- * Parse the storage contract without opening the database.
- *
- * New variables introduced by Stage 3:
- *
- *   FACTORYOS_HQ_RUNTIME=local|hosted
- *     Unset stays `local`, preserving every existing workstation/test setup.
- *
- *   FACTORYOS_HQ_PERSISTENCE=local-file|durable-volume
- *     Unset is `local-file` only for local runtime. Hosted runtime MUST say
- *     `durable-volume` explicitly.
- *
- *   FACTORYOS_HQ_DURABLE_ROOT=/mounted/volume
- *     Required for durable-volume mode. It must already exist: creating a
- *     missing directory ourselves could make an ephemeral container directory
- *     look like a mounted durable volume.
- *
- *   FACTORYOS_HQ_BACKUP_DIR=/mounted/volume/backups
- *     Optional. Defaults to <durable-root>/backups for durable mode, or a
- *     sibling `backups` directory for local mode.
+ * Validate an existing database directory entry without following a dangling
+ * symlink. A symlink is allowed only when it already resolves to a regular file
+ * inside the durable root. A dangling link is refused before SQLite can follow
+ * it and create the target elsewhere.
  */
+function validateExistingDurableDbEntry(
+  dbPath: string,
+  durableRoot: string,
+  log: (line: string) => void,
+): boolean {
+  const entry = lstatIfPresent(dbPath);
+  if (!entry) return true;
+
+  if (entry.isSymbolicLink()) {
+    let realDb: string;
+    try {
+      realDb = fs.realpathSync(dbPath);
+    } catch {
+      refuse(log, 'FACTORYOS_HQ_DB is a dangling/unresolvable symlink; hosted HQ stays OFF.');
+      return false;
+    }
+    if (!insideOrEqual(durableRoot, realDb)) {
+      refuse(log, 'FACTORYOS_HQ_DB resolves outside FACTORYOS_HQ_DURABLE_ROOT.');
+      return false;
+    }
+    if (!fs.statSync(realDb).isFile()) {
+      refuse(log, 'FACTORYOS_HQ_DB symlink target is not a regular file.');
+      return false;
+    }
+    return true;
+  }
+
+  if (!entry.isFile()) {
+    refuse(log, 'FACTORYOS_HQ_DB exists but is not a regular file.');
+    return false;
+  }
+  return true;
+}
+
+/** Post-open containment check closes the remaining config/open TOCTOU window. */
+function assertOpenedDurableDbInside(config: HqPersistenceConfig): void {
+  if (!config.durableRoot) return;
+  const entry = lstatIfPresent(config.dbPath);
+  if (!entry) throw new Error('opened durable HQ database path disappeared');
+  const realDb = fs.realpathSync(config.dbPath);
+  if (!insideOrEqual(config.durableRoot, realDb)) {
+    throw new Error('opened HQ database resolved outside FACTORYOS_HQ_DURABLE_ROOT');
+  }
+  if (!fs.statSync(realDb).isFile()) {
+    throw new Error('opened HQ database is not a regular file');
+  }
+}
+
 export function resolveHqPersistenceConfig(
   env: Record<string, string | undefined>,
   log: (line: string) => void = (line) => console.log(line),
 ): HqPersistenceConfig | null {
   const rawDbPath = env.FACTORYOS_HQ_DB?.trim();
-  if (!rawDbPath) {
-    return refuse(log, 'FACTORYOS_HQ_DB is not set.');
-  }
+  if (!rawDbPath) return refuse(log, 'FACTORYOS_HQ_DB is not set.');
 
   const runtimeRaw = (env.FACTORYOS_HQ_RUNTIME ?? 'local').trim();
   if (runtimeRaw !== 'local' && runtimeRaw !== 'hosted') {
@@ -135,13 +167,7 @@ export function resolveHqPersistenceConfig(
     const backupRoot = path.resolve(
       env.FACTORYOS_HQ_BACKUP_DIR?.trim() || path.join(path.dirname(dbPath), 'backups'),
     );
-    return {
-      runtime,
-      mode,
-      dbPath,
-      backupRoot,
-      topology: HQ_DURABLE_TOPOLOGY,
-    };
+    return { runtime, mode, dbPath, backupRoot, topology: HQ_DURABLE_TOPOLOGY };
   }
 
   if (rawDbPath === ':memory:') {
@@ -152,9 +178,7 @@ export function resolveHqPersistenceConfig(
   }
 
   const rawRoot = env.FACTORYOS_HQ_DURABLE_ROOT?.trim();
-  if (!rawRoot) {
-    return refuse(log, 'durable-volume mode requires FACTORYOS_HQ_DURABLE_ROOT.');
-  }
+  if (!rawRoot) return refuse(log, 'durable-volume mode requires FACTORYOS_HQ_DURABLE_ROOT.');
   if (!path.isAbsolute(rawRoot)) {
     return refuse(log, 'FACTORYOS_HQ_DURABLE_ROOT must be an absolute path.');
   }
@@ -180,15 +204,7 @@ export function resolveHqPersistenceConfig(
   if (!insideOrEqual(durableRoot, realDbParent)) {
     return refuse(log, 'FACTORYOS_HQ_DB must live inside FACTORYOS_HQ_DURABLE_ROOT.');
   }
-  if (fs.existsSync(dbPath)) {
-    if (!fs.statSync(dbPath).isFile()) {
-      return refuse(log, 'FACTORYOS_HQ_DB exists but is not a regular file.');
-    }
-    const realDb = fs.realpathSync(dbPath);
-    if (!insideOrEqual(durableRoot, realDb)) {
-      return refuse(log, 'FACTORYOS_HQ_DB resolves outside FACTORYOS_HQ_DURABLE_ROOT.');
-    }
-  }
+  if (!validateExistingDurableDbEntry(dbPath, durableRoot, log)) return null;
 
   const backupRoot = path.resolve(
     env.FACTORYOS_HQ_BACKUP_DIR?.trim() || path.join(durableRoot, 'backups'),
@@ -227,10 +243,20 @@ function safeBackupName(name: string | undefined): string {
   return `hq-${new Date().toISOString().replace(/[:.]/g, '-')}.sqlite`;
 }
 
-/**
- * Open the configured store. Hosted mode gets stronger SQLite durability and a
- * single explicit storage owner; all higher-level HQ semantics remain unchanged.
- */
+/** Atomically publish a verified file without ever replacing an existing name. */
+function publishNoReplace(partial: string, destination: string): void {
+  // A same-filesystem hard-link creation is atomic and fails with EEXIST if a
+  // concurrent writer already published this destination. Unlike rename(), it
+  // never replaces the previous verified recovery point.
+  fs.linkSync(partial, destination);
+  try {
+    fs.unlinkSync(partial);
+  } catch {
+    // The verified destination is already safely published. A leftover unique
+    // partial name is preferable to reporting failure or touching destination.
+  }
+}
+
 export function openHqPersistence(
   env: Record<string, string | undefined>,
   log: (line: string) => void = (line) => console.log(line),
@@ -238,19 +264,36 @@ export function openHqPersistence(
   const config = resolveHqPersistenceConfig(env, log);
   if (!config) return null;
 
-  let db: HqDatabase;
+  let db: HqDatabase | undefined;
   try {
     db = openHqDatabase(config.dbPath);
     db.pragma('busy_timeout = 5000');
     if (config.mode === 'durable-volume') {
-      // WAL + FULL synchronous keeps the proven transaction model while making
-      // a committed hosted write wait for durable storage rather than only RAM.
       db.pragma('journal_mode = WAL');
       db.pragma('synchronous = FULL');
       db.pragma('wal_autocheckpoint = 1000');
+
+      const journalMode = String(db.pragma('journal_mode', { simple: true })).toLowerCase();
+      const synchronous = Number(db.pragma('synchronous', { simple: true }));
+      if (journalMode !== 'wal' || synchronous !== 2) {
+        throw new Error(
+          `durable SQLite modes not active (journal_mode=${journalMode}, synchronous=${synchronous}); required WAL/FULL`,
+        );
+      }
+      assertOpenedDurableDbInside(config);
     }
   } catch (error) {
-    return refuse(log, `could not open HQ database: ${error instanceof Error ? error.message : 'unknown error'}`);
+    if (db) {
+      try {
+        db.close();
+      } catch {
+        // Preserve the original initialization error while best-effort releasing locks.
+      }
+    }
+    return refuse(
+      log,
+      `could not initialize HQ database: ${error instanceof Error ? error.message : 'unknown error'}`,
+    );
   }
 
   if (!quickCheck(db)) {
@@ -274,7 +317,7 @@ export function openHqPersistence(
       const backupRoot = ensureBackupRoot(config);
       const filename = safeBackupName(name);
       const destination = path.join(backupRoot, filename);
-      if (fs.existsSync(destination)) throw new Error(`HQ backup already exists: ${filename}`);
+      if (lstatIfPresent(destination)) throw new Error(`HQ backup already exists: ${filename}`);
 
       checkpoint();
       const partial = `${destination}.partial-${randomUUID()}`;
@@ -284,7 +327,7 @@ export function openHqPersistence(
         const valid = quickCheck(check);
         check.close();
         if (!valid) throw new Error('backup integrity check failed');
-        fs.renameSync(partial, destination);
+        publishNoReplace(partial, destination);
         return { path: destination, sizeBytes: fs.statSync(destination).size };
       } catch (error) {
         fs.rmSync(partial, { force: true });
@@ -293,8 +336,6 @@ export function openHqPersistence(
     },
     close(): void {
       if (closed) return;
-      // Best-effort checkpoint before releasing the file. SQLite still owns the
-      // transactional guarantee if this cannot truncate because a reader exists.
       try {
         db.pragma('wal_checkpoint(PASSIVE)');
       } finally {
@@ -311,13 +352,6 @@ export function openHqPersistence(
   return handle;
 }
 
-/**
- * Recovery primitive that never overwrites a live database.
- *
- * The operator restores into a NEW file, verifies it, and can then switch the
- * configured path in a separate controlled action. This avoids turning a
- * recovery helper into a destructive production overwrite button.
- */
 export function restoreHqBackupToNewFile(
   backupPath: string,
   destinationPath: string,
@@ -327,7 +361,7 @@ export function restoreHqBackupToNewFile(
   if (!fs.existsSync(source) || !fs.statSync(source).isFile()) {
     throw new Error('HQ backup does not exist or is not a regular file');
   }
-  if (fs.existsSync(destination)) {
+  if (lstatIfPresent(destination)) {
     throw new Error('HQ recovery refuses to overwrite an existing database');
   }
   const parent = path.dirname(destination);
@@ -340,15 +374,32 @@ export function restoreHqBackupToNewFile(
   sourceDb.close();
   if (!sourceHealthy) throw new Error('HQ backup failed integrity check');
 
+  let created: fs.Stats | null = null;
   try {
     fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+    created = fs.lstatSync(destination);
+
     const restoredDb = openHqDatabaseReadOnly(destination);
     const restoredHealthy = quickCheck(restoredDb);
     restoredDb.close();
     if (!restoredHealthy) throw new Error('restored HQ database failed integrity check');
-    return { path: destination, sizeBytes: fs.statSync(destination).size };
+
+    const current = fs.lstatSync(destination);
+    if (!sameFile(created, current)) {
+      throw new Error('HQ recovery destination changed during verification');
+    }
+    return { path: destination, sizeBytes: current.size };
   } catch (error) {
-    fs.rmSync(destination, { force: true });
+    // Only remove the exact inode created by THIS invocation. If COPYFILE_EXCL
+    // lost a race, or another actor replaced the path, their file is untouched.
+    if (created) {
+      try {
+        const current = lstatIfPresent(destination);
+        if (current && sameFile(created, current)) fs.rmSync(destination, { force: true });
+      } catch {
+        // Never trade a recovery failure for deleting an unproven path.
+      }
+    }
     throw error;
   }
 }
