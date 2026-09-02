@@ -6,6 +6,11 @@ import { newId, nowIso, randomToken, verifyPassword, AppError } from '../util.js
 import { getRoleMatrix } from './permissions.js';
 import { writeAudit } from './audit.js';
 import type { Ctx } from './context.js';
+import {
+  noIdentityRevocation,
+  revokeIdentitySessions,
+  type IdentityRevocation,
+} from './identity-revocation.js';
 
 /**
  * Resolve which candidate account a login/recovery attempt refers to.
@@ -102,10 +107,20 @@ export function login(
   return { token, user: sessionUser, expiresAt };
 }
 
-export function logout(db: Db, token: string): void {
+/**
+ * Sign one browser out.
+ *
+ * The revoke itself is delegated to `revokeIdentitySessions` — the single path
+ * that ends identity authority — so sign-out, password reset, recovery and
+ * deactivation all end a session the same way and all return the ids HQ has to
+ * be told about. The returned revocation is what the route feeds to
+ * `propagateIdentityRevocation`; ignoring it would silently reintroduce the
+ * defect where only logout reached HQ.
+ */
+export function logout(db: Db, token: string): IdentityRevocation {
   const session = db.select().from(sessions).where(eq(sessions.token, token)).get();
-  if (!session || session.revokedAt) return;
-  db.update(sessions).set({ revokedAt: nowIso() }).where(eq(sessions.id, session.id)).run();
+  if (!session || session.revokedAt) return noIdentityRevocation('logout');
+  const revocation = revokeIdentitySessions(db, { sessionId: session.id }, 'logout');
   const user = buildSessionUser(db, session.userId);
   if (user) {
     writeAudit(
@@ -119,6 +134,7 @@ export function logout(db: Db, token: string): void {
       },
     );
   }
+  return revocation;
 }
 
 export function resolveSession(db: Db, token: string): SessionUser | null {

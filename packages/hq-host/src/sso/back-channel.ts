@@ -50,6 +50,24 @@ export interface IdentityBackChannel {
  * at construction, and not only in the environment loaders: a loader can be
  * bypassed by a future caller, a constructor cannot. The loaders still check
  * first, so an operator gets a boot-log explanation rather than a stack trace.
+ *
+ * ## And it refuses to FOLLOW anything (second correction round)
+ *
+ * Validating the origin validates the URL this code chose to call. `fetch`
+ * follows redirects by default, and a redirect target is chosen by the
+ * responder: a compromised or merely misconfigured identity host answering
+ * 307/308 would make this client repeat the request — method, body and headers
+ * preserved, per RFC 7231 — at whatever URL it named, including plaintext http
+ * to somewhere else entirely. That request carries the service secret in a
+ * header and, on the step-up path, the Founder's password in the body. The
+ * origin check never sees that second URL.
+ *
+ * So every credential-bearing call sets `redirect: 'error'`. Fail closed, at the
+ * simplest possible point: the credential is never sent twice, because there is
+ * never a second request. A redirect from the identity host is a
+ * misconfiguration, and it surfaces as `unavailable` — the same honest "could
+ * not ask" an unreachable host produces — rather than as a silent credential
+ * forward or as a false rejection of a correct password.
  */
 export function httpBackChannel(options: {
   baseUrl: string;
@@ -78,6 +96,11 @@ export function httpBackChannel(options: {
           [SSO_SERVICE_AUTH_HEADER]: options.serviceSecret,
         },
         body: JSON.stringify(body),
+        // Never follow a redirect while carrying a credential: `fetch` would
+        // replay this exact method, body and header at a URL the responder
+        // chose, which the origin check never validated. `error` rejects the
+        // promise instead, and the catch below turns that into `unavailable`.
+        redirect: 'error',
         signal: controller.signal,
       });
       return { status: response.status, body: await response.json().catch(() => null) };

@@ -170,23 +170,9 @@ export function registerSsoHqRoutes(app: FastifyInstance, db: Db, plane: SsoHqPl
 }
 
 /**
- * Tell HQ that an identity session has ended (trap C).
- *
- * Called from the logout route. Never throws and never blocks sign-out: if HQ
- * cannot be reached the local logout still succeeds, the failure is audited,
- * and the HQ session's own 60-minute ceiling remains the backstop.
+ * Propagation to HQ used to live here as `propagateLogoutToHq`, reachable only
+ * from the logout route — which is precisely why a password reset, a recovery
+ * and a deactivation never reached HQ at all. It now lives in
+ * `services/identity-revocation.ts` as `propagateIdentityRevocation`, beside the
+ * single revocation path every one of those operations goes through.
  */
-export async function propagateLogoutToHq(
-  notifier: HqLogoutNotifier | undefined,
-  originSessionId: string | null,
-  audit: (line: string) => void = () => {},
-): Promise<void> {
-  if (!notifier || !originSessionId) return;
-  const result = await notifier.revokeSessionsFor(originSessionId);
-  audit(
-    result.ok
-      ? `[sso] HQ sessions revoked for identity session ${originSessionId}`
-      : `[sso] WARNING: could not revoke HQ sessions for ${originSessionId} (${result.detail}). ` +
-          'They remain valid until their own expiry.',
-  );
-}

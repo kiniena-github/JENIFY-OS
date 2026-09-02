@@ -1,9 +1,13 @@
 import type { FastifyInstance } from 'fastify';
 import type { Db } from '../db/index.js';
 import { SESSION_COOKIE, requireCtx, sessionCookieOptions } from '../app.js';
-import { login, logout, resolveSessionRecord } from '../services/auth.js';
-import { propagateLogoutToHq, type SsoHqPlane } from './sso-hq.js';
-import { invalidateTicketsForOriginSession } from '../services/sso-hq.js';
+import { login, logout } from '../services/auth.js';
+import type { SsoHqPlane } from './sso-hq.js';
+import {
+  noIdentityRevocation,
+  propagateIdentityRevocation,
+  type IdentityRevocation,
+} from '../services/identity-revocation.js';
 import { getTenant } from '../services/provisioning.js';
 import { getBundle, listLanguages } from '../services/translations.js';
 import { recoverWithCode } from '../services/recovery.js';
@@ -37,13 +41,18 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, ssoHq?: SsoHqPl
     async (req) => {
       const key = `${req.ip}|recover|${(req.body.username ?? '').trim().toLowerCase()}`;
       assertNotRateLimited(key);
+      let revocation: IdentityRevocation;
       try {
-        recoverWithCode(db, req.body);
+        revocation = recoverWithCode(db, req.body);
       } catch (err) {
         recordAuthFailure(key);
         throw err;
       }
       clearAuthFailures(key);
+      // Recovery changes the password and ends every session of the account, so
+      // it ends the HQ sessions derived from them too. Awaited AFTER the
+      // transaction has committed, and never able to fail the recovery itself.
+      await propagateIdentityRevocation(ssoHq, revocation);
       return { ok: true };
     },
   );
@@ -77,36 +86,22 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, ssoHq?: SsoHqPl
 
   app.post('/api/auth/logout', async (req, reply) => {
     const token = req.cookies?.[SESSION_COOKIE];
-    // Read the session id BEFORE revoking it: afterwards `resolveSessionRecord`
-    // correctly returns null and there would be nothing left to tell HQ about.
-    // This is trap C — a separate HQ cookie does not die on its own when this
-    // one does, so sign-out has to say so explicitly.
-    const originSessionId = token ? (resolveSessionRecord(db, token)?.id ?? null) : null;
-    if (token) {
-      // Trap E: a handoff ticket minted moments ago has no derived HQ session
-      // yet, so trap C's revoke-what-HQ-derived finds nothing to revoke and the
-      // unconsumed ticket would still mint a NEW HQ session after this
-      // sign-out. Revoking the session and killing its outstanding tickets in
-      // ONE transaction leaves no instant where one is done and the other is
-      // not. (Redemption re-checks the session independently, so neither half
-      // is load-bearing alone.)
-      // drizzle's better-sqlite3 transaction runs the callback synchronously and
-      // commits or rolls back atomically, exactly as `recovery.ts` relies on.
-      db.transaction((tx) => {
-        const txDb = tx as unknown as Db;
-        logout(txDb, token);
-        if (ssoHq && originSessionId) {
-          const killed = invalidateTicketsForOriginSession(txDb, originSessionId);
-          if (killed > 0) {
-            ssoHq.audit?.(`[sso] ${killed} unredeemed HQ ticket(s) invalidated by sign-out`);
-          }
-        }
-      });
-    }
+    // Trap C — a separate HQ cookie does not die on its own when this one does,
+    // so sign-out has to say so explicitly. Trap E — a handoff ticket minted
+    // moments ago has no derived HQ session yet, so revoking what HQ derived
+    // finds nothing and the unconsumed ticket would still mint a NEW HQ session
+    // after this sign-out; it has to be killed where it lives. Both are now the
+    // shared revocation path's job, in ONE transaction, exactly as they are for
+    // a password reset, a recovery and a deactivation.
+    // drizzle's better-sqlite3 transaction runs the callback synchronously and
+    // commits or rolls back atomically, exactly as `recovery.ts` relies on.
+    const revocation = token
+      ? db.transaction((tx) => logout(tx as unknown as Db, token))
+      : noIdentityRevocation('logout');
     reply.clearCookie(SESSION_COOKIE, sessionCookieOptions(req));
     // Never blocks or fails sign-out: an unreachable HQ is audited, and the HQ
     // session's own 60-minute ceiling remains the backstop.
-    await propagateLogoutToHq(ssoHq?.logoutNotifier, originSessionId, ssoHq?.audit);
+    await propagateIdentityRevocation(ssoHq, revocation);
     return { ok: true };
   });
 

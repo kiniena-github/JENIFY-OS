@@ -51,8 +51,18 @@ import { writeAudit } from '../services/audit.js';
 import { updateTenantBranding, getTenant } from '../services/provisioning.js';
 import { listSequences, defineSequence } from '../services/numbering.js';
 import { badRequest } from '../util.js';
+import { propagateIdentityRevocation } from '../services/identity-revocation.js';
+import type { SsoHqPlane } from './sso-hq.js';
 
-export function registerAdminRoutes(app: FastifyInstance, db: Db): void {
+/**
+ * Admin routes.
+ *
+ * `ssoHq` is the A-4 bridge plane, passed so the two operations here that END
+ * identity authority — a password reset and a deactivation — propagate to HQ.
+ * Absent (an ordinary JENIFY OS deployment) the propagation is a no-op, and
+ * these routes behave exactly as they always did.
+ */
+export function registerAdminRoutes(app: FastifyInstance, db: Db, ssoHq?: SsoHqPlane): void {
   // ------------------------------- users -----------------------------------
   app.get('/api/users', async (req) => {
     const ctx = requireCtx(db, req);
@@ -90,7 +100,9 @@ export function registerAdminRoutes(app: FastifyInstance, db: Db): void {
   }>('/api/users/:id', async (req) => {
     const ctx = requireCtx(db, req);
     requirePermission(ctx, 'users', 'manage_users');
-    updateUser(ctx, req.params.id, req.body);
+    // Deactivating an account ends its identity authority, so the HQ sessions
+    // derived from it have to die now rather than at their own expiry.
+    await propagateIdentityRevocation(ssoHq, updateUser(ctx, req.params.id, req.body));
     return { ok: true };
   });
 
@@ -99,7 +111,9 @@ export function registerAdminRoutes(app: FastifyInstance, db: Db): void {
     async (req) => {
       const ctx = requireCtx(db, req);
       requirePermission(ctx, 'users', 'manage_users');
-      resetPassword(ctx, req.params.id, req.body.password);
+      // Same reason: an administrator resetting a compromised password must not
+      // leave the attacker's HQ session working for the rest of its hour.
+      await propagateIdentityRevocation(ssoHq, resetPassword(ctx, req.params.id, req.body.password));
       return { ok: true };
     },
   );

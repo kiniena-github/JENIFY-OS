@@ -174,7 +174,31 @@ export function registerHqSsoRoutes(app: FastifyInstance, options: HqSsoOptions)
         .send(`HQ sign-in could not be completed (${redeemed.error}). Open HQ again to retry.`);
     }
 
-    const { token, record } = options.store.create(redeemed.claims);
+    // TRAP F. The redemption above is an await, and a sign-out can land inside
+    // it: the identity host consumes the ticket, the human signs out, the
+    // back-channel logout revokes nothing because this session does not exist
+    // yet, and then this line would create a fresh 60-minute session AFTER the
+    // sign-out. `create` refuses on the durable tombstone instead.
+    const created = options.store.create(redeemed.claims);
+    if (!created.ok) {
+      audit(
+        `[hq-sso] callback refused: ${created.reason} for identity session ` +
+          `${redeemed.claims.originSessionId}`,
+      );
+      // The cookie is cleared rather than merely not set: a browser arriving
+      // here with an older HQ cookie must not keep it after we have learned the
+      // identity authority behind this handoff is gone.
+      reply.clearCookie(HQ_SESSION_COOKIE, cookieOptions(secure));
+      reply.clearCookie('hq_sso_return', cookieOptions(secure));
+      return reply
+        .status(401)
+        .type('text/plain; charset=utf-8')
+        .send(
+          'HQ sign-in could not be completed: that Jenify sign-in ended while this handoff was ' +
+            'in flight. Sign in to Jenify again, then open HQ.',
+        );
+    }
+    const { token, record } = created;
     reply.setCookie(
       HQ_SESSION_COOKIE,
       token,

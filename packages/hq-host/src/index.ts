@@ -65,7 +65,12 @@ export {
   type BackChannelOriginRefusal,
 } from './sso/origin.js';
 
-export { HqSessionStore, type HqSessionRecord } from './sso/session-store.js';
+export {
+  HqSessionStore,
+  HQ_REVOCATION_TOMBSTONE_TTL_MS,
+  type HqSessionCreation,
+  type HqSessionRecord,
+} from './sso/session-store.js';
 export { httpBackChannel, type IdentityBackChannel } from './sso/back-channel.js';
 export { ssoIdentity, type SsoIdentity, type StepUpPreparation } from './sso/identity.js';
 export {

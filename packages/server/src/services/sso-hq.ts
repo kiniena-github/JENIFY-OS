@@ -30,6 +30,7 @@ import {
   type SessionRecord,
 } from './auth.js';
 import { assertNotRateLimited, recordAuthFailure, clearAuthFailures } from './ratelimit.js';
+import type { HqLogoutNotifier } from './identity-revocation.js';
 
 /** One minute. A ticket rides in a URL, so its window is deliberately tiny. */
 export const SSO_TICKET_TTL_MS = 60_000;
@@ -267,17 +268,22 @@ export function verifyStepUpPassword(
 }
 
 /**
- * Tell HQ that an identity session has ended (TRAP C).
+ * The HTTP notifier.
  *
- * A port, so the wiring is testable without sockets and so a deployment that
- * has no HQ configured simply has no notifier. Failures are reported, never
- * thrown: sign-out must succeed here even if HQ is unreachable, and the HQ
- * session's own 60-minute ceiling remains the backstop.
+ * ## It never follows a redirect (second correction round)
+ *
+ * This call carries the shared service secret in a header. `fetch` follows
+ * redirects by default and a 307/308 preserves the method, body AND headers, so
+ * an HQ origin that answered with one — compromised, or simply a proxy
+ * misconfigured to add a trailing slash — would have this process repeat the
+ * secret at a URL nobody validated, over whatever scheme that URL named. The
+ * configured origin is checked by `loadSsoHqPlane`; a redirect target is not,
+ * and cannot be, because it does not exist until the response arrives.
+ *
+ * `redirect: 'error'` therefore refuses outright. The failure is reported like
+ * any other transport failure, so sign-out still succeeds locally and the
+ * operator sees an audited warning naming it.
  */
-export interface HqLogoutNotifier {
-  revokeSessionsFor(originSessionId: string): Promise<{ ok: boolean; detail: string }>;
-}
-
 export function httpHqLogoutNotifier(options: {
   hqOrigin: string;
   serviceSecret: string;
@@ -296,6 +302,9 @@ export function httpHqLogoutNotifier(options: {
           method: 'POST',
           headers: { 'content-type': 'application/json', [options.header]: options.serviceSecret },
           body: JSON.stringify({ originSessionId }),
+          // Never follow a redirect while carrying the service secret: a 307/308
+          // would replay this header at an unvalidated URL.
+          redirect: 'error',
           signal: controller.signal,
         });
         return { ok: response.ok, detail: `status ${response.status}` };
@@ -309,29 +318,17 @@ export function httpHqLogoutNotifier(options: {
 }
 
 /**
- * Kill every unconsumed ticket minted from one identity session (trap E).
- *
- * Called as that session is revoked, in the same transaction, so there is no
- * instant at which the session is gone and a ticket from it is still redeemable.
- * Marking them consumed rather than deleting them keeps the single-use bookkeeping
- * intact: a redemption arriving afterwards is refused as `ticket_consumed`, which
- * is exactly what it is, and `pruneExpiredTickets` clears the rows later.
- *
- * Returns how many were invalidated, so the caller can audit it.
+ * Trap C's notifier port and trap E's ticket sweep now live in
+ * `identity-revocation.ts`, which owns the ONE path that ends identity
+ * authority — sign-out, password reset, recovery, deactivation — and which
+ * `auth.ts` must be able to import without a dependency cycle back through this
+ * module. Re-exported here so every existing import path keeps working and the
+ * SSO surface still reads as one thing.
  */
-export function invalidateTicketsForOriginSession(
-  db: Db,
-  originSessionId: string,
-  now: Date = new Date(),
-): number {
-  if (!originSessionId) return 0;
-  const result = db
-    .update(ssoHqTickets)
-    .set({ consumedAt: now.toISOString() })
-    .where(and(eq(ssoHqTickets.originSessionId, originSessionId), isNull(ssoHqTickets.consumedAt)))
-    .run();
-  return result.changes;
-}
+export {
+  invalidateTicketsForOriginSession,
+  type HqLogoutNotifier,
+} from './identity-revocation.js';
 
 /** Housekeeping: drop tickets that can no longer be redeemed. */
 export function pruneExpiredTickets(db: Db, now: Date = new Date()): number {
