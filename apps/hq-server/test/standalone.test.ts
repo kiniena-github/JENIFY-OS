@@ -8,6 +8,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import Fastify from 'fastify';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -189,5 +190,159 @@ describe('the A-4 sign-in bridge, wired from the environment', () => {
     // Present, and refusing — there is no ticket and no state.
     expect((await on!.app.inject({ method: 'GET', url: '/sso/callback' })).statusCode).toBe(400);
     await on!.close();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Issue #237, Codex P1-4 — the back channel may not be cleartext      */
+/* ------------------------------------------------------------------ */
+
+describe('the bridge refuses a cleartext back channel', () => {
+  const SAFE = {
+    HQ_SSO_IDENTITY_ORIGIN: 'https://app.example',
+    HQ_SSO_HQ_ORIGIN: 'https://hq.example',
+    HQ_SSO_SERVICE_SECRET: 'dev-test-secret',
+    HQ_SSO_INSECURE_COOKIES: '1',
+  };
+
+  /** Configured and refused ⇒ the process still boots, and still refuses everyone. */
+  async function bridgeIsOff(overrides: Record<string, string>): Promise<string> {
+    const lines: string[] = [];
+    const built = await buildStandaloneHq({
+      env: env({ ...SAFE, ...overrides }),
+      log: (line) => lines.push(line),
+    });
+    await built!.app.ready();
+    // No handoff is started: an unauthenticated visitor is refused, not
+    // redirected at an origin that cannot safely carry the credential.
+    expect((await built!.app.inject({ method: 'GET', url: '/hq/index.html' })).statusCode).toBe(401);
+    expect((await built!.app.inject({ method: 'GET', url: '/sso/callback' })).statusCode).toBe(404);
+    await built!.close();
+    return lines.join('\n');
+  }
+
+  it('REFUSES the finding: a plaintext non-loopback identity origin', async () => {
+    // The exact configuration Codex flagged: the service credential and the
+    // Founder's relayed step-up password would have crossed the network in
+    // the clear, with nothing in the boot log to distinguish it.
+    const log = await bridgeIsOff({ HQ_SSO_IDENTITY_ORIGIN: 'http://app.jenifylabs.com' });
+    expect(log).toContain('HQ_SSO_IDENTITY_ORIGIN');
+    expect(log).toContain('in the clear');
+  });
+
+  it('refuses a plaintext HQ origin too — sign-out is posted there with the secret', async () => {
+    const log = await bridgeIsOff({ HQ_SSO_HQ_ORIGIN: 'http://hq.jenifylabs.com' });
+    expect(log).toContain('HQ_SSO_HQ_ORIGIN');
+  });
+
+  it('refuses a host that only looks like loopback', async () => {
+    for (const origin of [
+      'http://localhost.evil.example',
+      'http://127.0.0.1.evil.example',
+      'http://localhost@evil.example',
+    ]) {
+      expect(await bridgeIsOff({ HQ_SSO_IDENTITY_ORIGIN: origin }), origin).toContain('refused');
+    }
+  });
+
+  it('still allows a genuine loopback proof stack over plain http', async () => {
+    const built = await buildStandaloneHq({
+      env: env({
+        ...SAFE,
+        HQ_SSO_IDENTITY_ORIGIN: 'http://127.0.0.1:3001',
+        HQ_SSO_HQ_ORIGIN: 'http://localhost:3200',
+      }),
+      log: () => {},
+    });
+    await built!.app.ready();
+    const res = await built!.app.inject({ method: 'GET', url: '/hq/index.html' });
+    expect(res.statusCode).toBe(302);
+    expect(new URL(res.headers.location as string).origin).toBe('http://127.0.0.1:3001');
+    await built!.close();
+  });
+
+  it('keeps HTTPS working exactly as before', async () => {
+    const built = await buildStandaloneHq({ env: env(SAFE), log: () => {} });
+    await built!.app.ready();
+    const res = await built!.app.inject({ method: 'GET', url: '/hq/index.html' });
+    expect(res.statusCode).toBe(302);
+    expect(new URL(res.headers.location as string).origin).toBe('https://app.example');
+    await built!.close();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Issue #237, Codex P1-3 — the shipped HQ process really hands off     */
+/* ------------------------------------------------------------------ */
+
+describe('the shipped HQ process completes a handoff over a real socket', () => {
+  /**
+   * The HQ half of the "two real entrypoints" proof.
+   *
+   * This process cannot import `@factoryos/server` — that boundary is the whole
+   * point of Stage 1 and is asserted in `package-boundary.test.ts` — so the
+   * identity host here is a stand-in that speaks the same contract, reached
+   * over a real loopback socket by the real `httpBackChannel` that
+   * `buildStandaloneHq` wires from the environment. The identity side of the
+   * same seam is proved against the real `packages/server` composition in
+   * `packages/server/test/sso-hq-wiring.test.ts`.
+   */
+  it('redeems a ticket through the environment-wired back channel and mints a session', async () => {
+    const redeemed: { ticket: string; state: string }[] = [];
+    const identity = Fastify({ logger: false });
+    identity.post('/api/sso/hq/redeem', async (req) => {
+      const body = req.body as { ticket: string; state: string };
+      redeemed.push(body);
+      // The stand-in enforces the same binding the real identity host does.
+      if (body.state !== 'round-trip') return { ok: false, error: 'state_mismatch' };
+      return {
+        ok: true,
+        claims: {
+          realmId: 'realm',
+          accountId: 'acc-1',
+          displayName: 'Proof Founder',
+          sessionEstablishedAt: new Date().toISOString(),
+          originSessionId: 'identity-session-1',
+        },
+      };
+    });
+    await identity.listen({ port: 0, host: '127.0.0.1' });
+    const address = identity.server.address();
+    if (address == null || typeof address === 'string') throw new Error('no port');
+    const identityOrigin = `http://127.0.0.1:${address.port}`;
+
+    const built = await buildStandaloneHq({
+      env: env({
+        HQ_SSO_IDENTITY_ORIGIN: identityOrigin,
+        HQ_SSO_HQ_ORIGIN: 'http://localhost:3200',
+        HQ_SSO_SERVICE_SECRET: 'dev-test-secret',
+        HQ_SSO_INSECURE_COOKIES: '1',
+      }),
+      log: () => {},
+    });
+    await built!.app.ready();
+
+    const callback = await built!.app.inject({
+      method: 'GET',
+      url: '/sso/callback?ticket=t-1&state=round-trip',
+      cookies: { hq_sso_state: 'round-trip' },
+    });
+    expect(callback.statusCode).toBe(302);
+    expect(callback.cookies.find((c) => c.name === 'hq_session')).toBeTruthy();
+    // The state travelled with the ticket (P1-1), on the real wire.
+    expect(redeemed).toEqual([{ ticket: 't-1', state: 'round-trip' }]);
+
+    // And the site it refused a moment ago now answers for this browser.
+    const session = callback.cookies.find((c) => c.name === 'hq_session')!.value;
+    const page = await built!.app.inject({
+      method: 'GET',
+      url: '/hq/index.html',
+      cookies: { hq_session: session },
+    });
+    expect(page.statusCode).toBe(200);
+    expect(page.body).toContain('canonical state');
+
+    await built!.close();
+    await identity.close();
   });
 });

@@ -14,6 +14,12 @@
  * on the same browser (CSRF / session-fixation on the callback), and the ticket
  * is exchanged over the back channel, where the identity host consumes it once
  * and answers with claims the browser never saw and cannot influence.
+ *
+ * The state is then sent ON to the identity host with the ticket (trap D in
+ * `contract.ts`). The cookie check alone proves only that SOME sign-in started
+ * in this browser — an attacker's own browser satisfies it trivially — so it
+ * cannot, by itself, stop a captured ticket being replayed elsewhere. Only the
+ * identity host holds the state the ticket was minted with.
  */
 
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -152,7 +158,13 @@ export function registerHqSsoRoutes(app: FastifyInstance, options: HqSsoOptions)
       );
     }
 
-    const redeemed = await options.backChannel.redeem(ticket);
+    // TRAP D. The state goes WITH the ticket, so the identity host can check
+    // that this ticket belongs to this round trip. The check just above proves
+    // the state is one this host issued to this browser; only the identity host
+    // can prove it is the one the ticket was minted for, because only it holds
+    // the ticket row. A ticket captured out of a URL and replayed from another
+    // browser therefore fails there even though it passes here.
+    const redeemed = await options.backChannel.redeem(ticket, state);
     if (!redeemed.ok) {
       audit(`[hq-sso] callback refused: redeem ${redeemed.error}`);
       const status = redeemed.error === 'unavailable' ? 503 : 400;

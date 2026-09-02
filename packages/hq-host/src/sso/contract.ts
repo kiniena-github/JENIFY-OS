@@ -40,6 +40,27 @@
  * The claims therefore carry `originSessionId`, and the identity host calls
  * HQ's back-channel logout on sign-out to revoke every HQ session derived from
  * it.
+ *
+ * ## Two more the first Codex review of this branch found
+ *
+ * **D — a ticket must be bound to its own round trip.** HQ's callback checks
+ * `state` against a cookie, which stops a callback that did not start here —
+ * but the first draft then redeemed the ticket ALONE. A ticket is carried in a
+ * URL, so it can be captured (history, a proxy log, a referrer, a shoulder);
+ * captured, it could be replayed into an ATTACKER's browser, whose own state
+ * cookie legitimately matched their own callback, and the identity host had
+ * nothing left to object to. The redeem call therefore carries the callback
+ * `state` too, and the identity host compares it to the state stored WITH the
+ * ticket before consuming it. HQ's cookie check now proves "this browser
+ * started a sign-in"; the identity host's check proves "and it is THIS one".
+ *
+ * **E — a ticket must not outlive its session.** Sign out between authorize and
+ * redeem and there is no derived HQ session for trap C to revoke, so the
+ * unconsumed ticket stayed redeemable for the rest of its TTL and could mint a
+ * NEW HQ session after logout. Closed from both ends: the identity host
+ * invalidates every unconsumed ticket for a session as it revokes that session,
+ * and redemption independently re-checks that the origin session is still live.
+ * Either alone would leave a window; both together do not.
  */
 
 /** Routes the IDENTITY host exposes. Mounted under the app origin. */
@@ -118,6 +139,20 @@ export type SsoRedeemError =
   | 'ticket_expired'
   | 'ticket_consumed'
   | 'audience_mismatch'
+  /**
+   * The redeem call did not present the state the ticket was minted with.
+   *
+   * See trap D above: without this a stolen ticket was redeemable from any
+   * browser that happened to hold a valid state of its own.
+   */
+  | 'state_mismatch'
+  /**
+   * The identity session this ticket derives from has ended (trap E above).
+   *
+   * Refused rather than honoured: a sign-out must not leave a redeemable
+   * credential behind that can still mint a new HQ session.
+   */
+  | 'origin_session_ended'
   | 'service_unauthenticated'
   | 'unavailable';
 

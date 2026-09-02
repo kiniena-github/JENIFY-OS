@@ -228,6 +228,37 @@ invented to paper over it.
 ### Stage 2 — FOUNDER GATE A: identity for a standalone origin (§7)
 No code until decided. Then implement the chosen option and its regression tests.
 
+**Gate A was decided A-4 on 2026-09-02** (shared Jenify identity, separate host-only HQ
+session) and Stage 2 was implemented on `claude/phase-2-hq-first-class-prep` (PR #236).
+Exact-head CI was green on `ef12d0d`, and an independent Codex review of that same head found
+**four P1 security/correctness defects**. All four were treated as blockers and fixed in a
+correction round (issue #237), each with hostile tests that fail against the code they correct:
+
+1. **A redeemed ticket is bound to its own round trip.** HQ's callback checked `state` against
+   its own cookie but then redeemed the ticket alone, so a ticket captured out of a URL could
+   be replayed from an attacker's browser, whose own state cookie matched their own callback.
+   The redeem call now carries the callback state, and the identity host compares it to the
+   state stored with the ticket before consuming it. (Trap D in `hq-host/src/sso/contract.ts`.)
+2. **A ticket does not outlive its session.** Signing out between authorize and redeem left an
+   unconsumed ticket that could still mint a NEW HQ session for the rest of its TTL, because no
+   derived HQ session existed yet for logout propagation to revoke. Closed at both ends:
+   sign-out invalidates that session's outstanding tickets in the same transaction that revokes
+   it, and redemption independently re-checks that the origin session is still live (which also
+   covers expiry, admin revocation and a deactivated account). (Trap E.)
+3. **The shipped identity process actually carries the bridge.** `buildApp` accepted an `ssoHq`
+   plane and `apps/hq-server` called the identity endpoints, but `packages/server/src/index.ts`
+   never built one — only tests did — so the two real processes could not complete a handoff at
+   all. The composition is now `packages/server/src/compose.ts`, configured fail-closed from
+   `FACTORYOS_SSO_HQ*` by `services/sso-hq-host.ts`, with the entrypoint's own seam under test.
+4. **The back channel may not be cleartext.** `HQ_SSO_IDENTITY_ORIGIN` accepted plaintext
+   `http://` to any host, which would have sent the service credential and the relayed Founder
+   step-up password in the clear. HTTPS is now required except to a genuine loopback address,
+   enforced in `hq-host/src/sso/origin.ts`, in both environment loaders, and at
+   `httpBackChannel` construction so no future wiring can bypass it.
+
+No production deployment, DNS change, paid service or production credential was involved, and
+Stage 3 has not been started.
+
 ### Stage 3 — Durable hosted persistence
 Already scoped by open issue **#227** (Founder-approved 2026-08-30). Do not duplicate that
 mission — Phase 2 should *absorb* it. Requirement stands: preserve atomicity, idempotency,

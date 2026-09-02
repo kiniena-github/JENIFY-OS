@@ -219,7 +219,7 @@ describe('the back channel', () => {
         method: 'POST',
         url: IDENTITY_ROUTES.redeem,
         headers: { 'content-type': 'application/json', ...headers },
-        payload: { ticket },
+        payload: { ticket, state: 's1' },
       });
       expect(res.statusCode).toBe(401);
     }
@@ -228,7 +228,7 @@ describe('the back channel', () => {
       method: 'POST',
       url: IDENTITY_ROUTES.redeem,
       headers: { 'content-type': 'application/json', [SSO_SERVICE_AUTH_HEADER]: SERVICE_SECRET },
-      payload: { ticket },
+      payload: { ticket, state: 's1' },
     });
     expect(ok.statusCode).toBe(200);
     await instance.close();
@@ -245,7 +245,7 @@ describe('the back channel', () => {
       method: 'POST',
       url: IDENTITY_ROUTES.redeem,
       headers,
-      payload: { ticket },
+      payload: { ticket, state: 's1' },
     });
     expect(first.statusCode).toBe(200);
     expect(first.json().claims.accountId).toBe(founderUserId);
@@ -254,7 +254,7 @@ describe('the back channel', () => {
       method: 'POST',
       url: IDENTITY_ROUTES.redeem,
       headers,
-      payload: { ticket },
+      payload: { ticket, state: 's1' },
     });
     expect(replay.statusCode).toBe(400);
     expect(replay.json().error).toBe('ticket_consumed');
@@ -390,12 +390,14 @@ describe('the two hosts complete a handoff', () => {
       [SSO_SERVICE_AUTH_HEADER]: SERVICE_SECRET,
     };
     return {
-      async redeem(ticket) {
+      async redeem(ticket, state) {
         const res = await identity.inject({
           method: 'POST',
           url: IDENTITY_ROUTES.redeem,
           headers,
-          payload: { ticket },
+          // Exactly what `httpBackChannel` puts on the wire, state included
+          // (trap D): the ticket alone is not enough to redeem.
+          payload: { ticket, state },
         });
         return res.json();
       },

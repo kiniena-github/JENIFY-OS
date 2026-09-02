@@ -155,6 +155,28 @@ export interface SessionRecord {
   expiresAt: string;
 }
 
+/**
+ * Is the session with this ID still usable, by ID rather than by token?
+ *
+ * The HQ sign-in bridge needs exactly this and cannot use `resolveSessionRecord`:
+ * a handoff ticket records the session's opaque ID deliberately and never its
+ * token, so that a stolen HQ database yields no usable credential for this
+ * server. Redemption then has to be able to ask "is that session still alive?"
+ * from the ID alone.
+ *
+ * Same three conditions as `resolveSessionRecord`, in the same order, plus the
+ * account check that function performs through `buildSessionUser` — a
+ * deactivated account must not complete a handoff that was started before it
+ * was switched off.
+ */
+export function sessionIsLive(db: Db, sessionId: string, now: Date = new Date()): boolean {
+  if (!sessionId) return false;
+  const session = db.select().from(sessions).where(eq(sessions.id, sessionId)).get();
+  if (!session || session.revokedAt) return false;
+  if (session.expiresAt < now.toISOString()) return false;
+  return buildSessionUser(db, session.userId) != null;
+}
+
 export function resolveSessionRecord(db: Db, token: string): SessionRecord | null {
   const session = db.select().from(sessions).where(eq(sessions.token, token)).get();
   if (!session || session.revokedAt) return null;

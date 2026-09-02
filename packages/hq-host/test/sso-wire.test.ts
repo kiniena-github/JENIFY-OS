@@ -56,7 +56,7 @@ describe('httpBackChannel talks to a real identity host', () => {
     });
 
     const channel = httpBackChannel({ baseUrl: base, serviceSecret: SECRET });
-    const result = await channel.redeem('ticket-1');
+    const result = await channel.redeem('ticket-1', 'state-1');
 
     expect(result.ok).toBe(true);
     expect(seen[0]!.header).toBe(SECRET);
@@ -77,7 +77,7 @@ describe('httpBackChannel talks to a real identity host', () => {
         },
       }));
     });
-    const result = await httpBackChannel({ baseUrl: base, serviceSecret: SECRET }).redeem('t');
+    const result = await httpBackChannel({ baseUrl: base, serviceSecret: SECRET }).redeem('t', 's');
     expect(result.ok && result.claims.sessionEstablishedAt).toBe('2026-09-02T08:15:00.000Z');
     expect(result.ok && result.claims.originSessionId).toBe('sess-9');
   });
@@ -89,7 +89,7 @@ describe('httpBackChannel talks to a real identity host', () => {
       serviceSecret: SECRET,
       timeoutMs: 500,
     });
-    expect(await channel.redeem('t')).toEqual({ ok: false, error: 'unavailable' });
+    expect(await channel.redeem('t', 's')).toEqual({ ok: false, error: 'unavailable' });
     expect(await channel.verifyPassword({
       realmId: 'r',
       accountId: 'a',

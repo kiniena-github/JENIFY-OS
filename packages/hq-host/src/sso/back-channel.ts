@@ -18,9 +18,18 @@ import {
   type SsoRedeemResult,
   type SsoVerifyPasswordRequest,
 } from './contract.js';
+import { checkBackChannelOrigin, describeBackChannelOriginRefusal } from './origin.js';
 
 export interface IdentityBackChannel {
-  redeem(ticket: string): Promise<SsoRedeemResult>;
+  /**
+   * Exchange a ticket for claims.
+   *
+   * `state` is the value that came back on the callback and matched this
+   * browser's state cookie. It is REQUIRED (trap D): the identity host compares
+   * it to the state the ticket was minted with, so a ticket captured out of a
+   * URL cannot be redeemed from a different browser's round trip.
+   */
+  redeem(ticket: string, state: string): Promise<SsoRedeemResult>;
   verifyPassword(input: SsoVerifyPasswordRequest): Promise<SsoPasswordResult>;
 }
 
@@ -32,6 +41,15 @@ export interface IdentityBackChannel {
  * `unavailable` rather than as a rejection, so the caller can fail CLOSED
  * without also telling the person at the keyboard that their password was
  * wrong.
+ *
+ * ## It refuses to be built on a cleartext transport
+ *
+ * Keeping a credential out of the URL is worth nothing if the whole request is
+ * readable on the wire, and this channel carries both the service secret and a
+ * relayed step-up password. `checkBackChannelOrigin` is therefore enforced HERE,
+ * at construction, and not only in the environment loaders: a loader can be
+ * bypassed by a future caller, a constructor cannot. The loaders still check
+ * first, so an operator gets a boot-log explanation rather than a stack trace.
  */
 export function httpBackChannel(options: {
   baseUrl: string;
@@ -41,7 +59,13 @@ export function httpBackChannel(options: {
 }): IdentityBackChannel {
   const doFetch = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? 5_000;
-  const base = options.baseUrl.replace(/\/+$/, '');
+  const checked = checkBackChannelOrigin(options.baseUrl);
+  if (!checked.ok) {
+    throw new Error(
+      describeBackChannelOriginRefusal('identity origin', options.baseUrl, checked.reason),
+    );
+  }
+  const base = checked.origin;
 
   async function post(path: string, body: unknown): Promise<{ status: number; body: unknown } | null> {
     const controller = new AbortController();
@@ -65,8 +89,8 @@ export function httpBackChannel(options: {
   }
 
   return {
-    async redeem(ticket) {
-      const response = await post(SSO_IDENTITY_ROUTES.redeem, { ticket });
+    async redeem(ticket, state) {
+      const response = await post(SSO_IDENTITY_ROUTES.redeem, { ticket, state });
       if (!response) return { ok: false, error: 'unavailable' };
       const body = response.body as SsoRedeemResult | null;
       if (!body || typeof body !== 'object') return { ok: false, error: 'unavailable' };

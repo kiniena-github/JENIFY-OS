@@ -23,7 +23,12 @@ import { and, eq, isNull } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
 import { ssoHqTickets } from '../db/schema.js';
 import { newId } from '../util.js';
-import { accountLoginIdentifier, verifyAccountPassword, type SessionRecord } from './auth.js';
+import {
+  accountLoginIdentifier,
+  sessionIsLive,
+  verifyAccountPassword,
+  type SessionRecord,
+} from './auth.js';
 import { assertNotRateLimited, recordAuthFailure, clearAuthFailures } from './ratelimit.js';
 
 /** One minute. A ticket rides in a URL, so its window is deliberately tiny. */
@@ -37,9 +42,17 @@ export interface HqSsoClaims {
   originSessionId: string;
 }
 
-export type SsoRedeemOutcome =
-  | { ok: true; claims: HqSsoClaims }
-  | { ok: false; error: 'ticket_unknown' | 'ticket_expired' | 'ticket_consumed' | 'audience_mismatch' };
+export type SsoRedeemError =
+  | 'ticket_unknown'
+  | 'ticket_expired'
+  | 'ticket_consumed'
+  | 'audience_mismatch'
+  /** The redeem call did not present the state this ticket was minted with. */
+  | 'state_mismatch'
+  /** The identity session this ticket derives from is revoked or expired. */
+  | 'origin_session_ended';
+
+export type SsoRedeemOutcome = { ok: true; claims: HqSsoClaims } | { ok: false; error: SsoRedeemError };
 
 function digest(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -110,17 +123,63 @@ export function mintTicket(
 }
 
 /**
- * Redeem a ticket exactly once.
+ * Constant-time equality for two opaque, browser-supplied values.
+ *
+ * `state` is compared with this rather than `===` for the same reason the
+ * service secret is: an attacker gets unlimited attempts at a value they
+ * control, so a comparison whose duration depends on the shared prefix is a
+ * (slow, noisy, but real) oracle. A length mismatch is refused outright,
+ * because `timingSafeEqual` throws on unequal lengths.
+ */
+function opaqueValuesMatch(supplied: string, expected: string): boolean {
+  if (supplied.length === 0 || expected.length === 0) return false;
+  const a = Buffer.from(supplied, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * Redeem a ticket exactly once, for the round trip it was minted for, while the
+ * session behind it is still live.
  *
  * The consume is a conditional UPDATE on `consumed_at IS NULL`, so two
  * simultaneous redemptions cannot both win: SQLite serialises them and the
  * second sees zero rows changed. Checking-then-writing would have been a race
  * with a replayed ticket as the prize.
+ *
+ * ## Why `state` is checked HERE and not only at HQ (trap D)
+ *
+ * HQ's callback already compares the returned `state` to a cookie it set on
+ * this browser, which is the right CSRF check and is not the same check as this
+ * one. That comparison proves the browser started A sign-in; it cannot prove
+ * the ticket belongs to THAT sign-in, because HQ does not hold the ticket row.
+ * So a ticket captured out of a URL — history, a proxy log, a referrer — could
+ * be pasted into an attacker's own callback, whose own state cookie matched
+ * their own state perfectly, and be redeemed for the victim's claims. Only this
+ * server can close that, by comparing the presented state to the one stored
+ * with the ticket at mint time.
+ *
+ * ## Why the origin session is re-checked (trap E)
+ *
+ * A ticket is minted from a live session and lives up to a minute. Sign out
+ * inside that minute and there is no derived HQ session yet for logout
+ * propagation to revoke, so the unconsumed ticket would otherwise still mint a
+ * brand-new HQ session AFTER sign-out. `invalidateTicketsForOriginSession`
+ * closes that from the logout side; this check closes it from the redeem side.
+ * Both exist deliberately: the first stops a ticket surviving a logout it saw,
+ * the second stops one surviving a session that ended any other way (expiry, an
+ * admin revoke, a deactivated account).
+ *
+ * Order of checks is deliberate too: a ticket that fails any of them is NOT
+ * consumed, so a legitimate ticket is never burned by an attacker's bad guess
+ * — and no failing path leaks which state or session was expected.
  */
 export function redeemTicket(
   db: Db,
   ticket: string,
   audience: string,
+  state: string,
   now: Date = new Date(),
 ): SsoRedeemOutcome {
   if (!ticket) return { ok: false, error: 'ticket_unknown' };
@@ -129,6 +188,14 @@ export function redeemTicket(
   if (row.consumedAt != null) return { ok: false, error: 'ticket_consumed' };
   if (Date.parse(row.expiresAt) <= now.getTime()) return { ok: false, error: 'ticket_expired' };
   if (row.audience !== audience) return { ok: false, error: 'audience_mismatch' };
+  // A missing state is a mismatch, never a waiver: an older HQ build that does
+  // not send one must fail closed rather than fall through unchecked.
+  if (typeof state !== 'string' || !opaqueValuesMatch(state, row.state)) {
+    return { ok: false, error: 'state_mismatch' };
+  }
+  if (!sessionIsLive(db, row.originSessionId, now)) {
+    return { ok: false, error: 'origin_session_ended' };
+  }
 
   const consumed = db
     .update(ssoHqTickets)
@@ -239,6 +306,31 @@ export function httpHqLogoutNotifier(options: {
       }
     },
   };
+}
+
+/**
+ * Kill every unconsumed ticket minted from one identity session (trap E).
+ *
+ * Called as that session is revoked, in the same transaction, so there is no
+ * instant at which the session is gone and a ticket from it is still redeemable.
+ * Marking them consumed rather than deleting them keeps the single-use bookkeeping
+ * intact: a redemption arriving afterwards is refused as `ticket_consumed`, which
+ * is exactly what it is, and `pruneExpiredTickets` clears the rows later.
+ *
+ * Returns how many were invalidated, so the caller can audit it.
+ */
+export function invalidateTicketsForOriginSession(
+  db: Db,
+  originSessionId: string,
+  now: Date = new Date(),
+): number {
+  if (!originSessionId) return 0;
+  const result = db
+    .update(ssoHqTickets)
+    .set({ consumedAt: now.toISOString() })
+    .where(and(eq(ssoHqTickets.originSessionId, originSessionId), isNull(ssoHqTickets.consumedAt)))
+    .run();
+  return result.changes;
 }
 
 /** Housekeeping: drop tickets that can no longer be redeemed. */

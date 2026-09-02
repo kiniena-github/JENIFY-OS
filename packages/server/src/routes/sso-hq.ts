@@ -9,7 +9,9 @@
  * One browser-facing route and two back-channel routes:
  *
  *   GET  /api/sso/hq/authorize        needs THIS server's session; mints a ticket
- *   POST /api/sso/hq/redeem           service-authenticated; consumes it once
+ *   POST /api/sso/hq/redeem           service-authenticated; consumes it once,
+ *                                     for the matching state, while the origin
+ *                                     session is still live
  *   POST /api/sso/hq/verify-password  service-authenticated; step-up, shared budget
  *
  * The two back-channel routes are useless to a browser: they demand a service
@@ -133,7 +135,11 @@ export function registerSsoHqRoutes(app: FastifyInstance, db: Db, plane: SsoHqPl
     }
     const body = req.body as Record<string, unknown> | undefined;
     const ticket = typeof body?.ticket === 'string' ? body.ticket : '';
-    const outcome = redeemTicket(db, ticket, plane.audience);
+    // The callback state, forwarded by HQ. Absent ⇒ the empty string ⇒
+    // `state_mismatch`, because a redeem that cannot name the round trip it
+    // belongs to is refused rather than trusted (trap D).
+    const state = typeof body?.state === 'string' ? body.state : '';
+    const outcome = redeemTicket(db, ticket, plane.audience, state);
     if (!outcome.ok) {
       audit(`[sso] redeem refused: ${outcome.error}`);
       return reply.status(400).send(outcome);

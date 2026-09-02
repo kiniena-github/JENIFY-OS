@@ -3,6 +3,7 @@ import type { Db } from '../db/index.js';
 import { SESSION_COOKIE, requireCtx, sessionCookieOptions } from '../app.js';
 import { login, logout, resolveSessionRecord } from '../services/auth.js';
 import { propagateLogoutToHq, type SsoHqPlane } from './sso-hq.js';
+import { invalidateTicketsForOriginSession } from '../services/sso-hq.js';
 import { getTenant } from '../services/provisioning.js';
 import { getBundle, listLanguages } from '../services/translations.js';
 import { recoverWithCode } from '../services/recovery.js';
@@ -81,7 +82,27 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, ssoHq?: SsoHqPl
     // This is trap C — a separate HQ cookie does not die on its own when this
     // one does, so sign-out has to say so explicitly.
     const originSessionId = token ? (resolveSessionRecord(db, token)?.id ?? null) : null;
-    if (token) logout(db, token);
+    if (token) {
+      // Trap E: a handoff ticket minted moments ago has no derived HQ session
+      // yet, so trap C's revoke-what-HQ-derived finds nothing to revoke and the
+      // unconsumed ticket would still mint a NEW HQ session after this
+      // sign-out. Revoking the session and killing its outstanding tickets in
+      // ONE transaction leaves no instant where one is done and the other is
+      // not. (Redemption re-checks the session independently, so neither half
+      // is load-bearing alone.)
+      // drizzle's better-sqlite3 transaction runs the callback synchronously and
+      // commits or rolls back atomically, exactly as `recovery.ts` relies on.
+      db.transaction((tx) => {
+        const txDb = tx as unknown as Db;
+        logout(txDb, token);
+        if (ssoHq && originSessionId) {
+          const killed = invalidateTicketsForOriginSession(txDb, originSessionId);
+          if (killed > 0) {
+            ssoHq.audit?.(`[sso] ${killed} unredeemed HQ ticket(s) invalidated by sign-out`);
+          }
+        }
+      });
+    }
     reply.clearCookie(SESSION_COOKIE, sessionCookieOptions(req));
     // Never blocks or fails sign-out: an unreachable HQ is audited, and the HQ
     // session's own 60-minute ceiling remains the backstop.

@@ -45,6 +45,8 @@ import {
   registerHeadquarterSite,
   registerHqSsoRoutes,
   beginHandoff,
+  checkBackChannelOrigin,
+  describeBackChannelOriginRefusal,
   httpBackChannel,
   ssoIdentity,
   HqSessionStore,
@@ -64,6 +66,11 @@ import {
  *   HQ_SSO_HQ_ORIGIN         this host, e.g. https://hq.jenifylabs.com
  *   HQ_SSO_SERVICE_SECRET    dev/test value only — production is a Founder gate
  *   HQ_SSO_INSECURE_COOKIES=1  drop `Secure`, for a loopback http proof stack
+ *
+ * Both origins must be https, or a loopback address for a local proof stack.
+ * `http://` to anything else is REFUSED (the bridge stays off): that channel
+ * carries the service secret on every call and relays the Founder's step-up
+ * password, so cleartext there is a credential disclosure, not a convenience.
  */
 function ssoConfigFrom(
   env: Record<string, string | undefined>,
@@ -82,16 +89,47 @@ function ssoConfigFrom(
     }
     return null;
   }
+
+  // The back channel carries the service secret on every call and RELAYS the
+  // Founder's step-up password, so plaintext to anything but a loopback address
+  // is refused outright rather than configured and quietly leaked. The HQ origin
+  // is checked by the same rule: it is where the browser lands with a ticket in
+  // the URL, and where the identity host posts sign-out with the same secret.
+  const checkedIdentity = checkBackChannelOrigin(identityOrigin);
+  if (!checkedIdentity.ok) {
+    log(
+      describeBackChannelOriginRefusal(
+        'HQ_SSO_IDENTITY_ORIGIN',
+        identityOrigin,
+        checkedIdentity.reason,
+      ),
+    );
+    return null;
+  }
+  const checkedHq = checkBackChannelOrigin(hqOrigin);
+  if (!checkedHq.ok) {
+    log(describeBackChannelOriginRefusal('HQ_SSO_HQ_ORIGIN', hqOrigin, checkedHq.reason));
+    return null;
+  }
+
   const store = new HqSessionStore(db);
-  const backChannel = httpBackChannel({ baseUrl: identityOrigin, serviceSecret });
+  const backChannel = httpBackChannel({ baseUrl: checkedIdentity.origin, serviceSecret });
   const secureCookies = env.HQ_SSO_INSECURE_COOKIES !== '1';
   log(
-    `[hq] Jenify sign-in bridge ON: identity=${identityOrigin}, hq=${hqOrigin}, ` +
+    `[hq] Jenify sign-in bridge ON: identity=${checkedIdentity.origin}, hq=${checkedHq.origin}, ` +
       `cookies=${secureCookies ? 'Secure' : 'INSECURE (loopback proof only)'}`,
   );
   return {
     identity: ssoIdentity(store, backChannel),
-    options: { store, backChannel, identityOrigin, hqOrigin, serviceSecret, secureCookies, audit: log },
+    options: {
+      store,
+      backChannel,
+      identityOrigin: checkedIdentity.origin,
+      hqOrigin: checkedHq.origin,
+      serviceSecret,
+      secureCookies,
+      audit: log,
+    },
   };
 }
 
