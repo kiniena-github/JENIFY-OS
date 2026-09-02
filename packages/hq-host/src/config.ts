@@ -1,76 +1,38 @@
 /**
- * Environment-gated host configuration for the HQ control plane
- * (issue #200, integration lane).
+ * Environment-gated host configuration for the HQ control plane.
  *
- * ## OFF is the default, and OFF means byte-for-byte unchanged
+ * OFF remains the default. Stage 3 adds an explicit persistence contract while
+ * preserving every existing local/workstation setting:
  *
- * An ordinary JENIFY OS deployment — the Mesob pilot's exact shape — sets
- * none of these variables, gets `null` from this loader, and `buildApp`
- * therefore registers no HQ route, serves no HQ page, and gains no new auth
- * surface. Every step toward a live HQ control plane is a separate,
- * deliberate configuration action:
+ *   FACTORYOS_HQ_CONTROL=1
+ *   FACTORYOS_HQ_DB=<path>
+ *   FACTORYOS_HQ_RUNTIME=local|hosted              (default: local)
+ *   FACTORYOS_HQ_PERSISTENCE=local-file|durable-volume
+ *   FACTORYOS_HQ_DURABLE_ROOT=<mounted volume>     (durable mode only)
+ *   FACTORYOS_HQ_BACKUP_DIR=<directory>            (optional)
  *
- *   FACTORYOS_HQ_CONTROL=1          master switch. Anything else ⇒ OFF.
- *   FACTORYOS_HQ_DB=<path>          the HQ SQLite database. REQUIRED once the
- *                                   switch is on; without it the loader logs
- *                                   and stays off rather than inventing a
- *                                   default location.
- *   FACTORYOS_HQ_FOUNDER_MAP=<json> explicit account→principal bindings.
- *                                   Unset ⇒ nobody is the Founder and every
- *                                   control stays off (that is a valid,
- *                                   fail-closed deployment state). Broken
- *                                   JSON is passed through UNPARSED so the
- *                                   boundary refuses every request as
- *                                   founder_map_malformed — visible, never
- *                                   silently "empty".
- *   FACTORYOS_HQ_ALLOWED_ORIGINS=<csv>  trusted origins for browser writes.
- *                                   Unset ⇒ the control API refuses every
- *                                   mutation (origin_allowlist_empty).
- *   FACTORYOS_HQ_MUTATIONS=1        browser writes. Anything else ⇒ the API
- *                                   serves reads only and SAYS so in
- *                                   /session's control availability.
- *   FACTORYOS_HQ_SITE_DIR=<path>    static HQ site directory (the output of
- *                                   `npm run build:site`), served same-origin
- *                                   at /hq/ and gated to the mapped Founder.
- *                                   Unset ⇒ nothing is served.
- *
- * ## What this loader deliberately does NOT do
- *
- * - It never registers `hq.direct_order`. Registering the capability is its
- *   own configuration action (`registerDirectOrderCapability`), and a
- *   deployment that has not taken it gets `capability_not_registered` — the
- *   session route advertises the composer as off, truthfully.
- * - It never hands the whole `process.env` to the control plane. Only the
- *   fact NAMES the provider registry declares are read, and only their
- *   presence travels (the same narrowing `build-site.ts` performs).
- * - It never parses the Founder map into a "best effort" shape. Authority
- *   configuration either parses exactly or fails closed loudly.
+ * A hosted runtime fails closed unless durable-volume mode is explicitly
+ * configured. The provider/volume itself is deliberately not chosen here.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { HeadquarterOperations } from '@factoryos/headquarter/application';
-import { openHqDatabase, HeadquarterStore, type HqDatabase } from '@factoryos/headquarter/store';
-import { PROVIDER_REGISTRY, type ProviderId, type SecretsEnv } from '@factoryos/headquarter/routing';
+import { HeadquarterStore, type HqDatabase } from '@factoryos/headquarter/store';
+import { PROVIDER_REGISTRY, type SecretsEnv } from '@factoryos/headquarter/routing';
 import { claude } from '@factoryos/headquarter/providers';
 import type { ControlAuditEvent } from '@factoryos/headquarter/live';
 import type { HeadquarterControlPlane } from './routes.js';
+import { openHqPersistence, type HqPersistence } from './persistence.js';
 
 export interface HeadquarterHost {
   plane: HeadquarterControlPlane;
   /** Directory of the static HQ site to serve at /hq/, when configured. */
   siteRoot?: string;
-  /**
-   * The opened HQ database, so a host can close it on shutdown.
-   *
-   * Added in Phase 2, Stage 1. While the only host was a long-lived server that
-   * exited with the process, nothing needed this. A standalone HQ process does:
-   * without a handle it cannot release the file, which on Windows leaves the
-   * database locked after the app closes. Exposing it is also the honest shape —
-   * this loader OPENS a resource, so it should hand back the means to release
-   * it.
-   */
+  /** Open database retained for compatibility with the Stage-1 host contract. */
   db: HqDatabase;
+  /** Stage-3 owner of durability, backups/checkpoints and shutdown. */
+  persistence: HqPersistence;
 }
 
 /** The provider facts the control plane may observe. Names, fixed by the registry. */
@@ -88,8 +50,9 @@ export function observableProviderFacts(): string[] {
 /**
  * Read the HQ host configuration from the environment, fail-closed.
  *
- * Returns `null` — HQ entirely off — unless the master switch and the
- * database path are both set deliberately.
+ * Nothing is opened unless the master switch is exactly `1`. Once it is on,
+ * persistence is the first boundary evaluated so a hosted process can never
+ * silently boot against an ephemeral database.
  */
 export function loadHeadquarterHost(
   env: Record<string, string | undefined>,
@@ -97,22 +60,14 @@ export function loadHeadquarterHost(
 ): HeadquarterHost | null {
   if (env.FACTORYOS_HQ_CONTROL !== '1') return null;
 
-  const dbPath = env.FACTORYOS_HQ_DB;
-  if (!dbPath) {
-    log(
-      '[hq] FACTORYOS_HQ_CONTROL=1 but FACTORYOS_HQ_DB is not set. The HQ control plane stays ' +
-        'OFF (fail closed) — pointing it at a database is a deliberate action, not a default.',
-    );
-    return null;
-  }
-
-  const hqDb = openHqDatabase(dbPath);
+  const persistence = openHqPersistence(env, log);
+  if (!persistence) return null;
+  const hqDb = persistence.db;
   const ops = new HeadquarterOperations(hqDb, { store: new HeadquarterStore(hqDb) });
 
-  // The Founder map: parsed here ONLY to distinguish "valid JSON" from
-  // "broken string". A broken value is passed through raw so the boundary's
-  // own fail-closed parser refuses every request with a reason the operator
-  // can see, instead of this loader silently normalising authority config.
+  // The Founder map is parsed only to distinguish valid JSON from malformed
+  // authority configuration. Malformed input travels raw to the boundary so it
+  // is refused visibly rather than normalized into an accidental empty map.
   let founderMap: unknown = null;
   const rawMap = env.FACTORYOS_HQ_FOUNDER_MAP;
   if (rawMap != null && rawMap.trim() !== '') {
@@ -131,10 +86,10 @@ export function loadHeadquarterHost(
     .split(',')
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
-
   const mutationsEnabled = env.FACTORYOS_HQ_MUTATIONS === '1';
 
-  // Presence-narrowed provider facts — never the whole environment.
+  // Presence-narrowed provider facts — never hand the entire process
+  // environment to the control plane.
   const secretsEnv: SecretsEnv = {};
   for (const fact of observableProviderFacts()) {
     if (env[fact] != null) secretsEnv[fact] = env[fact];
@@ -151,38 +106,17 @@ export function loadHeadquarterHost(
   }
 
   log(
-    `[hq] HQ control plane ON: db=${dbPath}, mutations=${mutationsEnabled ? 'ENABLED' : 'off (reads only)'}, ` +
+    `[hq] HQ control plane ON: db=${persistence.config.dbPath}, ` +
+      `persistence=${persistence.config.mode}/${persistence.config.runtime}, ` +
+      `mutations=${mutationsEnabled ? 'ENABLED' : 'off (reads only)'}, ` +
       `trusted origins=${allowedOrigins.length}, founder map=${
         founderMap == null ? 'UNCONFIGURED (controls stay off)' : 'configured'
       }, site=${siteRoot ?? 'not served'}`,
   );
 
   // What CLAUDE dispatchability actually depends on where this host runs.
-  //
-  // `CLAUDE_ROUTINE_*` are GitHub Actions secrets the workflow needs; on the
-  // Founder workstation they are deliberately absent while the order travels
-  // through the authenticated `gh` transport. Answering the composer from their
-  // absence made the browser contradict both the live snapshot and the
-  // transport that would really carry the work (issue #224).
-  //
-  // Cached, because `/session` is polled and the underlying check asks GitHub a
-  // question. A host with no transport observes nothing and returns null, so
-  // the routing contract answers exactly as it did before — this adds a
-  // verdict where one can be observed, and never invents one.
-  // The shared, reviewed derivation rather than a second copy of it
-  // (issue #224, Codex P2 on `66d34cc`). The hand-rolled version this replaces
-  // collapsed EVERY negative to null, including a live one: `gh auth status`
-  // calls the API, so a non-zero exit means the session is missing, expired or
-  // revoked. Discarding that made route resolution fall back to `secretsEnv`,
-  // and a host that happens to carry `CLAUDE_ROUTINE_*` then reported the
-  // composer and the submitted order READY while the only real transport would
-  // have refused them as unauthenticated — a surface more confident than its
-  // evidence, which is the defect this whole issue is about.
-  //
-  // `transportRouteAvailability` answers `false` for an observed live negative,
-  // `true` only for an observed authenticated session, and `null` for genuine
-  // ignorance (no `gh`, or a probe that could not run or threw). It carries the
-  // same caching this used to implement by hand.
+  // The shared helper returns false for an observed unavailable transport, true
+  // only for observed availability, and null for genuine ignorance.
   const dispatchAvailability =
     claude.transportRouteAvailability(claude.ghCliTransport()).providerDispatchable;
 
@@ -195,10 +129,6 @@ export function loadHeadquarterHost(
       dispatchAvailability,
       mutationsEnabled,
       audit: {
-        // A supplementary host-side sink. The authoritative record is the
-        // hash-chained op_evidence log inside the canonical operation; this
-        // line exists so privileged browser activity is visible in the server
-        // console too. The event shape carries no credential by contract.
         record(event: ControlAuditEvent) {
           log(
             `[hq-audit] ${event.at} ${event.route} ${event.outcome} ${event.detail}` +
@@ -209,5 +139,6 @@ export function loadHeadquarterHost(
     },
     siteRoot,
     db: hqDb,
+    persistence,
   };
 }
