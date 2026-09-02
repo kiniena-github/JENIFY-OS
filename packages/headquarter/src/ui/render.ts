@@ -197,7 +197,7 @@ export const DIRECT_ORDER_BLOCKER =
   'TRUSTED-LOCAL-ADMIN interface: it does not authenticate the Founder, it asserts a principal ' +
   'id that deny-by-default authorization and the no-self-approval rule then contain.';
 
-const ROUTE_STATE_PRESENTATION: Record<'ready' | 'blocked' | 'unknown', { label: string; tone: Tone }> = {
+export const ROUTE_STATE_PRESENTATION: Record<'ready' | 'blocked' | 'unknown', { label: string; tone: Tone }> = {
   ready: { label: 'Available', tone: 'accent' },
   blocked: { label: 'Blocked — not connected', tone: 'danger' },
   unknown: { label: 'Not evaluated', tone: 'neutral' },
@@ -226,9 +226,9 @@ function directOrderComposer(routes: DirectOrderRouteAvailability[] | undefined)
     const state = found == null ? 'unknown' : found.resolution.connected ? 'ready' : 'blocked';
     const presentation = ROUTE_STATE_PRESENTATION[state];
     const detail = found?.resolution.reason ?? 'Route availability was not evaluated for this build.';
-    return `<div class="order-route" data-route="${escapeHtml(route)}">
-<p class="row">${chip(route, 'neutral', true)}${chip(presentation.label, presentation.tone)}</p>
-<p class="faint">${escapeHtml(detail)}</p>
+    return `<div class="order-route" data-route="${escapeHtml(route)}" data-route-static-state="${escapeHtml(state)}">
+<p class="row">${chip(route, 'neutral', true)}<span data-route-state-chip>${chip(presentation.label, presentation.tone)}</span></p>
+<p class="faint" data-route-reason>${escapeHtml(detail)}</p>
 </div>`;
   }).join('\n');
 
@@ -564,7 +564,10 @@ ${event.status ? ` ${statusChip(event.status)}` : ` ${chip('note', 'neutral')}`}
 <div>
 ${section('WHAT NEEDS THE FOUNDER', attentionPanel, 'founder-attention')}
 ${section('DIRECT ORDER', directOrderComposer(orderRoutes), 'direct-order')}
-${directOrderConsoleScript()}
+${directOrderConsoleScript({
+  ready: ROUTE_STATE_PRESENTATION.ready,
+  blocked: ROUTE_STATE_PRESENTATION.blocked,
+})}
 <div class="grid grid-lanes">${lanes}</div>
 </div>
 <div>

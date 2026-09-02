@@ -166,7 +166,9 @@ function postJson(path, payload) {
  * project/title, route choice, Start Task) inside the mount; anything else
  * writes one truthful line about why nothing is drawn.
  */
-export function directOrderConsoleScript(): string {
+export function directOrderConsoleScript(
+  routePresentation: { ready: { label: string; tone: string }; blocked: { label: string; tone: string } },
+): string {
   return `<script>
 (function () {
   var mount = document.querySelector('[data-order-console]');
@@ -178,6 +180,59 @@ export function directOrderConsoleScript(): string {
 
   var SESSION_PATH = ${jsonForScript(CONTROL_ROUTES.session)};
   var ORDERS_PATH = ${jsonForScript(CONTROL_ROUTES.orders)};
+  var ROUTE_READY = ${jsonForScript(routePresentation.ready)};
+  var ROUTE_BLOCKED = ${jsonForScript(routePresentation.blocked)};
+
+  // ROUTE AVAILABILITY IS A FACT, NOT A CONTROL (issue #230, Founder-gate
+  // browser finding on the corrected head).
+  //
+  // The static route blocks above are rendered at SITE-BUILD time from
+  // whatever provider facts the build machine happened to hold — on the
+  // Founder workstation that means no \`CLAUDE_ROUTINE_*\`, so they read
+  // "Blocked — not connected". The live verdicts were only ever drawn inside
+  // the composer, and the composer is drawn only for a principal holding the
+  // \`hq.direct_order\` originate grant. A Founder signed in to APPROVE — who
+  // holds approval authority and no originate grant, exactly as the
+  // no-self-approval rule intends — therefore saw the build-time claim and
+  // nothing else, while /hq/connections.html showed the live truth. Two
+  // Founder-facing pages, one real execution path, two answers: the same
+  // defect class #226 closed on the Connections page, still open here.
+  //
+  // So the static blocks are corrected from the SAME \`/session\` routes field
+  // the composer reads, for every resolved Founder, whatever they may or may
+  // not originate. Whether CLAUDE can dispatch from this host does not depend
+  // on who is looking at it.
+  //
+  // A response with no readable \`routes\` (an unauthenticated or non-Founder
+  // session, an unreachable API) changes nothing: the build-time render stands
+  // rather than being guessed at.
+  function patchStaticRoutes(session) {
+    if (session == null || typeof session !== 'object' || !Array.isArray(session.routes)) return;
+    var blocks = document.querySelectorAll('[data-route]');
+    for (var b = 0; b < blocks.length; b++) {
+      (function (block) {
+        var name = block.getAttribute('data-route');
+        var found = null;
+        for (var i = 0; i < session.routes.length; i++) {
+          var entry = session.routes[i];
+          if (entry && entry.requested === name) { found = entry; break; }
+        }
+        if (found == null || typeof found.reason !== 'string') return;
+        var presentation = found.connected === true ? ROUTE_READY : ROUTE_BLOCKED;
+        var chipMount = block.querySelector('[data-route-state-chip]');
+        if (chipMount) {
+          chipMount.textContent = '';
+          var span = document.createElement('span');
+          span.className = 'chip tone-' + presentation.tone;
+          span.appendChild(document.createTextNode(presentation.label));
+          chipMount.appendChild(span);
+        }
+        var reason = block.querySelector('[data-route-reason]');
+        if (reason) reason.textContent = 'Live, from the same-origin control API just now: ' + found.reason;
+        block.setAttribute('data-route-live-state', found.connected === true ? 'ready' : 'blocked');
+      })(blocks[b]);
+    }
+  }
 
   // A bordered state panel, NOT another line of faint body text.
   //
@@ -355,6 +410,9 @@ export function directOrderConsoleScript(): string {
 
   jsonExchange(fetch(SESSION_PATH, { headers: { accept: 'application/json' } }))
     .then(function (result) {
+      // BEFORE the grant branch, and outside it: the route verdicts are the
+      // same facts whether or not this session may originate an order.
+      patchStaticRoutes(result.body);
       var grant = grantedControls(result.body);
       if (grant.directOrder) buildComposer(result.body);
       else stayOff(grant.reason);
