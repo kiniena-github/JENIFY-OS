@@ -52,6 +52,28 @@ export interface HqSsoOptions {
   audit?: (line: string) => void;
 }
 
+/**
+ * Reduce a caller-influenced "come back to" value to a SAFE local path.
+ *
+ * `startsWith('/')` is not enough, and that is worth stating plainly because it
+ * is the obvious-looking check and it is wrong: `//evil.example/x` starts with
+ * a slash and a browser reads it as a protocol-relative ABSOLUTE url, so it is
+ * an open redirect. Backslashes are excluded for the same reason — several
+ * browsers normalise `\` to `/`, making `/\evil.example` equivalent to `//`.
+ *
+ * The value reaching here is written by this host into a host-only cookie, so
+ * it should already be trustworthy; this is the belt to that braces. An open
+ * redirect on the sign-in path is precisely the primitive used to make a
+ * phishing link look legitimate.
+ */
+export function safeReturnPath(candidate: unknown, fallback = '/hq/'): string {
+  if (typeof candidate !== 'string' || candidate.length === 0) return fallback;
+  if (!candidate.startsWith('/')) return fallback;
+  if (candidate.startsWith('//')) return fallback;
+  if (candidate.includes('\\')) return fallback;
+  return candidate;
+}
+
 /** Constant-time comparison that also refuses on a length mismatch. */
 function secretMatches(supplied: unknown, expected: string): boolean {
   if (typeof supplied !== 'string' || supplied.length === 0 || expected.length === 0) return false;
@@ -96,7 +118,7 @@ export function beginHandoff(
   // can never become an open redirect.
   reply.setCookie(
     'hq_sso_return',
-    returnPath.startsWith('/') ? returnPath : '/hq/',
+    safeReturnPath(returnPath),
     cookieOptions(options.secureCookies ?? true, 600),
   );
   return url.toString();
@@ -153,7 +175,7 @@ export function registerHqSsoRoutes(app: FastifyInstance, options: HqSsoOptions)
 
     const returnTo = cookies?.hq_sso_return;
     reply.clearCookie('hq_sso_return', cookieOptions(secure));
-    return reply.redirect(returnTo && returnTo.startsWith('/') ? returnTo : '/hq/');
+    return reply.redirect(safeReturnPath(returnTo));
   });
 
   app.post(SSO_HQ_ROUTES.logout, async (req: FastifyRequest, reply: FastifyReply) => {

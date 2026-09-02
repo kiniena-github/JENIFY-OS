@@ -60,4 +60,9 @@ export {
 export { HqSessionStore, type HqSessionRecord } from './sso/session-store.js';
 export { httpBackChannel, type IdentityBackChannel } from './sso/back-channel.js';
 export { ssoIdentity, type SsoIdentity, type StepUpPreparation } from './sso/identity.js';
-export { registerHqSsoRoutes, beginHandoff, type HqSsoOptions } from './sso/routes.js';
+export {
+  registerHqSsoRoutes,
+  beginHandoff,
+  safeReturnPath,
+  type HqSsoOptions,
+} from './sso/routes.js';

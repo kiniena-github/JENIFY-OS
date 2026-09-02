@@ -400,13 +400,35 @@ describe('the callback refuses everything it should', () => {
 
   it('never redirects anywhere but a path on this host', async () => {
     const app = await buildHq(fakeBackChannel());
+    // `//evil` and `/\evil` are the ones that matter: both START WITH a slash,
+    // so the obvious `startsWith('/')` check passes them, and a browser reads
+    // both as absolute URLs. An open redirect on the sign-in path is exactly
+    // what makes a phishing link look legitimate.
+    for (const hostile of [
+      'https://evil.example/steal',
+      '//evil.example/steal',
+      '/\\evil.example/steal',
+      '\\\\evil.example/steal',
+      'javascript:alert(1)',
+    ]) {
+      const res = await app.inject({
+        method: 'GET',
+        url: `${SSO_HQ_ROUTES.callback}?ticket=t&state=s`,
+        cookies: { [HQ_SSO_STATE_COOKIE]: 's', hq_sso_return: hostile },
+      });
+      expect(res.headers.location, `${hostile} must not be followed`).toBe('/hq/');
+    }
+    await app.close();
+  });
+
+  it('still honours a genuine in-app path', async () => {
+    const app = await buildHq(fakeBackChannel());
     const res = await app.inject({
       method: 'GET',
       url: `${SSO_HQ_ROUTES.callback}?ticket=t&state=s`,
-      cookies: { [HQ_SSO_STATE_COOKIE]: 's', hq_sso_return: 'https://evil.example/steal' },
+      cookies: { [HQ_SSO_STATE_COOKIE]: 's', hq_sso_return: '/hq/connections.html' },
     });
-    // An absolute URL in the return cookie is discarded, not followed.
-    expect(res.headers.location).toBe('/hq/');
+    expect(res.headers.location).toBe('/hq/connections.html');
     await app.close();
   });
 });
