@@ -28,8 +28,21 @@ function sourceFiles(dir: string): string[] {
   return found;
 }
 
+/**
+ * Comments out, code only.
+ *
+ * Needed by every scan here, not just the import one: this package documents
+ * WHY it does not use a password KDF, so the words `scrypt` and `password_hash`
+ * legitimately appear in prose. A scan that reads comments reports the
+ * explanation as the violation — which is exactly what happened the first time
+ * the rule below was written.
+ */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
+}
+
 function importedModules(source: string): string[] {
-  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
+  const code = stripComments(source);
   const specifiers: string[] = [];
   for (const pattern of [
     /^\s*(?:import|export)\s+[^'"]*?\bfrom\s*['"]([^'"]+)['"]/gm,
@@ -82,16 +95,55 @@ describe('hq-host carries HQ, not the tenant platform', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('declares only the core, Fastify and its static plugin', () => {
-    expect(declared.sort()).toEqual(['@factoryos/headquarter', '@fastify/static', 'fastify']);
+  it('declares only the core, Fastify and its cookie/static plugins', () => {
+    expect(declared.sort()).toEqual([
+      '@factoryos/headquarter',
+      '@fastify/cookie',
+      '@fastify/static',
+      'fastify',
+    ]);
   });
 
-  it('implements no credential store of its own', () => {
-    // HQ has no sign-in. A password hash, a token mint or a session table
-    // appearing in this package would mean one had been invented during the
-    // split — the exact thing the 2026-08-28 Founder decision forbids.
-    const forbidden = /\b(scrypt|bcrypt|argon2|pbkdf2|createHmac|randomBytes)\b/;
-    const offenders = files.filter((file) => forbidden.test(readFileSync(file, 'utf8')));
+  /**
+   * HQ still holds no passwords (Founder decision 2026-08-28, reaffirmed in the
+   * Gate A decision of 2026-09-02: *"HQ must NOT create or store its own
+   * passwords... The HQ session store is not a second identity/password
+   * database"*).
+   *
+   * Stage 1 enforced this by banning every crypto primitive outright, which
+   * worked only while this package did no crypto at all. A-4 requires it to
+   * mint session tokens and hash them for storage, so the Founder explicitly
+   * authorised narrowing this rule "only as required to allow secure random
+   * session-token generation".
+   *
+   * The narrowing is exactly that, and no wider:
+   *
+   *   ALLOWED   randomBytes      minting a session token
+   *             createHash       storing a digest of it instead of the token
+   *             timingSafeEqual  comparing the service secret without a leak
+   *
+   *   FORBIDDEN scrypt bcrypt argon2 pbkdf2 — the password KDFs. Their whole
+   *             purpose is to be slow enough to resist guessing a HUMAN secret,
+   *             so one appearing here would mean a password store had arrived.
+   *
+   * The distinction is real, not cosmetic: a 32-byte CSPRNG token has no
+   * guessing attack for a slow KDF to defend, and a slow KDF on every request
+   * would be a denial-of-service surface rather than a protection.
+   */
+  it('implements no password store of its own', () => {
+    const passwordKdf = /\b(scrypt|bcrypt|argon2|pbkdf2)\b/;
+    const offenders = files.filter((file) => passwordKdf.test(stripComments(readFileSync(file, 'utf8'))));
+    expect(
+      offenders.map((f) => relative(packageRoot, f)),
+      'a password-hashing KDF here would mean HQ had grown a second credential system',
+    ).toEqual([]);
+  });
+
+  it('never reads a password field from its own storage', () => {
+    // Complements the KDF ban: HQ may RELAY a step-up password to the identity
+    // host over the back channel, but must never persist or look one up.
+    const persisted = /\b(password_hash|passwordHash|credentials?_hash)\b/;
+    const offenders = files.filter((file) => persisted.test(stripComments(readFileSync(file, 'utf8'))));
     expect(offenders.map((f) => relative(packageRoot, f))).toEqual([]);
   });
 });

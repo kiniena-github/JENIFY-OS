@@ -13,6 +13,7 @@
   "dependencies": {
     "@factoryos/headquarter": "*",
     "@factoryos/hq-host": "*",
+    "@fastify/cookie": "^11.0.0",
     "fastify": "^5.0.0"
   },
   "devDependencies": {

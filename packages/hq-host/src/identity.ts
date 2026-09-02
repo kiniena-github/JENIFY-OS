@@ -51,6 +51,22 @@ export interface HqRequestIdentity {
 
 export interface HqIdentityPort {
   forRequest(request: FastifyRequest): HqRequestIdentity;
+  /**
+   * Optional async pre-pass, run before the synchronous control API.
+   *
+   * `CredentialVerifierPort.verify` and `handleControlRequest` are both
+   * synchronous on purpose — the authority boundary is framework-free and
+   * unit-testable without a server. An identity source whose password check is
+   * a network call (A-4's back channel) therefore cannot do its work inside the
+   * verifier, so it does it here and the verifier returns the answer.
+   *
+   * `'unavailable'` means the check could not be performed at all. The host
+   * refuses the request with that reason rather than letting an outage be
+   * reported to the person at the keyboard as a wrong password.
+   *
+   * Hosts whose credential check is local — `@factoryos/server` — omit this.
+   */
+  prepare?(request: FastifyRequest): Promise<'none' | 'ready' | 'unavailable'>;
 }
 
 /**

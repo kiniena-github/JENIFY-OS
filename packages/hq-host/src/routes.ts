@@ -77,6 +77,25 @@ export function registerHeadquarterRoutes(
     const path = req.url.split('?')[0]!;
     const control: ControlRequest = { method, path, headers, body: req.body };
 
+    // The async pre-pass, for an identity source whose credential check is a
+    // network call. It must run BEFORE the synchronous core, and an outage must
+    // refuse the request rather than be laundered into "wrong password".
+    if (identity.prepare) {
+      const prepared = await identity.prepare(req);
+      if (prepared === 'unavailable') {
+        reply.header('cache-control', 'no-store');
+        return reply.status(503).send({
+          ok: false,
+          error: {
+            code: 'step_up_unavailable',
+            message:
+              'Step-up could not be verified because the Jenify identity service did not answer. ' +
+              'Nothing was approved. Try again shortly.',
+          },
+        });
+      }
+    }
+
     // Ports are built PER REQUEST, closed over this request's cookie and
     // source address. `ControlRequest` deliberately has no field a credential
     // or an IP could sit in — that shape is what stops the boundary reading
@@ -145,11 +164,28 @@ export const HQ_SITE_PREFIX = '/hq/';
  * `no-store` on every response keeps a shared cache from ever answering for
  * this gate.
  */
+export interface HeadquarterSiteOptions {
+  /**
+   * Where to send a caller who is not signed in at all (A-4's SSO handoff).
+   *
+   * Returning a URL turns the 401 into a redirect; returning null keeps the
+   * 401. It is consulted ONLY for `unauthenticated`, never for a signed-in
+   * account that simply is not the Founder — redirecting that case would
+   * bounce a legitimate user around a loop instead of telling them the truth,
+   * and would leak whether an account maps to the Founder.
+   *
+   * The hook receives the reply so it can set the CSRF state cookie that binds
+   * the round trip.
+   */
+  onUnauthenticated?: (request: FastifyRequest, reply: FastifyReply) => string | null;
+}
+
 export function registerHeadquarterSite(
   app: FastifyInstance,
   plane: HeadquarterControlPlane,
   identity: HqIdentityPort,
   root: string,
+  options: HeadquarterSiteOptions = {},
 ): void {
   app.register(async (scope) => {
     scope.addHook('onRequest', async (req, reply) => {
@@ -177,6 +213,15 @@ export function registerHeadquarterSite(
         },
       );
       if (!resolution.ok) {
+        // Not signed in at all, and the host offers a sign-in handoff: send
+        // them to it. Deliberately only for `unauthenticated` — see
+        // `HeadquarterSiteOptions.onUnauthenticated`.
+        if (resolution.reason === 'unauthenticated' && options.onUnauthenticated) {
+          const target = options.onUnauthenticated(req, reply);
+          if (target) {
+            return reply.status(302).header('cache-control', 'no-store').redirect(target);
+          }
+        }
         // `return reply` is load-bearing, not style: in an ASYNC Fastify hook
         // the documented way to respond and stop the chain is to return the
         // reply. Relying on implicit short-circuiting in the one hook that

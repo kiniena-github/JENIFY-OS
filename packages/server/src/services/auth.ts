@@ -140,6 +140,15 @@ export function resolveSession(db: Db, token: string): SessionUser | null {
  * about whether a session is still good.
  */
 export interface SessionRecord {
+  /**
+   * Opaque session id — NOT the token.
+   *
+   * Added for the HQ sign-in bridge (Phase 2, Stage 2): an HQ session records
+   * the identity session it derives from, so signing out here can revoke it
+   * there. The id travels; the token never does, so a stolen HQ database yields
+   * no usable credential for this server.
+   */
+  id: string;
   user: SessionUser;
   /** When this session was established. */
   establishedAt: string;
@@ -152,7 +161,7 @@ export function resolveSessionRecord(db: Db, token: string): SessionRecord | nul
   if (session.expiresAt < nowIso()) return null;
   const user = buildSessionUser(db, session.userId);
   if (!user) return null;
-  return { user, establishedAt: session.createdAt, expiresAt: session.expiresAt };
+  return { id: session.id, user, establishedAt: session.createdAt, expiresAt: session.expiresAt };
 }
 
 /**

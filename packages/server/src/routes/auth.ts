@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import type { Db } from '../db/index.js';
 import { SESSION_COOKIE, requireCtx, sessionCookieOptions } from '../app.js';
-import { login, logout } from '../services/auth.js';
+import { login, logout, resolveSessionRecord } from '../services/auth.js';
+import { propagateLogoutToHq, type SsoHqPlane } from './sso-hq.js';
 import { getTenant } from '../services/provisioning.js';
 import { getBundle, listLanguages } from '../services/translations.js';
 import { recoverWithCode } from '../services/recovery.js';
@@ -14,7 +15,7 @@ import { eq } from 'drizzle-orm';
 import { tenants, users } from '../db/schema.js';
 import { nowIso } from '../util.js';
 
-export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
+export function registerAuthRoutes(app: FastifyInstance, db: Db, ssoHq?: SsoHqPlane): void {
   /**
    * Public, unauthenticated: tenant identity for the login screen. The login
    * page is generated from tenant branding — never hard-coded per factory.
@@ -75,8 +76,16 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
 
   app.post('/api/auth/logout', async (req, reply) => {
     const token = req.cookies?.[SESSION_COOKIE];
+    // Read the session id BEFORE revoking it: afterwards `resolveSessionRecord`
+    // correctly returns null and there would be nothing left to tell HQ about.
+    // This is trap C — a separate HQ cookie does not die on its own when this
+    // one does, so sign-out has to say so explicitly.
+    const originSessionId = token ? (resolveSessionRecord(db, token)?.id ?? null) : null;
     if (token) logout(db, token);
     reply.clearCookie(SESSION_COOKIE, sessionCookieOptions(req));
+    // Never blocks or fails sign-out: an unreachable HQ is audited, and the HQ
+    // session's own 60-minute ceiling remains the backstop.
+    await propagateLogoutToHq(ssoHq?.logoutNotifier, originSessionId, ssoHq?.audit);
     return { ok: true };
   });
 

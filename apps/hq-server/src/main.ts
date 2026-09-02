@@ -38,13 +38,62 @@
  */
 
 import Fastify from 'fastify';
+import fastifyCookie from '@fastify/cookie';
 import {
   loadHeadquarterHost,
   registerHeadquarterRoutes,
   registerHeadquarterSite,
+  registerHqSsoRoutes,
+  beginHandoff,
+  httpBackChannel,
+  ssoIdentity,
+  HqSessionStore,
   NO_IDENTITY,
   type HqIdentityPort,
+  type HqSsoOptions,
 } from '@factoryos/hq-host';
+
+/**
+ * Read the A-4 bridge from the environment, or return null.
+ *
+ * Fail-closed and all-or-nothing, exactly like `loadHeadquarterHost`: a bridge
+ * missing any of its three values is not configured, and HQ falls back to
+ * refusing everyone rather than to a partially-checked sign-in.
+ *
+ *   HQ_SSO_IDENTITY_ORIGIN   e.g. https://app.jenifylabs.com
+ *   HQ_SSO_HQ_ORIGIN         this host, e.g. https://hq.jenifylabs.com
+ *   HQ_SSO_SERVICE_SECRET    dev/test value only — production is a Founder gate
+ *   HQ_SSO_INSECURE_COOKIES=1  drop `Secure`, for a loopback http proof stack
+ */
+function ssoConfigFrom(
+  env: Record<string, string | undefined>,
+  db: import('@factoryos/headquarter/store').HqDatabase,
+  log: (line: string) => void,
+): { identity: HqIdentityPort; options: HqSsoOptions } | null {
+  const identityOrigin = env.HQ_SSO_IDENTITY_ORIGIN;
+  const hqOrigin = env.HQ_SSO_HQ_ORIGIN;
+  const serviceSecret = env.HQ_SSO_SERVICE_SECRET;
+  if (!identityOrigin || !hqOrigin || !serviceSecret) {
+    if (identityOrigin || hqOrigin || serviceSecret) {
+      log(
+        '[hq] The Jenify sign-in bridge is only PARTLY configured, so it stays OFF. All three of ' +
+          'HQ_SSO_IDENTITY_ORIGIN, HQ_SSO_HQ_ORIGIN and HQ_SSO_SERVICE_SECRET are required.',
+      );
+    }
+    return null;
+  }
+  const store = new HqSessionStore(db);
+  const backChannel = httpBackChannel({ baseUrl: identityOrigin, serviceSecret });
+  const secureCookies = env.HQ_SSO_INSECURE_COOKIES !== '1';
+  log(
+    `[hq] Jenify sign-in bridge ON: identity=${identityOrigin}, hq=${hqOrigin}, ` +
+      `cookies=${secureCookies ? 'Secure' : 'INSECURE (loopback proof only)'}`,
+  );
+  return {
+    identity: ssoIdentity(store, backChannel),
+    options: { store, backChannel, identityOrigin, hqOrigin, serviceSecret, secureCookies, audit: log },
+  };
+}
 
 export interface StandaloneOptions {
   env?: Record<string, string | undefined>;
@@ -72,10 +121,26 @@ export async function buildStandaloneHq(options: StandaloneOptions = {}) {
   }
 
   const app = Fastify({ logger: false });
-  registerHeadquarterRoutes(app, host.plane, identity);
-  if (host.siteRoot) registerHeadquarterSite(app, host.plane, identity, host.siteRoot);
+  await app.register(fastifyCookie);
 
-  if (identity === NO_IDENTITY) {
+  // A-4: if the deployment names an identity host, HQ signs people in by
+  // handoff instead of refusing everyone. All three values are required — a
+  // half-configured bridge stays OFF rather than half-open.
+  const sso = ssoConfigFrom(env, host.db, log);
+  const effective = sso ? sso.identity : identity;
+
+  registerHeadquarterRoutes(app, host.plane, effective);
+  if (sso) registerHqSsoRoutes(app, sso.options);
+  if (host.siteRoot) {
+    registerHeadquarterSite(app, host.plane, effective, host.siteRoot, {
+      // Not signed in and a bridge exists ⇒ start the handoff rather than 401.
+      onUnauthenticated: sso
+        ? (req, reply) => beginHandoff(sso.options, reply, req.url.split('?')[0]!)
+        : undefined,
+    });
+  }
+
+  if (effective === NO_IDENTITY) {
     log(
       '[hq] NO IDENTITY SOURCE is wired into this process. HQ has no sign-in of its own, so every ' +
         'request will resolve nobody: reads answer 401 and all controls stay off. This is the ' +

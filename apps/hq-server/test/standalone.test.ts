@@ -128,3 +128,66 @@ describe('with no identity wired it refuses, loudly and truthfully', () => {
     expect(banner).toContain('It is NOT a hosted HQ');
   });
 });
+
+describe('the A-4 sign-in bridge, wired from the environment', () => {
+  const BRIDGE = {
+    HQ_SSO_IDENTITY_ORIGIN: 'https://app.example',
+    HQ_SSO_HQ_ORIGIN: 'https://hq.example',
+    HQ_SSO_SERVICE_SECRET: 'dev-test-secret',
+    HQ_SSO_INSECURE_COOKIES: '1',
+  };
+
+  it('stays OFF when only part of it is configured, and says so', async () => {
+    const lines: string[] = [];
+    const built = await buildStandaloneHq({
+      env: env({ HQ_SSO_IDENTITY_ORIGIN: 'https://app.example' }),
+      log: (line) => lines.push(line),
+    });
+    await built!.app.ready();
+    // Half-configured is OFF, not half-open: still refuses rather than redirects.
+    const res = await built!.app.inject({ method: 'GET', url: '/hq/index.html' });
+    expect(res.statusCode).toBe(401);
+    expect(lines.join('\n')).toContain('only PARTLY configured');
+    await built!.close();
+  });
+
+  it('sends an unauthenticated visitor to the identity host instead of a 401', async () => {
+    const built = await buildStandaloneHq({ env: env(BRIDGE), log: () => {} });
+    await built!.app.ready();
+    const res = await built!.app.inject({ method: 'GET', url: '/hq/index.html' });
+    expect(res.statusCode).toBe(302);
+    const target = new URL(res.headers.location as string);
+    expect(target.origin).toBe('https://app.example');
+    expect(target.pathname).toBe('/api/sso/hq/authorize');
+    // The callback it asks to be returned to is on THIS host, absolutely stated.
+    expect(target.searchParams.get('redirect_uri')).toBe('https://hq.example/sso/callback');
+    expect(target.searchParams.get('state')).toBeTruthy();
+    await built!.close();
+  });
+
+  it('binds the round trip to a host-only state cookie', async () => {
+    const built = await buildStandaloneHq({ env: env(BRIDGE), log: () => {} });
+    await built!.app.ready();
+    const res = await built!.app.inject({ method: 'GET', url: '/hq/index.html' });
+    const state = res.cookies.find((c) => c.name === 'hq_sso_state');
+    expect(state).toBeTruthy();
+    expect(state).not.toHaveProperty('domain');
+    expect(state!.httpOnly).toBe(true);
+    // The redirect's state matches the cookie it just set.
+    expect(new URL(res.headers.location as string).searchParams.get('state')).toBe(state!.value);
+    await built!.close();
+  });
+
+  it('exposes the bridge routes only when the bridge is on', async () => {
+    const off = await buildStandaloneHq({ env: env(), log: () => {} });
+    await off!.app.ready();
+    expect((await off!.app.inject({ method: 'GET', url: '/sso/callback' })).statusCode).toBe(404);
+    await off!.close();
+
+    const on = await buildStandaloneHq({ env: env(BRIDGE), log: () => {} });
+    await on!.app.ready();
+    // Present, and refusing — there is no ticket and no state.
+    expect((await on!.app.inject({ method: 'GET', url: '/sso/callback' })).statusCode).toBe(400);
+    await on!.close();
+  });
+});

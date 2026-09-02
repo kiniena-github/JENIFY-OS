@@ -32,3 +32,32 @@ export {
   observableProviderFacts,
   type HeadquarterHost,
 } from './config.js';
+
+export type { HeadquarterSiteOptions } from './routes.js';
+
+/**
+ * A-4: shared Jenify identity, separate host-only HQ session
+ * (Founder Gate A, decided 2026-09-02).
+ *
+ * A host wiring these must register `@fastify/cookie` itself — the cookie layer
+ * is the host's, not this package's, and `@factoryos/server` already has one.
+ */
+export {
+  HQ_SESSION_COOKIE,
+  HQ_SESSION_TTL_MS,
+  HQ_SSO_STATE_COOKIE,
+  SSO_HQ_ROUTES,
+  SSO_IDENTITY_ROUTES,
+  SSO_SERVICE_AUTH_HEADER,
+  SSO_TICKET_TTL_MS,
+  type HqSsoClaims,
+  type SsoPasswordResult,
+  type SsoRedeemError,
+  type SsoRedeemResult,
+  type SsoVerifyPasswordRequest,
+} from './sso/contract.js';
+
+export { HqSessionStore, type HqSessionRecord } from './sso/session-store.js';
+export { httpBackChannel, type IdentityBackChannel } from './sso/back-channel.js';
+export { ssoIdentity, type SsoIdentity, type StepUpPreparation } from './sso/identity.js';
+export { registerHqSsoRoutes, beginHandoff, type HqSsoOptions } from './sso/routes.js';
