@@ -2,6 +2,12 @@ import type { FastifyInstance } from 'fastify';
 import type { Db } from '../db/index.js';
 import { SESSION_COOKIE, requireCtx, sessionCookieOptions } from '../app.js';
 import { login, logout } from '../services/auth.js';
+import type { SsoHqPlane } from './sso-hq.js';
+import {
+  noIdentityRevocation,
+  propagateIdentityRevocation,
+  type IdentityRevocation,
+} from '../services/identity-revocation.js';
 import { getTenant } from '../services/provisioning.js';
 import { getBundle, listLanguages } from '../services/translations.js';
 import { recoverWithCode } from '../services/recovery.js';
@@ -14,7 +20,7 @@ import { eq } from 'drizzle-orm';
 import { tenants, users } from '../db/schema.js';
 import { nowIso } from '../util.js';
 
-export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
+export function registerAuthRoutes(app: FastifyInstance, db: Db, ssoHq?: SsoHqPlane): void {
   /**
    * Public, unauthenticated: tenant identity for the login screen. The login
    * page is generated from tenant branding — never hard-coded per factory.
@@ -35,13 +41,18 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
     async (req) => {
       const key = `${req.ip}|recover|${(req.body.username ?? '').trim().toLowerCase()}`;
       assertNotRateLimited(key);
+      let revocation: IdentityRevocation;
       try {
-        recoverWithCode(db, req.body);
+        revocation = recoverWithCode(db, req.body);
       } catch (err) {
         recordAuthFailure(key);
         throw err;
       }
       clearAuthFailures(key);
+      // Recovery changes the password and ends every session of the account, so
+      // it ends the HQ sessions derived from them too. Awaited AFTER the
+      // transaction has committed, and never able to fail the recovery itself.
+      await propagateIdentityRevocation(ssoHq, revocation);
       return { ok: true };
     },
   );
@@ -75,8 +86,22 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
 
   app.post('/api/auth/logout', async (req, reply) => {
     const token = req.cookies?.[SESSION_COOKIE];
-    if (token) logout(db, token);
+    // Trap C — a separate HQ cookie does not die on its own when this one does,
+    // so sign-out has to say so explicitly. Trap E — a handoff ticket minted
+    // moments ago has no derived HQ session yet, so revoking what HQ derived
+    // finds nothing and the unconsumed ticket would still mint a NEW HQ session
+    // after this sign-out; it has to be killed where it lives. Both are now the
+    // shared revocation path's job, in ONE transaction, exactly as they are for
+    // a password reset, a recovery and a deactivation.
+    // drizzle's better-sqlite3 transaction runs the callback synchronously and
+    // commits or rolls back atomically, exactly as `recovery.ts` relies on.
+    const revocation = token
+      ? db.transaction((tx) => logout(tx as unknown as Db, token))
+      : noIdentityRevocation('logout');
     reply.clearCookie(SESSION_COOKIE, sessionCookieOptions(req));
+    // Never blocks or fails sign-out: an unreachable HQ is audited, and the HQ
+    // session's own 60-minute ceiling remains the backstop.
+    await propagateIdentityRevocation(ssoHq, revocation);
     return { ok: true };
   });
 

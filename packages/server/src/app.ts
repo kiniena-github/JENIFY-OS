@@ -11,6 +11,7 @@ import { AppError } from './util.js';
 import { resolveSession } from './services/auth.js';
 import type { Ctx } from './services/context.js';
 import { registerAuthRoutes } from './routes/auth.js';
+import { registerSsoHqRoutes, type SsoHqPlane } from './routes/sso-hq.js';
 import { registerAdminRoutes } from './routes/admin.js';
 import { registerMasterdataRoutes } from './routes/masterdata.js';
 import { registerInventoryRoutes } from './routes/inventory.js';
@@ -180,6 +181,15 @@ export interface AppOptions {
    * configuration error and refused loudly rather than served open.
    */
   headquarterSite?: { root: string };
+  /**
+   * The JENIFY HQ sign-in bridge (Phase 2, Stage 2, Founder Gate A / A-4).
+   *
+   * OFF unless passed. When present this server can vouch for an
+   * already-signed-in account so HQ — on its own origin — can mint its own
+   * host-only session, without the `fos_session` cookie ever being widened to
+   * `.jenifylabs.com` and without HQ ever holding a password.
+   */
+  ssoHq?: SsoHqPlane;
 }
 
 export function buildApp(opts: AppOptions): FastifyInstance {
@@ -219,8 +229,8 @@ export function buildApp(opts: AppOptions): FastifyInstance {
 
   app.get('/api/health', async () => ({ ok: true, service: 'factoryos' }));
 
-  registerAuthRoutes(app, opts.db);
-  registerAdminRoutes(app, opts.db);
+  registerAuthRoutes(app, opts.db, opts.ssoHq);
+  registerAdminRoutes(app, opts.db, opts.ssoHq);
   registerMasterdataRoutes(app, opts.db);
   registerInventoryRoutes(app, opts.db);
   registerProductionRoutes(app, opts.db);
@@ -231,6 +241,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   registerAssistantRoutes(app, opts.db);
   registerOnboardingRoutes(app, opts.db);
   registerOperationsRoutes(app, opts.db);
+  if (opts.ssoHq) registerSsoHqRoutes(app, opts.db, opts.ssoHq);
   if (opts.headquarter) registerHeadquarterRoutes(app, opts.db, opts.headquarter);
   if (opts.headquarterSite) {
     if (!opts.headquarter) {

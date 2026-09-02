@@ -6,6 +6,11 @@ import { newId, nowIso, randomToken, verifyPassword, AppError } from '../util.js
 import { getRoleMatrix } from './permissions.js';
 import { writeAudit } from './audit.js';
 import type { Ctx } from './context.js';
+import {
+  noIdentityRevocation,
+  revokeIdentitySessions,
+  type IdentityRevocation,
+} from './identity-revocation.js';
 
 /**
  * Resolve which candidate account a login/recovery attempt refers to.
@@ -102,10 +107,20 @@ export function login(
   return { token, user: sessionUser, expiresAt };
 }
 
-export function logout(db: Db, token: string): void {
+/**
+ * Sign one browser out.
+ *
+ * The revoke itself is delegated to `revokeIdentitySessions` — the single path
+ * that ends identity authority — so sign-out, password reset, recovery and
+ * deactivation all end a session the same way and all return the ids HQ has to
+ * be told about. The returned revocation is what the route feeds to
+ * `propagateIdentityRevocation`; ignoring it would silently reintroduce the
+ * defect where only logout reached HQ.
+ */
+export function logout(db: Db, token: string): IdentityRevocation {
   const session = db.select().from(sessions).where(eq(sessions.token, token)).get();
-  if (!session || session.revokedAt) return;
-  db.update(sessions).set({ revokedAt: nowIso() }).where(eq(sessions.id, session.id)).run();
+  if (!session || session.revokedAt) return noIdentityRevocation('logout');
+  const revocation = revokeIdentitySessions(db, { sessionId: session.id }, 'logout');
   const user = buildSessionUser(db, session.userId);
   if (user) {
     writeAudit(
@@ -119,6 +134,7 @@ export function logout(db: Db, token: string): void {
       },
     );
   }
+  return revocation;
 }
 
 export function resolveSession(db: Db, token: string): SessionUser | null {
@@ -140,10 +156,41 @@ export function resolveSession(db: Db, token: string): SessionUser | null {
  * about whether a session is still good.
  */
 export interface SessionRecord {
+  /**
+   * Opaque session id — NOT the token.
+   *
+   * Added for the HQ sign-in bridge (Phase 2, Stage 2): an HQ session records
+   * the identity session it derives from, so signing out here can revoke it
+   * there. The id travels; the token never does, so a stolen HQ database yields
+   * no usable credential for this server.
+   */
+  id: string;
   user: SessionUser;
   /** When this session was established. */
   establishedAt: string;
   expiresAt: string;
+}
+
+/**
+ * Is the session with this ID still usable, by ID rather than by token?
+ *
+ * The HQ sign-in bridge needs exactly this and cannot use `resolveSessionRecord`:
+ * a handoff ticket records the session's opaque ID deliberately and never its
+ * token, so that a stolen HQ database yields no usable credential for this
+ * server. Redemption then has to be able to ask "is that session still alive?"
+ * from the ID alone.
+ *
+ * Same three conditions as `resolveSessionRecord`, in the same order, plus the
+ * account check that function performs through `buildSessionUser` — a
+ * deactivated account must not complete a handoff that was started before it
+ * was switched off.
+ */
+export function sessionIsLive(db: Db, sessionId: string, now: Date = new Date()): boolean {
+  if (!sessionId) return false;
+  const session = db.select().from(sessions).where(eq(sessions.id, sessionId)).get();
+  if (!session || session.revokedAt) return false;
+  if (session.expiresAt < now.toISOString()) return false;
+  return buildSessionUser(db, session.userId) != null;
 }
 
 export function resolveSessionRecord(db: Db, token: string): SessionRecord | null {
@@ -152,7 +199,7 @@ export function resolveSessionRecord(db: Db, token: string): SessionRecord | nul
   if (session.expiresAt < nowIso()) return null;
   const user = buildSessionUser(db, session.userId);
   if (!user) return null;
-  return { user, establishedAt: session.createdAt, expiresAt: session.expiresAt };
+  return { id: session.id, user, establishedAt: session.createdAt, expiresAt: session.expiresAt };
 }
 
 /**

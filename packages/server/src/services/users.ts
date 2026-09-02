@@ -1,9 +1,14 @@
-import { and, eq, isNull, ne } from 'drizzle-orm';
-import { roles, sessions, users } from '../db/schema.js';
+import { and, eq, ne } from 'drizzle-orm';
+import { roles, users } from '../db/schema.js';
 import { newId, nowIso, hashPassword, badRequest, notFound, forbidden } from '../util.js';
 import type { Ctx } from './context.js';
 import { actorId } from './context.js';
 import { writeAudit } from './audit.js';
+import {
+  noIdentityRevocation,
+  revokeIdentitySessions,
+  type IdentityRevocation,
+} from './identity-revocation.js';
 
 /** True when the acting user currently holds an owner role. */
 function callerIsOwner(ctx: Ctx): boolean {
@@ -102,7 +107,7 @@ export function updateUser(
     language?: string;
     active?: boolean;
   },
-): void {
+): IdentityRevocation {
   const user = ctx.db
     .select()
     .from(users)
@@ -140,18 +145,32 @@ export function updateUser(
     phone: user.phone,
     language: user.language,
   };
-  ctx.db
-    .update(users)
-    .set({
-      displayName: patch.displayName ?? user.displayName,
-      email: patch.email === undefined ? user.email : patch.email,
-      phone: patch.phone === undefined ? user.phone : patch.phone,
-      roleId: patch.roleId ?? user.roleId,
-      language: patch.language ?? user.language,
-      active: patch.active ?? user.active,
-    })
-    .where(eq(users.id, userId))
-    .run();
+  // Switching an account OFF ends its authority, so it ends its sessions — and
+  // therefore everything derived from them. Before this, deactivation revoked
+  // nothing: the identity side merely stopped resolving those sessions (because
+  // `buildSessionUser` refuses an inactive account), which left no revoked row
+  // for HQ propagation to notice and left the derived HQ session alive for the
+  // rest of its hour. Deactivating a compromised account has to be immediate on
+  // BOTH hosts.
+  const deactivating = patch.active === false && user.active;
+  const revocation = ctx.db.transaction((tx) => {
+    const txDb = tx as unknown as typeof ctx.db;
+    txDb
+      .update(users)
+      .set({
+        displayName: patch.displayName ?? user.displayName,
+        email: patch.email === undefined ? user.email : patch.email,
+        phone: patch.phone === undefined ? user.phone : patch.phone,
+        roleId: patch.roleId ?? user.roleId,
+        language: patch.language ?? user.language,
+        active: patch.active ?? user.active,
+      })
+      .where(eq(users.id, userId))
+      .run();
+    return deactivating
+      ? revokeIdentitySessions(txDb, { userId }, 'account_deactivated')
+      : noIdentityRevocation('account_deactivated');
+  });
   writeAudit(ctx, {
     module: 'users',
     action: 'user_update',
@@ -162,9 +181,10 @@ export function updateUser(
     before,
     after: patch,
   });
+  return revocation;
 }
 
-export function resetPassword(ctx: Ctx, userId: string, newPassword: string): void {
+export function resetPassword(ctx: Ctx, userId: string, newPassword: string): IdentityRevocation {
   const user = ctx.db
     .select()
     .from(users)
@@ -174,14 +194,16 @@ export function resetPassword(ctx: Ctx, userId: string, newPassword: string): vo
   if (!newPassword || newPassword.length < 6) {
     badRequest('password_weak', 'Password must be at least 6 characters');
   }
-  ctx.db.update(users).set({ passwordHash: hashPassword(newPassword) }).where(eq(users.id, userId)).run();
-  // a password reset signs the account out everywhere — stale sessions must
-  // never survive a credential change
-  ctx.db
-    .update(sessions)
-    .set({ revokedAt: nowIso() })
-    .where(and(eq(sessions.userId, userId), isNull(sessions.revokedAt)))
-    .run();
+  const hashed = hashPassword(newPassword);
+  // A password reset signs the account out everywhere — stale sessions must
+  // never survive a credential change, on this host OR on HQ. The two writes
+  // commit together so there is no instant with a new password and a live old
+  // session, and the returned revocation is what tells HQ.
+  const revocation = ctx.db.transaction((tx) => {
+    const txDb = tx as unknown as typeof ctx.db;
+    txDb.update(users).set({ passwordHash: hashed }).where(eq(users.id, userId)).run();
+    return revokeIdentitySessions(txDb, { userId }, 'password_reset');
+  });
   writeAudit(ctx, {
     module: 'users',
     action: 'password_reset',
@@ -190,6 +212,7 @@ export function resetPassword(ctx: Ctx, userId: string, newPassword: string): vo
     reference: user.username,
     summary: `Password reset for '${user.displayName}'`,
   });
+  return revocation;
 }
 
 /** The tenant must always keep at least one active user in the owner role. */

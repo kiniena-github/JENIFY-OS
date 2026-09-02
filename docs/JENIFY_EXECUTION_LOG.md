@@ -354,3 +354,61 @@ announced LIVE over demonstration data — next to a provenance chip correctly r
 `freshnessVerdict` now also reads the snapshot's own `mode`: a bundle that says it is
 `sample` or `reconstructed` is reported by that provenance, however exactly its timestamp
 matches. A snapshot that states no mode, and a genuinely `live` one, are unchanged.
+
+## LIVE HQ CONTROL V1 — FOUNDER-ACCEPTED AND MERGED (2026-09-02)
+
+**Phase 1 is closed and accepted.** This supersedes the "issue #200 V1 is still NOT marked
+accepted" statement earlier in this log, which was true when written and is now historical.
+
+- Accepted head: `36809306b2620cbc419e1b0a04bd7db05a91aaad` (PR #228).
+- Merge commit on `main`: `197844a8d637622fa08c3bdce02159070965d738`.
+- Acceptance basis: a Founder-gated browser proof on a real Edge session (issue #230, stages
+  A–F), not a code-inspection claim.
+
+**What the correction round closed.** Three defects, each with its own commit and its own
+hostile regression suite:
+
+1. **Connection Center dispatch truth** (`5952e30`). The Connections page reported CLAUDE as
+   NOT CONNECTED because it read workflow-secret presence only, while the host observed the
+   authenticated `gh` transport as dispatchable. The page now derives its verdict from the same
+   `dispatchAvailability` / provider-routing seam that governs real dispatch eligibility — one
+   source of truth, no second probe — and states the live answer first, with the
+   workflow-secret view retained after it as provenance. New state `dispatchable`
+   ("Dispatchable — unverified") keeps an unverified transport from being overclaimed as
+   `connected`. 7 tests.
+2. **Expired-approval stranding** (`52d057f`). A task whose one-hour Founder approval expired
+   sat at `queued` forever: eligibility refused before claim, and the browser flow only
+   approves `needs_approval`. `returnForFreshApproval` now routes such a task back to
+   `needs_approval` through the canonical execution boundary — no raw SQL, no auto-approve,
+   `--check-only` still read-only. Action-digest binding, no-self-approval, provider binding,
+   single-use approval nonce, claim fencing and the stale approval as immutable audit evidence
+   are all preserved; a digest/claim-binding mismatch still goes to `blocked`, not back for
+   re-approval. 13 tests.
+3. **Founder-facing route truth** (`7229b9d`). Found by the Founder at the gate: Connections
+   said "Dispatchable — unverified" while the Command Center said "Blocked — not connected",
+   same host, same instant. Live route verdicts were rendered only inside the Direct Order
+   composer, which requires the `hq.direct_order` originate grant — so a Founder signing in to
+   APPROVE (correctly holding no such grant) saw build-time markup only. Route availability is
+   a fact about the world, not a control: it is now patched outside the grant branch, so both
+   pages answer from the same `/session` `routes` field. The grant still governs the control.
+   7 tests.
+
+A fourth commit (`b82bc07`) pinned `commercial.test.ts › derives credit statuses` to a fixed
+evaluation date. `creditOverview` read the wall clock internally, so on 2026-09-01 a fixture
+invoice due 2026-08-31 correctly aged from `partial` into `overdue` and broke the assertion.
+The date is now an optional third parameter defaulting to the identical expression, so all six
+production call sites are unchanged in source and behaviour. No business rule was altered to
+make CI green. A fifth (`3680930`) restored LF line endings in `render.ts`, which had been
+rewritten as CRLF and made the largest file in the PR unreviewable.
+
+**Evidence at the accepted head:** headquarter 1752 tests green (80 files); server 483 passed,
+3 pre-existing skips, 0 failed; `tsc --noEmit` clean in headquarter, server and web; web bundle
+215.66 kB / 69.22 kB gzip with code splitting unchanged; exact-head CI green
+([run 33646927534](https://github.com/kiniena-github/JENIFY-OS/actions/runs/33646927534)).
+Exactly one real external dispatch was performed in the whole proof — a read-only GitHub issue
+read — and the Founder's pristine proof worktree and databases were verified byte-identical
+before and after.
+
+**Still open, carried into Phase 2:** issue #227 (Hosted JENIFY HQ V1, Founder-approved
+2026-08-30) and issue #231 (harmless GitHub proof). Phase 2 planning is recorded in
+`docs/HEADQUARTER/PHASE_2_FIRST_CLASS_PRODUCT_PLAN.md`.

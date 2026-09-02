@@ -1,0 +1,2 @@
+CREATE INDEX `sso_hq_tickets_expires_at` ON `sso_hq_tickets` (`expires_at`);--> statement-breakpoint
+CREATE INDEX `sso_hq_tickets_consumed_at` ON `sso_hq_tickets` (`consumed_at`) WHERE "sso_hq_tickets"."consumed_at" is not null;

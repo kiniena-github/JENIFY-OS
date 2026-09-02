@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@factoryos/headquarter": "*",
+    "@factoryos/hq-host": "*",
     "@factoryos/shared": "*",
     "@fastify/compress": "^9.2.0",
     "@fastify/cookie": "^11.0.0",

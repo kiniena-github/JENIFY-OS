@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 // ---------------------------------------------------------------------------
@@ -1161,4 +1162,63 @@ export const recoveryCodes = sqliteTable(
     revokedAt: text('revoked_at'),
   },
   (t) => [index('recovery_codes_user').on(t.tenantId, t.userId)],
+);
+
+/**
+ * Single-use handoff tickets for the JENIFY HQ sign-in bridge
+ * (Phase 2, Stage 2; Founder Gate A decided A-4 on 2026-09-02).
+ *
+ * A ticket is the ONLY thing that travels through the browser during the
+ * handoff, and it is deliberately worth almost nothing on its own: opaque, one
+ * minute long, single-use, bound to the audience and to the `state` of the
+ * redirect that created it, and exchangeable only over a service-authenticated
+ * back channel. The claims themselves — including the ORIGINAL sign-in instant
+ * that step-up freshness depends on — never pass through the browser at all.
+ *
+ * Stored as a HASH for the same reason session tokens are: a leaked copy of
+ * this table must not be a set of usable tickets. It is a random 32-byte value,
+ * not a human secret, so SHA-256 is right and a slow KDF would only add a
+ * denial-of-service surface.
+ *
+ * `origin_session_id` is what makes sign-out propagate: on logout the server
+ * tells HQ to revoke every HQ session derived from that identity session.
+ */
+export const ssoHqTickets = sqliteTable(
+  'sso_hq_tickets',
+  {
+    id: text('id').primaryKey(),
+    ticketHash: text('ticket_hash').notNull().unique(),
+    /** The host this ticket may be redeemed for. Checked on redeem. */
+    audience: text('audience').notNull(),
+    /** Exactly the redirect_uri that was allow-listed when it was minted. */
+    redirectUri: text('redirect_uri').notNull(),
+    /** Binds the ticket to the browser round trip that started it. */
+    state: text('state').notNull(),
+    realmId: text('realm_id').notNull(),
+    accountId: text('account_id').notNull(),
+    displayName: text('display_name').notNull(),
+    /** ORIGINAL sign-in instant. Never the handoff instant. */
+    sessionEstablishedAt: text('session_established_at').notNull(),
+    /** Identity session this derives from, so logout can revoke downstream. */
+    originSessionId: text('origin_session_id').notNull(),
+    createdAt: text('created_at').notNull(),
+    expiresAt: text('expires_at').notNull(),
+    consumedAt: text('consumed_at'),
+  },
+  (t) => [
+    index('sso_hq_tickets_origin').on(t.originSessionId),
+    // Housekeeping indexes (fourth correction round). `pruneExpiredTickets`
+    // runs on the authorize path, so its candidate selection must be a bounded
+    // index range scan rather than a scan of the growing live/grace set.
+    //
+    // `expires_at` is NOT NULL: a plain index lets the sweep seek to the oldest
+    // key and stop at the batch limit.
+    index('sso_hq_tickets_expires_at').on(t.expiresAt),
+    // `consumed_at` is NULL for every un-redeemed ticket. A plain index would
+    // hold an entry per live row for the sweep to walk past; the PARTIAL index
+    // holds only the consumed rows, which is exactly the set being collected.
+    index('sso_hq_tickets_consumed_at')
+      .on(t.consumedAt)
+      .where(sql`${t.consumedAt} is not null`),
+  ],
 );

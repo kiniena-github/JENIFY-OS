@@ -2,7 +2,7 @@ import { buildApp } from './app.js';
 import { createDb } from './db/index.js';
 import { registerTranslationKeys } from './services/translations.js';
 import { PLATFORM_KEYS } from './i18n-keys.js';
-import { loadHeadquarterHost } from './services/headquarter-host.js';
+import { composeAppOptions } from './compose.js';
 
 import { defaultDbPath } from './db/index.js';
 
@@ -11,15 +11,12 @@ console.log(`FactoryOS database: ${defaultDbPath()}`);
 const db = createDb();
 registerTranslationKeys(db, PLATFORM_KEYS.map((k) => ({ key: k.key, en: k.en, module: k.module })));
 
-// HQ control plane: OFF unless the environment switches it on deliberately.
-// An ordinary tenant deployment (the Mesob pilot included) sets none of the
-// FACTORYOS_HQ_* variables and is byte-for-byte unaffected.
-const hq = loadHeadquarterHost(process.env);
-const app = buildApp({
-  db,
-  ...(hq ? { headquarter: hq.plane } : {}),
-  ...(hq?.siteRoot ? { headquarterSite: { root: hq.siteRoot } } : {}),
-});
+// The HQ control plane and the A-4 sign-in bridge are both OFF unless the
+// environment switches them on deliberately. An ordinary tenant deployment (the
+// Mesob pilot included) sets none of those variables and is byte-for-byte
+// unaffected. `composeAppOptions` is the seam a test can assert against, so
+// "the shipped process never passed the bridge" cannot recur unnoticed.
+const app = buildApp(composeAppOptions(db, process.env).options);
 
 app
   .listen({ port, host: '127.0.0.1' })

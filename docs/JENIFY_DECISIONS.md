@@ -113,3 +113,29 @@ Append-only. Each entry: date, decision, rationale. Newest last.
   the canonical model records approve or deny only. HQ routes exist only when a host
   passes an explicit control plane to `buildApp`, so an ordinary tenant deployment has
   none of them.
+
+- **2026-09-02 — LIVE HQ CONTROL V1 is Founder-accepted and merged; JENIFY HQ is promoted to a
+  first-class Jenify product.** Accepted head `36809306b2620cbc419e1b0a04bd7db05a91aaad`,
+  merged to `main` as `197844a8d637622fa08c3bdce02159070965d738`. Acceptance rested on a
+  Founder-operated browser proof (issue #230), not on local test claims. Phase 2 is authorised
+  as PLANNING ONLY at this point: JENIFY HQ is to be separated from the historical JENIFY-OS
+  structure and prepared for `hq.jenifylabs.com`, a future Jenify HQ Desktop, and a core shared
+  between web and desktop. No extraction, move, merge or deployment is authorised by this
+  entry. The target structure, migration order and the two Founder gates it depends on are set
+  out in `docs/HEADQUARTER/PHASE_2_FIRST_CLASS_PRODUCT_PLAN.md`; the repository-boundary
+  question (top-level product inside this repo first, versus its own repo immediately) and the
+  hosted-identity question are Founder decisions that remain OPEN.
+
+- **2026-09-02 — The official JENIFY HQ visual direction reference is the Drive pack
+  `HQ-UI-3D`** (folder `1v8lBLeVtYYgfbegNAAbiUdgiIoKHEf6W`), comprising
+  `HQ-UI-3D-REFERENCE-NOTES.md`, four reference videos, nine concept images and eight video
+  frame references. Locked direction: premium, serious, futuristic — a real high-end command
+  headquarters, not a game; dark architectural base, glass/metal, controlled blue/cyan light,
+  strong depth, readable UI. The 3D layer is the experience layer, never decoration that hides
+  controls, and real data and controls stay authoritative underneath it. Spaces:
+  Home/Lobby, Command Room, Mission Room, Meeting Room, World/Network Map, Department
+  Navigation. Worker states rendered in 3D (WORKING, VERIFYING, BLOCKED, WAITING FOR FOUNDER,
+  COMPLETE) must represent REAL HQ state — this is binding on any 3D work and is the same
+  honesty rule `ui/spatial/state.ts` already enforces (deny by default, every live-looking
+  thing carries its evidence, nothing invented). The concept images are visual references, not
+  final UI specs.

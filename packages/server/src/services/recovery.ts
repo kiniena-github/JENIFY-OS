@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
 import { and, eq, isNull } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
-import { recoveryCodes, sessions, users } from '../db/schema.js';
+import { recoveryCodes, users } from '../db/schema.js';
 import { resolveUserByTenantCode } from './auth.js';
+import { revokeIdentitySessions, type IdentityRevocation } from './identity-revocation.js';
 import { newId, nowIso, hashPassword, badRequest, AppError } from '../util.js';
 import type { Ctx } from './context.js';
 import { actorId } from './context.js';
@@ -90,7 +91,7 @@ export function generateRecoveryCodes(ctx: Ctx, userId: string): string[] {
 export function recoverWithCode(
   db: Db,
   input: { username: string; code: string; newPassword: string; tenantCode?: string },
-): void {
+): IdentityRevocation {
   // Input validation happens BEFORE any account lookup so the response can
   // never become a username-existence oracle (same 400 for everyone).
   if (!input.newPassword || input.newPassword.length < 6) {
@@ -143,14 +144,18 @@ export function recoverWithCode(
   const hashedPassword = hashPassword(input.newPassword);
   // drizzle's better-sqlite3 transaction executes the callback synchronously
   // and commits/rolls back atomically.
-  db.transaction((tx) => {
+  return db.transaction((tx) => {
     tx.update(recoveryCodes).set({ usedAt: now }).where(eq(recoveryCodes.id, match!.id)).run();
     tx.update(users).set({ passwordHash: hashedPassword }).where(eq(users.id, user!.id)).run();
-    // every previously authenticated session is invalidated immediately
-    tx.update(sessions)
-      .set({ revokedAt: now })
-      .where(and(eq(sessions.userId, user!.id), isNull(sessions.revokedAt)))
-      .run();
+    // Every previously authenticated session is invalidated immediately —
+    // through the one shared path, so the derived HQ sessions die with them
+    // instead of outliving the credential change by up to an hour.
+    const revocation = revokeIdentitySessions(
+      tx as unknown as Db,
+      { userId: user!.id },
+      'recovery',
+      now,
+    );
     writeAudit(
       { db: tx as unknown as Db, tenantId: user!.tenantId, user: null },
       {
@@ -162,6 +167,7 @@ export function recoverWithCode(
         summary: `Emergency recovery code used for '${user!.displayName}' — password changed, code consumed`,
       },
     );
+    return revocation;
   });
 }
 
