@@ -48,30 +48,11 @@ interface RevokedSessionCandidate {
   expiresAt: string;
 }
 
-/**
- * Order notifications by the identity session's expiry, newest first.
- *
- * A derived HQ session can only be created while its origin identity session is
- * still live: ticket redemption checks origin-session liveness. HQ's own cookie
- * then lives at most 60 minutes. Therefore an identity session that expired a
- * long time ago cannot be more urgent than one that is live now or expired only
- * recently. Sorting by `expiresAt` guarantees the bounded notifier workers and
- * deadline are spent on the sessions that can still back live HQ authority
- * before an unbounded backlog of ancient, naturally-expired rows.
- *
- * We intentionally do NOT drop old rows from local revocation: every selected
- * identity session is still marked revoked and has its unconsumed tickets
- * invalidated. This function only controls the order in which HQ is notified.
- *
- * An unparseable timestamp is treated as highest risk and goes first. Unknown
- * state must fail safe, never be buried behind rows we know are stale.
- */
 function compareHqRevocationPriority(a: RevokedSessionCandidate, b: RevokedSessionCandidate): number {
   const aExpiry = Date.parse(a.expiresAt);
   const bExpiry = Date.parse(b.expiresAt);
   const aExpiryKnown = Number.isFinite(aExpiry);
   const bExpiryKnown = Number.isFinite(bExpiry);
-
   if (aExpiryKnown !== bExpiryKnown) return aExpiryKnown ? 1 : -1;
   if (aExpiryKnown && bExpiryKnown && aExpiry !== bExpiry) return bExpiry - aExpiry;
 
@@ -79,20 +60,12 @@ function compareHqRevocationPriority(a: RevokedSessionCandidate, b: RevokedSessi
   const bCreated = Date.parse(b.createdAt);
   const aCreatedKnown = Number.isFinite(aCreated);
   const bCreatedKnown = Number.isFinite(bCreated);
-
   if (aCreatedKnown !== bCreatedKnown) return aCreatedKnown ? 1 : -1;
   if (aCreatedKnown && bCreatedKnown && aCreated !== bCreated) return bCreated - aCreated;
 
   return a.id.localeCompare(b.id);
 }
 
-/**
- * End identity sessions and everything derived from them on THIS side.
- *
- * Local revocation remains exhaustive. The returned ids are priority-ordered so
- * the bounded HQ propagation step cannot let an ancient stale-session backlog
- * starve sessions that may still back live HQ cookies.
- */
 export function revokeIdentitySessions(
   db: Db,
   filter: IdentitySessionFilter,
@@ -111,7 +84,6 @@ export function revokeIdentitySessions(
       ),
     )
     .all();
-
   if (selected.length === 0) return noIdentityRevocation(reason);
 
   let ticketsInvalidated = 0;
@@ -120,10 +92,9 @@ export function revokeIdentitySessions(
     ticketsInvalidated += invalidateTicketsForOriginSession(db, row.id, new Date(now));
   }
 
-  const prioritized = [...selected].sort(compareHqRevocationPriority);
   return {
     reason,
-    originSessionIds: prioritized.map((row) => row.id),
+    originSessionIds: [...selected].sort(compareHqRevocationPriority).map((row) => row.id),
     ticketsInvalidated,
   };
 }
@@ -148,14 +119,6 @@ function sampleIds(ids: readonly string[]): string {
   return `${ids.slice(0, AUDIT_ID_SAMPLE).join(', ')}, and ${ids.length - AUDIT_ID_SAMPLE} more`;
 }
 
-/**
- * Tell HQ that these identity sessions are dead.
- *
- * At most `concurrency` calls are in flight and one deadline bounds the entire
- * operation. `revokeIdentitySessions` supplies ids in security-priority order,
- * so old stale rows cannot consume the bounded worker slots before sessions that
- * may still back a live HQ cookie.
- */
 export async function propagateIdentityRevocation(
   ssoHq: IdentityRevocationSink | undefined,
   revocation: IdentityRevocation,
@@ -168,7 +131,6 @@ export async function propagateIdentityRevocation(
         `${revocation.reason}`,
     );
   }
-
   const notifier = ssoHq?.logoutNotifier;
   if (!notifier) return;
   const ids = revocation.originSessionIds;
@@ -209,23 +171,18 @@ export async function propagateIdentityRevocation(
         unconfirmed.push(originSessionId);
         continue;
       }
-
       const outcome = await Promise.race([
         attempt(originSessionId).then((result) => ({ kind: 'settled' as const, result })),
         deadlineReached,
       ]);
-
       if (outcome.kind === 'deadline') {
         unconfirmed.push(originSessionId);
         continue;
       }
-
       const { result } = outcome;
       if (result.ok) {
         confirmed += 1;
-        audit(
-          `[sso] HQ sessions revoked for identity session ${originSessionId} (${revocation.reason})`,
-        );
+        audit(`[sso] HQ sessions revoked for identity session ${originSessionId} (${revocation.reason})`);
       } else {
         failed += 1;
         audit(
@@ -237,9 +194,7 @@ export async function propagateIdentityRevocation(
   }
 
   try {
-    await Promise.all(
-      Array.from({ length: Math.min(concurrency, ids.length) }, () => worker()),
-    );
+    await Promise.all(Array.from({ length: Math.min(concurrency, ids.length) }, () => worker()));
   } finally {
     if (deadlineTimer) clearTimeout(deadlineTimer);
   }
