@@ -118,7 +118,8 @@ export async function buildStandaloneHq(options: StandaloneOptions = {}) {
   if (effective === NO_IDENTITY) {
     log(
       '[hq] NO IDENTITY SOURCE is wired into this process. HQ has no sign-in of its own, so every ' +
-        'request resolves nobody: reads answer 401 and controls stay off.',
+        'request resolves nobody: reads answer 401 and controls stay off. This is the correct ' +
+        'fail-closed standalone posture when the A-4 identity bridge is absent. It is NOT a hosted HQ.',
     );
   }
 
