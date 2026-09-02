@@ -1,15 +1,10 @@
-import type { FastifyInstance, FastifyRequest } from 'fastify';
-import fastifyStatic from '@fastify/static';
+import type { FastifyInstance } from 'fastify';
 import {
-  handleControlRequest,
-  resolveFounderPrincipal,
-  CONTROL_API_PREFIX,
-  type ControlApiDeps,
-  type ControlAuditPort,
-  type ControlRequest,
-  type SessionResolverPort,
-  type CredentialVerifierPort,
-} from '@factoryos/headquarter/live';
+  registerHeadquarterRoutes as hostRegisterRoutes,
+  registerHeadquarterSite as hostRegisterSite,
+  type HqIdentityPort,
+} from '@factoryos/hq-host';
+import type { SessionResolverPort, CredentialVerifierPort } from '@factoryos/headquarter/live';
 import type { Db } from '../db/index.js';
 import { SESSION_COOKIE } from '../app.js';
 import {
@@ -25,7 +20,7 @@ import {
 
 /**
  * The JENIFY OS host adapter for the Headquarter browser-control API
- * (issue #200, Founder decision of 2026-08-28).
+ * (issue #200, Founder decision of 2026-08-28; narrowed in Phase 2, Stage 1).
  *
  * ## Why HQ's write path is mounted HERE
  *
@@ -36,41 +31,20 @@ import {
  * meant either a second credential (refused) or a cross-origin cookie
  * arrangement (weaker, and unnecessary).
  *
- * ## What this file is allowed to be
+ * ## What is left in this file after Stage 1
  *
- * An adapter and nothing more. It translates Fastify to the reduced request
- * shape and back, and supplies three ports. Every authority decision —
- * session → account → configured Founder map → registered principal, origin,
- * step-up, and the canonical Operator rules underneath — lives in
- * `@factoryos/headquarter`'s `live/auth.ts` and `live/control-api.ts`, where
- * it is unit-testable without a server. Nothing here may add a route, widen a
- * check, or shortcut one.
+ * Exactly the part of that decision that cannot leave: the two identity
+ * adapters. They read this server's session store, password store and rate
+ * limiter, so they belong to this server. Everything generic — request
+ * translation, the wildcard mounting, the Founder-gated static mount, the
+ * cache and referrer headers — now lives in `@factoryos/hq-host`, which HQ can
+ * carry to a process that never loads the tenant platform.
  *
- * ## Opt-in, so the tenant platform is unchanged by default
- *
- * `buildApp` registers this only when it is handed an explicit control plane.
- * An ordinary JENIFY OS deployment — the Mesob pilot included — passes
- * nothing, gets no HQ routes at all, and is byte-for-byte unaffected.
+ * The exported signatures are deliberately unchanged, so `buildApp` and the
+ * existing host tests are untouched by the split.
  */
 
-/**
- * Everything the host must decide deliberately before HQ browser writes exist.
- *
- * There is no default for any of it. In particular `founderMap` and
- * `allowedOrigins` have no fallback: an unconfigured deployment authenticates
- * no Founder and accepts no mutation.
- */
-export type HeadquarterControlPlane = Pick<
-  ControlApiDeps,
-  'ops' | 'founderMap' | 'allowedOrigins' | 'secretsEnv' | 'dispatchAvailability'
-> & {
-  /**
-   * Set false to expose the read routes without the write routes — the safe
-   * posture while a deployment's Founder binding is still being established.
-   */
-  mutationsEnabled?: boolean;
-  audit?: ControlAuditPort;
-};
+export type { HeadquarterControlPlane } from '@factoryos/hq-host';
 
 /**
  * Resolve the acting account from the session cookie ONLY.
@@ -155,149 +129,39 @@ function credentialVerifier(db: Db, ip: string): CredentialVerifierPort {
   };
 }
 
+/**
+ * This server's answer to "who is making this request", for `@factoryos/hq-host`.
+ *
+ * Built per request on purpose — see `HqRequestIdentity`. Hoisting either port
+ * would cache a session decision the resolver is required to re-take every
+ * time.
+ */
+export function serverIdentity(db: Db): HqIdentityPort {
+  return {
+    forRequest(req) {
+      return {
+        sessions: sessionResolver(db, req.cookies?.[SESSION_COOKIE]),
+        credentials: credentialVerifier(db, req.ip),
+      };
+    },
+  };
+}
+
 export function registerHeadquarterRoutes(
   app: FastifyInstance,
   db: Db,
-  plane: HeadquarterControlPlane,
+  plane: import('@factoryos/hq-host').HeadquarterControlPlane,
 ): void {
-  const handle = async (req: FastifyRequest, reply: import('fastify').FastifyReply) => {
-    const method = req.method.toUpperCase();
-    const headers: Record<string, string | undefined> = {};
-    for (const [name, value] of Object.entries(req.headers)) {
-      headers[name.toLowerCase()] = Array.isArray(value) ? value[0] : (value as string | undefined);
-    }
-    const path = req.url.split('?')[0]!;
-    const control: ControlRequest = { method, path, headers, body: req.body };
-
-    // Ports are built PER REQUEST, closed over this request's cookie and
-    // source address. `ControlRequest` deliberately has no field a credential
-    // or an IP could sit in — that shape is what stops the boundary reading
-    // identity out of a body — so the two are bound here instead, where they
-    // cannot be reached by anything the caller sends.
-    const deps: ControlApiDeps = {
-      ops: plane.ops,
-      founderMap: plane.founderMap,
-      allowedOrigins: plane.allowedOrigins,
-      secretsEnv: plane.secretsEnv,
-      // A host that genuinely observes the transport answers for its provider,
-      // so the composer, the approvals view and the order itself cannot
-      // disagree about whether a provider can dispatch from here.
-      dispatchAvailability: plane.dispatchAvailability,
-      // The flag is passed through rather than enforced here, so the layer that
-      // refuses a write is the same one that tells the console whether the
-      // button works. Enforcing it in this adapter left the two disagreeing.
-      mutationsEnabled: plane.mutationsEnabled,
-      sessions: sessionResolver(db, req.cookies?.[SESSION_COOKIE]),
-      credentials: credentialVerifier(db, req.ip),
-      audit: plane.audit,
-    };
-
-    const result = handleControlRequest(control, deps);
-    // No caching of an authenticated, principal-specific answer, ever.
-    reply.header('cache-control', 'no-store');
-    reply.status(result.status).send(result.body);
-  };
-
-  // One wildcard registration per method, so the deny-by-default route table
-  // lives in ONE place (`control-api.ts`) instead of being restated here where
-  // the two could drift.
-  app.get(`${CONTROL_API_PREFIX}/*`, handle);
-  app.post(`${CONTROL_API_PREFIX}/*`, handle);
+  hostRegisterRoutes(app, plane, serverIdentity(db));
 }
 
-/** Where the static HQ site is mounted when a host chooses to serve it. */
-export const HQ_SITE_PREFIX = '/hq/';
-
-/**
- * Serve the static HQ site from the API's own origin, Founder-gated.
- *
- * ## Why same-origin serving exists at all
- *
- * The pages poll `hq-snapshot.json` and call the control API with the
- * `fos_session` cookie, which is HttpOnly and SameSite=Lax — a browser only
- * sends it to the host that set it. A separately-hosted copy of the site
- * would therefore reach the control API with no cookie and be told
- * `unauthenticated` on every request. Serving the pages from this origin is
- * what makes the design's implicit same-origin requirement explicit and true.
- *
- * ## Why every request is Founder-gated
- *
- * The rendered pages project canonical company state — tasks, approvals,
- * transcripts, connection evidence. They are static files, but they are not
- * public files. Every request through this mount re-resolves the session and
- * the SAME explicit Founder binding the control API enforces (same map, same
- * principal registry, same fail-closed rules), so a signed-in non-Founder
- * tenant user gets a 403, not a floor plan. There is no caching exemption:
- * `no-store` on every response keeps a shared cache from ever answering for
- * this gate.
- */
 export function registerHeadquarterSite(
   app: FastifyInstance,
   db: Db,
-  plane: HeadquarterControlPlane,
+  plane: import('@factoryos/hq-host').HeadquarterControlPlane,
   root: string,
 ): void {
-  app.register(async (scope) => {
-    scope.addHook('onRequest', async (req, reply) => {
-      // `headers: {}` is deliberate and loses nothing: `resolveFounderPrincipal`
-      // reads the request ONLY to hand it to the sessions port, and the
-      // resolver built here ignores it entirely — it closes over the cookie
-      // token the host's own cookie layer already parsed. Origin allow-listing
-      // is NOT part of Founder resolution: `checkMutationOrigin` is a separate
-      // gate the control API applies to state-changing methods only, and this
-      // mount serves only GET/HEAD, for which that gate passes uncondition-
-      // ally on the mutation path too. So an empty header bag can neither
-      // skip nor weaken any check the control API performs — resolution is
-      // genuinely header-independent, and an unresolvable session still fails
-      // closed to 401/403 below.
-      const resolution = resolveFounderPrincipal(
-        { method: 'GET', path: req.url.split('?')[0]!, headers: {} },
-        {
-          sessions: sessionResolver(db, req.cookies?.[SESSION_COOKIE]),
-          // The SAME registry the operations authorize against, reached through
-          // the narrow lookup rather than the registry object — `ops.principals`
-          // was removed in issue #200 because a public collaborator there was
-          // patchable into a forged Founder gate.
-          principals: { get: (id: string) => plane.ops.lookupPrincipal(id) },
-          founderMap: plane.founderMap,
-        },
-      );
-      if (!resolution.ok) {
-        // `return reply` is load-bearing, not style: in an ASYNC Fastify hook
-        // the documented way to respond and stop the chain is to return the
-        // reply. Relying on implicit short-circuiting in the one hook that
-        // gates canonical company state would fail OPEN into the static
-        // handler if a framework bump ever changed the implicit behavior.
-        return reply
-          .status(resolution.reason === 'unauthenticated' ? 401 : 403)
-          .header('cache-control', 'no-store')
-          .type('text/plain; charset=utf-8')
-          .send(`HQ access refused: ${resolution.message}`);
-      }
-    });
-    scope.addHook('onSend', async (_req, reply) => {
-      reply.header('cache-control', 'no-store');
-      // The same policy the pages pin for themselves (`REFERRER_POLICY_META`),
-      // stated by the host as well (#219 correction round).
-      //
-      // The console's `/session` probe is a GET, so it carries no `Origin` and
-      // its `Referer` is the ONLY evidence of the page's origin the control
-      // API can check against the trusted-origin list. A response header is
-      // the more reliable half of the pair: it applies to the document before
-      // any markup is parsed, and it covers a page this host serves even if a
-      // future build ever stops emitting the meta.
-      //
-      // `same-origin` is stricter than the browser default, never weaker — HQ
-      // pages only ever call this same origin, and a cross-origin request now
-      // carries no referrer at all. Nothing about what the gate ACCEPTS
-      // changes: the referrer's origin is still checked against the configured
-      // allow-list.
-      reply.header('referrer-policy', 'same-origin');
-    });
-    scope.register(fastifyStatic, {
-      root,
-      prefix: HQ_SITE_PREFIX,
-      decorateReply: false,
-    });
-  });
+  hostRegisterSite(app, plane, serverIdentity(db), root);
 }
+
+export { HQ_SITE_PREFIX } from '@factoryos/hq-host';

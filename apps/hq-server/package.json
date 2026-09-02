@@ -1,0 +1,24 @@
+{
+  "name": "@factoryos/hq-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone JENIFY HQ process. Boots @factoryos/hq-host without the JENIFY OS tenant platform. Ships NO identity source, so it serves and truthfully refuses until Founder Gate A decides identity for a separate origin.",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@factoryos/headquarter": "*",
+    "@factoryos/hq-host": "*",
+    "fastify": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}

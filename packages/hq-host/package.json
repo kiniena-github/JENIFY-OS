@@ -1,0 +1,26 @@
+{
+  "name": "@factoryos/hq-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "JENIFY HQ's own HTTP host — the Fastify surface for the HQ control API and the static HQ site, with identity supplied by whichever host wires it. Depends on @factoryos/headquarter and nothing else in the workspace, so HQ can be served without the JENIFY OS tenant platform.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@factoryos/headquarter": "*",
+    "@fastify/static": "^8.0.0",
+    "fastify": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}

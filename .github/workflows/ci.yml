@@ -52,5 +52,21 @@ jobs:
       - name: Build headquarter site
         run: npm run build:site --workspace @factoryos/headquarter
 
+      # Phase 2, Stage 1. HQ's own HTTP host and the standalone process that
+      # boots it. Both are proof that HQ runs without the tenant platform, so
+      # both belong in the same pipeline as the server — a split pipeline is
+      # exactly how the port contract and its host would drift apart.
+      - name: Run hq-host tests
+        run: npm run test --workspace @factoryos/hq-host
+
+      - name: Typecheck hq-host
+        run: npm run typecheck --workspace @factoryos/hq-host
+
+      - name: Run standalone hq-server tests
+        run: npm run test --workspace @factoryos/hq-server
+
+      - name: Typecheck standalone hq-server
+        run: npm run typecheck --workspace @factoryos/hq-server
+
       - name: Build all workspaces
         run: npm run build
