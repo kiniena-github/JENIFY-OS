@@ -1,8 +1,18 @@
 # JENIFY HQ — Phase 2: separation into a first-class Jenify product
 
-Status: **PLAN ONLY. Nothing has been moved, merged or deployed.**
+Status: **Stages 0 and 1 IMPLEMENTED (Founder-approved 2026-09-02). Stages 2–5 not started.**
+Nothing is merged or deployed; no authentication, cookie or domain was touched.
 Written 2026-09-02 against `main` = `197844a8d637622fa08c3bdce02159070965d738`
-(Phase 1 LIVE HQ CONTROL V1, Founder-accepted at head `36809306`).
+(Phase 1 LIVE HQ CONTROL V1, Founder-accepted at head `36809306`, tagged
+`phase-1-accepted-36809306`).
+
+> **Progress**
+> - **Stage 0 — DONE.** `core-boundary.test.ts` + `host-port-contract.test.ts` (19 tests).
+> - **Stage 1 — DONE.** `packages/hq-host` + `apps/hq-server` (24 tests). The server's
+>   HQ route/host test files pass **unedited**.
+> - **Stage 2 — BLOCKED on Founder Gate A** (§7). Not started.
+> - **Stage 3 — absorbs open issue #227.** Not started.
+> - **Stages 4–5 —** not started.
 
 Targets this plan prepares for: `hq.jenifylabs.com`, a future Jenify HQ Desktop, and one core
 shared by web and desktop. Official visual direction: the Drive `HQ-UI-3D` reference pack
@@ -174,7 +184,15 @@ a huge diff, breaks every import, and gains nothing.
 Every stage ends with a green build. Every stage is independently revertible. No stage begins
 before the previous one is green on `main`.
 
-### Stage 0 — Baseline and contract pinning (no files move)
+### Stage 0 — Baseline and contract pinning (no files move) — **DONE**
+
+Delivered as planned. `phase-1-accepted-36809306` tagged; `core-boundary.test.ts` (6) pins that
+the core imports no sibling package, escapes its directory by no relative path, and confines
+`better-sqlite3` to `store/db.ts`; `host-port-contract.test.ts` (13) states the six host
+obligations framework-free. One finding worth carrying forward: `/session` answers an
+unauthenticated caller with **401 AND `ok: true`** plus `authenticated: false`, because it is the
+probe a page uses to discover its own state — a host must preserve that shape rather than
+flattening it into a generic error.
 - Tag the accepted head: `phase-1-accepted-36809306`.
 - Add `packages/headquarter/test/core-boundary.test.ts`: asserts the core imports no sibling
   package and no relative path escapes its directory. Pins the architecture before it is stressed.
@@ -185,7 +203,20 @@ before the previous one is green on `main`.
   (§5) as a written checklist.
 - **Risk: none. Nothing moves. Fully revertible.**
 
-### Stage 1 — Give HQ its own host (`packages/hq-host` + `apps/hq-server`)
+### Stage 1 — Give HQ its own host (`packages/hq-host` + `apps/hq-server`) — **DONE**
+
+Delivered as planned, and smaller than feared. `packages/hq-host` is the old
+`routes/headquarter.ts` with the two identity adapters lifted out behind `HqIdentityPort`; the
+config loader moved verbatim (it never had a server dependency). `packages/server` keeps the
+identical exported signatures, so `buildApp` and both host test files — 953 lines, 41 tests —
+pass **unedited**. `apps/hq-server` boots HQ with no tenant platform in the process at all.
+
+One addition beyond the move: `HeadquarterHost` now returns the opened database, so a host can
+close it. The long-lived server never needed that; a standalone process does.
+
+`apps/hq-server` ships **no identity source**, so it serves and refuses everything with 401 and
+says so at boot. That is Gate A's honest shape, and a test asserts no `/login`-style route was
+invented to paper over it.
 - Move the two server files into `hq-host`, parameterised over the three ports.
 - `packages/server` keeps a **thin re-export** so its routes, tests and env contract are
   byte-compatible. Nothing about the tenant platform changes.
