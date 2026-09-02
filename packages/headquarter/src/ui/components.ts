@@ -111,10 +111,16 @@ export interface KpiInput {
   value: string | number;
   hint?: string;
   tone?: Tone;
+  /**
+   * Stable hook (`data-kpi`) a page's own live script may target to patch
+   * this tile's value after a runtime check, without touching every other
+   * caller of `kpiRow`. Omitted by every existing caller; opt-in only.
+   */
+  id?: string;
 }
 
-export function kpi({ label, value, hint, tone = 'neutral' }: KpiInput): string {
-  return `<div class="card kpi tone-${tone}">
+export function kpi({ label, value, hint, tone = 'neutral', id }: KpiInput): string {
+  return `<div class="card kpi tone-${tone}"${id ? ` data-kpi="${escapeHtml(id)}"` : ''}>
 <span class="kpi-label">${escapeHtml(label)}</span>
 <span class="kpi-value">${escapeHtml(String(value))}</span>
 ${hint ? `<span class="kpi-hint">${escapeHtml(hint)}</span>` : ''}

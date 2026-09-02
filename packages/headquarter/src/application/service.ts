@@ -73,7 +73,7 @@ import { HeadquarterStore } from '../store/headquarter.js';
 import type { ActivityStatus } from '../contracts/events.js';
 import type { WorkerDescriptor, WorkerRole } from '../contracts/workers.js';
 import { evaluatePolicy, type PolicyContext, type PolicyDecision } from '../operator/policy.js';
-import { taskActionDigest } from '../operator/approvals.js';
+import { taskActionDigest, type ApprovalRejection } from '../operator/approvals.js';
 import { assertNoSecretLikeContent, type EvidenceEntry } from '../operator/evidence.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import {
@@ -1550,6 +1550,60 @@ export class HeadquarterOperations {
     if (!reconciler.ok) return reconciler;
     try {
       return ok(this.#requirePrivilegedQueue().reconcile(taskId, decision, by, note));
+    } catch (error) {
+      return fail('operator_rejected', errorMessage(error), { taskId });
+    }
+  }
+
+  /**
+   * Return a task whose Founder approval no longer admits execution to
+   * `needs_approval`, so a fresh Founder decision is possible (issue #226).
+   *
+   * ## The deadlock this exists to break
+   *
+   * A time-boxed approval moves a task to `queued`. If it expires there — the
+   * Founder-workstation dispatch lane asks `claudeDispatchEligibility` before it
+   * claims, so an expired approval refuses the dispatch and `claim()`, the only
+   * caller of the boundary recovery, never runs — the task stays `queued`
+   * forever. `approveTask` accepts `needs_approval` ONLY, so there was no
+   * supported way to give that task a fresh approval: it was canonically
+   * stranded, with a live order nobody could authorise or run.
+   *
+   * ## What it is not
+   *
+   * Not an approval, not an extension, and not a re-approval. It grants
+   * nothing, decides nothing on a Founder's behalf, and is a NO-OP whenever the
+   * approval still admits execution — so it cannot be used to strip a good one.
+   * The fresh decision that follows is an ordinary `approveTask` call, subject
+   * to every rule it already enforces: approval authority, the no-self-approval
+   * rule, the action digest the Founder echoes back, a new single-use nonce and
+   * a new time-box.
+   *
+   * The stale approval row is never touched: `hq_approvals` is immutable audit
+   * evidence, and only the task's binding to it is cleared.
+   *
+   * Unauthenticated on purpose — it takes no actor, because it attributes
+   * nothing to a human. It applies a consequence the canonical rules already
+   * require, and the only thing it can produce is LESS authority than before.
+   */
+  returnForFreshApproval(taskId: string): OpsResult<{
+    /** True when an approval was found dead and the consequence was applied. */
+    returned: boolean;
+    /** Which rejection was applied, or null when nothing needed applying. */
+    rejection: ApprovalRejection | null;
+    /** The task's status afterwards — `needs_approval`, or `blocked` if hostile. */
+    status: ActivityStatus;
+  }> {
+    const task = this.queue.get(taskId);
+    if (!task) return fail('unknown_task', `Unknown task: ${taskId}`);
+    try {
+      const rejection = this.#requirePrivilegedQueue().returnForFreshApproval(taskId);
+      const after = this.queue.get(taskId);
+      return ok({
+        returned: rejection !== null,
+        rejection,
+        status: after?.status ?? task.status,
+      });
     } catch (error) {
       return fail('operator_rejected', errorMessage(error), { taskId });
     }

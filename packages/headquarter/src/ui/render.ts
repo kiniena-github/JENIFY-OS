@@ -56,7 +56,11 @@ import {
 } from './components.js';
 import { archiveSearchScript, type ArchiveSearchRow } from './archive-search.js';
 import { liveRefreshScript } from './live-refresh.js';
-import { directOrderConsoleScript, approvalsConsoleScript } from './control-console.js';
+import {
+  directOrderConsoleScript,
+  approvalsConsoleScript,
+  connectionsLiveScript,
+} from './control-console.js';
 import {
   AUTH_MECHANISM_LABELS,
   CONNECTION_STATE_LABELS,
@@ -193,7 +197,7 @@ export const DIRECT_ORDER_BLOCKER =
   'TRUSTED-LOCAL-ADMIN interface: it does not authenticate the Founder, it asserts a principal ' +
   'id that deny-by-default authorization and the no-self-approval rule then contain.';
 
-const ROUTE_STATE_PRESENTATION: Record<'ready' | 'blocked' | 'unknown', { label: string; tone: Tone }> = {
+export const ROUTE_STATE_PRESENTATION: Record<'ready' | 'blocked' | 'unknown', { label: string; tone: Tone }> = {
   ready: { label: 'Available', tone: 'accent' },
   blocked: { label: 'Blocked — not connected', tone: 'danger' },
   unknown: { label: 'Not evaluated', tone: 'neutral' },
@@ -222,9 +226,9 @@ function directOrderComposer(routes: DirectOrderRouteAvailability[] | undefined)
     const state = found == null ? 'unknown' : found.resolution.connected ? 'ready' : 'blocked';
     const presentation = ROUTE_STATE_PRESENTATION[state];
     const detail = found?.resolution.reason ?? 'Route availability was not evaluated for this build.';
-    return `<div class="order-route" data-route="${escapeHtml(route)}">
-<p class="row">${chip(route, 'neutral', true)}${chip(presentation.label, presentation.tone)}</p>
-<p class="faint">${escapeHtml(detail)}</p>
+    return `<div class="order-route" data-route="${escapeHtml(route)}" data-route-static-state="${escapeHtml(state)}">
+<p class="row">${chip(route, 'neutral', true)}<span data-route-state-chip>${chip(presentation.label, presentation.tone)}</span></p>
+<p class="faint" data-route-reason>${escapeHtml(detail)}</p>
 </div>`;
   }).join('\n');
 
@@ -560,7 +564,10 @@ ${event.status ? ` ${statusChip(event.status)}` : ` ${chip('note', 'neutral')}`}
 <div>
 ${section('WHAT NEEDS THE FOUNDER', attentionPanel, 'founder-attention')}
 ${section('DIRECT ORDER', directOrderComposer(orderRoutes), 'direct-order')}
-${directOrderConsoleScript()}
+${directOrderConsoleScript({
+  ready: ROUTE_STATE_PRESENTATION.ready,
+  blocked: ROUTE_STATE_PRESENTATION.blocked,
+})}
 <div class="grid grid-lanes">${lanes}</div>
 </div>
 <div>
@@ -1097,13 +1104,13 @@ ${
     )}</span>
 </div>`;
 
-    return `<article class="card" data-connection="${escapeHtml(status.id)}">
-<p class="row">${chip(CONNECTION_STATE_LABELS[status.state], CONNECTION_STATE_TONE[status.state], true)}${chip(
+    return `<article class="card" data-connection="${escapeHtml(status.id)}" data-connection-static-state="${escapeHtml(status.state)}">
+<p class="row"><span data-connection-state-chip>${chip(CONNECTION_STATE_LABELS[status.state], CONNECTION_STATE_TONE[status.state], true)}</span>${chip(
       AUTH_MECHANISM_LABELS[status.authMechanism],
       'neutral',
     )}${chip(status.locality === 'local' ? 'Local' : 'Cloud', 'neutral')}</p>
 <h3>${escapeHtml(status.displayName)}</h3>
-<p class="muted">${escapeHtml(status.reason)}</p>
+<p class="muted" data-connection-reason>${escapeHtml(status.reason)}</p>
 ${capabilities}
 <div class="record-meta">
 ${facts}
@@ -1117,18 +1124,22 @@ ${controls}
 
   const body = `<p class="readonly-note">${escapeHtml(CONNECTIONS_NOTE)}</p>
 ${kpiRow([
-  { label: 'Connected', value: counts.connected, hint: 'a live check succeeded', tone: counts.connected > 0 ? 'accent' : 'neutral' },
-  { label: 'Dispatchable', value: counts.dispatchable, hint: 'routable, never verified', tone: counts.dispatchable > 0 ? 'info' : 'neutral' },
-  { label: 'Configured', value: counts.configured, hint: 'credentials present, never verified', tone: counts.configured > 0 ? 'warn' : 'neutral' },
-  { label: 'Setup required', value: counts.setup_required, hint: 'partially configured', tone: counts.setup_required > 0 ? 'warn' : 'neutral' },
-  { label: 'Not connected', value: counts.not_connected, hint: 'no required fact observed' },
-  { label: 'Error', value: counts.error, hint: 'a check failed or the probe threw', tone: counts.error > 0 ? 'danger' : 'neutral' },
+  { id: 'connected', label: 'Connected', value: counts.connected, hint: 'a live check succeeded', tone: counts.connected > 0 ? 'accent' : 'neutral' },
+  { id: 'dispatchable', label: 'Dispatchable', value: counts.dispatchable, hint: 'routable, never verified', tone: counts.dispatchable > 0 ? 'info' : 'neutral' },
+  { id: 'configured', label: 'Configured', value: counts.configured, hint: 'credentials present, never verified', tone: counts.configured > 0 ? 'warn' : 'neutral' },
+  { id: 'setup_required', label: 'Setup required', value: counts.setup_required, hint: 'partially configured', tone: counts.setup_required > 0 ? 'warn' : 'neutral' },
+  { id: 'not_connected', label: 'Not connected', value: counts.not_connected, hint: 'no required fact observed' },
+  { id: 'error', label: 'Error', value: counts.error, hint: 'a check failed or the probe threw', tone: counts.error > 0 ? 'danger' : 'neutral' },
 ])}
 ${section(
   'CONNECTIONS',
   statuses.length === 0
     ? emptyState('No integration is catalogued.')
     : `<div class="grid grid-wide">${statuses.map(card).join('\n')}</div>`,
+)}
+${connectionsLiveScript(
+  { label: CONNECTION_STATE_LABELS.dispatchable, tone: CONNECTION_STATE_TONE.dispatchable },
+  { label: CONNECTION_STATE_LABELS.not_connected, tone: CONNECTION_STATE_TONE.not_connected },
 )}
 ${section(
   'ADDING A CONNECTION',

@@ -24,7 +24,17 @@ export interface CreditRow {
  * Paid amounts and last-payment dates are computed in two grouped queries
  * (not per invoice) so the screen stays fast as history grows.
  */
-export function creditOverview(ctx: Ctx, filter: { customerId?: string; status?: CreditStatus } = {}): {
+export function creditOverview(
+  ctx: Ctx,
+  filter: { customerId?: string; status?: CreditStatus } = {},
+  /**
+   * Date the credit position is evaluated against (the overdue boundary and the
+   * start of the due-this-week window). Defaults to the wall clock, exactly as
+   * before; supplied by tests so a scenario does not change verdict as real time
+   * passes. Same shape as `invoiceCreditStatus`, which this delegates to.
+   */
+  today = nowIso().slice(0, 10),
+): {
   rows: CreditRow[];
   outstandingCents: number;
   overdueCents: number;
@@ -68,7 +78,6 @@ export function creditOverview(ctx: Ctx, filter: { customerId?: string; status?:
   // credit notes reduce the receivable: remaining = total - paid - creditNoted
   const creditNoted = creditNotedByInvoice(ctx, invoices.map((i) => i.inv.id));
 
-  const today = nowIso().slice(0, 10);
   const weekAhead = new Date(Date.now() + 7 * 86400_000).toISOString().slice(0, 10);
 
   const rows: CreditRow[] = invoices.map(({ inv, customerName }) => {

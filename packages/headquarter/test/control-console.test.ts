@@ -29,7 +29,7 @@ import {
   approvalsConsoleScript,
   directOrderConsoleScript,
 } from '../src/ui/control-console.js';
-import { HQ_PAGES } from '../src/ui/render.js';
+import { HQ_PAGES, ROUTE_STATE_PRESENTATION } from '../src/ui/render.js';
 import { buildSite, type HeadquarterData } from '../src/ui/site.js';
 import { SNAPSHOT_FILENAME } from '../src/ui/live-refresh.js';
 import { CONTROL_ROUTES, handleControlRequest, type ControlApiDeps } from '../src/live/control-api.js';
@@ -58,7 +58,7 @@ describe('the composer offers a route that will be RECORDED and BLOCKED (issue #
   // recorded and reported BLOCKED. A composer that still hid the control would
   // withhold the exact flow the correction exists to give the Founder, leaving
   // only API and CLI callers able to use it.
-  const composer = directOrderConsoleScript();
+  const composer = directOrderConsoleScript(ROUTE_STATE_PRESENTATION);
   const approvals = approvalsConsoleScript();
 
   it('creates the radio control on every route, connected or not', () => {

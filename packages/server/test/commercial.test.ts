@@ -468,7 +468,10 @@ describe('payments and credit', () => {
       },
       { post: true },
     );
-    const overview = creditOverview(tt.ownerCtx);
+    // Pinned inside the fixture's credit window (sale 2026-08-17, due 2026-08-31)
+    // so 'partial' stays 'partial' instead of ageing into 'overdue' as real time
+    // passes — the same fixed-date discipline the overdue assertion below uses.
+    const overview = creditOverview(tt.ownerCtx, {}, '2026-08-20');
     const rowA = overview.rows.find((r) => r.invoiceId === a)!;
     const rowB = overview.rows.find((r) => r.invoiceId === b)!;
     expect(rowB.status).toBe('paid');

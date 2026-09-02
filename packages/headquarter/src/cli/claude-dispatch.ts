@@ -161,6 +161,16 @@ function main(): void {
         ? '  eligibility: ELIGIBLE — canonical, CLAUDE-bound and cleared to execute.'
         : `  eligibility: REFUSED (${eligibility.code}) — ${eligibility.message}`,
     );
+    // The way OUT of a dead approval, stated where the Founder actually hits it
+    // (issue #226). This command reads; it does not perform the return, because
+    // --check-only writes nothing. It says which supported action does.
+    if (!eligibility.eligible && eligibility.code === 'approval_invalid') {
+      console.log(
+        '               A dispatch attempt (this command WITHOUT --check-only) returns this task ' +
+          'to needs_approval so a fresh Founder approval can be given, and still publishes ' +
+          'nothing. An expired approval never dispatches; it also never strands the task.',
+      );
+    }
     console.log(`  dispatch:    ${history.state}`);
     console.log(
       `  transport:   ${transport.id} — ${
