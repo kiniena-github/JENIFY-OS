@@ -73,6 +73,20 @@ CREATE TABLE IF NOT EXISTS hq_sessions (
   revoked_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_hq_sessions_origin ON hq_sessions(origin_session_id);
+-- Housekeeping indexes (fourth correction round). The cleanup sweep runs on the
+-- handoff path, so its candidate selection must be a bounded index range scan
+-- and never a table scan that grows with the live set.
+--
+-- expires_at is NOT NULL, so a plain index is right: the sweep seeks to the
+-- oldest key and stops at the batch limit.
+--
+-- revoked_at is NULL for every live session, which is almost all of them. A
+-- plain index would therefore store one entry per live row and the sweep would
+-- have to walk past them; the PARTIAL index holds only the revoked rows, so the
+-- index is exactly the set being collected and it stays small by construction.
+CREATE INDEX IF NOT EXISTS idx_hq_sessions_expires_at ON hq_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_hq_sessions_revoked_at
+  ON hq_sessions(revoked_at) WHERE revoked_at IS NOT NULL;
 CREATE TABLE IF NOT EXISTS hq_revoked_origin_sessions (
   origin_session_id TEXT PRIMARY KEY,
   revoked_at TEXT NOT NULL
@@ -115,6 +129,54 @@ export type HqSessionCreation =
  * deployment does not accumulate a row per sign-out forever.
  */
 export const HQ_REVOCATION_TOMBSTONE_TTL_MS = HQ_SESSION_TTL_MS;
+
+/**
+ * How many cold session rows one sweep may remove.
+ *
+ * The sweep runs on the handoff path, so it must be bounded: housekeeping that
+ * scaled with the backlog would put an unbounded amount of work in front of a
+ * human's sign-in the first time it ran on a neglected table. One handoff adds
+ * exactly one row and removes up to this many, so a backlog drains steadily
+ * across sign-ins instead of all at once.
+ */
+export const HQ_SESSION_PRUNE_BATCH = 200;
+
+/**
+ * How long a session row stays after it stops being usable.
+ *
+ * Not zero, deliberately, and for a different reason than the ticket store's
+ * grace: an HQ session row is the only local record that a handoff happened at
+ * all, so an operator investigating "was this browser signed in an hour ago"
+ * has one session lifetime in which to look. `resolve` already refuses an
+ * expired or revoked row, so the grace grants no authority — it only bounds the
+ * table at roughly two lifetimes' worth of handoffs instead of one.
+ */
+export const HQ_SESSION_PRUNE_RETENTION_MS = HQ_SESSION_TTL_MS;
+
+interface ColdSessionRow {
+  id: string;
+  expires_at: string;
+  revoked_at: string | null;
+}
+
+/**
+ * The two candidate reads the sweep actually issues.
+ *
+ * Module constants rather than inline strings so the boundedness test can
+ * `EXPLAIN QUERY PLAN` the SHIPPED SQL instead of a hand-copied lookalike that
+ * could drift away from it silently — which is precisely how an index-supported
+ * plan regresses back into a table scan without anybody noticing.
+ */
+export const HQ_SESSION_EXPIRED_CANDIDATES_SQL = `SELECT id, expires_at, revoked_at FROM hq_sessions
+   WHERE expires_at <= ? ORDER BY expires_at LIMIT ?`;
+
+/**
+ * `revoked_at IS NOT NULL` is not redundant with the range test — `x <= ?` on a
+ * NULL is NULL, never true — it is what makes SQLite match the PARTIAL index,
+ * so this scan touches only revoked rows rather than every live one.
+ */
+export const HQ_SESSION_REVOKED_CANDIDATES_SQL = `SELECT id, expires_at, revoked_at FROM hq_sessions
+   WHERE revoked_at IS NOT NULL AND revoked_at <= ? ORDER BY revoked_at LIMIT ?`;
 
 function digest(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex');
@@ -175,6 +237,20 @@ export class HqSessionStore {
       return true;
     })();
     if (!inserted) return { ok: false, reason: 'origin_session_revoked' };
+    // Housekeeping, on the ONE path that adds rows (fourth correction round).
+    // Opportunistic rather than scheduled, for the same reason the identity
+    // host's ticket sweep is: this host has no scheduler, and a timer would be
+    // a second lifecycle to own, shut down and keep from firing in tests.
+    // Deliberately OUTSIDE the transaction above: the insert is the human's
+    // sign-in and must commit on its own terms, never roll back because a
+    // cleanup DELETE ran into a lock.
+    try {
+      this.pruneColdSessions(now);
+    } catch {
+      // Housekeeping must never fail a sign-in. The session above is already
+      // written and valid; a sweep that could not run leaves rows for the next
+      // handoff to collect, which is the harmless failure of the two.
+    }
     return {
       ok: true,
       token,
@@ -287,6 +363,88 @@ export class HqSessionStore {
         .run(new Date(now.getTime() - HQ_REVOCATION_TOMBSTONE_TTL_MS).toISOString());
       return result.changes;
     })();
+  }
+
+  /**
+   * Housekeeping: drop session rows that can no longer authenticate anybody
+   * (fourth correction round, Codex P1).
+   *
+   * ## The defect this closes
+   *
+   * Every successful callback INSERTED a row and nothing ever deleted one.
+   * Logout and back-channel revocation only set `revoked_at`; `resolve` refused
+   * an expired row without removing it. So any authenticated identity account
+   * could complete handoff after handoff and grow this table without bound —
+   * and every row carries a realm id, an account id, a display name and an
+   * identity session id, which makes unbounded growth a data-retention problem
+   * as much as a disk one.
+   *
+   * ## Why it cannot take a live session with it
+   *
+   * A row is removable only once it is BOTH unusable and has been so for
+   * `retentionMs`. Unusable means exactly what `resolve` refuses on: revoked
+   * (`revoked_at` set) or past `expires_at`. A live session is neither, so it
+   * matches neither candidate query — and the JS pass then re-checks, against
+   * parsed instants, that the row `resolve` would still hand out is never in
+   * the doomed set. That second pass is not belt-and-braces for its own sake:
+   * the SQL comparison is lexicographic on ISO strings and must never be the
+   * only thing standing between a signed-in Founder and a DELETE.
+   *
+   * ## Why two queries instead of one OR
+   *
+   * `WHERE expires_at <= ? OR revoked_at <= ?` bounds the rows RETURNED, not
+   * the rows EXAMINED: SQLite cannot drive a single index from a disjunction
+   * over two columns, so it would scan the whole growing live set on every
+   * handoff. Two range scans, each ordered by its own indexed column and each
+   * capped, are bounded by construction — the same reasoning that fixes the
+   * ticket sweep next door.
+   *
+   * ## The tombstone is untouched
+   *
+   * Trap F's protection lives in `hq_revoked_origin_sessions`, a different
+   * table with its own bounded horizon. Collecting a cold `hq_sessions` row
+   * therefore cannot resurrect a signed-out identity session: the tombstone
+   * that refuses the next `create` outlives the rows this deletes.
+   */
+  pruneColdSessions(
+    now: Date = new Date(),
+    options: { limit?: number; retentionMs?: number } = {},
+  ): number {
+    const limit = options.limit ?? HQ_SESSION_PRUNE_BATCH;
+    const retentionMs = options.retentionMs ?? HQ_SESSION_PRUNE_RETENTION_MS;
+    if (limit <= 0) return 0;
+    const nowMs = now.getTime();
+    const cutoffMs = nowMs - Math.max(0, retentionMs);
+    const cutoff = new Date(cutoffMs).toISOString();
+
+    const expired = this.#db
+      .prepare(HQ_SESSION_EXPIRED_CANDIDATES_SQL)
+      .all(cutoff, limit) as ColdSessionRow[];
+    const revoked = this.#db
+      .prepare(HQ_SESSION_REVOKED_CANDIDATES_SQL)
+      .all(cutoff, limit) as ColdSessionRow[];
+
+    const doomed = new Set<string>();
+    for (const row of [...expired, ...revoked]) {
+      if (doomed.size >= limit) break;
+      const expiredLongEnough = Date.parse(row.expires_at) <= cutoffMs;
+      const revokedLongEnough = row.revoked_at != null && Date.parse(row.revoked_at) <= cutoffMs;
+      // A timestamp this cannot parse yields NaN, every comparison is false, and
+      // the row survives. Keeping an unclassifiable row is the safe failure.
+      if (!expiredLongEnough && !revokedLongEnough) continue;
+      // The invariant, stated once and checked against `now` rather than the
+      // cutoff: whatever `resolve` would still return is not collectable.
+      const stillUsable = row.revoked_at == null && Date.parse(row.expires_at) > nowMs;
+      if (stillUsable) continue;
+      doomed.add(row.id);
+    }
+
+    if (doomed.size === 0) return 0;
+    const ids = [...doomed];
+    this.#db
+      .prepare(`DELETE FROM hq_sessions WHERE id IN (${ids.map(() => '?').join(',')})`)
+      .run(...ids);
+    return ids.length;
   }
 
   /** Is this identity session tombstoned? Exposed for tests and diagnostics. */

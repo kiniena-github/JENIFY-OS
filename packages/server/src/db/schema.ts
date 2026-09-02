@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 // ---------------------------------------------------------------------------
@@ -1204,5 +1205,20 @@ export const ssoHqTickets = sqliteTable(
     expiresAt: text('expires_at').notNull(),
     consumedAt: text('consumed_at'),
   },
-  (t) => [index('sso_hq_tickets_origin').on(t.originSessionId)],
+  (t) => [
+    index('sso_hq_tickets_origin').on(t.originSessionId),
+    // Housekeeping indexes (fourth correction round). `pruneExpiredTickets`
+    // runs on the authorize path, so its candidate selection must be a bounded
+    // index range scan rather than a scan of the growing live/grace set.
+    //
+    // `expires_at` is NOT NULL: a plain index lets the sweep seek to the oldest
+    // key and stop at the batch limit.
+    index('sso_hq_tickets_expires_at').on(t.expiresAt),
+    // `consumed_at` is NULL for every un-redeemed ticket. A plain index would
+    // hold an entry per live row for the sweep to walk past; the PARTIAL index
+    // holds only the consumed rows, which is exactly the set being collected.
+    index('sso_hq_tickets_consumed_at')
+      .on(t.consumedAt)
+      .where(sql`${t.consumedAt} is not null`),
+  ],
 );

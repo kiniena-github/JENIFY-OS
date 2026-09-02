@@ -19,7 +19,7 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { and, eq, inArray, isNull, lte, or } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, lte } from 'drizzle-orm';
 import { backChannelUrl } from '@factoryos/hq-host';
 import type { Db } from '../db/index.js';
 import { ssoHqTickets } from '../db/schema.js';
@@ -395,7 +395,61 @@ export const TICKET_PRUNE_RETENTION_MS = SSO_TICKET_TTL_MS;
  * not redundant belt-and-braces for its own sake: the SQL comparison is
  * lexicographic on ISO strings, and it must never be the only thing standing
  * between a live sign-in ticket and a DELETE.
+ *
+ * ## Why the candidate selection is TWO queries (fourth correction round)
+ *
+ * `LIMIT 200` bounds the rows RETURNED, not the rows EXAMINED. The old
+ * predicate was a disjunction over two columns — `expires_at <= ? OR
+ * consumed_at <= ?` — and SQLite cannot drive one index from that, so with
+ * migration 0012 indexing only `ticket_hash` and `origin_session_id` every mint
+ * scanned the entire growing live/grace set to find its 200 rows. That is
+ * unbounded work on the authorize path, which is a human's sign-in.
+ *
+ * Splitting it into two range scans, each ordered by its own indexed column and
+ * each capped at the batch, makes the candidate read bounded by construction:
+ * migration 0013 adds `sso_hq_tickets_expires_at` (plain — `expires_at` is NOT
+ * NULL) and `sso_hq_tickets_consumed_at` (PARTIAL, `WHERE consumed_at IS NOT
+ * NULL`, so it holds only the consumed rows the sweep is actually after rather
+ * than a NULL entry for every live ticket). Each scan seeks to the oldest key
+ * and stops at the limit; the union is the same set the OR selected, so nothing
+ * about which rows are collectable changed.
  */
+/**
+ * The two candidate reads the sweep actually issues.
+ *
+ * Exported so the boundedness test can `EXPLAIN QUERY PLAN` the SHIPPED SQL
+ * rather than a hand-copied lookalike that could drift away from it silently —
+ * which is precisely how an index-supported plan regresses back into a table
+ * scan without anybody noticing.
+ */
+export function ticketSweepCandidateQueries(db: Db, cutoff: string, limit: number) {
+  const columns = {
+    id: ssoHqTickets.id,
+    expiresAt: ssoHqTickets.expiresAt,
+    consumedAt: ssoHqTickets.consumedAt,
+  };
+  return {
+    expired: db
+      .select(columns)
+      .from(ssoHqTickets)
+      .where(lte(ssoHqTickets.expiresAt, cutoff))
+      // ORDER BY the indexed column so the plan is a range scan from the oldest
+      // key, not a scan plus a sort. It also drains a backlog oldest-first,
+      // which is the order an operator would expect.
+      .orderBy(ssoHqTickets.expiresAt)
+      .limit(limit),
+    consumed: db
+      .select(columns)
+      .from(ssoHqTickets)
+      // `isNotNull` is not redundant with the range test — `lte` on a NULL is
+      // NULL, never true — it is what makes SQLite match the PARTIAL index, so
+      // this scan touches only consumed rows.
+      .where(and(isNotNull(ssoHqTickets.consumedAt), lte(ssoHqTickets.consumedAt, cutoff)))
+      .orderBy(ssoHqTickets.consumedAt)
+      .limit(limit),
+  };
+}
+
 export function pruneExpiredTickets(
   db: Db,
   now: Date = new Date(),
@@ -407,32 +461,24 @@ export function pruneExpiredTickets(
   const cutoffMs = now.getTime() - Math.max(0, retentionMs);
   const cutoff = new Date(cutoffMs).toISOString();
 
-  const candidates = db
-    .select({
-      id: ssoHqTickets.id,
-      expiresAt: ssoHqTickets.expiresAt,
-      consumedAt: ssoHqTickets.consumedAt,
-    })
-    .from(ssoHqTickets)
-    // `lte` on a NULL `consumed_at` is NULL, never true, so an unconsumed ticket
-    // can only be selected by having expired.
-    .where(or(lte(ssoHqTickets.expiresAt, cutoff), lte(ssoHqTickets.consumedAt, cutoff)))
-    .limit(limit)
-    .all();
+  const queries = ticketSweepCandidateQueries(db, cutoff, limit);
+  const expiredCandidates = queries.expired.all();
+  const consumedCandidates = queries.consumed.all();
 
-  const doomed = candidates
-    .filter((row) => {
-      const expiredLongEnough = Date.parse(row.expiresAt) <= cutoffMs;
-      const consumedLongEnough =
-        row.consumedAt != null && Date.parse(row.consumedAt) <= cutoffMs;
-      // A timestamp this cannot parse yields NaN, every comparison is false, and
-      // the row survives. Keeping an unclassifiable row is the safe failure.
-      return expiredLongEnough || consumedLongEnough;
-    })
-    .map((row) => row.id);
+  const doomed = new Set<string>();
+  for (const row of [...expiredCandidates, ...consumedCandidates]) {
+    if (doomed.size >= limit) break;
+    const expiredLongEnough = Date.parse(row.expiresAt) <= cutoffMs;
+    const consumedLongEnough = row.consumedAt != null && Date.parse(row.consumedAt) <= cutoffMs;
+    // A timestamp this cannot parse yields NaN, every comparison is false, and
+    // the row survives. Keeping an unclassifiable row is the safe failure.
+    if (!expiredLongEnough && !consumedLongEnough) continue;
+    doomed.add(row.id);
+  }
 
-  if (doomed.length === 0) return 0;
-  db.delete(ssoHqTickets).where(inArray(ssoHqTickets.id, doomed)).run();
-  return doomed.length;
+  if (doomed.size === 0) return 0;
+  const ids = [...doomed];
+  db.delete(ssoHqTickets).where(inArray(ssoHqTickets.id, ids)).run();
+  return ids.length;
 }
 

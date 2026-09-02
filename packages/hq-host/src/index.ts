@@ -71,6 +71,10 @@ export {
 export {
   HqSessionStore,
   HQ_REVOCATION_TOMBSTONE_TTL_MS,
+  HQ_SESSION_PRUNE_BATCH,
+  HQ_SESSION_PRUNE_RETENTION_MS,
+  HQ_SESSION_EXPIRED_CANDIDATES_SQL,
+  HQ_SESSION_REVOKED_CANDIDATES_SQL,
   type HqSessionCreation,
   type HqSessionRecord,
 } from './sso/session-store.js';
