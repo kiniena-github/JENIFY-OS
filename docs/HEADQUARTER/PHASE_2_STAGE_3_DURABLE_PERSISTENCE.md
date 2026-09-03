@@ -50,7 +50,7 @@ FACTORYOS_HQ_BACKUP_DIR=/mounted/durable-volume/backups
 
 The hosted database file itself must be pre-created as a **regular file** on the mounted durable volume before HQ starts. Stage 3 deliberately does not create a missing hosted DB through a pathname that could be swapped during startup. Final-component DB symlinks are refused even when they currently resolve inside the durable root.
 
-Hosted Stage 3 currently requires Linux `/proc/self/fd` so the process can prove that the inode SQLite actually opened is the same inode that was anchored and verified inside the durable volume. This is an OS-level safety gate, not a cloud-vendor choice. Local/workstation mode does not depend on procfs and remains portable.
+Hosted Stage 3 currently requires Linux `/proc/self/fd` so the process can bind SQLite's first writable/migrating connection to the already-open durable inode and then prove that SQLite itself holds that same inode. This is an OS-level safety gate, not a cloud-vendor choice. Local/workstation mode does not depend on procfs and remains portable.
 
 Hosted boot fails closed when:
 
@@ -75,20 +75,23 @@ The durable root is never auto-created. If the configured mount is absent, HQ st
 
 ## Opened-inode attestation
 
-Path checks alone are not enough because another process could replace a filename or parent component between a pre-check and SQLite's open.
+Path checks alone are not enough because another process could replace a filename or parent component between a pre-check and SQLite's open. A check performed only after a normal pathname-based SQLite open is also too late, because that open may already have enabled WAL, executed DDL, or applied migrations to the wrong file.
 
 Hosted Stage 3 therefore:
 
 1. opens the already-existing DB with `O_NOFOLLOW` and holds that file descriptor as an anchor;
 2. resolves that **descriptor** through `/proc/self/fd` and verifies its inode is inside the durable root;
 3. snapshots the process file-descriptor table;
-4. opens SQLite and enables the required durable modes;
-5. verifies the configured pathname still names the anchored inode;
-6. diffs the descriptor table and requires SQLite to hold a newly opened descriptor for the same anchored DB inode;
-7. requires every regular file opened during that synchronous SQLite initialization, including WAL/SHM sidecars when present, to resolve inside the durable root;
-8. only then releases the anchor and allows HQ to continue booting.
+4. opens SQLite through `/proc/self/fd/<anchor-fd>`, so the **first writable/migrating connection** is bound to the already-proven inode before WAL setup, DDL, or schema upgrades can write;
+5. enables and reads back the required durable modes;
+6. verifies the configured pathname still names the anchored inode;
+7. diffs the descriptor table and requires SQLite to hold a newly opened descriptor for the same anchored DB inode;
+8. requires every regular file opened during that synchronous SQLite initialization, including WAL/SHM sidecars when present, to resolve inside the durable root;
+9. only then releases the anchor and allows HQ to continue booting.
 
-This binds the safety decision to the file SQLite actually opened rather than to a pathname that can be swapped and swapped back.
+If the configured pathname is swapped after the anchor is acquired, startup still fails, but any initialization writes that occur before that refusal remain bound to the anchored durable inode rather than following the hostile replacement.
+
+This binds both the first mutation and the final safety decision to the file SQLite actually opened rather than to a pathname that can be swapped and swapped back.
 
 ## Durability and concurrency
 
@@ -136,6 +139,7 @@ Switching a live deployment from its current database to a restored database is 
 
 - hosted mode refuses ephemeral/local-file storage;
 - hosted mode refuses missing/symlink DB entries and requires opened-inode attestation;
+- a path swap after descriptor anchoring cannot redirect DDL/migrations/WAL writes to the replacement target;
 - canonical HQ rows survive close/reopen;
 - idempotency uniqueness survives restart;
 - lease/fence/claim state survives restart;
