@@ -194,6 +194,100 @@ describe('backup re-proves the published bytes, not just the inode', () => {
   });
 });
 
+describe('rejected durable work is withdrawn durably', () => {
+  it('fsyncs the backup directory after withdrawing a rejected publication', async () => {
+    if (process.platform !== 'linux') return;
+
+    const root = testRoot();
+    const persistence = hostedPersistence(root);
+    const hostile = join(root, 'hostile-withdraw.sqlite');
+    createProbeDb(hostile, 'hostile-withdrawn');
+    const hostileBytes = readFileSync(hostile);
+    const backupRoot = join(root, 'backups');
+    const destination = join(backupRoot, 'withdraw.sqlite');
+
+    const realLinkSync = fs.linkSync.bind(fs);
+    const realFsyncSync = fs.fsyncSync.bind(fs);
+    const fsynced: number[] = [];
+    let rewritten = false;
+    let backupDirectoryFd: number | undefined;
+
+    const realOpenSync = fs.openSync.bind(fs);
+    vi.spyOn(fs, 'openSync').mockImplementation(((candidate: unknown, flags: unknown, mode?: unknown) => {
+      const fd = (realOpenSync as any)(candidate, flags, mode);
+      if (String(candidate) === backupRoot) backupDirectoryFd = fd;
+      return fd;
+    }) as any);
+    vi.spyOn(fs, 'fsyncSync').mockImplementation(((fd: number) => {
+      fsynced.push(fd);
+      return realFsyncSync(fd);
+    }) as any);
+    vi.spyOn(fs, 'linkSync').mockImplementation(((existingPath, newPath) => {
+      if (!rewritten && String(newPath).endsWith('/withdraw.sqlite')) {
+        rewritten = true;
+        const partialName = fs.readdirSync(backupRoot).find((e) => e.includes('.partial-'));
+        expect(partialName).toBeDefined();
+        fs.writeFileSync(join(backupRoot, partialName!), hostileBytes);
+      }
+      return realLinkSync(existingPath, newPath);
+    }) as typeof fs.linkSync);
+
+    try {
+      await expect(persistence.backup('withdraw.sqlite')).rejects.toThrow(/contents changed/);
+      expect(rewritten).toBe(true);
+      expect(existsSync(destination)).toBe(false);
+      // Unlinking the published name is a cache update like creating it was,
+      // so the withdrawal itself must be committed.
+      expect(backupDirectoryFd).toBeDefined();
+      expect(fsynced).toContain(backupDirectoryFd!);
+    } finally {
+      persistence.close();
+    }
+  });
+
+  it('fsyncs the destination directory after withdrawing a rejected restore', () => {
+    if (process.platform !== 'linux') return;
+
+    const root = testRoot('.hq-recovery-withdraw-');
+    const source = join(root, 'source.sqlite');
+    const hostile = join(root, 'hostile.sqlite');
+    const destination = join(root, 'restored.sqlite');
+    createProbeDb(source, 'verified-original');
+    createProbeDb(hostile, 'hostile-withdrawn-restore');
+    const hostileBytes = readFileSync(hostile);
+
+    const realOpenSync = fs.openSync.bind(fs);
+    const realFsyncSync = fs.fsyncSync.bind(fs);
+    const directoryFds: number[] = [];
+    const fsynced: number[] = [];
+    let rewritten = false;
+
+    vi.spyOn(fs, 'openSync').mockImplementation(((candidate: unknown, flags: unknown, mode?: unknown) => {
+      if (!rewritten && String(candidate) === root) {
+        rewritten = true;
+        fs.writeFileSync(destination, hostileBytes);
+      }
+      const fd = (realOpenSync as any)(candidate, flags, mode);
+      if (String(candidate) === root) directoryFds.push(fd);
+      return fd;
+    }) as any);
+    vi.spyOn(fs, 'fsyncSync').mockImplementation(((fd: number) => {
+      fsynced.push(fd);
+      return realFsyncSync(fd);
+    }) as any);
+
+    expect(() => restoreHqBackupToNewFile(source, destination)).toThrow(
+      /restored HQ database changed after integrity verification/,
+    );
+    expect(rewritten).toBe(true);
+    expect(existsSync(destination)).toBe(false);
+    // The entry was already committed before the rewrite was detected, so the
+    // removal has to be committed too — a second directory fsync.
+    expect(directoryFds.length).toBeGreaterThanOrEqual(2);
+    expect(fsynced).toContain(directoryFds[directoryFds.length - 1]);
+  });
+});
+
 describe('portable local durability', () => {
   it('commits a local-file backup without requiring a platform directory fsync', async () => {
     if (process.platform !== 'linux') return;

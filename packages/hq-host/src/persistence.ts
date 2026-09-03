@@ -500,6 +500,27 @@ function unlinkIfSame(candidate: string, expected: fs.Stats): void {
  * break portable local/workstation backup and recovery rather than strengthen
  * it. Hosted durable mode is Linux-only and always performs it.
  */
+/**
+ * Durably commit a directory's own metadata.
+ *
+ * Used to make a WITHDRAWAL durable: unlinking a published name is a cache
+ * update like creating one, so a crash could otherwise resurrect an entry that
+ * was rejected. POSIX-only for the same reason as `fsyncDirectoryEntry`.
+ */
+function fsyncDirectory(directory: string): void {
+  if (process.platform === 'win32') return;
+  const directoryFlag = fs.constants.O_DIRECTORY ?? 0;
+  const fd = fs.openSync(directory, fs.constants.O_RDONLY | directoryFlag);
+  try {
+    if (!fs.fstatSync(fd).isDirectory()) {
+      throw new Error(`${directory} is not an opened directory`);
+    }
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function fsyncDirectoryEntry(directory: string, child: string, expectedChild: fs.Stats): void {
   const entry = lstatIfPresent(child);
   if (!entry || entry.isSymbolicLink() || !sameFile(entry, expectedChild)) {
@@ -692,11 +713,30 @@ export function openHqPersistence(
           throw new Error('SQLite did not write the pre-reserved HQ backup inode');
         }
 
+        // The reserved partial still has a visible directory entry until it is
+        // published, so a same-permission actor can open it by name and
+        // overwrite the inode IN PLACE with another valid SQLite image. Inode
+        // identity cannot see that.
+        //
+        // Both SIDES of the integrity check must therefore be proved. Hashing
+        // only afterwards would pin whatever bytes are present at that moment
+        // — including a replacement installed while quick_check was running —
+        // and every later comparison would then agree with the replacement.
+        const beforeVerification = proveOpenFileContents(partialFd);
+
         const verificationPath = descriptorPath ?? partial;
         const check = openHqDatabaseReadOnly(verificationPath);
         const valid = quickCheck(check);
         check.close();
         if (!valid) throw new Error('backup integrity check failed');
+
+        // Pinned to the bytes that actually passed quick_check, and re-proved
+        // after publication below: what gets published is what was verified,
+        // or the backup fails closed.
+        const verifiedState = proveOpenFileContents(partialFd);
+        if (verifiedState.digest !== beforeVerification.digest) {
+          throw new Error('HQ backup contents changed during integrity verification');
+        }
 
         const afterVerification = lstatIfPresent(partial);
         if (
@@ -706,14 +746,6 @@ export function openHqPersistence(
         ) {
           throw new Error('HQ backup partial changed during integrity verification');
         }
-
-        // The reserved partial still has a visible directory entry until it is
-        // published, so a same-permission actor can open it by name and
-        // overwrite the inode IN PLACE with another valid SQLite image. Inode
-        // identity cannot see that, so the verified bytes are pinned here and
-        // re-proved after publication: what gets published is what passed
-        // quick_check, or the backup fails closed.
-        const verifiedState = proveOpenFileContents(partialFd);
 
         fs.fsyncSync(partialFd);
         if (backupAnchor) assertDirectoryPathStillAnchored(backupAnchor, backupRoot);
@@ -733,8 +765,17 @@ export function openHqPersistence(
           }
         } catch (error) {
           // The published name is this operation's own inode, so withdrawing it
-          // never touches another process's file.
+          // never touches another process's file. The withdrawal has to be
+          // durable too: an unlink is a cache update like the link was, so a
+          // crash could otherwise resurrect the rejected bytes as a recovery
+          // point.
           unlinkIfSame(operationDestination, reservedPartial);
+          try {
+            if (backupAnchor) fs.fsyncSync(backupAnchor.fd);
+            else fsyncDirectory(backupRoot);
+          } catch {
+            // Never trade the real rejection reason for a cleanup failure.
+          }
           throw error;
         }
         return { path: destination, sizeBytes: published.size };
@@ -945,6 +986,15 @@ export function restoreHqBackupToNewFile(
         const current = lstatIfPresent(destination);
         if (current && !current.isSymbolicLink() && sameFile(created, current)) {
           fs.rmSync(destination, { force: true });
+          // The entry may already have been durably committed by this point,
+          // so its removal has to be committed as well; otherwise a crash can
+          // resurrect a rejected restore that blocks a retry or reads as a
+          // completed recovery.
+          try {
+            fsyncDirectory(parent);
+          } catch {
+            // Never trade the real recovery failure for a cleanup failure.
+          }
         }
       } catch {
         // Never trade a recovery failure for deleting an unproven path.
