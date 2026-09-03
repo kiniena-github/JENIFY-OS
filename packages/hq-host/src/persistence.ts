@@ -44,6 +44,14 @@ export interface HqPersistence {
   close(): void;
 }
 
+interface DurableDbAnchor {
+  fd: number;
+  stat: fs.Stats;
+  procFdRoot: string;
+}
+
+type FdSnapshot = Map<number, fs.Stats>;
+
 function insideOrEqual(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return (
@@ -79,58 +87,165 @@ function sameFile(a: fs.Stats, b: fs.Stats): boolean {
   return a.dev === b.dev && a.ino === b.ino;
 }
 
+function sameOpenObject(a: fs.Stats, b: fs.Stats): boolean {
+  return sameFile(a, b) && a.mode === b.mode && a.rdev === b.rdev;
+}
+
 /**
- * Validate an existing database directory entry without following a dangling
- * symlink. A symlink is allowed only when it already resolves to a regular file
- * inside the durable root. A dangling link is refused before SQLite can follow
- * it and create the target elsewhere.
+ * Hosted Stage 3 needs descriptor-backed evidence about the inode SQLite really
+ * opened. Linux procfs exposes process file descriptors without choosing a
+ * cloud vendor. Local/workstation mode never needs this gate.
+ */
+function requireProcFdRoot(): string {
+  const procFdRoot = '/proc/self/fd';
+  if (process.platform !== 'linux' || !fs.existsSync(procFdRoot)) {
+    throw new Error(
+      'hosted durable HQ requires Linux /proc/self/fd for opened-inode attestation; local mode is unaffected',
+    );
+  }
+  return procFdRoot;
+}
+
+function snapshotProcessFds(procFdRoot: string): FdSnapshot {
+  const snapshot: FdSnapshot = new Map();
+  for (const entry of fs.readdirSync(procFdRoot)) {
+    if (!/^\d+$/.test(entry)) continue;
+    const fd = Number(entry);
+    try {
+      snapshot.set(fd, fs.fstatSync(fd));
+    } catch {
+      // /proc/self/fd can list the directory descriptor used for the listing;
+      // it may be closed before fstat. A vanished descriptor is not evidence.
+    }
+  }
+  return snapshot;
+}
+
+function procFdTarget(procFdRoot: string, fd: number): string {
+  try {
+    return fs.realpathSync(path.join(procFdRoot, String(fd)));
+  } catch {
+    throw new Error(`could not resolve opened file descriptor ${fd} during durable inode attestation`);
+  }
+}
+
+/**
+ * Open and hold the exact pre-existing durable DB inode before SQLite starts.
+ *
+ * Hosted startup intentionally requires the DB file to be pre-created by the
+ * operator/mount initialization. That means this security check never creates a
+ * file through a pathname that another process could race outside the attested
+ * volume. Final-component symlinks are refused and O_NOFOLLOW gives the open
+ * itself the same rule. Parent-component races are caught by resolving the
+ * descriptor itself through procfs after open.
+ */
+function openDurableDbAnchor(config: HqPersistenceConfig): DurableDbAnchor {
+  if (!config.durableRoot) throw new Error('durable root missing from durable-volume configuration');
+  const procFdRoot = requireProcFdRoot();
+  const entry = lstatIfPresent(config.dbPath);
+  if (!entry) {
+    throw new Error(
+      'hosted durable HQ database must already exist as a regular file on the attested volume',
+    );
+  }
+  if (entry.isSymbolicLink()) {
+    throw new Error('hosted durable HQ database path must not be a symbolic link');
+  }
+  if (!entry.isFile()) throw new Error('hosted durable HQ database path is not a regular file');
+
+  const noFollow = fs.constants.O_NOFOLLOW;
+  const fd = fs.openSync(config.dbPath, fs.constants.O_RDWR | noFollow);
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw new Error('opened durable HQ database inode is not a regular file');
+    const target = procFdTarget(procFdRoot, fd);
+    if (!insideOrEqual(config.durableRoot, target)) {
+      throw new Error('opened durable HQ database inode is outside FACTORYOS_HQ_DURABLE_ROOT');
+    }
+    return { fd, stat, procFdRoot };
+  } catch (error) {
+    fs.closeSync(fd);
+    throw error;
+  }
+}
+
+/**
+ * Prove that SQLite itself holds the same inode we anchored, not merely that the
+ * configured pathname looks safe before/after open.
+ *
+ * The before/after descriptor diff is important: a pre-existing unrelated fd
+ * cannot satisfy the proof. Every regular file opened during the synchronous
+ * SQLite initialization must also resolve inside the durable root, covering WAL
+ * and SHM sidecars if they are opened during the transition to WAL mode.
+ */
+function assertSqliteOpenedAnchoredDb(
+  config: HqPersistenceConfig,
+  anchor: DurableDbAnchor,
+  before: FdSnapshot,
+): void {
+  if (!config.durableRoot) throw new Error('durable root missing from durable-volume configuration');
+
+  const currentEntry = lstatIfPresent(config.dbPath);
+  if (!currentEntry || currentEntry.isSymbolicLink() || !currentEntry.isFile()) {
+    throw new Error('durable HQ database pathname changed during SQLite startup');
+  }
+  const currentStat = fs.statSync(config.dbPath);
+  if (!sameFile(anchor.stat, currentStat)) {
+    throw new Error('durable HQ database pathname was replaced during SQLite startup');
+  }
+  const currentReal = fs.realpathSync(config.dbPath);
+  if (!insideOrEqual(config.durableRoot, currentReal)) {
+    throw new Error('durable HQ database pathname resolved outside the attested root after open');
+  }
+
+  let sqliteMainMatchesAnchor = false;
+  const after = snapshotProcessFds(anchor.procFdRoot);
+  for (const [fd, stat] of after) {
+    const previous = before.get(fd);
+    if (previous && sameOpenObject(previous, stat)) continue;
+    if (!stat.isFile()) continue;
+
+    const target = procFdTarget(anchor.procFdRoot, fd);
+    if (!insideOrEqual(config.durableRoot, target)) {
+      throw new Error(`SQLite initialization opened a regular file outside the durable root: ${target}`);
+    }
+    if (sameFile(anchor.stat, stat)) sqliteMainMatchesAnchor = true;
+  }
+
+  if (!sqliteMainMatchesAnchor) {
+    throw new Error(
+      'could not prove SQLite opened the anchored durable HQ database inode; hosted HQ stays OFF',
+    );
+  }
+}
+
+/**
+ * Validate the configured durable DB entry before descriptor attestation.
+ * Hosted mode deliberately refuses final-component symlinks, including valid
+ * ones, so the configured name and the inode SQLite opens have one unambiguous
+ * relationship.
  */
 function validateExistingDurableDbEntry(
   dbPath: string,
-  durableRoot: string,
   log: (line: string) => void,
 ): boolean {
   const entry = lstatIfPresent(dbPath);
-  if (!entry) return true;
-
-  if (entry.isSymbolicLink()) {
-    let realDb: string;
-    try {
-      realDb = fs.realpathSync(dbPath);
-    } catch {
-      refuse(log, 'FACTORYOS_HQ_DB is a dangling/unresolvable symlink; hosted HQ stays OFF.');
-      return false;
-    }
-    if (!insideOrEqual(durableRoot, realDb)) {
-      refuse(log, 'FACTORYOS_HQ_DB resolves outside FACTORYOS_HQ_DURABLE_ROOT.');
-      return false;
-    }
-    if (!fs.statSync(realDb).isFile()) {
-      refuse(log, 'FACTORYOS_HQ_DB symlink target is not a regular file.');
-      return false;
-    }
-    return true;
+  if (!entry) {
+    refuse(
+      log,
+      'FACTORYOS_HQ_DB must already exist as a regular file on the durable volume before hosted HQ starts.',
+    );
+    return false;
   }
-
+  if (entry.isSymbolicLink()) {
+    refuse(log, 'FACTORYOS_HQ_DB must not be a symbolic link in hosted durable mode.');
+    return false;
+  }
   if (!entry.isFile()) {
     refuse(log, 'FACTORYOS_HQ_DB exists but is not a regular file.');
     return false;
   }
   return true;
-}
-
-/** Post-open containment check closes the remaining config/open TOCTOU window. */
-function assertOpenedDurableDbInside(config: HqPersistenceConfig): void {
-  if (!config.durableRoot) return;
-  const entry = lstatIfPresent(config.dbPath);
-  if (!entry) throw new Error('opened durable HQ database path disappeared');
-  const realDb = fs.realpathSync(config.dbPath);
-  if (!insideOrEqual(config.durableRoot, realDb)) {
-    throw new Error('opened HQ database resolved outside FACTORYOS_HQ_DURABLE_ROOT');
-  }
-  if (!fs.statSync(realDb).isFile()) {
-    throw new Error('opened HQ database is not a regular file');
-  }
 }
 
 export function resolveHqPersistenceConfig(
@@ -204,7 +319,7 @@ export function resolveHqPersistenceConfig(
   if (!insideOrEqual(durableRoot, realDbParent)) {
     return refuse(log, 'FACTORYOS_HQ_DB must live inside FACTORYOS_HQ_DURABLE_ROOT.');
   }
-  if (!validateExistingDurableDbEntry(dbPath, durableRoot, log)) return null;
+  if (!validateExistingDurableDbEntry(dbPath, log)) return null;
 
   const backupRoot = path.resolve(
     env.FACTORYOS_HQ_BACKUP_DIR?.trim() || path.join(durableRoot, 'backups'),
@@ -265,7 +380,14 @@ export function openHqPersistence(
   if (!config) return null;
 
   let db: HqDatabase | undefined;
+  let anchor: DurableDbAnchor | undefined;
+  let beforeSqliteOpen: FdSnapshot | undefined;
   try {
+    if (config.mode === 'durable-volume') {
+      anchor = openDurableDbAnchor(config);
+      beforeSqliteOpen = snapshotProcessFds(anchor.procFdRoot);
+    }
+
     db = openHqDatabase(config.dbPath);
     db.pragma('busy_timeout = 5000');
     if (config.mode === 'durable-volume') {
@@ -280,7 +402,10 @@ export function openHqPersistence(
           `durable SQLite modes not active (journal_mode=${journalMode}, synchronous=${synchronous}); required WAL/FULL`,
         );
       }
-      assertOpenedDurableDbInside(config);
+      if (!anchor || !beforeSqliteOpen) {
+        throw new Error('durable inode attestation was not initialized');
+      }
+      assertSqliteOpenedAnchoredDb(config, anchor, beforeSqliteOpen);
     }
   } catch (error) {
     if (db) {
@@ -290,10 +415,22 @@ export function openHqPersistence(
         // Preserve the original initialization error while best-effort releasing locks.
       }
     }
+    if (anchor) {
+      try {
+        fs.closeSync(anchor.fd);
+      } catch {
+        // Preserve the original initialization error.
+      }
+    }
     return refuse(
       log,
       `could not initialize HQ database: ${error instanceof Error ? error.message : 'unknown error'}`,
     );
+  }
+
+  if (anchor) {
+    fs.closeSync(anchor.fd);
+    anchor = undefined;
   }
 
   if (!quickCheck(db)) {
