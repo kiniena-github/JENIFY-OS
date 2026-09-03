@@ -45,6 +45,7 @@ vi.mock('@factoryos/headquarter/store', async () => {
 
 import { openHqDatabase } from '@factoryos/headquarter/store';
 import { openHqPersistence } from '../src/index.js';
+import { attestDurableMountBoundary } from './support/durable-mount.js';
 
 const roots: string[] = [];
 
@@ -75,6 +76,7 @@ describe('backup verification-window defense in depth', () => {
     const root = testRoot();
     const dbPath = join(root, 'hq.sqlite');
     writeFileSync(dbPath, '');
+    attestDurableMountBoundary(root);
     const persistence = openHqPersistence(
       {
         FACTORYOS_HQ_DB: dbPath,
@@ -124,6 +126,7 @@ describe('backup verification-window defense in depth', () => {
     const root = testRoot();
     const dbPath = join(root, 'hq.sqlite');
     writeFileSync(dbPath, '');
+    attestDurableMountBoundary(root);
     const persistence = openHqPersistence(
       {
         FACTORYOS_HQ_DB: dbPath,

@@ -68,6 +68,9 @@ Hosted boot fails closed when:
 
 - persistence is not explicitly `durable-volume`;
 - the durable root is missing;
+- the configured durable root is not itself a mounted-volume boundary — an
+  ordinary directory of the same name, present in the image/container but with
+  no volume mounted at it, is refused (see *Durable mount attestation* below);
 - the durable root is relative;
 - the database path is relative;
 - the database file is missing instead of pre-created;
@@ -105,6 +108,23 @@ If the configured pathname is swapped after the anchor is acquired, startup stil
 
 This binds both the first mutation and the final safety decision to the file SQLite actually opened rather than to a pathname that can be swapped and swapped back.
 
+## Durable mount attestation
+
+Proving that the database and backups share the durable root's filesystem is not
+enough on its own: it cannot tell a mounted durable volume apart from a plain
+directory baked into the image at the same path. If the expected volume were
+absent but the mount-point directory existed, HQ could otherwise boot on
+ephemeral storage and later lose canonical state.
+
+Hosted durable mode therefore reads the kernel's own mount table
+(`/proc/self/mountinfo`) and requires an entry mounted **exactly at the
+configured durable root**, whose mount identity matches the opened root
+descriptor. No such entry exists for an ordinary directory, so hosted HQ stays
+off instead of running on ephemeral storage. This is provider-neutral — it
+inspects kernel mount information, never a cloud/provider service — and the
+configured root must be the mount point itself, not a subdirectory of a mount.
+Local/workstation mode does not perform mount attestation and stays portable.
+
 ## Durability and concurrency
 
 `@factoryos/hq-host` owns the persistence boundary. The HQ core still receives the same `HqDatabase`, so existing application transactions and invariants are unchanged.
@@ -133,6 +153,15 @@ The persistence adapter provides an online SQLite backup operation:
 8. `fsync` the reserved inode and publish it with an atomic no-replace hard-link operation;
 9. re-prove the published bytes against the pinned proof before reporting success; if they differ, withdraw the published name and `fsync` the directory so the withdrawal is itself durable;
 10. commit the directory entry (attested backup-directory descriptor in hosted mode, parent-directory `fsync` in local-file mode).
+
+When the backup directory itself did not previously exist, recursive creation
+also adds a new directory link into the durable root (and any intermediate
+components). fsyncing the backup directory alone commits the files inside it but
+not that new link, so a crash after a reported-successful first backup could
+lose the whole directory. The first backup therefore durably commits each newly
+created component's parent link before reporting success; an already-existing
+backup directory does no extra directory work. Like every directory `fsync`
+here this is POSIX-only, preserving the portable local/workstation contract.
 
 Verification and publication are bound to the exact inode the backup wrote, not to whatever a pathname happens to resolve to afterwards. A partial substituted at any point around `db.backup()` is refused rather than published, and an unproven pathname is never deleted on the caller's behalf.
 
@@ -166,7 +195,9 @@ Switching a live deployment from its current database to a restored database is 
 ## Evidence required for Stage 3 acceptance
 
 - hosted mode refuses ephemeral/local-file storage;
+- hosted mode refuses an ordinary directory masquerading as the durable root when no volume is mounted there, and accepts a correctly attested mount;
 - hosted mode refuses missing/symlink DB entries and requires opened-inode attestation;
+- a first backup into a newly created backup directory durably commits the new directory link before success, while an existing backup directory does no extra directory work;
 - a path swap after descriptor anchoring cannot redirect DDL/migrations/WAL writes to the replacement target;
 - canonical HQ rows survive close/reopen;
 - idempotency uniqueness survives restart;

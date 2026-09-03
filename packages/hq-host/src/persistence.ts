@@ -133,6 +133,80 @@ function procFdMountId(procFdRoot: string, fd: number): number {
   return mountId;
 }
 
+interface MountBoundary {
+  mountId: number;
+  mountPoint: string;
+}
+
+/**
+ * proc(5) escapes space, tab, newline and backslash in the root and mount-point
+ * fields as octal sequences. Decode them so a mount point with a space still
+ * compares equal to the resolved durable root.
+ */
+function decodeMountInfoField(field: string): string {
+  return field.replace(/\\([0-3][0-7][0-7])/g, (_match, oct: string) =>
+    String.fromCharCode(parseInt(oct, 8)),
+  );
+}
+
+function parseMountInfo(content: string): MountBoundary[] {
+  const boundaries: MountBoundary[] = [];
+  for (const line of content.split('\n')) {
+    if (!line) continue;
+    // proc(5) /proc/self/mountinfo: field 1 is the mount id, field 5 is the
+    // mount point. Optional fields precede the " - " separator but never shift
+    // fields 1 or 5, so a positional read of those two is safe.
+    const fields = line.split(' ');
+    if (fields.length < 5) continue;
+    const mountId = Number(fields[0]);
+    const mountPoint = decodeMountInfoField(fields[4]);
+    if (!Number.isSafeInteger(mountId) || mountId < 0 || !mountPoint) continue;
+    boundaries.push({ mountId, mountPoint });
+  }
+  return boundaries;
+}
+
+function readProcSelfMountInfo(): string {
+  try {
+    return fs.readFileSync('/proc/self/mountinfo', 'utf8');
+  } catch {
+    throw new Error(
+      'hosted durable HQ requires Linux /proc/self/mountinfo to attest the durable mount boundary',
+    );
+  }
+}
+
+/**
+ * Fail-closed proof that the configured durable root is itself a real mount
+ * boundary, not an ordinary directory that merely shares its pathname with the
+ * expected volume.
+ *
+ * The device/mount-id cross-checks elsewhere only prove that the DB and backups
+ * live on the SAME filesystem as the root directory; on their own they cannot
+ * tell a mounted durable volume apart from a plain directory baked into the
+ * image at the same path. This reads the kernel's own mount table and requires
+ * an entry mounted EXACTLY at the root whose mount identity matches the opened
+ * root descriptor. If the expected volume is absent, no such entry exists and
+ * hosted HQ stays off instead of booting on ephemeral storage that would later
+ * lose canonical state. This is provider-neutral: it inspects kernel mount
+ * information, never a cloud/provider service.
+ */
+function assertDurableRootIsMountBoundary(root: DurableDirectoryAnchor, durableRoot: string): void {
+  const resolvedRoot = path.resolve(durableRoot);
+  const boundaries = parseMountInfo(readProcSelfMountInfo());
+  const atRoot = boundaries.filter((boundary) => path.resolve(boundary.mountPoint) === resolvedRoot);
+  if (atRoot.length === 0) {
+    throw new Error(
+      'FACTORYOS_HQ_DURABLE_ROOT is not a mount boundary; a durable volume must be mounted exactly at the configured root, not an ordinary directory of the same name',
+    );
+  }
+  if (!atRoot.some((boundary) => boundary.mountId === root.mountId)) {
+    throw new Error(
+      'FACTORYOS_HQ_DURABLE_ROOT mount identity does not match the volume mounted at that path; refusing possibly ephemeral storage',
+    );
+  }
+}
+
 function snapshotProcessFds(procFdRoot: string): FdSnapshot {
   const snapshot: FdSnapshot = new Map();
   for (const entry of fs.readdirSync(procFdRoot)) {
@@ -187,9 +261,14 @@ function closeDirectoryAnchor(anchor: DurableDirectoryAnchor | undefined): void 
 function openDurableRootAnchor(config: HqPersistenceConfig, procFdRoot: string): DurableDirectoryAnchor {
   if (!config.durableRoot) throw new Error('durable root missing from durable-volume configuration');
   const root = openDirectoryAnchor(config.durableRoot, procFdRoot, 'FACTORYOS_HQ_DURABLE_ROOT');
-  if (path.resolve(root.target) !== path.resolve(config.durableRoot)) {
+  try {
+    if (path.resolve(root.target) !== path.resolve(config.durableRoot)) {
+      throw new Error('FACTORYOS_HQ_DURABLE_ROOT changed during mount attestation');
+    }
+    assertDurableRootIsMountBoundary(root, config.durableRoot);
+  } catch (error) {
     closeDirectoryAnchor(root);
-    throw new Error('FACTORYOS_HQ_DURABLE_ROOT changed during mount attestation');
+    throw error;
   }
   return root;
 }
@@ -420,13 +499,64 @@ export function resolveHqPersistenceConfig(
   };
 }
 
-function ensureBackupRoot(config: HqPersistenceConfig): string {
-  fs.mkdirSync(config.backupRoot, { recursive: true });
+interface EnsuredBackupRoot {
+  realBackupRoot: string;
+  createdDirectories: string[];
+}
+
+function ensureBackupRoot(config: HqPersistenceConfig): EnsuredBackupRoot {
+  const firstCreated = fs.mkdirSync(config.backupRoot, { recursive: true });
   const realBackupRoot = fs.realpathSync(config.backupRoot);
   if (config.durableRoot && !insideOrEqual(config.durableRoot, realBackupRoot)) {
     throw new Error('HQ backup directory resolved outside the durable root');
   }
-  return realBackupRoot;
+  return {
+    realBackupRoot,
+    createdDirectories: newlyCreatedDirectories(firstCreated, config.backupRoot),
+  };
+}
+
+/**
+ * The directory components recursive `mkdir` actually created, shallowest first
+ * down to the backup root. `fs.mkdirSync(recursive)` returns only the first
+ * path it created; every component beneath it was necessarily created in the
+ * same call, so the chain runs from that first path to the backup root.
+ */
+function newlyCreatedDirectories(firstCreated: string | undefined, backupRoot: string): string[] {
+  if (!firstCreated) return [];
+  const shallowest = path.resolve(firstCreated);
+  const target = path.resolve(backupRoot);
+  const chain: string[] = [];
+  let current = target;
+  while (true) {
+    chain.unshift(current);
+    if (current === shallowest) return chain;
+    const parent = path.dirname(current);
+    if (parent === current) break; // reached the filesystem root without matching
+    current = parent;
+  }
+  // firstCreated was not an ancestor of the backup root (not expected). Commit
+  // the backup root's own link conservatively rather than the whole chain.
+  return [target];
+}
+
+/**
+ * Durably commit the directory links recursive `mkdir` just created.
+ *
+ * Recursive creation writes a new directory ENTRY into each parent, but the
+ * backup success path otherwise only fsyncs the backup directory itself — which
+ * commits the files inside it, not the new directory's own link from the
+ * durable root. A crash after a reported-successful first backup could
+ * therefore lose the whole backup directory. Committing each new component's
+ * parent closes that gap. The chain is empty for an already-existing backup
+ * directory, so a steady-state backup does no extra directory work. POSIX-only,
+ * like every other directory fsync here: Windows commits directory metadata
+ * with the file and exposes no directory handle to fsync through Node.
+ */
+function commitCreatedDirectoryLinks(createdDirectories: string[]): void {
+  for (const created of createdDirectories) {
+    fsyncDirectory(path.dirname(created));
+  }
 }
 
 function openAttestedBackupRoot(
@@ -659,7 +789,12 @@ export function openHqPersistence(
       if (closed) throw new Error('HQ persistence is closed');
 
       const filename = safeBackupName(name);
-      const backupRoot = ensureBackupRoot(config);
+      const { realBackupRoot: backupRoot, createdDirectories } = ensureBackupRoot(config);
+      // A newly created backup directory's own link into the durable root must
+      // be durably committed before any backup published inside it can be
+      // reported successful; otherwise a crash could take the whole directory.
+      // No-op when the backup directory already existed.
+      commitCreatedDirectoryLinks(createdDirectories);
       const backupAnchor = openAttestedBackupRoot(config, backupRoot);
       const destination = path.join(backupRoot, filename);
       const operationDestination = backupAnchor
@@ -680,8 +815,11 @@ export function openHqPersistence(
         // Reserve the exact inode SQLite is allowed to write BEFORE the backup
         // runs. `O_EXCL` proves we created it, and the retained descriptor —
         // not the mutable pathname — is what every later step verifies and
-        // publishes. A same-permission actor can no longer expose a partial
-        // pathname to substitution between `db.backup()` and verification.
+        // publishes. This closes ordinary pathname-substitution races around
+        // `db.backup()` within the declared single-writer topology. It is NOT
+        // represented as protection against an arbitrary same-permission raw
+        // writer, which Stage 3 explicitly excludes (see the Stage 3 threat
+        // boundary doc); such a writer is ruled out operationally, not here.
         const noFollow = fs.constants.O_NOFOLLOW ?? 0;
         partialFd = fs.openSync(
           partial,
@@ -692,9 +830,11 @@ export function openHqPersistence(
         if (!reservedPartial.isFile()) throw new Error('HQ backup partial is not a regular file');
 
         // On Linux SQLite writes through our own descriptor path, so the object
-        // it opens IS the reserved inode; no pathname it resolves is reachable
-        // by another process. Elsewhere the reserved pathname is used and the
-        // identity re-proved below, which fails closed on any substitution.
+        // it opens IS the reserved inode and no substitutable pathname is
+        // exposed while the backup runs. Elsewhere the reserved pathname is used
+        // and its identity re-proved below, failing closed on substitution.
+        // Neither claims immutability against an arbitrary same-permission raw
+        // writer, which is outside the Stage 3 threat boundary.
         const procFdRoot = availableProcFdRoot();
         const descriptorPath = procFdRoot ? path.join(procFdRoot, String(partialFd)) : undefined;
 
@@ -714,14 +854,16 @@ export function openHqPersistence(
         }
 
         // The reserved partial still has a visible directory entry until it is
-        // published, so a same-permission actor can open it by name and
-        // overwrite the inode IN PLACE with another valid SQLite image. Inode
-        // identity cannot see that.
+        // published, so an in-place overwrite of the inode with another valid
+        // SQLite image is not visible to inode-identity checks alone.
         //
-        // Both SIDES of the integrity check must therefore be proved. Hashing
-        // only afterwards would pin whatever bytes are present at that moment
-        // — including a replacement installed while quick_check was running —
-        // and every later comparison would then agree with the replacement.
+        // Proving both SIDES of the integrity check is defense in depth that
+        // detects ordinary in-place mutation and accidental interference around
+        // `quick_check`: hashing only afterwards would pin whatever bytes are
+        // present at that moment and later comparisons would agree with them.
+        // Within the single-writer topology this is sufficient; it is NOT an
+        // immutable-snapshot guarantee against an arbitrary same-permission raw
+        // writer performing an A->B->A rewrite, which Stage 3 excludes.
         const beforeVerification = proveOpenFileContents(partialFd);
 
         const verificationPath = descriptorPath ?? partial;

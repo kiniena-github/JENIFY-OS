@@ -16,6 +16,7 @@ import {
   resolveHqPersistenceConfig,
   restoreHqBackupToNewFile,
 } from '../src/index.js';
+import { attestDurableMountBoundary } from './support/durable-mount.js';
 
 const roots: string[] = [];
 
@@ -42,6 +43,9 @@ function hostedEnv(root: string): Record<string, string> {
   // pathname. The mounted-volume initializer/operator pre-creates the regular
   // file; SQLite then owns its contents/schema. Never follow a dangling link.
   if (!entryExists(dbPath)) writeFileSync(dbPath, '');
+  // Present the test root to hosted mount-boundary attestation as a genuine
+  // mounted durable volume; the real device/mount-id/inode checks still run.
+  attestDurableMountBoundary(root);
   return {
     FACTORYOS_HQ_DB: dbPath,
     FACTORYOS_HQ_RUNTIME: 'hosted',

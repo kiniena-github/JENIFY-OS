@@ -61,6 +61,7 @@ vi.mock('@factoryos/headquarter/store', async () => {
 });
 
 import { openHqPersistence } from '../src/persistence.js';
+import { attestDurableMountBoundary } from './support/durable-mount.js';
 
 const cleanup: string[] = [];
 
@@ -78,6 +79,7 @@ function externalDir(): string {
 }
 
 function hostedEnv(root: string, dbPath: string): Record<string, string> {
+  attestDurableMountBoundary(root);
   return {
     FACTORYOS_HQ_DB: dbPath,
     FACTORYOS_HQ_RUNTIME: 'hosted',
@@ -101,6 +103,7 @@ function trySymlinkDir(target: string, link: string): boolean {
 afterEach(() => {
   hostile.beforeOpen = null;
   hostile.afterOpen = null;
+  vi.restoreAllMocks();
   for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 

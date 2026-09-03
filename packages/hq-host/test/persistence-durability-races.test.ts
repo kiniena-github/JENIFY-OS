@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openHqDatabase, openHqDatabaseReadOnly } from '@factoryos/headquarter/store';
 import { openHqPersistence, restoreHqBackupToNewFile } from '../src/index.js';
+import { attestDurableMountBoundary } from './support/durable-mount.js';
 
 const roots: string[] = [];
 
@@ -30,6 +31,7 @@ function testRoot(prefix = '.hq-durability-race-'): string {
 function hostedPersistence(root: string) {
   const dbPath = join(root, 'hq.sqlite');
   writeFileSync(dbPath, '');
+  attestDurableMountBoundary(root);
   const persistence = openHqPersistence(
     {
       FACTORYOS_HQ_DB: dbPath,

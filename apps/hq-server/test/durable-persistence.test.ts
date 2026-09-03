@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildStandaloneHq } from '../src/main.js';
+import { attestDurableMountBoundary } from './support/durable-mount.js';
 
 const roots: string[] = [];
 
@@ -14,6 +15,7 @@ function root(): string {
 function hostedEnv(durableRoot: string): Record<string, string> {
   const dbPath = join(durableRoot, 'hq.sqlite');
   if (!existsSync(dbPath)) writeFileSync(dbPath, '');
+  attestDurableMountBoundary(durableRoot);
   return {
     FACTORYOS_HQ_CONTROL: '1',
     FACTORYOS_HQ_DB: dbPath,
@@ -24,6 +26,7 @@ function hostedEnv(durableRoot: string): Record<string, string> {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const value of roots.splice(0)) rmSync(value, { recursive: true, force: true });
 });
 
