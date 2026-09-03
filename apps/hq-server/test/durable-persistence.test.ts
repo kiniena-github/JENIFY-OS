@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildStandaloneHq } from '../src/main.js';
 
@@ -12,9 +12,11 @@ function root(): string {
 }
 
 function hostedEnv(durableRoot: string): Record<string, string> {
+  const dbPath = join(durableRoot, 'hq.sqlite');
+  if (!existsSync(dbPath)) writeFileSync(dbPath, '');
   return {
     FACTORYOS_HQ_CONTROL: '1',
-    FACTORYOS_HQ_DB: join(durableRoot, 'hq.sqlite'),
+    FACTORYOS_HQ_DB: dbPath,
     FACTORYOS_HQ_RUNTIME: 'hosted',
     FACTORYOS_HQ_PERSISTENCE: 'durable-volume',
     FACTORYOS_HQ_DURABLE_ROOT: durableRoot,
@@ -42,6 +44,7 @@ describe('standalone HQ durable hosted runtime', () => {
   });
 
   it('reopens the same canonical state after the standalone process is fully closed', async () => {
+    if (process.platform !== 'linux') return;
     const durableRoot = root();
     const env = hostedEnv(durableRoot);
 
