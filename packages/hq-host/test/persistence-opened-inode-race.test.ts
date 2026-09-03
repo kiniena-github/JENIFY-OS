@@ -1,28 +1,21 @@
 /**
  * The opened-file identity race (issue #243).
  *
- * Stage 3 validated the database PATHNAME before SQLite opened it and resolved
- * that pathname again afterwards. Both checks can be true while SQLite holds a
- * completely different file: an attacker who swaps a path component during the
- * open, and restores it before the post-open check, got hosted HQ to run
- * against an external or ephemeral database while every pathname check reported
- * the attested durable root.
+ * Pathname-only validation was not enough: another process could swap a parent
+ * component while SQLite opened the database and restore it before the later
+ * path check. Earlier Stage 3 code therefore learned to anchor the durable DB
+ * inode with O_NOFOLLOW and verify SQLite's opened descriptor afterwards.
  *
- * The configuration-level tests in `persistence.test.ts` cover the inputs that
- * are refused before anything opens. They cannot cover this, because nothing
- * about the configuration is wrong here: the path is inside the root, the entry
- * is a regular file, and it still is when the old post-open check ran. Only the
- * moment of the open differs.
+ * The stronger correction now goes one step further: SQLite's FIRST writable
+ * and migrating open itself uses `/proc/self/fd/<anchor-fd>`. That means a
+ * parent-path swap can no longer redirect WAL setup, DDL, or migrations to an
+ * external database. If the configured pathname is restored before the final
+ * attestation, startup may safely continue because the mutation target never
+ * left the anchored durable inode.
  *
- * So this file drives the swap FROM the real open call rather than from a sleep
- * or a thread race — the race is deterministic, and it is the same race every
- * run — and asserts three things: that SQLite genuinely ended up holding the
- * external database, that every pathname check still says the durable root
- * (which is why the previous defence passed), and that hosted startup now
- * refuses the boot anyway because the attestation is descriptor-backed.
- *
- * The swapped component is a PARENT directory: hosted mode now refuses a
- * final-component symlink outright, so the parent is where a race still lives.
+ * This file deterministically drives the same parent-path swap from the mocked
+ * store open. It now proves the stronger invariant: the hostile replacement is
+ * untouched while the anchored durable database receives the schema writes.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -30,7 +23,6 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   realpathSync,
   rmSync,
   statSync,
@@ -62,16 +54,12 @@ vi.mock('@factoryos/headquarter/store', async () => {
       try {
         return actual.openHqDatabase(dbPath);
       } finally {
-        // Restoring the path here is the whole point: it is what made the old
-        // post-open realpath check pass on a database SQLite never opened.
         hostile.afterOpen?.();
       }
     },
   };
 });
 
-// Spread through unchanged by the mock above, so this is the real reader.
-import { openHqDatabaseReadOnly } from '@factoryos/headquarter/store';
 import { openHqPersistence } from '../src/persistence.js';
 
 const cleanup: string[] = [];
@@ -116,8 +104,8 @@ afterEach(() => {
   for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-describe('hosted HQ refuses a database SQLite opened outside the attested volume', () => {
-  it('refuses a boot where a parent component is swapped across SQLite’s open and restored after it', () => {
+describe('hosted HQ binds SQLite mutations to the attested durable inode', () => {
+  it('does not redirect migrations when a parent component is swapped across SQLite open and restored', () => {
     if (process.platform !== 'linux') return;
 
     const root = durableRoot();
@@ -128,7 +116,7 @@ describe('hosted HQ refuses a database SQLite opened outside the attested volume
 
     // The configured path reaches the attested file through a directory
     // symlink that resolves inside the root — a legitimate mounted-volume
-    // layout, and the component the attacker gets to swap.
+    // layout, and the component the hostile actor swaps.
     const live = join(root, 'live');
     if (!trySymlinkDir(attestedDir, live)) return;
     const dbPath = join(live, 'hq.sqlite');
@@ -148,27 +136,28 @@ describe('hosted HQ refuses a database SQLite opened outside the attested volume
     const logs: string[] = [];
     const persistence = openHqPersistence(hostedEnv(root, dbPath), (line) => logs.push(line));
 
-    expect(
-      persistence,
-      'hosted HQ must stay OFF when SQLite did not open the attested inode',
-    ).toBeNull();
-    expect(logs.join('\n')).toContain('outside the durable root');
+    // The swap happened around the store open, but that store open used the
+    // already-anchored /proc/self/fd path. Because the configured pathname was
+    // restored before final attestation, a safe boot is allowed.
+    expect(persistence, 'anchored SQLite open should remain on the durable inode').not.toBeNull();
+    expect(persistence!.db.name).toMatch(/^\/proc\/self\/fd\/\d+$/);
 
-    // The race really happened: SQLite created and initialised the EXTERNAL
-    // database, and the attested durable file was never written.
-    expect(existsSync(externalDb)).toBe(true);
-    const externalHandle = openHqDatabaseReadOnly(externalDb);
-    const tables = externalHandle
+    const tables = persistence!.db
       .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'hq_projects'`)
       .all() as { name: string }[];
-    externalHandle.close();
-    expect(tables, 'SQLite genuinely held the external database').toHaveLength(1);
-    expect(readFileSync(attestedDb).length, 'the attested durable file was never written').toBe(0);
+    expect(tables, 'DDL/migrations must land on the anchored durable database').toHaveLength(1);
 
-    // And this is why pathname checking was not enough: by the time any
-    // pathname check runs, everything about the path is correct again.
+    // The hostile replacement must remain completely untouched: no database
+    // creation and therefore no WAL/SHM sidecars outside the durable root.
+    expect(existsSync(externalDb)).toBe(false);
+    expect(existsSync(`${externalDb}-wal`)).toBe(false);
+    expect(existsSync(`${externalDb}-shm`)).toBe(false);
+
+    // The path is back to the anchored durable inode when startup finishes.
     expect(realpathSync(dbPath)).toBe(realpathSync(attestedDb));
     expect(statSync(dbPath).ino).toBe(statSync(attestedDb).ino);
+    expect(logs.join('\n')).not.toContain('outside the durable root');
+    persistence!.close();
   });
 
   it('boots normally through the same path when nothing swaps underneath it', () => {
@@ -185,7 +174,7 @@ describe('hosted HQ refuses a database SQLite opened outside the attested volume
 
     const persistence = openHqPersistence(hostedEnv(root, dbPath), () => {});
 
-    expect(persistence, 'the refusal must be the race, not the layout').not.toBeNull();
+    expect(persistence, 'the same legitimate layout must still boot').not.toBeNull();
     expect(persistence!.healthy()).toBe(true);
     expect(statSync(attestedDb).ino).toBe(statSync(dbPath).ino);
     persistence!.close();
