@@ -116,10 +116,12 @@ The persistence adapter provides an online SQLite backup operation:
 3. run the SQLite online backup **through that descriptor** (`/proc/self/fd/<fd>` on Linux), so the object SQLite writes is the reserved inode and no substitutable pathname is exposed while the backup runs;
 4. re-prove that the partial pathname still names the reserved inode, that the opened object did not change, and that SQLite actually wrote it;
 5. open the reserved descriptor read-only and run `PRAGMA quick_check`;
-6. re-prove the pathname identity once more after verification;
-7. `fsync` the reserved inode and publish it with an atomic no-replace hard-link operation, then commit the directory entry (attested backup-directory descriptor in hosted mode, parent-directory `fsync` in local-file mode).
+6. re-prove the pathname identity once more after verification, and take a SHA-256 proof of the verified bytes through the retained descriptor;
+7. `fsync` the reserved inode and publish it with an atomic no-replace hard-link operation;
+8. re-prove the published bytes against that SHA-256 before reporting success, withdrawing the published name if they differ;
+9. commit the directory entry (attested backup-directory descriptor in hosted mode, parent-directory `fsync` in local-file mode).
 
-Verification and publication are therefore bound to the exact inode the backup wrote, not to whatever a pathname happens to resolve to afterwards. A partial substituted at any point around `db.backup()` is refused rather than published, and an unproven pathname is never deleted on the caller's behalf.
+Verification and publication are therefore bound to the exact inode the backup wrote, not to whatever a pathname happens to resolve to afterwards. A partial substituted at any point around `db.backup()` is refused rather than published, and an unproven pathname is never deleted on the caller's behalf. The reserved partial keeps a visible directory entry until publication, so inode identity alone cannot rule out an **in-place** rewrite of that same inode — the content proof in steps 6 and 8 is what closes it.
 
 A concurrent backup using the same final name cannot replace an existing verified recovery point. A failed/partial backup is removed rather than presented as recoverable evidence.
 
@@ -135,9 +137,12 @@ Recovery deliberately refuses to overwrite an existing HQ database.
 4. requires the copied bytes, the source re-read after the copy, and the destination read back afterwards to all reproduce that same proof — an **in-place** mutation of the retained source between verification and copy therefore fails closed even though the inode and descriptor never changed;
 5. verifies the restored copy read-only and re-proves the destination inode identity;
 6. `fsync`s the restored inode and then the destination **parent directory**, so the new directory entry is durably committed before success is reported;
-7. removes a failed copy only when the destination still names that exact created inode.
+7. re-proves the destination contents against the verified state as the **last act before returning**, since the destination is reachable by name throughout verification;
+8. removes a failed copy only when the destination still names that exact created inode.
 
 Retaining the descriptor closes pathname substitution; the content proof is what closes same-inode mutation. Both are required, and both are covered by deterministic hostile regressions.
+
+**Platform note.** The directory `fsync` is a POSIX operation. Windows exposes no directory handle to `fsync` through Node and commits directory metadata with the file, so the child-identity proof runs on every platform while the `fsync` itself is skipped there — requiring it would break the documented portable local/workstation backup and recovery contract rather than strengthen it. Hosted durable mode is Linux-only and always performs it.
 
 If another process wins a race to create or replace the destination, its file is never deleted by the recovery helper.
 
@@ -154,6 +159,9 @@ Switching a live deployment from its current database to a restored database is 
 - effective WAL/FULL durability is read back and verified;
 - online backup is integrity checked and no-replace under races;
 - backup verification and publication stay bound to the pre-reserved inode SQLite wrote, and a partial substituted after `db.backup()` is refused;
+- an in-place rewrite of the reserved partial between verification and publication is refused, and the published name is withdrawn;
+- an in-place rewrite of the recovery destination after its content proof is refused before success is reported;
+- local-file backup and recovery still work on platforms without directory `fsync`;
 - recovery works only to a new file, refuses overwrite, and preserves concurrently created destinations;
 - recovery refuses an in-place mutation of the retained source applied between verification and the copy, or during it;
 - successful recovery `fsync`s the destination parent directory before returning;

@@ -150,6 +150,107 @@ describe('backup verification is bound to the inode SQLite wrote', () => {
   });
 });
 
+describe('backup re-proves the published bytes, not just the inode', () => {
+  it('refuses an in-place rewrite of the reserved partial before publication', async () => {
+    if (process.platform !== 'linux') return;
+
+    const root = testRoot();
+    const persistence = hostedPersistence(root);
+    const hostile = join(root, 'hostile-in-place.sqlite');
+    createProbeDb(hostile, 'hostile-same-inode');
+    const hostileBytes = readFileSync(hostile);
+    const backupRoot = join(root, 'backups');
+    const destination = join(backupRoot, 'inplace-proof.sqlite');
+
+    // The reserved partial keeps a visible directory entry until it is
+    // published, so a same-permission actor can open it BY NAME and rewrite
+    // the very inode we verified. dev/ino never changes, so only a content
+    // proof can catch this.
+    const realLinkSync = fs.linkSync.bind(fs);
+    let rewritten = false;
+    vi.spyOn(fs, 'linkSync').mockImplementation(((existingPath, newPath) => {
+      if (!rewritten && String(newPath).endsWith('/inplace-proof.sqlite')) {
+        rewritten = true;
+        const partialName = fs.readdirSync(backupRoot).find((e) => e.includes('.partial-'));
+        expect(partialName).toBeDefined();
+        const partial = join(backupRoot, partialName!);
+        const before = fs.statSync(partial).ino;
+        fs.writeFileSync(partial, hostileBytes);
+        expect(fs.statSync(partial).ino).toBe(before);
+      }
+      return realLinkSync(existingPath, newPath);
+    }) as typeof fs.linkSync);
+
+    try {
+      await expect(persistence.backup('inplace-proof.sqlite')).rejects.toThrow(
+        /contents changed between integrity verification and publication/,
+      );
+      expect(rewritten).toBe(true);
+      // The hostile bytes must not survive as a published recovery point.
+      expect(existsSync(destination)).toBe(false);
+    } finally {
+      persistence.close();
+    }
+  });
+});
+
+describe('portable local durability', () => {
+  it('commits a local-file backup without requiring a platform directory fsync', async () => {
+    if (process.platform !== 'linux') return;
+
+    const root = testRoot('.hq-local-durability-');
+    const dbPath = join(root, 'hq.sqlite');
+    const persistence = openHqPersistence(
+      { FACTORYOS_HQ_DB: dbPath, FACTORYOS_HQ_RUNTIME: 'local' },
+      () => {},
+    );
+    expect(persistence).not.toBeNull();
+
+    // Windows exposes no directory handle to fsync through Node, so opening a
+    // directory this way fails outright there. Model that faithfully: fake the
+    // platform AND make any directory open throw the way Windows would. The
+    // identity proof must still run, and local backup/recovery must still work.
+    const realOpenSync = fs.openSync.bind(fs);
+    const directoryOpens: string[] = [];
+    vi.spyOn(fs, 'openSync').mockImplementation(((candidate: unknown, flags: unknown, mode?: unknown) => {
+      const target = String(candidate);
+      let isDirectory = false;
+      try {
+        isDirectory = fs.statSync(target).isDirectory();
+      } catch {
+        isDirectory = false;
+      }
+      if (isDirectory) {
+        directoryOpens.push(target);
+        const error = new Error(`EPERM: operation not permitted, open '${target}'`);
+        (error as NodeJS.ErrnoException).code = 'EPERM';
+        throw error;
+      }
+      return (realOpenSync as any)(candidate, flags, mode);
+    }) as any);
+
+    const platform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    try {
+      const result = await persistence!.backup('portable.sqlite');
+      expect(existsSync(result.path)).toBe(true);
+      expect(result.sizeBytes).toBeGreaterThan(0);
+
+      const restored = join(root, 'restored.sqlite');
+      const recovery = restoreHqBackupToNewFile(result.path, restored);
+      expect(recovery.sizeBytes).toBe(result.sizeBytes);
+      expect(readFileSync(restored).equals(readFileSync(result.path))).toBe(true);
+
+      // No directory was opened at all: the durability step is skipped on the
+      // platform that cannot support it, rather than failing the operation.
+      expect(directoryOpens).toEqual([]);
+    } finally {
+      Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+      persistence!.close();
+    }
+  });
+});
+
 describe('recovery proves the copied bytes are the verified source state', () => {
   it('refuses an in-place source mutation applied after verification and before the copy', () => {
     if (process.platform !== 'linux') return;
@@ -228,6 +329,41 @@ describe('recovery proves the copied bytes are the verified source state', () =>
     expect(result.sizeBytes).toBe(fs.statSync(source).size);
     expect(readProbe(destination)).toBe('stable-state');
     expect(readFileSync(destination).equals(readFileSync(source))).toBe(true);
+  });
+});
+
+describe('recovery re-proves the restored bytes before reporting success', () => {
+  it('refuses an in-place destination rewrite applied after the destination hash', () => {
+    if (process.platform !== 'linux') return;
+
+    const root = testRoot('.hq-recovery-commit-');
+    const source = join(root, 'source.sqlite');
+    const hostile = join(root, 'hostile.sqlite');
+    const destination = join(root, 'restored.sqlite');
+    createProbeDb(source, 'verified-original');
+    createProbeDb(hostile, 'hostile-destination-rewrite');
+    const hostileBytes = readFileSync(hostile);
+
+    // The parent-directory open happens after the destination content hash and
+    // its SQLite verification, so injecting here models a rewrite that inode
+    // identity provably cannot see.
+    const realOpenSync = fs.openSync.bind(fs);
+    let rewritten = false;
+    vi.spyOn(fs, 'openSync').mockImplementation(((candidate: unknown, flags: unknown, mode?: unknown) => {
+      if (!rewritten && String(candidate) === root) {
+        rewritten = true;
+        const before = fs.statSync(destination).ino;
+        fs.writeFileSync(destination, hostileBytes);
+        expect(fs.statSync(destination).ino).toBe(before);
+      }
+      return (realOpenSync as any)(candidate, flags, mode);
+    }) as any);
+
+    expect(() => restoreHqBackupToNewFile(source, destination)).toThrow(
+      /restored HQ database changed after integrity verification/,
+    );
+    expect(rewritten).toBe(true);
+    expect(existsSync(destination)).toBe(false);
   });
 });
 

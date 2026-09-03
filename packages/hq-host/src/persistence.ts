@@ -493,8 +493,20 @@ function unlinkIfSame(candidate: string, expected: fs.Stats): void {
  * creates, replaces or removes anything, so the no-overwrite and exclusive
  * destination guarantees are untouched; it only refuses to report durability
  * it cannot prove.
+ *
+ * The child-identity proof runs everywhere. The directory fsync itself is a
+ * POSIX operation: Windows exposes no directory handle to `fsync` through Node
+ * and commits directory metadata with the file, so requiring it there would
+ * break portable local/workstation backup and recovery rather than strengthen
+ * it. Hosted durable mode is Linux-only and always performs it.
  */
 function fsyncDirectoryEntry(directory: string, child: string, expectedChild: fs.Stats): void {
+  const entry = lstatIfPresent(child);
+  if (!entry || entry.isSymbolicLink() || !sameFile(entry, expectedChild)) {
+    throw new Error(`${child} changed before its directory entry was committed`);
+  }
+  if (process.platform === 'win32') return;
+
   const directoryFlag = fs.constants.O_DIRECTORY ?? 0;
   const fd = fs.openSync(directory, fs.constants.O_RDONLY | directoryFlag);
   try {
@@ -503,8 +515,8 @@ function fsyncDirectoryEntry(directory: string, child: string, expectedChild: fs
     if (!sameFile(opened, fs.statSync(directory))) {
       throw new Error(`${directory} changed before its directory entry was committed`);
     }
-    const entry = lstatIfPresent(child);
-    if (!entry || entry.isSymbolicLink() || !sameFile(entry, expectedChild)) {
+    const stillLinked = lstatIfPresent(child);
+    if (!stillLinked || stillLinked.isSymbolicLink() || !sameFile(stillLinked, expectedChild)) {
       throw new Error(`${child} changed before its directory entry was committed`);
     }
     fs.fsyncSync(fd);
@@ -695,16 +707,35 @@ export function openHqPersistence(
           throw new Error('HQ backup partial changed during integrity verification');
         }
 
+        // The reserved partial still has a visible directory entry until it is
+        // published, so a same-permission actor can open it by name and
+        // overwrite the inode IN PLACE with another valid SQLite image. Inode
+        // identity cannot see that, so the verified bytes are pinned here and
+        // re-proved after publication: what gets published is what passed
+        // quick_check, or the backup fails closed.
+        const verifiedState = proveOpenFileContents(partialFd);
+
         fs.fsyncSync(partialFd);
         if (backupAnchor) assertDirectoryPathStillAnchored(backupAnchor, backupRoot);
         const published = publishVerifiedNoReplace(partial, operationDestination, reservedPartial);
-        if (backupAnchor) {
-          assertDirectoryPathStillAnchored(backupAnchor, backupRoot);
-          fs.fsyncSync(backupAnchor.fd);
-        } else {
-          // Local-file mode has no attested directory descriptor, so the
-          // published directory entry is committed here instead.
-          fsyncDirectoryEntry(backupRoot, destination, reservedPartial);
+        try {
+          const publishedState = proveOpenFileContents(partialFd);
+          if (publishedState.digest !== verifiedState.digest) {
+            throw new Error('HQ backup contents changed between integrity verification and publication');
+          }
+          if (backupAnchor) {
+            assertDirectoryPathStillAnchored(backupAnchor, backupRoot);
+            fs.fsyncSync(backupAnchor.fd);
+          } else {
+            // Local-file mode has no attested directory descriptor, so the
+            // published directory entry is committed here instead.
+            fsyncDirectoryEntry(backupRoot, destination, reservedPartial);
+          }
+        } catch (error) {
+          // The published name is this operation's own inode, so withdrawing it
+          // never touches another process's file.
+          unlinkIfSame(operationDestination, reservedPartial);
+          throw error;
         }
         return { path: destination, sizeBytes: published.size };
       } catch (error) {
@@ -896,6 +927,15 @@ export function restoreHqBackupToNewFile(
 
     // Only now is the destination name durable enough to report success.
     fsyncDirectoryEntry(parent, destination, created);
+
+    // The destination inode is reachable by name for the whole verification
+    // window, so identity checks alone cannot rule out an in-place rewrite
+    // around them. This is the last act before success: the bytes being
+    // reported as restored are re-proved against the verified source state.
+    const committedState = proveOpenFileContents(destinationFd);
+    if (committedState.digest !== verifiedState.digest) {
+      throw new Error('restored HQ database changed after integrity verification');
+    }
 
     const finalStat = fs.fstatSync(destinationFd);
     return { path: destination, sizeBytes: finalStat.size };
