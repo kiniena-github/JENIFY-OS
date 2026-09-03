@@ -170,6 +170,17 @@ function openDurableDbAnchor(config: HqPersistenceConfig): DurableDbAnchor {
 }
 
 /**
+ * Return a pathname that refers to the already-open anchor descriptor itself.
+ * SQLite opens this procfs descriptor path, so its FIRST writable/migrating
+ * connection is bound to the inode we already proved lives on the durable
+ * volume. A concurrent swap of FACTORYOS_HQ_DB can therefore make startup fail,
+ * but it cannot redirect DDL/migrations/WAL writes to the swapped pathname.
+ */
+function anchoredSqliteOpenPath(anchor: DurableDbAnchor): string {
+  return path.join(anchor.procFdRoot, String(anchor.fd));
+}
+
+/**
  * Prove that SQLite itself holds the same inode we anchored, not merely that the
  * configured pathname looks safe before/after open.
  *
@@ -388,7 +399,12 @@ export function openHqPersistence(
       beforeSqliteOpen = snapshotProcessFds(anchor.procFdRoot);
     }
 
-    db = openHqDatabase(config.dbPath);
+    // Critical ordering: in hosted durable mode the FIRST SQLite open — which
+    // performs WAL setup, DDL and schema upgrades inside openHqDatabase — goes
+    // through the already-open descriptor. We never migrate by config.dbPath
+    // and then attempt to prove afterward that the pathname was still safe.
+    const sqliteOpenPath = anchor ? anchoredSqliteOpenPath(anchor) : config.dbPath;
+    db = openHqDatabase(sqliteOpenPath);
     db.pragma('busy_timeout = 5000');
     if (config.mode === 'durable-volume') {
       db.pragma('journal_mode = WAL');
