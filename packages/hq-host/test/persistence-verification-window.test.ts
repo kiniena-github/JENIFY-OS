@@ -1,16 +1,17 @@
 /**
- * The backup integrity-check window (issue #244, third review round).
+ * Defense-in-depth coverage for the backup integrity-check window.
  *
- * Proving the backup bytes only AFTER `quick_check` is not enough. A
- * same-permission actor can rewrite the reserved inode in place while the
- * check is running or as its handle closes; a later-only hash would then pin
- * the REPLACEMENT as the verified state, and every downstream comparison —
- * including the post-publication proof — would agree with it. Bytes that never
- * passed SQLite integrity checking would be published as a successful backup.
+ * Stage 3 is explicitly single-process/single-writer. The before/after content
+ * proofs below are intended to catch ordinary in-place mutation and accidental
+ * interference around `quick_check`; they are NOT an immutable-snapshot claim
+ * against an arbitrary second process with the same OS permissions performing
+ * an A→B→A rewrite while SQLite verifies the inode. That stronger attacker is
+ * outside the Stage 3 threat boundary and must be excluded operationally by the
+ * accepted hosted runtime/provider.
  *
- * The window has no `fs` syscall inside it by design, so the hostile actor is
- * driven from the verification handle's own `close()`, which is exactly the
- * boundary the finding names.
+ * The window has no `fs` syscall inside it by design, so this regression drives
+ * a simple rewrite from the verification handle's own `close()` and proves the
+ * existing defense-in-depth rejection remains intact.
  */
 
 import fs from 'node:fs';
@@ -67,8 +68,8 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe('backup proves both sides of the integrity check', () => {
-  it('refuses a rewrite installed as the verification handle closes', async () => {
+describe('backup verification-window defense in depth', () => {
+  it('refuses a simple rewrite installed as the verification handle closes', async () => {
     if (process.platform !== 'linux') return;
 
     const root = testRoot();
@@ -98,7 +99,7 @@ describe('backup proves both sides of the integrity check', () => {
       if (!partialName) return;
       rewritten = true;
       const partial = join(backupRoot, partialName);
-      // In place: same inode, so identity checks provably cannot see it.
+      // In place: same inode, so identity checks alone cannot see it.
       const before = fs.statSync(partial).ino;
       fs.writeFileSync(partial, hostileBytes);
       expect(fs.statSync(partial).ino).toBe(before);
@@ -110,7 +111,6 @@ describe('backup proves both sides of the integrity check', () => {
       );
       expect(rewritten).toBe(true);
       expect(existsSync(destination)).toBe(false);
-      // Nothing was published at all, under any name.
       const published = fs.readdirSync(backupRoot).filter((e) => !e.includes('.partial-'));
       expect(published).toEqual([]);
     } finally {
