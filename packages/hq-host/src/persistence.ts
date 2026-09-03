@@ -99,11 +99,6 @@ function sameOpenObject(a: fs.Stats, b: fs.Stats): boolean {
   return sameFile(a, b) && a.mode === b.mode && a.rdev === b.rdev;
 }
 
-/**
- * Hosted Stage 3 needs descriptor-backed evidence about the inode SQLite really
- * opened. Linux procfs exposes process file descriptors without choosing a
- * cloud vendor. Local/workstation mode never needs this gate.
- */
 function requireProcFdRoot(): string {
   const procFdRoot = '/proc/self/fd';
   if (process.platform !== 'linux' || !fs.existsSync(procFdRoot)) {
@@ -118,11 +113,6 @@ function procFdInfoPath(procFdRoot: string, fd: number): string {
   return path.join(path.dirname(procFdRoot), 'fdinfo', String(fd));
 }
 
-/**
- * Linux fdinfo exposes `mnt_id`, which distinguishes bind mounts even when they
- * share the same backing device (`st_dev`). Stage 3 treats missing/unparseable
- * mount identity as a fail-closed condition for hosted durability claims.
- */
 function procFdMountId(procFdRoot: string, fd: number): number {
   let info: string;
   try {
@@ -146,8 +136,7 @@ function snapshotProcessFds(procFdRoot: string): FdSnapshot {
     try {
       snapshot.set(fd, fs.fstatSync(fd));
     } catch {
-      // /proc/self/fd can list the directory descriptor used for the listing;
-      // it may be closed before fstat. A vanished descriptor is not evidence.
+      // A descriptor may vanish between readdir and fstat; that is not evidence.
     }
   }
   return snapshot;
@@ -214,16 +203,6 @@ function assertSameDurableMount(
   }
 }
 
-/**
- * Open and hold the exact pre-existing durable DB inode before SQLite starts.
- *
- * Hosted startup intentionally requires the DB file to be pre-created by the
- * operator/mount initialization. That means this security check never creates a
- * file through a pathname that another process could race outside the attested
- * volume. Final-component symlinks are refused and O_NOFOLLOW gives the open
- * itself the same rule. Parent-component races are caught by resolving the
- * descriptor itself through procfs after open.
- */
 function openDurableDbAnchor(config: HqPersistenceConfig): DurableDbAnchor {
   if (!config.durableRoot) throw new Error('durable root missing from durable-volume configuration');
   const procFdRoot = requireProcFdRoot();
@@ -248,9 +227,6 @@ function openDurableDbAnchor(config: HqPersistenceConfig): DurableDbAnchor {
       throw new Error('opened durable HQ database inode is outside FACTORYOS_HQ_DURABLE_ROOT');
     }
 
-    // `st_dev` catches different filesystems; Linux `mnt_id` additionally
-    // catches same-device bind mounts. Both identities must match the descriptor
-    // for the attested durable root before SQLite is allowed to write anything.
     const root = openDurableRootAnchor(config, procFdRoot);
     try {
       assertSameDurableMount(
@@ -270,26 +246,10 @@ function openDurableDbAnchor(config: HqPersistenceConfig): DurableDbAnchor {
   }
 }
 
-/**
- * Return a pathname that refers to the already-open anchor descriptor itself.
- * SQLite opens this procfs descriptor path, so its FIRST writable/migrating
- * connection is bound to the inode we already proved lives on the durable
- * volume. A concurrent swap of FACTORYOS_HQ_DB can therefore make startup fail,
- * but it cannot redirect DDL/migrations/WAL writes to the swapped pathname.
- */
 function anchoredSqliteOpenPath(anchor: DurableDbAnchor): string {
   return path.join(anchor.procFdRoot, String(anchor.fd));
 }
 
-/**
- * Prove that SQLite itself holds the same inode we anchored, not merely that the
- * configured pathname looks safe before/after open.
- *
- * The before/after descriptor diff is important: a pre-existing unrelated fd
- * cannot satisfy the proof. Every regular file opened during the synchronous
- * SQLite initialization must also resolve inside the durable root, covering WAL
- * and SHM sidecars if they are opened during the transition to WAL mode.
- */
 function assertSqliteOpenedAnchoredDb(
   config: HqPersistenceConfig,
   anchor: DurableDbAnchor,
@@ -342,12 +302,6 @@ function assertSqliteOpenedAnchoredDb(
   }
 }
 
-/**
- * Validate the configured durable DB entry before descriptor attestation.
- * Hosted mode deliberately refuses final-component symlinks, including valid
- * ones, so the configured name and the inode SQLite opens have one unambiguous
- * relationship.
- */
 function validateExistingDurableDbEntry(
   dbPath: string,
   log: (line: string) => void,
@@ -517,17 +471,12 @@ function safeBackupName(name: string | undefined): string {
   return `hq-${new Date().toISOString().replace(/[:.]/g, '-')}.sqlite`;
 }
 
-/** Atomically publish a verified file without ever replacing an existing name. */
 function publishNoReplace(partial: string, destination: string): void {
-  // A same-filesystem hard-link creation is atomic and fails with EEXIST if a
-  // concurrent writer already published this destination. Unlike rename(), it
-  // never replaces the previous verified recovery point.
   fs.linkSync(partial, destination);
   try {
     fs.unlinkSync(partial);
   } catch {
-    // The verified destination is already safely published. A leftover unique
-    // partial name is preferable to reporting failure or touching destination.
+    // The verified destination is already safely published.
   }
 }
 
@@ -547,10 +496,6 @@ export function openHqPersistence(
       beforeSqliteOpen = snapshotProcessFds(anchor.procFdRoot);
     }
 
-    // Critical ordering: in hosted durable mode the FIRST SQLite open — which
-    // performs WAL setup, DDL and schema upgrades inside openHqDatabase — goes
-    // through the already-open descriptor. We never migrate by config.dbPath
-    // and then attempt to prove afterward that the pathname was still safe.
     const sqliteOpenPath = anchor ? anchoredSqliteOpenPath(anchor) : config.dbPath;
     db = openHqDatabase(sqliteOpenPath);
     db.pragma('busy_timeout = 5000');
@@ -616,8 +561,6 @@ export function openHqPersistence(
     async backup(name?: string): Promise<HqBackupResult> {
       if (closed) throw new Error('HQ persistence is closed');
 
-      // Validate untrusted input before opening any descriptor-backed directory
-      // anchor. Rejected names therefore cannot leak one fd per request.
       const filename = safeBackupName(name);
       const backupRoot = ensureBackupRoot(config);
       const backupAnchor = openAttestedBackupRoot(config, backupRoot);
@@ -700,8 +643,6 @@ export function restoreHqBackupToNewFile(
   backupPath: string,
   destinationPath: string,
 ): HqBackupResult {
-  // Stage 3 recovery uses the same descriptor-backed identity model as hosted
-  // persistence. This prevents verification/copy and creation/verification races.
   const procFdRoot = requireProcFdRoot();
   const source = path.resolve(backupPath);
   const destination = path.resolve(destinationPath);
@@ -723,8 +664,6 @@ export function restoreHqBackupToNewFile(
   let destinationFd: number | undefined;
   let created: fs.Stats | null = null;
   try {
-    // Hold the exact source inode from before integrity verification through the
-    // final copy. A pathname replacement cannot change what is verified/copied.
     sourceFd = fs.openSync(source, fs.constants.O_RDONLY | noFollow);
     const sourceStat = fs.fstatSync(sourceFd);
     if (!sourceStat.isFile()) throw new Error('HQ backup opened inode is not a regular file');
@@ -735,8 +674,6 @@ export function restoreHqBackupToNewFile(
     sourceDb.close();
     if (!sourceHealthy) throw new Error('HQ backup failed integrity check');
 
-    // Capture ownership at the instant of exclusive creation. All bytes and the
-    // post-copy integrity check use this descriptor, not the mutable pathname.
     destinationFd = fs.openSync(
       destination,
       fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_RDWR | noFollow,
@@ -757,10 +694,9 @@ export function restoreHqBackupToNewFile(
     if (!current || !sameFile(created, current)) {
       throw new Error('HQ recovery destination changed during verification');
     }
-    return { path: destination, sizeBytes: created.size };
+    const finalStat = fs.fstatSync(destinationFd);
+    return { path: destination, sizeBytes: finalStat.size };
   } catch (error) {
-    // Remove only the exact inode created by THIS invocation. If another actor
-    // replaced the pathname, their file is never deleted.
     if (created) {
       try {
         const current = lstatIfPresent(destination);
