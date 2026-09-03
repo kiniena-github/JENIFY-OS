@@ -162,6 +162,30 @@ function openDurableDbAnchor(config: HqPersistenceConfig): DurableDbAnchor {
     if (!insideOrEqual(config.durableRoot, target)) {
       throw new Error('opened durable HQ database inode is outside FACTORYOS_HQ_DURABLE_ROOT');
     }
+
+    // Path containment alone is not durability evidence: a nested tmpfs,
+    // emptyDir, or other ephemeral mount can live textually under the durable
+    // root. Anchor the root itself by descriptor, then require the DB inode to
+    // live on the same filesystem device before SQLite is allowed to write.
+    const rootFd = fs.openSync(config.durableRoot, fs.constants.O_RDONLY);
+    try {
+      const rootStat = fs.fstatSync(rootFd);
+      if (!rootStat.isDirectory()) {
+        throw new Error('FACTORYOS_HQ_DURABLE_ROOT no longer resolves to a directory');
+      }
+      const rootTarget = procFdTarget(procFdRoot, rootFd);
+      if (path.resolve(rootTarget) !== path.resolve(config.durableRoot)) {
+        throw new Error('FACTORYOS_HQ_DURABLE_ROOT changed during filesystem attestation');
+      }
+      if (stat.dev !== rootStat.dev) {
+        throw new Error(
+          'opened durable HQ database inode is on a different filesystem from FACTORYOS_HQ_DURABLE_ROOT',
+        );
+      }
+    } finally {
+      fs.closeSync(rootFd);
+    }
+
     return { fd, stat, procFdRoot };
   } catch (error) {
     fs.closeSync(fd);
