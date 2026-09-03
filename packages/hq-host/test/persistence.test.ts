@@ -1,5 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import {
+import fs, {
   existsSync,
   lstatSync,
   mkdtempSync,
@@ -9,6 +8,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'node:path';
 import { openHqDatabaseReadOnly } from '@factoryos/headquarter/store';
 import {
@@ -63,6 +63,7 @@ function trySymlink(target: string, link: string): boolean {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -157,6 +158,55 @@ describe('Stage 3 durable SQLite adapter', () => {
     expect(String(persistence!.db.pragma('journal_mode', { simple: true })).toLowerCase()).toBe('wal');
     expect(Number(persistence!.db.pragma('synchronous', { simple: true }))).toBe(2);
     persistence!.close();
+  });
+
+  it('binds the migrating SQLite open to the anchored inode before any path-race write', () => {
+    if (process.platform !== 'linux') return;
+
+    const root = durableRoot();
+    const outsideRoot = durableRoot();
+    const env = hostedEnv(root);
+    const dbPath = env.FACTORYOS_HQ_DB;
+    const anchoredAfterRename = join(root, 'anchored-original.sqlite');
+    const outsideTarget = join(outsideRoot, 'outside.sqlite');
+    writeFileSync(outsideTarget, '');
+
+    const originalOpenSync = fs.openSync.bind(fs);
+    let swapped = false;
+    vi.spyOn(fs, 'openSync').mockImplementation(((candidate: unknown, flags: unknown, mode?: unknown) => {
+      const fd = (originalOpenSync as any)(candidate, flags, mode);
+      if (
+        !swapped &&
+        String(candidate) === dbPath &&
+        typeof flags === 'number' &&
+        (flags & fs.constants.O_NOFOLLOW) !== 0
+      ) {
+        swapped = true;
+        fs.renameSync(dbPath, anchoredAfterRename);
+        fs.symlinkSync(outsideTarget, dbPath, 'file');
+      }
+      return fd;
+    }) as any);
+
+    const logs: string[] = [];
+    const persistence = openHqPersistence(env, (line) => logs.push(line));
+    expect(swapped).toBe(true);
+    expect(persistence).toBeNull();
+    expect(logs.join('\n')).toContain('pathname changed during SQLite startup');
+
+    // The hostile replacement was never opened for writable migration/WAL.
+    expect(fs.statSync(outsideTarget).size).toBe(0);
+    expect(existsSync(`${outsideTarget}-wal`)).toBe(false);
+    expect(existsSync(`${outsideTarget}-shm`)).toBe(false);
+
+    // DDL/migrations, if they ran before the pathname-change refusal, ran only
+    // against the already-anchored inode that stayed inside the durable root.
+    const anchoredDb = openHqDatabaseReadOnly(anchoredAfterRename);
+    const schema = anchoredDb
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'hq_projects'")
+      .get() as { name: string } | undefined;
+    expect(schema?.name).toBe('hq_projects');
+    anchoredDb.close();
   });
 
   it('survives a full close/reopen with canonical HQ state intact', () => {
