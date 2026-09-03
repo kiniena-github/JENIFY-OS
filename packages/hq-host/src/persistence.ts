@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   openHqDatabase,
   openHqDatabaseReadOnly,
@@ -485,6 +485,34 @@ function unlinkIfSame(candidate: string, expected: fs.Stats): void {
   }
 }
 
+/**
+ * Durably commit the directory entry that publishes `child`.
+ *
+ * fsyncing the file inode alone is not enough on filesystems that require an
+ * explicit directory fsync for the new name to survive a crash. This never
+ * creates, replaces or removes anything, so the no-overwrite and exclusive
+ * destination guarantees are untouched; it only refuses to report durability
+ * it cannot prove.
+ */
+function fsyncDirectoryEntry(directory: string, child: string, expectedChild: fs.Stats): void {
+  const directoryFlag = fs.constants.O_DIRECTORY ?? 0;
+  const fd = fs.openSync(directory, fs.constants.O_RDONLY | directoryFlag);
+  try {
+    const opened = fs.fstatSync(fd);
+    if (!opened.isDirectory()) throw new Error(`${directory} is not an opened directory`);
+    if (!sameFile(opened, fs.statSync(directory))) {
+      throw new Error(`${directory} changed before its directory entry was committed`);
+    }
+    const entry = lstatIfPresent(child);
+    if (!entry || entry.isSymbolicLink() || !sameFile(entry, expectedChild)) {
+      throw new Error(`${child} changed before its directory entry was committed`);
+    }
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function publishVerifiedNoReplace(
   partial: string,
   destination: string,
@@ -609,51 +637,78 @@ export function openHqPersistence(
         ? anchoredDirectoryChild(backupAnchor, partialFilename)
         : path.join(backupRoot, partialFilename);
       let partialFd: number | undefined;
-      let verifiedPartial: fs.Stats | undefined;
+      let reservedPartial: fs.Stats | undefined;
 
       try {
         if (lstatIfPresent(operationDestination)) {
           throw new Error(`HQ backup already exists: ${filename}`);
         }
 
-        checkpoint();
-        await db.backup(partial);
-
+        // Reserve the exact inode SQLite is allowed to write BEFORE the backup
+        // runs. `O_EXCL` proves we created it, and the retained descriptor —
+        // not the mutable pathname — is what every later step verifies and
+        // publishes. A same-permission actor can no longer expose a partial
+        // pathname to substitution between `db.backup()` and verification.
         const noFollow = fs.constants.O_NOFOLLOW ?? 0;
-        partialFd = fs.openSync(partial, fs.constants.O_RDWR | noFollow);
-        verifiedPartial = fs.fstatSync(partialFd);
-        if (!verifiedPartial.isFile()) throw new Error('HQ backup partial is not a regular file');
+        partialFd = fs.openSync(
+          partial,
+          fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_RDWR | noFollow,
+          0o600,
+        );
+        reservedPartial = fs.fstatSync(partialFd);
+        if (!reservedPartial.isFile()) throw new Error('HQ backup partial is not a regular file');
 
-        const verificationPath = backupAnchor
-          ? path.join(backupAnchor.procFdRoot, String(partialFd))
-          : partial;
-        if (!backupAnchor) {
-          const current = lstatIfPresent(partial);
-          if (!current || current.isSymbolicLink() || !sameFile(current, verifiedPartial)) {
-            throw new Error('HQ backup partial changed before integrity verification');
-          }
+        // On Linux SQLite writes through our own descriptor path, so the object
+        // it opens IS the reserved inode; no pathname it resolves is reachable
+        // by another process. Elsewhere the reserved pathname is used and the
+        // identity re-proved below, which fails closed on any substitution.
+        const procFdRoot = availableProcFdRoot();
+        const descriptorPath = procFdRoot ? path.join(procFdRoot, String(partialFd)) : undefined;
+
+        checkpoint();
+        await db.backup(descriptorPath ?? partial);
+
+        const afterBackup = lstatIfPresent(partial);
+        if (!afterBackup || afterBackup.isSymbolicLink() || !sameFile(afterBackup, reservedPartial)) {
+          throw new Error('HQ backup partial pathname was substituted around the SQLite backup');
         }
+        const written = fs.fstatSync(partialFd);
+        if (!sameOpenObject(reservedPartial, written)) {
+          throw new Error('HQ backup partial inode changed during the SQLite backup');
+        }
+        if (written.size === 0) {
+          throw new Error('SQLite did not write the pre-reserved HQ backup inode');
+        }
+
+        const verificationPath = descriptorPath ?? partial;
         const check = openHqDatabaseReadOnly(verificationPath);
         const valid = quickCheck(check);
         check.close();
         if (!valid) throw new Error('backup integrity check failed');
-        if (!backupAnchor) {
-          const current = lstatIfPresent(partial);
-          if (!current || current.isSymbolicLink() || !sameFile(current, verifiedPartial)) {
-            throw new Error('HQ backup partial changed during integrity verification');
-          }
+
+        const afterVerification = lstatIfPresent(partial);
+        if (
+          !afterVerification ||
+          afterVerification.isSymbolicLink() ||
+          !sameFile(afterVerification, reservedPartial)
+        ) {
+          throw new Error('HQ backup partial changed during integrity verification');
         }
 
         fs.fsyncSync(partialFd);
         if (backupAnchor) assertDirectoryPathStillAnchored(backupAnchor, backupRoot);
-        const published = publishVerifiedNoReplace(partial, operationDestination, verifiedPartial);
+        const published = publishVerifiedNoReplace(partial, operationDestination, reservedPartial);
         if (backupAnchor) {
           assertDirectoryPathStillAnchored(backupAnchor, backupRoot);
           fs.fsyncSync(backupAnchor.fd);
+        } else {
+          // Local-file mode has no attested directory descriptor, so the
+          // published directory entry is committed here instead.
+          fsyncDirectoryEntry(backupRoot, destination, reservedPartial);
         }
         return { path: destination, sizeBytes: published.size };
       } catch (error) {
-        if (verifiedPartial) unlinkIfSame(partial, verifiedPartial);
+        if (reservedPartial) unlinkIfSame(partial, reservedPartial);
         throw error;
       } finally {
         if (partialFd != null) {
@@ -684,8 +739,33 @@ export function openHqPersistence(
   return handle;
 }
 
-function copyExactFileDescriptor(sourceFd: number, destinationFd: number): void {
-  const buffer = Buffer.allocUnsafe(1024 * 1024);
+const RECOVERY_CHUNK_BYTES = 1024 * 1024;
+
+interface ContentProof {
+  digest: string;
+  size: number;
+}
+
+/**
+ * Content identity of an OPEN descriptor, read positionally so a concurrent
+ * reader/writer cannot move the shared file offset underneath us.
+ */
+function proveOpenFileContents(fd: number): ContentProof {
+  const hash = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(RECOVERY_CHUNK_BYTES);
+  let position = 0;
+  while (true) {
+    const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, position);
+    if (bytesRead === 0) break;
+    hash.update(buffer.subarray(0, bytesRead));
+    position += bytesRead;
+  }
+  return { digest: hash.digest('hex'), size: position };
+}
+
+function copyExactFileDescriptor(sourceFd: number, destinationFd: number): ContentProof {
+  const hash = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(RECOVERY_CHUNK_BYTES);
   let position = 0;
   while (true) {
     const bytesRead = fs.readSync(sourceFd, buffer, 0, buffer.length, position);
@@ -703,10 +783,12 @@ function copyExactFileDescriptor(sourceFd: number, destinationFd: number): void 
       if (bytesWritten <= 0) throw new Error('HQ recovery could not write restored database bytes');
       written += bytesWritten;
     }
+    hash.update(buffer.subarray(0, bytesRead));
     position += bytesRead;
   }
   fs.ftruncateSync(destinationFd, position);
   fs.fsyncSync(destinationFd);
+  return { digest: hash.digest('hex'), size: position };
 }
 
 function verifyOpenRecoveryFile(
@@ -766,6 +848,11 @@ export function restoreHqBackupToNewFile(
     const sourceStat = fs.fstatSync(sourceFd);
     if (!sourceStat.isFile()) throw new Error('HQ backup opened inode is not a regular file');
 
+    // Retaining the descriptor closes pathname substitution but NOT in-place
+    // writes to the same inode. The verified state is therefore pinned by
+    // content, not by inode identity: every later step must reproduce exactly
+    // these bytes or the restore fails closed.
+    const verifiedState = proveOpenFileContents(sourceFd);
     verifyOpenRecoveryFile(sourceFd, source, sourceStat, procFdRoot, 'HQ backup');
 
     destinationFd = fs.openSync(
@@ -776,7 +863,24 @@ export function restoreHqBackupToNewFile(
     created = fs.fstatSync(destinationFd);
     if (!created.isFile()) throw new Error('HQ recovery destination is not a regular file');
 
-    copyExactFileDescriptor(sourceFd, destinationFd);
+    const copied = copyExactFileDescriptor(sourceFd, destinationFd);
+    if (copied.digest !== verifiedState.digest) {
+      throw new Error('HQ backup contents changed between integrity verification and the restore copy');
+    }
+
+    // The source may also have been mutated in place after the last byte we
+    // read; re-proving it here is what makes "the copy is the verified state"
+    // a claim rather than an assumption.
+    const sourceAfterCopy = proveOpenFileContents(sourceFd);
+    if (sourceAfterCopy.digest !== verifiedState.digest) {
+      throw new Error('HQ backup contents changed during the restore copy');
+    }
+
+    const destinationState = proveOpenFileContents(destinationFd);
+    if (destinationState.digest !== verifiedState.digest) {
+      throw new Error('restored HQ database does not hold the verified backup contents');
+    }
+
     verifyOpenRecoveryFile(
       destinationFd,
       destination,
@@ -789,6 +893,10 @@ export function restoreHqBackupToNewFile(
     if (!current || current.isSymbolicLink() || !sameFile(created, current)) {
       throw new Error('HQ recovery destination changed during verification');
     }
+
+    // Only now is the destination name durable enough to report success.
+    fsyncDirectoryEntry(parent, destination, created);
+
     const finalStat = fs.fstatSync(destinationFd);
     return { path: destination, sizeBytes: finalStat.size };
   } catch (error) {

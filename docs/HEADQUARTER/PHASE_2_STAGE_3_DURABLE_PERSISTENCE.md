@@ -112,10 +112,14 @@ Stage 3 is intentionally **single-process / single-writer topology**. Multiple b
 The persistence adapter provides an online SQLite backup operation:
 
 1. checkpoint best-effort;
-2. SQLite online backup to a unique partial file;
-3. open the result read-only;
-4. run `PRAGMA quick_check`;
-5. publish the verified backup with an atomic no-replace hard-link operation.
+2. **reserve the partial inode first** with `O_CREAT|O_EXCL|O_RDWR` and keep the descriptor;
+3. run the SQLite online backup **through that descriptor** (`/proc/self/fd/<fd>` on Linux), so the object SQLite writes is the reserved inode and no substitutable pathname is exposed while the backup runs;
+4. re-prove that the partial pathname still names the reserved inode, that the opened object did not change, and that SQLite actually wrote it;
+5. open the reserved descriptor read-only and run `PRAGMA quick_check`;
+6. re-prove the pathname identity once more after verification;
+7. `fsync` the reserved inode and publish it with an atomic no-replace hard-link operation, then commit the directory entry (attested backup-directory descriptor in hosted mode, parent-directory `fsync` in local-file mode).
+
+Verification and publication are therefore bound to the exact inode the backup wrote, not to whatever a pathname happens to resolve to afterwards. A partial substituted at any point around `db.backup()` is refused rather than published, and an unproven pathname is never deleted on the caller's behalf.
 
 A concurrent backup using the same final name cannot replace an existing verified recovery point. A failed/partial backup is removed rather than presented as recoverable evidence.
 
@@ -125,11 +129,15 @@ Recovery deliberately refuses to overwrite an existing HQ database.
 
 `restoreHqBackupToNewFile`:
 
-1. verifies the source backup read-only;
-2. copies it only to a path that does not exist using exclusive creation;
-3. records the exact inode created by that invocation;
-4. verifies the restored copy;
-5. removes a failed copy only when the destination still names that exact created inode.
+1. opens the source with `O_NOFOLLOW` and retains the descriptor;
+2. **pins the verified state by content**, not by inode identity: a SHA-256 proof of the source bytes is taken before the read-only `PRAGMA quick_check`;
+3. copies only to a path that does not exist, using exclusive creation, and records the exact inode created by that invocation;
+4. requires the copied bytes, the source re-read after the copy, and the destination read back afterwards to all reproduce that same proof — an **in-place** mutation of the retained source between verification and copy therefore fails closed even though the inode and descriptor never changed;
+5. verifies the restored copy read-only and re-proves the destination inode identity;
+6. `fsync`s the restored inode and then the destination **parent directory**, so the new directory entry is durably committed before success is reported;
+7. removes a failed copy only when the destination still names that exact created inode.
+
+Retaining the descriptor closes pathname substitution; the content proof is what closes same-inode mutation. Both are required, and both are covered by deterministic hostile regressions.
 
 If another process wins a race to create or replace the destination, its file is never deleted by the recovery helper.
 
@@ -145,7 +153,10 @@ Switching a live deployment from its current database to a restored database is 
 - lease/fence/claim state survives restart;
 - effective WAL/FULL durability is read back and verified;
 - online backup is integrity checked and no-replace under races;
+- backup verification and publication stay bound to the pre-reserved inode SQLite wrote, and a partial substituted after `db.backup()` is refused;
 - recovery works only to a new file, refuses overwrite, and preserves concurrently created destinations;
+- recovery refuses an in-place mutation of the retained source applied between verification and the copy, or during it;
+- successful recovery `fsync`s the destination parent directory before returning;
 - standalone HQ process reopens the same canonical state after a full close;
 - full HQ/server/HQ-host/HQ-server tests and relevant typechecks/build pass;
 - exact-head CI passes;

@@ -1,0 +1,270 @@
+/**
+ * Stage 3 exact-head durability corrections (issue #244).
+ *
+ * Three defects are pinned here, each with a deterministic hostile actor driven
+ * from a real syscall boundary rather than from timing luck:
+ *
+ * 1. the backup partial pathname being substituted after `db.backup()` resolves
+ *    and before verification opens it;
+ * 2. the retained recovery source being mutated IN PLACE — same inode, so a
+ *    descriptor cannot notice — after verification and before/during the copy;
+ * 3. a successful recovery reporting durability before the destination
+ *    directory entry itself was committed.
+ */
+
+import fs from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { openHqDatabase, openHqDatabaseReadOnly } from '@factoryos/headquarter/store';
+import { openHqPersistence, restoreHqBackupToNewFile } from '../src/index.js';
+
+const roots: string[] = [];
+
+function testRoot(prefix = '.hq-durability-race-'): string {
+  const root = mkdtempSync(join(process.cwd(), prefix));
+  roots.push(root);
+  return root;
+}
+
+function hostedPersistence(root: string) {
+  const dbPath = join(root, 'hq.sqlite');
+  writeFileSync(dbPath, '');
+  const persistence = openHqPersistence(
+    {
+      FACTORYOS_HQ_DB: dbPath,
+      FACTORYOS_HQ_RUNTIME: 'hosted',
+      FACTORYOS_HQ_PERSISTENCE: 'durable-volume',
+      FACTORYOS_HQ_DURABLE_ROOT: root,
+    },
+    () => {},
+  );
+  expect(persistence).not.toBeNull();
+  return persistence!;
+}
+
+function createProbeDb(file: string, value: string): void {
+  const db = openHqDatabase(file);
+  db.exec('CREATE TABLE IF NOT EXISTS durability_probe(value TEXT NOT NULL)');
+  db.exec('DELETE FROM durability_probe');
+  db.prepare('INSERT INTO durability_probe(value) VALUES (?)').run(value);
+  db.close();
+}
+
+function readProbe(file: string): string {
+  const db = openHqDatabaseReadOnly(file);
+  const row = db.prepare('SELECT value FROM durability_probe LIMIT 1').get() as { value: string };
+  db.close();
+  return row.value;
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+describe('backup verification is bound to the inode SQLite wrote', () => {
+  it('publishes the exact pre-reserved inode the backup was written into', async () => {
+    if (process.platform !== 'linux') return;
+
+    const root = testRoot();
+    const persistence = hostedPersistence(root);
+    const realOpenSync = fs.openSync.bind(fs);
+    let reservedIno: number | undefined;
+
+    vi.spyOn(fs, 'openSync').mockImplementation(((candidate: unknown, flags: unknown, mode?: unknown) => {
+      const fd = (realOpenSync as any)(candidate, flags, mode);
+      if (
+        reservedIno === undefined &&
+        String(candidate).includes('.partial-') &&
+        typeof flags === 'number' &&
+        (flags & fs.constants.O_EXCL) !== 0
+      ) {
+        reservedIno = fs.fstatSync(fd).ino;
+      }
+      return fd;
+    }) as any);
+
+    try {
+      const result = await persistence.backup('reserved.sqlite');
+      // The partial inode is reserved with O_EXCL BEFORE db.backup() runs, so
+      // there is never a moment where an unbound pathname holds the backup.
+      expect(reservedIno).toBeDefined();
+      expect(fs.statSync(result.path).ino).toBe(reservedIno);
+      expect(result.sizeBytes).toBeGreaterThan(0);
+    } finally {
+      persistence.close();
+    }
+  });
+
+  it('refuses a hostile partial substituted after db.backup() and before verification', async () => {
+    if (process.platform !== 'linux') return;
+
+    const root = testRoot();
+    const persistence = hostedPersistence(root);
+    const hostile = join(root, 'hostile-valid.sqlite');
+    createProbeDb(hostile, 'hostile');
+    const hostileBytes = readFileSync(hostile);
+    const backupRoot = join(root, 'backups');
+    const destination = join(backupRoot, 'reserved-proof.sqlite');
+
+    // The exact window the reviewer named: db.backup() has resolved, the
+    // partial exists, and verification has not opened anything yet.
+    const realBackup = persistence.db.backup.bind(persistence.db);
+    let substituted = false;
+    vi.spyOn(persistence.db, 'backup').mockImplementation((async (
+      partialPath: string,
+      options?: unknown,
+    ) => {
+      const progress = await (realBackup as any)(partialPath, options);
+      if (!substituted) {
+        substituted = true;
+        // Same-permission actor: unlink the real partial and drop a
+        // structurally valid SQLite image at the very same pathname.
+        const partialName = fs
+          .readdirSync(backupRoot)
+          .find((entry) => entry.includes('.partial-'));
+        expect(partialName).toBeDefined();
+        const partial = join(backupRoot, partialName!);
+        fs.renameSync(partial, join(root, 'stolen-partial.sqlite'));
+        fs.writeFileSync(partial, hostileBytes);
+      }
+      return progress;
+    }) as typeof persistence.db.backup);
+
+    try {
+      await expect(persistence.backup('reserved-proof.sqlite')).rejects.toThrow(
+        /partial pathname was substituted around the SQLite backup/,
+      );
+      expect(substituted).toBe(true);
+      expect(existsSync(destination)).toBe(false);
+      // Nothing hostile was ever published, and an unproven pathname is never
+      // deleted on our behalf either.
+      const published = fs
+        .readdirSync(backupRoot)
+        .filter((entry) => !entry.includes('.partial-'));
+      expect(published).toEqual([]);
+    } finally {
+      persistence.close();
+    }
+  });
+});
+
+describe('recovery proves the copied bytes are the verified source state', () => {
+  it('refuses an in-place source mutation applied after verification and before the copy', () => {
+    if (process.platform !== 'linux') return;
+
+    const root = testRoot('.hq-recovery-freeze-');
+    const source = join(root, 'source.sqlite');
+    const hostile = join(root, 'hostile.sqlite');
+    const destination = join(root, 'restored.sqlite');
+    createProbeDb(source, 'verified-original');
+    createProbeDb(hostile, 'hostile-in-place');
+    // A different length as well as different content, so the copy itself
+    // reads bytes that never passed verification.
+    const hostileBytes = Buffer.concat([readFileSync(hostile), Buffer.alloc(4096)]);
+
+    const realOpenSync = fs.openSync.bind(fs);
+    let mutated = false;
+    vi.spyOn(fs, 'openSync').mockImplementation(((candidate: unknown, flags: unknown, mode?: unknown) => {
+      if (!mutated && String(candidate) === destination) {
+        mutated = true;
+        // In place: the source keeps its inode, so the retained descriptor
+        // still points at exactly the object that passed quick_check.
+        const before = fs.statSync(source).ino;
+        fs.writeFileSync(source, hostileBytes);
+        expect(fs.statSync(source).ino).toBe(before);
+      }
+      return (realOpenSync as any)(candidate, flags, mode);
+    }) as any);
+
+    expect(() => restoreHqBackupToNewFile(source, destination)).toThrow(
+      /contents changed between integrity verification and the restore copy/,
+    );
+    expect(mutated).toBe(true);
+    expect(existsSync(destination)).toBe(false);
+  });
+
+  it('refuses an in-place source mutation applied during the copy', () => {
+    if (process.platform !== 'linux') return;
+
+    const root = testRoot('.hq-recovery-freeze-');
+    const source = join(root, 'source.sqlite');
+    const hostile = join(root, 'hostile.sqlite');
+    const destination = join(root, 'restored.sqlite');
+    createProbeDb(source, 'verified-original');
+    createProbeDb(hostile, 'hostile-mid-copy');
+    const hostileBytes = readFileSync(hostile);
+
+    // ftruncateSync runs after the last source read but still inside the copy,
+    // so the copied bytes match the verified state and ONLY the post-copy
+    // re-proof of the source can catch this.
+    const realFtruncateSync = fs.ftruncateSync.bind(fs);
+    let mutated = false;
+    vi.spyOn(fs, 'ftruncateSync').mockImplementation(((fd: number, len?: number) => {
+      if (!mutated) {
+        mutated = true;
+        const before = fs.statSync(source).ino;
+        fs.writeFileSync(source, hostileBytes);
+        expect(fs.statSync(source).ino).toBe(before);
+      }
+      return realFtruncateSync(fd, len);
+    }) as any);
+
+    expect(() => restoreHqBackupToNewFile(source, destination)).toThrow(
+      /contents changed during the restore copy/,
+    );
+    expect(mutated).toBe(true);
+    expect(existsSync(destination)).toBe(false);
+  });
+
+  it('still restores a stable source exactly', () => {
+    const root = testRoot('.hq-recovery-freeze-');
+    const source = join(root, 'source.sqlite');
+    const destination = join(root, 'restored.sqlite');
+    createProbeDb(source, 'stable-state');
+
+    const result = restoreHqBackupToNewFile(source, destination);
+    expect(result.sizeBytes).toBe(fs.statSync(source).size);
+    expect(readProbe(destination)).toBe('stable-state');
+    expect(readFileSync(destination).equals(readFileSync(source))).toBe(true);
+  });
+});
+
+describe('recovery commits the destination directory entry', () => {
+  it('fsyncs the destination parent directory after verification and before returning', () => {
+    const root = testRoot('.hq-recovery-dirsync-');
+    const source = join(root, 'source.sqlite');
+    const destination = join(root, 'restored.sqlite');
+    createProbeDb(source, 'directory-durability');
+
+    const realOpenSync = fs.openSync.bind(fs);
+    const realFsyncSync = fs.fsyncSync.bind(fs);
+    const fsynced: number[] = [];
+    let destinationFd: number | undefined;
+    let parentFd: number | undefined;
+
+    vi.spyOn(fs, 'openSync').mockImplementation(((candidate: unknown, flags: unknown, mode?: unknown) => {
+      const fd = (realOpenSync as any)(candidate, flags, mode);
+      if (String(candidate) === destination) destinationFd = fd;
+      if (String(candidate) === root) parentFd = fd;
+      return fd;
+    }) as any);
+    vi.spyOn(fs, 'fsyncSync').mockImplementation(((fd: number) => {
+      fsynced.push(fd);
+      return realFsyncSync(fd);
+    }) as any);
+
+    const result = restoreHqBackupToNewFile(source, destination);
+
+    expect(result.path).toBe(destination);
+    expect(destinationFd).toBeDefined();
+    expect(parentFd).toBeDefined();
+    expect(fsynced).toContain(destinationFd!);
+    expect(fsynced).toContain(parentFd!);
+    // The directory entry is committed last: after the restored inode is
+    // fsynced and after destination identity/integrity verification.
+    expect(fsynced.indexOf(parentFd!)).toBeGreaterThan(fsynced.indexOf(destinationFd!));
+    expect(fsynced[fsynced.length - 1]).toBe(parentFd!);
+  });
+});
