@@ -62,7 +62,10 @@ describe('Stage 3 verified backup publication', () => {
     const realLinkSync = fs.linkSync.bind(fs);
     let swapped = false;
     vi.spyOn(fs, 'linkSync').mockImplementation(((existingPath, newPath) => {
-      if (!swapped && String(newPath) === destination) {
+      // Hosted publication operates through /proc/self/fd/<backup-dir-fd>/...
+      // rather than the mutable backupRoot pathname. Trigger on the destination
+      // filename so the hostile swap really occurs between identity check/link.
+      if (!swapped && String(newPath).endsWith('/proof.sqlite')) {
         swapped = true;
         const partial = String(existingPath);
         fs.renameSync(partial, `${partial}.verified-hidden`);
