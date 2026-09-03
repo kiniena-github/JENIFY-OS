@@ -615,9 +615,12 @@ export function openHqPersistence(
     healthy: () => !closed && quickCheck(db),
     async backup(name?: string): Promise<HqBackupResult> {
       if (closed) throw new Error('HQ persistence is closed');
+
+      // Validate untrusted input before opening any descriptor-backed directory
+      // anchor. Rejected names therefore cannot leak one fd per request.
+      const filename = safeBackupName(name);
       const backupRoot = ensureBackupRoot(config);
       const backupAnchor = openAttestedBackupRoot(config, backupRoot);
-      const filename = safeBackupName(name);
       const destination = path.join(backupRoot, filename);
       const operationDestination = backupAnchor
         ? anchoredDirectoryChild(backupAnchor, filename)
@@ -668,14 +671,45 @@ export function openHqPersistence(
   return handle;
 }
 
+function copyExactFileDescriptor(sourceFd: number, destinationFd: number): void {
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  let position = 0;
+  while (true) {
+    const bytesRead = fs.readSync(sourceFd, buffer, 0, buffer.length, position);
+    if (bytesRead === 0) break;
+
+    let written = 0;
+    while (written < bytesRead) {
+      const bytesWritten = fs.writeSync(
+        destinationFd,
+        buffer,
+        written,
+        bytesRead - written,
+        position + written,
+      );
+      if (bytesWritten <= 0) throw new Error('HQ recovery could not write restored database bytes');
+      written += bytesWritten;
+    }
+    position += bytesRead;
+  }
+  fs.ftruncateSync(destinationFd, position);
+  fs.fsyncSync(destinationFd);
+}
+
 export function restoreHqBackupToNewFile(
   backupPath: string,
   destinationPath: string,
 ): HqBackupResult {
+  // Stage 3 recovery uses the same descriptor-backed identity model as hosted
+  // persistence. This prevents verification/copy and creation/verification races.
+  const procFdRoot = requireProcFdRoot();
   const source = path.resolve(backupPath);
   const destination = path.resolve(destinationPath);
-  if (!fs.existsSync(source) || !fs.statSync(source).isFile()) {
-    throw new Error('HQ backup does not exist or is not a regular file');
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+
+  const sourceEntry = lstatIfPresent(source);
+  if (!sourceEntry || sourceEntry.isSymbolicLink() || !sourceEntry.isFile()) {
+    throw new Error('HQ backup does not exist as a regular non-symlink file');
   }
   if (lstatIfPresent(destination)) {
     throw new Error('HQ recovery refuses to overwrite an existing database');
@@ -685,29 +719,48 @@ export function restoreHqBackupToNewFile(
     throw new Error('HQ recovery destination directory must already exist');
   }
 
-  const sourceDb = openHqDatabaseReadOnly(source);
-  const sourceHealthy = quickCheck(sourceDb);
-  sourceDb.close();
-  if (!sourceHealthy) throw new Error('HQ backup failed integrity check');
-
+  let sourceFd: number | undefined;
+  let destinationFd: number | undefined;
   let created: fs.Stats | null = null;
   try {
-    fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
-    created = fs.lstatSync(destination);
+    // Hold the exact source inode from before integrity verification through the
+    // final copy. A pathname replacement cannot change what is verified/copied.
+    sourceFd = fs.openSync(source, fs.constants.O_RDONLY | noFollow);
+    const sourceStat = fs.fstatSync(sourceFd);
+    if (!sourceStat.isFile()) throw new Error('HQ backup opened inode is not a regular file');
 
-    const restoredDb = openHqDatabaseReadOnly(destination);
+    const verifiedSourcePath = path.join(procFdRoot, String(sourceFd));
+    const sourceDb = openHqDatabaseReadOnly(verifiedSourcePath);
+    const sourceHealthy = quickCheck(sourceDb);
+    sourceDb.close();
+    if (!sourceHealthy) throw new Error('HQ backup failed integrity check');
+
+    // Capture ownership at the instant of exclusive creation. All bytes and the
+    // post-copy integrity check use this descriptor, not the mutable pathname.
+    destinationFd = fs.openSync(
+      destination,
+      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_RDWR | noFollow,
+      0o600,
+    );
+    created = fs.fstatSync(destinationFd);
+    if (!created.isFile()) throw new Error('HQ recovery destination is not a regular file');
+
+    copyExactFileDescriptor(sourceFd, destinationFd);
+
+    const verifiedDestinationPath = path.join(procFdRoot, String(destinationFd));
+    const restoredDb = openHqDatabaseReadOnly(verifiedDestinationPath);
     const restoredHealthy = quickCheck(restoredDb);
     restoredDb.close();
     if (!restoredHealthy) throw new Error('restored HQ database failed integrity check');
 
-    const current = fs.lstatSync(destination);
-    if (!sameFile(created, current)) {
+    const current = lstatIfPresent(destination);
+    if (!current || !sameFile(created, current)) {
       throw new Error('HQ recovery destination changed during verification');
     }
-    return { path: destination, sizeBytes: current.size };
+    return { path: destination, sizeBytes: created.size };
   } catch (error) {
-    // Only remove the exact inode created by THIS invocation. If COPYFILE_EXCL
-    // lost a race, or another actor replaced the path, their file is untouched.
+    // Remove only the exact inode created by THIS invocation. If another actor
+    // replaced the pathname, their file is never deleted.
     if (created) {
       try {
         const current = lstatIfPresent(destination);
@@ -717,5 +770,20 @@ export function restoreHqBackupToNewFile(
       }
     }
     throw error;
+  } finally {
+    if (destinationFd != null) {
+      try {
+        fs.closeSync(destinationFd);
+      } catch {
+        // Preserve the primary recovery result/error.
+      }
+    }
+    if (sourceFd != null) {
+      try {
+        fs.closeSync(sourceFd);
+      } catch {
+        // Preserve the primary recovery result/error.
+      }
+    }
   }
 }
