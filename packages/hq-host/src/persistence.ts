@@ -50,6 +50,14 @@ interface DurableDbAnchor {
   procFdRoot: string;
 }
 
+interface DurableDirectoryAnchor {
+  fd: number;
+  stat: fs.Stats;
+  mountId: number;
+  target: string;
+  procFdRoot: string;
+}
+
 type FdSnapshot = Map<number, fs.Stats>;
 
 function insideOrEqual(root: string, candidate: string): boolean {
@@ -106,6 +114,30 @@ function requireProcFdRoot(): string {
   return procFdRoot;
 }
 
+function procFdInfoPath(procFdRoot: string, fd: number): string {
+  return path.join(path.dirname(procFdRoot), 'fdinfo', String(fd));
+}
+
+/**
+ * Linux fdinfo exposes `mnt_id`, which distinguishes bind mounts even when they
+ * share the same backing device (`st_dev`). Stage 3 treats missing/unparseable
+ * mount identity as a fail-closed condition for hosted durability claims.
+ */
+function procFdMountId(procFdRoot: string, fd: number): number {
+  let info: string;
+  try {
+    info = fs.readFileSync(procFdInfoPath(procFdRoot, fd), 'utf8');
+  } catch {
+    throw new Error(`could not read mount identity for opened file descriptor ${fd}`);
+  }
+  const match = /^mnt_id:\s*(\d+)\s*$/m.exec(info);
+  const mountId = match ? Number(match[1]) : Number.NaN;
+  if (!Number.isSafeInteger(mountId) || mountId < 0) {
+    throw new Error(`could not parse mount identity for opened file descriptor ${fd}`);
+  }
+  return mountId;
+}
+
 function snapshotProcessFds(procFdRoot: string): FdSnapshot {
   const snapshot: FdSnapshot = new Map();
   for (const entry of fs.readdirSync(procFdRoot)) {
@@ -126,6 +158,59 @@ function procFdTarget(procFdRoot: string, fd: number): string {
     return fs.realpathSync(path.join(procFdRoot, String(fd)));
   } catch {
     throw new Error(`could not resolve opened file descriptor ${fd} during durable inode attestation`);
+  }
+}
+
+function openDirectoryAnchor(
+  directory: string,
+  procFdRoot: string,
+  label: string,
+): DurableDirectoryAnchor {
+  const directoryFlag = fs.constants.O_DIRECTORY ?? 0;
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  const fd = fs.openSync(directory, fs.constants.O_RDONLY | directoryFlag | noFollow);
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isDirectory()) throw new Error(`${label} is not an opened directory`);
+    return {
+      fd,
+      stat,
+      mountId: procFdMountId(procFdRoot, fd),
+      target: procFdTarget(procFdRoot, fd),
+      procFdRoot,
+    };
+  } catch (error) {
+    fs.closeSync(fd);
+    throw error;
+  }
+}
+
+function closeDirectoryAnchor(anchor: DurableDirectoryAnchor | undefined): void {
+  if (!anchor) return;
+  fs.closeSync(anchor.fd);
+}
+
+function openDurableRootAnchor(config: HqPersistenceConfig, procFdRoot: string): DurableDirectoryAnchor {
+  if (!config.durableRoot) throw new Error('durable root missing from durable-volume configuration');
+  const root = openDirectoryAnchor(config.durableRoot, procFdRoot, 'FACTORYOS_HQ_DURABLE_ROOT');
+  if (path.resolve(root.target) !== path.resolve(config.durableRoot)) {
+    closeDirectoryAnchor(root);
+    throw new Error('FACTORYOS_HQ_DURABLE_ROOT changed during mount attestation');
+  }
+  return root;
+}
+
+function assertSameDurableMount(
+  root: DurableDirectoryAnchor,
+  candidateStat: fs.Stats,
+  candidateMountId: number,
+  label: string,
+): void {
+  if (candidateStat.dev !== root.stat.dev) {
+    throw new Error(`${label} is on a different filesystem from FACTORYOS_HQ_DURABLE_ROOT`);
+  }
+  if (candidateMountId !== root.mountId) {
+    throw new Error(`${label} is on a different mount from FACTORYOS_HQ_DURABLE_ROOT`);
   }
 }
 
@@ -153,7 +238,7 @@ function openDurableDbAnchor(config: HqPersistenceConfig): DurableDbAnchor {
   }
   if (!entry.isFile()) throw new Error('hosted durable HQ database path is not a regular file');
 
-  const noFollow = fs.constants.O_NOFOLLOW;
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
   const fd = fs.openSync(config.dbPath, fs.constants.O_RDWR | noFollow);
   try {
     const stat = fs.fstatSync(fd);
@@ -163,27 +248,19 @@ function openDurableDbAnchor(config: HqPersistenceConfig): DurableDbAnchor {
       throw new Error('opened durable HQ database inode is outside FACTORYOS_HQ_DURABLE_ROOT');
     }
 
-    // Path containment alone is not durability evidence: a nested tmpfs,
-    // emptyDir, or other ephemeral mount can live textually under the durable
-    // root. Anchor the root itself by descriptor, then require the DB inode to
-    // live on the same filesystem device before SQLite is allowed to write.
-    const rootFd = fs.openSync(config.durableRoot, fs.constants.O_RDONLY);
+    // `st_dev` catches different filesystems; Linux `mnt_id` additionally
+    // catches same-device bind mounts. Both identities must match the descriptor
+    // for the attested durable root before SQLite is allowed to write anything.
+    const root = openDurableRootAnchor(config, procFdRoot);
     try {
-      const rootStat = fs.fstatSync(rootFd);
-      if (!rootStat.isDirectory()) {
-        throw new Error('FACTORYOS_HQ_DURABLE_ROOT no longer resolves to a directory');
-      }
-      const rootTarget = procFdTarget(procFdRoot, rootFd);
-      if (path.resolve(rootTarget) !== path.resolve(config.durableRoot)) {
-        throw new Error('FACTORYOS_HQ_DURABLE_ROOT changed during filesystem attestation');
-      }
-      if (stat.dev !== rootStat.dev) {
-        throw new Error(
-          'opened durable HQ database inode is on a different filesystem from FACTORYOS_HQ_DURABLE_ROOT',
-        );
-      }
+      assertSameDurableMount(
+        root,
+        stat,
+        procFdMountId(procFdRoot, fd),
+        'opened durable HQ database inode',
+      );
     } finally {
-      fs.closeSync(rootFd);
+      closeDirectoryAnchor(root);
     }
 
     return { fd, stat, procFdRoot };
@@ -233,24 +310,35 @@ function assertSqliteOpenedAnchoredDb(
     throw new Error('durable HQ database pathname resolved outside the attested root after open');
   }
 
-  let sqliteMainMatchesAnchor = false;
-  const after = snapshotProcessFds(anchor.procFdRoot);
-  for (const [fd, stat] of after) {
-    const previous = before.get(fd);
-    if (previous && sameOpenObject(previous, stat)) continue;
-    if (!stat.isFile()) continue;
+  const root = openDurableRootAnchor(config, anchor.procFdRoot);
+  try {
+    let sqliteMainMatchesAnchor = false;
+    const after = snapshotProcessFds(anchor.procFdRoot);
+    for (const [fd, stat] of after) {
+      const previous = before.get(fd);
+      if (previous && sameOpenObject(previous, stat)) continue;
+      if (!stat.isFile()) continue;
 
-    const target = procFdTarget(anchor.procFdRoot, fd);
-    if (!insideOrEqual(config.durableRoot, target)) {
-      throw new Error(`SQLite initialization opened a regular file outside the durable root: ${target}`);
+      const target = procFdTarget(anchor.procFdRoot, fd);
+      if (!insideOrEqual(config.durableRoot, target)) {
+        throw new Error(`SQLite initialization opened a regular file outside the durable root: ${target}`);
+      }
+      assertSameDurableMount(
+        root,
+        stat,
+        procFdMountId(anchor.procFdRoot, fd),
+        `SQLite initialization file ${target}`,
+      );
+      if (sameFile(anchor.stat, stat)) sqliteMainMatchesAnchor = true;
     }
-    if (sameFile(anchor.stat, stat)) sqliteMainMatchesAnchor = true;
-  }
 
-  if (!sqliteMainMatchesAnchor) {
-    throw new Error(
-      'could not prove SQLite opened the anchored durable HQ database inode; hosted HQ stays OFF',
-    );
+    if (!sqliteMainMatchesAnchor) {
+      throw new Error(
+        'could not prove SQLite opened the anchored durable HQ database inode; hosted HQ stays OFF',
+      );
+    }
+  } finally {
+    closeDirectoryAnchor(root);
   }
 }
 
@@ -382,6 +470,42 @@ function ensureBackupRoot(config: HqPersistenceConfig): string {
   return realBackupRoot;
 }
 
+function openAttestedBackupRoot(
+  config: HqPersistenceConfig,
+  realBackupRoot: string,
+): DurableDirectoryAnchor | undefined {
+  if (config.mode !== 'durable-volume') return undefined;
+  if (!config.durableRoot) throw new Error('durable root missing from durable-volume configuration');
+
+  const procFdRoot = requireProcFdRoot();
+  const root = openDurableRootAnchor(config, procFdRoot);
+  let backup: DurableDirectoryAnchor | undefined;
+  try {
+    backup = openDirectoryAnchor(realBackupRoot, procFdRoot, 'HQ backup directory');
+    if (!insideOrEqual(config.durableRoot, backup.target)) {
+      throw new Error('HQ backup directory descriptor resolved outside the durable root');
+    }
+    assertSameDurableMount(root, backup.stat, backup.mountId, 'HQ backup directory');
+    return backup;
+  } catch (error) {
+    closeDirectoryAnchor(backup);
+    throw error;
+  } finally {
+    closeDirectoryAnchor(root);
+  }
+}
+
+function anchoredDirectoryChild(anchor: DurableDirectoryAnchor, filename: string): string {
+  return path.join(anchor.procFdRoot, String(anchor.fd), filename);
+}
+
+function assertDirectoryPathStillAnchored(anchor: DurableDirectoryAnchor, directory: string): void {
+  const current = fs.statSync(directory);
+  if (!sameFile(anchor.stat, current)) {
+    throw new Error('HQ backup directory changed during backup creation');
+  }
+}
+
 function safeBackupName(name: string | undefined): string {
   if (name != null) {
     const trimmed = name.trim();
@@ -492,23 +616,38 @@ export function openHqPersistence(
     async backup(name?: string): Promise<HqBackupResult> {
       if (closed) throw new Error('HQ persistence is closed');
       const backupRoot = ensureBackupRoot(config);
+      const backupAnchor = openAttestedBackupRoot(config, backupRoot);
       const filename = safeBackupName(name);
       const destination = path.join(backupRoot, filename);
-      if (lstatIfPresent(destination)) throw new Error(`HQ backup already exists: ${filename}`);
+      const operationDestination = backupAnchor
+        ? anchoredDirectoryChild(backupAnchor, filename)
+        : destination;
+      const partialFilename = `${filename}.partial-${randomUUID()}`;
+      const partial = backupAnchor
+        ? anchoredDirectoryChild(backupAnchor, partialFilename)
+        : path.join(backupRoot, partialFilename);
 
-      checkpoint();
-      const partial = `${destination}.partial-${randomUUID()}`;
       try {
+        if (lstatIfPresent(operationDestination)) {
+          throw new Error(`HQ backup already exists: ${filename}`);
+        }
+
+        checkpoint();
         await db.backup(partial);
         const check = openHqDatabaseReadOnly(partial);
         const valid = quickCheck(check);
         check.close();
         if (!valid) throw new Error('backup integrity check failed');
-        publishNoReplace(partial, destination);
-        return { path: destination, sizeBytes: fs.statSync(destination).size };
+
+        if (backupAnchor) assertDirectoryPathStillAnchored(backupAnchor, backupRoot);
+        publishNoReplace(partial, operationDestination);
+        if (backupAnchor) assertDirectoryPathStillAnchored(backupAnchor, backupRoot);
+        return { path: destination, sizeBytes: fs.statSync(operationDestination).size };
       } catch (error) {
         fs.rmSync(partial, { force: true });
         throw error;
+      } finally {
+        closeDirectoryAnchor(backupAnchor);
       }
     },
     close(): void {
