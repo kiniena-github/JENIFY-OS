@@ -99,9 +99,14 @@ function sameOpenObject(a: fs.Stats, b: fs.Stats): boolean {
   return sameFile(a, b) && a.mode === b.mode && a.rdev === b.rdev;
 }
 
-function requireProcFdRoot(): string {
+function availableProcFdRoot(): string | undefined {
   const procFdRoot = '/proc/self/fd';
-  if (process.platform !== 'linux' || !fs.existsSync(procFdRoot)) {
+  return process.platform === 'linux' && fs.existsSync(procFdRoot) ? procFdRoot : undefined;
+}
+
+function requireProcFdRoot(): string {
+  const procFdRoot = availableProcFdRoot();
+  if (!procFdRoot) {
     throw new Error(
       'hosted durable HQ requires Linux /proc/self/fd for opened-inode attestation; local mode is unaffected',
     );
@@ -471,12 +476,43 @@ function safeBackupName(name: string | undefined): string {
   return `hq-${new Date().toISOString().replace(/[:.]/g, '-')}.sqlite`;
 }
 
-function publishNoReplace(partial: string, destination: string): void {
-  fs.linkSync(partial, destination);
+function unlinkIfSame(candidate: string, expected: fs.Stats): void {
   try {
-    fs.unlinkSync(partial);
+    const current = lstatIfPresent(candidate);
+    if (current && !current.isSymbolicLink() && sameFile(current, expected)) fs.unlinkSync(candidate);
   } catch {
-    // The verified destination is already safely published.
+    // Never delete a path whose identity cannot be proven.
+  }
+}
+
+function publishVerifiedNoReplace(
+  partial: string,
+  destination: string,
+  verifiedPartial: fs.Stats,
+): fs.Stats {
+  const beforeLink = lstatIfPresent(partial);
+  if (!beforeLink || beforeLink.isSymbolicLink() || !sameFile(beforeLink, verifiedPartial)) {
+    throw new Error('HQ backup partial changed after integrity verification');
+  }
+
+  fs.linkSync(partial, destination);
+  let linked: fs.Stats | null = null;
+  try {
+    linked = fs.lstatSync(destination);
+    if (linked.isSymbolicLink() || !sameFile(linked, verifiedPartial)) {
+      throw new Error('HQ backup publication did not link the verified partial inode');
+    }
+
+    unlinkIfSame(partial, verifiedPartial);
+
+    const finalStat = lstatIfPresent(destination);
+    if (!finalStat || finalStat.isSymbolicLink() || !sameFile(finalStat, verifiedPartial)) {
+      throw new Error('HQ backup destination changed during publication');
+    }
+    return finalStat;
+  } catch (error) {
+    if (linked) unlinkIfSame(destination, linked);
+    throw error;
   }
 }
 
@@ -572,6 +608,8 @@ export function openHqPersistence(
       const partial = backupAnchor
         ? anchoredDirectoryChild(backupAnchor, partialFilename)
         : path.join(backupRoot, partialFilename);
+      let partialFd: number | undefined;
+      let verifiedPartial: fs.Stats | undefined;
 
       try {
         if (lstatIfPresent(operationDestination)) {
@@ -580,19 +618,51 @@ export function openHqPersistence(
 
         checkpoint();
         await db.backup(partial);
-        const check = openHqDatabaseReadOnly(partial);
+
+        const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+        partialFd = fs.openSync(partial, fs.constants.O_RDWR | noFollow);
+        verifiedPartial = fs.fstatSync(partialFd);
+        if (!verifiedPartial.isFile()) throw new Error('HQ backup partial is not a regular file');
+
+        const verificationPath = backupAnchor
+          ? path.join(backupAnchor.procFdRoot, String(partialFd))
+          : partial;
+        if (!backupAnchor) {
+          const current = lstatIfPresent(partial);
+          if (!current || current.isSymbolicLink() || !sameFile(current, verifiedPartial)) {
+            throw new Error('HQ backup partial changed before integrity verification');
+          }
+        }
+        const check = openHqDatabaseReadOnly(verificationPath);
         const valid = quickCheck(check);
         check.close();
         if (!valid) throw new Error('backup integrity check failed');
+        if (!backupAnchor) {
+          const current = lstatIfPresent(partial);
+          if (!current || current.isSymbolicLink() || !sameFile(current, verifiedPartial)) {
+            throw new Error('HQ backup partial changed during integrity verification');
+          }
+        }
 
+        fs.fsyncSync(partialFd);
         if (backupAnchor) assertDirectoryPathStillAnchored(backupAnchor, backupRoot);
-        publishNoReplace(partial, operationDestination);
-        if (backupAnchor) assertDirectoryPathStillAnchored(backupAnchor, backupRoot);
-        return { path: destination, sizeBytes: fs.statSync(operationDestination).size };
+        const published = publishVerifiedNoReplace(partial, operationDestination, verifiedPartial);
+        if (backupAnchor) {
+          assertDirectoryPathStillAnchored(backupAnchor, backupRoot);
+          fs.fsyncSync(backupAnchor.fd);
+        }
+        return { path: destination, sizeBytes: published.size };
       } catch (error) {
-        fs.rmSync(partial, { force: true });
+        if (verifiedPartial) unlinkIfSame(partial, verifiedPartial);
         throw error;
       } finally {
+        if (partialFd != null) {
+          try {
+            fs.closeSync(partialFd);
+          } catch {
+            // Preserve the primary backup result/error.
+          }
+        }
         closeDirectoryAnchor(backupAnchor);
       }
     },
@@ -639,11 +709,39 @@ function copyExactFileDescriptor(sourceFd: number, destinationFd: number): void 
   fs.fsyncSync(destinationFd);
 }
 
+function verifyOpenRecoveryFile(
+  fd: number,
+  fallbackPath: string,
+  expected: fs.Stats,
+  procFdRoot: string | undefined,
+  label: string,
+): void {
+  const verificationPath = procFdRoot ? path.join(procFdRoot, String(fd)) : fallbackPath;
+  if (!procFdRoot) {
+    const before = lstatIfPresent(fallbackPath);
+    if (!before || before.isSymbolicLink() || !sameFile(before, expected)) {
+      throw new Error(`${label} pathname changed before integrity verification`);
+    }
+  }
+
+  const check = openHqDatabaseReadOnly(verificationPath);
+  const healthy = quickCheck(check);
+  check.close();
+  if (!healthy) throw new Error(`${label} failed integrity check`);
+
+  if (!procFdRoot) {
+    const after = lstatIfPresent(fallbackPath);
+    if (!after || after.isSymbolicLink() || !sameFile(after, expected)) {
+      throw new Error(`${label} pathname changed during integrity verification`);
+    }
+  }
+}
+
 export function restoreHqBackupToNewFile(
   backupPath: string,
   destinationPath: string,
 ): HqBackupResult {
-  const procFdRoot = requireProcFdRoot();
+  const procFdRoot = availableProcFdRoot();
   const source = path.resolve(backupPath);
   const destination = path.resolve(destinationPath);
   const noFollow = fs.constants.O_NOFOLLOW ?? 0;
@@ -668,11 +766,7 @@ export function restoreHqBackupToNewFile(
     const sourceStat = fs.fstatSync(sourceFd);
     if (!sourceStat.isFile()) throw new Error('HQ backup opened inode is not a regular file');
 
-    const verifiedSourcePath = path.join(procFdRoot, String(sourceFd));
-    const sourceDb = openHqDatabaseReadOnly(verifiedSourcePath);
-    const sourceHealthy = quickCheck(sourceDb);
-    sourceDb.close();
-    if (!sourceHealthy) throw new Error('HQ backup failed integrity check');
+    verifyOpenRecoveryFile(sourceFd, source, sourceStat, procFdRoot, 'HQ backup');
 
     destinationFd = fs.openSync(
       destination,
@@ -683,15 +777,16 @@ export function restoreHqBackupToNewFile(
     if (!created.isFile()) throw new Error('HQ recovery destination is not a regular file');
 
     copyExactFileDescriptor(sourceFd, destinationFd);
-
-    const verifiedDestinationPath = path.join(procFdRoot, String(destinationFd));
-    const restoredDb = openHqDatabaseReadOnly(verifiedDestinationPath);
-    const restoredHealthy = quickCheck(restoredDb);
-    restoredDb.close();
-    if (!restoredHealthy) throw new Error('restored HQ database failed integrity check');
+    verifyOpenRecoveryFile(
+      destinationFd,
+      destination,
+      created,
+      procFdRoot,
+      'restored HQ database',
+    );
 
     const current = lstatIfPresent(destination);
-    if (!current || !sameFile(created, current)) {
+    if (!current || current.isSymbolicLink() || !sameFile(created, current)) {
       throw new Error('HQ recovery destination changed during verification');
     }
     const finalStat = fs.fstatSync(destinationFd);
@@ -700,7 +795,9 @@ export function restoreHqBackupToNewFile(
     if (created) {
       try {
         const current = lstatIfPresent(destination);
-        if (current && sameFile(created, current)) fs.rmSync(destination, { force: true });
+        if (current && !current.isSymbolicLink() && sameFile(created, current)) {
+          fs.rmSync(destination, { force: true });
+        }
       } catch {
         // Never trade a recovery failure for deleting an unproven path.
       }
