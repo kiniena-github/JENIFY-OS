@@ -26,9 +26,24 @@ function durableRoot(): string {
   return root;
 }
 
+function entryExists(candidate: string): boolean {
+  try {
+    lstatSync(candidate);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
 function hostedEnv(root: string): Record<string, string> {
+  const dbPath = join(root, 'hq.sqlite');
+  // Hosted Stage 3 deliberately refuses to create the DB through a raceable
+  // pathname. The mounted-volume initializer/operator pre-creates the regular
+  // file; SQLite then owns its contents/schema. Never follow a dangling link.
+  if (!entryExists(dbPath)) writeFileSync(dbPath, '');
   return {
-    FACTORYOS_HQ_DB: join(root, 'hq.sqlite'),
+    FACTORYOS_HQ_DB: dbPath,
     FACTORYOS_HQ_RUNTIME: 'hosted',
     FACTORYOS_HQ_PERSISTENCE: 'durable-volume',
     FACTORYOS_HQ_DURABLE_ROOT: root,
@@ -77,6 +92,24 @@ describe('Stage 3 hosted persistence configuration', () => {
     expect(logs.join('\n')).toContain('must live inside FACTORYOS_HQ_DURABLE_ROOT');
   });
 
+  it('refuses a missing hosted DB instead of creating through an unpinned pathname', () => {
+    const root = durableRoot();
+    const logs: string[] = [];
+    expect(
+      resolveHqPersistenceConfig(
+        {
+          FACTORYOS_HQ_DB: join(root, 'hq.sqlite'),
+          FACTORYOS_HQ_RUNTIME: 'hosted',
+          FACTORYOS_HQ_PERSISTENCE: 'durable-volume',
+          FACTORYOS_HQ_DURABLE_ROOT: root,
+        },
+        (line) => logs.push(line),
+      ),
+    ).toBeNull();
+    expect(logs.join('\n')).toContain('must already exist as a regular file');
+    expect(existsSync(join(root, 'hq.sqlite'))).toBe(false);
+  });
+
   it('refuses a dangling DB symlink before SQLite can create its outside target', () => {
     const root = durableRoot();
     const outsideRoot = durableRoot();
@@ -86,8 +119,20 @@ describe('Stage 3 hosted persistence configuration', () => {
 
     const logs: string[] = [];
     expect(resolveHqPersistenceConfig(hostedEnv(root), (line) => logs.push(line))).toBeNull();
-    expect(logs.join('\n')).toContain('dangling/unresolvable symlink');
+    expect(logs.join('\n')).toContain('must not be a symbolic link');
     expect(existsSync(outsideTarget)).toBe(false);
+  });
+
+  it('also refuses a valid final DB symlink inside the durable root', () => {
+    const root = durableRoot();
+    const target = join(root, 'real.sqlite');
+    writeFileSync(target, '');
+    const dbLink = join(root, 'hq.sqlite');
+    if (!trySymlink(target, dbLink)) return;
+
+    const logs: string[] = [];
+    expect(resolveHqPersistenceConfig(hostedEnv(root), (line) => logs.push(line))).toBeNull();
+    expect(logs.join('\n')).toContain('must not be a symbolic link');
   });
 
   it('preserves old local-file behavior when Stage 3 variables are absent', () => {
@@ -99,15 +144,23 @@ describe('Stage 3 hosted persistence configuration', () => {
 });
 
 describe('Stage 3 durable SQLite adapter', () => {
-  it('boots only with the required effective WAL/FULL SQLite modes', () => {
+  it('boots only with the required effective WAL/FULL SQLite modes and inode attestation', () => {
     const root = durableRoot();
-    const persistence = openHqPersistence(hostedEnv(root), () => {})!;
-    expect(String(persistence.db.pragma('journal_mode', { simple: true })).toLowerCase()).toBe('wal');
-    expect(Number(persistence.db.pragma('synchronous', { simple: true }))).toBe(2);
-    persistence.close();
+    const persistence = openHqPersistence(hostedEnv(root), () => {});
+    if (process.platform !== 'linux') {
+      // Hosted Stage 3 currently fails closed where descriptor-backed procfs
+      // attestation is unavailable. Local/workstation mode remains portable.
+      expect(persistence).toBeNull();
+      return;
+    }
+    expect(persistence).not.toBeNull();
+    expect(String(persistence!.db.pragma('journal_mode', { simple: true })).toLowerCase()).toBe('wal');
+    expect(Number(persistence!.db.pragma('synchronous', { simple: true }))).toBe(2);
+    persistence!.close();
   });
 
   it('survives a full close/reopen with canonical HQ state intact', () => {
+    if (process.platform !== 'linux') return;
     const root = durableRoot();
     const env = hostedEnv(root);
 
@@ -133,6 +186,7 @@ describe('Stage 3 durable SQLite adapter', () => {
   });
 
   it('keeps idempotency and lease/fence truth after restart', () => {
+    if (process.platform !== 'linux') return;
     const root = durableRoot();
     const env = hostedEnv(root);
     const first = openHqPersistence(env, () => {})!;
@@ -173,6 +227,7 @@ describe('Stage 3 durable SQLite adapter', () => {
   });
 
   it('publishes only one backup when two callers race for the same name', async () => {
+    if (process.platform !== 'linux') return;
     const root = durableRoot();
     const persistence = openHqPersistence(hostedEnv(root), () => {})!;
     const results = await Promise.allSettled([
@@ -186,6 +241,7 @@ describe('Stage 3 durable SQLite adapter', () => {
   });
 
   it('creates an integrity-checked backup and restores only into a new file', async () => {
+    if (process.platform !== 'linux') return;
     const root = durableRoot();
     const env = hostedEnv(root);
     const persistence = openHqPersistence(env, () => {})!;
@@ -218,6 +274,7 @@ describe('Stage 3 durable SQLite adapter', () => {
   });
 
   it('never removes an existing recovery destination', async () => {
+    if (process.platform !== 'linux') return;
     const root = durableRoot();
     const persistence = openHqPersistence(hostedEnv(root), () => {})!;
     const backup = await persistence.backup('recovery-source.sqlite');
@@ -230,6 +287,7 @@ describe('Stage 3 durable SQLite adapter', () => {
   });
 
   it('treats a dangling recovery destination symlink as existing and preserves it', async () => {
+    if (process.platform !== 'linux') return;
     const root = durableRoot();
     const outsideRoot = durableRoot();
     const persistence = openHqPersistence(hostedEnv(root), () => {})!;
