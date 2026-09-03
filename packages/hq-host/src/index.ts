@@ -36,6 +36,26 @@ export {
   type HqRuntimeMode,
 } from './persistence.js';
 
+/**
+ * Stage 3 durable-filesystem policy. Exported so the allow/refuse decision is
+ * inspectable and deterministically testable on its own, without needing a real
+ * privileged mount.
+ */
+export {
+  absoluteFilesystemRefusal,
+  classifyDurableFilesystem,
+  parseAttestedFilesystems,
+  parseMountInfo,
+  KERNEL_VIRTUAL_FILESYSTEMS,
+  KNOWN_EPHEMERAL_FILESYSTEMS,
+  KNOWN_PERSISTENT_FILESYSTEMS,
+  UNSUPPORTED_SHARED_FILESYSTEMS,
+  type AttestedFilesystemsResult,
+  type DurableFilesystemRefusal,
+  type DurableFilesystemVerdict,
+  type MountBoundary,
+} from './durable-filesystem.js';
+
 export type { HeadquarterSiteOptions } from './routes.js';
 
 /** A-4: shared Jenify identity, separate host-only HQ session. */

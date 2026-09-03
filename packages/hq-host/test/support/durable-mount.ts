@@ -13,6 +13,13 @@
  *
  * The negative case (an unattested ordinary directory is refused) is proven
  * WITHOUT these helpers, against the real mount table.
+ *
+ * The synthetic entry declares a PERMITTED PERSISTENT filesystem class (`ext4`
+ * on a block-device-shaped source) because that is what a real hosted durable
+ * volume looks like. It used to declare `tmpfs`, which taught the suite that an
+ * ephemeral filesystem is acceptable durable storage — the exact defect the
+ * filesystem-class gate now refuses. `filesystemType` is only overridden by the
+ * tests that deliberately synthesize a REFUSED filesystem.
  */
 
 import fs from 'node:fs';
@@ -31,6 +38,14 @@ function encodeMountInfoField(value: string): string {
     .replace(/ /g, '\\040')
     .replace(/\t/g, '\\011')
     .replace(/\n/g, '\\012');
+}
+
+export interface SyntheticMountOptions {
+  /** Declared filesystem type. Defaults to the permitted persistent class `ext4`. */
+  filesystemType?: string;
+  mountSource?: string;
+  mountOptions?: string;
+  superOptions?: string;
 }
 
 /**
@@ -67,11 +82,21 @@ function owningMountId(mountInfo: string, target: string): number {
  * test: it starts from whatever the current `fs.readFileSync` returns for the
  * mount table, which already includes any previously appended synthetic lines.
  */
-export function syntheticMountInfoFor(root: string, read: typeof fs.readFileSync = fs.readFileSync): string {
+export function syntheticMountInfoFor(
+  root: string,
+  read: typeof fs.readFileSync = fs.readFileSync,
+  options: SyntheticMountOptions = {},
+): string {
   const base = read('/proc/self/mountinfo', 'utf8') as string;
   const realRoot = fs.realpathSync(root);
   const mountId = owningMountId(base, realRoot);
-  const line = `${mountId} 1 0:0 / ${encodeMountInfoField(realRoot)} rw,relatime shared:1 - tmpfs synthetic rw`;
+  const filesystemType = options.filesystemType ?? 'ext4';
+  const mountSource = options.mountSource ?? '/dev/synthetic-durable';
+  const mountOptions = options.mountOptions ?? 'rw,relatime';
+  const superOptions = options.superOptions ?? 'rw';
+  const line =
+    `${mountId} 1 0:0 / ${encodeMountInfoField(realRoot)} ${mountOptions} shared:1 - ` +
+    `${filesystemType} ${encodeMountInfoField(mountSource)} ${superOptions}`;
   return `${base.replace(/\n?$/, '\n')}${line}\n`;
 }
 
@@ -83,9 +108,9 @@ export function syntheticMountInfoFor(root: string, read: typeof fs.readFileSync
  * composes with a test that also stubs readFileSync as long as this is called
  * last. Cleaned up by `vi.restoreAllMocks()`.
  */
-export function attestDurableMountBoundary(root: string): void {
+export function attestDurableMountBoundary(root: string, options: SyntheticMountOptions = {}): void {
   const previousRead = fs.readFileSync.bind(fs) as typeof fs.readFileSync;
-  const synthetic = syntheticMountInfoFor(root, previousRead);
+  const synthetic = syntheticMountInfoFor(root, previousRead, options);
   vi.spyOn(fs, 'readFileSync').mockImplementation(((candidate: unknown, options: unknown) => {
     if (String(candidate) === '/proc/self/mountinfo') return synthetic as never;
     return previousRead(candidate as never, options as never) as never;

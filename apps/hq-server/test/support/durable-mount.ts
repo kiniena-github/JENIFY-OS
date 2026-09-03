@@ -6,6 +6,12 @@
  * without privileges CI lacks, so this presents an ordinary test directory to
  * that probe as though a durable volume were mounted at it — and nothing else;
  * every real device/mount-id/inode cross-check still runs.
+ *
+ * The synthetic entry declares a PERMITTED PERSISTENT filesystem class (`ext4`
+ * on a block-device-shaped source), matching what a real hosted durable volume
+ * looks like. It used to declare `tmpfs`, which taught the suite that ephemeral
+ * storage is acceptable — now refused by the filesystem-class gate in
+ * `@factoryos/hq-host`.
  */
 
 import fs from 'node:fs';
@@ -47,12 +53,18 @@ function owningMountId(mountInfo: string, target: string): number {
   return best.id;
 }
 
-export function attestDurableMountBoundary(root: string): void {
+export function attestDurableMountBoundary(
+  root: string,
+  filesystemType = 'ext4',
+  mountSource = '/dev/synthetic-durable',
+): void {
   const previousRead = fs.readFileSync.bind(fs) as typeof fs.readFileSync;
   const base = previousRead('/proc/self/mountinfo', 'utf8') as string;
   const realRoot = fs.realpathSync(root);
   const mountId = owningMountId(base, realRoot);
-  const line = `${mountId} 1 0:0 / ${encodeMountInfoField(realRoot)} rw,relatime shared:1 - tmpfs synthetic rw`;
+  const line =
+    `${mountId} 1 0:0 / ${encodeMountInfoField(realRoot)} rw,relatime shared:1 - ` +
+    `${filesystemType} ${encodeMountInfoField(mountSource)} rw`;
   const synthetic = `${base.replace(/\n?$/, '\n')}${line}\n`;
   vi.spyOn(fs, 'readFileSync').mockImplementation(((candidate: unknown, options: unknown) => {
     if (String(candidate) === '/proc/self/mountinfo') return synthetic as never;

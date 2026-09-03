@@ -58,7 +58,17 @@ Optional:
 
 ```text
 FACTORYOS_HQ_BACKUP_DIR=/mounted/durable-volume/backups
+FACTORYOS_HQ_DURABLE_FS_ALLOW=<comma-separated filesystem types>
 ```
+
+`FACTORYOS_HQ_DURABLE_FS_ALLOW` is a narrow operator override for the durable
+filesystem-class gate (see *Durable mount attestation* below). It can only
+promote an otherwise-**unclassified** filesystem type into the allowed set; it
+can never attest a known-ephemeral (`tmpfs`, `ramfs`, overlay, …), kernel-virtual,
+or unsupported network/clustered/FUSE/passthrough filesystem, and a malformed or
+wildcard value fails the boot closed. When set, the attested types are printed to
+the boot log so the widening is always reviewable. It is unused in local-file
+mode.
 
 The hosted database file itself must be pre-created as a **regular file** on the mounted durable volume before HQ starts. Stage 3 deliberately does not create a missing hosted DB through a pathname that could be swapped during startup. Final-component DB symlinks are refused even when they currently resolve inside the durable root.
 
@@ -71,6 +81,12 @@ Hosted boot fails closed when:
 - the configured durable root is not itself a mounted-volume boundary — an
   ordinary directory of the same name, present in the image/container but with
   no volume mounted at it, is refused (see *Durable mount attestation* below);
+- the volume mounted at the durable root is on a non-persistent filesystem —
+  `tmpfs`, `ramfs`, a container overlay/ephemeral root, a kernel-virtual
+  filesystem, or a read-only image filesystem is refused even though it is a
+  genuine mount boundary; an unrecognized filesystem is also refused unless the
+  operator attests it via `FACTORYOS_HQ_DURABLE_FS_ALLOW` (see *Durable mount
+  attestation* below);
 - the durable root is relative;
 - the database path is relative;
 - the database file is missing instead of pre-created;
@@ -124,6 +140,41 @@ off instead of running on ephemeral storage. This is provider-neutral — it
 inspects kernel mount information, never a cloud/provider service — and the
 configured root must be the mount point itself, not a subdirectory of a mount.
 Local/workstation mode does not perform mount attestation and stays portable.
+
+**Being a mount boundary is necessary but not sufficient.** `tmpfs`, `ramfs`, a
+container overlay/ephemeral root and the kernel's virtual filesystems are all
+genuine mount boundaries whose contents disappear on reboot or on the next
+workload replacement — and each has a real mount identity, so it passes every
+same-device/same-mount cross-check. A gate that stopped at "is a mount boundary"
+would let canonical HQ state boot onto storage that later evaporates. The mount
+table also carries the filesystem type and source of each entry; the earlier
+parser discarded everything after the mountinfo `-` separator, which is exactly
+what left that hole open.
+
+Hosted durable mode therefore also evaluates the attested entry's filesystem
+class, under a deliberately **conservative allow/refuse policy** (there is no
+provider-neutral positive proof that a mount is backed by persistent media — the
+kernel exposes filesystem identity, not durability):
+
+- a small allow-list of block-backed local POSIX filesystems (ext2/3/4, xfs,
+  btrfs, zfs, f2fs, …) — the class Stage 3's WAL + `synchronous=FULL` SQLite
+  durability argument was reasoned about;
+- absolute refusal of known-ephemeral filesystems (`tmpfs`, `ramfs`, overlay,
+  squashfs, zram, …), kernel-virtual filesystems (proc, sysfs, cgroup, …), and
+  network/clustered/FUSE/paravirtual passthrough filesystems (nfs, cifs, ceph,
+  9p, virtiofs, fuse.*, …) whose locking/fsync semantics are a separate
+  architecture decision, and of any read-only mount;
+- refusal of everything else as **unclassified** — "unknown" must never read as
+  "durable".
+
+The only widening is `FACTORYOS_HQ_DURABLE_FS_ALLOW`, a narrow operator
+attestation that can move an *unclassified* filesystem type into the allowed set.
+It can never re-classify a known-ephemeral, kernel-virtual or unsupported shared
+filesystem — those refusals outrank it — so the default gate cannot be silently
+weakened by configuration; a wildcard or malformed value fails closed, and any
+attested types are printed to the boot log. This is not a vendor/provider
+selection; it is an OS-level operator statement about a mount the operator
+controls.
 
 ## Durability and concurrency
 
@@ -196,6 +247,7 @@ Switching a live deployment from its current database to a restored database is 
 
 - hosted mode refuses ephemeral/local-file storage;
 - hosted mode refuses an ordinary directory masquerading as the durable root when no volume is mounted there, and accepts a correctly attested mount;
+- hosted mode refuses an ephemeral filesystem (`tmpfs`/overlay/…) mounted exactly at the durable root even when its mount identity matches, refuses read-only and unclassified filesystems, and accepts a permitted persistent filesystem; the operator attestation widens only the unclassified case and can never attest a known-ephemeral/virtual/unsupported filesystem;
 - hosted mode refuses missing/symlink DB entries and requires opened-inode attestation;
 - a first backup into a newly created backup directory durably commits the new directory link before success, while an existing backup directory does no extra directory work;
 - a path swap after descriptor anchoring cannot redirect DDL/migrations/WAL writes to the replacement target;

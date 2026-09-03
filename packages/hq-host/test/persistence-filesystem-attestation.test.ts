@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { openHqPersistence } from '../src/persistence.js';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { openHqPersistence, resolveHqPersistenceConfig } from '../src/persistence.js';
+import { parseMountInfo } from '../src/durable-filesystem.js';
 import { attestDurableMountBoundary, syntheticMountInfoFor } from './support/durable-mount.js';
 
 const cleanup: string[] = [];
@@ -12,14 +13,37 @@ afterEach(() => {
   for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function makeHostedFixture(prefix: string) {
-  const root = mkdtempSync(join(process.cwd(), prefix));
+function makeHostedFixture(prefix: string, base: string = process.cwd()) {
+  const root = mkdtempSync(join(base, prefix));
   cleanup.push(root);
   const dataDir = join(root, 'data');
   mkdirSync(dataDir);
   const dbPath = join(dataDir, 'hq.sqlite');
   writeFileSync(dbPath, '');
   return { root, dbPath, backupRoot: join(root, 'backups') };
+}
+
+/**
+ * A REAL ephemeral mount to point the durable gate at, with no mount-table
+ * simulation whatsoever: `/dev/shm` is a genuine `tmpfs` mounted exactly at its
+ * own path on an ordinary Linux host. `undefined` when this host does not offer
+ * one in usable form, in which case the synthetic-tmpfs case below still proves
+ * the refusal deterministically.
+ */
+function realEphemeralMountPoint(): string | undefined {
+  if (process.platform !== 'linux') return undefined;
+  const candidate = '/dev/shm';
+  try {
+    const real = fs.realpathSync(candidate);
+    const mounted = parseMountInfo(readFileSync('/proc/self/mountinfo', 'utf8')).some(
+      (boundary) => resolve(boundary.mountPoint) === real && boundary.filesystemType === 'tmpfs',
+    );
+    if (!mounted) return undefined;
+    fs.accessSync(real, fs.constants.W_OK);
+    return real;
+  } catch {
+    return undefined;
+  }
 }
 
 function bumpMountId(info: string): string {
@@ -152,6 +176,197 @@ describe('hosted durable mount-boundary attestation', () => {
 
     expect(persistence).toBeNull();
     expect(logs.join('\n')).toContain('different mount from FACTORYOS_HQ_DURABLE_ROOT');
+  });
+
+  it('refuses a REAL mounted tmpfs as the durable root, against the real mount table', async () => {
+    const ephemeralMount = realEphemeralMountPoint();
+    if (!ephemeralMount) return;
+
+    // No stubbing at all: a real tmpfs, mounted exactly at its own path, with a
+    // real matching mount identity. It satisfies every mount-boundary check and
+    // must still be refused, because its contents do not survive workload
+    // replacement.
+    const { dbPath } = makeHostedFixture('.hq-real-tmpfs-root-', ephemeralMount);
+
+    const logs: string[] = [];
+    const persistence = openHqPersistence(
+      {
+        FACTORYOS_HQ_DB: dbPath,
+        FACTORYOS_HQ_RUNTIME: 'hosted',
+        FACTORYOS_HQ_PERSISTENCE: 'durable-volume',
+        FACTORYOS_HQ_DURABLE_ROOT: ephemeralMount,
+      },
+      (line) => logs.push(line),
+    );
+
+    expect(persistence).toBeNull();
+    expect(logs.join('\n')).toContain('cannot be attested as durable');
+    expect(logs.join('\n')).toContain('tmpfs');
+  });
+
+  it('refuses a mounted tmpfs whose mount identity matches the opened root descriptor', () => {
+    if (process.platform !== 'linux') return;
+
+    // The exact hostile shape the previous gate accepted: a valid mount boundary
+    // at the configured root, correct mount identity, ephemeral filesystem.
+    const { root, dbPath } = makeHostedFixture('.hq-synthetic-tmpfs-root-');
+    attestDurableMountBoundary(root, { filesystemType: 'tmpfs', mountSource: 'tmpfs' });
+
+    const logs: string[] = [];
+    const persistence = openHqPersistence(
+      {
+        FACTORYOS_HQ_DB: dbPath,
+        FACTORYOS_HQ_RUNTIME: 'hosted',
+        FACTORYOS_HQ_PERSISTENCE: 'durable-volume',
+        FACTORYOS_HQ_DURABLE_ROOT: root,
+      },
+      (line) => logs.push(line),
+    );
+
+    expect(persistence).toBeNull();
+    expect(logs.join('\n')).toContain('known ephemeral');
+  });
+
+  it('refuses a container overlay/ephemeral root mounted at the durable root', () => {
+    if (process.platform !== 'linux') return;
+
+    const { root, dbPath } = makeHostedFixture('.hq-overlay-root-');
+    attestDurableMountBoundary(root, { filesystemType: 'overlay', mountSource: 'overlay' });
+
+    const logs: string[] = [];
+    const persistence = openHqPersistence(
+      {
+        FACTORYOS_HQ_DB: dbPath,
+        FACTORYOS_HQ_RUNTIME: 'hosted',
+        FACTORYOS_HQ_PERSISTENCE: 'durable-volume',
+        FACTORYOS_HQ_DURABLE_ROOT: root,
+      },
+      (line) => logs.push(line),
+    );
+
+    expect(persistence).toBeNull();
+    expect(logs.join('\n')).toContain('cannot be attested as durable');
+  });
+
+  it('refuses a persistent filesystem mounted read-only', () => {
+    if (process.platform !== 'linux') return;
+
+    const { root, dbPath } = makeHostedFixture('.hq-readonly-root-');
+    attestDurableMountBoundary(root, { mountOptions: 'ro,relatime', superOptions: 'ro' });
+
+    const logs: string[] = [];
+    const persistence = openHqPersistence(
+      {
+        FACTORYOS_HQ_DB: dbPath,
+        FACTORYOS_HQ_RUNTIME: 'hosted',
+        FACTORYOS_HQ_PERSISTENCE: 'durable-volume',
+        FACTORYOS_HQ_DURABLE_ROOT: root,
+      },
+      (line) => logs.push(line),
+    );
+
+    expect(persistence).toBeNull();
+    expect(logs.join('\n')).toContain('mounted read-only');
+  });
+
+  it('refuses an unrecognized filesystem unless the operator attests it', async () => {
+    if (process.platform !== 'linux') return;
+
+    const { root, dbPath } = makeHostedFixture('.hq-unclassified-root-');
+    attestDurableMountBoundary(root, {
+      filesystemType: 'somenewfs',
+      mountSource: '/dev/synthetic-durable',
+    });
+    const env = {
+      FACTORYOS_HQ_DB: dbPath,
+      FACTORYOS_HQ_RUNTIME: 'hosted',
+      FACTORYOS_HQ_PERSISTENCE: 'durable-volume',
+      FACTORYOS_HQ_DURABLE_ROOT: root,
+    };
+
+    const refusedLogs: string[] = [];
+    expect(openHqPersistence(env, (line) => refusedLogs.push(line))).toBeNull();
+    expect(refusedLogs.join('\n')).toContain('FACTORYOS_HQ_DURABLE_FS_ALLOW');
+
+    // The narrow, explicit, logged operator attestation — and nothing broader —
+    // is what allows it.
+    const attestedLogs: string[] = [];
+    const persistence = openHqPersistence(
+      { ...env, FACTORYOS_HQ_DURABLE_FS_ALLOW: 'somenewfs' },
+      (line) => attestedLogs.push(line),
+    );
+
+    expect(persistence).not.toBeNull();
+    try {
+      expect(attestedLogs.join('\n')).toContain('operator-attested durable filesystem types');
+      const backup = await persistence!.backup('operator-attested.sqlite');
+      expect(existsSync(backup.path)).toBe(true);
+    } finally {
+      persistence!.close();
+    }
+  });
+
+  it('refuses an operator attestation that names an ephemeral filesystem', () => {
+    if (process.platform !== 'linux') return;
+
+    // The override must not be able to weaken the default: naming tmpfs refuses
+    // the boot outright, even though the root here is a permitted ext4 mount.
+    const { root, dbPath } = makeHostedFixture('.hq-dishonest-attestation-');
+    attestDurableMountBoundary(root);
+
+    const logs: string[] = [];
+    const persistence = openHqPersistence(
+      {
+        FACTORYOS_HQ_DB: dbPath,
+        FACTORYOS_HQ_RUNTIME: 'hosted',
+        FACTORYOS_HQ_PERSISTENCE: 'durable-volume',
+        FACTORYOS_HQ_DURABLE_ROOT: root,
+        FACTORYOS_HQ_DURABLE_FS_ALLOW: 'tmpfs',
+      },
+      (line) => logs.push(line),
+    );
+
+    expect(persistence).toBeNull();
+    expect(logs.join('\n')).toContain('cannot attest tmpfs as durable');
+  });
+
+  it('refuses a wildcard operator attestation', () => {
+    if (process.platform !== 'linux') return;
+
+    const { root, dbPath } = makeHostedFixture('.hq-wildcard-attestation-');
+    attestDurableMountBoundary(root);
+
+    const logs: string[] = [];
+    expect(
+      resolveHqPersistenceConfig(
+        {
+          FACTORYOS_HQ_DB: dbPath,
+          FACTORYOS_HQ_RUNTIME: 'hosted',
+          FACTORYOS_HQ_PERSISTENCE: 'durable-volume',
+          FACTORYOS_HQ_DURABLE_ROOT: root,
+          FACTORYOS_HQ_DURABLE_FS_ALLOW: '*',
+        },
+        (line) => logs.push(line),
+      ),
+    ).toBeNull();
+    expect(logs.join('\n')).toContain('wildcards and blanket values are refused');
+  });
+
+  it('keeps the filesystem allow-list out of the portable local-file contract', () => {
+    const { root, dbPath } = makeHostedFixture('.hq-local-fs-allow-');
+
+    const config = resolveHqPersistenceConfig(
+      {
+        FACTORYOS_HQ_DB: dbPath,
+        FACTORYOS_HQ_DURABLE_FS_ALLOW: 'somenewfs',
+      },
+      () => {},
+    );
+
+    expect(config).not.toBeNull();
+    expect(config!.mode).toBe('local-file');
+    expect(config!.attestedFilesystems).toEqual([]);
+    expect(root).toContain('.hq-local-fs-allow-');
   });
 
   it('refuses backups on a nested same-device mount with a different mount identity', async () => {

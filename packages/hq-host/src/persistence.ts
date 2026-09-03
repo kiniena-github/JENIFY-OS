@@ -15,6 +15,12 @@ import {
   openHqDatabaseReadOnly,
   type HqDatabase,
 } from '@factoryos/headquarter/store';
+import {
+  classifyDurableFilesystem,
+  parseAttestedFilesystems,
+  parseMountInfo,
+  type MountBoundary,
+} from './durable-filesystem.js';
 
 export type HqRuntimeMode = 'local' | 'hosted';
 export type HqPersistenceMode = 'local-file' | 'durable-volume';
@@ -28,6 +34,13 @@ export interface HqPersistenceConfig {
   durableRoot?: string;
   backupRoot: string;
   topology: typeof HQ_DURABLE_TOPOLOGY;
+  /**
+   * Filesystem types the operator explicitly attests as durable, from
+   * `FACTORYOS_HQ_DURABLE_FS_ALLOW`. Only ever widens the UNCLASSIFIED case;
+   * a known-ephemeral/virtual/unsupported filesystem can never be attested
+   * this way (see `./durable-filesystem.ts`). Empty in local-file mode.
+   */
+  attestedFilesystems: readonly string[];
 }
 
 export interface HqBackupResult {
@@ -48,6 +61,8 @@ interface DurableDbAnchor {
   fd: number;
   stat: fs.Stats;
   procFdRoot: string;
+  /** Filesystem type of the attested durable mount, reported as boot evidence. */
+  filesystemType: string;
 }
 
 interface DurableDirectoryAnchor {
@@ -133,39 +148,6 @@ function procFdMountId(procFdRoot: string, fd: number): number {
   return mountId;
 }
 
-interface MountBoundary {
-  mountId: number;
-  mountPoint: string;
-}
-
-/**
- * proc(5) escapes space, tab, newline and backslash in the root and mount-point
- * fields as octal sequences. Decode them so a mount point with a space still
- * compares equal to the resolved durable root.
- */
-function decodeMountInfoField(field: string): string {
-  return field.replace(/\\([0-3][0-7][0-7])/g, (_match, oct: string) =>
-    String.fromCharCode(parseInt(oct, 8)),
-  );
-}
-
-function parseMountInfo(content: string): MountBoundary[] {
-  const boundaries: MountBoundary[] = [];
-  for (const line of content.split('\n')) {
-    if (!line) continue;
-    // proc(5) /proc/self/mountinfo: field 1 is the mount id, field 5 is the
-    // mount point. Optional fields precede the " - " separator but never shift
-    // fields 1 or 5, so a positional read of those two is safe.
-    const fields = line.split(' ');
-    if (fields.length < 5) continue;
-    const mountId = Number(fields[0]);
-    const mountPoint = decodeMountInfoField(fields[4]);
-    if (!Number.isSafeInteger(mountId) || mountId < 0 || !mountPoint) continue;
-    boundaries.push({ mountId, mountPoint });
-  }
-  return boundaries;
-}
-
 function readProcSelfMountInfo(): string {
   try {
     return fs.readFileSync('/proc/self/mountinfo', 'utf8');
@@ -179,7 +161,8 @@ function readProcSelfMountInfo(): string {
 /**
  * Fail-closed proof that the configured durable root is itself a real mount
  * boundary, not an ordinary directory that merely shares its pathname with the
- * expected volume.
+ * expected volume — AND that the filesystem mounted there is one whose contents
+ * survive reboot and workload replacement.
  *
  * The device/mount-id cross-checks elsewhere only prove that the DB and backups
  * live on the SAME filesystem as the root directory; on their own they cannot
@@ -188,11 +171,24 @@ function readProcSelfMountInfo(): string {
  * an entry mounted EXACTLY at the root whose mount identity matches the opened
  * root descriptor. If the expected volume is absent, no such entry exists and
  * hosted HQ stays off instead of booting on ephemeral storage that would later
- * lose canonical state. This is provider-neutral: it inspects kernel mount
- * information, never a cloud/provider service.
+ * lose canonical state.
+ *
+ * Being a mount boundary is necessary but NOT sufficient: `tmpfs`, `ramfs` and a
+ * container overlay/ephemeral root are all real mount boundaries that lose
+ * everything on workload replacement. So the matching entry's filesystem
+ * metadata is evaluated too, under the conservative allow/refuse policy in
+ * `./durable-filesystem.ts`. Both halves are provider-neutral: they inspect
+ * kernel mount information, never a cloud/provider service.
+ *
+ * Returns the attested boundary so the accepted filesystem type can be reported
+ * as boot evidence.
  */
-function assertDurableRootIsMountBoundary(root: DurableDirectoryAnchor, durableRoot: string): void {
-  const resolvedRoot = path.resolve(durableRoot);
+function assertDurableRootIsMountBoundary(
+  root: DurableDirectoryAnchor,
+  config: HqPersistenceConfig,
+): MountBoundary {
+  if (!config.durableRoot) throw new Error('durable root missing from durable-volume configuration');
+  const resolvedRoot = path.resolve(config.durableRoot);
   const boundaries = parseMountInfo(readProcSelfMountInfo());
   const atRoot = boundaries.filter((boundary) => path.resolve(boundary.mountPoint) === resolvedRoot);
   if (atRoot.length === 0) {
@@ -200,11 +196,20 @@ function assertDurableRootIsMountBoundary(root: DurableDirectoryAnchor, durableR
       'FACTORYOS_HQ_DURABLE_ROOT is not a mount boundary; a durable volume must be mounted exactly at the configured root, not an ordinary directory of the same name',
     );
   }
-  if (!atRoot.some((boundary) => boundary.mountId === root.mountId)) {
+  const attestedBoundary = atRoot.find((boundary) => boundary.mountId === root.mountId);
+  if (!attestedBoundary) {
     throw new Error(
       'FACTORYOS_HQ_DURABLE_ROOT mount identity does not match the volume mounted at that path; refusing possibly ephemeral storage',
     );
   }
+
+  const verdict = classifyDurableFilesystem(attestedBoundary, config.attestedFilesystems);
+  if (!verdict.durable) {
+    throw new Error(
+      `FACTORYOS_HQ_DURABLE_ROOT is mounted on a filesystem that cannot be attested as durable: ${verdict.detail}`,
+    );
+  }
+  return attestedBoundary;
 }
 
 function snapshotProcessFds(procFdRoot: string): FdSnapshot {
@@ -258,19 +263,27 @@ function closeDirectoryAnchor(anchor: DurableDirectoryAnchor | undefined): void 
   fs.closeSync(anchor.fd);
 }
 
-function openDurableRootAnchor(config: HqPersistenceConfig, procFdRoot: string): DurableDirectoryAnchor {
+interface AttestedDurableRoot {
+  anchor: DurableDirectoryAnchor;
+  boundary: MountBoundary;
+}
+
+function attestDurableRoot(config: HqPersistenceConfig, procFdRoot: string): AttestedDurableRoot {
   if (!config.durableRoot) throw new Error('durable root missing from durable-volume configuration');
-  const root = openDirectoryAnchor(config.durableRoot, procFdRoot, 'FACTORYOS_HQ_DURABLE_ROOT');
+  const anchor = openDirectoryAnchor(config.durableRoot, procFdRoot, 'FACTORYOS_HQ_DURABLE_ROOT');
   try {
-    if (path.resolve(root.target) !== path.resolve(config.durableRoot)) {
+    if (path.resolve(anchor.target) !== path.resolve(config.durableRoot)) {
       throw new Error('FACTORYOS_HQ_DURABLE_ROOT changed during mount attestation');
     }
-    assertDurableRootIsMountBoundary(root, config.durableRoot);
+    return { anchor, boundary: assertDurableRootIsMountBoundary(anchor, config) };
   } catch (error) {
-    closeDirectoryAnchor(root);
+    closeDirectoryAnchor(anchor);
     throw error;
   }
-  return root;
+}
+
+function openDurableRootAnchor(config: HqPersistenceConfig, procFdRoot: string): DurableDirectoryAnchor {
+  return attestDurableRoot(config, procFdRoot).anchor;
 }
 
 function assertSameDurableMount(
@@ -311,7 +324,7 @@ function openDurableDbAnchor(config: HqPersistenceConfig): DurableDbAnchor {
       throw new Error('opened durable HQ database inode is outside FACTORYOS_HQ_DURABLE_ROOT');
     }
 
-    const root = openDurableRootAnchor(config, procFdRoot);
+    const { anchor: root, boundary } = attestDurableRoot(config, procFdRoot);
     try {
       assertSameDurableMount(
         root,
@@ -323,7 +336,7 @@ function openDurableDbAnchor(config: HqPersistenceConfig): DurableDbAnchor {
       closeDirectoryAnchor(root);
     }
 
-    return { fd, stat, procFdRoot };
+    return { fd, stat, procFdRoot, filesystemType: boundary.filesystemType };
   } catch (error) {
     fs.closeSync(fd);
     throw error;
@@ -443,7 +456,16 @@ export function resolveHqPersistenceConfig(
     const backupRoot = path.resolve(
       env.FACTORYOS_HQ_BACKUP_DIR?.trim() || path.join(path.dirname(dbPath), 'backups'),
     );
-    return { runtime, mode, dbPath, backupRoot, topology: HQ_DURABLE_TOPOLOGY };
+    // Local/workstation mode performs no mount attestation at all, so the
+    // filesystem allow-list is not part of its contract and stays empty.
+    return {
+      runtime,
+      mode,
+      dbPath,
+      backupRoot,
+      topology: HQ_DURABLE_TOPOLOGY,
+      attestedFilesystems: [],
+    };
   }
 
   if (rawDbPath === ':memory:') {
@@ -451,6 +473,18 @@ export function resolveHqPersistenceConfig(
   }
   if (!path.isAbsolute(rawDbPath)) {
     return refuse(log, 'durable-volume FACTORYOS_HQ_DB must be an absolute path.');
+  }
+
+  // Parsed BEFORE any path work so a malformed or dishonest attestation refuses
+  // the boot outright rather than being silently ignored.
+  const attested = parseAttestedFilesystems(env.FACTORYOS_HQ_DURABLE_FS_ALLOW);
+  if (!attested.ok) return refuse(log, attested.detail);
+  if (attested.values.length > 0) {
+    // Reviewable in the boot log: an operator widening of the durable-filesystem
+    // policy is never invisible.
+    log(
+      `[hq] operator-attested durable filesystem types (FACTORYOS_HQ_DURABLE_FS_ALLOW): ${attested.values.join(', ')}`,
+    );
   }
 
   const rawRoot = env.FACTORYOS_HQ_DURABLE_ROOT?.trim();
@@ -496,6 +530,7 @@ export function resolveHqPersistenceConfig(
     durableRoot,
     backupRoot,
     topology: HQ_DURABLE_TOPOLOGY,
+    attestedFilesystems: attested.values,
   };
 }
 
@@ -717,9 +752,11 @@ export function openHqPersistence(
   let db: HqDatabase | undefined;
   let anchor: DurableDbAnchor | undefined;
   let beforeSqliteOpen: FdSnapshot | undefined;
+  let attestedFilesystemType: string | undefined;
   try {
     if (config.mode === 'durable-volume') {
       anchor = openDurableDbAnchor(config);
+      attestedFilesystemType = anchor.filesystemType;
       beforeSqliteOpen = snapshotProcessFds(anchor.procFdRoot);
     }
 
@@ -948,6 +985,7 @@ export function openHqPersistence(
 
   log(
     `[hq] persistence=${config.mode}, runtime=${config.runtime}, topology=${config.topology}, ` +
+      (attestedFilesystemType ? `fstype=${attestedFilesystemType}, ` : '') +
       `db=${config.dbPath}`,
   );
   return handle;
