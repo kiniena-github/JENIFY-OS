@@ -204,13 +204,18 @@ describe('Stage 3 durable SQLite adapter', () => {
     expect(existsSync(`${outsideTarget}-wal`)).toBe(false);
     expect(existsSync(`${outsideTarget}-shm`)).toBe(false);
 
-    // DDL/migrations, if they ran before the pathname-change refusal, ran only
-    // against the already-anchored inode that stayed inside the durable root.
+    // Migration now runs only AFTER the opened-inode attestation, so a boot
+    // refused for a pathname change writes no schema at all — not to the
+    // hostile replacement (asserted above) and not to the anchored inode
+    // either. This used to assert the weaker property that DDL had already run
+    // against the anchored inode; the refusal simply lands earlier now.
+    // (Connecting still writes SQLite's own header/journal setup to the
+    // anchored inode; what must not exist is committed HQ schema.)
     const anchoredDb = openHqDatabaseReadOnly(anchoredAfterRename);
-    const schema = anchoredDb
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'hq_projects'")
-      .get() as { name: string } | undefined;
-    expect(schema?.name).toBe('hq_projects');
+    const tables = anchoredDb
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+      .all() as { name: string }[];
+    expect(tables).toHaveLength(0);
     anchoredDb.close();
   });
 

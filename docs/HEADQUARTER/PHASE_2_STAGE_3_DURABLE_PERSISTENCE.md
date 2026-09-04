@@ -52,7 +52,33 @@ FACTORYOS_HQ_RUNTIME=hosted
 FACTORYOS_HQ_PERSISTENCE=durable-volume
 FACTORYOS_HQ_DURABLE_ROOT=/mounted/durable-volume
 FACTORYOS_HQ_DB=/mounted/durable-volume/hq.sqlite
+FACTORYOS_HQ_DURABLE_VOLUME_PROVENANCE=operator:<stable-volume-id>
 ```
+
+All six are mandatory. `FACTORYOS_HQ_DURABLE_VOLUME_PROVENANCE` is the operator's
+or provider's explicit assertion that the volume mounted at the durable root is a
+*named, persistent* volume that survives workload replacement — the one durability
+fact the kernel cannot supply. Mount metadata proves mount identity and filesystem
+class, but an ephemeral cloud instance-store or a lifecycle-scoped CSI volume
+presents as the same ext4/xfs class as a durable block volume, so filesystem type
+alone is not durability provenance. Accepted forms:
+
+```text
+FACTORYOS_HQ_DURABLE_VOLUME_PROVENANCE=operator:<stable-volume-id>
+FACTORYOS_HQ_DURABLE_VOLUME_PROVENANCE=provider:<stable-volume-id>
+```
+
+Use `operator:` when a human operator attests the volume, `provider:` when the
+hosting platform's own stable volume identifier is used. The identifier must be
+3–128 characters of `A-Z a-z 0-9 . _ : / -`, starting alphanumeric, and should be
+the volume's stable identity (for example `operator:jenify-hq-volume-01` or
+`provider:vol-0a1b2c3d4e5f`) so the attestation stays reviewable and points at one
+specific volume across restarts. It is **not a secret and not a credential**: it
+names a volume, grants no access, and is printed to the boot log as reviewable
+evidence — never put a token, key or connection string in it. The value is
+provider-neutral and selects no vendor. Hosted boot fails closed when it is
+missing, malformed, or carries an unrecognized prefix. It is unused in local-file
+mode.
 
 Optional:
 
@@ -77,6 +103,9 @@ Hosted Stage 3 currently requires Linux `/proc/self/fd` so the process can bind 
 Hosted boot fails closed when:
 
 - persistence is not explicitly `durable-volume`;
+- `FACTORYOS_HQ_DURABLE_VOLUME_PROVENANCE` is missing or malformed — no
+  `operator:`/`provider:` prefix, or no stable volume identifier after it (see
+  *Environment contract* above);
 - the durable root is missing;
 - the configured durable root is not itself a mounted-volume boundary — an
   ordinary directory of the same name, present in the image/container but with
@@ -101,6 +130,14 @@ Hosted boot fails closed when:
 - the OS temporary tree is claimed as durable storage;
 - SQLite cannot enter effective WAL + `synchronous=FULL` mode;
 - SQLite cannot open or pass `PRAGMA quick_check`.
+
+In hosted durable-volume mode the durability modes are established and verified,
+and the opened inode attested, **before** any schema-creating or migrating
+transaction runs. `openHqDatabase` is a migrating open, so the hosted path uses
+the split `connectHqDatabaseUnmigrated` + `migrateHqDatabase` pair instead: first
+boot and every later migration commit under proven WAL + `synchronous=FULL`
+rather than under whatever `synchronous` the SQLite build happens to default to,
+and a boot refused by any earlier gate writes no schema to the volume at all.
 
 The durable root is never auto-created. If the configured mount is absent, HQ stays off instead of creating an ordinary container directory and pretending it is durable.
 

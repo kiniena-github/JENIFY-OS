@@ -11,7 +11,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  openHqDatabase,
+  connectHqDatabaseUnmigrated,
+  migrateHqDatabase,
   openHqDatabaseReadOnly,
   type HqDatabase,
 } from '@factoryos/headquarter/store';
@@ -923,7 +924,15 @@ export function openHqPersistence(
     }
 
     const sqliteOpenPath = anchor ? anchoredSqliteOpenPath(anchor) : config.dbPath;
-    db = openHqDatabase(sqliteOpenPath);
+    // Connect WITHOUT migrating. The schema DDL and the column upgrades are
+    // real write transactions, so a migrating open would commit first-boot
+    // schema creation and every later migration before the durability modes
+    // below are set and verified — the durability proof would trail the very
+    // writes it is supposed to cover, and would rest on whatever `synchronous`
+    // the SQLite build defaults to. Migration is moved after the WAL/FULL
+    // verification and after the opened-inode attestation, so no schema write
+    // can reach the volume until this process has proven both.
+    db = connectHqDatabaseUnmigrated(sqliteOpenPath);
     db.pragma('busy_timeout = 5000');
     if (config.mode === 'durable-volume') {
       db.pragma('journal_mode = WAL');
@@ -942,6 +951,10 @@ export function openHqPersistence(
       }
       assertSqliteOpenedAnchoredDb(config, anchor, beforeSqliteOpen);
     }
+
+    // Durability and inode identity are now proven for this connection, so the
+    // schema-creating/migrating transactions can commit under them.
+    migrateHqDatabase(db);
   } catch (error) {
     if (db) {
       try {
