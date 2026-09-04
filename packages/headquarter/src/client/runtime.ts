@@ -385,7 +385,21 @@ export function clientRuntimeScript(): string {
   }
 
   function headerValid(body) {
-    return isText(body.generatedAt) && isText(body.mode) && killSwitchValid(body.killSwitch);
+    // generatedAt must be a real instant, not merely a string. The stamp says
+    // "Canonical state as of X", and an X that is not a time makes that
+    // sentence false rather than ugly.
+    if (!isText(body.generatedAt) || isNaN(Date.parse(body.generatedAt))) return false;
+    // mode is the field that tells a reader whether they are looking at real or
+    // sample data, so an empty one leaves the stamp reading "provenance " with
+    // nothing after it — an assertion of provenance with the provenance missing.
+    //
+    // It is deliberately NOT checked against a list of known modes. The server
+    // owns that vocabulary and may legitimately grow it; a client that blanked
+    // the whole page on an unfamiliar provenance value would be trading a
+    // cosmetic problem for a total one. Mode is displayed as text either way,
+    // so the safe failure and the strict failure differ only in blast radius.
+    if (!isText(body.mode) || body.mode.length === 0) return false;
+    return killSwitchValid(body.killSwitch);
   }
 
   function applyState(body) {

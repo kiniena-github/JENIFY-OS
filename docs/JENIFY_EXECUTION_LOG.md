@@ -889,3 +889,31 @@ been in verification rather than in the product.
 Evidence at this commit: headquarter 1908, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
 web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.
+
+### Stage 4, self-review after round 8 — the provenance header
+
+Not a reviewer finding. I had put a question to round 9 — should `headerValid`
+also check that `generatedAt` parses and `mode` is meaningful — and then noticed
+my own reason for stopping was *"both would render as text rather than
+mislead"*. That is the identical reasoning that let `[object Object]` reach a
+lock banner, so it does not survive contact with this stage's own standard, and
+half the question did not need a reviewer at all.
+
+`generatedAt` must now be a real instant. The stamp says "Canonical state as of
+X", and an X that is not a time makes that sentence false rather than ugly.
+`mode` must be non-empty, since it is the field that tells a reader whether they
+are looking at real or sample data and an empty one leaves the stamp asserting a
+provenance with the provenance missing.
+
+**What was deliberately NOT done, and pinned by a test so a later tightening
+cannot quietly take it away:** `mode` is not checked against a list of known
+provenance values. The server owns that vocabulary and may legitimately grow it;
+a client that blanked the whole page on an unfamiliar mode would trade a cosmetic
+problem for a total one. Mode is displayed as text either way, so the strict and
+lenient failures differ only in blast radius — and the lenient one is smaller.
+This is the second constraint on this surface capable of a false refusal, and
+the reasoning for where the line sits belongs in a test rather than in a memory.
+
+Evidence at this commit: headquarter 1910, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.

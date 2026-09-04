@@ -889,6 +889,102 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     page.close();
   });
 
+  it('refuses a provenance header that is present but not true', async () => {
+    // Self-review after round 8. `headerValid` required non-empty strings and
+    // stopped there, on the reasoning that a malformed value "renders as text
+    // rather than misleading" — which is exactly the reasoning that let
+    // `[object Object]` reach a lock banner, so it does not survive contact
+    // with this stage's own standard.
+    //
+    // A `generatedAt` that is not an instant makes "Canonical state as of X"
+    // false rather than merely ugly, and an empty `mode` leaves the stamp
+    // asserting a provenance with the provenance missing.
+    const live = deployment();
+    const rooms = HQ_ROOMS.map((room) => ({
+      roomId: room.id,
+      ordinal: room.ordinal,
+      status: room.binding.kind === 'live' ? 'live' : room.binding.kind,
+      liveness: 'dark',
+      metrics: [],
+      rows: [],
+      emptyMessage: 'x',
+      provenance: 'x',
+    }));
+
+    for (const header of [
+      { generatedAt: 'the day before yesterday', mode: 'live' },
+      { generatedAt: '', mode: 'live' },
+      { generatedAt: new Date().toISOString(), mode: '' },
+    ]) {
+      const page = await loadPage(live.deps);
+      expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toContain('provenance live');
+
+      const original = page.window.fetch as (input: string) => Promise<unknown>;
+      page.window.fetch = (input: string) => {
+        if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+          return Promise.resolve({
+            status: 200,
+            json: () =>
+              Promise.resolve({ ok: true, ...header, killSwitch: { globalEngaged: false, engagedScopes: [] }, rooms }),
+          });
+        }
+        return original(input);
+      };
+      (page.window.__hqStateChanged as () => void)();
+      await page.settle();
+
+      const stamp = page.document.querySelector('[data-hq-stamp]')!.textContent ?? '';
+      expect(stamp, JSON.stringify(header)).toBe('');
+      expect(bodyText(page.document, 'home'), JSON.stringify(header)).toContain('cannot read');
+      page.close();
+    }
+  });
+
+  it('accepts a provenance mode it has never heard of', async () => {
+    // The other half of the judgement, pinned so a later tightening cannot
+    // quietly take it away. The server owns the provenance vocabulary and may
+    // grow it; a client that blanked the whole page on an unfamiliar mode would
+    // trade a cosmetic problem for a total one. Mode is displayed as text
+    // either way, so the strict and lenient failures differ only in blast
+    // radius — and this one is the smaller.
+    const live = deployment();
+    const page = await loadPage(live.deps);
+
+    const original = page.window.fetch as (input: string) => Promise<unknown>;
+    page.window.fetch = (input: string) => {
+      if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+        return Promise.resolve({
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              ok: true,
+              generatedAt: '2027-01-01T00:00:00.000Z',
+              mode: 'some-future-provenance-mode',
+              killSwitch: { globalEngaged: false, engagedScopes: [] },
+              rooms: HQ_ROOMS.map((room) => ({
+                roomId: room.id,
+                ordinal: room.ordinal,
+                status: room.binding.kind === 'live' ? 'live' : room.binding.kind,
+                liveness: 'dark',
+                metrics: [],
+                rows: [],
+                emptyMessage: 'Nothing recorded.',
+                provenance: 'future source',
+              })),
+            }),
+        });
+      }
+      return original(input);
+    };
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toContain(
+      'provenance some-future-provenance-mode',
+    );
+    page.close();
+  });
+
   it('will not let a missing kill-switch record read as an unlocked HQ', async () => {
     // Codex round 8, and the most dangerous of the three: a response with
     // seventeen valid rooms and NO kill-switch record resolved to
