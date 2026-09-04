@@ -1382,3 +1382,38 @@ shows the floor follows it too.
 Evidence at this commit: headquarter 1932, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
 web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.
+
+### Stage 4, after round 16 — sweeping for tautological tests
+
+In the round-17 request I asked Codex where else on this branch a test derives its
+expectation from the same source as the behaviour it checks, having nearly filed
+exactly such a test as evidence. Asking without looking would have been the same
+error one level up, so the sweep was done.
+
+**No worthless tautology found.** Three tests do share a source between
+expectation and behaviour, and all three are sound for what they claim — but each
+claims less than its name suggests, so the limit is now written beside it:
+
+- **`LIT_CONNECTION_STATES`** (reachability): proves the client still FOLLOWS the
+  canonical list, not that the list is right. Changing the constant moves both
+  sides together and proves nothing; the control that means something is
+  re-hardcoding the consumer while the constant differs.
+- **`SOURCE_MODE_LABELS`** (provenance vocabulary drift): identical shape. It
+  catches a runtime that has stopped deriving and gone back to a copy, which is
+  what it exists for.
+- **`CLIENT_FETCH_TARGETS`** (fetch allow-list): exported by the same module that
+  writes the fetches, so it proves the page reaches nothing the runtime has not
+  DECLARED — not that the declared set is right. Adding a path to both would
+  pass. That is the intended semantics of an allow-list, and the same test's
+  independent half — no absolute URL, no write route — is not derived from the
+  constant.
+
+The general lesson, since this branch keeps producing it in new costumes: a test
+whose expectation shares a source with the behaviour is invisible when it is
+worthless, because it is always green. The only way to tell the useful ones from
+the hollow ones is to name what breaking each side would do — which is what a
+negative control is, and why "I ran a control" is not the same claim as "I ran a
+control that could have failed".
+
+Evidence at this commit: headquarter 1932, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); no behaviour changed — comments only.

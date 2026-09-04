@@ -210,6 +210,13 @@ describe('the emitted page carries the whole building before any script runs', (
   });
 
   it('speaks only to the two authenticated read routes and the freshness snapshot', () => {
+    // LIMIT, stated rather than implied: `CLIENT_FETCH_TARGETS` is exported by
+    // the same module that writes the fetches, so this proves the emitted page
+    // reaches nothing the runtime has not DECLARED — not that the declared set
+    // is the right one. Adding a path to both would pass. That is the intended
+    // semantics of an allow-list (the declaration becomes a review signal), and
+    // the assertions below are the independent half: no absolute URL, and no
+    // write route, neither of which is derived from the constant.
     const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]!).join('\n');
     const allowed = new Set<string>([...CLIENT_FETCH_TARGETS]);
     for (const literal of scripts.matchAll(/"(\/[A-Za-z0-9/._-]*)"/g)) {
@@ -1244,6 +1251,13 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     // document carrying the new mode would be refused and the page would go
     // blank — a false refusal caused by a stale copy, which is precisely the
     // class of bug that put `[object Object]` on a lock banner.
+    // LIMIT: both sides derive from SOURCE_MODE_LABELS, so this cannot catch a
+    // wrong vocabulary — only a runtime that has STOPPED deriving from it and
+    // gone back to a copy. That is exactly the failure it exists for, and the
+    // negative control (hard-coding a short list) is what shows it fires. It is
+    // recorded because a test whose expectation shares a source with the
+    // behaviour is invisible when it is worthless, and I nearly recorded one
+    // such test as evidence in round 16.
     const emitted = immersiveHtml().match(/var MODE_VALUES = (\{[^}]*\});/);
     expect(emitted, 'MODE_VALUES not found in the emitted page').not.toBeNull();
     expect(Object.keys(JSON.parse(emitted![1]!)).sort()).toEqual(Object.keys(SOURCE_MODE_LABELS).sort());

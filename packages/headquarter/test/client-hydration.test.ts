@@ -740,6 +740,12 @@ describe('reachability comes from one list, not two that agree', () => {
     // presentation layer — two lists agreeing by luck, which is the shape that
     // produced the tone-mapping finding in the same round. The constant now
     // lives beside CONNECTION_STATE_TONE and both views read it.
+    // LIMIT: the expectation derives from LIT_CONNECTION_STATES, the same
+    // constant the client reads, so this cannot say whether that list is
+    // correct — only whether the client still follows it. Controlled by
+    // re-hardcoding the client while the constant differs, which fails by name.
+    // Changing the constant alone makes both sides move together and proves
+    // nothing; that tautology is the one I nearly filed as evidence.
     for (const connectionState of ['connected', 'local_only', 'configured', 'dispatchable', 'error']) {
       const state = buildHqSnapshot({
         generatedAt: AT,
