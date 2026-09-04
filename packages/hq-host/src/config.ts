@@ -22,6 +22,7 @@ import { HeadquarterStore, type HqDatabase } from '@factoryos/headquarter/store'
 import { PROVIDER_REGISTRY, type SecretsEnv } from '@factoryos/headquarter/routing';
 import { claude } from '@factoryos/headquarter/providers';
 import type { ControlAuditEvent } from '@factoryos/headquarter/live';
+import type { HeadquarterControlPlane } from './routes.js';
 import { openHqPersistence } from './persistence-guard.js';
 import type { HqPersistence } from './persistence.js';
 
