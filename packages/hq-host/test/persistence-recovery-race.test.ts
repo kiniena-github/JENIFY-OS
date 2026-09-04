@@ -105,6 +105,7 @@ describe('Stage 3 descriptor-bound recovery', () => {
         FACTORYOS_HQ_RUNTIME: 'hosted',
         FACTORYOS_HQ_PERSISTENCE: 'durable-volume',
         FACTORYOS_HQ_DURABLE_ROOT: root,
+        FACTORYOS_HQ_DURABLE_VOLUME_PROVENANCE: 'operator:test-durable-volume',
       },
       () => {},
     );
