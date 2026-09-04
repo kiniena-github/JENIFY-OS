@@ -32,6 +32,7 @@ describe('hosted backup parent-chain durability bound', () => {
         FACTORYOS_HQ_RUNTIME: 'hosted',
         FACTORYOS_HQ_PERSISTENCE: 'durable-volume',
         FACTORYOS_HQ_DURABLE_ROOT: root,
+        FACTORYOS_HQ_DURABLE_VOLUME_PROVENANCE: 'operator:test-durable-volume',
         FACTORYOS_HQ_BACKUP_DIR: backupRoot,
       },
       (line) => logs.push(line),
