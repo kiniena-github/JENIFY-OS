@@ -609,6 +609,130 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     page.close();
   });
 
+  it('refuses a document whose rooms are all present but malformed', async () => {
+    // Codex round 6. The completeness guard checked the seventeen ids and
+    // stopped, so a version-skewed 200 carrying all seventeen with a room
+    // missing `metrics` passed it — then threw at `view.metrics.length` PART
+    // WAY THROUGH the render loop, after earlier panels had already been
+    // mutated, and the throw was caught by a handler that only cleared
+    // `inFlight`. The same mixed old/new page with the same stale stamp,
+    // reached by a different door.
+    const live = deployment();
+    handleControlRequest(
+      {
+        method: 'POST',
+        path: CONTROL_ROUTES.orders,
+        headers: { origin: PAGE_ORIGIN, 'content-type': 'application/json' },
+        body: { instruction: 'Held work.', route: 'CLAUDE', idempotencyKey: 'k-malformed', title: 'Held' },
+      },
+      live.deps,
+    );
+    const page = await loadPage(live.deps);
+    expect(panel(page.document, 'approvals').getAttribute('data-liveness')).toBe('attention');
+
+    const original = page.window.fetch as (input: string) => Promise<unknown>;
+    page.window.fetch = (input: string) => {
+      if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+        return Promise.resolve({
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              ok: true,
+              generatedAt: new Date().toISOString(),
+              // All seventeen ids, each exactly once — and the LAST one is
+              // missing `metrics`, so a guard that validated lazily would have
+              // rendered sixteen panels before discovering it.
+              rooms: HQ_ROOMS.map((room, index) => {
+                const view: Record<string, unknown> = {
+                  roomId: room.id,
+                  ordinal: room.ordinal,
+                  status: 'live',
+                  liveness: 'quiet',
+                  metrics: [],
+                  rows: [],
+                  emptyMessage: 'skewed',
+                  provenance: 'skewed',
+                };
+                if (index === HQ_ROOMS.length - 1) delete view.metrics;
+                return view;
+              }),
+            }),
+        });
+      }
+      return original(input);
+    };
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    // Nothing rendered from it, and nothing left claiming to be current.
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toBe('');
+    expect(bodyText(page.document, 'home')).toContain('cannot read');
+    // The first room in the loop must NOT have taken the skewed document's
+    // wording — that is the "mutated part way through" failure.
+    expect(bodyText(page.document, 'home')).not.toContain('skewed');
+    // And the room that held real state is surrendered, not left on the
+    // previous document.
+    expect(panel(page.document, 'approvals').getAttribute('data-liveness')).toBe('dark');
+    // Rejected up front by the completeness guard, NOT caught downstream after
+    // panels were already touched — the two paths word themselves differently
+    // on purpose, and only one of them means nothing was mutated.
+    expect(bodyText(page.document, 'home')).not.toContain('could not finish reading');
+    page.close();
+  });
+
+  it('bounds a stalled read on a browser with no AbortController', async () => {
+    // Codex round 6. The timeout was armed but its callback did nothing when
+    // there was no AbortController, so on such a browser the read still never
+    // settled: the cycle deadline would eventually allow a NEW poll, but it
+    // neither invalidated what was on screen nor cancelled the abandoned
+    // promise. Stale canonical state stayed visible through repeated stalls.
+    // A guarantee that only holds where a constructor happens to exist is not a
+    // guarantee, so the timeout now resolves the read itself.
+    const live = deployment();
+    const page = await loadPage(live.deps);
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toContain('provenance live');
+
+    // Take AbortController away, exactly as an old browser would.
+    const hadAbort = page.window.AbortController;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (page.window as Record<string, unknown>).AbortController;
+    expect(typeof page.window.AbortController).not.toBe('function');
+
+    const original = page.window.fetch as (input: string, options?: unknown) => Promise<unknown>;
+    let silent = true;
+    page.window.fetch = (input: string, options?: { signal?: AbortSignal }) => {
+      if (!silent || String(input).split('?')[0] !== CONTROL_ROUTES.state) return original(input, options);
+      // Never resolves, never rejects, and nothing can abort it.
+      return new Promise(() => {});
+    };
+
+    const realSetTimeout = page.window.setTimeout as (fn: () => void, ms: number) => number;
+    let armedAtTimeout = 0;
+    page.window.setTimeout = (fn: () => void, ms: number) => {
+      if (ms === CLIENT_READ_TIMEOUT_MS) {
+        armedAtTimeout += 1;
+        return realSetTimeout(fn, 0);
+      }
+      return realSetTimeout(fn, ms);
+    };
+
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    expect(armedAtTimeout).toBeGreaterThan(0);
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toBe('');
+    expect(bodyText(page.document, 'home')).toContain('no answer within');
+
+    // Not wedged either: the next poll hydrates, with no AbortController still.
+    silent = false;
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toContain('provenance live');
+
+    (page.window as Record<string, unknown>).AbortController = hadAbort;
+    page.close();
+  });
+
   it('abandons a read that never answers, rather than wedging every later poll', async () => {
     // Codex round 5. A fetch that connects and then neither resolves nor
     // rejects — a stalled proxy, a hung host — left `inFlight` true forever:

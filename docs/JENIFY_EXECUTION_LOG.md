@@ -726,3 +726,49 @@ Evidence at this commit: headquarter 1900, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
 web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS on
 Chromium/SwiftShader.
+
+### Stage 4, review round 6 — Codex
+
+Two findings, both real, both the same shape as findings already fixed — and
+both reachable because the earlier fix stopped one step short of the guarantee
+it claimed.
+
+**The read timeout only bound browsers that have `AbortController`.** Round 5
+armed a timer whose callback did nothing when there was no controller to abort,
+so on such a browser the read still never settled. The `inFlightSince` deadline
+would eventually let a new poll start, but it neither invalidated what was on
+screen nor cancelled the abandoned promise: stale canonical state stayed visible
+through repeated stalls, and a late answer from an abandoned read could land on
+top of a newer one. A guarantee that holds only where a constructor happens to
+exist is not a guarantee. The timeout now resolves the read itself, and the
+abort is an optimisation on top of it. A generation counter was added with it,
+so a superseded cycle cannot write the page when its answer finally arrives.
+
+**Completeness checked the seventeen ids and stopped there.** A version-skewed
+200 carrying all seventeen ids with one room missing `metrics` passed, then threw
+at `view.metrics.length` part way through the render loop — after earlier panels
+had already been mutated — and the throw was caught by a handler that only
+cleared `inFlight`. The same mixed old/new page with the same stale stamp and
+lock, reached by a different door. The whole `RoomView` shape is now validated
+for every entry before any panel is touched, and the outer catch invalidates
+instead of walking away.
+
+The negative control for the second one printed the predicted failure verbatim:
+`Cannot read properties of undefined (reading 'length')`. It also showed that the
+outer-catch change alone would have invalidated the page — but only *after* the
+mutation had happened, which is why the pre-validation is the fix and the catch
+is the backstop. Both are kept, and the two paths word themselves differently so
+a test can tell which one ran.
+
+**A process note worth more than either fix.** When the round-6 request first
+came back with "To use Codex here, create an environment for this repo", I
+recorded it as a configuration state and wrote that retrying would not clear it.
+The review then arrived ten minutes later. The evidence I had — one bot message,
+and no review at this SHA — supported "the review has not run", and I stated a
+cause I had not established. Reporting the blocker promptly was right; asserting
+its permanence was not, and that was corrected on the PR.
+
+Evidence at this commit: headquarter 1902, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS
+(lit 2436 warm samples vs 0 dark, framesAfterLoss 0).

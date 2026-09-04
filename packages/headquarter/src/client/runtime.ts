@@ -250,18 +250,65 @@ export function clientRuntimeScript(): string {
 
   // A document is applied whole or not at all.
   //
-  // The previous guard asked only whether rooms was an array, so a 200
-  // carrying an empty, partial or duplicated set updated the panels it did
+  // The first version of this guard asked only whether rooms was an array, so a
+  // 200 carrying an empty, partial or duplicated set updated the panels it did
   // supply and left every omitted panel showing the PREVIOUS document's
   // metrics, liveness and provenance — while the global stamp advanced to the
   // new one. Half a document is not a smaller truth, it is a page mixing two
   // instants (Codex round 5).
+  //
+  // The second version checked the seventeen ids and stopped there, which left
+  // the same failure reachable by a different door: a version-skewed server
+  // sending all seventeen ids with a room missing metrics passed the check,
+  // then threw at view.metrics.length PART WAY THROUGH the render loop —
+  // after earlier panels had already been mutated — and the throw was caught by
+  // a handler that only cleared inFlight. Same mixed page, same stale stamp
+  // and lock (Codex round 6).
+  //
+  // So the whole shape is checked, for every entry, before any panel is
+  // touched. Everything the render path and the shell read is required to be
+  // present and of the right type: a missing hint would draw an empty node
+  // rather than throw, but a page that renders canonical company state should
+  // not be guessing which half of a malformed document it can trust.
+  function isText(value) { return typeof value === 'string'; }
+
+  function metricValid(metric) {
+    return metric != null && typeof metric === 'object' &&
+      isText(metric.label) && isText(metric.hint) && isText(metric.tone) &&
+      (typeof metric.value === 'string' || typeof metric.value === 'number');
+  }
+
+  function chipValid(chip) {
+    return chip != null && typeof chip === 'object' && isText(chip.tone) && isText(chip.label);
+  }
+
+  function rowValid(row) {
+    if (row == null || typeof row !== 'object') return false;
+    if (!isText(row.primary) || !isText(row.secondary) || !Array.isArray(row.chips)) return false;
+    for (var i = 0; i < row.chips.length; i += 1) if (!chipValid(row.chips[i])) return false;
+    return true;
+  }
+
+  function roomViewValid(view) {
+    if (view == null || typeof view !== 'object') return false;
+    if (!isText(view.roomId) || !isText(view.status) || !isText(view.liveness) || !isText(view.provenance)) return false;
+    if (!isText(view.emptyMessage)) return false;
+    // The shell indexes its per-room state by this, so a bad ordinal would
+    // light the wrong building.
+    if (typeof view.ordinal !== 'number' || !(view.ordinal >= 1 && view.ordinal <= ROOM_IDS.length)) return false;
+    if (!Array.isArray(view.metrics) || !Array.isArray(view.rows)) return false;
+    for (var m = 0; m < view.metrics.length; m += 1) if (!metricValid(view.metrics[m])) return false;
+    for (var r = 0; r < view.rows.length; r += 1) if (!rowValid(view.rows[r])) return false;
+    return true;
+  }
+
   function roomsComplete(rooms) {
     if (!Array.isArray(rooms) || rooms.length !== ROOM_IDS.length) return false;
     var seen = {};
     for (var i = 0; i < rooms.length; i += 1) {
-      var id = rooms[i] && rooms[i].roomId;
-      if (typeof id !== 'string' || seen[id] === true) return false;
+      if (!roomViewValid(rooms[i])) return false;
+      var id = rooms[i].roomId;
+      if (seen[id] === true) return false;
       seen[id] = true;
     }
     for (var j = 0; j < ROOM_IDS.length; j += 1) if (seen[ROOM_IDS[j]] !== true) return false;
@@ -275,9 +322,9 @@ export function clientRuntimeScript(): string {
       // it dropped the rooms and left the previous poll's lock banner and stamp
       // standing. Found by re-reading my own fix rather than by a second
       // review round, which is where it should have been found the first time.
-      invalidate('The state route answered with a body this client cannot read as a complete set of all ' +
-        ROOM_IDS.length + ' rooms, so nothing is claimed here rather than part of the page moving to a new ' +
-        'document and the rest staying on the old one.');
+      invalidate('The state route answered with a body this client cannot read as a complete, well-formed set ' +
+        'of all ' + ROOM_IDS.length + ' rooms, so nothing is claimed here rather than part of the page moving ' +
+        'to a new document and the rest staying on the old one.');
       return;
     }
     lastViews = body.rooms;
@@ -289,42 +336,67 @@ export function clientRuntimeScript(): string {
     if (typeof window.__hqShellApply === 'function') window.__hqShellApply(body.rooms, activeRoom());
   }
 
-  // Every read is bounded.
+  // Every read is bounded — by the CLOCK, not by the browser's feature set.
   //
   // A fetch that establishes a connection and then never resolves OR rejects —
   // a stalled proxy, a hung host — left inFlight true forever: every
   // subsequent poll was discarded, the last hydrated rooms stayed on screen
   // looking current, and even a session expiry could no longer invalidate
   // them. A fail-closed runtime that can be wedged open by silence is not
-  // fail-closed (Codex round 5). An abort surfaces as a transport error, which
-  // already routes to invalidation.
+  // fail-closed (Codex round 5).
+  //
+  // The first fix hung that bound on AbortController, and the timer's callback
+  // did nothing at all when there was none. On such a browser the read still
+  // never settled: the deadline in cycle() below would eventually let a NEW
+  // poll start, but it neither invalidated what was on screen nor cancelled the
+  // abandoned promise — so stale canonical state stayed visible through
+  // repeated stalls, and a late answer from an abandoned read could still land
+  // on top of a newer one (Codex round 6). A guarantee that only holds where a
+  // constructor happens to exist is not a guarantee.
+  //
+  // So the timeout resolves the read itself. The abort is now an optimisation
+  // on top — it frees the connection where it can — and never the mechanism the
+  // deadline depends on. finish is idempotent, so whichever arrives first
+  // wins and the loser is dropped.
+  var READ_TIMED_OUT = 'no answer within ' + Math.round(READ_TIMEOUT_MS / 1000) + 's';
+
   function read(path) {
     var controller = typeof AbortController === 'function' ? new AbortController() : null;
-    var timer = window.setTimeout(function () {
-      if (controller) controller.abort();
-    }, READ_TIMEOUT_MS);
-    var settle = function (result) {
-      window.clearTimeout(timer);
-      return result;
-    };
     var options = { cache: 'no-store', credentials: 'same-origin', headers: { accept: 'application/json' } };
     if (controller) options.signal = controller.signal;
-    return fetch(path, options)
-      .then(function (response) {
-        return response.json().then(
-          function (parsed) { return { status: response.status, body: parsed, error: null }; },
-          function () { return { status: response.status, body: null, error: null }; }
-        );
-      })
-      .then(settle, function (failure) {
-        return settle({
-          status: 0,
-          body: null,
-          error: failure && failure.name === 'AbortError'
-            ? 'no answer within ' + Math.round(READ_TIMEOUT_MS / 1000) + 's'
-            : failure && failure.message ? failure.message : 'network failure',
-        });
-      });
+    return new Promise(function (resolve) {
+      var done = false;
+      var timer = null;
+      function finish(result) {
+        if (done) return;
+        done = true;
+        if (timer !== null) window.clearTimeout(timer);
+        resolve(result);
+      }
+      timer = window.setTimeout(function () {
+        // Best effort: release the connection if this browser can. The read is
+        // resolved either way, on the line below.
+        if (controller) { try { controller.abort(); } catch (ignored) {} }
+        finish({ status: 0, body: null, error: READ_TIMED_OUT });
+      }, READ_TIMEOUT_MS);
+      fetch(path, options).then(
+        function (response) {
+          return response.json().then(
+            function (parsed) { finish({ status: response.status, body: parsed, error: null }); },
+            function () { finish({ status: response.status, body: null, error: null }); }
+          );
+        },
+        function (failure) {
+          finish({
+            status: 0,
+            body: null,
+            error: failure && failure.name === 'AbortError'
+              ? READ_TIMED_OUT
+              : failure && failure.message ? failure.message : 'network failure',
+          });
+        }
+      );
+    });
   }
 
   // Everything derived from a state document goes at once, or the page ends up
@@ -341,15 +413,25 @@ export function clientRuntimeScript(): string {
 
   var inFlight = false;
   var inFlightSince = 0;
+  // Which cycle is the current one. A cycle that has been superseded — because
+  // the deadline below let a new one start — must not be able to write the page
+  // when its answer finally arrives, or a stale document lands on top of a
+  // fresher one (Codex round 6).
+  var generation = 0;
+
   function cycle() {
-    // The abort above is the real fix. This is the second lock on the same
-    // door, for a browser with no AbortController: a cycle that has been
-    // running longer than two timeouts is treated as lost rather than allowed
-    // to block every future poll indefinitely.
+    // The timeout inside read() is the real bound. This is the second lock on
+    // the same door: if a read somehow outlives it anyway, a cycle running
+    // longer than two timeouts is treated as lost rather than allowed to block
+    // every future poll indefinitely.
     if (inFlight && Date.now() - inFlightSince < READ_TIMEOUT_MS * 2) return;
+    generation += 1;
+    var mine = generation;
+    function current() { return mine === generation; }
     inFlight = true;
     inFlightSince = Date.now();
     read(SESSION_PATH).then(function (session) {
+      if (!current()) return;
       var verdict = accessVerdict(session.status, session.body, session.error);
       setAccess(verdict);
       if (verdict.state !== 'ready') {
@@ -361,6 +443,7 @@ export function clientRuntimeScript(): string {
         return;
       }
       return read(STATE_PATH).then(function (state) {
+        if (!current()) return;
         if (state.error) {
           invalidate('The HQ state route could not be reached (' + state.error + '), so nothing on this page is claimed to be current.');
         } else if (state.status !== 200) {
@@ -372,7 +455,17 @@ export function clientRuntimeScript(): string {
         }
         inFlight = false;
       });
-    }).catch(function () {
+    }).catch(function (failure) {
+      // A throw anywhere above means the page may have been mutated part way
+      // through a document. Clearing inFlight and walking away left exactly the
+      // mixed old/new page — stale stamp, stale lock — that invalidate() exists
+      // to prevent (Codex round 6). Whatever went wrong, nothing here is
+      // claimed to be current afterwards.
+      if (current()) {
+        invalidate('This page could not finish reading canonical HQ state (' +
+          (failure && failure.message ? failure.message : 'unexpected client error') +
+          '), so nothing on it is claimed to be current.');
+      }
       inFlight = false;
     });
   }
