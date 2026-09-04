@@ -83,6 +83,7 @@ describe('backup verification-window defense in depth', () => {
         FACTORYOS_HQ_RUNTIME: 'hosted',
         FACTORYOS_HQ_PERSISTENCE: 'durable-volume',
         FACTORYOS_HQ_DURABLE_ROOT: root,
+        FACTORYOS_HQ_DURABLE_VOLUME_PROVENANCE: 'operator:test-durable-volume',
       },
       () => {},
     );
@@ -133,6 +134,7 @@ describe('backup verification-window defense in depth', () => {
         FACTORYOS_HQ_RUNTIME: 'hosted',
         FACTORYOS_HQ_PERSISTENCE: 'durable-volume',
         FACTORYOS_HQ_DURABLE_ROOT: root,
+        FACTORYOS_HQ_DURABLE_VOLUME_PROVENANCE: 'operator:test-durable-volume',
       },
       () => {},
     );
