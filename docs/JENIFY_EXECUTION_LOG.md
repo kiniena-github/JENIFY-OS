@@ -806,3 +806,43 @@ Evidence at this commit: headquarter 1903, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
 web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS
 (lit 2449 warm samples vs 0 dark, framesAfterLoss 0).
+
+### Stage 4, self-review after round 7 — the registry constraint
+
+Not a reviewer finding. Round 7's lesson was that three times running I had made
+the right observation and written a check that enforced something weaker, so
+before requesting round 8 I put that question to the rest of the guard: what does
+a *well-formed* state document still get through it?
+
+Two things did, and both are now closed:
+
+- **`liveness` was any string.** It is a closed set of four in the contract. The
+  shell falls back to dark for anything else and the CSS simply would not match,
+  so nothing threw — which is exactly why it needed asserting rather than
+  assuming.
+- **`status` was unconstrained by the room's binding.** `hydrateRooms` is exact:
+  a room bound `not_recorded` or `later_phase` always reports that kind and
+  always reports `dark`, while a live-bound room reports `live` or `awaiting`.
+  Both sides of the wire hold the same registry, so a document that disagrees is
+  a version skew or worse — and what it produces is the failure this whole stage
+  exists to prevent: a room the registry says HQ does not record, arriving as
+  LIVE and rendering canonical-looking state for a capability that does not
+  exist.
+
+**The constraint immediately rejected my own evidence tool's fixture**, which had
+hard-coded `status: 'live'` for all seventeen rooms including the four static
+ones. That fixture had been wrong since it was written, and nothing noticed
+because nothing checked: `webgl-evidence.mjs` was lighting the page with a
+document the real server cannot produce and calling the result evidence. The
+fixture now carries each room's real binding, and the comment beside it says why
+the column exists so it cannot quietly drift back.
+
+That is the fourth defect this stage has found in its own verification
+instruments, and the pattern behind all four is the same — an instrument is a
+claim about the system, and an unchecked claim decays exactly like unchecked
+code.
+
+Evidence at this commit: headquarter 1905, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS
+(lit 2433 warm samples vs 0 dark, framesAfterLoss 0).

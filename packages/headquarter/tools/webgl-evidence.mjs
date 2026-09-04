@@ -155,13 +155,13 @@ const SESSION = {
   routes: [],
 };
 
-function room(id, ordinal, name, liveness, metrics = [], rows = []) {
+function room(id, ordinal, name, liveness, status, metrics = [], rows = []) {
   return {
     roomId: id,
     name,
     ordinal,
     purpose: `${name} — evidence fixture.`,
-    status: 'live',
+    status,
     liveness,
     metrics,
     rows,
@@ -170,26 +170,39 @@ function room(id, ordinal, name, liveness, metrics = [], rows = []) {
   };
 }
 
+// The fourth column is the room's BINDING, and it is not decoration.
+//
+// This fixture used to hard-code `status: 'live'` for all seventeen, including
+// the four rooms the registry binds as not_recorded or later_phase — a document
+// the real server cannot produce, since `hydrateRooms` reports a static room's
+// binding kind and never 'live'. Nothing noticed, because nothing checked: the
+// tool was lighting the page with a shape that could not occur in production
+// and calling the result evidence.
+//
+// The client now refuses such a document, which is how this was found — the
+// constraint rejected my own fixture on its first run. Worth recording plainly:
+// a hand-written fixture is a claim about what the server produces, and this one
+// was wrong for as long as it existed.
 const ROOMS = [
-  ['home', 1, 'Main Home', 'attention'],
-  ['command-room', 2, 'Command Room', 'active'],
-  ['mission-room', 3, 'Mission Room', 'active'],
-  ['meeting-room', 4, 'Meeting Room', 'dark'],
-  ['world-network', 5, 'World Network', 'quiet'],
-  ['departments', 6, 'Department Navigation', 'quiet'],
-  ['ai-workforce', 7, 'AI Workforce', 'quiet'],
-  ['approvals', 8, 'Approvals', 'attention'],
-  ['resources', 9, 'Resources', 'quiet'],
-  ['analytics', 10, 'Analytics', 'active'],
-  ['founder-office', 11, 'Founder Office', 'attention'],
-  ['projects', 12, 'Projects', 'quiet'],
-  ['product-factory', 13, 'Product Factory', 'dark'],
-  ['company-memory', 14, 'Company Memory', 'dark'],
-  ['research', 15, 'Research / R&D', 'dark'],
-  ['security-center', 16, 'Security Center', 'quiet'],
-  ['connections', 17, 'Settings / Connections', 'quiet'],
-].map(([id, ordinal, name, liveness]) =>
-  room(id, ordinal, name, liveness, [
+  ['home', 1, 'Main Home', 'attention', 'live'],
+  ['command-room', 2, 'Command Room', 'active', 'live'],
+  ['mission-room', 3, 'Mission Room', 'active', 'live'],
+  ['meeting-room', 4, 'Meeting Room', 'dark', 'not_recorded'],
+  ['world-network', 5, 'World Network', 'quiet', 'live'],
+  ['departments', 6, 'Department Navigation', 'quiet', 'live'],
+  ['ai-workforce', 7, 'AI Workforce', 'quiet', 'live'],
+  ['approvals', 8, 'Approvals', 'attention', 'live'],
+  ['resources', 9, 'Resources', 'quiet', 'live'],
+  ['analytics', 10, 'Analytics', 'active', 'live'],
+  ['founder-office', 11, 'Founder Office', 'attention', 'live'],
+  ['projects', 12, 'Projects', 'quiet', 'live'],
+  ['product-factory', 13, 'Product Factory', 'dark', 'later_phase'],
+  ['company-memory', 14, 'Company Memory', 'dark', 'later_phase'],
+  ['research', 15, 'Research / R&D', 'dark', 'not_recorded'],
+  ['security-center', 16, 'Security Center', 'quiet', 'live'],
+  ['connections', 17, 'Settings / Connections', 'quiet', 'live'],
+].map(([id, ordinal, name, liveness, status]) =>
+  room(id, ordinal, name, liveness, status, [
     { label: 'Evidence metric', value: liveness === 'dark' ? 0 : 3, hint: 'Fixture value.', tone: 'info' },
   ]),
 );

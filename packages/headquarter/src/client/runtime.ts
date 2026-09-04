@@ -75,6 +75,7 @@ export const CLIENT_FETCH_TARGETS: readonly string[] = [CONTROL_ROUTES.session, 
 export function clientRuntimeScript(): string {
   const roomIds = HQ_ROOMS.map((room) => room.id);
   const roomOrdinals = HQ_ROOMS.map((room) => room.ordinal);
+  const roomBindingKinds = HQ_ROOMS.map((room) => room.binding.kind);
   // The provenance each room carries when NO state document is in hand — the
   // same string the server rendered into the page. `hydrateRooms(null, null)`
   // is the one source for it, so the static page and a page that has just
@@ -100,6 +101,9 @@ export function clientRuntimeScript(): string {
   // coincidence that silently lights the wrong room if the registry is ever
   // reordered.
   var ROOM_ORDINALS = ${jsonForScript(roomOrdinals)};
+  // The binding kind of each room, in the same order. Used to hold a document
+  // to what the registry says the room can possibly be.
+  var ROOM_BINDING_KINDS = ${jsonForScript(roomBindingKinds)};
   var ROOM_STATIC_PROVENANCE = ${jsonForScript(staticProvenance)};
   var POLL_MS = ${CLIENT_POLL_INTERVAL_MS};
   var READ_TIMEOUT_MS = ${CLIENT_READ_TIMEOUT_MS};
@@ -289,14 +293,45 @@ export function clientRuntimeScript(): string {
     return true;
   }
 
-  // The ordinal the registry gives each room, by id. Built once.
+  // What the registry says about each room, by id. Built once.
   var ROOM_ORDINAL_BY_ID = {};
-  for (var o = 0; o < ROOM_IDS.length; o += 1) ROOM_ORDINAL_BY_ID[ROOM_IDS[o]] = ROOM_ORDINALS[o];
+  var ROOM_BINDING_BY_ID = {};
+  for (var o = 0; o < ROOM_IDS.length; o += 1) {
+    ROOM_ORDINAL_BY_ID[ROOM_IDS[o]] = ROOM_ORDINALS[o];
+    ROOM_BINDING_BY_ID[ROOM_IDS[o]] = ROOM_BINDING_KINDS[o];
+  }
+
+  // Both of these are closed sets in the contract, so a value outside them is
+  // not a document this client can read — it is a different document format
+  // wearing the same field names.
+  var LIVENESS_VALUES = { active: true, attention: true, quiet: true, dark: true };
+
+  // What status each room may legitimately carry, given its binding.
+  //
+  // hydrateRooms is the only thing that produces these, and it is exact: a
+  // room bound not_recorded or later_phase ALWAYS reports that kind and ALWAYS
+  // reports dark, while a live-bound room reports live or awaiting and nothing
+  // else. Both sides of the wire hold the same registry, so a document that
+  // disagrees is a version skew or worse — and the failure it produces is the
+  // one this stage exists to prevent: a room the registry says HQ does not
+  // record, arriving as LIVE and rendering canonical-looking state for a
+  // capability that does not exist.
+  //
+  // Not asked for. Found by putting round 7's own lesson to the rest of this
+  // guard — what would still get through it — instead of waiting to be told.
+  function statusAllowed(view) {
+    var binding = ROOM_BINDING_BY_ID[view.roomId];
+    if (binding === 'live') return view.status === 'live' || view.status === 'awaiting';
+    // A static room's truth does not depend on a session, so it may not move.
+    return view.status === binding && view.liveness === 'dark';
+  }
 
   function roomViewValid(view) {
     if (view == null || typeof view !== 'object') return false;
     if (!isText(view.roomId) || !isText(view.status) || !isText(view.liveness) || !isText(view.provenance)) return false;
     if (!isText(view.emptyMessage)) return false;
+    if (LIVENESS_VALUES[view.liveness] !== true) return false;
+    if (!statusAllowed(view)) return false;
     // The ordinal must be THIS room's ordinal, not merely a number in range.
     //
     // The text panels are selected by roomId while the shell indexes its

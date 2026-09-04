@@ -746,6 +746,107 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     page.close();
   });
 
+  it('refuses to light a room the registry says HQ does not record', async () => {
+    // Not a reviewer finding — found by putting round 7's lesson to the rest of
+    // the guard rather than waiting to be told. `hydrateRooms` is exact: a room
+    // bound `not_recorded` or `later_phase` always reports that kind and always
+    // reports `dark`. Both sides of the wire hold the same registry, so a
+    // document claiming otherwise is a version skew or worse — and what it
+    // produces is the failure this whole stage exists to prevent: a room the
+    // registry says HQ does not record, arriving as LIVE and rendering
+    // canonical-looking state for a capability that does not exist.
+    const live = deployment();
+    const page = await loadPage(live.deps);
+
+    const research = HQ_ROOMS.find((room) => room.id === 'research')!;
+    const researchBinding = research.binding;
+    // Narrowing and assertion in one: if this room ever becomes live-bound,
+    // this test is about the wrong room and should say so loudly.
+    if (researchBinding.kind !== 'not_recorded') {
+      throw new Error(`research is bound ${researchBinding.kind}, so this test no longer tests what it claims`);
+    }
+
+    const original = page.window.fetch as (input: string) => Promise<unknown>;
+    page.window.fetch = (input: string) => {
+      if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+        return Promise.resolve({
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              ok: true,
+              generatedAt: new Date().toISOString(),
+              rooms: HQ_ROOMS.map((room) => ({
+                roomId: room.id,
+                ordinal: room.ordinal,
+                // Everything correct except the one room that claims to hold
+                // canonical state its binding says does not exist.
+                status: room.id === 'research' ? 'live' : room.binding.kind === 'live' ? 'live' : room.binding.kind,
+                liveness: room.id === 'research' ? 'attention' : 'dark',
+                metrics:
+                  room.id === 'research'
+                    ? [{ label: 'Studies running', value: 7, hint: 'invented', tone: 'accent' }]
+                    : [],
+                rows: [],
+                emptyMessage: 'x',
+                provenance: 'x',
+              })),
+            }),
+        });
+      }
+      return original(input);
+    };
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toBe('');
+    // The invented number must not be anywhere on the page.
+    expect(page.document.body.textContent).not.toContain('Studies running');
+    // And the room HQ does not record still says exactly what it always said,
+    // rather than being blanked into an access complaint.
+    expect(bodyText(page.document, 'research')).toContain(researchBinding.reason);
+    page.close();
+  });
+
+  it('refuses a liveness value it has no meaning for', async () => {
+    // `RoomLiveness` is a closed set of four. The shell falls back to dark for
+    // anything else and the CSS simply would not match, so nothing throws —
+    // which is exactly why this needs asserting rather than assuming.
+    const live = deployment();
+    const page = await loadPage(live.deps);
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toContain('provenance live');
+
+    const original = page.window.fetch as (input: string) => Promise<unknown>;
+    page.window.fetch = (input: string) => {
+      if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+        return Promise.resolve({
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              ok: true,
+              generatedAt: new Date().toISOString(),
+              rooms: HQ_ROOMS.map((room, index) => ({
+                roomId: room.id,
+                ordinal: room.ordinal,
+                status: room.binding.kind === 'live' ? 'live' : room.binding.kind,
+                liveness: index === 2 ? 'extremely-busy' : 'dark',
+                metrics: [],
+                rows: [],
+                emptyMessage: 'x',
+                provenance: 'x',
+              })),
+            }),
+        });
+      }
+      return original(input);
+    };
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toBe('');
+    expect(panel(page.document, HQ_ROOMS[2]!.id).getAttribute('data-liveness')).toBe('dark');
+    page.close();
+  });
+
   it('bounds a stalled read on a browser with no AbortController', async () => {
     // Codex round 6. The timeout was armed but its callback did nothing when
     // there was no AbortController, so on such a browser the read still never
