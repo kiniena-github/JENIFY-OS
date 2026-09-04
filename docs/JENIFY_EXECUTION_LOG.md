@@ -1618,3 +1618,34 @@ lived.
 
 Evidence at this commit: headquarter 1939 (89 files), hq-host 206, hq-server 20,
 server 569 (3 pre-existing skips); typechecks clean; `npm run build`.
+
+### Stage 4 technically cleared at `029a9c3` — Founder acceptance is what remains
+
+The Codex quota cleared and round 20 ran on `26e92d9`, finding the plan
+contradiction recorded above. With that fixed, an independent substitute review
+(ChatGPT, in the reviewer role the Founder authorized while Codex was
+unavailable) covered the material browser/runtime surface — authenticated state
+reads, access and lock fail-closed logic, whole-document validation,
+stale-response and timeout handling, canonical room derivation, static-room
+truth boundaries, provenance handling, the WebGL upload/motion/context-loss
+lifecycle, and the real-browser evidence instrumentation — and found **no
+additional material P0/P1/P2 defect**. A second pass over the documentation
+delta found none either.
+
+Verified here against the primary source rather than taken from the review
+comment: JENIFY CI run **33923080697** completed **success** on head
+`029a9c36ce9d477ff0edc9b44dc7faf2911209f7`.
+
+**Twenty review rounds, and the shape of the branch in one line:** every round
+found the same class of defect — an enforcement narrower than the invariant
+behind it — and the last one found it in the plan document rather than in the
+product. That is the artefact worth keeping from this work, more than any
+individual fix.
+
+**Stage 4 is technically verified and NOT accepted.** Founder visual acceptance
+against the 17 approved HQ references cannot be performed by any automated
+session — the references are local to the Founder's workstation and were never
+read by this implementation, so nothing in the visual layer was verified against
+them. Merge and deployment remain Founder-gated and untouched: PR #251 is open
+and unmerged, `main` is unchanged, nothing was deployed or promoted, and no paid
+service was enabled.
