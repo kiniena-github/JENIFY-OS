@@ -1280,3 +1280,36 @@ shows me where they were thin.
 Evidence at this commit: headquarter 1924, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
 web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.
+
+### Stage 4, after round 15 — the invariant behind rounds 1, 3 and 14
+
+Not a reviewer finding. In the round-16 request I named the empty messages as a
+place I had fixed twice by instance and never checked generally. Rather than read
+the other twelve rooms — which is exactly what failed in round 14 — it is now a
+test over every live room at once.
+
+The invariant, taken straight from the page's own legend: **a dark room is a room
+HQ is holding nothing in.** So a dark room may not display a non-zero count or a
+row, and a room that is not dark must display something that explains why.
+Rounds 1, 3 and 14 were all instances of that one property, each fixed correctly
+and none of them preventing the next.
+
+Eight canonical-state scenarios, every live room checked in both directions.
+
+**It found something on its first run**, and the right answer was to leave the
+code alone. The Founder Office renders a row while dark — but that row is the
+SESSION's resolved principal, who you are, not something HQ is holding. The
+existing comment already said so: lighting the office for it would mean an empty
+HQ never looks empty, and would light a room for "you exist" rather than for
+recorded work. That is the no-fake-state rule beating visual tidiness, and it is
+correct.
+
+So the exemption is recorded in the test with its reasoning — and kept narrow.
+The office's numeric metric, tasks held at the gate, is still required to be zero
+when it is dark, so a dark Founder Office with a real approval waiting still
+fails. Verified by forcing exactly that: the check names the room and the count.
+Only the identity row is forgiven.
+
+Evidence at this commit: headquarter 1926, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip.

@@ -523,3 +523,143 @@ describe('Analytics ranks an approval the way every other room does', () => {
     expect(roomLiveness(state, 'analytics')).not.toBe('active');
   });
 });
+
+describe('no room contradicts its own displayed numbers', () => {
+  // The general form of rounds 1, 3 and 14, all of which were one room's
+  // liveness disagreeing with the figures printed inside it: the Command Room
+  // saying "HQ is holding nothing" above a metric reading 1; Analytics dark
+  // above four populated counts; Analytics quiet while five rooms called the
+  // same approval attention.
+  //
+  // Each was fixed individually and each fix was correct. None of them stopped
+  // the next one, because they were instances. This is the invariant behind
+  // them, checked over every live room at once: the legend says a dark room is
+  // a room HQ is holding nothing in, so a dark room may not display a non-zero
+  // count or a row, and a room displaying one may not be dark.
+  //
+  // Numeric metrics only — the Security Center's metrics are deliberately
+  // strings ('global', 'released', 'enabled'), which state a condition rather
+  // than count anything. Its rows still participate.
+  function scenarios(): { name: string; state: HqSnapshot }[] {
+    const task = {
+      taskId: 't',
+      capabilityId: 'repo.read_status',
+      status: 'running',
+      reviewState: 'none',
+      fence: 1,
+      claimedBy: 'worker-a',
+      submittedBy: null,
+      createdBy: 'founder',
+      createdAt: AT,
+      updatedAt: AT,
+      blockReason: null,
+      classification: {
+        capabilityId: 'repo.read_status',
+        riskClass: 'read_only',
+        sideEffect: false,
+        idempotent: true,
+        requiresApproval: false,
+        requiresIndependentReview: false,
+        requiresIdempotencyKey: false,
+        route: 'auto',
+        reason: 'read only',
+      },
+      project: 'jenify-os',
+      title: 'Read CI status',
+      assignedTo: 'worker-a',
+      sourceProposalId: null,
+    };
+    const build = (mutate: (c: ReturnType<typeof emptyFounderConsole>) => void): HqSnapshot => {
+      const console_ = emptyFounderConsole(AT);
+      mutate(console_);
+      return buildHqSnapshot({
+        generatedAt: AT,
+        console: { data: console_, provenance: PROVENANCE },
+        connections: { data: [], provenance: PROVENANCE },
+        workforce: { data: [], provenance: PROVENANCE },
+        capabilities: { data: [], provenance: PROVENANCE },
+        activity: { data: [], provenance: PROVENANCE },
+      });
+    };
+    return [
+      { name: 'empty HQ', state: emptyState() },
+      { name: 'in flight', state: build((c) => { c.inFlight = [task] as typeof c.inFlight; }) },
+      { name: 'queued', state: build((c) => { c.queued = [{ ...task, status: 'queued' }] as typeof c.queued; }) },
+      { name: 'blocked', state: build((c) => { c.blocked = [{ ...task, status: 'blocked' }] as typeof c.blocked; }) },
+      {
+        name: 'review failed',
+        state: build((c) => { c.blocked = [{ ...task, status: 'review_failed' }] as typeof c.blocked; }),
+      },
+      {
+        name: 'pending review',
+        state: build((c) => {
+          c.pendingReviews = [
+            { ...task, reviewState: 'pending', ineligibleReviewers: ['system'] },
+          ] as unknown as typeof c.pendingReviews;
+        }),
+      },
+      {
+        name: 'approval only',
+        state: build((c) => {
+          c.approvals = [
+            { ...task, status: 'needs_approval', actionDigest: 'd', ask: 'Approve.', requestedBy: null },
+          ] as unknown as typeof c.approvals;
+        }),
+      },
+      {
+        name: 'outcome unknown',
+        state: build((c) => {
+          c.outcomeUnknown = [
+            { ...task, status: 'outcome_unknown', allowedDecisions: ['confirmed_done'], ineligibleReconcilers: ['system'] },
+          ] as unknown as typeof c.outcomeUnknown;
+        }),
+      },
+    ];
+  }
+
+  it('never renders a dark room above a non-zero count or a row', () => {
+    for (const { name, state } of scenarios()) {
+      for (const view of hydrateRooms(state, FOUNDER_SESSION)) {
+        if (view.status !== 'live') continue;
+        const counted = view.metrics
+          .filter((m) => typeof m.value === 'number')
+          .reduce((sum, m) => sum + (m.value as number), 0);
+        if (view.liveness !== 'dark') continue;
+        expect(counted, `${name}: ${view.roomId} is dark but counts ${counted}`).toBe(0);
+        // The Founder Office is the one room that may be dark with a row in it,
+        // and the reason is deliberate rather than an oversight: its row is the
+        // SESSION's resolved principal — who you are — not something HQ is
+        // holding. Lighting the office for that would mean an empty HQ never
+        // looks empty, and would light a room for "you exist" rather than for
+        // recorded work, which is the no-fake-state rule losing to visual
+        // tidiness.
+        //
+        // The exemption is narrow on purpose. Its numeric metric — tasks held at
+        // the gate — is still required to be zero above, so a dark Founder
+        // Office with real approvals waiting still fails here. Only the identity
+        // row is forgiven.
+        if (view.roomId === 'founder-office') continue;
+        expect(view.rows.length, `${name}: ${view.roomId} is dark but lists rows`).toBe(0);
+      }
+    }
+  });
+
+  it('never renders a lit room with nothing at all in it', () => {
+    // The inverse, and the one round 14 needed: a room that is not dark must
+    // show the reader WHY. The Command Room's presence fix would have recreated
+    // round 1's defect without the "Awaiting review" metric beside it.
+    for (const { name, state } of scenarios()) {
+      for (const view of hydrateRooms(state, FOUNDER_SESSION)) {
+        if (view.status !== 'live' || view.liveness === 'dark') continue;
+        const counted = view.metrics
+          .filter((m) => typeof m.value === 'number')
+          .reduce((sum, m) => sum + (m.value as number), 0);
+        const statedCondition = view.metrics.some((m) => typeof m.value === 'string');
+        expect(
+          counted > 0 || view.rows.length > 0 || statedCondition,
+          `${name}: ${view.roomId} is ${view.liveness} but displays nothing that explains it`,
+        ).toBe(true);
+      }
+    }
+  });
+});
