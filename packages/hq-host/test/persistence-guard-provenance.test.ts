@@ -1,13 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { resolveHqPersistenceConfig } from '../src/persistence-guard.js';
 
 const roots: string[] = [];
 
 function tempRoot(label: string): string {
-  const value = fs.mkdtempSync(path.join(os.tmpdir(), label));
+  const value = fs.mkdtempSync(path.join(process.cwd(), `.${label}`));
   roots.push(value);
   return value;
 }
