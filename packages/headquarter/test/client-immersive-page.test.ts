@@ -393,6 +393,79 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     page.close();
   });
 
+  it('does not relight the building from a read it has disowned', async () => {
+    // Codex P1 on `7e87392`. The text panels were cleared on session expiry,
+    // but the cached views the 3D shell is driven from were not — so navigating
+    // to another room afterwards reapplied the previous AUTHENTICATED read to
+    // the building, relighting and potentially pulsing rooms whose panels
+    // beside them said nothing was current. Wiping the rooms has to mean
+    // wiping every copy of them.
+    const live = deployment();
+    handleControlRequest(
+      {
+        method: 'POST',
+        path: CONTROL_ROUTES.orders,
+        headers: { origin: PAGE_ORIGIN, 'content-type': 'application/json' },
+        body: { instruction: 'Something lit.', route: 'CLAUDE', idempotencyKey: 'k-relight', title: 'Lit work' },
+      },
+      live.deps,
+    );
+    const page = await loadPage(live.deps);
+    expect(panel(page.document, 'approvals').getAttribute('data-liveness')).toBe('attention');
+
+    // Capture what the shell is told, from here on.
+    const applied: { rooms: { roomId: string; liveness: string }[]; active: string }[] = [];
+    const shell = page.window.__hqShellApply as ((v: unknown, a: string) => void) | undefined;
+    page.window.__hqShellApply = (views: { roomId: string; liveness: string }[], active: string) => {
+      applied.push({ rooms: views, active });
+      if (shell) shell(views, active);
+    };
+
+    live.setAccount(null);
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+    expect(accessState(page.document)).toBe('unauthenticated');
+
+    // Now navigate, which is what used to reapply the stale views.
+    page.dom.window.location.hash = '#/room/mission-room';
+    page.dom.window.dispatchEvent(new page.dom.window.Event('hashchange'));
+    await page.settle();
+
+    expect(applied.length).toBeGreaterThan(0);
+    for (const call of applied) {
+      for (const room of call.rooms) {
+        expect(room.liveness, `${room.roomId} relit after invalidation`).toBe('dark');
+      }
+    }
+    page.close();
+  });
+
+  it('clears the lock banner and the state stamp when a state read fails, not just the rooms', async () => {
+    // Codex P2 on `7e87392`. The session probe still succeeds, so the earlier
+    // code took the state-failure branch and cleared only the rooms — leaving
+    // the previous poll's stamp on screen. The page then said nothing was
+    // current while still asserting when it was current.
+    const live = deployment();
+    const page = await loadPage(live.deps);
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toContain('provenance live');
+
+    // Session keeps working; the STATE route stops answering.
+    const original = page.window.fetch as (input: string) => Promise<unknown>;
+    page.window.fetch = (input: string) => {
+      if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+        return Promise.reject(new Error('Failed to fetch'));
+      }
+      return original(input);
+    };
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toBe('');
+    expect((page.document.querySelector('[data-hq-lock]') as HTMLElement).hidden).toBe(true);
+    expect(bodyText(page.document, 'home')).toContain('could not be reached');
+    page.close();
+  });
+
   it('leaves the rooms HQ does not record saying exactly what they said', async () => {
     // Their statement does not depend on a session, so an access failure must
     // not replace a true sentence with an access complaint.

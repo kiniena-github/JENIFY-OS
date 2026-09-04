@@ -341,9 +341,16 @@ void main() {
   vec3 toEye = normalize(uEye - vWorld);
   float lambert = max(dot(n, normalize(uKey)), 0.0);
   float rim = pow(1.0 - max(dot(n, toEye), 0.0), 3.0);
-  vec3 base = vColor * (0.22 + 0.78 * lambert);
-  vec3 lit = base + vColor * rim * 0.85;
-  vec3 glow = vTint * vGlow * (vEmissive > 0.5 ? 2.35 : 0.85);
+  vec3 base = vColor * (0.30 + 0.70 * lambert);
+  vec3 lit = base + vColor * rim * 0.95;
+  // The EMISSIVE surfaces — the facade and the light column — carry a room's
+  // light. The shell takes only a hint of the same colour.
+  //
+  // At 0.85 the whole room volume glowed, which reads acceptably from across
+  // the atrium and turns into a flat wall of colour the moment the camera
+  // enters the room: a lit box rather than a lit space. Found by looking at the
+  // browser evidence screenshot; no test can see it.
+  vec3 glow = vTint * vGlow * (vEmissive > 0.5 ? 1.25 : 0.2);
   vec3 color = lit + glow;
   // A floor grid drawn in the shader, so no extra geometry carries it.
   if (abs(n.y - 1.0) < 0.01 && vWorld.y < 0.05) {
@@ -354,6 +361,16 @@ void main() {
   float dist = length(uEye - vWorld);
   float fog = clamp((dist - 34.0) / 96.0, 0.0, 0.92);
   color = mix(color, vec3(0.016, 0.024, 0.037), fog);
+  // Highlight rolloff, applied ONLY above the knee.
+  //
+  // A lit facade seen close up otherwise clipped every channel to 1.0 and
+  // turned WHITE, losing the one thing its colour carries: which liveness the
+  // room is in. Compressing the WHOLE range instead (color / (1 + color * k))
+  // fixed the clipping and crushed every mid-tone with it — the building went
+  // murky, which the browser evidence screenshot showed immediately. This
+  // leaves everything below the knee untouched and bends only what would have
+  // clipped.
+  color = color - max(color - 0.66, 0.0) * 0.72;
   gl_FragColor = vec4(color, 1.0);
 }`;
 
@@ -548,7 +565,9 @@ export function immersiveShellScript(): string {
   gl.clearColor(0.016, 0.024, 0.037, 1);
 
   /* ---------- camera ---------- */
-  var HOME = { x: 0, y: 22, z: 62, tx: 0, ty: 3, tz: 0 };
+  // The establishing shot: high enough and far enough back that the whole
+  // building — atrium, inner ring, outer ring — is in frame at once.
+  var HOME = { x: 0, y: 34, z: 88, tx: 0, ty: 2, tz: 0 };
   var camera = { x: HOME.x, y: HOME.y, z: HOME.z, tx: HOME.tx, ty: HOME.ty, tz: HOME.tz };
   var target = { x: HOME.x, y: HOME.y, z: HOME.z, tx: HOME.tx, ty: HOME.ty, tz: HOME.tz };
   var orbit = 0;
@@ -560,7 +579,7 @@ export function immersiveShellScript(): string {
     if (!room || room.ordinal === 1) {
       target = { x: HOME.x, y: HOME.y, z: HOME.z, tx: HOME.tx, ty: HOME.ty, tz: HOME.tz };
     } else {
-      target = { x: room.camX, y: room.camY, z: room.camZ, tx: room.x, ty: 4.2, tz: room.z };
+      target = { x: room.camX, y: room.camY, z: room.camZ, tx: room.x, ty: 3.5, tz: room.z };
     }
     if (motion.reduced) { camera = { x: target.x, y: target.y, z: target.z, tx: target.tx, ty: target.ty, tz: target.tz }; }
     wake();

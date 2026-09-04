@@ -250,6 +250,37 @@ describe('a real mutation changes what the next read answers', () => {
     expect(after.liveness).toBe('attention');
   });
 
+  it('never tells the Command Room it is empty while approvals are pending', () => {
+    // Codex P2 on `7e87392`. With one approval pending and nothing else — the
+    // ordinary state immediately after submitting an order — the Command Room
+    // has no rows, because approvals are the Approvals room's subject. Its
+    // empty message must not therefore claim HQ is holding nothing, directly
+    // beneath its own metric reading 1 and a room lit amber.
+    const h = harness();
+    handleControlRequest(
+      {
+        method: 'POST',
+        path: CONTROL_ROUTES.orders,
+        headers: { origin: ORIGIN, 'content-type': 'application/json' },
+        body: { instruction: 'Awaiting a decision.', route: 'CLAUDE', idempotencyKey: 'k-cmd' },
+      },
+      h.deps,
+    );
+    const command = rooms(h.call({})).find((room) => room.roomId === 'command-room')!;
+    expect(command.rows).toHaveLength(0);
+    expect(command.metrics.find((metric) => metric.label === 'Awaiting decision')!.value).toBe(1);
+    expect(command.liveness).toBe('attention');
+    expect(command.emptyMessage).not.toContain('HQ is holding nothing');
+    expect(command.emptyMessage).toContain('held at the Founder gate');
+    expect(command.emptyMessage).toContain('1 task(s)');
+  });
+
+  it('still says HQ is holding nothing when it genuinely is', () => {
+    const command = rooms(harness().call({})).find((room) => room.roomId === 'command-room')!;
+    expect(command.emptyMessage).toContain('HQ is holding nothing');
+    expect(command.liveness).toBe('dark');
+  });
+
   it('refuses the mutation, and changes nothing, when the session holds no authority', () => {
     const h = harness({ account: STAFF_ACCOUNT });
     const refused = handleControlRequest(

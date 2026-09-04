@@ -179,9 +179,23 @@ function operationsSection(state: HqStateDocument): Section {
       metric('Awaiting decision', ops.approvals.length, 'Held at the Founder gate.', tone(ops.approvals.length, 'warn')),
     ],
     rows: limited(rows),
+    // The empty message has to agree with the metrics above it.
+    //
+    // The Command Room lists what is moving or stuck — in flight, queued,
+    // blocked, unresolved — and deliberately does NOT list approvals, which
+    // are the Approvals room's subject. But it COUNTS them, and it goes to
+    // `attention` liveness for them. So immediately after an order is
+    // submitted (the ordinary case: one approval pending, nothing else) the
+    // room had no rows and said "HQ is holding nothing" directly beneath a
+    // metric reading 1 and a room lit amber. Two true numbers and a false
+    // sentence between them (Codex P2 on `7e87392`).
     emptyMessage:
-      'No task is recorded in flight, queued, blocked or unresolved. The Command Room is empty ' +
-      'because HQ is holding nothing, not because nothing loaded.',
+      ops.approvals.length > 0
+        ? `Nothing is in flight, queued, blocked or unresolved — but ${ops.approvals.length} task(s) ` +
+          'are held at the Founder gate and cannot start until decided. They are listed in the ' +
+          'Approvals room.'
+        : 'No task is recorded in flight, queued, blocked or unresolved. The Command Room is empty ' +
+          'because HQ is holding nothing, not because nothing loaded.',
     liveness: livenessFrom({ attention, active: ops.inFlight.length, present: rows.length }),
   };
 }

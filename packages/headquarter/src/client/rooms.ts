@@ -428,16 +428,28 @@ export function roomAnchor(room: HqRoom): RoomAnchor {
   const radius = RING_RADIUS[ring];
   const x = round(Math.cos(angle) * radius);
   const z = round(Math.sin(angle) * radius);
-  // Stand back toward the atrium by a fixed distance, and a little above eye
-  // height, so the room's facade fills the frame from the inside of the ring.
-  const standOff = radius - 17;
+  // Stand back toward the atrium, above head height, looking slightly down.
+  //
+  // The distance is chosen so the room reads as a SPACE with its neighbours
+  // around it rather than as a facade filling the frame. Successive browser
+  // evidence screenshots settled it: at 17 units back the room was a wall of
+  // colour, at 19 it still filled the frame. At 25 back and 13 up the room
+  // occupies roughly a third of the frame with its neighbours either side,
+  // which is what "large cinematic architectural space" actually looks like.
+  //
+  // Both rings stay in open floor at this offset: the inner ring's camera sits
+  // at radius 5, out in the atrium plaza; the outer ring's sits at 29, and
+  // because the outer ring is offset by half a slot, that line passes cleanly
+  // BETWEEN two inner rooms — about 6 units of clearance either side — rather
+  // than through one.
+  const standOff = radius - 25;
   return {
     x,
     z,
     angle,
     cameraX: round(Math.cos(angle) * standOff),
     cameraZ: round(Math.sin(angle) * standOff),
-    cameraY: 9,
+    cameraY: 13,
   };
 }
 

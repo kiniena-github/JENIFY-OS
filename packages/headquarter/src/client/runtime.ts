@@ -116,6 +116,14 @@ export function clientRuntimeScript(): string {
   }
 
   function clearRooms(reason) {
+    // Drop the cached views FIRST. They were read under an authority this page
+    // no longer has, and the hashchange handler below reapplies them to the 3D
+    // shell — so keeping them here would relight, and possibly pulse, rooms
+    // from the previous authenticated read while the text panels beside them
+    // said nothing was current (Codex P1 on 7e87392). Wiping the rooms has to
+    // mean wiping every copy of them, including the one only the building can
+    // see.
+    lastViews = null;
     for (var i = 0; i < ROOM_IDS.length; i += 1) {
       var panel = panelFor(ROOM_IDS[i]);
       if (!panel) continue;
@@ -238,6 +246,18 @@ export function clientRuntimeScript(): string {
       .catch(function (failure) { return { status: 0, body: null, error: failure && failure.message ? failure.message : 'network failure' }; });
   }
 
+  // Everything derived from a state document goes at once, or the page ends up
+  // half-current: an earlier version cleared only the rooms when a state read
+  // failed, leaving the previous poll's lock banner and "canonical state as of"
+  // stamp on screen — the page saying nothing is current while still asserting
+  // a lock and a provenance from a read it had just disowned (Codex P2 on
+  // 7e87392). One function, so a future branch cannot forget half of it.
+  function invalidate(reason) {
+    clearRooms(reason);
+    setLock({ locked: false, label: '', message: '' });
+    if (stampNode) stampNode.textContent = '';
+  }
+
   var inFlight = false;
   function cycle() {
     if (inFlight) return;
@@ -249,19 +269,17 @@ export function clientRuntimeScript(): string {
         // Every non-ready state wipes the rooms. Including the transition OUT
         // of ready: an expired session must not leave the previous render on
         // screen looking current.
-        clearRooms(verdict.message);
-        setLock({ locked: false, label: '', message: '' });
-        if (stampNode) stampNode.textContent = '';
+        invalidate(verdict.message);
         inFlight = false;
         return;
       }
       return read(STATE_PATH).then(function (state) {
         if (state.error) {
-          clearRooms('The HQ state route could not be reached (' + state.error + '), so nothing on this page is claimed to be current.');
+          invalidate('The HQ state route could not be reached (' + state.error + '), so nothing on this page is claimed to be current.');
         } else if (state.status !== 200) {
           var verdict2 = accessVerdict(state.status, state.body, null);
           setAccess(verdict2);
-          clearRooms(verdict2.message);
+          invalidate(verdict2.message);
         } else {
           applyState(state.body);
         }

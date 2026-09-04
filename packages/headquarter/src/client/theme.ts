@@ -108,6 +108,17 @@ export const IMMERSIVE_CSS = `
 }
 
 [data-hq-lock] { border-color: var(--danger); }
+/*
+ * display:none must WIN over .provenance-banner's display:flex.
+ *
+ * The lock banner reuses that class and is hidden by the HTML hidden attribute
+ * when nothing is locked — but the UA stylesheet's [hidden]{display:none} loses
+ * to any author rule that sets display, so an unlocked HQ rendered an empty red
+ * bar under the header. Found by looking at the browser evidence screenshot,
+ * which is exactly the class of defect a DOM test cannot see: the element WAS
+ * hidden, and every assertion about it passed.
+ */
+[data-hq-lock][hidden] { display: none !important; }
 [data-hq-client][data-hq-access-state="unauthenticated"] .hq-building,
 [data-hq-client][data-hq-access-state="not_founder"] .hq-building,
 [data-hq-client][data-hq-access-state="refused"] .hq-building { opacity: 0.45; }
