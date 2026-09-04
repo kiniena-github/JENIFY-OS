@@ -266,6 +266,18 @@ describe('provenance and freshness are never overstated', () => {
     // Before the first poll returns, the page genuinely does not know.
     for (const page of HQ_PAGES) {
       const html = bare.get(page.file)!;
+      // The immersive HQ carries no bundle data, so a bundle timestamp there
+      // would be a claim about something the page does not show — and it is
+      // what installs the snapshot poll, whose verdicts ("UPDATED — page not
+      // rebuilt", "OFFLINE — build-time data", "SAMPLE — not live data") could
+      // appear above rooms hydrated live from the control API (Codex round 19).
+      // The exemption is asserted rather than skipped: the page must carry NO
+      // build-time instant and NO freshness UI, so it cannot quietly regain one.
+      if (page.file === 'immersive.html') {
+        expect(html).not.toContain('data-live-state');
+        expect(html).not.toContain(SNAPSHOT_FILENAME);
+        continue;
+      }
       expect(html).toContain('data-live-state="checking"');
       expect(html).toContain('CHECKING…');
     }
@@ -369,6 +381,11 @@ describe('provenance and freshness are never overstated', () => {
 
   it('still states the build-time instant, which is true with or without scripting', () => {
     for (const page of HQ_PAGES) {
+      if (page.file === 'immersive.html') {
+        // See the freshness test above: no build-time instant on this page.
+        expect(bare.get(page.file)!).not.toContain('As of ');
+        continue;
+      }
       expect(bare.get(page.file)!).toContain('As of 2026-08-26T10:30:00Z');
     }
   });

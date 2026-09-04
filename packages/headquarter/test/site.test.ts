@@ -119,7 +119,21 @@ describe('buildSite', () => {
     // Newest timestamp in the sample bundle, not wall-clock time.
     expect(bundleAsOf(sample)).toBe('2026-08-26T10:30:00Z');
     for (const page of HQ_PAGES) {
-      expect(site.get(page.file)!).toContain('As of 2026-08-26T10:30:00Z');
+      const html = site.get(page.file)!;
+      // The immersive HQ carries no bundle data, so a bundle timestamp there
+      // would be a claim about something the page does not show — and it is
+      // what installs the snapshot poll, whose verdicts ("UPDATED — page not
+      // rebuilt", "OFFLINE — build-time data", "SAMPLE — not live data") could
+      // appear above rooms hydrated live from the control API (Codex round 19).
+      // The exemption is asserted rather than skipped: the page must carry NO
+      // build-time instant and NO freshness UI, so it cannot quietly regain one.
+      if (page.file === 'immersive.html') {
+        expect(html).not.toContain('As of ');
+        expect(html).not.toContain('data-as-of');
+        expect(html).not.toContain('data-live-state');
+        continue;
+      }
+      expect(html).toContain('As of 2026-08-26T10:30:00Z');
     }
     // Renders are reproducible: the same bundle always produces the same HTML.
     expect(buildSite(sample).get('index.html')).toBe(site.get('index.html'));

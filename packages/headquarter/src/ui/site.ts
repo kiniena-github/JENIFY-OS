@@ -188,7 +188,7 @@ export function buildSite(data: HeadquarterData): Map<string, string> {
   // data, contradicting the live stamp its own runtime writes — the comment
   // above said "NO bundle data" while the call one line below passed two pieces
   // of it (Codex round 18).
-  site.set('immersive.html', renderImmersiveHq(nowIso));
+  site.set('immersive.html', renderImmersiveHq());
   site.set('projects.html', renderProjects(cards, timelines, nowIso, data.note, data.sourceMode));
   site.set(
     'executive-room.html',
