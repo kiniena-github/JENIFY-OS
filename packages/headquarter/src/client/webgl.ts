@@ -787,6 +787,40 @@ export function immersiveShellScript(): string {
     });
   }
 
+  // A context lost AFTER startup.
+  //
+  // Detection only covers a context that is already lost when it is created.
+  // A GPU reset or resource eviction later emits a webglcontextlost event, at
+  // which point the program and every buffer are gone — but the canvas was
+  // still on the page and the status still said the 3D headquarters was
+  // active, which is exactly the black rectangle claiming to work that this
+  // design exists to avoid (Codex round 4). Losing the picture is acceptable;
+  // lying about having it is not.
+  //
+  // This takes the documented fallback rather than rebuilding. Restoring would
+  // mean recreating the program, both buffers, every attribute binding and the
+  // current lighting state, and a half-restored building is a worse failure
+  // than an honest one. The rooms below are unaffected either way.
+  canvas.addEventListener('webglcontextlost', function (event) {
+    // Without preventDefault the context is never eligible for restoration and
+    // the browser may keep retrying; either way the page must stop drawing.
+    event.preventDefault();
+    running = false;
+    if (frame) window.cancelAnimationFrame(frame);
+    if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+    if (labelLayer && labelLayer.parentNode) labelLayer.parentNode.removeChild(labelLayer);
+    if (motionButton && motionButton.parentNode) motionButton.parentNode.removeChild(motionButton);
+    if (motionNote && motionNote.parentNode) motionNote.parentNode.removeChild(motionNote);
+    document.documentElement.setAttribute('data-hq-3d', 'lost');
+    say(
+      'The graphics context was lost after the headquarters had loaded — a GPU reset or a device ' +
+      'reclaiming memory. The 3D view is gone rather than frozen, because a still picture of an old ' +
+      'moment would be worse than none. Every room below is unaffected and still live; reload to ' +
+      'get the building back.',
+      'warn',
+    );
+  });
+
   window.__hqShellGoTo = goTo;
   say('3D headquarters active. Rooms are lit only by canonical state; drag to look around, or use the room list below.', 'ok');
   wake();

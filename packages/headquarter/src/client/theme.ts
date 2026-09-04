@@ -29,7 +29,8 @@ export const IMMERSIVE_CSS = `
     linear-gradient(180deg, #060910, #04060b);
   min-width: 0;
 }
-:root[data-hq-3d="unavailable"] .hq-building { display: none; }
+:root[data-hq-3d="unavailable"] .hq-building,
+:root[data-hq-3d="lost"] .hq-building { display: none; }
 
 .hq-canvas {
   display: block;

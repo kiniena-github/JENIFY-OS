@@ -527,6 +527,34 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     page.close();
   });
 
+  it('stops each room claiming the previous document’s provenance', async () => {
+    // Per-room provenance is state-derived too. Left alone through
+    // invalidation, every live room went on printing "as of <instant> ·
+    // provenance live" while the header above it said no state had been read —
+    // the same defect as the global stamp, one level further in (Codex round
+    // 4).
+    const live = deployment();
+    const page = await loadPage(live.deps);
+    const provenance = (roomId: string) =>
+      panel(page.document, roomId).querySelector('[data-hq-room-provenance]')!.textContent ?? '';
+    expect(provenance('home')).toContain('provenance live');
+
+    live.setAccount(null);
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    for (const room of HQ_ROOMS) {
+      if (room.binding.kind !== 'live') continue;
+      const shown = provenance(room.id);
+      expect(shown, room.id).not.toContain('provenance live');
+      expect(shown, room.id).not.toContain('as of');
+      // And it says something true rather than going blank: the binding's own
+      // source, exactly as the server-rendered page states it.
+      expect(shown, room.id).toBe(room.binding.source);
+    }
+    page.close();
+  });
+
   it('leaves the rooms HQ does not record saying exactly what they said', async () => {
     // Their statement does not depend on a session, so an access failure must
     // not replace a true sentence with an access complaint.

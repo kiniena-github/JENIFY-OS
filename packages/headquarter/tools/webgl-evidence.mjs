@@ -146,15 +146,31 @@ const ROOMS = [
   ]),
 );
 
-const STATE = {
-  ok: true,
-  generatedAt: new Date().toISOString(),
-  mode: 'live',
-  note: 'webgl-evidence fixture',
-  counts: { approvals: 2, pendingReviews: 0, outcomeUnknown: 0, blocked: 1, inFlight: 3, queued: 1 },
-  killSwitch: { globalEngaged: false, engagedScopes: [] },
-  rooms: ROOMS,
-};
+function stateWith(rooms) {
+  return {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    mode: 'live',
+    note: 'webgl-evidence fixture',
+    counts: { approvals: 2, pendingReviews: 0, outcomeUnknown: 0, blocked: 1, inFlight: 3, queued: 1 },
+    killSwitch: { globalEngaged: false, engagedScopes: [] },
+    rooms,
+  };
+}
+
+const STATE = stateWith(ROOMS);
+
+/**
+ * The same seventeen rooms with every one of them dark.
+ *
+ * Used for the differential below: the page is loaded twice, and the two
+ * composited images must differ. That is what makes this a test of the GPU
+ * rather than of the DOM.
+ */
+const DARK_STATE = stateWith(ROOMS.map((room) => ({ ...room, liveness: 'dark' })));
+
+/** Swapped between page loads; the stub serves whatever this points at. */
+let servedState = STATE;
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -177,7 +193,7 @@ const server = createServer((req, res) => {
   }
   if (path === '/api/hq/control/state') {
     res.writeHead(200, { 'content-type': TYPES['.json'], 'cache-control': 'no-store' });
-    res.end(JSON.stringify(STATE));
+    res.end(JSON.stringify(servedState));
     return;
   }
   if (path === '/favicon.ico') {
@@ -434,6 +450,124 @@ try {
   if (Object.keys(actualLiveness).length !== ROOMS.length) {
     failures.push(`expected ${ROOMS.length} room panels, found ${Object.keys(actualLiveness).length}`);
   }
+
+  /* ---------- the differential: does the GPU actually light the rooms? ---------- */
+  //
+  // The check above reads `data-liveness` off the TEXT PANELS, which the client
+  // runtime writes. That proves hydration reached the DOM and nothing more: if
+  // `__hqShellApply` stopped writing `stateData`, or the `bufferSubData` upload
+  // were dropped, every panel attribute would still be correct, the screenshot
+  // would still be "drawn" because the structural geometry is enough, and this
+  // tool would still print PASS with every room dark in the actual building
+  // (Codex round 4, against this file for the second time).
+  //
+  // So the page is loaded TWICE — once with the mixed fixture, once with the
+  // same seventeen rooms all dark — and the two composited canvases are
+  // compared. Amber only ever comes from a room at `attention`, so its presence
+  // in one image and absence in the other is an independently observable fact
+  // about what the GPU drew, not about what the DOM says.
+  const warmthOf = async (label) => {
+    const box = await page.locator('[data-hq-canvas]').boundingBox();
+    const png = await page.screenshot({ clip: box ?? undefined });
+    return page.evaluate(async ([base64, tag]) => {
+      const image = new Image();
+      await new Promise((done, fail) => {
+        image.onload = done;
+        image.onerror = fail;
+        image.src = `data:image/png;base64,${base64}`;
+      });
+      const copy = document.createElement('canvas');
+      copy.width = image.width;
+      copy.height = image.height;
+      const ctx = copy.getContext('2d');
+      ctx.drawImage(image, 0, 0);
+      const { data } = ctx.getImageData(0, 0, copy.width, copy.height);
+      let warm = 0;
+      let bright = 0;
+      for (let i = 0; i < data.length; i += 4 * 17) {
+        const [r, g, b] = [data[i], data[i + 1], data[i + 2]];
+        // Amber: red clearly ahead of blue. The dark tint and the cyan
+        // structure are both blue-dominant, so this cannot be reached by them.
+        if (r > b + 25 && r > 70) warm += 1;
+        if (r + g + b > 150) bright += 1;
+      }
+      return { tag, warm, bright };
+    }, [png.toString('base64'), label]);
+  };
+
+  const litMeasurement = await warmthOf('mixed');
+
+  servedState = DARK_STATE;
+  await page.evaluate(() => {
+    window.location.hash = '';
+  });
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForTimeout(2500);
+  const darkMeasurement = await warmthOf('all-dark');
+  servedState = STATE;
+
+  report.gpuDifferential = { lit: litMeasurement, dark: darkMeasurement };
+
+  if (!(litMeasurement.warm > 0)) {
+    failures.push(
+      `the GPU drew no amber with rooms at attention (${JSON.stringify(litMeasurement)}) — the ` +
+        'state document is reaching the DOM but not the building',
+    );
+  }
+  if (!(litMeasurement.warm > darkMeasurement.warm * 4 + 20)) {
+    failures.push(
+      'the composited building looks the same lit and unlit ' +
+        `(lit ${JSON.stringify(litMeasurement)} vs dark ${JSON.stringify(darkMeasurement)}) — ` +
+        'room lighting is not reaching the GPU',
+    );
+  }
+
+  /* ---------- context loss after startup ---------- */
+  //
+  // Detection covers a context that is already lost when created; a GPU reset
+  // later is a different path and used to leave the canvas on the page with
+  // the status still claiming the 3D headquarters was active — the black
+  // rectangle this design exists to avoid (Codex round 4). `WEBGL_lose_context`
+  // makes that testable rather than theoretical, so it is tested.
+  servedState = STATE;
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForTimeout(1500);
+  const loseSupported = await page.evaluate(() => {
+    const canvas = document.querySelector('[data-hq-canvas]');
+    if (!canvas) return false;
+    const gl = canvas.getContext('webgl2') ?? canvas.getContext('webgl');
+    const lose = gl && gl.getExtension('WEBGL_lose_context');
+    if (!lose) return false;
+    lose.loseContext();
+    return true;
+  });
+  if (loseSupported) {
+    await page.waitForTimeout(800);
+    report.contextLoss = await page.evaluate(() => ({
+      flag: document.documentElement.getAttribute('data-hq-3d'),
+      status: document.querySelector('[data-hq-3d-status]')?.textContent ?? '',
+      canvasPresent: document.querySelector('[data-hq-canvas]') != null,
+      motionPresent: document.querySelector('[data-hq-motion]') != null,
+      roomsStillPresent: document.querySelectorAll('[data-hq-room]').length,
+    }));
+    if (report.contextLoss.flag !== 'lost') {
+      failures.push(`after context loss data-hq-3d was ${report.contextLoss.flag}, expected "lost"`);
+    }
+    if (report.contextLoss.canvasPresent) {
+      failures.push('the canvas survived context loss — a dead rectangle claiming to be the building');
+    }
+    if (!report.contextLoss.status.includes('lost after')) {
+      failures.push(`context-loss status did not explain itself: ${report.contextLoss.status}`);
+    }
+    if (report.contextLoss.roomsStillPresent !== ROOMS.length) {
+      failures.push(
+        `context loss took the rooms with it: ${report.contextLoss.roomsStillPresent} of ${ROOMS.length} left`,
+      );
+    }
+  } else {
+    report.contextLoss = { skipped: 'WEBGL_lose_context not available on this driver' };
+  }
+
   if (report.consoleErrors.length > 0) failures.push(`console errors: ${report.consoleErrors.join(' | ')}`);
 } finally {
   await browser.close();

@@ -38,6 +38,7 @@ import { CONTROL_ROUTES } from '../live/control-api.js';
 import { DOM_HELPERS_JS } from '../ui/control-console.js';
 import { ACCESS_VERDICT_JS, LOCK_STATE_JS } from './access.js';
 import { HQ_ROOMS } from './rooms.js';
+import { hydrateRooms } from './hydrate.js';
 
 /** The authenticated read route this stage adds. */
 export const CLIENT_STATE_PATH: string = CONTROL_ROUTES.state;
@@ -65,6 +66,13 @@ export const CLIENT_FETCH_TARGETS: readonly string[] = [CONTROL_ROUTES.session, 
 export function clientRuntimeScript(): string {
   const roomIds = HQ_ROOMS.map((room) => room.id);
   const roomOrdinals = HQ_ROOMS.map((room) => room.ordinal);
+  // The provenance each room carries when NO state document is in hand — the
+  // same string the server rendered into the page. `hydrateRooms(null, null)`
+  // is the one source for it, so the static page and a page that has just
+  // invalidated say exactly the same thing.
+  const staticProvenance = Object.fromEntries(
+    hydrateRooms(null, null).map((view) => [view.roomId, view.provenance]),
+  );
   return `<script>
 (function () {
   var root = document.querySelector('[data-hq-client]');
@@ -83,6 +91,7 @@ export function clientRuntimeScript(): string {
   // coincidence that silently lights the wrong room if the registry is ever
   // reordered.
   var ROOM_ORDINALS = ${jsonForScript(roomOrdinals)};
+  var ROOM_STATIC_PROVENANCE = ${jsonForScript(staticProvenance)};
   var POLL_MS = ${CLIENT_POLL_INTERVAL_MS};
 
   var accessChip = document.querySelector('[data-hq-access]');
@@ -138,6 +147,14 @@ export function clientRuntimeScript(): string {
       if (body) {
         body.textContent = '';
         body.appendChild(el('p', 'readonly-note', reason));
+      }
+      // The per-room provenance is state-derived too. Left alone, each live
+      // room went on claiming the previous document's "as of ... provenance
+      // live" while everything around it said no state had been read — the
+      // same defect as the global stamp, one level further in (Codex round 4).
+      var provenanceNode = panel.querySelector('[data-hq-room-provenance]');
+      if (provenanceNode) {
+        provenanceNode.textContent = ROOM_STATIC_PROVENANCE[ROOM_IDS[i]] || '';
       }
       panel.setAttribute('data-liveness', 'dark');
     }
