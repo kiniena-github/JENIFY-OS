@@ -23,7 +23,7 @@ import { PROVIDER_REGISTRY, type SecretsEnv } from '@factoryos/headquarter/routi
 import { claude } from '@factoryos/headquarter/providers';
 import type { ControlAuditEvent } from '@factoryos/headquarter/live';
 import type { HeadquarterControlPlane } from './routes.js';
-import { openHqPersistence, type HqPersistence } from './persistence.js';
+import { openHqPersistence, type HqPersistence } from './persistence-guard.js';
 
 export interface HeadquarterHost {
   plane: HeadquarterControlPlane;
