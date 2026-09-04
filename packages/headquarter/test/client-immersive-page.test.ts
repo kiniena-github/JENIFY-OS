@@ -720,6 +720,59 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     page.close();
   });
 
+  it('refuses a document carrying a tone outside the contract\u2019s vocabulary', async () => {
+    // Codex round 18. `tone` went straight into a class name after only a
+    // typeof check, so a version-skewed document could carry
+    // `tone: 'critical'` and render `class="kpi tone-critical"` — a rule the
+    // stylesheet does not have. The number stayed and its colour vanished,
+    // while the page went on stamping the document as current: a danger metric
+    // reading like an ordinary one is the quiet direction of wrong, and the
+    // two other closed sets (liveness, provenance mode) were already checked.
+    const live = deployment();
+    const page = await loadPage(live.deps);
+
+    const original = page.window.fetch as (input: string) => Promise<unknown>;
+    page.window.fetch = (input: string) => {
+      if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+        return Promise.resolve({
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              ok: true,
+              generatedAt: new Date().toISOString(),
+              mode: 'live',
+              killSwitch: { globalEngaged: false, engagedScopes: [] },
+              rooms: HQ_ROOMS.map((room) => ({
+                roomId: room.id,
+                ordinal: room.ordinal,
+                status: room.binding.kind === 'live' ? 'live' : room.binding.kind,
+                liveness: 'dark',
+                metrics:
+                  room.binding.kind === 'live'
+                    ? [{ label: 'Blocked', value: 3, hint: 'skewed', tone: 'critical' }]
+                    : [],
+                rows: [],
+                emptyMessage: 'skewed',
+                provenance: 'skewed',
+              })),
+            }),
+        });
+      }
+      return original(input);
+    };
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    // Refused whole, as with any other unreadable document: nothing rendered
+    // from it and nothing left claiming to be current.
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toBe('');
+    expect(bodyText(page.document, 'home')).not.toContain('skewed');
+    // The specific failure being prevented: a number on the page wearing a
+    // class the stylesheet cannot colour.
+    expect(page.document.body.innerHTML).not.toContain('tone-critical');
+    page.close();
+  });
+
   it('refuses a document that swaps two rooms’ ordinals', async () => {
     // Codex round 7. The text panels are selected by roomId while the shell
     // indexes its lighting by view.ordinal, so the two identify a room by

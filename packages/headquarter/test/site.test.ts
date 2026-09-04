@@ -93,6 +93,20 @@ describe('buildSite', () => {
       // Footer provenance, plus a banner at the top of the page.
       expect(html).toContain('data-provenance');
       expect(html).toContain('data-provenance-banner');
+      // The immersive HQ is the one page that holds no bundle data, so the
+      // bundle's note would be a claim about content it does not carry — and it
+      // would sit above a runtime stamp reading `provenance live`, which is the
+      // contradiction this exemption exists to remove (Codex round 18).
+      //
+      // It is an exemption from the BUNDLE's note, not from stating provenance:
+      // the assertions above still require a note and a banner, and the test
+      // below requires that note to describe the authenticated read. A page
+      // that quietly dropped its provenance entirely would fail here.
+      if (page.file === 'immersive.html') {
+        expect(html).toContain('carries no build-time data');
+        expect(html).not.toContain('reconstructed from real GitHub-visible JENIFY-OS activity');
+        continue;
+      }
       expect(html).toContain('reconstructed from real GitHub-visible JENIFY-OS activity');
     }
     // A bundle without a note renders no empty provenance footer or banner.

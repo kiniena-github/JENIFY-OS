@@ -859,3 +859,133 @@ describe('the attention count and its hint describe the same set of states', () 
     expect(hint).toMatch(/half-finished setup/);
   });
 });
+
+describe('a room names every state section that can change what it shows', () => {
+  /**
+   * Provenance that omits a source the room is actually reading.
+   *
+   * Analytics displayed "Integrations known" from `state.connections.data` and
+   * counted those rows toward its own liveness, while its stated source named
+   * only operations, workforce, capabilities and activity. Five numbers, four
+   * named sources, and the unnamed one able to light the room (Codex round 18).
+   *
+   * Asserting the corrected sentence would prove nothing about the next
+   * section someone wires in, so this is behavioural instead: populate ONE
+   * section, see whether the room's rendered output moves, and require the
+   * room's own provenance to name any section that moved it. It is the same
+   * question a reader asks of a number — where did that come from — put to the
+   * code rather than to the comment.
+   */
+  const SECTION_FIXTURES: Record<string, () => HqSnapshot> = {
+    workforce: () =>
+      buildHqSnapshot({
+        generatedAt: AT,
+        console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
+        connections: { data: [], provenance: PROVENANCE },
+        workforce: {
+          data: [
+            { id: 'w1', displayName: 'Claude', vendor: 'anthropic', role: 'build_lead', active: false, allowedCapabilities: [] },
+          ] as never,
+          provenance: PROVENANCE,
+        },
+        capabilities: { data: [], provenance: PROVENANCE },
+        activity: { data: [], provenance: PROVENANCE },
+      }),
+    capabilities: () =>
+      buildHqSnapshot({
+        generatedAt: AT,
+        console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
+        connections: { data: [], provenance: PROVENANCE },
+        workforce: { data: [], provenance: PROVENANCE },
+        capabilities: {
+          data: [
+            {
+              id: 'repo.read_status',
+              displayName: 'Read status',
+              riskClass: 'read_only',
+              enabled: true,
+              classification: {
+                capabilityId: 'repo.read_status',
+                riskClass: 'read_only',
+                sideEffect: false,
+                idempotent: true,
+                requiresApproval: false,
+                requiresIndependentReview: false,
+                requiresIdempotencyKey: false,
+                route: 'auto',
+                reason: 'read only',
+              },
+            },
+          ] as never,
+          provenance: PROVENANCE,
+        },
+        activity: { data: [], provenance: PROVENANCE },
+      }),
+    connections: () =>
+      buildHqSnapshot({
+        generatedAt: AT,
+        console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
+        connections: {
+          data: [
+            { id: 'c1', displayName: 'C', state: 'connected', reason: 'fixture', authMechanism: 'token', missingFacts: [] },
+          ] as never,
+          provenance: PROVENANCE,
+        },
+        workforce: { data: [], provenance: PROVENANCE },
+        capabilities: { data: [], provenance: PROVENANCE },
+        activity: { data: [], provenance: PROVENANCE },
+      }),
+    activity: () =>
+      buildHqSnapshot({
+        generatedAt: AT,
+        console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
+        connections: { data: [], provenance: PROVENANCE },
+        workforce: { data: [], provenance: PROVENANCE },
+        capabilities: { data: [], provenance: PROVENANCE },
+        activity: {
+          data: [
+            { id: 'e1', at: AT, kind: 'task.created', project: 'jenify-os', summary: 'fixture', actor: 'founder' },
+          ] as never,
+          provenance: PROVENANCE,
+        },
+      }),
+  };
+
+  /**
+   * What counts as naming a section, per section.
+   *
+   * Stems rather than the exact key, because a room's source is a sentence a
+   * Founder reads, not a field list: the Security Center says "connection auth
+   * mechanisms from the state document", which names the connections section
+   * perfectly well. Matching the literal key would have failed that room and
+   * pushed the sentence toward machine vocabulary to satisfy a test — the
+   * wrong direction for a line whose whole job is to be read.
+   */
+  const NAMES: Record<string, readonly string[]> = {
+    workforce: ['workforce', 'worker'],
+    capabilities: ['capabilit'],
+    connections: ['connection', 'integration'],
+    activity: ['activity', 'canonical event'],
+  };
+
+  const render = (state: HqSnapshot, roomId: string) => {
+    const view = hydrateRooms(state, FOUNDER_SESSION).find((room) => room.roomId === roomId)!;
+    return JSON.stringify({ metrics: view.metrics, rows: view.rows, liveness: view.liveness });
+  };
+
+  it('states a source for every section that moves the room', () => {
+    const unnamed: string[] = [];
+    for (const room of HQ_ROOMS) {
+      if (room.binding.kind !== 'live') continue;
+      const source = room.binding.source.toLowerCase();
+      for (const [sectionName, fixture] of Object.entries(SECTION_FIXTURES)) {
+        const before = render(emptyState(), room.id);
+        const after = render(fixture(), room.id);
+        if (before === after) continue;
+        const named = NAMES[sectionName]!.some((stem) => source.includes(stem));
+        if (!named) unnamed.push(`${room.id} reads ${sectionName}, source: "${room.binding.source}"`);
+      }
+    }
+    expect(unnamed, unnamed.join(' | ')).toEqual([]);
+  });
+});

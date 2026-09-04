@@ -22,6 +22,7 @@ import {
 } from '../src/ui/live-refresh.js';
 import { jsonForScript } from '../src/ui/components.js';
 import { CONNECTION_CATALOG } from '../src/live/connections.js';
+import { SOURCE_MODE_LABELS } from '../src/live/provenance.js';
 
 const samplePath = join(dirname(fileURLToPath(import.meta.url)), '..', 'sample-data', 'hq-sample.json');
 const sample = JSON.parse(readFileSync(samplePath, 'utf8')) as HeadquarterData;
@@ -235,10 +236,23 @@ describe('provenance and freshness are never overstated', () => {
   it('chips the bundle’s own source mode on every page when it states one', () => {
     const marked = buildSite({ ...sample, sourceMode: 'reconstructed' });
     for (const page of HQ_PAGES) {
+      // Every page that PROJECTS the bundle. The immersive HQ does not: it
+      // renders no bundle data at all, so the bundle's mode is not a fact about
+      // it, and chipping it there put a build-time SAMPLE beside a runtime
+      // stamp reading `provenance live` (Codex round 18). The mode of the
+      // document that page actually shows is only knowable after HQ answers,
+      // and the runtime writes it then.
+      if (page.file === 'immersive.html') continue;
       expect(marked.get(page.file)!).toContain('>RECONSTRUCTED<');
     }
     const asSample = buildSite({ ...sample, sourceMode: 'sample' });
     expect(asSample.get('index.html')!).toContain('>SAMPLE<');
+    // And the exemption is exact: no bundle mode reaches the immersive page in
+    // ANY mode, rather than only in the one this test happened to build.
+    for (const mode of ['live', 'reconstructed', 'sample'] as const) {
+      const html = buildSite({ ...sample, sourceMode: mode }).get('immersive.html')!;
+      expect(html, mode).not.toContain(`>${SOURCE_MODE_LABELS[mode]}<`);
+    }
   });
 
   it('makes no source claim for a bundle that states none', () => {

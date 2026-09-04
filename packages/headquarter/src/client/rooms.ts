@@ -271,7 +271,15 @@ export const HQ_ROOMS: readonly HqRoom[] = [
       // carries. It does not compute a rate, a cost, a duration or a
       // completion percentage, because HQ records none of those and
       // `assertNoFabricatedFields` refuses them on the wire.
-      source: 'counts over the operations, workforce, capabilities and activity sections',
+      //
+      // `connections` was missing from this list while the room displayed
+      // "Integrations known" from `state.connections.data` and counted it
+      // toward presence — so the room's own provenance line named four
+      // sections beneath five numbers, and the unnamed one was lighting the
+      // room. Provenance that omits a source it is actually using is the same
+      // class of over-claim as a number without a source (Codex round 18).
+      source:
+        'counts over the operations, workforce, capabilities, connections and activity sections',
     },
     placement: { ring: 2, slot: 0 },
   },

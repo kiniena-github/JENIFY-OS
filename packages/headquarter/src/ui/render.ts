@@ -1392,6 +1392,28 @@ export function renderHeadquartersFloor({
 }
 
 /**
+ * What this page says about where its own content came from.
+ *
+ * NOT the bundle's provenance. The signature below takes no bundle data, and
+ * this is the reason: everything the shell would otherwise stamp — the source
+ * chip, the provenance banner — describes the build's snapshot, and this page
+ * contains none of it. A build from a `sample` bundle therefore printed a
+ * SAMPLE chip and the bundle's caveat at the top of a page whose runtime, one
+ * paragraph below, stamps the live document it just read as `provenance live`.
+ * Two provenance claims about one page, one of them about data the page does
+ * not hold (Codex round 18).
+ *
+ * So the page states its own truth instead, and no source chip is drawn: the
+ * mode of the document is not knowable at build time, and the runtime prints
+ * the real one as soon as HQ answers.
+ */
+const IMMERSIVE_PROVENANCE_NOTE =
+  'This page carries no build-time data. Every number and every lit room is read from the ' +
+  'authenticated HQ control API in your browser, and the line under the title states the canonical ' +
+  'state document’s own time and provenance once HQ has answered. Until it does, the rooms say so ' +
+  'rather than showing a zero.';
+
+/**
  * The immersive HQ (issue #250, Phase 2 Stage 4).
  *
  * Deliberately takes NO data. Every other page on this site is a projection of
@@ -1401,15 +1423,15 @@ export function renderHeadquartersFloor({
  * from a build rather than from HQ — so the signature makes that impossible
  * rather than merely discouraged.
  *
+ * That was true of the room data and false of the provenance chrome, which was
+ * being forwarded from the bundle until round 18. The parameters are gone now,
+ * so it is true of both.
+ *
  * `asOf` is still stamped, because the freshness chip in the shell is about
  * THIS RENDER, and the render is genuinely from that instant. The canonical
  * state stamp is a separate line the runtime fills in.
  */
-export function renderImmersiveHq(
-  nowIso: string,
-  provenanceNote?: string,
-  sourceMode?: SourceMode,
-): string {
+export function renderImmersiveHq(nowIso: string): string {
   return shell({
     title: 'Immersive HQ',
     activeFile: 'immersive.html',
@@ -1420,7 +1442,6 @@ export function renderImmersiveHq(
       'a dark room is a room HQ is holding nothing in.',
     asOf: nowIso,
     body: immersiveBody(),
-    provenanceNote,
-    sourceMode,
+    provenanceNote: IMMERSIVE_PROVENANCE_NOTE,
   });
 }

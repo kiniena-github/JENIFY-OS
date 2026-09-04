@@ -125,8 +125,19 @@ export interface ClientState {
 /**
  * Presentation tone. Structurally the same vocabulary the HQ theme uses, named
  * here so `client/` does not have to import the HTML layer to describe itself.
+ *
+ * A runtime tuple with the type derived from it, not a bare union, because the
+ * browser runtime has to CHECK an incoming tone and a type cannot be checked at
+ * run time. It used to accept any string, so a version-skewed document could
+ * carry `tone: 'critical'`, pass validation, and render `class="kpi tone-
+ * critical"` — a rule the stylesheet does not have, so the metric lost its
+ * colour entirely while the page went on stamping the document as current. A
+ * silently uncoloured danger metric is worse than a rejected document (Codex
+ * round 18).
  */
-export type RoomTone = 'accent' | 'info' | 'warn' | 'danger' | 'violet' | 'neutral';
+export const ROOM_TONES = ['accent', 'info', 'warn', 'danger', 'violet', 'neutral'] as const;
+
+export type RoomTone = (typeof ROOM_TONES)[number];
 
 /**
  * How lit a room is in the 3D shell.
@@ -137,7 +148,9 @@ export type RoomTone = 'accent' | 'info' | 'warn' | 'danger' | 'violet' | 'neutr
  * looks better with something moving". `dark` is the honest default: a room
  * with no recorded state is a dark room.
  */
-export type RoomLiveness = 'active' | 'attention' | 'quiet' | 'dark';
+export const ROOM_LIVENESS_VALUES = ['active', 'attention', 'quiet', 'dark'] as const;
+
+export type RoomLiveness = (typeof ROOM_LIVENESS_VALUES)[number];
 
 export interface RoomMetric {
   label: string;

@@ -40,6 +40,7 @@ import { ACCESS_VERDICT_JS, LOCK_STATE_JS } from './access.js';
 import { HQ_ROOMS } from './rooms.js';
 import { hydrateRooms } from './hydrate.js';
 import { SOURCE_MODE_LABELS } from '../live/provenance.js';
+import { ROOM_LIVENESS_VALUES, ROOM_TONES } from './contracts.js';
 
 /** The authenticated read route this stage adds. */
 export const CLIENT_STATE_PATH: string = CONTROL_ROUTES.state;
@@ -81,6 +82,12 @@ export function clientRuntimeScript(): string {
   // so TypeScript requires a key for every provenance mode the server can emit.
   // Growing the union grows this list in the same build.
   const modeValues = Object.fromEntries(Object.keys(SOURCE_MODE_LABELS).map((mode) => [mode, true]));
+  // Same treatment for the two vocabularies the room views carry. Both are
+  // `as const` tuples in `contracts.ts` with the types derived from them, so a
+  // tone or liveness added to the contract arrives here in the same build
+  // instead of being silently accepted as an unknown string.
+  const toneValues = Object.fromEntries(ROOM_TONES.map((t) => [t, true]));
+  const livenessValues = Object.fromEntries(ROOM_LIVENESS_VALUES.map((l) => [l, true]));
   // The provenance each room carries when NO state document is in hand — the
   // same string the server rendered into the page. `hydrateRooms(null, null)`
   // is the one source for it, so the static page and a page that has just
@@ -298,14 +305,23 @@ export function clientRuntimeScript(): string {
   // not be guessing which half of a malformed document it can trust.
   function isText(value) { return typeof value === 'string'; }
 
+  // isText(tone) was not enough, and the gap is specific: a tone goes
+  // straight into a class name, so an unknown one produces a rule the
+  // stylesheet does not have and the metric renders with NO tone — the danger
+  // colouring simply absent, on a page still stamped as current. That is the
+  // quiet direction of wrong: the number stays, the warning disappears.
+  // Liveness and provenance mode were already checked against closed sets;
+  // tone is the third closed set and was not (Codex round 18).
+  function toneValid(tone) { return TONE_VALUES[tone] === true; }
+
   function metricValid(metric) {
     return metric != null && typeof metric === 'object' &&
-      isText(metric.label) && isText(metric.hint) && isText(metric.tone) &&
+      isText(metric.label) && isText(metric.hint) && toneValid(metric.tone) &&
       (typeof metric.value === 'string' || typeof metric.value === 'number');
   }
 
   function chipValid(chip) {
-    return chip != null && typeof chip === 'object' && isText(chip.tone) && isText(chip.label);
+    return chip != null && typeof chip === 'object' && toneValid(chip.tone) && isText(chip.label);
   }
 
   function rowValid(row) {
@@ -326,7 +342,17 @@ export function clientRuntimeScript(): string {
   // Both of these are closed sets in the contract, so a value outside them is
   // not a document this client can read — it is a different document format
   // wearing the same field names.
-  var LIVENESS_VALUES = { active: true, attention: true, quiet: true, dark: true };
+  //
+  // Emitted from the contract's own tuples rather than typed out here. The
+  // liveness list WAS typed out, and it happened to be right; the tone list did
+  // not exist at all, which is the defect that made this worth changing rather
+  // than leaving as a passing restatement (Codex round 18).
+  var LIVENESS_VALUES = ${jsonForScript(livenessValues)};
+  // Every tone the client will put in a class name. A tone outside this set has
+  // no rule in the stylesheet, so it renders as no colour at all: the metric
+  // still shows its number, silently stripped of the one thing that says
+  // whether the number is fine or a problem.
+  var TONE_VALUES = ${jsonForScript(toneValues)};
 
   // What status each room may legitimately carry, given its binding.
   //
