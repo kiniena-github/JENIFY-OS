@@ -621,3 +621,42 @@ already fixed in `b6caedc`, found by putting my own review-request question to
 the code instead of leaving it for the reviewer.
 
 All ten review threads across the three rounds are answered and resolved.
+
+### Stage 4, review round 4 — Codex, fixed at `3d54ff1`
+
+Three findings, all real, all in the same family: things that are DERIVED from a
+state document and therefore have to be surrendered with it.
+
+**Per-room provenance survived invalidation.** `invalidate()` cleared the rooms,
+the lock banner and the global stamp; each room's own provenance line went on
+printing the previous document's "as of <instant> · provenance live". Now reset
+to the binding's own source, taken from `hydrateRooms(null, null)` — the same
+function `build-site.ts` uses — so an invalidated page and a freshly-served page
+say exactly the same thing rather than having two wordings that can drift.
+
+**Context loss after startup left a dead canvas claiming to be the building.**
+Detection covered only a context already lost at creation; a later GPU reset
+left the canvas in place with the status still reporting the headquarters
+active. The shell now takes the documented fallback. Rebuilding was rejected
+deliberately: a half-restored building — right geometry, stale lighting — looks
+like it is working, which is worse than an honest absence.
+
+**The evidence tool verified the DOM and I called it verifying the building.**
+Its round-3 liveness assertion read `data-liveness` off the text panels, which
+the client runtime writes; with the shell silently not uploading, every panel
+attribute stays correct and the tool prints PASS over a completely dark
+building. It now loads the page twice — mixed fixture, then all rooms dark — and
+compares the composited canvases, which is a fact about the GPU rather than
+about the DOM.
+
+**The pattern across four rounds, stated plainly.** Nine of ten findings were
+real. Two of them were against the verification instrument itself, both times
+because I had described a check as proving more than it did. The habit that
+came out of it: every new check in this stage is now negative-controlled — the
+thing it watches is deliberately broken and the check is required to fail —
+and where a control does NOT work, that limit is recorded next to the check.
+Removing the `bufferSubData` upload leaves every DOM assertion passing and
+fails only the differential; `WEBGL_lose_context` drives a real context loss
+and the fallback is checked, including that all seventeen rooms survive it.
+
+All thirteen review threads across four rounds are answered and resolved.
