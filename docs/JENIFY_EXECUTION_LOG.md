@@ -574,3 +574,50 @@ recorded in the tool.
 This closes the "no real-browser GPU verification" limitation this entry opened
 with. The Founder visual acceptance pass against the 17 reference images
 remains open and is unchanged by any of it.
+
+### Stage 4, review rounds 2 and 3 — Codex, fixed at `12be3c2` and `258bc3f`
+
+Six more findings, all real. Round 2 contained the most consequential defect on
+this branch, and round 3 contained the most useful one.
+
+**Round 2, and the lesson in it.** Every box roof and the standalone atrium
+floor were wound against their own normals (`+X × +Z` is `-Y`), so with
+back-face culling they were removed the moment the camera was above them —
+which is where the camera always is. The building had been rendering roofless
+and groundless since the first commit.
+
+The lesson is not the bug; it is that **I had looked at browser screenshots of
+this scene three times and read the result as a lighting problem.** Two rounds
+went into emissive multipliers, a highlight rolloff, and then narrowing that
+rolloff to a knee — chasing murk that was missing geometry. Having a real
+browser in the loop was necessary and was not sufficient: it showed the symptom
+and I supplied the wrong cause. The regression test is therefore the general
+invariant rather than the specific case — every triangle's geometric normal
+must agree in DIRECTION with its supplied normal, over the whole buffer, since
+a sign flip is precisely the bug.
+
+Round 2 also found that the atrium had no geometry bound to Main Home's slot,
+so the one room the page opens on could never light whatever HQ was doing; and
+sixteen focusable anchors inside an `aria-hidden` overlay, which removes a
+subtree from the accessibility tree but not from sequential focus.
+
+**Round 3, and the finding that mattered most.** `tools/webgl-evidence.mjs`
+collected each room's liveness and never asserted on it — so the instrument
+being used to answer the other findings could print PASS while the state-driven
+lighting it existed to prove was broken. It now asserts, and the assertion was
+negative-controlled by breaking hydration (stubbed state route returning 500):
+the run exits 1 and names every room that stayed dark. The control that does
+NOT work is recorded in the tool as well, because it bounds the claim: editing
+a fixture liveness changes both what the page is sent and what it is compared
+against, so it passes. The assertion's power is over hydration failing, not
+over the fixture being wrong about itself.
+
+Round 3 also found Analytics going dark while displaying four non-zero counts,
+because its presence came from the task buckets alone while its binding and its
+metrics cover the workforce, capability, connection and activity sections too.
+
+One round-3 finding — routing malformed state through full invalidation — was
+already fixed in `b6caedc`, found by putting my own review-request question to
+the code instead of leaving it for the reviewer.
+
+All ten review threads across the three rounds are answered and resolved.
