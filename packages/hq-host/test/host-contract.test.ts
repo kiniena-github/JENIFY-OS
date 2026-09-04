@@ -230,3 +230,44 @@ describe('the obligations, through Fastify this time', () => {
     await app.close();
   });
 });
+
+describe('the Stage 4 hydration route reaches the browser through this host', () => {
+  it('answers a resolved Founder with the seventeen rooms, uncached', async () => {
+    // The route is served by the SAME wildcard registration as the rest of the
+    // control API, which is the point of that design — but "the wildcard covers
+    // it" is an assumption until something asks the real Fastify instance. And
+    // `no-store` matters more here than anywhere: this body is canonical
+    // company state, projected for one specific principal.
+    const app = await build(identityFor(FOUNDER));
+    const res = await app.inject({ method: 'GET', url: CONTROL_ROUTES.state });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['cache-control']).toBe('no-store');
+    const body = res.json() as { ok: boolean; rooms: { roomId: string }[] };
+    expect(body.ok).toBe(true);
+    expect(body.rooms).toHaveLength(17);
+    await app.close();
+  });
+
+  it('refuses it to nobody, exactly as it refuses the rest', async () => {
+    const app = await build(NO_IDENTITY);
+    const res = await app.inject({ method: 'GET', url: CONTROL_ROUTES.state });
+    expect(res.statusCode).toBe(401);
+    expect(res.body).not.toContain('Mission Room');
+    await app.close();
+  });
+
+  it('serves the read even where this deployment mounts HQ read-only', async () => {
+    const app = await build(identityFor(FOUNDER), { mutationsEnabled: false });
+    const state = await app.inject({ method: 'GET', url: CONTROL_ROUTES.state });
+    expect(state.statusCode).toBe(200);
+    // ...while the write routes stay refused, which is what read-only means.
+    const write = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.orders,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: { instruction: 'x', route: 'CLAUDE', idempotencyKey: 'k' },
+    });
+    expect(write.statusCode).toBe(403);
+    await app.close();
+  });
+});

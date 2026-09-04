@@ -19,7 +19,8 @@
     "./providers": "./src/providers/index.ts",
     "./application": "./src/application/index.ts",
     "./routing": "./src/routing/index.ts",
-    "./live": "./src/live/index.ts"
+    "./live": "./src/live/index.ts",
+    "./client": "./src/client/index.ts"
   },
   "scripts": {
     "test": "vitest run",

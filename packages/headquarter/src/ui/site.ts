@@ -33,6 +33,7 @@ import {
   renderConnections,
   renderArchive,
   renderHeadquartersFloor,
+  renderImmersiveHq,
   type DirectOrderRouteAvailability,
 } from './render.js';
 import { floorState } from './spatial/state.js';
@@ -179,6 +180,10 @@ export function buildSite(data: HeadquarterData): Map<string, string> {
       sourceMode: data.sourceMode,
     }),
   );
+  // The immersive HQ. It takes NO bundle data on purpose: it hydrates from the
+  // authenticated control API in the browser, so a build that happened to hold
+  // a rich sample bundle cannot make it look busier than HQ actually is.
+  site.set('immersive.html', renderImmersiveHq(nowIso, data.note, data.sourceMode));
   site.set('projects.html', renderProjects(cards, timelines, nowIso, data.note, data.sourceMode));
   site.set(
     'executive-room.html',

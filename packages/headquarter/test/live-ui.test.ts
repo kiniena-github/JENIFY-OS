@@ -58,12 +58,12 @@ function freshnessVerdict(): (
 }
 
 describe('the Connections page joins the site without disturbing it', () => {
-  it('keeps all seven original pages, Connections as the eighth, and the Headquarters Floor as the ninth', () => {
+  it('keeps every earlier page and adds the immersive HQ as the tenth', () => {
     // The count is asserted so a page can never be added silently; the list
     // below is the part that matters, and it is the original seven plus the
     // two surfaces added by issue #200 — the Connection Center and the
-    // spatial Headquarters Floor.
-    expect(HQ_PAGES).toHaveLength(9);
+    // spatial Headquarters Floor — plus the Stage 4 immersive HQ (issue #250).
+    expect(HQ_PAGES).toHaveLength(10);
     for (const file of [
       'index.html',
       'projects.html',
@@ -74,6 +74,7 @@ describe('the Connections page joins the site without disturbing it', () => {
       'archive.html',
       'connections.html',
       'headquarters.html',
+      'immersive.html',
     ]) {
       expect(bare.has(file)).toBe(true);
     }

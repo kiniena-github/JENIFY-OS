@@ -73,9 +73,11 @@ import { DIRECT_ORDER_ROUTES, type RouteResolution } from '../live/orders.js';
 import { SOURCE_MODE_LABELS, type SourceMode } from '../live/provenance.js';
 import type { FloorState } from './spatial/state.js';
 import { spatialFloorBody } from './spatial/page.js';
+import { immersiveBody } from '../client/page.js';
 
 export const HQ_PAGES = [
   { file: 'index.html', title: 'Command Center', glyph: '◈' },
+  { file: 'immersive.html', title: 'Immersive HQ', glyph: '◉' },
   { file: 'headquarters.html', title: 'Headquarters Floor', glyph: '⬡' },
   { file: 'projects.html', title: 'Projects', glyph: '▤' },
   { file: 'executive-room.html', title: 'Executive Room', glyph: '◎' },
@@ -1384,6 +1386,40 @@ export function renderHeadquartersFloor({
     lede: 'The whole company as one floor: who is at work, what is blocked, what waits on you, and which uplinks are lit — drawn only from canonical state.',
     asOf: nowIso,
     body: spatialFloorBody({ floor, nowIso, specialists }),
+    provenanceNote,
+    sourceMode,
+  });
+}
+
+/**
+ * The immersive HQ (issue #250, Phase 2 Stage 4).
+ *
+ * Deliberately takes NO data. Every other page on this site is a projection of
+ * the build's bundle; this one is a projection of the authenticated control
+ * API, read in the browser at run time. Handing it bundle data would have
+ * reintroduced exactly the thing Stage 4 removes — a page whose numbers came
+ * from a build rather than from HQ — so the signature makes that impossible
+ * rather than merely discouraged.
+ *
+ * `asOf` is still stamped, because the freshness chip in the shell is about
+ * THIS RENDER, and the render is genuinely from that instant. The canonical
+ * state stamp is a separate line the runtime fills in.
+ */
+export function renderImmersiveHq(
+  nowIso: string,
+  provenanceNote?: string,
+  sourceMode?: SourceMode,
+): string {
+  return shell({
+    title: 'Immersive HQ',
+    activeFile: 'immersive.html',
+    eyebrow: 'The building',
+    lede:
+      'All seventeen HQ destinations as one place you move through. Every room is lit by canonical ' +
+      'state read from the authenticated control API — nothing here is baked in at build time, and ' +
+      'a dark room is a room HQ is holding nothing in.',
+    asOf: nowIso,
+    body: immersiveBody(),
     provenanceNote,
     sourceMode,
   });

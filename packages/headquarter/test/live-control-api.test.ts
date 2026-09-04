@@ -415,13 +415,19 @@ describe('every hostile caller is refused, and nothing is written', () => {
     }
   });
 
-  it('exposes no generic mutation surface — the whole route table is five entries', () => {
+  it('exposes no generic mutation surface — the whole route table is six entries', () => {
+    // Six since Stage 4 (issue #250). The addition is `/state`, a READ route:
+    // the write surface is unchanged and still the same three POSTs. What this
+    // assertion protects is unchanged too — no route takes a table, a column, a
+    // capability id to register, a principal to grant, or a SQL fragment, and
+    // a route added without amending this list fails here.
     expect(Object.values(CONTROL_ROUTES).sort()).toEqual([
       '/api/hq/control/approvals',
       '/api/hq/control/approvals/approve',
       '/api/hq/control/approvals/deny',
       '/api/hq/control/orders',
       '/api/hq/control/session',
+      '/api/hq/control/state',
     ]);
   });
 });

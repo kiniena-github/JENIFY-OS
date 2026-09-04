@@ -412,3 +412,105 @@ before and after.
 **Still open, carried into Phase 2:** issue #227 (Hosted JENIFY HQ V1, Founder-approved
 2026-08-30) and issue #231 (harmless GitHub proof). Phase 2 planning is recorded in
 `docs/HEADQUARTER/PHASE_2_FIRST_CLASS_PRODUCT_PLAN.md`.
+
+---
+
+## 2026-09-04 — Phase 2 Stage 4: browser client runtime + immersive live 3D HQ (issue #250)
+
+Branch `claude/phase-2-stage-4-client-runtime-3d`, from merged Stage 3 main `416954c`.
+Implementation only. Nothing merged, deployed, promoted, activated or billed.
+
+### What changed, and why it is the point of the stage
+
+Before this stage every HQ page was a photograph. `build-site.ts` projected a data bundle
+into HTML, and the only question the browser ever asked the server was "is this photograph
+out of date?" — which is why the freshness chip has a state reading `UPDATED — page not
+rebuilt`. The pages could not show current state even in principle.
+
+**1. An authenticated read route.** `GET /api/hq/control/state` (`live/control-api.ts`)
+answers a Founder session with canonical state read from the live database. It reuses
+`liveSnapshotFromOperations`, the same builder the polled snapshot uses, so it inherits the
+guarantees already proven for that artefact: no task payloads, no secrets
+(`assertBrowserSafe`), and no invented metric (`assertNoFabricatedFields` refuses
+cost/token/ETA/progress shapes on the wire). It is READ ONLY — the write surface is still
+the same three POSTs — and it is served even where a deployment mounts HQ read-only,
+because refusing the read alongside the writes would leave a correctly-configured safe
+deployment with a blank building.
+
+**2. A typed client runtime** — `packages/headquarter/src/client/` (`@factoryos/headquarter/client`):
+`rooms.ts` (the seventeen approved destinations, their bindings and their procedural
+placement), `contracts.ts` (the wire shapes), `hydrate.ts` (pure canonical-state → room
+views), `access.ts` (the access and lock decisions, as browser source executed by the
+tests), `runtime.ts` (the emitted hydration runtime), `webgl.ts` (the shell), `page.ts`,
+`theme.ts`.
+
+**3. `immersive.html`** — a tenth HQ page carrying all seventeen rooms, hydrated from the
+authenticated route. It takes no bundle data at all: `renderImmersiveHq` has no data
+parameter, so a build that happened to hold a rich sample bundle *cannot* make the page
+look busier than HQ actually is.
+
+### The honesty boundary, moved forward rather than merely preserved
+
+Room projection happens on the SERVER, inside the Founder gate, and the browser renders
+text it was handed. That was deliberate: projecting in the browser would have meant two
+implementations of "what does the Mission Room show" — one in TypeScript that the tests
+exercise, one in the emitted string that actually ships — and no-fake-state is exactly the
+property that rots when the tested copy and the shipped copy are different code.
+
+Each room declares in code where its content may come from. Thirteen are `live` and name
+their section. Four are not, and say so at length rather than being filled in: **Meeting
+Room** (`not_recorded` — transcript text is deliberately off the client boundary, the same
+rule that keeps an order's instruction text server-side), **Research / R&D**
+(`not_recorded` — HQ records tasks, not task *classes*, so any research/delivery split
+would be invented), **Product Factory** and **Company Memory / Ask Jenify** (`later_phase`).
+**Department Navigation** is live but precisely worded: `src/organization/` models
+departments, but it is an in-memory engine with no store binding and nothing in the
+canonical database persists it, so the room shows the registered *role* of every specialist
+— the real recorded lanes — and says HQ has no separate department registry.
+
+Liveness (`active` / `attention` / `quiet` / `dark`) is computed from canonical counts in
+`hydrate.ts` and is the only thing that lights a room or moves anything in it. A registry
+`active` FLAG does not light the AI Workforce room: it means the registry permits that
+worker to hold work, not that it is holding any.
+
+### The 3D shell
+
+Raw WebGL, no dependency, no external asset, ~1.2k procedural triangles, three complete
+routes through the page: full motion; reduced motion (instant camera cuts, frozen shader
+clock, render loop stops itself); and no WebGL at all (the canvas is removed and the page
+is the complete server-rendered document — all seventeen rooms, every metric, every row).
+The motion toggle is created by the shell script rather than rendered into the page, which
+keeps the site-wide "static markup carries no control" invariant literally true and is also
+correct: with no WebGL there is no camera to slow down. Rationale for not taking Three.js,
+and for the module landing inside `@factoryos/headquarter` rather than as `packages/hq-client`,
+is recorded in `docs/HEADQUARTER/PHASE_2_FIRST_CLASS_PRODUCT_PLAN.md` §4 Stage 4.
+
+### Evidence
+
+Headquarter **1879 tests green, 88 files** (was 1771/82 at the Stage 3 head); hq-host **206**
+(was 203); hq-server 20; server 569 passed, 3 pre-existing skips; `tsc --noEmit` clean in
+headquarter, hq-host and hq-server; `npm run build:site` renders 10 pages; `npm run build`
+clean with the web bundle unchanged at 215.66 kB / 69.22 kB gzip (no file under
+`packages/web` was touched).
+
+New suites: `client-rooms` (the seventeen, their routes, and a procedural layout checked for
+overlap), `client-hydration` (no-fake-state, asserted over every room rather than a sample),
+`client-access` (the shipped access and lock decisions, executed), `client-state-route` (the
+route end to end, including a real order changing what the next read answers and a refusal
+changing nothing), `client-shell` (feature detection, motion policy, geometry containment in
+each room's own frame, page budget), and `client-immersive-page` — which loads the REAL
+emitted page into a DOM, lets its own scripts run, and answers every request from the REAL
+control API. That last suite exists for the reason `command-center-live-composer.test.ts`
+exists: string-level tests can all be green while the page a Founder opens shows nothing.
+
+Four pre-existing assertions were updated because their subject genuinely changed: the page
+count (9 → 10), the emitted artefact count (10 → 11), and the control route table (5 → 6, the
+addition being a read). One was strengthened: the fetch call-site audit now also allow-lists
+`read()` targets, so the runtime's indirection over `fetch` is not a hole in it.
+
+### Not done, and stated as not done
+
+No Founder visual acceptance pass. The approved visual DNA is a 17-screen reference set the
+Founder holds locally as image files; this runtime could not read them, so the building was
+built from the issue's written design language and the existing HQ UI. The reference
+comparison is a Founder step and remains open.
