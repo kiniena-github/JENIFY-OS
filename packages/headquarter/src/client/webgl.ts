@@ -629,7 +629,7 @@ export function immersiveShellScript(): string {
     gl.uniform3f(uEye, eye[0], eye[1], eye[2]);
     gl.uniform3f(uKey, 0.35, 0.86, 0.38);
     gl.drawArrays(gl.TRIANGLES, 0, ${geometry.triangles * 3});
-    positionLabels(eye);
+    positionLabels();
 
     // Stop the loop when nothing is moving. A still building costs nothing, and
     // under reduced motion that is the steady state within a frame or two.
@@ -648,7 +648,7 @@ export function immersiveShellScript(): string {
     return { x: (cx / cw * 0.5 + 0.5), y: (1 - (cy / cw * 0.5 + 0.5)), w: cw };
   }
 
-  function positionLabels(eye) {
+  function positionLabels() {
     if (!labelLayer) return;
     for (var i = 0; i < ROOMS.length; i += 1) {
       var room = ROOMS[i];

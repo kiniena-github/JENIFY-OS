@@ -64,6 +64,7 @@ export const CLIENT_FETCH_TARGETS: readonly string[] = [CONTROL_ROUTES.session, 
 
 export function clientRuntimeScript(): string {
   const roomIds = HQ_ROOMS.map((room) => room.id);
+  const roomOrdinals = HQ_ROOMS.map((room) => room.ordinal);
   return `<script>
 (function () {
   var root = document.querySelector('[data-hq-client]');
@@ -76,6 +77,12 @@ export function clientRuntimeScript(): string {
   var SESSION_PATH = ${jsonForScript(CONTROL_ROUTES.session)};
   var STATE_PATH = ${jsonForScript(CLIENT_STATE_PATH)};
   var ROOM_IDS = ${jsonForScript(roomIds)};
+  // Carried explicitly rather than derived from the array index. They happen to
+  // be 1..17 in order today, and a test holds that — but a shell slot is a
+  // shader array index, and deriving one from a list position is the kind of
+  // coincidence that silently lights the wrong room if the registry is ever
+  // reordered.
+  var ROOM_ORDINALS = ${jsonForScript(roomOrdinals)};
   var POLL_MS = ${CLIENT_POLL_INTERVAL_MS};
 
   var accessChip = document.querySelector('[data-hq-access]');
@@ -128,7 +135,9 @@ export function clientRuntimeScript(): string {
     }
     if (typeof window.__hqShellApply === 'function') {
       var dark = [];
-      for (var j = 0; j < ROOM_IDS.length; j += 1) dark.push({ roomId: ROOM_IDS[j], ordinal: j + 1, liveness: 'dark' });
+      for (var j = 0; j < ROOM_IDS.length; j += 1) {
+        dark.push({ roomId: ROOM_IDS[j], ordinal: ROOM_ORDINALS[j], liveness: 'dark' });
+      }
       window.__hqShellApply(dark, activeRoom());
     }
   }

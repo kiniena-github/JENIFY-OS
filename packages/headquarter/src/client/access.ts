@@ -148,18 +148,6 @@ export const ACCESS_VERDICT_JS = `function accessVerdict(status, body, transport
 }`;
 
 /**
- * The same decision, callable from Node.
- *
- * Built by evaluating the SHIPPED source rather than re-implementing it, so a
- * server-side reader and the browser can never disagree. The one-time `new
- * Function` is over a module-private constant, never over anything a request
- * could reach.
- */
-export const accessVerdict = new Function(
-  `${ACCESS_VERDICT_JS}; return accessVerdict;`,
-)() as (status: number, body: unknown, transportError: string | null) => AccessVerdict;
-
-/**
  * Is HQ locked down right now, according to canonical state?
  *
  * The kill switch is not an access question — a Founder can be perfectly
@@ -201,6 +189,15 @@ export const LOCK_STATE_JS = `function lockState(killSwitch) {
   return { locked: false, label: '', message: '' };
 }`;
 
-export const lockState = new Function(`${LOCK_STATE_JS}; return lockState;`)() as (
-  killSwitch: unknown,
-) => LockState;
+/**
+ * NOTE what this module deliberately does NOT export: a Node-callable copy of
+ * either decision, built by `new Function` at import time.
+ *
+ * An earlier draft did, on the reasoning that a server-side reader and the
+ * browser should share one implementation. Nothing in the product ever needed
+ * it — both decisions are made in the browser, by definition — so it was dead
+ * code that ran an `eval` in the site-build process every time this module was
+ * imported. `test/client-access.test.ts` builds its own callable from the
+ * source strings above, which is the same guarantee with none of that: what the
+ * tests execute is still literally what ships.
+ */
