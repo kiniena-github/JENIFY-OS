@@ -772,3 +772,37 @@ Evidence at this commit: headquarter 1902, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
 web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS
 (lit 2436 warm samples vs 0 dark, framesAfterLoss 0).
+
+### Stage 4, review round 7 — Codex
+
+One finding, real, and the third in a row where I had made the right observation
+and attached a check that did not enforce it.
+
+**A room's ordinal was only range-checked, not matched to that room.** The text
+panels are selected by `roomId` while the shell indexes its lighting by
+`view.ordinal`, so the two identify a room by different keys. A document with all
+seventeen ids, each once, and every ordinal in range — but two of them exchanged
+between two valid rooms — passed, and then lit and pulsed the wrong buildings
+beside text panels that were themselves correct. The page disagreeing with
+itself is precisely what this stage exists to prevent.
+
+The ordinal is now required to be that room's registered ordinal, from a map
+built once out of the same registry the page is emitted from. The test swaps two
+adjacent rooms' ordinals — both values valid, both in range, every id present —
+and asserts at the shell entry point rather than at the panels, since panels were
+never the half that was wrong. Reverting to the range check fails exactly that
+test and none of the other 28.
+
+**The pattern, now three deep and worth stating plainly.** Round 6's timeout was
+bound to a constructor rather than to the clock. Round 6's completeness check was
+weaker than what the code downstream relied on. This one sat under a comment I
+had written myself — "the shell indexes its per-room state by it, so a bad
+ordinal would light the wrong building" — above a check that only verified the
+number was between 1 and 17. Each time the reviewer reported a class of defect, I
+fixed the instance and left the class open. The observation was never the missing
+part; the enforcement was.
+
+Evidence at this commit: headquarter 1903, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS
+(lit 2449 warm samples vs 0 dark, framesAfterLoss 0).

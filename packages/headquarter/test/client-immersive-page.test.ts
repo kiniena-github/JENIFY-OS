@@ -680,6 +680,72 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     page.close();
   });
 
+  it('refuses a document that swaps two rooms’ ordinals', async () => {
+    // Codex round 7. The text panels are selected by roomId while the shell
+    // indexes its lighting by view.ordinal, so the two identify a room by
+    // different keys. A document with all seventeen ids, each once, and every
+    // ordinal in range — but two of them exchanged — passed the range check and
+    // then lit and pulsed the WRONG buildings beside panels that were
+    // themselves correct. The page disagreeing with itself is the one thing
+    // this stage exists to prevent.
+    const live = deployment();
+    const page = await loadPage(live.deps);
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toContain('provenance live');
+
+    // Capture what the shell would be told, so the assertion goes at the
+    // building and not only at the text.
+    const applied: { roomId: string; ordinal: number }[][] = [];
+    page.window.__hqShellApply = (views: { roomId: string; ordinal: number }[]) => {
+      applied.push(views);
+    };
+
+    const original = page.window.fetch as (input: string) => Promise<unknown>;
+    page.window.fetch = (input: string) => {
+      if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+        return Promise.resolve({
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              ok: true,
+              generatedAt: new Date().toISOString(),
+              rooms: HQ_ROOMS.map((room, index) => ({
+                roomId: room.id,
+                // Two adjacent rooms exchange ordinals. Both values are valid,
+                // both are in range, and every id is present exactly once.
+                ordinal:
+                  index === 3 ? HQ_ROOMS[4]!.ordinal : index === 4 ? HQ_ROOMS[3]!.ordinal : room.ordinal,
+                status: 'live',
+                liveness: 'attention',
+                metrics: [],
+                rows: [],
+                emptyMessage: 'swapped',
+                provenance: 'swapped',
+              })),
+            }),
+        });
+      }
+      return original(input);
+    };
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toBe('');
+    expect(bodyText(page.document, 'home')).toContain('cannot read');
+    expect(bodyText(page.document, 'home')).not.toContain('swapped');
+
+    // Whatever the shell was handed after this, no room may carry an ordinal
+    // that is not its own — the mislit-building failure, asserted directly.
+    const registered = new Map(HQ_ROOMS.map((room) => [room.id, room.ordinal]));
+    for (const call of applied) {
+      for (const view of call) {
+        expect(view.ordinal, `${view.roomId} was given another room's ordinal`).toBe(
+          registered.get(view.roomId),
+        );
+      }
+    }
+    page.close();
+  });
+
   it('bounds a stalled read on a browser with no AbortController', async () => {
     // Codex round 6. The timeout was armed but its callback did nothing when
     // there was no AbortController, so on such a browser the read still never

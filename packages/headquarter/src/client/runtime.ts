@@ -289,13 +289,27 @@ export function clientRuntimeScript(): string {
     return true;
   }
 
+  // The ordinal the registry gives each room, by id. Built once.
+  var ROOM_ORDINAL_BY_ID = {};
+  for (var o = 0; o < ROOM_IDS.length; o += 1) ROOM_ORDINAL_BY_ID[ROOM_IDS[o]] = ROOM_ORDINALS[o];
+
   function roomViewValid(view) {
     if (view == null || typeof view !== 'object') return false;
     if (!isText(view.roomId) || !isText(view.status) || !isText(view.liveness) || !isText(view.provenance)) return false;
     if (!isText(view.emptyMessage)) return false;
-    // The shell indexes its per-room state by this, so a bad ordinal would
-    // light the wrong building.
-    if (typeof view.ordinal !== 'number' || !(view.ordinal >= 1 && view.ordinal <= ROOM_IDS.length)) return false;
+    // The ordinal must be THIS room's ordinal, not merely a number in range.
+    //
+    // The text panels are selected by roomId while the shell indexes its
+    // lighting by view.ordinal, so the two identify a room by different keys.
+    // A document that swaps two valid ordinals between two valid rooms passed a
+    // range check and then lit and pulsed the wrong buildings beside panels
+    // that were themselves correct — the page disagreeing with itself, which is
+    // the one thing this stage exists to prevent (Codex round 7).
+    //
+    // I had written the range check under a comment saying a bad ordinal lights
+    // the wrong building, which was the right observation attached to a check
+    // that did not enforce it.
+    if (ROOM_ORDINAL_BY_ID[view.roomId] !== view.ordinal) return false;
     if (!Array.isArray(view.metrics) || !Array.isArray(view.rows)) return false;
     for (var m = 0; m < view.metrics.length; m += 1) if (!metricValid(view.metrics[m])) return false;
     for (var r = 0; r < view.rows.length; r += 1) if (!rowValid(view.rows[r])) return false;
