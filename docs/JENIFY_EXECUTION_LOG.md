@@ -1553,3 +1553,28 @@ attribute passes under the old pattern and fails under the new one.
 Evidence at this commit: headquarter 1936, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); four typechecks clean; `npm run build`; `build:site`;
 `evidence:webgl` PASS.
+
+### Stage 4 stands blocked on review capacity, not on code (`147a387`)
+
+Round 20 could not run. Codex answered the request with *"You have reached your
+Codex usage limits for code reviews."* That is the observation; the reset time is
+not known and is not being guessed here — an earlier outage on this PR was
+diagnosed by assertion rather than evidence, and the diagnosis was wrong within
+ten minutes.
+
+State at this head: JENIFY CI green on the exact SHA, every finding across
+nineteen Codex rounds fixed, answered and resolved, no open review thread.
+headquarter 1936, hq-host 206, hq-server 20, server 569 (3 pre-existing skips);
+four typechecks clean; `npm run build`; `build:site`; `evidence:webgl` PASS.
+
+**Stage 4 is deliberately NOT reported complete.** The loop ends at green
+exact-head CI *and* a fresh review with no material findings. Half of that is
+unavailable, and this branch has specific evidence that the half I have is not a
+substitute for the half I do not: rounds 17, 18 and 19 each found real defects on
+a head whose CI was green, and two of them found defects in guards I had audited
+myself and recorded as sound. A test that under-enforces is invisible precisely
+because it stays green, which is why my own assurance about test quality here
+should count for less than the reviewer's.
+
+Founder-gated and untouched: visual acceptance against the 17 reference images,
+and the merge decision.
