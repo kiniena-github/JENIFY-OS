@@ -1514,3 +1514,42 @@ because the count is the argument for a lint rule if it happens again.
 Evidence at this commit: headquarter 1936, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); four typechecks clean; `npm run build`; `build:site`;
 `evidence:webgl` PASS.
+
+### Codex round 19 — the build's clock on a page that reads HQ live (`b7ce153`)
+
+Two findings; one was already fixed by the previous commit (row-chip tones —
+`chipValid` calls `toneValid` as of `dda08a9`), one was new and real.
+
+**The freshness poll.** Round 18 removed the bundle's provenance note and
+source-mode chip from the immersive page. It did not remove the bundle
+timestamp, and that is what `shell()` uses to install the `hq-snapshot.json`
+poll — whose verdicts are `UPDATED — page not rebuilt`, `OFFLINE — build-time
+data` and `SAMPLE — not live data`. Any of those could appear in the header
+above rooms hydrated live from the control API: a stale-build warning over
+current state. The chip beside it read `As of 2026-08-26T10:30:00Z`, because
+`buildSite` passes the newest instant in the bundle — so this file's own
+docstring, defending the timestamp as "about THIS RENDER", was wrong on its
+face and had been since the first commit.
+
+`renderImmersiveHq()` now takes nothing. `asOf` is optional on the shell, and
+omitting it drops the as-of chip, the freshness chip, the "checking whether a
+newer snapshot exists" line and the poll as one unit.
+
+**Worth recording: I fixed this defect one layer at a time across two rounds.**
+Round 18's finding was "bundle provenance on a live page", and I removed the two
+parameters that were named in it. The timestamp was the same defect, in the same
+call, and I did not ask what else in that call came from the bundle. Reading the
+finding rather than the invariant behind it is the branch's recurring shape, and
+this time it cost a round.
+
+**A guard that skipped what it claimed to check.** While the as-of chip was
+being removed, the "never conveys status by colour alone" test dropped to zero
+matches on this page — its pattern required `class` to be the LAST attribute, so
+every chip carrying another was silently skipped, including all seventeen
+`data-hq-room-status` chips. It has been reporting coverage of a page it was
+not checking. Widened, and controlled both ways: a labelless chip with an
+attribute passes under the old pattern and fails under the new one.
+
+Evidence at this commit: headquarter 1936, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); four typechecks clean; `npm run build`; `build:site`;
+`evidence:webgl` PASS.
