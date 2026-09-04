@@ -55,10 +55,34 @@
  * page is sent and what it is compared against, so it passes. The assertion's
  * power is over hydration failing, not over the fixture being wrong about
  * itself.
+ *
+ * The GPU differential was controlled the same way, by deleting the
+ * `gl.bufferSubData` that uploads room state in `src/client/webgl.ts` and
+ * rebuilding the site. The run fails —
+ *
+ *     - the GPU drew no amber with rooms at attention
+ *       ({"warm":0,"bright":385,"peakWarmth":-5}) ...
+ *     - the composited building looks the same lit and unlit ...
+ *
+ * and note `bright` staying at 385 through the failure: the frame was fully
+ * captured and genuinely unlit, which is the distinction that separates a real
+ * regression from a broken measurement. Both are asserted separately below for
+ * that reason.
+ *
+ * The post-loss frame counter was controlled by suppressing the `disposed`
+ * flag in the `webglcontextlost` handler: `framesAfterLoss` goes from 0 to 136
+ * and the run fails. That number is the whole point of the check — the loop had
+ * restarted against a canvas no longer in the document, which no assertion
+ * about the DOM after the loss can see.
+ *
+ * Each of those controls was run against a REBUILT site. See the staleness
+ * guard below for why that sentence is here: the first attempt at the buffer
+ * control reported a confident PASS purely because the browser was being shown
+ * the previous build.
  */
 
 import { createServer } from 'node:http';
-import { readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, statSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -74,8 +98,32 @@ const siteDir = resolve(flag('--site', join(packageRoot, 'dist', 'site')));
 const outDir = resolve(flag('--out', join(packageRoot, 'dist', 'webgl-evidence')));
 const port = Number(flag('--port', '4317'));
 
-if (!existsSync(join(siteDir, 'immersive.html'))) {
+const immersiveHtml = join(siteDir, 'immersive.html');
+if (!existsSync(immersiveHtml)) {
   console.error(`No immersive.html in ${siteDir}. Run: npm run build:site --workspace @factoryos/headquarter`);
+  process.exit(1);
+}
+
+// Refuse to measure a stale build.
+//
+// This tool serves a PREBUILT site, so an edit to the shell that has not been
+// rebuilt is invisible to it. That is not a theoretical hazard: running the
+// negative control for the differential below — deleting the room-state buffer
+// upload and requiring the check to fail — produced a confident PASS, because
+// the deletion was sitting in `src/` while the browser was being shown the
+// previous build. A verification tool that reports on code other than the code
+// in front of you is worse than no tool, so it now says so and stops.
+const clientDir = join(packageRoot, 'src', 'client');
+const builtAt = statSync(immersiveHtml).mtimeMs;
+const newerSources = readdirSync(clientDir)
+  .map((name) => join(clientDir, name))
+  .filter((path) => statSync(path).isFile() && statSync(path).mtimeMs > builtAt);
+if (newerSources.length > 0) {
+  console.error(
+    `${immersiveHtml} is older than ${newerSources.length} client source file(s):\n` +
+      newerSources.map((path) => `  ${path}`).join('\n') +
+      '\nRun: npm run build:site --workspace @factoryos/headquarter',
+  );
   process.exit(1);
 }
 
@@ -467,8 +515,35 @@ try {
   // in one image and absence in the other is an independently observable fact
   // about what the GPU drew, not about what the DOM says.
   const warmthOf = async (label) => {
-    const box = await page.locator('[data-hq-canvas]').boundingBox();
-    const png = await page.screenshot({ clip: box ?? undefined });
+    // An ELEMENT screenshot, not a clipped page screenshot.
+    //
+    // A clip rectangle is in page coordinates, so once an earlier step had
+    // scrolled the building out of the viewport the clip fell on blank space
+    // and both measurements came back near-black — which read as "room
+    // lighting is not reaching the GPU" when the renderer was perfectly fine.
+    // A tool that can produce a false FAILURE is only marginally better than
+    // one that can produce a false pass. Locator screenshots scroll the element
+    // into view first.
+    // Nudge a fresh frame immediately before capturing.
+    //
+    // The shell deliberately stops its render loop after a few idle frames, and
+    // it does not set `preserveDrawingBuffer` — so a capture taken well after
+    // the last draw can come back empty even though the building is plainly on
+    // screen. That is a property of programmatic capture rather than of the
+    // page: a viewer sees the composited frame perfectly well. Measuring it
+    // without this produced a false FAILURE ("room lighting is not reaching the
+    // GPU") against a renderer that was working, which is only marginally
+    // better than a false pass.
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    await page.waitForTimeout(250);
+    const png = await page.locator('[data-hq-canvas]').screenshot();
+    // The measured frames are kept, not just their numbers. When this
+    // differential last produced a false failure the only way to tell a broken
+    // renderer from a broken probe was to look at what was actually measured,
+    // and the frame the tool judged was the one image not written down.
+    writeFileSync(join(outDir, `differential-${label}.png`), png);
     return page.evaluate(async ([base64, tag]) => {
       const image = new Image();
       await new Promise((done, fail) => {
@@ -484,34 +559,99 @@ try {
       const { data } = ctx.getImageData(0, 0, copy.width, copy.height);
       let warm = 0;
       let bright = 0;
+      let peakWarmth = -255;
+      let samples = 0;
       for (let i = 0; i < data.length; i += 4 * 17) {
         const [r, g, b] = [data[i], data[i + 1], data[i + 2]];
-        // Amber: red clearly ahead of blue. The dark tint and the cyan
-        // structure are both blue-dominant, so this cannot be reached by them.
-        if (r > b + 25 && r > 70) warm += 1;
+        samples += 1;
+        // Amber: red ahead of blue. EVERY colour in this scene — the fog
+        // (4, 6, 9), the unlit facades, the cyan structure, the label chips —
+        // is blue-dominant, so a red-over-blue pixel is unreachable without a
+        // room burning at `attention`. The all-dark frame is the control, and
+        // it measures 0 at every margin from 4 upward with a peak r-b of -5.
+        //
+        // The margin is 8 and there is deliberately NO brightness gate. The
+        // previous criterion also demanded `r > 70`, a number taken when this
+        // measurement was made from the close approvals camera. From the home
+        // camera the same amber roofs sit around (40, 35, 24) — plainly amber
+        // to the eye and in the saved frame, but far below 70 — so the tool
+        // reported "room lighting is not reaching the GPU" against a renderer
+        // that was working correctly (Codex round 5 moved both captures to the
+        // home camera; the brightness gate was mine, and it was the actual
+        // cause of the false failure). A viewpoint-dependent absolute
+        // brightness cut has no place in a differential; the channel
+        // comparison is scale-free and the dark frame sets the floor.
+        if (r - b >= 8) warm += 1;
+        if (r - b > peakWarmth) peakWarmth = r - b;
+        // Not part of the amber test: this distinguishes "no amber because the
+        // building is unlit" from "no amber because the capture is empty". A
+        // frame of pure fog scores near zero here.
         if (r + g + b > 150) bright += 1;
       }
-      return { tag, warm, bright };
+      return { tag, warm, bright, peakWarmth, samples };
     }, [png.toString('base64'), label]);
   };
 
+  // BOTH measurements are taken from the same camera.
+  //
+  // The first version of this differential compared a lit frame captured after
+  // the screenshot step had flown the camera to `#/room/approvals` against a
+  // dark frame captured at the home camera after a reload. That varies the
+  // viewpoint AND the lighting, which is not a differential at all — any future
+  // geometry, label or colour visible only from the approvals view could
+  // satisfy the amber ratio with room lighting completely broken (Codex round
+  // 5). My earlier negative control passed only because removing the buffer
+  // upload happened to kill the amber from every viewpoint at once.
+  //
+  // So both frames are now taken at the home camera, after the same settle.
+  const atHomeCamera = async () => {
+    await page.evaluate(() => {
+      window.location.hash = '';
+    });
+    // Long enough for the camera flight to converge; the ease is ~0.085/frame.
+    await page.waitForTimeout(2500);
+  };
+
+  await atHomeCamera();
   const litMeasurement = await warmthOf('mixed');
 
   servedState = DARK_STATE;
-  await page.evaluate(() => {
-    window.location.hash = '';
-  });
   await page.reload({ waitUntil: 'load' });
-  await page.waitForTimeout(2500);
+  await page.waitForTimeout(1500);
+  await atHomeCamera();
   const darkMeasurement = await warmthOf('all-dark');
   servedState = STATE;
 
   report.gpuDifferential = { lit: litMeasurement, dark: darkMeasurement };
 
-  if (!(litMeasurement.warm > 0)) {
+  // Before either frame is allowed to mean anything: was anything captured at
+  // all? Both frames are of the same building from the same camera and differ
+  // only in room state, so both must contain structure. Without this a capture
+  // that silently came back empty would read as "the building is unlit", which
+  // is exactly the wrong conclusion to hand a reviewer.
+  for (const measurement of [litMeasurement, darkMeasurement]) {
+    if (!(measurement.bright > 100)) {
+      failures.push(
+        `the ${measurement.tag} capture is essentially empty (${JSON.stringify(measurement)}) — ` +
+          'this is a measurement failure, not evidence about the renderer',
+      );
+    }
+  }
+
+  if (!(litMeasurement.warm > 100)) {
     failures.push(
       `the GPU drew no amber with rooms at attention (${JSON.stringify(litMeasurement)}) — the ` +
         'state document is reaching the DOM but not the building',
+    );
+  }
+  // The control frame should be at zero, not merely lower: amber is
+  // structurally unreachable with every room dark. If it is not zero, some
+  // warmth is coming from somewhere other than room state and the whole
+  // differential is measuring the wrong thing.
+  if (!(darkMeasurement.warm === 0)) {
+    failures.push(
+      `the all-dark control frame contains amber (${JSON.stringify(darkMeasurement)}) — warmth is ` +
+        'reaching the building from something other than room state',
     );
   }
   if (!(litMeasurement.warm > darkMeasurement.warm * 4 + 20)) {
@@ -532,6 +672,23 @@ try {
   servedState = STATE;
   await page.reload({ waitUntil: 'load' });
   await page.waitForTimeout(1500);
+  // Count animation frames from here on.
+  //
+  // The shell reads `window.requestAnimationFrame` at each call rather than
+  // capturing it, so this counter sees every frame it schedules from now until
+  // the end of the run. It is what turns "the shell stops after context loss"
+  // from an assertion about source into an observation (Codex round 5): the
+  // client runtime keeps calling __hqShellApply on its poll, and a lit room
+  // used to restart the loop against a canvas that was no longer in the
+  // document, forever.
+  await page.evaluate(() => {
+    const real = window.requestAnimationFrame.bind(window);
+    window.__hqFrames = 0;
+    window.requestAnimationFrame = (callback) => {
+      window.__hqFrames += 1;
+      return real(callback);
+    };
+  });
   const loseSupported = await page.evaluate(() => {
     const canvas = document.querySelector('[data-hq-canvas]');
     if (!canvas) return false;
@@ -562,6 +719,29 @@ try {
     if (report.contextLoss.roomsStillPresent !== ROOMS.length) {
       failures.push(
         `context loss took the rooms with it: ${report.contextLoss.roomsStillPresent} of ${ROOMS.length} left`,
+      );
+    }
+
+    // Now push the shell exactly the way the runtime does after a loss, and
+    // watch whether it starts drawing again.
+    const framesBeforePoll = await page.evaluate(() => window.__hqFrames);
+    await page.evaluate(() => {
+      if (typeof window.__hqStateChanged === 'function') window.__hqStateChanged();
+    });
+    await page.waitForTimeout(1200);
+    // Hash navigation is the second way in, and it reapplies the cached views.
+    await page.evaluate(() => {
+      window.location.hash = '#/room/founder-office';
+    });
+    await page.waitForTimeout(1200);
+    report.contextLoss.framesAfterLoss = (await page.evaluate(() => window.__hqFrames)) - framesBeforePoll;
+    // A running loop at 60 Hz would be some hundreds of frames over 2.4s. Zero
+    // is the correct number; the bound is loose so this reports a restarted
+    // loop rather than a stray scheduled frame.
+    if (report.contextLoss.framesAfterLoss > 5) {
+      failures.push(
+        `the shell scheduled ${report.contextLoss.framesAfterLoss} animation frames after losing its ` +
+          'context — a poll or a hash change restarted the render loop against a canvas that is gone',
       );
     }
   } else {

@@ -283,6 +283,30 @@ describe('the shell can only be lit by the hydration runtime', () => {
     expect(script).toContain('gl.bufferSubData(gl.ARRAY_BUFFER, 0, stateData)');
   });
 
+  it('shuts every entry point after the context is lost, not just the render loop', () => {
+    // Codex round 5. The runtime holds its own references to __hqShellApply and
+    // __hqShellGoTo and calls them on every poll and every hash change, so
+    // stopping the loop was not enough: the next successful poll ran buffer
+    // operations against a lost context and then called wake(), and because a
+    // lit room sets anyMotion the loop then ran forever against a canvas no
+    // longer in the document.
+    //
+    // This is a STRUCTURAL check — CI has no GPU and no way to lose a context.
+    // The behavioural proof is `tools/webgl-evidence.mjs`, which loses the
+    // context for real and then counts animation frames.
+    expect(script).toContain('var disposed = false;');
+    // Set before anything else in the handler, so nothing can re-enter first.
+    expect(script).toMatch(/event\.preventDefault\(\);[\s\S]{0,800}?disposed = true;\s*\n\s*running = false;/);
+    for (const guard of [
+      'function wake() {\n    if (disposed) return;',
+      'function tick(now) {\n    if (disposed) { running = false; return; }',
+      'window.__hqShellApply = function (views, activeRoomId) {\n    if (disposed) return;',
+      'function goTo(roomId) {\n    if (disposed) return;',
+    ]) {
+      expect(script, `missing disposal guard: ${guard.split('\n')[0]}`).toContain(guard);
+    }
+  });
+
   it('caps the device pixel ratio so a high-DPI screen cannot melt the GPU', () => {
     expect(script).toContain('Math.min(window.devicePixelRatio || 1, 2)');
   });

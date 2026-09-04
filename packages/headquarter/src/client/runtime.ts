@@ -54,6 +54,15 @@ export const CLIENT_STATE_PATH: string = CONTROL_ROUTES.state;
 export const CLIENT_POLL_INTERVAL_MS = 20_000;
 
 /**
+ * How long a single read may take before it is abandoned.
+ *
+ * Comfortably longer than a Founder-gated state read on a loaded host, and
+ * comfortably shorter than the poll interval, so a stalled request is dropped
+ * before the next cycle would have started rather than accumulating.
+ */
+export const CLIENT_READ_TIMEOUT_MS = 12_000;
+
+/**
  * Every path this runtime may fetch.
  *
  * Exported so `test/client-runtime.test.ts` can allow-list every `fetch(` in
@@ -93,6 +102,7 @@ export function clientRuntimeScript(): string {
   var ROOM_ORDINALS = ${jsonForScript(roomOrdinals)};
   var ROOM_STATIC_PROVENANCE = ${jsonForScript(staticProvenance)};
   var POLL_MS = ${CLIENT_POLL_INTERVAL_MS};
+  var READ_TIMEOUT_MS = ${CLIENT_READ_TIMEOUT_MS};
 
   var accessChip = document.querySelector('[data-hq-access]');
   var accessNote = document.querySelector('[data-hq-access-note]');
@@ -238,14 +248,36 @@ export function clientRuntimeScript(): string {
 
   var lastViews = null;
 
+  // A document is applied whole or not at all.
+  //
+  // The previous guard asked only whether rooms was an array, so a 200
+  // carrying an empty, partial or duplicated set updated the panels it did
+  // supply and left every omitted panel showing the PREVIOUS document's
+  // metrics, liveness and provenance — while the global stamp advanced to the
+  // new one. Half a document is not a smaller truth, it is a page mixing two
+  // instants (Codex round 5).
+  function roomsComplete(rooms) {
+    if (!Array.isArray(rooms) || rooms.length !== ROOM_IDS.length) return false;
+    var seen = {};
+    for (var i = 0; i < rooms.length; i += 1) {
+      var id = rooms[i] && rooms[i].roomId;
+      if (typeof id !== 'string' || seen[id] === true) return false;
+      seen[id] = true;
+    }
+    for (var j = 0; j < ROOM_IDS.length; j += 1) if (seen[ROOM_IDS[j]] !== true) return false;
+    return true;
+  }
+
   function applyState(body) {
-    if (body == null || typeof body !== 'object' || body.ok !== true || !Array.isArray(body.rooms)) {
+    if (body == null || typeof body !== 'object' || body.ok !== true || !roomsComplete(body.rooms)) {
       // invalidate(), not clearRooms(): this is the fourth path that abandons a
       // state document, and it had the same defect as the three Codex found —
       // it dropped the rooms and left the previous poll's lock banner and stamp
       // standing. Found by re-reading my own fix rather than by a second
       // review round, which is where it should have been found the first time.
-      invalidate('The state route answered with a body this client cannot read, so nothing is claimed here.');
+      invalidate('The state route answered with a body this client cannot read as a complete set of all ' +
+        ROOM_IDS.length + ' rooms, so nothing is claimed here rather than part of the page moving to a new ' +
+        'document and the rest staying on the old one.');
       return;
     }
     lastViews = body.rooms;
@@ -257,15 +289,42 @@ export function clientRuntimeScript(): string {
     if (typeof window.__hqShellApply === 'function') window.__hqShellApply(body.rooms, activeRoom());
   }
 
+  // Every read is bounded.
+  //
+  // A fetch that establishes a connection and then never resolves OR rejects —
+  // a stalled proxy, a hung host — left inFlight true forever: every
+  // subsequent poll was discarded, the last hydrated rooms stayed on screen
+  // looking current, and even a session expiry could no longer invalidate
+  // them. A fail-closed runtime that can be wedged open by silence is not
+  // fail-closed (Codex round 5). An abort surfaces as a transport error, which
+  // already routes to invalidation.
   function read(path) {
-    return fetch(path, { cache: 'no-store', credentials: 'same-origin', headers: { accept: 'application/json' } })
+    var controller = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = window.setTimeout(function () {
+      if (controller) controller.abort();
+    }, READ_TIMEOUT_MS);
+    var settle = function (result) {
+      window.clearTimeout(timer);
+      return result;
+    };
+    var options = { cache: 'no-store', credentials: 'same-origin', headers: { accept: 'application/json' } };
+    if (controller) options.signal = controller.signal;
+    return fetch(path, options)
       .then(function (response) {
         return response.json().then(
           function (parsed) { return { status: response.status, body: parsed, error: null }; },
           function () { return { status: response.status, body: null, error: null }; }
         );
       })
-      .catch(function (failure) { return { status: 0, body: null, error: failure && failure.message ? failure.message : 'network failure' }; });
+      .then(settle, function (failure) {
+        return settle({
+          status: 0,
+          body: null,
+          error: failure && failure.name === 'AbortError'
+            ? 'no answer within ' + Math.round(READ_TIMEOUT_MS / 1000) + 's'
+            : failure && failure.message ? failure.message : 'network failure',
+        });
+      });
   }
 
   // Everything derived from a state document goes at once, or the page ends up
@@ -281,9 +340,15 @@ export function clientRuntimeScript(): string {
   }
 
   var inFlight = false;
+  var inFlightSince = 0;
   function cycle() {
-    if (inFlight) return;
+    // The abort above is the real fix. This is the second lock on the same
+    // door, for a browser with no AbortController: a cycle that has been
+    // running longer than two timeouts is treated as lost rather than allowed
+    // to block every future poll indefinitely.
+    if (inFlight && Date.now() - inFlightSince < READ_TIMEOUT_MS * 2) return;
     inFlight = true;
+    inFlightSince = Date.now();
     read(SESSION_PATH).then(function (session) {
       var verdict = accessVerdict(session.status, session.body, session.error);
       setAccess(verdict);

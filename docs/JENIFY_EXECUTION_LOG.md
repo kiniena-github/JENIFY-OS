@@ -660,3 +660,69 @@ fails only the differential; `WEBGL_lose_context` drives a real context loss
 and the fallback is checked, including that all seventeen rooms survive it.
 
 All thirteen review threads across four rounds are answered and resolved.
+
+### Stage 4, review round 5 — Codex
+
+Four findings. Three were real defects in the runtime and the shell; the fourth
+was against the evidence tool again, and chasing it down found a fifth problem
+that nobody had reported.
+
+**A stalled read wedged the runtime open.** A fetch that connects and then
+neither resolves nor rejects left `inFlight` true forever: every later poll was
+discarded, the last hydrated rooms stayed on screen looking current, and not
+even a session expiry could take them down. A fail-closed runtime that silence
+can wedge open is not fail-closed. Every read is now bounded by an
+`AbortController` at `CLIENT_READ_TIMEOUT_MS` (12s — longer than a Founder-gated
+state read on a loaded host, shorter than the 20s poll), with an `inFlight`
+deadline behind it for browsers with no `AbortController`.
+
+**A partial state document was applied piecemeal.** The guard asked only whether
+`rooms` was an array, so a 200 carrying an incomplete or duplicated set updated
+the panels it supplied and left the rest showing the PREVIOUS document — with
+the global stamp advanced to the new one. The page presented two instants as
+one. `roomsComplete()` now requires exactly the registered seventeen, each
+once, before anything is applied.
+
+**The shell kept drawing after losing its context.** Disposal stopped the render
+loop, but the runtime holds its own references to `__hqShellApply` and
+`__hqShellGoTo` and calls them on every poll and every hash change: the next
+successful poll ran buffer operations against a lost context and then called
+`wake()`, and because a lit room sets `anyMotion` the loop ran forever against a
+canvas no longer in the document. A `disposed` flag, set first in the
+`webglcontextlost` handler, now closes every entry point.
+
+**The GPU differential compared two different viewpoints.** The lit frame was
+captured after an earlier step had flown the camera to `#/room/approvals` while
+the control frame was captured at the home camera, so the "differential" varied
+the viewpoint as well as the lighting. Both captures now happen at the home
+camera — and that change immediately produced a FALSE FAILURE, which was the
+more useful finding. The cause was mine, not Codex's: the amber test also
+demanded `r > 70`, an absolute brightness taken when the measurement was made
+from the close approvals camera. From the home camera the same amber roofs sit
+around (40, 35, 24) — plainly amber in the saved frame — so the tool reported
+"room lighting is not reaching the GPU" against a renderer that was working.
+A viewpoint-dependent brightness cut has no place in a differential. The test is
+now the scale-free channel comparison alone (`r - b >= 8`), with the all-dark
+frame as its floor: that frame measures 0 at every margin from 4 upward, peak
+`r - b` of -5, because every colour in the scene — fog, facades, cyan structure,
+label chips — is blue-dominant. Lit measures ~2,430 of 37,158 samples, peak +22.
+
+Two guards came out of that false failure. A capture is now required to contain
+structure (`bright > 100`) before its amber count is allowed to mean anything,
+which separates "the building is unlit" from "the measurement is empty" — the
+exact confusion that produced the false failure. And the tool now refuses to run
+against a site build older than `src/client/`: the first attempt at the buffer
+negative control returned a confident PASS because the deletion was sitting in
+`src/` while the browser was being shown the previous build. An instrument that
+reports on code other than the code in front of you is worse than no instrument.
+
+**Controls run for this round**, each against a rebuilt site: suppressing
+`gl.bufferSubData` fails the differential with `bright` still at 385 (captured,
+genuinely unlit); suppressing the `disposed` flag takes `framesAfterLoss` from 0
+to 136; reverting `roomsComplete` to the array check and dropping the abort
+signal fails the three new runtime tests and none of the other 23 in that suite.
+
+Evidence at this commit: headquarter 1900, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS on
+Chromium/SwiftShader.

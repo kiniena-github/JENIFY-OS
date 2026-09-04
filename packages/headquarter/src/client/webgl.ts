@@ -589,6 +589,7 @@ export function immersiveShellScript(): string {
   var dragging = false, lastX = 0;
 
   function goTo(roomId) {
+    if (disposed) return;
     var room = null;
     for (var i = 0; i < ROOMS.length; i += 1) if (ROOMS[i].id === roomId) room = ROOMS[i];
     if (!room || room.ordinal === 1) {
@@ -615,6 +616,7 @@ export function immersiveShellScript(): string {
     }
   }
   window.__hqShellApply = function (views, activeRoomId) {
+    if (disposed) return;
     anyMotion = false;
     resetSlots();
     for (var v = 0; v < views.length; v += 1) {
@@ -699,9 +701,18 @@ export function immersiveShellScript(): string {
   }
 
   var running = false, frame = 0, idleFrames = 0, viewProj = null;
-  function wake() { idleFrames = 0; if (!running) { running = true; frame = window.requestAnimationFrame(tick); } }
+  // Set once the context is gone. Every entry point checks it, because the
+  // runtime holds references to the shell's callbacks and will go on calling
+  // them on its normal poll long after the canvas has been removed.
+  var disposed = false;
+  function wake() {
+    if (disposed) return;
+    idleFrames = 0;
+    if (!running) { running = true; frame = window.requestAnimationFrame(tick); }
+  }
 
   function tick(now) {
+    if (disposed) { running = false; return; }
     resize();
     var t = now / 1000;
     // Ease toward the target. Under reduced motion goTo() already snapped, so
@@ -805,6 +816,15 @@ export function immersiveShellScript(): string {
     // Without preventDefault the context is never eligible for restoration and
     // the browser may keep retrying; either way the page must stop drawing.
     event.preventDefault();
+    // Dispose FIRST, before anything else can re-enter.
+    //
+    // The client runtime keeps its own references to __hqShellApply and
+    // __hqShellGoTo and calls them on every poll and every hash change. Without
+    // this flag the next successful poll ran buffer operations against a lost
+    // context and then called wake(), and because a lit room sets anyMotion an
+    // animation frame loop then ran forever against a canvas no longer in the
+    // document (Codex round 5).
+    disposed = true;
     running = false;
     if (frame) window.cancelAnimationFrame(frame);
     if (canvas.parentNode) canvas.parentNode.removeChild(canvas);

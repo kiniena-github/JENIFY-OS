@@ -34,7 +34,7 @@ import type { AuthenticatedAccount, ControlRequest } from '../src/live/auth.js';
 import { registerDirectOrderCapability, DIRECT_ORDER_CAPABILITY } from '../src/live/orders.js';
 import { setupFixture, type Fixture } from './application.fixture.js';
 import { HQ_ROOMS } from '../src/client/rooms.js';
-import { CLIENT_FETCH_TARGETS } from '../src/client/runtime.js';
+import { CLIENT_FETCH_TARGETS, CLIENT_READ_TIMEOUT_MS } from '../src/client/runtime.js';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -524,6 +524,141 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toBe('');
     expect((page.document.querySelector('[data-hq-lock]') as HTMLElement).hidden).toBe(true);
     expect(bodyText(page.document, 'home')).toContain('cannot read');
+    page.close();
+  });
+
+  it('refuses a document that describes only some of the rooms', async () => {
+    // Codex round 5. The guard used to ask only whether `rooms` was an array,
+    // so a 200 carrying a partial set updated the panels it supplied and left
+    // every omitted panel showing the PREVIOUS document — with the global
+    // stamp advanced to the new one. The page then presented two different
+    // instants as one, which is worse than presenting none.
+    const live = deployment();
+    handleControlRequest(
+      {
+        method: 'POST',
+        path: CONTROL_ROUTES.orders,
+        headers: { origin: PAGE_ORIGIN, 'content-type': 'application/json' },
+        body: { instruction: 'Held work.', route: 'CLAUDE', idempotencyKey: 'k-partial', title: 'Held' },
+      },
+      live.deps,
+    );
+    const page = await loadPage(live.deps);
+    expect(panel(page.document, 'approvals').getAttribute('data-liveness')).toBe('attention');
+
+    // A well-formed document describing one room and omitting sixteen.
+    const original = page.window.fetch as (input: string) => Promise<unknown>;
+    page.window.fetch = (input: string) => {
+      if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+        return Promise.resolve({
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              ok: true,
+              generatedAt: new Date().toISOString(),
+              rooms: [{ roomId: 'home', status: 'live', liveness: 'quiet', metrics: [], provenance: 'partial' }],
+            }),
+        });
+      }
+      return original(input);
+    };
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    // Nothing is kept — not the room the partial document did describe, and
+    // above all not the sixteen it did not.
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toBe('');
+    expect(panel(page.document, 'approvals').getAttribute('data-liveness')).toBe('dark');
+    expect(bodyText(page.document, 'approvals')).toContain('cannot read');
+    expect(bodyText(page.document, 'home')).toContain('cannot read');
+    page.close();
+  });
+
+  it('refuses a document that names the same room twice', async () => {
+    // The other way to arrive at seventeen entries without seventeen rooms.
+    // Counting alone would have accepted it and left fifteen panels stale.
+    const live = deployment();
+    const page = await loadPage(live.deps);
+
+    const original = page.window.fetch as (input: string) => Promise<unknown>;
+    page.window.fetch = (input: string) => {
+      if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+        return Promise.resolve({
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              ok: true,
+              generatedAt: new Date().toISOString(),
+              rooms: HQ_ROOMS.map((room, index) => ({
+                roomId: index === 5 ? 'home' : room.id,
+                status: 'live',
+                liveness: 'quiet',
+                metrics: [],
+                provenance: 'duplicated',
+              })),
+            }),
+        });
+      }
+      return original(input);
+    };
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toBe('');
+    expect(bodyText(page.document, 'home')).toContain('cannot read');
+    page.close();
+  });
+
+  it('abandons a read that never answers, rather than wedging every later poll', async () => {
+    // Codex round 5. A fetch that connects and then neither resolves nor
+    // rejects — a stalled proxy, a hung host — left `inFlight` true forever:
+    // every later poll was discarded, the last hydrated rooms stayed on screen
+    // looking current, and not even a session expiry could take them down. A
+    // fail-closed runtime that silence can wedge open is not fail-closed.
+    const live = deployment();
+    const page = await loadPage(live.deps);
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toContain('provenance live');
+
+    const original = page.window.fetch as (input: string, options?: unknown) => Promise<unknown>;
+    let silent = true;
+    page.window.fetch = (input: string, options?: { signal?: AbortSignal }) => {
+      if (!silent || String(input).split('?')[0] !== CONTROL_ROUTES.state) return original(input, options);
+      // Only the abort signal can end this.
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          const failure = new Error('The user aborted a request.');
+          failure.name = 'AbortError';
+          reject(failure);
+        });
+      });
+    };
+
+    // Fire the runtime's OWN timer immediately instead of waiting out twelve
+    // real seconds. The delay is matched exactly, so this cannot pass against a
+    // runtime that arms no timeout, or arms one of a different length.
+    const realSetTimeout = page.window.setTimeout as (fn: () => void, ms: number) => number;
+    let armedAtTimeout = 0;
+    page.window.setTimeout = (fn: () => void, ms: number) => {
+      if (ms === CLIENT_READ_TIMEOUT_MS) {
+        armedAtTimeout += 1;
+        return realSetTimeout(fn, 0);
+      }
+      return realSetTimeout(fn, ms);
+    };
+
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    expect(armedAtTimeout).toBeGreaterThan(0);
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toBe('');
+    expect(bodyText(page.document, 'home')).toContain('could not be reached');
+    expect(bodyText(page.document, 'home')).toContain('no answer within');
+
+    // And the runtime is not wedged: the very next poll hydrates again.
+    silent = false;
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toContain('provenance live');
     page.close();
   });
 
