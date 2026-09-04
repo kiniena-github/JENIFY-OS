@@ -454,7 +454,23 @@ function analyticsSection(state: HqStateDocument): Section {
       'Analytics here is counting, and only counting. HQ records no duration, cost, token, ETA or ' +
       'completion figure, so none is shown and none is inferred — the wire format actively refuses ' +
       'those fields.',
-    liveness: livenessFrom({ attention: stopped, active: c.inFlight, present: open }),
+    // Presence covers everything this room COUNTS, not just the task buckets.
+    //
+    // With `present: open` it went dark whenever no operation was open, even
+    // while showing non-zero worker, capability, integration and event counts —
+    // a room the page calls dark, meaning "HQ is holding nothing here", sitting
+    // above four populated numbers (Codex round 3). Active and attention still
+    // come from task state alone: registry rows are not work in progress.
+    liveness: livenessFrom({
+      attention: stopped,
+      active: c.inFlight,
+      present:
+        open +
+        state.workforce.data.length +
+        state.capabilities.data.length +
+        state.connections.data.length +
+        state.activity.data.length,
+    }),
   };
 }
 

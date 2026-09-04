@@ -272,6 +272,39 @@ describe('a populated HQ is copied, never re-derived', () => {
   });
 });
 
+describe('a room is dark only when everything it counts is empty', () => {
+  it('keeps Analytics lit when its recorded inputs hold rows but no operation is open', () => {
+    // Analytics counts workers, capabilities, integrations and events as well as
+    // the task buckets. Deriving its presence from the task buckets alone made
+    // it go dark — "HQ is holding nothing here" — while displaying four
+    // non-zero counts directly underneath (Codex round 3).
+    const withRecords = buildHqSnapshot({
+      generatedAt: AT,
+      console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
+      connections: { data: [], provenance: PROVENANCE },
+      workforce: {
+        data: [
+          { id: 'w1', displayName: 'Claude', vendor: 'anthropic', role: 'build_lead', active: false, allowedCapabilities: [] },
+        ] as never,
+        provenance: PROVENANCE,
+      },
+      capabilities: { data: [], provenance: PROVENANCE },
+      activity: { data: [], provenance: PROVENANCE },
+    });
+    const views = hydrateRooms(withRecords, FOUNDER_SESSION);
+    const analytics = views.find((view) => view.roomId === 'analytics')!;
+    expect(analytics.metrics.find((metric) => metric.label === 'Registered workers')!.value).toBe(1);
+    expect(analytics.liveness).toBe('quiet');
+    // And still not moving: a registry row is not work in progress.
+    expect(['active', 'attention']).not.toContain(analytics.liveness);
+  });
+
+  it('still goes dark when nothing it counts holds anything', () => {
+    const analytics = hydrateRooms(emptyState(), FOUNDER_SESSION).find((v) => v.roomId === 'analytics')!;
+    expect(analytics.liveness).toBe('dark');
+  });
+});
+
 describe('liveness is ordered by what needs a human first', () => {
   it('ranks attention over active over quiet over dark', () => {
     expect(livenessFrom({ attention: 1, active: 5, present: 9 })).toBe('attention');

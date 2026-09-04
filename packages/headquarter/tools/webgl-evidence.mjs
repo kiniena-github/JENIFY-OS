@@ -38,6 +38,23 @@
  * Local only. It serves the built site over loopback and stubs the two READ
  * routes; it never reaches a network, a database or a deployment, and it
  * cannot mutate anything — the stub answers GETs and nothing else.
+ *
+ * ## This tool has been negative-controlled
+ *
+ * A verification instrument that cannot fail proves nothing, so the liveness
+ * assertion was checked by breaking the thing it watches: with the stubbed
+ * state route returning 500 instead of a document, the run exits 1 and names
+ * every room that stayed dark —
+ *
+ *     - approvals rendered as dark, fixture said attention
+ *     - analytics rendered as dark, fixture said active
+ *     ...
+ *
+ * which is exactly the regression it exists to catch. Note the control that
+ * does NOT work: editing a room's liveness in the fixture changes both what the
+ * page is sent and what it is compared against, so it passes. The assertion's
+ * power is over hydration failing, not over the fixture being wrong about
+ * itself.
  */
 
 import { createServer } from 'node:http';
@@ -390,6 +407,33 @@ try {
   if (!report.shaders?.fragmentCompiled) failures.push(`fragment shader failed: ${report.shaders?.fragmentLog}`);
   if (!report.shaders?.linked) failures.push(`program did not link: ${report.shaders?.linkLog}`);
   if (!report.rendered?.drawn) failures.push(`nothing was drawn: ${JSON.stringify(report.rendered)}`);
+
+  // The state-driven lighting itself, asserted rather than merely collected.
+  //
+  // Without this the tool could print PASS while the one thing it exists to
+  // prove was broken: a ready session, compiled shaders and the shell's
+  // structural geometry alone satisfy every check above, so a regression that
+  // stopped rooms hydrating would have gone unnoticed and the "verified in a
+  // real browser" claim would have been hollow (Codex round 3, against this
+  // file). The fixture's liveness per room is known, so it is checked.
+  const expectedLiveness = new Map(ROOMS.map((room) => [room.roomId, room.liveness]));
+  const actualLiveness = await page.evaluate(() =>
+    Object.fromEntries(
+      [...document.querySelectorAll('[data-hq-room]')].map((node) => [
+        node.getAttribute('data-hq-room'),
+        node.getAttribute('data-liveness'),
+      ]),
+    ),
+  );
+  report.liveness = { expected: Object.fromEntries(expectedLiveness), actual: actualLiveness };
+  for (const [roomId, expected] of expectedLiveness) {
+    if (actualLiveness[roomId] !== expected) {
+      failures.push(`${roomId} rendered as ${actualLiveness[roomId]}, fixture said ${expected}`);
+    }
+  }
+  if (Object.keys(actualLiveness).length !== ROOMS.length) {
+    failures.push(`expected ${ROOMS.length} room panels, found ${Object.keys(actualLiveness).length}`);
+  }
   if (report.consoleErrors.length > 0) failures.push(`console errors: ${report.consoleErrors.join(' | ')}`);
 } finally {
   await browser.close();
