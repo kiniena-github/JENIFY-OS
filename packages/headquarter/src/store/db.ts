@@ -187,6 +187,10 @@ function ensureColumns(db: HqDatabase): void {
 export function openHqDatabase(path: string = DEFAULT_HQ_DB_PATH): HqDatabase {
   const db = new Database(path);
   db.pragma('journal_mode = WAL');
+  // Durability must be active before first-boot DDL or any column migration.
+  // Hosted Stage 3 verifies this effective setting again after the migrating
+  // open, but setting FULL here closes the initialization crash window itself.
+  db.pragma('synchronous = FULL');
   db.pragma('foreign_keys = ON');
   db.exec(DDL);
   ensureColumns(db);
