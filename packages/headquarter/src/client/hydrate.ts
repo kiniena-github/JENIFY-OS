@@ -29,7 +29,12 @@
  */
 
 import { HQ_ROOMS, type HqRoom, type RoomSection } from './rooms.js';
-import { CONNECTION_STATE_TONE, LIT_CONNECTION_STATES } from '../live/connections.js';
+import {
+  CONNECTION_STATE_LABELS,
+  CONNECTION_STATE_TONE,
+  LIT_CONNECTION_STATES,
+  type ConnectionState,
+} from '../live/connections.js';
 import type {
   ClientSession,
   HqStateDocument,
@@ -417,6 +422,29 @@ function capabilitiesSection(state: HqStateDocument): Section {
   };
 }
 
+/**
+ * The states "Needing attention" counts — and the words the hint uses to say so.
+ *
+ * The hint used to read "Reported error or expired credential". That was true
+ * of the older, narrower filter and became false the moment the count started
+ * reading `CONNECTION_STATE_TONE`, which also warns on `configured` and
+ * `setup_required`. So a count of 1 told the Founder a failure had occurred
+ * when the integration may only be half set up — a page whose whole claim is
+ * that it never asserts more than canonical state supports, asserting a
+ * failure that canonical state does not record (Codex round 17).
+ *
+ * Both the filter and the hint now read this one list, and the list is derived
+ * from the same mapping, so the number and its explanation cannot drift, and a
+ * state whose tone changes moves both at once.
+ */
+const WARNED_CONNECTION_STATES: readonly ConnectionState[] = (
+  Object.keys(CONNECTION_STATE_TONE) as ConnectionState[]
+).filter((state) => CONNECTION_STATE_TONE[state] === 'warn' || CONNECTION_STATE_TONE[state] === 'danger');
+
+const NEEDS_ATTENTION_HINT = `Integrations HQ records as: ${WARNED_CONNECTION_STATES.map(
+  (state) => CONNECTION_STATE_LABELS[state],
+).join(', ')}. A reported failure and a half-finished setup both count.`;
+
 function connectionsSection(state: HqStateDocument): Section {
   const connections = state.connections.data;
   // Reachability from the canonical list, not a copy of it.
@@ -443,16 +471,14 @@ function connectionsSection(state: HqStateDocument): Section {
   // in one place and left the floor reading Quiet". I restated a narrower list
   // beside the mapping that was created to stop precisely that (Codex round
   // 16).
-  const warned = (state: string): boolean => {
-    const t = (CONNECTION_STATE_TONE as Record<string, string>)[state];
-    return t === 'warn' || t === 'danger';
-  };
+  const warned = (state: string): boolean =>
+    (WARNED_CONNECTION_STATES as readonly string[]).includes(state);
   const needsAttention = connections.filter((connection) => warned(connection.state)).length;
   return {
     metrics: [
       metric('Known integrations', connections.length, 'Every integration HQ has a descriptor for.', 'neutral'),
       metric('Proven reachable', lit, 'Verified, or local-only with evidence. Configuration alone does not count.', tone(lit, 'accent')),
-      metric('Needing attention', needsAttention, 'Reported error or expired credential.', tone(needsAttention, 'danger')),
+      metric('Needing attention', needsAttention, NEEDS_ATTENTION_HINT, tone(needsAttention, 'danger')),
     ],
     rows: limited(
       connections.map((connection) => ({

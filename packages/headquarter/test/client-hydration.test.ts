@@ -26,7 +26,12 @@ import { hydrateRoom, hydrateRooms, livenessFrom, ROOM_ROW_LIMIT } from '../src/
 import { buildHqSnapshot, emptyFounderConsole, type HqSnapshot } from '../src/live/snapshot.js';
 import type { ClientSession } from '../src/client/contracts.js';
 import type { Provenance } from '../src/live/provenance.js';
-import { LIT_CONNECTION_STATES } from '../src/live/connections.js';
+import {
+  CONNECTION_STATE_LABELS,
+  CONNECTION_STATE_TONE,
+  LIT_CONNECTION_STATES,
+  type ConnectionState,
+} from '../src/live/connections.js';
 import type { ConsoleTask } from '../src/application/console.js';
 
 const AT = '2026-09-04T12:00:00.000Z';
@@ -734,19 +739,53 @@ describe('connection attention follows the canonical tone mapping', () => {
 });
 
 describe('reachability comes from one list, not two that agree', () => {
-  it('reports proven-reachable exactly for the canonical lit states', () => {
-    // `connected || local_only` used to be written out in hydrate.ts while
-    // LIT_CONNECTION_STATES said the same thing in the spatial floor's
-    // presentation layer — two lists agreeing by luck, which is the shape that
-    // produced the tone-mapping finding in the same round. The constant now
-    // lives beside CONNECTION_STATE_TONE and both views read it.
-    // LIMIT: the expectation derives from LIT_CONNECTION_STATES, the same
-    // constant the client reads, so this cannot say whether that list is
-    // correct — only whether the client still follows it. Controlled by
-    // re-hardcoding the client while the constant differs, which fails by name.
-    // Changing the constant alone makes both sides move together and proves
-    // nothing; that tautology is the one I nearly filed as evidence.
-    for (const connectionState of ['connected', 'local_only', 'configured', 'dispatchable', 'error']) {
+  /**
+   * Written out here, on purpose, one line per state.
+   *
+   * The previous version of this suite derived the expectation from
+   * LIT_CONNECTION_STATES — the same constant the client reads — and covered
+   * five of the eight states. Two things followed, and both are the reason
+   * this is now a literal table (Codex round 17):
+   *
+   *   1. It said nothing about whether the list is CORRECT. Re-hardcoding the
+   *      client to treat `not_connected`, `expired` or `setup_required` as
+   *      reachable stayed green, because those three were never asked about.
+   *   2. A ninth `ConnectionState` needed no test change at all: the loop
+   *      would simply never mention it.
+   *
+   * `Record<ConnectionState, ...>` closes (2) at the type level — a new state
+   * fails `tsc` until someone decides, here, whether it may be drawn as
+   * reachable. The literal values close (1): they are a judgement about what
+   * each word means, made independently of the constant, and the assertion
+   * below then holds the constant to them.
+   *
+   * The judgement itself: only a state that means "HQ observed this working"
+   * may be lit. `dispatchable` and `configured` mean the setup looks right,
+   * which is a weaker claim wearing the stronger one's clothes.
+   */
+  const MAY_BE_DRAWN_REACHABLE: Record<ConnectionState, boolean> = {
+    connected: true, // a live check ran and succeeded
+    local_only: true, // runs here, with evidence; nothing to reach
+    dispatchable: false, // an executor exists — the provider was never asked
+    configured: false, // required facts present; nothing was verified
+    not_connected: false,
+    expired: false, // it worked once, which is not "it works"
+    error: false,
+    setup_required: false,
+  };
+
+  it('holds the canonical lit list to an independently stated judgement', () => {
+    // The direction the derived version could not check at all: not "does the
+    // client follow the list" but "is the list the right list".
+    const canonical = [...LIT_CONNECTION_STATES].sort();
+    const expected = (Object.keys(MAY_BE_DRAWN_REACHABLE) as ConnectionState[])
+      .filter((state) => MAY_BE_DRAWN_REACHABLE[state])
+      .sort();
+    expect(canonical).toEqual(expected);
+  });
+
+  it('reports proven-reachable for exactly the states that may be drawn reachable', () => {
+    for (const connectionState of Object.keys(MAY_BE_DRAWN_REACHABLE) as ConnectionState[]) {
       const state = buildHqSnapshot({
         generatedAt: AT,
         console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
@@ -769,9 +808,54 @@ describe('reachability comes from one list, not two that agree', () => {
       });
       const room = hydrateRooms(state, FOUNDER_SESSION).find((r) => r.roomId === 'world-network')!;
       const proven = room.metrics.find((m) => m.label === 'Proven reachable')!;
-      expect(proven.value, connectionState).toBe(
-        (LIT_CONNECTION_STATES as readonly string[]).includes(connectionState) ? 1 : 0,
+      expect(proven.value, connectionState).toBe(MAY_BE_DRAWN_REACHABLE[connectionState] ? 1 : 0);
+    }
+  });
+});
+
+describe('the attention count and its hint describe the same set of states', () => {
+  it('names every warned state, and no settled one, in the hint', () => {
+    // The count reads CONNECTION_STATE_TONE; the hint used to read "Reported
+    // error or expired credential", left over from a narrower filter. So a
+    // `configured` integration made the count say 1 while the hint said that 1
+    // meant a failure — HQ asserting something canonical state does not record
+    // (Codex round 17).
+    //
+    // Not a string comparison against a copy of the sentence: that would pass
+    // whatever the sentence claimed. The property is that every warned state
+    // is named and no settled one is.
+    const state = buildHqSnapshot({
+      generatedAt: AT,
+      console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
+      connections: {
+        data: [
+          {
+            id: 'c',
+            displayName: 'C',
+            state: 'configured',
+            reason: 'fixture',
+            authMechanism: 'token',
+            missingFacts: [],
+          },
+        ] as never,
+        provenance: PROVENANCE,
+      },
+      workforce: { data: [], provenance: PROVENANCE },
+      capabilities: { data: [], provenance: PROVENANCE },
+      activity: { data: [], provenance: PROVENANCE },
+    });
+    const room = hydrateRooms(state, FOUNDER_SESSION).find((r) => r.roomId === 'world-network')!;
+    const hint = room.metrics.find((m) => m.label === 'Needing attention')!.hint;
+
+    for (const connectionState of Object.keys(CONNECTION_STATE_TONE) as ConnectionState[]) {
+      const tone = CONNECTION_STATE_TONE[connectionState];
+      const warned = tone === 'warn' || tone === 'danger';
+      expect(hint.includes(CONNECTION_STATE_LABELS[connectionState]), `${connectionState} (${tone})`).toBe(
+        warned,
       );
     }
+    // And it must not describe the count as a failure, which is the specific
+    // false claim that started this.
+    expect(hint).toMatch(/half-finished setup/);
   });
 });
