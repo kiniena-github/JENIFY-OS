@@ -330,9 +330,18 @@ varying vec3 vWorld;
 varying vec3 vTint;
 varying float vEmissive;
 varying float vGlow;
+varying float vSelected;
 void main() {
   float pulse = aPulse.x > 0.0 ? (0.72 + 0.28 * sin(uTime * 1.7 + aMeta.x)) : 1.0;
-  vGlow = aState.a * pulse + aPulse.y * 0.45;
+  // Selection is NOT part of the glow. It used to be — vGlow carried
+  // "+ aPulse.y * 0.45" — which made the room you were standing in brighter
+  // regardless of its canonical state: a dark Main Home in an empty HQ, the
+  // default route, rendered at roughly eight times the emissive output of an
+  // unselected dark room and read as lit. The page's own legend says a dark
+  // room is a room HQ is holding nothing in, so that was the building
+  // contradicting the legend beside it (Codex round 11).
+  vGlow = aState.a * pulse;
+  vSelected = aPulse.y;
   vTint = aState.rgb;
   vNormal = aNormal;
   vColor = aColor;
@@ -349,6 +358,7 @@ varying vec3 vWorld;
 varying vec3 vTint;
 varying float vEmissive;
 varying float vGlow;
+varying float vSelected;
 uniform vec3 uEye;
 uniform vec3 uKey;
 void main() {
@@ -366,7 +376,12 @@ void main() {
   // enters the room: a lit box rather than a lit space. Found by looking at the
   // browser evidence screenshot; no test can see it.
   vec3 glow = vTint * vGlow * (vEmissive > 0.5 ? 1.25 : 0.2);
-  vec3 color = lit + glow;
+  // Selection reads as an EDGE in a fixed neutral colour, never as more of the
+  // room's own light. Two things keep it unmistakable for liveness: it is not
+  // multiplied by vTint, so it cannot borrow a state colour; and it rides the
+  // rim term, so it outlines the room you are in rather than filling it.
+  vec3 selection = vec3(0.42, 0.50, 0.62) * rim * vSelected;
+  vec3 color = lit + glow + selection;
   // A floor grid drawn in the shader, so no extra geometry carries it.
   if (abs(n.y - 1.0) < 0.01 && vWorld.y < 0.05) {
     vec2 g = abs(fract(vWorld.xz / 4.0) - 0.5);

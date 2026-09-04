@@ -1024,3 +1024,39 @@ motion in the first place, the reduced-motion measurement proves nothing, so
 That is the same lesson the differential's `bright > 100` guard encodes — a
 measurement that cannot distinguish "working correctly" from "not measuring" is
 not evidence.
+
+### Stage 4, review round 11 — Codex
+
+One finding, and the best no-fake-state catch since the roofs: **navigation
+selection was lighting rooms.**
+
+The vertex shader carried `vGlow = aState.a * pulse + aPulse.y * 0.45`, so the
+room the current route selected glowed harder regardless of its canonical state.
+A dark room, selected, rendered at roughly eight times the emissive output of an
+unselected dark room — and Main Home is the DEFAULT route, so on an empty HQ the
+very first thing a Founder saw was a lit room that HQ was holding nothing in,
+directly beneath a legend reading "a dark room is a room HQ is holding nothing
+in". The building was contradicting the sentence printed beside it.
+
+Selection is now an edge in a fixed neutral colour, carried on its own varying
+and added after the glow term. Two properties keep it unmistakable for liveness,
+and both are asserted: it never multiplies the state tint, so it cannot borrow a
+state colour; and it rides the rim term, so it outlines the room rather than
+filling it. The legend now describes it, because a building with a visual
+vocabulary should explain all of it rather than most of it.
+
+**On what the test does and does not prove.** It is structural — the emitted
+shader source must not put `aPulse.y` into `vGlow`, and the selection colour must
+be a literal rather than `vTint`. A pixel-level check was considered and
+deliberately not built: isolating one room's pixels while changing only the
+selection needs either a camera move (the round-5 confound) or a per-room mask
+this tool does not have, and a fragile measurement that could report a false
+failure is worse than an honest structural test with its limits written down.
+Shader compile, link and the lit/dark differential are all re-verified in a real
+browser, so the change is known not to have broken the rendering path.
+
+Evidence at this commit: headquarter 1914, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS
+(shaders compiled and linked, lit 2441 warm samples vs 0 dark, motion
+36/0/35, framesAfterLoss 0).

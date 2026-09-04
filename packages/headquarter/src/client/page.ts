@@ -38,6 +38,8 @@ const BINDING_CHIP: Record<RoomView['status'], { label: string; tone: Tone }> = 
 export const IMMERSIVE_HONESTY_NOTE =
   'Every room here is lit by canonical state and nothing else. A dark room is a room HQ is holding ' +
   'nothing in; a room that pulses holds work the canonical queue records as running or stopped. ' +
+  'The room you are currently in is outlined in a neutral grey — that edge is navigation, not state, ' +
+  'and it never changes how brightly a room is lit. ' +
   'Rooms whose subject HQ does not record say so in place of a number, and no control is drawn ' +
   'that the control API did not grant to this session.';
 

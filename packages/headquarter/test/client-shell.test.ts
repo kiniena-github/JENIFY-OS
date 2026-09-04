@@ -283,6 +283,25 @@ describe('the shell can only be lit by the hydration runtime', () => {
     expect(script).toContain('gl.bufferSubData(gl.ARRAY_BUFFER, 0, stateData)');
   });
 
+  it('never lets navigation selection brighten a room', () => {
+    // Codex round 11. `vGlow` used to carry "+ aPulse.y * 0.45", so the room the
+    // route selected glowed harder whatever its canonical state — a dark Main
+    // Home in an empty HQ, which is the DEFAULT route, rendered at roughly eight
+    // times the emissive output of an unselected dark room. The page's legend
+    // says a dark room is a room HQ is holding nothing in, so the building was
+    // contradicting the sentence printed beside it.
+    //
+    // Selection is now an edge in a fixed neutral colour. Two properties make it
+    // unmistakable for liveness, and both are asserted: it never multiplies the
+    // state tint, and it never enters the glow term.
+    expect(script).toContain('vGlow = aState.a * pulse;');
+    expect(script).not.toMatch(/vGlow\s*=[^;]*aPulse\.y/);
+    expect(script).toContain('vec3 selection = vec3(0.42, 0.50, 0.62) * rim * vSelected;');
+    // The selection colour is a literal. If it ever borrows vTint it can carry a
+    // liveness reading again, which is the whole defect coming back.
+    expect(script).not.toMatch(/selection\s*=[^;]*vTint/);
+  });
+
   it('recomputes the building when the motion preference changes', () => {
     // Codex round 10. The motion preference is an INPUT to the per-room pulse
     // flags and to `anyMotion`, and `applyViews` is the only place either is
