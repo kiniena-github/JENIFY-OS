@@ -220,6 +220,41 @@ describe('the emitted page carries the whole building before any script runs', (
     expect(scripts).not.toContain(CONTROL_ROUTES.deny);
   });
 
+  it('puts no focusable element inside aria-hidden content', () => {
+    // `aria-hidden` removes a subtree from the accessibility tree but NOT from
+    // sequential keyboard focus. The scene labels were anchors inside an
+    // `aria-hidden` overlay, so a keyboard user tabbed through sixteen
+    // invisible stops that a screen reader could not explain — and
+    // `positionLabels` could not move them out of the way either, because it
+    // changes opacity, not focusability (Codex round 2). They are decorative
+    // spans now, and the room index below carries the real link semantics.
+    const dom = new JSDOM(immersiveHtml(), { url: PAGE_URL });
+    const focusable = 'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])';
+    for (const hidden of dom.window.document.querySelectorAll('[aria-hidden="true"]')) {
+      const trapped = [...hidden.querySelectorAll(focusable)].map(
+        (node) => `${node.tagName.toLowerCase()}[${node.getAttribute('data-hq-label') ?? ''}]`,
+      );
+      expect(trapped, `focusable elements inside aria-hidden: ${trapped.join(', ')}`).toEqual([]);
+    }
+    dom.window.close();
+  });
+
+  it('still lets a keyboard user reach every room, through real links', () => {
+    // The other half of the fix above: making the labels decorative is only
+    // acceptable because the room index is genuine link markup covering all
+    // seventeen destinations.
+    const dom = new JSDOM(immersiveHtml(), { url: PAGE_URL });
+    const reachable = new Set(
+      [...dom.window.document.querySelectorAll('[data-hq-room-link]')].map((node) =>
+        node.getAttribute('href'),
+      ),
+    );
+    for (const room of HQ_ROOMS) {
+      expect(reachable.has(`#/room/${room.id}`), `${room.id} is not reachable by keyboard`).toBe(true);
+    }
+    dom.window.close();
+  });
+
   it('builds every string through textContent, never markup', () => {
     expect(html).not.toContain('innerHTML');
     expect(html).not.toContain('outerHTML');

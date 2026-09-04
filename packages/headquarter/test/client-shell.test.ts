@@ -176,6 +176,57 @@ describe('the building is generated from code, with nothing to load', () => {
     }
   });
 
+  it('winds every triangle so its geometric normal agrees with its supplied one', () => {
+    // The invariant that back-face culling actually depends on, checked over
+    // EVERY triangle rather than face by face.
+    //
+    // The top faces were wound the other way, giving a geometric normal of -Y
+    // against a supplied +Y, so with `cullFace(BACK)` every roof and the atrium
+    // floor were removed the moment the camera was above them. The building
+    // rendered roofless and groundless, and I read the resulting murk as a
+    // lighting problem and spent two rounds adjusting the shader. A cross
+    // product would have said it immediately (Codex round 2).
+    for (let i = 0; i < geometry.vertices.length; i += 11 * 3) {
+      const at = (v: number, o: number) => geometry.vertices[i + v * 11 + o]!;
+      const p = [0, 1, 2].map((v) => [at(v, 0), at(v, 1), at(v, 2)]);
+      const supplied = [at(0, 3), at(0, 4), at(0, 5)];
+      const e1 = [p[1]![0]! - p[0]![0]!, p[1]![1]! - p[0]![1]!, p[1]![2]! - p[0]![2]!];
+      const e2 = [p[2]![0]! - p[1]![0]!, p[2]![1]! - p[1]![1]!, p[2]![2]! - p[1]![2]!];
+      const geometric = [
+        e1[1]! * e2[2]! - e1[2]! * e2[1]!,
+        e1[2]! * e2[0]! - e1[0]! * e2[2]!,
+        e1[0]! * e2[1]! - e1[1]! * e2[0]!,
+      ];
+      const length = Math.hypot(...geometric);
+      expect(length, `degenerate triangle at vertex ${i / 11}`).toBeGreaterThan(1e-6);
+      const dot =
+        (geometric[0]! * supplied[0]! + geometric[1]! * supplied[1]! + geometric[2]! * supplied[2]!) / length;
+      // Same direction, not merely the same axis: a sign flip IS the bug.
+      expect(dot, `triangle at vertex ${i / 11} is wound against its normal`).toBeGreaterThan(0.9);
+    }
+  });
+
+  it('gives Main Home geometry of its own, so the atrium can be lit by its state', () => {
+    // The atrium used to be emitted as structural slot 0, which meant ordinal 1
+    // had no vertices at all: hydration computed Main Home's liveness, wrote it
+    // to slot 1, and nothing in the building could ever read it — while the
+    // page promised all seventeen rooms were state-lit (Codex round 2).
+    const home = HQ_ROOMS.find((room) => room.placement.ring === 0)!;
+    let vertices = 0;
+    for (let i = 0; i < geometry.vertices.length; i += 11) {
+      if (geometry.vertices[i + 9] === home.ordinal) vertices += 1;
+    }
+    expect(vertices, 'Main Home has no geometry bound to its slot').toBeGreaterThan(0);
+  });
+
+  it('gives every one of the seventeen rooms geometry the shell can light', () => {
+    const slots = new Set<number>();
+    for (let i = 0; i < geometry.vertices.length; i += 11) slots.add(geometry.vertices[i + 9]!);
+    for (const room of HQ_ROOMS) {
+      expect(slots.has(room.ordinal), `${room.id} (ordinal ${room.ordinal}) has no geometry`).toBe(true);
+    }
+  });
+
   it('never puts geometry below the floor', () => {
     for (let i = 0; i < geometry.vertices.length; i += 11) {
       expect(geometry.vertices[i + 1]!).toBeGreaterThanOrEqual(0);

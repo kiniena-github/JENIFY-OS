@@ -208,8 +208,14 @@ function pushBox(
   };
   const [a, b] = [-halfX, halfX];
   const [c, d] = [-halfZ, halfZ];
-  // Top.
-  pushQuad(out, [corner(a, c, y1), corner(b, c, y1), corner(b, d, y1), corner(a, d, y1)], [0, 1, 0], color, slot, 0);
+  // Top. Wound counter-clockwise seen from ABOVE, which is where it is seen
+  // from: with back-face culling on, the reverse order gives a geometric normal
+  // of -Y and every roof in the building is culled the moment the camera is
+  // above it. That was the state of this file until Codex round 2 — the scene
+  // rendered roofless and without its atrium floor, and I had been reading the
+  // resulting murk as a lighting problem. The winding test now checks every
+  // triangle's geometric normal against its supplied one.
+  pushQuad(out, [corner(a, c, y1), corner(a, d, y1), corner(b, d, y1), corner(b, c, y1)], [0, 1, 0], color, slot, 0);
   // +Z side.
   pushQuad(out, [corner(a, d, y0), corner(b, d, y0), corner(b, d, y1), corner(a, d, y1)], normal(0, 1), color, slot, 0);
   // −Z side.
@@ -236,16 +242,25 @@ export function buildSceneGeometry(): SceneGeometry {
   // Atrium floor: one large slab, plus a raised ring the rooms look onto.
   pushQuad(
     out,
-    [[-80, 0, -80], [80, 0, -80], [80, 0, 80], [-80, 0, 80]],
+    [[-80, 0, -80], [-80, 0, 80], [80, 0, 80], [80, 0, -80]],
     [0, 1, 0],
     [0.045, 0.055, 0.075],
     0,
     0,
   );
-  pushBox(out, roomFrame(0, 0, 0), 9, 9, 0.6, 0, metal, 0);
-  // Four atrium light blades — structure, never a state claim.
+  // The atrium IS Main Home, so its plinth and light blades carry Main Home's
+  // slot rather than the structural slot 0.
+  //
+  // They used to be slot 0, which meant ordinal 1 had no geometry at all: the
+  // hydration layer computed Main Home's liveness, wrote it to slot 1, and
+  // nothing in the building ever read it — so the one room the page opens on
+  // could never light, however busy HQ was, while the page promised all
+  // seventeen were state-lit (Codex round 2). The ground plane above stays
+  // slot 0: it is the floor of the building, not a room.
+  const HOME_SLOT = HQ_ROOMS.find((room) => room.placement.ring === 0)?.ordinal ?? 0;
+  pushBox(out, roomFrame(0, 0, 0), 9, 9, 0.6, 0, metal, HOME_SLOT);
   for (const [bx, bz] of [[0, 12], [0, -12], [12, 0], [-12, 0]] as const) {
-    pushBox(out, roomFrame(bx, bz, 0), 0.35, 0.35, 16, 0, [0.1, 0.3, 0.42], 0);
+    pushBox(out, roomFrame(bx, bz, 0), 0.35, 0.35, 16, 0, [0.1, 0.3, 0.42], HOME_SLOT);
   }
 
   for (const room of HQ_ROOMS) {
@@ -760,6 +775,17 @@ export function immersiveShellScript(): string {
   canvas.addEventListener('pointercancel', endDrag);
   window.addEventListener('resize', function () { resize(); wake(); });
   document.addEventListener('visibilitychange', function () { if (!document.hidden) wake(); });
+
+  // The scene labels are decorative spans (see page.ts for why they are not
+  // anchors). Pointing at one still walks into that room; keyboard users reach
+  // the same destinations through the room index, which is real link markup.
+  if (labelLayer) {
+    labelLayer.addEventListener('click', function (event) {
+      var node = event.target && event.target.closest ? event.target.closest('[data-hq-label]') : null;
+      if (!node) return;
+      window.location.hash = '#/room/' + node.getAttribute('data-hq-label');
+    });
+  }
 
   window.__hqShellGoTo = goTo;
   say('3D headquarters active. Rooms are lit only by canonical state; drag to look around, or use the room list below.', 'ok');

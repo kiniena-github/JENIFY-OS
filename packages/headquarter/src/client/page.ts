@@ -75,12 +75,24 @@ export function immersiveBody(): string {
       )}</a></li>`,
   ).join('');
 
+  // Spans, NOT anchors.
+  //
+  // These float over the canvas and are `aria-hidden`, because the room index
+  // below is the real, accessible navigation and duplicating it in the
+  // accessibility tree would just make every room announce twice. But
+  // `aria-hidden` does not remove descendants from sequential focus, so as
+  // anchors they were sixteen invisible tab stops that a screen reader could
+  // not explain and that `positionLabels` could not even move out of the way —
+  // it changes opacity, not focusability (Codex round 2).
+  //
+  // As spans they are decorative, exactly as they are described. The shell
+  // script attaches click handlers so pointing at a room still walks into it;
+  // keyboard users get the same destinations from the room index, with proper
+  // link semantics.
   const labels = HQ_ROOMS.filter((room) => room.placement.ring !== 0)
     .map(
       (room) =>
-        `<a class="hq-label" data-hq-label="${escapeHtml(room.id)}" href="${escapeHtml(roomRoute(room.id))}">${escapeHtml(
-          room.name,
-        )}</a>`,
+        `<span class="hq-label" data-hq-label="${escapeHtml(room.id)}">${escapeHtml(room.name)}</span>`,
     )
     .join('');
 

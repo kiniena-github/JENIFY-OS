@@ -55,10 +55,11 @@ export const IMMERSIVE_CSS = `
   text-transform: uppercase;
   text-decoration: none;
   white-space: nowrap;
+  cursor: pointer;
   opacity: 0;
   transition: opacity 160ms linear;
 }
-.hq-label:hover, .hq-label:focus-visible { border-color: var(--accent); color: var(--accent); }
+.hq-label:hover { border-color: var(--accent); color: var(--accent); }
 
 .hq-building-bar {
   display: flex;
