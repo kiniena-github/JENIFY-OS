@@ -1468,3 +1468,49 @@ Evidence at this commit: headquarter 1934, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); four typechecks clean; `npm run build`; `build:site`;
 `evidence:webgl` PASS (warm 5119 lit / 0 dark, frames 33 / 0 / 32, 17 rooms
 still present after context loss).
+
+### Codex round 18 — three over-claims, one of them in the page's own chrome (`dda08a9`)
+
+Three findings, all real, all fixed.
+
+1. **The immersive page wore the bundle's provenance.** It forwarded `data.note`
+   and `data.sourceMode` into the shell, so a site built from a sample bundle
+   printed a SAMPLE chip and the bundle's caveat at the top of a page whose
+   runtime stamps the live document it just read as `provenance live`. Two
+   provenance claims about one page, one of them about data the page does not
+   hold. The comment directly above the call said "It takes NO bundle data on
+   purpose" — I wrote that comment and then passed two pieces of bundle data on
+   the next line. The parameters are gone; the page now states its own truth.
+
+2. **Analytics named four sources for five numbers.** It displayed
+   "Integrations known" from `state.connections.data` and counted those rows
+   toward its liveness, while its binding source omitted connections. The
+   unnamed section could light the room.
+
+3. **Tone was validated as text only.** A version-skewed document carrying
+   `tone: 'critical'` rendered `class="kpi tone-critical"` — a rule the
+   stylesheet does not have — so the metric kept its number and lost its
+   colour, on a page still stamped as current. Liveness and provenance mode
+   were already checked against closed sets; tone was the third and was not.
+   `RoomTone` and `RoomLiveness` are now `as const` tuples with the types
+   derived from them, and the runtime's sets are emitted from those tuples. The
+   liveness list had been typed out by hand and happened to be right — a
+   passing restatement, which is exactly the shape this branch keeps punishing.
+
+**The guard for finding 2 is behavioural, not textual.** Asserting the corrected
+sentence would say nothing about the next section someone wires in, so the test
+populates one state section at a time, checks whether the room's rendered output
+moves, and requires the room's provenance to name any section that moved it. It
+flagged a second room on its first run — the Security Center, which reads
+connection auth mechanisms and says so in prose rather than by key. That is a
+false positive of a too-literal matcher, not a defect, and the fix was to accept
+stems: a source line is a sentence a Founder reads, and bending it toward field
+names to satisfy a test would make the page worse.
+
+**A seventh backtick-in-an-emitted-comment**, caught by `tsc` this time. The
+class is now well past the point where discipline is the answer; noting it here
+because the count is the argument for a lint rule if it happens again.
+
+Evidence at this commit: headquarter 1936, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); four typechecks clean; `npm run build`; `build:site`;
+`evidence:webgl` PASS.
