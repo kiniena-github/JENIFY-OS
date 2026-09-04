@@ -1206,3 +1206,43 @@ by re-declaring `'activity'`: it fails and names it.
 Evidence at this commit: headquarter 1921, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
 web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.
+
+### Stage 4, review round 14 — Codex
+
+Two findings, both real, and both land squarely on work I had just declared
+finished.
+
+**Analytics ignored approvals.** `attention: stopped` counted blocked and
+outcome-unknown only, so an approval-only HQ left this room QUIET while Home,
+Command, Mission, Approvals and Founder Office all ranked the same approval as
+attention — five rooms amber and one not, over one task. Worse with running work
+present: Analytics went `active`, which under the documented
+attention-over-active ordering reads as "work is moving and nothing needs you".
+
+The uncomfortable part is that **my own sweep one commit earlier read this room
+and declared it sound.** It was not. Reading each room in turn is not the same
+as comparing them against one another, and I had done the first while claiming
+the second.
+
+**The Command Room went dark over a pending review.** With `pendingReviews` the
+only populated bucket, it was absent from rows, attention and active, so
+`present: rows.length` was 0 — the room said "HQ is holding nothing" while Home
+and Mission said quiet, because the task IS recorded. Presence now includes
+approvals and pending reviews, an "Awaiting review" metric was added so a
+non-dark room always shows the reader why, and the empty message names whichever
+of the two is holding work.
+
+**And the finding against my own test.** My round-13 cross-room check compared
+only `lit()` — "both lit or both unlit" — so a DARK room contradicting two QUIET
+ones passed straight through it. A consistency check that collapses the very
+distinction the page depends on is not a consistency check. It now asserts exact
+liveness equality across Home, Command and Mission, and in that form it catches
+the Command defect on its own.
+
+That is the seventh time the enforcement was narrower than the invariant, and
+the second time the narrow thing was a test I had written to prevent exactly
+this class.
+
+Evidence at this commit: headquarter 1923, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.

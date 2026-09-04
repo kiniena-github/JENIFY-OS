@@ -191,6 +191,10 @@ function operationsSection(state: HqStateDocument): Section {
       metric('Queued', ops.queued.length, 'Accepted, not started.', tone(ops.queued.length, 'neutral')),
       metric('Stopped', ops.blocked.length + ops.outcomeUnknown.length, 'Blocked or outcome unknown.', tone(ops.blocked.length + ops.outcomeUnknown.length, 'danger')),
       metric('Awaiting decision', ops.approvals.length, 'Held at the Founder gate.', tone(ops.approvals.length, 'warn')),
+      // Counted here because the room's PRESENCE now includes it, and a room
+      // that is not dark must show the reader why. Without this metric the
+      // Command Room would sit quiet over four zeroes.
+      metric('Awaiting review', ops.pendingReviews.length, 'Submitted and waiting for the independent review lane.', tone(ops.pendingReviews.length, 'info')),
     ],
     rows: limited(rows),
     // The empty message has to agree with the metrics above it.
@@ -203,14 +207,36 @@ function operationsSection(state: HqStateDocument): Section {
     // room had no rows and said "HQ is holding nothing" directly beneath a
     // metric reading 1 and a room lit amber. Two true numbers and a false
     // sentence between them (Codex P2 on `7e87392`).
-    emptyMessage:
-      ops.approvals.length > 0
-        ? `Nothing is in flight, queued, blocked or unresolved — but ${ops.approvals.length} task(s) ` +
-          'are held at the Founder gate and cannot start until decided. They are listed in the ' +
-          'Approvals room.'
+    //
+    // Pending reviews are the same case one bucket over, and they were missing
+    // (Codex round 14): with ONLY a pending review recorded, `present:
+    // rows.length` was 0, so this room went DARK and said "HQ is holding
+    // nothing" while Home and Mission — which count the task — said quiet. A
+    // dark room means HQ holds nothing here, and HQ held something.
+    emptyMessage: (() => {
+      const held: string[] = [];
+      if (ops.approvals.length > 0) {
+        held.push(
+          `${ops.approvals.length} task(s) are held at the Founder gate and cannot start until ` +
+            'decided — they are listed in the Approvals room',
+        );
+      }
+      if (ops.pendingReviews.length > 0) {
+        held.push(
+          `${ops.pendingReviews.length} task(s) are submitted and waiting for the independent ` +
+            'review lane, so no worker is executing them',
+        );
+      }
+      return held.length > 0
+        ? `Nothing is in flight, queued, blocked or unresolved — but ${held.join('; and ')}.`
         : 'No task is recorded in flight, queued, blocked or unresolved. The Command Room is empty ' +
-          'because HQ is holding nothing, not because nothing loaded.',
-    liveness: livenessFrom({ attention, active: ops.inFlight.length, present: rows.length }),
+          'because HQ is holding nothing, not because nothing loaded.';
+    })(),
+    liveness: livenessFrom({
+      attention,
+      active: ops.inFlight.length,
+      present: rows.length + ops.approvals.length + ops.pendingReviews.length,
+    }),
   };
 }
 
@@ -493,7 +519,20 @@ function analyticsSection(state: HqStateDocument): Section {
     // above four populated numbers (Codex round 3). Active and attention still
     // come from task state alone: registry rows are not work in progress.
     liveness: livenessFrom({
-      attention: stopped,
+      // Approvals are attention here too.
+      //
+      // `stopped` alone left an approval-only HQ QUIET in this room while Home,
+      // Command, Mission, Approvals and Founder Office all ranked the same
+      // approval as attention — five rooms amber and this one not, over one
+      // task. Worse when running work also existed: Analytics went `active`,
+      // which under the documented attention-over-active ordering reads as
+      // "work is moving and nothing needs you" (Codex round 14).
+      //
+      // Recorded plainly: my own sweep one commit earlier declared this room
+      // sound. It was not. Reading each room in turn is not the same as
+      // comparing them against each other, which is what the strengthened
+      // cross-room test now does.
+      attention: stopped + c.approvals,
       active: c.inFlight,
       present:
         open +

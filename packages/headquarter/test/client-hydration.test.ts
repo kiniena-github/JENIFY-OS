@@ -431,15 +431,95 @@ describe('the Mission Room reads canonical buckets, not raw task statuses', () =
         },
       },
     ];
+    // EXACT equality, not "both lit or both unlit".
+    //
+    // The first version of this compared only `lit()`, and Codex round 14 walked
+    // straight through the gap: with only a pending review recorded, the Command
+    // Room was DARK — "HQ is holding nothing" — while Home and Mission were
+    // `quiet`, because the task is still recorded. Both are "not lit", so the
+    // test passed over a room contradicting two others about whether HQ held
+    // anything at all. A consistency check that collapses the very distinction
+    // the page relies on is not a consistency check.
     for (const { name, mutate } of combinations) {
       const state = stateWith(mutate);
+      const homeView = hydrateRooms(stateWith(mutate), FOUNDER_SESSION).find((v) => v.roomId === 'home')!;
       const missionView = mission(state);
       const commandView = commandRoom(state);
-      // Both are driven by the same bucket arithmetic, so neither can claim
-      // work is running or stopped while the other says otherwise.
-      const lit = (liveness: string) => liveness === 'active' || liveness === 'attention';
-      expect(lit(missionView.liveness), `${name}: mission ${missionView.liveness}, command ${commandView.liveness}`)
-        .toBe(lit(commandView.liveness));
+      expect(
+        [homeView.liveness, missionView.liveness, commandView.liveness],
+        `${name}: home ${homeView.liveness}, mission ${missionView.liveness}, command ${commandView.liveness}`,
+      ).toEqual([homeView.liveness, homeView.liveness, homeView.liveness]);
     }
+  });
+});
+
+describe('Analytics ranks an approval the way every other room does', () => {
+  // Codex round 14, and a direct miss by my own sweep one commit earlier, which
+  // read each room in turn and declared this one sound. Reading rooms
+  // individually is not the same as comparing them against each other.
+  function stateWithApproval(alsoRunning: boolean): HqSnapshot {
+    const console_ = emptyFounderConsole(AT);
+    const base = {
+      taskId: 't-appr',
+      capabilityId: 'repo.read_status',
+      status: 'needs_approval',
+      reviewState: 'none',
+      fence: 1,
+      claimedBy: null,
+      submittedBy: null,
+      createdBy: 'founder',
+      createdAt: AT,
+      updatedAt: AT,
+      blockReason: null,
+      classification: {
+        capabilityId: 'repo.read_status',
+        riskClass: 'read_only',
+        sideEffect: false,
+        idempotent: true,
+        requiresApproval: true,
+        requiresIndependentReview: false,
+        requiresIdempotencyKey: false,
+        route: 'auto',
+        reason: 'needs approval',
+      },
+      project: 'jenify-os',
+      title: 'Approve me',
+      assignedTo: null,
+      sourceProposalId: null,
+    };
+    console_.approvals = [
+      { ...base, actionDigest: 'digest-1', ask: 'Approve the read.', requestedBy: null },
+    ] as unknown as typeof console_.approvals;
+    if (alsoRunning) {
+      console_.inFlight = [
+        { ...base, taskId: 't-run', status: 'running', assignedTo: 'worker-a', claimedBy: 'worker-a' },
+      ] as unknown as typeof console_.inFlight;
+    }
+    return buildHqSnapshot({
+      generatedAt: AT,
+      console: { data: console_, provenance: PROVENANCE },
+      connections: { data: [], provenance: PROVENANCE },
+      workforce: { data: [], provenance: PROVENANCE },
+      capabilities: { data: [], provenance: PROVENANCE },
+      activity: { data: [], provenance: PROVENANCE },
+    });
+  }
+
+  const roomLiveness = (state: HqSnapshot, roomId: string) =>
+    hydrateRooms(state, FOUNDER_SESSION).find((view) => view.roomId === roomId)!.liveness;
+
+  it('is attention for an approval-only HQ, like the five rooms beside it', () => {
+    const state = stateWithApproval(false);
+    for (const roomId of ['home', 'command-room', 'mission-room', 'approvals', 'founder-office', 'analytics']) {
+      expect(roomLiveness(state, roomId), roomId).toBe('attention');
+    }
+  });
+
+  it('does not report merely active when an approval is waiting behind running work', () => {
+    // The worse half: `active` under the documented attention-over-active
+    // ordering reads as "work is moving and nothing needs you".
+    const state = stateWithApproval(true);
+    expect(roomLiveness(state, 'analytics')).toBe('attention');
+    expect(roomLiveness(state, 'analytics')).not.toBe('active');
   });
 });
