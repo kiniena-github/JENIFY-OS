@@ -691,6 +691,85 @@ try {
     );
   }
 
+  /* ---------- the motion toggle, observed rather than asserted ---------- */
+  //
+  // The motion preference is an INPUT to the per-room pulse flags and to
+  // anyMotion, not a rendering detail, and both toggle handlers used to change
+  // the policy and call wake() — which redraws with the OLD flags. Reduced ->
+  // full left lit rooms frozen until the next poll; full -> reduced left
+  // anyMotion true and the loop scheduling frames forever against a frozen
+  // shader clock, which contradicted the shell's own documented promise that an
+  // idle reduced-motion tab costs no GPU (Codex round 10).
+  //
+  // The regression test for that is structural, because CI has no GPU. This is
+  // the part CI cannot do: toggle the real button in a real browser and COUNT
+  // FRAMES. A structural test proves the wiring exists; only this proves the
+  // loop actually stops.
+  servedState = STATE;
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForTimeout(1500);
+  const framesOver = async (ms) => {
+    const before = await page.evaluate(() => {
+      if (typeof window.__hqFrames !== 'number') {
+        const real = window.requestAnimationFrame.bind(window);
+        window.__hqFrames = 0;
+        window.requestAnimationFrame = (callback) => {
+          window.__hqFrames += 1;
+          return real(callback);
+        };
+      }
+      return window.__hqFrames;
+    });
+    await page.waitForTimeout(ms);
+    return (await page.evaluate(() => window.__hqFrames)) - before;
+  };
+  const clickMotion = async () => {
+    await page.evaluate(() => document.querySelector('[data-hq-motion]')?.click());
+    // Long enough for the loop to reach its idle cutoff (idleFrames > 3) if it
+    // is going to stop at all.
+    await page.waitForTimeout(1200);
+  };
+
+  const motionLabel = () =>
+    page.evaluate(() => document.querySelector('[data-hq-motion]')?.textContent ?? '');
+
+  report.motion = { present: (await motionLabel()) !== '' };
+  if (report.motion.present) {
+    // Lit rooms and full motion: the loop must be running.
+    report.motion.startLabel = await motionLabel();
+    report.motion.framesFullMotion = await framesOver(1000);
+    await clickMotion();
+    report.motion.reducedLabel = await motionLabel();
+    report.motion.framesReducedMotion = await framesOver(1000);
+    await clickMotion();
+    report.motion.restoredLabel = await motionLabel();
+    report.motion.framesRestored = await framesOver(1000);
+
+    if (!(report.motion.framesFullMotion > 10)) {
+      failures.push(
+        `the shell drew ${report.motion.framesFullMotion} frames with lit rooms under full motion — ` +
+          'the pulse loop is not running at all, so this measurement proves nothing about the toggle',
+      );
+    }
+    if (!(report.motion.framesReducedMotion <= 5)) {
+      failures.push(
+        `the shell kept drawing (${report.motion.framesReducedMotion} frames) after motion was reduced — ` +
+          'anyMotion was not recomputed, so an idle tab burns GPU rendering a frozen image',
+      );
+    }
+    if (!(report.motion.framesRestored > 10)) {
+      failures.push(
+        `the shell drew ${report.motion.framesRestored} frames after motion was restored — turning motion ` +
+          'back on left the building frozen until the next poll',
+      );
+    }
+    if (report.motion.reducedLabel === report.motion.startLabel) {
+      failures.push(`the motion control did not change state: still "${report.motion.reducedLabel}"`);
+    }
+  } else {
+    report.motion.skipped = 'no motion control was drawn';
+  }
+
   /* ---------- context loss after startup ---------- */
   //
   // Detection covers a context that is already lost when created; a GPU reset
