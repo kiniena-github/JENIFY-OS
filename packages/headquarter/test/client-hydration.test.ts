@@ -663,3 +663,71 @@ describe('no room contradicts its own displayed numbers', () => {
     }
   });
 });
+
+describe('connection attention follows the canonical tone mapping', () => {
+  // Codex round 16. The filter named `error` and `expired` only, so an
+  // integration that is `configured` or `setup_required` left both
+  // connection-backed rooms quiet and reported "Needing attention: 0".
+  //
+  // `CONNECTION_STATE_TONE` already classified both as warnings, and its
+  // docstring exists because this exact defect was caught once before on
+  // another surface — a half-finished integration flagged in one place and
+  // reading Quiet on the floor. I restated a narrower list beside the mapping
+  // created to prevent it.
+  function stateWithConnection(connectionState: string): HqSnapshot {
+    return buildHqSnapshot({
+      generatedAt: AT,
+      console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
+      connections: {
+        data: [
+          {
+            id: 'github',
+            displayName: 'GitHub',
+            state: connectionState,
+            reason: 'fixture',
+            authMechanism: 'token',
+            missingFacts: [],
+          },
+        ] as never,
+        provenance: PROVENANCE,
+      },
+      workforce: { data: [], provenance: PROVENANCE },
+      capabilities: { data: [], provenance: PROVENANCE },
+      activity: { data: [], provenance: PROVENANCE },
+    });
+  }
+
+  const view = (state: HqSnapshot, roomId: string) =>
+    hydrateRooms(state, FOUNDER_SESSION).find((room) => room.roomId === roomId)!;
+
+  it('warns for every state the canonical mapping calls a warning', () => {
+    for (const connectionState of ['error', 'expired', 'configured', 'setup_required']) {
+      const state = stateWithConnection(connectionState);
+      for (const roomId of ['world-network', 'connections']) {
+        const room = view(state, roomId);
+        expect(room.liveness, `${connectionState} in ${roomId}`).toBe('attention');
+        const needing = room.metrics.find((m) => m.label === 'Needing attention')!;
+        expect(needing.value, `${connectionState} in ${roomId}`).toBe(1);
+      }
+    }
+  });
+
+  it('does not warn for states the mapping calls settled', () => {
+    // The other direction, so this cannot become "always attention".
+    for (const connectionState of ['connected', 'local_only', 'not_connected']) {
+      const state = stateWithConnection(connectionState);
+      const room = view(state, 'world-network');
+      expect(room.liveness, connectionState).not.toBe('attention');
+      expect(room.metrics.find((m) => m.label === 'Needing attention')!.value, connectionState).toBe(0);
+    }
+  });
+
+  it('gives the row chip the same tone as the count, for the same integration', () => {
+    // A row and a count disagreeing about one integration is the cross-room
+    // contradiction of round 14, one level in.
+    const state = stateWithConnection('setup_required');
+    const room = view(state, 'world-network');
+    const chip = room.rows[0]!.chips.find((c) => c.label === 'setup_required')!;
+    expect(chip.tone).toBe('warn');
+  });
+});

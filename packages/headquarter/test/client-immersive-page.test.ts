@@ -34,6 +34,7 @@ import type { AuthenticatedAccount, ControlRequest } from '../src/live/auth.js';
 import { registerDirectOrderCapability, DIRECT_ORDER_CAPABILITY } from '../src/live/orders.js';
 import { setupFixture, type Fixture } from './application.fixture.js';
 import { HQ_ROOMS } from '../src/client/rooms.js';
+import { IMMERSIVE_HONESTY_NOTE } from '../src/client/page.js';
 import { SOURCE_MODE_LABELS } from '../src/live/provenance.js';
 import { CLIENT_FETCH_TARGETS, CLIENT_READ_TIMEOUT_MS, clientRuntimeScript } from '../src/client/runtime.js';
 import { immersiveShellScript } from '../src/client/webgl.js';
@@ -262,6 +263,36 @@ describe('the emitted page carries the whole building before any script runs', (
     expect(html).not.toContain('outerHTML');
     expect(html).not.toContain('insertAdjacentHTML');
     expect(html).not.toContain('document.write');
+  });
+});
+
+describe('the legend accounts for every way a room can be lit', () => {
+  it('does not claim a pulse always means queue work', () => {
+    // Codex round 16. The legend said a pulsing room "holds work the canonical
+    // queue records as running or stopped" — true of the task rooms and FALSE
+    // of two others. The Security Center reaches attention for an engaged kill
+    // switch or an untrusted origin, and the connection-backed rooms for an
+    // integration in error, expired, configured or setup_required, all with an
+    // entirely empty queue. The shell pulses every attention room, so the page
+    // was telling a Founder that a deployment-posture pulse proved queue work.
+    //
+    // A page whose whole claim is that it never asserts more than canonical
+    // state supports cannot afford a legend asserting more than the lighting
+    // supports.
+    expect(IMMERSIVE_HONESTY_NOTE).not.toContain('a room that pulses holds work the canonical queue');
+    // Every non-task source of attention is named.
+    expect(IMMERSIVE_HONESTY_NOTE).toContain('kill switch');
+    expect(IMMERSIVE_HONESTY_NOTE).toContain('request origin');
+    expect(IMMERSIVE_HONESTY_NOTE).toContain('integration');
+    // And the task source is still named, so broadening it did not blur it.
+    expect(IMMERSIVE_HONESTY_NOTE).toContain('canonical queue records as running or stopped');
+    // The no-fake-state promise survives the rewrite.
+    expect(IMMERSIVE_HONESTY_NOTE).toContain('Never a timer');
+  });
+
+  it('is the note the page actually renders', () => {
+    // Asserting the constant alone would pass if the page stopped using it.
+    expect(immersiveHtml()).toContain('Never a timer, never');
   });
 });
 

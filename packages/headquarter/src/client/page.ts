@@ -37,7 +37,25 @@ const BINDING_CHIP: Record<RoomView['status'], { label: string; tone: Tone }> = 
 
 export const IMMERSIVE_HONESTY_NOTE =
   'Every room here is lit by canonical state and nothing else. A dark room is a room HQ is holding ' +
-  'nothing in; a room that pulses holds work the canonical queue records as running or stopped. ' +
+  'nothing in. ' +
+  // What a pulse actually means, room by room.
+  //
+  // This used to say a pulsing room "holds work the canonical queue records as
+  // running or stopped" — true of the task rooms and FALSE of two others. The
+  // Security Center goes to attention for an engaged kill switch or an untrusted
+  // request origin, and the World Network and Settings rooms for an integration
+  // in error, expired, configured or setup-required — all with an empty queue.
+  // The shell pulses every attention room, so the legend was telling a Founder
+  // that a deployment-posture pulse proved queue work (Codex round 16).
+  //
+  // A page whose whole claim is that it never asserts more than canonical state
+  // supports cannot afford a legend that asserts more than the lighting
+  // supports.
+  'A room glows or pulses for what that room is bound to: in the task rooms that means work the ' +
+  'canonical queue records as running or stopped; in the Security Center it means an engaged kill ' +
+  'switch or an untrusted request origin; in the World Network and Settings rooms it means an ' +
+  'integration HQ recorded as failing, expired or only half configured. Never a timer, never ' +
+  'activity invented to fill the room. ' +
   'The room you are currently in is outlined in a neutral grey — that edge is navigation, not state, ' +
   'and it never changes how brightly a room is lit. ' +
   'Rooms whose subject HQ does not record say so in place of a number, and no control is drawn ' +

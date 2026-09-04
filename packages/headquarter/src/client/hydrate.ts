@@ -29,6 +29,7 @@
  */
 
 import { HQ_ROOMS, type HqRoom, type RoomSection } from './rooms.js';
+import { CONNECTION_STATE_TONE } from '../live/connections.js';
 import type {
   ClientSession,
   HqStateDocument,
@@ -421,9 +422,22 @@ function connectionsSection(state: HqStateDocument): Section {
   const lit = connections.filter(
     (connection) => connection.state === 'connected' || connection.state === 'local_only',
   ).length;
-  const needsAttention = connections.filter(
-    (connection) => connection.state === 'error' || connection.state === 'expired',
-  ).length;
+  // Attention comes from the CANONICAL tone mapping, not a list kept here.
+  //
+  // This filter named `error` and `expired` only, so an integration that is
+  // `configured` or `setup_required` — ordinary outcomes from
+  // `assessConnections` — left both connection-backed rooms quiet and reported
+  // "Needing attention: 0". `CONNECTION_STATE_TONE` already classifies both as
+  // warnings, and its docstring exists BECAUSE this exact defect was caught
+  // once before on another surface: "a half-finished integration raised a flag
+  // in one place and left the floor reading Quiet". I restated a narrower list
+  // beside the mapping that was created to stop precisely that (Codex round
+  // 16).
+  const warned = (state: string): boolean => {
+    const t = (CONNECTION_STATE_TONE as Record<string, string>)[state];
+    return t === 'warn' || t === 'danger';
+  };
+  const needsAttention = connections.filter((connection) => warned(connection.state)).length;
   return {
     metrics: [
       metric('Known integrations', connections.length, 'Every integration HQ has a descriptor for.', 'neutral'),
@@ -436,7 +450,9 @@ function connectionsSection(state: HqStateDocument): Section {
         primary: connection.displayName,
         secondary: connection.reason,
         chips: [
-          { label: connection.state, tone: connection.state === 'connected' ? 'accent' : ('neutral' as RoomTone) },
+          // Same mapping for the chip, so the row and the count cannot
+          // disagree about the same integration.
+          { label: connection.state, tone: ((CONNECTION_STATE_TONE as Record<string, RoomTone>)[connection.state] ?? 'neutral') },
           { label: connection.authMechanism, tone: 'violet' as RoomTone },
           ...(connection.missingFacts.length > 0
             ? [{ label: `missing: ${connection.missingFacts.join(', ')}`, tone: 'warn' as RoomTone }]

@@ -1313,3 +1313,41 @@ Only the identity row is forgiven.
 Evidence at this commit: headquarter 1926, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
 web; web bundle unchanged at 215.66 kB / 69.22 kB gzip.
+
+### Stage 4, review round 16 — Codex
+
+Two findings, both in the two rooms I had named in the round-16 request as the
+place nothing on this branch could cross-check. Asking was right; the rooms were
+wrong.
+
+**The legend told the Founder something false.** It said a pulsing room "holds
+work the canonical queue records as running or stopped" — true of the task rooms
+and false of two others. The Security Center reaches `attention` for an engaged
+kill switch or an untrusted request origin; the World Network and Settings rooms
+for a failing integration. All three with an entirely empty queue, and the shell
+pulses every attention room. So a deployment-posture pulse was being explained as
+proof of queue work.
+
+A page whose entire claim is that it never asserts more than canonical state
+supports cannot afford a legend that asserts more than the lighting supports.
+The note now says what a pulse means room by room, and a test holds it to that —
+including that the page actually renders the note, since asserting the constant
+alone would pass if the page stopped using it.
+
+**Connection attention was a narrower list than the canonical mapping.** The
+filter named `error` and `expired` only, so `configured` or `setup_required` —
+ordinary outcomes of `assessConnections` — left both connection-backed rooms
+quiet and reported "Needing attention: 0". `CONNECTION_STATE_TONE` already
+classifies both as warnings.
+
+The part worth recording: **that mapping's docstring exists because this exact
+defect was caught once before**, on another surface, and says so — "a
+half-finished integration raised a flag in one place and left the floor reading
+Quiet". I wrote a narrower list beside the constant created to prevent it. The
+count and the row chip now both derive from the mapping, so a row and a count
+cannot disagree about one integration, and a test asserts both directions so this
+cannot become "always attention".
+
+Evidence at this commit: headquarter 1931, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.
