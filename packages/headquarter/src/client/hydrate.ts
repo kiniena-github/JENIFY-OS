@@ -29,7 +29,7 @@
  */
 
 import { HQ_ROOMS, type HqRoom, type RoomSection } from './rooms.js';
-import { CONNECTION_STATE_TONE } from '../live/connections.js';
+import { CONNECTION_STATE_TONE, LIT_CONNECTION_STATES } from '../live/connections.js';
 import type {
   ClientSession,
   HqStateDocument,
@@ -419,8 +419,18 @@ function capabilitiesSection(state: HqStateDocument): Section {
 
 function connectionsSection(state: HqStateDocument): Section {
   const connections = state.connections.data;
-  const lit = connections.filter(
-    (connection) => connection.state === 'connected' || connection.state === 'local_only',
+  // Reachability from the canonical list, not a copy of it.
+  //
+  // This was `connected || local_only` written out here, duplicating
+  // LIT_CONNECTION_STATES — which lived in the spatial floor's presentation
+  // layer, so the two agreed by luck rather than by construction. I flagged it
+  // on the round-16 thread and offered to move it; leaving two lists agreeing
+  // by luck is the same restatement shape that caused the finding directly
+  // above, so it is moved rather than left as an offer. The constant now sits
+  // beside CONNECTION_STATE_TONE in `live/connections.ts`, where the docstring
+  // already referred to it, and both views read the one list.
+  const lit = connections.filter((connection) =>
+    (LIT_CONNECTION_STATES as readonly string[]).includes(connection.state),
   ).length;
   // Attention comes from the CANONICAL tone mapping, not a list kept here.
   //

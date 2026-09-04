@@ -26,7 +26,7 @@ import type { ActivityStatus } from '../../contracts/events.js';
 import type { WorkerDescriptor } from '../../contracts/workers.js';
 import type { ArchiveRecord } from '../../archive/schema.js';
 import type { ConnectionStatus } from '../../live/connections.js';
-import { CONNECTION_STATE_LABELS, CONNECTION_STATE_TONE } from '../../live/connections.js';
+import { CONNECTION_STATE_LABELS, CONNECTION_STATE_TONE, LIT_CONNECTION_STATES } from '../../live/connections.js';
 import type { TaskState } from '../model.js';
 import type { FounderDashboard, ProjectBoardCard, WorkerStatus } from '../views.js';
 import type { Tone } from '../components.js';
@@ -380,7 +380,8 @@ export function occupantZone(occupant: Occupant, specialists: readonly WorkerDes
  * "the setup looks right", which is not the same claim as "this works", and
  * a lit pillar would make the weaker claim look like the stronger one.
  */
-export const LIT_CONNECTION_STATES = ['connected', 'local_only'] as const;
+// Re-exported so the floor's existing importers are unaffected by the move.
+export { LIT_CONNECTION_STATES };
 
 function uplinkFixtures(connections: readonly ConnectionStatus[]): Fixture[] {
   return connections.map((connection) => {

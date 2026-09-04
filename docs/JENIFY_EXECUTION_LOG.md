@@ -1351,3 +1351,34 @@ cannot become "always attention".
 Evidence at this commit: headquarter 1931, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
 web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.
+
+### Stage 4, after round 16 — the duplication I had only offered to fix
+
+On the round-16 thread I noted that "Proven reachable" still wrote out
+`connected || local_only`, duplicating `LIT_CONNECTION_STATES` in the spatial
+floor's presentation layer, and offered to move it *if the reviewer agreed*.
+
+That was the wrong shape of answer. Two lists agreeing by luck is the same
+restatement pattern as the finding directly above it in the same round, and this
+branch has now been taught "derive, do not restate" seven times. Offering to fix
+it is not fixing it.
+
+`LIT_CONNECTION_STATES` now lives in `live/connections.ts` beside
+`CONNECTION_STATE_TONE` — where that mapping's docstring already referred to it —
+and both the spatial floor and the client read the one list. The floor re-exports
+it so its existing importers are untouched.
+
+**The control worth recording, because my first one proved nothing.** Changing
+the constant and re-running made the client test pass: expectation and behaviour
+both derive from the constant, so they moved together. That is a tautology, not
+evidence. The control that means something is re-hardcoding the client while the
+constant differs — then it fails, by name:
+
+    local_only: expected 1 to be +0
+
+The spatial floor's own test fails under the constant change alone, which is what
+shows the floor follows it too.
+
+Evidence at this commit: headquarter 1932, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.

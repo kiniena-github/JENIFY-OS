@@ -26,6 +26,7 @@ import { hydrateRoom, hydrateRooms, livenessFrom, ROOM_ROW_LIMIT } from '../src/
 import { buildHqSnapshot, emptyFounderConsole, type HqSnapshot } from '../src/live/snapshot.js';
 import type { ClientSession } from '../src/client/contracts.js';
 import type { Provenance } from '../src/live/provenance.js';
+import { LIT_CONNECTION_STATES } from '../src/live/connections.js';
 import type { ConsoleTask } from '../src/application/console.js';
 
 const AT = '2026-09-04T12:00:00.000Z';
@@ -729,5 +730,42 @@ describe('connection attention follows the canonical tone mapping', () => {
     const room = view(state, 'world-network');
     const chip = room.rows[0]!.chips.find((c) => c.label === 'setup_required')!;
     expect(chip.tone).toBe('warn');
+  });
+});
+
+describe('reachability comes from one list, not two that agree', () => {
+  it('reports proven-reachable exactly for the canonical lit states', () => {
+    // `connected || local_only` used to be written out in hydrate.ts while
+    // LIT_CONNECTION_STATES said the same thing in the spatial floor's
+    // presentation layer — two lists agreeing by luck, which is the shape that
+    // produced the tone-mapping finding in the same round. The constant now
+    // lives beside CONNECTION_STATE_TONE and both views read it.
+    for (const connectionState of ['connected', 'local_only', 'configured', 'dispatchable', 'error']) {
+      const state = buildHqSnapshot({
+        generatedAt: AT,
+        console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
+        connections: {
+          data: [
+            {
+              id: 'c',
+              displayName: 'C',
+              state: connectionState,
+              reason: 'fixture',
+              authMechanism: 'token',
+              missingFacts: [],
+            },
+          ] as never,
+          provenance: PROVENANCE,
+        },
+        workforce: { data: [], provenance: PROVENANCE },
+        capabilities: { data: [], provenance: PROVENANCE },
+        activity: { data: [], provenance: PROVENANCE },
+      });
+      const room = hydrateRooms(state, FOUNDER_SESSION).find((r) => r.roomId === 'world-network')!;
+      const proven = room.metrics.find((m) => m.label === 'Proven reachable')!;
+      expect(proven.value, connectionState).toBe(
+        (LIT_CONNECTION_STATES as readonly string[]).includes(connectionState) ? 1 : 0,
+      );
+    }
   });
 });
