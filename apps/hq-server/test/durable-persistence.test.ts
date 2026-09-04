@@ -22,6 +22,7 @@ function hostedEnv(durableRoot: string): Record<string, string> {
     FACTORYOS_HQ_RUNTIME: 'hosted',
     FACTORYOS_HQ_PERSISTENCE: 'durable-volume',
     FACTORYOS_HQ_DURABLE_ROOT: durableRoot,
+    FACTORYOS_HQ_DURABLE_VOLUME_PROVENANCE: 'operator:test-durable-volume',
   };
 }
 
