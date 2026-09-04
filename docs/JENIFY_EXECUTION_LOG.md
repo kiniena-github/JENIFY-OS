@@ -1578,3 +1578,43 @@ should count for less than the reviewer's.
 
 Founder-gated and untouched: visual acceptance against the 17 reference images,
 and the merge decision.
+
+### Codex round 20 — the plan was calling Stage 4 done (`855dcc8`)
+
+The quota cleared and the review ran on `26e92d9`. One finding, against the
+commit immediately above this one.
+
+`PHASE_2_FIRST_CLASS_PRODUCT_PLAN.md` had Stage 4's heading as **DONE** while
+its own Progress block, six lines into the same file, said *"Stages 4–5 — not
+started"*. So the entry I had just written recording Stage 4 as deliberately
+incomplete was contradicted by the canonical plan — the document a Founder
+consults to decide what is left to do — and contradicted in the direction that
+presents an unmet gate as satisfied.
+
+Neither line was right, and the honest status is neither. Stage 4 is implemented
+and technically verified; it is **not accepted**, because Founder visual
+acceptance against the `HQ-UI-3D` reference pack has not happened and cannot
+happen in an automated session — those images are local to the Founder's
+workstation and were never read by the implementation. Both places say that now,
+and the heading states plainly that Stage 4 becomes DONE when a Founder records
+acceptance, not when its tests pass.
+
+**Guarded, because the class is worse than the instance.** The plan is a
+markdown file: nothing compiled it, no test read it, and it had been carrying a
+false completion claim with no check behind it. Of everything on this branch it
+has the longest shelf life and the widest audience.
+`test/phase-2-plan-status.test.ts` now requires the two status lines to agree
+about DONE-ness per stage, asserts it found both lines for all six stages so it
+cannot silently match nothing, and asserts its own negation handling directly —
+a guard that read "becomes DONE when a Founder records acceptance" as a DONE
+claim would push the honest wording out of the document to stay green.
+
+**The pattern, one more time.** Every earlier round found a page asserting more
+than canonical state supported. This one found the *plan* doing it, about the
+work itself. The reviewer had to read a documentation file nobody was checking
+to see it, which is the same lesson as rounds 15, 17 and 19: the enforcement was
+narrower than the invariant, and the unenforced part is where the false claim
+lived.
+
+Evidence at this commit: headquarter 1939 (89 files), hq-host 206, hq-server 20,
+server 569 (3 pre-existing skips); typechecks clean; `npm run build`.
