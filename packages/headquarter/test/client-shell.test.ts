@@ -216,6 +216,20 @@ describe('the shell can only be lit by the hydration runtime', () => {
     expect(script).toContain('if (idleFrames > 3) { running = false; return; }');
   });
 
+  it('indexes no uniform array by a value the vertex data supplies', () => {
+    // GLSL ES 1.00 only REQUIRES array indexing by a constant-index-expression
+    // (Appendix A). A room slot read out of a vertex attribute is not one, so a
+    // strict WebGL 1 implementation may legally refuse to compile it — and the
+    // failure mode is the whole building silently missing on exactly the
+    // devices least likely to be tested. Per-room lighting therefore travels as
+    // a vertex attribute rewritten on state change, and this test is what stops
+    // the tempting uniform-array shape coming back.
+    expect(script).not.toMatch(/uniform\s+\w+\s+\w+\s*\[/);
+    expect(script).toContain('attribute vec4 aState;');
+    expect(script).toContain('attribute vec2 aPulse;');
+    expect(script).toContain('gl.bufferSubData(gl.ARRAY_BUFFER, 0, stateData)');
+  });
+
   it('caps the device pixel ratio so a high-DPI screen cannot melt the GPU', () => {
     expect(script).toContain('Math.min(window.devicePixelRatio || 1, 2)');
   });

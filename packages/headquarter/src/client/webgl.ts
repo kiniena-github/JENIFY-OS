@@ -277,16 +277,37 @@ export function buildSceneGeometry(): SceneGeometry {
   return { vertices: out, triangles: out.length / 11 / 3 };
 }
 
-/** The GLSL pair. GLSL ES 1.00, so one source runs on both WebGL 1 and 2. */
+/**
+ * The GLSL pair. GLSL ES 1.00, so one source runs on both WebGL 1 and 2.
+ *
+ * ## Why per-room state is an ATTRIBUTE and not a uniform array
+ *
+ * The obvious shape is `uniform vec4 uRoom[18]` indexed by a per-vertex room
+ * slot. It is also not portable: GLSL ES 1.00 only *requires* array indexing by
+ * a constant-index-expression (Appendix A), and a slot read out of a vertex
+ * attribute is not one. Desktop drivers overwhelmingly accept it; a strict
+ * WebGL 1 implementation is entitled to refuse to compile, and the failure mode
+ * would be the whole building silently missing on exactly the devices least
+ * likely to be tested.
+ *
+ * So the room's liveness travels per-vertex, in a second buffer the shell
+ * rewrites when — and only when — the state document changes. That is a
+ * `bufferSubData` of a few thousand floats on a poll interval measured in tens
+ * of seconds, which is nothing, and it removes the portability question
+ * entirely rather than betting on driver leniency.
+ *
+ * `aMeta.x` still carries the slot, but only as a number in arithmetic (a
+ * per-room phase offset for the pulse), never as an index.
+ */
 const VERTEX_SHADER = `
 precision highp float;
 attribute vec3 aPos;
 attribute vec3 aNormal;
 attribute vec3 aColor;
 attribute vec2 aMeta;
+attribute vec4 aState;
+attribute vec2 aPulse;
 uniform mat4 uViewProj;
-uniform vec4 uRoom[18];
-uniform vec3 uRoomTint[18];
 uniform float uTime;
 varying vec3 vNormal;
 varying vec3 vColor;
@@ -295,11 +316,9 @@ varying vec3 vTint;
 varying float vEmissive;
 varying float vGlow;
 void main() {
-  int slot = int(aMeta.x + 0.5);
-  vec4 room = uRoom[slot];
-  float pulse = room.y > 0.0 ? (0.72 + 0.28 * sin(uTime * 1.7 + float(slot))) : 1.0;
-  vGlow = room.x * pulse + room.z * 0.45;
-  vTint = uRoomTint[slot];
+  float pulse = aPulse.x > 0.0 ? (0.72 + 0.28 * sin(uTime * 1.7 + aMeta.x)) : 1.0;
+  vGlow = aState.a * pulse + aPulse.y * 0.45;
+  vTint = aState.rgb;
   vNormal = aNormal;
   vColor = aColor;
   vWorld = aPos;
@@ -478,22 +497,47 @@ export function immersiveShellScript(): string {
   }
   gl.useProgram(program);
 
-  var buffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(VERTS), gl.STATIC_DRAW);
-  var stride = 11 * 4;
-  function attrib(name, size, offset) {
+  function attrib(buffer, name, size, stride, offset) {
     var loc = gl.getAttribLocation(program, name);
     if (loc < 0) return;
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, size, gl.FLOAT, false, stride, offset);
   }
-  attrib('aPos', 3, 0); attrib('aNormal', 3, 12); attrib('aColor', 3, 24); attrib('aMeta', 2, 36);
+
+  // The building itself: uploaded once, never rewritten.
   var vertexCount = VERTS.length / 11;
+  var geometryBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, geometryBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(VERTS), gl.STATIC_DRAW);
+  attrib(geometryBuffer, 'aPos', 3, 44, 0);
+  attrib(geometryBuffer, 'aNormal', 3, 44, 12);
+  attrib(geometryBuffer, 'aColor', 3, 44, 24);
+  attrib(geometryBuffer, 'aMeta', 2, 44, 36);
+
+  // The lighting: rewritten only when the state document changes. Six floats a
+  // vertex — tint.rgb, intensity, pulsing, selected. See the vertex shader's
+  // comment for why this is an attribute rather than an indexed uniform array.
+  var STATE_FLOATS = 6;
+  var stateData = new Float32Array(vertexCount * STATE_FLOATS);
+  var DARK = ${jsonForScript(LIVENESS_COLOR.dark)};
+  // Start every room dark-but-visible, so the architecture reads before the
+  // first hydration returns. NOT lit: an unlit building and a building whose
+  // state has not loaded look the same on purpose, because at that moment
+  // nothing is known either way.
+  for (var s = 0; s < vertexCount; s += 1) {
+    stateData[s * STATE_FLOATS] = DARK[0];
+    stateData[s * STATE_FLOATS + 1] = DARK[1];
+    stateData[s * STATE_FLOATS + 2] = DARK[2];
+    stateData[s * STATE_FLOATS + 3] = 0.06;
+  }
+  var stateBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, stateBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, stateData, gl.DYNAMIC_DRAW);
+  attrib(stateBuffer, 'aState', 4, STATE_FLOATS * 4, 0);
+  attrib(stateBuffer, 'aPulse', 2, STATE_FLOATS * 4, 16);
 
   var uViewProj = gl.getUniformLocation(program, 'uViewProj');
-  var uRoom = gl.getUniformLocation(program, 'uRoom');
-  var uRoomTint = gl.getUniformLocation(program, 'uRoomTint');
   var uTime = gl.getUniformLocation(program, 'uTime');
   var uEye = gl.getUniformLocation(program, 'uEye');
   var uKey = gl.getUniformLocation(program, 'uKey');
@@ -523,13 +567,22 @@ export function immersiveShellScript(): string {
   }
 
   /* ---------- per-room state, supplied by the hydration runtime ---------- */
-  var roomState = new Float32Array(18 * 4);
-  var roomTint = new Float32Array(18 * 3);
+  // Per-slot lighting, resolved once per apply and then written out per vertex.
+  var slotState = new Float32Array(18 * STATE_FLOATS);
   var anyMotion = false;
+  function resetSlots() {
+    for (var i = 0; i < 18; i += 1) {
+      slotState[i * STATE_FLOATS] = DARK[0];
+      slotState[i * STATE_FLOATS + 1] = DARK[1];
+      slotState[i * STATE_FLOATS + 2] = DARK[2];
+      slotState[i * STATE_FLOATS + 3] = 0.06;
+      slotState[i * STATE_FLOATS + 4] = 0;
+      slotState[i * STATE_FLOATS + 5] = 0;
+    }
+  }
   window.__hqShellApply = function (views, activeRoomId) {
     anyMotion = false;
-    for (var i = 0; i < roomState.length; i += 1) roomState[i] = 0;
-    for (var j = 0; j < roomTint.length; j += 1) roomTint[j] = 0;
+    resetSlots();
     for (var v = 0; v < views.length; v += 1) {
       var view = views[v];
       var slot = view.ordinal;
@@ -545,13 +598,23 @@ export function immersiveShellScript(): string {
       // under reduced motion.
       var pulsing = (!motion.reduced && (view.liveness === 'active' || view.liveness === 'attention')) ? 1 : 0;
       if (pulsing) anyMotion = true;
-      roomState[slot * 4] = intensity;
-      roomState[slot * 4 + 1] = pulsing;
-      roomState[slot * 4 + 2] = view.roomId === activeRoomId ? 1 : 0;
-      roomTint[slot * 3] = color[0];
-      roomTint[slot * 3 + 1] = color[1];
-      roomTint[slot * 3 + 2] = color[2];
+      slotState[slot * STATE_FLOATS] = color[0];
+      slotState[slot * STATE_FLOATS + 1] = color[1];
+      slotState[slot * STATE_FLOATS + 2] = color[2];
+      slotState[slot * STATE_FLOATS + 3] = intensity;
+      slotState[slot * STATE_FLOATS + 4] = pulsing;
+      slotState[slot * STATE_FLOATS + 5] = view.roomId === activeRoomId ? 1 : 0;
     }
+    // Fan the per-slot answer out to the vertices that belong to each slot. The
+    // slot lives in the static geometry (aMeta.x), so no extra table is needed
+    // and the two can never disagree about which vertex is in which room.
+    for (var vert = 0; vert < vertexCount; vert += 1) {
+      var from = (VERTS[vert * 11 + 9] | 0) * STATE_FLOATS;
+      var to = vert * STATE_FLOATS;
+      for (var f = 0; f < STATE_FLOATS; f += 1) stateData[to + f] = slotState[from + f];
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, stateBuffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, stateData);
     wake();
   };
 
@@ -623,8 +686,6 @@ export function immersiveShellScript(): string {
 
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.uniformMatrix4fv(uViewProj, false, viewProj);
-    gl.uniform4fv(uRoom, roomState);
-    gl.uniform3fv(uRoomTint, roomTint);
     gl.uniform1f(uTime, motion.reduced ? 0 : t);
     gl.uniform3f(uEye, eye[0], eye[1], eye[2]);
     gl.uniform3f(uKey, 0.35, 0.86, 0.38);
