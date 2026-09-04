@@ -17,6 +17,7 @@ import {
   buildSceneGeometry,
   immersiveShellScript,
 } from '../src/client/webgl.js';
+import { clientRuntimeScript } from '../src/client/runtime.js';
 import { HQ_ROOMS, ROOM_HALF_SPAN, roomAnchor } from '../src/client/rooms.js';
 
 const detectWebgl = new Function(`${WEBGL_SUPPORT_JS}; return detectWebgl;`)() as (
@@ -133,8 +134,9 @@ describe('the building is generated from code, with nothing to load', () => {
       if (room.placement.ring === 0) continue;
       expect(slots.has(room.ordinal), room.id).toBe(true);
     }
-    // The uniform array is sized 18 (slot 0 plus rooms 1..17); a slot outside
-    // that range would read past the end of it in the shader.
+    // Slot 0 is the structure and 1..17 are the rooms. The shell's per-slot
+    // state array is sized to that, so a slot outside the range would read past
+    // the end of it when the lighting buffer is filled.
     for (const slot of slots) {
       expect(slot).toBeGreaterThanOrEqual(0);
       expect(slot).toBeLessThanOrEqual(17);
@@ -264,6 +266,27 @@ describe('the shell can only be lit by the hydration runtime', () => {
       expect(decimals, String(value)).toBeLessThanOrEqual(3);
     }
     expect(script).not.toContain('-0,');
+  });
+
+  it('emits JavaScript that actually parses', () => {
+    // Guard against a whole class of defect this package is unusually exposed
+    // to: browser source lives inside TypeScript template literals, so a
+    // stray backtick in a CODE COMMENT silently terminates the literal. `tsc`
+    // catches it as a TypeScript syntax error, but only if someone runs `tsc`
+    // between writing the comment and shipping — and the failure it produces
+    // points at a line that looks fine. Parsing every emitted script here makes
+    // the check part of the suite instead of part of anyone's discipline.
+    for (const [name, source] of [
+      ['shell', immersiveShellScript()],
+      ['runtime', clientRuntimeScript()],
+    ] as const) {
+      const bodies = [...source.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]!);
+      expect(bodies.length, name).toBeGreaterThan(0);
+      for (const body of bodies) {
+        // `new Function` parses without executing. A syntax error throws here.
+        expect(() => new Function(body), name).not.toThrow();
+      }
+    }
   });
 
   it('loads no external resource of any kind', () => {

@@ -466,6 +466,32 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     page.close();
   });
 
+  it('clears everything on a 200 whose body it cannot read, not just the rooms', async () => {
+    // The FOURTH path that abandons a state document, and the one Codex did not
+    // reach: a well-formed HTTP 200 carrying a body this client cannot parse as
+    // a state document. It had the same defect as the three that were reported
+    // — rooms dropped, lock banner and stamp left standing — so it is pinned
+    // here rather than left to a later review round.
+    const live = deployment();
+    const page = await loadPage(live.deps);
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toContain('provenance live');
+
+    const original = page.window.fetch as (input: string) => Promise<unknown>;
+    page.window.fetch = (input: string) => {
+      if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+        return Promise.resolve({ status: 200, json: () => Promise.resolve({ ok: true, rooms: 'not-an-array' }) });
+      }
+      return original(input);
+    };
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toBe('');
+    expect((page.document.querySelector('[data-hq-lock]') as HTMLElement).hidden).toBe(true);
+    expect(bodyText(page.document, 'home')).toContain('cannot read');
+    page.close();
+  });
+
   it('leaves the rooms HQ does not record saying exactly what they said', async () => {
     // Their statement does not depend on a session, so an access failure must
     // not replace a true sentence with an access complaint.

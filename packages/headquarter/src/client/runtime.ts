@@ -223,7 +223,12 @@ export function clientRuntimeScript(): string {
 
   function applyState(body) {
     if (body == null || typeof body !== 'object' || body.ok !== true || !Array.isArray(body.rooms)) {
-      clearRooms('The state route answered with a body this client cannot read, so nothing is claimed here.');
+      // invalidate(), not clearRooms(): this is the fourth path that abandons a
+      // state document, and it had the same defect as the three Codex found —
+      // it dropped the rooms and left the previous poll's lock banner and stamp
+      // standing. Found by re-reading my own fix rather than by a second
+      // review round, which is where it should have been found the first time.
+      invalidate('The state route answered with a body this client cannot read, so nothing is claimed here.');
       return;
     }
     lastViews = body.rooms;
