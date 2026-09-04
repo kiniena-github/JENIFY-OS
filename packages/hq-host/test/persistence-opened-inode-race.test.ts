@@ -14,8 +14,9 @@
  * left the anchored durable inode.
  *
  * This file deterministically drives the same parent-path swap from the mocked
- * store open. It now proves the stronger invariant: the hostile replacement is
- * untouched while the anchored durable database receives the schema writes.
+ * unmigrated store connection that hosted startup actually calls. It proves the
+ * stronger invariant: the hostile replacement is untouched while the anchored
+ * durable database receives the schema writes.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -49,10 +50,10 @@ vi.mock('@factoryos/headquarter/store', async () => {
     );
   return {
     ...actual,
-    openHqDatabase: (dbPath?: string) => {
+    connectHqDatabaseUnmigrated: (dbPath?: string) => {
       hostile.beforeOpen?.();
       try {
-        return actual.openHqDatabase(dbPath);
+        return actual.connectHqDatabaseUnmigrated(dbPath);
       } finally {
         hostile.afterOpen?.();
       }
