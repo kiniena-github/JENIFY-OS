@@ -514,3 +514,63 @@ No Founder visual acceptance pass. The approved visual DNA is a 17-screen refere
 Founder holds locally as image files; this runtime could not read them, so the building was
 built from the issue's written design language and the existing HQ UI. The reference
 comparison is a Founder step and remains open.
+
+### Stage 4, review round 1 — Codex on `7e87392`, fixed at `9aeec65`
+
+Four findings. Three were real, and one was not — but chasing the one that was
+not produced more than the three that were.
+
+**Real, P1: stale views relit the building after invalidation.** The text panels
+were cleared on session expiry or a failed state read; the cached views the 3D
+shell is driven from were not, and the `hashchange` handler reapplied them. A
+signed-out reader navigating between rooms would have watched a lit HQ built
+from state they were no longer entitled to see — which defeats the exact
+property this stage exists to establish. `clearRooms` now drops the cache
+first. The regression test goes at the SHELL entry point rather than at the
+DOM, because asserting on the panels is what missed it.
+
+**Real, P2: the page stayed half-current after a failed state read.** The
+non-ready session branch cleared the rooms, the lock banner and the state
+stamp; the two state-failure branches cleared only the rooms. The page then
+said nothing was current while still asserting when it was current and whether
+HQ was locked. All three now call one `invalidate()`, so the asymmetry is
+unrepresentable rather than merely fixed.
+
+**Real, P2: the Command Room contradicted its own metrics.** Approvals are the
+Approvals room's subject, so the Command Room does not list them — but it
+counts them and goes to `attention` for them. Immediately after an order is
+submitted, the ordinary case, it read "HQ is holding nothing" beneath a metric
+reading 1, in a room lit amber. The empty message is now approval-aware, and a
+second test asserts the plain wording still appears when HQ genuinely is empty.
+
+**Not real, P1: "WebGL 2 rejects GLSL ES 1.00 shaders."** It does not —
+`#version 300 es` is what opts into 3.00, and a WebGL 2 context compiles both.
+Rather than reply with a specification citation, the claim was verified:
+`packages/headquarter/tools/webgl-evidence.mjs` (`npm run evidence:webgl`)
+opens the BUILT page in real Chromium, answers its control-API calls, and pulls
+the shader sources out of the page's own inline script so the check cannot pass
+while the shipped shaders fail. Result on ANGLE/SwiftShader: WebGL 2 context,
+both shaders compiled with empty info logs, program linked, all six attributes
+bound, canvas demonstrably drawing.
+
+**That tool then earned its place three times over**, finding defects no DOM
+test can see:
+
+- an empty red lock banner on every unlocked page — `[hidden]` in the UA
+  stylesheet loses to `.provenance-banner { display: flex }`. The element WAS
+  hidden and every assertion about it passed;
+- the liveness tint applied to the whole room volume, so entering a room showed
+  a wall of colour rather than a lit space;
+- lit facades clipping every channel to 1.0 and turning WHITE, losing the one
+  thing their colour carries — which liveness the room is in.
+
+It also caught two defects in ITSELF before they could become false findings:
+`readPixels` and `drawImage` both return a cleared buffer once a frame without
+`preserveDrawingBuffer` has been composited (so an early run reported "nothing
+was drawn" beside a screenshot showing the building), and the first highlight
+rolloff compressed the whole range and made the building murky. Both are
+recorded in the tool.
+
+This closes the "no real-browser GPU verification" limitation this entry opened
+with. The Founder visual acceptance pass against the 17 reference images
+remains open and is unchanged by any of it.
