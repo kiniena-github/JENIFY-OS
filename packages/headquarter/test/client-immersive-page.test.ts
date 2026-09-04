@@ -35,7 +35,8 @@ import { registerDirectOrderCapability, DIRECT_ORDER_CAPABILITY } from '../src/l
 import { setupFixture, type Fixture } from './application.fixture.js';
 import { HQ_ROOMS } from '../src/client/rooms.js';
 import { SOURCE_MODE_LABELS } from '../src/live/provenance.js';
-import { CLIENT_FETCH_TARGETS, CLIENT_READ_TIMEOUT_MS } from '../src/client/runtime.js';
+import { CLIENT_FETCH_TARGETS, CLIENT_READ_TIMEOUT_MS, clientRuntimeScript } from '../src/client/runtime.js';
+import { immersiveShellScript } from '../src/client/webgl.js';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -995,6 +996,61 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     // And the room still says exactly what the registry says it says.
     expect(bodyText(page.document, 'research')).toContain(researchBinding.reason);
     page.close();
+  });
+
+  it('validates every field the render path and the shell actually read', () => {
+    // The guard against the defect this branch has produced five times.
+    //
+    // Rounds 7, 8, 10, 11 and 12 were all the same shape: a field arrives from
+    // the wire, something downstream reads it, and the validator happens not to
+    // check that particular one. Each was found by review, one field per round.
+    // Reviewing harder is not a fix for that — the fix is to stop it being
+    // possible to read a field nobody validated.
+    //
+    // So this derives both sets from the SHIPPED source rather than from a list
+    // I maintain: every `view.x` / `metric.x` / `row.x` / `chip.x` the rendering
+    // code and the 3D shell touch, against every one the validators touch. A new
+    // field consumed without a check fails here, in the same commit that adds
+    // it, rather than in someone's next review round.
+    const runtime = clientRuntimeScript();
+    const shell = immersiveShellScript();
+
+    const between = (source: string, start: string, end: string): string => {
+      const from = source.indexOf(start);
+      const to = source.indexOf(end, from + 1);
+      expect(from, `marker not found: ${start}`).toBeGreaterThan(-1);
+      expect(to, `marker not found: ${end}`).toBeGreaterThan(from);
+      return source.slice(from, to);
+    };
+
+    const fieldsOn = (source: string, receivers: string[]): Set<string> => {
+      const found = new Set<string>();
+      for (const receiver of receivers) {
+        const pattern = new RegExp(`\\b${receiver}\\.([A-Za-z_][A-Za-z0-9_]*)`, 'g');
+        for (const match of source.matchAll(pattern)) found.add(match[1]!);
+      }
+      return found;
+    };
+
+    // What the rendering path reads: the three node builders plus renderRoom.
+    const renderPath = between(runtime, 'function metricNode(metric)', 'function activeRoom()');
+    // What the building reads.
+    const shellApply = between(shell, 'function applyViews(views, activeRoomId)', 'window.__hqShellApply =');
+    // What the validators check.
+    const validators = between(runtime, 'function isText(value)', 'function applyState(body)');
+
+    const consumed = new Set([
+      ...fieldsOn(renderPath, ['view', 'metric', 'row', 'chip']),
+      ...fieldsOn(shellApply, ['view']),
+    ]);
+    const validated = fieldsOn(validators, ['view', 'metric', 'row', 'chip', 'rooms[i]']);
+    // `length` is a JavaScript property of the arrays, not a wire field.
+    consumed.delete('length');
+    validated.delete('length');
+
+    expect(consumed.size, 'no fields were extracted — the markers have drifted').toBeGreaterThan(8);
+    const unchecked = [...consumed].filter((field) => !validated.has(field));
+    expect(unchecked, `read from a state document but never validated: ${unchecked.join(', ')}`).toEqual([]);
   });
 
   it('refuses a fetched document that says a live room is still awaiting', async () => {

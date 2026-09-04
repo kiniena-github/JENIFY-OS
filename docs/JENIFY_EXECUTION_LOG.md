@@ -1097,3 +1097,36 @@ Evidence at this commit: headquarter 1916, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
 web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS
 (lit 2439 vs 0 dark, motion 31/0/33, framesAfterLoss 0).
+
+### Stage 4, after round 12 — a guard against the defect this branch keeps producing
+
+Not a reviewer finding. Rounds 7, 8, 10, 11 and 12 were all the same shape: a
+field arrives from the wire, something downstream reads it, and the validator
+happens not to check that particular one. Each was caught by review, one field
+per round. Reviewing harder is not a fix for that; the fix is to make it
+impossible to read a field nobody validated.
+
+`client-immersive-page` now derives BOTH sets from the shipped source rather than
+from a list anyone maintains: every `view.x` / `metric.x` / `row.x` / `chip.x`
+that the rendering path and the 3D shell touch, against every one the validators
+touch. A field consumed without a check fails in the same commit that adds it,
+rather than in someone's next review round.
+
+Negative-controlled by dropping `isText(view.provenance)` from `roomViewValid`:
+the test fails and names the field —
+
+    read from a state document but never validated: provenance
+
+It also guards its own extraction: if the source markers drift and nothing is
+found, `consumed.size > 8` fails rather than the test silently passing on an
+empty set. That check exists because an emptily-passing test is the exact failure
+mode that made the round-3 evidence tool useless, and this file has now written
+that lesson down three times.
+
+What this does NOT cover, stated so it is not read as more than it is: it sees
+property access by literal name, so a field read through a computed key would
+escape it, and it says nothing about whether a validated field is validated
+*correctly* — only that something checks it. The per-field tests remain the proof
+of correctness; this is the proof of coverage.
+
+Evidence at this commit: headquarter 1917, hq-host 206; `evidence:webgl` PASS.
