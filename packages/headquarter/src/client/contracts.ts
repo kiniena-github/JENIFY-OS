@@ -23,6 +23,7 @@
  */
 
 import type { HqSnapshot } from '../live/snapshot.js';
+import type { KillSwitchView } from '../application/console.js';
 
 /**
  * The authenticated HQ state document.
@@ -95,8 +96,23 @@ export interface HqClientStateResponse {
   mode: string;
   note: string | null;
   counts: HqStateDocument['counts'];
-  /** The canonical kill-switch record, for the lock banner. */
-  killSwitch: { globalEngaged: boolean; engagedScopes: string[] };
+  /**
+   * The canonical kill-switch record, for the lock banner.
+   *
+   * DERIVED, not restated. This was declared as
+   * `{ globalEngaged: boolean; engagedScopes: string[] }` — and the server sends
+   * `engagedScopes` as `{ scope, reason, engagedBy, engagedAt }[]`. Because the
+   * lie was in the type, `tsc` had nothing to complain about when
+   * `securitySection` joined the array straight into a sentence, and the
+   * partial-lock banner would have read "engaged for 2 scope(s):
+   * [object Object], [object Object]" — a security control failing to name what
+   * it had locked (Codex round 8).
+   *
+   * That is precisely the failure this module's own docstring exists to
+   * prevent, three paragraphs above. Pointing at the server's type is what
+   * makes the promise real rather than aspirational.
+   */
+  killSwitch: KillSwitchView;
   rooms: RoomView[];
 }
 

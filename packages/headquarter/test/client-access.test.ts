@@ -151,11 +151,46 @@ describe('the lock banner reports the canonical kill switch and nothing else', (
     expect(result.message).toContain('No capability may execute');
   });
 
-  it('names the scopes when the lock is partial', () => {
-    const result = lock({ globalEngaged: false, engagedScopes: ['github', 'archive'] });
+  it('names the scopes when the lock is partial, from the records the server actually sends', () => {
+    // This test used to pass `['github', 'archive']` — plain strings — because
+    // the client contract declared `engagedScopes: string[]`. The server sends
+    // `{ scope, reason, engagedBy, engagedAt }` records, so the test agreed with
+    // the wrong contract and passed while the real banner would have read
+    // "engaged for 2 scope(s): [object Object], [object Object]": a security
+    // control failing to name what it had locked (Codex round 8).
+    //
+    // The fixture is now the shape the server produces, taken from
+    // `KillSwitchView`. A test whose fixture is a guess proves only that the
+    // guess is self-consistent.
+    const result = lock({
+      globalEngaged: false,
+      engagedScopes: [
+        { scope: 'github', reason: 'incident', engagedBy: 'founder', engagedAt: '2026-09-04T10:00:00Z' },
+        { scope: 'archive', reason: null, engagedBy: null, engagedAt: null },
+      ],
+    });
     expect(result.locked).toBe(true);
     expect(result.label).toBe('PARTIALLY LOCKED');
     expect(result.message).toContain('github, archive');
+    expect(result.message).not.toContain('[object Object]');
+  });
+
+  it('counts a scope it cannot name rather than inventing one', () => {
+    // Half the truth is still true. An invented scope name on a lock banner
+    // would not be, and this is the one banner where being wrong is worst.
+    const result = lock({
+      globalEngaged: false,
+      engagedScopes: [
+        { scope: 'github', reason: null, engagedBy: null, engagedAt: null },
+        { reason: 'malformed', engagedBy: null, engagedAt: null },
+      ],
+    });
+    expect(result.locked).toBe(true);
+    expect(result.message).toContain('2 scope(s)');
+    expect(result.message).toContain('github');
+    expect(result.message).toContain('1 of them carried no readable scope name');
+    expect(result.message).not.toContain('[object Object]');
+    expect(result.message).not.toContain('undefined');
   });
 
   it('claims nothing when the state document carried no kill-switch record', () => {

@@ -522,7 +522,7 @@ function securitySection(state: HqStateDocument, session: ClientSession | null):
       secondary: kill.globalEngaged
         ? 'No capability may execute anywhere in HQ.'
         : engagedScopes > 0
-          ? `Engaged for ${engagedScopes} scope(s): ${kill.engagedScopes.join(', ')}.`
+          ? `Engaged for ${engagedScopes} scope(s): ${kill.engagedScopes.map((entry) => entry.scope).join(', ')}.`
           : 'No scope is under a kill switch.',
       chips: [{ label: kill.globalEngaged || engagedScopes > 0 ? 'locked' : 'open', tone: kill.globalEngaged || engagedScopes > 0 ? 'danger' : 'accent' }],
     },

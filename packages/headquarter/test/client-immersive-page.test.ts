@@ -847,6 +847,123 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     page.close();
   });
 
+  it('refuses a document with perfect rooms and no provenance header', async () => {
+    // Codex round 8. Room validation said nothing about the document's own
+    // header, so seventeen perfect rooms with a missing `generatedAt`/`mode`
+    // were applied and the stamp read "Canonical state as of undefined".
+    const live = deployment();
+    const page = await loadPage(live.deps);
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toContain('provenance live');
+
+    const original = page.window.fetch as (input: string) => Promise<unknown>;
+    page.window.fetch = (input: string) => {
+      if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+        return Promise.resolve({
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              ok: true,
+              killSwitch: { globalEngaged: false, engagedScopes: [] },
+              rooms: HQ_ROOMS.map((room) => ({
+                roomId: room.id,
+                ordinal: room.ordinal,
+                status: room.binding.kind === 'live' ? 'live' : room.binding.kind,
+                liveness: 'dark',
+                metrics: [],
+                rows: [],
+                emptyMessage: 'x',
+                provenance: 'x',
+              })),
+            }),
+        });
+      }
+      return original(input);
+    };
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    const stamp = page.document.querySelector('[data-hq-stamp]')!.textContent ?? '';
+    expect(stamp).toBe('');
+    expect(stamp).not.toContain('undefined');
+    expect(bodyText(page.document, 'home')).toContain('cannot read');
+    page.close();
+  });
+
+  it('will not let a missing kill-switch record read as an unlocked HQ', async () => {
+    // Codex round 8, and the most dangerous of the three: a response with
+    // seventeen valid rooms and NO kill-switch record resolved to
+    // `locked: false`, which CLEARS a lock banner that was previously and
+    // correctly visible — while the rooms beside it still presented as current.
+    // A page that quietly stops showing a lock is the worst single failure
+    // available on this surface. Absent is not "unlocked"; it is unreadable,
+    // and unreadable fails closed like everything else here.
+    const live = deployment();
+    const page = await loadPage(live.deps);
+
+    const lockBanner = page.document.querySelector('[data-hq-lock]') as HTMLElement;
+    const original = page.window.fetch as (input: string) => Promise<unknown>;
+
+    const roomsPayload = HQ_ROOMS.map((room) => ({
+      roomId: room.id,
+      ordinal: room.ordinal,
+      status: room.binding.kind === 'live' ? 'live' : room.binding.kind,
+      liveness: 'dark',
+      metrics: [],
+      rows: [],
+      emptyMessage: 'x',
+      provenance: 'x',
+    }));
+
+    // First: HQ is genuinely locked, and the banner says so.
+    page.window.fetch = (input: string) => {
+      if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+        return Promise.resolve({
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              ok: true,
+              generatedAt: new Date().toISOString(),
+              mode: 'live',
+              killSwitch: { globalEngaged: true, engagedScopes: [] },
+              rooms: roomsPayload,
+            }),
+        });
+      }
+      return original(input);
+    };
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+    expect(lockBanner.hidden).toBe(false);
+    expect(lockBanner.textContent).toContain('HQ LOCKED');
+
+    // Then: a document that simply omits the record.
+    page.window.fetch = (input: string) => {
+      if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+        return Promise.resolve({
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              ok: true,
+              generatedAt: new Date().toISOString(),
+              mode: 'live',
+              rooms: roomsPayload,
+            }),
+        });
+      }
+      return original(input);
+    };
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    // The rooms must NOT still be presented as current beside a cleared lock.
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toBe('');
+    expect(bodyText(page.document, 'home')).toContain('cannot read');
+    // And the page must say out loud that the lock is among what it no longer
+    // claims, rather than silently dropping a red banner.
+    expect(bodyText(page.document, 'home')).toContain('including whether HQ is locked');
+    page.close();
+  });
+
   it('bounds a stalled read on a browser with no AbortController', async () => {
     // Codex round 6. The timeout was armed but its callback did nothing when
     // there was no AbortController, so on such a browser the read still never

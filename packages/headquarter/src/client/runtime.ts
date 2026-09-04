@@ -364,16 +364,41 @@ export function clientRuntimeScript(): string {
     return true;
   }
 
+  // The document's own header, checked as strictly as its rooms.
+  //
+  // Room validation said nothing about generatedAt, mode or killSwitch, so
+  // a response with seventeen perfect rooms and a missing header was applied:
+  // the stamp read "Canonical state as of undefined", and — much worse — an
+  // absent kill-switch record resolved to locked: false, which CLEARS a lock
+  // banner that was previously and correctly visible while the rooms beside it
+  // still presented as current. A page that quietly stops showing a lock is the
+  // most dangerous single failure available on this surface (Codex round 8).
+  //
+  // The kill switch is required to be a real record with the canonical shape,
+  // not merely present: globalEngaged an actual boolean and engagedScopes
+  // an actual array. Absent or malformed is not "unlocked"; it is unreadable,
+  // and unreadable fails closed like everything else here.
+  function killSwitchValid(kill) {
+    if (kill == null || typeof kill !== 'object') return false;
+    if (typeof kill.globalEngaged !== 'boolean') return false;
+    return Array.isArray(kill.engagedScopes);
+  }
+
+  function headerValid(body) {
+    return isText(body.generatedAt) && isText(body.mode) && killSwitchValid(body.killSwitch);
+  }
+
   function applyState(body) {
-    if (body == null || typeof body !== 'object' || body.ok !== true || !roomsComplete(body.rooms)) {
+    if (body == null || typeof body !== 'object' || body.ok !== true || !headerValid(body) || !roomsComplete(body.rooms)) {
       // invalidate(), not clearRooms(): this is the fourth path that abandons a
       // state document, and it had the same defect as the three Codex found —
       // it dropped the rooms and left the previous poll's lock banner and stamp
       // standing. Found by re-reading my own fix rather than by a second
       // review round, which is where it should have been found the first time.
-      invalidate('The state route answered with a body this client cannot read as a complete, well-formed set ' +
-        'of all ' + ROOM_IDS.length + ' rooms, so nothing is claimed here rather than part of the page moving ' +
-        'to a new document and the rest staying on the old one.');
+      invalidate('The state route answered with a body this client cannot read as a complete, well-formed ' +
+        'document — its provenance header and all ' + ROOM_IDS.length + ' rooms — so nothing is claimed here, ' +
+        'including whether HQ is locked, rather than part of the page moving to a new document and the rest ' +
+        'staying on the old one.');
       return;
     }
     lastViews = body.rooms;

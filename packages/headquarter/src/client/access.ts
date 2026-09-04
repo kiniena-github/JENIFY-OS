@@ -179,10 +179,30 @@ export const LOCK_STATE_JS = `function lockState(killSwitch) {
     };
   }
   if (scopes.length > 0) {
+    // Each entry is a RECORD — { scope, reason, engagedBy, engagedAt } — not a
+    // string. Joining the array directly made the banner read "engaged for 2
+    // scope(s): [object Object], [object Object]": a security control failing
+    // to name the thing it had locked, at the moment that name matters most
+    // (Codex round 8). The client contract had declared string[], so the type
+    // system had nothing to object to.
+    //
+    // An entry whose scope is not a string is COUNTED but not named, rather
+    // than named with a guess. Half the truth is still true; an invented scope
+    // name on a lock banner would not be.
+    var named = [];
+    for (var s = 0; s < scopes.length; s += 1) {
+      var entry = scopes[s];
+      var name = entry != null && typeof entry === 'object' ? entry.scope : entry;
+      if (typeof name === 'string' && name.length > 0) named.push(name);
+    }
     return {
       locked: true,
       label: 'PARTIALLY LOCKED',
-      message: 'The kill switch is engaged for ' + scopes.length + ' scope(s): ' + scopes.join(', ') +
+      message: 'The kill switch is engaged for ' + scopes.length + ' scope(s)' +
+        (named.length > 0 ? ': ' + named.join(', ') : '') +
+        (named.length < scopes.length
+          ? ' (' + (scopes.length - named.length) + ' of them carried no readable scope name)'
+          : '') +
         '. Work inside those scopes cannot execute.'
     };
   }

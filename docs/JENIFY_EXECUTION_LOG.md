@@ -846,3 +846,46 @@ Evidence at this commit: headquarter 1905, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
 web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS
 (lit 2433 warm samples vs 0 dark, framesAfterLoss 0).
+
+### Stage 4, review round 8 — Codex
+
+Three findings. Two new and real; the third had already been fixed in `660e78b`
+minutes earlier, from the opposite direction — I had put round 7's own lesson to
+the rest of the guard and reached the same conclusion independently. That
+convergence is the first sign in eight rounds that the loop is nearing its end.
+
+**The client contract lied about the kill switch, so the type system helped
+nobody.** `contracts.ts` declared `engagedScopes: string[]`; the server sends
+`{ scope, reason, engagedBy, engagedAt }[]`. Both the lock banner and
+`securitySection` joined that array straight into a sentence, so a partial lock
+would have read "engaged for 2 scope(s): [object Object], [object Object]" — a
+security control failing to name what it had locked, at the moment the name
+matters most. The contract module's own docstring says these types are
+"deliberately DERIVED from the server's own published shapes rather than
+restated". This one was restated, and wrongly. It now points at `KillSwitchView`.
+
+Note what did NOT catch it: `tsc` was clean before and after the type was fixed,
+because `join()` is legal on any array. The existing test did not catch it either
+— its fixture used plain strings, agreeing with the wrong contract, so it passed
+while production would have printed `[object Object]`. A test whose fixture is a
+guess proves only that the guess is self-consistent.
+
+**A document's own header was never validated.** Seventeen perfect rooms with a
+missing `generatedAt`/`mode` were applied and the stamp read "Canonical state as
+of undefined" — and, far worse, an absent `killSwitch` resolved through
+`lockState` to `locked: false`, which CLEARS a lock banner that was previously
+and correctly visible while the rooms beside it still presented as current. A
+page that quietly stops showing a lock is the worst single failure available on
+this surface. Absent is not "unlocked"; it is unreadable, and unreadable now
+fails closed like everything else here, with the invalidation message saying
+explicitly that the lock is among what the page no longer claims.
+
+**Two instruments were wrong in the same way this round**: the kill-switch test
+fixture, and (found by my own registry constraint) the WebGL evidence fixture.
+Both were hand-written claims about what the server produces, and both were
+wrong for as long as they existed. Five of the defects in this stage have now
+been in verification rather than in the product.
+
+Evidence at this commit: headquarter 1908, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.
