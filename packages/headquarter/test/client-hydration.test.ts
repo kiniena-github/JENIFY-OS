@@ -26,6 +26,7 @@ import { hydrateRoom, hydrateRooms, livenessFrom, ROOM_ROW_LIMIT } from '../src/
 import { buildHqSnapshot, emptyFounderConsole, type HqSnapshot } from '../src/live/snapshot.js';
 import type { ClientSession } from '../src/client/contracts.js';
 import type { Provenance } from '../src/live/provenance.js';
+import type { ConsoleTask } from '../src/application/console.js';
 
 const AT = '2026-09-04T12:00:00.000Z';
 const PROVENANCE: Provenance = { mode: 'live', source: 'test', asOf: AT };
@@ -324,6 +325,121 @@ describe('a room that is not live can never be filled in by a state document', (
       expect(view.metrics, room.id).toHaveLength(0);
       expect(view.rows, room.id).toHaveLength(0);
       expect(view.liveness, room.id).toBe('dark');
+    }
+  });
+});
+
+describe('the Mission Room reads canonical buckets, not raw task statuses', () => {
+  // Codex round 13. Liveness was re-derived by matching task.status against
+  // hand-kept sets, which got it wrong in BOTH directions — and each direction
+  // is a different kind of lie.
+  function taskAt(taskId: string, status: string, reviewState: string): ConsoleTask {
+    return {
+      taskId,
+      capabilityId: 'repo.read_status',
+      status,
+      reviewState,
+      fence: 1,
+      claimedBy: 'worker-a',
+      submittedBy: 'worker-a',
+      createdBy: 'founder',
+      createdAt: AT,
+      updatedAt: AT,
+      blockReason: null,
+      classification: {
+        capabilityId: 'repo.read_status',
+        riskClass: 'read_only',
+        sideEffect: false,
+        idempotent: true,
+        requiresApproval: false,
+        requiresIndependentReview: true,
+        requiresIdempotencyKey: false,
+        route: 'auto',
+        reason: 'read only',
+      },
+      project: 'jenify-os',
+      title: 'Read CI status',
+      assignedTo: 'worker-a',
+      sourceProposalId: null,
+    } as ConsoleTask;
+  }
+
+  function stateWith(mutate: (console_: ReturnType<typeof emptyFounderConsole>) => void): HqSnapshot {
+    const console_ = emptyFounderConsole(AT);
+    mutate(console_);
+    return buildHqSnapshot({
+      generatedAt: AT,
+      console: { data: console_, provenance: PROVENANCE },
+      connections: { data: [], provenance: PROVENANCE },
+      workforce: { data: [], provenance: PROVENANCE },
+      capabilities: { data: [], provenance: PROVENANCE },
+      activity: { data: [], provenance: PROVENANCE },
+    });
+  }
+
+  const mission = (state: HqSnapshot) =>
+    hydrateRooms(state, FOUNDER_SESSION).find((view) => view.roomId === 'mission-room')!;
+  const commandRoom = (state: HqSnapshot) =>
+    hydrateRooms(state, FOUNDER_SESSION).find((view) => view.roomId === 'command-room')!;
+
+  it('does not pulse for a task awaiting review that nobody is executing', () => {
+    // The task keeps status `running`, but `founderConsole` files it in
+    // pendingReviews and DELIBERATELY excludes it from inFlight. Reading the
+    // status asserted that a worker still held it, and pulsed the room to say
+    // so — motion standing in for work that is not happening.
+    const state = stateWith((console_) => {
+      console_.pendingReviews = [
+        { ...taskAt('t-review', 'running', 'pending'), ineligibleReviewers: ['system', 'worker-a'] },
+      ] as typeof console_.pendingReviews;
+    });
+    const view = mission(state);
+    expect(view.liveness).not.toBe('active');
+    expect(view.liveness).not.toBe('attention');
+    // Still recorded, so the room is not dark either — something is there, and
+    // nothing is running or stuck.
+    expect(view.liveness).toBe('quiet');
+  });
+
+  it('lights for review_failed, which the canonical console files as blocked', () => {
+    // `blocked` is byStatus('blocked') PLUS byStatus('review_failed'), so this
+    // task is canonically stopped. The status set omitted `review_failed`, so
+    // the Mission Room sat quiet while Home and the Command Room — which read
+    // the bucket — reported attention. Two rooms describing one task
+    // differently is the failure this stage exists to prevent.
+    const state = stateWith((console_) => {
+      console_.blocked = [taskAt('t-failed', 'review_failed', 'failed')];
+    });
+    expect(mission(state).liveness).toBe('attention');
+    expect(commandRoom(state).liveness).toBe('attention');
+  });
+
+  it('agrees with the Command Room about the same tasks, in every combination', () => {
+    // The general property, rather than the two reported cases: both rooms
+    // cover the same buckets, so neither may reach a state the other does not.
+    const combinations: { name: string; mutate: (c: ReturnType<typeof emptyFounderConsole>) => void }[] = [
+      { name: 'empty', mutate: () => {} },
+      { name: 'in flight', mutate: (c) => { c.inFlight = [taskAt('t1', 'running', 'none')]; } },
+      { name: 'queued', mutate: (c) => { c.queued = [taskAt('t2', 'queued', 'none')]; } },
+      { name: 'blocked', mutate: (c) => { c.blocked = [taskAt('t3', 'blocked', 'none')]; } },
+      { name: 'review failed', mutate: (c) => { c.blocked = [taskAt('t4', 'review_failed', 'failed')]; } },
+      {
+        name: 'pending review',
+        mutate: (c) => {
+          c.pendingReviews = [
+            { ...taskAt('t5', 'running', 'pending'), ineligibleReviewers: ['system'] },
+          ] as typeof c.pendingReviews;
+        },
+      },
+    ];
+    for (const { name, mutate } of combinations) {
+      const state = stateWith(mutate);
+      const missionView = mission(state);
+      const commandView = commandRoom(state);
+      // Both are driven by the same bucket arithmetic, so neither can claim
+      // work is running or stopped while the other says otherwise.
+      const lit = (liveness: string) => liveness === 'active' || liveness === 'attention';
+      expect(lit(missionView.liveness), `${name}: mission ${missionView.liveness}, command ${commandView.liveness}`)
+        .toBe(lit(commandView.liveness));
     }
   });
 });

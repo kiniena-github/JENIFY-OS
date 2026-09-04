@@ -1130,3 +1130,43 @@ escape it, and it says nothing about whether a validated field is validated
 of correctness; this is the proof of coverage.
 
 Evidence at this commit: headquarter 1917, hq-host 206; `evidence:webgl` PASS.
+
+### Stage 4, review round 13 — Codex
+
+One finding, wrong in **both** directions, and each direction a different kind of
+lie. The Mission Room derived its liveness by matching raw `task.status` against
+hand-kept sets instead of reading canonical bucket membership.
+
+- **A task awaiting independent review keeps status `running`**, but
+  `founderConsole` files it in `pendingReviews` and deliberately excludes it from
+  `inFlight`. Matching the status marked the room `active` and pulsed it —
+  motion asserting a worker held a task the canonical console says nobody is
+  executing. Fabricated activity, which is the single thing this stage exists to
+  make impossible.
+- **`review_failed` is canonically blocked** — `blocked` is built as
+  `byStatus('blocked')` plus `byStatus('review_failed')` — but it was missing
+  from `ATTENTION_STATUSES`, so the Mission Room sat quiet while Home and the
+  Command Room, which read the bucket, showed attention. Two rooms describing one
+  task differently.
+
+Mission now uses exactly the arithmetic the Command Room already used
+(`ops.blocked + ops.outcomeUnknown + ops.approvals` for attention,
+`ops.inFlight` for active), so the two cannot diverge by construction rather
+than by agreement. `review_failed` was added to `ATTENTION_STATUSES`, which now
+only tones chips and per-status metrics and no longer decides whether anything
+is lit.
+
+**`RUNNING_STATUSES` was deleted rather than left unused.** It held
+`['assigned', 'running']` and looked like the obvious way to ask "is a worker
+holding this task" — which is precisely how the defect happened. An unused
+shortcut with a plausible name is the next person's mistake waiting to happen,
+and the comment left in its place says so.
+
+Three tests, and the third is the one that matters: beyond the two reported
+cases, a property test walks six bucket combinations and requires the Mission and
+Command rooms to agree on whether they are lit. All three fail against the old
+derivation.
+
+Evidence at this commit: headquarter 1920, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.

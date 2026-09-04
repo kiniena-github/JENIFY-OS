@@ -48,16 +48,30 @@ export const ROOM_ROW_LIMIT = 12;
  * vocabulary rather than restated, so a status added to the contract does not
  * silently become "fine".
  */
-const ATTENTION_STATUSES = new Set(['blocked', 'outcome_unknown', 'needs_approval']);
+// Statuses that colour a chip or a per-status metric as needing attention.
+//
+// `review_failed` belongs here because the canonical console files it in the
+// BLOCKED bucket (`[...byStatus('blocked'), ...byStatus('review_failed')]`).
+// It was missing, so a canonically-blocked task wore a neutral chip — the same
+// disagreement between a status reading and a bucket reading that this file now
+// refuses to make about liveness (Codex round 13).
+//
+// This set no longer decides whether any room is LIT. That is bucket
+// membership, everywhere.
+const ATTENTION_STATUSES = new Set(['blocked', 'review_failed', 'outcome_unknown', 'needs_approval']);
 
-/**
- * Statuses that mean a worker is genuinely holding this task right now.
- *
- * The two the canonical queue uses for live work. Stated here rather than
- * imported from the spatial floor's presentation layer, so `client/` depends on
- * the CONTRACT vocabulary and not on another view's opinion of it.
- */
-const RUNNING_STATUSES = new Set(['assigned', 'running']);
+// RUNNING_STATUSES is deliberately GONE.
+//
+// It held ['assigned', 'running'] and looked like the obvious way to ask "is a
+// worker holding this task". It is not, and that is exactly how the Mission
+// Room came to pulse for work nobody was executing: a task awaiting independent
+// review keeps status `running` while `founderConsole` excludes it from
+// `inFlight` on purpose. The status is a fact about the task; the bucket is the
+// canonical answer to the question, and the two are not the same question.
+//
+// `ops.inFlight.length` is that answer, and it is what every room now uses.
+// The set is not left here unused, because an unused shortcut with a plausible
+// name is the next person's mistake waiting to happen (Codex round 13).
 
 function tone(count: number, positive: RoomTone, zero: RoomTone = 'neutral'): RoomTone {
   return count > 0 ? positive : zero;
@@ -212,8 +226,28 @@ function missionsSection(state: HqStateDocument): Section {
   ];
   const byStatus = new Map<string, number>();
   for (const task of all) byStatus.set(task.status, (byStatus.get(task.status) ?? 0) + 1);
-  const attention = all.filter((task) => ATTENTION_STATUSES.has(task.status)).length;
-  const active = all.filter((task) => RUNNING_STATUSES.has(task.status)).length;
+  // Liveness comes from CANONICAL BUCKET MEMBERSHIP, not from re-reading the
+  // raw status strings — and from exactly the same arithmetic the Command Room
+  // uses, so the two rooms cannot disagree about the same tasks.
+  //
+  // Reclassifying the statuses got both directions wrong (Codex round 13):
+  //
+  //   - A task awaiting independent review keeps status `running`, but
+  //     `founderConsole` puts it in `pendingReviews` and DELIBERATELY excludes
+  //     it from `inFlight`. Counting `running` marked the Mission Room active
+  //     and pulsed it, asserting a worker still held a task the canonical
+  //     console says nobody is executing.
+  //   - `review_failed` is canonically blocked — `blocked` is built as
+  //     `byStatus('blocked')` plus `byStatus('review_failed')` — but it was
+  //     absent from ATTENTION_STATUSES, so the Mission Room sat quiet while
+  //     Home and the Command Room, which read the bucket, showed attention.
+  //     Two rooms describing one task differently.
+  //
+  // The status counts below stay as they are: they are honest copies of what
+  // canonical state records, and a status is a fact about a task. What may not
+  // be re-derived from them is whether the room is lit.
+  const attention = ops.blocked.length + ops.outcomeUnknown.length + ops.approvals.length;
+  const active = ops.inFlight.length;
   return {
     metrics: [
       metric('Missions recorded', all.length, 'Every open task the canonical queue holds.', tone(all.length, 'info')),
