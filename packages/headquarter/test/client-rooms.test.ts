@@ -19,6 +19,9 @@ import {
   roomRoute,
   roomsOverlap,
 } from '../src/client/rooms.js';
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** The Founder's list, in the Founder's order. Transcribed from issue #250. */
 const APPROVED = [
@@ -184,5 +187,33 @@ describe('the building is laid out by construction, and the construction is soun
     for (const room of HQ_ROOMS) {
       expect(roomAnchor(room)).toEqual(roomAnchor(room));
     }
+  });
+});
+
+describe('every declared section is actually bound to a room', () => {
+  it('leaves no section unreachable', () => {
+    // `activity` was declared as a RoomSection, implemented as a full
+    // `activitySection`, and bound by NO room — so it never ran, and nothing
+    // said so. It also carried the round-13 defect: it derived `attention` by
+    // matching status strings against a set, on activity events whose status is
+    // historical rather than a statement about now.
+    //
+    // Unreachable code with a plausible name is the next person's mistake
+    // waiting to happen. This makes a dead section fail immediately rather than
+    // sit there looking maintained.
+    const bound = new Set(
+      HQ_ROOMS.flatMap((room) => (room.binding.kind === 'live' ? [room.binding.section] : [])),
+    );
+    // Read the declared union straight from the source, so adding a member
+    // without binding it is what fails — not a list in this test.
+    const source = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'client', 'rooms.ts'),
+      'utf8',
+    );
+    const union = source.split('export type RoomSection')[1]!.split(';')[0]!;
+    const declared = [...union.matchAll(/'(\w+)'/g)].map((match) => match[1]!);
+    expect(declared.length).toBeGreaterThan(8);
+    const unbound = declared.filter((section) => !(bound as Set<string>).has(section));
+    expect(unbound, `declared but bound to no room: ${unbound.join(', ')}`).toEqual([]);
   });
 });

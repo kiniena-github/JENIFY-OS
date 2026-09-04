@@ -452,23 +452,20 @@ function projectsSection(state: HqStateDocument): Section {
   };
 }
 
-function activitySection(state: HqStateDocument): Section {
-  const events = state.activity.data;
-  const attention = events.filter((event) => event.status && ATTENTION_STATUSES.has(event.status)).length;
-  return {
-    metrics: [metric('Recent canonical events', events.length, 'As carried by this state document.', tone(events.length, 'info'))],
-    rows: limited(
-      events.map((event) => ({
-        id: `${event.seq}`,
-        primary: event.summary,
-        secondary: `${event.actor} · ${event.subjectKind} ${event.subjectId} · ${event.at}`,
-        chips: event.status ? [{ label: event.status, tone: 'info' as RoomTone }] : [],
-      })),
-    ),
-    emptyMessage: 'The canonical event log carries nothing in this window.',
-    liveness: livenessFrom({ attention, active: 0, present: events.length }),
-  };
-}
+// activitySection is GONE, with its RoomSection member.
+//
+// No room was bound to it — 'activity' was the one declared section nothing
+// used — so it never ran. It also carried the exact defect round 13 named: it
+// derived `attention` by matching ATTENTION_STATUSES against `event.status`,
+// where an activity event is a HISTORICAL log entry and its status is the
+// status at the time of the event, not a statement about now. A room lit from
+// that would have claimed something needs a human because something once did.
+//
+// Deleted rather than fixed and kept, for the reason RUNNING_STATUSES was
+// deleted one round earlier: unused code with a plausible name is the next
+// person's mistake waiting to happen, and this one was already wrong. The
+// projects room still reads the activity data — through projectsSection, which
+// counts what each project is carrying and never re-interprets a status.
 
 function analyticsSection(state: HqStateDocument): Section {
   const c = state.counts;
@@ -624,8 +621,6 @@ function sectionFor(
       return connectionsSection(state);
     case 'projects':
       return projectsSection(state);
-    case 'activity':
-      return activitySection(state);
     case 'analytics':
       return analyticsSection(state);
     case 'founder':

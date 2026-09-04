@@ -76,8 +76,7 @@ export type RoomSection =
   | 'connections'
   | 'analytics'
   | 'security'
-  | 'founder'
-  | 'activity';
+  | 'founder';
 
 export interface RoomPlacement {
   /** 0 = the atrium, 1 = the inner ring, 2 = the outer ring. */

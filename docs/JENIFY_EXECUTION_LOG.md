@@ -1170,3 +1170,39 @@ derivation.
 Evidence at this commit: headquarter 1920, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
 web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.
+
+### Stage 4, after round 13 — the sweep, actually done
+
+In the round-14 request I named as my first item "the other rooms' liveness, with
+round 13's lens", and admitted it was "exactly the sweep I keep believing I have
+done and keep being shown I have not". So it was done rather than left as a
+question, room by room:
+
+- **Home, Command, Mission, Approvals, Founder Office, Analytics** — all read
+  canonical bucket counts. Correct, and Mission and Command now agree by
+  construction rather than by coincidence.
+- **AI Workforce, Departments, Resources, Projects** — presence only, no status
+  interpretation at all.
+- **World Network / Connections** — reads `connection.state` directly, which is
+  the canonical field for a descriptor. There is no bucket to disagree with.
+- **Security Center** — derives from the canonical kill-switch record and the
+  server's own control grant. No re-interpretation.
+
+One thing fell out, and it is the same shape as round 13 twice over.
+`activitySection` derived `attention` by matching `ATTENTION_STATUSES` against
+`event.status` — but an activity event is a HISTORICAL log entry, and its status
+is the status at the time of the event, not a statement about now. A room lit
+from that would claim something needs a human because something once did.
+
+It never ran: `'activity'` was the one declared `RoomSection` that **no room was
+bound to**. So it was dead code, with a plausible name, already containing the
+defect. Deleted for the reason `RUNNING_STATUSES` was deleted one round earlier.
+
+A new test reads the declared `RoomSection` union **out of the source** and
+requires every member to be bound by a live room, so an unreachable section
+fails immediately instead of sitting there looking maintained. Negative-controlled
+by re-declaring `'activity'`: it fails and names it.
+
+Evidence at this commit: headquarter 1921, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.
