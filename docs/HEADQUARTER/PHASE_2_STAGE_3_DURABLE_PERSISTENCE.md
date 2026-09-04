@@ -205,16 +205,49 @@ The persistence adapter provides an online SQLite backup operation:
 9. re-prove the published bytes against the pinned proof before reporting success; if they differ, withdraw the published name and `fsync` the directory so the withdrawal is itself durable;
 10. commit the directory entry (attested backup-directory descriptor in hosted mode, parent-directory `fsync` in local-file mode).
 
-When the backup directory itself did not previously exist, recursive creation
-also adds a new directory link into the durable root (and any intermediate
-components). fsyncing the backup directory alone commits the files inside it but
-not that new link, so a crash after a reported-successful first backup could
-lose the whole directory. The first backup therefore durably commits each newly
-created component's parent link before reporting success; an already-existing
-backup directory does no extra directory work. Like every directory `fsync`
-here this is POSIX-only, preserving the portable local/workstation contract.
+Recursive creation of the backup directory adds a new directory link into the
+durable root (and into any intermediate components). fsyncing the backup
+directory alone commits the files inside it but not those links, so a crash
+after a reported-successful backup could lose the whole directory and the
+recovery point with it.
+
+Every successful backup therefore recommits the parent-directory chain, whether
+or not this invocation created it. Keying the commit off "did THIS invocation's
+`mkdir` create it" was not enough: an earlier backup can create the hierarchy
+and then crash or fail before its parent-link `fsync` completes, after which
+every later invocation sees the directories already present, records nothing as
+newly created, and commits only the backup directory.
+
+The chain runs from the backup directory's own parent up to an anchor this
+process never creates, so the work stays bounded:
+
+- **durable-volume mode** — the anchor is `FACTORYOS_HQ_DURABLE_ROOT`, whose own
+  link belongs to the mount. The chain is therefore bounded to the configured
+  backup path and never climbs above the attested volume. Any failure in the
+  chain fails the backup closed.
+- **local-file mode** — there is no attested volume boundary, so the anchor is
+  the filesystem root, capped at 32 components. The backup directory's own
+  parent is still required; ancestors above it are best-effort, because a
+  workstation path can climb into system directories the process may traverse
+  but not open for reading.
+
+Like every directory `fsync` here this is POSIX-only, preserving the portable
+local/workstation contract.
 
 Verification and publication are bound to the exact inode the backup wrote, not to whatever a pathname happens to resolve to afterwards. A partial substituted at any point around `db.backup()` is refused rather than published, and an unproven pathname is never deleted on the caller's behalf.
+
+**Rollback is scoped to this invocation's own entry.** What a publication
+attempt actually published is established from the retained partial descriptor's
+link count across the hard link — never from a stat read back from the
+destination pathname, which is exactly the read another actor can poison. If the
+destination has been replaced between the link and the identity check, the
+comparison fails, the backup fails closed, and the replacement is preserved
+untouched: this invocation never unlinks a file it did not create. The distinct
+case where the link SOURCE was substituted, so our own link attached an inode we
+never verified, is still withdrawn — unverified bytes must not survive under the
+final backup name — but only while the entry is provably the extra hard link we
+added (not our verified inode, still the inode the source names, still multiply
+linked), so the substituted file keeps its own name and its data.
 
 Within the declared single-writer topology, the before/after content proofs detect ordinary in-place mutation during verification. They do **not** make the inode immutable and do not close an adversarial A→B→A rewrite performed by an unauthorized same-permission raw writer. Such a writer is outside the Stage 3 threat boundary defined above.
 
@@ -249,7 +282,8 @@ Switching a live deployment from its current database to a restored database is 
 - hosted mode refuses an ordinary directory masquerading as the durable root when no volume is mounted there, and accepts a correctly attested mount;
 - hosted mode refuses an ephemeral filesystem (`tmpfs`/overlay/…) mounted exactly at the durable root even when its mount identity matches, refuses read-only and unclassified filesystems, and accepts a permitted persistent filesystem; the operator attestation widens only the unclassified case and can never attest a known-ephemeral/virtual/unsupported filesystem;
 - hosted mode refuses missing/symlink DB entries and requires opened-inode attestation;
-- a first backup into a newly created backup directory durably commits the new directory link before success, while an existing backup directory does no extra directory work;
+- a first backup into a newly created backup directory durably commits the new directory link before success, and so does a later backup into a pre-existing directory whose link was never committed (including a retry after the creating invocation failed), with the recommitted chain bounded to the configured backup path and never climbing above the attested durable root;
+- a destination replaced between publication and the identity check is detected, the replacement is preserved rather than unlinked, and the invocation's own published inode is still withdrawn when rejection requires it;
 - a path swap after descriptor anchoring cannot redirect DDL/migrations/WAL writes to the replacement target;
 - canonical HQ rows survive close/reopen;
 - idempotency uniqueness survives restart;
