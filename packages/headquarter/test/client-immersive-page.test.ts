@@ -997,6 +997,111 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     page.close();
   });
 
+  it('refuses a fetched document that says a live room is still awaiting', async () => {
+    // Codex round 12. `awaiting` means "no state document has been read yet" —
+    // it is what the STATIC build ships, from hydrateRooms(null, null). The
+    // state route always calls hydrateRooms with a real state, so a fetched
+    // document can never legitimately contain it. Accepting it let a payload
+    // render canonical metrics and lit rooms underneath a NO STATE READ chip
+    // while advancing the provenance stamp: the page claiming it had read
+    // nothing and showing what it read, at the same time.
+    const live = deployment();
+    const page = await loadPage(live.deps);
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toContain('provenance live');
+
+    const original = page.window.fetch as (input: string) => Promise<unknown>;
+    page.window.fetch = (input: string) => {
+      if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+        return Promise.resolve({
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              ok: true,
+              generatedAt: new Date().toISOString(),
+              mode: 'live',
+              killSwitch: { globalEngaged: false, engagedScopes: [] },
+              rooms: HQ_ROOMS.map((room) => ({
+                roomId: room.id,
+                ordinal: room.ordinal,
+                status: room.binding.kind === 'live' ? 'awaiting' : room.binding.kind,
+                liveness: room.binding.kind === 'live' ? 'active' : 'dark',
+                metrics:
+                  room.binding.kind === 'live'
+                    ? [{ label: 'Running now', value: 9, hint: 'Under a NO STATE READ chip.', tone: 'accent' }]
+                    : [],
+                rows: [],
+                emptyMessage: 'x',
+                provenance: 'x',
+              })),
+            }),
+        });
+      }
+      return original(input);
+    };
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toBe('');
+    expect(page.document.body.textContent).not.toContain('Running now');
+    expect(bodyText(page.document, 'home')).toContain('cannot read');
+    page.close();
+  });
+
+  it('never lets a response rewrite what a static room says', async () => {
+    // Codex round 12, and the reason the fix is structural rather than a fourth
+    // field check. I had pinned status, then liveness, then metrics and rows —
+    // and a fabricated `emptyMessage` still walked through and replaced the
+    // registry-backed NOT RECORDED explanation with server text. A static room's
+    // statement does not depend on a session, so no response has business
+    // rewriting it: those panels are validated but never re-rendered.
+    const live = deployment();
+    const page = await loadPage(live.deps);
+    const research = HQ_ROOMS.find((room) => room.id === 'research')!;
+    const researchBinding = research.binding;
+    if (researchBinding.kind !== 'not_recorded') {
+      throw new Error(`research is bound ${researchBinding.kind}, so this test no longer tests what it claims`);
+    }
+
+    const original = page.window.fetch as (input: string) => Promise<unknown>;
+    page.window.fetch = (input: string) => {
+      if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+        return Promise.resolve({
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              ok: true,
+              generatedAt: new Date().toISOString(),
+              mode: 'live',
+              killSwitch: { globalEngaged: false, engagedScopes: [] },
+              rooms: HQ_ROOMS.map((room) => ({
+                roomId: room.id,
+                ordinal: room.ordinal,
+                status: room.binding.kind === 'live' ? 'live' : room.binding.kind,
+                liveness: 'dark',
+                metrics: [],
+                rows: [],
+                // Everything the guard checks is correct. Only the words lie.
+                emptyMessage:
+                  room.id === 'research' ? 'Research throughput is tracked and healthy.' : 'x',
+                provenance: room.id === 'research' ? 'Canonical research telemetry.' : 'x',
+              })),
+            }),
+        });
+      }
+      return original(input);
+    };
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    // This document is well-formed, so the live rooms hydrate normally...
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toContain('provenance live');
+    // ...and the static room still says exactly what the registry says.
+    expect(bodyText(page.document, 'research')).toContain(researchBinding.reason);
+    expect(page.document.body.textContent).not.toContain('Research throughput is tracked and healthy.');
+    expect(page.document.body.textContent).not.toContain('Canonical research telemetry.');
+    page.close();
+  });
+
   it('refuses a provenance mode the server cannot emit', async () => {
     // I argued against this one round ago: the server owns the vocabulary and
     // might grow it, so a client checking a list would blank a legitimate page.

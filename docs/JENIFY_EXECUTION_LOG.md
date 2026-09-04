@@ -1060,3 +1060,40 @@ Evidence at this commit: headquarter 1914, hq-host 206, hq-server 20, server 569
 web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS
 (shaders compiled and linked, lit 2441 warm samples vs 0 dark, motion
 36/0/35, framesAfterLoss 0).
+
+### Stage 4, review round 12 — Codex
+
+Two findings, both real, and both the same recurring shape: I had enforced a
+SUBSET of what `hydrateRoom` guarantees. That is now the fifth round in which the
+observation was right and the enforcement was narrower than the invariant, so
+this time one of the fixes is structural rather than another field check.
+
+**`awaiting` was accepted from the wire.** It means "no state document has been
+read yet" — what the static build ships, from `hydrateRooms(null, null)`. The
+state route always calls `hydrateRooms` with a real state, so a fetched document
+can never legitimately contain it. Accepting it let a payload render canonical
+metrics and lit rooms underneath a NO STATE READ chip while advancing the
+provenance stamp: the page claiming it had read nothing and showing what it read,
+simultaneously. Live-bound rooms must now be exactly `live`.
+
+**A response could rewrite what a static room says.** I had pinned status, then
+liveness, then metrics and rows — and a fabricated `emptyMessage` still walked
+through and replaced the registry-backed NOT RECORDED explanation with server
+text. Adding a fourth and fifth field check was the losing game. Static panels
+are now **never re-rendered from the wire at all**: their statement comes from
+the registry, does not depend on a session, and the server-rendered sentence is
+already the right one. They are still validated — the shell reads their ordinal
+and liveness, and a document that omits or malforms one is still refused whole —
+but nothing in a response can reach their text. This also matches what
+`clearRooms` has always done with those panels.
+
+The lesson, stated once more because five rounds have now taught it: when a
+reviewer names a class of defect, the fix is to enforce the invariant, not to
+close the instance. Where the invariant is "this text never comes from the wire",
+the enforcement is to stop reading it from the wire — not to compare it against
+what it should have been.
+
+Evidence at this commit: headquarter 1916, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS
+(lit 2439 vs 0 dark, motion 31/0/33, framesAfterLoss 0).

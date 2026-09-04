@@ -212,6 +212,20 @@ export function clientRuntimeScript(): string {
   function renderRoom(view) {
     var panel = panelFor(view.roomId);
     if (!panel) return;
+    // A static room is never re-rendered from the wire.
+    //
+    // Its statement comes from the registry and does not depend on a session,
+    // so the server-rendered sentence is already the right one and no response
+    // has business replacing it. Constraining the fields one at a time was the
+    // losing game: I pinned status and liveness, then metrics and rows, and a
+    // fabricated emptyMessage or provenance still walked through and replaced
+    // the NOT RECORDED explanation with server text (Codex round 12).
+    //
+    // Skipping is the structural answer rather than a fourth check, and it
+    // matches what clearRooms already does with these panels. They are still
+    // VALIDATED — the shell reads their ordinal and liveness, and a document
+    // that omits or malforms one is still refused whole.
+    if (panel.getAttribute('data-hq-room-static') === 'yes') return;
     var statusNode = panel.querySelector('[data-hq-room-status]');
     var body = panel.querySelector('[data-hq-room-body]');
     var provenanceNode = panel.querySelector('[data-hq-room-provenance]');
@@ -329,7 +343,16 @@ export function clientRuntimeScript(): string {
   // guard — what would still get through it — instead of waiting to be told.
   function statusAllowed(view) {
     var binding = ROOM_BINDING_BY_ID[view.roomId];
-    if (binding === 'live') return view.status === 'live' || view.status === 'awaiting';
+    // 'live', and NOT 'awaiting'.
+    //
+    // 'awaiting' means "no state document has been read yet" — it is what the
+    // static build ships, from hydrateRooms(null, null). The state route always
+    // calls hydrateRooms with a real state, so a fetched document can never
+    // legitimately contain it. Accepting it let a payload render canonical
+    // metrics and lit rooms underneath a NO STATE READ chip while advancing the
+    // provenance stamp: the page simultaneously claiming it had read nothing
+    // and showing what it read (Codex round 12).
+    if (binding === 'live') return view.status === 'live';
     // A static room's truth does not depend on a session, so it may not move.
     return view.status === binding && view.liveness === 'dark';
   }
