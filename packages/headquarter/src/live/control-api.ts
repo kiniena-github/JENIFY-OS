@@ -56,6 +56,8 @@
  */
 
 import { founderConsole, type ApprovalCard } from '../application/console.js';
+import { hydrateRooms } from '../client/hydrate.js';
+import { liveSnapshotFromOperations } from './snapshot.js';
 import { capabilityRowFor } from '../application/service.js';
 import type { HeadquarterOperations } from '../application/service.js';
 import { taskActionDigest } from '../operator/approvals.js';
@@ -106,6 +108,15 @@ export const MAX_APPROVAL_NOTE_LENGTH = 500;
 export const CONTROL_ROUTES = {
   session: `${CONTROL_API_PREFIX}/session`,
   approvals: `${CONTROL_API_PREFIX}/approvals`,
+  /**
+   * The Stage 4 read route: canonical HQ state, projected into the seventeen
+   * approved rooms, for an authenticated Founder session.
+   *
+   * READ ONLY, and the same projection the polled snapshot uses — see the
+   * `state` branch in `route()` for why it is a projection of an existing read
+   * model rather than a new source of truth.
+   */
+  state: `${CONTROL_API_PREFIX}/state`,
   orders: `${CONTROL_API_PREFIX}/orders`,
   approve: `${CONTROL_API_PREFIX}/approvals/approve`,
   deny: `${CONTROL_API_PREFIX}/approvals/deny`,
@@ -272,7 +283,10 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
   const now = deps.now ?? (() => new Date());
 
   const known =
-    (method === 'GET' && (path === CONTROL_ROUTES.session || path === CONTROL_ROUTES.approvals)) ||
+    (method === 'GET' &&
+      (path === CONTROL_ROUTES.session ||
+        path === CONTROL_ROUTES.approvals ||
+        path === CONTROL_ROUTES.state)) ||
     (method === 'POST' &&
       (path === CONTROL_ROUTES.orders ||
         path === CONTROL_ROUTES.approve ||
@@ -447,6 +461,64 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         approvals: console_.approvals.map((card) =>
           approvalView(card, founder.principal.id, isDispatchBlocked(deps, card.taskId)),
         ),
+      }),
+    );
+  }
+
+  if (method === 'GET' && path === CONTROL_ROUTES.state) {
+    // Canonical state, for a Founder session, projected into the seventeen
+    // approved rooms (issue #250, Stage 4 §A.2–A.4).
+    //
+    // ## Why this route exists at all
+    //
+    // Until Stage 4 the HQ pages carried their data BAKED IN by
+    // `build-site.ts`, and the browser asked the server only whether that bake
+    // was stale. This is the seam that ends that: same-origin, Founder-gated,
+    // read-only, and answered from the live database rather than from a file
+    // written at build time.
+    //
+    // ## Why it is a projection, not a new read model
+    //
+    // `liveSnapshotFromOperations` is the SAME builder the polled snapshot
+    // uses. Reusing it is what keeps the two artefacts from disagreeing, and it
+    // means this route inherits the guarantees that were already proven for it:
+    // no task payloads, no secrets (`assertBrowserSafe`), and no invented
+    // metric (`assertNoFabricatedFields` refuses cost/token/ETA/progress
+    // fields on the way out, so a future field of that shape fails here rather
+    // than reaching a browser).
+    //
+    // ## Why the room projection happens HERE and not in the browser
+    //
+    // So there is exactly one implementation of "what does this room show", in
+    // TypeScript, under test. The browser renders text it was handed; it holds
+    // no rule it could get wrong. See `client/contracts.ts`.
+    //
+    // `safe()` walks the finished body a second time regardless, because this
+    // response carries session-derived fields the snapshot does not.
+    const state = liveSnapshotFromOperations(deps.ops, {
+      now: now().toISOString(),
+      env: deps.secretsEnv,
+      dispatchAvailability: deps.dispatchAvailability,
+    });
+    const rooms = hydrateRooms(state, {
+      ok: true,
+      authenticated: true,
+      founder: true,
+      principalId: founder.principal.id,
+      displayName: founder.principal.displayName,
+      approvalAuthority: founder.principal.approvalAuthority,
+      controls: controlAvailability(deps, founder, request),
+    });
+    audit('allowed', 'read_state', founder);
+    return safe(
+      json(200, {
+        ok: true,
+        generatedAt: state.generatedAt,
+        mode: state.mode,
+        note: state.note,
+        counts: state.counts,
+        killSwitch: state.operations.data.killSwitch,
+        rooms,
       }),
     );
   }

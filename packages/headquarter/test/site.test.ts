@@ -93,6 +93,20 @@ describe('buildSite', () => {
       // Footer provenance, plus a banner at the top of the page.
       expect(html).toContain('data-provenance');
       expect(html).toContain('data-provenance-banner');
+      // The immersive HQ is the one page that holds no bundle data, so the
+      // bundle's note would be a claim about content it does not carry — and it
+      // would sit above a runtime stamp reading `provenance live`, which is the
+      // contradiction this exemption exists to remove (Codex round 18).
+      //
+      // It is an exemption from the BUNDLE's note, not from stating provenance:
+      // the assertions above still require a note and a banner, and the test
+      // below requires that note to describe the authenticated read. A page
+      // that quietly dropped its provenance entirely would fail here.
+      if (page.file === 'immersive.html') {
+        expect(html).toContain('carries no build-time data');
+        expect(html).not.toContain('reconstructed from real GitHub-visible JENIFY-OS activity');
+        continue;
+      }
       expect(html).toContain('reconstructed from real GitHub-visible JENIFY-OS activity');
     }
     // A bundle without a note renders no empty provenance footer or banner.
@@ -105,7 +119,21 @@ describe('buildSite', () => {
     // Newest timestamp in the sample bundle, not wall-clock time.
     expect(bundleAsOf(sample)).toBe('2026-08-26T10:30:00Z');
     for (const page of HQ_PAGES) {
-      expect(site.get(page.file)!).toContain('As of 2026-08-26T10:30:00Z');
+      const html = site.get(page.file)!;
+      // The immersive HQ carries no bundle data, so a bundle timestamp there
+      // would be a claim about something the page does not show — and it is
+      // what installs the snapshot poll, whose verdicts ("UPDATED — page not
+      // rebuilt", "OFFLINE — build-time data", "SAMPLE — not live data") could
+      // appear above rooms hydrated live from the control API (Codex round 19).
+      // The exemption is asserted rather than skipped: the page must carry NO
+      // build-time instant and NO freshness UI, so it cannot quietly regain one.
+      if (page.file === 'immersive.html') {
+        expect(html).not.toContain('As of ');
+        expect(html).not.toContain('data-as-of');
+        expect(html).not.toContain('data-live-state');
+        continue;
+      }
+      expect(html).toContain('As of 2026-08-26T10:30:00Z');
     }
     // Renders are reproducible: the same bundle always produces the same HTML.
     expect(buildSite(sample).get('index.html')).toBe(site.get('index.html'));

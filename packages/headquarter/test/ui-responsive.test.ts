@@ -143,8 +143,16 @@ describe('accessibility and keyboard usability', () => {
 
   it.each(pages)('%s never conveys status by colour alone', (_title, html) => {
     // Every status chip carries a text label next to its colour dot.
+    //
+    // The pattern used to require the class attribute to be the LAST one
+    // (`class="chip …">`), so every chip carrying another attribute was
+    // skipped silently — including all seventeen `data-hq-room-status` chips
+    // on the immersive page, which is the page this rule matters most on. The
+    // sanity check below still passed on the chips it did match, so the guard
+    // went on claiming it covered the page (Codex round 19, found while its
+    // as-of chip was removed and this page dropped to zero matches).
     const withoutDots = bodyOf(html).replaceAll('<span class="dot" aria-hidden="true"></span>', '');
-    const chips = [...withoutDots.matchAll(/<span class="chip[^"]*">(.*?)<\/span>/g)];
+    const chips = [...withoutDots.matchAll(/<span class="chip[^"]*"[^>]*>(.*?)<\/span>/g)];
     expect(chips.length).toBeGreaterThan(0);
     for (const [, inner] of chips) {
       expect(inner.replace(/<[^>]+>/g, '').trim().length).toBeGreaterThan(0);

@@ -134,6 +134,24 @@ export const CONNECTION_STATE_LABELS: Record<ConnectionState, string> = {
  * Tone is a presentation fact, not a connectivity claim: `LIT_CONNECTION_STATES`
  * still decides what may be drawn as live, and a warned pillar stays unlit.
  */
+/**
+ * The states that may be drawn as genuinely reachable.
+ *
+ * Only `connected` and `local_only` — the two this module allows to carry
+ * effective capabilities. Everything else, `configured` and `dispatchable`
+ * included, means "the setup looks right", which is not the same claim as
+ * "this works": drawing them as live would make the weaker claim look like the
+ * stronger one.
+ *
+ * It lives HERE, next to `CONNECTION_STATE_TONE`, because two surfaces need it
+ * and neither should own it. It used to be declared in the spatial floor's
+ * presentation layer while `client/hydrate.ts` kept its own `connected ||
+ * local_only` beside it — two lists agreeing by luck, which is the same
+ * restatement shape that produced the tone-mapping defect one round earlier.
+ * Moved rather than re-copied, so there is one list and both views read it.
+ */
+export const LIT_CONNECTION_STATES: readonly ConnectionState[] = ['connected', 'local_only'];
+
 export const CONNECTION_STATE_TONE: Record<ConnectionState, 'accent' | 'info' | 'warn' | 'danger' | 'neutral'> = {
   connected: 'accent',
   local_only: 'info',

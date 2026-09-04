@@ -12,7 +12,12 @@ Written 2026-09-02 against `main` = `197844a8d637622fa08c3bdce02159070965d738`
 >   HQ route/host test files pass **unedited**.
 > - **Stage 2 — BLOCKED on Founder Gate A** (§7). Not started.
 > - **Stage 3 — absorbs open issue #227.** Not started.
-> - **Stages 4–5 —** not started.
+> - **Stage 4 — IMPLEMENTED AND TECHNICALLY VERIFIED; NOT ACCEPTED.** Branch
+>   `claude/phase-2-stage-4-client-runtime-3d`, PR #251, issue #250. Exact-head CI green
+>   and every independent-review finding resolved; still open are a fresh exact-head
+>   review and **Founder visual acceptance against the `HQ-UI-3D` reference pack**.
+>   Not merged, not deployed.
+> - **Stage 5 —** not started.
 
 Targets this plan prepares for: `hq.jenifylabs.com`, a future Jenify HQ Desktop, and one core
 shared by web and desktop. Official visual direction: the Drive `HQ-UI-3D` reference pack
@@ -266,11 +271,61 @@ fencing, approval-digest binding, dispatch evidence and audit history; do not re
 serverless filesystem state; provider-neutral code and tests first, then stop at the Founder gate
 for any paid/irreversible service choice.
 
-### Stage 4 — Client runtime and the 3D experience layer (`packages/hq-client`)
-- New package; the static server-rendered site **remains the fallback and stays truthful**.
-- Reuse `ui/spatial/state.ts` unchanged as the honesty boundary — 3D shows real state or nothing.
-- Feature-flagged. The Drive concept images are references, not specs.
-- Keep the existing enforced invariants (§5) — they must survive into any client runtime.
+### Stage 4 — Client runtime and the 3D experience layer — **IMPLEMENTED, NOT ACCEPTED** (issue #250)
+
+**Status, stated precisely, because "DONE" here was wrong in both directions.** This heading
+read **DONE** while the Progress block six lines into this same file read *"Stages 4–5 — not
+started"* — the canonical plan contradicting itself about the same stage, and the DONE half
+presenting an unmet review-and-acceptance gate as satisfied. A plan for a product whose whole
+claim is that it never asserts more than the evidence supports cannot carry that.
+
+What is true at PR #251:
+
+- **Built and technically verified.** Exact-head JENIFY CI green; every finding from the
+  independent review lane fixed, answered and resolved; `evidence:webgl` PASS on a real
+  browser graphics stack.
+- **Not reviewed-clear.** A fresh exact-head review with no material findings is a condition
+  of completion and had not been obtained when this was written.
+- **Not accepted.** Founder visual acceptance against the `HQ-UI-3D` reference pack has not
+  happened, and cannot happen in an automated session — the reference images are local to the
+  Founder's workstation and were never read by the implementation.
+- **Not merged and not deployed.** No `main` mutation, no promotion, no DNS, no credentials,
+  no paid service.
+
+Stage 4 becomes DONE when a Founder records acceptance, not when its tests pass. The
+engineering claims below are what the code holds; they are not that record.
+- The static server-rendered site **remains the fallback and stays truthful** — held.
+- 3D shows real state or nothing — held, and tightened: liveness is computed in
+  `client/hydrate.ts` from canonical counts alone, so the shell has no way to light a
+  room the state document did not.
+- The existing invariants (§5) all survive: the emitted HTML still carries no form,
+  button or inline handler; every page fetch is allow-listed; every string reaches the
+  DOM through `textContent`.
+
+**One deviation from this plan, decided during implementation and recorded here rather
+than escalated** (routine structural choice, per `CLAUDE.md`): the runtime landed as
+`packages/headquarter/src/client/` with its own export subpath
+(`@factoryos/headquarter/client`), *not* as a separate `packages/hq-client` workspace.
+A separate package would have been circular from the first commit — `ui/render.ts` and
+`ui/site.ts` must import the immersive page body to emit it, while the client must
+import `live/snapshot.ts` and `ui/components.ts` — and a circular workspace dependency
+is a worse boundary than a clear module with a declared subpath. Extracting it later is
+mechanical: the module imports exactly three things from the rest of the package
+(`live/snapshot`, `live/control-api` for the route constants, `ui/components` for
+`escapeHtml`/`section`), and nothing imports it except `ui/render.ts`, `ui/site.ts`,
+`ui/theme.ts` and the one new `live/control-api.ts` route.
+
+**Also decided during implementation:** the 3D shell is written directly against WebGL
+rather than Three.js / React Three Fiber. The building is procedural — boxes, a floor
+grid, glass facades and light columns, ~1.2k triangles — so a scene graph would have
+bought nothing, and taking the dependency would have meant either a CDN `<script>` (an
+untracked external asset on a page that renders canonical company state, and a
+third-party origin on the one document that must stay same-origin for its session
+cookie) or a bundler in a package whose architecture is pure functions from data to
+HTML. The whole shell — shaders, renderer and building — is ~29 kB gzipped, smaller
+than a 3D library's minified core, which is also why no lazy-loading split was needed.
+If a later phase needs skinned meshes, glTF or post-processing, that is the point to
+take the dependency.
 
 ### Stage 5 — FOUNDER GATE B: repo split, only if still wanted (§6)
 If taken, use `git subtree split` to preserve history, never a copy-paste of files.

@@ -55,6 +55,11 @@ import { CONTROL_ROUTES } from '../live/control-api.js';
 export const CONTROL_FETCH_TARGETS: readonly string[] = [
   CONTROL_ROUTES.session,
   CONTROL_ROUTES.approvals,
+  // Stage 4's authenticated read route. It belongs on this list for the same
+  // reason as the others: it is a control-API path an HQ page fetches, and the
+  // page-wide audit in `test/control-console.test.ts` is only load-bearing if
+  // the list is complete.
+  CONTROL_ROUTES.state,
   CONTROL_ROUTES.orders,
   CONTROL_ROUTES.approve,
   CONTROL_ROUTES.deny,
@@ -136,7 +141,13 @@ function freshOrderKey() {
 }`;
 
 /** Shared DOM helpers embedded in both console scripts. */
-const DOM_HELPERS_JS = `function el(tag, className, text) {
+/**
+ * Shared browser helpers. Exported since Stage 4 so the immersive client
+ * runtime builds its DOM through the SAME `el()` — the one that sets
+ * `textContent` and never `innerHTML`, which is what keeps server-supplied
+ * strings from becoming markup on any HQ page.
+ */
+export const DOM_HELPERS_JS = `function el(tag, className, text) {
   var node = document.createElement(tag);
   if (className) node.className = className;
   if (text != null) node.textContent = text;
@@ -156,6 +167,15 @@ function postJson(path, payload) {
     headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify(payload)
   }));
+}
+// Stage 4: tell the client runtime that canonical state moved, so a page
+// showing all of HQ re-READS it rather than patching itself from a response
+// that describes one task. Optional by design — the control consoles ship on
+// pages that have no runtime, and a missing hook must change nothing.
+function notifyStateChanged() {
+  if (typeof window.__hqStateChanged === 'function') {
+    try { window.__hqStateChanged(); } catch (e) {}
+  }
 }`;
 
 /**
@@ -372,6 +392,7 @@ export function directOrderConsoleScript(
                 routeLine + '). It awaits Founder approval and executes nothing until then.' + blockedNote
               : 'This exact order already exists as task ' + body.taskId +
                 ' \\u2014 deduplicated; no second task was created.' + blockedNote;
+            notifyStateChanged();
             return;
           }
           var error = body.error || {};
@@ -509,6 +530,7 @@ export function approvalsConsoleScript(): string {
         var controls = box.querySelectorAll('button, input, textarea');
         for (var i = 0; i < controls.length; i++) controls[i].disabled = true;
         if (stepUp) stepUp.value = '';
+        notifyStateChanged();
         return;
       }
       var error = body.error || {};

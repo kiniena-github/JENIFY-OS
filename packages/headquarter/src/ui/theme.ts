@@ -20,6 +20,7 @@
  */
 
 import { SPATIAL_CSS } from './spatial/theme.js';
+import { IMMERSIVE_CSS } from '../client/theme.js';
 
 const BASE_CSS = `
 :root {
@@ -575,4 +576,4 @@ footer[data-provenance] {
  * `BASE_CSS` uses `!important`, so it disables the spatial animations
  * regardless of the order the two halves appear in.
  */
-export const THEME_CSS = `${BASE_CSS}${SPATIAL_CSS}`;
+export const THEME_CSS = `${BASE_CSS}${SPATIAL_CSS}${IMMERSIVE_CSS}`;

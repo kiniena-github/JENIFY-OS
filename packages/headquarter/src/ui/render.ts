@@ -73,9 +73,11 @@ import { DIRECT_ORDER_ROUTES, type RouteResolution } from '../live/orders.js';
 import { SOURCE_MODE_LABELS, type SourceMode } from '../live/provenance.js';
 import type { FloorState } from './spatial/state.js';
 import { spatialFloorBody } from './spatial/page.js';
+import { immersiveBody } from '../client/page.js';
 
 export const HQ_PAGES = [
   { file: 'index.html', title: 'Command Center', glyph: '◈' },
+  { file: 'immersive.html', title: 'Immersive HQ', glyph: '◉' },
   { file: 'headquarters.html', title: 'Headquarters Floor', glyph: '⬡' },
   { file: 'projects.html', title: 'Projects', glyph: '▤' },
   { file: 'executive-room.html', title: 'Executive Room', glyph: '◎' },
@@ -126,8 +128,23 @@ interface ShellOptions {
   eyebrow: string;
   /** One sentence explaining what the page answers. */
   lede: string;
-  /** Instant the rendered view is current as of. */
-  asOf: string;
+  /**
+   * Instant the rendered view is current as of — a fact about the BUNDLE this
+   * page was built from, not about the reader's clock.
+   *
+   * Omit it, and the page gets no as-of chip, no freshness chip, no
+   * "checking whether a newer snapshot exists" line and no
+   * `hq-snapshot.json` poll. That is not cosmetic: the poll's own verdicts are
+   * `UPDATED — page not rebuilt`, `OFFLINE — build-time data` and
+   * `SAMPLE — not live data`, every one of which is a claim about the build's
+   * snapshot. On a page whose rooms are hydrated from the authenticated
+   * control API, those verdicts describe something the reader is not looking
+   * at, and can call a live view stale (Codex round 19).
+   *
+   * Exactly one page omits it today, and it is the one that renders no bundle
+   * data at all.
+   */
+  asOf?: string;
   body: string;
   provenanceNote?: string;
   /**
@@ -330,15 +347,19 @@ ${REFERRER_POLICY_META}
 <p class="eyebrow">${escapeHtml(eyebrow)}</p>
 <h1>${escapeHtml(title)}</h1>
 <p class="lede">${escapeHtml(lede)}</p>
-<p class="row" data-as-of>${chip(`As of ${asOf}`, 'neutral', true)}${
-    sourceMode ? chip(SOURCE_MODE_LABELS[sourceMode], SOURCE_MODE_TONE[sourceMode], true) : ''
-  }${freshnessChip()}</p>
-<p class="faint" data-live-detail>Checking whether a newer snapshot exists…</p>
+${
+    asOf === undefined
+      ? ''
+      : `<p class="row" data-as-of>${chip(`As of ${asOf}`, 'neutral', true)}${
+          sourceMode ? chip(SOURCE_MODE_LABELS[sourceMode], SOURCE_MODE_TONE[sourceMode], true) : ''
+        }${freshnessChip()}</p>
+<p class="faint" data-live-detail>Checking whether a newer snapshot exists…</p>`
+  }
 </div>
 ${provenanceNote ? provenanceBanner(provenanceNote) : ''}
 ${body}
 ${footer}
-${liveRefreshScript(asOf)}
+${asOf === undefined ? '' : liveRefreshScript(asOf)}
 </main>
 </div>
 </body>
@@ -1386,5 +1407,70 @@ export function renderHeadquartersFloor({
     body: spatialFloorBody({ floor, nowIso, specialists }),
     provenanceNote,
     sourceMode,
+  });
+}
+
+/**
+ * What this page says about where its own content came from.
+ *
+ * NOT the bundle's provenance. The signature below takes no bundle data, and
+ * this is the reason: everything the shell would otherwise stamp — the source
+ * chip, the provenance banner — describes the build's snapshot, and this page
+ * contains none of it. A build from a `sample` bundle therefore printed a
+ * SAMPLE chip and the bundle's caveat at the top of a page whose runtime, one
+ * paragraph below, stamps the live document it just read as `provenance live`.
+ * Two provenance claims about one page, one of them about data the page does
+ * not hold (Codex round 18).
+ *
+ * So the page states its own truth instead, and no source chip is drawn: the
+ * mode of the document is not knowable at build time, and the runtime prints
+ * the real one as soon as HQ answers.
+ */
+const IMMERSIVE_PROVENANCE_NOTE =
+  'This page carries no build-time data. Every number and every lit room is read from the ' +
+  'authenticated HQ control API in your browser, and the line under the title states the canonical ' +
+  'state document’s own time and provenance once HQ has answered. Until it does, the rooms say so ' +
+  'rather than showing a zero.';
+
+/**
+ * The immersive HQ (issue #250, Phase 2 Stage 4).
+ *
+ * Deliberately takes NO data. Every other page on this site is a projection of
+ * the build's bundle; this one is a projection of the authenticated control
+ * API, read in the browser at run time. Handing it bundle data would have
+ * reintroduced exactly the thing Stage 4 removes — a page whose numbers came
+ * from a build rather than from HQ — so the signature makes that impossible
+ * rather than merely discouraged.
+ *
+ * That was true of the room data and false of the chrome, twice. Round 18
+ * removed the bundle's provenance note and source-mode chip; round 19 removed
+ * the last piece, the timestamp — and with it the freshness poll it installs.
+ *
+ * The timestamp was defended in this docstring as being "about THIS RENDER".
+ * It is not: `buildSite` passes the newest instant in the BUNDLE, so the chip
+ * read `As of 2026-08-26T10:30:00Z` on a page holding nothing from that
+ * bundle. Worse, `shell()` uses it to start a `hq-snapshot.json` poll whose
+ * verdicts are `UPDATED — page not rebuilt`, `OFFLINE — build-time data` and
+ * `SAMPLE — not live data`. Any of those could appear in the header of a page
+ * whose rooms had just been hydrated live from the control API — a stale-build
+ * warning over current state, which is the same contradiction as round 18 in
+ * its loudest possible form.
+ *
+ * This function now takes nothing at all, which is what the docstring above
+ * has claimed since the first commit. The only timestamp on the page is the
+ * one the runtime writes from the canonical state document itself.
+ */
+export function renderImmersiveHq(): string {
+  return shell({
+    title: 'Immersive HQ',
+    activeFile: 'immersive.html',
+    eyebrow: 'The building',
+    lede:
+      'All seventeen HQ destinations as one place you move through. Every room is lit by canonical ' +
+      'state read from the authenticated control API — nothing here is baked in at build time, and ' +
+      'a dark room is a room HQ is holding nothing in.',
+    // No asOf: no bundle timestamp, no freshness chip, no snapshot poll.
+    body: immersiveBody(),
+    provenanceNote: IMMERSIVE_PROVENANCE_NOTE,
   });
 }

@@ -83,8 +83,9 @@ describe('the real site build', () => {
     artifacts = runBuild();
   }, 120_000);
 
-  it('produced the nine pages and the snapshot', () => {
-    expect(artifacts.size).toBe(10);
+  it('produced the ten pages and the snapshot', () => {
+    // Ten since Stage 4 (issue #250) added `immersive.html`.
+    expect(artifacts.size).toBe(11);
     expect(artifacts.has('hq-snapshot.json')).toBe(true);
     expect(artifacts.has('index.html')).toBe(true);
   });

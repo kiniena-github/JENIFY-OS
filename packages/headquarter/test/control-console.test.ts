@@ -112,6 +112,22 @@ describe('every page script speaks only to the control API and the snapshot', ()
     }
   });
 
+  it('allow-lists every read() call site against the two authenticated read routes', () => {
+    // `read(path)` is the Stage 4 client runtime's indirection over `fetch`.
+    // Its own `fetch(path,` head is on the allow-list above, so without this
+    // second audit the indirection would be a hole in the first one: any path
+    // at all could reach the network through it.
+    for (const page of HQ_PAGES) {
+      const scripts = scriptsOf(site.get(page.file)!);
+      for (const match of scripts.matchAll(/[^a-zA-Z_]read\((\w+)[,)]/g)) {
+        expect(
+          ['SESSION_PATH', 'STATE_PATH', 'path'].includes(match[1]!),
+          `${page.file}: unexpected read target: ${match[1]}`,
+        ).toBe(true);
+      }
+    }
+  });
+
   it('allow-lists every postJson call site against the three write routes', () => {
     for (const page of HQ_PAGES) {
       const scripts = scriptsOf(site.get(page.file)!);

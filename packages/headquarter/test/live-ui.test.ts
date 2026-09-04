@@ -22,6 +22,7 @@ import {
 } from '../src/ui/live-refresh.js';
 import { jsonForScript } from '../src/ui/components.js';
 import { CONNECTION_CATALOG } from '../src/live/connections.js';
+import { SOURCE_MODE_LABELS } from '../src/live/provenance.js';
 
 const samplePath = join(dirname(fileURLToPath(import.meta.url)), '..', 'sample-data', 'hq-sample.json');
 const sample = JSON.parse(readFileSync(samplePath, 'utf8')) as HeadquarterData;
@@ -58,12 +59,12 @@ function freshnessVerdict(): (
 }
 
 describe('the Connections page joins the site without disturbing it', () => {
-  it('keeps all seven original pages, Connections as the eighth, and the Headquarters Floor as the ninth', () => {
+  it('keeps every earlier page and adds the immersive HQ as the tenth', () => {
     // The count is asserted so a page can never be added silently; the list
     // below is the part that matters, and it is the original seven plus the
     // two surfaces added by issue #200 — the Connection Center and the
-    // spatial Headquarters Floor.
-    expect(HQ_PAGES).toHaveLength(9);
+    // spatial Headquarters Floor — plus the Stage 4 immersive HQ (issue #250).
+    expect(HQ_PAGES).toHaveLength(10);
     for (const file of [
       'index.html',
       'projects.html',
@@ -74,6 +75,7 @@ describe('the Connections page joins the site without disturbing it', () => {
       'archive.html',
       'connections.html',
       'headquarters.html',
+      'immersive.html',
     ]) {
       expect(bare.has(file)).toBe(true);
     }
@@ -234,10 +236,23 @@ describe('provenance and freshness are never overstated', () => {
   it('chips the bundle’s own source mode on every page when it states one', () => {
     const marked = buildSite({ ...sample, sourceMode: 'reconstructed' });
     for (const page of HQ_PAGES) {
+      // Every page that PROJECTS the bundle. The immersive HQ does not: it
+      // renders no bundle data at all, so the bundle's mode is not a fact about
+      // it, and chipping it there put a build-time SAMPLE beside a runtime
+      // stamp reading `provenance live` (Codex round 18). The mode of the
+      // document that page actually shows is only knowable after HQ answers,
+      // and the runtime writes it then.
+      if (page.file === 'immersive.html') continue;
       expect(marked.get(page.file)!).toContain('>RECONSTRUCTED<');
     }
     const asSample = buildSite({ ...sample, sourceMode: 'sample' });
     expect(asSample.get('index.html')!).toContain('>SAMPLE<');
+    // And the exemption is exact: no bundle mode reaches the immersive page in
+    // ANY mode, rather than only in the one this test happened to build.
+    for (const mode of ['live', 'reconstructed', 'sample'] as const) {
+      const html = buildSite({ ...sample, sourceMode: mode }).get('immersive.html')!;
+      expect(html, mode).not.toContain(`>${SOURCE_MODE_LABELS[mode]}<`);
+    }
   });
 
   it('makes no source claim for a bundle that states none', () => {
@@ -251,6 +266,18 @@ describe('provenance and freshness are never overstated', () => {
     // Before the first poll returns, the page genuinely does not know.
     for (const page of HQ_PAGES) {
       const html = bare.get(page.file)!;
+      // The immersive HQ carries no bundle data, so a bundle timestamp there
+      // would be a claim about something the page does not show — and it is
+      // what installs the snapshot poll, whose verdicts ("UPDATED — page not
+      // rebuilt", "OFFLINE — build-time data", "SAMPLE — not live data") could
+      // appear above rooms hydrated live from the control API (Codex round 19).
+      // The exemption is asserted rather than skipped: the page must carry NO
+      // build-time instant and NO freshness UI, so it cannot quietly regain one.
+      if (page.file === 'immersive.html') {
+        expect(html).not.toContain('data-live-state');
+        expect(html).not.toContain(SNAPSHOT_FILENAME);
+        continue;
+      }
       expect(html).toContain('data-live-state="checking"');
       expect(html).toContain('CHECKING…');
     }
@@ -354,6 +381,11 @@ describe('provenance and freshness are never overstated', () => {
 
   it('still states the build-time instant, which is true with or without scripting', () => {
     for (const page of HQ_PAGES) {
+      if (page.file === 'immersive.html') {
+        // See the freshness test above: no build-time instant on this page.
+        expect(bare.get(page.file)!).not.toContain('As of ');
+        continue;
+      }
       expect(bare.get(page.file)!).toContain('As of 2026-08-26T10:30:00Z');
     }
   });
