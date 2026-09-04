@@ -34,6 +34,7 @@ import type { AuthenticatedAccount, ControlRequest } from '../src/live/auth.js';
 import { registerDirectOrderCapability, DIRECT_ORDER_CAPABILITY } from '../src/live/orders.js';
 import { setupFixture, type Fixture } from './application.fixture.js';
 import { HQ_ROOMS } from '../src/client/rooms.js';
+import { SOURCE_MODE_LABELS } from '../src/live/provenance.js';
 import { CLIENT_FETCH_TARGETS, CLIENT_READ_TIMEOUT_MS } from '../src/client/runtime.js';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -940,15 +941,20 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     }
   });
 
-  it('accepts a provenance mode it has never heard of', async () => {
-    // The other half of the judgement, pinned so a later tightening cannot
-    // quietly take it away. The server owns the provenance vocabulary and may
-    // grow it; a client that blanked the whole page on an unfamiliar mode would
-    // trade a cosmetic problem for a total one. Mode is displayed as text
-    // either way, so the strict and lenient failures differ only in blast
-    // radius — and this one is the smaller.
+  it('refuses a provenance mode the server cannot emit', async () => {
+    // I argued against this one round ago: the server owns the vocabulary and
+    // might grow it, so a client checking a list would blank a legitimate page.
+    // That was wrong, and wrong in a way this branch had already been taught
+    // once — I framed it as strict versus lenient instead of asking WHERE THE
+    // TRUTH LIVES (Codex round 9).
+    //
+    // The list is not restated in the runtime. It is emitted from
+    // `SOURCE_MODE_LABELS`, which TypeScript requires to carry a key for every
+    // `SourceMode`, so growing the union grows the emitted list in the same
+    // build. There was never a real dilemma to resolve.
     const live = deployment();
     const page = await loadPage(live.deps);
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toContain('provenance live');
 
     const original = page.window.fetch as (input: string) => Promise<unknown>;
     page.window.fetch = (input: string) => {
@@ -959,7 +965,7 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
             Promise.resolve({
               ok: true,
               generatedAt: '2027-01-01T00:00:00.000Z',
-              mode: 'some-future-provenance-mode',
+              mode: 'definitely-canonical-trust-me',
               killSwitch: { globalEngaged: false, engagedScopes: [] },
               rooms: HQ_ROOMS.map((room) => ({
                 roomId: room.id,
@@ -969,7 +975,7 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
                 metrics: [],
                 rows: [],
                 emptyMessage: 'Nothing recorded.',
-                provenance: 'future source',
+                provenance: 'invented source',
               })),
             }),
         });
@@ -979,10 +985,20 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     (page.window.__hqStateChanged as () => void)();
     await page.settle();
 
-    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toContain(
-      'provenance some-future-provenance-mode',
-    );
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toBe('');
+    expect(page.document.body.textContent).not.toContain('definitely-canonical-trust-me');
     page.close();
+  });
+
+  it('emits the provenance vocabulary from the server, so it cannot drift', () => {
+    // The assertion that makes the constraint above safe rather than brittle.
+    // If someone adds a SourceMode and this list did not follow, every real
+    // document carrying the new mode would be refused and the page would go
+    // blank — a false refusal caused by a stale copy, which is precisely the
+    // class of bug that put `[object Object]` on a lock banner.
+    const emitted = immersiveHtml().match(/var MODE_VALUES = (\{[^}]*\});/);
+    expect(emitted, 'MODE_VALUES not found in the emitted page').not.toBeNull();
+    expect(Object.keys(JSON.parse(emitted![1]!)).sort()).toEqual(Object.keys(SOURCE_MODE_LABELS).sort());
   });
 
   it('will not let a missing kill-switch record read as an unlocked HQ', async () => {

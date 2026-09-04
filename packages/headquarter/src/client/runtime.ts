@@ -39,6 +39,7 @@ import { DOM_HELPERS_JS } from '../ui/control-console.js';
 import { ACCESS_VERDICT_JS, LOCK_STATE_JS } from './access.js';
 import { HQ_ROOMS } from './rooms.js';
 import { hydrateRooms } from './hydrate.js';
+import { SOURCE_MODE_LABELS } from '../live/provenance.js';
 
 /** The authenticated read route this stage adds. */
 export const CLIENT_STATE_PATH: string = CONTROL_ROUTES.state;
@@ -76,6 +77,10 @@ export function clientRuntimeScript(): string {
   const roomIds = HQ_ROOMS.map((room) => room.id);
   const roomOrdinals = HQ_ROOMS.map((room) => room.ordinal);
   const roomBindingKinds = HQ_ROOMS.map((room) => room.binding.kind);
+  // Derived, not restated: SOURCE_MODE_LABELS is a Record<SourceMode, string>,
+  // so TypeScript requires a key for every provenance mode the server can emit.
+  // Growing the union grows this list in the same build.
+  const modeValues = Object.fromEntries(Object.keys(SOURCE_MODE_LABELS).map((mode) => [mode, true]));
   // The provenance each room carries when NO state document is in hand — the
   // same string the server rendered into the page. `hydrateRooms(null, null)`
   // is the one source for it, so the static page and a page that has just
@@ -105,6 +110,9 @@ export function clientRuntimeScript(): string {
   // to what the registry says the room can possibly be.
   var ROOM_BINDING_KINDS = ${jsonForScript(roomBindingKinds)};
   var ROOM_STATIC_PROVENANCE = ${jsonForScript(staticProvenance)};
+  // The provenance vocabulary, emitted from the server's own SourceMode union
+  // rather than restated here. See headerValid below.
+  var MODE_VALUES = ${jsonForScript(modeValues)};
   var POLL_MS = ${CLIENT_POLL_INTERVAL_MS};
   var READ_TIMEOUT_MS = ${CLIENT_READ_TIMEOUT_MS};
 
@@ -390,15 +398,19 @@ export function clientRuntimeScript(): string {
     // sentence false rather than ugly.
     if (!isText(body.generatedAt) || isNaN(Date.parse(body.generatedAt))) return false;
     // mode is the field that tells a reader whether they are looking at real or
-    // sample data, so an empty one leaves the stamp reading "provenance " with
-    // nothing after it — an assertion of provenance with the provenance missing.
+    // sample data, so it must be one of the provenance values the server can
+    // actually emit — not merely a non-empty string.
     //
-    // It is deliberately NOT checked against a list of known modes. The server
-    // owns that vocabulary and may legitimately grow it; a client that blanked
-    // the whole page on an unfamiliar provenance value would be trading a
-    // cosmetic problem for a total one. Mode is displayed as text either way,
-    // so the safe failure and the strict failure differ only in blast radius.
-    if (!isText(body.mode) || body.mode.length === 0) return false;
+    // I argued against this one round ago, on the grounds that the server owns
+    // the vocabulary and might grow it, so a client checking a hard-coded list
+    // would blank a legitimate page. That reasoning was wrong, and wrong in a
+    // way this branch has already been taught once: I framed it as strict
+    // versus lenient instead of asking WHERE THE TRUTH LIVES. The vocabulary is
+    // not hard-coded here — it is emitted from SOURCE_MODE_LABELS, which
+    // TypeScript requires to have a key for every SourceMode. Grow the union
+    // and this list grows in the same build. There is no drift to trade
+    // against, so there was never a real dilemma (Codex round 9).
+    if (MODE_VALUES[body.mode] !== true) return false;
     return killSwitchValid(body.killSwitch);
   }
 

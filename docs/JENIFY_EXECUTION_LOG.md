@@ -917,3 +917,38 @@ the reasoning for where the line sits belongs in a test rather than in a memory.
 Evidence at this commit: headquarter 1910, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
 web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.
+
+### Stage 4, review round 9 — Codex
+
+One finding: reject empty provenance header values. The empty-string half was
+already fixed in `d2bf9b5`, pushed minutes before the review submitted — the
+second convergence in two rounds, and the clearest signal yet that this loop is
+running out of defects rather than out of patience.
+
+The half that was NOT convergence is the one worth recording. Codex added that
+`mode` should ideally be restricted to the server's `live | reconstructed |
+sample` vocabulary. I had explicitly argued against exactly that one round
+earlier, and pinned my reasoning in a test: the server owns the vocabulary and
+may grow it, so a client checking a hard-coded list would blank a legitimate
+page.
+
+**That reasoning was wrong, and wrong in a way this branch had already been
+taught once.** I framed it as strict versus lenient, when the real question was
+where the truth lives. `SOURCE_MODE_LABELS` is a `Record<SourceMode, string>`,
+so TypeScript already requires a key for every mode the server can emit; the
+vocabulary can be emitted from it at build time and grows in the same build the
+union does. There was no drift to trade against and therefore no dilemma — the
+same "derive, do not restate" lesson that the kill-switch contract taught in
+round 8, applied one round later to a decision I had already made confidently in
+the opposite direction.
+
+The test that asserted an unknown mode is accepted is now inverted, and a second
+test asserts the emitted list equals `Object.keys(SOURCE_MODE_LABELS)` — because
+a stale copy of that list would cause a false refusal that blanks the page, which
+is the failure mode the constraint itself is meant to avoid. Both are
+negative-controlled independently: relaxing the check fails the refusal test;
+hard-coding a wrong list fails the drift test.
+
+Evidence at this commit: headquarter 1911, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.
