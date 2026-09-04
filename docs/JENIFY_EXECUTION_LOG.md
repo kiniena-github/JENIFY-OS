@@ -999,3 +999,28 @@ coverage already includes the truthy-but-not-true variants and pins that
 `authenticated` never substitutes for `founder`. A negative result from the
 author is worth less than one from a reviewer, so the request stands — but it is
 recorded rather than left as an open unknown.
+
+**Round 10 follow-up — the motion toggle, observed rather than asserted.** In
+the review reply I noted that the regression test for the motion fix is
+structural, that it therefore does not observe a frame count changing after a
+toggle, and that extending `evidence:webgl` to do so was possible but not done.
+Leaving it there would have been leaving a known gap for later, so it is done:
+the tool now clicks the real button in a real browser and counts frames.
+
+    "motion": {
+      "startLabel": "Motion: full",      "framesFullMotion": 33,
+      "reducedLabel": "Motion: reduced", "framesReducedMotion": 0,
+      "restoredLabel": "Motion: full",   "framesRestored": 33
+    }
+
+Zero is the number that matters: it is the shell's own documented promise —
+"the render loop then stops itself, so an idle tab costs no GPU at all" —
+finally measured instead of claimed. Negative-controlled by reverting either
+handler to a bare `wake()`, which reports `framesReducedMotion: 35` and fails.
+
+The check also guards its own premise: if the loop is not running under full
+motion in the first place, the reduced-motion measurement proves nothing, so
+`framesFullMotion > 10` is asserted before the zero is allowed to mean anything.
+That is the same lesson the differential's `bright > 100` guard encodes — a
+measurement that cannot distinguish "working correctly" from "not measuring" is
+not evidence.
