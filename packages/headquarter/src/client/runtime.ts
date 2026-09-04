@@ -354,6 +354,18 @@ export function clientRuntimeScript(): string {
     // that did not enforce it.
     if (ROOM_ORDINAL_BY_ID[view.roomId] !== view.ordinal) return false;
     if (!Array.isArray(view.metrics) || !Array.isArray(view.rows)) return false;
+    // A room HQ does not record carries NOTHING, not merely a dark light.
+    //
+    // statusAllowed pinned the status and the liveness and stopped there, so a
+    // document could keep NOT RECORDED and dark while supplying perfectly valid
+    // metrics and rows — and renderRoom would replace the registry-backed
+    // statement with canonical-looking content underneath a chip still saying
+    // the subject is not recorded. hydrateRoom guarantees these collections are
+    // empty for a static binding; this now enforces what that guarantees rather
+    // than a weaker neighbouring property (Codex round 10).
+    if (ROOM_BINDING_BY_ID[view.roomId] !== 'live' && (view.metrics.length > 0 || view.rows.length > 0)) {
+      return false;
+    }
     for (var m = 0; m < view.metrics.length; m += 1) if (!metricValid(view.metrics[m])) return false;
     for (var r = 0; r < view.rows.length; r += 1) if (!rowValid(view.rows[r])) return false;
     return true;

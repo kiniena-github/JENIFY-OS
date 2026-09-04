@@ -941,6 +941,62 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     }
   });
 
+  it('refuses content for a room HQ does not record, even when its light is right', async () => {
+    // Codex round 10, and the same shape as round 7's ordinal: I pinned the
+    // status and the liveness and stopped, so a document could keep NOT
+    // RECORDED and `dark` while supplying perfectly valid metrics — and
+    // `renderRoom` would put canonical-looking numbers underneath a chip still
+    // saying the subject is not recorded. `hydrateRoom` guarantees these
+    // collections are empty for a static binding; the guard now enforces that
+    // rather than a weaker neighbouring property.
+    const live = deployment();
+    const page = await loadPage(live.deps);
+    const research = HQ_ROOMS.find((room) => room.id === 'research')!;
+    const researchBinding = research.binding;
+    if (researchBinding.kind !== 'not_recorded') {
+      throw new Error(`research is bound ${researchBinding.kind}, so this test no longer tests what it claims`);
+    }
+
+    const original = page.window.fetch as (input: string) => Promise<unknown>;
+    page.window.fetch = (input: string) => {
+      if (String(input).split('?')[0] === CONTROL_ROUTES.state) {
+        return Promise.resolve({
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              ok: true,
+              generatedAt: new Date().toISOString(),
+              mode: 'live',
+              killSwitch: { globalEngaged: false, engagedScopes: [] },
+              rooms: HQ_ROOMS.map((room) => ({
+                roomId: room.id,
+                ordinal: room.ordinal,
+                status: room.binding.kind === 'live' ? 'live' : room.binding.kind,
+                // Correct status, correct liveness — and content it may not have.
+                liveness: 'dark',
+                metrics:
+                  room.id === 'research'
+                    ? [{ label: 'Active studies', value: 12, hint: 'Fabricated.', tone: 'accent' }]
+                    : [],
+                rows: [],
+                emptyMessage: 'x',
+                provenance: 'x',
+              })),
+            }),
+        });
+      }
+      return original(input);
+    };
+    (page.window.__hqStateChanged as () => void)();
+    await page.settle();
+
+    expect(page.document.querySelector('[data-hq-stamp]')!.textContent).toBe('');
+    expect(page.document.body.textContent).not.toContain('Active studies');
+    // And the room still says exactly what the registry says it says.
+    expect(bodyText(page.document, 'research')).toContain(researchBinding.reason);
+    page.close();
+  });
+
   it('refuses a provenance mode the server cannot emit', async () => {
     // I argued against this one round ago: the server owns the vocabulary and
     // might grow it, so a client checking a list would blank a legitimate page.

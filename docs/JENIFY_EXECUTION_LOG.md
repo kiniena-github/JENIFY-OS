@@ -952,3 +952,50 @@ hard-coding a wrong list fails the drift test.
 Evidence at this commit: headquarter 1911, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
 web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.
+
+### Stage 4, review round 10 — Codex
+
+Two findings, both real, both fixed.
+
+**A static room could carry content while its light was correct.**
+`statusAllowed` pinned the status and the liveness of a `not_recorded` or
+`later_phase` room and stopped there, so a document could keep NOT RECORDED and
+`dark` while supplying perfectly valid metrics — and `renderRoom` would put
+canonical-looking numbers underneath a chip still saying the subject is not
+recorded. `hydrateRoom` guarantees those collections are empty for a static
+binding; the guard now enforces what that guarantees rather than a weaker
+neighbouring property. Same shape as round 7's ordinal, one level further in.
+
+**The motion toggle changed the policy and nothing else.** The preference is an
+INPUT to the per-room pulse flags and to `anyMotion`, and `applyViews` is the
+only place either is computed — but both handlers changed `motion` and called
+`wake()`, which redraws with the old flags. Reduced → full left active and
+attention rooms frozen until the next poll, up to twenty seconds later. Full →
+reduced left `anyMotion` true, so the loop went on scheduling frames forever
+against a deliberately frozen shader clock — which also made this module's own
+docstring false where it promises the render loop stops itself under reduced
+motion. The shell now remembers the last state it was given and recomputes from
+it whenever either the button or the OS media query changes.
+
+**The evidence fixture was caught claiming something the server cannot produce,
+for the second time.** It gave every room a metric, including the four static
+ones. The first time was `status: 'live'` on all seventeen. Both were found by a
+constraint added to the CLIENT rather than by anything watching the tool, which
+is the strongest argument yet for keeping the client strict: the strictness
+audits the fixtures too. That is six defects in this stage's verification
+instruments.
+
+Evidence at this commit: headquarter 1913, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS
+(lit 2430 warm samples vs 0 dark, framesAfterLoss 0).
+
+**On `accessVerdict`,** which I have asked three reviews to look at and none has
+reached: I read it adversarially myself rather than keep asking. Every path fails
+closed — transport error first, explicit 401/503/403, anything else non-200 to
+malformed, and `ready` reachable only with no transport error, status 200, a
+readable object, and strict `=== true` on both `ok` and `founder`. Existing
+coverage already includes the truthy-but-not-true variants and pins that
+`authenticated` never substitutes for `founder`. A negative result from the
+author is worth less than one from a reviewer, so the request stands — but it is
+recorded rather than left as an open unknown.

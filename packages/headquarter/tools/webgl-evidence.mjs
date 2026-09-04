@@ -202,9 +202,25 @@ const ROOMS = [
   ['security-center', 16, 'Security Center', 'quiet', 'live'],
   ['connections', 17, 'Settings / Connections', 'quiet', 'live'],
 ].map(([id, ordinal, name, liveness, status]) =>
-  room(id, ordinal, name, liveness, status, [
-    { label: 'Evidence metric', value: liveness === 'dark' ? 0 : 3, hint: 'Fixture value.', tone: 'info' },
-  ]),
+  room(
+    id,
+    ordinal,
+    name,
+    liveness,
+    status,
+    // A room HQ does not record carries no metrics, because the real server
+    // never gives it any — `hydrateRoom` returns empty collections for a static
+    // binding. This fixture used to hand every room a metric, which is the
+    // SECOND time the same fixture has been caught claiming something the
+    // server cannot produce (the first was `status: 'live'` on all seventeen).
+    //
+    // Both times it was found by a constraint added to the client rather than
+    // by anything watching the tool, which is the argument for keeping the
+    // client strict: the strictness audits the fixtures too.
+    status === 'live'
+      ? [{ label: 'Evidence metric', value: liveness === 'dark' ? 0 : 3, hint: 'Fixture value.', tone: 'info' }]
+      : [],
+  ),
 );
 
 function stateWith(rooms) {

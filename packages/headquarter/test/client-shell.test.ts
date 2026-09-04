@@ -283,6 +283,31 @@ describe('the shell can only be lit by the hydration runtime', () => {
     expect(script).toContain('gl.bufferSubData(gl.ARRAY_BUFFER, 0, stateData)');
   });
 
+  it('recomputes the building when the motion preference changes', () => {
+    // Codex round 10. The motion preference is an INPUT to the per-room pulse
+    // flags and to `anyMotion`, and `applyViews` is the only place either is
+    // computed — but both motion handlers changed the policy and called
+    // `wake()`, which redraws with the OLD flags. Reduced → full left active and
+    // attention rooms frozen until the next poll up to twenty seconds later;
+    // full → reduced left `anyMotion` true, so the loop went on scheduling
+    // frames forever against a deliberately frozen shader clock. That second
+    // one also made this module's own docstring false where it promises the
+    // render loop stops itself under reduced motion.
+    //
+    // Structural, because CI has no GPU: what is pinned is that neither handler
+    // can go back to a bare `wake()`, and that the shell keeps the state needed
+    // to recompute.
+    expect(script).toContain('var lastViews = null;');
+    expect(script).toContain('function reapplyMotion() {');
+    expect(script).toContain('if (lastViews) applyViews(lastViews, lastActiveRoom);');
+    // Both handlers — the button and the OS media query — go through it.
+    expect(script.match(/reapplyMotion\(\);/g) ?? []).toHaveLength(2);
+    // And the entry point still records what it was given, or reapply would
+    // have nothing to recompute from.
+    expect(script).toContain('lastViews = views;');
+    expect(script).toContain('lastActiveRoom = activeRoomId;');
+  });
+
   it('shuts every entry point after the context is lost, not just the render loop', () => {
     // Codex round 5. The runtime holds its own references to __hqShellApply and
     // __hqShellGoTo and calls them on every poll and every hash change, so

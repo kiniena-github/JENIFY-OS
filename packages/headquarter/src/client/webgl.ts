@@ -488,14 +488,14 @@ export function immersiveShellScript(): string {
       explicitMotion = next;
       motion = motionMode(next, media ? media.matches === true : false);
       applyMotionNote();
-      wake();
+      reapplyMotion();
     });
   }
   if (media && typeof media.addEventListener === 'function') {
     media.addEventListener('change', function () {
       motion = motionMode(explicitMotion, media.matches === true);
       applyMotionNote();
-      wake();
+      reapplyMotion();
     });
   }
 
@@ -615,7 +615,20 @@ export function immersiveShellScript(): string {
       slotState[i * STATE_FLOATS + 5] = 0;
     }
   }
-  window.__hqShellApply = function (views, activeRoomId) {
+  // The last state the building was given.
+  //
+  // Kept because the motion preference is an INPUT to the per-room pulse flags
+  // and to anyMotion, and applyViews below is the only place either is
+  // computed. Without it, toggling motion changed the policy and nothing else:
+  // reduced -> full left active and attention rooms frozen until the next poll
+  // up to twenty seconds later, and full -> reduced left anyMotion true, so the
+  // loop went on scheduling frames forever against a deliberately frozen shader
+  // clock — which also made this module's own docstring false where it says the
+  // render loop stops itself under reduced motion (Codex round 10).
+  var lastViews = null;
+  var lastActiveRoom = null;
+
+  function applyViews(views, activeRoomId) {
     if (disposed) return;
     anyMotion = false;
     resetSlots();
@@ -652,7 +665,23 @@ export function immersiveShellScript(): string {
     gl.bindBuffer(gl.ARRAY_BUFFER, stateBuffer);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, stateData);
     wake();
+  }
+
+  window.__hqShellApply = function (views, activeRoomId) {
+    if (disposed) return;
+    lastViews = views;
+    lastActiveRoom = activeRoomId;
+    applyViews(views, activeRoomId);
   };
+
+  // Re-derive the building from the state it already holds. Called whenever the
+  // motion preference changes, because that preference is an input to the pulse
+  // flags rather than merely a rendering detail.
+  function reapplyMotion() {
+    if (disposed) return;
+    if (lastViews) applyViews(lastViews, lastActiveRoom);
+    else wake();
+  }
 
   /* ---------- matrices ---------- */
   function multiply(a, b) {
