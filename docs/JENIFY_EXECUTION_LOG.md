@@ -1246,3 +1246,37 @@ this class.
 Evidence at this commit: headquarter 1923, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
 web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.
+
+### Stage 4, review round 15 — Codex
+
+One finding, and the **third** against a guard I built rather than against the
+product. The section-binding test read the declared `RoomSection` union by
+regex-scanning `rooms.ts` for `'(\w+)'`. A section named `'audit-log'` would
+have been skipped entirely — and the guard's own sanity check still passed on the
+members it did match, so it would have gone on reporting that every section was
+bound while silently not checking one.
+
+The fix is the lesson this branch keeps re-teaching, applied to a test this time
+rather than to the client: **derive, do not parse.** `ROOM_SECTIONS` is now an
+exported runtime tuple and `RoomSection` is `(typeof ROOM_SECTIONS)[number]`, so
+`tsc` keeps the two identical by construction and there is nothing left to scan.
+Any name a TypeScript string literal can hold is covered, because no name is
+being matched.
+
+Controlled with Codex's own example: adding `'audit-log'` to the tuple without
+binding it fails and names it. A second test asserts the other direction — every
+bound section is declared — because the guard looked one way, and looking one way
+is how three of these findings happened.
+
+**The tally, stated plainly.** Fifteen rounds, thirty-three findings, thirty-two
+real. Nine of them were in verification rather than in the product: three in the
+evidence tool, two in its fixtures, one in a test fixture that agreed with a
+wrong contract, and three in guards written specifically to stop a recurring
+class. Every guard has caught real defects and was worth building. Every one of
+them also needed the reviewer to find its gap first, which is the honest summary
+of this branch: the instruments improve, and they improve *after* someone else
+shows me where they were thin.
+
+Evidence at this commit: headquarter 1924, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); `tsc --noEmit` clean in headquarter, hq-host, server and
+web; web bundle unchanged at 215.66 kB / 69.22 kB gzip; `evidence:webgl` PASS.

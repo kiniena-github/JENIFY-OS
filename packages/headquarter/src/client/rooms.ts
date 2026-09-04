@@ -64,19 +64,37 @@ export type RoomBinding =
  * `analytics`, `security`). A derived section is still a projection: it counts
  * and groups rows the state document already carries, and adds no row.
  */
-export type RoomSection =
-  | 'overview'
-  | 'operations'
-  | 'missions'
-  | 'workforce'
-  | 'approvals'
-  | 'lanes'
-  | 'projects'
-  | 'capabilities'
-  | 'connections'
-  | 'analytics'
-  | 'security'
-  | 'founder';
+export const ROOM_SECTIONS = [
+  'overview',
+  'operations',
+  'missions',
+  'workforce',
+  'approvals',
+  'lanes',
+  'projects',
+  'capabilities',
+  'connections',
+  'analytics',
+  'security',
+  'founder',
+] as const;
+
+/**
+ * A runtime tuple, with the type DERIVED from it — not the other way round.
+ *
+ * The binding guard in `client-rooms` needs the list of declared sections at
+ * runtime, and it used to get it by regex-scanning this file's type
+ * declaration for `'(\w+)'`. A section whose name contained punctuation —
+ * `'audit-log'` — would have been skipped silently, while the guard's own
+ * sanity check still passed on the members it did match, so it would have gone
+ * on reporting that every section was bound while quietly not checking one
+ * (Codex round 15, the third finding against one of my own guards).
+ *
+ * There is nothing to parse now. The tuple IS the list, `tsc` keeps the type
+ * and the tuple identical by construction, and any name a TypeScript string
+ * literal can hold is covered because no name is being matched.
+ */
+export type RoomSection = (typeof ROOM_SECTIONS)[number];
 
 export interface RoomPlacement {
   /** 0 = the atrium, 1 = the inner ring, 2 = the outer ring. */

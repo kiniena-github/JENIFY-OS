@@ -18,10 +18,8 @@ import {
   roomForRoute,
   roomRoute,
   roomsOverlap,
+  ROOM_SECTIONS,
 } from '../src/client/rooms.js';
-import { readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 /** The Founder's list, in the Founder's order. Transcribed from issue #250. */
 const APPROVED = [
@@ -198,22 +196,31 @@ describe('every declared section is actually bound to a room', () => {
     // matching status strings against a set, on activity events whose status is
     // historical rather than a statement about now.
     //
-    // Unreachable code with a plausible name is the next person's mistake
-    // waiting to happen. This makes a dead section fail immediately rather than
-    // sit there looking maintained.
-    const bound = new Set(
-      HQ_ROOMS.flatMap((room) => (room.binding.kind === 'live' ? [room.binding.section] : [])),
+    // The first version of this test read the declared union by regex-scanning
+    // rooms.ts for `'(\w+)'`. A section named `'audit-log'` would have been
+    // skipped entirely — and the sanity check below still passed on the members
+    // it did match, so the guard would have gone on claiming it covered every
+    // section while silently not checking one (Codex round 15).
+    //
+    // There is nothing to parse now: ROOM_SECTIONS is a runtime tuple and
+    // RoomSection is derived FROM it, so tsc keeps the two identical and any
+    // name a string literal can hold is covered.
+    const bound = new Set<string>(
+      HQ_ROOMS.flatMap((room) => (room.binding.kind === 'live' ? [room.binding.section as string] : [])),
     );
-    // Read the declared union straight from the source, so adding a member
-    // without binding it is what fails — not a list in this test.
-    const source = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'client', 'rooms.ts'),
-      'utf8',
-    );
-    const union = source.split('export type RoomSection')[1]!.split(';')[0]!;
-    const declared = [...union.matchAll(/'(\w+)'/g)].map((match) => match[1]!);
-    expect(declared.length).toBeGreaterThan(8);
-    const unbound = declared.filter((section) => !(bound as Set<string>).has(section));
+    expect(ROOM_SECTIONS.length).toBeGreaterThan(8);
+    const unbound = ROOM_SECTIONS.filter((section) => !bound.has(section));
     expect(unbound, `declared but bound to no room: ${unbound.join(', ')}`).toEqual([]);
+  });
+
+  it('binds no section that is not declared', () => {
+    // The other direction, which the type system already enforces — asserted
+    // anyway because the guard above only looks one way, and looking one way is
+    // how three of these findings happened.
+    const declared = new Set<string>(ROOM_SECTIONS);
+    for (const room of HQ_ROOMS) {
+      if (room.binding.kind !== 'live') continue;
+      expect(declared.has(room.binding.section), `${room.id} -> ${room.binding.section}`).toBe(true);
+    }
   });
 });
