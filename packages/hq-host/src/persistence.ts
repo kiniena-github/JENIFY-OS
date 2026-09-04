@@ -534,63 +534,107 @@ export function resolveHqPersistenceConfig(
   };
 }
 
-interface EnsuredBackupRoot {
-  realBackupRoot: string;
-  createdDirectories: string[];
-}
-
-function ensureBackupRoot(config: HqPersistenceConfig): EnsuredBackupRoot {
-  const firstCreated = fs.mkdirSync(config.backupRoot, { recursive: true });
+function ensureBackupRoot(config: HqPersistenceConfig): string {
+  fs.mkdirSync(config.backupRoot, { recursive: true });
   const realBackupRoot = fs.realpathSync(config.backupRoot);
   if (config.durableRoot && !insideOrEqual(config.durableRoot, realBackupRoot)) {
     throw new Error('HQ backup directory resolved outside the durable root');
   }
-  return {
-    realBackupRoot,
-    createdDirectories: newlyCreatedDirectories(firstCreated, config.backupRoot),
-  };
+  return realBackupRoot;
 }
 
 /**
- * The directory components recursive `mkdir` actually created, shallowest first
- * down to the backup root. `fs.mkdirSync(recursive)` returns only the first
- * path it created; every component beneath it was necessarily created in the
- * same call, so the chain runs from that first path to the backup root.
+ * Upper bound on how many ancestor directories a single backup will commit.
+ *
+ * Hosted durable mode is already bounded by the attested durable root (normally
+ * one component). This only caps a pathologically deep local/workstation backup
+ * path so the per-backup directory work stays bounded rather than unbounded in
+ * the configured path depth.
  */
-function newlyCreatedDirectories(firstCreated: string | undefined, backupRoot: string): string[] {
-  if (!firstCreated) return [];
-  const shallowest = path.resolve(firstCreated);
-  const target = path.resolve(backupRoot);
+const MAX_COMMITTED_PARENT_DIRECTORIES = 32;
+
+/**
+ * The ancestor directories whose own metadata must be committed so the backup
+ * directory PATH — not just the files inside it — survives a crash, shallowest
+ * first.
+ *
+ * Making `<root>/a/b/backups` durable means committing the entry for `backups`
+ * in `b`, for `b` in `a`, and for `a` in `<root>`; i.e. fsyncing every ancestor
+ * from the backup directory's own parent up to the anchor, inclusive.
+ *
+ * The anchor is storage this process never creates and therefore never has to
+ * commit:
+ * - durable-volume mode: `FACTORYOS_HQ_DURABLE_ROOT`, whose own link belongs to
+ *   the mount, and inside which the backup root is already proven to live. That
+ *   keeps the chain strictly bounded to the configured backup path.
+ * - local-file mode: the filesystem root, because a workstation backup
+ *   directory may legitimately be created several levels deep by this process
+ *   and there is no attested volume boundary to stop at. Bounded by the cap
+ *   above, and committing an already-durable directory is a cheap no-op.
+ */
+function backupParentChainToCommit(config: HqPersistenceConfig, realBackupRoot: string): string[] {
+  const target = path.resolve(realBackupRoot);
+  const anchor =
+    config.mode === 'durable-volume' && config.durableRoot
+      ? path.resolve(config.durableRoot)
+      : path.parse(target).root;
+
   const chain: string[] = [];
   let current = target;
-  while (true) {
-    chain.unshift(current);
-    if (current === shallowest) return chain;
+  while (current !== anchor && chain.length < MAX_COMMITTED_PARENT_DIRECTORIES) {
     const parent = path.dirname(current);
-    if (parent === current) break; // reached the filesystem root without matching
+    if (parent === current) break; // reached the filesystem root
+    chain.unshift(parent);
     current = parent;
   }
-  // firstCreated was not an ancestor of the backup root (not expected). Commit
-  // the backup root's own link conservatively rather than the whole chain.
-  return [target];
+  return chain;
 }
 
 /**
- * Durably commit the directory links recursive `mkdir` just created.
+ * Durably commit the backup directory's parent chain on EVERY backup, not only
+ * when this invocation's own recursive `mkdir` reported creating it.
  *
- * Recursive creation writes a new directory ENTRY into each parent, but the
+ * Recursive creation writes a new directory entry into each parent, but the
  * backup success path otherwise only fsyncs the backup directory itself — which
- * commits the files inside it, not the new directory's own link from the
- * durable root. A crash after a reported-successful first backup could
- * therefore lose the whole backup directory. Committing each new component's
- * parent closes that gap. The chain is empty for an already-existing backup
- * directory, so a steady-state backup does no extra directory work. POSIX-only,
- * like every other directory fsync here: Windows commits directory metadata
- * with the file and exposes no directory handle to fsync through Node.
+ * commits the files inside it, not the directory's own link. Keying the parent
+ * commit off "did THIS invocation create it" leaves a real hole: an earlier
+ * backup can create the hierarchy and then crash or fail before its parent-link
+ * fsync completes, after which every later invocation sees the directories
+ * already present, records nothing as newly created, and commits only the
+ * backup directory. A power loss then still loses the directory entry chain and
+ * with it the recovery point this backup reported. Recommitting the chain
+ * unconditionally makes durability a property of a successful backup rather
+ * than of which invocation happened to create the path.
+ *
+ * Already-durable directories make each fsync cheap, and the chain is bounded
+ * by the anchor and the cap above, so a steady-state backup does bounded extra
+ * work rather than none.
+ *
+ * POSIX-only, like every other directory fsync here: `fsyncDirectory` returns
+ * immediately on Windows, which exposes no directory handle to fsync through
+ * Node and commits directory metadata with the file.
+ *
+ * Strictness follows the documented tiers. In durable-volume mode the whole
+ * chain lives inside the attested volume and every failure fails the backup
+ * closed. In local-file mode the backup directory's OWN parent is still
+ * required — that is exactly what the previous contract committed — while
+ * ancestors above it are best-effort, because a workstation path can climb into
+ * system directories this process may traverse but not open for reading, and
+ * the portable contract already tolerates a skipped directory fsync there.
  */
-function commitCreatedDirectoryLinks(createdDirectories: string[]): void {
-  for (const created of createdDirectories) {
-    fsyncDirectory(path.dirname(created));
+function commitBackupParentChain(config: HqPersistenceConfig, realBackupRoot: string): void {
+  const chain = backupParentChainToCommit(config, realBackupRoot);
+  // Shallowest-first, so a crash part-way through leaves an already-committed
+  // outer prefix rather than a committed inner link hanging off an uncommitted
+  // parent.
+  const strictFrom = config.mode === 'durable-volume' ? 0 : chain.length - 1;
+  for (let index = 0; index < chain.length; index += 1) {
+    try {
+      fsyncDirectory(chain[index]);
+    } catch (error) {
+      if (index >= strictFrom) throw error;
+      // Best-effort ancestor in local/workstation mode only; see above.
+    }
   }
 }
 
@@ -711,20 +755,132 @@ function fsyncDirectoryEntry(directory: string, child: string, expectedChild: fs
   }
 }
 
+/**
+ * Which inode a publication attempt actually attached to the destination name.
+ *
+ * `verified` is the normal case: the retained partial descriptor's link count
+ * grew across `linkSync`, which proves it was OUR verified inode that gained
+ * the destination link. `substituted-source` means it did not grow, so the
+ * source PATHNAME named a different inode at the instant of linking and the
+ * entry we created publishes bytes we never verified.
+ *
+ * The distinction exists only so rollback can name what this invocation
+ * published without trusting a stat read back from the mutable destination
+ * pathname — which is exactly the read another actor can poison.
+ */
+type PublishedIdentity = 'verified' | 'substituted-source';
+
+/**
+ * Whether the entry now at the destination is provably the extra hard link this
+ * invocation's own `linkSync` created from a substituted source pathname.
+ *
+ * All three conditions matter. It must not be our verified inode (that case is
+ * handled by the exact-identity comparison instead). It must be the inode the
+ * link SOURCE still names, which is what a source substitution leaves behind
+ * and what a destination replacement by an unrelated actor does NOT produce —
+ * so a replaced destination can never reach this branch. And it must still be
+ * multiply linked, so removing our extra link can never be the removal of the
+ * last name for anyone's data.
+ */
+function isLinkThisInvocationCreatedFromASubstitutedSource(
+  partial: string,
+  destinationEntry: fs.Stats,
+  verifiedPartial: fs.Stats,
+): boolean {
+  if (sameFile(destinationEntry, verifiedPartial)) return false;
+  if (destinationEntry.nlink < 2) return false;
+  const source = lstatIfPresent(partial);
+  if (!source || source.isSymbolicLink() || !source.isFile()) return false;
+  return sameFile(destinationEntry, source);
+}
+
+/**
+ * Withdraw a rejected publication — and ONLY ever the entry this invocation
+ * itself published.
+ *
+ * The destination is removed only while it still names the inode this
+ * invocation published:
+ *
+ * - `verified`: it must still be the exact verified partial inode. If another
+ *   actor replaced the destination between `linkSync` and the identity check,
+ *   the comparison fails and their file is preserved untouched. This is the
+ *   case the Stage 3 P1 correction is about: rollback must never be expressed
+ *   against a stat read back from the destination, because that stat can BE the
+ *   replacement, and deleting it would destroy a file this invocation never
+ *   created.
+ *
+ * - `substituted-source`: our own `linkSync` attached a foreign inode, so the
+ *   entry is still one we created and must not survive as an unverified backup
+ *   under the final name. It is removed only while all three hold: it is not
+ *   our verified inode, it is the very inode our link SOURCE still names (which
+ *   is what proves our own `linkSync` put it there rather than someone else
+ *   installing it), and it is multiply linked, so the substituted file keeps
+ *   its own name and its data. Anything else at that path is somebody else's
+ *   and is preserved.
+ *
+ * The withdrawal is committed as well: an unlink is a cache update just as the
+ * link was, so a crash could otherwise resurrect rejected bytes as a recovery
+ * point.
+ */
+function withdrawPublishedDestination(
+  partial: string,
+  destination: string,
+  verifiedPartial: fs.Stats,
+  published: PublishedIdentity,
+  commitDirectory: () => void,
+): void {
+  try {
+    const current = lstatIfPresent(destination);
+    if (current && !current.isSymbolicLink() && current.isFile()) {
+      const ours =
+        published === 'verified'
+          ? sameFile(current, verifiedPartial)
+          : isLinkThisInvocationCreatedFromASubstitutedSource(partial, current, verifiedPartial);
+      if (ours) fs.unlinkSync(destination);
+    }
+  } catch {
+    // Never delete a path whose identity cannot be proven.
+  }
+  try {
+    commitDirectory();
+  } catch {
+    // Never trade the real rejection reason for a cleanup failure.
+  }
+}
+
+/**
+ * Publish the verified partial under its final name without ever replacing an
+ * existing entry (`link` fails closed on EEXIST).
+ *
+ * `linkSync` is the only step that can publish anything, so a throw from it
+ * means nothing was published and the destination is never touched. Once it
+ * succeeds, what this invocation published is established from the RETAINED
+ * partial descriptor's link count — never from a stat of the destination
+ * pathname — and rollback is expressed against that, so a destination another
+ * actor has since replaced is preserved rather than deleted.
+ */
 function publishVerifiedNoReplace(
   partial: string,
   destination: string,
   verifiedPartial: fs.Stats,
+  partialFd: number,
+  commitDirectory: () => void,
 ): fs.Stats {
   const beforeLink = lstatIfPresent(partial);
   if (!beforeLink || beforeLink.isSymbolicLink() || !sameFile(beforeLink, verifiedPartial)) {
     throw new Error('HQ backup partial changed after integrity verification');
   }
+  const linksBeforePublication = fs.fstatSync(partialFd).nlink;
 
   fs.linkSync(partial, destination);
-  let linked: fs.Stats | null = null;
+  const published: PublishedIdentity =
+    fs.fstatSync(partialFd).nlink > linksBeforePublication ? 'verified' : 'substituted-source';
+
   try {
-    linked = fs.lstatSync(destination);
+    if (published !== 'verified') {
+      throw new Error('HQ backup publication did not link the verified partial inode');
+    }
+    const linked = fs.lstatSync(destination);
     if (linked.isSymbolicLink() || !sameFile(linked, verifiedPartial)) {
       throw new Error('HQ backup publication did not link the verified partial inode');
     }
@@ -737,7 +893,13 @@ function publishVerifiedNoReplace(
     }
     return finalStat;
   } catch (error) {
-    if (linked) unlinkIfSame(destination, linked);
+    withdrawPublishedDestination(
+      partial,
+      destination,
+      verifiedPartial,
+      published,
+      commitDirectory,
+    );
     throw error;
   }
 }
@@ -826,12 +988,13 @@ export function openHqPersistence(
       if (closed) throw new Error('HQ persistence is closed');
 
       const filename = safeBackupName(name);
-      const { realBackupRoot: backupRoot, createdDirectories } = ensureBackupRoot(config);
-      // A newly created backup directory's own link into the durable root must
-      // be durably committed before any backup published inside it can be
-      // reported successful; otherwise a crash could take the whole directory.
-      // No-op when the backup directory already existed.
-      commitCreatedDirectoryLinks(createdDirectories);
+      const backupRoot = ensureBackupRoot(config);
+      // The backup directory's own link chain must be durably committed before
+      // any backup published inside it can be reported successful; otherwise a
+      // crash could take the whole directory and the recovery point with it.
+      // Recommitted on EVERY backup, because an earlier invocation may have
+      // created the hierarchy and died before committing it.
+      commitBackupParentChain(config, backupRoot);
       const backupAnchor = openAttestedBackupRoot(config, backupRoot);
       const destination = path.join(backupRoot, filename);
       const operationDestination = backupAnchor
@@ -928,7 +1091,17 @@ export function openHqPersistence(
 
         fs.fsyncSync(partialFd);
         if (backupAnchor) assertDirectoryPathStillAnchored(backupAnchor, backupRoot);
-        const published = publishVerifiedNoReplace(partial, operationDestination, reservedPartial);
+        const commitBackupDirectory = (): void => {
+          if (backupAnchor) fs.fsyncSync(backupAnchor.fd);
+          else fsyncDirectory(backupRoot);
+        };
+        const published = publishVerifiedNoReplace(
+          partial,
+          operationDestination,
+          reservedPartial,
+          partialFd,
+          commitBackupDirectory,
+        );
         try {
           const publishedState = proveOpenFileContents(partialFd);
           if (publishedState.digest !== verifiedState.digest) {
@@ -943,18 +1116,17 @@ export function openHqPersistence(
             fsyncDirectoryEntry(backupRoot, destination, reservedPartial);
           }
         } catch (error) {
-          // The published name is this operation's own inode, so withdrawing it
-          // never touches another process's file. The withdrawal has to be
-          // durable too: an unlink is a cache update like the link was, so a
-          // crash could otherwise resurrect the rejected bytes as a recovery
-          // point.
-          unlinkIfSame(operationDestination, reservedPartial);
-          try {
-            if (backupAnchor) fs.fsyncSync(backupAnchor.fd);
-            else fsyncDirectory(backupRoot);
-          } catch {
-            // Never trade the real rejection reason for a cleanup failure.
-          }
+          // Withdrawal is expressed against this invocation's own verified
+          // inode, so it can only ever remove the entry we published — never a
+          // replacement installed by another actor — and it is committed so a
+          // crash cannot resurrect the rejected bytes as a recovery point.
+          withdrawPublishedDestination(
+            partial,
+            operationDestination,
+            reservedPartial,
+            'verified',
+            commitBackupDirectory,
+          );
           throw error;
         }
         return { path: destination, sizeBytes: published.size };
