@@ -25,9 +25,12 @@ export {
 } from './config.js';
 
 export {
-  HQ_DURABLE_TOPOLOGY,
   openHqPersistence,
   resolveHqPersistenceConfig,
+} from './persistence-guard.js';
+
+export {
+  HQ_DURABLE_TOPOLOGY,
   restoreHqBackupToNewFile,
   type HqBackupResult,
   type HqPersistence,
