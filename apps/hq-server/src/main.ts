@@ -1,40 +1,10 @@
 /**
- * Standalone JENIFY HQ process (Phase 2, Stage 1).
+ * Standalone JENIFY HQ process.
  *
- * ## What this proves
- *
- * That HQ is a product, not a feature of the tenant platform. This process
- * imports `@factoryos/hq-host` and `@factoryos/headquarter` and nothing else —
- * no `@factoryos/server`, no Drizzle, no tenant schema, no Mesob. It opens the
- * HQ database, mounts the same control API and the same Founder-gated site, and
- * answers on its own port.
- *
- * ## What it deliberately does NOT do
- *
- * It ships no identity source. HQ has never had a sign-in of its own, and this
- * process does not invent one: it boots with `NO_IDENTITY`, so every request
- * resolves nobody, every read is refused 401 and every control stays off.
- *
- * That is not a limitation to work around — it is the honest shape of the open
- * Founder decision (Gate A). A browser sends `fos_session` only to the host that
- * set it, and the cookie carries no `Domain`, so an HQ served from its own
- * origin receives no session. Wiring a "local trust" or "dev bypass" here to
- * make the pages appear would be a second authority path built in the dark, and
- * exactly the class of defect Phase 1 spent three correction rounds removing.
- *
- * So this process is useful now for what it demonstrates, and becomes useful to
- * a human the moment Gate A is answered and a real `HqIdentityPort` is passed
- * at the marked seam below.
- *
- * ## Running it
- *
- *   FACTORYOS_HQ_CONTROL=1 \
- *   FACTORYOS_HQ_DB=<path to the HQ sqlite> \
- *   FACTORYOS_HQ_SITE_DIR=<path to the built site> \
- *   npm start --workspace @factoryos/hq-server
- *
- * Binds 127.0.0.1 unless HQ_HOST says otherwise, because a process that refuses
- * everyone is still projecting canonical company state at whatever it binds.
+ * Phase 2 Stage 3 keeps the proven HQ core/storage semantics but makes hosted
+ * persistence explicit. `loadHeadquarterHost` now refuses `runtime=hosted`
+ * unless the database is on an operator-attested durable volume. The actual
+ * cloud/volume provider remains a Founder gate.
  */
 
 import Fastify from 'fastify';
@@ -55,23 +25,6 @@ import {
   type HqSsoOptions,
 } from '@factoryos/hq-host';
 
-/**
- * Read the A-4 bridge from the environment, or return null.
- *
- * Fail-closed and all-or-nothing, exactly like `loadHeadquarterHost`: a bridge
- * missing any of its three values is not configured, and HQ falls back to
- * refusing everyone rather than to a partially-checked sign-in.
- *
- *   HQ_SSO_IDENTITY_ORIGIN   e.g. https://app.jenifylabs.com
- *   HQ_SSO_HQ_ORIGIN         this host, e.g. https://hq.jenifylabs.com
- *   HQ_SSO_SERVICE_SECRET    dev/test value only — production is a Founder gate
- *   HQ_SSO_INSECURE_COOKIES=1  drop `Secure`, for a loopback http proof stack
- *
- * Both origins must be https, or a loopback address for a local proof stack.
- * `http://` to anything else is REFUSED (the bridge stays off): that channel
- * carries the service secret on every call and relays the Founder's step-up
- * password, so cleartext there is a credential disclosure, not a convenience.
- */
 function ssoConfigFrom(
   env: Record<string, string | undefined>,
   db: import('@factoryos/headquarter/store').HqDatabase,
@@ -90,11 +43,8 @@ function ssoConfigFrom(
     return null;
   }
 
-  // The back channel carries the service secret on every call and RELAYS the
-  // Founder's step-up password, so plaintext to anything but a loopback address
-  // is refused outright rather than configured and quietly leaked. The HQ origin
-  // is checked by the same rule: it is where the browser lands with a ticket in
-  // the URL, and where the identity host posts sign-out with the same secret.
+  // This channel carries the service secret and Founder step-up password. Only
+  // TLS, or recognized loopback for local proof stacks, is accepted.
   const checkedIdentity = checkBackChannelOrigin(identityOrigin);
   if (!checkedIdentity.ok) {
     log(
@@ -135,13 +85,7 @@ function ssoConfigFrom(
 
 export interface StandaloneOptions {
   env?: Record<string, string | undefined>;
-  /**
-   * The seam Founder Gate A plugs into.
-   *
-   * Defaults to `NO_IDENTITY`. Tests pass a resolver to prove the host wiring
-   * end to end; a real deployment passes one only once the Founder has decided
-   * how a session reaches this origin.
-   */
+  /** Test/host seam. Production identity comes from the A-4 SSO bridge. */
   identity?: HqIdentityPort;
   log?: (line: string) => void;
 }
@@ -153,17 +97,11 @@ export async function buildStandaloneHq(options: StandaloneOptions = {}) {
   const identity = options.identity ?? NO_IDENTITY;
 
   const host = loadHeadquarterHost(env, log);
-  if (!host) {
-    // Fail closed and say why, rather than serving an empty shell.
-    return null;
-  }
+  if (!host) return null;
 
   const app = Fastify({ logger: false });
   await app.register(fastifyCookie);
 
-  // A-4: if the deployment names an identity host, HQ signs people in by
-  // handoff instead of refusing everyone. All three values are required — a
-  // half-configured bridge stays OFF rather than half-open.
   const sso = ssoConfigFrom(env, host.db, log);
   const effective = sso ? sso.identity : identity;
 
@@ -171,7 +109,6 @@ export async function buildStandaloneHq(options: StandaloneOptions = {}) {
   if (sso) registerHqSsoRoutes(app, sso.options);
   if (host.siteRoot) {
     registerHeadquarterSite(app, host.plane, effective, host.siteRoot, {
-      // Not signed in and a bridge exists ⇒ start the handoff rather than 401.
       onUnauthenticated: sso
         ? (req, reply) => beginHandoff(sso.options, reply, req.url.split('?')[0]!)
         : undefined,
@@ -181,16 +118,18 @@ export async function buildStandaloneHq(options: StandaloneOptions = {}) {
   if (effective === NO_IDENTITY) {
     log(
       '[hq] NO IDENTITY SOURCE is wired into this process. HQ has no sign-in of its own, so every ' +
-        'request will resolve nobody: reads answer 401 and all controls stay off. This is the ' +
-        'correct standalone posture until Founder Gate A decides how a session reaches this ' +
-        'origin. It is NOT a hosted HQ.',
+        'request resolves nobody: reads answer 401 and controls stay off. This is the correct ' +
+        'fail-closed standalone posture when the A-4 identity bridge is absent. It is NOT a hosted HQ.',
     );
   }
 
-  /** Release the port and the database together — the two things this owns. */
+  /**
+   * Release HTTP and durable storage through their owners. The persistence close
+   * checkpoints WAL best-effort before releasing SQLite.
+   */
   const close = async (): Promise<void> => {
     await app.close();
-    host.db.close();
+    host.persistence.close();
   };
 
   return { app, host, close };
@@ -200,21 +139,18 @@ async function main(): Promise<void> {
   const built = await buildStandaloneHq();
   if (!built) {
     console.error(
-      '[hq] Not started. Set FACTORYOS_HQ_CONTROL=1 and FACTORYOS_HQ_DB=<path> to boot the ' +
-        'standalone HQ host.',
+      '[hq] Not started. Set FACTORYOS_HQ_CONTROL=1 and FACTORYOS_HQ_DB=<path>. ' +
+        'Hosted runtime additionally requires durable-volume persistence.',
     );
     process.exitCode = 1;
     return;
   }
   const port = Number(process.env.HQ_PORT ?? 3200);
-  // Loopback unless a deployment says otherwise, deliberately.
   const address = process.env.HQ_HOST ?? '127.0.0.1';
   await built.app.listen({ port, host: address });
   console.log(`[hq] standalone HQ host listening on http://${address}:${port}`);
 }
 
-// Only run when executed directly, so importing this module in a test does not
-// start a listener.
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
   void main();
 }

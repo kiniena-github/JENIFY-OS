@@ -1,17 +1,8 @@
 /**
- * `@factoryos/hq-host` — JENIFY HQ's own HTTP host (Phase 2, Stage 1).
+ * `@factoryos/hq-host` — JENIFY HQ's own HTTP host.
  *
- * HQ can now be served by any process that can run Fastify. It needs the core
- * (`@factoryos/headquarter`) and an identity source, and nothing else — in
- * particular, not the JENIFY OS tenant platform.
- *
- * Two consumers exist today:
- *
- *   · `@factoryos/server` — supplies identity over its `fos_session` cookie, so
- *     the proven local control plane behaves exactly as before.
- *   · `apps/hq-server`    — supplies `NO_IDENTITY`, so it boots, serves, and
- *     truthfully refuses everything. That is the correct standalone posture
- *     until Founder Gate A decides identity for a separate origin.
+ * HQ can be served by any process that can run Fastify. It depends on the HQ
+ * core and a host-supplied identity source, not on the JENIFY OS tenant server.
  */
 
 export {
@@ -33,15 +24,44 @@ export {
   type HeadquarterHost,
 } from './config.js';
 
-export type { HeadquarterSiteOptions } from './routes.js';
+export {
+  openHqPersistence,
+  resolveHqPersistenceConfig,
+} from './persistence-guard.js';
+
+export {
+  HQ_DURABLE_TOPOLOGY,
+  restoreHqBackupToNewFile,
+  type HqBackupResult,
+  type HqPersistence,
+  type HqPersistenceConfig,
+  type HqPersistenceMode,
+  type HqRuntimeMode,
+} from './persistence.js';
 
 /**
- * A-4: shared Jenify identity, separate host-only HQ session
- * (Founder Gate A, decided 2026-09-02).
- *
- * A host wiring these must register `@fastify/cookie` itself — the cookie layer
- * is the host's, not this package's, and `@factoryos/server` already has one.
+ * Stage 3 durable-filesystem policy. Exported so the allow/refuse decision is
+ * inspectable and deterministically testable on its own, without needing a real
+ * privileged mount.
  */
+export {
+  absoluteFilesystemRefusal,
+  classifyDurableFilesystem,
+  parseAttestedFilesystems,
+  parseMountInfo,
+  KERNEL_VIRTUAL_FILESYSTEMS,
+  KNOWN_EPHEMERAL_FILESYSTEMS,
+  KNOWN_PERSISTENT_FILESYSTEMS,
+  UNSUPPORTED_SHARED_FILESYSTEMS,
+  type AttestedFilesystemsResult,
+  type DurableFilesystemRefusal,
+  type DurableFilesystemVerdict,
+  type MountBoundary,
+} from './durable-filesystem.js';
+
+export type { HeadquarterSiteOptions } from './routes.js';
+
+/** A-4: shared Jenify identity, separate host-only HQ session. */
 export {
   HQ_SESSION_COOKIE,
   HQ_SESSION_TTL_MS,
