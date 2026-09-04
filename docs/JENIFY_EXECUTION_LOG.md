@@ -1417,3 +1417,54 @@ control that could have failed".
 
 Evidence at this commit: headquarter 1932, hq-host 206, hq-server 20, server 569
 (3 pre-existing skips); no behaviour changed — comments only.
+
+### Codex round 17 — the sweep's own subject was one of its blind spots (`45bfac4`)
+
+Two findings, both real, both fixed. They are one defect in two places: an
+enforcement narrower than the invariant behind it — the seventh round on this
+branch to produce that shape.
+
+**The reachability test.** One commit earlier I swept every test that shares a
+source with its subject and recorded three of them as "sound for what they
+claim". The reachability test was the first on that list. Codex read the same
+test and found what the sweep did not: it covered five of the eight
+`ConnectionState`s, so `not_connected`, `expired` and `setup_required` were
+never asked about at all. Re-hardcoding the client to light any of those three
+stayed green, and a ninth state needed no test change. The limit I wrote beside
+it was accurate about the *derivation* and silent about the *coverage*, which
+made it read as a smaller problem than it was.
+
+It is now a literal `Record<ConnectionState, boolean>` judgement, written
+independently of `LIT_CONNECTION_STATES`, with a second test holding the
+constant to it. `Record` closes the new-state hole at the type level: adding a
+state fails `tsc` on the test file until someone decides, there, whether it may
+be drawn reachable.
+
+**The attention hint.** "Needing attention" started counting every state
+`CONNECTION_STATE_TONE` warns on — a round-16 fix — while its hint went on
+saying "Reported error or expired credential". So a `configured` integration
+made HQ report 1 needing attention and explain that 1 as a failure. On a page
+whose single claim is that it never asserts more than canonical state supports,
+that is the worst direction to be wrong in. Hint and filter now read one derived
+list.
+
+**Controls that could fail** (the distinction the previous commit named and this
+round shows I applied incompletely):
+
+- client re-hardcoded to light `setup_required` → `expected 1 to be +0`
+- `LIT_CONNECTION_STATES` widened to `dispatchable` → *both* tests fail, so the
+  expectation is independent of the constant rather than derived from it
+- old hint text restored → `configured (warn): expected false to be true`
+- a ninth `ConnectionState` added → `tsc` fails at `client-hydration.test.ts:766`
+
+**The lesson, stated plainly.** I audited these tests for the wrong property. I
+asked "does the expectation derive from the behaviour" and answered it
+correctly; I did not ask "does it cover the whole domain", and that was the live
+defect. A guard written to close one class of gap is not evidence about a class
+it was not looking for — and saying "no worthless tautology found" invited a
+reader to believe the sweep had checked more than it had.
+
+Evidence at this commit: headquarter 1934, hq-host 206, hq-server 20, server 569
+(3 pre-existing skips); four typechecks clean; `npm run build`; `build:site`;
+`evidence:webgl` PASS (warm 5119 lit / 0 dark, frames 33 / 0 / 32, 17 rooms
+still present after context loss).
