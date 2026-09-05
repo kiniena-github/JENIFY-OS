@@ -87,14 +87,26 @@ WHERE u.username = '<the founder''s username>';
 | POST | `/api/hq/control/missions` | mapped Founder holding `hq.mission_command` — command one canonical mission (Phase 3) |
 | POST | `/api/hq/control/missions/transition` | same — move a mission through its lifecycle |
 | POST | `/api/hq/control/missions/amend` | same — amend mission intent, append-only |
+| GET | `/api/hq/control/projects` | mapped Founder — the canonical project register, full detail (Phase 4) |
+| GET | `/api/hq/control/workforce` | mapped Founder — registered workers with transport/member truth (Phase 4) |
+| POST | `/api/hq/control/projects` | mapped Founder holding `hq.project_command` — create one register entry idempotently |
+| POST | `/api/hq/control/projects/transition` | same — close/reopen, note required both directions |
+| POST | `/api/hq/control/projects/update` | same — audited register edit (closed entries refuse) |
+| POST | `/api/hq/control/missions/assign-project` | mapped Founder holding `hq.mission_command` — bind/clear the mission → project link |
+| POST | `/api/hq/control/missions/link-plan-item` | same — link a plan item to a real task, write-once |
+| POST | `/api/hq/control/workforce/route` | mapped Founder — evaluate task eligibility (records `routing_evaluated` evidence) |
+| POST | `/api/hq/control/workforce/assign` | mapped Founder holding `hq.workforce_assign` — record an ADVISORY assignment intent |
 
 Anything else under the prefix is a 404. There is no generic mutation endpoint,
 and no *ask for changes*: the canonical approval model records approve or deny
 only, so a third button would show a decision the Operator never saw. The three
 mission writes are the Phase 3 widening recorded in `docs/JENIFY_DECISIONS.md`
-(2026-09-05); they take no step-up because they release no execution authority
-(a mission executes nothing in Phase 3), and that exemption is revisited the
-moment any autonomous consumer reads mission state.
+(2026-09-05); the project, linkage and workforce writes are the Phase 4
+widening (issue #262), recorded the same way. None takes step-up: the
+exemption was RE-EVALUATED at Phase 4 and re-affirmed — Phase 4 still adds no
+autonomous consumer that can turn mission/project state into execution
+(nomination is advisory and inert; an assignment intent changes no status and
+burns no approval) — and must be re-evaluated again the moment one exists.
 
 `GET /session` reports which controls are genuinely available, derived from the
 resolved principal's own grants — `approve`/`deny` from `approvalAuthority`,
