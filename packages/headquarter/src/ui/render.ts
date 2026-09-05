@@ -60,6 +60,8 @@ import {
   directOrderConsoleScript,
   approvalsConsoleScript,
   connectionsLiveScript,
+  missionCommandConsoleScript,
+  missionsConsoleScript,
 } from './control-console.js';
 import {
   AUTH_MECHANISM_LABELS,
@@ -263,6 +265,25 @@ ${fields}
 <div data-order-console></div>
 <p class="muted">Every direct order is created as the Founder-gated capability <code>hq.direct_order</code>: it lands in <code>needs_approval</code> with an action digest and executes nothing until a Founder approves that exact action. An order for a provider that cannot dispatch today is still <b>RECORDED and BLOCKED</b>, never started and never lost — bound to the provider it names, so only a worker declared as that provider could ever claim it. No other provider is ever substituted.</p>
 <p class="muted">The resolved provider is binding at execution, not a label: the order records it as <code>executionProvider</code>, and the Operator refuses to let any worker but one declared as that provider claim or start it. Because it sits in the payload, it is inside the digest the Founder approves — the provider cannot be swapped between approval and execution. <code>hq.direct_order</code> must also already be registered and enabled here: placing an order never registers it, and never re-enables one that was disabled.</p>
+</div>`;
+}
+
+/**
+ * The static Founder Command panel (Phase 3, issue #254). Inert by the
+ * site-wide rule: no form, no button, no input in emitted markup. The
+ * working composer is drawn inside the mount by
+ * `missionCommandConsoleScript` only when `/session` grants
+ * `controls.missionCommand`.
+ */
+function founderCommandPanel(): string {
+  return `<div class="panel order-composer">
+<p class="readonly-note">A Founder order such as “Improve the QOS website speed without changing the visual design and do not deploy production” becomes a canonical, durable <b>mission</b>: objective, non-negotiable constraints, acceptance criteria, priority and a task plan, with the original order preserved server-side as an immutable intent record and every change appended as an auditable amendment.</p>
+<div class="decision-controls" role="group" aria-label="Founder Command — inert in this static render">
+<span class="control-readonly" aria-disabled="true">Command Mission</span>
+<span class="faint">inert in this static render — a working composer appears below only when the control API grants it to your session</span>
+</div>
+<div data-mission-command-console></div>
+<p class="muted">Commanding a mission is the Founder-gated capability <code>hq.mission_command</code>: it records direction and creates <b>no task</b> — nothing executes from a mission in this phase. Task breakdown is exactly what the Founder states; an empty plan is recorded as an explicit “not yet decided” item, never invented. The full mission record lives in the Mission Room (Projects page).</p>
 </div>`;
 }
 
@@ -589,6 +610,8 @@ ${directOrderConsoleScript({
   ready: ROUTE_STATE_PRESENTATION.ready,
   blocked: ROUTE_STATE_PRESENTATION.blocked,
 })}
+${section('FOUNDER COMMAND — MISSIONS', founderCommandPanel(), 'founder-command')}
+${missionCommandConsoleScript()}
 <div class="grid grid-lanes">${lanes}</div>
 </div>
 <div>
@@ -681,13 +704,18 @@ ${
     )
     .join('\n');
 
+  const missionRoom = `<div class="panel">
+<p class="readonly-note">The canonical missions the Founder has commanded — objective, constraints, plan, blockers and lifecycle, read live from the same-origin control API. This static render holds no mission data and claims none; the list below is drawn only from a live, Founder-authenticated read. Zero commanded missions renders as an explicit zero.</p>
+<div data-missions-console></div>
+</div>`;
+
   return shell({
     title: 'Projects',
     activeFile: 'projects.html',
     eyebrow: 'Company portfolio board',
     lede: 'Every project with recorded activity, its health, who is on it, what is blocking it, and what happened last.',
     asOf: nowIso,
-    body: `${section('PORTFOLIO', board)}${timelineHtml}`,
+    body: `${section('MISSION ROOM — FOUNDER COMMAND RECORD', missionRoom, 'mission-room')}${missionsConsoleScript()}${section('PORTFOLIO', board)}${timelineHtml}`,
     provenanceNote,
     sourceMode,
   });
