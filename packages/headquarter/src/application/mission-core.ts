@@ -1303,6 +1303,32 @@ export class MissionCore {
     return latest?.kind === 'execution_failed';
   }
 
+  /**
+   * The https evidence refs a worker submitted with a result, read from the
+   * evidence chain where `OperatorQueue.complete` records them. Only absolute
+   * https refs travel: a local path would leak the machine's layout.
+   */
+  #evidenceRefs(opTaskId: string): string[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT payload FROM op_evidence WHERE task_id = ?
+         AND kind IN ('execution_result', 'execution_result_submitted_for_review') ORDER BY seq`,
+      )
+      .all(opTaskId) as { payload: string }[];
+    const refs: string[] = [];
+    for (const row of rows) {
+      try {
+        const parsed = JSON.parse(row.payload) as { refs?: unknown };
+        if (Array.isArray(parsed.refs)) {
+          for (const ref of parsed.refs) if (typeof ref === 'string' && ref.startsWith('https:')) refs.push(ref);
+        }
+      } catch {
+        // A payload the log itself wrote and cannot be parsed contributes no ref.
+      }
+    }
+    return refs;
+  }
+
   #view(row: MissionRow): MissionView {
     const intent = JSON.parse(row.intent) as MissionIntent;
     const evidenceRefs: string[] = [];
@@ -1325,10 +1351,7 @@ export class MissionCore {
           reviewState: op.reviewState,
           workerReportedFailure: this.#workerReportedFailure(op.id),
         });
-        const refs = (op.result as { refs?: unknown } | null)?.refs;
-        if (Array.isArray(refs)) {
-          for (const ref of refs) if (typeof ref === 'string' && ref.startsWith('https:')) evidenceRefs.push(ref);
-        }
+        evidenceRefs.push(...this.#evidenceRefs(op.id));
       } else if (task.op_task_id && !op) {
         // A link to a task that no longer resolves is a blocked task, not a
         // waiting one: something HQ recorded cannot be read back.
