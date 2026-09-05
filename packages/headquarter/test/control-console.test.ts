@@ -98,6 +98,8 @@ describe('every page script speaks only to the control API and the snapshot', ()
       `fetch(${JSON.stringify(SNAPSHOT_FILENAME)}`,
       'fetch(SESSION_PATH',
       'fetch(APPROVALS_PATH',
+      // Phase 3 (issue #253): the mission console's read of the mission list.
+      'fetch(MISSIONS_PATH',
       'fetch(path,', // postJson's parameter; its call sites are audited below
     ];
     for (const page of HQ_PAGES) {
@@ -128,12 +130,15 @@ describe('every page script speaks only to the control API and the snapshot', ()
     }
   });
 
-  it('allow-lists every postJson call site against the three write routes', () => {
+  it('allow-lists every postJson call site against the five write routes', () => {
+    // Three until Phase 3; `MISSIONS_PATH` (Founder Command) and
+    // `MISSION_CANCEL_PATH` were added by issue #253 and are the only two
+    // additions. A POST helper aimed anywhere else fails here.
     for (const page of HQ_PAGES) {
       const scripts = scriptsOf(site.get(page.file)!);
       for (const match of scripts.matchAll(/postJson\((\w+)[,)]/g)) {
         expect(
-          ['ORDERS_PATH', 'APPROVE_PATH', 'DENY_PATH', 'path'].includes(match[1]!),
+          ['ORDERS_PATH', 'APPROVE_PATH', 'DENY_PATH', 'MISSIONS_PATH', 'MISSION_CANCEL_PATH', 'path'].includes(match[1]!),
           `${page.file}: unexpected postJson target: ${match[1]}`,
         ).toBe(true);
       }

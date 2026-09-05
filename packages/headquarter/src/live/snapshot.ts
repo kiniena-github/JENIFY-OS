@@ -39,6 +39,7 @@ import { founderConsole, type FounderConsole } from '../application/console.js';
 import { directOrderDispatchBlocked } from './orders.js';
 import { dispatchHistory } from '../providers/claude/dispatch.js';
 import type { HeadquarterOperations } from '../application/service.js';
+import type { MissionView } from '../application/mission-core.js';
 import type { ProviderId, SecretsEnv } from '../routing/providers.js';
 import { assessConnections, type ConnectionProbe, type ConnectionStatus } from './connections.js';
 import { assertBrowserSafe, assertNoFabricatedFields } from './redaction.js';
@@ -111,6 +112,14 @@ export interface HqSnapshot {
   workforce: SnapshotSection<SnapshotWorker[]>;
   capabilities: SnapshotSection<SnapshotCapability[]>;
   activity: SnapshotSection<SnapshotActivityEntry[]>;
+  /**
+   * Phase 3 missions (issue #253). `MissionView` is the browser-safe read
+   * model `MissionCore` produces: normalized intent, plan, decisions, derived
+   * status, and the command's DIGEST and length in place of its text. The
+   * original Founder instruction has no field here and no path into one; the
+   * guards below walk this section like every other.
+   */
+  missions: SnapshotSection<MissionView[]>;
 }
 
 /**
@@ -169,6 +178,13 @@ export interface SnapshotSources {
   workforce: { data: WorkerDescriptor[]; provenance: Provenance };
   capabilities: { data: Capability[]; provenance: Provenance };
   activity: { data: ActivityEvent[]; provenance: Provenance };
+  /**
+   * REQUIRED, not defaulted. A caller that has not read the mission tables
+   * must say so with its own provenance (the static build passes an empty
+   * section stamped as a static bundle); a silent default would let a
+   * snapshot claim LIVE over a section nothing read.
+   */
+  missions: { data: MissionView[]; provenance: Provenance };
   policyContext?: Parameters<typeof classifyCapability>[1];
   activityLimit?: number;
 }
@@ -190,6 +206,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       sources.workforce.provenance.mode,
       sources.capabilities.provenance.mode,
       sources.activity.provenance.mode,
+      sources.missions.provenance.mode,
     ]),
     note: sources.note ?? null,
     counts: {
@@ -229,6 +246,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       sources.activity.provenance,
       trimActivity(sources.activity.data, sources.activityLimit),
     ),
+    missions: section(sources.missions.provenance, sources.missions.data),
   };
 
   // Fail closed: prove it before anyone can publish it.
@@ -361,6 +379,12 @@ export function liveSnapshotFromOperations(
     activity: {
       data: ops.directory.latestStatusPerSubject(),
       provenance: provenanceFor('hq_events via HeadquarterStore.latestStatusPerSubject'),
+    },
+    missions: {
+      // Derived status and mapped task states come from `MissionCore.list`,
+      // which reads canonical `op_tasks` truth for every opened execution.
+      data: ops.missions.list(),
+      provenance: provenanceFor('hq_missions / hq_mission_tasks / hq_mission_decisions via MissionCore.list'),
     },
   });
 }

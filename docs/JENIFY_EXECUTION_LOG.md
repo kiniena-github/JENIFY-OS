@@ -1649,3 +1649,43 @@ read by this implementation, so nothing in the visual layer was verified against
 them. Merge and deployment remain Founder-gated and untouched: PR #251 is open
 and unmerged, `main` is unchanged, nothing was deployed or promoted, and no paid
 service was enabled.
+
+### Phase 3 — Founder Command + Mission Core built (issue #253), awaiting independent review
+
+Built on the accepted Phase 2 head (`9f98723`), branch `claude/epic-pascal-4cmhqi`,
+not merged, nothing deployed, no paid service enabled.
+
+**What exists now.** A Founder command in plain language becomes a canonical
+mission with a locked objective, explicit `do_not` rules and constraints, a
+dependency-ordered task plan, Founder-visible decisions and a status derived
+from canonical task truth. It sits BESIDE the inert chat-room proposal and the
+direct order, never around them, and owns no execution authority of its own:
+a mission task becomes work only through `HeadquarterOperations.createTask`
+under the unchanged gates. The raw command is stored server-side only; the
+browser gets the normalized intent plus the command's digest and length. Goal
+Lock is real: versioned intent, `expectedIntentVersion` fencing on every
+intent-dependent write, do-not rules removable only by name, and a revised
+intent refusing a stale execution's approval (`approveTask` gained the
+`mission_intent_changed` refusal — a stricter precondition, not a second
+approval system). Cancellation is honest: it refuses while canonical work is
+queued, claimed, running or unresolved, and denies executions still at the
+Founder gate. Two browser routes (`/missions` GET+POST, `/missions/cancel`) join
+the exact-match table; the Command Center gains a Mission Core console with
+five explicit states; the immersive Mission Room projects missions beside the
+task cards. No AI call, no orchestrator, no fabricated metric.
+
+**Decisions recorded rather than invented.** Founder Command authority is an
+explicit originate grant for a reserved `hq.founder_command` capability
+(registered as a configuration act, exactly like `hq.direct_order`).
+Verification/completion are explicit Founder decisions requiring approval
+authority; task-level no-self-approval is untouched and proven to still hold
+under a mission. The browser accepts no structured plan; the planner seam is
+in-process only. Full reasoning: `docs/HEADQUARTER/PHASE_3_FOUNDER_COMMAND_MISSION_CORE.md`.
+
+**Existing tests amended, each with its reason in the diff:** the control
+route table assertion (six → eight entries), the console fetch/postJson
+allow-lists (two new declared paths), the host-port contract's POST heuristic
+(a POST-only route), and `buildHqSnapshot` call sites that must now state a
+`missions` source explicitly (a required field, so no snapshot can claim LIVE
+over a section nothing read). Nothing was deleted, skipped or weakened.
+

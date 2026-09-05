@@ -3,6 +3,11 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildStandaloneHq } from '../src/main.js';
 import { attestDurableMountBoundary } from './support/durable-mount.js';
+import {
+  FOUNDER_COMMAND_CAPABILITY,
+  HumanPrincipalRegistry,
+  registerFounderCommandCapability,
+} from '@factoryos/headquarter/application';
 
 const roots: string[] = [];
 
@@ -70,6 +75,61 @@ describe('standalone HQ durable hosted runtime', () => {
     expect(row).toEqual({ id: 'restart-process', status: 'working' });
     expect(second!.host.persistence.config.mode).toBe('durable-volume');
     expect(second!.host.persistence.config.runtime).toBe('hosted');
+    await second!.close();
+  });
+
+  it('reopens a Phase 3 mission — objective, constraints, plan, decisions, version — after a full restart', async () => {
+    // Issue #253: the mission tables ride the same durable open as every other
+    // canonical table, so a Founder command issued through the REAL standalone
+    // process's own `HeadquarterOperations` must read back identically from the
+    // next process, with its idempotency and intent fence intact.
+    if (process.platform !== 'linux') return;
+    const durableRoot = root();
+    const env = hostedEnv(durableRoot);
+
+    const first = await buildStandaloneHq({ env, log: () => {} });
+    expect(first).not.toBeNull();
+    registerFounderCommandCapability(first!.host.db);
+    new HumanPrincipalRegistry(first!.host.db).register({
+      id: 'founder',
+      displayName: 'Founder',
+      originateCapabilities: [FOUNDER_COMMAND_CAPABILITY.id],
+      approvalAuthority: true,
+      active: true,
+    });
+    const created = first!.host.plane.ops.missions.createFromCommand({
+      instruction: 'Fix the header and deploy it to production without changing the design.',
+      requestedBy: 'founder',
+      project: 'qos',
+      title: 'Header fix',
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const before = first!.host.plane.ops.missions.get(created.data.mission.id)!;
+    expect(before.status).toBe('blocked');
+    expect(before.tasks).toHaveLength(3);
+    await first!.close();
+
+    const second = await buildStandaloneHq({ env, log: () => {} });
+    expect(second).not.toBeNull();
+    const after = second!.host.plane.ops.missions.get(created.data.mission.id);
+    expect(after).toEqual(before);
+    expect(after!.intent.doNot).toEqual(['changing the design']);
+    expect(after!.decisions.map((decision) => decision.kind)).toEqual(['founder_gate']);
+    const again = second!.host.plane.ops.missions.createFromCommand({
+      instruction: 'Fix the header and deploy it to production without changing the design.',
+      requestedBy: 'founder',
+      project: 'qos',
+      title: 'Header fix',
+    });
+    expect(again.ok && again.data.deduplicated).toBe(true);
+    const stale = second!.host.plane.ops.missions.cancel({
+      missionId: created.data.mission.id,
+      founderId: 'founder',
+      expectedIntentVersion: 99,
+      reason: 'stale reading',
+    });
+    expect(!stale.ok && stale.error.code).toBe('stale_intent_version');
     await second!.close();
   });
 });
