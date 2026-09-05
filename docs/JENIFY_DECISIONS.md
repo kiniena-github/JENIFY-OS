@@ -139,3 +139,41 @@ Append-only. Each entry: date, decision, rationale. Newest last.
   honesty rule `ui/spatial/state.ts` already enforces (deny by default, every live-looking
   thing carries its evidence, nothing invented). The concept images are visual references, not
   final UI specs.
+
+- **2026-09-05 — Phase 3 (Founder Command + Mission Core, issue #254) widens the HQ browser
+  write surface and defines the canonical Mission.** Founder-approved via #254/#255; recorded
+  here so nothing about it is silent:
+  1. **Write surface.** The browser write surface widens from exactly three routes
+     (create order / approve / deny — the 2026-08-28 decision) to additionally
+     `POST /api/hq/control/missions` (command), `/missions/transition` and `/missions/amend`.
+     This supersedes ONLY the surface-count clause of 2026-08-28; every other clause —
+     identity from the server session and Founder map only, fail-closed on a broken map,
+     no generic mutation endpoint, no ask-for-changes route — stands and applies to the new
+     routes unchanged.
+  2. **"Mission" now has a third, authoritative meaning.** The canonical Mission aggregate
+     (`hq_missions` + append-only `hq_mission_intents`/`hq_mission_events` +
+     `hq_mission_plan_items`) is the command-level record of a Founder order: objective,
+     non-negotiable constraints, acceptance criteria (unknown recorded as unknown), priority
+     (mission metadata only — the operator queue stays strictly FIFO), plan, blockers and the
+     eight lifecycle states of #254. The chat-lane proposal flow (`hq_mission_proposals`) and
+     the still-unwired mission watchdog are untouched and remain distinct concepts. The
+     Mission Room is deliberately rebound from "open op_tasks rows" to this aggregate; the
+     Command Room keeps task truth and gains a mission-decision metric computed from the same
+     status set, so the rooms cannot disagree.
+  3. **Missions execute nothing in Phase 3.** Commanding, transitioning, amending and linking
+     create no task, touch no approval, dispatch nothing and read no worker registry. The
+     `verified` state is reachable only as an explicit recorded Founder decision with a
+     mandatory note (method vocabulary has no machine member); the two-actor rule of
+     2026-08-27 continues to govern execution-granting approvals unchanged — an inert,
+     actor-audited state record is not an approval, so single-actor verification is honest
+     and displayed as exactly what it is.
+  4. **No step-up on mission writes.** Step-up stays bound to what it protects —
+     execution-granting approvals. This exemption MUST be revisited the moment any autonomous
+     consumer reads mission state (Phase 4+).
+  5. **Mission writes are not kill-switch-gated**, in parity with direct-order intake (also
+     un-gated): the switch stops execution reachability — claims and approvals — and must not
+     stop the Founder from recording direction, including "cancelled", during an emergency
+     stop. Pinned by tests whose names state the rationale.
+  6. **Raw order isolation.** The raw Founder instruction and every amendment rationale live
+     in the server-side intent bodies only; no route response or snapshot carries them. The
+     browser sees intake-scanned canonical fields and intent-history metadata.

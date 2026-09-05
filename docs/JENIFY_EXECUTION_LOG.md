@@ -1649,3 +1649,41 @@ read by this implementation, so nothing in the visual layer was verified against
 them. Merge and deployment remain Founder-gated and untouched: PR #251 is open
 and unmerged, `main` is unchanged, nothing was deployed or promoted, and no paid
 service was enabled.
+
+## Phase 3 — Founder Command + Mission Core (local Fable main-builder pass)
+
+**2026-09-05.** Branch `local/phase-3-founder-command-mission-core` from accepted main
+`9f98723` (issues #254 binding requirements, #255 local handoff — this lane is the sole
+Phase 3 integrator; the dispatched cloud session on #254 is reference-only and nothing from
+it was merged). Main builder: genuine Fable 5, stated per the model requirement.
+
+**What was built.** The canonical Mission aggregate above tasks: 8-state lifecycle vocabulary
+(`contracts/mission.ts`, structural map fixed, all transitions Founder-driven in this phase),
+module-owned schema (`hq_missions`, append-only `hq_mission_intents`/`hq_mission_events`,
+`hq_mission_plan_items`), the CONFIGURATION-vs-INVOCATION capability trio for
+`hq.mission_command`, seven facade methods, four exact-match control routes through the
+unchanged pipeline (hq-host adapter: zero changes, proven through a real Fastify instance),
+the shared `missionBrowserView` projection feeding both the routes and the snapshot's new
+missions section, the Mission Room rebound to real missions (semantic change recorded, the
+bucket-agreement invariant replaced on record), a Command Room mission-decision metric on the
+same status set, and two script-created consoles (Founder Command on index.html; mission
+list/detail/lifecycle/amend on projects.html) under the emitted-markup-stays-inert rule.
+Decisions recorded in `docs/JENIFY_DECISIONS.md` (2026-09-05): write-surface widening,
+"mission" reconciliation, verified-as-recorded-Founder-decision, no step-up on mission writes
+(revisit at Phase 4+), mission writes not kill-switch-gated, raw-order isolation.
+
+**What is deliberately NOT here.** No orchestrator, no dynamic teams, no evidence engine, no
+machine verification, no queue priority (claiming stays strictly FIFO — test-pinned), no
+watchdog wiring, no pause/resume states. Zero missions renders as zero; later-phase
+capability says later instead of being simulated.
+
+**Local verification on the Founder workstation (Windows).** Focused suites all green:
+mission-contracts 17, application.mission-core 36, live-mission-routes 21, mission-consoles 9
+(JSDOM against the real control API), mission-durability 2, immersive-page 46 (three Phase 3
+additions), client/snapshot suites 205 across the rebind, hq-host host-contract 19.
+Known environmental caveats, identical on the unmodified base: 6 hq-host persistence tests
+are POSIX-only (`/proc/self/mountinfo`, directory-fd fsync) and fail on Windows; the
+hq-server hosted-restart mission rows are Linux-gated; occasional subprocess-timeout flakes
+in codex-lane/routing suites under full-suite load pass in isolation. Ubuntu exact-head CI is
+the authority for all of these. Full-matrix results and the exact frozen SHA are recorded in
+the Phase 3 PR; merge remains gated on independent review and the Founder.
