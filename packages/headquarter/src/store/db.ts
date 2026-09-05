@@ -182,7 +182,22 @@ CREATE TABLE IF NOT EXISTS hq_missions (
   actor_authentication TEXT NOT NULL,
   requested_route TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  -- The intent chain's HEAD, anchored on the mission row (mutation-testing
+  -- pass on b3f72d1, P1.3). The chain in hq_mission_intent verifies forward
+  -- from genesis, which catches an edited, reordered or middle-deleted row —
+  -- but a chain with no anchored head cannot tell that its NEWEST rows were
+  -- dropped: every remaining row still hashes to the one before it. Deleting
+  -- the latest amendment left verifyIntentChain reporting true and the
+  -- Mission Room showing a pristine, unamended mission. These two columns are
+  -- written by MissionStore.appendIntent in the same transaction as the intent
+  -- row; verification recomputes the head and the count from the rows and
+  -- compares them here. NULL means the mission was recorded before the anchor
+  -- existed (a database upgraded in place); the store reports such a chain as
+  -- UNANCHORED rather than pretending to a check it cannot make, and the next
+  -- append anchors it.
+  intent_head_hash TEXT,
+  intent_count INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_hq_missions_state ON hq_missions(state, created_at);
 
@@ -266,6 +281,14 @@ const COLUMN_UPGRADES: readonly { table: string; column: string; ddl: string }[]
   // Issue #79: the consumption record also pins the exact task, so a consumed
   // approval cannot ride another task even behind a forged action digest.
   { table: 'hq_approvals', column: 'consumed_task_id', ddl: 'TEXT' },
+  // Issue #254, mutation-testing pass on b3f72d1 (P1.3): the intent chain's
+  // anchored head. Nullable on purpose — an existing row gets NULL, which the
+  // mission store reads as "recorded before anchoring existed" and reports
+  // honestly as unanchored; it never invents a head for rows it did not see
+  // appended, because anchoring whatever happens to be there NOW would bless a
+  // truncation that may already have happened.
+  { table: 'hq_missions', column: 'intent_head_hash', ddl: 'TEXT' },
+  { table: 'hq_missions', column: 'intent_count', ddl: 'INTEGER' },
 ];
 
 function ensureColumns(db: HqDatabase): void {

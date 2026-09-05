@@ -130,6 +130,40 @@ export function isMissionTerminal(state: MissionState): boolean {
 }
 
 /**
+ * Whether a row of `hq_mission_events` is one the history is ALLOWED to hold.
+ *
+ * The transition table above never lists a self-edge — a state change is a
+ * change — and `test/mission-states.test.ts` asserts that. But the history
+ * table is written by `MissionStore.recordTransition`, which records and does
+ * not decide, and one caller writes an edge the table does not list: an
+ * amendment to a still-unreadable, plan-less mission refreshes the block
+ * reason to name THIS amendment's unknowns, and it does so through the same
+ * recorded-transition path so the refresh has its own attributed history row.
+ * That row reads `blocked → blocked`. It is not a state change; it is a
+ * reason change, recorded where the reason lives.
+ *
+ * The mutation-testing pass on `b3f72d1` found that branch uncovered and the
+ * exception undocumented: the table said "no self-edge, ever", the history
+ * could hold one, and nothing stated which was right. This function is the
+ * statement. Exactly three kinds of row are legal:
+ *
+ *   1. genesis        `null → <any state>`   the mission's first row
+ *   2. a table edge   `from → to`            `MISSION_TRANSITIONS[from]` lists `to`
+ *   3. reason refresh `blocked → blocked`    the ONE self-edge, for the
+ *                                            clarification refresh above
+ *
+ * No other self-edge is legal, and `recordTransition` now refuses to write a
+ * row this function rejects — belt and braces, since every caller already
+ * checks the table, but the history is the record a Founder reads back and a
+ * record that can hold an edge nobody stated is a record nobody can trust.
+ */
+export function isRecordedMissionEdgeLegal(from: MissionState | null, to: MissionState): boolean {
+  if (from === null) return true;
+  if (from === 'blocked' && to === 'blocked') return true;
+  return canMissionTransition(from, to);
+}
+
+/**
  * The block-reason CODE the mission core itself writes when it refuses to
  * invent a plan. A Founder-typed reason on an explicit transition to `blocked`
  * never begins with this prefix — `command.ts` refuses one that does, so the

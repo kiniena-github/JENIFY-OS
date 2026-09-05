@@ -43,6 +43,49 @@ describe('the adapter is total over canonical status × review state', () => {
   it('is pure: the same inputs give the same answer', () => {
     expect(at('running', 'pending')).toEqual(at('running', 'pending'));
   });
+
+  it('gives exactly this word for every one of the 36 combinations', () => {
+    // Mutation-testing pass on `b3f72d1`. The totality test above proves an
+    // ANSWER exists for every combination, and the spot-checks below pin the
+    // word for eight of them. Making `blocked` + `passed` answer `waiting`
+    // passed everything. Every cell is pinned here, as a literal table: the
+    // row is the canonical status, the columns are none / pending / passed /
+    // failed, and the only status whose word depends on the review state is
+    // `running`.
+    const EXPECTED: Record<(typeof ACTIVITY_STATUSES)[number], readonly [string, string, string, string]> = {
+      queued: ['waiting', 'waiting', 'waiting', 'waiting'],
+      assigned: ['working', 'working', 'working', 'working'],
+      running: ['working', 'needs_review', 'working', 'working'],
+      blocked: ['blocked', 'blocked', 'blocked', 'blocked'],
+      needs_approval: ['needs_approval', 'needs_approval', 'needs_approval', 'needs_approval'],
+      review_failed: ['failed', 'failed', 'failed', 'failed'],
+      review_passed: ['working', 'working', 'working', 'working'],
+      completed: ['completed', 'completed', 'completed', 'completed'],
+      outcome_unknown: ['blocked', 'blocked', 'blocked', 'blocked'],
+    };
+    expect([...REVIEW_STATES]).toEqual(['none', 'pending', 'passed', 'failed']);
+    let cells = 0;
+    for (const status of ACTIVITY_STATUSES) {
+      REVIEW_STATES.forEach((review, column) => {
+        expect(presentTaskState(status, review).presentation, `${status}/${review}`).toBe(EXPECTED[status][column]);
+        cells += 1;
+      });
+    }
+    expect(cells).toBe(36);
+  });
+
+  it('anchors REVIEW_STATES to the canonical ReviewState type rather than restating it', () => {
+    // A hand-copied `readonly ReviewState[]` is checked in one direction only:
+    // each element must be a ReviewState, but a fifth ReviewState added to
+    // `operator/queue.ts` would leave the tuple at four, compile cleanly, and
+    // let the totality loop keep passing over 9×4 while the real space was
+    // 9×5. The tuple is now the key set of a `Record<ReviewState, true>`,
+    // which the compiler checks in both directions. This test reads the
+    // source to make sure the anchor stays the anchor.
+    const source = readFileSync(fileURLToPath(new URL('../src/mission/presentation.ts', import.meta.url)), 'utf8');
+    expect(source).toMatch(/const REVIEW_STATE_KEYS: Record<ReviewState, true> = \{/);
+    expect(source).toMatch(/export const REVIEW_STATES: readonly ReviewState\[\] = Object\.keys\(REVIEW_STATE_KEYS\)/);
+  });
 });
 
 describe('the mappings that are easy to get wrong', () => {

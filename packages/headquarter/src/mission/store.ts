@@ -26,10 +26,42 @@
  * `hq_mission_intent` and `hq_mission_events` are only ever INSERTed into.
  * The intent rows are additionally hash-chained per mission
  * (`hash = sha256(prev_hash ‖ canonical row)`), so an edit to any historical
- * row breaks every hash after it and `verifyIntentChain` reports it. The
- * mission row's `state`/`block_reason`/`updated_at` are the only columns any
- * UPDATE in this file touches, and only through `recordTransition`, which
- * writes the event in the same statement sequence.
+ * row breaks every hash after it and `verifyIntentChain` reports it.
+ *
+ * ## The chain has an anchored head (mutation-testing pass on `b3f72d1`, P1.3)
+ *
+ * A forward walk from genesis proves that every row still hashes to the row
+ * before it. It proves NOTHING about rows that are no longer there at the
+ * end: delete the newest amendment and every remaining row still chains
+ * perfectly, so the walk reported `true` and the Mission Room showed
+ * `chainIntact: true, revisions: 1` over a mission whose latest Founder
+ * amendment had been erased with one DELETE. The docstring on
+ * `verifyIntentChain` claimed a deletion would be reported; for the tail it
+ * was not.
+ *
+ * So `appendIntent` also writes the new head hash and the row count onto the
+ * mission row (`intent_head_hash`, `intent_count`), in the same transaction
+ * as the intent row, and verification compares the recomputed head and count
+ * against that anchor. Dropping the newest row(s) now leaves an anchor that
+ * names a hash no remaining row carries, and the chain reports NOT intact.
+ * The anchor is the only thing the walk cannot recompute from the rows, which
+ * is exactly why it has to live somewhere else.
+ *
+ * A mission recorded before the anchor existed carries NULL in both columns.
+ * Its chain is reported as verified-but-UNANCHORED: the forward walk still
+ * runs and still catches an edit, a reorder or a middle deletion, but a tail
+ * truncation is undetectable for that row until its next append anchors it.
+ * Nothing backfills an anchor from the rows that happen to be present at
+ * upgrade time, because that would bless whatever truncation may already have
+ * happened. The verdict says which case it is, and the view publishes both
+ * bits so no UI can read "unanchored" as "intact".
+ *
+ * ## The UPDATEs in this file, all of them
+ *
+ * `recordTransition` writes `state`/`block_reason`/`updated_at` together with
+ * the event row that explains them; `appendIntent` writes the two anchor
+ * columns together with the intent row they anchor. No other UPDATE exists,
+ * and neither touches the other's columns.
  */
 
 import { createHash } from 'node:crypto';
@@ -39,7 +71,13 @@ import { nowIso } from '../store/db.js';
 import { canonicalJson } from '../operator/approvals.js';
 import type { ActorAuthentication } from '../live/local-trust.js';
 import type { DirectOrderRoute } from '../live/orders.js';
-import { isMissionState, MISSION_STATES, NEEDS_CLARIFICATION_REASON, type MissionState } from './states.js';
+import {
+  isMissionState,
+  isRecordedMissionEdgeLegal,
+  MISSION_STATES,
+  NEEDS_CLARIFICATION_REASON,
+  type MissionState,
+} from './states.js';
 import type { IntentUnknown } from './intent.js';
 
 /** The most missions a list read returns. Newest first; the rest are still in the table. */
@@ -57,9 +95,37 @@ export interface MissionRecord {
   requestedRoute: DirectOrderRoute;
   createdAt: string;
   updatedAt: string;
+  /**
+   * The intent chain's anchored head — the hash of the newest intent row —
+   * and how many rows the chain held when it was written. Both null for a
+   * mission recorded before the anchor existed. See the module docstring.
+   */
+  intentHeadHash: string | null;
+  intentCount: number | null;
 }
 
 export type IntentKind = 'original' | 'amendment';
+
+/**
+ * What `intentChainVerdict` can say about a mission's intent chain.
+ *
+ * `intact` is the answer a caller that wants one bit should read.
+ * `anchored` says whether that bit covers tail truncation: false means the
+ * mission row carries no head to compare against, so the forward walk is all
+ * the verification there is. `reason` names the first failure found, so a
+ * report can say WHAT is wrong rather than only that something is.
+ */
+export interface IntentChainVerdict {
+  intact: boolean;
+  anchored: boolean;
+  reason:
+    | null
+    | 'unknown_mission'
+    | 'link_broken'
+    | 'row_rehashed'
+    | 'head_mismatch'
+    | 'count_mismatch';
+}
 
 export interface IntentRecord {
   seq: number;
@@ -140,12 +206,17 @@ export class MissionStore {
     requestedRoute: DirectOrderRoute;
     at: string;
   }): MissionRecord {
+    // Anchored from birth: the chain of nothing has the genesis value as its
+    // head and zero rows. Only a row that predates the anchor columns is ever
+    // unanchored (NULL), so "unanchored" always means "upgraded in place",
+    // never "freshly inserted by this code".
     this.#db
       .prepare(
         `INSERT INTO hq_missions
            (id, idempotency_key, title, project, state, block_reason, requested_by,
-            actor_authentication, requested_route, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            actor_authentication, requested_route, created_at, updated_at,
+            intent_head_hash, intent_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
       )
       .run(
         input.id,
@@ -159,6 +230,7 @@ export class MissionStore {
         input.requestedRoute,
         input.at,
         input.at,
+        GENESIS_HASH,
       );
     return this.getMission(input.id)!;
   }
@@ -229,10 +301,18 @@ export class MissionStore {
   }
 
   /**
-   * The ONLY update in this module. Moves the mission's current state and
-   * appends the history row that explains it, together. The caller has
-   * already asserted the transition is legal; this method records, it does
-   * not decide.
+   * Moves the mission's current state and appends the history row that
+   * explains it, together. The caller has already decided the transition is
+   * right; this method records, it does not decide.
+   *
+   * It does REFUSE, though, to write an edge the history is not allowed to
+   * hold (`isRecordedMissionEdgeLegal`: genesis, a table edge, or the one
+   * documented `blocked → blocked` reason refresh). The mutation-testing pass
+   * on `b3f72d1` found that this method never consulted the table at all,
+   * while the table's test asserted "never a self-edge": a future caller
+   * could have written `working → working` and nothing would have said no.
+   * Every present caller checks the table first, so this throw is unreachable
+   * from them; it exists for the caller that does not.
    */
   recordTransition(input: {
     missionId: string;
@@ -243,6 +323,12 @@ export class MissionStore {
     reason: string | null;
     at?: string;
   }): MissionEvent {
+    if (!isRecordedMissionEdgeLegal(input.fromState, input.toState)) {
+      throw new Error(
+        `Refusing to record mission history edge ${String(input.fromState)} -> ${input.toState}: ` +
+          'not a table edge, not genesis, and not the documented blocked -> blocked reason refresh.',
+      );
+    }
     const at = input.at ?? nowIso();
     const id = uuid();
     this.#db
@@ -277,7 +363,12 @@ export class MissionStore {
   /* Intent lock                                                       */
   /* ---------------------------------------------------------------- */
 
-  /** APPEND. The previous row's hash is read and chained; nothing is overwritten. */
+  /**
+   * APPEND. The previous row's hash is read and chained; nothing is
+   * overwritten. The new row's hash and the new row count are then written to
+   * the mission row as the chain's anchored head — see the module docstring
+   * for why a chain without one cannot see its own tail go missing.
+   */
   appendIntent(input: {
     missionId: string;
     kind: IntentKind;
@@ -341,6 +432,15 @@ export class MissionStore {
         prevHash,
         hash,
       );
+    // The anchor. Counted from the table rather than incremented from the
+    // previous anchor, so a legacy (NULL) anchor becomes a correct one on the
+    // first append after the upgrade instead of NULL + 1.
+    const count = this.#db
+      .prepare(`SELECT COUNT(*) AS n FROM hq_mission_intent WHERE mission_id = ?`)
+      .get(input.missionId) as { n: number };
+    this.#db
+      .prepare(`UPDATE hq_missions SET intent_head_hash = ?, intent_count = ? WHERE id = ?`)
+      .run(hash, count.n, input.missionId);
     return this.listIntent(input.missionId).find((record) => record.id === id)!;
   }
 
@@ -371,14 +471,37 @@ export class MissionStore {
   }
 
   /**
-   * Recompute the chain from genesis and compare. False means a historical
-   * row no longer hashes to what the row after it was chained to — an edit,
-   * a deletion, or an insertion out of order.
+   * Recompute the chain from genesis, then compare its head and length
+   * against the anchor on the mission row. The one-bit form of
+   * `intentChainVerdict`: false means an edit, a reordering, a deletion
+   * ANYWHERE — the tail included, now that there is an anchor — or an
+   * insertion out of order. For a mission with no anchor (recorded before
+   * anchoring existed) the tail is the one thing this cannot see; read
+   * `intentChainVerdict(...).anchored` to know whether that caveat applies.
    */
   verifyIntentChain(missionId: string): boolean {
+    return this.intentChainVerdict(missionId).intact;
+  }
+
+  /**
+   * The full verdict. Order of checks, and why: the forward walk first, so a
+   * rehashed or middle-deleted row is named as such rather than showing up
+   * only as a head mismatch; then the anchor, which is the only check that
+   * can see a truncated tail.
+   *
+   * The count is compared as well as the head. The head alone would already
+   * catch a dropped tail (the anchor names a hash no remaining row has), but
+   * the count is cheap, it names a distinct failure, and it is a second fact
+   * an attacker with raw access has to get right at the same time.
+   */
+  intentChainVerdict(missionId: string): IntentChainVerdict {
+    const mission = this.getMission(missionId);
+    if (!mission) return { intact: false, anchored: false, reason: 'unknown_mission' };
+    const anchored = mission.intentHeadHash !== null && mission.intentCount !== null;
     let prev = GENESIS_HASH;
+    let count = 0;
     for (const record of this.listIntent(missionId)) {
-      if (record.prevHash !== prev) return false;
+      if (record.prevHash !== prev) return { intact: false, anchored, reason: 'link_broken' };
       const expected = intentHash(prev, {
         id: record.id,
         missionId: record.missionId,
@@ -395,10 +518,19 @@ export class MissionStore {
         reason: record.reason,
         at: record.at,
       });
-      if (expected !== record.hash) return false;
+      if (expected !== record.hash) return { intact: false, anchored, reason: 'row_rehashed' };
       prev = record.hash;
+      count += 1;
     }
-    return true;
+    if (!anchored) {
+      // Verified as far as a forward walk can verify. Not a failure — a
+      // mission upgraded in place has done nothing wrong — but not the full
+      // check either, and the verdict says so rather than rounding up.
+      return { intact: true, anchored: false, reason: null };
+    }
+    if (prev !== mission.intentHeadHash) return { intact: false, anchored: true, reason: 'head_mismatch' };
+    if (count !== mission.intentCount) return { intact: false, anchored: true, reason: 'count_mismatch' };
+    return { intact: true, anchored: true, reason: null };
   }
 
   /* ---------------------------------------------------------------- */
@@ -440,5 +572,7 @@ function toMission(row: Record<string, unknown>): MissionRecord {
     requestedRoute: row.requested_route as DirectOrderRoute,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
+    intentHeadHash: typeof row.intent_head_hash === 'string' ? row.intent_head_hash : null,
+    intentCount: typeof row.intent_count === 'number' ? row.intent_count : null,
   };
 }

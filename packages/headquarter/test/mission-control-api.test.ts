@@ -266,6 +266,115 @@ describe('nothing Founder-typed but the title crosses the wire', () => {
     expect(response.body.error).toMatchObject({ code: 'unsafe_command' });
     expect(h.missions.countMissions()).toBe(0);
   });
+
+  it('refuses a credential-shaped transition or amendment reason with 400 unsafe_reason, and an over-long one with reason_too_long', () => {
+    // Mutation-testing pass on `b3f72d1`, P1.4(a), at the wire: the two
+    // codes are asserted as the answer a browser gets, with the recorded
+    // state and the intent lock untouched afterwards.
+    const h = harness();
+    const missionId = h.call({ body: COMMAND_BODY }).body.missionId as string;
+    const TOKEN_REASON = 'Waiting on token ghp_abcdefghijklmnopqrstuvwxyz1234 from the auditor.';
+    const unsafe = h.call({ path: CONTROL_ROUTES.missionTransition, body: { missionId, to: 'blocked', reason: TOKEN_REASON } });
+    expect(unsafe.status).toBe(400);
+    expect(unsafe.body.error).toMatchObject({ code: 'unsafe_reason' });
+    expect(h.audit.at(-1)?.detail).toBe('unsafe_reason');
+    const long = h.call({ path: CONTROL_ROUTES.missionTransition, body: { missionId, to: 'blocked', reason: 'r'.repeat(501) } });
+    expect(long.status).toBe(400);
+    expect(long.body.error).toMatchObject({ code: 'reason_too_long' });
+    const unsafeAmend = h.call({ path: CONTROL_ROUTES.missionAmend, body: { missionId, command: 'Ship it faster.', reason: TOKEN_REASON } });
+    expect(unsafeAmend.status).toBe(400);
+    expect(unsafeAmend.body.error).toMatchObject({ code: 'unsafe_reason' });
+    expect(h.missions.getMission(missionId)!.state).toBe('planned');
+    expect(h.missions.listIntent(missionId)).toHaveLength(1);
+    expect(JSON.stringify(h.call({ method: 'GET' }).body)).not.toContain('ghp_');
+  });
+});
+
+describe('one poisoned row does not brick the list (mutation-testing pass on b3f72d1, P1.4b)', () => {
+  /**
+   * Measured before the fix: a credential-shaped `block_reason` written by
+   * any path bypassing `checkReason` made `missionListing` throw OUTSIDE the
+   * `safe()` wrapper, and `GET /control/missions` answered 500 for the ENTIRE
+   * list — one poisoned reason made every mission unreadable. Now the
+   * poisoned mission alone is withheld, with the field named and the value
+   * absent, and the list answers 200 with the others intact.
+   */
+  const TOKEN = 'ghp_abcdefghijklmnopqrstuvwxyz1234';
+
+  it('answers 200 with the poisoned mission withheld and its neighbour untouched', () => {
+    const h = harness();
+    const clean = h.call({ body: COMMAND_BODY }).body.missionId as string;
+    const poisoned = h.call({ body: { ...COMMAND_BODY, title: 'Poisoned', command: 'Draft the Q3 maintenance plan.' } }).body.missionId as string;
+    h.fixture.db
+      .prepare(`UPDATE hq_missions SET state = 'blocked', block_reason = ? WHERE id = ?`)
+      .run(`Waiting on token ${TOKEN} from the auditor.`, poisoned);
+
+    const listed = h.call({ method: 'GET' });
+    expect(listed.status).toBe(200);
+    expect(JSON.stringify(listed.body)).not.toContain(TOKEN);
+    expect(JSON.stringify(listed.body)).not.toContain('ghp_');
+    const views = missionsOf(listed);
+    expect(views).toHaveLength(2);
+    const withheld = views.find((view) => view.missionId === poisoned)!;
+    expect(withheld.withheld).toEqual({ path: `missions.${poisoned}.blockReason` });
+    expect(withheld.title).not.toBe('Poisoned');
+    expect(withheld.blockReason).toBeNull();
+    const intact = views.find((view) => view.missionId === clean)!;
+    expect(intact.withheld).toBeNull();
+    expect(intact.title).toBe('Shift export');
+    expect(intact.taskCount).toBe(2);
+    // The store-wide facts still count the row as blocked.
+    expect(listed.body.counts).toMatchObject({ total: 2, blocked: 1 });
+    // The state document is served the same way, and the Mission Room names
+    // the withheld row rather than losing it.
+    const state = h.call({ method: 'GET', path: CONTROL_ROUTES.state });
+    expect(state.status).toBe(200);
+    expect(JSON.stringify(state.body)).not.toContain(TOKEN);
+    const room = (state.body.rooms as RoomView[]).find((room) => room.roomId === 'mission-room')!;
+    const row = room.rows.find((row) => row.id === `mission:${poisoned}`)!;
+    expect(row.chips.map((chip) => chip.label)).toContainEqual(expect.stringContaining('withheld'));
+  });
+
+  it('still refuses the whole list, by name, when the substitute cannot be made safe', () => {
+    // An identifier that is credential-shaped has no safe substitute; the
+    // listing throws and the route answers the same refusal `safe()` gives,
+    // audited as `unsafe_mission_listing` rather than falling through to the
+    // anonymous catch-all.
+    const h = harness();
+    h.missions.insertMission({
+      id: TOKEN,
+      idempotencyKey: 'mission:poisoned-id',
+      title: 'Id poisoned',
+      project: null,
+      state: 'planned',
+      blockReason: null,
+      requestedBy: 'founder',
+      actorAuthentication: 'authenticated_os_session',
+      requestedRoute: 'CLAUDE',
+      at: FRESH,
+    });
+    const listed = h.call({ method: 'GET' });
+    expect(listed.status).toBe(500);
+    expect(listed.body.error).toMatchObject({ code: 'internal', message: 'The response could not be produced safely.' });
+    expect(JSON.stringify(listed.body)).not.toContain(TOKEN);
+    expect(h.audit.at(-1)?.detail).toBe('unsafe_mission_listing');
+  });
+});
+
+describe('a deduplicated receipt names the plan links it could not carry, on the wire', () => {
+  it('lists omittedTasks with the reason, and an empty list on creation', () => {
+    const h = harness();
+    const created = h.call({ body: COMMAND_BODY });
+    expect(created.body.omittedTasks).toEqual([]);
+    const gone = (created.body.tasks as { taskId: string }[])[1]!.taskId;
+    h.fixture.db.pragma('foreign_keys = OFF');
+    h.fixture.db.prepare(`DELETE FROM op_tasks WHERE id = ?`).run(gone);
+    h.fixture.db.pragma('foreign_keys = ON');
+    const again = h.call({ body: COMMAND_BODY });
+    expect(again.status).toBe(200);
+    expect(again.body).toMatchObject({ deduplicated: true, taskCount: 1 });
+    expect(again.body.omittedTasks).toEqual([{ taskId: gone, ordinal: 2, reason: 'task_missing' }]);
+  });
 });
 
 describe('the mission list is live state', () => {

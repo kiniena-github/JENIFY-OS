@@ -293,6 +293,10 @@ function missionRow(view: MissionView): RoomRow {
                 : 'neutral',
     },
   ];
+  // A withheld view is a substitute for a mission whose record failed the
+  // browser-safety scan; the chip names the field so the Founder knows which
+  // row to look at, and the row's other fields are the substitute's constants.
+  if (view.withheld) chips.push({ label: `withheld — unsafe content at ${view.withheld.path}`, tone: 'danger' });
   if (view.needsClarification) chips.push({ label: 'needs clarification', tone: 'warn' });
   if (view.driftFromTasks && view.impliedStateLabel) {
     chips.push({ label: `tasks imply ${view.impliedStateLabel}`, tone: 'warn' });

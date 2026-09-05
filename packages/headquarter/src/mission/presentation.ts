@@ -68,8 +68,23 @@ export const MISSION_TASK_PRESENTATION_LABELS: Record<MissionTaskPresentation, s
   failed: 'Failed',
 };
 
-/** The review states a task row can carry. Restated as a tuple for the totality test. */
-export const REVIEW_STATES: readonly ReviewState[] = ['none', 'pending', 'passed', 'failed'];
+/**
+ * The review states a task row can carry, as a tuple for the totality test —
+ * ANCHORED to the canonical `ReviewState` union rather than restated beside it.
+ *
+ * The first version was a hand-copied array typed `readonly ReviewState[]`,
+ * which the compiler checks in one direction only: every element had to be a
+ * `ReviewState`, but nothing required every `ReviewState` to be an element. A
+ * fifth review state added to `operator/queue.ts` would have compiled, left
+ * this tuple at four, and let the "total over status × review" test keep
+ * passing over 9×4 while the real space had become 9×5 (mutation-testing pass
+ * on `b3f72d1`). A `Record<ReviewState, true>` literal is checked in BOTH
+ * directions — a missing key is a compile error, an extra key is an excess
+ * property error — so the tuple derived from its keys cannot drift from the
+ * union. Same idiom as `MISSION_STATE_LABELS: Record<MissionState, string>`.
+ */
+const REVIEW_STATE_KEYS: Record<ReviewState, true> = { none: true, pending: true, passed: true, failed: true };
+export const REVIEW_STATES: readonly ReviewState[] = Object.keys(REVIEW_STATE_KEYS) as ReviewState[];
 
 export interface PresentedTaskState {
   /** The presentation word. */
@@ -142,8 +157,20 @@ export function everyCanonicalStatus(): readonly ActivityStatus[] {
  *
  * `null` for a mission with no tasks: zero tasks imply nothing, and saying
  * "planned" about an empty plan would be the filler D8 forbids.
+ *
+ * Takes anything that carries a presentation word, not only a full
+ * `PresentedTaskState`, so the view can feed it a task whose canonical row is
+ * GONE: such a task has no canonical status to present from, but it is shown
+ * as `blocked` (a human is needed — the plan is damaged), and what it implies
+ * about the mission must agree with what it shows. The first version dropped
+ * missing tasks from this computation, so a one-task mission whose task row
+ * had vanished showed `blocked 1` in its counts and `impliedState null`,
+ * `driftFromTasks false` beside them — a damaged plan that reported no drift
+ * (mutation-testing pass on `b3f72d1`).
  */
-export function impliedMissionState(tasks: readonly PresentedTaskState[]): MissionState | null {
+export function impliedMissionState(
+  tasks: readonly Pick<PresentedTaskState, 'presentation'>[],
+): MissionState | null {
   if (tasks.length === 0) return null;
   const words = tasks.map((task) => task.presentation);
   if (words.every((word) => word === 'completed')) return 'ready_review';

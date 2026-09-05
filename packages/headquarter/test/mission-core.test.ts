@@ -29,8 +29,10 @@ import { HeadquarterOperations } from '../src/application/service.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { EXECUTION_PROVIDER_KEY } from '../src/operator/provider-binding.js';
 import { DIRECT_ORDER_CAPABILITY, registerDirectOrderCapability } from '../src/live/orders.js';
+import { BrowserSafetyError } from '../src/live/redaction.js';
 import {
   amendMission,
+  isRecordedMissionEdgeLegal,
   missionAttention,
   missionIdempotencyKey,
   missionListing,
@@ -39,9 +41,12 @@ import {
   MissionStore,
   submitFounderCommand,
   transitionMission,
+  MAX_COMMAND_LENGTH,
   MAX_MISSIONS_LISTED,
+  MAX_MISSION_REASON_LENGTH,
   NEEDS_CLARIFICATION_REASON,
   MAX_MISSION_TITLE_LENGTH,
+  WITHHELD_MISSION_TITLE,
 } from '../src/mission/index.js';
 
 const CLAUDE_ONLY = { CLAUDE_ROUTINE_URL: 'present', CLAUDE_ROUTINE_TOKEN: 'present' };
@@ -198,6 +203,12 @@ describe('refusals fail closed, and write nothing', () => {
   it('refuses a human without the direct-order grant', () => refused({ ...SINGLE, requestedBy: 'coo' }, 'not_permitted'));
   it('refuses system', () => refused({ ...SINGLE, requestedBy: 'system' }, 'invalid_input'));
   it('refuses an empty order', () => refused({ ...SINGLE, command: '   ' }, 'empty_command'));
+  it('refuses an order longer than MAX_COMMAND_LENGTH — a document is not an order', () =>
+    // Mutation-testing pass on `b3f72d1`: `command_too_long` had no test at
+    // all. Built from short words so it is inside every OTHER bound and over
+    // this one alone — by a clear margin, since the trim drops the trailing
+    // space and a repeat count that lands exactly on the bound is accepted.
+    refused({ ...SINGLE, command: 'Ship it. '.repeat(Math.ceil(MAX_COMMAND_LENGTH / 9) + 2) }, 'command_too_long'));
   it('refuses a too-long title', () =>
     refused({ ...SINGLE, title: 'x'.repeat(MAX_MISSION_TITLE_LENGTH + 1) }, 'title_too_long'));
   it('refuses a credential-shaped order before any write', () =>
@@ -246,6 +257,80 @@ describe('a repeated command is the same mission', () => {
     expect(missionIdempotencyKey({ ...base, project: 'p q', command: 'r' })).not.toBe(
       missionIdempotencyKey({ ...base, project: 'p', command: 'q r' }),
     );
+  });
+
+  it('treats a different COMMAND as a different mission — the one direction of dedupe that loses data', () => {
+    // Mutation-testing pass on `b3f72d1`, P1.2. The test above varies every
+    // key input except the command itself; replacing `input.command.trim()`
+    // with `''` in `missionIdempotencyKey` broke nothing. The failure that
+    // mutation stands for: two DIFFERENT Founder orders sharing a title,
+    // project and route collapse onto the first — the second returns
+    // `{ok: true, deduplicated: true}` carrying the FIRST mission's task ids,
+    // and the second order is never recorded anywhere. Every other key input
+    // going wrong makes a duplicate; this one makes a silent loss.
+    const base = { requestedBy: 'founder', route: 'CLAUDE' as const, actorAuthentication: 'unauthenticated' as const, command: 'x' };
+    expect(missionIdempotencyKey({ ...base, command: 'y' })).not.toBe(missionIdempotencyKey(base));
+    expect(missionIdempotencyKey({ ...base, requestedBy: 'founder-2' })).not.toBe(missionIdempotencyKey(base));
+
+    // End to end, through the real path: same title, project and route, the
+    // order text alone differs. Two missions, two disjoint task sets, neither
+    // deduplicated.
+    const { fixture, missions } = core();
+    const first = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    const second = submitFounderCommand(
+      fixture.ops,
+      missions,
+      { ...STEPPED, command: 'Ship the shift-report IMPORT.\n1. Add the import endpoint\n2. Write the regression test' },
+      CLAUDE_ONLY,
+    );
+    if (!first.ok || !second.ok) throw new Error('expected ok');
+    expect(second.data.deduplicated).toBe(false);
+    expect(second.data.mission.id).not.toBe(first.data.mission.id);
+    const firstIds = new Set(first.data.tasks.map((task) => task.task.id));
+    expect(second.data.tasks).toHaveLength(2);
+    expect(second.data.tasks.some((task) => firstIds.has(task.task.id))).toBe(false);
+    expect(missions.countMissions()).toBe(2);
+    expect(fixture.ops.queue.listByStatus('needs_approval')).toHaveLength(5);
+    // The second order's words are in ITS intent lock, not the first's.
+    expect(missions.listIntent(second.data.mission.id)[0]!.command).toContain('IMPORT');
+    expect(missions.listIntent(first.data.mission.id)[0]!.command).not.toContain('IMPORT');
+  });
+
+  it('records a second mission for every other key input too, end to end', () => {
+    // The same property for each remaining input, through the real path
+    // rather than the key function alone: a change in any one of them must
+    // yield a second mission, not a dedupe onto the first.
+    const { fixture, missions } = core();
+    fixture.principals.register({
+      id: 'founder-2',
+      displayName: 'Second Founder',
+      originateCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+      approvalAuthority: true,
+      active: true,
+    });
+    const first = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    if (!first.ok) throw new Error(first.error.message);
+    const variants: [string, Parameters<typeof submitFounderCommand>[2]][] = [
+      ['title', { ...STEPPED, title: 'Shift export v2' }],
+      ['project', { ...STEPPED, project: 'qos' }],
+      ['route', { ...STEPPED, route: 'AUTO' }],
+      ['requestedBy', { ...STEPPED, requestedBy: 'founder-2' }],
+      ['idempotencyKey', { ...STEPPED, idempotencyKey: 'client-key-2' }],
+    ];
+    const seen = new Set([first.data.mission.id]);
+    for (const [label, input] of variants) {
+      const result = submitFounderCommand(fixture.ops, missions, input, CLAUDE_ONLY);
+      expect(result.ok, label).toBe(true);
+      if (!result.ok) continue;
+      expect(result.data.deduplicated, label).toBe(false);
+      expect(seen.has(result.data.mission.id), label).toBe(false);
+      seen.add(result.data.mission.id);
+    }
+    expect(missions.countMissions()).toBe(1 + variants.length);
+    // And the unchanged order still dedupes, so the property is not "always new".
+    const again = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    expect(again.ok && again.data.deduplicated).toBe(true);
+    expect(missions.countMissions()).toBe(1 + variants.length);
   });
 });
 
@@ -310,6 +395,51 @@ describe('a mission survives a restart', () => {
         expect(view.tasks.every((task) => task.presentation === 'needs_approval')).toBe(true);
         expect(view.impliedState).toBe('planned');
         expect(view.driftFromTasks).toBe(false);
+        db.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('upgrades a database file that predates the anchor columns, and reads its missions as unanchored — not as failures', () => {
+    // Mutation-testing pass on `b3f72d1`, P1.3, the migration half. A file
+    // written before `intent_head_hash` / `intent_count` existed gets both
+    // columns from `COLUMN_UPGRADES` on the next open, NULL for every
+    // existing row. The store must read NULL as "recorded before anchoring"
+    // and report intact-but-unanchored, never `head_mismatch` against an
+    // anchor that was never written. The pre-upgrade file is made by
+    // dropping the two columns from a fresh one.
+    const dir = mkdtempSync(join(tmpdir(), 'hq-mission-upgrade-'));
+    const path = join(dir, 'hq.sqlite');
+    try {
+      let missionId: string;
+      {
+        const db = openHqDatabase(path);
+        const ops = new HeadquarterOperations(db);
+        registerDirectOrderCapability(db);
+        db.prepare(
+          `INSERT INTO hq_human_principals (id, display_name, originate_capabilities, approval_authority, active)
+           VALUES ('founder', 'Founder', ?, 1, 1)`,
+        ).run(JSON.stringify([DIRECT_ORDER_CAPABILITY.id]));
+        const result = submitFounderCommand(ops, new MissionStore(db), STEPPED, CLAUDE_ONLY);
+        if (!result.ok) throw new Error(result.error.message);
+        missionId = result.data.mission.id;
+        db.exec(`ALTER TABLE hq_missions DROP COLUMN intent_head_hash`);
+        db.exec(`ALTER TABLE hq_missions DROP COLUMN intent_count`);
+        expect((db.prepare(`PRAGMA table_info(hq_missions)`).all() as { name: string }[]).map((c) => c.name)).not.toContain('intent_count');
+        db.close();
+      }
+      {
+        const db = openHqDatabase(path);
+        const columns = (db.prepare(`PRAGMA table_info(hq_missions)`).all() as { name: string }[]).map((c) => c.name);
+        expect(columns).toContain('intent_head_hash');
+        expect(columns).toContain('intent_count');
+        const missions = new MissionStore(db);
+        expect(missions.getMission(missionId)).toMatchObject({ intentHeadHash: null, intentCount: null });
+        expect(missions.intentChainVerdict(missionId)).toEqual({ intact: true, anchored: false, reason: null });
+        const view = missionView(new HeadquarterOperations(db), missions, missions.getMission(missionId)!);
+        expect(view.intent).toMatchObject({ revisions: 1, chainIntact: true, chainAnchored: false });
         db.close();
       }
     } finally {
@@ -403,6 +533,133 @@ describe('amendments append; the original is never mutated', () => {
     expect(missionView(fixture.ops, missions, missions.getMission(created.data.mission.id)!).intent.chainIntact).toBe(false);
   });
 
+  it('detects a truncated TAIL: the newest amendment deleted, the head anchor disagrees', () => {
+    // Mutation-testing pass on `b3f72d1`, P1.3. Proven before the fix: after
+    // `DELETE FROM hq_mission_intent WHERE mission_id=? AND kind='amendment'`,
+    // `verifyIntentChain` returned TRUE and the view reported
+    // `chainIntact: true, revisions: 1` — a forward walk from genesis has no
+    // anchored head, so dropping the newest row(s) was invisible, and anyone
+    // with raw database access could erase the latest Founder amendment and
+    // leave a pristine-looking mission. The head hash and the row count are
+    // now anchored on the mission row by `appendIntent`; this is the
+    // reviewer's exact scenario, and it must report NOT intact.
+    const { fixture, missions } = core();
+    const created = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.data.mission.id;
+    amendMission(fixture.ops, missions, { missionId: id, command: `${STEPPED.command}\nMust be done by Friday.`, reason: 'deadline', actor: 'founder' }, CLAUDE_ONLY);
+    expect(missions.intentChainVerdict(id)).toEqual({ intact: true, anchored: true, reason: null });
+    expect(missions.getMission(id)!.intentCount).toBe(2);
+    expect(missions.getMission(id)!.intentHeadHash).toBe(missions.listIntent(id)[1]!.hash);
+
+    fixture.db.prepare(`DELETE FROM hq_mission_intent WHERE mission_id = ? AND kind = 'amendment'`).run(id);
+    expect(missions.listIntent(id)).toHaveLength(1);
+    expect(missions.verifyIntentChain(id)).toBe(false);
+    expect(missions.intentChainVerdict(id)).toEqual({ intact: false, anchored: true, reason: 'head_mismatch' });
+    const view = missionView(fixture.ops, missions, missions.getMission(id)!);
+    expect(view.intent.chainIntact).toBe(false);
+    expect(view.intent.chainAnchored).toBe(true);
+    expect(view.intent.revisions).toBe(1);
+  });
+
+  it('detects a deleted MIDDLE row, and reports an untampered chain as intact and anchored', () => {
+    const { fixture, missions } = core();
+    const created = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.data.mission.id;
+    for (const extra of ['Must be done by Friday.', 'Must not touch the ledger.']) {
+      const amended = amendMission(fixture.ops, missions, { missionId: id, command: `${STEPPED.command}\n${extra}`, reason: extra, actor: 'founder' }, CLAUDE_ONLY);
+      expect(amended.ok).toBe(true);
+    }
+    // Untampered: three rows, the anchor names the third.
+    expect(missions.listIntent(id)).toHaveLength(3);
+    expect(missions.intentChainVerdict(id)).toEqual({ intact: true, anchored: true, reason: null });
+    expect(missionView(fixture.ops, missions, missions.getMission(id)!).intent).toMatchObject({
+      revisions: 3,
+      chainIntact: true,
+      chainAnchored: true,
+    });
+    // Delete the middle row: the third row's prev_hash names a hash no
+    // remaining row carries. Caught by the forward walk, before the anchor.
+    const middle = missions.listIntent(id)[1]!;
+    fixture.db.prepare(`DELETE FROM hq_mission_intent WHERE id = ?`).run(middle.id);
+    expect(missions.intentChainVerdict(id)).toEqual({ intact: false, anchored: true, reason: 'link_broken' });
+    expect(missions.verifyIntentChain(id)).toBe(false);
+  });
+
+  it('names an edited row as rehashed, and counts a count mismatch separately', () => {
+    const { fixture, missions } = core();
+    const created = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.data.mission.id;
+    fixture.db.prepare(`UPDATE hq_mission_intent SET objective = 'Something else.' WHERE mission_id = ?`).run(id);
+    expect(missions.intentChainVerdict(id)).toEqual({ intact: false, anchored: true, reason: 'row_rehashed' });
+    // Restore the row's content exactly and corrupt only the anchor's count.
+    fixture.db.prepare(`UPDATE hq_mission_intent SET objective = ? WHERE mission_id = ?`).run('Ship the shift-report export.', id);
+    expect(missions.intentChainVerdict(id).intact).toBe(true);
+    fixture.db.prepare(`UPDATE hq_missions SET intent_count = 2 WHERE id = ?`).run(id);
+    expect(missions.intentChainVerdict(id)).toEqual({ intact: false, anchored: true, reason: 'count_mismatch' });
+    expect(missions.intentChainVerdict('no-such-mission')).toEqual({ intact: false, anchored: false, reason: 'unknown_mission' });
+  });
+
+  it('degrades honestly for a mission recorded before the anchor existed: intact but UNANCHORED, until the next append', () => {
+    // A database upgraded in place holds NULL in both anchor columns for
+    // every existing mission. That is not a tamper report — the forward walk
+    // still runs and still passes — but it is not the full check either, and
+    // the verdict must say so rather than round it to "intact". No backfill:
+    // anchoring whatever rows happen to be present at upgrade time would
+    // bless a truncation that may already have happened. The next append
+    // writes a real anchor.
+    const { fixture, missions } = core();
+    const created = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.data.mission.id;
+    fixture.db.prepare(`UPDATE hq_missions SET intent_head_hash = NULL, intent_count = NULL WHERE id = ?`).run(id);
+    expect(missions.getMission(id)).toMatchObject({ intentHeadHash: null, intentCount: null });
+    expect(missions.verifyIntentChain(id)).toBe(true);
+    expect(missions.intentChainVerdict(id)).toEqual({ intact: true, anchored: false, reason: null });
+    const before = missionView(fixture.ops, missions, missions.getMission(id)!);
+    expect(before.intent.chainIntact).toBe(true);
+    expect(before.intent.chainAnchored).toBe(false);
+    // A forward-walk failure is still a failure for an unanchored chain.
+    fixture.db.prepare(`UPDATE hq_mission_intent SET objective = 'edited' WHERE mission_id = ?`).run(id);
+    expect(missions.intentChainVerdict(id)).toEqual({ intact: false, anchored: false, reason: 'row_rehashed' });
+    fixture.db.prepare(`UPDATE hq_mission_intent SET objective = ? WHERE mission_id = ?`).run('Ship the shift-report export.', id);
+    // The next append anchors it: count from the table, not NULL + 1.
+    const amended = amendMission(fixture.ops, missions, { missionId: id, command: `${STEPPED.command}\nMust be done by Friday.`, reason: 'deadline', actor: 'founder' }, CLAUDE_ONLY);
+    expect(amended.ok).toBe(true);
+    expect(missions.getMission(id)).toMatchObject({ intentCount: 2, intentHeadHash: missions.listIntent(id)[1]!.hash });
+    expect(missions.intentChainVerdict(id)).toEqual({ intact: true, anchored: true, reason: null });
+    expect(missionView(fixture.ops, missions, missions.getMission(id)!).intent.chainAnchored).toBe(true);
+  });
+
+  it('reports the whole fallback, unanchored, for a mission with no intent row at all', () => {
+    // The `intents.length === 0` branch of the view, asserted field by field
+    // rather than by `chainIntact` alone (mutation-testing pass on `b3f72d1`).
+    const { fixture, missions } = core();
+    const created = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    if (!created.ok) throw new Error(created.error.message);
+    fixture.db.prepare(`DELETE FROM hq_mission_intent WHERE mission_id = ?`).run(created.data.mission.id);
+    const mission = missions.getMission(created.data.mission.id)!;
+    expect(missionView(fixture.ops, missions, mission).intent).toEqual({
+      revisions: 0,
+      latestKind: 'original',
+      latestAt: mission.createdAt,
+      latestActor: 'founder',
+      latestActorAuthentication: mission.actorAuthentication,
+      latestReason: null,
+      constraintCount: 0,
+      acceptanceCriteriaCount: 0,
+      stepCount: 0,
+      needsClarification: false,
+      unknowns: [],
+      chainIntact: false,
+      chainAnchored: false,
+    });
+    // The store agrees: zero rows against an anchor that says one.
+    expect(missions.intentChainVerdict(mission.id)).toEqual({ intact: false, anchored: true, reason: 'head_mismatch' });
+  });
+
   it('refuses an amendment without a reason, on a terminal mission, or from an ungranted actor', () => {
     const { fixture, missions } = core();
     const created = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
@@ -475,6 +732,42 @@ describe('recorded transitions follow the table, and only a decision-maker recor
     const stated = transitionMission(fixture.ops, missions, { missionId: id, to: 'blocked', actor: 'founder', reason: 'Waiting on the auditor.' });
     expect(stated.ok).toBe(true);
     expect(missions.getMission(id)!.blockReason).toBe('Waiting on the auditor.');
+  });
+
+  it('REFUSES a credential-shaped reason with unsafe_reason, and an over-long one with reason_too_long, writing nothing', () => {
+    // Mutation-testing pass on `b3f72d1`, P1.4(a). Both error codes existed
+    // with zero coverage: removing the credential scan from `checkReason`
+    // broke no test, because the leak tests only asserted that PLANTED
+    // strings were absent from a serialized body — which is true whether or
+    // not the scanner ever runs. These tests exercise the guard itself: the
+    // refusal code is asserted, and so is the absence of any write.
+    const { fixture, missions, id } = planned();
+    const TOKEN_REASON = 'Waiting on token ghp_abcdefghijklmnopqrstuvwxyz1234 from the auditor.';
+    const LONG_REASON = 'r'.repeat(MAX_MISSION_REASON_LENGTH + 1);
+
+    const unsafeStop = transitionMission(fixture.ops, missions, { missionId: id, to: 'blocked', actor: 'founder', reason: TOKEN_REASON });
+    expect(!unsafeStop.ok && unsafeStop.error.code).toBe('unsafe_reason');
+    // An optional reason on an advancing edge is scanned too.
+    const unsafeAdvance = transitionMission(fixture.ops, missions, { missionId: id, to: 'working', actor: 'founder', reason: TOKEN_REASON });
+    expect(!unsafeAdvance.ok && unsafeAdvance.error.code).toBe('unsafe_reason');
+    const tooLong = transitionMission(fixture.ops, missions, { missionId: id, to: 'blocked', actor: 'founder', reason: LONG_REASON });
+    expect(!tooLong.ok && tooLong.error.code).toBe('reason_too_long');
+    expect(!tooLong.ok && tooLong.error.details).toEqual({ length: MAX_MISSION_REASON_LENGTH + 1 });
+    expect(missions.getMission(id)!.state).toBe('planned');
+    expect(missions.getMission(id)!.blockReason).toBeNull();
+    expect(missions.listEvents(id)).toHaveLength(1);
+
+    // The amendment reason goes through the same guard.
+    const unsafeAmend = amendMission(fixture.ops, missions, { missionId: id, command: `${STEPPED.command}\nMust finish by Friday.`, reason: TOKEN_REASON, actor: 'founder' }, CLAUDE_ONLY);
+    expect(!unsafeAmend.ok && unsafeAmend.error.code).toBe('unsafe_reason');
+    const longAmend = amendMission(fixture.ops, missions, { missionId: id, command: `${STEPPED.command}\nMust finish by Friday.`, reason: LONG_REASON, actor: 'founder' }, CLAUDE_ONLY);
+    expect(!longAmend.ok && longAmend.error.code).toBe('reason_too_long');
+    expect(missions.listIntent(id)).toHaveLength(1);
+    // Nothing credential-shaped reached any published surface.
+    expect(JSON.stringify(missionViews(fixture.ops, missions))).not.toContain('ghp_');
+    // A reason of exactly the bound is accepted, so the bound is the bound.
+    const atBound = transitionMission(fixture.ops, missions, { missionId: id, to: 'blocked', actor: 'founder', reason: 'r'.repeat(MAX_MISSION_REASON_LENGTH) });
+    expect(atBound.ok).toBe(true);
   });
 
   it('refuses a principal without approval authority, a worker, and an unknown id', () => {
@@ -581,6 +874,179 @@ describe('the kill switch halts mission transitions that record work moving or d
   });
 });
 
+describe('one poisoned row is withheld; the rest of the list still answers (mutation-testing pass on b3f72d1, P1.4b)', () => {
+  /**
+   * Measured before the fix: a credential-shaped `block_reason` written by
+   * any path bypassing `checkReason` (raw database access here) made
+   * `missionListing` throw on its whole-list scan, and the route turned that
+   * into a 500 for `GET /control/missions` — one poisoned reason bricked
+   * every mission read. Each view is now proven safe on its own and a failing
+   * one is replaced by a withheld substitute that carries the id, the recorded
+   * state, and the PATH of the offending field — never its value.
+   */
+  const TOKEN = 'ghp_abcdefghijklmnopqrstuvwxyz1234';
+
+  it('replaces the poisoned mission with a withheld view and leaves its neighbour intact', () => {
+    const { fixture, missions } = core();
+    const clean = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    const poisoned = submitFounderCommand(fixture.ops, missions, { ...SINGLE, title: 'Poisoned' }, CLAUDE_ONLY);
+    if (!clean.ok || !poisoned.ok) throw new Error('expected ok');
+    // Written past the write-time scan, the way only raw access can.
+    fixture.db
+      .prepare(`UPDATE hq_missions SET state = 'blocked', block_reason = ? WHERE id = ?`)
+      .run(`Waiting on token ${TOKEN} from the auditor.`, poisoned.data.mission.id);
+
+    const listing = missionListing(fixture.ops, missions, { env: CLAUDE_ONLY });
+    expect(listing.missions).toHaveLength(2);
+    const serialized = JSON.stringify(listing);
+    expect(serialized).not.toContain(TOKEN);
+    expect(serialized).not.toContain('ghp_');
+
+    const withheld = listing.missions.find((view) => view.missionId === poisoned.data.mission.id)!;
+    expect(withheld.withheld).toEqual({ path: `missions.${poisoned.data.mission.id}.blockReason` });
+    expect(withheld.title).toBe(WITHHELD_MISSION_TITLE);
+    expect(withheld.title).not.toBe('Poisoned');
+    expect(withheld.state).toBe('blocked');
+    expect(withheld.blockReason).toBeNull();
+    expect(withheld.tasks).toEqual([]);
+    expect(withheld.taskCount).toBe(0);
+    expect(withheld.intent.chainIntact).toBe(false);
+    expect(withheld.requestedBy).toBe('withheld');
+
+    const intact = listing.missions.find((view) => view.missionId === clean.data.mission.id)!;
+    expect(intact.withheld).toBeNull();
+    expect(intact.title).toBe('Shift export');
+    expect(intact.taskCount).toBe(3);
+    expect(intact.intent.chainIntact).toBe(true);
+    // The store-wide facts are unaffected: the poisoned row is still a
+    // blocked mission, counted from the column.
+    expect(listing.byState.blocked).toBe(1);
+    expect(missionAttention(listing.missions, listing).blocked).toBe(1);
+  });
+
+  it('still fails closed when the substitute itself cannot be made safe — an identifier that is credential-shaped', () => {
+    // The whole-list scan stays as the last line. A withheld view is built
+    // from constants plus the id; if the ID is the poisoned field there is
+    // no safe substitute for an identifier, and the listing throws as it
+    // always did. This pins that final guard, which the per-mission
+    // containment would otherwise leave unexercised.
+    const { fixture, missions } = core();
+    missions.insertMission({
+      id: TOKEN,
+      idempotencyKey: 'mission:poisoned-id',
+      title: 'Id poisoned',
+      project: null,
+      state: 'planned',
+      blockReason: null,
+      requestedBy: 'founder',
+      actorAuthentication: 'authenticated_os_session',
+      requestedRoute: 'CLAUDE',
+      at: new Date().toISOString(),
+    });
+    expect(() => missionListing(fixture.ops, missions)).toThrow(BrowserSafetyError);
+    expect(() => missionViews(fixture.ops, missions)).toThrow(/credential shape/);
+  });
+});
+
+describe('the history holds only stated edges (mutation-testing pass on b3f72d1)', () => {
+  /**
+   * `amendMission` writes `blocked → blocked` when an amendment leaves a
+   * plan-less mission still unreadable — a reason refresh with its own
+   * attributed history row — and that branch had no test while the table's
+   * test asserted "never a self-edge". The exception is now stated in
+   * `isRecordedMissionEdgeLegal`; this covers the branch, asserts the
+   * invariant over every history row the suite's scenarios write, and proves
+   * `recordTransition` refuses any OTHER self-edge.
+   */
+  const unreadable = (question: string) => ({ command: question, route: 'CLAUDE' as const, requestedBy: 'founder' });
+
+  it('refreshes the block reason of a still-unreadable mission through a blocked → blocked history row', () => {
+    const { fixture, missions } = core();
+    const created = submitFounderCommand(fixture.ops, missions, unreadable('Should we move the warehouse to Adama?'), CLAUDE_ONLY);
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.data.mission.id;
+    expect(created.data.mission.blockReason).toBe(`${NEEDS_CLARIFICATION_REASON}: question_not_order`);
+    // Another unreadable order: a placeholder-style TODO the rules refuse.
+    const amended = amendMission(
+      fixture.ops,
+      missions,
+      { missionId: id, command: 'Move the warehouse to TBD.', reason: 'Trying again.', actor: 'founder' },
+      CLAUDE_ONLY,
+    );
+    expect(amended.ok).toBe(true);
+    if (!amended.ok) return;
+    expect(amended.data.needsClarification).toBe(true);
+    expect(amended.data.planCreated).toBe(false);
+    expect(amended.data.tasks).toEqual([]);
+    expect(amended.data.mission.state).toBe('blocked');
+    // The reason now names THIS amendment's unknowns, not the original's.
+    expect(amended.data.mission.blockReason).toMatch(new RegExp(`^${NEEDS_CLARIFICATION_REASON}: `));
+    expect(amended.data.mission.blockReason).not.toContain('question_not_order');
+    expect(fixture.ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+    const events = missions.listEvents(id);
+    expect(events.map((event) => [event.fromState, event.toState])).toEqual([
+      [null, 'blocked'],
+      ['blocked', 'blocked'],
+    ]);
+    expect(events[1]!.reason).toBe('Amendment recorded; the order still needs clarification and no task was created.');
+    expect(events[1]!.actor).toBe('founder');
+    expect(missions.listIntent(id)).toHaveLength(2);
+  });
+
+  it('every history row is genesis, a table edge, or the documented reason refresh — across a full lifecycle', () => {
+    const { fixture, missions } = core();
+    // Scenario 1: unreadable, refreshed, then clarified into a plan, then walked to complete.
+    const unclear = submitFounderCommand(fixture.ops, missions, unreadable('Should we ship the export?'), CLAUDE_ONLY);
+    if (!unclear.ok) throw new Error(unclear.error.message);
+    amendMission(fixture.ops, missions, { missionId: unclear.data.mission.id, command: 'Ship TBD.', reason: 'r', actor: 'founder' }, CLAUDE_ONLY);
+    amendMission(fixture.ops, missions, { missionId: unclear.data.mission.id, command: 'Ship the export.\n1. Add the endpoint', reason: 'Decided.', actor: 'founder' }, CLAUDE_ONLY);
+    for (const to of ['working', 'ready_review', 'verified', 'complete'] as const) {
+      expect(transitionMission(fixture.ops, missions, { missionId: unclear.data.mission.id, to, actor: 'founder' }).ok, to).toBe(true);
+    }
+    // Scenario 2: planned, blocked by the Founder, failed, re-planned, cancelled.
+    const stepped = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    if (!stepped.ok) throw new Error(stepped.error.message);
+    for (const [to, reason] of [['blocked', 'auditor'], ['failed', 'gave up'], ['planned', undefined], ['cancelled', 'dropped']] as const) {
+      expect(transitionMission(fixture.ops, missions, { missionId: stepped.data.mission.id, to, actor: 'founder', reason }).ok, to).toBe(true);
+    }
+    const rows = fixture.db
+      .prepare(`SELECT mission_id, from_state, to_state, reason FROM hq_mission_events ORDER BY seq`)
+      .all() as { mission_id: string; from_state: string | null; to_state: string; reason: string | null }[];
+    expect(rows.length).toBe(1 + 1 + 1 + 4 + 1 + 4);
+    for (const row of rows) {
+      const from = row.from_state as 'planned' | null;
+      const to = row.to_state as 'planned';
+      expect(isRecordedMissionEdgeLegal(from, to), `${String(from)} -> ${to}`).toBe(true);
+      // The exception, stated: the ONLY self-edge is blocked → blocked, and
+      // it carries the refresh sentence — never a Founder-typed reason.
+      if (from === to) {
+        expect(from).toBe('blocked');
+        expect(row.reason).toBe('Amendment recorded; the order still needs clarification and no task was created.');
+      }
+    }
+    expect(rows.filter((row) => row.from_state === row.to_state)).toHaveLength(1);
+  });
+
+  it('refuses, at the store, to record any self-edge other than the refresh', () => {
+    const { fixture, missions } = core();
+    const created = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.data.mission.id;
+    for (const state of ['planned', 'working', 'ready_review', 'verified', 'complete', 'failed', 'cancelled'] as const) {
+      expect(
+        () => missions.recordTransition({ missionId: id, fromState: state, toState: state, blockReason: null, actor: 'founder', reason: null }),
+        state,
+      ).toThrow(/Refusing to record mission history edge/);
+    }
+    // And an unlisted non-self edge, in case a future caller skips the table.
+    expect(() =>
+      missions.recordTransition({ missionId: id, fromState: 'planned', toState: 'complete', blockReason: null, actor: 'founder', reason: null }),
+    ).toThrow(/planned -> complete/);
+    expect(missions.getMission(id)!.state).toBe('planned');
+    expect(missions.listEvents(id)).toHaveLength(1);
+  });
+});
+
 describe('a mission with no intent row is refused as a broken record, never thrown as a 500', () => {
   /**
    * Opus second pass on `a849af8`, nit 2. `existingReceipt` dereferenced the
@@ -612,6 +1078,59 @@ describe('a mission with no intent row is refused as a broken record, never thro
     expect(fixture.ops.queue.listByStatus('needs_approval')).toHaveLength(3);
     // And the view says the same thing about the same mission.
     expect(missionView(fixture.ops, missions, missions.getMission(created.data.mission.id)!).intent.chainIntact).toBe(false);
+  });
+});
+
+describe('a deduplicated receipt lists the plan links it could not carry (mutation-testing pass on b3f72d1)', () => {
+  /**
+   * `existingReceipt` was rewritten to stop a deduplicated receipt
+   * under-reporting its plan — and then did the same thing one line lower
+   * with two silent `continue`s: a link whose task row was gone, or whose
+   * capability no longer classified, simply vanished from `tasks`. Both
+   * branches now record the link in `omitted` with the reason, and both are
+   * covered here, so `tasks.length + omitted.length` is the plan's size.
+   */
+  it('names a link whose canonical task row is gone as task_missing', () => {
+    const { fixture, missions } = core();
+    const created = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    if (!created.ok) throw new Error(created.error.message);
+    const gone = created.data.tasks[1]!.task.id;
+    fixture.db.pragma('foreign_keys = OFF');
+    fixture.db.prepare(`DELETE FROM op_tasks WHERE id = ?`).run(gone);
+    fixture.db.pragma('foreign_keys = ON');
+    const again = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    expect(again.ok).toBe(true);
+    if (!again.ok) return;
+    expect(again.data.deduplicated).toBe(true);
+    expect(again.data.tasks.map((task) => task.task.id)).toEqual([created.data.tasks[0]!.task.id, created.data.tasks[2]!.task.id]);
+    expect(again.data.omitted).toEqual([{ taskId: gone, ordinal: 2, reason: 'task_missing' }]);
+    expect(again.data.tasks.length + again.data.omitted.length).toBe(3);
+  });
+
+  it('names a link whose task no longer classifies as unclassifiable', () => {
+    const { fixture, missions } = core();
+    const created = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    if (!created.ok) throw new Error(created.error.message);
+    const edited = created.data.tasks[2]!.task.id;
+    // The capability gate on the command path checks hq.direct_order itself,
+    // so the only way a linked task fails to classify is its OWN capability
+    // id having been changed underneath it.
+    fixture.db.pragma('foreign_keys = OFF');
+    fixture.db.prepare(`UPDATE op_tasks SET capability_id = 'gone.capability' WHERE id = ?`).run(edited);
+    fixture.db.pragma('foreign_keys = ON');
+    const again = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    expect(again.ok).toBe(true);
+    if (!again.ok) return;
+    expect(again.data.tasks).toHaveLength(2);
+    expect(again.data.omitted).toEqual([{ taskId: edited, ordinal: 3, reason: 'unclassifiable' }]);
+  });
+
+  it('carries an empty omitted list on creation and on an undamaged dedupe', () => {
+    const { fixture, missions } = core();
+    const created = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    const again = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    expect(created.ok && created.data.omitted).toEqual([]);
+    expect(again.ok && again.data.omitted).toEqual([]);
   });
 });
 
@@ -761,6 +1280,45 @@ describe('the view copies canonical truth and publishes no Founder text', () => 
     expect(view.state).toBe('working');
     expect(view.impliedState).toBe('planned');
     expect(view.driftFromTasks).toBe(true);
+  });
+
+  it('reports a link whose canonical task is gone as a BLOCKED task that implies blocked, with drift', () => {
+    // The `missing: true` branch (mutation-testing pass on `b3f72d1`). Before:
+    // the missing task was counted (`taskCount 1`, `blocked 1`) but excluded
+    // from the implied-state computation, so a mission whose entire plan had
+    // vanished reported `impliedState null` and `driftFromTasks false` — a
+    // damaged plan with no drift. A link with no row behind it now presents
+    // as blocked AND implies blocked, so the counts and the implication agree
+    // and the recorded `planned` is shown to disagree with them.
+    const { fixture, missions } = core();
+    const created = submitFounderCommand(fixture.ops, missions, SINGLE, CLAUDE_ONLY);
+    if (!created.ok) throw new Error(created.error.message);
+    const taskId = created.data.tasks[0]!.task.id;
+    // Foreign keys are ON, so this is exactly the damage a raw write can do
+    // only by switching them off first — which is what the test does.
+    fixture.db.pragma('foreign_keys = OFF');
+    fixture.db.prepare(`DELETE FROM op_tasks WHERE id = ?`).run(taskId);
+    fixture.db.pragma('foreign_keys = ON');
+    expect(fixture.ops.queue.get(taskId)).toBeNull();
+
+    const view = missionView(fixture.ops, missions, missions.getMission(created.data.mission.id)!);
+    expect(view.taskCount).toBe(1);
+    expect(view.tasks[0]).toMatchObject({
+      taskId,
+      missing: true,
+      title: null,
+      canonicalStatus: 'missing',
+      presentation: 'blocked',
+      presentationNote: expect.stringContaining('no longer holds'),
+    });
+    expect(view.taskCounts.blocked).toBe(1);
+    expect(view.impliedState).toBe('blocked');
+    expect(view.impliedStateLabel).toBe('Blocked');
+    expect(view.state).toBe('planned');
+    expect(view.driftFromTasks).toBe(true);
+    // Through the listing, the drift is counted where the rooms read it.
+    const listing = missionListing(fixture.ops, missions, { env: CLAUDE_ONLY });
+    expect(missionAttention(listing.missions, listing).drift).toBe(1);
   });
 
   it('never carries the order text, the objective, a constraint or a step across the boundary', () => {

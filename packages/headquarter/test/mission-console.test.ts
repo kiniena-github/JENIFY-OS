@@ -22,8 +22,9 @@ import { SNAPSHOT_FILENAME } from '../src/ui/live-refresh.js';
 import { CLIENT_FETCH_TARGETS } from '../src/client/runtime.js';
 import { MISSION_TRANSITIONS } from '../src/mission/states.js';
 import { MissionStore } from '../src/mission/store.js';
+import { submitFounderCommand } from '../src/mission/command.js';
 import { roomById } from '../src/client/rooms.js';
-import { setupFixture } from './application.fixture.js';
+import { setupFixture, type Fixture } from './application.fixture.js';
 
 const samplePath = join(dirname(fileURLToPath(import.meta.url)), '..', 'sample-data', 'hq-sample.json');
 const sample = JSON.parse(readFileSync(samplePath, 'utf8')) as HeadquarterData;
@@ -211,7 +212,7 @@ describe('the Founder Command composer is withdrawn when the session is gone', (
     tick(): Promise<void>;
   }
 
-  async function loadPage(): Promise<Loaded> {
+  async function loadPage(seed?: (fixture: Fixture, missions: MissionStore) => void): Promise<Loaded> {
     const fixture = setupFixture();
     registerDirectOrderCapability(fixture.db);
     fixture.principals.register({
@@ -221,6 +222,8 @@ describe('the Founder Command composer is withdrawn when the session is gone', (
       approvalAuthority: true,
       active: true,
     });
+    const missions = new MissionStore(fixture.db);
+    seed?.(fixture, missions);
     let current: AuthenticatedAccount | null = ACCOUNT;
     const api: ControlApiDeps = {
       ops: fixture.ops,
@@ -229,7 +232,7 @@ describe('the Founder Command composer is withdrawn when the session is gone', (
       allowedOrigins: [PAGE_ORIGIN],
       secretsEnv: {},
       mutationsEnabled: true,
-      missions: new MissionStore(fixture.db),
+      missions,
     };
     const calls: string[] = [];
     const errors: string[] = [];
@@ -339,6 +342,55 @@ describe('the Founder Command composer is withdrawn when the session is gone', (
     expect(back.formPresent).toBe(true);
     expect(back.submitEnabled).toBe(true);
     expect(back.listState).toBe('live');
+    expect(page.errors).toEqual([]);
+  });
+
+  it('RENDERS a zero-task mission as zero — in the list chip and in the opened detail', async () => {
+    // Mutation-testing pass on `b3f72d1` (nit). The rest of this file pins
+    // substrings of the generated source, which proves the sentence exists in
+    // the script and nothing about what the page draws. This runs the emitted
+    // page against a REAL clarification-blocked mission (recorded with zero
+    // tasks through the real command path), reads the drawn list row, clicks
+    // Open, and reads the drawn detail.
+    const page = await loadPage((fixture, missions) => {
+      const recorded = submitFounderCommand(
+        fixture.ops,
+        missions,
+        { command: 'Should we ship the export?', route: 'CLAUDE', requestedBy: 'hq-proof-originator', title: 'Unclear order' },
+        {},
+      );
+      if (!recorded.ok) throw new Error(recorded.error.message);
+      if (recorded.data.tasks.length !== 0) throw new Error('fixture must hold zero tasks');
+    });
+    expect(page.errors).toEqual([]);
+    const document = page.dom.window.document;
+    const rows = [...document.querySelectorAll('[data-mission-row]')];
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    expect(row.textContent).toContain('Unclear order');
+    const chips = [...row.querySelectorAll('.chip')].map((chip) => chip.textContent);
+    expect(chips).toContain('0 task(s)');
+    expect(chips).toContain('needs clarification');
+    expect(chips).toContain('Blocked');
+    // Nothing is drawn as a task, and no detail is open yet.
+    expect(document.querySelectorAll('.mission-task')).toHaveLength(0);
+    expect(document.querySelector('[data-mission-detail-for]')).toBeNull();
+
+    const open = [...row.querySelectorAll('button')].find((button) => button.textContent === 'Open') as
+      | { click(): void }
+      | undefined;
+    expect(open).toBeDefined();
+    open!.click();
+    const detail = document.querySelector('[data-mission-detail-for]')!;
+    expect(detail).not.toBeNull();
+    expect(detail.textContent).toContain('Task plan — 0 task(s)');
+    expect(detail.textContent).toContain('This mission holds no task.');
+    expect(detail.textContent).toContain('The order needs clarification');
+    expect(detail.querySelectorAll('.mission-task')).toHaveLength(0);
+    // The intent line reports the chain as intact AND anchored (no
+    // UNANCHORED caveat) for a mission recorded by this code.
+    expect(detail.textContent).toContain('chain intact');
+    expect(detail.textContent).not.toContain('UNANCHORED');
     expect(page.errors).toEqual([]);
   });
 });

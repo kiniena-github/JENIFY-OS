@@ -29,6 +29,30 @@
  * Field names avoid `payload` on purpose: the state-route test asserts the
  * serialized document never contains that word, which is the cheapest proof
  * that no task payload leaked.
+ *
+ * ## One poisoned row must not brick the list (mutation-testing pass on
+ * `b3f72d1`, P1.4)
+ *
+ * Every published sentence — a block reason, a transition reason, a title —
+ * is credential-scanned at the moment it is written. That is the first line.
+ * The second line was one `assertBrowserSafe` over the whole finished list,
+ * which threw on the first unsafe string it met. Measured: a block reason
+ * written by any path that bypasses the write-time scan (raw database
+ * access, a hand edit) made `missionListing` throw, and the route turned that
+ * into a 500 for `GET /control/missions` — every mission unreadable because
+ * one row was. Fail-closed is right; fail-closed for the whole collection is
+ * more than the situation needs, and it hands anyone with a write path a way
+ * to blind the Mission Room.
+ *
+ * So the second line is now per mission: each view is scanned on its own,
+ * and one that fails is REPLACED by `withheldMissionView` — a view that
+ * carries the mission's id and recorded state, says it was withheld and at
+ * which field, and copies nothing else from the row. The list still answers,
+ * the other missions are untouched, and the Founder sees WHICH mission needs
+ * its record looked at instead of a blank 500. The scan over the whole list
+ * stays as the last line: a withheld view is built from constants plus the
+ * id and the enum state, but if the id itself were the poisoned field there
+ * is no safe substitute for an identifier, and the listing throws as before.
  */
 
 import type { HeadquarterOperations } from '../application/service.js';
@@ -37,7 +61,7 @@ import { isProviderId } from '../routing/providers.js';
 import { readProviderBinding } from '../operator/provider-binding.js';
 import { dispatchHistory } from '../providers/claude/dispatch.js';
 import { directOrderDispatchBlocked } from '../live/orders.js';
-import { assertBrowserSafe } from '../live/redaction.js';
+import { assertBrowserSafe, BrowserSafetyError } from '../live/redaction.js';
 import { INTENT_UNKNOWN_DESCRIPTIONS, type IntentUnknownCode } from './intent.js';
 import {
   impliedMissionState,
@@ -45,9 +69,8 @@ import {
   MISSION_TASK_PRESENTATIONS,
   presentTaskState,
   type MissionTaskPresentation,
-  type PresentedTaskState,
 } from './presentation.js';
-import { MISSION_STATE_LABELS, NEEDS_CLARIFICATION_REASON, type MissionState } from './states.js';
+import { isMissionState, MISSION_STATE_LABELS, NEEDS_CLARIFICATION_REASON, type MissionState } from './states.js';
 import { MAX_MISSIONS_LISTED, type MissionRecord, type MissionStore } from './store.js';
 
 export interface MissionTaskView {
@@ -90,6 +113,14 @@ export interface MissionIntentView {
   unknowns: MissionUnknownView[];
   /** Whether every intent row still hashes to the chain. False is a tamper report. */
   chainIntact: boolean;
+  /**
+   * Whether `chainIntact` covers a truncated tail. False for a mission
+   * recorded before the chain's head was anchored on its row: the rows that
+   * remain verify, but a dropped newest amendment would not be seen until
+   * the next append anchors the chain. Published beside `chainIntact` so no
+   * UI can render "unanchored" as "intact". See `MissionStore`.
+   */
+  chainAnchored: boolean;
 }
 
 export interface MissionHistoryView {
@@ -124,6 +155,14 @@ export interface MissionView {
   requestedRoute: string;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Non-null when this view is a SUBSTITUTE: the real projection failed the
+   * browser-safety scan (a credential-shaped string reached a published
+   * field by a path that bypassed the write-time scan), so everything but the
+   * id and the recorded state was withheld. `path` names the offending field,
+   * never its value.
+   */
+  withheld: { path: string } | null;
 }
 
 export interface MissionViewOptions {
@@ -142,26 +181,29 @@ function taskView(
   ops: HeadquarterOperations,
   link: { taskId: string; ordinal: number },
   options: MissionViewOptions,
-): { view: MissionTaskView; presented: PresentedTaskState | null } {
+): MissionTaskView {
   const task = ops.queue.get(link.taskId);
   if (!task) {
+    // A link with no canonical row behind it. Reported, never hidden — and
+    // presented as BLOCKED, which then feeds `impliedMissionState` like any
+    // other task's word, so a mission whose plan has vanished implies
+    // `blocked` and shows drift against a recorded `planned`. The first
+    // version excluded missing tasks from the implied computation, which
+    // left a damaged plan reporting no drift at all.
     return {
-      presented: null,
-      view: {
-        ordinal: link.ordinal,
-        taskId: link.taskId,
-        title: null,
-        canonicalStatus: 'missing',
-        reviewState: 'none',
-        presentation: 'blocked',
-        presentationLabel: MISSION_TASK_PRESENTATION_LABELS.blocked,
-        presentationNote: 'The mission links a task the canonical queue no longer holds.',
-        boundProvider: null,
-        dispatchBlocked: false,
-        blockReason: null,
-        claimedBy: null,
-        missing: true,
-      },
+      ordinal: link.ordinal,
+      taskId: link.taskId,
+      title: null,
+      canonicalStatus: 'missing',
+      reviewState: 'none',
+      presentation: 'blocked',
+      presentationLabel: MISSION_TASK_PRESENTATION_LABELS.blocked,
+      presentationNote: 'The mission links a task the canonical queue no longer holds.',
+      boundProvider: null,
+      dispatchBlocked: false,
+      blockReason: null,
+      claimedBy: null,
+      missing: true,
     };
   }
   const presented = presentTaskState(task.status, task.reviewState);
@@ -169,25 +211,22 @@ function taskView(
   const boundProvider =
     binding.bound && binding.provider != null && isProviderId(binding.provider) ? binding.provider : null;
   return {
-    presented,
-    view: {
-      ordinal: link.ordinal,
-      taskId: task.id,
-      title: ops.readMeta(task.id)?.title ?? null,
-      canonicalStatus: task.status,
-      reviewState: task.reviewState,
-      presentation: presented.presentation,
-      presentationLabel: MISSION_TASK_PRESENTATION_LABELS[presented.presentation],
-      presentationNote: presented.note,
-      boundProvider,
-      dispatchBlocked: directOrderDispatchBlocked(task, options.env ?? {}, {
-        alreadyDispatched: dispatchHistory(ops, task.id).state === 'dispatched',
-        providerDispatchable: options.dispatchAvailability,
-      }),
-      blockReason: task.blockReason,
-      claimedBy: task.claimedBy,
-      missing: false,
-    },
+    ordinal: link.ordinal,
+    taskId: task.id,
+    title: ops.readMeta(task.id)?.title ?? null,
+    canonicalStatus: task.status,
+    reviewState: task.reviewState,
+    presentation: presented.presentation,
+    presentationLabel: MISSION_TASK_PRESENTATION_LABELS[presented.presentation],
+    presentationNote: presented.note,
+    boundProvider,
+    dispatchBlocked: directOrderDispatchBlocked(task, options.env ?? {}, {
+      alreadyDispatched: dispatchHistory(ops, task.id).state === 'dispatched',
+      providerDispatchable: options.dispatchAvailability,
+    }),
+    blockReason: task.blockReason,
+    claimedBy: task.claimedBy,
+    missing: false,
   };
 }
 
@@ -198,18 +237,17 @@ export function missionView(
   mission: MissionRecord,
   options: MissionViewOptions = {},
 ): MissionView {
-  const projected = missions.listTaskLinks(mission.id).map((link) => taskView(ops, link, options));
-  const tasks = projected.map((entry) => entry.view);
-  const presented = projected
-    .map((entry) => entry.presented)
-    .filter((entry): entry is PresentedTaskState => entry !== null);
+  const tasks = missions.listTaskLinks(mission.id).map((link) => taskView(ops, link, options));
   const counts = emptyCounts();
   for (const task of tasks) counts[task.presentation] += 1;
-  const implied = tasks.length === 0 ? null : impliedMissionState(presented);
+  // Every task's word, the missing ones included: what the counts show and
+  // what the mission implies are computed from the same list.
+  const implied = tasks.length === 0 ? null : impliedMissionState(tasks);
 
   const intents = missions.listIntent(mission.id);
   const latest = intents[intents.length - 1];
-  const intent: MissionIntentView = latest
+  const chain = latest ? missions.intentChainVerdict(mission.id) : null;
+  const intent: MissionIntentView = latest && chain
     ? {
         revisions: intents.length,
         latestKind: latest.kind,
@@ -226,7 +264,8 @@ export function missionView(
           blocking: entry.blocking,
           description: INTENT_UNKNOWN_DESCRIPTIONS[entry.code],
         })),
-        chainIntact: missions.verifyIntentChain(mission.id),
+        chainIntact: chain.intact,
+        chainAnchored: chain.anchored,
       }
     : {
         revisions: 0,
@@ -241,8 +280,10 @@ export function missionView(
         needsClarification: false,
         unknowns: [],
         // A mission with NO intent row is a broken record, and the chain of
-        // nothing is not "intact" — it is absent. Reported as not intact.
+        // nothing is not "intact" — it is absent. Reported as not intact, and
+        // as unanchored: there is no chain for an anchor to cover.
         chainIntact: false,
+        chainAnchored: false,
       };
 
   return {
@@ -273,7 +314,83 @@ export function missionView(
     requestedRoute: mission.requestedRoute,
     createdAt: mission.createdAt,
     updatedAt: mission.updatedAt,
+    withheld: null,
   };
+}
+
+/** The title a withheld view carries instead of the row's. A constant, so it cannot be the poisoned field. */
+export const WITHHELD_MISSION_TITLE = 'Mission withheld: its record holds a credential-shaped string';
+
+/**
+ * The substitute for a mission whose projection failed the browser-safety
+ * scan. Built from constants plus the two things that can be published
+ * without copying a free-text column: the id, and the recorded state IF it is
+ * one of the eight (a state column edited to something else is treated as
+ * `blocked`, which is what a Founder should do about it). Every count is
+ * zero and every list is empty, because the alternative is to copy fields
+ * from a row that has already proven it cannot be trusted field by field.
+ */
+export function withheldMissionView(mission: MissionRecord, error: BrowserSafetyError): MissionView {
+  const state: MissionState = isMissionState(mission.state) ? mission.state : 'blocked';
+  return {
+    missionId: mission.id,
+    title: WITHHELD_MISSION_TITLE,
+    project: null,
+    state,
+    stateLabel: MISSION_STATE_LABELS[state],
+    needsClarification: false,
+    blockReason: null,
+    impliedState: null,
+    impliedStateLabel: null,
+    driftFromTasks: false,
+    taskCount: 0,
+    taskCounts: emptyCounts(),
+    tasks: [],
+    intent: {
+      revisions: 0,
+      latestKind: 'original',
+      latestAt: mission.createdAt,
+      latestActor: 'withheld',
+      latestActorAuthentication: 'withheld',
+      latestReason: null,
+      constraintCount: 0,
+      acceptanceCriteriaCount: 0,
+      stepCount: 0,
+      needsClarification: false,
+      unknowns: [],
+      chainIntact: false,
+      chainAnchored: false,
+    },
+    history: [],
+    requestedBy: 'withheld',
+    actorAuthentication: 'withheld',
+    requestedRoute: 'withheld',
+    createdAt: mission.createdAt,
+    updatedAt: mission.updatedAt,
+    withheld: { path: error.path },
+  };
+}
+
+/**
+ * Project one mission and prove it safe, substituting the withheld view when
+ * it is not. The path passed to the scanner names the mission, so the
+ * reported field is `missions.<id>.<field>` — enough to find the row, and
+ * never its value.
+ */
+function containedMissionView(
+  ops: HeadquarterOperations,
+  missions: MissionStore,
+  mission: MissionRecord,
+  options: MissionViewOptions,
+): MissionView {
+  const view = missionView(ops, missions, mission, options);
+  try {
+    assertBrowserSafe(view, `missions.${mission.id}`);
+    return view;
+  } catch (error) {
+    if (error instanceof BrowserSafetyError) return withheldMissionView(mission, error);
+    throw error;
+  }
 }
 
 /**
@@ -321,8 +438,11 @@ export interface MissionListing extends MissionListingFacts {
 
 /**
  * The list read: the newest missions up to the cap, with the store-wide facts
- * that say how much of the store the window is. Fail closed: a view that
- * cannot be proven safe throws rather than being returned partially.
+ * that say how much of the store the window is. Each view is proven safe on
+ * its own and replaced by a withheld substitute when it is not (see the
+ * module docstring); the whole list is then proven safe once more, and THAT
+ * failure still throws — it can only mean a substitute was itself unsafe,
+ * for which there is no further substitute.
  */
 export function missionListing(
   ops: HeadquarterOperations,
@@ -330,7 +450,7 @@ export function missionListing(
   options: MissionViewOptions = {},
 ): MissionListing {
   const limit = options.limit ?? MAX_MISSIONS_LISTED;
-  const views = missions.listMissions(limit).map((mission) => missionView(ops, missions, mission, options));
+  const views = missions.listMissions(limit).map((mission) => containedMissionView(ops, missions, mission, options));
   assertBrowserSafe(views, 'missions');
   const total = missions.countMissions();
   const tallies = missions.countMissionsByState();

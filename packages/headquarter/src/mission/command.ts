@@ -120,12 +120,31 @@ export interface FounderCommandInput {
   idempotencyKey?: string;
 }
 
+/**
+ * A plan link a deduplicated receipt could not carry as a task receipt, and
+ * why. `task_missing`: the canonical row the link names is gone.
+ * `unclassifiable`: the row exists but its capability no longer classifies
+ * (a hand-edited `capability_id`, or a registry row removed underneath it).
+ */
+export interface OmittedPlanTask {
+  taskId: string;
+  ordinal: number;
+  reason: 'task_missing' | 'unclassifiable';
+}
+
 export interface FounderCommandReceipt {
   mission: MissionRecord;
   /** The intent record this submission wrote — or, when deduplicated, the mission's latest. */
   intent: IntentRecord;
   /** One receipt per task in the plan, in ordinal order. Empty when the order needs clarification. */
   tasks: DirectOrderReceipt[];
+  /**
+   * Plan links that `tasks` does NOT carry, each with the reason. Always
+   * empty for a fresh creation (every task was just created); non-empty only
+   * on a deduplicated receipt whose plan has been damaged since. Stated so
+   * that `tasks.length` can never be read as the plan's size when it is not.
+   */
+  omitted: OmittedPlanTask[];
   deduplicated: boolean;
   needsClarification: boolean;
 }
@@ -457,6 +476,14 @@ function createPlanTasks(
  * reporting fewer tasks than it holds. The links are the record; the tasks
  * they name are read straight from the queue, and the dispatch verdict is the
  * same live derivation every other surface uses.
+ *
+ * And when a link's task cannot be read — the row is gone, or its capability
+ * no longer classifies — the link is NOT dropped on the floor. The rewrite
+ * above was made precisely to stop a deduplicated receipt under-reporting its
+ * plan, and its first version then did the same thing one line lower with
+ * two silent `continue`s (mutation-testing pass on `b3f72d1`). Each such link
+ * is now listed in `omitted` with its ordinal and the reason, so
+ * `tasks.length + omitted.length` is always the plan's true size.
  */
 function existingReceipt(
   ops: HeadquarterOperations,
@@ -488,11 +515,18 @@ function existingReceipt(
     );
   }
   const tasks: DirectOrderReceipt[] = [];
+  const omitted: OmittedPlanTask[] = [];
   for (const link of missions.listTaskLinks(mission.id)) {
     const task = ops.queue.get(link.taskId);
-    if (!task) continue;
+    if (!task) {
+      omitted.push({ taskId: link.taskId, ordinal: link.ordinal, reason: 'task_missing' });
+      continue;
+    }
     const classification = ops.classify(task.capabilityId);
-    if (!classification.ok) continue;
+    if (!classification.ok) {
+      omitted.push({ taskId: link.taskId, ordinal: link.ordinal, reason: 'unclassifiable' });
+      continue;
+    }
     const route = resolveOrderRoute(mission.requestedRoute, env, availability);
     const binding = readProviderBinding(task.payload);
     const boundProvider =
@@ -514,7 +548,7 @@ function existingReceipt(
   }
   return {
     ok: true,
-    data: { mission, intent: latest, tasks, deduplicated: true, needsClarification: latest.needsClarification },
+    data: { mission, intent: latest, tasks, omitted, deduplicated: true, needsClarification: latest.needsClarification },
   };
 }
 
@@ -637,6 +671,7 @@ export function submitFounderCommand(
         mission: missions.getMission(missionId)!,
         intent: record,
         tasks,
+        omitted: [],
         deduplicated: false,
         needsClarification: intent.needsClarification,
       };
@@ -770,9 +805,13 @@ export function amendMission(
         }
       } else if (!hadTasks && intent.needsClarification && mission.state === 'blocked') {
         // Still unreadable. The block reason is refreshed to name THIS
-        // amendment's unknowns, through the same recorded-transition path
-        // (blocked → blocked is not a listed edge, so it is written as a
-        // reason refresh on the current state, with its own history row).
+        // amendment's unknowns, through the same recorded-transition path.
+        // `blocked → blocked` is NOT a listed edge — the table lists no
+        // self-edge — and this is the ONE place the history is allowed to
+        // hold one: it is a reason refresh, not a state change, recorded
+        // with its own attributed history row so the refresh is visible.
+        // `states.isRecordedMissionEdgeLegal` states the exception, and
+        // `recordTransition` refuses every other self-edge.
         missions.recordTransition({
           missionId: mission.id,
           fromState: 'blocked',

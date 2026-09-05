@@ -98,7 +98,7 @@ import {
   type ResolvedFounder,
   type SessionResolverPort,
 } from './auth.js';
-import { assertBrowserSafe } from './redaction.js';
+import { assertBrowserSafe, BrowserSafetyError } from './redaction.js';
 import {
   directOrderCapabilityState,
   directOrderDispatchBlocked,
@@ -1033,10 +1033,27 @@ function listMissions(
   audit: Audit,
   now: () => Date,
 ): ControlResponse {
-  const listing = missionListing(deps.ops, missions, {
-    env: deps.secretsEnv,
-    dispatchAvailability: deps.dispatchAvailability,
-  });
+  // `missionListing` proves each mission safe on its own and substitutes a
+  // withheld view for one that is not, so a single poisoned row no longer
+  // throws here (mutation-testing pass on `b3f72d1`, P1.4 — measured before:
+  // one credential-shaped block reason written past the write-time scan made
+  // this call throw, the catch-all turned it into a 500, and every mission
+  // became unreadable). What CAN still throw is the listing's final
+  // whole-list scan, which fails only when a substitute is itself unsafe —
+  // an identifier that is credential-shaped, say — and for that there is no
+  // safe answer but the same refusal `safe()` gives, audited by name rather
+  // than falling through to the anonymous catch-all.
+  let listing: ReturnType<typeof missionListing>;
+  try {
+    listing = missionListing(deps.ops, missions, {
+      env: deps.secretsEnv,
+      dispatchAvailability: deps.dispatchAvailability,
+    });
+  } catch (error) {
+    if (!(error instanceof BrowserSafetyError)) throw error;
+    audit('refused', 'unsafe_mission_listing', founder);
+    return refusal(500, 'internal', 'The response could not be produced safely.');
+  }
   audit('allowed', 'list_missions', founder);
   return safe(
     json(200, {
@@ -1146,6 +1163,10 @@ function createMission(
         dispatchBlocked: task.dispatchBlocked,
         actionDigest: taskActionDigest(task.task),
       })),
+      // Plan links a deduplicated receipt could not read as tasks, with the
+      // reason each. Empty on creation; stated on the wire so `taskCount`
+      // is never mistaken for the plan's size when the plan is damaged.
+      omittedTasks: receipt.omitted,
     }),
   );
 }

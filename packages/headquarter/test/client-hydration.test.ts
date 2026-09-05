@@ -335,6 +335,55 @@ describe('a room that is not live can never be filled in by a state document', (
   });
 });
 
+describe('the Mission Room renders zero-with-a-store as zero, distinct from no-store', () => {
+  // Mutation-testing pass on `b3f72d1`. Home covered "store attached, zero
+  // missions" incidentally; the Mission Room — the room whose whole subject
+  // is missions — did not. The three states this suite exists for apply to
+  // this room by name: absent (no store: nothing claimed, not even zero),
+  // attached-and-empty (zero, said as zero), populated.
+  const ZERO_LISTING = {
+    total: 0,
+    listed: 0,
+    limit: 50,
+    truncated: false,
+    byState: { planned: 0, working: 0, blocked: 0, ready_review: 0, verified: 0, complete: 0, failed: 0, cancelled: 0 },
+    needsClarification: 0,
+  };
+  const attachedAndEmpty = (): HqSnapshot =>
+    buildHqSnapshot({
+      generatedAt: AT,
+      console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
+      connections: { data: [], provenance: PROVENANCE },
+      workforce: { data: [], provenance: PROVENANCE },
+      capabilities: { data: [], provenance: PROVENANCE },
+      activity: { data: [], provenance: PROVENANCE },
+      missions: { data: [], listing: ZERO_LISTING, provenance: PROVENANCE },
+    });
+  const missionRoom = (state: HqSnapshot) =>
+    hydrateRooms(state, FOUNDER_SESSION).find((view) => view.roomId === 'mission-room')!;
+
+  it('says "Missions recorded: 0" with the store-attached empty message', () => {
+    const view = missionRoom(attachedAndEmpty());
+    const recorded = view.metrics.find((metric) => metric.label === 'Missions recorded')!;
+    expect(recorded.value).toBe(0);
+    expect(view.metrics.find((metric) => metric.label === 'Missions blocked')!.value).toBe(0);
+    expect(view.metrics.find((metric) => metric.label === 'Needing clarification')!.value).toBe(0);
+    expect(view.metrics.some((metric) => metric.label === 'Mission core')).toBe(false);
+    expect(view.rows).toHaveLength(0);
+    expect(view.emptyMessage).toContain('The mission core holds no Founder mission');
+    expect(view.emptyMessage).not.toContain('no mission store attached');
+    expect(view.liveness).toBe('dark');
+  });
+
+  it('says something different, and no zero, when there is no store at all', () => {
+    const view = missionRoom(emptyState());
+    expect(view.metrics.some((metric) => metric.label === 'Missions recorded')).toBe(false);
+    expect(view.metrics.find((metric) => metric.label === 'Mission core')!.value).toBe('not attached');
+    expect(view.emptyMessage).toContain('no mission store attached');
+    expect(view.emptyMessage).not.toBe(missionRoom(attachedAndEmpty()).emptyMessage);
+  });
+});
+
 describe('the Mission Room reads canonical buckets, not raw task statuses', () => {
   // Codex round 13. Liveness was re-derived by matching task.status against
   // hand-kept sets, which got it wrong in BOTH directions — and each direction
@@ -951,6 +1000,14 @@ describe('a room names every state section that can change what it shows', () =>
       }),
     // Phase 3 (issue #254): a mission section with one recorded mission. A
     // room that changes for it must name missions in its source.
+    //
+    // The fixture is INTERNALLY CONSISTENT: it counts one task and carries
+    // that task in `tasks`. The first version said `taskCount: 1` over
+    // `tasks: []`, so a room that changes only when `tasks[]` is non-empty
+    // would have rendered identically before and after and been silently
+    // skipped by the before/after diff below (mutation-testing pass on
+    // `b3f72d1`). A fixture that contradicts itself cannot tell which rooms
+    // read it.
     missions: () =>
       buildHqSnapshot({
         generatedAt: AT,
@@ -974,7 +1031,23 @@ describe('a room names every state section that can change what it shows', () =>
               driftFromTasks: false,
               taskCount: 1,
               taskCounts: { waiting: 0, working: 0, needs_review: 0, needs_approval: 1, completed: 0, blocked: 0, failed: 0 },
-              tasks: [],
+              tasks: [
+                {
+                  ordinal: 1,
+                  taskId: 't-m1-1',
+                  title: 'Fixture mission',
+                  canonicalStatus: 'needs_approval',
+                  reviewState: 'none',
+                  presentation: 'needs_approval',
+                  presentationLabel: 'Needs Approval',
+                  presentationNote: 'Held at the Founder gate.',
+                  boundProvider: 'CLAUDE',
+                  dispatchBlocked: false,
+                  blockReason: null,
+                  claimedBy: null,
+                  missing: false,
+                },
+              ],
               intent: {
                 revisions: 1,
                 latestKind: 'original',
@@ -988,6 +1061,7 @@ describe('a room names every state section that can change what it shows', () =>
                 needsClarification: false,
                 unknowns: [],
                 chainIntact: true,
+                chainAnchored: true,
               },
               history: [],
               requestedBy: 'founder',
@@ -995,6 +1069,7 @@ describe('a room names every state section that can change what it shows', () =>
               requestedRoute: 'CLAUDE',
               createdAt: AT,
               updatedAt: AT,
+              withheld: null,
             },
           ],
           // The window IS the store here: one mission, one listed. A builder

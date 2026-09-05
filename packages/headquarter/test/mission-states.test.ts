@@ -15,12 +15,42 @@ import {
   canMissionTransition,
   isMissionState,
   isMissionTerminal,
+  isRecordedMissionEdgeLegal,
   MISSION_STATE_LABELS,
   MISSION_STATES,
   MISSION_TRANSITIONS,
+  type MissionState,
 } from '../src/mission/states.js';
 
 describe('the mission transition table', () => {
+  it('holds exactly these edges, written out — no more, no fewer', () => {
+    // Mutation-testing pass on `b3f72d1`, P1.1. The test below this one
+    // computes `listed` from the table and compares it to `canMissionTransition`
+    // — which IS `MISSION_TRANSITIONS[from].includes(to)`. That proves the
+    // function agrees with the table and nothing about the table. Proven by
+    // mutation: adding `verified` to `working` — a mission declared
+    // Founder-verified without ever passing through `ready_review` — passed
+    // every test. Only the terminal set, `failed`'s two exits and
+    // complete-only-from-verified were genuinely pinned.
+    //
+    // This is the pin: the CONTENTS, as a literal. An edge added or removed
+    // anywhere in the table fails here, and the docstring in `states.ts` has
+    // to be argued with before this expectation is changed.
+    const EXPECTED: Record<MissionState, readonly MissionState[]> = {
+      planned: ['working', 'blocked', 'cancelled'],
+      working: ['blocked', 'ready_review', 'failed', 'cancelled'],
+      blocked: ['planned', 'working', 'failed', 'cancelled'],
+      ready_review: ['verified', 'working', 'blocked', 'failed', 'cancelled'],
+      verified: ['complete', 'working', 'cancelled'],
+      complete: [],
+      failed: ['planned', 'cancelled'],
+      cancelled: [],
+    };
+    expect(MISSION_TRANSITIONS).toEqual(EXPECTED);
+    // And the reviewer's exact mutation, named: working never reaches verified.
+    expect(canMissionTransition('working', 'verified')).toBe(false);
+  });
+
   it('is total: every state has an entry, and every target is a state', () => {
     for (const state of MISSION_STATES) {
       expect(MISSION_TRANSITIONS[state], state).toBeDefined();
@@ -48,6 +78,25 @@ describe('the mission transition table', () => {
   it('never lists a self-edge: a state change is a change', () => {
     for (const state of MISSION_STATES) {
       expect(MISSION_TRANSITIONS[state], state).not.toContain(state);
+    }
+  });
+
+  it('states the one self-edge the HISTORY may hold, and refuses every other', () => {
+    // Mutation-testing pass on `b3f72d1`. The table lists no self-edge, and
+    // the assertion above says so — but `amendMission` records
+    // `blocked → blocked` when an amendment leaves a plan-less mission still
+    // unreadable (a reason refresh with its own history row), and
+    // `recordTransition` never consulted the table, so the two statements
+    // contradicted each other and nothing said which was right.
+    // `isRecordedMissionEdgeLegal` is the explicit statement: genesis, a
+    // table edge, or that one documented refresh. Nothing else.
+    for (const state of MISSION_STATES) {
+      expect(isRecordedMissionEdgeLegal(null, state), `genesis -> ${state}`).toBe(true);
+      expect(isRecordedMissionEdgeLegal(state, state), `${state} -> ${state}`).toBe(state === 'blocked');
+      for (const to of MISSION_STATES) {
+        if (to === state) continue;
+        expect(isRecordedMissionEdgeLegal(state, to), `${state} -> ${to}`).toBe(canMissionTransition(state, to));
+      }
     }
   });
 

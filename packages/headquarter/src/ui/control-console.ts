@@ -962,6 +962,7 @@ export function founderCommandConsoleScript(): string {
     head.appendChild(chipNode(view.stateLabel, stateTone(view.state)));
     row.appendChild(head);
     var chips = el('p', 'row');
+    if (view.withheld) chips.appendChild(chipNode('WITHHELD \\u2014 unsafe content at ' + String(view.withheld.path), 'danger'));
     if (view.needsClarification) chips.appendChild(chipNode('needs clarification', 'warn'));
     if (view.driftFromTasks && view.impliedStateLabel) chips.appendChild(chipNode('tasks imply ' + view.impliedStateLabel, 'warn'));
     if (view.project) chips.appendChild(chipNode(view.project, 'neutral'));
@@ -1031,7 +1032,13 @@ export function founderCommandConsoleScript(): string {
       ' (' + String(intent.latestActorAuthentication) + ') at ' + String(intent.latestAt) +
       ' \\u00b7 ' + String(intent.constraintCount) + ' constraint(s) \\u00b7 ' + String(intent.acceptanceCriteriaCount) +
       ' acceptance criterion/criteria \\u00b7 ' + String(intent.stepCount) + ' written step(s) \\u00b7 chain ' +
-      (intent.chainIntact === true ? 'intact' : 'NOT INTACT')));
+      (intent.chainIntact === true ? 'intact' : 'NOT INTACT') +
+      // An unanchored chain verified as far as a forward walk can; a dropped
+      // newest amendment would not show. Said here so "intact" is not read
+      // as more than it is.
+      (intent.chainIntact === true && intent.chainAnchored !== true
+        ? ' (UNANCHORED \\u2014 recorded before head anchoring; a removed newest amendment would not be detected until the next append)'
+        : '')));
     if (intent.latestReason) panel.appendChild(el('p', 'faint', 'Latest amendment reason: ' + intent.latestReason));
     panel.appendChild(el('p', 'faint',
       'The objective, constraint and step text stay server-side, exactly as a direct order\\u2019s instruction does. ' +
