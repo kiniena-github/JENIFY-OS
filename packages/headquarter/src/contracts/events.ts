@@ -84,8 +84,17 @@ export function isTerminal(status: ActivityStatus): boolean {
   return ALLOWED_TRANSITIONS[status].length === 0;
 }
 
-/** What kind of thing an event is about. */
-export type ActivitySubjectKind = 'task' | 'project' | 'worker' | 'approval' | 'system';
+/**
+ * What kind of thing an event is about.
+ *
+ * `mission` (Phase 3, issue #253) is a Founder-commanded mission. Mission
+ * events are ANNOTATIONS — `status` is always null on them — because the
+ * mission vocabulary (planned / working / blocked / …) is not the task
+ * vocabulary this envelope's `status` field is typed with, and copying one
+ * into the other would let a Command Center lane file a mission as if it were
+ * a task. The mission's own state travels in `detail.missionStatus`.
+ */
+export type ActivitySubjectKind = 'task' | 'project' | 'worker' | 'approval' | 'system' | 'mission';
 
 /**
  * The canonical event envelope. Events are immutable facts; the append-only

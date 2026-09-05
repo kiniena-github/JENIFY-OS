@@ -19,6 +19,22 @@ const FOUNDER_GATED: readonly RiskClass[] = ['destructive', 'founder_gate'];
 /** Risk classes that require approval unless the Founder pre-approved the capability via policy. */
 const APPROVAL_GATED: readonly RiskClass[] = ['external_side_effect'];
 
+/**
+ * Whether a risk class demands a Founder approval when NO capability is bound
+ * yet (Phase 3 mission planning, issue #253).
+ *
+ * A planned mission task names a risk class before it names a capability, so
+ * there is no registry row for `approvalRequired` to read and no capability id
+ * a standing pre-approval could match. The only honest answer at that point is
+ * the stricter one: every class that CAN require approval is treated as
+ * requiring it. This is a planning-time statement for the Founder to read; the
+ * enforced decision is still made by `approvalRequired`/`evaluatePolicy` from
+ * the real capability row when the task is opened as canonical work.
+ */
+export function riskClassRequiresFounderApproval(riskClass: RiskClass): boolean {
+  return FOUNDER_GATED.includes(riskClass) || APPROVAL_GATED.includes(riskClass);
+}
+
 export interface PolicyContext {
   /** Capability ids the Founder has standing-approved for automatic execution. */
   preApprovedCapabilities?: ReadonlySet<string>;
