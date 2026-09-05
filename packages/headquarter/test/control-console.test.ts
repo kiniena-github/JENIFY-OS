@@ -99,6 +99,8 @@ describe('every page script speaks only to the control API and the snapshot', ()
       'fetch(SESSION_PATH',
       'fetch(APPROVALS_PATH',
       'fetch(MISSIONS_PATH', // Phase 3: the Founder-gated mission read
+      'fetch(PROJECTS_PATH', // Phase 4: the Founder-gated register read
+      'fetch(WORKFORCE_PATH', // Phase 4: the Founder-gated workforce read
       'fetch(path,', // postJson's parameter; its call sites are audited below
     ];
     for (const page of HQ_PAGES) {
@@ -129,10 +131,14 @@ describe('every page script speaks only to the control API and the snapshot', ()
     }
   });
 
-  it('allow-lists every postJson call site against the six write routes', () => {
+  it('allow-lists every postJson call site against the thirteen write routes', () => {
     // Three until Phase 3; the mission command/transition/amend writes joined
-    // with issue #254 — the same Founder-approved widening the route-table
-    // test records.
+    // with issue #254; the project register, mission-linkage and workforce
+    // writes joined with issue #262 — each the same Founder-approved widening
+    // the route-table test records. (TRANSITION_PATH and UPDATE_PATH name the
+    // mission transition on projects.html's mission console and the project
+    // transition/update on its register console respectively — the
+    // variable-binding test below pins each to its canonical route.)
     for (const page of HQ_PAGES) {
       const scripts = scriptsOf(site.get(page.file)!);
       for (const match of scripts.matchAll(/postJson\((\w+)[,)]/g)) {
@@ -144,6 +150,12 @@ describe('every page script speaks only to the control API and the snapshot', ()
             'MISSIONS_PATH',
             'TRANSITION_PATH',
             'AMEND_PATH',
+            'PROJECTS_PATH',
+            'UPDATE_PATH',
+            'ASSIGN_PROJECT_PATH',
+            'LINK_ITEM_PATH',
+            'ROUTE_PATH',
+            'ASSIGN_PATH',
             'path',
           ].includes(match[1]!),
           `${page.file}: unexpected postJson target: ${match[1]}`,
@@ -168,6 +180,31 @@ describe('every page script speaks only to the control API and the snapshot', ()
       `var TRANSITION_PATH = ${JSON.stringify(CONTROL_ROUTES.missionTransition)};`,
     );
     expect(projects).toContain(`var AMEND_PATH = ${JSON.stringify(CONTROL_ROUTES.missionAmend)};`);
+    // Phase 4: the register console (its own IIFE, so its TRANSITION_PATH
+    // shadows nothing) and the mission console's linkage paths.
+    expect(projects).toContain(`var PROJECTS_PATH = ${JSON.stringify(CONTROL_ROUTES.projects)};`);
+    expect(projects).toContain(
+      `var TRANSITION_PATH = ${JSON.stringify(CONTROL_ROUTES.projectTransition)};`,
+    );
+    expect(projects).toContain(
+      `var UPDATE_PATH = ${JSON.stringify(CONTROL_ROUTES.projectUpdate)};`,
+    );
+    expect(projects).toContain(
+      `var ASSIGN_PROJECT_PATH = ${JSON.stringify(CONTROL_ROUTES.missionAssignProject)};`,
+    );
+    expect(projects).toContain(
+      `var LINK_ITEM_PATH = ${JSON.stringify(CONTROL_ROUTES.missionLinkPlanItem)};`,
+    );
+    const specialists = scriptsOf(site.get('specialists.html')!);
+    expect(specialists).toContain(
+      `var WORKFORCE_PATH = ${JSON.stringify(CONTROL_ROUTES.workforce)};`,
+    );
+    expect(specialists).toContain(
+      `var ROUTE_PATH = ${JSON.stringify(CONTROL_ROUTES.workforceRoute)};`,
+    );
+    expect(specialists).toContain(
+      `var ASSIGN_PATH = ${JSON.stringify(CONTROL_ROUTES.workforceAssign)};`,
+    );
   });
 
   it('names no absolute URL and no path outside the allow-list in any script', () => {
