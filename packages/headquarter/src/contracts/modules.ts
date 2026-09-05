@@ -29,17 +29,11 @@ export const COMMAND_CENTER_LANES = [
 
 export type CommandCenterLane = (typeof COMMAND_CENTER_LANES)[number];
 
-export interface ProjectRecord {
-  id: string;
-  name: string;
-  /** e.g. 'jenify-os', 'qos', 'jenify-news', 'company-infra'. */
-  stream: string;
-  summary: string;
-  /** Canonical activity status of the project as a whole. */
-  status: string;
-  createdAt: string;
-  updatedAt: string;
-}
+// ProjectRecord moved (Phase 4, issue #262): the canonical project register
+// type is `ProjectRecord` in `application/project-command.ts`, which adopted
+// the `hq_projects` table with a typed lifecycle and Founder-gated writes.
+// The untyped foundation-wave shape that lived here described a table nothing
+// wrote and was deleted with the store's ungated upsert.
 
 export interface ApprovalRequest {
   id: string;

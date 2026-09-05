@@ -129,6 +129,12 @@ describe('lane F — the Founder can only approve what was on screen', () => {
       surface.filter((name) =>
         // `Mission` joined the suffix group with Phase 3: the scan predates
         // missions, and `updateMission`/`setMissionState` would have passed it.
+        // `Project` is deliberately ABSENT (Phase 4): a project is a mutable
+        // REGISTER entry, not an authority object — `updateProject` is an
+        // audited Founder-gated register edit whose append-only history lives
+        // in `hq_project_events`, engine-enforced. This scan protects objects
+        // whose mutation could move an approved action or a grant; the
+        // project register holds neither.
         /^(set|update|edit|patch|mutate|force|override)(Task|Payload|Capability|Approval|Mission)/i.test(
           name,
         ),

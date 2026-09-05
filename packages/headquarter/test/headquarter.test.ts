@@ -60,18 +60,19 @@ describe('headquarter store', () => {
     expect(snap.lanes.next.map((i) => i.subjectId)).toEqual(['e']);
   });
 
-  it('manages projects, approvals, chats, specialists and archive refs', () => {
-    const p = hq.upsertProject({
-      id: 'stream2',
-      name: 'Company Infrastructure',
-      stream: 'company-infra',
-      summary: 'Headquarter + Universal Operator',
-      status: 'running',
-    });
-    expect(p.name).toBe('Company Infrastructure');
+  it('manages approvals, chats, specialists and archive refs — and holds NO project write path', () => {
+    // Phase 4 (issue #262): `hq_projects` became the canonical project
+    // register, owned by application/project-command.ts and written only
+    // through the Founder-gated facade. The store's ungated `upsertProject`
+    // was deleted with it; this pin keeps the raw path from growing back.
+    expect(
+      Object.getOwnPropertyNames(Object.getPrototypeOf(hq)).filter((name) =>
+        /project/i.test(name),
+      ),
+    ).toEqual([]);
 
     const approval = hq.requestApproval({
-      projectId: p.id,
+      projectId: 'stream2',
       ask: 'Approve standing pre-approval for github.open_pr',
       riskClass: 'external_side_effect',
       requestedBy: 'claude',
@@ -97,7 +98,7 @@ describe('headquarter store', () => {
     });
     expect(hq.listSpecialists()[0].allowedCapabilities).toEqual(['archive.index_document']);
 
-    const ref = hq.addArchiveRef({ title: 'Stream 2 kickoff', locator: 'archive://2026/08/stream2', projectId: p.id });
-    expect(hq.listArchiveRefs(p.id)[0].id).toBe(ref.id);
+    const ref = hq.addArchiveRef({ title: 'Stream 2 kickoff', locator: 'archive://2026/08/stream2', projectId: 'stream2' });
+    expect(hq.listArchiveRefs('stream2')[0].id).toBe(ref.id);
   });
 });

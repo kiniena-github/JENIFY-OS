@@ -276,6 +276,15 @@ BEGIN SELECT RAISE(ABORT, 'hq_mission_plan_items task link is write-once'); END;
 export function ensureMissionCommandSchema(db: HqDatabase): void {
   if (db.readonly) return;
   db.exec(MISSION_COMMAND_DDL);
+  // Phase 4: the canonical mission -> project relationship. Additive,
+  // idempotent, module-owned (this module owns hq_missions). Distinct from
+  // the free-text `project` LABEL column above it, which stays a label —
+  // `project_id` references the canonical register (`hq_projects`, owned by
+  // application/project-command.ts) and is validated at the facade.
+  const cols = db.prepare(`PRAGMA table_info(hq_missions)`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === 'project_id')) {
+    db.exec(`ALTER TABLE hq_missions ADD COLUMN project_id TEXT`);
+  }
 }
 
 /**

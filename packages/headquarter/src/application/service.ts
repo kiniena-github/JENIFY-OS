@@ -444,6 +444,30 @@ import {
   type MissionPriority,
   type MissionStatus,
 } from '../contracts/mission.js';
+import {
+  MAX_PROJECT_NAME_LENGTH,
+  MAX_PROJECT_NOTE_LENGTH,
+  MAX_PROJECT_PURPOSE_LENGTH,
+  MAX_PROJECT_STREAM_LENGTH,
+  PROJECT_COMMAND_CAPABILITY,
+  appendProjectEvent,
+  encodeStream,
+  ensureProjectCommandSchema,
+  findProjectIdByIdempotencyKey,
+  listProjectIds,
+  projectCommandCapabilityState,
+  projectCommandContractDrift,
+  projectCommandIdempotencyKey,
+  projectCommandSchemaPresent,
+  readProjectRecord,
+  type ProjectRecord,
+} from './project-command.js';
+import {
+  PROJECT_ALLOWED_TRANSITIONS,
+  canTransitionProject,
+  isProjectStatus,
+  type ProjectStatus,
+} from '../contracts/project.js';
 
 // ---- result contract ----
 
@@ -473,7 +497,11 @@ export type OpsErrorCode =
   | 'invalid_mission_transition'
   | 'mission_status_changed'
   | 'mission_terminal'
-  | 'mission_intent_conflict';
+  | 'mission_intent_conflict'
+  | 'unknown_project'
+  | 'invalid_project_transition'
+  | 'project_status_changed'
+  | 'project_closed';
 
 export interface OpsError {
   code: OpsErrorCode;
@@ -947,6 +975,9 @@ export class HeadquarterOperations {
    */
   readonly #missionStorePresent: boolean;
 
+  /** The Phase 4 project schema, same truth-recording as missions above. */
+  readonly #projectStorePresent: boolean;
+
   /**
    * The capability ROW, read from the database (issue #219, Codex P1 on
    * `9c2a474`).
@@ -980,12 +1011,15 @@ export class HeadquarterOperations {
     };
     ensureApplicationSchema(db);
     ensureMissionCommandSchema(db);
-    // A writable construction just ensured the mission tables. A READ-ONLY
-    // one (the hq:snapshot path) may be observing a pre-Phase-3 file that has
-    // none — the ensure above deliberately writes nothing through a read-only
-    // handle — so record what is actually there and let every mission read
-    // answer truthfully instead of throwing at the first prepare.
+    ensureProjectCommandSchema(db);
+    // A writable construction just ensured the mission and project tables. A
+    // READ-ONLY one (the hq:snapshot path) may be observing a pre-Phase-3/4
+    // file that has none — the ensures above deliberately write nothing
+    // through a read-only handle — so record what is actually there and let
+    // every mission/project read answer truthfully instead of throwing at
+    // the first prepare.
     this.#missionStorePresent = db.readonly ? missionSchemaPresent(db) : true;
+    this.#projectStorePresent = db.readonly ? projectCommandSchemaPresent(db) : true;
     this.#store = options.store ?? new HeadquarterStore(db);
     // The approval mutations are handed to whoever CONSTRUCTS the queue and to
     // nobody else, so they are unreachable from a queue handle a worker holds.
@@ -3163,12 +3197,20 @@ export class HeadquarterOperations {
   }
 
   /**
-   * Missions are commanded by an active HUMAN principal holding the
-   * `hq.mission_command` originate grant. Deny by default; a registered
-   * worker is refused outright — commanding company direction is a Founder
-   * act, and worker identity never carries it.
+   * The shared Founder-gate actor resolution behind mission AND project
+   * commands (Phase 4 extracted it; the mission refusal texts are
+   * byte-identical to their Phase 3 originals). An active HUMAN principal
+   * holding the named originate grant; deny by default; a registered worker
+   * is refused outright — `founderActNoun` names the act in the refusal
+   * ("commanding a mission is a Founder act, and worker identity never
+   * carries it").
    */
-  #resolveMissionCommander(actor: string, action: string): OpsResult<never> | null {
+  #resolveFounderGateActor(
+    actor: string,
+    action: string,
+    capabilityId: string,
+    founderActNoun: string,
+  ): OpsResult<never> | null {
     if (!actor) return fail('invalid_input', `An actor is required to ${action}`);
     if (actor === 'system') {
       return fail('not_permitted', `'system' cannot ${action}: a human principal is required`);
@@ -3178,14 +3220,14 @@ export class HeadquarterOperations {
     if (resolved.data.kind === 'worker') {
       return fail(
         'not_permitted',
-        `Registered worker ${actor} cannot ${action}: commanding a mission is a Founder act, and worker identity never carries it`,
+        `Registered worker ${actor} cannot ${action}: ${founderActNoun} is a Founder act, and worker identity never carries it`,
         { actor },
       );
     }
-    if (!resolved.data.allowedCapabilities.includes(MISSION_COMMAND_CAPABILITY.id)) {
+    if (!resolved.data.allowedCapabilities.includes(capabilityId)) {
       return fail(
         'not_permitted',
-        `${actor} may not ${action}: the principal does not hold ${MISSION_COMMAND_CAPABILITY.id}`,
+        `${actor} may not ${action}: the principal does not hold ${capabilityId}`,
         { actor },
       );
     }
@@ -3193,33 +3235,79 @@ export class HeadquarterOperations {
   }
 
   /**
-   * Fail closed while the `hq.mission_command` registry row is missing,
-   * weakened or disabled. Reads the DATABASE row (never `queue.capabilities`)
-   * and never repairs — registration is a separate configuration act.
+   * The shared fail-closed capability gate behind mission AND project
+   * commands. Reads the DATABASE row (never `queue.capabilities`) and never
+   * repairs — registration is a separate configuration act. `classify` and
+   * `drift` come from the owning module so each contract stays test-pinned
+   * where it is defined.
    */
-  #missionCapabilityGate(action: string): OpsResult<never> | null {
-    const row = this.#capabilityFromStore(MISSION_COMMAND_CAPABILITY.id);
-    const state = missionCommandCapabilityState(row);
+  #founderGateCapabilityGate(
+    action: string,
+    capabilityId: string,
+    classify: (row: Capability | null) => 'missing' | 'altered' | 'disabled' | 'enabled',
+    drift: (row: Capability) => string[],
+    founderActNoun: string,
+  ): OpsResult<never> | null {
+    const row = this.#capabilityFromStore(capabilityId);
+    const state = classify(row);
     if (state === 'enabled') return null;
     if (state === 'missing') {
       return fail(
         'unknown_capability',
-        `Cannot ${action}: ${MISSION_COMMAND_CAPABILITY.id} is not registered. ` +
-          `Registering it is a separate, deliberate configuration action — commanding a mission never performs it.`,
+        `Cannot ${action}: ${capabilityId} is not registered. ` +
+          `Registering it is a separate, deliberate configuration action — ${founderActNoun} never performs it.`,
       );
     }
     if (state === 'altered') {
-      const drift = missionCommandContractDrift(row!);
+      const driftFields = drift(row!);
       return fail(
         'not_permitted',
-        `Cannot ${action}: the ${MISSION_COMMAND_CAPABILITY.id} definition no longer matches its reserved contract ` +
-          `(drift: ${drift.join(', ')}). Re-registering it is a separate configuration action.`,
-        { drift },
+        `Cannot ${action}: the ${capabilityId} definition no longer matches its reserved contract ` +
+          `(drift: ${driftFields.join(', ')}). Re-registering it is a separate configuration action.`,
+        { drift: driftFields },
       );
     }
     return fail(
       'capability_disabled',
-      `Cannot ${action}: ${MISSION_COMMAND_CAPABILITY.id} is disabled. Re-enabling it is a separate configuration action.`,
+      `Cannot ${action}: ${capabilityId} is disabled. Re-enabling it is a separate configuration action.`,
+    );
+  }
+
+  #resolveMissionCommander(actor: string, action: string): OpsResult<never> | null {
+    return this.#resolveFounderGateActor(
+      actor,
+      action,
+      MISSION_COMMAND_CAPABILITY.id,
+      'commanding a mission',
+    );
+  }
+
+  #missionCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      MISSION_COMMAND_CAPABILITY.id,
+      missionCommandCapabilityState,
+      missionCommandContractDrift,
+      'commanding a mission',
+    );
+  }
+
+  #resolveProjectCommander(actor: string, action: string): OpsResult<never> | null {
+    return this.#resolveFounderGateActor(
+      actor,
+      action,
+      PROJECT_COMMAND_CAPABILITY.id,
+      'commanding a project record',
+    );
+  }
+
+  #projectCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      PROJECT_COMMAND_CAPABILITY.id,
+      projectCommandCapabilityState,
+      projectCommandContractDrift,
+      'commanding a project record',
     );
   }
 
@@ -3241,6 +3329,335 @@ export class HeadquarterOperations {
     if (!row) return null;
     return { status: row.status as ActivityStatus, reviewPending: row.review_state === 'pending' };
   };
+
+  // ---- projects (Phase 4 — Projects + Tasks + Dynamic AI Workforce, #262) ----
+
+  /**
+   * Create a canonical project register entry.
+   *
+   * A project organizes missions and executes nothing: no task, no approval,
+   * no worker, no dispatch. Founder-only via the `hq.project_command`
+   * originate grant and the fail-closed capability gate (the mission
+   * CONFIGURATION-vs-INVOCATION trio). Transactional and idempotent on a
+   * derived digest key; the client key is an input, never the key.
+   */
+  createProject(input: {
+    name: string;
+    purpose: string;
+    stream?: string;
+    /** Resolved principal id. Set by the boundary, never read from a body. */
+    requestedBy: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ project: ProjectRecord; deduplicated: boolean }> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    const name = missionText('name', input.name, MAX_PROJECT_NAME_LENGTH, true);
+    if (!name.ok) return fail('invalid_input', name.message);
+    const purpose = missionText('purpose', input.purpose, MAX_PROJECT_PURPOSE_LENGTH, true);
+    if (!purpose.ok) return fail('invalid_input', purpose.message);
+    const stream = missionText('stream', input.stream, MAX_PROJECT_STREAM_LENGTH, false);
+    if (!stream.ok) return fail('invalid_input', stream.message);
+    const refusedCommander = this.#resolveProjectCommander(input.requestedBy, 'create a project');
+    if (refusedCommander) return refusedCommander;
+    const refusedCapability = this.#projectCapabilityGate('create a project');
+    if (refusedCapability) return refusedCapability;
+    // Everything that will be PERSISTED is scanned before anything is written.
+    try {
+      assertNoSecretLikeContent({ name: name.value, purpose: purpose.value, stream: stream.value });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+    const idempotencyKey = projectCommandIdempotencyKey({
+      requestedBy: input.requestedBy,
+      name: name.value!,
+      purpose: purpose.value!,
+      stream: stream.value,
+      idempotencyKey: input.idempotencyKey ?? null,
+    });
+    const id = `project-${uuid()}`;
+    const at = nowIso();
+    // Dedupe read, register write, module event and evidence in ONE IMMEDIATE
+    // transaction (the commandMission shape): a service holding no privileged
+    // grant refuses before any row exists, a failing evidence append rolls
+    // the project back, and the dedupe decision cannot race a concurrent
+    // writer past the UNIQUE idempotency index.
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    privileged.reserve(() => {
+      const existing = findProjectIdByIdempotencyKey(this.#db, idempotencyKey);
+      if (existing) {
+        dedupedTo = existing;
+        return;
+      }
+      this.#db
+        .prepare(
+          `INSERT INTO hq_projects
+             (id, name, stream, summary, status, created_at, updated_at,
+              created_by, status_changed_at, status_changed_by, idempotency_key)
+           VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          name.value,
+          encodeStream(stream.value),
+          purpose.value,
+          at,
+          at,
+          input.requestedBy,
+          at,
+          input.requestedBy,
+          idempotencyKey,
+        );
+      appendProjectEvent(this.#db, {
+        projectId: id,
+        actor: input.requestedBy,
+        kind: 'created',
+        toStatus: 'active',
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'project_created',
+        payload: { projectId: id, idempotencyKey, executable: false },
+      });
+    });
+    if (dedupedTo) {
+      return ok({ project: this.#projectRecord(dedupedTo)!, deduplicated: true });
+    }
+    return ok({ project: this.#projectRecord(id)!, deduplicated: false });
+  }
+
+  /**
+   * Update a project's register fields. An AUDITED register edit — the event
+   * records which fields changed — not a history rewrite: `hq_project_events`
+   * is append-only and untouched by this method's UPDATE. Closed projects
+   * refuse edits (reopen first); an update that changes nothing writes
+   * nothing, because an 'updated' event with no change would forge history.
+   */
+  updateProject(input: {
+    projectId: string;
+    name?: string;
+    purpose?: string;
+    /** undefined = unchanged; '' or null = clear the stream label. */
+    stream?: string | null;
+    requestedBy: string;
+  }): OpsResult<ProjectRecord> {
+    if (!input.projectId || !input.requestedBy) {
+      return fail('invalid_input', 'projectId and requestedBy are required');
+    }
+    const nameSupplied = input.name !== undefined;
+    const purposeSupplied = input.purpose !== undefined;
+    const streamSupplied = input.stream !== undefined;
+    if (!nameSupplied && !purposeSupplied && !streamSupplied) {
+      return fail('invalid_input', 'Nothing to update: supply name, purpose or stream');
+    }
+    const name = nameSupplied
+      ? missionText('name', input.name, MAX_PROJECT_NAME_LENGTH, true)
+      : null;
+    if (name && !name.ok) return fail('invalid_input', name.message);
+    const purpose = purposeSupplied
+      ? missionText('purpose', input.purpose, MAX_PROJECT_PURPOSE_LENGTH, true)
+      : null;
+    if (purpose && !purpose.ok) return fail('invalid_input', purpose.message);
+    const stream = streamSupplied
+      ? missionText('stream', input.stream ?? undefined, MAX_PROJECT_STREAM_LENGTH, false)
+      : null;
+    if (stream && !stream.ok) return fail('invalid_input', stream.message);
+
+    const refusedCommander = this.#resolveProjectCommander(input.requestedBy, 'update a project');
+    if (refusedCommander) return refusedCommander;
+    const refusedCapability = this.#projectCapabilityGate('update a project');
+    if (refusedCapability) return refusedCapability;
+
+    const current = this.#projectRecord(input.projectId);
+    if (!current) return fail('unknown_project', `Unknown project: ${input.projectId}`);
+    if (current.status === 'closed') {
+      return fail(
+        'project_closed',
+        `Project ${input.projectId} is closed; reopen it before editing the register entry`,
+      );
+    }
+    const nextName = name ? name.value! : current.name;
+    const nextPurpose = purpose ? purpose.value! : current.purpose;
+    const nextStream = stream ? stream.value : current.stream;
+    const changed: string[] = [];
+    if (nextName !== current.name) changed.push('name');
+    if (nextPurpose !== current.purpose) changed.push('purpose');
+    if (nextStream !== current.stream) changed.push('stream');
+    if (changed.length === 0) return ok(current);
+    try {
+      assertNoSecretLikeContent({ name: nextName, purpose: nextPurpose, stream: nextStream });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+
+    const at = nowIso();
+    let raced = false;
+    const privileged = this.#requirePrivilegedQueue();
+    privileged.reserve(() => {
+      const result = this.#db
+        .prepare(
+          `UPDATE hq_projects SET name = ?, summary = ?, stream = ?, updated_at = ?
+           WHERE id = ? AND status = 'active'`,
+        )
+        .run(nextName, nextPurpose, encodeStream(nextStream), at, input.projectId);
+      if (result.changes === 0) {
+        raced = true;
+        return;
+      }
+      appendProjectEvent(this.#db, {
+        projectId: input.projectId,
+        actor: input.requestedBy,
+        kind: 'updated',
+        detail: { changed },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'project_updated',
+        payload: { projectId: input.projectId, changed, executable: false },
+      });
+    });
+    if (raced) {
+      return fail(
+        'project_status_changed',
+        `Project ${input.projectId} changed while the update was being decided`,
+      );
+    }
+    return ok(this.#projectRecord(input.projectId)!);
+  }
+
+  /**
+   * Move a project between `active` and `closed`. Every move demands a note
+   * (two states means every move is a decision with a reason); a replayed
+   * same-status move is refused rather than re-applied.
+   */
+  transitionProject(input: {
+    projectId: string;
+    to: string;
+    note?: string;
+    /** Optimistic guard: refuse if the project moved since it was read. */
+    expectedStatus?: string;
+    requestedBy: string;
+  }): OpsResult<ProjectRecord> {
+    if (!input.projectId || !input.requestedBy) {
+      return fail('invalid_input', 'projectId and requestedBy are required');
+    }
+    if (!isProjectStatus(input.to)) {
+      return fail('invalid_input', `Unknown project status: ${input.to}`);
+    }
+    if (input.expectedStatus != null && !isProjectStatus(input.expectedStatus)) {
+      return fail('invalid_input', `Unknown project status: ${input.expectedStatus}`);
+    }
+    const noteField = missionText('note', input.note, MAX_PROJECT_NOTE_LENGTH, false);
+    if (!noteField.ok) return fail('invalid_input', noteField.message);
+    const note = noteField.value;
+    if (!note) {
+      return fail('invalid_input', `Moving a project to ${input.to} requires a note`);
+    }
+
+    const refusedCommander = this.#resolveProjectCommander(
+      input.requestedBy,
+      `move project ${input.projectId} to ${input.to}`,
+    );
+    if (refusedCommander) return refusedCommander;
+    const refusedCapability = this.#projectCapabilityGate('transition a project');
+    if (refusedCapability) return refusedCapability;
+
+    const current = this.#projectRecord(input.projectId);
+    if (!current) return fail('unknown_project', `Unknown project: ${input.projectId}`);
+    if (input.expectedStatus && current.status !== input.expectedStatus) {
+      return fail(
+        'project_status_changed',
+        `Project ${input.projectId} is ${current.status}, not ${input.expectedStatus}`,
+        { status: current.status },
+      );
+    }
+    if (current.status === input.to) {
+      return fail('project_status_changed', `Project ${input.projectId} is already ${input.to}`, {
+        status: current.status,
+      });
+    }
+    if (!canTransitionProject(current.status, input.to)) {
+      return fail(
+        'invalid_project_transition',
+        `Illegal project transition: ${current.status} -> ${input.to}`,
+        {
+          from: current.status,
+          to: input.to,
+          allowed: [...PROJECT_ALLOWED_TRANSITIONS[current.status]],
+        },
+      );
+    }
+    try {
+      assertNoSecretLikeContent({ note });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+
+    const at = nowIso();
+    let raced = false;
+    const privileged = this.#requirePrivilegedQueue();
+    privileged.reserve(() => {
+      const result = this.#db
+        .prepare(
+          `UPDATE hq_projects
+           SET status = ?, updated_at = ?, status_changed_at = ?, status_changed_by = ?
+           WHERE id = ? AND status = ?`,
+        )
+        .run(input.to, at, at, input.requestedBy, input.projectId, current.status);
+      if (result.changes === 0) {
+        raced = true;
+        return;
+      }
+      appendProjectEvent(this.#db, {
+        projectId: input.projectId,
+        actor: input.requestedBy,
+        kind: 'transitioned',
+        fromStatus: current.status,
+        toStatus: input.to as ProjectStatus,
+        note,
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'project_transitioned',
+        payload: {
+          projectId: input.projectId,
+          from: current.status,
+          to: input.to,
+          executable: false,
+        },
+      });
+    });
+    if (raced) {
+      return fail(
+        'project_status_changed',
+        `Project ${input.projectId} changed status while the transition was being decided`,
+      );
+    }
+    return ok(this.#projectRecord(input.projectId)!);
+  }
+
+  getProject(id: string): ProjectRecord | null {
+    if (!id) return null;
+    return this.#projectRecord(id);
+  }
+
+  listProjects(status?: ProjectStatus): ProjectRecord[] {
+    if (!this.#projectStorePresent) return [];
+    return listProjectIds(this.#db, status).map((id) => this.#projectRecord(id)!);
+  }
+
+  /**
+   * Whether this database carries the Phase 4 project schema. False only for
+   * a read-only handle over a pre-Phase-4 file; project reads then answer
+   * empty/null and the snapshot's projects provenance states the absence.
+   */
+  projectStorePresent(): boolean {
+    return this.#projectStorePresent;
+  }
+
+  #projectRecord(id: string): ProjectRecord | null {
+    if (!this.#projectStorePresent) return null;
+    return readProjectRecord(this.#db, id, this.#capabilityFromStore(PROJECT_COMMAND_CAPABILITY.id));
+  }
 
   // ---- task metadata (console labels + advisory assignment) ----
 
