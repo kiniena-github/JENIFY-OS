@@ -39,6 +39,7 @@ import { founderConsole, type FounderConsole } from '../application/console.js';
 import { directOrderDispatchBlocked } from './orders.js';
 import { dispatchHistory } from '../providers/claude/dispatch.js';
 import type { HeadquarterOperations } from '../application/service.js';
+import { missionBrowserView, type MissionBrowserView } from '../application/mission-command.js';
 import type { ProviderId, SecretsEnv } from '../routing/providers.js';
 import { assessConnections, type ConnectionProbe, type ConnectionStatus } from './connections.js';
 import { assertBrowserSafe, assertNoFabricatedFields } from './redaction.js';
@@ -50,11 +51,45 @@ import {
   type SourceMode,
 } from './provenance.js';
 
-/** Bumped whenever the wire shape changes incompatibly. */
+/**
+ * Bumped whenever the wire shape changes incompatibly.
+ *
+ * Phase 3 added the `missions` section and `counts.missions` WITHOUT a bump,
+ * deliberately: the change is purely additive, no consumer validates by
+ * exhaustive shape, and the site and server deploy as one unit. A bump is for
+ * a change an old reader would misread, not for a field it never looks at.
+ */
 export const HQ_SNAPSHOT_VERSION = 1;
 
 /** How many recent canonical events a snapshot carries. */
 export const SNAPSHOT_ACTIVITY_LIMIT = 40;
+
+/**
+ * How many missions the WRITTEN snapshot artefact carries (the `hq:snapshot`
+ * CLI passes this as `missionLimit`). Deliberately an opt-in bound: the live
+ * `/state` route passes no limit, so the Mission Room's rows and metrics
+ * never silently truncate. When the bound applies, `counts.missions` still
+ * reports the TOTAL and the section's provenance says what was trimmed.
+ */
+export const SNAPSHOT_MISSION_LIMIT = 40;
+
+/**
+ * Bound a mission list to the NEWEST `limit`, returned oldest-first (the
+ * order `listMissions` already uses, so bounded and unbounded sections read
+ * the same way). Mirrors `trimActivity`; unlike it, this trims rows only —
+ * the browser view is already the whitelisted projection.
+ */
+export function trimMissions(
+  missions: readonly MissionBrowserView[],
+  limit = SNAPSHOT_MISSION_LIMIT,
+): MissionBrowserView[] {
+  const byNewest = [...missions].sort((a, b) =>
+    a.createdAt === b.createdAt
+      ? b.id.localeCompare(a.id)
+      : b.createdAt.localeCompare(a.createdAt),
+  );
+  return byNewest.slice(0, limit).reverse();
+}
 
 /** One canonical event, trimmed to what the browser renders. */
 export interface SnapshotActivityEntry {
@@ -97,6 +132,8 @@ export interface SnapshotCounts {
   blocked: number;
   inFlight: number;
   queued: number;
+  /** Canonical missions commanded by the Founder (Phase 3). 0 means 0. */
+  missions: number;
 }
 
 export interface HqSnapshot {
@@ -111,6 +148,13 @@ export interface HqSnapshot {
   workforce: SnapshotSection<SnapshotWorker[]>;
   capabilities: SnapshotSection<SnapshotCapability[]>;
   activity: SnapshotSection<SnapshotActivityEntry[]>;
+  /**
+   * The canonical Mission aggregate (Phase 3, issue #254) — the SHARED
+   * `missionBrowserView` projection, so this section and the mission routes
+   * cannot disagree about what the browser sees. No intent bodies, no
+   * idempotency keys, no invented metrics.
+   */
+  missions: SnapshotSection<MissionBrowserView[]>;
 }
 
 /**
@@ -169,8 +213,11 @@ export interface SnapshotSources {
   workforce: { data: WorkerDescriptor[]; provenance: Provenance };
   capabilities: { data: Capability[]; provenance: Provenance };
   activity: { data: ActivityEvent[]; provenance: Provenance };
+  missions: { data: MissionBrowserView[]; provenance: Provenance };
   policyContext?: Parameters<typeof classifyCapability>[1];
   activityLimit?: number;
+  /** Opt-in mission bound — see SNAPSHOT_MISSION_LIMIT. Omitted = unbounded. */
+  missionLimit?: number;
 }
 
 /**
@@ -190,6 +237,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       sources.workforce.provenance.mode,
       sources.capabilities.provenance.mode,
       sources.activity.provenance.mode,
+      sources.missions.provenance.mode,
     ]),
     note: sources.note ?? null,
     counts: {
@@ -199,6 +247,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       blocked: console_.blocked.length,
       inFlight: console_.inFlight.length,
       queued: console_.queued.length,
+      missions: sources.missions.data.length,
     },
     operations: section(sources.console.provenance, console_),
     connections: section(sources.connections.provenance, sources.connections.data),
@@ -229,6 +278,18 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       sources.activity.provenance,
       trimActivity(sources.activity.data, sources.activityLimit),
     ),
+    missions:
+      sources.missionLimit != null && sources.missions.data.length > sources.missionLimit
+        ? section(
+            {
+              ...sources.missions.provenance,
+              note:
+                `Trimmed to the newest ${sources.missionLimit} of ` +
+                `${sources.missions.data.length} missions; counts.missions still reports the total.`,
+            },
+            trimMissions(sources.missions.data, sources.missionLimit),
+          )
+        : section(sources.missions.provenance, sources.missions.data),
   };
 
   // Fail closed: prove it before anyone can publish it.
@@ -250,6 +311,8 @@ export interface LiveSnapshotOptions {
    */
   mode?: SourceMode;
   activityLimit?: number;
+  /** Opt-in mission bound — see SNAPSHOT_MISSION_LIMIT. Omitted = unbounded. */
+  missionLimit?: number;
   /**
    * Connection probes to assess with (issue #221, Codex P2 on `1d5b3bf`).
    *
@@ -335,6 +398,7 @@ export function liveSnapshotFromOperations(
     note: options.note,
     policyContext: ops.policyContext,
     activityLimit: options.activityLimit,
+    missionLimit: options.missionLimit,
     console: {
       data: withDispatchBlocked(founderConsole(ops, new Date(at)), ops, env, options.dispatchAvailability),
       provenance: provenanceFor('op_tasks / hq_approvals via application/console.founderConsole'),
@@ -362,6 +426,26 @@ export function liveSnapshotFromOperations(
       data: ops.directory.latestStatusPerSubject(),
       provenance: provenanceFor('hq_events via HeadquarterStore.latestStatusPerSubject'),
     },
+    missions: ops.missionStorePresent()
+      ? {
+          data: ops.listMissions().map(missionBrowserView),
+          provenance: provenanceFor('hq_missions via HeadquarterOperations.listMissions'),
+        }
+      : {
+          // A read-only handle over a pre-Phase-3 file: the mission tables do
+          // not exist, and a read-only path never creates them. Zero missions
+          // with THIS provenance is the truth; an unlabeled empty list would
+          // read as "the store is empty", which it is not — it is absent.
+          data: [],
+          provenance: {
+            mode,
+            source: 'hq_missions via HeadquarterOperations.listMissions',
+            asOf: at,
+            note:
+              'This database predates the Phase 3 mission tables and was opened read-only, so no ' +
+              'mission store exists to read. 0 rows states that absence; nothing was migrated.',
+          },
+        },
   });
 }
 

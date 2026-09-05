@@ -139,3 +139,71 @@ Append-only. Each entry: date, decision, rationale. Newest last.
   honesty rule `ui/spatial/state.ts` already enforces (deny by default, every live-looking
   thing carries its evidence, nothing invented). The concept images are visual references, not
   final UI specs.
+
+- **2026-09-05 — Phase 3 (Founder Command + Mission Core, issue #254) widens the HQ browser
+  write surface and defines the canonical Mission.** Founder-approved via #254/#255; recorded
+  here so nothing about it is silent:
+  1. **Write surface.** The browser write surface widens from exactly three routes
+     (create order / approve / deny — the 2026-08-28 decision) to additionally
+     `POST /api/hq/control/missions` (command), `/missions/transition` and `/missions/amend`.
+     This supersedes ONLY the surface-count clause of 2026-08-28; every other clause —
+     identity from the server session and Founder map only, fail-closed on a broken map,
+     no generic mutation endpoint, no ask-for-changes route — stands and applies to the new
+     routes unchanged.
+  2. **"Mission" now has a third, authoritative meaning.** The canonical Mission aggregate
+     (`hq_missions` + append-only `hq_mission_intents`/`hq_mission_events` +
+     `hq_mission_plan_items`) is the command-level record of a Founder order: objective,
+     non-negotiable constraints, acceptance criteria (unknown recorded as unknown), priority
+     (mission metadata only — the operator queue stays strictly FIFO), plan, blockers and the
+     eight lifecycle states of #254. The chat-lane proposal flow (`hq_mission_proposals`) and
+     the still-unwired mission watchdog are untouched and remain distinct concepts. The
+     Mission Room is deliberately rebound from "open op_tasks rows" to this aggregate; the
+     Command Room keeps task truth and gains a mission-decision metric computed from the same
+     status set, so the rooms cannot disagree.
+  3. **Missions execute nothing in Phase 3.** Commanding, transitioning, amending and linking
+     create no task, touch no approval, dispatch nothing and read no worker registry. The
+     `verified` state is reachable only as an explicit recorded Founder decision with a
+     mandatory note (method vocabulary has no machine member); the two-actor rule of
+     2026-08-27 continues to govern execution-granting approvals unchanged — an inert,
+     actor-audited state record is not an approval, so single-actor verification is honest
+     and displayed as exactly what it is.
+  4. **No step-up on mission writes.** Step-up stays bound to what it protects —
+     execution-granting approvals. This exemption MUST be revisited the moment any autonomous
+     consumer reads mission state (Phase 4+).
+  5. **Mission writes are not kill-switch-gated**, in parity with direct-order intake (also
+     un-gated): the switch stops execution reachability — claims and approvals — and must not
+     stop the Founder from recording direction, including "cancelled", during an emergency
+     stop. Pinned by tests whose names state the rationale.
+  6. **Raw order isolation.** The raw Founder instruction and every amendment rationale live
+     in the server-side intent bodies only; no route response or snapshot carries them. The
+     browser sees intake-scanned canonical fields and intent-history metadata.
+
+- **2026-09-05 — Phase 3 Opus second-pass corrections (PR #260, review of `cee771f`) are
+  applied on the same canonical branch.** Recorded so none of it is silent:
+  1. **Intent-lock visibility (M3).** The browser now sees the STRUCTURED per-sequence intent
+     history — seq/kind/actor/at plus objective/constraints/acceptance criteria, all
+     intake-scanned canonical fields — so the Founder can audit the immutable original order
+     (seq 0) next to every amendment from HQ itself. This supersedes ONLY the "intent-history
+     metadata" clause of item 6 above; the raw instruction and every amendment rationale
+     remain server-side, and the no-leak scans still pin that.
+  2. **Console honesty on authorization loss (M1).** Safe/off clears rendered mission rows by
+     construction; a 401/403 on a mission write re-checks the session and re-reads rather
+     than guessing — a lost session wipes the record, a lost write grant leaves the readable
+     record on screen without controls and without a false "not readable" claim.
+  3. **Read-only truth (M2).** Schema init never writes through a read-only database handle;
+     `hq:snapshot` over a pre-Phase-3 file projects zero missions with provenance stating the
+     store's absence instead of throwing or migrating.
+  4. **Append-only by engine (L1).** `hq_mission_intents`/`hq_mission_events` carry
+     BEFORE UPDATE/DELETE abort triggers; the source guard now scans all of `src/`.
+  5. **Atomic evidence (L5) and closed CAS windows (L4).** Every mission mutation commits its
+     rows, its mission event and its `op_evidence` entry in one IMMEDIATE reserve transaction
+     (the issue-#224 precedent); amendment sequence reads moved inside it, and a raced
+     amendment is a typed 409 (`mission_intent_conflict`), never an opaque 500.
+  6. **Digest binds the raw instruction.** Two orders differing only in wording are two
+     missions; pre-fix stored digests no longer dedupe against new re-commands (dev-stage
+     data, accepted). An invalid mission status filter now matches nothing (fail closed).
+  7. **Snapshot bound (L7).** The written snapshot artefact carries the newest
+     `SNAPSHOT_MISSION_LIMIT` missions with the TOTAL still in `counts.missions` and the trim
+     named in provenance; the live `/state` route stays unbounded on purpose.
+  Priority still never touches operator FIFO order (now proven behaviorally, not just by
+  grep), and the hosted restart proof now drives the real `commandMission` path.

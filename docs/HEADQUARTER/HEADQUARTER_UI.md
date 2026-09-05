@@ -1,5 +1,14 @@
 # JENIFY Headquarter UI — Module Map & Ownership
 
+> **STALE — historical record.** This document predates the spatial floor, the
+> immersive 3D HQ, the client runtime, the live control API and Phase 3
+> (Founder Command + Mission Core); its page and test counts describe an
+> earlier build. Its responsive/accessibility guarantees and design decisions
+> remain accurate. For the current control surface see
+> `FOUNDER_AUTH.md`; for Phase 3 see
+> `PHASE_3_FOUNDER_COMMAND_MISSION_CORE.md`. Kept unedited below to avoid a
+> silent rewrite of a delivered record.
+
 Stream 2 deliverable (war room #41 order C, task issue #43 orders 1, 4–6).
 Package: `packages/headquarter` (`@factoryos/headquarter`) — a new, isolated
 npm workspace. **Zero changes to the Mesob pilot packages** (`shared`,

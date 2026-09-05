@@ -127,7 +127,11 @@ describe('lane F — the Founder can only approve what was on screen', () => {
     ];
     expect(
       surface.filter((name) =>
-        /^(set|update|edit|patch|mutate|force|override)(Task|Payload|Capability|Approval)/i.test(name),
+        // `Mission` joined the suffix group with Phase 3: the scan predates
+        // missions, and `updateMission`/`setMissionState` would have passed it.
+        /^(set|update|edit|patch|mutate|force|override)(Task|Payload|Capability|Approval|Mission)/i.test(
+          name,
+        ),
       ),
     ).toEqual([]);
   });

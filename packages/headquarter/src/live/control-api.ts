@@ -14,13 +14,29 @@
  *
  * ## What is exposed, and what deliberately is not
  *
- * Five routes, matched exactly, deny-by-default on everything else:
+ * Matched exactly, deny-by-default on everything else:
  *
- *   GET  /api/hq/control/session            who am I, and are the controls on
- *   GET  /api/hq/control/approvals          the pending approvals + digests
- *   POST /api/hq/control/orders             create a canonical direct order
- *   POST /api/hq/control/approvals/approve  approve the exact rendered action
- *   POST /api/hq/control/approvals/deny     deny, with a reason
+ *   GET  /api/hq/control/session             who am I, and are the controls on
+ *   GET  /api/hq/control/approvals           the pending approvals + digests
+ *   GET  /api/hq/control/state               canonical state, room-projected
+ *   GET  /api/hq/control/missions            the canonical missions, full detail
+ *   POST /api/hq/control/orders              create a canonical direct order
+ *   POST /api/hq/control/approvals/approve   approve the exact rendered action
+ *   POST /api/hq/control/approvals/deny      deny, with a reason
+ *   POST /api/hq/control/missions            command a canonical mission (Phase 3)
+ *   POST /api/hq/control/missions/transition move a mission through its lifecycle
+ *   POST /api/hq/control/missions/amend      amend mission intent, append-only
+ *
+ * The three mission writes widen the browser write surface the 2026-08-28
+ * Founder decision pinned at exactly orders/approve/deny. That widening is
+ * itself Founder-approved (issue #254, Phase 3) and recorded in
+ * `docs/JENIFY_DECISIONS.md`; every other clause of the original decision —
+ * identity derivation, fail-closed map, no generic mutation endpoint —
+ * applies to the new routes unchanged. Mission writes take no step-up: they
+ * release no execution authority (a mission executes nothing in Phase 3),
+ * and step-up stays bound to what it protects — execution-granting
+ * approvals. That exemption must be revisited the moment any autonomous
+ * consumer reads mission state (Phase ≥ 4).
  *
  * There is **no ask-for-changes route**, and its absence is a decision rather
  * than an omission. The canonical approval model has exactly two outcomes:
@@ -88,6 +104,12 @@ import {
   DIRECT_ORDER_ROUTES,
   type DirectOrderRoute,
 } from './orders.js';
+import {
+  MISSION_COMMAND_CAPABILITY,
+  missionBrowserView,
+  missionCommandCapabilityState,
+  type MissionRecord,
+} from '../application/mission-command.js';
 
 export const CONTROL_API_PREFIX = '/api/hq/control';
 
@@ -120,7 +142,30 @@ export const CONTROL_ROUTES = {
   orders: `${CONTROL_API_PREFIX}/orders`,
   approve: `${CONTROL_API_PREFIX}/approvals/approve`,
   deny: `${CONTROL_API_PREFIX}/approvals/deny`,
+  /**
+   * Phase 3 (issue #254): the canonical Mission surface. GET lists every
+   * mission with full browser-safe detail (exact-match routing is preserved —
+   * no path parameters, and Phase-3 scale needs no pagination); POST commands
+   * one canonical mission idempotently.
+   */
+  missions: `${CONTROL_API_PREFIX}/missions`,
+  missionTransition: `${CONTROL_API_PREFIX}/missions/transition`,
+  missionAmend: `${CONTROL_API_PREFIX}/missions/amend`,
 } as const;
+
+/**
+ * Every state-changing route, stated once so test obligations can enumerate
+ * the write surface instead of inferring it from path shapes — a heuristic
+ * that silently probed new POSTs as GETs when it guessed wrong.
+ */
+export const CONTROL_WRITE_ROUTES: readonly string[] = [
+  CONTROL_ROUTES.orders,
+  CONTROL_ROUTES.approve,
+  CONTROL_ROUTES.deny,
+  CONTROL_ROUTES.missions,
+  CONTROL_ROUTES.missionTransition,
+  CONTROL_ROUTES.missionAmend,
+];
 
 export interface ControlResponse {
   status: number;
@@ -240,6 +285,39 @@ function stringField(body: unknown, key: string): string | undefined {
 }
 
 /**
+ * A list-of-strings body field. `undefined` when absent, `'invalid'` when
+ * present but not a string array — the caller refuses rather than coercing.
+ */
+function stringArrayField(body: unknown, key: string): string[] | undefined | 'invalid' {
+  if (body == null || typeof body !== 'object') return undefined;
+  const value = (body as Record<string, unknown>)[key];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) return 'invalid';
+  return value as string[];
+}
+
+/** A list-of-integers body field, same contract as `stringArrayField`. */
+function numberArrayField(body: unknown, key: string): number[] | undefined | 'invalid' {
+  if (body == null || typeof body !== 'object') return undefined;
+  const value = (body as Record<string, unknown>)[key];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((entry) => !Number.isInteger(entry))) return 'invalid';
+  return value as number[];
+}
+
+/**
+ * Everything the browser is told about a mission — the ONE shared projection
+ * (`missionBrowserView`), so this route and the snapshot's missions section
+ * cannot drift apart. Intent BODIES (the raw Founder order and every
+ * amendment's rationale) are server-side audit material, exactly as a direct
+ * order's instruction is; the derived `idempotency_key` stays internal.
+ * `safe()` re-walks this on the way out like every other response.
+ */
+function missionView(mission: MissionRecord): Record<string, unknown> {
+  return missionBrowserView(mission) as unknown as Record<string, unknown>;
+}
+
+/**
  * Handle one HQ control request.
  *
  * Never throws for a client's benefit: an unexpected error becomes an opaque
@@ -286,11 +364,15 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     (method === 'GET' &&
       (path === CONTROL_ROUTES.session ||
         path === CONTROL_ROUTES.approvals ||
-        path === CONTROL_ROUTES.state)) ||
+        path === CONTROL_ROUTES.state ||
+        path === CONTROL_ROUTES.missions)) ||
     (method === 'POST' &&
       (path === CONTROL_ROUTES.orders ||
         path === CONTROL_ROUTES.approve ||
-        path === CONTROL_ROUTES.deny));
+        path === CONTROL_ROUTES.deny ||
+        path === CONTROL_ROUTES.missions ||
+        path === CONTROL_ROUTES.missionTransition ||
+        path === CONTROL_ROUTES.missionAmend));
   if (!known) {
     // Deny by default, and say nothing about what does exist.
     return refusal(404, 'not_found', 'No such HQ control route.');
@@ -523,8 +605,24 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     );
   }
 
+  if (method === 'GET' && path === CONTROL_ROUTES.missions) {
+    audit('allowed', 'list_missions', founder);
+    return safe(
+      json(200, {
+        ok: true,
+        generatedAt: now().toISOString(),
+        missions: deps.ops.listMissions().map(missionView),
+      }),
+    );
+  }
+
   if (path === CONTROL_ROUTES.orders) return createOrder(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.approve) return approve(request, deps, founder, audit, now);
+  if (path === CONTROL_ROUTES.missions) return commandMission(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.missionTransition) {
+    return transitionMission(request, deps, founder, audit);
+  }
+  if (path === CONTROL_ROUTES.missionAmend) return amendMission(request, deps, founder, audit);
   return deny(request, deps, founder, audit);
 }
 
@@ -571,10 +669,19 @@ function controlAvailability(
   const mayApprove = writable && principal?.approvalAuthority === true;
   const mayOriginate =
     writable && principal?.originateCapabilities.includes(DIRECT_ORDER_CAPABILITY.id) === true;
+  const mayCommandMissions =
+    writable && principal?.originateCapabilities.includes(MISSION_COMMAND_CAPABILITY.id) === true;
   return {
     directOrder: mayOriginate && directOrderCapabilityState(deps.ops) === 'enabled',
     approve: mayApprove,
     deny: mayApprove,
+    // Advertised from the same conditions that decide the write: the mapped
+    // principal must hold the mission originate grant AND the registry row
+    // must match its reserved contract, read enforcement-safe.
+    missionCommand:
+      mayCommandMissions &&
+      missionCommandCapabilityState(capabilityRowFor(deps.ops, MISSION_COMMAND_CAPABILITY.id)) ===
+        'enabled',
     mutationsEnabled: deps.mutationsEnabled !== false,
     trustedOriginConfigured: originsUsable,
     // Stated separately from `trustedOriginConfigured`, because they answer
@@ -739,6 +846,233 @@ function createOrder(
       actionDigest: taskActionDigest(task),
     }),
   );
+}
+
+/**
+ * One status per refusal class, shared by the three mission writes so the
+ * browser is told the same thing for the same cause everywhere:
+ * - 400 invalid input — fix the request;
+ * - 403 authority/capability — nothing in this request will help;
+ * - 404 unknown mission — same non-oracle shape as an unknown route;
+ * - 409 state conflict — the mission moved, or the act conflicts with a
+ *   terminal/current state; re-read and decide again.
+ */
+function missionErrorStatus(code: string): number {
+  switch (code) {
+    case 'unknown_mission':
+      return 404;
+    case 'invalid_mission_transition':
+    case 'mission_status_changed':
+    case 'mission_terminal':
+    case 'mission_intent_conflict':
+      return 409;
+    case 'unknown_capability':
+    case 'capability_disabled':
+    case 'not_permitted':
+    case 'unknown_principal':
+      return 403;
+    default:
+      return 400;
+  }
+}
+
+function commandMission(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const constraints = stringArrayField(request.body, 'constraints');
+  const acceptanceCriteria = stringArrayField(request.body, 'acceptanceCriteria');
+  const planItems = stringArrayField(request.body, 'planItems');
+  const dependsOn = stringArrayField(request.body, 'dependsOn');
+  if (
+    constraints === 'invalid' ||
+    acceptanceCriteria === 'invalid' ||
+    planItems === 'invalid' ||
+    dependsOn === 'invalid'
+  ) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(
+      400,
+      'invalid_input',
+      'constraints, acceptanceCriteria, planItems and dependsOn must be lists of text entries.',
+    );
+  }
+  const title = stringField(request.body, 'title') ?? '';
+  const objective = stringField(request.body, 'objective') ?? '';
+  const scope = stringField(request.body, 'scope');
+  const project = stringField(request.body, 'project');
+  const priority = stringField(request.body, 'priority');
+  const instruction = stringField(request.body, 'instruction');
+  const sourceOrderTaskId = stringField(request.body, 'sourceOrderTaskId');
+  const clientKey = stringField(request.body, 'idempotencyKey');
+
+  // The browser boundary's stricter scan, BEFORE anything persists — raw
+  // provider-token shapes included. The instruction is scanned too even
+  // though it never returns to a browser: a credential has no business being
+  // stored, whatever table it would land in (the direct-order precedent).
+  try {
+    assertBrowserSafe(
+      { title, objective, scope, project, instruction, constraints, acceptanceCriteria, planItems },
+      'mission',
+    );
+  } catch {
+    audit('refused', 'unsafe_mission_content', founder);
+    return refusal(
+      400,
+      'unsafe_mission_content',
+      'The mission text looks like it contains credential material, so it was refused rather than stored.',
+    );
+  }
+
+  const result = deps.ops.commandMission({
+    title,
+    objective,
+    scope,
+    constraints,
+    acceptanceCriteria,
+    planItems,
+    project,
+    priority,
+    dependsOn,
+    sourceOrderTaskId,
+    instruction,
+    // The ONLY place the acting principal comes from — never the body, which
+    // the identity scan already refuses.
+    requestedBy: founder.principal.id,
+    idempotencyKey: clientKey,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return safe(
+      json(missionErrorStatus(result.error.code), {
+        ok: false,
+        error: { code: result.error.code, message: result.error.message },
+      }),
+    );
+  }
+  audit('allowed', result.data.deduplicated ? 'mission_deduplicated' : 'mission_commanded', founder);
+  return safe(
+    json(result.data.deduplicated ? 200 : 201, {
+      ok: true,
+      deduplicated: result.data.deduplicated,
+      mission: missionView(result.data.mission),
+    }),
+  );
+}
+
+function transitionMission(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const missionId = stringField(request.body, 'missionId') ?? '';
+  const to = stringField(request.body, 'to') ?? '';
+  const note = stringField(request.body, 'note');
+  const expectedStatus = stringField(request.body, 'expectedStatus');
+  if (!missionId || !to) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'missionId and to are required.');
+  }
+  if (note) {
+    try {
+      assertBrowserSafe({ note }, 'mission');
+    } catch {
+      audit('refused', 'unsafe_mission_content', founder);
+      return refusal(
+        400,
+        'unsafe_mission_content',
+        'The note looks like it contains credential material, so it was refused rather than stored.',
+      );
+    }
+  }
+  const result = deps.ops.transitionMission({
+    missionId,
+    to,
+    note,
+    expectedStatus,
+    requestedBy: founder.principal.id,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return safe(
+      json(missionErrorStatus(result.error.code), {
+        ok: false,
+        error: { code: result.error.code, message: result.error.message },
+      }),
+    );
+  }
+  audit('allowed', `mission_transitioned_${result.data.status}`, founder);
+  return safe(json(200, { ok: true, mission: missionView(result.data) }));
+}
+
+function amendMission(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const constraints = stringArrayField(request.body, 'constraints');
+  const acceptanceCriteria = stringArrayField(request.body, 'acceptanceCriteria');
+  const addPlanItems = stringArrayField(request.body, 'addPlanItems');
+  const supersedePlanItemSeqs = numberArrayField(request.body, 'supersedePlanItemSeqs');
+  if (
+    constraints === 'invalid' ||
+    acceptanceCriteria === 'invalid' ||
+    addPlanItems === 'invalid' ||
+    supersedePlanItemSeqs === 'invalid'
+  ) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(
+      400,
+      'invalid_input',
+      'constraints, acceptanceCriteria and addPlanItems must be lists of text entries; ' +
+        'supersedePlanItemSeqs must be a list of integers.',
+    );
+  }
+  const missionId = stringField(request.body, 'missionId') ?? '';
+  const amendment = stringField(request.body, 'amendment') ?? '';
+  const objective = stringField(request.body, 'objective');
+  if (!missionId || !amendment.trim()) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'missionId and a non-empty amendment are required.');
+  }
+  try {
+    assertBrowserSafe(
+      { amendment, objective, constraints, acceptanceCriteria, addPlanItems },
+      'mission',
+    );
+  } catch {
+    audit('refused', 'unsafe_mission_content', founder);
+    return refusal(
+      400,
+      'unsafe_mission_content',
+      'The amendment text looks like it contains credential material, so it was refused rather than stored.',
+    );
+  }
+  const result = deps.ops.amendMissionIntent({
+    missionId,
+    amendment,
+    objective,
+    constraints,
+    acceptanceCriteria,
+    addPlanItems,
+    supersedePlanItemSeqs,
+    requestedBy: founder.principal.id,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return safe(
+      json(missionErrorStatus(result.error.code), {
+        ok: false,
+        error: { code: result.error.code, message: result.error.message },
+      }),
+    );
+  }
+  audit('allowed', 'mission_amended', founder);
+  return safe(json(200, { ok: true, mission: missionView(result.data) }));
 }
 
 function approve(

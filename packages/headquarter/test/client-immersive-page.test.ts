@@ -38,6 +38,10 @@ import { IMMERSIVE_HONESTY_NOTE } from '../src/client/page.js';
 import { SOURCE_MODE_LABELS } from '../src/live/provenance.js';
 import { CLIENT_FETCH_TARGETS, CLIENT_READ_TIMEOUT_MS, clientRuntimeScript } from '../src/client/runtime.js';
 import { immersiveShellScript } from '../src/client/webgl.js';
+import {
+  MISSION_COMMAND_CAPABILITY,
+  registerMissionCommandCapability,
+} from '../src/application/mission-command.js';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1557,3 +1561,79 @@ describe('every refusal reaches the reader, and takes the state with it', () => 
     dom.window.close();
   });
 });
+
+describe('the Mission Room carries the canonical mission record live (Phase 3)', () => {
+  // The #254 evidence trio for the immersive surface: live refresh picks up a
+  // newly commanded mission without a reload; the kill-switch banner renders
+  // OVER mission rows (locked is not blanked); and a mid-session expiry wipes
+  // the mission record with everything else.
+  async function missionDeployment() {
+    const d = deployment();
+    registerMissionCommandCapability(d.fixture.db);
+    d.fixture.principals.register({
+      id: 'hq-mission-commander',
+      displayName: 'Mission Founder',
+      originateCapabilities: [MISSION_COMMAND_CAPABILITY.id],
+      approvalAuthority: true,
+      active: true,
+    });
+    return d;
+  }
+
+  function commandOne(d: Awaited<ReturnType<typeof missionDeployment>>, title: string): void {
+    const result = d.fixture.ops.commandMission({
+      title,
+      objective: 'Reduce load times without changing the visual design',
+      constraints: ['No visual changes'],
+      requestedBy: 'hq-mission-commander',
+    });
+    if (!result.ok) throw new Error(`fixture could not command a mission: ${result.error.message}`);
+  }
+
+  it('a newly commanded mission reaches the room on the next state read, no reload', async () => {
+    const d = await missionDeployment();
+    const loaded = await loadPage(d.deps);
+    expect(bodyText(loaded.document, 'mission-room')).toContain('0 means 0');
+
+    commandOne(d, 'Improve QOS website speed');
+    (loaded.window as { __hqStateChanged?: () => void }).__hqStateChanged!();
+    await loaded.settle();
+
+    const body = bodyText(loaded.document, 'mission-room');
+    expect(body).toContain('Improve QOS website speed');
+    expect(body).toContain('Missions commanded');
+    loaded.close();
+  });
+
+  it('an engaged kill switch locks the page while the mission record stays readable', async () => {
+    const d = await missionDeployment();
+    commandOne(d, 'Improve QOS website speed');
+    d.fixture.ops.engageKillSwitch('*', 'hq-mission-commander', 'containment drill');
+    const loaded = await loadPage(d.deps);
+
+    const lock = loaded.document.querySelector('[data-hq-lock]')!;
+    expect(lock.textContent).toContain('HQ LOCKED');
+    // Locked is not blanked: the mission record is still the truth on screen.
+    expect(bodyText(loaded.document, 'mission-room')).toContain('Improve QOS website speed');
+    loaded.close();
+  });
+
+  it('a mid-session expiry wipes the mission record with everything else', async () => {
+    const d = await missionDeployment();
+    commandOne(d, 'Improve QOS website speed');
+    const loaded = await loadPage(d.deps);
+    expect(bodyText(loaded.document, 'mission-room')).toContain('Improve QOS website speed');
+
+    d.setAccount(null);
+    (loaded.window as { __hqStateChanged?: () => void }).__hqStateChanged!();
+    await loaded.settle();
+
+    expect(accessState(loaded.document)).toBe('unauthenticated');
+    const body = bodyText(loaded.document, 'mission-room');
+    expect(body).not.toContain('Improve QOS website speed');
+    // The room now carries the refusal's own reason, not a stale record.
+    expect(body).toContain('Sign in');
+    loaded.close();
+  });
+});
+

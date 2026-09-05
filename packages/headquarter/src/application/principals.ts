@@ -73,7 +73,9 @@ CREATE TABLE IF NOT EXISTS hq_human_principals (
 );
 `;
 
+/** Never attempts DDL on a READ-ONLY handle — see `ensureApplicationSchema`. */
 export function ensurePrincipalSchema(db: HqDatabase): void {
+  if (db.readonly) return;
   db.exec(PRINCIPAL_DDL);
 }
 

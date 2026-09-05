@@ -164,6 +164,17 @@ const snapshot = buildHqSnapshot({
     data: data.events,
     provenance: { mode: data.sourceMode ?? 'sample', source: `bundle.events (${dataPathLabel})`, asOf },
   },
+  missions: {
+    // Synthetic, exactly like the console and capability sections: a static
+    // build opens no hq_missions table, so zero missions here is a statement
+    // about this build, never live canonical state.
+    data: [],
+    provenance: {
+      mode: staticSectionMode(data.sourceMode),
+      source: 'no mission store is open in a static build',
+      asOf,
+    },
+  },
 });
 
 writeFileSync(join(outDir, SNAPSHOT_FILENAME), `${JSON.stringify(snapshot, null, 2)}\n`);

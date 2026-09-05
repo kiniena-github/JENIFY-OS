@@ -79,13 +79,22 @@ WHERE u.username = '<the founder''s username>';
 |---|---|---|
 | GET | `/api/hq/control/session` | any signed-in account (says whether the controls are on, and why not) |
 | GET | `/api/hq/control/approvals` | mapped Founder — pending approvals with their action digests |
+| GET | `/api/hq/control/state` | mapped Founder — canonical state, room-projected (Stage 4) |
+| GET | `/api/hq/control/missions` | mapped Founder — the canonical missions, full detail (Phase 3) |
 | POST | `/api/hq/control/orders` | mapped Founder — create a canonical direct order |
 | POST | `/api/hq/control/approvals/approve` | mapped Founder — approve the exact rendered action |
 | POST | `/api/hq/control/approvals/deny` | mapped Founder — deny, with a reason |
+| POST | `/api/hq/control/missions` | mapped Founder holding `hq.mission_command` — command one canonical mission (Phase 3) |
+| POST | `/api/hq/control/missions/transition` | same — move a mission through its lifecycle |
+| POST | `/api/hq/control/missions/amend` | same — amend mission intent, append-only |
 
 Anything else under the prefix is a 404. There is no generic mutation endpoint,
 and no *ask for changes*: the canonical approval model records approve or deny
-only, so a third button would show a decision the Operator never saw.
+only, so a third button would show a decision the Operator never saw. The three
+mission writes are the Phase 3 widening recorded in `docs/JENIFY_DECISIONS.md`
+(2026-09-05); they take no step-up because they release no execution authority
+(a mission executes nothing in Phase 3), and that exemption is revisited the
+moment any autonomous consumer reads mission state.
 
 `GET /session` reports which controls are genuinely available, derived from the
 resolved principal's own grants — `approve`/`deny` from `approvalAuthority`,

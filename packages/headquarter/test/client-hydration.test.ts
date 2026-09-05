@@ -45,6 +45,7 @@ function emptyState(): HqSnapshot {
     workforce: { data: [], provenance: PROVENANCE },
     capabilities: { data: [], provenance: PROVENANCE },
     activity: { data: [], provenance: PROVENANCE },
+    missions: { data: [], provenance: PROVENANCE },
   });
 }
 
@@ -200,6 +201,7 @@ describe('a populated HQ is copied, never re-derived', () => {
       workforce: { data: [], provenance: PROVENANCE },
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
+    missions: { data: [], provenance: PROVENANCE },
     });
   }
 
@@ -219,7 +221,10 @@ describe('a populated HQ is copied, never re-derived', () => {
     // Blocked work outranks running work: a room holding both is a room you
     // need to walk into.
     expect(view('command-room').liveness).toBe('attention');
-    expect(view('mission-room').liveness).toBe('attention');
+    // Phase 3: the Mission Room shows COMMANDED MISSIONS, not tasks. An HQ
+    // busy with tasks but empty of missions is a dark Mission Room — zero
+    // commanded missions means zero, however loud the Command Room is.
+    expect(view('mission-room').liveness).toBe('dark');
     // Nothing was registered in the directory or the registry, so those rooms
     // stay dark even though HQ is busy.
     expect(view('ai-workforce').liveness).toBe('dark');
@@ -251,6 +256,7 @@ describe('a populated HQ is copied, never re-derived', () => {
       },
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
+    missions: { data: [], provenance: PROVENANCE },
     });
     const workforce = hydrateRooms(withWorkers, FOUNDER_SESSION).find((v) => v.roomId === 'ai-workforce')!;
     expect(workforce.liveness).toBe('quiet');
@@ -272,6 +278,7 @@ describe('a populated HQ is copied, never re-derived', () => {
       workforce: { data: [], provenance: PROVENANCE },
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
+    missions: { data: [], provenance: PROVENANCE },
     });
     const command = hydrateRooms(snapshot, FOUNDER_SESSION).find((v) => v.roomId === 'command-room')!;
     expect(command.rows).toHaveLength(ROOM_ROW_LIMIT + 1);
@@ -297,6 +304,7 @@ describe('a room is dark only when everything it counts is empty', () => {
       },
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
+    missions: { data: [], provenance: PROVENANCE },
     });
     const views = hydrateRooms(withRecords, FOUNDER_SESSION);
     const analytics = views.find((view) => view.roomId === 'analytics')!;
@@ -335,44 +343,73 @@ describe('a room that is not live can never be filled in by a state document', (
   });
 });
 
-describe('the Mission Room reads canonical buckets, not raw task statuses', () => {
-  // Codex round 13. Liveness was re-derived by matching task.status against
-  // hand-kept sets, which got it wrong in BOTH directions — and each direction
-  // is a different kind of lie.
-  function taskAt(taskId: string, status: string, reviewState: string): ConsoleTask {
+describe('the Mission Room shows commanded missions, and only those (Phase 3)', () => {
+  // PHASE 3 REPLACEMENT of the round-13/14 bucket-agreement invariant,
+  // deliberate and on record (issue #254; docs/JENIFY_DECISIONS.md). Until
+  // Phase 3 this room projected op_tasks rows as "missions", so the three
+  // rooms were held to one liveness over the same tasks. The room now shows
+  // the canonical Mission aggregate — a DIFFERENT canonical entity — so the
+  // replacement invariant is:
+  //   - the Mission Room's liveness derives ONLY from missions, by the
+  //     stated status sets (attention: blocked/ready_review; active: working);
+  //   - task liveness stays the Command Room's and Home's subject, unchanged;
+  //   - the one shared quantity — missions needing a decision — is computed
+  //     from the SAME status set in both rooms, so they cannot disagree about
+  //     the same missions (the round-13 lesson, carried to the new entity).
+  function missionAt(
+    id: string,
+    status: string,
+    extra: Partial<HqSnapshot['missions']['data'][number]> = {},
+  ): HqSnapshot['missions']['data'][number] {
     return {
-      taskId,
-      capabilityId: 'repo.read_status',
-      status,
-      reviewState,
-      fence: 1,
-      claimedBy: 'worker-a',
-      submittedBy: 'worker-a',
+      id,
+      title: `Mission ${id}`,
+      objective: 'Improve the QOS site without changing the visual design',
+      scope: null,
+      constraints: ['No visual changes'],
+      acceptanceCriteria: null,
+      project: 'qos',
+      priority: null,
+      status: status as HqSnapshot['missions']['data'][number]['status'],
+      blockReason: status === 'blocked' ? 'Waiting on the hosting decision.' : null,
+      dependsOn: [],
+      sourceOrderTaskId: null,
       createdBy: 'founder',
       createdAt: AT,
       updatedAt: AT,
-      blockReason: null,
-      classification: {
-        capabilityId: 'repo.read_status',
-        riskClass: 'read_only',
-        sideEffect: false,
-        idempotent: true,
-        requiresApproval: false,
-        requiresIndependentReview: true,
-        requiresIdempotencyKey: false,
-        route: 'auto',
-        reason: 'read only',
+      statusChangedAt: AT,
+      statusChangedBy: 'founder',
+      verification: null,
+      authority: {
+        riskClass: 'founder_gate',
+        founderOnly: true,
+        approvalFlow: 'originate_gated_no_approval_row',
       },
-      project: 'jenify-os',
-      title: 'Read CI status',
-      assignedTo: 'worker-a',
-      sourceProposalId: null,
-    } as ConsoleTask;
+      planItems: [],
+      intentHistory: [
+        {
+          seq: 0,
+          kind: 'founder_order',
+          actor: 'founder',
+          at: AT,
+          // M3: the structured per-seq state rides the browser view; the raw
+          // body/rationale never does.
+          objective: 'Improve the QOS site without changing the visual design',
+          constraints: ['No visual changes'],
+          acceptanceCriteria: null,
+        },
+      ],
+      blockHistory: [],
+      ...extra,
+    };
   }
 
-  function stateWith(mutate: (console_: ReturnType<typeof emptyFounderConsole>) => void): HqSnapshot {
+  function stateWith(
+    missions: HqSnapshot['missions']['data'],
+    mutateConsole: (console_: ReturnType<typeof emptyFounderConsole>) => void = () => {},
+  ): HqSnapshot {
     const console_ = emptyFounderConsole(AT);
-    mutate(console_);
+    mutateConsole(console_);
     return buildHqSnapshot({
       generatedAt: AT,
       console: { data: console_, provenance: PROVENANCE },
@@ -380,6 +417,7 @@ describe('the Mission Room reads canonical buckets, not raw task statuses', () =
       workforce: { data: [], provenance: PROVENANCE },
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
+      missions: { data: missions, provenance: PROVENANCE },
     });
   }
 
@@ -387,75 +425,118 @@ describe('the Mission Room reads canonical buckets, not raw task statuses', () =
     hydrateRooms(state, FOUNDER_SESSION).find((view) => view.roomId === 'mission-room')!;
   const commandRoom = (state: HqSnapshot) =>
     hydrateRooms(state, FOUNDER_SESSION).find((view) => view.roomId === 'command-room')!;
+  const missionMetric = (state: HqSnapshot) =>
+    commandRoom(state).metrics.find((m) => m.label === 'Missions needing a decision')!;
 
-  it('does not pulse for a task awaiting review that nobody is executing', () => {
-    // The task keeps status `running`, but `founderConsole` files it in
-    // pendingReviews and DELIBERATELY excludes it from inFlight. Reading the
-    // status asserted that a worker still held it, and pulsed the room to say
-    // so — motion standing in for work that is not happening.
-    const state = stateWith((console_) => {
-      console_.pendingReviews = [
-        { ...taskAt('t-review', 'running', 'pending'), ineligibleReviewers: ['system', 'worker-a'] },
-      ] as typeof console_.pendingReviews;
+  it('stays dark over an HQ full of tasks but empty of missions — zero means zero', () => {
+    const state = stateWith([], (console_) => {
+      console_.inFlight = [
+        {
+          taskId: 't-busy',
+          capabilityId: 'repo.read_status',
+          status: 'running',
+          reviewState: 'none',
+          fence: 1,
+          claimedBy: 'worker-a',
+          submittedBy: null,
+          createdBy: 'founder',
+          createdAt: AT,
+          updatedAt: AT,
+          blockReason: null,
+          classification: {
+            capabilityId: 'repo.read_status',
+            riskClass: 'read_only',
+            sideEffect: false,
+            idempotent: true,
+            requiresApproval: false,
+            requiresIndependentReview: false,
+            requiresIdempotencyKey: false,
+            route: 'auto',
+            reason: 'read only',
+          },
+          project: 'jenify-os',
+          title: 'Read CI status',
+          assignedTo: 'worker-a',
+          sourceProposalId: null,
+        } as ConsoleTask,
+      ];
     });
     const view = mission(state);
-    expect(view.liveness).not.toBe('active');
-    expect(view.liveness).not.toBe('attention');
-    // Still recorded, so the room is not dark either — something is there, and
-    // nothing is running or stuck.
-    expect(view.liveness).toBe('quiet');
+    expect(view.liveness).toBe('dark');
+    expect(view.emptyMessage).toContain('0 means 0');
+    expect(view.emptyMessage).toContain('Command Room');
+    // The tasks still light the rooms whose subject they are.
+    expect(commandRoom(state).liveness).toBe('active');
   });
 
-  it('lights for review_failed, which the canonical console files as blocked', () => {
-    // `blocked` is byStatus('blocked') PLUS byStatus('review_failed'), so this
-    // task is canonically stopped. The status set omitted `review_failed`, so
-    // the Mission Room sat quiet while Home and the Command Room — which read
-    // the bucket — reported attention. Two rooms describing one task
-    // differently is the failure this stage exists to prevent.
-    const state = stateWith((console_) => {
-      console_.blocked = [taskAt('t-failed', 'review_failed', 'failed')];
-    });
+  it('pulses attention for a blocked mission, and the Command Room counts the same mission', () => {
+    const state = stateWith([missionAt('m1', 'blocked')]);
     expect(mission(state).liveness).toBe('attention');
+    expect(missionMetric(state).value).toBe(1);
     expect(commandRoom(state).liveness).toBe('attention');
   });
 
-  it('agrees with the Command Room about the same tasks, in every combination', () => {
-    // The general property, rather than the two reported cases: both rooms
-    // cover the same buckets, so neither may reach a state the other does not.
-    const combinations: { name: string; mutate: (c: ReturnType<typeof emptyFounderConsole>) => void }[] = [
-      { name: 'empty', mutate: () => {} },
-      { name: 'in flight', mutate: (c) => { c.inFlight = [taskAt('t1', 'running', 'none')]; } },
-      { name: 'queued', mutate: (c) => { c.queued = [taskAt('t2', 'queued', 'none')]; } },
-      { name: 'blocked', mutate: (c) => { c.blocked = [taskAt('t3', 'blocked', 'none')]; } },
-      { name: 'review failed', mutate: (c) => { c.blocked = [taskAt('t4', 'review_failed', 'failed')]; } },
-      {
-        name: 'pending review',
-        mutate: (c) => {
-          c.pendingReviews = [
-            { ...taskAt('t5', 'running', 'pending'), ineligibleReviewers: ['system'] },
-          ] as typeof c.pendingReviews;
-        },
-      },
+  it('pulses attention for ready_review — a verification decision is a Founder decision', () => {
+    const state = stateWith([missionAt('m1', 'ready_review')]);
+    expect(mission(state).liveness).toBe('attention');
+    expect(missionMetric(state).value).toBe(1);
+  });
+
+  it('is active while a mission is working, without inventing any task activity', () => {
+    const state = stateWith([missionAt('m1', 'working')]);
+    expect(mission(state).liveness).toBe('active');
+    // No task exists and no mission needs a decision, so the Command Room's
+    // own subject is genuinely empty — dark — while its empty message points
+    // at the Mission Room instead of claiming HQ holds nothing.
+    expect(missionMetric(state).value).toBe(0);
+    const command = commandRoom(state);
+    expect(command.liveness).toBe('dark');
+    expect(command.emptyMessage).toContain('Mission Room');
+    expect(command.emptyMessage).not.toContain('HQ is holding nothing');
+  });
+
+  it('holds terminal missions quietly — records, not activity', () => {
+    const state = stateWith([missionAt('m1', 'complete'), missionAt('m2', 'cancelled')]);
+    const view = mission(state);
+    expect(view.liveness).toBe('quiet');
+    expect(view.metrics.find((m) => m.label === 'Missions commanded')!.value).toBe(2);
+  });
+
+  it('never disagrees with the Command Room about missions needing a decision', () => {
+    const combinations: HqSnapshot['missions']['data'][] = [
+      [],
+      [missionAt('m1', 'planned')],
+      [missionAt('m1', 'working')],
+      [missionAt('m1', 'blocked')],
+      [missionAt('m1', 'ready_review')],
+      [missionAt('m1', 'blocked'), missionAt('m2', 'ready_review'), missionAt('m3', 'working')],
+      [missionAt('m1', 'complete'), missionAt('m2', 'failed')],
     ];
-    // EXACT equality, not "both lit or both unlit".
-    //
-    // The first version of this compared only `lit()`, and Codex round 14 walked
-    // straight through the gap: with only a pending review recorded, the Command
-    // Room was DARK — "HQ is holding nothing" — while Home and Mission were
-    // `quiet`, because the task is still recorded. Both are "not lit", so the
-    // test passed over a room contradicting two others about whether HQ held
-    // anything at all. A consistency check that collapses the very distinction
-    // the page relies on is not a consistency check.
-    for (const { name, mutate } of combinations) {
-      const state = stateWith(mutate);
-      const homeView = hydrateRooms(stateWith(mutate), FOUNDER_SESSION).find((v) => v.roomId === 'home')!;
+    for (const missions of combinations) {
+      const state = stateWith(missions);
+      const needing = missions.filter(
+        (m) => m.status === 'blocked' || m.status === 'ready_review',
+      ).length;
+      // Same set, same arithmetic, both rooms.
+      expect(missionMetric(state).value).toBe(needing);
       const missionView = mission(state);
-      const commandView = commandRoom(state);
-      expect(
-        [homeView.liveness, missionView.liveness, commandView.liveness],
-        `${name}: home ${homeView.liveness}, mission ${missionView.liveness}, command ${commandView.liveness}`,
-      ).toEqual([homeView.liveness, homeView.liveness, homeView.liveness]);
+      if (needing > 0) {
+        expect(missionView.liveness).toBe('attention');
+        expect(commandRoom(state).liveness).toBe('attention');
+      } else {
+        expect(missionView.liveness).not.toBe('attention');
+      }
     }
+  });
+
+  it('lists mission rows with the recorded fields, never an invented metric', () => {
+    const state = stateWith([missionAt('m1', 'blocked', { priority: 'high' })]);
+    const view = mission(state);
+    expect(view.rows).toHaveLength(1);
+    const row = view.rows[0]!;
+    expect(row.primary).toBe('Mission m1');
+    expect(row.secondary).toContain('blocked: Waiting on the hosting decision.');
+    expect(row.chips.map((chip) => chip.label)).toEqual(['blocked', 'high', 'qos']);
   });
 });
 
@@ -508,6 +589,7 @@ describe('Analytics ranks an approval the way every other room does', () => {
       workforce: { data: [], provenance: PROVENANCE },
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
+    missions: { data: [], provenance: PROVENANCE },
     });
   }
 
@@ -516,7 +598,9 @@ describe('Analytics ranks an approval the way every other room does', () => {
 
   it('is attention for an approval-only HQ, like the five rooms beside it', () => {
     const state = stateWithApproval(false);
-    for (const roomId of ['home', 'command-room', 'mission-room', 'approvals', 'founder-office', 'analytics']) {
+    // `mission-room` left this list with Phase 3: it shows commanded missions
+    // now, and a task approval is not a mission.
+    for (const roomId of ['home', 'command-room', 'approvals', 'founder-office', 'analytics']) {
       expect(roomLiveness(state, roomId), roomId).toBe('attention');
     }
   });
@@ -585,6 +669,7 @@ describe('no room contradicts its own displayed numbers', () => {
         workforce: { data: [], provenance: PROVENANCE },
         capabilities: { data: [], provenance: PROVENANCE },
         activity: { data: [], provenance: PROVENANCE },
+    missions: { data: [], provenance: PROVENANCE },
       });
     };
     return [
@@ -700,6 +785,7 @@ describe('connection attention follows the canonical tone mapping', () => {
       workforce: { data: [], provenance: PROVENANCE },
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
+    missions: { data: [], provenance: PROVENANCE },
     });
   }
 
@@ -805,6 +891,7 @@ describe('reachability comes from one list, not two that agree', () => {
         workforce: { data: [], provenance: PROVENANCE },
         capabilities: { data: [], provenance: PROVENANCE },
         activity: { data: [], provenance: PROVENANCE },
+    missions: { data: [], provenance: PROVENANCE },
       });
       const room = hydrateRooms(state, FOUNDER_SESSION).find((r) => r.roomId === 'world-network')!;
       const proven = room.metrics.find((m) => m.label === 'Proven reachable')!;
@@ -843,6 +930,7 @@ describe('the attention count and its hint describe the same set of states', () 
       workforce: { data: [], provenance: PROVENANCE },
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
+    missions: { data: [], provenance: PROVENANCE },
     });
     const room = hydrateRooms(state, FOUNDER_SESSION).find((r) => r.roomId === 'world-network')!;
     const hint = room.metrics.find((m) => m.label === 'Needing attention')!.hint;
@@ -890,6 +978,7 @@ describe('a room names every state section that can change what it shows', () =>
         },
         capabilities: { data: [], provenance: PROVENANCE },
         activity: { data: [], provenance: PROVENANCE },
+    missions: { data: [], provenance: PROVENANCE },
       }),
     capabilities: () =>
       buildHqSnapshot({
@@ -920,6 +1009,7 @@ describe('a room names every state section that can change what it shows', () =>
           provenance: PROVENANCE,
         },
         activity: { data: [], provenance: PROVENANCE },
+    missions: { data: [], provenance: PROVENANCE },
       }),
     connections: () =>
       buildHqSnapshot({
@@ -934,6 +1024,7 @@ describe('a room names every state section that can change what it shows', () =>
         workforce: { data: [], provenance: PROVENANCE },
         capabilities: { data: [], provenance: PROVENANCE },
         activity: { data: [], provenance: PROVENANCE },
+    missions: { data: [], provenance: PROVENANCE },
       }),
     activity: () =>
       buildHqSnapshot({
@@ -948,6 +1039,7 @@ describe('a room names every state section that can change what it shows', () =>
           ] as never,
           provenance: PROVENANCE,
         },
+        missions: { data: [], provenance: PROVENANCE },
       }),
   };
 

@@ -30,6 +30,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openHqDatabase, openHqDatabaseReadOnly } from '../src/store/db.js';
 import { HeadquarterOperations } from '../src/application/service.js';
+import { ensureApplicationSchema } from '../src/application/db.js';
+import { ensurePrincipalSchema } from '../src/application/principals.js';
 
 const NOW = '2026-08-28T12:00:00Z';
 const CLAUDE_ONLY = { CLAUDE_ROUTINE_URL: 'present', CLAUDE_ROUTINE_TOKEN: 'present' };
@@ -43,7 +45,50 @@ function sources(overrides: Partial<SnapshotSources> = {}): SnapshotSources {
     workforce: { data: [], provenance },
     capabilities: { data: [], provenance },
     activity: { data: [], provenance },
+    missions: { data: [], provenance },
     ...overrides,
+  };
+}
+
+/** A minimal, browser-safe MissionBrowserView for section-shape tests. */
+function missionView(id: string, createdAt: string): SnapshotSources['missions']['data'][number] {
+  return {
+    id,
+    title: `Mission ${id}`,
+    objective: 'Objective',
+    scope: null,
+    constraints: [],
+    acceptanceCriteria: null,
+    project: null,
+    priority: null,
+    status: 'planned',
+    blockReason: null,
+    dependsOn: [],
+    sourceOrderTaskId: null,
+    createdBy: 'founder',
+    createdAt,
+    updatedAt: createdAt,
+    statusChangedAt: createdAt,
+    statusChangedBy: 'founder',
+    verification: null,
+    authority: {
+      riskClass: 'founder_gate',
+      founderOnly: true,
+      approvalFlow: 'originate_gated_no_approval_row',
+    },
+    planItems: [],
+    intentHistory: [
+      {
+        seq: 0,
+        kind: 'founder_order',
+        actor: 'founder',
+        at: createdAt,
+        objective: 'Objective',
+        constraints: [],
+        acceptanceCriteria: null,
+      },
+    ],
+    blockHistory: [],
   };
 }
 
@@ -186,6 +231,23 @@ describe('what the snapshot must never contain', () => {
     expect(() => assertNoFabricatedFields(snapshot)).not.toThrow();
   });
 
+  it('refuses a fabricated mission metric — the concept-art numbers stay out (Phase 3)', () => {
+    // The HQ-UI-3D reference concepts show progress bars and budgets. HQ
+    // measures neither, so a missions section that grew such a field must
+    // fail the build, never reach a browser.
+    const provenance = { mode: 'live' as const, source: 'test', asOf: NOW };
+    expect(() =>
+      buildHqSnapshot(
+        sources({
+          missions: {
+            data: [{ id: 'mission-x', title: 'X', progressPercent: 62 } as never],
+            provenance,
+          },
+        }),
+      ),
+    ).toThrow(BrowserSafetyError);
+  });
+
   it('publishes no cost, token, ETA or sentiment field anywhere', () => {
     const { ops } = setupFixture();
     const serialized = JSON.stringify(liveSnapshotFromOperations(ops, { now: NOW }));
@@ -312,6 +374,73 @@ describe('projecting the store never writes to it', () => {
     expect(snapshot.mode).toBe('live');
     expect(snapshot.capabilities.data.map((c) => c.id)).toContain('repo.read_status');
     ro.close();
+  });
+
+  it('projects a truthful snapshot over a read-only PRE-PHASE-3 database', () => {
+    // Opus second-pass finding (M2) on `cee771f`: the constructor ran mission
+    // DDL unconditionally, so hq:snapshot over a read-only pre-Phase-3 file
+    // threw SQLITE_READONLY before it could project anything. Schema init now
+    // never writes through a read-only handle, and the absent mission store
+    // is REPRESENTED — zero rows with provenance saying why — not migrated.
+    const path = tmp();
+    const writable = openHqDatabase(path);
+    // A Phase 2 store: foundation + application + principal schema, and
+    // deliberately NO mission tables.
+    ensureApplicationSchema(writable);
+    ensurePrincipalSchema(writable);
+    writable.close();
+
+    const ro = openHqDatabaseReadOnly(path);
+    const ops = new HeadquarterOperations(ro);
+    expect(ops.missionStorePresent()).toBe(false);
+    expect(ops.listMissions()).toEqual([]);
+    expect(ops.getMission('mission-anything')).toBeNull();
+    expect(ops.getMissionIntentHistory('mission-anything')).toEqual([]);
+
+    const snapshot = liveSnapshotFromOperations(ops, { now: NOW, env: CLAUDE_ONLY });
+    expect(snapshot.counts.missions).toBe(0);
+    expect(snapshot.missions.data).toEqual([]);
+    expect(snapshot.missions.provenance.note).toContain('predates the Phase 3 mission tables');
+
+    // Truthful means UNTOUCHED: nothing on the read-only path migrated the
+    // file — the mission tables still do not exist.
+    expect(
+      ro
+        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'hq_missions'`)
+        .get(),
+    ).toBeUndefined();
+    ro.close();
+  });
+});
+
+describe('the mission section bound (opt-in, honest)', () => {
+  it('bounds the section to the newest N while counts and provenance keep the total', () => {
+    const missions = [
+      missionView('mission-a', '2026-09-01T00:00:00Z'),
+      missionView('mission-b', '2026-09-02T00:00:00Z'),
+      missionView('mission-c', '2026-09-03T00:00:00Z'),
+    ];
+    const provenance = { mode: 'live' as const, source: 'test', asOf: NOW };
+    const snapshot = buildHqSnapshot(
+      sources({ missions: { data: missions, provenance }, missionLimit: 2 }),
+    );
+    // The NEWEST two survive, still oldest-first for display stability…
+    expect(snapshot.missions.data.map((m) => m.id)).toEqual(['mission-b', 'mission-c']);
+    // …the count reports the TOTAL, not the trimmed length…
+    expect(snapshot.counts.missions).toBe(3);
+    // …and the provenance states exactly what was dropped.
+    expect(snapshot.missions.provenance.note).toContain('newest 2 of 3');
+  });
+
+  it('changes nothing when no limit is passed — the live /state path stays unbounded', () => {
+    const missions = [
+      missionView('mission-a', '2026-09-01T00:00:00Z'),
+      missionView('mission-b', '2026-09-02T00:00:00Z'),
+    ];
+    const provenance = { mode: 'live' as const, source: 'test', asOf: NOW };
+    const snapshot = buildHqSnapshot(sources({ missions: { data: missions, provenance } }));
+    expect(snapshot.missions.data).toHaveLength(2);
+    expect(snapshot.missions.provenance.note).toBeUndefined();
   });
 });
 

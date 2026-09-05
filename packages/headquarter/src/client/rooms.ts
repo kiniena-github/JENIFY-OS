@@ -160,11 +160,16 @@ export const HQ_ROOMS: readonly HqRoom[] = [
     id: 'mission-room',
     ordinal: 3,
     name: 'Mission Room',
-    purpose: 'Every recorded mission, by the status the canonical queue holds for it.',
+    purpose:
+      'Every canonical mission the Founder has commanded — objective, constraints, plan and ' +
+      'lifecycle. Tasks remain the Command Room’s subject.',
     binding: {
       kind: 'live',
       section: 'missions',
-      source: 'operations section — the same canonical task cards, grouped by status',
+      // Phase 3 (issue #254) deliberately rebound this room: mission stopped
+      // meaning "an open op_tasks row" and became the canonical Mission
+      // aggregate. Recorded in docs/JENIFY_DECISIONS.md, not slipped in.
+      source: 'hq_missions via HeadquarterOperations.listMissions — the canonical command-level missions',
     },
     placement: { ring: 1, slot: 1 },
     page: 'projects.html',
