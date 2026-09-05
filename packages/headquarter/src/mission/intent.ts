@@ -42,7 +42,30 @@
  * written here, never quotations of the order.
  */
 
-/** A mission order may be this long. Below `MAX_INSTRUCTION_LENGTH` so a composed step brief always fits. */
+/**
+ * A mission order may be this long.
+ *
+ * It is NOT, on its own, enough to keep a composed brief inside
+ * `MAX_INSTRUCTION_LENGTH` — an earlier version of this comment claimed it was,
+ * and that claim was wrong in a way worth recording, because the arithmetic is
+ * counter-intuitive. `composeBrief` does not carry the order across; it carries
+ * the objective, EVERY constraint, EVERY acceptance criterion and every declared
+ * unknown into EACH step's brief, plus a label line for each. So the briefs a
+ * command yields can total far more than the command, in two compounding ways:
+ *
+ *   - per-item overhead: each constraint or criterion costs `- ` and a newline
+ *     on top of its own text, and a line of short sentences becomes many items
+ *     (`no a. no b. no c.` is three constraints, not one);
+ *   - per-step duplication: N steps repeat the whole constraint block N times.
+ *
+ * A 3,079-character order of one step and many short constraints composed to a
+ * 4,248-character brief — inside every bound stated here, past the bound the
+ * order path enforces. The mission was then refused with `instruction_too_long`
+ * and rolled back, reporting a limit the Founder had not exceeded.
+ *
+ * The bound that actually holds is therefore checked where it is real, against
+ * the composed briefs themselves: see `assertBriefsFit` in `command.ts`.
+ */
 export const MAX_COMMAND_LENGTH = 3500;
 /** A plan may have at most this many steps. Beyond it the order needs splitting, not guessing. */
 export const MAX_MISSION_STEPS = 12;

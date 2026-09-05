@@ -70,6 +70,7 @@ import {
   DIRECT_ORDER_ROUTES,
   directOrderCapabilityState,
   directOrderDispatchBlocked,
+  MAX_INSTRUCTION_LENGTH,
   resolveOrderRoute,
   submitDirectOrder,
   type DirectOrderErrorCode,
@@ -133,6 +134,7 @@ export type FounderCommandErrorCode =
   | DirectOrderErrorCode
   | 'empty_command'
   | 'command_too_long'
+  | 'plan_brief_too_long'
   | 'unsafe_command'
   | 'unknown_mission'
   | 'mission_terminal'
@@ -336,6 +338,48 @@ function checkCommand(input: {
   return { ok: true, data: { command, title } };
 }
 
+/**
+ * Refuse a plan whose composed briefs would not survive the order path, BEFORE
+ * anything is written (Opus second pass on `f98fbfd`).
+ *
+ * The defect this closes: `MAX_COMMAND_LENGTH` (3500) bounds the Founder's
+ * ORDER, and `MAX_INSTRUCTION_LENGTH` (4000) bounds each TASK's instruction,
+ * and the first was documented as guaranteeing the second. It does not.
+ * `composeBrief` repeats the objective, every constraint, every criterion and
+ * every declared unknown into each step's brief, with a label line per item, so
+ * a 3,079-character order of one step and many short constraints composed to a
+ * 4,248-character brief.
+ *
+ * What happened then was safe but not honest. `submitDirectOrder` refused the
+ * over-long instruction, `createPlanTasks` threw, and the whole mission rolled
+ * back — no partial write, which is right. But the Founder was told their
+ * instruction exceeded 4,000 characters when the thing they typed was 3,079,
+ * and the number they were shown belonged to an internal brief they never saw.
+ *
+ * Checking it here makes the refusal name the real cause and arrive before the
+ * transaction rather than out of it. Nothing is truncated: dropping a
+ * constraint to make a brief fit would silently discard a non-negotiable the
+ * Founder wrote, which is the one thing the intent lock exists to prevent.
+ */
+function assertBriefsFit(briefs: readonly string[]): FounderCommandResult<null> {
+  const over = briefs
+    .map((brief, index) => ({ ordinal: index + 1, length: brief.length }))
+    .filter((entry) => entry.length > MAX_INSTRUCTION_LENGTH);
+  if (over.length === 0) return { ok: true, data: null };
+  const worst = over.reduce((a, b) => (b.length > a.length ? b : a));
+  return commandFail(
+    'plan_brief_too_long',
+    `The order is within the ${MAX_COMMAND_LENGTH}-character limit, but ${over.length} of ` +
+      `${briefs.length} step brief(s) would exceed the ${MAX_INSTRUCTION_LENGTH}-character limit a ` +
+      `task instruction must satisfy (largest: step ${worst.ordinal}, ${worst.length} characters). ` +
+      'Each step brief repeats the objective, every constraint and every acceptance criterion so a ' +
+      'worker reading one task sees the whole intent, so many constraints or many steps grow the ' +
+      'briefs faster than the order. Shorten the constraints or split this into more than one ' +
+      'mission. Nothing was recorded, and no constraint was dropped to make it fit.',
+    { steps: briefs.length, overLength: over.length, largestStep: worst.ordinal, largestLength: worst.length },
+  );
+}
+
 /** The capability gate, named per state exactly as `submitDirectOrder` names it. */
 function checkCapability(ops: HeadquarterOperations): FounderCommandResult<null> {
   const state = directOrderCapabilityState(ops);
@@ -503,6 +547,8 @@ export function submitFounderCommand(
   const missionId = uuid();
   const missionTitle = title || defaultMissionTitle(missionId);
   const briefs = planFromIntent(intent, missionTitle);
+  const fits = assertBriefsFit(briefs);
+  if (!fits.ok) return fits;
   const at = nowIso();
   const initialState: MissionState = briefs.length > 0 ? 'planned' : 'blocked';
   const blockReason =
@@ -656,6 +702,8 @@ export function amendMission(
   const intent = parseFounderCommand(checked.data.command);
   const hadTasks = missions.listTaskLinks(mission.id).length > 0;
   const briefs = hadTasks ? [] : planFromIntent(intent, mission.title);
+  const fits = assertBriefsFit(briefs);
+  if (!fits.ok) return fits;
   const at = nowIso();
 
   try {

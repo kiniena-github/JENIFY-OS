@@ -567,3 +567,92 @@ describe('the store never touches a canonical table', () => {
     expect([...tables].sort()).toEqual(['hq_mission_events', 'hq_mission_intent', 'hq_mission_tasks', 'hq_missions']);
   });
 });
+
+describe('a plan whose composed briefs would not fit is refused before anything is written', () => {
+  /**
+   * Opus second pass on `f98fbfd`. `MAX_COMMAND_LENGTH` (3500) was documented
+   * as guaranteeing that a composed brief fits `MAX_INSTRUCTION_LENGTH`
+   * (4000). It does not: `composeBrief` repeats the objective, every
+   * constraint and every criterion into EACH step's brief, so a short order
+   * with many short constraints composes to a longer brief than the order.
+   *
+   * The order below is inside every documented bound — 3,079 characters, 11
+   * lines, 1 step, a real objective, no placeholder, no open choice — and used
+   * to compose to a 4,248-character brief. The mission was then refused deep
+   * inside the creation transaction with `instruction_too_long`, quoting a
+   * 4,000-character limit against an order the Founder had written to 3,079.
+   */
+  const OVERSIZED = {
+    command: [
+      'Improve the QOS website speed.',
+      '1. Profile the homepage.',
+      ...Array.from({ length: 9 }, () => 'no a. '.repeat(56).trim()),
+    ].join('\n'),
+    route: 'CLAUDE' as const,
+    requestedBy: 'founder',
+  };
+
+  it('is genuinely inside every bound the order path documents', () => {
+    expect(OVERSIZED.command.length).toBeLessThan(3500);
+    expect(OVERSIZED.command.split('\n')).toHaveLength(11);
+  });
+
+  it('refuses with the mission-level reason, not the task-level one', () => {
+    const { fixture, missions } = core();
+    const result = submitFounderCommand(fixture.ops, missions, OVERSIZED, CLAUDE_ONLY);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('plan_brief_too_long');
+    // Names the real cause rather than a limit the Founder did not exceed.
+    expect(result.error.code).not.toBe('instruction_too_long');
+    expect(result.error.details?.largestLength).toBeGreaterThan(4000);
+    expect(result.error.message).toContain('split this into more than one mission');
+  });
+
+  it('writes nothing at all — no mission, no intent, no task', () => {
+    const { fixture, missions } = core();
+    submitFounderCommand(fixture.ops, missions, OVERSIZED, CLAUDE_ONLY);
+    expect(missions.countMissions()).toBe(0);
+    expect(fixture.ops.queue.listByStatus('needs_approval')).toHaveLength(0);
+    expect(fixture.ops.queue.listByStatus('queued')).toHaveLength(0);
+  });
+
+  it('refuses an amendment that would give a plan-less mission oversized briefs', () => {
+    const { fixture, missions } = core();
+    // A mission recorded with no plan: an unreadable order.
+    const created = submitFounderCommand(
+      fixture.ops,
+      missions,
+      { command: 'What should we do about the website?', route: 'CLAUDE', requestedBy: 'founder' },
+      CLAUDE_ONLY,
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.data.tasks).toHaveLength(0);
+
+    const amended = amendMission(
+      fixture.ops,
+      missions,
+      {
+        missionId: created.data.mission.id,
+        command: OVERSIZED.command,
+        reason: 'Clarified into an instruction.',
+        actor: 'founder',
+      },
+      CLAUDE_ONLY,
+    );
+    expect(amended.ok).toBe(false);
+    if (amended.ok) return;
+    expect(amended.error.code).toBe('plan_brief_too_long');
+    // The refused amendment appended nothing: the intent lock still holds only
+    // the original order.
+    expect(missions.listIntent(created.data.mission.id)).toHaveLength(1);
+    expect(missions.verifyIntentChain(created.data.mission.id)).toBe(true);
+  });
+
+  it('still accepts an order whose briefs do fit', () => {
+    const { fixture, missions } = core();
+    const result = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    expect(result.ok).toBe(true);
+  });
+});
