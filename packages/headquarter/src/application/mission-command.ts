@@ -26,9 +26,13 @@
  *   operator queue (which stays strictly FIFO).
  * - `hq_mission_intents` and `hq_mission_events` are APPEND-ONLY: this
  *   module contains INSERT statements for them and nothing else, and the
- *   schema carries BEFORE UPDATE / BEFORE DELETE triggers that make SQLite
- *   itself abort a history rewrite from ANY writer. Amendments append; the
- *   original Founder order (intent seq 0) is immutable.
+ *   schema carries BEFORE UPDATE / BEFORE DELETE triggers plus BEFORE INSERT
+ *   guards against inserts landing on an existing row, so SQLite itself
+ *   aborts a history rewrite — UPDATE, DELETE, REPLACE, INSERT OR REPLACE
+ *   and UPSERT alike — from ANY writer (Phase 4 §G closed the REPLACE path,
+ *   which the default-off recursive_triggers setting let slip past the
+ *   DELETE trigger). Amendments append; the original Founder order (intent
+ *   seq 0) is immutable.
  * - `hq_mission_intents.body` is the canonical JSON of the full submitted
  *   command/amendment, INCLUDING optional free-text instruction and
  *   amendment rationale. It is SERVER-SIDE ONLY: no route response and no
@@ -219,6 +223,46 @@ BEGIN SELECT RAISE(ABORT, 'hq_mission_events is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS trg_hq_mission_events_no_erase
 BEFORE DELETE ON hq_mission_events
 BEGIN SELECT RAISE(ABORT, 'hq_mission_events is append-only'); END;
+
+-- REPLACE/UPSERT closure (Phase 4 §G). SQLite's REPLACE conflict resolution
+-- deletes a colliding row WITHOUT firing BEFORE DELETE triggers while
+-- recursive_triggers is off (the engine default, and connection-scoped — a
+-- pragma cannot bind a foreign writer). So the four triggers above alone did
+-- not stop "INSERT OR REPLACE" from silently overwriting history, including
+-- the immutable intent seq 0. A BEFORE INSERT trigger fires BEFORE conflict
+-- resolution, so an insert that would land on an existing row aborts in the
+-- engine for every writer and every conflict clause — REPLACE, INSERT OR
+-- REPLACE, and ON CONFLICT ... DO UPDATE alike. Ordinary appends never
+-- collide and are untouched.
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_intents_no_replace
+BEFORE INSERT ON hq_mission_intents
+WHEN EXISTS (SELECT 1 FROM hq_mission_intents WHERE mission_id = NEW.mission_id AND seq = NEW.seq)
+  OR EXISTS (SELECT 1 FROM hq_mission_intents WHERE id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'hq_mission_intents is append-only'); END;
+-- TYPEOF guards the autoincrement key: in a BEFORE INSERT trigger an
+-- auto-assigned NEW.seq is not yet an integer, and only an EXPLICITLY
+-- supplied seq can collide.
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_events_no_replace
+BEFORE INSERT ON hq_mission_events
+WHEN EXISTS (SELECT 1 FROM hq_mission_events WHERE id = NEW.id)
+  OR (TYPEOF(NEW.seq) = 'integer'
+      AND EXISTS (SELECT 1 FROM hq_mission_events WHERE seq = NEW.seq))
+BEGIN SELECT RAISE(ABORT, 'hq_mission_events is append-only'); END;
+
+-- Plan items are not append-only as a table (supersede and link legitimately
+-- UPDATE their own columns), but two of their facts are write-once and the
+-- engine now holds both: a row's identity can never be replaced out from
+-- under its mission, and a linked task id can never be re-pointed. The link
+-- path sets task_id only WHERE task_id IS NULL, so it never trips this.
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_plan_items_no_replace
+BEFORE INSERT ON hq_mission_plan_items
+WHEN EXISTS (SELECT 1 FROM hq_mission_plan_items WHERE mission_id = NEW.mission_id AND seq = NEW.seq)
+  OR EXISTS (SELECT 1 FROM hq_mission_plan_items WHERE id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'hq_mission_plan_items seq is write-once'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_plan_items_no_relink
+BEFORE UPDATE OF task_id ON hq_mission_plan_items
+WHEN OLD.task_id IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'hq_mission_plan_items task link is write-once'); END;
 `;
 
 /**

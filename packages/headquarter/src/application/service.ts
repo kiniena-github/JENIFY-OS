@@ -535,16 +535,23 @@ function missionList(
 }
 
 /**
- * A UNIQUE(mission_id, seq) violation from a raced concurrent amendment.
+ * A (mission_id, seq) collision from a raced concurrent amendment.
  * With the amendment's reads inside an IMMEDIATE transaction this should be
  * unreachable; it is kept so that any writer which nevertheless collides
  * surfaces as a typed conflict rather than an opaque 500.
+ *
+ * Two engine shapes describe the same collision: the UNIQUE constraint, and
+ * — since Phase 4 §G — the BEFORE INSERT append-only guard, which fires
+ * FIRST (it aborts an insert landing on an existing row before conflict
+ * resolution or the UNIQUE check can run) and surfaces as
+ * SQLITE_CONSTRAINT_TRIGGER carrying the table name in its message.
  */
 function isMissionSequenceConflict(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = (error as { code?: string }).code;
+  if (code !== 'SQLITE_CONSTRAINT_UNIQUE' && code !== 'SQLITE_CONSTRAINT_TRIGGER') return false;
   return (
-    error instanceof Error &&
-    (error as { code?: string }).code === 'SQLITE_CONSTRAINT_UNIQUE' &&
-    (error.message.includes('hq_mission_intents') || error.message.includes('hq_mission_plan_items'))
+    error.message.includes('hq_mission_intents') || error.message.includes('hq_mission_plan_items')
   );
 }
 

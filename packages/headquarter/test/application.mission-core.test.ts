@@ -497,13 +497,15 @@ describe('the intent lock and append-only amendment history', () => {
     );
   });
 
-  it('no source file anywhere contains an UPDATE or DELETE for the history tables', () => {
+  it('no source file anywhere contains an UPDATE, DELETE, REPLACE or UPSERT for the history tables', () => {
     // The previous guard scanned only mission-command.ts while every mission
     // UPDATE statement lives in service.ts (Opus second-pass finding on
     // `cee771f`) — it could not see the file where a history rewrite would
     // most naturally be written. Scan all of src/ instead. Tests are excluded
     // deliberately: the tamper test below must be free to ATTEMPT the
     // forbidden statements to prove the engine refuses them.
+    // Phase 4 §G widened the patterns: REPLACE and UPSERT rewrite history via
+    // conflict resolution without ever spelling UPDATE or DELETE.
     for (const file of missionSourceFiles(join(packageRoot, 'src'))) {
       const source = readFileSync(file, 'utf8');
       for (const pattern of [
@@ -511,6 +513,9 @@ describe('the intent lock and append-only amendment history', () => {
         /DELETE\s+FROM\s+hq_mission_intents/i,
         /UPDATE\s+hq_mission_events/i,
         /DELETE\s+FROM\s+hq_mission_events/i,
+        /INSERT\s+OR\s+\w+\s+INTO\s+hq_mission_(intents|events)/i,
+        /REPLACE\s+INTO\s+hq_mission_(intents|events)/i,
+        /hq_mission_(intents|events)[^;]{0,200}ON\s+CONFLICT/i,
       ]) {
         expect(source, `${file} must not rewrite mission history`).not.toMatch(pattern);
       }
@@ -544,6 +549,101 @@ describe('the intent lock and append-only amendment history', () => {
     expect(history[0]!.objective).toBe(
       'Reduce QOS page load times without changing the visual design',
     );
+  });
+
+  it('SQLite itself aborts REPLACE and UPSERT against history — the recursive_triggers bypass is closed', () => {
+    // SQLite's REPLACE conflict resolution deletes the colliding row WITHOUT
+    // firing BEFORE DELETE triggers while recursive_triggers is off (the
+    // engine default), so before Phase 4 §G these statements silently
+    // overwrote history — including the immutable intent seq 0 — past the
+    // UPDATE/DELETE triggers the previous test proves. The BEFORE INSERT
+    // guards fire before conflict resolution and close every clause.
+    const { mission } = expectOk(command(fx));
+    const originalObjective = 'Reduce QOS page load times without changing the visual design';
+
+    // INSERT OR REPLACE landing on the intent lock (mission_id, seq 0).
+    expect(() =>
+      fx.db
+        .prepare(
+          `INSERT OR REPLACE INTO hq_mission_intents
+             (id, mission_id, seq, kind, body, objective, constraints, acceptance_criteria, actor, at)
+           VALUES ('forged-intent', ?, 0, 'founder_order', '{}', 'forged', '[]', NULL, 'attacker', 'now')`,
+        )
+        .run(mission.id),
+    ).toThrow(/append-only/);
+
+    // Bare REPLACE INTO is the same statement in different spelling.
+    const eventId = (
+      fx.db
+        .prepare(`SELECT id FROM hq_mission_events WHERE mission_id = ? ORDER BY seq LIMIT 1`)
+        .get(mission.id) as { id: string }
+    ).id;
+    expect(() =>
+      fx.db
+        .prepare(
+          `REPLACE INTO hq_mission_events (id, mission_id, at, actor, kind)
+           VALUES (?, ?, 'now', 'attacker', 'forged')`,
+        )
+        .run(eventId, mission.id),
+    ).toThrow(/append-only/);
+
+    // UPSERT never reaches its DO UPDATE arm either.
+    expect(() =>
+      fx.db
+        .prepare(
+          `INSERT INTO hq_mission_intents
+             (id, mission_id, seq, kind, body, objective, constraints, acceptance_criteria, actor, at)
+           VALUES ('forged-upsert', ?, 0, 'founder_order', '{}', 'forged', '[]', NULL, 'attacker', 'now')
+           ON CONFLICT (mission_id, seq) DO UPDATE SET objective = 'forged'`,
+        )
+        .run(mission.id),
+    ).toThrow(/append-only/);
+
+    // Refused means intact: seq 0 survives byte-identical, the event survives.
+    const history = fx.ops.getMissionIntentHistory(mission.id);
+    expect(history).toHaveLength(1);
+    expect(history[0]!.objective).toBe(originalObjective);
+    const event = fx.db
+      .prepare(`SELECT actor, kind FROM hq_mission_events WHERE id = ?`)
+      .get(eventId) as { actor: string; kind: string };
+    expect(event.actor).not.toBe('attacker');
+    expect(event.kind).toBe('commanded');
+  });
+
+  it('SQLite itself refuses to re-point a linked plan item or replace its row', () => {
+    // The task link is write-once at the ENGINE, not only in the facade's
+    // WHERE clause: once a plan item names a real task, no writer can quietly
+    // point it at a different one, and REPLACE cannot resurrect the row blank.
+    const missionId = expectOk(command(fx, { planItems: ['Measure current load times'] })).mission
+      .id;
+    const taskId = expectOk(
+      fx.ops.createTask({
+        capabilityId: CAPS.readStatus,
+        payload: { kind: 'measure' },
+        requestedBy: FOUNDER,
+      }),
+    ).task.id;
+    expectOk(fx.ops.linkMissionPlanItem({ missionId, planItemSeq: 1, taskId, requestedBy: FOUNDER }));
+
+    expect(() =>
+      fx.db
+        .prepare(`UPDATE hq_mission_plan_items SET task_id = 'other-task' WHERE mission_id = ?`)
+        .run(missionId),
+    ).toThrow(/write-once/);
+    expect(() =>
+      fx.db
+        .prepare(
+          `INSERT OR REPLACE INTO hq_mission_plan_items
+             (id, mission_id, seq, summary, kind, created_in_intent_seq)
+           VALUES ('forged-item', ?, 1, 'forged', 'work', 0)`,
+        )
+        .run(missionId),
+    ).toThrow(/write-once/);
+
+    const item = fx.db
+      .prepare(`SELECT task_id FROM hq_mission_plan_items WHERE mission_id = ? AND seq = 1`)
+      .get(missionId) as { task_id: string };
+    expect(item.task_id).toBe(taskId);
   });
 
   it('a raced amendment surfaces as a typed conflict with nothing written, never an opaque failure', () => {
@@ -582,6 +682,39 @@ describe('the intent lock and append-only amendment history', () => {
     expect(fx.ops.getMission(mission.id)!.objective).toBe(
       'Reduce QOS page load times without changing the visual design',
     );
+  });
+
+  it('a raced amendment stopped by the §G BEFORE INSERT guard is the same typed conflict', () => {
+    // Since Phase 4 §G the append-only BEFORE INSERT trigger fires before
+    // the UNIQUE check, so a genuinely raced duplicate seq now aborts as
+    // SQLITE_CONSTRAINT_TRIGGER. Same collision, second engine shape — the
+    // caller must still receive the typed 409, never an opaque 500.
+    const { mission } = expectOk(command(fx));
+    const realPrepare = fx.db.prepare.bind(fx.db);
+    const dbPatched = fx.db as unknown as { prepare: (sql: string) => unknown };
+    dbPatched.prepare = (sql: string) => {
+      if (/INSERT INTO hq_mission_intents/.test(sql)) {
+        const collision = new Error('hq_mission_intents is append-only') as Error & {
+          code: string;
+        };
+        collision.code = 'SQLITE_CONSTRAINT_TRIGGER';
+        throw collision;
+      }
+      return realPrepare(sql);
+    };
+    try {
+      const result = fx.ops.amendMissionIntent({
+        missionId: mission.id,
+        amendment: 'This amendment loses the race to the trigger.',
+        objective: 'Never applied',
+        requestedBy: FOUNDER,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe('mission_intent_conflict');
+    } finally {
+      dbPatched.prepare = realPrepare;
+    }
+    expect(fx.ops.getMissionIntentHistory(mission.id)).toHaveLength(1);
   });
 });
 

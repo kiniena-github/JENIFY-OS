@@ -100,8 +100,12 @@ or providers**.
   before any row exists (kinds `mission_commanded`, `mission_transitioned`,
   `mission_intent_amended`, `mission_plan_item_linked`, all `executable: false`).
 - The two history tables are append-only BY ENGINE: `BEFORE UPDATE`/`BEFORE DELETE` triggers
-  in the module DDL abort a rewrite from any writer, and a src-wide guard plus a raw-SQL
-  tamper test pin it.
+  in the module DDL abort a rewrite from any writer, and — since Phase 4 §G — `BEFORE INSERT`
+  guards abort any insert landing on an existing row, closing the REPLACE/UPSERT path that
+  SQLite's default-off `recursive_triggers` let slip past the DELETE trigger. UPDATE, DELETE,
+  `REPLACE INTO`, `INSERT OR REPLACE` and `ON CONFLICT ... DO UPDATE` all abort in the engine,
+  from any connection. A src-wide guard (UPDATE/DELETE/REPLACE/UPSERT patterns) plus raw-SQL
+  tamper tests pin it, and the plan-item task link is additionally write-once at the engine.
 
 ## Surfaces
 
@@ -138,8 +142,9 @@ grant gone → rows stay, controls go), and the composer disarms itself on a ref
 
 ## Evidence
 
-Focused suites: `mission-contracts` (17), `application.mission-core` (36),
-`live-mission-routes` (21), `mission-consoles` (9, JSDOM against the real control API),
+Focused suites (counts as of the Phase 4 §G hardening commit): `mission-contracts` (17),
+`application.mission-core` (46), `live-mission-routes` (23),
+`mission-consoles` (15, JSDOM against the real control API),
 `mission-durability` (2, real file reopen), three immersive-page additions (live refresh,
 lock-over-rows, expiry wipe), hq-host wildcard forwarding (3), hq-server hosted restart driven
 through the real `commandMission`/read-back facade path (Linux-gated, CI-authoritative), plus
