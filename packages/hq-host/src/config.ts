@@ -17,10 +17,16 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { HeadquarterOperations } from '@factoryos/headquarter/application';
+import { HeadquarterOperations, MemberRegistryNominationSource } from '@factoryos/headquarter/application';
 import { HeadquarterStore, type HqDatabase } from '@factoryos/headquarter/store';
 import { PROVIDER_REGISTRY, type SecretsEnv } from '@factoryos/headquarter/routing';
-import { claude } from '@factoryos/headquarter/providers';
+import { AiMemberRegistry, MemberCapabilityRegistry } from '@factoryos/headquarter/registry';
+import {
+  KNOWN_PROVIDERS,
+  ProviderDirectory,
+  claude,
+  declaredOnlyAdapter,
+} from '@factoryos/headquarter/providers';
 import type { ControlAuditEvent } from '@factoryos/headquarter/live';
 import type { HeadquarterControlPlane } from './routes.js';
 import { openHqPersistence } from './persistence-guard.js';
@@ -64,7 +70,28 @@ export function loadHeadquarterHost(
   const persistence = openHqPersistence(env, log);
   if (!persistence) return null;
   const hqDb = persistence.db;
-  const ops = new HeadquarterOperations(hqDb, { store: new HeadquarterStore(hqDb) });
+
+  // Phase 4 (issue #262): the AI member registry, wired for LIFECYCLE,
+  // DISPLAY and ADVISORY nomination only. The provider directory carries the
+  // vendors' declared catalogs through `declaredOnlyAdapter` — probeHealth
+  // answers 'unknown' always, because this host asks no vendor anything;
+  // catalog knowledge is not connection evidence.
+  //
+  // `memberRegistry` (the capability-NARROWING seam) is DELIBERATELY NOT
+  // passed. Turning narrowing on is the recorded authority migration
+  // (application/registry-directory.ts, issue #182): the operator capability
+  // ids and the member capability vocabulary are disjoint, so a same-id
+  // worker's grants would intersect to nothing, and the enforcement read
+  // would leave its hardened closure. That switch stays a separate Founder
+  // decision — pinned by the anti-emptying regression in test/.
+  const providers = new ProviderDirectory();
+  for (const descriptor of KNOWN_PROVIDERS) providers.register(declaredOnlyAdapter(descriptor));
+  const aiMembers = new AiMemberRegistry(hqDb, providers, new MemberCapabilityRegistry(hqDb));
+  const ops = new HeadquarterOperations(hqDb, {
+    store: new HeadquarterStore(hqDb),
+    aiMemberRegistry: aiMembers,
+    nominationSources: [new MemberRegistryNominationSource(aiMembers)],
+  });
 
   // The Founder map is parsed only to distinguish valid JSON from malformed
   // authority configuration. Malformed input travels raw to the boundary so it
