@@ -60,6 +60,8 @@ function missionView(id: string, createdAt: string): SnapshotSources['missions']
     constraints: [],
     acceptanceCriteria: null,
     project: null,
+    projectId: null,
+    projectName: null,
     priority: null,
     status: 'planned',
     blockReason: null,

@@ -2512,7 +2512,10 @@ export class HeadquarterOperations {
     constraints?: string[];
     acceptanceCriteria?: string[];
     planItems?: string[];
+    /** Free-text console LABEL — never authority, never matched to the register. */
     project?: string;
+    /** Canonical register id (Phase 4). Validated: must exist and be active. */
+    projectId?: string;
     priority?: string;
     dependsOn?: string[];
     sourceOrderTaskId?: string;
@@ -2578,6 +2581,17 @@ export class HeadquarterOperations {
     ) {
       return fail('invalid_input', `sourceOrderTaskId names an unknown task: ${sourceOrderTaskId}`);
     }
+    const projectId = input.projectId?.trim() || null;
+    if (projectId) {
+      const target = this.#projectRecord(projectId);
+      if (!target) return fail('unknown_project', `Unknown project: ${projectId}`);
+      if (target.status === 'closed') {
+        return fail(
+          'project_closed',
+          `Project ${projectId} is closed; reopen it before assigning missions to it`,
+        );
+      }
+    }
 
     // Everything that will be PERSISTED is scanned before anything is
     // written — a credential-looking order is refused, never stored.
@@ -2604,6 +2618,7 @@ export class HeadquarterOperations {
       constraints: constraints.value ?? [],
       acceptanceCriteria: acceptance.value,
       project: project.value,
+      projectId,
       priority,
       sourceOrderTaskId,
       dependsOn,
@@ -2623,6 +2638,7 @@ export class HeadquarterOperations {
       acceptanceCriteria: acceptance.value,
       planItems: planItems.value ?? [],
       project: project.value,
+      projectId,
       priority,
       dependsOn,
       sourceOrderTaskId,
@@ -2658,10 +2674,10 @@ export class HeadquarterOperations {
       this.#db
         .prepare(
           `INSERT INTO hq_missions
-             (id, title, objective, scope, constraints, acceptance_criteria, project, priority,
+             (id, title, objective, scope, constraints, acceptance_criteria, project, project_id, priority,
               status, depends_on, source_order_task_id, idempotency_key,
               created_by, created_at, updated_at, status_changed_at, status_changed_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -2671,6 +2687,7 @@ export class HeadquarterOperations {
           JSON.stringify(constraints.value ?? []),
           acceptance.value == null ? null : JSON.stringify(acceptance.value),
           project.value,
+          projectId,
           priority,
           JSON.stringify(dependsOn),
           sourceOrderTaskId,
@@ -3192,6 +3209,103 @@ export class HeadquarterOperations {
     });
     if (raced) {
       return fail('invalid_input', `Plan item ${input.planItemSeq} was linked concurrently`);
+    }
+    return ok(this.#missionRecord(input.missionId)!);
+  }
+
+  /**
+   * Assign a mission to a canonical project register entry, or clear the
+   * assignment (`projectId: null`). A mission-directing act, so it carries
+   * the MISSION gate (`hq.mission_command`), not the project one. The target
+   * must exist and be `active`; terminal missions refuse (their record is
+   * history). Changes the relationship column only — never the mission's
+   * free-text `project` label, status, plan or intent history — and records
+   * the move in the append-only mission event log plus the evidence chain.
+   */
+  assignMissionToProject(input: {
+    missionId: string;
+    projectId: string | null;
+    requestedBy: string;
+  }): OpsResult<MissionRecord> {
+    if (!input.missionId || !input.requestedBy) {
+      return fail('invalid_input', 'missionId and requestedBy are required');
+    }
+    const refusedCommander = this.#resolveMissionCommander(
+      input.requestedBy,
+      `assign mission ${input.missionId} to a project`,
+    );
+    if (refusedCommander) return refusedCommander;
+    const refusedCapability = this.#missionCapabilityGate('assign a mission to a project');
+    if (refusedCapability) return refusedCapability;
+
+    const current = this.#missionRecord(input.missionId);
+    if (!current) return fail('unknown_mission', `Unknown mission: ${input.missionId}`);
+    if (isMissionTerminal(current.status)) {
+      return fail(
+        'mission_terminal',
+        `Mission ${input.missionId} is ${current.status}; its record is history`,
+      );
+    }
+    const projectId = input.projectId?.trim() || null;
+    if (projectId) {
+      const target = this.#projectRecord(projectId);
+      if (!target) return fail('unknown_project', `Unknown project: ${projectId}`);
+      if (target.status === 'closed') {
+        return fail(
+          'project_closed',
+          `Project ${projectId} is closed; reopen it before assigning missions to it`,
+        );
+      }
+    }
+    if (current.projectId === projectId) {
+      // A replayed assignment is refused rather than re-applied: appending a
+      // second identical event would forge history (the transition rule).
+      return fail(
+        'invalid_input',
+        projectId
+          ? `Mission ${input.missionId} is already assigned to ${projectId}`
+          : `Mission ${input.missionId} is not assigned to any project`,
+      );
+    }
+
+    const at = nowIso();
+    let raced = false;
+    const privileged = this.#requirePrivilegedQueue();
+    privileged.reserve(() => {
+      // `IS ?` is null-safe equality in SQLite, so one guarded UPDATE covers
+      // both "currently unassigned" and "currently assigned to X".
+      const result = this.#db
+        .prepare(
+          `UPDATE hq_missions SET project_id = ?, updated_at = ?
+           WHERE id = ? AND project_id IS ?`,
+        )
+        .run(projectId, at, input.missionId, current.projectId);
+      if (result.changes === 0) {
+        raced = true;
+        return;
+      }
+      appendMissionEvent(this.#db, {
+        missionId: input.missionId,
+        actor: input.requestedBy,
+        kind: 'project_assigned',
+        detail: { from: current.projectId, to: projectId },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'mission_project_assigned',
+        payload: {
+          missionId: input.missionId,
+          from: current.projectId,
+          to: projectId,
+          executable: false,
+        },
+      });
+    });
+    if (raced) {
+      return fail(
+        'mission_status_changed',
+        `Mission ${input.missionId} changed while the assignment was being decided`,
+      );
     }
     return ok(this.#missionRecord(input.missionId)!);
   }

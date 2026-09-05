@@ -373,6 +373,10 @@ export interface MissionRecord {
   /** null = honestly not supplied (an explicit unknown, not an empty list). */
   acceptanceCriteria: string[] | null;
   project: string | null;
+  /** Canonical project relationship — a register id, validated at the facade. */
+  projectId: string | null;
+  /** DERIVED read-time join from the register; null when projectId is null. */
+  projectName: string | null;
   priority: MissionPriority | null;
   status: MissionStatus;
   blockReason: string | null;
@@ -415,6 +419,8 @@ export interface MissionBrowserView {
   constraints: string[];
   acceptanceCriteria: string[] | null;
   project: string | null;
+  projectId: string | null;
+  projectName: string | null;
   priority: MissionPriority | null;
   status: MissionStatus;
   blockReason: string | null;
@@ -452,6 +458,8 @@ export function missionBrowserView(mission: MissionRecord): MissionBrowserView {
     constraints: mission.constraints,
     acceptanceCriteria: mission.acceptanceCriteria,
     project: mission.project,
+    projectId: mission.projectId,
+    projectName: mission.projectName,
     priority: mission.priority,
     status: mission.status,
     blockReason: mission.blockReason,
@@ -487,7 +495,7 @@ export interface MissionEventRecord {
   missionId: string;
   at: string;
   actor: string;
-  kind: 'commanded' | 'transitioned' | 'intent_amended' | 'plan_item_linked';
+  kind: 'commanded' | 'transitioned' | 'intent_amended' | 'plan_item_linked' | 'project_assigned';
   fromStatus: MissionStatus | null;
   toStatus: MissionStatus | null;
   note: string | null;
@@ -510,6 +518,8 @@ export function missionCommandIdempotencyKey(input: {
   constraints: string[];
   acceptanceCriteria: string[] | null;
   project: string | null;
+  /** Canonical project relationship (Phase 4). See the field note below. */
+  projectId?: string | null;
   priority: MissionPriority | null;
   sourceOrderTaskId: string | null;
   dependsOn: string[];
@@ -524,25 +534,28 @@ export function missionCommandIdempotencyKey(input: {
   instruction: string | null;
   idempotencyKey: string | null;
 }): string {
-  const digest = createHash('sha256')
-    .update(
-      canonicalJson({
-        requestedBy: input.requestedBy,
-        title: input.title,
-        objective: input.objective,
-        scope: input.scope,
-        constraints: input.constraints,
-        acceptanceCriteria: input.acceptanceCriteria,
-        project: input.project,
-        priority: input.priority,
-        sourceOrderTaskId: input.sourceOrderTaskId,
-        dependsOn: input.dependsOn,
-        planItems: input.planItems,
-        instruction: input.instruction,
-        idempotencyKey: input.idempotencyKey,
-      }),
-    )
-    .digest('hex');
+  const fields: Record<string, unknown> = {
+    requestedBy: input.requestedBy,
+    title: input.title,
+    objective: input.objective,
+    scope: input.scope,
+    constraints: input.constraints,
+    acceptanceCriteria: input.acceptanceCriteria,
+    project: input.project,
+    priority: input.priority,
+    sourceOrderTaskId: input.sourceOrderTaskId,
+    dependsOn: input.dependsOn,
+    planItems: input.planItems,
+    instruction: input.instruction,
+    idempotencyKey: input.idempotencyKey,
+  };
+  // `projectId` joins the digest ONLY when stated. Unconditionally adding
+  // `projectId: null` would change every digest and a byte-identical
+  // re-command of a Phase 3 order would then DUPLICATE the mission instead of
+  // deduping onto it — the stored Phase 3 keys never contained the field.
+  // Pinned by test: key(without) === key(projectId: null).
+  if (input.projectId != null) fields.projectId = input.projectId;
+  const digest = createHash('sha256').update(canonicalJson(fields)).digest('hex');
   return `mission:${digest.slice(0, 32)}`;
 }
 
@@ -641,6 +654,21 @@ export function readMissionRecord(
 
   const verificationMethod = (row.verification_method as string | null) ?? null;
 
+  // The canonical project relationship, joined at read time. `project` (the
+  // free-text label) and `projectId` (the register reference) are different
+  // claims and both travel; the name is a projection of the register, never
+  // stored here. A dangling id (register row gone is impossible — projects
+  // are never hard-deleted — but a pre-adoption raw write could dangle)
+  // reports its id with a null name rather than hiding the link.
+  const projectId = (row.project_id as string | null) ?? null;
+  const projectName = projectId
+    ? ((
+        db.prepare(`SELECT name FROM hq_projects WHERE id = ?`).get(projectId) as
+          | { name: string }
+          | undefined
+      )?.name ?? null)
+    : null;
+
   return {
     id: row.id as string,
     title: row.title as string,
@@ -650,6 +678,8 @@ export function readMissionRecord(
     acceptanceCriteria:
       row.acceptance_criteria == null ? null : parseStringArray(row.acceptance_criteria as string),
     project: (row.project as string | null) ?? null,
+    projectId,
+    projectName,
     priority: (row.priority as MissionPriority | null) ?? null,
     status: row.status as MissionStatus,
     blockReason: (row.block_reason as string | null) ?? null,

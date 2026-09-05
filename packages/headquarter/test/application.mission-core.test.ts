@@ -21,8 +21,13 @@ import type { MissionStatus } from '../src/contracts/mission.js';
 import {
   MISSION_COMMAND_CAPABILITY,
   MISSION_PLAN_NOT_DECIDED_SUMMARY,
+  missionCommandIdempotencyKey,
   registerMissionCommandCapability,
 } from '../src/application/mission-command.js';
+import {
+  PROJECT_COMMAND_CAPABILITY,
+  registerProjectCommandCapability,
+} from '../src/application/project-command.js';
 
 const FOUNDER = 'mission-founder';
 /** Holds the mission grant but NOT approval authority — cannot verify. */
@@ -966,6 +971,196 @@ describe('linking plan items to real operator tasks', () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.message).toContain('open question');
+  });
+});
+
+describe('mission <-> project linkage (Phase 4)', () => {
+  let fx: Fixture;
+  beforeEach(() => {
+    fx = missionFixture();
+    registerProjectCommandCapability(fx.db);
+    // The mission founder also holds the project grant, so one actor can
+    // exercise both registers in these linkage tests.
+    fx.principals.register({
+      id: FOUNDER,
+      displayName: 'Mission Founder',
+      originateCapabilities: [
+        MISSION_COMMAND_CAPABILITY.id,
+        PROJECT_COMMAND_CAPABILITY.id,
+        CAPS.readStatus,
+      ],
+      approvalAuthority: true,
+      active: true,
+    });
+  });
+
+  function project(overrides: Record<string, unknown> = {}): string {
+    return expectOk(
+      fx.ops.createProject({
+        name: 'QOS program',
+        purpose: 'Everything QOS',
+        requestedBy: FOUNDER,
+        ...overrides,
+      }),
+    ).project.id;
+  }
+
+  it('commands a mission into a project, and both sides read the one relationship', () => {
+    const projectId = project();
+    const { mission } = expectOk(command(fx, { projectId, project: 'qos-label' }));
+    expect(mission.projectId).toBe(projectId);
+    expect(mission.projectName).toBe('QOS program');
+    // The free-text label is a different claim and is untouched.
+    expect(mission.project).toBe('qos-label');
+    const view = fx.ops.getProject(projectId)!;
+    expect(view.missions).toEqual([
+      { missionId: mission.id, title: mission.title, status: 'planned' },
+    ]);
+  });
+
+  it('the projectId joins the idempotency digest only when stated — Phase 3 keys still dedupe', () => {
+    // A byte-identical Phase 3 command (no projectId field existed) must keep
+    // producing its stored digest, or every pre-Phase-4 mission would
+    // duplicate on re-command. Pinned as the equality that guarantees it.
+    const base = {
+      requestedBy: FOUNDER,
+      title: 'T',
+      objective: 'O',
+      scope: null,
+      constraints: [],
+      acceptanceCriteria: null,
+      project: null,
+      priority: null,
+      sourceOrderTaskId: null,
+      dependsOn: [],
+      planItems: [],
+      instruction: null,
+      idempotencyKey: null,
+    };
+    expect(missionCommandIdempotencyKey(base)).toBe(
+      missionCommandIdempotencyKey({ ...base, projectId: null }),
+    );
+    expect(missionCommandIdempotencyKey({ ...base, projectId: 'project-x' })).not.toBe(
+      missionCommandIdempotencyKey(base),
+    );
+    // Behaviorally: a no-project command still dedupes onto itself.
+    const first = expectOk(command(fx));
+    const again = expectOk(command(fx));
+    expect(again.deduplicated).toBe(true);
+    expect(again.mission.id).toBe(first.mission.id);
+  });
+
+  it('refuses to command a mission into an unknown or closed project', () => {
+    const unknown = command(fx, { projectId: 'project-never' });
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.error.code).toBe('unknown_project');
+
+    const closedId = project({ name: 'Closed program' });
+    expectOk(
+      fx.ops.transitionProject({
+        projectId: closedId,
+        to: 'closed',
+        note: 'wound down',
+        requestedBy: FOUNDER,
+      }),
+    );
+    const closed = command(fx, { projectId: closedId, title: 'Late mission' });
+    expect(closed.ok).toBe(false);
+    if (!closed.ok) expect(closed.error.code).toBe('project_closed');
+  });
+
+  it('assigns, reassigns and clears the relationship, recording every move', () => {
+    const a = project({ name: 'Program A' });
+    const b = project({ name: 'Program B' });
+    const missionId = expectOk(command(fx)).mission.id;
+
+    const assigned = expectOk(
+      fx.ops.assignMissionToProject({ missionId, projectId: a, requestedBy: FOUNDER }),
+    );
+    expect(assigned.projectId).toBe(a);
+    // Replay refused — an identical second event would forge history.
+    expect(fx.ops.assignMissionToProject({ missionId, projectId: a, requestedBy: FOUNDER }).ok).toBe(
+      false,
+    );
+    const moved = expectOk(
+      fx.ops.assignMissionToProject({ missionId, projectId: b, requestedBy: FOUNDER }),
+    );
+    expect(moved.projectId).toBe(b);
+    expect(moved.projectName).toBe('Program B');
+    const cleared = expectOk(
+      fx.ops.assignMissionToProject({ missionId, projectId: null, requestedBy: FOUNDER }),
+    );
+    expect(cleared.projectId).toBeNull();
+    expect(cleared.projectName).toBeNull();
+
+    const events = fx.db
+      .prepare(
+        `SELECT kind, detail FROM hq_mission_events WHERE mission_id = ? AND kind = 'project_assigned' ORDER BY seq`,
+      )
+      .all(missionId) as { kind: string; detail: string }[];
+    expect(events.map((e) => JSON.parse(e.detail))).toEqual([
+      { from: null, to: a },
+      { from: a, to: b },
+      { from: b, to: null },
+    ]);
+    const evidence = fx.db
+      .prepare(`SELECT COUNT(*) AS n FROM op_evidence WHERE kind = 'mission_project_assigned'`)
+      .get() as { n: number };
+    expect(evidence.n).toBe(3);
+  });
+
+  it('refuses assignment on terminal missions, unknown projects and by non-mission actors', () => {
+    const missionId = expectOk(command(fx)).mission.id;
+    expectOk(
+      fx.ops.transitionMission({
+        missionId,
+        to: 'cancelled',
+        note: 'stood down',
+        requestedBy: FOUNDER,
+      }),
+    );
+    const terminal = fx.ops.assignMissionToProject({
+      missionId,
+      projectId: project(),
+      requestedBy: FOUNDER,
+    });
+    expect(terminal.ok).toBe(false);
+    if (!terminal.ok) expect(terminal.error.code).toBe('mission_terminal');
+
+    const live = expectOk(command(fx, { title: 'Live mission' })).mission.id;
+    const unknown = fx.ops.assignMissionToProject({
+      missionId: live,
+      projectId: 'project-never',
+      requestedBy: FOUNDER,
+    });
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.error.code).toBe('unknown_project');
+
+    const worker = fx.ops.assignMissionToProject({
+      missionId: live,
+      projectId: null,
+      requestedBy: 'claude',
+    });
+    expect(worker.ok).toBe(false);
+  });
+
+  it('project task counts derive from linked plan items through the one canonical status', () => {
+    const projectId = project();
+    const missionId = expectOk(
+      command(fx, { projectId, planItems: ['Measure', 'Optimize'] }),
+    ).mission.id;
+    const taskId = expectOk(
+      fx.ops.createTask({
+        capabilityId: CAPS.readStatus,
+        payload: { kind: 'measure' },
+        requestedBy: FOUNDER,
+      }),
+    ).task.id;
+    expectOk(fx.ops.linkMissionPlanItem({ missionId, planItemSeq: 1, taskId, requestedBy: FOUNDER }));
+    const view = fx.ops.getProject(projectId)!;
+    // One linked task, queued; the unlinked item has no task and counts nowhere.
+    expect(view.taskCounts).toEqual([{ status: 'queued', count: 1 }]);
+    expect(JSON.stringify(view)).not.toMatch(/percent|progress/i);
   });
 });
 
