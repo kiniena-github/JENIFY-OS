@@ -305,11 +305,14 @@ export const HQ_ROOMS: readonly HqRoom[] = [
     id: 'projects',
     ordinal: 12,
     name: 'Projects',
-    purpose: 'The projects the canonical event log names, and what each is currently carrying.',
+    // Rebound in Phase 4 (issue #262; decisions entry): the canonical
+    // Founder project REGISTER, not a label counter over the activity
+    // window. See projectsSection() in hydrate.ts for the recorded change.
+    purpose: 'The canonical project register: what the Founder has declared, and the missions each carries.',
     binding: {
       kind: 'live',
       section: 'projects',
-      source: 'activity section — the project recorded on each canonical event',
+      source: 'hq_projects via HeadquarterOperations.listProjects — the canonical Founder project register',
     },
     placement: { ring: 2, slot: 2 },
     page: 'projects.html',

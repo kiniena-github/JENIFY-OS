@@ -412,6 +412,37 @@ function workforceSection(state: HqStateDocument): Section {
         chips: [
           { label: worker.active ? 'active' : 'inactive', tone: worker.active ? 'accent' : ('neutral' as RoomTone) },
           { label: worker.role, tone: 'violet' as RoomTone },
+          // Phase 4 truth chips. Provider: declared or absent, never
+          // inferred from the vendor string. Dispatchable renders only when
+          // the building context genuinely observed it (three-valued).
+          // Member health: 'unknown' is drawn AS unknown — nothing probed,
+          // nothing claimed.
+          ...(worker.provider
+            ? [
+                { label: `provider: ${worker.provider.declaredId}`, tone: 'info' as RoomTone },
+                ...(worker.provider.dispatchable !== null
+                  ? [
+                      {
+                        label: worker.provider.dispatchable ? 'dispatchable' : 'not dispatchable',
+                        tone: worker.provider.dispatchable ? 'accent' : ('warn' as RoomTone),
+                      },
+                    ]
+                  : []),
+              ]
+            : [{ label: 'no provider declared', tone: 'neutral' as RoomTone }]),
+          ...(worker.member
+            ? [
+                {
+                  label: `health: ${worker.member.health}`,
+                  tone:
+                    worker.member.health === 'healthy'
+                      ? ('accent' as RoomTone)
+                      : worker.member.health === 'unknown'
+                        ? ('neutral' as RoomTone)
+                        : ('warn' as RoomTone),
+                },
+              ]
+            : []),
         ],
       })),
     ),
@@ -571,31 +602,58 @@ function connectionsSection(state: HqStateDocument): Section {
 }
 
 function projectsSection(state: HqStateDocument): Section {
-  const byProject = new Map<string, { events: number; latest: string }>();
-  for (const event of state.activity.data) {
-    if (!event.project) continue;
-    const entry = byProject.get(event.project) ?? { events: 0, latest: event.at };
-    entry.events += 1;
-    if (event.at > entry.latest) entry.latest = event.at;
-    byProject.set(event.project, entry);
-  }
-  const projects = [...byProject.entries()].sort((a, b) => b[1].latest.localeCompare(a[1].latest));
+  // PHASE 4 SEMANTIC CHANGE, recorded here deliberately (issue #262 and the
+  // matching docs/JENIFY_DECISIONS.md entry) — the Mission Room rebinding
+  // treatment, applied to this room. Until Phase 4 this section counted the
+  // free-text `project` LABELS on the recent activity window: an honest
+  // projection of the only project-shaped data that existed. `hq_projects`
+  // is now the canonical Founder-commanded project REGISTER, and this room
+  // shows THAT. Activity labels stay labels and are not restated here; a
+  // register entry's missions come from the canonical `project_id`
+  // relationship, never from label matching.
+  //
+  // Liveness derives from the register's missions by the SAME status sets
+  // the Mission Room uses (attention: MISSION_ATTENTION_STATUSES; active:
+  // 'working'), so the two rooms can never describe the same missions
+  // differently — the round-13 lesson, carried to the new entity.
+  const projects = state.projects.data;
+  const active = projects.filter((project) => project.status === 'active').length;
+  const missionsAssigned = projects.reduce((sum, project) => sum + project.missions.length, 0);
+  const attention = projects.filter((project) =>
+    project.missions.some((mission) => MISSION_ATTENTION_STATUSES.has(mission.status)),
+  ).length;
+  const working = projects.filter((project) =>
+    project.missions.some((mission) => mission.status === 'working'),
+  ).length;
   return {
     metrics: [
-      metric('Projects named', projects.length, 'Distinct project labels on the recent canonical events this document carries.', tone(projects.length, 'info')),
+      metric('Projects registered', projects.length, 'Canonical register entries the Founder has created. 0 means 0.', tone(projects.length, 'info')),
+      metric('Active', active, 'Open for mission assignment.', tone(active, 'accent')),
+      metric('Closed', projects.length - active, 'Closed with a recorded reason; reopenable.', tone(projects.length - active, 'neutral')),
+      metric('Missions assigned', missionsAssigned, 'Canonical project_id relationships, not label matches.', tone(missionsAssigned, 'info')),
     ],
     rows: limited(
-      projects.map(([project, entry]) => ({
-        id: project,
-        primary: project,
-        secondary: `${entry.events} recent canonical event(s) · latest ${entry.latest}`,
-        chips: [],
+      projects.map((project) => ({
+        id: project.id,
+        primary: project.name,
+        secondary: `${project.purpose} · ${project.missions.length} mission(s)`,
+        chips: [
+          {
+            label: project.status,
+            tone: project.status === 'active' ? 'accent' : ('neutral' as RoomTone),
+          },
+          ...(project.stream ? [{ label: project.stream, tone: 'violet' as RoomTone }] : []),
+          ...(project.missions.length > 0
+            ? [{ label: `${project.missions.length} mission(s)`, tone: 'info' as RoomTone }]
+            : []),
+        ],
       })),
     ),
     emptyMessage:
-      'No recent canonical event names a project. This counts the events in THIS document only — ' +
-      'it is not a claim that the archive holds no project.',
-    liveness: livenessFrom({ attention: 0, active: 0, present: projects.length }),
+      'HQ holds no registered project. 0 means 0 — the Founder has registered nothing yet, and ' +
+      'nothing is invented to fill the room. Project labels on activity events are labels, not ' +
+      'this register.',
+    liveness: livenessFrom({ attention, active: working, present: projects.length }),
   };
 }
 

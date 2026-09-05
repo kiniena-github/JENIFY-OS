@@ -46,6 +46,7 @@ function sources(overrides: Partial<SnapshotSources> = {}): SnapshotSources {
     capabilities: { data: [], provenance },
     activity: { data: [], provenance },
     missions: { data: [], provenance },
+    projects: { data: [], provenance },
     ...overrides,
   };
 }
@@ -144,6 +145,109 @@ describe('shape and provenance', () => {
     const claude = snapshot.connections.data.find((entry) => entry.id === 'anthropic-claude')!;
     expect(claude.state).toBe('dispatchable');
     expect(claude.effectiveCapabilities).toEqual([]);
+  });
+});
+
+describe('the Phase 4 sections travel the live path truthfully', () => {
+  it('carries the project register, provider declarations and member enrichment', async () => {
+    const fixture = setupFixture();
+    const { registerProjectCommandCapability, PROJECT_COMMAND_CAPABILITY } = await import(
+      '../src/application/project-command.js'
+    );
+    const { registerMissionCommandCapability, MISSION_COMMAND_CAPABILITY } = await import(
+      '../src/application/mission-command.js'
+    );
+    const { AiMemberRegistry } = await import('../src/registry/members.js');
+    const { MemberCapabilityRegistry } = await import('../src/registry/capabilities.js');
+    const { ProviderDirectory } = await import('../src/providers/directory.js');
+    const { declaredOnlyAdapter } = await import('../src/providers/declared.js');
+    const { HeadquarterOperations } = await import('../src/application/service.js');
+    const { HeadquarterStore } = await import('../src/store/headquarter.js');
+
+    registerProjectCommandCapability(fixture.db);
+    registerMissionCommandCapability(fixture.db);
+    fixture.principals.register({
+      id: 'founder',
+      displayName: 'Founder',
+      originateCapabilities: [PROJECT_COMMAND_CAPABILITY.id, MISSION_COMMAND_CAPABILITY.id],
+      approvalAuthority: true,
+      active: true,
+    });
+    const providers = new ProviderDirectory();
+    providers.register(
+      declaredOnlyAdapter({
+        providerId: 'anthropic',
+        displayName: 'Anthropic',
+        kind: 'cloud',
+        advertisedModels: [],
+      }),
+    );
+    const registry = new AiMemberRegistry(
+      fixture.db,
+      providers,
+      new MemberCapabilityRegistry(fixture.db),
+    );
+    const ops = new HeadquarterOperations(fixture.db, {
+      store: new HeadquarterStore(fixture.db),
+      aiMemberRegistry: registry,
+    });
+
+    const projectId = (() => {
+      const created = ops.createProject({
+        name: 'JENIFY OS',
+        purpose: 'The platform program',
+        stream: 'jenify-os',
+        requestedBy: 'founder',
+      });
+      if (!created.ok) throw new Error(created.error.message);
+      return created.data.project.id;
+    })();
+    const commanded = ops.commandMission({
+      title: 'Ship Phase 4',
+      objective: 'Projects, tasks and the workforce become first-class',
+      projectId,
+      requestedBy: 'founder',
+    });
+    expect(commanded.ok).toBe(true);
+    expect(
+      ops.declareWorkerProvider({ workerId: 'claude', providerId: 'CLAUDE', founderId: 'founder' })
+        .ok,
+    ).toBe(true);
+    expect(
+      ops.registerAiMember({
+        id: 'claude',
+        displayName: 'Claude member record',
+        providerId: 'anthropic',
+        modelId: 'claude-fable-5',
+        modelVersion: '1',
+        workerType: 'execution',
+        locality: 'cloud',
+        privacyClass: 'internal',
+        costClass: 'high',
+        founderId: 'founder',
+      }).ok,
+    ).toBe(true);
+
+    const snapshot = liveSnapshotFromOperations(ops, { now: NOW, env: CLAUDE_ONLY });
+    expect(snapshot.counts.projects).toBe(1);
+    const project = snapshot.projects.data[0]!;
+    expect(project.name).toBe('JENIFY OS');
+    expect(project.status).toBe('active');
+    expect(project.missions.map((m) => m.title)).toEqual(['Ship Phase 4']);
+    // The mission section carries the SAME relationship through the shared view.
+    const mission = snapshot.missions.data[0]!;
+    expect(mission.projectId).toBe(projectId);
+    expect(mission.projectName).toBe('JENIFY OS');
+
+    const claude = snapshot.workforce.data.find((worker) => worker.id === 'claude')!;
+    // Declared truth, not inference; dispatchability unobserved here => null.
+    expect(claude.provider).toEqual({ declaredId: 'CLAUDE', dispatchable: null });
+    expect(claude.member!.identityKey).toBe('anthropic:claude-fable-5:1');
+    expect(claude.member!.health).toBe('unknown'); // nothing probed, nothing claimed
+    // Workers with no declaration and no member record say so with nulls.
+    const codex = snapshot.workforce.data.find((worker) => worker.id === 'codex')!;
+    expect(codex.provider).toBeNull();
+    expect(codex.member).toBeNull();
   });
 });
 
@@ -403,6 +507,17 @@ describe('projecting the store never writes to it', () => {
     expect(snapshot.counts.missions).toBe(0);
     expect(snapshot.missions.data).toEqual([]);
     expect(snapshot.missions.provenance.note).toContain('predates the Phase 3 mission tables');
+
+    // The Phase 4 register follows the same absence rule: the foundation
+    // hq_projects table exists in this file, but the Phase 4 schema (the
+    // append-only event log) does not, and a read-only handle never creates
+    // it — so the section states absence rather than an empty register.
+    expect(ops.projectStorePresent()).toBe(false);
+    expect(ops.listProjects()).toEqual([]);
+    expect(ops.getProject('project-anything')).toBeNull();
+    expect(snapshot.counts.projects).toBe(0);
+    expect(snapshot.projects.data).toEqual([]);
+    expect(snapshot.projects.provenance.note).toContain('predates the Phase 4 project schema');
 
     // Truthful means UNTOUCHED: nothing on the read-only path migrated the
     // file — the mission tables still do not exist.
