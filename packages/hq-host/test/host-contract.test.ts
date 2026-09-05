@@ -20,7 +20,12 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openMemoryHqDatabase, HeadquarterStore } from '@factoryos/headquarter/store';
-import { HeadquarterOperations, HumanPrincipalRegistry } from '@factoryos/headquarter/application';
+import {
+  HeadquarterOperations,
+  HumanPrincipalRegistry,
+  MISSION_COMMAND_CAPABILITY,
+  registerMissionCommandCapability,
+} from '@factoryos/headquarter/application';
 import {
   CONTROL_ROUTES,
   DIRECT_ORDER_CAPABILITY,
@@ -63,11 +68,12 @@ afterAll(() => {
 function plane(overrides: Partial<HeadquarterControlPlane> = {}): HeadquarterControlPlane {
   const db = openMemoryHqDatabase();
   registerDirectOrderCapability(db);
+  registerMissionCommandCapability(db);
   const ops = new HeadquarterOperations(db, { store: new HeadquarterStore(db) });
   new HumanPrincipalRegistry(db).register({
     id: 'founder',
     displayName: 'Proof Founder',
-    originateCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+    originateCapabilities: [DIRECT_ORDER_CAPABILITY.id, MISSION_COMMAND_CAPABILITY.id],
     approvalAuthority: true,
     active: true,
   });
@@ -268,6 +274,53 @@ describe('the Stage 4 hydration route reaches the browser through this host', ()
       payload: { instruction: 'x', route: 'CLAUDE', idempotencyKey: 'k' },
     });
     expect(write.statusCode).toBe(403);
+    await app.close();
+  });
+});
+
+describe('the Phase 3 mission surface travels through the same two wildcards', () => {
+  it('commands a canonical mission through the real Fastify instance, uncached', async () => {
+    // The adapter needed ZERO changes for these routes — that is the design
+    // claim, and this is the ask that turns it from assumption into evidence.
+    const app = await build(identityFor(FOUNDER));
+    const res = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.missions,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: {
+        title: 'Improve QOS website speed',
+        objective: 'Reduce load times without changing the visual design',
+        constraints: ['No visual changes', 'No production deploy'],
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.headers['cache-control']).toBe('no-store');
+    const body = res.json() as { ok: boolean; mission: { id: string; createdBy: string } };
+    expect(body.ok).toBe(true);
+    expect(body.mission.createdBy).toBe('founder');
+
+    const read = await app.inject({ method: 'GET', url: CONTROL_ROUTES.missions });
+    expect(read.statusCode).toBe(200);
+    expect((read.json() as { missions: unknown[] }).missions).toHaveLength(1);
+    await app.close();
+  });
+
+  it('refuses a mission write from an origin the host did not allow-list', async () => {
+    const app = await build(identityFor(FOUNDER), { allowedOrigins: [] });
+    const res = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.missions,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: { title: 'x', objective: 'y' },
+    });
+    expect(res.json().ok).toBe(false);
+    await app.close();
+  });
+
+  it('refuses the mission surface to nobody, exactly as it refuses the rest', async () => {
+    const app = await build(NO_IDENTITY);
+    const res = await app.inject({ method: 'GET', url: CONTROL_ROUTES.missions });
+    expect(res.statusCode).toBe(401);
     await app.close();
   });
 });

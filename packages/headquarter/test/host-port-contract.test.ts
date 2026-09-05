@@ -29,6 +29,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   CONTROL_ROUTES,
+  CONTROL_WRITE_ROUTES,
   handleControlRequest,
   type ControlApiDeps,
 } from '../src/live/control-api.js';
@@ -97,7 +98,10 @@ describe('obligation 1 — the session port is asked on every request', () => {
   it('refuses every route when no session resolves', () => {
     const { deps } = host({}, null);
     for (const path of Object.values(CONTROL_ROUTES)) {
-      const writes = path.includes('approve') || path.includes('deny') || path.endsWith('orders');
+      // The write surface is STATED by the boundary, not inferred from path
+      // shapes — a heuristic here once probed new POST routes as GETs and the
+      // obligation silently weakened.
+      const writes = CONTROL_WRITE_ROUTES.includes(path);
       const result = handleControlRequest(writes ? post(path) : get(path), deps);
       expect(result.status, `${path} must not answer an unauthenticated caller`).toBe(401);
     }
@@ -120,8 +124,8 @@ describe('obligation 1 — the session port is asked on every request', () => {
 
   it('refuses the other routes as errors carrying no state', () => {
     const { deps } = host({}, null);
-    for (const path of [CONTROL_ROUTES.approvals, CONTROL_ROUTES.orders, CONTROL_ROUTES.approve, CONTROL_ROUTES.deny]) {
-      const writes = path !== CONTROL_ROUTES.approvals;
+    for (const path of [CONTROL_ROUTES.approvals, CONTROL_ROUTES.missions, ...CONTROL_WRITE_ROUTES]) {
+      const writes = CONTROL_WRITE_ROUTES.includes(path);
       const result = handleControlRequest(writes ? post(path) : get(path), deps);
       expect(result.body.ok, `${path} leaked a success shape to a stranger`).toBe(false);
     }
