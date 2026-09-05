@@ -45,6 +45,7 @@ function emptyState(): HqSnapshot {
     workforce: { data: [], provenance: PROVENANCE },
     capabilities: { data: [], provenance: PROVENANCE },
     activity: { data: [], provenance: PROVENANCE },
+    missions: { data: [], provenance: PROVENANCE },
   });
 }
 
@@ -200,6 +201,7 @@ describe('a populated HQ is copied, never re-derived', () => {
       workforce: { data: [], provenance: PROVENANCE },
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
+      missions: { data: [], provenance: PROVENANCE },
     });
   }
 
@@ -251,6 +253,7 @@ describe('a populated HQ is copied, never re-derived', () => {
       },
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
+      missions: { data: [], provenance: PROVENANCE },
     });
     const workforce = hydrateRooms(withWorkers, FOUNDER_SESSION).find((v) => v.roomId === 'ai-workforce')!;
     expect(workforce.liveness).toBe('quiet');
@@ -272,6 +275,7 @@ describe('a populated HQ is copied, never re-derived', () => {
       workforce: { data: [], provenance: PROVENANCE },
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
+      missions: { data: [], provenance: PROVENANCE },
     });
     const command = hydrateRooms(snapshot, FOUNDER_SESSION).find((v) => v.roomId === 'command-room')!;
     expect(command.rows).toHaveLength(ROOM_ROW_LIMIT + 1);
@@ -297,6 +301,7 @@ describe('a room is dark only when everything it counts is empty', () => {
       },
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
+      missions: { data: [], provenance: PROVENANCE },
     });
     const views = hydrateRooms(withRecords, FOUNDER_SESSION);
     const analytics = views.find((view) => view.roomId === 'analytics')!;
@@ -380,6 +385,7 @@ describe('the Mission Room reads canonical buckets, not raw task statuses', () =
       workforce: { data: [], provenance: PROVENANCE },
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
+      missions: { data: [], provenance: PROVENANCE },
     });
   }
 
@@ -508,6 +514,7 @@ describe('Analytics ranks an approval the way every other room does', () => {
       workforce: { data: [], provenance: PROVENANCE },
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
+      missions: { data: [], provenance: PROVENANCE },
     });
   }
 
@@ -585,6 +592,7 @@ describe('no room contradicts its own displayed numbers', () => {
         workforce: { data: [], provenance: PROVENANCE },
         capabilities: { data: [], provenance: PROVENANCE },
         activity: { data: [], provenance: PROVENANCE },
+        missions: { data: [], provenance: PROVENANCE },
       });
     };
     return [
@@ -700,6 +708,7 @@ describe('connection attention follows the canonical tone mapping', () => {
       workforce: { data: [], provenance: PROVENANCE },
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
+      missions: { data: [], provenance: PROVENANCE },
     });
   }
 
@@ -805,6 +814,7 @@ describe('reachability comes from one list, not two that agree', () => {
         workforce: { data: [], provenance: PROVENANCE },
         capabilities: { data: [], provenance: PROVENANCE },
         activity: { data: [], provenance: PROVENANCE },
+        missions: { data: [], provenance: PROVENANCE },
       });
       const room = hydrateRooms(state, FOUNDER_SESSION).find((r) => r.roomId === 'world-network')!;
       const proven = room.metrics.find((m) => m.label === 'Proven reachable')!;
@@ -843,6 +853,7 @@ describe('the attention count and its hint describe the same set of states', () 
       workforce: { data: [], provenance: PROVENANCE },
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
+      missions: { data: [], provenance: PROVENANCE },
     });
     const room = hydrateRooms(state, FOUNDER_SESSION).find((r) => r.roomId === 'world-network')!;
     const hint = room.metrics.find((m) => m.label === 'Needing attention')!.hint;
@@ -890,6 +901,7 @@ describe('a room names every state section that can change what it shows', () =>
         },
         capabilities: { data: [], provenance: PROVENANCE },
         activity: { data: [], provenance: PROVENANCE },
+        missions: { data: [], provenance: PROVENANCE },
       }),
     capabilities: () =>
       buildHqSnapshot({
@@ -920,6 +932,7 @@ describe('a room names every state section that can change what it shows', () =>
           provenance: PROVENANCE,
         },
         activity: { data: [], provenance: PROVENANCE },
+        missions: { data: [], provenance: PROVENANCE },
       }),
     connections: () =>
       buildHqSnapshot({
@@ -934,6 +947,7 @@ describe('a room names every state section that can change what it shows', () =>
         workforce: { data: [], provenance: PROVENANCE },
         capabilities: { data: [], provenance: PROVENANCE },
         activity: { data: [], provenance: PROVENANCE },
+        missions: { data: [], provenance: PROVENANCE },
       }),
     activity: () =>
       buildHqSnapshot({
@@ -948,6 +962,7 @@ describe('a room names every state section that can change what it shows', () =>
           ] as never,
           provenance: PROVENANCE,
         },
+        missions: { data: [], provenance: PROVENANCE },
       }),
   };
 

@@ -150,6 +150,100 @@ CREATE TABLE IF NOT EXISTS hq_archive_refs (
   project_id TEXT,
   added_at TEXT NOT NULL
 );
+
+-- Phase 3 Mission Core (issue #253). Four additive tables; nothing above is
+-- altered. They live in the durable store's own DDL rather than in a module
+-- schema so the hosted durable-volume owner migrates them under the same
+-- verified WAL + synchronous=FULL ordering as every other canonical table.
+--
+-- \`original_instruction\` is the Founder's raw command and is SERVER-SIDE ONLY:
+-- no read model, snapshot or control route publishes it. What the browser gets
+-- is the normalized intent JSON plus the command's digest and length, so a
+-- Founder can prove which command a mission came from without the text
+-- travelling. \`lifecycle\` records only EXPLICIT decisions (open / verified /
+-- complete / failed / cancelled); the Founder-facing status is derived at read
+-- time from lifecycle + open decisions + task execution truth, so a status can
+-- never be a stale stored claim.
+CREATE TABLE IF NOT EXISTS hq_missions (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  original_instruction TEXT NOT NULL,
+  command_digest TEXT NOT NULL,
+  intent_version INTEGER NOT NULL,
+  intent TEXT NOT NULL,
+  intent_digest TEXT NOT NULL,
+  planner TEXT NOT NULL,
+  project TEXT,
+  product TEXT,
+  priority TEXT NOT NULL,
+  risk_ceiling TEXT NOT NULL,
+  lifecycle TEXT NOT NULL DEFAULT 'open',
+  idempotency_key TEXT NOT NULL UNIQUE,
+  created_by TEXT NOT NULL,
+  actor_authentication TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  decided_by TEXT,
+  decided_at TEXT,
+  decision_note TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_hq_missions_lifecycle ON hq_missions(lifecycle, created_at);
+
+-- Immutable intent history: one row per version, never updated. The mission
+-- row's \`intent_version\` points at the current one.
+CREATE TABLE IF NOT EXISTS hq_mission_intents (
+  mission_id TEXT NOT NULL REFERENCES hq_missions(id),
+  version INTEGER NOT NULL,
+  intent TEXT NOT NULL,
+  intent_digest TEXT NOT NULL,
+  changed_by TEXT NOT NULL,
+  changed_at TEXT NOT NULL,
+  note TEXT,
+  scope_expanded INTEGER NOT NULL DEFAULT 0,
+  removed_do_not TEXT,
+  PRIMARY KEY (mission_id, version)
+);
+
+-- Planned tasks. \`op_task_id\` links a mission task to the canonical Operator
+-- task that executes it, once one is opened; execution truth is always read
+-- from op_tasks, never copied here. \`intent_version\` is the version the task
+-- was planned under; an execution opened under an older version is STALE.
+CREATE TABLE IF NOT EXISTS hq_mission_tasks (
+  id TEXT PRIMARY KEY,
+  mission_id TEXT NOT NULL REFERENCES hq_missions(id),
+  task_key TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  depends_on TEXT NOT NULL,
+  risk_class TEXT NOT NULL,
+  requires_founder_approval INTEGER NOT NULL,
+  scope TEXT NOT NULL,
+  do_not TEXT NOT NULL,
+  intent_version INTEGER NOT NULL,
+  op_task_id TEXT,
+  execution_intent_version INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (mission_id, task_key)
+);
+CREATE INDEX IF NOT EXISTS idx_hq_mission_tasks_op_task ON hq_mission_tasks(op_task_id);
+
+-- Founder-visible decisions a mission is blocked on: a material ambiguity or a
+-- hard Founder gate the command appears to require. Open decisions make the
+-- derived status \`blocked\`; nothing plans around them.
+CREATE TABLE IF NOT EXISTS hq_mission_decisions (
+  id TEXT PRIMARY KEY,
+  mission_id TEXT NOT NULL REFERENCES hq_missions(id),
+  kind TEXT NOT NULL,
+  question TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  raised_at TEXT NOT NULL,
+  resolved_by TEXT,
+  resolved_at TEXT,
+  resolution TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_hq_mission_decisions_open ON hq_mission_decisions(mission_id, status);
 `;
 
 /**

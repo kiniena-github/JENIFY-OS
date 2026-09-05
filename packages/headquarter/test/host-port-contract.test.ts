@@ -97,7 +97,10 @@ describe('obligation 1 — the session port is asked on every request', () => {
   it('refuses every route when no session resolves', () => {
     const { deps } = host({}, null);
     for (const path of Object.values(CONTROL_ROUTES)) {
-      const writes = path.includes('approve') || path.includes('deny') || path.endsWith('orders');
+      // `/missions/cancel` (Phase 3, issue #253) is POST-only; `/missions`
+      // answers both verbs and is exercised here as the read it also is.
+      const writes =
+        path.includes('approve') || path.includes('deny') || path.endsWith('orders') || path.endsWith('cancel');
       const result = handleControlRequest(writes ? post(path) : get(path), deps);
       expect(result.status, `${path} must not answer an unauthenticated caller`).toBe(401);
     }

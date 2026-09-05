@@ -407,6 +407,11 @@ import {
   type MissionProposal,
   type MissionProposalStatus,
 } from './missions.js';
+import { MissionCore } from './mission-core.js';
+import {
+  DEFAULT_ACTOR_AUTHENTICATION,
+  isCallerAssertableActorAuthentication,
+} from '../live/local-trust.js';
 
 // ---- result contract ----
 
@@ -431,7 +436,13 @@ export type OpsErrorCode =
   | 'proposal_not_found'
   | 'proposal_not_open'
   | 'proposal_digest_mismatch'
-  | 'replacement_blocked';
+  | 'replacement_blocked'
+  /**
+   * Phase 3 (issue #253): the task executes a mission task, and the mission's
+   * Founder intent has moved on since that execution was opened. A stale
+   * approval cannot authorize changed intent, so the approval is refused.
+   */
+  | 'mission_intent_changed';
 
 export interface OpsError {
   code: OpsErrorCode;
@@ -848,6 +859,22 @@ export class HeadquarterOperations {
    */
   readonly #capabilityFromStore: (id: string) => Capability | null;
 
+  /**
+   * Phase 3 Mission Core (issue #253): Founder Command → canonical mission.
+   *
+   * A public collaborator, deliberately, and the reason it is safe to be one
+   * is the reason the rest of this class is built the way it is: `MissionCore`
+   * holds no authority of its own. It is constructed here and nowhere else,
+   * and every gate it applies is a closure over THIS instance's `#private`
+   * resolvers and the privileged queue — the same deny-by-default requester
+   * resolution, the same approval-authority assertion as the kill switch, the
+   * same evidence writer. Patching a method on `ops.missions` changes what the
+   * patcher's own call does and nothing about what any gate decides, which is
+   * the standard `queue.get` and `lookupPrincipal` already meet. Its database
+   * handle is `#private` inside it for the same reason `#db` is here.
+   */
+  readonly missions: MissionCore;
+
   constructor(db: HqDatabase, options: HeadquarterOperationsOptions = {}) {
     this.#db = db;
     this.#capabilityFromStore = (capabilityId: string): Capability | null => {
@@ -960,6 +987,29 @@ export class HeadquarterOperations {
       isRegistered: (workerId: string) => this.#workers.isRegistered(workerId),
       assignability: (workerId: string) => this.#workers.assignability(workerId),
     };
+
+    // Mission Core, wired to this instance's own gates. Every closure below
+    // resolves through a `#private` member or the privileged queue, so the
+    // mission layer cannot be handed a weaker authority than the task layer.
+    this.missions = new MissionCore({
+      db,
+      privileged: () => this.#requirePrivilegedQueue(),
+      resolveRequester: (actor, action) => this.#resolveRequester(actor, action),
+      assertApprovalAuthority: (actor, action) => {
+        const refusal = this.#assertApprovalAuthority(actor, action);
+        return refusal && !refusal.ok ? refusal : null;
+      },
+      capabilityRow: (capabilityId) => this.#capabilityFromStore(capabilityId),
+      killSwitchEngaged: (capabilityId) => this.queue.killSwitchEngaged(capabilityId),
+      taskById: (taskId) => this.queue.get(taskId),
+      createTask: (input) => this.createTask(input),
+      denyTask: (input) => this.denyTask(input),
+      appendEvent: (event) => {
+        this.#store.appendEvent(event);
+      },
+      isCallerAssertableActorAuthentication: (value) => isCallerAssertableActorAuthentication(value),
+      defaultActorAuthentication: DEFAULT_ACTOR_AUTHENTICATION,
+    });
 
     // LAST in the constructor, deliberately. The grant is a closure over `this`
     // and the caller may use it the moment it is handed over, so every field it
@@ -1270,6 +1320,34 @@ export class HeadquarterOperations {
         'action_digest_mismatch',
         `Task ${task.id}: the action changed since it was presented for approval; nothing was approved`,
         { expected: input.expectedActionDigest ?? null, current: currentDigest },
+      );
+    }
+
+    // Phase 3 (issue #253): a task that executes a mission task carries the
+    // intent version it was opened under. If the Founder has since revised the
+    // mission's intent, the action the approver is looking at was planned
+    // against a goal that no longer holds — so the approval is refused, before
+    // any approval row exists, exactly as a digest mismatch is. A STRICTER
+    // precondition on the existing gate; it adds no second approval system,
+    // and a task belonging to no mission is unaffected.
+    const staleness = this.missions.executionIntentStaleness(task.id);
+    if (staleness?.stale) {
+      this.#requirePrivilegedQueue().appendEvidence({
+        taskId: task.id,
+        actor: input.founderId,
+        kind: 'approval_refused_mission_intent_changed',
+        payload: {
+          missionId: staleness.missionId,
+          executionIntentVersion: staleness.executionVersion,
+          currentIntentVersion: staleness.currentVersion,
+        },
+      });
+      return fail(
+        'mission_intent_changed',
+        `Task ${task.id} executes mission ${staleness.missionId} under intent v${staleness.executionVersion}, but the ` +
+          `mission is now at v${staleness.currentVersion}. A stale execution cannot be approved against changed ` +
+          'Founder intent; nothing was approved. Open the task again under the current intent.',
+        { missionId: staleness.missionId, executionIntentVersion: staleness.executionVersion, currentIntentVersion: staleness.currentVersion },
       );
     }
 

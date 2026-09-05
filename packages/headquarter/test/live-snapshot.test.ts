@@ -43,6 +43,7 @@ function sources(overrides: Partial<SnapshotSources> = {}): SnapshotSources {
     workforce: { data: [], provenance },
     capabilities: { data: [], provenance },
     activity: { data: [], provenance },
+    missions: { data: [], provenance },
     ...overrides,
   };
 }

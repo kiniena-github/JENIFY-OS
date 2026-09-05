@@ -60,6 +60,7 @@ import {
   directOrderConsoleScript,
   approvalsConsoleScript,
   connectionsLiveScript,
+  missionConsoleScript,
 } from './control-console.js';
 import {
   AUTH_MECHANISM_LABELS,
@@ -452,6 +453,23 @@ export interface CommandCenterInput {
   orderRoutes?: DirectOrderRouteAvailability[];
 }
 
+/**
+ * The Mission Core section's STATIC half (Phase 3, issue #253).
+ *
+ * Inert by construction, like the Direct Order composer above it: no form, no
+ * button, no input in the markup. The build holds no HQ database and no
+ * session, so it cannot know which missions exist or whether this reader may
+ * command — it states the rules, and `missionConsoleScript` draws the working
+ * composer and the live list only after `/session` answers.
+ */
+function founderCommandPanel(): string {
+  return `<div class="panel">
+<p class="muted">A Founder command in plain language becomes a <b>canonical mission</b>: a locked objective, explicit <code>do_not</code> rules and constraints, a dependency-ordered task plan, and a status derived from canonical task truth — never from a count. The command text itself stays server-side; this console shows what HQ <em>understood</em>, with the command's digest as provenance.</p>
+<p class="muted">A command that appears to require a Founder hard gate — production deployment, DNS, spend, credentials, destructive data changes, legal commitments — is recorded as <b>BLOCKED on a decision</b> rather than planned around. A mission executes nothing by itself: each task becomes work only through the ordinary gated task path, under the unchanged approval, provider-binding and kill-switch rules.</p>
+<div data-mission-console></div>
+</div>`;
+}
+
 export function renderCommandCenter({
   dashboard,
   workers,
@@ -589,6 +607,8 @@ ${directOrderConsoleScript({
   ready: ROUTE_STATE_PRESENTATION.ready,
   blocked: ROUTE_STATE_PRESENTATION.blocked,
 })}
+${section('FOUNDER COMMAND — MISSION CORE', founderCommandPanel(), 'founder-command')}
+${missionConsoleScript()}
 <div class="grid grid-lanes">${lanes}</div>
 </div>
 <div>

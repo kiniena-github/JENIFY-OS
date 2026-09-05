@@ -160,11 +160,21 @@ export const HQ_ROOMS: readonly HqRoom[] = [
     id: 'mission-room',
     ordinal: 3,
     name: 'Mission Room',
-    purpose: 'Every recorded mission, by the status the canonical queue holds for it.',
+    purpose:
+      'Every Founder-commanded mission with its locked goal, plan and derived status — and every ' +
+      'recorded task, by the status the canonical queue holds for it.',
     binding: {
       kind: 'live',
       section: 'missions',
-      source: 'operations section — the same canonical task cards, grouped by status',
+      // Two sources, both named (Phase 3, issue #253). The mission records come
+      // from the missions section — `MissionCore.list` over hq_missions, with
+      // status DERIVED from canonical op_tasks truth, never stored as a claim.
+      // The task cards are the same canonical cards the Command Room shows,
+      // grouped by status, exactly as before Phase 3.
+      source:
+        'missions section — hq_missions / hq_mission_tasks via MissionCore.list, status derived from ' +
+        'canonical op_tasks truth; plus the operations section — the same canonical task cards, ' +
+        'grouped by status',
     },
     placement: { ring: 1, slot: 1 },
     page: 'projects.html',

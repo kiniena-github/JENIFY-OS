@@ -31,6 +31,13 @@ nothing until a Founder explicitly registers someone.
 `src/store/db.ts` is deliberately **not** edited, so this lane can land beside
 the other #117 lanes without schema conflicts.
 
+> Phase 3 (issue #253) later added `src/application/mission-domain.ts` and
+> `src/application/mission-core.ts` — the Founder Command → canonical mission
+> layer, exposed as `HeadquarterOperations.missions` — and its four tables in
+> `src/store/db.ts` itself, so the durable-volume owner migrates them. See
+> `PHASE_3_FOUNDER_COMMAND_MISSION_CORE.md`. The proposal table above is
+> unchanged.
+
 ---
 
 ## 2. The lifecycle

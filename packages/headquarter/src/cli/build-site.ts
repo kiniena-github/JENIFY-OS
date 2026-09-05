@@ -164,6 +164,18 @@ const snapshot = buildHqSnapshot({
     data: data.events,
     provenance: { mode: data.sourceMode ?? 'sample', source: `bundle.events (${dataPathLabel})`, asOf },
   },
+  missions: {
+    // Synthetic, for the same reason as the console and capability sections:
+    // no HQ database is opened by this build, so there are no missions to
+    // read, and the empty array says so with a static provenance rather than
+    // letting a bundle stamp LIVE over a section nothing produced.
+    data: [],
+    provenance: {
+      mode: staticSectionMode(data.sourceMode),
+      source: 'no mission store is open in a static build',
+      asOf,
+    },
+  },
 });
 
 writeFileSync(join(outDir, SNAPSHOT_FILENAME), `${JSON.stringify(snapshot, null, 2)}\n`);

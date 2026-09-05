@@ -246,8 +246,46 @@ function operationsSection(state: HqStateDocument): Section {
   };
 }
 
+/**
+ * Mission status → chip/metric tone. `attention` statuses are the ones a
+ * Founder must act on; `working` is live motion; the rest are settled.
+ */
+const MISSION_ATTENTION_STATUSES = new Set(['blocked', 'ready_review', 'failed']);
+const MISSION_ACTIVE_STATUSES = new Set(['working']);
+
+function missionTone(status: string): RoomTone {
+  if (MISSION_ATTENTION_STATUSES.has(status)) return 'warn';
+  if (MISSION_ACTIVE_STATUSES.has(status)) return 'info';
+  if (status === 'complete' || status === 'verified') return 'accent';
+  return 'neutral';
+}
+
+function missionRow(mission: HqStateDocument['missions']['data'][number]): RoomRow {
+  const open = mission.decisions.filter((decision) => decision.status === 'open').length;
+  const chips: RoomChip[] = [
+    { label: mission.status, tone: missionTone(mission.status) },
+    { label: mission.priority, tone: 'neutral' },
+    { label: `${mission.tasks.length} task(s)`, tone: 'neutral' },
+    { label: `intent v${mission.intentVersion}`, tone: 'neutral' },
+  ];
+  if (open > 0) chips.push({ label: `${open} decision(s) need you`, tone: 'warn' });
+  if (mission.project) chips.push({ label: mission.project, tone: 'violet' });
+  return {
+    id: mission.id,
+    primary: mission.title,
+    // The NORMALIZED objective — what HQ understood — never the command text,
+    // which the read model does not carry. The block reason, when there is
+    // one, is the sentence a Founder needs first.
+    secondary: mission.blockReason
+      ? `${mission.intent.objective} — BLOCKED: ${mission.blockReason}`
+      : `${mission.intent.objective} · ${mission.intent.doNot.length} do-not rule(s) · updated ${mission.updatedAt}`,
+    chips,
+  };
+}
+
 function missionsSection(state: HqStateDocument): Section {
   const ops = state.operations.data;
+  const missions = state.missions.data;
   const all = [
     ...ops.approvals,
     ...ops.pendingReviews,
@@ -258,6 +296,8 @@ function missionsSection(state: HqStateDocument): Section {
   ];
   const byStatus = new Map<string, number>();
   for (const task of all) byStatus.set(task.status, (byStatus.get(task.status) ?? 0) + 1);
+  const missionsByStatus = new Map<string, number>();
+  for (const mission of missions) missionsByStatus.set(mission.status, (missionsByStatus.get(mission.status) ?? 0) + 1);
   // Liveness comes from CANONICAL BUCKET MEMBERSHIP, not from re-reading the
   // raw status strings — and from exactly the same arithmetic the Command Room
   // uses, so the two rooms cannot disagree about the same tasks.
@@ -278,20 +318,37 @@ function missionsSection(state: HqStateDocument): Section {
   // The status counts below stay as they are: they are honest copies of what
   // canonical state records, and a status is a fact about a task. What may not
   // be re-derived from them is whether the room is lit.
-  const attention = ops.blocked.length + ops.outcomeUnknown.length + ops.approvals.length;
-  const active = ops.inFlight.length;
+  //
+  // Phase 3 (issue #253) ADDS the mission records to the same arithmetic. A
+  // mission's status is itself derived server-side from canonical task truth
+  // plus open Founder decisions, so lighting the room from it is lighting it
+  // from evidence: a blocked or ready-for-review mission is attention, a
+  // working mission is active, and a planned one is merely present. With no
+  // missions recorded the sums below are exactly what they were before.
+  const missionAttention = missions.filter((mission) => MISSION_ATTENTION_STATUSES.has(mission.status)).length;
+  const missionActive = missions.filter((mission) => MISSION_ACTIVE_STATUSES.has(mission.status)).length;
+  const attention = ops.blocked.length + ops.outcomeUnknown.length + ops.approvals.length + missionAttention;
+  const active = ops.inFlight.length + missionActive;
   return {
     metrics: [
-      metric('Missions recorded', all.length, 'Every open task the canonical queue holds.', tone(all.length, 'info')),
+      metric('Missions recorded', missions.length, 'Founder-commanded missions HQ holds, in any lifecycle state.', tone(missions.length, 'info')),
+      ...[...missionsByStatus.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([status, count]) =>
+          metric(`mission ${status}`, count, `Missions whose derived status is ${status}.`, missionTone(status) === 'neutral' ? 'neutral' : missionTone(status)),
+        ),
+      metric('Tasks recorded', all.length, 'Every open task the canonical queue holds.', tone(all.length, 'info')),
       ...[...byStatus.entries()]
         .sort((a, b) => a[0].localeCompare(b[0]))
         .map(([status, count]) =>
           metric(status, count, `Tasks whose canonical status is ${status}.`, ATTENTION_STATUSES.has(status) ? 'warn' : 'neutral'),
         ),
     ],
-    rows: limited(all.map(taskRow)),
-    emptyMessage: 'The canonical queue holds no open mission. Nothing is hidden behind this view.',
-    liveness: livenessFrom({ attention, active, present: all.length }),
+    rows: limited([...missions.map(missionRow), ...all.map(taskRow)]),
+    emptyMessage:
+      'No Founder mission is recorded and the canonical queue holds no open task. Nothing is hidden behind ' +
+      'this view; the Command Room composer is where a Founder command becomes a mission.',
+    liveness: livenessFrom({ attention, active, present: all.length + missions.length }),
   };
 }
 

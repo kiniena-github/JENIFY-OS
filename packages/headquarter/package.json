@@ -29,6 +29,7 @@
     "inventory": "tsx src/cli/inventory.ts",
     "build:site": "tsx src/cli/build-site.ts",
     "hq:order": "tsx src/cli/direct-order.ts",
+    "hq:founder-command": "tsx src/cli/founder-command.ts",
     "hq:snapshot": "tsx src/cli/snapshot.ts",
     "hq:dispatch-claude": "tsx src/cli/claude-dispatch.ts",
     "hq:ingest-claude": "tsx src/cli/claude-ingest.ts",

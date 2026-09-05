@@ -14,13 +14,26 @@
  *
  * ## What is exposed, and what deliberately is not
  *
- * Five routes, matched exactly, deny-by-default on everything else:
+ * Nine routes, matched exactly, deny-by-default on everything else:
  *
  *   GET  /api/hq/control/session            who am I, and are the controls on
  *   GET  /api/hq/control/approvals          the pending approvals + digests
+ *   GET  /api/hq/control/state              canonical state, projected into rooms
+ *   GET  /api/hq/control/missions           Phase 3 missions, browser-safe read model
  *   POST /api/hq/control/orders             create a canonical direct order
+ *   POST /api/hq/control/missions           Founder Command → canonical mission
+ *   POST /api/hq/control/missions/cancel    cancel a mission through the honest path
  *   POST /api/hq/control/approvals/approve  approve the exact rendered action
  *   POST /api/hq/control/approvals/deny     deny, with a reason
+ *
+ * The two Phase 3 writes (issue #253) call `ops.missions.createFromCommand`
+ * and `ops.missions.cancel` — the same `MissionCore` the CLI and the tests
+ * hold, constructed by `HeadquarterOperations` over its own gates. There is
+ * deliberately NO browser route that revises a mission's intent, resolves a
+ * decision, decides an outcome or opens task work: each is a Founder decision
+ * or a worker act with its own step-up/independence consequences, and none is
+ * needed for the Founder to command, see and cancel missions. Adding one is a
+ * reviewed change to this table, not a body field.
  *
  * There is **no ask-for-changes route**, and its absence is a decision rather
  * than an omission. The canonical approval model has exactly two outcomes:
@@ -79,6 +92,8 @@ import {
   type SessionResolverPort,
 } from './auth.js';
 import { assertBrowserSafe } from './redaction.js';
+import { FOUNDER_COMMAND_CAPABILITY, type MissionErrorCode } from '../application/mission-core.js';
+import { MISSION_PRIORITIES, type MissionPriority } from '../application/mission-domain.js';
 import {
   directOrderCapabilityState,
   directOrderDispatchBlocked,
@@ -118,9 +133,23 @@ export const CONTROL_ROUTES = {
    */
   state: `${CONTROL_API_PREFIX}/state`,
   orders: `${CONTROL_API_PREFIX}/orders`,
+  /**
+   * Phase 3 (issue #253). GET lists the browser-safe mission read model; POST
+   * issues a Founder Command. One path, two verbs, both Founder-gated.
+   *
+   * The list carries every mission's FULL view (plan, decisions, intent), so
+   * "open a mission" is a client-side selection over a document this route
+   * already vouched for — a per-mission route would need a path parameter,
+   * and this table is exact-match on purpose.
+   */
+  missions: `${CONTROL_API_PREFIX}/missions`,
+  missionCancel: `${CONTROL_API_PREFIX}/missions/cancel`,
   approve: `${CONTROL_API_PREFIX}/approvals/approve`,
   deny: `${CONTROL_API_PREFIX}/approvals/deny`,
 } as const;
+
+/** A cancellation reason is persisted and evidenced, so it is bounded like a denial reason. */
+export const MAX_MISSION_CANCEL_REASON_LENGTH = 500;
 
 export interface ControlResponse {
   status: number;
@@ -286,9 +315,12 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     (method === 'GET' &&
       (path === CONTROL_ROUTES.session ||
         path === CONTROL_ROUTES.approvals ||
-        path === CONTROL_ROUTES.state)) ||
+        path === CONTROL_ROUTES.state ||
+        path === CONTROL_ROUTES.missions)) ||
     (method === 'POST' &&
       (path === CONTROL_ROUTES.orders ||
+        path === CONTROL_ROUTES.missions ||
+        path === CONTROL_ROUTES.missionCancel ||
         path === CONTROL_ROUTES.approve ||
         path === CONTROL_ROUTES.deny));
   if (!known) {
@@ -523,6 +555,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     );
   }
 
+  if (method === 'GET' && path === CONTROL_ROUTES.missions) return listMissions(deps, founder, audit, now);
+  if (path === CONTROL_ROUTES.missions) return createMission(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.missionCancel) return cancelMission(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.orders) return createOrder(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.approve) return approve(request, deps, founder, audit, now);
   return deny(request, deps, founder, audit);
@@ -571,8 +606,18 @@ function controlAvailability(
   const mayApprove = writable && principal?.approvalAuthority === true;
   const mayOriginate =
     writable && principal?.originateCapabilities.includes(DIRECT_ORDER_CAPABILITY.id) === true;
+  // Phase 3 (issue #253): the same rule, for the same reason. A Founder Command
+  // is refused by `MissionCore.createFromCommand` unless the principal holds
+  // the ORIGINATE grant for `hq.founder_command` and the capability row is
+  // registered, enabled and unaltered — so the composer is advertised on
+  // exactly those conditions, and cancellation on the approval authority that
+  // `MissionCore.cancel` demands.
+  const mayCommand =
+    writable && principal?.originateCapabilities.includes(FOUNDER_COMMAND_CAPABILITY.id) === true;
   return {
     directOrder: mayOriginate && directOrderCapabilityState(deps.ops) === 'enabled',
+    founderCommand: mayCommand && deps.ops.missions.capabilityState() === 'enabled',
+    cancelMission: mayApprove,
     approve: mayApprove,
     deny: mayApprove,
     mutationsEnabled: deps.mutationsEnabled !== false,
@@ -739,6 +784,195 @@ function createOrder(
       actionDigest: taskActionDigest(task),
     }),
   );
+}
+
+/**
+ * HTTP status for a mission-layer refusal. The same reasoning as the order
+ * path: a refusal that is a property of the SERVER's configuration or of the
+ * caller's authority is 403 (nothing you change in this request will help); a
+ * refusal about the request's own content is 400; a refusal that names state
+ * the caller read stale is 409, so the console re-reads rather than retries.
+ */
+function missionErrorStatus(code: MissionErrorCode): number {
+  switch (code) {
+    case 'mission_not_found':
+    case 'decision_not_found':
+    case 'mission_task_not_found':
+      return 404;
+    case 'stale_intent_version':
+    case 'mission_not_open':
+    case 'mission_status_forbids':
+    case 'cancellation_blocked':
+    case 'mission_task_already_opened':
+      return 409;
+    case 'capability_not_registered':
+    case 'capability_disabled':
+    case 'capability_definition_altered':
+    case 'unknown_principal':
+    case 'not_permitted':
+    case 'kill_switch_engaged':
+    case 'humans_do_not_execute':
+    case 'worker_not_assignable':
+      return 403;
+    default:
+      return 400;
+  }
+}
+
+/**
+ * The browser-safe mission read model, for a Founder session. READ ONLY, and
+ * the same `MissionCore.list` the state route's `missions` section carries —
+ * one projection, so the Mission Room and this list cannot disagree. Bounded
+ * by `MISSION_LIST_LIMIT`; the response says when it is the whole set.
+ */
+function listMissions(deps: ControlApiDeps, founder: ResolvedFounder, audit: Audit, now: () => Date): ControlResponse {
+  const missions = deps.ops.missions.list();
+  audit('allowed', 'list_missions', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      // Stated, so the browser can show it: what this list is derived from.
+      provenance: 'hq_missions / hq_mission_tasks / hq_mission_decisions via MissionCore.list; status derived from canonical op_tasks truth',
+      missions,
+    }),
+  );
+}
+
+/**
+ * Founder Command → canonical mission.
+ *
+ * The body may carry the instruction, an optional title/project/product, a
+ * priority and a client idempotency key — and nothing else that decides
+ * anything. There is deliberately NO `plan` field on the browser path: a
+ * structured planner result is the seam a later AI planner uses in-process,
+ * and accepting one from a request body would make the browser a planner. The
+ * acting principal is the server-resolved Founder, exactly as for an order.
+ */
+function createMission(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const instruction = stringField(request.body, 'instruction') ?? '';
+  const title = stringField(request.body, 'title');
+  const project = stringField(request.body, 'project');
+  const product = stringField(request.body, 'product');
+  const priorityRaw = stringField(request.body, 'priority');
+  const clientKey = stringField(request.body, 'idempotencyKey');
+  if (priorityRaw !== undefined && !(MISSION_PRIORITIES as readonly string[]).includes(priorityRaw)) {
+    audit('refused', 'invalid_priority', founder);
+    return refusal(400, 'invalid_input', `Unknown priority. Choose one of: ${MISSION_PRIORITIES.join(', ')}.`);
+  }
+  if (request.body != null && typeof request.body === 'object' && 'plan' in (request.body as Record<string, unknown>)) {
+    audit('refused', 'plan_not_accepted_from_browser', founder);
+    return refusal(
+      400,
+      'invalid_input',
+      'A structured plan is not accepted from the browser. HQ derives the plan server-side; a planner result ' +
+        'enters only through the in-process seam, where the same invariants are enforced.',
+    );
+  }
+
+  const result = deps.ops.missions.createFromCommand(
+    {
+      instruction,
+      title,
+      project,
+      product,
+      priority: priorityRaw as MissionPriority | undefined,
+      idempotencyKey: clientKey,
+      // The ONLY place the acting principal comes from. Not the body — the
+      // identity scan refuses a body that names one.
+      requestedBy: founder.principal.id,
+    },
+    // Earned, not asserted — set here, on the options object no body can
+    // populate, exactly as for a direct order.
+    { resolvedActorAuthentication: 'authenticated_os_session' },
+  );
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return safe(
+      json(missionErrorStatus(result.error.code), {
+        ok: false,
+        error: { code: result.error.code, message: result.error.message },
+      }),
+    );
+  }
+  audit('allowed', result.data.deduplicated ? 'mission_deduplicated' : 'mission_created', founder);
+  return safe(
+    json(result.data.deduplicated ? 200 : 201, {
+      ok: true,
+      missionId: result.data.mission.id,
+      status: result.data.mission.status,
+      deduplicated: result.data.deduplicated,
+      intentVersion: result.data.mission.intentVersion,
+      // The whole browser-safe view, so the console can show what HQ
+      // understood without a second round trip. Walked by `safe()` like
+      // everything else.
+      mission: result.data.mission,
+    }),
+  );
+}
+
+/**
+ * Cancel a mission. Founder authority is asserted by `MissionCore.cancel`;
+ * the fence is the intent version the console displayed, so a mission whose
+ * intent moved since the page was read is not cancelled on a stale reading.
+ */
+function cancelMission(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const missionId = stringField(request.body, 'missionId') ?? '';
+  const reason = (stringField(request.body, 'reason') ?? '').trim();
+  const versionRaw =
+    request.body != null && typeof request.body === 'object'
+      ? (request.body as Record<string, unknown>).expectedIntentVersion
+      : undefined;
+  if (!missionId || !reason || typeof versionRaw !== 'number' || !Number.isInteger(versionRaw)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(
+      400,
+      'invalid_input',
+      'A cancellation needs a missionId, a reason and the integer expectedIntentVersion that was displayed.',
+    );
+  }
+  if (reason.length > MAX_MISSION_CANCEL_REASON_LENGTH) {
+    audit('refused', 'reason_too_long', founder);
+    return refusal(400, 'reason_too_long', `A cancellation reason may be at most ${MAX_MISSION_CANCEL_REASON_LENGTH} characters.`);
+  }
+  try {
+    assertBrowserSafe({ reason }, 'cancellation');
+  } catch {
+    audit('refused', 'unsafe_reason', founder);
+    return refusal(
+      400,
+      'unsafe_reason',
+      'The cancellation reason looks like it contains a credential. Cancellations are recorded in the ' +
+        'append-only evidence log, so nothing was written.',
+    );
+  }
+  const result = deps.ops.missions.cancel({
+    missionId,
+    founderId: founder.principal.id,
+    expectedIntentVersion: versionRaw,
+    reason,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return safe(
+      json(missionErrorStatus(result.error.code), {
+        ok: false,
+        error: { code: result.error.code, message: result.error.message },
+      }),
+    );
+  }
+  audit('allowed', 'mission_cancelled', founder);
+  return safe(json(200, { ok: true, missionId, status: result.data.status, mission: result.data }));
 }
 
 function approve(
