@@ -563,6 +563,51 @@ describe('approvals under a mission keep every canonical rule, and gain one', ()
     expect(refused(fx.ops.missions.openTaskWork({ missionId, missionTaskId: `${missionId}/index`, requestedBy: 'claude', expectedIntentVersion: 2, capabilityId: CAPS.indexDoc, payload: {} }))).toBe('mission_task_already_opened');
   });
 
+  it('supersedes an approval it already granted when the intent moves, and re-opens the task under the new one', () => {
+    const opened = missionOk(
+      fx.ops.missions.openTaskWork({ missionId, missionTaskId: `${missionId}/index`, requestedBy: 'claude', expectedIntentVersion: 1, capabilityId: CAPS.indexDoc, payload: { doc: 'launch-notes' } }),
+    );
+    const digest = taskActionDigest(fx.ops.queue.get(opened.task.id)!);
+    expectOk(fx.ops.approveTask({ taskId: opened.task.id, founderId: 'coo', expectedActionDigest: digest }));
+    expect(fx.ops.queue.get(opened.task.id)!.status).toBe('queued');
+
+    // The gap this closes: the approval above was granted under v1 and is
+    // unexpired, so `approveTask`'s refusal never runs again and the next claim
+    // would consume it against a goal the Founder has since replaced.
+    missionOk(
+      fx.ops.missions.reviseIntent({
+        missionId,
+        founderId: 'founder',
+        expectedIntentVersion: 1,
+        doNot: ['touching the public site'],
+        note: 'narrowed after the approval was granted',
+      }),
+    );
+    const superseded = fx.ops.queue.get(opened.task.id)!;
+    expect(superseded.status).toBe('blocked');
+    expect(superseded.blockReason).toContain('intent revised to v2');
+    // Nothing had been claimed and nothing ran.
+    expect(superseded.claimedBy).toBeNull();
+    const revised = fx.ops.queue.evidence.list().find((entry) => entry.kind === 'mission_intent_revised')!;
+    expect(revised.payload.supersededExecutions).toEqual([opened.task.id]);
+
+    // And the revision is not a dead end: the mission task re-opens under v2 as
+    // a NEW action with its own idempotency key and its own approval to come.
+    const reopened = missionOk(
+      fx.ops.missions.openTaskWork({ missionId, missionTaskId: `${missionId}/index`, requestedBy: 'claude', expectedIntentVersion: 2, capabilityId: CAPS.indexDoc, payload: { doc: 'launch-notes' } }),
+    );
+    expect(reopened.task.id).not.toBe(opened.task.id);
+    expect(reopened.task.idempotencyKey).toBe(`mission-task:${missionId}/index:v2`);
+    expect(reopened.task.status).toBe('needs_approval');
+    expect(reopened.missionTask.execution).toMatchObject({ taskId: reopened.task.id, stale: false });
+    expect(
+      fx.ops.queue.evidence.list(reopened.task.id).find((entry) => entry.kind === 'mission_task_work_opened')!.payload
+        .supersededOpTaskId,
+    ).toBe(opened.task.id);
+    // The superseded row is history, never edited away.
+    expect(fx.ops.queue.get(opened.task.id)!.status).toBe('blocked');
+  });
+
   it('a current execution is approvable by an independent Founder-authority principal, with the digest', () => {
     const opened = missionOk(
       fx.ops.missions.openTaskWork({ missionId, missionTaskId: `${missionId}/index`, requestedBy: 'claude', expectedIntentVersion: 1, capabilityId: CAPS.indexDoc, payload: { doc: 'launch-notes' } }),

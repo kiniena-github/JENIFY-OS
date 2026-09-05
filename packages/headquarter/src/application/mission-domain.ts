@@ -361,20 +361,49 @@ function dedupeDecisions(decisions: RaisedDecision[]): RaisedDecision[] {
   });
 }
 
+/** Case-insensitively remove every occurrence of `clause` from `text`. */
+function excise(text: string, clause: string): string {
+  const needle = clause.trim().toLowerCase();
+  if (needle.length === 0) return text;
+  let out = '';
+  let rest = text;
+  for (;;) {
+    const at = rest.toLowerCase().indexOf(needle);
+    if (at < 0) return out + rest;
+    // A space, not an empty string: excising must not fuse the words either
+    // side of the clause into a phrase neither of them said.
+    out += `${rest.slice(0, at)} `;
+    rest = rest.slice(at + needle.length);
+  }
+}
+
 /**
- * Founder hard gates the command appears to REQUIRE. A match whose phrase also
- * appears inside a do-not constraint is a prohibition, not a requirement, and
- * is discounted.
+ * Founder hard gates the command appears to REQUIRE.
+ *
+ * The patterns are matched against the REQUIRING half of the command — the
+ * text with every do-not clause excised — because "without deploying to
+ * production" is a constraint HQ can honour while "and deploy to production"
+ * is a gate HQ must stop at, and the difference is WHERE the phrase sits.
+ *
+ * This used to compare the matched phrase against each do-not clause by
+ * substring instead, in both directions and regardless of position, which was
+ * wrong in both directions at once. It discounted a genuine gate whenever any
+ * unrelated do-not clause happened to mention the same word — "Set up DNS for
+ * the new domain. Do not change the DNS TTL." lost its `dns_or_domain`
+ * decision and the mission was created unblocked — and, because a clause is
+ * split on commas and `and`/`or`, a two-character fragment could discount a
+ * gate by appearing inside its phrase. Excision states the positional rule the
+ * comment always claimed, and has neither failure mode.
  */
 export function detectFounderGates(text: string, doNot: readonly string[]): FounderGateSignal[] {
-  const prohibited = doNot.map((clause) => clause.toLowerCase());
+  let requiring = text;
+  for (const clause of doNot) requiring = excise(requiring, clause);
   const signals: FounderGateSignal[] = [];
   for (const { kind, pattern } of FOUNDER_GATE_PATTERNS) {
-    const match = pattern.exec(text);
+    const match = pattern.exec(requiring);
     if (!match) continue;
-    const phrase = collapseWhitespace(match[0]).toLowerCase();
-    if (prohibited.some((clause) => clause.includes(phrase) || phrase.includes(clause))) continue;
     if (signals.some((signal) => signal.kind === kind)) continue;
+    const phrase = collapseWhitespace(match[0]).toLowerCase();
     signals.push({ kind, phrase: phrase.length > 60 ? `${phrase.slice(0, 59)}…` : phrase });
   }
   return signals;

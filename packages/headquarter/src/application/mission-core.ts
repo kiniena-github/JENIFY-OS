@@ -446,6 +446,46 @@ interface DecisionRow {
 /** Op statuses that make honest cancellation impossible from this layer. */
 const UNCANCELLABLE_EXECUTION_STATUSES: readonly string[] = ['queued', 'assigned', 'running', 'outcome_unknown'];
 
+/**
+ * Op statuses an intent revision SUPERSEDES: approved but not yet claimed.
+ *
+ * `queued` is the one status where a live Founder approval could still admit
+ * execution after the goal it was granted under has changed — the approval is
+ * unexpired, so `returnForFreshApproval` is a documented no-op on it, and the
+ * next claim would consume it. Revising the intent therefore denies these
+ * through the ordinary `denyTask` gate: nothing has been claimed and nothing
+ * has run, and a denial is not an authorization.
+ *
+ * `needs_approval` is deliberately NOT here. It is already covered, harder, by
+ * `HeadquarterOperations.approveTask`'s `mission_intent_changed` refusal, and
+ * denying it from this side would make that guard unreachable on the path it
+ * exists for. `assigned` / `running` are not here either: this layer cannot
+ * honestly stop claimed work — the Operator's kill switch, review and
+ * reconciliation own that, exactly as `cancel()` already says — so a revision
+ * records them as stale in flight and stops them from being APPROVED again
+ * rather than pretending to halt them.
+ */
+const SUPERSEDED_BY_REVISION_STATUSES: readonly string[] = ['queued'];
+
+/**
+ * Op statuses a mission task may be RE-OPENED past once its execution is
+ * stale: the work is over and it did not succeed.
+ *
+ * Without this a revision was a dead end. An execution opened under v1 can
+ * neither be approved after v2 (`mission_intent_changed`) nor replaced
+ * (`mission_task_already_opened`), so the mission task had no forward path at
+ * all and cancelling the whole mission was the only escape. A stale execution
+ * that is finished and unsuccessful is superseded by a fresh one under the
+ * current intent; the old `op_tasks` row and its evidence are untouched, which
+ * is what keeps this a supersession rather than an edit.
+ *
+ * Every other status still refuses: `needs_approval` and `queued` are live
+ * decisions (the Founder denies one deliberately, and it becomes `blocked`
+ * here), `assigned` / `running` / `outcome_unknown` are unfinished, and
+ * `completed` / `review_passed` succeeded and are not re-done.
+ */
+const REOPENABLE_EXECUTION_STATUSES: readonly string[] = ['blocked', 'review_failed'];
+
 export const MISSION_LIST_LIMIT = 100;
 
 function parseJsonArray(text: string): string[] {
@@ -770,63 +810,104 @@ export class MissionCore {
       return fail('invalid_input', 'The revision looks like it contains a credential; nothing was written.');
     }
 
+    // Executions the revision must act on, read before the write so the
+    // refusal-free part of this method stays a pure decision.
+    const executions = this.#taskRows(row.id)
+      .filter((task) => task.op_task_id !== null)
+      .map((task) => ({ task, op: this.#deps.taskById(task.op_task_id!) }));
+    const superseded = executions.filter((entry) => entry.op && SUPERSEDED_BY_REVISION_STATUSES.includes(entry.op.status));
+    const staleInFlight = executions.filter((entry) => entry.op && ['assigned', 'running', 'outcome_unknown'].includes(entry.op.status));
+
     const privileged = this.#deps.privileged();
-    const view = privileged.reserve((): MissionView => {
-      const at = nowIso();
-      const version = row.intent_version + 1;
-      const hash = intentDigest(revised.outcome.next);
-      this.#db
-        .prepare(
-          `INSERT INTO hq_mission_intents
-             (mission_id, version, intent, intent_digest, changed_by, changed_at, note, scope_expanded, removed_do_not)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          row.id,
-          version,
-          JSON.stringify(revised.outcome.next),
-          hash,
-          input.founderId,
-          at,
-          input.note.trim(),
-          revised.outcome.scopeExpanded ? 1 : 0,
-          revised.outcome.removedDoNot.length > 0 ? JSON.stringify(revised.outcome.removedDoNot) : null,
-        );
-      // Fenced UPDATE: the row must still be at the version the caller read.
-      const updated = this.#db
-        .prepare(
-          `UPDATE hq_missions SET intent = ?, intent_digest = ?, intent_version = ?, risk_ceiling = ?, updated_at = ?
-           WHERE id = ? AND intent_version = ?`,
-        )
-        .run(JSON.stringify(revised.outcome.next), hash, version, nextCeiling, at, row.id, row.intent_version);
-      if (updated.changes !== 1) {
-        throw new Error(`Mission ${row.id} moved past intent version ${row.intent_version} during the revision`);
-      }
-      privileged.appendEvidence({
-        actor: input.founderId,
-        kind: 'mission_intent_revised',
-        payload: {
-          missionId: row.id,
-          fromVersion: row.intent_version,
-          toVersion: version,
-          intentDigest: hash,
-          scopeExpanded: revised.outcome.scopeExpanded,
-          removedDoNot: revised.outcome.removedDoNot,
-          riskCeiling: nextCeiling,
-          staleExecutions: this.#taskRows(row.id).filter((t) => t.op_task_id !== null).length,
-        },
+    let view: MissionView;
+    try {
+      view = privileged.reserve((): MissionView => {
+        const at = nowIso();
+        const version = row.intent_version + 1;
+        const hash = intentDigest(revised.outcome.next);
+        this.#db
+          .prepare(
+            `INSERT INTO hq_mission_intents
+               (mission_id, version, intent, intent_digest, changed_by, changed_at, note, scope_expanded, removed_do_not)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            row.id,
+            version,
+            JSON.stringify(revised.outcome.next),
+            hash,
+            input.founderId,
+            at,
+            input.note.trim(),
+            revised.outcome.scopeExpanded ? 1 : 0,
+            revised.outcome.removedDoNot.length > 0 ? JSON.stringify(revised.outcome.removedDoNot) : null,
+          );
+        // Fenced UPDATE: the row must still be at the version the caller read.
+        const updated = this.#db
+          .prepare(
+            `UPDATE hq_missions SET intent = ?, intent_digest = ?, intent_version = ?, risk_ceiling = ?, updated_at = ?
+             WHERE id = ? AND intent_version = ?`,
+          )
+          .run(JSON.stringify(revised.outcome.next), hash, version, nextCeiling, at, row.id, row.intent_version);
+        if (updated.changes !== 1) {
+          throw new Error(`Mission ${row.id} moved past intent version ${row.intent_version} during the revision`);
+        }
+        // The Goal Lock's teeth on an APPROVED execution. `approveTask` refuses
+        // to grant a new approval against changed intent, but an approval
+        // granted BEFORE the revision is unexpired and still admits execution,
+        // so the next claim would consume it and a worker would act on a goal
+        // the Founder has replaced. Denying it here, in the same transaction as
+        // the version bump, is what makes "a stale approval cannot authorize
+        // changed mission intent" true rather than merely displayed. Nothing
+        // was claimed and nothing ran; the task becomes `blocked` with the
+        // reason stated, and the mission task can be re-opened under v${version}.
+        for (const entry of superseded) {
+          const denied = this.#deps.denyTask({
+            taskId: entry.op!.id,
+            founderId: input.founderId,
+            reason:
+              `Mission ${row.id} intent revised to v${version}. An approval issued under v${row.intent_version} ` +
+              'cannot authorize work against changed Founder intent. Nothing ran; re-open this mission task ' +
+              'under the current intent.',
+          });
+          if (!denied.ok) {
+            throw new Error(`Could not supersede ${entry.op!.id} while revising the intent: ${denied.error.message}`);
+          }
+        }
+        privileged.appendEvidence({
+          actor: input.founderId,
+          kind: 'mission_intent_revised',
+          payload: {
+            missionId: row.id,
+            fromVersion: row.intent_version,
+            toVersion: version,
+            intentDigest: hash,
+            scopeExpanded: revised.outcome.scopeExpanded,
+            removedDoNot: revised.outcome.removedDoNot,
+            riskCeiling: nextCeiling,
+            staleExecutions: executions.length,
+            // Named, not counted: which approved executions this revision
+            // denied, and which claimed ones it could not stop.
+            supersededExecutions: superseded.map((entry) => entry.op!.id),
+            staleInFlightExecutions: staleInFlight.map((entry) => entry.op!.id),
+          },
+        });
+        const mission = this.get(row.id)!;
+        this.#deps.appendEvent({
+          subjectKind: 'mission',
+          subjectId: row.id,
+          status: null,
+          actor: input.founderId,
+          summary:
+            `Mission intent revised to v${version}${revised.outcome.scopeExpanded ? ' (scope expanded)' : ''}` +
+            (superseded.length > 0 ? `, superseding ${superseded.length} approved execution(s)` : ''),
+          detail: { missionStatus: mission.status, project: row.project ?? undefined, title: row.title },
+        });
+        return mission;
       });
-      const mission = this.get(row.id)!;
-      this.#deps.appendEvent({
-        subjectKind: 'mission',
-        subjectId: row.id,
-        status: null,
-        actor: input.founderId,
-        summary: `Mission intent revised to v${version}${revised.outcome.scopeExpanded ? ' (scope expanded)' : ''}`,
-        detail: { missionStatus: mission.status, project: row.project ?? undefined, title: row.title },
-      });
-      return mission;
-    });
+    } catch (error) {
+      return fail('operator_rejected', error instanceof Error ? error.message : String(error), { missionId: row.id });
+    }
     return ok(view);
   }
 
@@ -1084,10 +1165,27 @@ export class MissionCore {
     }
     const task = this.#taskRows(row.id).find((t) => t.id === input.missionTaskId);
     if (!task) return fail('mission_task_not_found', `Unknown mission task ${input.missionTaskId} on mission ${row.id}`);
-    if (task.op_task_id !== null) {
-      return fail('mission_task_already_opened', `Mission task ${task.task_key} already has canonical work ${task.op_task_id}.`, {
-        taskId: task.op_task_id,
-      });
+    // A mission task carries at most ONE live execution. A stale execution that
+    // is finished and unsuccessful may be SUPERSEDED by a fresh one under the
+    // current intent — see `REOPENABLE_EXECUTION_STATUSES` for why that is not
+    // a loophole and why the dead end it removes was a real one. The old
+    // `op_tasks` row is never edited or deleted; it stays exactly as it ended.
+    const previousOpTaskId = task.op_task_id;
+    if (previousOpTaskId !== null) {
+      const previous = this.#deps.taskById(previousOpTaskId);
+      const previousStale = (task.execution_intent_version ?? task.intent_version) !== row.intent_version;
+      const supersedable =
+        previous !== null && previousStale && REOPENABLE_EXECUTION_STATUSES.includes(previous.status);
+      if (!supersedable) {
+        return fail(
+          'mission_task_already_opened',
+          `Mission task ${task.task_key} already has canonical work ${previousOpTaskId}` +
+            (previous ? ` (${previous.status})` : ' that no longer resolves') +
+            '. A mission task carries one live execution; a stale one may be superseded only once it has ' +
+            'finished without success.',
+          { taskId: previousOpTaskId, status: previous?.status ?? null, stale: previousStale },
+        );
+      }
     }
     const view = current.tasks.find((t) => t.id === task.id)!;
     const incomplete = view.dependsOn.filter((key) => current.tasks.find((t) => t.key === key)?.state !== 'completed');
@@ -1137,12 +1235,15 @@ export class MissionCore {
         });
         if (!result.ok) return fromOps(result.error);
         const at = nowIso();
+        // Fenced on the link the decision above was made against, so a
+        // concurrent open — or a concurrent supersession — loses rather than
+        // silently replacing a live execution.
         const linked = this.#db
           .prepare(
             `UPDATE hq_mission_tasks SET op_task_id = ?, execution_intent_version = ?, updated_at = ?
-             WHERE id = ? AND op_task_id IS NULL`,
+             WHERE id = ? AND (op_task_id IS ?)`,
           )
-          .run(result.data.task.id, row.intent_version, at, task.id);
+          .run(result.data.task.id, row.intent_version, at, task.id, previousOpTaskId);
         if (linked.changes !== 1) throw new Error(`Mission task ${task.id} was opened concurrently`);
         this.#touch(row.id, at);
         privileged.appendEvidence({
@@ -1156,6 +1257,8 @@ export class MissionCore {
             capabilityId: input.capabilityId,
             riskClass: capability.riskClass,
             deduplicated: result.data.deduplicated,
+            /** The finished, stale execution this one supersedes, when there was one. */
+            supersededOpTaskId: previousOpTaskId,
           },
         });
         const mission = this.get(row.id)!;

@@ -90,6 +90,16 @@ describe('normalizing a Founder command', () => {
     expect(detectFounderGates('Ship it and deploy to production', [])).toHaveLength(1);
   });
 
+  it('still raises a gate the command REQUIRES when a do-not clause merely mentions the same word', () => {
+    // The gate is required by the first sentence and only mentioned by the
+    // second. Discounting by substring against the whole do-not list — rather
+    // than by where the match sits — lost this decision entirely and created
+    // the mission unblocked.
+    const { gates, decisions } = normalizeFounderCommand('Set up DNS for the new launch domain. Do not change the DNS TTL.');
+    expect(gates.map((gate) => gate.kind)).toEqual(['dns_or_domain']);
+    expect(decisions.filter((decision) => decision.kind === 'founder_gate')).toHaveLength(1);
+  });
+
   it('raises an ambiguity decision for an objective too short to plan from', () => {
     const { decisions } = normalizeFounderCommand('Fix it.');
     expect(decisions.map((decision) => decision.kind)).toEqual(['ambiguity']);

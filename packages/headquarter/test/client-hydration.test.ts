@@ -45,7 +45,7 @@ function emptyState(): HqSnapshot {
     workforce: { data: [], provenance: PROVENANCE },
     capabilities: { data: [], provenance: PROVENANCE },
     activity: { data: [], provenance: PROVENANCE },
-      missions: { data: [], provenance: PROVENANCE },
+    missions: { data: [], provenance: PROVENANCE },
   });
 }
 
@@ -592,7 +592,7 @@ describe('no room contradicts its own displayed numbers', () => {
         workforce: { data: [], provenance: PROVENANCE },
         capabilities: { data: [], provenance: PROVENANCE },
         activity: { data: [], provenance: PROVENANCE },
-      missions: { data: [], provenance: PROVENANCE },
+        missions: { data: [], provenance: PROVENANCE },
       });
     };
     return [
@@ -814,7 +814,7 @@ describe('reachability comes from one list, not two that agree', () => {
         workforce: { data: [], provenance: PROVENANCE },
         capabilities: { data: [], provenance: PROVENANCE },
         activity: { data: [], provenance: PROVENANCE },
-      missions: { data: [], provenance: PROVENANCE },
+        missions: { data: [], provenance: PROVENANCE },
       });
       const room = hydrateRooms(state, FOUNDER_SESSION).find((r) => r.roomId === 'world-network')!;
       const proven = room.metrics.find((m) => m.label === 'Proven reachable')!;
@@ -901,7 +901,7 @@ describe('a room names every state section that can change what it shows', () =>
         },
         capabilities: { data: [], provenance: PROVENANCE },
         activity: { data: [], provenance: PROVENANCE },
-      missions: { data: [], provenance: PROVENANCE },
+        missions: { data: [], provenance: PROVENANCE },
       }),
     capabilities: () =>
       buildHqSnapshot({
@@ -932,7 +932,7 @@ describe('a room names every state section that can change what it shows', () =>
           provenance: PROVENANCE,
         },
         activity: { data: [], provenance: PROVENANCE },
-      missions: { data: [], provenance: PROVENANCE },
+        missions: { data: [], provenance: PROVENANCE },
       }),
     connections: () =>
       buildHqSnapshot({
@@ -947,7 +947,7 @@ describe('a room names every state section that can change what it shows', () =>
         workforce: { data: [], provenance: PROVENANCE },
         capabilities: { data: [], provenance: PROVENANCE },
         activity: { data: [], provenance: PROVENANCE },
-      missions: { data: [], provenance: PROVENANCE },
+        missions: { data: [], provenance: PROVENANCE },
       }),
     activity: () =>
       buildHqSnapshot({

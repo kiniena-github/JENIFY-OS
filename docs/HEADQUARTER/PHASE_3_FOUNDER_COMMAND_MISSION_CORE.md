@@ -77,6 +77,15 @@ lets the read model publish "what HQ understood" while the raw command stays
 server-side. A later AI planner replaces the baseline plan and must still pass
 `validatePlan`.
 
+Founder hard gates are detected by matching the gate patterns against the
+**requiring half** of the command — the text with every do-not clause excised —
+because "without deploying to production" is a constraint HQ can honour while
+"and deploy to production" is a gate HQ must stop at, and the difference is
+where the phrase sits. Detection stays conservative and is not the containment:
+a phrasing the patterns miss raises no decision, but every task still passes the
+real capability, policy, approval and kill-switch gates when it is opened as
+canonical work.
+
 ## 4. Goal Lock
 
 - The original command is written once and never updated.
@@ -93,6 +102,32 @@ server-side. A later AI planner replaces the baseline plan and must still pass
   `HeadquarterOperations.approveTask` refuses to approve it
   (`mission_intent_changed`) — a stricter precondition on the existing gate,
   not a second approval system.
+- An approval granted **before** the revision is unexpired and would still
+  admit execution, so `approveTask`'s refusal never runs again for it and the
+  next claim would consume it. A revision therefore **supersedes** every
+  execution of the mission that is `queued` — approved but not yet claimed —
+  by denying it through the ordinary `denyTask` gate, in the same transaction
+  as the version bump. Nothing was claimed and nothing ran; the task becomes
+  `blocked` with the reason stated, and the denied task ids are named in the
+  `mission_intent_revised` evidence.
+  - `needs_approval` executions are deliberately left alone: `approveTask`'s
+    refusal already covers them, harder, and denying them from this side would
+    make that guard unreachable on the path it exists for. The Founder can
+    still deny one deliberately.
+  - `assigned` / `running` / `outcome_unknown` executions are **not** stopped
+    by a revision. This layer cannot honestly halt claimed work — the
+    Operator's kill switch, review and reconciliation own that, the same rule
+    `cancel()` states — so they are recorded as stale in flight in the same
+    evidence entry and are refused a fresh approval, rather than the mission
+    layer pretending to have stopped them.
+- A revision is not a dead end for the task it supersedes. A mission task whose
+  execution is **stale and finished without success** (`blocked` or
+  `review_failed`) may be re-opened under the current intent: `openTaskWork`
+  creates a fresh canonical task with its own `mission-task:<id>:v<version>`
+  idempotency key and re-links, naming the superseded task id in evidence. The
+  old `op_tasks` row is never edited or deleted. Every other status still
+  refuses `mission_task_already_opened` — a live decision, unfinished work, or
+  work that succeeded.
 - `MissionCore.manifest(id)` is the compact authoritative manifest a later
   worker prompt consumes (server-side; it includes the original command).
 

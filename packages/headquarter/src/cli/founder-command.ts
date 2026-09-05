@@ -8,10 +8,14 @@
  *                           `hq:order --register-capability`, it never
  *                           re-enables a capability that was disabled and it
  *                           issues no command.
- *   --list                  prints the browser-safe mission read model from a
- *                           READ-ONLY connection. No schema is created or
- *                           migrated; a missing database is an error, not a
- *                           new empty one (`openHqDatabaseReadOnly`).
+ *   --list                  prints the STORED mission columns from a READ-ONLY
+ *                           connection — never the original command, and never
+ *                           the derived status, which needs the service's
+ *                           canonical task read and so cannot be produced over
+ *                           a read-only connection (see the comment at the
+ *                           call site). No schema is created or migrated; a
+ *                           missing database is an error, not a new empty one
+ *                           (`openHqDatabaseReadOnly`).
  *
  * Deliberately NO `--instruction` here. Issuing a Founder Command is the
  * authenticated browser path (`POST /api/hq/control/missions`) or an
