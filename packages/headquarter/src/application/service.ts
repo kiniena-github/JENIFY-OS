@@ -427,6 +427,7 @@ import {
   missionCommandCapabilityState,
   missionCommandContractDrift,
   missionCommandIdempotencyKey,
+  missionSchemaPresent,
   readMissionIntentEntries,
   readMissionRecord,
   type LinkedTaskLookup,
@@ -471,7 +472,8 @@ export type OpsErrorCode =
   | 'unknown_mission'
   | 'invalid_mission_transition'
   | 'mission_status_changed'
-  | 'mission_terminal';
+  | 'mission_terminal'
+  | 'mission_intent_conflict';
 
 export interface OpsError {
   code: OpsErrorCode;
@@ -530,6 +532,20 @@ function missionList(
     out.push(trimmed);
   }
   return { ok: true, value: out };
+}
+
+/**
+ * A UNIQUE(mission_id, seq) violation from a raced concurrent amendment.
+ * With the amendment's reads inside an IMMEDIATE transaction this should be
+ * unreachable; it is kept so that any writer which nevertheless collides
+ * surfaces as a typed conflict rather than an opaque 500.
+ */
+function isMissionSequenceConflict(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error as { code?: string }).code === 'SQLITE_CONSTRAINT_UNIQUE' &&
+    (error.message.includes('hq_mission_intents') || error.message.includes('hq_mission_plan_items'))
+  );
 }
 
 // ---- inputs / outputs ----
@@ -917,6 +933,14 @@ export class HeadquarterOperations {
   readonly #db: HqDatabase;
 
   /**
+   * Whether this database carries the Phase 3 mission tables. False only for
+   * a READ-ONLY handle over a pre-Phase-3 file (schema init never writes
+   * through a read-only connection); mission reads then answer empty/null
+   * truthfully, and the snapshot layer states the absence in its provenance.
+   */
+  readonly #missionStorePresent: boolean;
+
+  /**
    * The capability ROW, read from the database (issue #219, Codex P1 on
    * `9c2a474`).
    *
@@ -949,6 +973,12 @@ export class HeadquarterOperations {
     };
     ensureApplicationSchema(db);
     ensureMissionCommandSchema(db);
+    // A writable construction just ensured the mission tables. A READ-ONLY
+    // one (the hq:snapshot path) may be observing a pre-Phase-3 file that has
+    // none — the ensure above deliberately writes nothing through a read-only
+    // handle — so record what is actually there and let every mission read
+    // answer truthfully instead of throwing at the first prepare.
+    this.#missionStorePresent = db.readonly ? missionSchemaPresent(db) : true;
     this.#store = options.store ?? new HeadquarterStore(db);
     // The approval mutations are handed to whoever CONSTRUCTS the queue and to
     // nobody else, so they are unreachable from a queue handle a worker holds.
@@ -2481,6 +2511,16 @@ export class HeadquarterOperations {
       }
       priority = input.priority;
     }
+    const refusedCommander = this.#resolveMissionCommander(input.requestedBy, 'command a mission');
+    if (refusedCommander) return refusedCommander;
+    const refusedCapability = this.#missionCapabilityGate('command a mission');
+    if (refusedCapability) return refusedCapability;
+
+    // Existence probes run AFTER the authority gates — the order the other
+    // three mission methods already use — so a caller without the mission
+    // grant gets the same refusal for a real and an imaginary id and learns
+    // nothing about which missions or tasks exist (Opus second-pass finding
+    // on `cee771f`: this method was the sole outlier).
     const dependsOn = [...new Set((input.dependsOn ?? []).map((d) => d.trim()).filter(Boolean))];
     if (dependsOn.length > MAX_MISSION_LIST_ITEMS) {
       return fail('invalid_input', `dependsOn exceeds ${MAX_MISSION_LIST_ITEMS} entries`);
@@ -2497,11 +2537,6 @@ export class HeadquarterOperations {
     ) {
       return fail('invalid_input', `sourceOrderTaskId names an unknown task: ${sourceOrderTaskId}`);
     }
-
-    const refusedCommander = this.#resolveMissionCommander(input.requestedBy, 'command a mission');
-    if (refusedCommander) return refusedCommander;
-    const refusedCapability = this.#missionCapabilityGate('command a mission');
-    if (refusedCapability) return refusedCapability;
 
     // Everything that will be PERSISTED is scanned before anything is
     // written — a credential-looking order is refused, never stored.
@@ -2532,12 +2567,9 @@ export class HeadquarterOperations {
       sourceOrderTaskId,
       dependsOn,
       planItems: planItems.value ?? [],
+      instruction: instruction.value,
       idempotencyKey: input.idempotencyKey ?? null,
     });
-    const existing = findMissionIdByIdempotencyKey(this.#db, idempotencyKey);
-    if (existing) {
-      return ok({ mission: this.#missionRecord(existing)!, deduplicated: true });
-    }
 
     const id = `mission-${uuid()}`;
     const at = nowIso();
@@ -2567,7 +2599,21 @@ export class HeadquarterOperations {
           }))
         : [{ summary: MISSION_PLAN_NOT_DECIDED_SUMMARY, kind: 'needs_clarification' as const, seq: 1 }];
 
-    this.#db.transaction(() => {
+    // The dedupe read, the mission write, its event and its evidence commit
+    // inside ONE IMMEDIATE transaction (the declareWorkerProvider precedent,
+    // issue #224): the privileged handle is resolved BEFORE anything is
+    // written — a service holding no grant refuses with zero rows, not after
+    // a committed mission — a failing evidence append rolls the mission back
+    // with it, and the read-then-insert dedupe decision cannot race a
+    // concurrent writer past the UNIQUE idempotency key.
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    privileged.reserve(() => {
+      const existing = findMissionIdByIdempotencyKey(this.#db, idempotencyKey);
+      if (existing) {
+        dedupedTo = existing;
+        return;
+      }
       this.#db
         .prepare(
           `INSERT INTO hq_missions
@@ -2621,12 +2667,15 @@ export class HeadquarterOperations {
         toStatus: 'planned',
         detail: { planItemCount: items.length },
       });
-    })();
-    this.#requirePrivilegedQueue().appendEvidence({
-      actor: input.requestedBy,
-      kind: 'mission_commanded',
-      payload: { missionId: id, idempotencyKey, planItemCount: items.length, executable: false },
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'mission_commanded',
+        payload: { missionId: id, idempotencyKey, planItemCount: items.length, executable: false },
+      });
     });
+    if (dedupedTo) {
+      return ok({ mission: this.#missionRecord(dedupedTo)!, deduplicated: true });
+    }
     return ok({ mission: this.#missionRecord(id)!, deduplicated: false });
   }
 
@@ -2636,15 +2685,28 @@ export class HeadquarterOperations {
   }
 
   listMissions(status?: MissionStatus): MissionRecord[] {
+    if (!this.#missionStorePresent) return [];
     return listMissionIds(this.#db, status).map((id) => this.#missionRecord(id)!);
+  }
+
+  /**
+   * Whether this database carries the Phase 3 mission tables. False only for
+   * a read-only handle over a pre-Phase-3 file; mission reads then answer
+   * empty/null and the snapshot's missions provenance states the absence.
+   */
+  missionStorePresent(): boolean {
+    return this.#missionStorePresent;
   }
 
   /**
    * Full intent history INCLUDING bodies (raw order + amendment rationale).
    * SERVER-SIDE ONLY: no route response or snapshot may carry these bodies —
-   * the browser gets the metadata that already rides on `MissionRecord`.
+   * the browser gets the structured per-sequence history that rides on
+   * `MissionRecord.intentHistory` (audit spine + objective/constraints/
+   * acceptance criteria), never the raw text.
    */
   getMissionIntentHistory(missionId: string): MissionIntentEntry[] {
+    if (!this.#missionStorePresent) return [];
     return readMissionIntentEntries(this.#db, missionId);
   }
 
@@ -2731,7 +2793,13 @@ export class HeadquarterOperations {
 
     const at = nowIso();
     let raced = false;
-    this.#db.transaction(() => {
+    // The guarded UPDATE, its event and its evidence commit inside ONE
+    // IMMEDIATE transaction (the declareWorkerProvider precedent, issue
+    // #224): the privileged handle is resolved before anything is written,
+    // and a failing evidence append rolls the transition back instead of
+    // leaving a moved mission with no evidence row.
+    const privileged = this.#requirePrivilegedQueue();
+    privileged.reserve(() => {
       const blockReason = input.to === 'blocked' ? note : null;
       const result =
         input.to === 'verified'
@@ -2773,7 +2841,12 @@ export class HeadquarterOperations {
         toStatus: input.to as MissionStatus,
         note,
       });
-    })();
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'mission_transitioned',
+        payload: { missionId: input.missionId, from: current.status, to: input.to, executable: false },
+      });
+    });
     if (raced) {
       return fail(
         'mission_status_changed',
@@ -2781,11 +2854,6 @@ export class HeadquarterOperations {
         {},
       );
     }
-    this.#requirePrivilegedQueue().appendEvidence({
-      actor: input.requestedBy,
-      kind: 'mission_transitioned',
-      payload: { missionId: input.missionId, from: current.status, to: input.to, executable: false },
-    });
     return ok(this.#missionRecord(input.missionId)!);
   }
 
@@ -2834,27 +2902,10 @@ export class HeadquarterOperations {
     const refusedCapability = this.#missionCapabilityGate('amend a mission');
     if (refusedCapability) return refusedCapability;
 
-    const current = this.#missionRecord(input.missionId);
-    if (!current) return fail('unknown_mission', `Unknown mission: ${input.missionId}`);
-    if (isMissionTerminal(current.status)) {
-      return fail(
-        'mission_terminal',
-        `Mission ${input.missionId} is ${current.status} — a terminal mission is closed history and cannot be amended`,
-        { status: current.status },
-      );
-    }
-
     const supersedeSeqs = [...new Set(input.supersedePlanItemSeqs ?? [])];
     for (const seq of supersedeSeqs) {
       if (!Number.isInteger(seq)) {
         return fail('invalid_input', `supersedePlanItemSeqs entries must be integers`);
-      }
-      const item = current.planItems.find((p) => p.seq === seq);
-      if (!item) {
-        return fail('invalid_input', `Mission ${input.missionId} has no plan item ${seq}`);
-      }
-      if (item.supersededInIntentSeq != null) {
-        return fail('invalid_input', `Plan item ${seq} is already superseded`);
       }
     }
 
@@ -2870,93 +2921,142 @@ export class HeadquarterOperations {
       return fail('invalid_input', errorMessage(error));
     }
 
+    // The status read, the plan-item validation, both MAX(seq) reads and
+    // every write commit inside ONE IMMEDIATE transaction (the
+    // declareWorkerProvider precedent, issue #224). That closes the
+    // check-then-append window in which two concurrent amendments computed
+    // the same sequence and the loser surfaced as an opaque
+    // UNIQUE-constraint 500; it resolves the privileged handle before
+    // anything is written; and a failing evidence append rolls the amendment
+    // back with it.
+    const privileged = this.#requirePrivilegedQueue();
     const at = nowIso();
-    const nextObjective = objective.value ?? current.objective;
-    const nextConstraints = constraints.value ?? current.constraints;
-    const nextAcceptance = acceptance.value ?? current.acceptanceCriteria;
-    const nextIntentSeq =
-      ((
-        this.#db
-          .prepare(`SELECT MAX(seq) AS max_seq FROM hq_mission_intents WHERE mission_id = ?`)
-          .get(input.missionId) as { max_seq: number | null }
-      ).max_seq ?? 0) + 1;
-    const maxPlanSeq =
-      (
-        this.#db
-          .prepare(`SELECT MAX(seq) AS max_seq FROM hq_mission_plan_items WHERE mission_id = ?`)
-          .get(input.missionId) as { max_seq: number | null }
-      ).max_seq ?? 0;
-    const body = canonicalJson({
-      kind: 'amendment',
-      amendment: amendment.value,
-      objective: objective.value,
-      constraints: constraints.value,
-      acceptanceCriteria: acceptance.value,
-      addPlanItems: addPlanItems.value,
-      supersedePlanItemSeqs: supersedeSeqs,
-      requestedBy: input.requestedBy,
-      at,
-    });
+    let refusal: OpsResult<MissionRecord> | null = null;
+    try {
+      privileged.reserve(() => {
+        const current = this.#missionRecord(input.missionId);
+        if (!current) {
+          refusal = fail('unknown_mission', `Unknown mission: ${input.missionId}`);
+          return;
+        }
+        if (isMissionTerminal(current.status)) {
+          refusal = fail(
+            'mission_terminal',
+            `Mission ${input.missionId} is ${current.status} — a terminal mission is closed history and cannot be amended`,
+            { status: current.status },
+          );
+          return;
+        }
+        for (const seq of supersedeSeqs) {
+          const item = current.planItems.find((p) => p.seq === seq);
+          if (!item) {
+            refusal = fail('invalid_input', `Mission ${input.missionId} has no plan item ${seq}`);
+            return;
+          }
+          if (item.supersededInIntentSeq != null) {
+            refusal = fail('invalid_input', `Plan item ${seq} is already superseded`);
+            return;
+          }
+        }
 
-    this.#db.transaction(() => {
-      this.#db
-        .prepare(
-          `UPDATE hq_missions
-           SET objective = ?, constraints = ?, acceptance_criteria = ?, updated_at = ?
-           WHERE id = ?`,
-        )
-        .run(
-          nextObjective,
-          JSON.stringify(nextConstraints),
-          nextAcceptance == null ? null : JSON.stringify(nextAcceptance),
+        const nextObjective = objective.value ?? current.objective;
+        const nextConstraints = constraints.value ?? current.constraints;
+        const nextAcceptance = acceptance.value ?? current.acceptanceCriteria;
+        const nextIntentSeq =
+          ((
+            this.#db
+              .prepare(`SELECT MAX(seq) AS max_seq FROM hq_mission_intents WHERE mission_id = ?`)
+              .get(input.missionId) as { max_seq: number | null }
+          ).max_seq ?? 0) + 1;
+        const maxPlanSeq =
+          (
+            this.#db
+              .prepare(`SELECT MAX(seq) AS max_seq FROM hq_mission_plan_items WHERE mission_id = ?`)
+              .get(input.missionId) as { max_seq: number | null }
+          ).max_seq ?? 0;
+        const body = canonicalJson({
+          kind: 'amendment',
+          amendment: amendment.value,
+          objective: objective.value,
+          constraints: constraints.value,
+          acceptanceCriteria: acceptance.value,
+          addPlanItems: addPlanItems.value,
+          supersedePlanItemSeqs: supersedeSeqs,
+          requestedBy: input.requestedBy,
           at,
-          input.missionId,
-        );
-      appendMissionIntent(this.#db, {
-        missionId: input.missionId,
-        seq: nextIntentSeq,
-        kind: 'amendment',
-        body,
-        objective: nextObjective,
-        constraints: nextConstraints,
-        acceptanceCriteria: nextAcceptance,
-        actor: input.requestedBy,
-        at,
-      });
-      for (const seq of supersedeSeqs) {
+        });
+
         this.#db
           .prepare(
-            `UPDATE hq_mission_plan_items
-             SET superseded_in_intent_seq = ?
-             WHERE mission_id = ? AND seq = ? AND superseded_in_intent_seq IS NULL`,
+            `UPDATE hq_missions
+             SET objective = ?, constraints = ?, acceptance_criteria = ?, updated_at = ?
+             WHERE id = ?`,
           )
-          .run(nextIntentSeq, input.missionId, seq);
-      }
-      (addPlanItems.value ?? []).forEach((summary, i) => {
-        insertMissionPlanItem(this.#db, {
+          .run(
+            nextObjective,
+            JSON.stringify(nextConstraints),
+            nextAcceptance == null ? null : JSON.stringify(nextAcceptance),
+            at,
+            input.missionId,
+          );
+        appendMissionIntent(this.#db, {
           missionId: input.missionId,
-          seq: maxPlanSeq + i + 1,
-          summary,
-          kind: 'work',
-          createdInIntentSeq: nextIntentSeq,
+          seq: nextIntentSeq,
+          kind: 'amendment',
+          body,
+          objective: nextObjective,
+          constraints: nextConstraints,
+          acceptanceCriteria: nextAcceptance,
+          actor: input.requestedBy,
+          at,
+        });
+        for (const seq of supersedeSeqs) {
+          this.#db
+            .prepare(
+              `UPDATE hq_mission_plan_items
+               SET superseded_in_intent_seq = ?
+               WHERE mission_id = ? AND seq = ? AND superseded_in_intent_seq IS NULL`,
+            )
+            .run(nextIntentSeq, input.missionId, seq);
+        }
+        (addPlanItems.value ?? []).forEach((summary, i) => {
+          insertMissionPlanItem(this.#db, {
+            missionId: input.missionId,
+            seq: maxPlanSeq + i + 1,
+            summary,
+            kind: 'work',
+            createdInIntentSeq: nextIntentSeq,
+          });
+        });
+        appendMissionEvent(this.#db, {
+          missionId: input.missionId,
+          actor: input.requestedBy,
+          kind: 'intent_amended',
+          detail: {
+            intentSeq: nextIntentSeq,
+            addedPlanItems: addPlanItems.value?.length ?? 0,
+            supersededPlanItems: supersedeSeqs.length,
+          },
+        });
+        privileged.appendEvidence({
+          actor: input.requestedBy,
+          kind: 'mission_intent_amended',
+          payload: { missionId: input.missionId, intentSeq: nextIntentSeq, executable: false },
         });
       });
-      appendMissionEvent(this.#db, {
-        missionId: input.missionId,
-        actor: input.requestedBy,
-        kind: 'intent_amended',
-        detail: {
-          intentSeq: nextIntentSeq,
-          addedPlanItems: addPlanItems.value?.length ?? 0,
-          supersededPlanItems: supersedeSeqs.length,
-        },
-      });
-    })();
-    this.#requirePrivilegedQueue().appendEvidence({
-      actor: input.requestedBy,
-      kind: 'mission_intent_amended',
-      payload: { missionId: input.missionId, intentSeq: nextIntentSeq, executable: false },
-    });
+    } catch (error) {
+      // Belt over the braces above: even a writer that somehow slipped past
+      // the IMMEDIATE transaction surfaces as a typed 409 conflict, never an
+      // opaque 500 that hides which write lost.
+      if (isMissionSequenceConflict(error)) {
+        return fail(
+          'mission_intent_conflict',
+          `Mission ${input.missionId} was amended concurrently — re-read the mission and retry`,
+        );
+      }
+      throw error;
+    }
+    if (refusal) return refusal;
     return ok(this.#missionRecord(input.missionId)!);
   }
 
@@ -3017,7 +3117,10 @@ export class HeadquarterOperations {
 
     const at = nowIso();
     let raced = false;
-    this.#db.transaction(() => {
+    // Write-once link, its event and its evidence in ONE IMMEDIATE
+    // transaction — same rationale as the other three mission mutations.
+    const privileged = this.#requirePrivilegedQueue();
+    privileged.reserve(() => {
       const result = this.#db
         .prepare(
           `UPDATE hq_mission_plan_items
@@ -3035,20 +3138,20 @@ export class HeadquarterOperations {
         kind: 'plan_item_linked',
         detail: { planItemSeq: input.planItemSeq, taskId: input.taskId },
       });
-    })();
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'mission_plan_item_linked',
+        payload: {
+          missionId: input.missionId,
+          planItemSeq: input.planItemSeq,
+          taskId: input.taskId,
+          executable: false,
+        },
+      });
+    });
     if (raced) {
       return fail('invalid_input', `Plan item ${input.planItemSeq} was linked concurrently`);
     }
-    this.#requirePrivilegedQueue().appendEvidence({
-      actor: input.requestedBy,
-      kind: 'mission_plan_item_linked',
-      payload: {
-        missionId: input.missionId,
-        planItemSeq: input.planItemSeq,
-        taskId: input.taskId,
-        executable: false,
-      },
-    });
     return ok(this.#missionRecord(input.missionId)!);
   }
 
@@ -3114,6 +3217,7 @@ export class HeadquarterOperations {
   }
 
   #missionRecord(id: string): MissionRecord | null {
+    if (!this.#missionStorePresent) return null;
     return readMissionRecord(
       this.#db,
       id,

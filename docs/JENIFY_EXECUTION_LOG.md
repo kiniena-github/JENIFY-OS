@@ -1687,3 +1687,42 @@ hq-server hosted-restart mission rows are Linux-gated; occasional subprocess-tim
 in codex-lane/routing suites under full-suite load pass in isolation. Ubuntu exact-head CI is
 the authority for all of these. Full-matrix results and the exact frozen SHA are recorded in
 the Phase 3 PR; merge remains gated on independent review and the Founder.
+
+## Phase 3 — Opus second-pass correction cycle (local Fable integrator, 2026-09-05)
+
+The local Opus 5 exact-head review of `cee771f` (PR #260) returned CHANGES REQUIRED: three
+Medium findings and a set of Lows. All were fixed in one consolidated pass on the same
+canonical branch, with regression tests locking each one.
+
+**Medium fixes.** M1 — the Mission Room console now clears every rendered mission row on any
+safe/off entry, and a 401/403 on a lifecycle/amend write re-checks the session and re-reads
+instead of guessing (session gone → wipe; write grant gone but record readable → rows stay,
+controls go — no false "not readable" claim); the Founder Command composer disarms itself on
+a refused command. M2 — schema init never writes through a read-only database handle, so
+`hq:snapshot` over a pre-Phase-3 file projects an honest zero-mission section with provenance
+stating the store's absence instead of throwing SQLITE_READONLY. M3 — the structured
+per-sequence intent history (objective/constraints/acceptance criteria + seq/kind/actor/at)
+now rides the shared browser projection and the Mission Room renders it, ORIGINAL (seq 0,
+immutable) clearly distinguished from CURRENT; raw order text and amendment rationale stay
+server-side, still scan-pinned.
+
+**Low/extra fixes in the same pass.** Append-only enforced by engine triggers + a src-wide
+guard + a raw-SQL tamper test (L1); a behavioral proof that mission priority never reorders
+operator FIFO claiming (L2); authority gates moved ahead of the dependsOn/sourceOrderTaskId
+existence probes in `commandMission` (L3); all four mission mutations commit mutation +
+mission event + evidence atomically in one IMMEDIATE reserve transaction, amendment sequence
+reads moved inside it, raced amendments now a typed 409 `mission_intent_conflict` (L4+L5);
+the hosted restart proof drives the real `commandMission`/read-back facade path (L6); the
+written snapshot bounds missions to the newest N with honest total + provenance while /state
+stays unbounded (L7); PR/doc wording corrected — the client fetch-target list is a test pin,
+the protection is server-side `CONTROL_WRITE_ROUTES` (L8); the hq-host origin refusals now
+pin status 403 + `origin_allowlist_empty` + nothing-written (L9). From the reference cloud
+review, Founder-approved: the idempotency digest now binds the raw instruction (two orders
+differing only in wording are two missions), and an invalid mission status filter matches
+nothing instead of everything.
+
+Deliberate test-pin updates, all recorded in the diff: the intent-history exact-key pins and
+the hydration fixture (M3), the widened append-only guard (L1), and the two rewritten
+host/durability tests (L6/L9). Full-matrix results, the new exact SHA and the honest
+environmental caveats are recorded on PR #260; the new head awaits a fresh Opus exact-head
+review, and merge remains gated on independent review and the Founder.

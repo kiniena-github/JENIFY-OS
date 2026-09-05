@@ -10,10 +10,14 @@
  * execute nothing and never touch the approval or task tables.
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { CAPS, expectOk, setupFixture, type Fixture } from './application.fixture.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
+import { HeadquarterOperations } from '../src/application/service.js';
+import type { MissionStatus } from '../src/contracts/mission.js';
 import {
   MISSION_COMMAND_CAPABILITY,
   MISSION_PLAN_NOT_DECIDED_SUMMARY,
@@ -58,6 +62,19 @@ function count(fx: Fixture, sql: string): number {
   return (fx.db.prepare(sql).get() as { n: number }).n;
 }
 
+const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+/** Every .ts file under a directory, recursively (the core-boundary walker). */
+function missionSourceFiles(dir: string): string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) found.push(...missionSourceFiles(full));
+    else if (entry.endsWith('.ts')) found.push(full);
+  }
+  return found;
+}
+
 describe('commanding a mission (Founder-authenticated creation)', () => {
   let fx: Fixture;
   beforeEach(() => {
@@ -97,9 +114,19 @@ describe('commanding a mission (Founder-authenticated creation)', () => {
       'Optimize the slowest pages',
     ]);
     expect(mission.planItems.every((p) => p.kind === 'work' && p.state === 'waiting')).toBe(true);
-    // The intent lock starts at seq 0 — the original order.
+    // The intent lock starts at seq 0 — the original order, carrying the
+    // structured original state (M3: browser-inspectable) and never the raw
+    // instruction text.
     expect(mission.intentHistory).toEqual([
-      { seq: 0, kind: 'founder_order', actor: FOUNDER, at: expect.any(String) },
+      {
+        seq: 0,
+        kind: 'founder_order',
+        actor: FOUNDER,
+        at: expect.any(String),
+        objective: 'Reduce QOS page load times without changing the visual design',
+        constraints: ['Do not change the visual design', 'Do not deploy production'],
+        acceptanceCriteria: ['Median page load under 2 seconds'],
+      },
     ]);
   });
 
@@ -228,6 +255,42 @@ describe('commanding a mission (Founder-authenticated creation)', () => {
     );
     expect(second.mission.dependsOn).toEqual([first.mission.id]);
   });
+
+  it('an ungranted principal gets one identical refusal for a real and an imaginary id — no existence oracle', () => {
+    // Authority gates run BEFORE the dependsOn / sourceOrderTaskId existence
+    // probes (Opus second-pass finding on `cee771f`: commandMission was the
+    // sole method probing first, so a Founder-mapped account without the
+    // mission grant could distinguish real ids from imaginary ones).
+    const { mission } = expectOk(command(fx));
+    fx.principals.register({
+      id: 'mission-staff',
+      displayName: 'Ungranted Staff',
+      originateCapabilities: [CAPS.readStatus],
+      approvalAuthority: false,
+      active: true,
+    });
+    const real = command(fx, { requestedBy: 'mission-staff', dependsOn: [mission.id] });
+    const fake = command(fx, { requestedBy: 'mission-staff', dependsOn: ['mission-imaginary'] });
+    expect(real.ok).toBe(false);
+    expect(fake.ok).toBe(false);
+    if (!real.ok && !fake.ok) {
+      expect(real.error.code).toBe('not_permitted');
+      expect(fake.error.code).toBe(real.error.code);
+      expect(fake.error.message).toBe(real.error.message);
+    }
+    const realTask = command(fx, { requestedBy: 'mission-staff', sourceOrderTaskId: 'task-x' });
+    expect(realTask.ok).toBe(false);
+    if (!realTask.ok && !real.ok) expect(realTask.error.message).toBe(real.error.message);
+  });
+
+  it('an unrecognized status filter matches nothing rather than everything', () => {
+    // Fail closed on a read: the old shape silently widened an invalid
+    // filter to EVERY mission.
+    expectOk(command(fx));
+    expect(fx.ops.listMissions()).toHaveLength(1);
+    expect(fx.ops.listMissions('planned')).toHaveLength(1);
+    expect(fx.ops.listMissions('bogus-status' as MissionStatus)).toHaveLength(0);
+  });
 });
 
 describe('idempotent duplicate commands', () => {
@@ -273,6 +336,45 @@ describe('idempotent duplicate commands', () => {
     const third = expectOk(command(fx, { idempotencyKey: 'client-key', requestedBy: PLANNER }));
     expect(third.mission.id).not.toBe(first.mission.id);
   });
+
+  it('two orders differing only in the raw instruction are two different missions', () => {
+    // The digest binds the raw order text (Opus second-pass finding on
+    // `cee771f`): before this, two commands identical in every structured
+    // field collapsed onto one mission and the second order's text was
+    // stored NOWHERE.
+    const first = expectOk(command(fx, { instruction: 'Original wording of the order.' }));
+    const second = expectOk(
+      command(fx, { instruction: 'Different wording — a genuinely different order.' }),
+    );
+    expect(second.deduplicated).toBe(false);
+    expect(second.mission.id).not.toBe(first.mission.id);
+    // Both raw orders are preserved server-side; neither was discarded.
+    expect(fx.ops.getMissionIntentHistory(first.mission.id)[0]!.body).toContain(
+      'Original wording of the order.',
+    );
+    expect(fx.ops.getMissionIntentHistory(second.mission.id)[0]!.body).toContain(
+      'Different wording — a genuinely different order.',
+    );
+  });
+
+  it('a service without the privileged grant refuses before any mission row exists', () => {
+    // Constructed around an externally supplied queue, the service holds no
+    // evidence grant. The refusal must arrive BEFORE the transaction opens:
+    // the old shape committed the mission first and threw after, leaving a
+    // mission with no evidence row that a retry could never repair (dedupe
+    // returns the existing mission and writes nothing).
+    const external = new HeadquarterOperations(fx.db, { queue: fx.ops.queue });
+    expect(() =>
+      external.commandMission({
+        title: 'Never recorded',
+        objective: 'This must not produce a mission row',
+        requestedBy: FOUNDER,
+      }),
+    ).toThrow(/externally supplied queue/);
+    expect(count(fx, 'SELECT COUNT(*) AS n FROM hq_missions')).toBe(0);
+    expect(count(fx, 'SELECT COUNT(*) AS n FROM hq_mission_intents')).toBe(0);
+    expect(count(fx, 'SELECT COUNT(*) AS n FROM hq_mission_events')).toBe(0);
+  });
 });
 
 describe('the intent lock and append-only amendment history', () => {
@@ -310,11 +412,28 @@ describe('the intent lock and append-only amendment history', () => {
     const after = fx.ops.getMission(mission.id)!;
     expect(after.objective).toBe('Reduce QOS landing-page load time only');
     expect(after.constraints).toContain('No paid CDN services');
-    // …and the history metadata rides on the record, bodies excluded.
+    // …and the per-seq STRUCTURED history rides on the record (M3: the
+    // Founder can audit the original next to every amendment), while the raw
+    // body/rationale stays excluded by shape.
     expect(after.intentHistory.map((e) => e.seq)).toEqual([0, 1, 2]);
     for (const entry of after.intentHistory) {
-      expect(Object.keys(entry).sort()).toEqual(['actor', 'at', 'kind', 'seq']);
+      expect(Object.keys(entry).sort()).toEqual([
+        'acceptanceCriteria',
+        'actor',
+        'at',
+        'constraints',
+        'kind',
+        'objective',
+        'seq',
+      ]);
     }
+    // Seq 0 carries the ORIGINAL structured state, unchanged by amendments.
+    expect(after.intentHistory[0]!.objective).toBe(
+      'Reduce QOS page load times without changing the visual design',
+    );
+    // The latest entry carries the current state the amendments produced.
+    expect(after.intentHistory[2]!.objective).toBe('Reduce QOS landing-page load time only');
+    expect(after.intentHistory[2]!.constraints).toContain('No paid CDN services');
   });
 
   it('amendments supersede plan items rather than deleting them', () => {
@@ -378,15 +497,91 @@ describe('the intent lock and append-only amendment history', () => {
     );
   });
 
-  it('the mission module itself contains no UPDATE or DELETE for the history tables', () => {
-    const source = readFileSync(
-      new URL('../src/application/mission-command.ts', import.meta.url),
-      'utf8',
+  it('no source file anywhere contains an UPDATE or DELETE for the history tables', () => {
+    // The previous guard scanned only mission-command.ts while every mission
+    // UPDATE statement lives in service.ts (Opus second-pass finding on
+    // `cee771f`) — it could not see the file where a history rewrite would
+    // most naturally be written. Scan all of src/ instead. Tests are excluded
+    // deliberately: the tamper test below must be free to ATTEMPT the
+    // forbidden statements to prove the engine refuses them.
+    for (const file of missionSourceFiles(join(packageRoot, 'src'))) {
+      const source = readFileSync(file, 'utf8');
+      for (const pattern of [
+        /UPDATE\s+hq_mission_intents/i,
+        /DELETE\s+FROM\s+hq_mission_intents/i,
+        /UPDATE\s+hq_mission_events/i,
+        /DELETE\s+FROM\s+hq_mission_events/i,
+      ]) {
+        expect(source, `${file} must not rewrite mission history`).not.toMatch(pattern);
+      }
+    }
+  });
+
+  it('SQLite itself aborts a history rewrite, whoever attempts it', () => {
+    // Append-only is enforced by schema triggers, not just by code review:
+    // these statements go straight at the database, past every path the
+    // module owns, and the ENGINE refuses them.
+    const { mission } = expectOk(command(fx));
+    expect(() =>
+      fx.db
+        .prepare(`UPDATE hq_mission_intents SET objective = 'forged' WHERE mission_id = ?`)
+        .run(mission.id),
+    ).toThrow(/append-only/);
+    expect(() =>
+      fx.db.prepare(`DELETE FROM hq_mission_intents WHERE mission_id = ?`).run(mission.id),
+    ).toThrow(/append-only/);
+    expect(() =>
+      fx.db
+        .prepare(`UPDATE hq_mission_events SET actor = 'forged' WHERE mission_id = ?`)
+        .run(mission.id),
+    ).toThrow(/append-only/);
+    expect(() =>
+      fx.db.prepare(`DELETE FROM hq_mission_events WHERE mission_id = ?`).run(mission.id),
+    ).toThrow(/append-only/);
+    // Refused means intact: the history is unchanged afterwards.
+    const history = fx.ops.getMissionIntentHistory(mission.id);
+    expect(history).toHaveLength(1);
+    expect(history[0]!.objective).toBe(
+      'Reduce QOS page load times without changing the visual design',
     );
-    expect(source).not.toMatch(/UPDATE\s+hq_mission_intents/i);
-    expect(source).not.toMatch(/DELETE\s+FROM\s+hq_mission_intents/i);
-    expect(source).not.toMatch(/UPDATE\s+hq_mission_events/i);
-    expect(source).not.toMatch(/DELETE\s+FROM\s+hq_mission_events/i);
+  });
+
+  it('a raced amendment surfaces as a typed conflict with nothing written, never an opaque failure', () => {
+    // The sequence reads now sit inside an IMMEDIATE transaction, so an
+    // in-process race cannot occur; this injects the UNIQUE violation a
+    // cross-process race would produce and locks two behaviors: the caller
+    // receives the typed `mission_intent_conflict` refusal (409 at the
+    // route), and the whole amendment rolled back.
+    const { mission } = expectOk(command(fx));
+    const realPrepare = fx.db.prepare.bind(fx.db);
+    const dbPatched = fx.db as unknown as { prepare: (sql: string) => unknown };
+    dbPatched.prepare = (sql: string) => {
+      if (/INSERT INTO hq_mission_intents/.test(sql)) {
+        const collision = new Error(
+          'UNIQUE constraint failed: hq_mission_intents.mission_id, hq_mission_intents.seq',
+        ) as Error & { code: string };
+        collision.code = 'SQLITE_CONSTRAINT_UNIQUE';
+        throw collision;
+      }
+      return realPrepare(sql);
+    };
+    try {
+      const result = fx.ops.amendMissionIntent({
+        missionId: mission.id,
+        amendment: 'This amendment loses the race.',
+        objective: 'Never applied',
+        requestedBy: FOUNDER,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe('mission_intent_conflict');
+    } finally {
+      dbPatched.prepare = realPrepare;
+    }
+    // The losing amendment wrote nothing anywhere.
+    expect(fx.ops.getMissionIntentHistory(mission.id)).toHaveLength(1);
+    expect(fx.ops.getMission(mission.id)!.objective).toBe(
+      'Reduce QOS page load times without changing the visual design',
+    );
   });
 });
 
@@ -646,6 +841,58 @@ describe('what Phase 3 deliberately does NOT do', () => {
     const source = readFileSync(new URL('../src/operator/queue.ts', import.meta.url), 'utf8');
     expect(source).not.toMatch(/priority/i);
     expect(source).not.toMatch(/hq_missions/);
+  });
+
+  it('mission priority does not change the operator claiming order — proven behaviorally', () => {
+    // The source grep above proves a word is absent from one file; this
+    // proves the PROPERTY: a CRITICAL mission whose linked task was enqueued
+    // second is claimed second. Priority is mission metadata, never queue
+    // authority (Opus second-pass finding on `cee771f` asked for exactly
+    // this behavioral form).
+    const fx = missionFixture();
+    const low = expectOk(
+      command(fx, { title: 'Low mission', priority: 'low', planItems: ['First work'] }),
+    ).mission;
+    const critical = expectOk(
+      command(fx, { title: 'Critical mission', priority: 'critical', planItems: ['Second work'] }),
+    ).mission;
+
+    const task = () =>
+      expectOk(
+        fx.ops.createTask({
+          capabilityId: CAPS.readStatus,
+          payload: { kind: 'measure' },
+          requestedBy: FOUNDER,
+        }),
+      ).task.id;
+    const firstTask = task();
+    // Distinct created_at (millisecond ISO text), so FIFO is unambiguous.
+    const start = Date.now();
+    while (Date.now() === start) {
+      /* spin for at most one millisecond */
+    }
+    const secondTask = task();
+    expectOk(
+      fx.ops.linkMissionPlanItem({
+        missionId: low.id,
+        planItemSeq: 1,
+        taskId: firstTask,
+        requestedBy: FOUNDER,
+      }),
+    );
+    expectOk(
+      fx.ops.linkMissionPlanItem({
+        missionId: critical.id,
+        planItemSeq: 1,
+        taskId: secondTask,
+        requestedBy: FOUNDER,
+      }),
+    );
+
+    // The LOW mission's task went in first, so it comes out first — the
+    // critical mission moves nothing ahead in the queue.
+    expect(expectOk(fx.ops.claimNext('claude', CAPS.readStatus)).id).toBe(firstTask);
+    expect(expectOk(fx.ops.claimNext('claude', CAPS.readStatus)).id).toBe(secondTask);
   });
 
   it('the mission module reaches no operator internals — it plans, it never executes', () => {

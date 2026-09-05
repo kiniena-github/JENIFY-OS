@@ -25,8 +25,10 @@
  *   action, holds no claim, names no provider and reorders nothing in the
  *   operator queue (which stays strictly FIFO).
  * - `hq_mission_intents` and `hq_mission_events` are APPEND-ONLY: this
- *   module contains INSERT statements for them and nothing else. Amendments
- *   append; the original Founder order (intent seq 0) is immutable.
+ *   module contains INSERT statements for them and nothing else, and the
+ *   schema carries BEFORE UPDATE / BEFORE DELETE triggers that make SQLite
+ *   itself abort a history rewrite from ANY writer. Amendments append; the
+ *   original Founder order (intent seq 0) is immutable.
  * - `hq_mission_intents.body` is the canonical JSON of the full submitted
  *   command/amendment, INCLUDING optional free-text instruction and
  *   amendment rationale. It is SERVER-SIDE ONLY: no route response and no
@@ -201,11 +203,48 @@ CREATE TABLE IF NOT EXISTS hq_mission_events (
   detail TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_hq_mission_events_mission ON hq_mission_events(mission_id, seq);
+
+-- Append-only ENFORCED by the engine, not just by code convention: the two
+-- history tables abort any rewrite attempt from ANY writer, present or
+-- future, however it reached the database.
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_intents_no_rewrite
+BEFORE UPDATE ON hq_mission_intents
+BEGIN SELECT RAISE(ABORT, 'hq_mission_intents is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_intents_no_erase
+BEFORE DELETE ON hq_mission_intents
+BEGIN SELECT RAISE(ABORT, 'hq_mission_intents is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_events_no_rewrite
+BEFORE UPDATE ON hq_mission_events
+BEGIN SELECT RAISE(ABORT, 'hq_mission_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_events_no_erase
+BEFORE DELETE ON hq_mission_events
+BEGIN SELECT RAISE(ABORT, 'hq_mission_events is append-only'); END;
 `;
 
-/** Idempotent; safe to call on every construction of the service. */
+/**
+ * Idempotent; safe to call on every construction of the service.
+ *
+ * Never attempts DDL on a READ-ONLY handle: `hq:snapshot` legitimately builds
+ * the service over `openHqDatabaseReadOnly`, and a pre-Phase-3 file lacking
+ * these tables must be OBSERVED truthfully (`missionSchemaPresent`), never
+ * migrated by a path that promised to write nothing.
+ */
 export function ensureMissionCommandSchema(db: HqDatabase): void {
+  if (db.readonly) return;
   db.exec(MISSION_COMMAND_DDL);
+}
+
+/**
+ * Does this database carry the Phase 3 mission tables? False only for a
+ * read-only handle over a pre-Phase-3 file — a writable construction just
+ * ensured them. Readers answer empty/null truthfully when this is false.
+ */
+export function missionSchemaPresent(db: HqDatabase): boolean {
+  return (
+    db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'hq_missions'`)
+      .get() !== undefined
+  );
 }
 
 // ---- records ----
@@ -226,21 +265,30 @@ export interface MissionPlanItem {
   rawTaskStatus: ActivityStatus | null;
 }
 
-/** Intent history metadata. Bodies stay server-side (getMissionIntentHistory). */
+/**
+ * Per-sequence intent history the browser MAY see: the audit spine
+ * (seq/kind/actor/at) plus the intake-scanned STRUCTURED state after each
+ * intent — so the Founder can inspect the ORIGINAL objective, constraints and
+ * acceptance criteria (seq 0, immutable) next to every later amendment
+ * without database access. Absent by shape: the raw `body` (original order
+ * text + amendment rationale), which stays server-side on
+ * `MissionIntentEntry` / `getMissionIntentHistory`.
+ */
 export interface MissionIntentRef {
   seq: number;
   kind: 'founder_order' | 'amendment';
   actor: string;
   at: string;
+  /** Canonical objective AFTER this intent. Seq 0 holds the original, forever. */
+  objective: string;
+  constraints: string[];
+  acceptanceCriteria: string[] | null;
 }
 
 /** A full intent entry INCLUDING the server-side body. Never routed to a browser. */
 export interface MissionIntentEntry extends MissionIntentRef {
   missionId: string;
   body: string;
-  objective: string;
-  constraints: string[];
-  acceptanceCriteria: string[] | null;
 }
 
 export interface MissionBlockRecord {
@@ -413,6 +461,14 @@ export function missionCommandIdempotencyKey(input: {
   sourceOrderTaskId: string | null;
   dependsOn: string[];
   planItems: string[];
+  /**
+   * The RAW order text is part of the command's identity: two orders that
+   * differ only in their instruction are two different Founder orders, and
+   * collapsing them would silently discard the second order's text (Opus
+   * second-pass finding on `cee771f`). The instruction itself still never
+   * leaves the server — only its digest participates here.
+   */
+  instruction: string | null;
   idempotencyKey: string | null;
 }): string {
   const digest = createHash('sha256')
@@ -429,6 +485,7 @@ export function missionCommandIdempotencyKey(input: {
         sourceOrderTaskId: input.sourceOrderTaskId,
         dependsOn: input.dependsOn,
         planItems: input.planItems,
+        instruction: input.instruction,
         idempotencyKey: input.idempotencyKey,
       }),
     )
@@ -513,8 +570,13 @@ export function readMissionRecord(
     };
   });
 
+  // The structured columns ride along; the raw `body` deliberately does NOT —
+  // it is selected only by `readMissionIntentEntries` (server-side).
   const intentRows = db
-    .prepare(`SELECT seq, kind, actor, at FROM hq_mission_intents WHERE mission_id = ? ORDER BY seq`)
+    .prepare(
+      `SELECT seq, kind, actor, at, objective, constraints, acceptance_criteria
+       FROM hq_mission_intents WHERE mission_id = ? ORDER BY seq`,
+    )
     .all(id) as Record<string, unknown>[];
 
   const blockRows = db
@@ -566,6 +628,10 @@ export function readMissionRecord(
       kind: r.kind as MissionIntentRef['kind'],
       actor: r.actor as string,
       at: r.at as string,
+      objective: r.objective as string,
+      constraints: parseStringArray(r.constraints as string),
+      acceptanceCriteria:
+        r.acceptance_criteria == null ? null : parseStringArray(r.acceptance_criteria as string),
     })),
     blockHistory: blockRows.map((r) => ({
       at: r.at as string,
@@ -576,8 +642,12 @@ export function readMissionRecord(
 }
 
 export function listMissionIds(db: HqDatabase, status?: MissionStatus): string[] {
+  // Fail closed: a supplied-but-unrecognized status filter matches NOTHING.
+  // The previous shape silently widened it to every mission — the wrong
+  // direction for a read path in this codebase.
+  if (status != null && !isMissionStatus(status)) return [];
   const rows = (
-    status && isMissionStatus(status)
+    status != null
       ? db.prepare(`SELECT id FROM hq_missions WHERE status = ? ORDER BY created_at, id`).all(status)
       : db.prepare(`SELECT id FROM hq_missions ORDER BY created_at, id`).all()
   ) as { id: string }[];

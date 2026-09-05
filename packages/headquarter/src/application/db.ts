@@ -52,7 +52,15 @@ CREATE INDEX IF NOT EXISTS idx_hq_mission_proposals_status
   ON hq_mission_proposals(status, proposed_at);
 `;
 
-/** Idempotent; safe to call on every construction of the service. */
+/**
+ * Idempotent; safe to call on every construction of the service.
+ *
+ * Never attempts DDL on a READ-ONLY handle (the `hq:snapshot` path): a
+ * read-only connection can only OBSERVE, and a file predating these tables
+ * must be read truthfully, never migrated from a path that promised to write
+ * nothing.
+ */
 export function ensureApplicationSchema(db: HqDatabase): void {
+  if (db.readonly) return;
   db.exec(APPLICATION_DDL);
 }

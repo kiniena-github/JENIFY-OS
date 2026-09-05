@@ -864,6 +864,7 @@ function missionErrorStatus(code: string): number {
     case 'invalid_mission_transition':
     case 'mission_status_changed':
     case 'mission_terminal':
+    case 'mission_intent_conflict':
       return 409;
     case 'unknown_capability':
     case 'capability_disabled':

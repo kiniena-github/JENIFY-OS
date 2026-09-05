@@ -32,15 +32,22 @@ nothing until a Founder explicitly registers someone.
 Phase 3 (issue #254) added four more module-owned tables in
 `mission-command.ts`, initialised by the constructor beside
 `ensureApplicationSchema`: `hq_missions`, the APPEND-ONLY `hq_mission_intents`
-(seq 0 = the original Founder order, immutable) and `hq_mission_events`, and
-`hq_mission_plan_items`. None is authority and none is execution: a mission
-grants nothing, holds no claim, names no provider, and no runtime consumer
-reads mission state in Phase 3. The facade methods are `commandMission`,
-`getMission`, `listMissions`, `getMissionIntentHistory` (server-side only —
-intent bodies never cross the browser boundary), `transitionMission`,
-`amendMissionIntent` and `linkMissionPlanItem`; every write resolves its actor
-and appends both a mission event and an `op_evidence` entry. See
-`docs/HEADQUARTER/PHASE_3_FOUNDER_COMMAND_MISSION_CORE.md`.
+(seq 0 = the original Founder order, immutable) and `hq_mission_events` —
+append-only enforced by `BEFORE UPDATE`/`BEFORE DELETE` triggers in the module
+DDL, so the engine itself aborts a history rewrite from any writer — and
+`hq_mission_plan_items`. Schema init is skipped on a read-only handle (the
+`hq:snapshot` path): a pre-Phase-3 file is observed truthfully
+(`missionStorePresent()`), never migrated. None of these tables is authority
+and none is execution: a mission grants nothing, holds no claim, names no
+provider, and no runtime consumer reads mission state in Phase 3. The facade
+methods are `commandMission`, `getMission`, `listMissions`,
+`getMissionIntentHistory` (server-side only — intent bodies never cross the
+browser boundary; the browser gets the structured per-sequence history on the
+mission record instead), `transitionMission`, `amendMissionIntent` and
+`linkMissionPlanItem`; every write resolves its actor and commits its mission
+event and its `op_evidence` entry atomically with the mutation, inside one
+IMMEDIATE reserve transaction (the `declareWorkerProvider` precedent, issue
+#224). See `docs/HEADQUARTER/PHASE_3_FOUNDER_COMMAND_MISSION_CORE.md`.
 
 `src/store/db.ts` is deliberately **not** edited, so this lane can land beside
 the other #117 lanes without schema conflicts.

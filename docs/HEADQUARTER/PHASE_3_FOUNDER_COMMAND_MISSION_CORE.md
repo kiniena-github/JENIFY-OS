@@ -74,22 +74,34 @@ or providers**.
 - Commanding requires an active HUMAN principal holding the originate grant; workers, `system`
   and unknown ids are refused outright. `requestedBy` comes only from the resolved Founder
   principal at the boundary; a body naming an actor is refused (`scanForClientIdentity`).
-- Idempotency: derived sha256 digest over the canonical-JSON of the normalized command; the
-  client key is an input, never the key. Dedupe returns the existing mission (200 +
-  `deduplicated`), writing nothing.
+- Idempotency: derived sha256 digest over the canonical-JSON of the normalized command —
+  INCLUDING the raw instruction text, so two orders differing only in their wording are two
+  missions (Opus finding on `cee771f`); the client key is an input, never the key. Dedupe
+  returns the existing mission (200 + `deduplicated`), writing nothing; the dedupe read runs
+  inside the same IMMEDIATE transaction as the insert, so it cannot race a concurrent writer.
 - Risk/approval truth is server-derived and honest: `authority.riskClass` from the registry row
   (null = row absent, stated), `founderOnly: true`, `approvalFlow:
   'originate_gated_no_approval_row'` — deliberately NOT a `TaskClassification` echo, whose
   `requiresApproval` would misdescribe an intake with no approval row.
 - Raw order text and amendment rationale: server-side intent bodies only
-  (`getMissionIntentHistory`), never in any route response or snapshot. All persisted text is
+  (`getMissionIntentHistory`), never in any route response or snapshot. The browser DOES see
+  the structured per-sequence intent history (seq/kind/actor/at + objective/constraints/
+  acceptance criteria — all intake-scanned canonical fields), so the Founder can audit the
+  immutable original (seq 0) next to every amendment in-product; the Mission Room console
+  renders exactly that, ORIGINAL clearly distinguished from CURRENT. All persisted text is
   scanned (`assertNoSecretLikeContent` at the facade; `assertBrowserSafe` at the routes,
   raw-token shapes included) and bounded before anything writes.
 - Kill switch: mission writes stay open (parity with direct-order intake; recording direction —
   including "cancelled" — must survive an emergency stop) and still create nothing executable.
-- Every mutation appends one row to the mission-owned append-only `hq_mission_events` AND one
-  entry to the hash-chained `op_evidence` (kinds `mission_commanded`, `mission_transitioned`,
+- Every mutation commits its row(s), one entry in the mission-owned append-only
+  `hq_mission_events` AND one entry in the hash-chained `op_evidence` ATOMICALLY, inside one
+  IMMEDIATE reserve transaction (the `declareWorkerProvider` precedent, issue #224): a failing
+  evidence append rolls the mutation back, and a service holding no privileged grant refuses
+  before any row exists (kinds `mission_commanded`, `mission_transitioned`,
   `mission_intent_amended`, `mission_plan_item_linked`, all `executable: false`).
+- The two history tables are append-only BY ENGINE: `BEFORE UPDATE`/`BEFORE DELETE` triggers
+  in the module DDL abort a rewrite from any writer, and a src-wide guard plus a raw-SQL
+  tamper test pin it.
 
 ## Surfaces
 
@@ -111,15 +123,27 @@ regex gained `Mission` in the same commit that added them.
 
 Snapshot: `HqSnapshot.missions` + `counts.missions` via the one shared `missionBrowserView`
 projection (no version bump — purely additive; the constant's docstring records the policy).
+The WRITTEN `hq:snapshot` artefact bounds the section to the newest `SNAPSHOT_MISSION_LIMIT`
+missions with `counts.missions` keeping the total and provenance naming the trim; the live
+`/state` route stays unbounded so the rooms never silently truncate. `hq:snapshot` also works
+over a read-only pre-Phase-3 database: schema init never writes through a read-only handle,
+and an absent mission store projects as an honest zero with provenance saying why.
 UI: Founder Command composer on index.html, Mission Room console on projects.html (list +
-detail + map-derived transition buttons + amend form), immersive Mission Room rebound — all
-script-created after `/session` grants, textContent-only, zero-truth explicit.
+detail + per-sequence intent record + map-derived transition buttons + amend form), immersive
+Mission Room rebound — all script-created after `/session` grants, textContent-only,
+zero-truth explicit. Authorization loss is honest in BOTH directions: any safe/off entry
+clears every rendered mission row by construction, a 401/403 on a lifecycle/amend write
+re-checks `/session` and re-reads (session gone → wipe; record still readable with the write
+grant gone → rows stay, controls go), and the composer disarms itself on a refused command.
 
 ## Evidence
 
 Focused suites: `mission-contracts` (17), `application.mission-core` (36),
 `live-mission-routes` (21), `mission-consoles` (9, JSDOM against the real control API),
 `mission-durability` (2, real file reopen), three immersive-page additions (live refresh,
-lock-over-rows, expiry wipe), hq-host wildcard forwarding (3), hq-server hosted restart rows
-(Linux-gated, CI-authoritative), plus the deliberate pin updates recorded in their diffs
-(route table nine entries, six-write postJson allow-list, bucket-agreement replacement).
+lock-over-rows, expiry wipe), hq-host wildcard forwarding (3), hq-server hosted restart driven
+through the real `commandMission`/read-back facade path (Linux-gated, CI-authoritative), plus
+the deliberate pin updates recorded in their diffs (route table nine entries,
+bucket-agreement replacement; the client fetch-target list in `control-console.test.ts` is a
+TEST PIN over the emitted scripts — the protective boundary is the server-side
+`CONTROL_WRITE_ROUTES` and the unchanged request pipeline, not any client-side allow-list).

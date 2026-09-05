@@ -222,7 +222,10 @@ describe('the obligations, through Fastify this time', () => {
       headers: { origin: ORIGIN, 'content-type': 'application/json' },
       payload: { instruction: 'x' },
     });
-    expect(res.json().ok).toBe(false);
+    // Status AND cause, not just `ok:false` — an empty allow-list is its own
+    // named refusal, checked before the origin comparison.
+    expect(res.statusCode).toBe(403);
+    expect((res.json() as { error: { code: string } }).error.code).toBe('origin_allowlist_empty');
     await app.close();
   });
 
@@ -313,7 +316,14 @@ describe('the Phase 3 mission surface travels through the same two wildcards', (
       headers: { origin: ORIGIN, 'content-type': 'application/json' },
       payload: { title: 'x', objective: 'y' },
     });
-    expect(res.json().ok).toBe(false);
+    // The exact status and the exact cause (empty allow-list is checked
+    // before the origin comparison), plus proof that nothing was written:
+    // the Founder-gated READ — which needs no origin — still shows zero.
+    expect(res.statusCode).toBe(403);
+    expect((res.json() as { error: { code: string } }).error.code).toBe('origin_allowlist_empty');
+    const read = await app.inject({ method: 'GET', url: CONTROL_ROUTES.missions });
+    expect(read.statusCode).toBe(200);
+    expect((read.json() as { missions: unknown[] }).missions).toHaveLength(0);
     await app.close();
   });
 

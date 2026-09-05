@@ -386,7 +386,19 @@ describe('the Mission Room shows commanded missions, and only those (Phase 3)', 
         approvalFlow: 'originate_gated_no_approval_row',
       },
       planItems: [],
-      intentHistory: [{ seq: 0, kind: 'founder_order', actor: 'founder', at: AT }],
+      intentHistory: [
+        {
+          seq: 0,
+          kind: 'founder_order',
+          actor: 'founder',
+          at: AT,
+          // M3: the structured per-seq state rides the browser view; the raw
+          // body/rationale never does.
+          objective: 'Improve the QOS site without changing the visual design',
+          constraints: ['No visual changes'],
+          acceptanceCriteria: null,
+        },
+      ],
       blockHistory: [],
       ...extra,
     };

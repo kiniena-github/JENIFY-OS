@@ -273,6 +273,93 @@ describe('raw instruction material stays server-side', () => {
     expect(history[1]!.body).toContain('A private rationale');
   });
 
+  it('exposes the STRUCTURED original intent for audit while the raw text stays server-side (M3)', () => {
+    // The Founder Intent Lock is inspectable in-product: after an amendment
+    // replaces the canonical fields, the browser can still read the original
+    // structured objective/constraints per sequence — without ever seeing
+    // the raw order text or the amendment rationale.
+    const h = harness();
+    const id = (h.call({ body: COMMAND_BODY }).body.mission as { id: string }).id;
+    h.call({
+      path: CONTROL_ROUTES.missionAmend,
+      body: {
+        missionId: id,
+        amendment: 'A private rationale for narrowing the objective.',
+        objective: 'Reduce QOS landing-page load time only',
+        constraints: ['Do not change the visual design'],
+      },
+    });
+    const listed = h.call({ method: 'GET', path: CONTROL_ROUTES.missions, body: undefined });
+    const mission = (listed.body.missions as Record<string, unknown>[]).find(
+      (m) => m.id === id,
+    )! as {
+      objective: string;
+      intentHistory: {
+        seq: number;
+        kind: string;
+        actor: string;
+        at: string;
+        objective: string;
+        constraints: string[];
+        acceptanceCriteria: string[] | null;
+      }[];
+    };
+    // The current record changed truthfully…
+    expect(mission.objective).toBe('Reduce QOS landing-page load time only');
+    // …the ORIGINAL structured intent (seq 0) is visible and unchanged…
+    expect(mission.intentHistory).toHaveLength(2);
+    const original = mission.intentHistory[0]!;
+    expect(original.seq).toBe(0);
+    expect(original.kind).toBe('founder_order');
+    expect(original.actor).toBe('founder');
+    expect(original.objective).toBe(
+      'Reduce QOS page load times without changing the visual design',
+    );
+    expect(original.constraints).toEqual([
+      'Do not change the visual design',
+      'Do not deploy production',
+    ]);
+    // …and the amendment entry carries the state it produced.
+    expect(mission.intentHistory[1]!.objective).toBe('Reduce QOS landing-page load time only');
+    // Raw material still never crosses: checked field by field above via the
+    // exact key pin (mission-core) and here over the whole wire body.
+    const text = JSON.stringify(listed.body);
+    expect(text).not.toContain(RAW_ORDER);
+    expect(text).not.toContain('A private rationale');
+    expect(text).not.toContain('"body"');
+  });
+
+  it('a raced amendment answers 409 with a typed conflict, not an opaque 500', () => {
+    // Injects the UNIQUE violation a cross-process race would produce (the
+    // in-process window is closed by the IMMEDIATE transaction) and pins the
+    // wire contract for it.
+    const h = harness();
+    const id = commanded(h);
+    const realPrepare = h.fixture.db.prepare.bind(h.fixture.db);
+    const dbPatched = h.fixture.db as unknown as { prepare: (sql: string) => unknown };
+    dbPatched.prepare = (sql: string) => {
+      if (/INSERT INTO hq_mission_intents/.test(sql)) {
+        const collision = new Error(
+          'UNIQUE constraint failed: hq_mission_intents.mission_id, hq_mission_intents.seq',
+        ) as Error & { code: string };
+        collision.code = 'SQLITE_CONSTRAINT_UNIQUE';
+        throw collision;
+      }
+      return realPrepare(sql);
+    };
+    try {
+      const response = h.call({
+        path: CONTROL_ROUTES.missionAmend,
+        body: { missionId: id, amendment: 'Loses the race.' },
+      });
+      expect(response.status).toBe(409);
+      expect((response.body.error as { code: string }).code).toBe('mission_intent_conflict');
+    } finally {
+      dbPatched.prepare = realPrepare;
+    }
+    expect(h.fixture.ops.getMissionIntentHistory(id)).toHaveLength(1);
+  });
+
   it('refuses credential-shaped mission text with the boundary scan, storing nothing', () => {
     const h = harness();
     const response = h.call({

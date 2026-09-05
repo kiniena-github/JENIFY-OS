@@ -28,7 +28,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openHqDatabaseReadOnly } from '../store/db.js';
 import { HeadquarterOperations } from '../application/service.js';
-import { liveSnapshotFromOperations } from '../live/snapshot.js';
+import { liveSnapshotFromOperations, SNAPSHOT_MISSION_LIMIT } from '../live/snapshot.js';
 import { CONNECTION_CATALOG } from '../live/connections.js';
 import { SNAPSHOT_FILENAME } from '../ui/live-refresh.js';
 import { PROVIDER_REGISTRY, type SecretsEnv } from '../routing/providers.js';
@@ -134,6 +134,9 @@ const snapshot = liveSnapshotFromOperations(ops, {
   mode: 'live',
   connectionProbes: connectionProbesWithGitHubDispatch(transport),
   dispatchAvailability,
+  // The WRITTEN artefact is bounded (newest N; counts and provenance keep
+  // the total honest). The live /state route stays unbounded on purpose.
+  missionLimit: SNAPSHOT_MISSION_LIMIT,
 });
 
 mkdirSync(dirname(outPath), { recursive: true });

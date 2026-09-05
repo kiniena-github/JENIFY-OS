@@ -177,3 +177,33 @@ Append-only. Each entry: date, decision, rationale. Newest last.
   6. **Raw order isolation.** The raw Founder instruction and every amendment rationale live
      in the server-side intent bodies only; no route response or snapshot carries them. The
      browser sees intake-scanned canonical fields and intent-history metadata.
+
+- **2026-09-05 — Phase 3 Opus second-pass corrections (PR #260, review of `cee771f`) are
+  applied on the same canonical branch.** Recorded so none of it is silent:
+  1. **Intent-lock visibility (M3).** The browser now sees the STRUCTURED per-sequence intent
+     history — seq/kind/actor/at plus objective/constraints/acceptance criteria, all
+     intake-scanned canonical fields — so the Founder can audit the immutable original order
+     (seq 0) next to every amendment from HQ itself. This supersedes ONLY the "intent-history
+     metadata" clause of item 6 above; the raw instruction and every amendment rationale
+     remain server-side, and the no-leak scans still pin that.
+  2. **Console honesty on authorization loss (M1).** Safe/off clears rendered mission rows by
+     construction; a 401/403 on a mission write re-checks the session and re-reads rather
+     than guessing — a lost session wipes the record, a lost write grant leaves the readable
+     record on screen without controls and without a false "not readable" claim.
+  3. **Read-only truth (M2).** Schema init never writes through a read-only database handle;
+     `hq:snapshot` over a pre-Phase-3 file projects zero missions with provenance stating the
+     store's absence instead of throwing or migrating.
+  4. **Append-only by engine (L1).** `hq_mission_intents`/`hq_mission_events` carry
+     BEFORE UPDATE/DELETE abort triggers; the source guard now scans all of `src/`.
+  5. **Atomic evidence (L5) and closed CAS windows (L4).** Every mission mutation commits its
+     rows, its mission event and its `op_evidence` entry in one IMMEDIATE reserve transaction
+     (the issue-#224 precedent); amendment sequence reads moved inside it, and a raced
+     amendment is a typed 409 (`mission_intent_conflict`), never an opaque 500.
+  6. **Digest binds the raw instruction.** Two orders differing only in wording are two
+     missions; pre-fix stored digests no longer dedupe against new re-commands (dev-stage
+     data, accepted). An invalid mission status filter now matches nothing (fail closed).
+  7. **Snapshot bound (L7).** The written snapshot artefact carries the newest
+     `SNAPSHOT_MISSION_LIMIT` missions with the TOTAL still in `counts.missions` and the trim
+     named in provenance; the live `/state` route stays unbounded on purpose.
+  Priority still never touches operator FIFO order (now proven behaviorally, not just by
+  grep), and the hosted restart proof now drives the real `commandMission` path.

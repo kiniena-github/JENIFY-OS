@@ -926,6 +926,15 @@ export function missionCommandConsoleScript(): string {
           var error = body.error || {};
           outcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' +
             (error.message || 'no detail was given') + ' Nothing was created.';
+          if (result.status === 401 || result.status === 403) {
+            // Session/authorization loss: a live-looking composer must not
+            // stay armed under it. Disarm every control and flip the banner
+            // off; re-authenticating and reloading the page rebuilds it.
+            var armed = box.querySelectorAll('input, textarea, select, button');
+            for (var d = 0; d < armed.length; d++) armed[d].disabled = true;
+            stayOff('the control API refused the command (' +
+              (error.code || ('HTTP ' + result.status)) + ').');
+          }
         })
         .catch(function (error) {
           submit.disabled = false;
@@ -989,9 +998,36 @@ export function missionsConsoleScript(): string {
   mount.appendChild(listBox);
 
   function stayOff(reason) {
+    // Safe/off clears the record BY CONSTRUCTION: once this session cannot
+    // prove the mission read, previously rendered mission details (and their
+    // still-wired controls) must not stay on screen under a banner saying
+    // the record is unreadable (Opus second-pass finding on cee771f).
+    listBox.textContent = '';
     note.setAttribute('data-missions-console-state', 'off');
     note.className = 'readonly-note console-state console-state-off';
     note.textContent = 'MISSION RECORD IS NOT READABLE FROM THIS PAGE \\u2014 ' + reason;
+  }
+
+  function recheckAfterWriteRefusal(status, error) {
+    // A 401/403 on a lifecycle/amend write can mean session loss (wipe the
+    // record) or a narrower loss (mutations or the capability turned off)
+    // where the record stays legitimately readable. Never guess which:
+    // re-ask /session, then let the read path decide — a refused read wipes
+    // via stayOff, a granted read re-renders with the controls this session
+    // still actually holds.
+    jsonExchange(fetch(SESSION_PATH, { headers: { accept: 'application/json' } }))
+      .then(function (result) {
+        sessionAnswer = result.body;
+        if (result.body == null || typeof result.body !== 'object' || result.body.founder !== true) {
+          stayOff('the session no longer resolves to the Founder (a write was refused: ' +
+            (error.code || ('HTTP ' + status)) + ')');
+          return;
+        }
+        reload();
+      })
+      .catch(function (err) {
+        stayOff('the HQ control API is not reachable from this page (' + err.message + ').');
+      });
   }
 
   function textLine(parent, cls, text) {
@@ -1027,7 +1063,7 @@ export function missionsConsoleScript(): string {
     card.appendChild(head);
 
     textLine(card, 'faint', mission.id + ' \\u00b7 commanded by ' + mission.createdBy + ' \\u00b7 ' + mission.createdAt);
-    textLine(card, '', 'Objective: ' + mission.objective);
+    textLine(card, '', 'Objective (current): ' + mission.objective);
     if (mission.scope) textLine(card, 'muted', 'Scope: ' + mission.scope);
 
     var constraints = Array.isArray(mission.constraints) ? mission.constraints : [];
@@ -1069,8 +1105,37 @@ export function missionsConsoleScript(): string {
         ', Founder-only origination, no approval row exists for commanding \\u2014 execution approvals stay at the task level.');
     }
     var history = Array.isArray(mission.intentHistory) ? mission.intentHistory : [];
-    textLine(card, 'faint', 'Intent record: ' + history.length + ' entr' + (history.length === 1 ? 'y' : 'ies') +
-      ' (original order plus amendments), append-only; bodies stay server-side.');
+    if (history.length > 0) {
+      // The Founder Intent Lock, inspectable in-product (M3): every sequence
+      // shows its STRUCTURED state — the immutable original (seq 0) clearly
+      // distinguished from later amendments and from the CURRENT fields
+      // above. The raw order text and amendment rationale stay server-side.
+      textLine(card, 'order-label', 'Intent record (append-only; raw order text and rationale stay server-side)');
+      var intentList = document.createElement('ul');
+      intentList.className = 'timeline';
+      intentList.setAttribute('data-mission-intents', mission.id);
+      for (var s = 0; s < history.length; s++) {
+        var entry = history[s];
+        var li2 = document.createElement('li');
+        var line = (entry.seq === 0
+          ? 'ORIGINAL intent (seq 0, immutable)'
+          : 'Amendment (seq ' + entry.seq + ')') +
+          ' \\u2014 by ' + entry.actor + ' at ' + entry.at +
+          ' \\u00b7 objective: ' + entry.objective;
+        var entryConstraints = Array.isArray(entry.constraints) ? entry.constraints : [];
+        line += entryConstraints.length > 0
+          ? ' \\u00b7 constraints: ' + entryConstraints.join(' \\u00b7 ')
+          : ' \\u00b7 constraints: none stated';
+        var entryAcceptance = entry.acceptanceCriteria;
+        line += Array.isArray(entryAcceptance) && entryAcceptance.length > 0
+          ? ' \\u00b7 acceptance: ' + entryAcceptance.join(' \\u00b7 ')
+          : ' \\u00b7 acceptance: recorded as unknown';
+        li2.textContent = line;
+        if (entry.seq === 0) li2.setAttribute('data-mission-original-intent', '');
+        intentList.appendChild(li2);
+      }
+      card.appendChild(intentList);
+    }
 
     if (canCommand && ALLOWED[mission.status] && ALLOWED[mission.status].length > 0) {
       var controls = el('div', 'decision-controls');
@@ -1106,6 +1171,9 @@ export function missionsConsoleScript(): string {
               var error = body.error || {};
               actionOutcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' +
                 (error.message || 'no detail was given');
+              if (result.status === 401 || result.status === 403) {
+                recheckAfterWriteRefusal(result.status, error);
+              }
             }).catch(function (error) {
               button.disabled = false;
               actionOutcome.textContent = 'Not submitted (' + error.message + ').';
@@ -1163,6 +1231,9 @@ export function missionsConsoleScript(): string {
           var error = body.error || {};
           amendOutcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' +
             (error.message || 'no detail was given');
+          if (result.status === 401 || result.status === 403) {
+            recheckAfterWriteRefusal(result.status, error);
+          }
         }).catch(function (error) {
           amendSubmit.disabled = false;
           amendOutcome.textContent = 'Not submitted (' + error.message + ').';
