@@ -997,6 +997,16 @@ describe('a room names every state section that can change what it shows', () =>
               updatedAt: AT,
             },
           ],
+          // The window IS the store here: one mission, one listed. A builder
+          // must say so beside the views (Opus second pass on `a849af8`, P1).
+          listing: {
+            total: 1,
+            listed: 1,
+            limit: 50,
+            truncated: false,
+            byState: { planned: 1, working: 0, blocked: 0, ready_review: 0, verified: 0, complete: 0, failed: 0, cancelled: 0 },
+            needsClarification: 0,
+          },
           provenance: PROVENANCE,
         },
       }),

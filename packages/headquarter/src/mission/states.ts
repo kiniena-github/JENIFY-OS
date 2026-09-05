@@ -31,10 +31,23 @@
  *                 cannot be decomposed honestly has no plan to be `planned`
  *                 with. Blocked exits to `planned` for exactly that case: an
  *                 amendment that yields a plan.
- *   ready_review  The work is done and awaits a mission-level review.
- *   verified      Reviewed and accepted. One step short of complete so that
- *                 "the work checked out" and "the mission is closed" remain two
- *                 recorded decisions rather than one.
+ *   ready_review  The work is done and awaits a mission-level review by the
+ *                 Founder.
+ *   verified      The Founder RECORDED that the work checked out. This is the
+ *                 Founder's own record of acceptance and nothing more: the
+ *                 mission core imposes no independence bar, so the same
+ *                 principal that placed the mission may record it verified
+ *                 and then complete. That is deliberate — enforcing a second
+ *                 reviewer here would deadlock a single-Founder deployment —
+ *                 and it is an OPEN product question for the Founder, recorded
+ *                 rather than decided (Opus second pass on `a849af8`). It is
+ *                 NOT an independent review; independent review exists at the
+ *                 TASK level, in the canonical review lane `presentation.ts`
+ *                 reads, and nothing about this state claims it. The label
+ *                 says "Founder-verified" so no UI can read it as more. One
+ *                 step short of complete so that "the work checked out" and
+ *                 "the mission is closed" remain two recorded decisions rather
+ *                 than one.
  *   complete      TERMINAL. No exit.
  *   failed        The mission did not achieve its objective. NOT terminal, and
  *                 its exits are stated deliberately: `planned` (re-plan under an
@@ -70,7 +83,11 @@ export const MISSION_STATE_LABELS: Record<MissionState, string> = {
   working: 'Working',
   blocked: 'Blocked',
   ready_review: 'Ready for review',
-  verified: 'Verified',
+  // "Founder-verified", never bare "Verified": the state is the Founder's own
+  // record of acceptance, and a label that reads as independent verification
+  // would claim a review the mission core does not perform. See the module
+  // docstring.
+  verified: 'Founder-verified',
   complete: 'Complete',
   failed: 'Failed',
   cancelled: 'Cancelled',

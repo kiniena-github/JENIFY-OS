@@ -27,12 +27,20 @@
  *   POST /api/hq/control/missions/amend     append an amendment to a mission's intent
  *   POST /api/hq/control/missions/transition move a mission's recorded state
  *
- * The four mission routes (Phase 3, issue #254) add no mutation the three
- * order/approval writes could not already reach: a mission's tasks are
- * created by `submitDirectOrder` through `mission/command.ts`, and the
- * mission tables themselves carry no authority. They are refused outright
- * when the host attached no `MissionStore` — absence fails closed, it is not
- * answered with an empty list.
+ * The four mission routes (Phase 3, issue #254) create no new unit of WORK:
+ * every task a mission holds is created by `submitDirectOrder` through
+ * `mission/command.ts`, under the same Founder gate, digest and idempotency
+ * as an order placed directly, and the mission tables themselves carry no
+ * authority — nothing in them is read by the dispatcher, the claim path or
+ * the approval path. What IS genuinely new, stated so nobody reads the line
+ * above as "nothing new": (a) a mission state transition is a mutation class
+ * with no order/approval equivalent — it writes a recorded state and a
+ * history row that no other route can write; and (b) a clarification-needed
+ * `POST /missions` commits a mission row, an intent row and an event row on a
+ * path that never reaches `createTask`, which is why `mission/command.ts`
+ * checks the actor's grant itself before that write. The mission routes are
+ * refused outright when the host attached no `MissionStore` — absence fails
+ * closed, it is not answered with an empty list.
  *
  * There is **no ask-for-changes route**, and its absence is a decision rather
  * than an omission. The canonical approval model has exactly two outcomes:
@@ -103,7 +111,7 @@ import {
 import {
   amendMission,
   missionAttention,
-  missionViews,
+  missionListing,
   submitFounderCommand,
   transitionMission,
   type FounderCommandErrorCode,
@@ -588,7 +596,15 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
   if (method === 'GET') return listMissions(deps, missions, founder, audit, now);
   if (path === CONTROL_ROUTES.missions) return createMission(request, deps, missions, founder, audit);
   if (path === CONTROL_ROUTES.missionAmend) return amend(request, deps, missions, founder, audit);
-  return transition(request, deps, missions, founder, audit);
+  // Matched literally, like every other branch, and 404 after it. This was
+  // an unguarded `return transition(...)` — a fifth mission path added to
+  // `known` without a branch of its own would have fallen through and
+  // executed a transition (Opus second pass on `a849af8`, nit 1). `known`
+  // already refuses anything not in the table, so this line is unreachable
+  // today; it is here so that stays true when the table grows.
+  if (path === CONTROL_ROUTES.missionTransition) return transition(request, deps, missions, founder, audit);
+  audit('refused', 'not_found', founder);
+  return refusal(404, 'not_found', 'No such HQ control route.');
 }
 
 type Audit = (outcome: 'allowed' | 'refused', detail: string, founder?: ResolvedFounder) => void;
@@ -994,6 +1010,7 @@ function missionErrorStatus(code: FounderCommandErrorCode): number {
     case 'mission_terminal':
     case 'mission_has_no_plan':
     case 'illegal_mission_transition':
+    case 'mission_intent_missing':
     case 'provider_not_connected':
       return 409;
     case 'capability_not_registered':
@@ -1016,7 +1033,7 @@ function listMissions(
   audit: Audit,
   now: () => Date,
 ): ControlResponse {
-  const views = missionViews(deps.ops, missions, {
+  const listing = missionListing(deps.ops, missions, {
     env: deps.secretsEnv,
     dispatchAvailability: deps.dispatchAvailability,
   });
@@ -1029,9 +1046,17 @@ function listMissions(
       // with nothing" from "there is no store" — the latter never reaches
       // this line, but the field makes the claim legible on the wire.
       attached: true,
-      recorded: missions.countMissions(),
-      counts: missionAttention(views),
-      missions: views,
+      // The window is explicit on the wire (Opus second pass on `a849af8`,
+      // P1): `recorded` is the store-wide total, `listed`/`limit`/`truncated`
+      // say how much of it `missions` carries, and `counts` says per field
+      // what it was counted over — see `MissionAttention`. A client that
+      // printed `counts.total` as "recorded" used to be printing the window.
+      recorded: listing.total,
+      listed: listing.listed,
+      limit: listing.limit,
+      truncated: listing.truncated,
+      counts: missionAttention(listing.missions, listing),
+      missions: listing.missions,
     }),
   );
 }

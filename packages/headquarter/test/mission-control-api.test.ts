@@ -11,6 +11,8 @@
  * changes what the state route answers next.
  */
 
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { setupFixture, type Fixture } from './application.fixture.js';
 import {
@@ -19,6 +21,7 @@ import {
   type ControlApiDeps,
   type ControlResponse,
 } from '../src/live/control-api.js';
+import { CONTROL_GRANT_JS } from '../src/ui/control-console.js';
 import { DIRECT_ORDER_CAPABILITY, registerDirectOrderCapability } from '../src/live/orders.js';
 import type { AuthenticatedAccount, ControlAuditEvent, ControlRequest } from '../src/live/auth.js';
 import { MissionStore } from '../src/mission/store.js';
@@ -359,5 +362,191 @@ describe('amend and transition over the API', () => {
     expect(h.call({ body: COMMAND_BODY }).status).toBe(403);
     // Reads still answer.
     expect(h.call({ method: 'GET' }).status).toBe(200);
+  });
+
+  it('refuses an advancing transition with 403 while the kill switch is engaged, and records it after release', () => {
+    // Opus second pass on `a849af8`. Verified before the fix: with
+    // `engageKillSwitch('*')` in force, this exact request answered 200 and
+    // the recorded state moved. The route maps `kill_switch_engaged` to 403
+    // already — the order path has used that code since #200 — so once the
+    // command layer consults the switch, the browser is told "refused, and
+    // nothing in this request will change that", which is the truth.
+    const h = harness();
+    const missionId = h.call({ body: COMMAND_BODY }).body.missionId as string;
+    expect(h.fixture.ops.engageKillSwitch('*', 'founder', 'incident').ok).toBe(true);
+    const halted = h.call({ path: CONTROL_ROUTES.missionTransition, body: { missionId, to: 'working' } });
+    expect(halted.status).toBe(403);
+    expect(halted.body.error).toMatchObject({ code: 'kill_switch_engaged' });
+    expect(h.missions.getMission(missionId)!.state).toBe('planned');
+    expect(h.audit.at(-1)?.detail).toBe('kill_switch_engaged');
+    expect(h.fixture.ops.releaseKillSwitch('*', 'founder').ok).toBe(true);
+    const moved = h.call({ path: CONTROL_ROUTES.missionTransition, body: { missionId, to: 'working' } });
+    expect(moved.status).toBe(200);
+    expect(h.missions.getMission(missionId)!.state).toBe('working');
+  });
+
+  it('answers 409 mission_intent_missing, not an opaque 500, for a mission whose intent row is gone', () => {
+    // Opus second pass on `a849af8`, nit 2. `existingReceipt` used to throw on
+    // a mission with no intent row and the route turned it into `internal`.
+    const h = harness();
+    const created = h.call({ body: COMMAND_BODY });
+    h.fixture.db.prepare(`DELETE FROM hq_mission_intent WHERE mission_id = ?`).run(created.body.missionId);
+    const again = h.call({ body: COMMAND_BODY });
+    expect(again.status).toBe(409);
+    expect(again.body.error).toMatchObject({ code: 'mission_intent_missing' });
+    expect(h.missions.countMissions()).toBe(1);
+    // The list still answers, and reports the chain as not intact.
+    expect(missionsOf(h.call({ method: 'GET' }))[0]!.intent.chainIntact).toBe(false);
+  });
+});
+
+describe('the list is explicit about being a window (Opus second pass on a849af8, P1)', () => {
+  /**
+   * Reproduced before the fix, with 55 missions of which the 5 oldest were
+   * blocked: `GET /control/missions` reported `counts.total 50, blocked 0`;
+   * the Mission Room showed "Missions recorded 50" with the hint "Founder
+   * missions the mission core holds, in any state"; the Command Room showed
+   * "Missions needing attention 0"; and because `missionAttention` also feeds
+   * `livenessFrom`, the room rendered quiet over five blocked missions.
+   *
+   * The missions are inserted straight into the store rather than through
+   * the command path — 55 real orders would create 55 gated tasks the test
+   * does not need — and given ascending timestamps so the window is the
+   * newest 50 and the blocked five are exactly the ones it leaves out.
+   */
+  function seeded(): Harness {
+    const h = harness();
+    for (let i = 0; i < 55; i += 1) {
+      const blocked = i < 5;
+      h.missions.insertMission({
+        id: `m-${String(i).padStart(3, '0')}`,
+        idempotencyKey: `mission:seed-${i}`,
+        title: `Seeded mission ${i}`,
+        project: null,
+        state: blocked ? 'blocked' : 'planned',
+        blockReason: blocked ? 'Waiting on the auditor.' : null,
+        requestedBy: 'founder',
+        actorAuthentication: 'authenticated_os_session',
+        requestedRoute: 'CLAUDE',
+        at: new Date(NOW.getTime() - (55 - i) * 60_000).toISOString(),
+      });
+    }
+    return h;
+  }
+
+  it('carries total, listed, limit and truncated, and counts the blocked five the window omits', () => {
+    const listed = seeded().call({ method: 'GET' });
+    expect(listed.status).toBe(200);
+    expect(listed.body).toMatchObject({ recorded: 55, listed: 50, limit: 50, truncated: true });
+    expect(missionsOf(listed)).toHaveLength(50);
+    expect(missionsOf(listed).filter((view) => view.state === 'blocked')).toHaveLength(0);
+    // Store-wide, not the window: this is the line that used to read 50 / 0.
+    expect(listed.body.counts).toMatchObject({ total: 55, listed: 50, truncated: true, blocked: 5, planned: 50, drift: 0 });
+  });
+
+  it('labels every room metric by what it was counted over, and lights the rooms for the omitted blocked missions', () => {
+    const state = seeded().call({ method: 'GET', path: CONTROL_ROUTES.state });
+    const rooms = state.body.rooms as RoomView[];
+    const byLabel = (room: RoomView, label: string) => room.metrics.find((metric) => metric.label === label);
+
+    const mission = rooms.find((room) => room.roomId === 'mission-room')!;
+    expect(byLabel(mission, 'Missions recorded')!.value).toBe(55);
+    expect(byLabel(mission, 'Missions recorded')!.hint).toContain('whole store');
+    // The precedent two sections away — "Events in window" — applied to
+    // missions: the window's size is a metric of its own, and the one
+    // window-scoped count is labelled as one, in label AND hint.
+    expect(byLabel(mission, 'Missions in window')!.value).toBe(50);
+    expect(byLabel(mission, 'Missions in window')!.hint).toContain('5 older mission(s)');
+    expect(byLabel(mission, 'Missions blocked')!.value).toBe(5);
+    expect(byLabel(mission, 'Missions blocked')!.hint).toContain('Store-wide');
+    expect(byLabel(mission, 'Recorded state disagrees with tasks')).toBeUndefined();
+    const drift = byLabel(mission, 'Recorded state disagrees with tasks — in window')!;
+    expect(drift.value).toBe(0);
+    expect(drift.hint).toContain('the 50 most recent of 55');
+    expect(mission.liveness).toBe('attention');
+
+    const command = rooms.find((room) => room.roomId === 'command-room')!;
+    const attention = byLabel(command, 'Missions needing attention')!;
+    expect(attention.value).toBe(5);
+    // The count says which part is store-wide and which is window-scoped,
+    // because it is a sum of both.
+    expect(attention.hint).toContain('anywhere in the store (5)');
+    expect(attention.hint).toContain('among the 50 most recent of 55 listed');
+    expect(attention.hint).toContain('Drift is known only for listed missions');
+    expect(command.liveness).toBe('attention');
+
+    const home = rooms.find((room) => room.roomId === 'home')!;
+    expect(byLabel(home, 'Missions needing you')!.value).toBe(5);
+    expect(home.liveness).toBe('attention');
+
+    const analytics = rooms.find((room) => room.roomId === 'analytics')!;
+    expect(byLabel(analytics, 'Missions recorded')!.value).toBe(55);
+    expect(byLabel(analytics, 'Missions recorded')!.hint).toContain('not the listed window');
+  });
+
+  it('draws no window metric and no window suffix when the store fits in one read', () => {
+    const h = harness();
+    h.call({ body: COMMAND_BODY });
+    const listed = h.call({ method: 'GET' });
+    expect(listed.body).toMatchObject({ recorded: 1, listed: 1, truncated: false });
+    const rooms = h.call({ method: 'GET', path: CONTROL_ROUTES.state }).body.rooms as RoomView[];
+    const mission = rooms.find((room) => room.roomId === 'mission-room')!;
+    expect(mission.metrics.some((metric) => metric.label === 'Missions in window')).toBe(false);
+    expect(mission.metrics.some((metric) => metric.label === 'Recorded state disagrees with tasks')).toBe(true);
+    const command = rooms.find((room) => room.roomId === 'command-room')!;
+    expect(command.metrics.find((metric) => metric.label === 'Missions needing attention')!.hint).not.toContain('store');
+  });
+});
+
+describe('the route table and the module docstring say only what is true (Opus second pass on a849af8)', () => {
+  const source = readFileSync(fileURLToPath(new URL('../src/live/control-api.ts', import.meta.url)), 'utf8');
+
+  it('matches the transition path literally and 404s after it — no fallthrough default', () => {
+    // Nit 1. `return transition(...)` was the unguarded last line of the
+    // mission dispatch: a fifth mission path added to `known` without a branch
+    // would have silently executed a transition. Every `return transition(`
+    // in the file must now sit behind a literal match on its route.
+    // Comments aside — the fix's own comment quotes the old line.
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    const calls = [...code.matchAll(/^.*return transition\(.*$/gm)].map((match) => match[0]);
+    expect(calls.length).toBeGreaterThan(0);
+    for (const line of calls) {
+      expect(line).toContain('if (path === CONTROL_ROUTES.missionTransition) return transition(');
+    }
+  });
+
+  it('no longer claims the mission routes add no mutation the order/approval writes could reach', () => {
+    // The overclaim: a mission state transition is a mutation class with no
+    // order/approval equivalent, and a clarification-needed POST commits three
+    // rows on a path that never reaches createTask. The docstring now says
+    // what is true — no new unit of WORK — and names what is genuinely new.
+    expect(source).not.toContain('add no mutation the three');
+    expect(source).toContain('create no new unit of WORK');
+    expect(source).toContain('a mission state transition is a mutation class');
+    expect(source).toContain('never reaches `createTask`');
+  });
+});
+
+describe('an absent mission store is named as the cause in the browser (Opus second pass on a849af8, P2)', () => {
+  it('gives the console a mission reason that names the store, not the principal or the registry', () => {
+    // The session route published `missionCoreAttached: false` and nothing
+    // consumed it: the grant rule fell through to a sentence blaming the
+    // principal's authority or the capability registry, both of which are
+    // fine here. This feeds the REAL session body to the REAL embedded grant
+    // rule and reads the reason the console would draw.
+    const grantedControls = new Function(`${CONTROL_GRANT_JS}; return grantedControls;`)() as (
+      session: unknown,
+    ) => { founderCommand: boolean; reason: string; missionReason: string };
+    const h = harness({ store: false });
+    const session = h.call({ method: 'GET', path: CONTROL_ROUTES.session }).body;
+    const grant = grantedControls(session);
+    expect(grant.founderCommand).toBe(false);
+    expect(grant.missionReason).toContain('No mission store is attached');
+    expect(grant.missionReason).toContain('not what withheld it');
+    expect(grant.missionReason).not.toContain('principal may not hold');
+    // The order control on the same deployment IS granted, and its reason is
+    // untouched: an absent mission store says nothing about direct orders.
+    expect((session.controls as Record<string, unknown>).directOrder).toBe(true);
+    expect(grant.reason).not.toContain('mission store');
   });
 });

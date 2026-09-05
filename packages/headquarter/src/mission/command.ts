@@ -139,6 +139,7 @@ export type FounderCommandErrorCode =
   | 'unknown_mission'
   | 'mission_terminal'
   | 'mission_has_no_plan'
+  | 'mission_intent_missing'
   | 'invalid_mission_state'
   | 'illegal_mission_transition'
   | 'reason_required'
@@ -463,9 +464,29 @@ function existingReceipt(
   mission: MissionRecord,
   env: SecretsEnv,
   availability: RouteAvailability | undefined,
-): FounderCommandReceipt {
+): FounderCommandResult {
   const intents = missions.listIntent(mission.id);
-  const latest = intents[intents.length - 1]!;
+  const latest = intents[intents.length - 1];
+  if (!latest) {
+    // A mission row with NO intent row is a broken record: the creation
+    // transaction writes both or neither, so this can only be damage or a
+    // hand-edited table. `missionView` already handles the case explicitly
+    // and reports `chainIntact: false`; this path used to dereference the
+    // missing row with `!` and throw, which the route turned into an opaque
+    // 500 that said nothing about what was wrong (Opus second pass on
+    // `a849af8`, nit 2). A receipt cannot carry "no intent" — its `intent` is
+    // the record that was written — so the honest answer is a typed refusal
+    // naming the mission, with nothing created: the key still belongs to that
+    // mission, and creating a second one beside a damaged first would hide
+    // the damage.
+    return commandFail(
+      'mission_intent_missing',
+      `Mission ${mission.id} already exists for this exact order but holds no intent row, so its record ` +
+        'is incomplete and its intent chain cannot be verified. Nothing was created. The Mission Room ' +
+        'reports it with its chain NOT intact; inspect it there before repeating the order.',
+      { missionId: mission.id },
+    );
+  }
   const tasks: DirectOrderReceipt[] = [];
   for (const link of missions.listTaskLinks(mission.id)) {
     const task = ops.queue.get(link.taskId);
@@ -491,7 +512,10 @@ function existingReceipt(
       }),
     });
   }
-  return { mission, intent: latest, tasks, deduplicated: true, needsClarification: latest.needsClarification };
+  return {
+    ok: true,
+    data: { mission, intent: latest, tasks, deduplicated: true, needsClarification: latest.needsClarification },
+  };
 }
 
 /**
@@ -539,9 +563,7 @@ export function submitFounderCommand(
     command,
   });
   const existing = missions.findByIdempotencyKey(idempotencyKey);
-  if (existing) {
-    return { ok: true, data: existingReceipt(ops, missions, existing, env, availability) };
-  }
+  if (existing) return existingReceipt(ops, missions, existing, env, availability);
 
   const intent = parseFounderCommand(command);
   const missionId = uuid();
@@ -677,15 +699,20 @@ export function amendMission(
 ): FounderCommandResult<AmendMissionReceipt> {
   const mission = missions.getMission(input.missionId ?? '');
   if (!mission) return commandFail('unknown_mission', `Unknown mission: ${String(input.missionId)}`);
+  // Authorization FIRST, then the state check, then the body (Opus second
+  // pass on `a849af8`, nit 4). This used to validate the command and the
+  // reason before asking who was amending, which inverted the order
+  // `transitionMission` uses and let an ungranted caller learn, from the
+  // specific refusal code, whether its text was well-formed before being told
+  // it may not amend at all. The identity of the actor is the first question,
+  // and its answer does not depend on what they typed.
+  const actor = requireActor(ops, input.actor, 'amend a Founder mission', 'originate');
+  if (!actor.ok) return actor.result;
   if (isMissionTerminal(mission.state)) {
     return commandFail('mission_terminal', `Mission ${mission.id} is ${mission.state} and takes no amendment.`, {
       state: mission.state,
     });
   }
-  const checked = checkCommand({ command: input.command, project: mission.project ?? undefined });
-  if (!checked.ok) return checked;
-  const reason = checkReason(input.reason, true);
-  if (!reason.ok) return reason;
   if (
     input.actorAuthentication !== undefined &&
     !isCallerAssertableActorAuthentication(input.actorAuthentication)
@@ -696,8 +723,10 @@ export function amendMission(
     availability?.resolvedActorAuthentication ?? input.actorAuthentication ?? DEFAULT_ACTOR_AUTHENTICATION;
   const capability = checkCapability(ops);
   if (!capability.ok) return capability;
-  const actor = requireActor(ops, input.actor, 'amend a Founder mission', 'originate');
-  if (!actor.ok) return actor.result;
+  const checked = checkCommand({ command: input.command, project: mission.project ?? undefined });
+  if (!checked.ok) return checked;
+  const reason = checkReason(input.reason, true);
+  if (!reason.ok) return reason;
 
   const intent = parseFounderCommand(checked.data.command);
   const hadTasks = missions.listTaskLinks(mission.id).length > 0;
@@ -791,8 +820,38 @@ const REASON_REQUIRED_TARGETS: readonly MissionState[] = ['blocked', 'failed', '
 const PLAN_REQUIRED_TARGETS: readonly MissionState[] = ['planned', 'working', 'ready_review', 'verified', 'complete'];
 
 /**
+ * Targets that record work MOVING or DONE, and are therefore refused while
+ * the kill switch is engaged (Opus second pass on `a849af8`, P2).
+ *
+ * The defect: `transitionMission` never consulted the kill switch. With
+ * `engageKillSwitch('*')` in force, `POST /missions/transition {to: 'working'}`
+ * answered 200 and the recorded state moved — a mission could be walked to
+ * `working`, `ready_review`, `verified` and `complete` while HQ was halted,
+ * and the Mission Room would have shown a mission completing during an
+ * incident in which nothing was permitted to run.
+ *
+ * The switch is read the way the canonical facade reads it — the queue's
+ * `killSwitchEngaged(capabilityId)`, the same call `approveTask` and the claim
+ * path make — against `hq.direct_order`, because every task of every mission
+ * is created under that capability. A global scope (`*`) and a scope on that
+ * capability both engage it. No new mechanism, no second switch.
+ *
+ * Which edges it gates follows the precedent already in the facade rather
+ * than an invented one: under the switch `approveTask` refuses (an approval
+ * primes work to run) and `denyTask` does not (a denial stops work). So the
+ * four targets that assert work is running or has been accepted are refused,
+ * and the stop targets — `blocked`, `failed`, `cancelled` — stay recordable:
+ * refusing a Founder's stop during a halt would be perverse. `planned` also
+ * stays recordable, because a re-plan records intent the way recording an
+ * order does, and `createTask` itself does not consult the switch — the plan's
+ * tasks land gated, and their approval is what the switch refuses.
+ */
+const KILL_SWITCH_REFUSED_TARGETS: readonly MissionState[] = ['working', 'ready_review', 'verified', 'complete'];
+
+/**
  * Move a mission's RECORDED state. Explicit, attributed, reasoned, and
- * refused when the table does not list the edge.
+ * refused when the table does not list the edge — or when the kill switch is
+ * engaged and the target says work is moving or done.
  */
 export function transitionMission(
   ops: HeadquarterOperations,
@@ -807,6 +866,15 @@ export function transitionMission(
   const to = input.to;
   const actor = requireActor(ops, input.actor, 'move a Founder mission', 'approve');
   if (!actor.ok) return actor.result;
+  if (KILL_SWITCH_REFUSED_TARGETS.includes(to) && ops.queue.killSwitchEngaged(DIRECT_ORDER_CAPABILITY.id)) {
+    return commandFail(
+      'kill_switch_engaged',
+      `The kill switch is engaged for ${DIRECT_ORDER_CAPABILITY.id}, so mission ${mission.id} cannot be recorded ` +
+        `as ${to}: that would record work moving or accepted while HQ is halted. The recorded state is unchanged. ` +
+        'Recording a stop (blocked, failed, cancelled) is still permitted; releasing the switch is a separate Founder action.',
+      { from: mission.state, to },
+    );
+  }
   if (!canMissionTransition(mission.state, to)) {
     return commandFail(
       'illegal_mission_transition',

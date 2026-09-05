@@ -31,12 +31,15 @@ import { EXECUTION_PROVIDER_KEY } from '../src/operator/provider-binding.js';
 import { DIRECT_ORDER_CAPABILITY, registerDirectOrderCapability } from '../src/live/orders.js';
 import {
   amendMission,
+  missionAttention,
   missionIdempotencyKey,
+  missionListing,
   missionView,
   missionViews,
   MissionStore,
   submitFounderCommand,
   transitionMission,
+  MAX_MISSIONS_LISTED,
   NEEDS_CLARIFICATION_REASON,
   MAX_MISSION_TITLE_LENGTH,
 } from '../src/mission/index.js';
@@ -502,6 +505,229 @@ describe('recorded transitions follow the table, and only a decision-maker recor
     // Cancelling it is fine: that claims nothing about a plan.
     const cancel = transitionMission(fixture.ops, missions, { missionId: created.data.mission.id, to: 'cancelled', actor: 'founder', reason: 'never mind' });
     expect(cancel.ok).toBe(true);
+  });
+});
+
+describe('the kill switch halts mission transitions that record work moving or done', () => {
+  /**
+   * Opus second pass on `a849af8`. `transitionMission` checked the mission,
+   * the target, the actor, the table and the reason — and never the kill
+   * switch. With `engageKillSwitch('*')` in force, a mission could be walked
+   * `planned → working → ready_review → verified → complete` and the Mission
+   * Room would have shown a mission completing while HQ was halted.
+   *
+   * The switch is read the way `approveTask` and the claim path read it:
+   * `ops.queue.killSwitchEngaged(capabilityId)`, against `hq.direct_order`,
+   * because every mission task is created under that capability. Which edges
+   * it gates follows the facade's own precedent — under the switch
+   * `approveTask` refuses and `denyTask` does not — so the four targets that
+   * assert work is running or accepted are refused and a stop stays
+   * recordable. Both halves are asserted, engaged and released.
+   */
+  function planned(): Core & { id: string } {
+    const c = core();
+    const created = submitFounderCommand(c.fixture.ops, c.missions, STEPPED, CLAUDE_ONLY);
+    if (!created.ok) throw new Error(created.error.message);
+    return { ...c, id: created.data.mission.id };
+  }
+
+  it('refuses every advancing target while the global switch is engaged, and writes nothing', () => {
+    const { fixture, missions, id } = planned();
+    const engaged = fixture.ops.engageKillSwitch('*', 'founder', 'incident: halt everything');
+    expect(engaged.ok).toBe(true);
+    const result = transitionMission(fixture.ops, missions, { missionId: id, to: 'working', actor: 'founder' });
+    expect(!result.ok && result.error.code).toBe('kill_switch_engaged');
+    expect(!result.ok && result.error.message).toContain('halted');
+    expect(!result.ok && result.error.message).toContain(DIRECT_ORDER_CAPABILITY.id);
+    expect(missions.getMission(id)!.state).toBe('planned');
+    expect(missions.listEvents(id)).toHaveLength(1);
+    // The other three advancing targets are refused on the same ground, not
+    // merely because the table lacks the edge: the switch is consulted
+    // BEFORE the table, so the code names the real cause.
+    for (const to of ['ready_review', 'verified', 'complete'] as const) {
+      const refused = transitionMission(fixture.ops, missions, { missionId: id, to, actor: 'founder' });
+      expect(!refused.ok && refused.error.code, to).toBe('kill_switch_engaged');
+    }
+  });
+
+  it('refuses under a switch scoped to the direct-order capability alone', () => {
+    const { fixture, missions, id } = planned();
+    expect(fixture.ops.engageKillSwitch(DIRECT_ORDER_CAPABILITY.id, 'founder', 'orders paused').ok).toBe(true);
+    const result = transitionMission(fixture.ops, missions, { missionId: id, to: 'working', actor: 'founder' });
+    expect(!result.ok && result.error.code).toBe('kill_switch_engaged');
+    expect(missions.getMission(id)!.state).toBe('planned');
+  });
+
+  it('still records a stop while engaged — a halt is not a reason to refuse a Founder’s stop', () => {
+    const { fixture, missions, id } = planned();
+    expect(fixture.ops.engageKillSwitch('*', 'founder', 'incident').ok).toBe(true);
+    const stopped = transitionMission(fixture.ops, missions, { missionId: id, to: 'blocked', actor: 'founder', reason: 'Halted during the incident.' });
+    expect(stopped.ok).toBe(true);
+    expect(missions.getMission(id)!.state).toBe('blocked');
+    const cancelled = transitionMission(fixture.ops, missions, { missionId: id, to: 'cancelled', actor: 'founder', reason: 'Dropped.' });
+    expect(cancelled.ok).toBe(true);
+    expect(missions.getMission(id)!.state).toBe('cancelled');
+  });
+
+  it('records the same advancing transition once the switch is released', () => {
+    const { fixture, missions, id } = planned();
+    expect(fixture.ops.engageKillSwitch('*', 'founder', 'incident').ok).toBe(true);
+    expect(transitionMission(fixture.ops, missions, { missionId: id, to: 'working', actor: 'founder' }).ok).toBe(false);
+    expect(fixture.ops.releaseKillSwitch('*', 'founder').ok).toBe(true);
+    const result = transitionMission(fixture.ops, missions, { missionId: id, to: 'working', actor: 'founder' });
+    expect(result.ok).toBe(true);
+    expect(missions.getMission(id)!.state).toBe('working');
+    expect(missions.listEvents(id).map((event) => event.toState)).toEqual(['planned', 'working']);
+  });
+});
+
+describe('a mission with no intent row is refused as a broken record, never thrown as a 500', () => {
+  /**
+   * Opus second pass on `a849af8`, nit 2. `existingReceipt` dereferenced the
+   * latest intent row with `!`; on a mission that holds none it threw, and
+   * the route turned that into an opaque 500 saying nothing about what was
+   * wrong. `missionView` already handles the same case explicitly and reports
+   * `chainIntact: false`. A receipt cannot carry "no intent" — its `intent` IS
+   * the record that was written — so the honest answer is a typed refusal
+   * naming the mission, with nothing created beside the damaged row.
+   *
+   * The creation transaction writes the mission row and the intent row
+   * together, so this state is reachable only by damage or a hand-edited
+   * table; the test makes it by deleting the intent row underneath a real
+   * mission.
+   */
+  it('returns mission_intent_missing for the deduplicated resubmission and creates nothing', () => {
+    const { fixture, missions } = core();
+    const created = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    if (!created.ok) throw new Error(created.error.message);
+    fixture.db.prepare(`DELETE FROM hq_mission_intent WHERE mission_id = ?`).run(created.data.mission.id);
+    expect(missions.listIntent(created.data.mission.id)).toHaveLength(0);
+    const again = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    expect(again.ok).toBe(false);
+    if (again.ok) return;
+    expect(again.error.code).toBe('mission_intent_missing');
+    expect(again.error.message).toContain(created.data.mission.id);
+    expect(again.error.message).toContain('NOT intact');
+    expect(missions.countMissions()).toBe(1);
+    expect(fixture.ops.queue.listByStatus('needs_approval')).toHaveLength(3);
+    // And the view says the same thing about the same mission.
+    expect(missionView(fixture.ops, missions, missions.getMission(created.data.mission.id)!).intent.chainIntact).toBe(false);
+  });
+});
+
+describe('amendment authorization comes before body validation', () => {
+  /**
+   * Opus second pass on `a849af8`, nit 4. `amendMission` validated the
+   * command and the reason before asking who was amending, which inverted the
+   * order `transitionMission` uses: an ungranted caller was told
+   * `reason_required` or `unsafe_command` — learning whether its text was
+   * well-formed — before being told it may not amend at all. The identity of
+   * the actor is the first question, and its answer does not depend on what
+   * they typed.
+   */
+  it('answers an ungranted actor with not_permitted whatever the body looks like', () => {
+    const { fixture, missions } = core();
+    const created = submitFounderCommand(fixture.ops, missions, STEPPED, CLAUDE_ONLY);
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.data.mission.id;
+    for (const [label, body] of [
+      ['empty reason', { command: 'Ship it faster.', reason: '' }],
+      ['empty command', { command: '   ', reason: 'r' }],
+      ['credential-shaped command', { command: 'Use sk-abcdefghijklmnopqrstuvwxyz to fix it.', reason: 'r' }],
+    ] as const) {
+      const result = amendMission(fixture.ops, missions, { missionId: id, actor: 'coo', ...body }, CLAUDE_ONLY);
+      expect(!result.ok && result.error.code, label).toBe('not_permitted');
+    }
+    // A granted actor still gets the body refusals, in the same words as before.
+    const noReason = amendMission(fixture.ops, missions, { missionId: id, command: 'x y z', reason: '', actor: 'founder' }, CLAUDE_ONLY);
+    expect(!noReason.ok && noReason.error.code).toBe('reason_required');
+    expect(missions.listIntent(id)).toHaveLength(1);
+  });
+});
+
+describe('the listing says how much of the store the window is', () => {
+  /**
+   * Opus second pass on `a849af8`, P1. `missionViews` capped the list at
+   * `MAX_MISSIONS_LISTED` and nothing downstream knew a cap had applied:
+   * `missionAttention` counted the window and every consumer printed the
+   * result as a fact about the store. `missionListing` now carries the
+   * store-wide total, whether the cap applied, and store-wide tallies by
+   * recorded state from `countMissionsByState` — a column count over every
+   * row — so a blocked mission outside the window is still counted. Drift is
+   * the one count that stays window-scoped (it needs the task projection),
+   * and `missionAttention` says so on its type.
+   */
+  function seed(missions: MissionStore, count: number, blockedOldest: number): void {
+    for (let i = 0; i < count; i += 1) {
+      const blocked = i < blockedOldest;
+      missions.insertMission({
+        id: `m-${String(i).padStart(3, '0')}`,
+        idempotencyKey: `mission:seed-${i}`,
+        title: `Seeded mission ${i}`,
+        project: null,
+        state: blocked ? 'blocked' : 'planned',
+        // Alternate the two block reasons so the clarification subset is a
+        // strict subset and the tally can be checked against the view rule.
+        blockReason: blocked ? (i % 2 === 0 ? `${NEEDS_CLARIFICATION_REASON}: question_not_order` : 'Waiting on the auditor.') : null,
+        requestedBy: 'founder',
+        actorAuthentication: 'authenticated_os_session',
+        requestedRoute: 'CLAUDE',
+        at: new Date(Date.UTC(2026, 8, 1, 0, i)).toISOString(),
+      });
+    }
+  }
+
+  it('reports total 55, a truncated window of 50, and 5 blocked that the window does not contain', () => {
+    const { fixture, missions } = core();
+    seed(missions, 55, 5);
+    const listing = missionListing(fixture.ops, missions);
+    expect(listing.total).toBe(55);
+    expect(listing.listed).toBe(50);
+    expect(listing.limit).toBe(MAX_MISSIONS_LISTED);
+    expect(listing.truncated).toBe(true);
+    expect(listing.missions).toHaveLength(50);
+    // The window is the NEWEST 50, and the 5 blocked are the OLDEST: none of
+    // them is listed, which is exactly the case that used to read "0 blocked".
+    expect(listing.missions.filter((view) => view.state === 'blocked')).toHaveLength(0);
+    expect(listing.byState.blocked).toBe(5);
+    expect(listing.byState.planned).toBe(50);
+    expect(listing.needsClarification).toBe(3);
+    const counts = missionAttention(listing.missions, listing);
+    expect(counts).toMatchObject({ total: 55, listed: 50, truncated: true, blocked: 5, needsClarification: 3, planned: 50, drift: 0 });
+    // The bare window is still available for callers that want only rows.
+    expect(missionViews(fixture.ops, missions)).toHaveLength(50);
+  });
+
+  it('is not truncated when the store fits, and the tallies agree with the views', () => {
+    const { fixture, missions } = core();
+    seed(missions, 7, 2);
+    const listing = missionListing(fixture.ops, missions);
+    expect(listing).toMatchObject({ total: 7, listed: 7, truncated: false });
+    expect(listing.byState.blocked).toBe(listing.missions.filter((view) => view.state === 'blocked').length);
+    expect(listing.needsClarification).toBe(listing.missions.filter((view) => view.needsClarification).length);
+  });
+
+  it('counts the clarification subset by the reserved prefix exactly, not by a LIKE wildcard', () => {
+    // `needs_clarification` contains an underscore, which LIKE reads as a
+    // single-character wildcard; a reason of `needsXclarification…` would
+    // have matched. The tally uses substr and must agree with the view rule.
+    const { fixture, missions } = core();
+    missions.insertMission({
+      id: 'm-lookalike',
+      idempotencyKey: 'mission:lookalike',
+      title: 'Lookalike',
+      project: null,
+      state: 'blocked',
+      blockReason: 'needsXclarification: not the reserved prefix',
+      requestedBy: 'founder',
+      actorAuthentication: 'authenticated_os_session',
+      requestedRoute: 'CLAUDE',
+      at: new Date().toISOString(),
+    });
+    const listing = missionListing(fixture.ops, missions);
+    expect(listing.byState.blocked).toBe(1);
+    expect(listing.needsClarification).toBe(0);
+    expect(listing.missions[0]!.needsClarification).toBe(false);
   });
 });
 

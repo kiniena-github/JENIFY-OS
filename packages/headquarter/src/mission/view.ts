@@ -277,41 +277,130 @@ export function missionView(
 }
 
 /**
+ * What is true about the WHOLE store at the moment a list was read, carried
+ * beside the listed window so the window can never masquerade as the total
+ * (Opus second pass on `a849af8`, P1).
+ *
+ * The defect this closes: `missionViews` capped the list at
+ * `MAX_MISSIONS_LISTED` (50) and nothing downstream learned that a cap had
+ * applied. The snapshot section carried no total, `missionAttention` counted
+ * only the 50 it was handed, and every room metric — "Missions recorded",
+ * "Missions blocked", "Missions needing attention" — was a fact about the
+ * window wearing the label of a fact about the store. Reproduced: 55 missions
+ * with the 5 oldest blocked gave `total 50, blocked 0`, a Command Room reading
+ * "needing attention 0", and a Mission Room rendered quiet over five blocked
+ * missions. `livenessFrom` reads the same count, so the room did not light.
+ *
+ * Every number here that is a fact about the `state` column is counted over
+ * every row by `MissionStore.countMissionsByState`, so it is true whether the
+ * window held 3 missions or 50 of 5,000. The one count that is NOT here is
+ * drift: whether a mission's recorded state disagrees with its tasks needs the
+ * task projection, and projecting every mission is exactly the cost the cap
+ * exists to avoid. Drift stays a window count and is labelled as one wherever
+ * it is shown.
+ */
+export interface MissionListingFacts {
+  /** Every mission the store holds, in any state. `countMissions()`, not the list length. */
+  total: number;
+  /** How many the window carries. */
+  listed: number;
+  /** The cap that applied. */
+  limit: number;
+  /** True when `total > listed`: the window is the newest `listed` of `total`. */
+  truncated: boolean;
+  /** Store-wide, by recorded state. A column count, never a count over the window. */
+  byState: Record<MissionState, number>;
+  /** Store-wide: recorded blocked by the mission core for clarification. */
+  needsClarification: number;
+}
+
+export interface MissionListing extends MissionListingFacts {
+  /** The window, newest first, proven browser-safe. */
+  missions: MissionView[];
+}
+
+/**
+ * The list read: the newest missions up to the cap, with the store-wide facts
+ * that say how much of the store the window is. Fail closed: a view that
+ * cannot be proven safe throws rather than being returned partially.
+ */
+export function missionListing(
+  ops: HeadquarterOperations,
+  missions: MissionStore,
+  options: MissionViewOptions = {},
+): MissionListing {
+  const limit = options.limit ?? MAX_MISSIONS_LISTED;
+  const views = missions.listMissions(limit).map((mission) => missionView(ops, missions, mission, options));
+  assertBrowserSafe(views, 'missions');
+  const total = missions.countMissions();
+  const tallies = missions.countMissionsByState();
+  return {
+    missions: views,
+    total,
+    listed: views.length,
+    limit,
+    truncated: total > views.length,
+    byState: tallies.byState,
+    needsClarification: tallies.needsClarification,
+  };
+}
+
+/**
  * Every mission the store lists, newest first, proven browser-safe before it
- * is returned. Fail closed: a view that cannot be proven safe throws rather
- * than being returned partially.
+ * is returned. The bare window — callers that need to know whether it IS the
+ * whole store read `missionListing` instead.
  */
 export function missionViews(
   ops: HeadquarterOperations,
   missions: MissionStore,
   options: MissionViewOptions = {},
 ): MissionView[] {
-  const views = missions
-    .listMissions(options.limit ?? MAX_MISSIONS_LISTED)
-    .map((mission) => missionView(ops, missions, mission, options));
-  assertBrowserSafe(views, 'missions');
-  return views;
+  return missionListing(ops, missions, options).missions;
 }
 
-/** Counts over a list of views — what the rooms light on. Copied and counted, nothing else. */
-export function missionAttention(views: readonly MissionView[]): {
+export interface MissionAttention {
+  /** Store-wide. */
   total: number;
+  /** The window's size, so a reader can see how much of `total` the rows cover. */
+  listed: number;
+  truncated: boolean;
+  /** Store-wide. */
   needsClarification: number;
+  /** Store-wide. */
   blocked: number;
+  /** Store-wide. */
   readyReview: number;
+  /** Store-wide. */
   working: number;
+  /** Store-wide. */
   planned: number;
-  drift: number;
+  /** Store-wide. */
   terminal: number;
-} {
+  /**
+   * WINDOW-SCOPED — the only count here that is. Drift needs each mission's
+   * task projection, which exists only for the listed missions. When
+   * `truncated` is true this is "drift among the `listed` newest", and every
+   * label that shows it says so.
+   */
+  drift: number;
+}
+
+/**
+ * Counts the rooms light on. Copied and counted, nothing else — and each
+ * count says what it is counted over: the store-wide facts come from the
+ * listing's column tallies, the window-scoped drift from the views.
+ */
+export function missionAttention(views: readonly MissionView[], facts: MissionListingFacts): MissionAttention {
   return {
-    total: views.length,
-    needsClarification: views.filter((view) => view.needsClarification).length,
-    blocked: views.filter((view) => view.state === 'blocked').length,
-    readyReview: views.filter((view) => view.state === 'ready_review').length,
-    working: views.filter((view) => view.state === 'working').length,
-    planned: views.filter((view) => view.state === 'planned').length,
+    total: facts.total,
+    listed: views.length,
+    truncated: facts.truncated,
+    needsClarification: facts.needsClarification,
+    blocked: facts.byState.blocked,
+    readyReview: facts.byState.ready_review,
+    working: facts.byState.working,
+    planned: facts.byState.planned,
+    terminal: facts.byState.complete + facts.byState.cancelled,
     drift: views.filter((view) => view.driftFromTasks).length,
-    terminal: views.filter((view) => view.state === 'complete' || view.state === 'cancelled').length,
   };
 }

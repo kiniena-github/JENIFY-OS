@@ -176,7 +176,34 @@ function limited(rows: RoomRow[]): RoomRow[] {
  *              mission-level review, or whose recorded state disagrees with
  *              what their canonical tasks imply
  *   active     missions recorded `working`
- *   present    every mission the section carries
+ *   present    every mission the STORE holds
+ *
+ * ## The window is not the store (Opus second pass on `a849af8`, P1)
+ *
+ * The section's `data` is a window — the newest `MAX_MISSIONS_LISTED` — and
+ * until this pass every count above was taken over it and labelled as if it
+ * were the store. Reproduced with 55 missions whose 5 oldest were blocked:
+ * "Missions recorded 50", "Missions blocked 0", "Missions needing attention
+ * 0", and a Mission Room rendered quiet over five blocked missions, because
+ * `livenessFrom` reads the same count. A metric that under-reports is worse
+ * than no metric: a Founder reading "0 blocked" stops looking.
+ *
+ * Now the counts say what they are counted over, the way the Analytics room's
+ * "Events in window" already does two sections down:
+ *
+ *   - Every count that is a fact about the recorded `state` column — total,
+ *     blocked, ready for review, working, needing clarification — is
+ *     STORE-WIDE. `missionAttention` takes it from the listing's column
+ *     tallies (`MissionStore.countMissionsByState`), not from the window, so
+ *     it is true whether the window held 3 missions or 50 of 5,000. This is
+ *     what lights the room: five blocked missions light it wherever in the
+ *     store they sit.
+ *   - Drift — recorded state disagreeing with what the tasks imply — needs the
+ *     task projection, which exists only for the listed missions. It stays a
+ *     WINDOW count, and when the cap applied its label and hint both say so,
+ *     and the "needing attention" hint says which of its parts is which.
+ *   - When the cap applied, a "Missions in window" metric states the window's
+ *     size beside the total, so nobody reads the row list as the whole store.
  */
 function missionSignals(state: HqStateDocument): {
   absent: boolean;
@@ -185,6 +212,8 @@ function missionSignals(state: HqStateDocument): {
   active: number;
   present: number;
   metrics: RoomMetric[];
+  /** How the "needing attention" count was taken, for the rooms that show it. */
+  attentionHint: string;
 } {
   const section = state.missions;
   if (section == null) {
@@ -194,6 +223,7 @@ function missionSignals(state: HqStateDocument): {
       attention: 0,
       active: 0,
       present: 0,
+      attentionHint: '',
       metrics: [
         metric(
           'Mission core',
@@ -205,21 +235,44 @@ function missionSignals(state: HqStateDocument): {
     };
   }
   const views = section.data;
-  const counts = missionAttention(views);
+  const counts = missionAttention(views, section.listing);
   const attention = counts.blocked + counts.readyReview + counts.drift;
+  const window = counts.truncated ? `the ${counts.listed} most recent of ${counts.total}` : null;
+  const attentionHint = window
+    ? `Recorded blocked or ready for review anywhere in the store (${counts.blocked + counts.readyReview}), plus ` +
+      `missions among ${window} listed whose recorded state disagrees with their tasks (${counts.drift}). ` +
+      'Drift is known only for listed missions; the other counts are store-wide.'
+    : 'Blocked, ready for review, or recorded in a state their tasks disagree with.';
   return {
     absent: false,
     views,
     attention,
     active: counts.working,
     present: counts.total,
+    attentionHint,
     metrics: [
-      metric('Missions recorded', counts.total, 'Founder missions the mission core holds, in any state.', tone(counts.total, 'info')),
-      metric('Needing clarification', counts.needsClarification, 'Recorded blocked with zero tasks: the order could not be decomposed honestly.', tone(counts.needsClarification, 'warn')),
-      metric('Missions blocked', counts.blocked, 'Recorded blocked, for clarification or by an explicit Founder decision.', tone(counts.blocked, 'danger')),
-      metric('Ready for review', counts.readyReview, 'Recorded ready_review — a mission-level decision is what is left.', tone(counts.readyReview, 'warn')),
-      metric('Missions working', counts.working, 'Recorded working. Recorded, not inferred: nothing moves a mission on its own.', tone(counts.working, 'info')),
-      metric('Recorded state disagrees with tasks', counts.drift, 'The mission’s recorded state and what its canonical tasks imply are different. Shown, never auto-resolved.', tone(counts.drift, 'warn')),
+      metric('Missions recorded', counts.total, 'Founder missions the mission core holds, in any state — counted across the whole store, not the length of the list.', tone(counts.total, 'info')),
+      ...(window
+        ? [
+            metric(
+              'Missions in window',
+              counts.listed,
+              `This document carries ${window}; ${counts.total - counts.listed} older mission(s) are held and counted but not listed here.`,
+              'neutral',
+            ),
+          ]
+        : []),
+      metric('Needing clarification', counts.needsClarification, 'Recorded blocked with zero tasks: the order could not be decomposed honestly. Store-wide.', tone(counts.needsClarification, 'warn')),
+      metric('Missions blocked', counts.blocked, 'Recorded blocked, for clarification or by an explicit Founder decision. Store-wide.', tone(counts.blocked, 'danger')),
+      metric('Ready for review', counts.readyReview, 'Recorded ready_review — a mission-level decision is what is left. Store-wide.', tone(counts.readyReview, 'warn')),
+      metric('Missions working', counts.working, 'Recorded working. Recorded, not inferred: nothing moves a mission on its own. Store-wide.', tone(counts.working, 'info')),
+      metric(
+        window ? 'Recorded state disagrees with tasks — in window' : 'Recorded state disagrees with tasks',
+        counts.drift,
+        'The mission’s recorded state and what its canonical tasks imply are different. Shown, never auto-resolved.' +
+          (window ? ` Counted over ${window} listed only: drift needs each mission’s task projection, which exists for listed missions alone.` : ''),
+        tone(counts.drift, 'warn'),
+      ),
     ],
   };
 }
@@ -283,12 +336,7 @@ function overviewSection(state: HqStateDocument): Section {
       ...(missions.absent
         ? missions.metrics
         : [
-            metric(
-              'Missions needing you',
-              missions.attention,
-              'Blocked, ready for review, or recorded in a state their tasks disagree with.',
-              tone(missions.attention, 'warn'),
-            ),
+            metric('Missions needing you', missions.attention, missions.attentionHint, tone(missions.attention, 'warn')),
           ]),
     ],
     rows: [],
@@ -324,8 +372,8 @@ function operationsSection(state: HqStateDocument): Section {
       ...(missions.absent
         ? missions.metrics
         : [
-            metric('Missions needing attention', missions.attention, 'Blocked, ready for review, or recorded in a state their tasks disagree with.', tone(missions.attention, 'warn')),
-            metric('Missions working', missions.active, 'Recorded working — an explicit Founder record, not an inference.', tone(missions.active, 'info')),
+            metric('Missions needing attention', missions.attention, missions.attentionHint, tone(missions.attention, 'warn')),
+            metric('Missions working', missions.active, 'Recorded working — an explicit Founder record, not an inference. Store-wide.', tone(missions.active, 'info')),
           ]),
     ],
     rows: limited(rows),
@@ -700,7 +748,7 @@ function analyticsSection(state: HqStateDocument): Section {
       metric('Events in window', state.activity.data.length, 'Canonical events carried by this document.', 'neutral'),
       ...(missions.absent
         ? missions.metrics
-        : [metric('Missions recorded', missions.present, 'Mission rows, in any state.', 'neutral')]),
+        : [metric('Missions recorded', missions.present, 'Mission rows, in any state — the whole store, not the listed window.', 'neutral')]),
     ],
     rows: [],
     emptyMessage:

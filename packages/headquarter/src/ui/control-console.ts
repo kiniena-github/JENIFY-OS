@@ -89,16 +89,29 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
  * error answer, or no answer at all grant nothing. The reason string is the
  * server's own message when it sent one, so the page explains itself in the
  * server's words rather than guessing.
+ *
+ * Two reasons, not one (Opus second pass on `a849af8`, P2): `reason` explains
+ * a withheld order/approval control and `missionReason` a withheld mission
+ * control. They differ in exactly one branch. The session route publishes
+ * `controls.missionCoreAttached`, and nothing consumed it: a deployment that
+ * attached no `MissionStore` but was otherwise correct told a fully-granted
+ * Founder that "the principal may not hold that authority, or the capability
+ * behind it is not registered" — two things that were fine — while the true
+ * cause sat unread in the same response. The mission consoles read
+ * `missionReason`; the order and approvals consoles keep `reason`, because
+ * an absent mission store says nothing about THEIR grants.
  */
 export const CONTROL_GRANT_JS = `function grantedControls(session) {
-  var off = { directOrder: false, approve: false, deny: false, founderCommand: false, missionAmend: false, missionTransition: false, reason: '' };
+  var off = { directOrder: false, approve: false, deny: false, founderCommand: false, missionAmend: false, missionTransition: false, reason: '', missionReason: '' };
   if (session == null || typeof session !== 'object') {
     off.reason = 'The control API gave no readable answer, so no control is drawn.';
+    off.missionReason = off.reason;
     return off;
   }
   var stated = typeof session.message === 'string' && session.message !== '' ? session.message : '';
   if (session.ok !== true || session.founder !== true || session.controls == null || typeof session.controls !== 'object') {
     off.reason = stated !== '' ? stated : 'This session holds no Founder grant, so no control is drawn.';
+    off.missionReason = off.reason;
     return off;
   }
   return {
@@ -108,10 +121,11 @@ export const CONTROL_GRANT_JS = `function grantedControls(session) {
     founderCommand: session.controls.founderCommand === true,
     missionAmend: session.controls.missionAmend === true,
     missionTransition: session.controls.missionTransition === true,
-    reason: stated !== '' ? stated : ungrantedReason(session.controls)
+    reason: stated !== '' ? stated : ungrantedReason(session.controls, 'order'),
+    missionReason: stated !== '' ? stated : ungrantedReason(session.controls, 'mission')
   };
 }
-function ungrantedReason(controls) {
+function ungrantedReason(controls, control) {
   if (controls.mutationsEnabled === false) {
     return 'This deployment mounts HQ read-only \\u2014 browser writes are not enabled here, so the control API would refuse every one of them.';
   }
@@ -121,6 +135,11 @@ function ungrantedReason(controls) {
   if (controls.requestOriginAllowed !== true) {
     return 'The origin of THIS page was not established as a trusted one (origin evidence: ' +
       String(controls.requestOriginSource) + '), so a write from it would be refused.';
+  }
+  if (control === 'mission' && controls.missionCoreAttached === false) {
+    return 'No mission store is attached to this deployment, so no mission control can be granted here \\u2014 ' +
+      'the principal and the capability registry are not what withheld it. Attaching a mission store is a deliberate ' +
+      'host configuration action; nothing on this page can do it.';
   }
   return 'This session is a mapped Founder and this page\\u2019s origin is trusted, but the server did not grant this ' +
     'specific control \\u2014 the principal may not hold that authority, or the capability behind it is not registered ' +
@@ -179,10 +198,15 @@ function jsonExchange(promise) {
   });
 }
 function postJson(path, payload) {
+  // credentials stated explicitly, as on every read: same-origin is the
+  // browser default, so this changes nothing, but the consoles' fetch calls
+  // are audited as a set and one bare call among stated ones reads as a
+  // difference that is not there (Opus second pass on a849af8, nit 3).
   return jsonExchange(fetch(path, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    credentials: 'same-origin'
   }));
 }
 // Stage 4: tell the client runtime that canonical state moved, so a page
@@ -808,8 +832,9 @@ export function connectionsLiveScript(
  *      whether or not they may originate; re-read on the same cadence the
  *      immersive runtime polls, and after every confirmed write. Every read is
  *      re-gated by the server, so a session that expires between polls moves
- *      the console to an explicit UNAUTHENTICATED state and empties the list —
- *      never a stale list looking current.
+ *      the console to an explicit UNAUTHENTICATED state, empties the list AND
+ *      withdraws the composer — never a stale list looking current, and never
+ *      a "Live" note over a Record Mission button the server would refuse.
  *   3. The SELECTED-MISSION DETAIL — recorded state beside what the canonical
  *      tasks imply, the block reason, the intent lock's shape (revisions,
  *      constraint and criterion counts, unknown codes, chain intact), the task
@@ -867,6 +892,8 @@ export function founderCommandConsoleScript(): string {
   var session = null;
   var selected = null;
   var lastMissions = null;
+  var composerDrawn = false;
+  var composerRetired = false;
 
   function stayOff(reason) {
     note.setAttribute('data-founder-command-state', 'off');
@@ -881,14 +908,38 @@ export function founderCommandConsoleScript(): string {
     listState.textContent = message;
   }
 
-  // Every path that abandons the list drops the cached views and the detail
-  // together, so a detail panel cannot outlive the authority it was read
-  // under.
+  // Withdraw the composer when a read fails to re-confirm the authority it
+  // was drawn under (Opus second pass on a849af8, P2). The note used to be
+  // set to "Live: this session is granted Founder Command" once, at load, and
+  // the 401 path touched only the list: after a session expired between
+  // polls the mount read "Live" directly above "NOT SIGNED IN", and Record
+  // Mission stayed enabled and would submit. The docstring's claim that an
+  // expired session moves the CONSOLE to an explicit unauthenticated state
+  // was true of the list only. Now the composer is removed, the grant is
+  // reset to nothing, and the note says why; a later read that answers again
+  // does not restore it — only a fresh /session grant does (see refresh()).
+  function retireComposer(reason) {
+    if (!composerDrawn) return;
+    composerDrawn = false;
+    composerRetired = true;
+    composerMount.textContent = '';
+    grant = grantedControls(null);
+    note.setAttribute('data-founder-command-state', 'off');
+    note.className = 'readonly-note console-state console-state-off';
+    note.textContent = 'FOUNDER COMMAND IS OFF \\u2014 ' + reason +
+      ' The composer was withdrawn: a control drawn under a session the server no longer confirms is not a live control. ' +
+      'It is redrawn only when a fresh session check grants it again.';
+  }
+
+  // Every path that abandons the list drops the cached views, the detail AND
+  // the composer together, so no control can outlive the authority it was
+  // drawn under.
   function clearMissions(message, state) {
     lastMissions = null;
     listMount.textContent = '';
     detailMount.textContent = '';
     setListState(state, message);
+    retireComposer(message);
   }
 
   function stateTone(state) {
@@ -1196,12 +1247,38 @@ export function founderCommandConsoleScript(): string {
             return;
           }
         }
-        lastMissions = body.missions;
-        var counts = body.counts || {};
-        setListState('live', 'Mission list: LIVE \\u2014 ' + String(body.recorded) + ' recorded (' + String(body.missions.length) + ' listed), ' +
-          String(counts.blocked || 0) + ' blocked, ' + String(counts.readyReview || 0) + ' ready for review, ' +
-          String(counts.working || 0) + ' working, ' + String(counts.drift || 0) + ' with recorded state disagreeing with tasks \\u00b7 as of ' + String(body.generatedAt));
-        renderMissions(body.missions);
+        function show() {
+          lastMissions = body.missions;
+          var counts = body.counts || {};
+          var listed = body.missions.length;
+          var recorded = typeof body.recorded === 'number' ? body.recorded : listed;
+          var truncated = body.truncated === true;
+          // The state counts beside the total are STORE-WIDE (the server
+          // counts them over every row), and drift is counted over the listed
+          // window only; the line says both, and says how many older missions
+          // the window leaves out. It used to print "55 recorded (50 listed),
+          // 0 blocked" with the 0 taken over the 50 — a window count beside
+          // an honest total (Opus second pass on a849af8, P1).
+          setListState('live', 'Mission list: LIVE \\u2014 ' + String(recorded) + ' recorded, ' +
+            String(counts.blocked || 0) + ' blocked, ' + String(counts.readyReview || 0) + ' ready for review, ' +
+            String(counts.working || 0) + ' working' +
+            (truncated ? ' (counted across all ' + String(recorded) + ', not only the ' + String(listed) + ' listed)' : '') +
+            ' \\u00b7 ' + String(counts.drift || 0) + (truncated ? ' of the ' + String(listed) + ' listed' : '') +
+            ' with recorded state disagreeing with tasks' +
+            (truncated ? ' \\u00b7 the ' + String(listed) + ' most recent are listed below; ' + String(recorded - listed) + ' older mission(s) are held but not listed' : '') +
+            ' \\u00b7 as of ' + String(body.generatedAt));
+          renderMissions(body.missions);
+        }
+        if (composerRetired) {
+          // The list answers again, but the authority this console drew under
+          // was withdrawn by an earlier read, and a list answering is not a
+          // grant. Ask /session again first and draw only what it grants now.
+          establish().then(show).catch(function (error) {
+            clearMissions('Mission list: OFFLINE \\u2014 the control API could not be reached (' + error.message + '). Nothing here is claimed to be current.', 'offline');
+          });
+          return;
+        }
+        show();
       })
       .catch(function (error) {
         refreshing = false;
@@ -1210,6 +1287,8 @@ export function founderCommandConsoleScript(): string {
   }
 
   function buildComposer() {
+    composerMount.textContent = '';
+    composerDrawn = true;
     note.setAttribute('data-founder-command-state', 'granted');
     note.className = 'readonly-note console-state console-state-live';
     note.textContent = 'Live: this session is granted Founder Command' +
@@ -1334,19 +1413,34 @@ export function founderCommandConsoleScript(): string {
     composerMount.appendChild(box);
   }
 
-  jsonExchange(fetch(SESSION_PATH, { headers: { accept: 'application/json' } }))
-    .then(function (result) {
-      session = result.body;
-      grant = grantedControls(session);
-      if (grant.founderCommand) buildComposer();
-      else stayOff(grant.reason);
+  // Ask /session and draw exactly what it grants. Run once at load and again
+  // whenever the composer was withdrawn and the list has come back — a fresh
+  // grant is the only thing that redraws a control. The fetch carries
+  // credentials: 'same-origin' like the list read two functions up; the pair
+  // used to differ (Opus second pass on a849af8, nit 3), and a browser that
+  // applied a stricter default to the bare call would have answered the
+  // session probe as signed-out while the list read was signed-in.
+  function establish() {
+    return jsonExchange(fetch(SESSION_PATH, { headers: { accept: 'application/json' }, cache: 'no-store', credentials: 'same-origin' }))
+      .then(function (result) {
+        session = result.body;
+        grant = grantedControls(session);
+        composerRetired = false;
+        if (grant.founderCommand) buildComposer();
+        else stayOff(grant.missionReason);
+        return session != null && typeof session === 'object' && session.ok === true && session.founder === true;
+      });
+  }
+
+  establish()
+    .then(function (founder) {
       // The list is a READ, open to any resolved Founder. The server decides;
       // this console just asks and reports what it was told.
-      if (session != null && typeof session === 'object' && session.ok === true && session.founder === true) {
+      if (founder) {
         refresh();
         window.setInterval(refresh, POLL_MS);
       } else {
-        clearMissions('Mission list: not read \\u2014 ' + grant.reason, session != null && typeof session === 'object' && session.authenticated === true ? 'unauthorized' : 'unauthenticated');
+        clearMissions('Mission list: not read \\u2014 ' + grant.missionReason, session != null && typeof session === 'object' && session.authenticated === true ? 'unauthorized' : 'unauthenticated');
       }
     })
     .catch(function (error) {

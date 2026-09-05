@@ -7,6 +7,8 @@
  * are the two the module docstring commits to.
  */
 
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   assertMissionTransition,
@@ -72,6 +74,27 @@ describe('the mission transition table', () => {
   it('refuses an unknown string as a state', () => {
     for (const hostile of ['done', 'Planned', '', 'queued', 'running']) {
       expect(isMissionState(hostile), hostile).toBe(false);
+    }
+  });
+
+  it('labels verified as the Founder’s own record, never as independent verification', () => {
+    // Opus second pass on `a849af8`. `verified` read "Reviewed and accepted"
+    // in the docstring and "Verified" in the label, and both implied a review
+    // the mission core does not perform: there is no independence bar, and
+    // the same principal that placed a mission may record it verified and
+    // complete. That is deliberate — enforcing a second reviewer would
+    // deadlock a single-Founder deployment — and it is left as an OPEN
+    // product question for the Founder rather than decided here. What is
+    // fixed is the honesty: the label says whose record it is, and no UI
+    // surface that renders a mission state claims independent verification.
+    expect(MISSION_STATE_LABELS.verified).not.toBe('Verified');
+    expect(MISSION_STATE_LABELS.verified).toMatch(/founder/i);
+    const states = readFileSync(fileURLToPath(new URL('../src/mission/states.ts', import.meta.url)), 'utf8');
+    expect(states).toContain("Founder's own record");
+    expect(states).toContain('NOT an independent review');
+    for (const file of ['../src/ui/control-console.ts', '../src/client/hydrate.ts']) {
+      const source = readFileSync(fileURLToPath(new URL(file, import.meta.url)), 'utf8');
+      expect(source, file).not.toMatch(/independent(ly)?[ -]verif/i);
     }
   });
 });

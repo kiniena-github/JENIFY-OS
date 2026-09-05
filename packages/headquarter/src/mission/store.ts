@@ -39,7 +39,7 @@ import { nowIso } from '../store/db.js';
 import { canonicalJson } from '../operator/approvals.js';
 import type { ActorAuthentication } from '../live/local-trust.js';
 import type { DirectOrderRoute } from '../live/orders.js';
-import { isMissionState, type MissionState } from './states.js';
+import { isMissionState, MISSION_STATES, NEEDS_CLARIFICATION_REASON, type MissionState } from './states.js';
 import type { IntentUnknown } from './intent.js';
 
 /** The most missions a list read returns. Newest first; the rest are still in the table. */
@@ -188,6 +188,44 @@ export class MissionStore {
   countMissions(): number {
     const row = this.#db.prepare(`SELECT COUNT(*) AS n FROM hq_missions`).get() as { n: number };
     return row.n;
+  }
+
+  /**
+   * Store-wide tallies by recorded state, plus the clarification-blocked
+   * subset — ONE query over every row, never a count over a listed window
+   * (Opus second pass on `a849af8`, P1).
+   *
+   * Why this exists: `listMissions` is bounded to `MAX_MISSIONS_LISTED`, and
+   * the attention counts the rooms light on were being taken over that window.
+   * With 55 missions of which the 5 oldest were blocked, the list route
+   * reported `blocked: 0`, the Command Room said nothing needed attention, and
+   * the Mission Room sat quiet — five blocked missions were in the store and
+   * none of them was in the window. A count that is a fact about the recorded
+   * `state` column does not need the projection at all, so it is taken from
+   * the column, across every row, and can be believed regardless of how many
+   * missions the list carries.
+   *
+   * The clarification subset is decided EXACTLY as `missionView` decides
+   * `needsClarification`: recorded `blocked` with a block reason that begins
+   * with the reserved prefix. `substr` rather than `LIKE`, because the prefix
+   * contains an underscore, which `LIKE` would read as a wildcard.
+   */
+  countMissionsByState(): { byState: Record<MissionState, number>; needsClarification: number } {
+    const byState = {} as Record<MissionState, number>;
+    for (const state of MISSION_STATES) byState[state] = 0;
+    const rows = this.#db
+      .prepare(`SELECT state, COUNT(*) AS n FROM hq_missions GROUP BY state`)
+      .all() as { state: string; n: number }[];
+    for (const row of rows) {
+      if (isMissionState(row.state)) byState[row.state] = row.n;
+    }
+    const clarification = this.#db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM hq_missions
+         WHERE state = 'blocked' AND substr(block_reason, 1, length(?)) = ?`,
+      )
+      .get(NEEDS_CLARIFICATION_REASON, NEEDS_CLARIFICATION_REASON) as { n: number };
+    return { byState, needsClarification: clarification.n };
   }
 
   /**
