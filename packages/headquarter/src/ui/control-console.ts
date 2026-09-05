@@ -45,6 +45,13 @@
 
 import { jsonForScript } from './components.js';
 import { CONTROL_ROUTES } from '../live/control-api.js';
+import {
+  MISSION_STATE_LABELS,
+  MISSION_STATES,
+  MISSION_TRANSITIONS,
+} from '../mission/states.js';
+import { MISSION_TASK_PRESENTATION_LABELS } from '../mission/presentation.js';
+import { INTENT_UNKNOWN_DESCRIPTIONS } from '../mission/intent.js';
 
 /**
  * The only paths any HQ page script may fetch, beside the freshness
@@ -63,6 +70,13 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
   CONTROL_ROUTES.orders,
   CONTROL_ROUTES.approve,
   CONTROL_ROUTES.deny,
+  // Phase 3 (issue #254): the Founder Command console reads the mission list
+  // and writes a command, an amendment or a transition. Listed here for the
+  // same reason as every other entry — the page-wide audit is only
+  // load-bearing if the list is complete.
+  CONTROL_ROUTES.missions,
+  CONTROL_ROUTES.missionAmend,
+  CONTROL_ROUTES.missionTransition,
 ];
 
 /**
@@ -77,7 +91,7 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
  * server's words rather than guessing.
  */
 export const CONTROL_GRANT_JS = `function grantedControls(session) {
-  var off = { directOrder: false, approve: false, deny: false, reason: '' };
+  var off = { directOrder: false, approve: false, deny: false, founderCommand: false, missionAmend: false, missionTransition: false, reason: '' };
   if (session == null || typeof session !== 'object') {
     off.reason = 'The control API gave no readable answer, so no control is drawn.';
     return off;
@@ -91,6 +105,9 @@ export const CONTROL_GRANT_JS = `function grantedControls(session) {
     directOrder: session.controls.directOrder === true,
     approve: session.controls.approve === true,
     deny: session.controls.deny === true,
+    founderCommand: session.controls.founderCommand === true,
+    missionAmend: session.controls.missionAmend === true,
+    missionTransition: session.controls.missionTransition === true,
     reason: stated !== '' ? stated : ungrantedReason(session.controls)
   };
 }
@@ -765,6 +782,576 @@ export function connectionsLiveScript(
       // The control API is not reachable from this page (a static preview, a
       // host with HQ control off, or genuinely offline) — the build-time card
       // stands, exactly as it did before this script existed.
+    });
+})();
+</script>`;
+}
+
+/**
+ * Founder Command + Mission Room console (Phase 3, issue #254).
+ *
+ * Mounted on the Command Center page beside the Direct Order composer, on the
+ * same terms: the static markup is inert, `/session` is asked first, and a
+ * working control exists only as a DOM node this script creates after the
+ * server granted it as literally `true`.
+ *
+ * Three things live in the mount:
+ *
+ *   1. The COMPOSER — drawn only with `controls.founderCommand`. One order in
+ *      the Founder's words, an optional title (the one field the Mission Room
+ *      will publish), an optional project label, and the route choice from
+ *      the same `/session` route verdicts the order composer reads. Submits to
+ *      `POST /missions`; the receipt says whether a plan was made or the order
+ *      needs clarification, and how many tasks exist — zero is printed as
+ *      zero.
+ *   2. The MISSION LIST — read from `GET /missions` for ANY resolved Founder,
+ *      whether or not they may originate; re-read on the same cadence the
+ *      immersive runtime polls, and after every confirmed write. Every read is
+ *      re-gated by the server, so a session that expires between polls moves
+ *      the console to an explicit UNAUTHENTICATED state and empties the list —
+ *      never a stale list looking current.
+ *   3. The SELECTED-MISSION DETAIL — recorded state beside what the canonical
+ *      tasks imply, the block reason, the intent lock's shape (revisions,
+ *      constraint and criterion counts, unknown codes, chain intact), the task
+ *      plan with each task's canonical status and presentation word, and the
+ *      transition history. Amend and transition controls are drawn only with
+ *      their grants; the server refuses an illegal transition regardless, and
+ *      the target list is emitted from the SAME `MISSION_TRANSITIONS` table the
+ *      server enforces, so the console cannot offer an edge the table lacks.
+ *
+ * The objective, constraints and step text are never on the wire and are
+ * therefore never drawn: the console shows their SHAPE and says so.
+ */
+export function founderCommandConsoleScript(): string {
+  return `<script>
+(function () {
+  var mount = document.querySelector('[data-founder-command-console]');
+  if (!mount || typeof window.fetch !== 'function') return;
+
+  ${CONTROL_GRANT_JS}
+  ${ORDER_KEY_JS}
+  ${DOM_HELPERS_JS}
+
+  var SESSION_PATH = ${jsonForScript(CONTROL_ROUTES.session)};
+  var MISSIONS_PATH = ${jsonForScript(CONTROL_ROUTES.missions)};
+  var MISSION_AMEND_PATH = ${jsonForScript(CONTROL_ROUTES.missionAmend)};
+  var MISSION_TRANSITION_PATH = ${jsonForScript(CONTROL_ROUTES.missionTransition)};
+  // Emitted from the server's own tables, never restated here.
+  var MISSION_STATES = ${jsonForScript(MISSION_STATES)};
+  var STATE_LABELS = ${jsonForScript(MISSION_STATE_LABELS)};
+  var TRANSITIONS = ${jsonForScript(MISSION_TRANSITIONS)};
+  var TASK_LABELS = ${jsonForScript(MISSION_TASK_PRESENTATION_LABELS)};
+  var UNKNOWN_DESCRIPTIONS = ${jsonForScript(INTENT_UNKNOWN_DESCRIPTIONS)};
+  var POLL_MS = 20000;
+
+  var note = el('p', 'readonly-note console-state', 'Checking with the control API whether this session grants Founder Command\\u2026');
+  note.setAttribute('data-founder-command-state', 'checking');
+  note.setAttribute('role', 'status');
+  mount.appendChild(note);
+
+  var composerMount = el('div', 'mission-composer-mount');
+  var listState = el('p', 'readonly-note console-state', 'Mission list: not read yet.');
+  listState.setAttribute('data-mission-list-state', 'checking');
+  listState.setAttribute('role', 'status');
+  listState.setAttribute('aria-live', 'polite');
+  var listMount = el('div', 'mission-list');
+  listMount.setAttribute('data-mission-list', '');
+  var detailMount = el('div', 'mission-detail');
+  detailMount.setAttribute('data-mission-detail', '');
+  mount.appendChild(composerMount);
+  mount.appendChild(listState);
+  mount.appendChild(listMount);
+  mount.appendChild(detailMount);
+
+  var grant = grantedControls(null);
+  var session = null;
+  var selected = null;
+  var lastMissions = null;
+
+  function stayOff(reason) {
+    note.setAttribute('data-founder-command-state', 'off');
+    note.className = 'readonly-note console-state console-state-off';
+    note.textContent = 'FOUNDER COMMAND IS OFF \\u2014 ' + reason +
+      ' The static description above remains read-only, and nothing here submits an order.';
+  }
+
+  function setListState(state, message) {
+    listState.setAttribute('data-mission-list-state', state);
+    listState.className = 'readonly-note console-state ' + (state === 'live' ? 'console-state-live' : 'console-state-off');
+    listState.textContent = message;
+  }
+
+  // Every path that abandons the list drops the cached views and the detail
+  // together, so a detail panel cannot outlive the authority it was read
+  // under.
+  function clearMissions(message, state) {
+    lastMissions = null;
+    listMount.textContent = '';
+    detailMount.textContent = '';
+    setListState(state, message);
+  }
+
+  function stateTone(state) {
+    if (state === 'blocked' || state === 'failed') return 'danger';
+    if (state === 'ready_review') return 'warn';
+    if (state === 'working') return 'info';
+    if (state === 'complete' || state === 'verified') return 'accent';
+    return 'neutral';
+  }
+
+  function chipNode(label, tone) {
+    return el('span', 'chip tone-' + tone, label);
+  }
+
+  function missionSummaryRow(view) {
+    var row = el('article', 'card mission-row');
+    row.setAttribute('data-mission-row', view.missionId);
+    var head = el('p', 'row-between');
+    head.appendChild(el('b', null, view.title));
+    head.appendChild(chipNode(view.stateLabel, stateTone(view.state)));
+    row.appendChild(head);
+    var chips = el('p', 'row');
+    if (view.needsClarification) chips.appendChild(chipNode('needs clarification', 'warn'));
+    if (view.driftFromTasks && view.impliedStateLabel) chips.appendChild(chipNode('tasks imply ' + view.impliedStateLabel, 'warn'));
+    if (view.project) chips.appendChild(chipNode(view.project, 'neutral'));
+    chips.appendChild(chipNode(String(view.taskCount) + ' task(s)', view.taskCount > 0 ? 'info' : 'neutral'));
+    row.appendChild(chips);
+    row.appendChild(el('p', 'faint', 'Requested by ' + view.requestedBy + ' (' + view.actorAuthentication + ') \\u00b7 route ' + view.requestedRoute + ' \\u00b7 updated ' + view.updatedAt));
+    var open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'mission-select';
+    open.textContent = selected === view.missionId ? 'Selected' : 'Open';
+    open.setAttribute('aria-pressed', selected === view.missionId ? 'true' : 'false');
+    open.addEventListener('click', function () {
+      selected = view.missionId;
+      renderMissions(lastMissions);
+    });
+    row.appendChild(open);
+    return row;
+  }
+
+  function taskRow(task) {
+    var item = el('li', 'mission-task');
+    item.appendChild(el('b', null, 'Step ' + task.ordinal + (task.title ? ' \\u2014 ' + task.title : '')));
+    var chips = el('p', 'row');
+    var word = TASK_LABELS[task.presentation] || task.presentation;
+    var tone = task.presentation === 'blocked' || task.presentation === 'failed' ? 'danger'
+      : task.presentation === 'needs_approval' || task.presentation === 'needs_review' ? 'warn'
+      : task.presentation === 'completed' ? 'accent'
+      : task.presentation === 'working' ? 'info' : 'neutral';
+    chips.appendChild(chipNode(word, tone));
+    chips.appendChild(chipNode('canonical ' + task.canonicalStatus + (task.reviewState !== 'none' ? ' / review ' + task.reviewState : ''), 'neutral'));
+    if (task.boundProvider) chips.appendChild(chipNode('bound to ' + task.boundProvider, 'violet'));
+    if (task.dispatchBlocked) chips.appendChild(chipNode('BLOCKED \\u2014 not connected', 'danger'));
+    if (task.missing) chips.appendChild(chipNode('task row missing', 'danger'));
+    item.appendChild(chips);
+    var detail = 'Task ' + task.taskId;
+    if (task.claimedBy) detail += ' \\u00b7 claimed by ' + task.claimedBy;
+    if (task.blockReason) detail += ' \\u00b7 ' + task.blockReason;
+    if (task.presentationNote) detail += ' \\u00b7 ' + task.presentationNote;
+    item.appendChild(el('p', 'faint', detail));
+    return item;
+  }
+
+  function renderDetail(view) {
+    detailMount.textContent = '';
+    var panel = el('div', 'panel mission-detail-panel');
+    panel.setAttribute('data-mission-detail-for', view.missionId);
+    panel.appendChild(el('h3', null, view.title));
+
+    var stateLine = el('p', 'row');
+    stateLine.appendChild(el('span', 'order-label', 'Recorded state'));
+    stateLine.appendChild(chipNode(view.stateLabel, stateTone(view.state)));
+    stateLine.appendChild(el('span', 'order-label', 'Tasks imply'));
+    stateLine.appendChild(chipNode(view.impliedStateLabel || 'nothing (no task)', view.impliedStateLabel ? (view.driftFromTasks ? 'warn' : 'neutral') : 'neutral'));
+    panel.appendChild(stateLine);
+    if (view.driftFromTasks) {
+      panel.appendChild(el('p', 'readonly-note', 'The recorded state and what the canonical tasks imply disagree. Nothing resolves this automatically: the recorded state moves only when a Founder moves it below.'));
+    }
+    if (view.blockReason) {
+      panel.appendChild(el('p', 'order-route-blocked', 'Block reason: ' + view.blockReason));
+    }
+
+    // Intent lock: the SHAPE of the order. The words stay server-side.
+    var intent = view.intent || {};
+    panel.appendChild(el('p', 'order-label', 'Intent lock'));
+    panel.appendChild(el('p', 'muted',
+      String(intent.revisions) + ' revision(s) \\u00b7 latest ' + String(intent.latestKind) + ' by ' + String(intent.latestActor) +
+      ' (' + String(intent.latestActorAuthentication) + ') at ' + String(intent.latestAt) +
+      ' \\u00b7 ' + String(intent.constraintCount) + ' constraint(s) \\u00b7 ' + String(intent.acceptanceCriteriaCount) +
+      ' acceptance criterion/criteria \\u00b7 ' + String(intent.stepCount) + ' written step(s) \\u00b7 chain ' +
+      (intent.chainIntact === true ? 'intact' : 'NOT INTACT')));
+    if (intent.latestReason) panel.appendChild(el('p', 'faint', 'Latest amendment reason: ' + intent.latestReason));
+    panel.appendChild(el('p', 'faint',
+      'The objective, constraint and step text stay server-side, exactly as a direct order\\u2019s instruction does. ' +
+      'The title is the one Founder-typed field published here.'));
+    if (Array.isArray(intent.unknowns) && intent.unknowns.length > 0) {
+      var unknownList = el('ul', 'hq-occupants');
+      for (var u = 0; u < intent.unknowns.length; u += 1) {
+        var unknown = intent.unknowns[u];
+        var li = el('li', 'hq-occupant');
+        li.appendChild(el('b', null, String(unknown.code) + (unknown.blocking ? ' (blocking)' : ' (recorded, not blocking)')));
+        li.appendChild(el('p', 'faint', String(unknown.description || UNKNOWN_DESCRIPTIONS[unknown.code] || '')));
+        unknownList.appendChild(li);
+      }
+      panel.appendChild(el('p', 'order-label', 'Unknowns'));
+      panel.appendChild(unknownList);
+    }
+
+    // The task plan. Zero is drawn as zero.
+    panel.appendChild(el('p', 'order-label', 'Task plan \\u2014 ' + String(view.taskCount) + ' task(s)'));
+    if (view.taskCount === 0) {
+      panel.appendChild(el('p', 'muted', 'This mission holds no task. ' +
+        (view.needsClarification
+          ? 'The order needs clarification; amend it below and a plan is created only when the rules can read it.'
+          : 'No plan is recorded.')));
+    } else {
+      var list = el('ul', 'hq-occupants mission-plan');
+      for (var t = 0; t < view.tasks.length; t += 1) list.appendChild(taskRow(view.tasks[t]));
+      panel.appendChild(list);
+      panel.appendChild(el('p', 'faint',
+        'Every task is a canonical Founder-gated order: it executes nothing until its exact action digest is approved in the Approvals console.'));
+    }
+
+    // History.
+    if (Array.isArray(view.history) && view.history.length > 0) {
+      panel.appendChild(el('p', 'order-label', 'History'));
+      var hist = el('ul', 'feed');
+      for (var h = 0; h < view.history.length; h += 1) {
+        var event = view.history[h];
+        var line = el('li', null);
+        line.appendChild(el('span', 'faint when', String(event.at)));
+        line.appendChild(el('span', 'what',
+          (event.fromState ? String(STATE_LABELS[event.fromState] || event.fromState) + ' \\u2192 ' : 'recorded as ') +
+          String(STATE_LABELS[event.toState] || event.toState) + ' by ' + String(event.actor) +
+          (event.reason ? ' \\u2014 ' + String(event.reason) : '')));
+        hist.appendChild(line);
+      }
+      panel.appendChild(hist);
+    }
+
+    var outcome = el('p', 'muted', '');
+    outcome.setAttribute('role', 'status');
+    outcome.setAttribute('aria-live', 'polite');
+    outcome.setAttribute('data-mission-detail-outcome', '');
+
+    // Amend — drawn only with the grant.
+    if (grant.missionAmend && view.state !== 'complete' && view.state !== 'cancelled') {
+      panel.appendChild(el('p', 'order-label', 'Amend the intent (appends a revision; the original is never changed)'));
+      var amendText = document.createElement('textarea');
+      amendText.rows = 3;
+      amendText.setAttribute('aria-label', 'Amended order');
+      var amendReason = document.createElement('input');
+      amendReason.type = 'text';
+      amendReason.setAttribute('aria-label', 'Amendment reason');
+      amendReason.placeholder = 'Why the intent changed (required, recorded permanently)';
+      var amendButton = document.createElement('button');
+      amendButton.type = 'button';
+      amendButton.textContent = 'Append amendment';
+      amendButton.addEventListener('click', function () {
+        if (amendText.value.trim() === '' || amendReason.value.trim() === '') {
+          outcome.textContent = 'An amendment needs the amended order and a reason. Nothing was sent.';
+          return;
+        }
+        amendButton.disabled = true;
+        outcome.textContent = 'Appending\\u2026';
+        postJson(MISSION_AMEND_PATH, { missionId: view.missionId, command: amendText.value.trim(), reason: amendReason.value.trim() })
+          .then(function (result) {
+            amendButton.disabled = false;
+            var body = result.body || {};
+            if (body.ok === true) {
+              outcome.textContent = 'Amendment recorded as revision ' + String(body.revision) + '. ' +
+                (body.planCreated === true
+                  ? 'It supplied a plan: ' + String(body.taskCount) + ' task(s) created, each awaiting Founder approval.'
+                  : body.needsClarification === true
+                    ? 'The order still needs clarification; no task was created.'
+                    : 'Existing tasks are unchanged \\u2014 their briefs sit inside approved action digests and cannot be rewritten.');
+              notifyStateChanged();
+              refresh();
+              return;
+            }
+            var error = body.error || {};
+            outcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given') + ' Nothing was recorded.';
+          })
+          .catch(function (error) {
+            amendButton.disabled = false;
+            outcome.textContent = 'The amendment could not be submitted (' + error.message + '). Nothing was recorded.';
+          });
+      });
+      if (view.taskCount > 0) {
+        panel.appendChild(el('p', 'faint', 'This mission already has tasks. An amendment is recorded beside them; it cannot rewrite a brief that sits inside an approved action digest.'));
+      }
+      panel.appendChild(amendText);
+      panel.appendChild(amendReason);
+      panel.appendChild(amendButton);
+    }
+
+    // Transition — drawn only with the grant, and only the edges the table lists.
+    var targets = TRANSITIONS[view.state] || [];
+    if (grant.missionTransition && targets.length > 0) {
+      panel.appendChild(el('p', 'order-label', 'Move the recorded state'));
+      var select = document.createElement('select');
+      select.setAttribute('aria-label', 'Target mission state');
+      for (var s = 0; s < targets.length; s += 1) {
+        var option = document.createElement('option');
+        option.value = targets[s];
+        option.textContent = STATE_LABELS[targets[s]] || targets[s];
+        select.appendChild(option);
+      }
+      var reasonInput = document.createElement('input');
+      reasonInput.type = 'text';
+      reasonInput.setAttribute('aria-label', 'Transition reason');
+      reasonInput.placeholder = 'Reason (required for blocked, failed, cancelled; recorded permanently)';
+      var moveButton = document.createElement('button');
+      moveButton.type = 'button';
+      moveButton.textContent = 'Record transition';
+      moveButton.addEventListener('click', function () {
+        moveButton.disabled = true;
+        outcome.textContent = 'Recording\\u2026';
+        var payload = { missionId: view.missionId, to: select.value };
+        if (reasonInput.value.trim() !== '') payload.reason = reasonInput.value.trim();
+        postJson(MISSION_TRANSITION_PATH, payload)
+          .then(function (result) {
+            moveButton.disabled = false;
+            var body = result.body || {};
+            if (body.ok === true) {
+              outcome.textContent = 'Recorded: ' + String(STATE_LABELS[body.from] || body.from) + ' \\u2192 ' + String(STATE_LABELS[body.to] || body.to) + '.';
+              notifyStateChanged();
+              refresh();
+              return;
+            }
+            var error = body.error || {};
+            outcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given') + ' The recorded state is unchanged.';
+          })
+          .catch(function (error) {
+            moveButton.disabled = false;
+            outcome.textContent = 'The transition could not be submitted (' + error.message + '). The recorded state is unchanged.';
+          });
+      });
+      panel.appendChild(select);
+      panel.appendChild(reasonInput);
+      panel.appendChild(moveButton);
+    } else if (targets.length === 0) {
+      panel.appendChild(el('p', 'faint', STATE_LABELS[view.state] + ' is terminal: the table lists no exit, so no transition control is drawn.'));
+    } else if (!grant.missionTransition) {
+      panel.appendChild(el('p', 'faint', 'No transition control is drawn: this session does not hold the mission-transition grant.'));
+    }
+
+    panel.appendChild(outcome);
+    detailMount.appendChild(panel);
+  }
+
+  function missionViewValid(view) {
+    return view != null && typeof view === 'object' &&
+      typeof view.missionId === 'string' && typeof view.title === 'string' &&
+      typeof view.state === 'string' && typeof view.stateLabel === 'string' &&
+      typeof view.taskCount === 'number' && Array.isArray(view.tasks) && Array.isArray(view.history) &&
+      view.intent != null && typeof view.intent === 'object';
+  }
+
+  function renderMissions(missions) {
+    listMount.textContent = '';
+    if (!Array.isArray(missions)) return;
+    if (missions.length === 0) {
+      listMount.appendChild(el('p', 'muted', 'The mission core holds no Founder mission. Zero is the recorded answer, not a loading state.'));
+      detailMount.textContent = '';
+      return;
+    }
+    var found = null;
+    for (var i = 0; i < missions.length; i += 1) {
+      listMount.appendChild(missionSummaryRow(missions[i]));
+      if (missions[i].missionId === selected) found = missions[i];
+    }
+    if (found) renderDetail(found);
+    else detailMount.textContent = '';
+  }
+
+  var refreshing = false;
+  function refresh() {
+    if (refreshing) return;
+    refreshing = true;
+    jsonExchange(fetch(MISSIONS_PATH, { headers: { accept: 'application/json' }, cache: 'no-store', credentials: 'same-origin' }))
+      .then(function (result) {
+        refreshing = false;
+        var body = result.body || {};
+        if (result.status === 401) {
+          clearMissions('Mission list: NOT SIGNED IN \\u2014 the session that read this list is gone, so nothing here is claimed to be current. Sign in to JENIFY OS again.', 'unauthenticated');
+          return;
+        }
+        if (result.status === 403) {
+          clearMissions('Mission list: NOT AUTHORIZED \\u2014 ' + ((body.error && body.error.message) || 'this session is not the mapped Founder.'), 'unauthorized');
+          return;
+        }
+        if (result.status === 503) {
+          clearMissions('Mission list: NOT AVAILABLE \\u2014 ' + ((body.error && body.error.message) || 'no mission store is attached to this deployment.'), 'unavailable');
+          return;
+        }
+        if (result.status !== 200 || body.ok !== true || !Array.isArray(body.missions)) {
+          clearMissions('Mission list: could not be read (HTTP ' + result.status + '). Nothing here is claimed to be current.', 'error');
+          return;
+        }
+        for (var i = 0; i < body.missions.length; i += 1) {
+          if (!missionViewValid(body.missions[i])) {
+            clearMissions('Mission list: the control API answered with a mission this console cannot read, so the whole list is withheld rather than half-drawn.', 'error');
+            return;
+          }
+        }
+        lastMissions = body.missions;
+        var counts = body.counts || {};
+        setListState('live', 'Mission list: LIVE \\u2014 ' + String(body.recorded) + ' recorded (' + String(body.missions.length) + ' listed), ' +
+          String(counts.blocked || 0) + ' blocked, ' + String(counts.readyReview || 0) + ' ready for review, ' +
+          String(counts.working || 0) + ' working, ' + String(counts.drift || 0) + ' with recorded state disagreeing with tasks \\u00b7 as of ' + String(body.generatedAt));
+        renderMissions(body.missions);
+      })
+      .catch(function (error) {
+        refreshing = false;
+        clearMissions('Mission list: OFFLINE \\u2014 the control API could not be reached (' + error.message + '). Nothing here is claimed to be current.', 'offline');
+      });
+  }
+
+  function buildComposer() {
+    note.setAttribute('data-founder-command-state', 'granted');
+    note.className = 'readonly-note console-state console-state-live';
+    note.textContent = 'Live: this session is granted Founder Command' +
+      (typeof session.displayName === 'string' && session.displayName !== '' ? ' as ' + session.displayName + '.' : '.');
+
+    var idempotencyKey = freshOrderKey();
+    var box = el('div', 'panel order-live');
+    box.setAttribute('data-founder-command-form', '');
+
+    box.appendChild(el('p', 'order-label', 'Order \\u2014 in your own words. Numbered lines become steps; must/never/only lines become constraints; done-when lines become acceptance criteria.'));
+    var command = document.createElement('textarea');
+    command.rows = 6;
+    command.setAttribute('aria-label', 'Founder order');
+    box.appendChild(command);
+    box.appendChild(el('p', 'order-label', 'Title (optional \\u2014 the one field published to the Mission Room)'));
+    var title = document.createElement('input');
+    title.type = 'text';
+    title.setAttribute('aria-label', 'Mission title');
+    box.appendChild(title);
+    box.appendChild(el('p', 'order-label', 'Project (optional, a label only)'));
+    var project = document.createElement('input');
+    project.type = 'text';
+    project.setAttribute('aria-label', 'Project label');
+    box.appendChild(project);
+
+    box.appendChild(el('p', 'order-label', 'Route'));
+    var routeBox = el('div', 'order-live-routes');
+    var resolutions = Array.isArray(session.routes) ? session.routes : null;
+    var chosen = null;
+    var routeNames = ['AUTO', 'CLAUDE', 'CODEX'];
+    for (var i = 0; i < routeNames.length; i += 1) {
+      (function (name) {
+        var row = el('p', 'row');
+        var found = null;
+        if (resolutions) {
+          for (var j = 0; j < resolutions.length; j += 1) {
+            if (resolutions[j] && resolutions[j].requested === name) found = resolutions[j];
+          }
+        }
+        var radio = document.createElement('input');
+        radio.type = 'radio';
+        radio.name = 'hq-mission-route';
+        radio.value = name;
+        radio.id = 'hq-mission-route-' + name;
+        radio.addEventListener('change', function () { chosen = name; });
+        var label = document.createElement('label');
+        label.setAttribute('for', radio.id);
+        if (found == null) {
+          label.textContent = name + ' \\u2014 availability was not evaluated by this server; every task is recorded either way, and no provider is ever substituted.';
+        } else if (found.connected === true) {
+          label.textContent = name + ' \\u2014 ' + found.reason;
+        } else {
+          row.className = 'row order-route-blocked';
+          label.textContent = name + ' \\u2014 NOT CONNECTED: every task will be RECORDED and BLOCKED, not started. ' + found.reason;
+        }
+        row.appendChild(radio);
+        row.appendChild(label);
+        routeBox.appendChild(row);
+      })(routeNames[i]);
+    }
+    box.appendChild(routeBox);
+
+    var submit = document.createElement('button');
+    submit.type = 'button';
+    submit.textContent = 'Record Mission';
+    submit.className = 'order-live-submit';
+    var outcome = el('p', 'muted', 'Every task in a mission lands in needs_approval and executes nothing until a Founder approves that exact action digest. An order the rules cannot read is recorded with zero tasks and asks for clarification.');
+    outcome.setAttribute('role', 'status');
+    outcome.setAttribute('aria-live', 'polite');
+    outcome.setAttribute('data-founder-command-outcome', '');
+
+    submit.addEventListener('click', function () {
+      var text = command.value.trim();
+      if (text === '') { outcome.textContent = 'A mission needs an order. Nothing was sent.'; return; }
+      if (chosen == null) { outcome.textContent = 'Choose a route first. Nothing was sent.'; return; }
+      submit.disabled = true;
+      outcome.textContent = 'Recording\\u2026';
+      var payload = { command: text, route: chosen, idempotencyKey: idempotencyKey };
+      if (project.value.trim() !== '') payload.project = project.value.trim();
+      if (title.value.trim() !== '') payload.title = title.value.trim();
+      postJson(MISSIONS_PATH, payload)
+        .then(function (result) {
+          submit.disabled = false;
+          var body = result.body || {};
+          if (body.ok === true) {
+            var kind = body.deduplicated === true ? 'deduplicated' : 'created';
+            idempotencyKey = orderKeyAfterSubmit(kind, idempotencyKey, freshOrderKey());
+            var codes = [];
+            if (Array.isArray(body.unknowns)) {
+              for (var k = 0; k < body.unknowns.length; k += 1) {
+                if (body.unknowns[k] && body.unknowns[k].blocking === true) codes.push(String(body.unknowns[k].code));
+              }
+            }
+            var line = (kind === 'created' ? 'Mission recorded as ' : 'This exact order already exists as mission ') + String(body.missionId) +
+              ' (' + String(STATE_LABELS[body.state] || body.state) + ', ' + String(body.taskCount) + ' task(s)).';
+            if (body.needsClarification === true) {
+              line += ' NEEDS CLARIFICATION \\u2014 no task was created: ' + codes.join(', ') + '. Open the mission below to amend the order.';
+            } else {
+              line += ' Each task awaits Founder approval and executes nothing until then.';
+              var blocked = 0;
+              if (Array.isArray(body.tasks)) for (var b = 0; b < body.tasks.length; b += 1) if (body.tasks[b] && body.tasks[b].dispatchBlocked === true) blocked += 1;
+              if (blocked > 0) line += ' ' + blocked + ' task(s) are BLOCKED \\u2014 NOT CONNECTED: recorded and gated, but the bound provider cannot dispatch from here yet.';
+            }
+            outcome.textContent = line;
+            selected = String(body.missionId);
+            notifyStateChanged();
+            refresh();
+            return;
+          }
+          var error = body.error || {};
+          outcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given') +
+            ' Nothing was recorded, and no other provider was substituted.';
+        })
+        .catch(function (error) {
+          submit.disabled = false;
+          outcome.textContent = 'The mission could not be submitted (' + error.message + '). Retrying keeps the same idempotency key, so a retry cannot record a duplicate mission.';
+        });
+    });
+
+    box.appendChild(submit);
+    box.appendChild(outcome);
+    composerMount.appendChild(box);
+  }
+
+  jsonExchange(fetch(SESSION_PATH, { headers: { accept: 'application/json' } }))
+    .then(function (result) {
+      session = result.body;
+      grant = grantedControls(session);
+      if (grant.founderCommand) buildComposer();
+      else stayOff(grant.reason);
+      // The list is a READ, open to any resolved Founder. The server decides;
+      // this console just asks and reports what it was told.
+      if (session != null && typeof session === 'object' && session.ok === true && session.founder === true) {
+        refresh();
+        window.setInterval(refresh, POLL_MS);
+      } else {
+        clearMissions('Mission list: not read \\u2014 ' + grant.reason, session != null && typeof session === 'object' && session.authenticated === true ? 'unauthorized' : 'unauthenticated');
+      }
+    })
+    .catch(function (error) {
+      stayOff('the HQ control API is not reachable from this page (' + error.message + ').');
+      clearMissions('Mission list: OFFLINE \\u2014 the control API could not be reached (' + error.message + ').', 'offline');
     });
 })();
 </script>`;

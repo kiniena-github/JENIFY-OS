@@ -98,6 +98,8 @@ describe('every page script speaks only to the control API and the snapshot', ()
       `fetch(${JSON.stringify(SNAPSHOT_FILENAME)}`,
       'fetch(SESSION_PATH',
       'fetch(APPROVALS_PATH',
+      // Phase 3 (issue #254): the Founder Command console's mission read.
+      'fetch(MISSIONS_PATH',
       'fetch(path,', // postJson's parameter; its call sites are audited below
     ];
     for (const page of HQ_PAGES) {
@@ -128,12 +130,23 @@ describe('every page script speaks only to the control API and the snapshot', ()
     }
   });
 
-  it('allow-lists every postJson call site against the three write routes', () => {
+  it('allow-lists every postJson call site against the six write routes', () => {
+    // Three since #200; six since Phase 3 (issue #254) added the mission
+    // create, amend and transition writes. Each is bound to its canonical
+    // route verbatim below.
     for (const page of HQ_PAGES) {
       const scripts = scriptsOf(site.get(page.file)!);
       for (const match of scripts.matchAll(/postJson\((\w+)[,)]/g)) {
         expect(
-          ['ORDERS_PATH', 'APPROVE_PATH', 'DENY_PATH', 'path'].includes(match[1]!),
+          [
+            'ORDERS_PATH',
+            'APPROVE_PATH',
+            'DENY_PATH',
+            'MISSIONS_PATH',
+            'MISSION_AMEND_PATH',
+            'MISSION_TRANSITION_PATH',
+            'path',
+          ].includes(match[1]!),
           `${page.file}: unexpected postJson target: ${match[1]}`,
         ).toBe(true);
       }
@@ -144,6 +157,11 @@ describe('every page script speaks only to the control API and the snapshot', ()
     const index = scriptsOf(site.get('index.html')!);
     expect(index).toContain(`var SESSION_PATH = ${JSON.stringify(CONTROL_ROUTES.session)};`);
     expect(index).toContain(`var ORDERS_PATH = ${JSON.stringify(CONTROL_ROUTES.orders)};`);
+    expect(index).toContain(`var MISSIONS_PATH = ${JSON.stringify(CONTROL_ROUTES.missions)};`);
+    expect(index).toContain(`var MISSION_AMEND_PATH = ${JSON.stringify(CONTROL_ROUTES.missionAmend)};`);
+    expect(index).toContain(
+      `var MISSION_TRANSITION_PATH = ${JSON.stringify(CONTROL_ROUTES.missionTransition)};`,
+    );
     const approvals = scriptsOf(site.get('approvals.html')!);
     expect(approvals).toContain(`var SESSION_PATH = ${JSON.stringify(CONTROL_ROUTES.session)};`);
     expect(approvals).toContain(`var APPROVALS_PATH = ${JSON.stringify(CONTROL_ROUTES.approvals)};`);

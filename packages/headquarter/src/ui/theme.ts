@@ -553,6 +553,20 @@ details.record[open] { background: var(--surface-2); border-color: var(--line-st
 [data-connection] .record-meta code { overflow-wrap: anywhere; }
 [data-live-detail] { margin: 0.25rem 0 0; min-width: 0; overflow-wrap: anywhere; }
 
+/* Founder Command + Mission Room console (Phase 3, issue #254). Reuses the
+   card/chip/panel vocabulary; these rules only stack the list and the detail
+   and keep every child shrinkable, so nothing here can widen a narrow
+   viewport. */
+.mission-list { display: grid; gap: 0.6rem; min-width: 0; margin: 0 0 1rem; }
+.mission-row { min-width: 0; }
+.mission-row .mission-select { margin-top: 0.4rem; }
+.mission-detail { min-width: 0; }
+.mission-detail-panel { display: grid; gap: 0.55rem; min-width: 0; }
+.mission-detail-panel h3 { margin: 0; overflow-wrap: anywhere; }
+.mission-detail-panel .order-label { margin-top: 0.4rem; }
+.mission-plan .mission-task { min-width: 0; overflow-wrap: anywhere; }
+.mission-detail-panel select { max-width: 100%; }
+
 footer[data-provenance] {
   margin-top: 2rem;
   padding-top: 0.9rem;

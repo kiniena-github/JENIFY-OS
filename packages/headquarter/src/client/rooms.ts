@@ -138,7 +138,9 @@ export const HQ_ROOMS: readonly HqRoom[] = [
     binding: {
       kind: 'live',
       section: 'overview',
-      source: 'counts + provenance mode of the authenticated HQ state document',
+      source:
+        'counts + provenance mode of the authenticated HQ state document, plus the missions section ' +
+        'when a mission store was read',
     },
     placement: { ring: 0, slot: 0 },
     page: 'index.html',
@@ -147,11 +149,13 @@ export const HQ_ROOMS: readonly HqRoom[] = [
     id: 'command-room',
     ordinal: 2,
     name: 'Command Room',
-    purpose: 'Mission control. What is in flight, what is queued, and what has stopped.',
+    purpose: 'Mission control. What is in flight, what is queued, what has stopped, and which missions need you.',
     binding: {
       kind: 'live',
       section: 'operations',
-      source: 'operations section — op_tasks via application/console.founderConsole',
+      source:
+        'operations section — op_tasks via application/console.founderConsole; missions section — ' +
+        'hq_missions via mission/view.missionViews',
     },
     placement: { ring: 1, slot: 0 },
     page: 'index.html',
@@ -160,14 +164,26 @@ export const HQ_ROOMS: readonly HqRoom[] = [
     id: 'mission-room',
     ordinal: 3,
     name: 'Mission Room',
-    purpose: 'Every recorded mission, by the status the canonical queue holds for it.',
+    purpose:
+      'Every Founder mission — its recorded state, its task plan and its intent lock — and every open canonical task.',
     binding: {
       kind: 'live',
       section: 'missions',
-      source: 'operations section — the same canonical task cards, grouped by status',
+      // Two sources, stated as two. The missions section is the Phase 3
+      // record (hq_missions + intent lock, each linked task read live from
+      // op_tasks); the operations section is the same canonical task cards
+      // the Command Room lists. A mission's tasks are among those cards
+      // because they ARE ordinary canonical tasks, created through the same
+      // Founder-gated order path.
+      source:
+        'missions section — hq_missions / hq_mission_intent via mission/view.missionViews, each task ' +
+        'read live from op_tasks; operations section — the same canonical task cards, grouped by status',
     },
     placement: { ring: 1, slot: 1 },
-    page: 'projects.html',
+    // The long form — Founder Command composer, the full mission list and the
+    // selected-mission detail — lives on the Command Center page, which is
+    // the page that already hosts HQ's write consoles.
+    page: 'index.html',
   },
   {
     id: 'meeting-room',
@@ -279,7 +295,7 @@ export const HQ_ROOMS: readonly HqRoom[] = [
       // room. Provenance that omits a source it is actually using is the same
       // class of over-claim as a number without a source (Codex round 18).
       source:
-        'counts over the operations, workforce, capabilities, connections and activity sections',
+        'counts over the operations, workforce, capabilities, connections, activity and missions sections',
     },
     placement: { ring: 2, slot: 0 },
   },

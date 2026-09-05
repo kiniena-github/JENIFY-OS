@@ -20,7 +20,8 @@
     "./application": "./src/application/index.ts",
     "./routing": "./src/routing/index.ts",
     "./live": "./src/live/index.ts",
-    "./client": "./src/client/index.ts"
+    "./client": "./src/client/index.ts",
+    "./mission": "./src/mission/index.ts"
   },
   "scripts": {
     "test": "vitest run",

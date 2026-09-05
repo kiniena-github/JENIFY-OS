@@ -949,6 +949,57 @@ describe('a room names every state section that can change what it shows', () =>
           provenance: PROVENANCE,
         },
       }),
+    // Phase 3 (issue #254): a mission section with one recorded mission. A
+    // room that changes for it must name missions in its source.
+    missions: () =>
+      buildHqSnapshot({
+        generatedAt: AT,
+        console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
+        connections: { data: [], provenance: PROVENANCE },
+        workforce: { data: [], provenance: PROVENANCE },
+        capabilities: { data: [], provenance: PROVENANCE },
+        activity: { data: [], provenance: PROVENANCE },
+        missions: {
+          data: [
+            {
+              missionId: 'm1',
+              title: 'Fixture mission',
+              project: null,
+              state: 'planned',
+              stateLabel: 'Planned',
+              needsClarification: false,
+              blockReason: null,
+              impliedState: 'planned',
+              impliedStateLabel: 'Planned',
+              driftFromTasks: false,
+              taskCount: 1,
+              taskCounts: { waiting: 0, working: 0, needs_review: 0, needs_approval: 1, completed: 0, blocked: 0, failed: 0 },
+              tasks: [],
+              intent: {
+                revisions: 1,
+                latestKind: 'original',
+                latestAt: AT,
+                latestActor: 'founder',
+                latestActorAuthentication: 'authenticated_os_session',
+                latestReason: null,
+                constraintCount: 0,
+                acceptanceCriteriaCount: 0,
+                stepCount: 0,
+                needsClarification: false,
+                unknowns: [],
+                chainIntact: true,
+              },
+              history: [],
+              requestedBy: 'founder',
+              actorAuthentication: 'authenticated_os_session',
+              requestedRoute: 'CLAUDE',
+              createdAt: AT,
+              updatedAt: AT,
+            },
+          ],
+          provenance: PROVENANCE,
+        },
+      }),
   };
 
   /**
@@ -966,6 +1017,7 @@ describe('a room names every state section that can change what it shows', () =>
     capabilities: ['capabilit'],
     connections: ['connection', 'integration'],
     activity: ['activity', 'canonical event'],
+    missions: ['mission'],
   };
 
   const render = (state: HqSnapshot, roomId: string) => {

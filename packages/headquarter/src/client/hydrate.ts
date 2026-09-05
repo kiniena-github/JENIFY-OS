@@ -45,6 +45,8 @@ import type {
   RoomTone,
   RoomView,
 } from './contracts.js';
+import { missionAttention, type MissionView } from '../mission/view.js';
+import { MISSION_TASK_PRESENTATION_LABELS, type MissionTaskPresentation } from '../mission/presentation.js';
 
 /** How many rows a room lists before it says how many more there are. */
 export const ROOM_ROW_LIMIT = 12;
@@ -157,14 +159,117 @@ function limited(rows: RoomRow[]): RoomRow[] {
 }
 
 /* ------------------------------------------------------------------ */
+/* Founder missions (Phase 3, issue #254)                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * What the mission section contributes to a room — counted the same way in
+ * every room that reads it, so Home, the Command Room and the Mission Room
+ * cannot rank the same mission differently (the cross-room rule the task
+ * buckets already live under).
+ *
+ * `absent` is the honest third case: the document carries no mission section
+ * because the read had no store. It contributes NOTHING to liveness and no
+ * numeric metric — an absent section is not a zero.
+ *
+ *   attention  missions blocked (clarification included), ready for a
+ *              mission-level review, or whose recorded state disagrees with
+ *              what their canonical tasks imply
+ *   active     missions recorded `working`
+ *   present    every mission the section carries
+ */
+function missionSignals(state: HqStateDocument): {
+  absent: boolean;
+  views: MissionView[];
+  attention: number;
+  active: number;
+  present: number;
+  metrics: RoomMetric[];
+} {
+  const section = state.missions;
+  if (section == null) {
+    return {
+      absent: true,
+      views: [],
+      attention: 0,
+      active: 0,
+      present: 0,
+      metrics: [
+        metric(
+          'Mission core',
+          'not attached',
+          'This read had no mission store, so nothing is claimed about missions — not even zero.',
+          'neutral',
+        ),
+      ],
+    };
+  }
+  const views = section.data;
+  const counts = missionAttention(views);
+  const attention = counts.blocked + counts.readyReview + counts.drift;
+  return {
+    absent: false,
+    views,
+    attention,
+    active: counts.working,
+    present: counts.total,
+    metrics: [
+      metric('Missions recorded', counts.total, 'Founder missions the mission core holds, in any state.', tone(counts.total, 'info')),
+      metric('Needing clarification', counts.needsClarification, 'Recorded blocked with zero tasks: the order could not be decomposed honestly.', tone(counts.needsClarification, 'warn')),
+      metric('Missions blocked', counts.blocked, 'Recorded blocked, for clarification or by an explicit Founder decision.', tone(counts.blocked, 'danger')),
+      metric('Ready for review', counts.readyReview, 'Recorded ready_review — a mission-level decision is what is left.', tone(counts.readyReview, 'warn')),
+      metric('Missions working', counts.working, 'Recorded working. Recorded, not inferred: nothing moves a mission on its own.', tone(counts.working, 'info')),
+      metric('Recorded state disagrees with tasks', counts.drift, 'The mission’s recorded state and what its canonical tasks imply are different. Shown, never auto-resolved.', tone(counts.drift, 'warn')),
+    ],
+  };
+}
+
+function missionRow(view: MissionView): RoomRow {
+  const chips: RoomChip[] = [
+    {
+      label: view.stateLabel,
+      tone:
+        view.state === 'blocked' || view.state === 'failed'
+          ? 'danger'
+          : view.state === 'ready_review'
+            ? 'warn'
+            : view.state === 'working'
+              ? 'info'
+              : view.state === 'complete' || view.state === 'verified'
+                ? 'accent'
+                : 'neutral',
+    },
+  ];
+  if (view.needsClarification) chips.push({ label: 'needs clarification', tone: 'warn' });
+  if (view.driftFromTasks && view.impliedStateLabel) {
+    chips.push({ label: `tasks imply ${view.impliedStateLabel}`, tone: 'warn' });
+  }
+  if (view.project) chips.push({ label: view.project, tone: 'neutral' });
+  const breakdown = (Object.keys(view.taskCounts) as MissionTaskPresentation[])
+    .filter((word) => view.taskCounts[word] > 0)
+    .map((word) => `${view.taskCounts[word]} ${MISSION_TASK_PRESENTATION_LABELS[word]}`)
+    .join(', ');
+  return {
+    id: `mission:${view.missionId}`,
+    primary: view.title,
+    secondary:
+      view.taskCount === 0
+        ? `Mission · 0 tasks — ${view.blockReason ?? 'no plan recorded'} · intent revisions ${view.intent.revisions}`
+        : `Mission · ${view.taskCount} task(s): ${breakdown} · intent revisions ${view.intent.revisions} · updated ${view.updatedAt}`,
+    chips,
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /* Per-section projections                                             */
 /* ------------------------------------------------------------------ */
 
 function overviewSection(state: HqStateDocument): Section {
   const c = state.counts;
-  const attention = c.approvals + c.blocked + c.outcomeUnknown;
-  const active = c.inFlight;
-  const present = attention + active + c.queued + c.pendingReviews;
+  const missions = missionSignals(state);
+  const attention = c.approvals + c.blocked + c.outcomeUnknown + missions.attention;
+  const active = c.inFlight + missions.active;
+  const present = attention + active + c.queued + c.pendingReviews + missions.present;
   return {
     metrics: [
       metric('Waiting on the Founder', c.approvals, 'Recorded needs_approval — nothing moves until decided.', tone(c.approvals, 'warn')),
@@ -173,6 +278,18 @@ function overviewSection(state: HqStateDocument): Section {
       metric('Blocked', c.blocked, 'Recorded blocked — work has stopped.', tone(c.blocked, 'danger')),
       metric('Outcome unknown', c.outcomeUnknown, 'The result was never confirmed.', tone(c.outcomeUnknown, 'danger')),
       metric('Pending review', c.pendingReviews, 'Awaiting the independent review lane.', tone(c.pendingReviews, 'info')),
+      // Missions: the one Founder-facing count Phase 3 adds to the arrival
+      // hall. Absent when no store was read, and then a stated absence.
+      ...(missions.absent
+        ? missions.metrics
+        : [
+            metric(
+              'Missions needing you',
+              missions.attention,
+              'Blocked, ready for review, or recorded in a state their tasks disagree with.',
+              tone(missions.attention, 'warn'),
+            ),
+          ]),
     ],
     rows: [],
     emptyMessage:
@@ -184,13 +301,14 @@ function overviewSection(state: HqStateDocument): Section {
 
 function operationsSection(state: HqStateDocument): Section {
   const ops = state.operations.data;
+  const missions = missionSignals(state);
   const rows = [
     ...ops.inFlight.map(taskRow),
     ...ops.blocked.map(taskRow),
     ...ops.outcomeUnknown.map(taskRow),
     ...ops.queued.map(taskRow),
   ];
-  const attention = ops.blocked.length + ops.outcomeUnknown.length + ops.approvals.length;
+  const attention = ops.blocked.length + ops.outcomeUnknown.length + ops.approvals.length + missions.attention;
   return {
     metrics: [
       metric('In flight', ops.inFlight.length, 'Assigned or running right now.', tone(ops.inFlight.length, 'info')),
@@ -201,6 +319,14 @@ function operationsSection(state: HqStateDocument): Section {
       // that is not dark must show the reader why. Without this metric the
       // Command Room would sit quiet over four zeroes.
       metric('Awaiting review', ops.pendingReviews.length, 'Submitted and waiting for the independent review lane.', tone(ops.pendingReviews.length, 'info')),
+      // Mission control reflects missions (Phase 3): the count that lights
+      // this room for a mission is the same count the Mission Room uses.
+      ...(missions.absent
+        ? missions.metrics
+        : [
+            metric('Missions needing attention', missions.attention, 'Blocked, ready for review, or recorded in a state their tasks disagree with.', tone(missions.attention, 'warn')),
+            metric('Missions working', missions.active, 'Recorded working — an explicit Founder record, not an inference.', tone(missions.active, 'info')),
+          ]),
     ],
     rows: limited(rows),
     // The empty message has to agree with the metrics above it.
@@ -233,6 +359,11 @@ function operationsSection(state: HqStateDocument): Section {
             'review lane, so no worker is executing them',
         );
       }
+      if (missions.present > 0) {
+        held.push(
+          `${missions.present} Founder mission(s) are recorded — they are listed in the Mission Room`,
+        );
+      }
       return held.length > 0
         ? `Nothing is in flight, queued, blocked or unresolved — but ${held.join('; and ')}.`
         : 'No task is recorded in flight, queued, blocked or unresolved. The Command Room is empty ' +
@@ -240,8 +371,8 @@ function operationsSection(state: HqStateDocument): Section {
     })(),
     liveness: livenessFrom({
       attention,
-      active: ops.inFlight.length,
-      present: rows.length + ops.approvals.length + ops.pendingReviews.length,
+      active: ops.inFlight.length + missions.active,
+      present: rows.length + ops.approvals.length + ops.pendingReviews.length + missions.present,
     }),
   };
 }
@@ -278,20 +409,29 @@ function missionsSection(state: HqStateDocument): Section {
   // The status counts below stay as they are: they are honest copies of what
   // canonical state records, and a status is a fact about a task. What may not
   // be re-derived from them is whether the room is lit.
-  const attention = ops.blocked.length + ops.outcomeUnknown.length + ops.approvals.length;
-  const active = ops.inFlight.length;
+  const missions = missionSignals(state);
+  const attention = ops.blocked.length + ops.outcomeUnknown.length + ops.approvals.length + missions.attention;
+  const active = ops.inFlight.length + missions.active;
   return {
     metrics: [
-      metric('Missions recorded', all.length, 'Every open task the canonical queue holds.', tone(all.length, 'info')),
+      // The Founder missions first (Phase 3): the durable record of what was
+      // ordered. Then the canonical open tasks, exactly as before — a mission's
+      // tasks are among them, because they ARE ordinary canonical tasks.
+      ...missions.metrics,
+      metric('Open tasks recorded', all.length, 'Every open task the canonical queue holds, mission-linked or not.', tone(all.length, 'info')),
       ...[...byStatus.entries()]
         .sort((a, b) => a[0].localeCompare(b[0]))
         .map(([status, count]) =>
           metric(status, count, `Tasks whose canonical status is ${status}.`, ATTENTION_STATUSES.has(status) ? 'warn' : 'neutral'),
         ),
     ],
-    rows: limited(all.map(taskRow)),
-    emptyMessage: 'The canonical queue holds no open mission. Nothing is hidden behind this view.',
-    liveness: livenessFrom({ attention, active, present: all.length }),
+    rows: limited([...missions.views.map(missionRow), ...all.map(taskRow)]),
+    emptyMessage: missions.absent
+      ? 'The canonical queue holds no open task, and this read had no mission store attached, so ' +
+        'nothing is claimed about missions. Nothing is hidden behind this view.'
+      : 'The mission core holds no Founder mission and the canonical queue holds no open task. ' +
+        'Nothing is hidden behind this view.',
+    liveness: livenessFrom({ attention, active, present: all.length + missions.present }),
   };
 }
 
@@ -547,6 +687,7 @@ function projectsSection(state: HqStateDocument): Section {
 
 function analyticsSection(state: HqStateDocument): Section {
   const c = state.counts;
+  const missions = missionSignals(state);
   const open = c.approvals + c.pendingReviews + c.outcomeUnknown + c.blocked + c.inFlight + c.queued;
   const stopped = c.blocked + c.outcomeUnknown;
   return {
@@ -557,6 +698,9 @@ function analyticsSection(state: HqStateDocument): Section {
       metric('Registered capabilities', state.capabilities.data.length, 'Registry rows.', 'neutral'),
       metric('Integrations known', state.connections.data.length, 'Descriptor rows.', 'neutral'),
       metric('Events in window', state.activity.data.length, 'Canonical events carried by this document.', 'neutral'),
+      ...(missions.absent
+        ? missions.metrics
+        : [metric('Missions recorded', missions.present, 'Mission rows, in any state.', 'neutral')]),
     ],
     rows: [],
     emptyMessage:
@@ -584,14 +728,15 @@ function analyticsSection(state: HqStateDocument): Section {
       // sound. It was not. Reading each room in turn is not the same as
       // comparing them against each other, which is what the strengthened
       // cross-room test now does.
-      attention: stopped + c.approvals,
-      active: c.inFlight,
+      attention: stopped + c.approvals + missions.attention,
+      active: c.inFlight + missions.active,
       present:
         open +
         state.workforce.data.length +
         state.capabilities.data.length +
         state.connections.data.length +
-        state.activity.data.length,
+        state.activity.data.length +
+        missions.present,
     }),
   };
 }

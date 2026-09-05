@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { HeadquarterOperations } from '@factoryos/headquarter/application';
 import { HeadquarterStore, type HqDatabase } from '@factoryos/headquarter/store';
+import { MissionStore } from '@factoryos/headquarter/mission';
 import { PROVIDER_REGISTRY, type SecretsEnv } from '@factoryos/headquarter/routing';
 import { claude } from '@factoryos/headquarter/providers';
 import type { ControlAuditEvent } from '@factoryos/headquarter/live';
@@ -65,6 +66,11 @@ export function loadHeadquarterHost(
   if (!persistence) return null;
   const hqDb = persistence.db;
   const ops = new HeadquarterOperations(hqDb, { store: new HeadquarterStore(hqDb) });
+  // The mission store (Phase 3, issue #254) on the SAME connection the
+  // operations write through, so a mission and its canonical tasks commit or
+  // roll back together. Attaching it here is the deliberate host action the
+  // control API's `mission_core_unavailable` refusal refers to.
+  const missions = new MissionStore(hqDb);
 
   // The Founder map is parsed only to distinguish valid JSON from malformed
   // authority configuration. Malformed input travels raw to the boundary so it
@@ -124,6 +130,7 @@ export function loadHeadquarterHost(
   return {
     plane: {
       ops,
+      missions,
       founderMap,
       allowedOrigins,
       secretsEnv,
