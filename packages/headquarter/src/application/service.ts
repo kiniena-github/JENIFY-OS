@@ -73,7 +73,7 @@ import { HeadquarterStore } from '../store/headquarter.js';
 import type { ActivityStatus } from '../contracts/events.js';
 import type { WorkerDescriptor, WorkerRole } from '../contracts/workers.js';
 import { evaluatePolicy, type PolicyContext, type PolicyDecision } from '../operator/policy.js';
-import { taskActionDigest, type ApprovalRejection } from '../operator/approvals.js';
+import { canonicalJson, taskActionDigest, type ApprovalRejection } from '../operator/approvals.js';
 import { assertNoSecretLikeContent, type EvidenceEntry } from '../operator/evidence.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import {
@@ -407,6 +407,42 @@ import {
   type MissionProposal,
   type MissionProposalStatus,
 } from './missions.js';
+import {
+  MISSION_COMMAND_CAPABILITY,
+  MAX_MISSION_INSTRUCTION_LENGTH,
+  MAX_MISSION_ITEM_LENGTH,
+  MAX_MISSION_LIST_ITEMS,
+  MAX_MISSION_NOTE_LENGTH,
+  MAX_MISSION_OBJECTIVE_LENGTH,
+  MAX_MISSION_PROJECT_LENGTH,
+  MAX_MISSION_SCOPE_LENGTH,
+  MAX_MISSION_TITLE_LENGTH,
+  MISSION_PLAN_NOT_DECIDED_SUMMARY,
+  appendMissionEvent,
+  appendMissionIntent,
+  ensureMissionCommandSchema,
+  findMissionIdByIdempotencyKey,
+  insertMissionPlanItem,
+  listMissionIds,
+  missionCommandCapabilityState,
+  missionCommandContractDrift,
+  missionCommandIdempotencyKey,
+  readMissionIntentEntries,
+  readMissionRecord,
+  type LinkedTaskLookup,
+  type MissionIntentEntry,
+  type MissionRecord,
+} from './mission-command.js';
+import {
+  MISSION_ALLOWED_TRANSITIONS,
+  MISSION_NOTE_REQUIRED_TARGETS,
+  canTransitionMission,
+  isMissionPriority,
+  isMissionStatus,
+  isMissionTerminal,
+  type MissionPriority,
+  type MissionStatus,
+} from '../contracts/mission.js';
 
 // ---- result contract ----
 
@@ -431,7 +467,11 @@ export type OpsErrorCode =
   | 'proposal_not_found'
   | 'proposal_not_open'
   | 'proposal_digest_mismatch'
-  | 'replacement_blocked';
+  | 'replacement_blocked'
+  | 'unknown_mission'
+  | 'invalid_mission_transition'
+  | 'mission_status_changed'
+  | 'mission_terminal';
 
 export interface OpsError {
   code: OpsErrorCode;
@@ -447,6 +487,49 @@ function fail(code: OpsErrorCode, message: string, details?: Record<string, unkn
 
 function ok<T>(data: T): OpsResult<T> {
   return { ok: true, data };
+}
+
+/** Trim + bound one mission text field. Absent optional fields become null. */
+function missionText(
+  field: string,
+  value: string | undefined,
+  max: number,
+  required: boolean,
+): { ok: true; value: string | null; message?: never } | { ok: false; message: string } {
+  const trimmed = value?.trim() ?? '';
+  if (!trimmed) {
+    return required ? { ok: false, message: `${field} is required` } : { ok: true, value: null };
+  }
+  if (trimmed.length > max) {
+    return { ok: false, message: `${field} exceeds ${max} characters` };
+  }
+  return { ok: true, value: trimmed };
+}
+
+/**
+ * Trim + bound one mission list field. `undefined` stays null (honestly not
+ * supplied); an explicit empty list is a stated empty list.
+ */
+function missionList(
+  field: string,
+  values: string[] | undefined,
+): { ok: true; value: string[] | null; message?: never } | { ok: false; message: string } {
+  if (values == null) return { ok: true, value: null };
+  if (!Array.isArray(values)) return { ok: false, message: `${field} must be a list` };
+  if (values.length > MAX_MISSION_LIST_ITEMS) {
+    return { ok: false, message: `${field} exceeds ${MAX_MISSION_LIST_ITEMS} entries` };
+  }
+  const out: string[] = [];
+  for (const entry of values) {
+    if (typeof entry !== 'string') return { ok: false, message: `${field} entries must be text` };
+    const trimmed = entry.trim();
+    if (!trimmed) return { ok: false, message: `${field} entries must not be empty` };
+    if (trimmed.length > MAX_MISSION_ITEM_LENGTH) {
+      return { ok: false, message: `${field} entries exceed ${MAX_MISSION_ITEM_LENGTH} characters` };
+    }
+    out.push(trimmed);
+  }
+  return { ok: true, value: out };
 }
 
 // ---- inputs / outputs ----
@@ -865,6 +948,7 @@ export class HeadquarterOperations {
       };
     };
     ensureApplicationSchema(db);
+    ensureMissionCommandSchema(db);
     this.#store = options.store ?? new HeadquarterStore(db);
     // The approval mutations are handed to whoever CONSTRUCTS the queue and to
     // nobody else, so they are unreachable from a queue handle a worker holds.
@@ -2322,6 +2406,730 @@ export class HeadquarterOperations {
     ) as { id: string }[];
     return rows.map((r) => this.getProposal(r.id)!);
   }
+
+  // ---- missions (Phase 3 — Founder Command + Mission Core, issue #254) ----
+
+  /**
+   * Command a canonical Mission from a Founder order.
+   *
+   * A mission is a durable planning record ABOVE tasks. Commanding one
+   * executes nothing: no task is created, no approval is touched, no worker
+   * is dispatched, and no later-phase orchestration is implied. The act is
+   * Founder-only — the requester must resolve to an active HUMAN principal
+   * holding the `hq.mission_command` originate grant (workers are refused
+   * outright), and the capability row must match its reserved contract
+   * (fail closed on missing/altered/disabled; commanding never registers or
+   * repairs — the direct-order CONFIGURATION-vs-INVOCATION rule).
+   *
+   * Transactional and idempotent: the derived digest key dedupes an
+   * identical re-command onto the existing mission with no second intent,
+   * plan, event or evidence row.
+   *
+   * The optional free-text `instruction` is the raw order. It is preserved
+   * in the intent body (seq 0, immutable, append-only history) and stays
+   * SERVER-SIDE ONLY — the browser sees the intake-scanned canonical fields.
+   *
+   * No text is ever parsed into capabilities, tasks or providers. The plan
+   * is exactly what the Founder supplied; when nothing was supplied, the one
+   * honest plan item is a needs-clarification record, never an invented
+   * breakdown.
+   */
+  commandMission(input: {
+    title: string;
+    objective: string;
+    scope?: string;
+    constraints?: string[];
+    acceptanceCriteria?: string[];
+    planItems?: string[];
+    project?: string;
+    priority?: string;
+    dependsOn?: string[];
+    sourceOrderTaskId?: string;
+    /** Raw order text. SERVER-SIDE ONLY — lives in the intent body. */
+    instruction?: string;
+    /** Resolved principal id. Set by the boundary, never read from a body. */
+    requestedBy: string;
+    /** Client dedupe hint — an INPUT to the derived key, never the key. */
+    idempotencyKey?: string;
+  }): OpsResult<{ mission: MissionRecord; deduplicated: boolean }> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    const title = missionText('title', input.title, MAX_MISSION_TITLE_LENGTH, true);
+    if (!title.ok) return fail('invalid_input', title.message);
+    const objective = missionText('objective', input.objective, MAX_MISSION_OBJECTIVE_LENGTH, true);
+    if (!objective.ok) return fail('invalid_input', objective.message);
+    const scope = missionText('scope', input.scope, MAX_MISSION_SCOPE_LENGTH, false);
+    if (!scope.ok) return fail('invalid_input', scope.message);
+    const project = missionText('project', input.project, MAX_MISSION_PROJECT_LENGTH, false);
+    if (!project.ok) return fail('invalid_input', project.message);
+    const instruction = missionText(
+      'instruction',
+      input.instruction,
+      MAX_MISSION_INSTRUCTION_LENGTH,
+      false,
+    );
+    if (!instruction.ok) return fail('invalid_input', instruction.message);
+    const constraints = missionList('constraints', input.constraints);
+    if (!constraints.ok) return fail('invalid_input', constraints.message);
+    const acceptance = missionList('acceptanceCriteria', input.acceptanceCriteria);
+    if (!acceptance.ok) return fail('invalid_input', acceptance.message);
+    const planItems = missionList('planItems', input.planItems);
+    if (!planItems.ok) return fail('invalid_input', planItems.message);
+    let priority: MissionPriority | null = null;
+    if (input.priority != null && input.priority !== '') {
+      if (!isMissionPriority(input.priority)) {
+        return fail('invalid_input', `Unknown mission priority: ${input.priority}`);
+      }
+      priority = input.priority;
+    }
+    const dependsOn = [...new Set((input.dependsOn ?? []).map((d) => d.trim()).filter(Boolean))];
+    if (dependsOn.length > MAX_MISSION_LIST_ITEMS) {
+      return fail('invalid_input', `dependsOn exceeds ${MAX_MISSION_LIST_ITEMS} entries`);
+    }
+    for (const dep of dependsOn) {
+      if (!this.#db.prepare(`SELECT 1 FROM hq_missions WHERE id = ?`).get(dep)) {
+        return fail('invalid_input', `dependsOn names an unknown mission: ${dep}`);
+      }
+    }
+    const sourceOrderTaskId = input.sourceOrderTaskId?.trim() || null;
+    if (
+      sourceOrderTaskId &&
+      !this.#db.prepare(`SELECT 1 FROM op_tasks WHERE id = ?`).get(sourceOrderTaskId)
+    ) {
+      return fail('invalid_input', `sourceOrderTaskId names an unknown task: ${sourceOrderTaskId}`);
+    }
+
+    const refusedCommander = this.#resolveMissionCommander(input.requestedBy, 'command a mission');
+    if (refusedCommander) return refusedCommander;
+    const refusedCapability = this.#missionCapabilityGate('command a mission');
+    if (refusedCapability) return refusedCapability;
+
+    // Everything that will be PERSISTED is scanned before anything is
+    // written — a credential-looking order is refused, never stored.
+    try {
+      assertNoSecretLikeContent({
+        title: title.value,
+        objective: objective.value,
+        scope: scope.value,
+        project: project.value,
+        instruction: instruction.value,
+        constraints: constraints.value,
+        acceptanceCriteria: acceptance.value,
+        planItems: planItems.value,
+      });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+
+    const idempotencyKey = missionCommandIdempotencyKey({
+      requestedBy: input.requestedBy,
+      title: title.value!,
+      objective: objective.value!,
+      scope: scope.value,
+      constraints: constraints.value ?? [],
+      acceptanceCriteria: acceptance.value,
+      project: project.value,
+      priority,
+      sourceOrderTaskId,
+      dependsOn,
+      planItems: planItems.value ?? [],
+      idempotencyKey: input.idempotencyKey ?? null,
+    });
+    const existing = findMissionIdByIdempotencyKey(this.#db, idempotencyKey);
+    if (existing) {
+      return ok({ mission: this.#missionRecord(existing)!, deduplicated: true });
+    }
+
+    const id = `mission-${uuid()}`;
+    const at = nowIso();
+    const body = canonicalJson({
+      kind: 'founder_order',
+      title: title.value,
+      objective: objective.value,
+      scope: scope.value,
+      constraints: constraints.value ?? [],
+      acceptanceCriteria: acceptance.value,
+      planItems: planItems.value ?? [],
+      project: project.value,
+      priority,
+      dependsOn,
+      sourceOrderTaskId,
+      instruction: instruction.value,
+      requestedBy: input.requestedBy,
+      clientIdempotencyKey: input.idempotencyKey ?? null,
+      at,
+    });
+    const items =
+      planItems.value && planItems.value.length > 0
+        ? planItems.value.map((summary, i) => ({
+            summary,
+            kind: 'work' as const,
+            seq: i + 1,
+          }))
+        : [{ summary: MISSION_PLAN_NOT_DECIDED_SUMMARY, kind: 'needs_clarification' as const, seq: 1 }];
+
+    this.#db.transaction(() => {
+      this.#db
+        .prepare(
+          `INSERT INTO hq_missions
+             (id, title, objective, scope, constraints, acceptance_criteria, project, priority,
+              status, depends_on, source_order_task_id, idempotency_key,
+              created_by, created_at, updated_at, status_changed_at, status_changed_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          title.value,
+          objective.value,
+          scope.value,
+          JSON.stringify(constraints.value ?? []),
+          acceptance.value == null ? null : JSON.stringify(acceptance.value),
+          project.value,
+          priority,
+          JSON.stringify(dependsOn),
+          sourceOrderTaskId,
+          idempotencyKey,
+          input.requestedBy,
+          at,
+          at,
+          at,
+          input.requestedBy,
+        );
+      appendMissionIntent(this.#db, {
+        missionId: id,
+        seq: 0,
+        kind: 'founder_order',
+        body,
+        objective: objective.value!,
+        constraints: constraints.value ?? [],
+        acceptanceCriteria: acceptance.value,
+        actor: input.requestedBy,
+        at,
+      });
+      for (const item of items) {
+        insertMissionPlanItem(this.#db, {
+          missionId: id,
+          seq: item.seq,
+          summary: item.summary,
+          kind: item.kind,
+          createdInIntentSeq: 0,
+        });
+      }
+      appendMissionEvent(this.#db, {
+        missionId: id,
+        actor: input.requestedBy,
+        kind: 'commanded',
+        toStatus: 'planned',
+        detail: { planItemCount: items.length },
+      });
+    })();
+    this.#requirePrivilegedQueue().appendEvidence({
+      actor: input.requestedBy,
+      kind: 'mission_commanded',
+      payload: { missionId: id, idempotencyKey, planItemCount: items.length, executable: false },
+    });
+    return ok({ mission: this.#missionRecord(id)!, deduplicated: false });
+  }
+
+  getMission(id: string): MissionRecord | null {
+    if (!id) return null;
+    return this.#missionRecord(id);
+  }
+
+  listMissions(status?: MissionStatus): MissionRecord[] {
+    return listMissionIds(this.#db, status).map((id) => this.#missionRecord(id)!);
+  }
+
+  /**
+   * Full intent history INCLUDING bodies (raw order + amendment rationale).
+   * SERVER-SIDE ONLY: no route response or snapshot may carry these bodies —
+   * the browser gets the metadata that already rides on `MissionRecord`.
+   */
+  getMissionIntentHistory(missionId: string): MissionIntentEntry[] {
+    return readMissionIntentEntries(this.#db, missionId);
+  }
+
+  /**
+   * Move a mission through its lifecycle. Founder-driven in Phase 3 — every
+   * transition is an actor-checked act by a principal holding the mission
+   * grant, structurally bounded by `MISSION_ALLOWED_TRANSITIONS`.
+   *
+   * `verified` additionally requires approval AUTHORITY (the decision-class
+   * check used by approvals and the kill switch) and a mandatory note: with
+   * no evidence engine in Phase 3, verification IS the recorded Founder
+   * decision, and it is displayed as exactly that. It grants and executes
+   * nothing, and never touches `hq_approvals`.
+   */
+  transitionMission(input: {
+    missionId: string;
+    to: string;
+    note?: string;
+    /** Optimistic guard: refuse if the mission moved since it was read. */
+    expectedStatus?: string;
+    requestedBy: string;
+  }): OpsResult<MissionRecord> {
+    if (!input.missionId || !input.requestedBy) {
+      return fail('invalid_input', 'missionId and requestedBy are required');
+    }
+    if (!isMissionStatus(input.to)) {
+      return fail('invalid_input', `Unknown mission status: ${input.to}`);
+    }
+    if (input.expectedStatus != null && !isMissionStatus(input.expectedStatus)) {
+      return fail('invalid_input', `Unknown mission status: ${input.expectedStatus}`);
+    }
+    const noteField = missionText('note', input.note, MAX_MISSION_NOTE_LENGTH, false);
+    if (!noteField.ok) return fail('invalid_input', noteField.message);
+    const note = noteField.value;
+
+    const refusedCommander = this.#resolveMissionCommander(
+      input.requestedBy,
+      `move mission ${input.missionId} to ${input.to}`,
+    );
+    if (refusedCommander) return refusedCommander;
+    const refusedCapability = this.#missionCapabilityGate('transition a mission');
+    if (refusedCapability) return refusedCapability;
+
+    const current = this.#missionRecord(input.missionId);
+    if (!current) return fail('unknown_mission', `Unknown mission: ${input.missionId}`);
+    if (input.expectedStatus && current.status !== input.expectedStatus) {
+      return fail(
+        'mission_status_changed',
+        `Mission ${input.missionId} is ${current.status}, not ${input.expectedStatus}`,
+        { status: current.status },
+      );
+    }
+    if (current.status === input.to) {
+      // A replayed transition is refused rather than re-applied: appending a
+      // second identical event would forge history.
+      return fail('mission_status_changed', `Mission ${input.missionId} is already ${input.to}`, {
+        status: current.status,
+      });
+    }
+    if (!canTransitionMission(current.status, input.to)) {
+      return fail(
+        'invalid_mission_transition',
+        `Illegal mission transition: ${current.status} -> ${input.to}`,
+        { from: current.status, to: input.to, allowed: [...MISSION_ALLOWED_TRANSITIONS[current.status]] },
+      );
+    }
+    if (MISSION_NOTE_REQUIRED_TARGETS.includes(input.to) && !note) {
+      return fail('invalid_input', `Moving a mission to ${input.to} requires a note`);
+    }
+    if (note) {
+      try {
+        assertNoSecretLikeContent({ note });
+      } catch (error) {
+        return fail('invalid_input', errorMessage(error));
+      }
+    }
+    if (input.to === 'verified') {
+      const refusedAuthority = this.#assertApprovalAuthority(
+        input.requestedBy,
+        `verify mission ${input.missionId}`,
+      );
+      if (refusedAuthority) return refusedAuthority;
+    }
+
+    const at = nowIso();
+    let raced = false;
+    this.#db.transaction(() => {
+      const blockReason = input.to === 'blocked' ? note : null;
+      const result =
+        input.to === 'verified'
+          ? this.#db
+              .prepare(
+                `UPDATE hq_missions
+                 SET status = ?, block_reason = ?, updated_at = ?, status_changed_at = ?, status_changed_by = ?,
+                     verified_by = ?, verified_at = ?, verified_note = ?, verification_method = 'founder_decision'
+                 WHERE id = ? AND status = ?`,
+              )
+              .run(
+                input.to,
+                blockReason,
+                at,
+                at,
+                input.requestedBy,
+                input.requestedBy,
+                at,
+                note,
+                input.missionId,
+                current.status,
+              )
+          : this.#db
+              .prepare(
+                `UPDATE hq_missions
+                 SET status = ?, block_reason = ?, updated_at = ?, status_changed_at = ?, status_changed_by = ?
+                 WHERE id = ? AND status = ?`,
+              )
+              .run(input.to, blockReason, at, at, input.requestedBy, input.missionId, current.status);
+      if (result.changes === 0) {
+        raced = true;
+        return;
+      }
+      appendMissionEvent(this.#db, {
+        missionId: input.missionId,
+        actor: input.requestedBy,
+        kind: 'transitioned',
+        fromStatus: current.status,
+        toStatus: input.to as MissionStatus,
+        note,
+      });
+    })();
+    if (raced) {
+      return fail(
+        'mission_status_changed',
+        `Mission ${input.missionId} changed status while the transition was being decided`,
+        {},
+      );
+    }
+    this.#requirePrivilegedQueue().appendEvidence({
+      actor: input.requestedBy,
+      kind: 'mission_transitioned',
+      payload: { missionId: input.missionId, from: current.status, to: input.to, executable: false },
+    });
+    return ok(this.#missionRecord(input.missionId)!);
+  }
+
+  /**
+   * Amend a mission's intent. APPEND-ONLY: the original Founder order (seq 0)
+   * is never rewritten; each amendment appends the full rationale body and
+   * the canonical state AFTER it, and supersedes plan items rather than
+   * deleting them. Terminal missions cannot be amended — their record is
+   * closed history.
+   */
+  amendMissionIntent(input: {
+    missionId: string;
+    /** Required rationale. SERVER-SIDE ONLY — lives in the intent body. */
+    amendment: string;
+    objective?: string;
+    constraints?: string[];
+    acceptanceCriteria?: string[];
+    addPlanItems?: string[];
+    supersedePlanItemSeqs?: number[];
+    requestedBy: string;
+  }): OpsResult<MissionRecord> {
+    if (!input.missionId || !input.requestedBy) {
+      return fail('invalid_input', 'missionId and requestedBy are required');
+    }
+    const amendment = missionText(
+      'amendment',
+      input.amendment,
+      MAX_MISSION_INSTRUCTION_LENGTH,
+      true,
+    );
+    if (!amendment.ok) return fail('invalid_input', amendment.message);
+    const objective = missionText('objective', input.objective, MAX_MISSION_OBJECTIVE_LENGTH, false);
+    if (!objective.ok) return fail('invalid_input', objective.message);
+    const constraints = missionList('constraints', input.constraints);
+    if (!constraints.ok) return fail('invalid_input', constraints.message);
+    const acceptance = missionList('acceptanceCriteria', input.acceptanceCriteria);
+    if (!acceptance.ok) return fail('invalid_input', acceptance.message);
+    const addPlanItems = missionList('addPlanItems', input.addPlanItems);
+    if (!addPlanItems.ok) return fail('invalid_input', addPlanItems.message);
+
+    const refusedCommander = this.#resolveMissionCommander(
+      input.requestedBy,
+      `amend mission ${input.missionId}`,
+    );
+    if (refusedCommander) return refusedCommander;
+    const refusedCapability = this.#missionCapabilityGate('amend a mission');
+    if (refusedCapability) return refusedCapability;
+
+    const current = this.#missionRecord(input.missionId);
+    if (!current) return fail('unknown_mission', `Unknown mission: ${input.missionId}`);
+    if (isMissionTerminal(current.status)) {
+      return fail(
+        'mission_terminal',
+        `Mission ${input.missionId} is ${current.status} — a terminal mission is closed history and cannot be amended`,
+        { status: current.status },
+      );
+    }
+
+    const supersedeSeqs = [...new Set(input.supersedePlanItemSeqs ?? [])];
+    for (const seq of supersedeSeqs) {
+      if (!Number.isInteger(seq)) {
+        return fail('invalid_input', `supersedePlanItemSeqs entries must be integers`);
+      }
+      const item = current.planItems.find((p) => p.seq === seq);
+      if (!item) {
+        return fail('invalid_input', `Mission ${input.missionId} has no plan item ${seq}`);
+      }
+      if (item.supersededInIntentSeq != null) {
+        return fail('invalid_input', `Plan item ${seq} is already superseded`);
+      }
+    }
+
+    try {
+      assertNoSecretLikeContent({
+        amendment: amendment.value,
+        objective: objective.value,
+        constraints: constraints.value,
+        acceptanceCriteria: acceptance.value,
+        addPlanItems: addPlanItems.value,
+      });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+
+    const at = nowIso();
+    const nextObjective = objective.value ?? current.objective;
+    const nextConstraints = constraints.value ?? current.constraints;
+    const nextAcceptance = acceptance.value ?? current.acceptanceCriteria;
+    const nextIntentSeq =
+      ((
+        this.#db
+          .prepare(`SELECT MAX(seq) AS max_seq FROM hq_mission_intents WHERE mission_id = ?`)
+          .get(input.missionId) as { max_seq: number | null }
+      ).max_seq ?? 0) + 1;
+    const maxPlanSeq =
+      (
+        this.#db
+          .prepare(`SELECT MAX(seq) AS max_seq FROM hq_mission_plan_items WHERE mission_id = ?`)
+          .get(input.missionId) as { max_seq: number | null }
+      ).max_seq ?? 0;
+    const body = canonicalJson({
+      kind: 'amendment',
+      amendment: amendment.value,
+      objective: objective.value,
+      constraints: constraints.value,
+      acceptanceCriteria: acceptance.value,
+      addPlanItems: addPlanItems.value,
+      supersedePlanItemSeqs: supersedeSeqs,
+      requestedBy: input.requestedBy,
+      at,
+    });
+
+    this.#db.transaction(() => {
+      this.#db
+        .prepare(
+          `UPDATE hq_missions
+           SET objective = ?, constraints = ?, acceptance_criteria = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          nextObjective,
+          JSON.stringify(nextConstraints),
+          nextAcceptance == null ? null : JSON.stringify(nextAcceptance),
+          at,
+          input.missionId,
+        );
+      appendMissionIntent(this.#db, {
+        missionId: input.missionId,
+        seq: nextIntentSeq,
+        kind: 'amendment',
+        body,
+        objective: nextObjective,
+        constraints: nextConstraints,
+        acceptanceCriteria: nextAcceptance,
+        actor: input.requestedBy,
+        at,
+      });
+      for (const seq of supersedeSeqs) {
+        this.#db
+          .prepare(
+            `UPDATE hq_mission_plan_items
+             SET superseded_in_intent_seq = ?
+             WHERE mission_id = ? AND seq = ? AND superseded_in_intent_seq IS NULL`,
+          )
+          .run(nextIntentSeq, input.missionId, seq);
+      }
+      (addPlanItems.value ?? []).forEach((summary, i) => {
+        insertMissionPlanItem(this.#db, {
+          missionId: input.missionId,
+          seq: maxPlanSeq + i + 1,
+          summary,
+          kind: 'work',
+          createdInIntentSeq: nextIntentSeq,
+        });
+      });
+      appendMissionEvent(this.#db, {
+        missionId: input.missionId,
+        actor: input.requestedBy,
+        kind: 'intent_amended',
+        detail: {
+          intentSeq: nextIntentSeq,
+          addedPlanItems: addPlanItems.value?.length ?? 0,
+          supersededPlanItems: supersedeSeqs.length,
+        },
+      });
+    })();
+    this.#requirePrivilegedQueue().appendEvidence({
+      actor: input.requestedBy,
+      kind: 'mission_intent_amended',
+      payload: { missionId: input.missionId, intentSeq: nextIntentSeq, executable: false },
+    });
+    return ok(this.#missionRecord(input.missionId)!);
+  }
+
+  /**
+   * Link a plan item to a REAL operator task (created through the ordinary
+   * gated paths — a direct order, a promoted proposal). Written once: the
+   * link records which canonical work carries the item; it grants nothing,
+   * moves nothing, and never touches the task.
+   */
+  linkMissionPlanItem(input: {
+    missionId: string;
+    planItemSeq: number;
+    taskId: string;
+    requestedBy: string;
+  }): OpsResult<MissionRecord> {
+    if (!input.missionId || !input.requestedBy || !input.taskId) {
+      return fail('invalid_input', 'missionId, planItemSeq, taskId and requestedBy are required');
+    }
+    if (!Number.isInteger(input.planItemSeq)) {
+      return fail('invalid_input', 'planItemSeq must be an integer');
+    }
+    const refusedCommander = this.#resolveMissionCommander(
+      input.requestedBy,
+      `link a task to mission ${input.missionId}`,
+    );
+    if (refusedCommander) return refusedCommander;
+    const refusedCapability = this.#missionCapabilityGate('link a mission plan item');
+    if (refusedCapability) return refusedCapability;
+
+    const current = this.#missionRecord(input.missionId);
+    if (!current) return fail('unknown_mission', `Unknown mission: ${input.missionId}`);
+    if (isMissionTerminal(current.status)) {
+      return fail(
+        'mission_terminal',
+        `Mission ${input.missionId} is ${current.status} — a terminal mission is closed history`,
+        { status: current.status },
+      );
+    }
+    const item = current.planItems.find((p) => p.seq === input.planItemSeq);
+    if (!item) {
+      return fail('invalid_input', `Mission ${input.missionId} has no plan item ${input.planItemSeq}`);
+    }
+    if (item.supersededInIntentSeq != null) {
+      return fail('invalid_input', `Plan item ${input.planItemSeq} is superseded`);
+    }
+    if (item.kind !== 'work') {
+      return fail(
+        'invalid_input',
+        `Plan item ${input.planItemSeq} records an open question — amend the mission to turn it into work before linking`,
+      );
+    }
+    if (item.taskId) {
+      return fail('invalid_input', `Plan item ${input.planItemSeq} is already linked to ${item.taskId}`);
+    }
+    if (!this.#db.prepare(`SELECT 1 FROM op_tasks WHERE id = ?`).get(input.taskId)) {
+      return fail('unknown_task', `Unknown task: ${input.taskId}`);
+    }
+
+    const at = nowIso();
+    let raced = false;
+    this.#db.transaction(() => {
+      const result = this.#db
+        .prepare(
+          `UPDATE hq_mission_plan_items
+           SET task_id = ?, linked_by = ?, linked_at = ?
+           WHERE mission_id = ? AND seq = ? AND task_id IS NULL`,
+        )
+        .run(input.taskId, input.requestedBy, at, input.missionId, input.planItemSeq);
+      if (result.changes === 0) {
+        raced = true;
+        return;
+      }
+      appendMissionEvent(this.#db, {
+        missionId: input.missionId,
+        actor: input.requestedBy,
+        kind: 'plan_item_linked',
+        detail: { planItemSeq: input.planItemSeq, taskId: input.taskId },
+      });
+    })();
+    if (raced) {
+      return fail('invalid_input', `Plan item ${input.planItemSeq} was linked concurrently`);
+    }
+    this.#requirePrivilegedQueue().appendEvidence({
+      actor: input.requestedBy,
+      kind: 'mission_plan_item_linked',
+      payload: {
+        missionId: input.missionId,
+        planItemSeq: input.planItemSeq,
+        taskId: input.taskId,
+        executable: false,
+      },
+    });
+    return ok(this.#missionRecord(input.missionId)!);
+  }
+
+  /**
+   * Missions are commanded by an active HUMAN principal holding the
+   * `hq.mission_command` originate grant. Deny by default; a registered
+   * worker is refused outright — commanding company direction is a Founder
+   * act, and worker identity never carries it.
+   */
+  #resolveMissionCommander(actor: string, action: string): OpsResult<never> | null {
+    if (!actor) return fail('invalid_input', `An actor is required to ${action}`);
+    if (actor === 'system') {
+      return fail('not_permitted', `'system' cannot ${action}: a human principal is required`);
+    }
+    const resolved = this.#resolveRequester(actor, action);
+    if (!resolved.ok) return resolved;
+    if (resolved.data.kind === 'worker') {
+      return fail(
+        'not_permitted',
+        `Registered worker ${actor} cannot ${action}: commanding a mission is a Founder act, and worker identity never carries it`,
+        { actor },
+      );
+    }
+    if (!resolved.data.allowedCapabilities.includes(MISSION_COMMAND_CAPABILITY.id)) {
+      return fail(
+        'not_permitted',
+        `${actor} may not ${action}: the principal does not hold ${MISSION_COMMAND_CAPABILITY.id}`,
+        { actor },
+      );
+    }
+    return null;
+  }
+
+  /**
+   * Fail closed while the `hq.mission_command` registry row is missing,
+   * weakened or disabled. Reads the DATABASE row (never `queue.capabilities`)
+   * and never repairs — registration is a separate configuration act.
+   */
+  #missionCapabilityGate(action: string): OpsResult<never> | null {
+    const row = this.#capabilityFromStore(MISSION_COMMAND_CAPABILITY.id);
+    const state = missionCommandCapabilityState(row);
+    if (state === 'enabled') return null;
+    if (state === 'missing') {
+      return fail(
+        'unknown_capability',
+        `Cannot ${action}: ${MISSION_COMMAND_CAPABILITY.id} is not registered. ` +
+          `Registering it is a separate, deliberate configuration action — commanding a mission never performs it.`,
+      );
+    }
+    if (state === 'altered') {
+      const drift = missionCommandContractDrift(row!);
+      return fail(
+        'not_permitted',
+        `Cannot ${action}: the ${MISSION_COMMAND_CAPABILITY.id} definition no longer matches its reserved contract ` +
+          `(drift: ${drift.join(', ')}). Re-registering it is a separate configuration action.`,
+        { drift },
+      );
+    }
+    return fail(
+      'capability_disabled',
+      `Cannot ${action}: ${MISSION_COMMAND_CAPABILITY.id} is disabled. Re-enabling it is a separate configuration action.`,
+    );
+  }
+
+  #missionRecord(id: string): MissionRecord | null {
+    return readMissionRecord(
+      this.#db,
+      id,
+      this.#linkedTaskLookup,
+      this.#capabilityFromStore(MISSION_COMMAND_CAPABILITY.id),
+    );
+  }
+
+  /** A linked task's canonical display inputs, read from the one true row. */
+  readonly #linkedTaskLookup: LinkedTaskLookup = (taskId) => {
+    const row = this.#db
+      .prepare(`SELECT status, review_state FROM op_tasks WHERE id = ?`)
+      .get(taskId) as { status: string; review_state: string | null } | undefined;
+    if (!row) return null;
+    return { status: row.status as ActivityStatus, reviewPending: row.review_state === 'pending' };
+  };
 
   // ---- task metadata (console labels + advisory assignment) ----
 
