@@ -14,13 +14,33 @@
  *
  * ## What is exposed, and what deliberately is not
  *
- * Five routes, matched exactly, deny-by-default on everything else:
+ * Nine routes, matched exactly, deny-by-default on everything else:
  *
  *   GET  /api/hq/control/session            who am I, and are the controls on
  *   GET  /api/hq/control/approvals          the pending approvals + digests
+ *   GET  /api/hq/control/state              canonical state, projected into rooms
  *   POST /api/hq/control/orders             create a canonical direct order
  *   POST /api/hq/control/approvals/approve  approve the exact rendered action
  *   POST /api/hq/control/approvals/deny     deny, with a reason
+ *   GET  /api/hq/control/missions           every Founder mission, browser-safe
+ *   POST /api/hq/control/missions           record a Founder command as a mission
+ *   POST /api/hq/control/missions/amend     append an amendment to a mission's intent
+ *   POST /api/hq/control/missions/transition move a mission's recorded state
+ *
+ * The four mission routes (Phase 3, issue #254) create no new unit of WORK:
+ * every task a mission holds is created by `submitDirectOrder` through
+ * `mission/command.ts`, under the same Founder gate, digest and idempotency
+ * as an order placed directly, and the mission tables themselves carry no
+ * authority — nothing in them is read by the dispatcher, the claim path or
+ * the approval path. What IS genuinely new, stated so nobody reads the line
+ * above as "nothing new": (a) a mission state transition is a mutation class
+ * with no order/approval equivalent — it writes a recorded state and a
+ * history row that no other route can write; and (b) a clarification-needed
+ * `POST /missions` commits a mission row, an intent row and an event row on a
+ * path that never reaches `createTask`, which is why `mission/command.ts`
+ * checks the actor's grant itself before that write. The mission routes are
+ * refused outright when the host attached no `MissionStore` — absence fails
+ * closed, it is not answered with an empty list.
  *
  * There is **no ask-for-changes route**, and its absence is a decision rather
  * than an omission. The canonical approval model has exactly two outcomes:
@@ -78,7 +98,7 @@ import {
   type ResolvedFounder,
   type SessionResolverPort,
 } from './auth.js';
-import { assertBrowserSafe } from './redaction.js';
+import { assertBrowserSafe, BrowserSafetyError } from './redaction.js';
 import {
   directOrderCapabilityState,
   directOrderDispatchBlocked,
@@ -88,6 +108,15 @@ import {
   DIRECT_ORDER_ROUTES,
   type DirectOrderRoute,
 } from './orders.js';
+import {
+  amendMission,
+  missionAttention,
+  missionListing,
+  submitFounderCommand,
+  transitionMission,
+  type FounderCommandErrorCode,
+  type MissionStore,
+} from '../mission/index.js';
 
 export const CONTROL_API_PREFIX = '/api/hq/control';
 
@@ -120,6 +149,14 @@ export const CONTROL_ROUTES = {
   orders: `${CONTROL_API_PREFIX}/orders`,
   approve: `${CONTROL_API_PREFIX}/approvals/approve`,
   deny: `${CONTROL_API_PREFIX}/approvals/deny`,
+  /**
+   * Founder Command + Mission Core (Phase 3, issue #254). One path serves
+   * the read (GET) and the create (POST); the two explicit mission writes
+   * have paths of their own so the deny-by-default table stays literal.
+   */
+  missions: `${CONTROL_API_PREFIX}/missions`,
+  missionAmend: `${CONTROL_API_PREFIX}/missions/amend`,
+  missionTransition: `${CONTROL_API_PREFIX}/missions/transition`,
 } as const;
 
 export interface ControlResponse {
@@ -171,6 +208,16 @@ export interface ControlApiDeps {
    * One flag, read once, decides both what happens and what is claimed.
    */
   mutationsEnabled?: boolean;
+  /**
+   * The mission store (Phase 3, issue #254). Optional because a host is not
+   * obliged to attach one — but its absence is refusal, never emptiness: the
+   * four mission routes answer `mission_core_unavailable`, the session route
+   * advertises no mission control, and the state document's `missions`
+   * section is `null`. Supplied by the composition root that holds the
+   * database, from the SAME connection `ops` writes through, so a mission and
+   * its tasks commit together.
+   */
+  missions?: MissionStore;
 }
 
 function json(status: number, body: Record<string, unknown>): ControlResponse {
@@ -286,11 +333,15 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     (method === 'GET' &&
       (path === CONTROL_ROUTES.session ||
         path === CONTROL_ROUTES.approvals ||
-        path === CONTROL_ROUTES.state)) ||
+        path === CONTROL_ROUTES.state ||
+        path === CONTROL_ROUTES.missions)) ||
     (method === 'POST' &&
       (path === CONTROL_ROUTES.orders ||
         path === CONTROL_ROUTES.approve ||
-        path === CONTROL_ROUTES.deny));
+        path === CONTROL_ROUTES.deny ||
+        path === CONTROL_ROUTES.missions ||
+        path === CONTROL_ROUTES.missionAmend ||
+        path === CONTROL_ROUTES.missionTransition));
   if (!known) {
     // Deny by default, and say nothing about what does exist.
     return refusal(404, 'not_found', 'No such HQ control route.');
@@ -499,6 +550,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
       now: now().toISOString(),
       env: deps.secretsEnv,
       dispatchAvailability: deps.dispatchAvailability,
+      // Missions travel in the same document, from the same read, so the
+      // Mission Room and the Command Room cannot describe two instants.
+      missions: deps.missions,
     });
     const rooms = hydrateRooms(state, {
       ok: true,
@@ -525,7 +579,32 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
 
   if (path === CONTROL_ROUTES.orders) return createOrder(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.approve) return approve(request, deps, founder, audit, now);
-  return deny(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.deny) return deny(request, deps, founder, audit);
+
+  // Founder Command + Mission Core. Every one of these fails closed on a host
+  // that attached no store — see `ControlApiDeps.missions`.
+  const missions = deps.missions;
+  if (!missions) {
+    audit('refused', 'mission_core_unavailable', founder);
+    return refusal(
+      503,
+      'mission_core_unavailable',
+      'No mission store is attached to this deployment, so Founder missions can be neither read nor ' +
+        'recorded here. Attaching one is a deliberate host configuration action.',
+    );
+  }
+  if (method === 'GET') return listMissions(deps, missions, founder, audit, now);
+  if (path === CONTROL_ROUTES.missions) return createMission(request, deps, missions, founder, audit);
+  if (path === CONTROL_ROUTES.missionAmend) return amend(request, deps, missions, founder, audit);
+  // Matched literally, like every other branch, and 404 after it. This was
+  // an unguarded `return transition(...)` — a fifth mission path added to
+  // `known` without a branch of its own would have fallen through and
+  // executed a transition (Opus second pass on `a849af8`, nit 1). `known`
+  // already refuses anything not in the table, so this line is unreachable
+  // today; it is here so that stays true when the table grows.
+  if (path === CONTROL_ROUTES.missionTransition) return transition(request, deps, missions, founder, audit);
+  audit('refused', 'not_found', founder);
+  return refusal(404, 'not_found', 'No such HQ control route.');
 }
 
 type Audit = (outcome: 'allowed' | 'refused', detail: string, founder?: ResolvedFounder) => void;
@@ -571,10 +650,21 @@ function controlAvailability(
   const mayApprove = writable && principal?.approvalAuthority === true;
   const mayOriginate =
     writable && principal?.originateCapabilities.includes(DIRECT_ORDER_CAPABILITY.id) === true;
+  const orderCapabilityEnabled = directOrderCapabilityState(deps.ops) === 'enabled';
+  // The mission controls are gated on EXACTLY what refuses the mission
+  // routes: a store attached, the same originate grant (command, amend) or
+  // approval authority (transition), and the same capability state the
+  // tasks will be created under. Advertising them on anything weaker would
+  // repeat the defect this function exists to prevent.
+  const missionCoreAttached = deps.missions != null;
   return {
-    directOrder: mayOriginate && directOrderCapabilityState(deps.ops) === 'enabled',
+    directOrder: mayOriginate && orderCapabilityEnabled,
     approve: mayApprove,
     deny: mayApprove,
+    missionCoreAttached,
+    founderCommand: missionCoreAttached && mayOriginate && orderCapabilityEnabled,
+    missionAmend: missionCoreAttached && mayOriginate && orderCapabilityEnabled,
+    missionTransition: missionCoreAttached && mayApprove,
     mutationsEnabled: deps.mutationsEnabled !== false,
     trustedOriginConfigured: originsUsable,
     // Stated separately from `trustedOriginConfigured`, because they answer
@@ -901,4 +991,270 @@ function deny(
   }
   audit('allowed', 'denied', founder);
   return safe(json(200, { ok: true, taskId, status: result.data.status }));
+}
+
+/* ------------------------------------------------------------------ */
+/* Founder Command + Mission Core (Phase 3, issue #254)                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * HTTP status for a mission-core refusal. The same reasoning as the order
+ * path's mapping: an authorization or configuration refusal is 403 (nothing in
+ * the request will fix it), a conflict with the mission's current state is
+ * 409, an unknown mission is 404, and only a malformed request is 400.
+ */
+function missionErrorStatus(code: FounderCommandErrorCode): number {
+  switch (code) {
+    case 'unknown_mission':
+      return 404;
+    case 'mission_terminal':
+    case 'mission_has_no_plan':
+    case 'illegal_mission_transition':
+    case 'mission_intent_missing':
+    case 'provider_not_connected':
+      return 409;
+    case 'capability_not_registered':
+    case 'capability_disabled':
+    case 'capability_definition_altered':
+    case 'unknown_principal':
+    case 'not_permitted':
+    case 'enqueue_rejected':
+    case 'kill_switch_engaged':
+      return 403;
+    default:
+      return 400;
+  }
+}
+
+function listMissions(
+  deps: ControlApiDeps,
+  missions: MissionStore,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  // `missionListing` proves each mission safe on its own and substitutes a
+  // withheld view for one that is not, so a single poisoned row no longer
+  // throws here (mutation-testing pass on `b3f72d1`, P1.4 — measured before:
+  // one credential-shaped block reason written past the write-time scan made
+  // this call throw, the catch-all turned it into a 500, and every mission
+  // became unreadable). What CAN still throw is the listing's final
+  // whole-list scan, which fails only when a substitute is itself unsafe —
+  // an identifier that is credential-shaped, say — and for that there is no
+  // safe answer but the same refusal `safe()` gives, audited by name rather
+  // than falling through to the anonymous catch-all.
+  let listing: ReturnType<typeof missionListing>;
+  try {
+    listing = missionListing(deps.ops, missions, {
+      env: deps.secretsEnv,
+      dispatchAvailability: deps.dispatchAvailability,
+    });
+  } catch (error) {
+    if (!(error instanceof BrowserSafetyError)) throw error;
+    audit('refused', 'unsafe_mission_listing', founder);
+    return refusal(500, 'internal', 'The response could not be produced safely.');
+  }
+  audit('allowed', 'list_missions', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      // Stated explicitly so a client can distinguish "the store answered
+      // with nothing" from "there is no store" — the latter never reaches
+      // this line, but the field makes the claim legible on the wire.
+      attached: true,
+      // The window is explicit on the wire (Opus second pass on `a849af8`,
+      // P1): `recorded` is the store-wide total, `listed`/`limit`/`truncated`
+      // say how much of it `missions` carries, and `counts` says per field
+      // what it was counted over — see `MissionAttention`. A client that
+      // printed `counts.total` as "recorded" used to be printing the window.
+      recorded: listing.total,
+      listed: listing.listed,
+      limit: listing.limit,
+      truncated: listing.truncated,
+      counts: missionAttention(listing.missions, listing),
+      missions: listing.missions,
+    }),
+  );
+}
+
+function createMission(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  missions: MissionStore,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const command = stringField(request.body, 'command') ?? '';
+  const routeName = stringField(request.body, 'route') ?? '';
+  const project = stringField(request.body, 'project');
+  const title = stringField(request.body, 'title');
+  const clientKey = stringField(request.body, 'idempotencyKey');
+
+  if (!DIRECT_ORDER_ROUTES.includes(routeName as DirectOrderRoute)) {
+    audit('refused', 'invalid_route', founder);
+    return refusal(400, 'invalid_input', `Unknown route. Choose one of: ${DIRECT_ORDER_ROUTES.join(', ')}.`);
+  }
+
+  const result = submitFounderCommand(
+    deps.ops,
+    missions,
+    {
+      command,
+      project,
+      title,
+      route: routeName as DirectOrderRoute,
+      // The server-resolved principal, never a body field — the identity
+      // scan refused any body that tried.
+      requestedBy: founder.principal.id,
+      idempotencyKey: clientKey,
+    },
+    deps.secretsEnv,
+    {
+      providerDispatchable: deps.dispatchAvailability,
+      // Earned, on the options object, unreachable from a body — exactly as
+      // for an order. See `createOrder`.
+      resolvedActorAuthentication: 'authenticated_os_session',
+    },
+  );
+
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return safe(
+      json(missionErrorStatus(result.error.code), {
+        ok: false,
+        error: { code: result.error.code, message: result.error.message },
+      }),
+    );
+  }
+
+  const receipt = result.data;
+  audit(
+    'allowed',
+    receipt.deduplicated
+      ? 'mission_deduplicated'
+      : receipt.needsClarification
+        ? 'mission_recorded_needs_clarification'
+        : 'mission_created',
+    founder,
+  );
+  return safe(
+    json(receipt.deduplicated ? 200 : 201, {
+      ok: true,
+      missionId: receipt.mission.id,
+      title: receipt.mission.title,
+      state: receipt.mission.state,
+      blockReason: receipt.mission.blockReason,
+      deduplicated: receipt.deduplicated,
+      // Honest about a plan-less mission: recorded, blocked for
+      // clarification, and holding ZERO tasks. The codes name the rules that
+      // fired, never the text they fired on.
+      needsClarification: receipt.needsClarification,
+      unknowns: receipt.intent.unknowns.map((entry) => ({ code: entry.code, blocking: entry.blocking })),
+      constraintCount: receipt.intent.constraints.length,
+      acceptanceCriteriaCount: receipt.intent.acceptanceCriteria.length,
+      taskCount: receipt.tasks.length,
+      tasks: receipt.tasks.map((task, index) => ({
+        ordinal: index + 1,
+        taskId: task.task.id,
+        status: task.task.status,
+        requiresFounderApproval: task.task.status === 'needs_approval',
+        boundProvider: task.boundProvider,
+        dispatchBlocked: task.dispatchBlocked,
+        actionDigest: taskActionDigest(task.task),
+      })),
+      // Plan links a deduplicated receipt could not read as tasks, with the
+      // reason each. Empty on creation; stated on the wire so `taskCount`
+      // is never mistaken for the plan's size when the plan is damaged.
+      omittedTasks: receipt.omitted,
+    }),
+  );
+}
+
+function amend(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  missions: MissionStore,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const missionId = stringField(request.body, 'missionId') ?? '';
+  const command = stringField(request.body, 'command') ?? '';
+  const reason = stringField(request.body, 'reason') ?? '';
+  if (!missionId) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'An amendment needs a missionId.');
+  }
+  const result = amendMission(
+    deps.ops,
+    missions,
+    { missionId, command, reason, actor: founder.principal.id },
+    deps.secretsEnv,
+    {
+      providerDispatchable: deps.dispatchAvailability,
+      resolvedActorAuthentication: 'authenticated_os_session',
+    },
+  );
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return safe(
+      json(missionErrorStatus(result.error.code), {
+        ok: false,
+        error: { code: result.error.code, message: result.error.message },
+      }),
+    );
+  }
+  audit('allowed', result.data.planCreated ? 'mission_amended_plan_created' : 'mission_amended', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      missionId: result.data.mission.id,
+      state: result.data.mission.state,
+      revision: result.data.intent.seq,
+      planCreated: result.data.planCreated,
+      needsClarification: result.data.needsClarification,
+      taskCount: result.data.tasks.length,
+    }),
+  );
+}
+
+function transition(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  missions: MissionStore,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const missionId = stringField(request.body, 'missionId') ?? '';
+  const to = stringField(request.body, 'to') ?? '';
+  const reason = stringField(request.body, 'reason');
+  if (!missionId || !to) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'A transition needs a missionId and a target state.');
+  }
+  const result = transitionMission(deps.ops, missions, {
+    missionId,
+    to,
+    actor: founder.principal.id,
+    reason,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return safe(
+      json(missionErrorStatus(result.error.code), {
+        ok: false,
+        error: { code: result.error.code, message: result.error.message },
+      }),
+    );
+  }
+  audit('allowed', `mission_${result.data.from}_to_${result.data.to}`, founder);
+  return safe(
+    json(200, {
+      ok: true,
+      missionId: result.data.mission.id,
+      from: result.data.from,
+      to: result.data.to,
+      state: result.data.mission.state,
+    }),
+  );
 }

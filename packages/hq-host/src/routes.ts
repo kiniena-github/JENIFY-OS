@@ -53,7 +53,7 @@ import type { HqIdentityPort } from './identity.js';
  */
 export type HeadquarterControlPlane = Pick<
   ControlApiDeps,
-  'ops' | 'founderMap' | 'allowedOrigins' | 'secretsEnv' | 'dispatchAvailability'
+  'ops' | 'founderMap' | 'allowedOrigins' | 'secretsEnv' | 'dispatchAvailability' | 'missions'
 > & {
   /**
    * Set false to expose the read routes without the write routes — the safe
@@ -112,6 +112,10 @@ export function registerHeadquarterRoutes(
       // so the composer, the approvals view and the order itself cannot
       // disagree about whether a provider can dispatch from here.
       dispatchAvailability: plane.dispatchAvailability,
+      // The mission store (Phase 3), passed through untouched. A plane that
+      // attached none gets the control API's fail-closed refusal on every
+      // mission route, not an empty list.
+      missions: plane.missions,
       // The flag is passed through rather than enforced here, so the layer that
       // refuses a write is the same one that tells the console whether the
       // button works. Enforcing it in this adapter left the two disagreeing.

@@ -150,6 +150,114 @@ CREATE TABLE IF NOT EXISTS hq_archive_refs (
   project_id TEXT,
   added_at TEXT NOT NULL
 );
+
+-- Founder Command + Mission Core (Phase 3, issue #254).
+--
+-- A MISSION is the durable record of one Founder order: what was asked, what
+-- must not be violated, what it was decomposed into, and where it stands. It
+-- is NOT a second task queue. Every unit of work a mission carries is an
+-- ordinary canonical row in op_tasks, created through the same Founder-gated
+-- direct-order path as any other order, and hq_mission_tasks only LINKS a
+-- mission to those rows — it duplicates no task state, so the truth about a
+-- task can only ever be read from op_tasks. Nothing in these four tables is
+-- authority: they grant no capability, approve no action and change no task
+-- status; the Operator never reads them.
+CREATE TABLE IF NOT EXISTS hq_missions (
+  id TEXT PRIMARY KEY,
+  -- Derived by the mission module from everything that makes an order THE
+  -- SAME ORDER, exactly as op_tasks.idempotency_key is for a direct order. A
+  -- caller-supplied key is mixed in, never used verbatim.
+  idempotency_key TEXT NOT NULL UNIQUE,
+  -- The ONE Founder-typed field that is published to the browser. Bounded and
+  -- browser-safety-scanned before the write; the order text itself lives only
+  -- in hq_mission_intent.
+  title TEXT NOT NULL,
+  project TEXT,
+  state TEXT NOT NULL,
+  -- Why the mission is blocked, when it is. A reason CODE for a block the
+  -- mission core itself imposed (needs_clarification), or a Founder-typed
+  -- reason for an explicit transition — bounded and scanned like a denial.
+  block_reason TEXT,
+  requested_by TEXT NOT NULL,
+  actor_authentication TEXT NOT NULL,
+  requested_route TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  -- The intent chain's HEAD, anchored on the mission row (mutation-testing
+  -- pass on b3f72d1, P1.3). The chain in hq_mission_intent verifies forward
+  -- from genesis, which catches an edited, reordered or middle-deleted row —
+  -- but a chain with no anchored head cannot tell that its NEWEST rows were
+  -- dropped: every remaining row still hashes to the one before it. Deleting
+  -- the latest amendment left verifyIntentChain reporting true and the
+  -- Mission Room showing a pristine, unamended mission. These two columns are
+  -- written by MissionStore.appendIntent in the same transaction as the intent
+  -- row; verification recomputes the head and the count from the rows and
+  -- compares them here. NULL means the mission was recorded before the anchor
+  -- existed (a database upgraded in place); the store reports such a chain as
+  -- UNANCHORED rather than pretending to a check it cannot make, and the next
+  -- append anchors it.
+  intent_head_hash TEXT,
+  intent_count INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_hq_missions_state ON hq_missions(state, created_at);
+
+CREATE TABLE IF NOT EXISTS hq_mission_tasks (
+  mission_id TEXT NOT NULL REFERENCES hq_missions(id),
+  task_id TEXT NOT NULL REFERENCES op_tasks(id),
+  -- 1-based position in the task plan. Presentation order only.
+  ordinal INTEGER NOT NULL,
+  -- The intent record whose plan created this task, so a plan can be traced
+  -- to the exact (original or amended) wording that produced it.
+  intent_id TEXT NOT NULL,
+  PRIMARY KEY (mission_id, task_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hq_mission_tasks_ordinal
+  ON hq_mission_tasks(mission_id, ordinal);
+
+-- The Intent Lock. APPEND-ONLY BY CONSTRUCTION: the mission module only ever
+-- INSERTs here, every row is hash-chained to the one before it within its
+-- mission, and there is no UPDATE or DELETE statement against this table
+-- anywhere in the codebase (test/mission-intent.test.ts scans for one). The
+-- first row of a mission is the original order; every later row is an
+-- amendment carrying its own actor, timestamp and reason. The original is
+-- never mutated — an amendment is a new fact beside it, not a correction of it.
+CREATE TABLE IF NOT EXISTS hq_mission_intent (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  mission_id TEXT NOT NULL REFERENCES hq_missions(id),
+  kind TEXT NOT NULL,
+  -- The Founder's words, verbatim. SERVER-SIDE ONLY, exactly like a direct
+  -- order's instruction: no projection publishes this column.
+  command TEXT NOT NULL,
+  objective TEXT NOT NULL,
+  constraints TEXT NOT NULL,
+  acceptance_criteria TEXT NOT NULL,
+  unknowns TEXT NOT NULL,
+  needs_clarification INTEGER NOT NULL,
+  step_count INTEGER NOT NULL,
+  actor TEXT NOT NULL,
+  actor_authentication TEXT NOT NULL,
+  reason TEXT,
+  at TEXT NOT NULL,
+  prev_hash TEXT NOT NULL,
+  hash TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hq_mission_intent_mission ON hq_mission_intent(mission_id, seq);
+
+-- Every explicit mission state change, in order, with who made it and why.
+-- Append-only like the intent log; the mission row's state column is the
+-- CURRENT value and this table is its history.
+CREATE TABLE IF NOT EXISTS hq_mission_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  mission_id TEXT NOT NULL REFERENCES hq_missions(id),
+  from_state TEXT,
+  to_state TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  reason TEXT,
+  at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hq_mission_events_mission ON hq_mission_events(mission_id, seq);
 `;
 
 /**
@@ -173,6 +281,14 @@ const COLUMN_UPGRADES: readonly { table: string; column: string; ddl: string }[]
   // Issue #79: the consumption record also pins the exact task, so a consumed
   // approval cannot ride another task even behind a forged action digest.
   { table: 'hq_approvals', column: 'consumed_task_id', ddl: 'TEXT' },
+  // Issue #254, mutation-testing pass on b3f72d1 (P1.3): the intent chain's
+  // anchored head. Nullable on purpose — an existing row gets NULL, which the
+  // mission store reads as "recorded before anchoring existed" and reports
+  // honestly as unanchored; it never invents a head for rows it did not see
+  // appended, because anchoring whatever happens to be there NOW would bless a
+  // truncation that may already have happened.
+  { table: 'hq_missions', column: 'intent_head_hash', ddl: 'TEXT' },
+  { table: 'hq_missions', column: 'intent_count', ddl: 'INTEGER' },
 ];
 
 function ensureColumns(db: HqDatabase): void {

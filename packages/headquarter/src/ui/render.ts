@@ -58,6 +58,7 @@ import { archiveSearchScript, type ArchiveSearchRow } from './archive-search.js'
 import { liveRefreshScript } from './live-refresh.js';
 import {
   directOrderConsoleScript,
+  founderCommandConsoleScript,
   approvalsConsoleScript,
   connectionsLiveScript,
 } from './control-console.js';
@@ -214,11 +215,61 @@ export const DIRECT_ORDER_BLOCKER =
   'TRUSTED-LOCAL-ADMIN interface: it does not authenticate the Founder, it asserts a principal ' +
   'id that deny-by-default authorization and the no-self-approval rule then contain.';
 
+/**
+ * Founder Command (Phase 3, issue #254): the static explanation of what a
+ * mission is, rendered inert. The working composer, the live mission list and
+ * the selected-mission detail are drawn by `founderCommandConsoleScript` only
+ * after `/session` grants them — the same rule as the Direct Order composer
+ * directly above it on the page.
+ */
+export const FOUNDER_COMMAND_BLOCKER =
+  'A Founder Command records a high-level order as a MISSION: an append-only intent lock (the ' +
+  'order, its constraints, its acceptance criteria, its declared unknowns), a task plan whose every ' +
+  'task is an ordinary Founder-gated direct order, a recorded mission state moved only by an ' +
+  'explicit decision, and a history of those decisions. Decomposition is a fixed set of written ' +
+  'rules, not a model: numbered lines become steps, must/never/only lines become constraints, ' +
+  'done-when lines become acceptance criteria, and an order the rules cannot read is recorded with ' +
+  'ZERO tasks and asks for clarification rather than being guessed into a plan. This static render ' +
+  'submits nothing; a working composer is drawn below only when the control API confirms that your ' +
+  'signed-in session is the mapped Founder holding the direct-order grant and a mission store is ' +
+  'attached to this deployment.';
+
 export const ROUTE_STATE_PRESENTATION: Record<'ready' | 'blocked' | 'unknown', { label: string; tone: Tone }> = {
   ready: { label: 'Available', tone: 'accent' },
   blocked: { label: 'Blocked — not connected', tone: 'danger' },
   unknown: { label: 'Not evaluated', tone: 'neutral' },
 };
+
+/**
+ * The Founder Command static panel (Phase 3). Inert, like the order composer:
+ * no `<form>`, no `<button>`, no `<input>`. What it renders is the description
+ * of the mission model and the mount the console script fills.
+ */
+function founderCommandComposer(): string {
+  const fields = [
+    ['Order', 'What you want achieved, in your own words. Numbered lines are steps; must / never / only lines are constraints; done-when lines are acceptance criteria; unknown: lines are declared open questions.'],
+    ['Title (optional)', 'The one Founder-typed field the Mission Room publishes. Everything else in the order stays server-side.'],
+    ['Project (optional)', 'A label only. Labels are presentation, never authority.'],
+  ]
+    .map(
+      ([label, hint]) => `<div class="order-field">
+<p class="order-label">${escapeHtml(label)}</p>
+<span class="control-readonly" aria-disabled="true">${escapeHtml(hint)}</span>
+</div>`,
+    )
+    .join('\n');
+  return `<div class="panel order-composer">
+<p class="readonly-note">${escapeHtml(FOUNDER_COMMAND_BLOCKER)}</p>
+${fields}
+<div class="decision-controls" role="group" aria-label="Founder Command controls — inert in this static render">
+<span class="control-readonly" aria-disabled="true">Record Mission</span>
+<span class="faint">inert in this static render — a working control appears below only when the control API grants it to your session</span>
+</div>
+<div data-founder-command-console></div>
+<p class="muted">Mission states are <code>planned</code>, <code>working</code>, <code>blocked</code>, <code>ready_review</code>, <code>verified</code>, <code>complete</code>, <code>failed</code> and <code>cancelled</code>, moved only through a fixed transition table and only by an explicit, reasoned decision. Nothing advances a mission on its own: what its canonical tasks imply is computed and shown beside the recorded state, never written to it. That autonomy is later-phase work and is not imitated here.</p>
+<p class="muted">Task words — Waiting, Working, Needs Review, Needs Approval, Completed, Blocked, Failed — are a reading of each task's canonical <code>op_tasks</code> status and review state, derived on every read and never stored. The canonical status is always shown beside the word.</p>
+</div>`;
+}
 
 /**
  * The composer. Rendered entirely from inert elements — no `<form>`, no
@@ -589,6 +640,8 @@ ${directOrderConsoleScript({
   ready: ROUTE_STATE_PRESENTATION.ready,
   blocked: ROUTE_STATE_PRESENTATION.blocked,
 })}
+${section('FOUNDER COMMAND · MISSION ROOM', founderCommandComposer(), 'founder-command')}
+${founderCommandConsoleScript()}
 <div class="grid grid-lanes">${lanes}</div>
 </div>
 <div>

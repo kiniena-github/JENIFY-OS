@@ -40,6 +40,12 @@ import { directOrderDispatchBlocked } from './orders.js';
 import { dispatchHistory } from '../providers/claude/dispatch.js';
 import type { HeadquarterOperations } from '../application/service.js';
 import type { ProviderId, SecretsEnv } from '../routing/providers.js';
+import {
+  missionListing,
+  type MissionListingFacts,
+  type MissionStore,
+  type MissionView,
+} from '../mission/index.js';
 import { assessConnections, type ConnectionProbe, type ConnectionStatus } from './connections.js';
 import { assertBrowserSafe, assertNoFabricatedFields } from './redaction.js';
 import {
@@ -111,6 +117,30 @@ export interface HqSnapshot {
   workforce: SnapshotSection<SnapshotWorker[]>;
   capabilities: SnapshotSection<SnapshotCapability[]>;
   activity: SnapshotSection<SnapshotActivityEntry[]>;
+  /**
+   * Founder missions (Phase 3, issue #254) — or `null` when the read had no
+   * mission store to read from.
+   *
+   * `null` and `[]` are two different claims and this field keeps them apart
+   * on purpose. A static site build and a snapshot taken without a
+   * `MissionStore` attached cannot say how many missions HQ holds; rendering
+   * that as zero would be the "absence as zero" lie `client/hydrate.ts` exists
+   * to prevent. Only a read that genuinely opened the mission tables may say
+   * `[]`, and then it means exactly that.
+   *
+   * Added as an OPTIONAL field rather than a required one so every existing
+   * builder of a snapshot keeps producing a valid one; the wire version is
+   * unchanged because a reader that ignores the field reads the same document
+   * it always did.
+   *
+   * `data` is the listed WINDOW (newest first, capped at `MAX_MISSIONS_LISTED`)
+   * and `listing` says how much of the store that window is — the store-wide
+   * total, whether the cap applied, and the store-wide tallies by recorded
+   * state (Opus second pass on `a849af8`, P1). Without `listing`, a reader had
+   * no way to tell 50-of-50 from 50-of-5,000 and every room counted the window
+   * as if it were the store. See `MissionListingFacts`.
+   */
+  missions?: (SnapshotSection<MissionView[]> & { listing: MissionListingFacts }) | null;
 }
 
 /**
@@ -169,6 +199,12 @@ export interface SnapshotSources {
   workforce: { data: WorkerDescriptor[]; provenance: Provenance };
   capabilities: { data: Capability[]; provenance: Provenance };
   activity: { data: ActivityEvent[]; provenance: Provenance };
+  /**
+   * Omitted or null: no mission store was read, and the snapshot says so
+   * rather than saying zero. `listing` is required beside `data` so a builder
+   * cannot hand over a window without saying how much of the store it is.
+   */
+  missions?: { data: MissionView[]; listing: MissionListingFacts; provenance: Provenance } | null;
   policyContext?: Parameters<typeof classifyCapability>[1];
   activityLimit?: number;
 }
@@ -190,6 +226,10 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       sources.workforce.provenance.mode,
       sources.capabilities.provenance.mode,
       sources.activity.provenance.mode,
+      // A mission section that exists counts toward the headline claim like
+      // any other; an absent one contributes nothing, because it claims
+      // nothing.
+      ...(sources.missions ? [sources.missions.provenance.mode] : []),
     ]),
     note: sources.note ?? null,
     counts: {
@@ -229,6 +269,9 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       sources.activity.provenance,
       trimActivity(sources.activity.data, sources.activityLimit),
     ),
+    missions: sources.missions
+      ? { ...section(sources.missions.provenance, sources.missions.data), listing: sources.missions.listing }
+      : null,
   };
 
   // Fail closed: prove it before anyone can publish it.
@@ -269,6 +312,16 @@ export interface LiveSnapshotOptions {
    * back to the routing contract.
    */
   dispatchAvailability?: (provider: ProviderId) => boolean | null;
+  /**
+   * The mission store to read Founder missions from (Phase 3, issue #254).
+   *
+   * Optional, and its absence is reported as ABSENCE: the snapshot's
+   * `missions` field is `null`, and the Mission Room says no mission store was
+   * attached to this read. The composition root that holds the database
+   * (the host's config, the local snapshot CLI) supplies one; a caller that
+   * holds only `ops` cannot, and must not have the answer invented for it.
+   */
+  missions?: MissionStore;
 }
 
 /**
@@ -362,6 +415,24 @@ export function liveSnapshotFromOperations(
       data: ops.directory.latestStatusPerSubject(),
       provenance: provenanceFor('hq_events via HeadquarterStore.latestStatusPerSubject'),
     },
+    missions: options.missions
+      ? (() => {
+          // One read for the window AND the store-wide facts, so the two
+          // cannot describe different instants.
+          const { missions: data, ...listing } = missionListing(ops, options.missions, {
+            env,
+            dispatchAvailability: options.dispatchAvailability,
+          });
+          return {
+            data,
+            listing,
+            provenance: provenanceFor(
+              'hq_missions / hq_mission_tasks / hq_mission_intent via mission/view.missionListing, ' +
+                'each task read live from op_tasks; store-wide tallies via MissionStore.countMissionsByState',
+            ),
+          };
+        })()
+      : null,
   });
 }
 

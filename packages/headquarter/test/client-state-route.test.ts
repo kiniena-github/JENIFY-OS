@@ -28,6 +28,7 @@ import { DIRECT_ORDER_CAPABILITY, registerDirectOrderCapability } from '../src/l
 import type { AuthenticatedAccount, ControlRequest } from '../src/live/auth.js';
 import { HQ_ROOMS } from '../src/client/rooms.js';
 import type { RoomView } from '../src/client/contracts.js';
+import { MissionStore } from '../src/mission/store.js';
 
 const ORIGIN = 'https://hq.example';
 const FRESH = new Date().toISOString();
@@ -59,7 +60,7 @@ interface Harness {
   call(request: Partial<ControlRequest>, account?: AuthenticatedAccount | null): ControlResponse;
 }
 
-function harness(options: { account?: AuthenticatedAccount | null } = {}): Harness {
+function harness(options: { account?: AuthenticatedAccount | null; missions?: false } = {}): Harness {
   const fixture = setupFixture();
   registerDirectOrderCapability(fixture.db);
   fixture.principals.register({
@@ -77,6 +78,10 @@ function harness(options: { account?: AuthenticatedAccount | null } = {}): Harne
     allowedOrigins: [ORIGIN],
     secretsEnv: CLAUDE_ONLY,
     mutationsEnabled: true,
+    // The host wiring since Phase 3 (issue #254): a mission store on the SAME
+    // connection the operations use. Omitted only by the test that proves
+    // absence is reported as absence.
+    ...(options.missions === false ? {} : { missions: new MissionStore(fixture.db) }),
   };
   return {
     fixture,
@@ -169,6 +174,23 @@ describe('what the state route publishes', () => {
     const home = rooms(response).find((room) => room.roomId === 'home')!;
     expect(home.status).toBe('live');
     for (const metric of home.metrics) expect(metric.value).toBe(0);
+  });
+
+  it('reports a missing mission store as ABSENCE, never as zero missions (issue #254)', () => {
+    // A host that attached no `MissionStore` cannot say how many missions HQ
+    // holds. The document carries `missions: null`, and every room that would
+    // count missions states the absence in words instead of printing a 0 that
+    // nobody measured.
+    const response = harness({ missions: false }).call({});
+    const body = response.body as { rooms: RoomView[] };
+    const home = body.rooms.find((room) => room.roomId === 'home')!;
+    const absence = home.metrics.find((metric) => metric.label === 'Mission core')!;
+    expect(absence.value).toBe('not attached');
+    expect(home.metrics.filter((metric) => typeof metric.value === 'number').every((m) => m.value === 0)).toBe(true);
+    const mission = body.rooms.find((room) => room.roomId === 'mission-room')!;
+    expect(mission.metrics.some((metric) => metric.label === 'Missions recorded')).toBe(false);
+    expect(mission.emptyMessage).toContain('no mission store');
+    expect(mission.liveness).toBe('dark');
   });
 
   it('carries no task payload, no instruction text and no secret', () => {

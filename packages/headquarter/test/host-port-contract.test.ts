@@ -97,9 +97,19 @@ describe('obligation 1 — the session port is asked on every request', () => {
   it('refuses every route when no session resolves', () => {
     const { deps } = host({}, null);
     for (const path of Object.values(CONTROL_ROUTES)) {
-      const writes = path.includes('approve') || path.includes('deny') || path.endsWith('orders');
+      // The mission amend/transition routes are POST-only (Phase 3, #254);
+      // `/missions` itself is GET for the read and POST for the create, and
+      // both verbs are exercised.
+      const writes =
+        path.includes('approve') ||
+        path.includes('deny') ||
+        path.endsWith('orders') ||
+        path.includes('missions/');
       const result = handleControlRequest(writes ? post(path) : get(path), deps);
       expect(result.status, `${path} must not answer an unauthenticated caller`).toBe(401);
+      if (path.endsWith('missions')) {
+        expect(handleControlRequest(post(path), deps).status, `POST ${path}`).toBe(401);
+      }
     }
   });
 

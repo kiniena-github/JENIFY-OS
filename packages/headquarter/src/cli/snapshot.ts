@@ -29,6 +29,7 @@ import { fileURLToPath } from 'node:url';
 import { openHqDatabaseReadOnly } from '../store/db.js';
 import { HeadquarterOperations } from '../application/service.js';
 import { liveSnapshotFromOperations } from '../live/snapshot.js';
+import { MissionStore } from '../mission/store.js';
 import { CONNECTION_CATALOG } from '../live/connections.js';
 import { SNAPSHOT_FILENAME } from '../ui/live-refresh.js';
 import { PROVIDER_REGISTRY, type SecretsEnv } from '../routing/providers.js';
@@ -134,6 +135,10 @@ const snapshot = liveSnapshotFromOperations(ops, {
   mode: 'live',
   connectionProbes: connectionProbesWithGitHubDispatch(transport),
   dispatchAvailability,
+  // Founder missions (Phase 3), read through the same read-only handle. The
+  // store's read methods are the only ones this tool ever calls; SQLite
+  // refuses a write on this connection regardless.
+  missions: new MissionStore(db),
 });
 
 mkdirSync(dirname(outPath), { recursive: true });
