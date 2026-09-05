@@ -468,6 +468,20 @@ import {
   isProjectStatus,
   type ProjectStatus,
 } from '../contracts/project.js';
+import {
+  MAX_ASSIGNMENT_RATIONALE_LENGTH,
+  WORKFORCE_ASSIGN_CAPABILITY,
+  workforceAssignCapabilityState,
+  workforceAssignContractDrift,
+} from './workforce-command.js';
+import {
+  MEMBER_HEALTHS,
+  type AiMember,
+  type AiMemberRegistry,
+  type MemberAssignment,
+  type MemberHealth,
+  type RegisterMemberInput,
+} from '../registry/members.js';
 
 // ---- result contract ----
 
@@ -501,7 +515,8 @@ export type OpsErrorCode =
   | 'unknown_project'
   | 'invalid_project_transition'
   | 'project_status_changed'
-  | 'project_closed';
+  | 'project_closed'
+  | 'workforce_registry_unconfigured';
 
 export interface OpsError {
   code: OpsErrorCode;
@@ -632,6 +647,37 @@ export interface AssignmentIntent {
   assignedBy: string;
   assignedAt: string;
   rationale: string | null;
+}
+
+/**
+ * One registered worker's standing toward one task (Phase 4). Everything here
+ * is enforcement truth or its verbatim refusal reason — nothing advisory can
+ * change `eligible`, and nothing here fabricates availability: transport/
+ * connectivity truth deliberately lives at the control-api layer, where the
+ * secrets environment does.
+ */
+export interface WorkerEligibility {
+  workerId: string;
+  displayName: string;
+  role: string;
+  /** The directory grants the task's capability id (enforcement read). */
+  holdsCapability: boolean;
+  assignability: WorkerAssignability;
+  operatorOutcome: PolicyDecision['outcome'];
+  denyReason: string | null;
+  /** Declared execution provider — declared or null, never inferred. */
+  providerDeclared: string | null;
+  /** Advisory only: which sources nominated this worker, and why. */
+  nominatedBy: string[];
+  rationales: string[];
+  eligible: boolean;
+}
+
+export interface TaskEligibilityReport {
+  taskId: string;
+  capabilityId: string;
+  classification: TaskClassification;
+  workers: WorkerEligibility[];
 }
 
 export interface TaskMeta {
@@ -767,6 +813,19 @@ export interface HeadquarterOperationsOptions {
    * is already a deliberate override of this whole resolution.
    */
   memberRegistry?: MemberDirectorySource;
+  /**
+   * Lane C's full AI Member Registry, for the Phase 4 workforce LIFECYCLE
+   * facade (`registerAiMember`, `disableAiMember`, `setAiMemberHealth`,
+   * `listAiMembers`) — registration, display and advisory truth only.
+   *
+   * DELIBERATELY NOT the same thing as `memberRegistry` above, and NEVER
+   * consulted for capability narrowing, worker resolution or any enforcement
+   * read: wiring narrowing on is the recorded authority migration
+   * (registry-directory.ts, issue #182) and remains a separate Founder
+   * decision. Omitting this leaves the workforce facade truthfully
+   * unconfigured (`workforce_registry_unconfigured`), never silently active.
+   */
+  aiMemberRegistry?: AiMemberRegistry;
   /**
    * Receives the dispatch-only evidence capability, once, at construction — and
    * nobody else ever does (issue #219, Founder decision approving Option B).
@@ -979,6 +1038,13 @@ export class HeadquarterOperations {
   readonly #projectStorePresent: boolean;
 
   /**
+   * The Phase 4 workforce lifecycle registry (or null: unconfigured, stated).
+   * `#private` and read by the workforce facade methods ONLY — never by
+   * `#grantOf`, `#workers`, policy evaluation or any enforcement path.
+   */
+  readonly #aiMemberRegistry: AiMemberRegistry | null;
+
+  /**
    * The capability ROW, read from the database (issue #219, Codex P1 on
    * `9c2a474`).
    *
@@ -1020,6 +1086,7 @@ export class HeadquarterOperations {
     // the first prepare.
     this.#missionStorePresent = db.readonly ? missionSchemaPresent(db) : true;
     this.#projectStorePresent = db.readonly ? projectCommandSchemaPresent(db) : true;
+    this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
     // The approval mutations are handed to whoever CONSTRUCTS the queue and to
     // nobody else, so they are unreachable from a queue handle a worker holds.
@@ -2247,6 +2314,320 @@ export class HeadquarterOperations {
       );
     }
     return plan;
+  }
+
+  // ---- dynamic AI workforce (Phase 4 — issue #262) ----
+
+  /**
+   * Deactivate an execution worker. Founder-gated and strictly NARROWING:
+   * the worker keeps its row and its history, loses assignability, and there
+   * is deliberately NO reactivate method — turning a worker back on would be
+   * a widening, and stays a separate recorded act (re-registration is
+   * create-only and will refuse the id, so reactivation today means a
+   * deliberate configuration change, not an API call).
+   *
+   * In-flight work is protected: `assertReplacementSafe` refuses while the
+   * worker holds assigned/running/outcome_unknown tasks, so deactivation can
+   * never orphan a claim.
+   */
+  deactivateExecutionWorker(input: {
+    workerId: string;
+    reason: string;
+    founderId: string;
+  }): OpsResult<WorkerDescriptor> {
+    const refused = this.#assertApprovalAuthority(input.founderId, 'deactivate an execution worker');
+    if (refused) return refused;
+    const reason = missionText('reason', input.reason, MAX_ASSIGNMENT_RATIONALE_LENGTH, true);
+    if (!reason.ok) return fail('invalid_input', reason.message);
+    try {
+      assertNoSecretLikeContent({ reason: reason.value });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+    const specialist = this.#store.getSpecialist(input.workerId);
+    if (!specialist) {
+      return fail('invalid_input', `Unknown worker: ${input.workerId}`, {
+        workerId: input.workerId,
+      });
+    }
+    if (!specialist.active) {
+      return fail('invalid_input', `Worker ${input.workerId} is already inactive`, {
+        workerId: input.workerId,
+      });
+    }
+    const safe = this.assertReplacementSafe(input.workerId);
+    if (!safe.ok) return safe;
+    const deactivated: WorkerDescriptor = { ...specialist, active: false };
+    const privileged = this.#requirePrivilegedQueue();
+    return ok(
+      privileged.reserve(() => {
+        this.#store.upsertSpecialist(deactivated);
+        privileged.appendEvidence({
+          actor: input.founderId,
+          kind: 'execution_worker_deactivated',
+          payload: { workerId: deactivated.id, reason: reason.value },
+        });
+        return deactivated;
+      }),
+    );
+  }
+
+  /**
+   * Record an ADVISORY assignment intent from the Founder surface.
+   *
+   * The browser-facing wrapper around `assignTask`: same advisory semantics
+   * (no status change, narrowing-only at claim), gated by the
+   * `hq.workforce_assign` trio instead of bare actor resolution, and the
+   * rationale is bounded and secret-scanned BEFORE the first write — the
+   * underlying method writes its meta row before its evidence append, so a
+   * scan there would refuse after a partial commit.
+   */
+  assignTaskAsFounder(input: {
+    taskId: string;
+    workerId: string;
+    founderId: string;
+    rationale?: string;
+  }): OpsResult<AssignmentIntent> {
+    if (!input.taskId || !input.workerId) {
+      return fail('invalid_input', 'taskId and workerId are required');
+    }
+    const rationale = missionText(
+      'rationale',
+      input.rationale,
+      MAX_ASSIGNMENT_RATIONALE_LENGTH,
+      false,
+    );
+    if (!rationale.ok) return fail('invalid_input', rationale.message);
+    if (rationale.value) {
+      try {
+        assertNoSecretLikeContent({ rationale: rationale.value });
+      } catch (error) {
+        return fail('invalid_input', errorMessage(error));
+      }
+    }
+    const refusedActor = this.#resolveFounderGateActor(
+      input.founderId,
+      `assign task ${input.taskId}`,
+      WORKFORCE_ASSIGN_CAPABILITY.id,
+      'assigning workforce',
+    );
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#founderGateCapabilityGate(
+      'assign a task to a worker',
+      WORKFORCE_ASSIGN_CAPABILITY.id,
+      workforceAssignCapabilityState,
+      workforceAssignContractDrift,
+      'assigning workforce',
+    );
+    if (refusedCapability) return refusedCapability;
+    return this.assignTask(input.taskId, input.workerId, input.founderId, rationale.value ?? undefined);
+  }
+
+  /**
+   * Which registered workers could take this task, and why not — the
+   * eligible-worker calculation. A READ over enforcement-safe truth plus one
+   * `routeTask` evaluation (which records its `routing_evaluated` evidence),
+   * merged per worker. Deliberately absent: transport/connectivity truth —
+   * the facade holds no secrets environment, so "is the executor wired up"
+   * belongs to the control-api layer, which composes it in from
+   * `providerConnectivity` where that truth actually lives.
+   */
+  evaluateTaskEligibility(taskId: string): OpsResult<TaskEligibilityReport> {
+    const routed = this.routeTask(taskId);
+    if (!routed.ok) return routed;
+    const task = this.queue.get(taskId)!;
+    const cap = this.queue.capabilities.get(task.capabilityId)!;
+    const declaredProviders = new Map(
+      this.queue.listWorkerProviders().map((d) => [d.workerId, d.providerId] as const),
+    );
+    const nominationByWorker = new Map(routed.data.nominations.map((n) => [n.workerId, n] as const));
+    const workers: WorkerEligibility[] = this.#store
+      .listSpecialists()
+      .map((specialist) => {
+        const granted = this.#grantOf(specialist.id);
+        const assignability = this.#workers.assignability(specialist.id);
+        const decision = evaluatePolicy(
+          cap,
+          { workerId: specialist.id, allowedCapabilities: [...granted] },
+          this.#policyCtx,
+        );
+        const nomination = nominationByWorker.get(specialist.id);
+        const holdsCapability = granted.includes(task.capabilityId);
+        return {
+          workerId: specialist.id,
+          displayName: specialist.displayName,
+          role: specialist.role,
+          holdsCapability,
+          assignability,
+          operatorOutcome: decision.outcome,
+          denyReason: decision.outcome === 'deny' ? decision.reason : null,
+          providerDeclared: declaredProviders.get(specialist.id) ?? null,
+          nominatedBy: nomination?.nominatedBy ?? [],
+          rationales: nomination?.rationales ?? [],
+          eligible: holdsCapability && assignability.assignable && decision.outcome !== 'deny',
+        };
+      })
+      .sort((a, b) => a.workerId.localeCompare(b.workerId));
+    return ok({
+      taskId,
+      capabilityId: task.capabilityId,
+      classification: routed.data.classification,
+      workers,
+    });
+  }
+
+  /**
+   * Register an AI member — the rich provider/model/capability record behind
+   * the workforce display and advisory nomination. Founder-gated (approval
+   * authority, the same bar as registering an execution worker).
+   *
+   * NOT an execution enrolment: a member row grants nothing and is never
+   * consulted by enforcement. When the id matches a registered execution
+   * worker the result says `enrichesExecutionWorker: true` — the same
+   * identity described in both layers. An id registered as a HUMAN principal
+   * is refused outright: the narrowing directory's `isRegistered` ORs the
+   * member registry in, and a member row under a human's id would flip that
+   * human into "worker identity" and silently strip their approval
+   * authority.
+   */
+  registerAiMember(
+    input: RegisterMemberInput & { founderId: string },
+  ): OpsResult<{ member: AiMember; warnings: string[]; enrichesExecutionWorker: boolean }> {
+    const refused = this.#assertApprovalAuthority(input.founderId, 'register an AI member');
+    if (refused) return refused;
+    const registry = this.#aiMemberRegistry;
+    if (!registry) {
+      return fail(
+        'workforce_registry_unconfigured',
+        'No AI member registry is configured on this deployment. Wiring one is a composition-root act, not something registration performs.',
+      );
+    }
+    const memberId = input.id?.trim();
+    if (!memberId) return fail('invalid_input', 'A member id is required.');
+    if (this.#principals.get(memberId) != null) {
+      return fail(
+        'not_permitted',
+        `${memberId} is registered as a HUMAN principal. A member row under that id would make ` +
+          'the id read as worker identity and silently strip the human of approval authority. ' +
+          'Choose a distinct member id.',
+        { memberId },
+      );
+    }
+    const enrichesExecutionWorker = this.#store.getSpecialist(memberId) != null;
+    try {
+      const privileged = this.#requirePrivilegedQueue();
+      return ok(
+        privileged.reserve(() => {
+          const result = registry.register({ ...input, id: memberId }, input.founderId);
+          privileged.appendEvidence({
+            actor: input.founderId,
+            kind: 'ai_member_registered',
+            payload: {
+              memberId,
+              identityKey: result.member.identityKey,
+              workerType: result.member.workerType,
+              grantedCapabilities: result.member.grantedCapabilities,
+              enrichesExecutionWorker,
+            },
+          });
+          return { member: result.member, warnings: result.warnings, enrichesExecutionWorker };
+        }),
+      );
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error), { memberId });
+    }
+  }
+
+  /** Disable an AI member (Founder-gated; display/advisory layer only). */
+  disableAiMember(input: {
+    memberId: string;
+    reason: string;
+    founderId: string;
+  }): OpsResult<{ member: AiMember; handoverRequired: MemberAssignment[] }> {
+    const refused = this.#assertApprovalAuthority(input.founderId, 'disable an AI member');
+    if (refused) return refused;
+    const registry = this.#aiMemberRegistry;
+    if (!registry) {
+      return fail(
+        'workforce_registry_unconfigured',
+        'No AI member registry is configured on this deployment.',
+      );
+    }
+    const reason = missionText('reason', input.reason, MAX_ASSIGNMENT_RATIONALE_LENGTH, true);
+    if (!reason.ok) return fail('invalid_input', reason.message);
+    try {
+      const privileged = this.#requirePrivilegedQueue();
+      return ok(
+        privileged.reserve(() => {
+          const result = registry.disable(input.memberId, reason.value!, input.founderId);
+          privileged.appendEvidence({
+            actor: input.founderId,
+            kind: 'ai_member_disabled',
+            payload: {
+              memberId: input.memberId,
+              reason: reason.value,
+              handoverRequired: result.handoverRequired.map((a) => a.id),
+            },
+          });
+          return result;
+        }),
+      );
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error), { memberId: input.memberId });
+    }
+  }
+
+  /**
+   * Declare an AI member's health. An explicit Founder statement, never a
+   * probe: HQ asked nothing, so HQ records what the Founder observed, with
+   * the timestamp of the declaration.
+   */
+  setAiMemberHealth(input: {
+    memberId: string;
+    health: string;
+    founderId: string;
+  }): OpsResult<AiMember> {
+    const refused = this.#assertApprovalAuthority(input.founderId, "declare an AI member's health");
+    if (refused) return refused;
+    const registry = this.#aiMemberRegistry;
+    if (!registry) {
+      return fail(
+        'workforce_registry_unconfigured',
+        'No AI member registry is configured on this deployment.',
+      );
+    }
+    if (!(MEMBER_HEALTHS as readonly string[]).includes(input.health)) {
+      return fail('invalid_input', `Unknown member health: ${input.health}`);
+    }
+    try {
+      const privileged = this.#requirePrivilegedQueue();
+      return ok(
+        privileged.reserve(() => {
+          const member = registry.setHealth(
+            input.memberId,
+            input.health as MemberHealth,
+            input.founderId,
+          );
+          privileged.appendEvidence({
+            actor: input.founderId,
+            kind: 'ai_member_health_declared',
+            payload: { memberId: input.memberId, health: input.health },
+          });
+          return member;
+        }),
+      );
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error), { memberId: input.memberId });
+    }
+  }
+
+  /**
+   * The member roster, or the truthful statement that none is configured.
+   * A read, available to any caller — member rows grant nothing.
+   */
+  listAiMembers(): { configured: boolean; members: AiMember[] } {
+    if (!this.#aiMemberRegistry) return { configured: false, members: [] };
+    return { configured: true, members: this.#aiMemberRegistry.list() };
   }
 
   // ---- group-room mission intake ----
