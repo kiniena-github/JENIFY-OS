@@ -295,6 +295,91 @@ export interface MissionRecord {
   blockHistory: MissionBlockRecord[];
 }
 
+/**
+ * The browser-safe mission projection, used by BOTH the control API's mission
+ * responses and the snapshot's missions section so there is exactly one
+ * implementation of "what does the browser see of a mission".
+ *
+ * Note what is absent: the intent BODIES (raw Founder order + amendment
+ * rationale — server-side audit material) and the derived `idempotencyKey`
+ * (internal dedupe machinery). Everything present was scanned and bounded at
+ * intake, and every response/snapshot that carries it passes the browser
+ * guards again on the way out.
+ */
+export interface MissionBrowserView {
+  id: string;
+  title: string;
+  objective: string;
+  scope: string | null;
+  constraints: string[];
+  acceptanceCriteria: string[] | null;
+  project: string | null;
+  priority: MissionPriority | null;
+  status: MissionStatus;
+  blockReason: string | null;
+  dependsOn: string[];
+  sourceOrderTaskId: string | null;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  statusChangedAt: string;
+  statusChangedBy: string;
+  verification: MissionRecord['verification'];
+  authority: MissionAuthorityTruth;
+  planItems: {
+    seq: number;
+    summary: string;
+    kind: MissionPlanItem['kind'];
+    taskId: string | null;
+    state: MissionPlanItemState;
+    rawTaskStatus: ActivityStatus | null;
+    createdInIntentSeq: number;
+    supersededInIntentSeq: number | null;
+    linkedBy: string | null;
+    linkedAt: string | null;
+  }[];
+  intentHistory: MissionIntentRef[];
+  blockHistory: MissionBlockRecord[];
+}
+
+export function missionBrowserView(mission: MissionRecord): MissionBrowserView {
+  return {
+    id: mission.id,
+    title: mission.title,
+    objective: mission.objective,
+    scope: mission.scope,
+    constraints: mission.constraints,
+    acceptanceCriteria: mission.acceptanceCriteria,
+    project: mission.project,
+    priority: mission.priority,
+    status: mission.status,
+    blockReason: mission.blockReason,
+    dependsOn: mission.dependsOn,
+    sourceOrderTaskId: mission.sourceOrderTaskId,
+    createdBy: mission.createdBy,
+    createdAt: mission.createdAt,
+    updatedAt: mission.updatedAt,
+    statusChangedAt: mission.statusChangedAt,
+    statusChangedBy: mission.statusChangedBy,
+    verification: mission.verification,
+    authority: mission.authority,
+    planItems: mission.planItems.map((item) => ({
+      seq: item.seq,
+      summary: item.summary,
+      kind: item.kind,
+      taskId: item.taskId,
+      state: item.state,
+      rawTaskStatus: item.rawTaskStatus,
+      createdInIntentSeq: item.createdInIntentSeq,
+      supersededInIntentSeq: item.supersededInIntentSeq,
+      linkedBy: item.linkedBy,
+      linkedAt: item.linkedAt,
+    })),
+    intentHistory: mission.intentHistory,
+    blockHistory: mission.blockHistory,
+  };
+}
+
 export interface MissionEventRecord {
   seq: number;
   id: string;

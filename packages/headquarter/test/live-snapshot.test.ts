@@ -43,6 +43,7 @@ function sources(overrides: Partial<SnapshotSources> = {}): SnapshotSources {
     workforce: { data: [], provenance },
     capabilities: { data: [], provenance },
     activity: { data: [], provenance },
+    missions: { data: [], provenance },
     ...overrides,
   };
 }
@@ -184,6 +185,23 @@ describe('what the snapshot must never contain', () => {
     const snapshot = liveSnapshotFromOperations(ops, { now: NOW, env: CLAUDE_ONLY });
     expect(() => assertBrowserSafe(snapshot)).not.toThrow();
     expect(() => assertNoFabricatedFields(snapshot)).not.toThrow();
+  });
+
+  it('refuses a fabricated mission metric — the concept-art numbers stay out (Phase 3)', () => {
+    // The HQ-UI-3D reference concepts show progress bars and budgets. HQ
+    // measures neither, so a missions section that grew such a field must
+    // fail the build, never reach a browser.
+    const provenance = { mode: 'live' as const, source: 'test', asOf: NOW };
+    expect(() =>
+      buildHqSnapshot(
+        sources({
+          missions: {
+            data: [{ id: 'mission-x', title: 'X', progressPercent: 62 } as never],
+            provenance,
+          },
+        }),
+      ),
+    ).toThrow(BrowserSafetyError);
   });
 
   it('publishes no cost, token, ETA or sentiment field anywhere', () => {

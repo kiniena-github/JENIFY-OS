@@ -39,6 +39,7 @@ import { founderConsole, type FounderConsole } from '../application/console.js';
 import { directOrderDispatchBlocked } from './orders.js';
 import { dispatchHistory } from '../providers/claude/dispatch.js';
 import type { HeadquarterOperations } from '../application/service.js';
+import { missionBrowserView, type MissionBrowserView } from '../application/mission-command.js';
 import type { ProviderId, SecretsEnv } from '../routing/providers.js';
 import { assessConnections, type ConnectionProbe, type ConnectionStatus } from './connections.js';
 import { assertBrowserSafe, assertNoFabricatedFields } from './redaction.js';
@@ -50,7 +51,14 @@ import {
   type SourceMode,
 } from './provenance.js';
 
-/** Bumped whenever the wire shape changes incompatibly. */
+/**
+ * Bumped whenever the wire shape changes incompatibly.
+ *
+ * Phase 3 added the `missions` section and `counts.missions` WITHOUT a bump,
+ * deliberately: the change is purely additive, no consumer validates by
+ * exhaustive shape, and the site and server deploy as one unit. A bump is for
+ * a change an old reader would misread, not for a field it never looks at.
+ */
 export const HQ_SNAPSHOT_VERSION = 1;
 
 /** How many recent canonical events a snapshot carries. */
@@ -97,6 +105,8 @@ export interface SnapshotCounts {
   blocked: number;
   inFlight: number;
   queued: number;
+  /** Canonical missions commanded by the Founder (Phase 3). 0 means 0. */
+  missions: number;
 }
 
 export interface HqSnapshot {
@@ -111,6 +121,13 @@ export interface HqSnapshot {
   workforce: SnapshotSection<SnapshotWorker[]>;
   capabilities: SnapshotSection<SnapshotCapability[]>;
   activity: SnapshotSection<SnapshotActivityEntry[]>;
+  /**
+   * The canonical Mission aggregate (Phase 3, issue #254) — the SHARED
+   * `missionBrowserView` projection, so this section and the mission routes
+   * cannot disagree about what the browser sees. No intent bodies, no
+   * idempotency keys, no invented metrics.
+   */
+  missions: SnapshotSection<MissionBrowserView[]>;
 }
 
 /**
@@ -169,6 +186,7 @@ export interface SnapshotSources {
   workforce: { data: WorkerDescriptor[]; provenance: Provenance };
   capabilities: { data: Capability[]; provenance: Provenance };
   activity: { data: ActivityEvent[]; provenance: Provenance };
+  missions: { data: MissionBrowserView[]; provenance: Provenance };
   policyContext?: Parameters<typeof classifyCapability>[1];
   activityLimit?: number;
 }
@@ -190,6 +208,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       sources.workforce.provenance.mode,
       sources.capabilities.provenance.mode,
       sources.activity.provenance.mode,
+      sources.missions.provenance.mode,
     ]),
     note: sources.note ?? null,
     counts: {
@@ -199,6 +218,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       blocked: console_.blocked.length,
       inFlight: console_.inFlight.length,
       queued: console_.queued.length,
+      missions: sources.missions.data.length,
     },
     operations: section(sources.console.provenance, console_),
     connections: section(sources.connections.provenance, sources.connections.data),
@@ -229,6 +249,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       sources.activity.provenance,
       trimActivity(sources.activity.data, sources.activityLimit),
     ),
+    missions: section(sources.missions.provenance, sources.missions.data),
   };
 
   // Fail closed: prove it before anyone can publish it.
@@ -361,6 +382,10 @@ export function liveSnapshotFromOperations(
     activity: {
       data: ops.directory.latestStatusPerSubject(),
       provenance: provenanceFor('hq_events via HeadquarterStore.latestStatusPerSubject'),
+    },
+    missions: {
+      data: ops.listMissions().map(missionBrowserView),
+      provenance: provenanceFor('hq_missions via HeadquarterOperations.listMissions'),
     },
   });
 }

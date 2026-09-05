@@ -106,6 +106,7 @@ import {
 } from './orders.js';
 import {
   MISSION_COMMAND_CAPABILITY,
+  missionBrowserView,
   missionCommandCapabilityState,
   type MissionRecord,
 } from '../application/mission-command.js';
@@ -305,51 +306,15 @@ function numberArrayField(body: unknown, key: string): number[] | undefined | 'i
 }
 
 /**
- * Everything the browser is told about a mission.
- *
- * Note what is absent: the INTENT BODIES (the raw Founder order and every
- * amendment's rationale). They are server-side audit material, exactly as a
- * direct order's instruction is; the browser gets the intake-scanned
- * canonical fields plus intent-history METADATA, and the derived
- * `idempotency_key` stays internal. `safe()` re-walks this on the way out
- * like every other response.
+ * Everything the browser is told about a mission — the ONE shared projection
+ * (`missionBrowserView`), so this route and the snapshot's missions section
+ * cannot drift apart. Intent BODIES (the raw Founder order and every
+ * amendment's rationale) are server-side audit material, exactly as a direct
+ * order's instruction is; the derived `idempotency_key` stays internal.
+ * `safe()` re-walks this on the way out like every other response.
  */
 function missionView(mission: MissionRecord): Record<string, unknown> {
-  return {
-    id: mission.id,
-    title: mission.title,
-    objective: mission.objective,
-    scope: mission.scope,
-    constraints: mission.constraints,
-    acceptanceCriteria: mission.acceptanceCriteria,
-    project: mission.project,
-    priority: mission.priority,
-    status: mission.status,
-    blockReason: mission.blockReason,
-    dependsOn: mission.dependsOn,
-    sourceOrderTaskId: mission.sourceOrderTaskId,
-    createdBy: mission.createdBy,
-    createdAt: mission.createdAt,
-    updatedAt: mission.updatedAt,
-    statusChangedAt: mission.statusChangedAt,
-    statusChangedBy: mission.statusChangedBy,
-    verification: mission.verification,
-    authority: mission.authority,
-    planItems: mission.planItems.map((item) => ({
-      seq: item.seq,
-      summary: item.summary,
-      kind: item.kind,
-      taskId: item.taskId,
-      state: item.state,
-      rawTaskStatus: item.rawTaskStatus,
-      createdInIntentSeq: item.createdInIntentSeq,
-      supersededInIntentSeq: item.supersededInIntentSeq,
-      linkedBy: item.linkedBy,
-      linkedAt: item.linkedAt,
-    })),
-    intentHistory: mission.intentHistory,
-    blockHistory: mission.blockHistory,
-  };
+  return missionBrowserView(mission) as unknown as Record<string, unknown>;
 }
 
 /**

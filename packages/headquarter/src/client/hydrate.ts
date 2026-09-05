@@ -190,7 +190,14 @@ function operationsSection(state: HqStateDocument): Section {
     ...ops.outcomeUnknown.map(taskRow),
     ...ops.queued.map(taskRow),
   ];
-  const attention = ops.blocked.length + ops.outcomeUnknown.length + ops.approvals.length;
+  // Commanded missions recorded blocked or ready_review need the Founder to
+  // walk in — the same bucket arithmetic the Mission Room uses, so the two
+  // rooms cannot disagree about the same missions (Phase 3).
+  const missionsNeedingDecision = state.missions.data.filter(
+    (mission) => MISSION_ATTENTION_STATUSES.has(mission.status),
+  ).length;
+  const attention =
+    ops.blocked.length + ops.outcomeUnknown.length + ops.approvals.length + missionsNeedingDecision;
   return {
     metrics: [
       metric('In flight', ops.inFlight.length, 'Assigned or running right now.', tone(ops.inFlight.length, 'info')),
@@ -201,6 +208,7 @@ function operationsSection(state: HqStateDocument): Section {
       // that is not dark must show the reader why. Without this metric the
       // Command Room would sit quiet over four zeroes.
       metric('Awaiting review', ops.pendingReviews.length, 'Submitted and waiting for the independent review lane.', tone(ops.pendingReviews.length, 'info')),
+      metric('Missions needing a decision', missionsNeedingDecision, 'Commanded missions recorded blocked or ready for review — the Mission Room holds them.', tone(missionsNeedingDecision, 'warn')),
     ],
     rows: limited(rows),
     // The empty message has to agree with the metrics above it.
@@ -233,65 +241,126 @@ function operationsSection(state: HqStateDocument): Section {
             'review lane, so no worker is executing them',
         );
       }
-      return held.length > 0
-        ? `Nothing is in flight, queued, blocked or unresolved — but ${held.join('; and ')}.`
-        : 'No task is recorded in flight, queued, blocked or unresolved. The Command Room is empty ' +
-          'because HQ is holding nothing, not because nothing loaded.';
+      // The same lesson one aggregate over (Phase 3): the room COUNTS
+      // decision-needing missions and lights amber for them, so it must not
+      // say "holding nothing" beneath a non-zero mission metric.
+      if (missionsNeedingDecision > 0) {
+        held.push(
+          `${missionsNeedingDecision} commanded mission(s) are blocked or ready for review — ` +
+            'they are listed in the Mission Room',
+        );
+      }
+      if (held.length > 0) {
+        return `Nothing is in flight, queued, blocked or unresolved — but ${held.join('; and ')}.`;
+      }
+      // "HQ is holding nothing" is a whole-HQ sentence, so it may only be
+      // said when the mission record is empty too. With missions on the books
+      // and no task work, the honest sentence is narrower (Phase 3).
+      if (state.missions.data.length > 0) {
+        return (
+          'No task is recorded in flight, queued, blocked or unresolved. The commanded mission ' +
+          `record lives in the Mission Room (${state.missions.data.length} mission(s)); no task ` +
+          'work has been opened for it here.'
+        );
+      }
+      return (
+        'No task is recorded in flight, queued, blocked or unresolved. The Command Room is empty ' +
+        'because HQ is holding nothing, not because nothing loaded.'
+      );
     })(),
     liveness: livenessFrom({
       attention,
       active: ops.inFlight.length,
-      present: rows.length + ops.approvals.length + ops.pendingReviews.length,
+      present:
+        rows.length + ops.approvals.length + ops.pendingReviews.length + missionsNeedingDecision,
     }),
   };
 }
 
-function missionsSection(state: HqStateDocument): Section {
-  const ops = state.operations.data;
-  const all = [
-    ...ops.approvals,
-    ...ops.pendingReviews,
-    ...ops.inFlight,
-    ...ops.queued,
-    ...ops.blocked,
-    ...ops.outcomeUnknown,
+/**
+ * Mission statuses that put the room into the Founder's attention set:
+ * `blocked` needs unblocking, `ready_review` needs a verification decision.
+ * Stated once, and the Command Room's mission metric uses the same set, so
+ * the two rooms cannot disagree about the same missions.
+ */
+const MISSION_ATTENTION_STATUSES = new Set(['blocked', 'ready_review']);
+
+function missionRow(mission: HqStateDocument['missions']['data'][number]): RoomRow {
+  const chips: RoomChip[] = [
+    {
+      label: mission.status,
+      tone: MISSION_ATTENTION_STATUSES.has(mission.status)
+        ? 'warn'
+        : mission.status === 'failed'
+          ? 'danger'
+          : 'info',
+    },
   ];
+  if (mission.priority) chips.push({ label: mission.priority, tone: 'neutral' });
+  if (mission.project) chips.push({ label: mission.project, tone: 'neutral' });
+  const openPlanItems = mission.planItems.filter((item) => item.state !== 'superseded').length;
+  return {
+    id: mission.id,
+    primary: mission.title,
+    secondary: mission.blockReason
+      ? `${mission.objective} — blocked: ${mission.blockReason}`
+      : `${mission.objective} · ${openPlanItems} plan item(s) · updated ${mission.updatedAt}`,
+    chips,
+  };
+}
+
+function missionsSection(state: HqStateDocument): Section {
+  // PHASE 3 SEMANTIC CHANGE, recorded here deliberately (issue #254 and the
+  // matching docs/JENIFY_DECISIONS.md entry). Until Phase 3 this room
+  // projected open `op_tasks` rows as "missions" — an honest projection of
+  // the only canonical data that existed. A Mission is now its own canonical
+  // aggregate (`hq_missions`), commanded by the Founder, and this room shows
+  // THAT. Tasks remain the Command Room's subject; a mission's linked tasks
+  // surface through its plan items. Zero missions truthfully means zero
+  // COMMANDED missions even while tasks exist — the counts of the two rooms
+  // are counts of different canonical entities now, and each says which.
+  //
+  // The round-13 lesson carries over unchanged: whether this room is LIT
+  // comes from the stated canonical status sets below, never re-derived from
+  // any other string, and the Command Room's mission metric shares the same
+  // arithmetic so the rooms cannot describe the same missions differently.
+  const missions = state.missions.data;
   const byStatus = new Map<string, number>();
-  for (const task of all) byStatus.set(task.status, (byStatus.get(task.status) ?? 0) + 1);
-  // Liveness comes from CANONICAL BUCKET MEMBERSHIP, not from re-reading the
-  // raw status strings — and from exactly the same arithmetic the Command Room
-  // uses, so the two rooms cannot disagree about the same tasks.
-  //
-  // Reclassifying the statuses got both directions wrong (Codex round 13):
-  //
-  //   - A task awaiting independent review keeps status `running`, but
-  //     `founderConsole` puts it in `pendingReviews` and DELIBERATELY excludes
-  //     it from `inFlight`. Counting `running` marked the Mission Room active
-  //     and pulsed it, asserting a worker still held a task the canonical
-  //     console says nobody is executing.
-  //   - `review_failed` is canonically blocked — `blocked` is built as
-  //     `byStatus('blocked')` plus `byStatus('review_failed')` — but it was
-  //     absent from ATTENTION_STATUSES, so the Mission Room sat quiet while
-  //     Home and the Command Room, which read the bucket, showed attention.
-  //     Two rooms describing one task differently.
-  //
-  // The status counts below stay as they are: they are honest copies of what
-  // canonical state records, and a status is a fact about a task. What may not
-  // be re-derived from them is whether the room is lit.
-  const attention = ops.blocked.length + ops.outcomeUnknown.length + ops.approvals.length;
-  const active = ops.inFlight.length;
+  for (const mission of missions) {
+    byStatus.set(mission.status, (byStatus.get(mission.status) ?? 0) + 1);
+  }
+  const attention = missions.filter((mission) =>
+    MISSION_ATTENTION_STATUSES.has(mission.status),
+  ).length;
+  const active = missions.filter((mission) => mission.status === 'working').length;
+  const terminal = new Set(['complete', 'failed', 'cancelled']);
+  const ordered = [
+    ...missions.filter((mission) => MISSION_ATTENTION_STATUSES.has(mission.status)),
+    ...missions.filter((mission) => mission.status === 'working'),
+    ...missions.filter((mission) => mission.status === 'planned'),
+    ...missions.filter((mission) => mission.status === 'verified'),
+    ...missions.filter((mission) => terminal.has(mission.status)),
+  ];
   return {
     metrics: [
-      metric('Missions recorded', all.length, 'Every open task the canonical queue holds.', tone(all.length, 'info')),
+      metric('Missions commanded', missions.length, 'Canonical missions the Founder has commanded. 0 means 0.', tone(missions.length, 'info')),
       ...[...byStatus.entries()]
         .sort((a, b) => a[0].localeCompare(b[0]))
         .map(([status, count]) =>
-          metric(status, count, `Tasks whose canonical status is ${status}.`, ATTENTION_STATUSES.has(status) ? 'warn' : 'neutral'),
+          metric(
+            status,
+            count,
+            `Missions whose canonical status is ${status}.`,
+            MISSION_ATTENTION_STATUSES.has(status) ? 'warn' : status === 'failed' ? 'danger' : 'neutral',
+          ),
         ),
     ],
-    rows: limited(all.map(taskRow)),
-    emptyMessage: 'The canonical queue holds no open mission. Nothing is hidden behind this view.',
-    liveness: livenessFrom({ attention, active, present: all.length }),
+    rows: limited(ordered.map(missionRow)),
+    emptyMessage:
+      'HQ holds no commanded mission. 0 means 0 — the Founder has commanded nothing yet, and ' +
+      'nothing is invented to fill the room. Open tasks are the Command Room’s subject and are ' +
+      'not restated here as missions.',
+    liveness: livenessFrom({ attention, active, present: missions.length }),
   };
 }
 
