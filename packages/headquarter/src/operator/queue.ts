@@ -228,7 +228,13 @@ export type EnqueueResult =
 
 export type ReconcileDecision = 'confirmed_done' | 'confirmed_failed' | 'confirmed_not_executed';
 
-const GLOBAL_SCOPE = '*';
+/**
+ * The kill switch's global scope row. Exported so an enforcement-safe reader
+ * outside the queue (the service's locked orchestration revalidation, Sol M1
+ * on PR #266) names the same scope the queue writes, instead of a drifting
+ * copy of the literal.
+ */
+export const GLOBAL_SCOPE = '*';
 
 
 /**

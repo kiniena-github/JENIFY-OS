@@ -77,6 +77,7 @@ import { canonicalJson, taskActionDigest, type ApprovalRejection } from '../oper
 import { assertNoSecretLikeContent, type EvidenceEntry } from '../operator/evidence.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import {
+  GLOBAL_SCOPE,
   OperatorQueue,
   type OperatorTask,
   type PrivilegedQueueApi,
@@ -1386,8 +1387,36 @@ export class HeadquarterOperations {
    */
   readonly #capabilityFromStore: (id: string) => Capability | null;
 
+  /**
+   * The kill-switch ROW read, from the database (Sol M1, PR #266 review
+   * 5124774932).
+   *
+   * `queue.killSwitchEngaged` is the read-only delegate that #200 documents
+   * as safe to patch because enforcement never dispatches through it — a
+   * caller who lies to itself about a read harms only itself. That stops
+   * being true the moment such a read becomes the authority a WRITE path
+   * acts on: the locked orchestration cycle refuses or proceeds on this
+   * answer. So the locked revalidation reads the `op_kill_switch` rows
+   * through this `#private` closure (the `#capabilityFromStore` recipe)
+   * and never through the patchable public delegate. The fast prechecks
+   * may keep using the delegate — after the locked revalidation they are
+   * an optimization, not the boundary.
+   */
+  readonly #killSwitchEngagedFromStore: (capabilityId?: string) => boolean;
+
   constructor(db: HqDatabase, options: HeadquarterOperationsOptions = {}) {
     this.#db = db;
+    this.#killSwitchEngagedFromStore = (capabilityId?: string): boolean => {
+      const scopes = [GLOBAL_SCOPE, ...(capabilityId ? [capabilityId] : [])];
+      const row = db
+        .prepare(
+          `SELECT 1 AS hit FROM op_kill_switch WHERE engaged = 1 AND scope IN (${scopes
+            .map(() => '?')
+            .join(',')}) LIMIT 1`,
+        )
+        .get(...scopes);
+      return row !== undefined;
+    };
     this.#capabilityFromStore = (capabilityId: string): Capability | null => {
       const row = db.prepare(`SELECT * FROM op_capabilities WHERE id = ?`).get(capabilityId) as
         | Record<string, unknown>
@@ -4157,6 +4186,13 @@ export class HeadquarterOperations {
    * PREVIEW stays available because reading is not reachability. Mission
    * priority still never reorders operator FIFO: created tasks join the
    * queue in arrival order like every other task.
+   *
+   * The gates run TWICE on apply, deliberately: once before the lock for
+   * fast refusal, and again inside the outer IMMEDIATE transaction from
+   * canonical store truth (`#revalidateOrchestrationAuthorityLocked`,
+   * Sol M1) — a revocation or kill-switch engagement another connection
+   * commits between precheck and lock refuses the whole cycle with zero
+   * orchestration writes.
    */
   orchestrateMission(input: {
     missionId: string;
@@ -4252,6 +4288,18 @@ export class HeadquarterOperations {
     let refusal: OpsResult<never> | null = null;
     const enacted: OrchestrationDecision[] = [];
     privileged.reserve(() => {
+      // Revalidated INSIDE the write lock, before anything else (Sol M1,
+      // PR #266 review 5124774932): the prechecks above ran on a picture a
+      // second connection could still move — a revocation or kill-switch
+      // engagement committed between them and this lock must refuse the
+      // whole cycle, never let it act on stale authority. Nothing below —
+      // no task, no link, no run item, no run, no event, no evidence — may
+      // be written until the CURRENT canonical truth re-admits the act.
+      const staleAuthority = this.#revalidateOrchestrationAuthorityLocked(input.requestedBy);
+      if (staleAuthority) {
+        refusal = staleAuthority;
+        return;
+      }
       // Re-observed INSIDE the write lock (the assignMissionToProject
       // precedent): the decisions acted on are the decisions of the locked
       // picture, not the pre-lock one.
@@ -4399,6 +4447,70 @@ export class HeadquarterOperations {
       state: this.#missionExecutionState(after),
       decisions: enacted,
     });
+  }
+
+  /**
+   * Every load-bearing orchestrate gate, re-proven from CURRENT canonical
+   * enforcement truth INSIDE the outer IMMEDIATE write transaction (Sol M1,
+   * PR #266 review 5124774932).
+   *
+   * Why it exists: `orchestrateMission`'s prechecks run BEFORE the lock, so a
+   * second connection could commit an authority revocation or engage the
+   * orchestrate kill switch after the precheck observed them clear and before
+   * the apply acquired its write lock — and the locked cycle would then create
+   * real tasks on stale authority. The same window let `createTask` succeed
+   * before `linkMissionPlanItem` observed a concurrently revoked Mission gate,
+   * leaving a real unlinked task. Holding the lock while re-proving all five
+   * gates closes both: nothing can move between this check and the writes.
+   *
+   * The five gates, in precheck order:
+   *   1. the acting principal still holds `hq.mission_orchestrate`
+   *      (`#resolveFounderGateActor` → the database principal row);
+   *   2. the canonical `hq.mission_orchestrate` row is still present, enabled
+   *      and contract-correct (`#founderGateCapabilityGate` → `#capabilityFromStore`);
+   *   3. the Mission actor and `hq.mission_command` gate still admit the
+   *      linking act (`#resolveMissionCommander` + `#missionCapabilityGate`);
+   *   4./5. the global and `hq.mission_orchestrate` kill-switch scopes are
+   *      still clear — read through `#killSwitchEngagedFromStore`, never the
+   *      patchable `queue.killSwitchEngaged` convenience delegate.
+   *
+   * A refusal is the canonical precheck refusal with `revalidation:
+   * 'post_lock'` added to its details — truthful provenance of WHERE the
+   * refusal was decided, so audit and the concurrency proofs can tell a
+   * precheck refusal from a raced one. The caller returns it before any
+   * orchestration write, so a failed revalidation leaves ZERO mutations.
+   */
+  #revalidateOrchestrationAuthorityLocked(requestedBy: string): OpsResult<never> | null {
+    const refused =
+      this.#resolveFounderGateActor(
+        requestedBy,
+        'orchestrate a mission',
+        MISSION_ORCHESTRATE_CAPABILITY.id,
+        'orchestrating a mission',
+      ) ??
+      this.#founderGateCapabilityGate(
+        'orchestrate a mission',
+        MISSION_ORCHESTRATE_CAPABILITY.id,
+        missionOrchestrateCapabilityState,
+        missionOrchestrateContractDrift,
+        'orchestrating a mission',
+      ) ??
+      this.#resolveMissionCommander(requestedBy, 'orchestrate a mission') ??
+      this.#missionCapabilityGate('orchestrate a mission');
+    if (refused && !refused.ok) {
+      return fail(refused.error.code, refused.error.message, {
+        ...(refused.error.details ?? {}),
+        revalidation: 'post_lock',
+      });
+    }
+    if (this.#killSwitchEngagedFromStore(MISSION_ORCHESTRATE_CAPABILITY.id)) {
+      return fail(
+        'kill_switch_engaged',
+        'The kill switch engaged while orchestrate-apply waited for the write lock: the locked cycle refuses wholesale so no orchestrated task sits primed. Preview remains available.',
+        { revalidation: 'post_lock' },
+      );
+    }
+    return null;
   }
 
   /** Observe the facts the decision core classifies — reads only, no clock beyond `nowIso` provenance. */
