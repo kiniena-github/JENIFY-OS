@@ -100,7 +100,10 @@ decision and every write (`proposeAction`, `authorizeAction`, `executeAction`,
 
 `#gatewayGate` is the ONE gate behind both `authorizeAction` and `executeAction`, evaluated
 INSIDE the IMMEDIATE write lock over canonical rows read through `#db` and the enforcement-safe
-closures only. Authority = worker permissions ∩ mission permissions ∩ policy ∩ approvals:
+closures only. (At head `20d70ef` this sentence was FALSE for step 9: the dispatch-lane
+exclusion read `queue.evidence.list`, the deliberately patchable display read; the review
+round 1 correction below moved it onto `op_evidence` rows through `#db`, and the sentence is
+true again.) Authority = worker permissions ∩ mission permissions ∩ policy ∩ approvals:
 
 1. The executing identity must be a worker (`#rejectHumanExecution`), assignable, and granted
    the task's capability by the directory (`#grantOf`, the composed registry-narrowed grant).
@@ -127,7 +130,9 @@ closures only. Authority = worker permissions ∩ mission permissions ∩ policy
 8. Mission (when referenced): must exist and be neither terminal nor `blocked`
    (`mission_not_active`); at proposal the task must be linked to one of its plan items.
 9. The existing Claude GitHub dispatch lane must not already hold the task
-   (`duplicate_external_action`) — see the seam below.
+   (`duplicate_external_action`), read from the canonical `op_evidence` rows through `#db`
+   (`#claudeDispatchState`: `SELECT kind FROM op_evidence WHERE task_id = ?`), never from
+   `queue.evidence` — see the seam below.
 
 The Intent Guard / goal lock is the comparison of the authorized snapshot with the one
 re-derived at execution (`snapshotDrift`). Drift refuses, classified by what outranks what:
@@ -159,13 +164,20 @@ read for DISPLAY. Audit of every call site in `src/`:
 | `service.ts` `#revalidateOrchestrationAuthorityLocked`, `#observeOrchestration` | `#killSwitchEngagedFromStore` (Sol M1/M2) | unchanged | Already canonical. |
 | `operator/queue.ts` `claim` | `#killSwitchEngagedInternal` | unchanged | Already canonical (issue #200). |
 | Phase 8 gateway (`#gatewayGate`) | — | `#engagedKillSwitchScopeFromStore([...5 scopes])` | New; canonical by construction. |
+| `service.ts` `#claudeDispatchState` (`#gatewayGate` step 9 and `proposeAction`) | `this.queue.evidence.list(taskId)` at `20d70ef` | `#db` → `SELECT kind FROM op_evidence WHERE task_id = ?` | **Migrated in review round 1.** Not a kill-switch read, but the same class of defect reintroduced in the new gate: a fact deciding whether HQ EXECUTES an external action was read from the patchable display surface. Proven: a forged `queue.evidence.list` hiding the lane's entries turned `refused:duplicate_external_action` into a real adapter call. |
+| `providers/claude/dispatch.ts` `claudeDispatchEligibility` gateway mirror check | `ops.gatewayActionHistory(taskId)` (a prototype method) | `gatewayActionHistoryFor(ops, taskId)` — a function binding over the private `#gatewayActionHistoryFromStore`, which reads the ledger rows through `#db` and not through the public `listActions` | **Hardened in review round 1, minimally.** Not a regression from this wave (the same verdict already reads `ops.queue.get` / `ops.queue.capabilities.get` on accepted main), but the mirror check decides whether a public issue is published, and the recipe already existed. |
 
 Pinned in `kill-switch-enforcement-safe` (5): each site is exercised with the delegate forged
 on BOTH the instance and `OperatorQueue.prototype`, the lie proven to have taken
 (`queue.killSwitchEngaged()` answers false), and the decision proven unchanged — zero approval
 rows, no claim and the typed `kill_switch_engaged`, zero orchestration writes, an ineligible
-dispatch verdict — plus the deliberate-left projection pin. The gateway's own forged-delegate
-pin lives in `action-gateway-authority`.
+dispatch verdict — plus the deliberate-left projection pin. The dispatch-eligibility test also
+attempts a plain reassignment of the `killSwitchEngagedFor` module binding through a namespace
+import and pins that it throws `TypeError` (its earlier name claimed this without attempting
+it; the name now says exactly what is attempted — note that a bundler/test transform may
+differ from native ESM on `Object.defineProperty`, which is why only the assignment form is
+pinned). The gateway's own forged-delegate pin, the forged-`queue.evidence` pin and the
+forged-`gatewayActionHistory`/`listActions` pin live in `action-gateway-authority`.
 
 ## What is canonical vs projection
 
@@ -177,7 +189,7 @@ pin lives in `action-gateway-authority`.
 | `op_evidence` hash chain | appended to, referenced by context refs, never copied |
 | `op_worker_providers`, directory grants, principals | read only |
 | Claude GitHub dispatch lane and its evidence contract | untouched except the two narrowing reads above |
-| — | `hq_action_intents`, `hq_action_events`: INSERT-only BY ENGINE (full §G trigger set: no UPDATE, no DELETE, REPLACE/UPSERT closed) plus the UNIQUE `side_effect_key` index; derived `state`, `authorization`, `attempt`, `outcome`, `reconciliation`, `retryBlocked` |
+| — | `hq_action_intents`, `hq_action_events`: INSERT-only BY ENGINE (full §G trigger set: no UPDATE, no DELETE, and a BEFORE INSERT guard on EVERY unique index — `id`/`seq`, `hq_action_intents.idempotency_key`, `hq_action_events.side_effect_key` — so REPLACE/UPSERT is closed on every conflict target for every writer; see review round 1) plus the UNIQUE `side_effect_key` index; derived `state`, `authorization`, `attempt`, `outcome`, `reconciliation`, `retryBlocked` |
 
 Migration safety: both tables are `CREATE TABLE IF NOT EXISTS`, ensured by
 `ensureActionGatewaySchema` from the constructor (readonly-safe, the post-Phase-3 pattern). No
@@ -193,10 +205,11 @@ never migrated (pinned).
   ordinary Phase 7 `recordTruth`/`verifyTruth` acts with the action's `op_evidence` entries as
   evidence refs; this phase adds no automatic truth writer.
 - One canonical task has ONE external execution path. The gateway refuses to propose or
-  execute for a task the Claude GitHub lane has attempted or dispatched (read from the same
-  evidence kinds `dispatchHistory` reads — `#claudeDispatchState`); `claudeDispatchEligibility`
-  refuses a task with a gateway action `attempted | outcome_unknown | succeeded`
-  (`ops.gatewayActionHistory`, asked before the lane's own binding checks). The existing lane's
+  execute for a task the Claude GitHub lane has attempted or dispatched (the same evidence
+  kinds `dispatchHistory` reads, read as canonical `op_evidence` rows through `#db` —
+  `#claudeDispatchState`); `claudeDispatchEligibility` refuses a task with a gateway action
+  `attempted | outcome_unknown | succeeded` (`gatewayActionHistoryFor`, a function binding over
+  the ledger rows, asked before the lane's own binding checks). The existing lane's
   claim/start/publish/reconcile behaviour, evidence kinds and correlation block are unchanged;
   the two narrowing checks are the ONLY edits to `dispatch.ts`. No Claude/GitHub adapter is
   wired into the gateway in this phase — see limitations.
@@ -270,6 +283,14 @@ text against constraint prose would be an invented rule.
   action's proposer only; the task creator is not refused (the queue's own reconcile refuses
   the task creator for task-level reconciliation, and a task-level rule here would refuse the
   legitimate case of a Founder who ordered the work and later checks the remote).
+- **`claudeDispatchEligibility` is only partly enforcement-safe.** Its kill-switch read and
+  (since review round 1) its gateway-history read go through function bindings over `#db`,
+  but the task and capability it reasons about still come from `ops.queue.get` and
+  `ops.queue.capabilities.get` — patchable reads inherited from accepted main, not introduced
+  by this wave. The claim/start the lane performs afterwards re-reads canonical rows, so a lie
+  there cannot mint a claim, but it can mis-shape the eligibility verdict. Recorded as
+  carry-forward debt, not fixed here (out of this correction's scope by the reviewer's own
+  framing).
 
 ## Deliberate pin ledger
 
@@ -280,7 +301,10 @@ routes" with the allow-list itself deliberately unchanged (no console call site 
 two new writes). `application.fixture.ts` gained an `actionAdapters` passthrough (a fixture,
 not a test). No test was deleted or relaxed; no `counts` pin, no `ROOM_SECTIONS` change, no
 `HQ_SNAPSHOT_VERSION` bump, no `CONTROL_GRANT_JS` change, no change to `CLAIM_BOUND_EVIDENCE_KINDS`
-or the dispatch evidence kinds.
+or the dispatch evidence kinds. Review round 1 renamed one test in `kill-switch-enforcement-safe`
+to match a reassignment attempt it now actually makes (assertions added, none removed), and
+added one exported function binding (`gatewayActionHistoryFor`) plus its module-private reader;
+`gatewayActionHistory` keeps its public shape and now delegates to the same private read.
 
 ## Deployment runbook (configuration acts, never automatic)
 
@@ -297,7 +321,7 @@ proposer's own registry, and reconciling requires approval authority.
 
 ## Evidence
 
-New suites: `action-gateway-authority` (28: categorical/monotone risk engine + contract
+New suites: `action-gateway-authority` (31: categorical/monotone risk engine + contract
 validation; proposal identity/grant/adapter/provider/refs/secrets/dedupe; the recorded arc with
 one adapter call and a payload-free view; truthful `failed`; stale approval, mutated task,
 provider redeclaration, mission amendment and blocked mission refusals; duplicate side effect
@@ -306,8 +330,11 @@ and reconciliation authority/independence/idempotency rules; adapter throw = unk
 generation after `confirmed_not_executed`; every kill-switch scope incl. provider scope and the
 forged-delegate pin; risk-required approval on a pre-approved capability; proposer ≠ approver;
 authority intersection incl. revoked grant and disabled capability; secret-like adapter result
-withheld everywhere; engine immutability on both tables; the dispatch-lane mutual exclusion in
-both directions; pure bounded reads), `kill-switch-enforcement-safe` (5: the Low-7 migration
+withheld everywhere; engine immutability on both tables incl. REPLACE on the secondary unique
+indexes with `recursive_triggers` OFF and the attempt reservation surviving; the dispatch-lane
+mutual exclusion in both directions, under a forged `queue.evidence.list` at execute AND
+propose, and under forged `gatewayActionHistory`/`listActions` on instance and prototype; pure
+bounded reads), `kill-switch-enforcement-safe` (5: the Low-7 migration
 audit above), `action-gateway-durability` (2: real file close/reopen with an unknown outcome
 that stays unknown, identical refusals, no retry, then human reconciliation; read-only
 pre-Phase-8 absence), `live-action-routes` (11: write surface and the ABSENCE of
@@ -318,3 +345,50 @@ reconcile input/404/409; `actionReconcile` control; nobody/staff/mutations-off s
 `host-contract` (+2: Fastify-wired propose/read/no-execute-route/worker-step arc; NO_IDENTITY
 sweep of all four action routes). Full-matrix results are recorded in the wave PR; merge stays
 gated on independent review and the Founder.
+
+## Independent review round 1 — corrections (head `20d70ef` → this head)
+
+An independent hostile review of the exact head `20d70ef` (CI run #518 green, every test count
+confirmed) returned CHANGES REQUIRED with working exploits. The Phase 8 items and their fixes
+(the Phase 7 items, including the shared trigger flaw and the `hq_memory` carry-forward, are
+recorded in `PHASE_7_TRUTH_AND_EVIDENCE.md`):
+
+- **High — the duplicate-external-path check read a patchable surface (Law 3 reintroduced).**
+  `#claudeDispatchState` read `this.queue.evidence.list(taskId)`, the surface `operator/queue.ts`
+  documents as deliberately patchable for display, and both `#gatewayGate` step 9 and
+  `proposeAction` decided on it. Proven: with the Claude lane's `attempted` + `succeeded`
+  entries present, an honest `executeAction` refused `duplicate_external_action` with zero
+  adapter calls; after `ops.queue.evidence.list = (id) => real(id).filter(not dispatch kinds)`
+  the same call EXECUTED and the adapter ran — two external side effects for one canonical
+  task. **Fix (`service.ts`):** `#claudeDispatchState` now reads
+  `SELECT kind FROM op_evidence WHERE task_id = ? ORDER BY seq` through `#db` (the
+  `#missingEvidenceIds` recipe); the `#gatewayGate` sentence in Authority rules is true again
+  and says when it was not. Pinned in `action-gateway-authority` with the forged
+  `queue.evidence.list` proven to have taken and the gate still refusing at execute and at
+  propose; verified to fail against the old read.
+- **Mirror check hardened (judged, minimal):** `claudeDispatchEligibility` read
+  `ops.gatewayActionHistory` — a prototype method whose body also went through the public
+  `listActions`. Not a regression from this wave, but the verdict decides a publication and the
+  `killSwitchEngagedFor` recipe already existed, so: a private `#gatewayActionHistoryFromStore`
+  reads the ledger rows through `#db`, the public method delegates to it, and the new function
+  binding `gatewayActionHistoryFor` is what `dispatch.ts` calls. Pinned with
+  `gatewayActionHistory` AND `listActions` forged on instance and prototype (the lie proven to
+  have taken on the public method), the binding still answering `succeeded`, the lane still
+  ineligible; verified to fail when the binding is routed back through the public method.
+- **High (shared with Phase 7) — `INSERT OR REPLACE` through the secondary unique indexes.**
+  On `hq_action_events` the standing row was the durable attempt reservation: a REPLACE carrying
+  the reserved `side_effect_key` erased the `attempted` event (ledger read
+  `proposed → authorized → succeeded → proposed`, `attempt: null`), and a forged replacement
+  claiming `reconciled: confirmed_not_executed` would have raised `sideEffectGeneration` and
+  freed the side effect for a SECOND real execution. **Fix (`action-gateway.ts`):**
+  `trg_hq_action_intents_no_replace_unique` (`idempotency_key`) and
+  `trg_hq_action_events_no_replace_unique` (`side_effect_key`), additive names. Because the
+  guard now fires BEFORE the UNIQUE index on a raced legitimate reservation, `executeAction`'s
+  concurrent-duplicate catch also recognises `SQLITE_CONSTRAINT_TRIGGER` naming
+  `side_effect_key` (still `duplicate_external_action`, nothing executes). Pinned with the
+  pragma OFF: both REPLACEs abort, rows byte-identical, ledger
+  `proposed → authorized → attempted → succeeded`, re-execute `action_state_conflict`, adapter
+  calls 1; verified to fail against the old DDL.
+- **Low — overstated test name** in `kill-switch-enforcement-safe` ("cannot be reassigned" with
+  no attempt). The test now makes the plain reassignment through a namespace import, pins the
+  `TypeError`, pins the binding identity afterwards, and is named for exactly that.

@@ -139,7 +139,7 @@ row, shown and never used as a tie-breaker.
 
 | Canonical (unchanged, never rewritten by this phase) | Projection (Phase 7, derived) |
 |---|---|
-| `op_evidence` hash chain — evidence truth; truth entries only APPEND to it and reference ids | `hq_truth_records` (born state + refs + stated pointers), `hq_truth_relations`, `hq_truth_verifications`, `hq_truth_acceptances` — all INSERT-only BY ENGINE (full §G trigger set: no UPDATE of any column, no DELETE, REPLACE/UPSERT closed) |
+| `op_evidence` hash chain — evidence truth; truth entries only APPEND to it and reference ids | `hq_truth_records` (born state + refs + stated pointers), `hq_truth_relations`, `hq_truth_verifications`, `hq_truth_acceptances` — all INSERT-only BY ENGINE (full §G trigger set: no UPDATE of any column, no DELETE, and a BEFORE INSERT guard on EVERY unique index — `id`/`seq` AND the secondary indexes `idempotency_key`, `supersedes`, one-acceptance-per-record — so REPLACE/UPSERT is closed on every conflict target, for every writer, regardless of that writer's `recursive_triggers` setting; see the review-round-1 corrections below) |
 | `op_tasks`, `hq_approvals`, `op_kill_switch`, `hq_missions`, `hq_projects`, `hq_memory`, registries | derived `state`, `lifecycle`, `verification`, `contested`, `subjectDrift`, `acceptanceDigest`, contradiction resolutions, `entityCurrentState` |
 | Founder gate, capability trios, worker directory, principal registry | nothing — no gate, grant, policy, claim, dispatch, orchestration or kill-switch path reads a truth table (pinned: an accepted "this task is approved" truth changes no status, approval row, eligibility verdict or claimability) |
 
@@ -174,9 +174,19 @@ withheld founder_only count, newest `TRUTH_SNAPSHOT_LIMIT`=20 records, unresolve
 Optional by shape on purpose — a static build opens no truth store and states nothing rather
 than an invented zero, every pre-Phase-7 fixture stays valid, and no `counts` pin moved. The
 Founder-gated `/state` carries founder_only rows; the unauthenticated artifact withholds them,
-withholds contradictions touching them, keeps them in the totals and says so in provenance
-(pinned, including that the private statement text never appears). A read-only pre-Phase-7
-file projects absence with provenance saying why; no `HQ_SNAPSHOT_VERSION` bump (additive).
+withholds the pair-level contradictions touching them, AND projects every carried public
+record through `withholdFounderOnlyRelations` so no relation id (`supports`/`contradicts`/
+`derived_from` in either direction, `supersedes`/`supersededBy`) and no `contradictions[]`
+entry pointing at a founder_only record survives — counted per withheld counterpart as
+`withheldFounderOnlyRelations`, stated in provenance beside `withheldFounderOnly`. Pinned:
+neither the private statement text NOR the private record id appears anywhere in the
+artifact blob. What is deliberately NOT rewritten is the public record's own categorical
+standing: a public statement that is `contested` or `superseded` stays so in the artifact
+(the same answer the Founder-gated view gives), because laundering it would present a
+contested statement as clean — the artifact withholds who by, in which direction and how it
+stands, never the fact that the public record itself is in that state. A read-only
+pre-Phase-7 file projects absence with provenance saying why; no `HQ_SNAPSHOT_VERSION` bump
+(additive — one new count field, `withheldFounderOnlyRelations`).
 
 Rooms (server-side `hydrate.ts`, counts only, present-only when the section exists): **Security
 Center** gains a `Truth contradictions` condition metric and one attention row per unresolved
@@ -229,6 +239,12 @@ to act; the truth projection is read by humans and by nothing that decides.
 - Truth writes are not kill-switch-gated (intake parity with memory/missions). If Phase 8 makes
   an accepted truth an INPUT to an external action, the gateway must gate there — this phase
   records only.
+- The unauthenticated artifact still states a carried public record's `contested` /
+  `lifecycle` truthfully (see Surfaces). Together with `withheldFounderOnlyRelations > 0` a
+  reader can infer that SOME founder_only counterpart relates to a public record — the count
+  is the price of stating the omission honestly rather than silently. The private record's
+  id, statement, direction and resolution never appear. If the Founder prefers the artifact
+  to carry no count, that is a one-line policy change, recorded here as an open choice.
 
 ## Deliberate pin ledger
 
@@ -238,6 +254,10 @@ fetch heads (+`TRUTH_PATH`, `TRUTH_ENTITY_PATH`) and postJson targets (+`TRUTH_P
 (`control-console`), `CONTROL_FETCH_TARGETS` (+4), room `binding.source` texts for
 security-center / founder-office / company-memory, `CONTROL_GRANT_JS` (+3 flags). No test was
 deleted or relaxed; no `counts` pin, no `ROOM_SECTIONS` change, no `HQ_SNAPSHOT_VERSION` bump.
+Review round 1 RENAMED one test to what it proves (`truth-graph-hardening`: the engine-abort
+test covered UPDATE/DELETE on all four tables but REPLACE/upsert only on the `id` target — it
+is now named exactly that, and a second test carries the secondary-index cases); its
+assertions were not changed.
 
 ## Deployment runbook (configuration acts, never automatic)
 
@@ -255,21 +275,75 @@ Until these acts happen every invocation fails closed (`unknown_capability` / `n
 New suites: `truth-authority` (16: self-upgrade, self-verify, observation rules, verification
 authority/vocabulary, Founder gate + digest + independence + contested/refuted, execution
 inertness, identity/trio fail-closed, no existence oracle, dedupe), `truth-graph-hardening`
-(20: no newest-wins incl. verified-but-contested, timestamp-blind judgement, evidence/relation
-existence, engine immutability on all four tables incl. REPLACE/UPSERT, op_evidence chain
-grows only, src-wide rewrite-spelling guard, superseded auditability and Founder-tier
-supersession, categorical staleness, memory-never-grants incl. memory-as-evidence refusal and
-founder_only inheritance, no-second-evidence-store canonical-inertness, pure reads,
-hostile-patch ×3), `truth-durability` (2: real file reopen with identical derivation and
-identical refusals; read-only pre-Phase-7 absence), `live-truth-routes` (14: write surface,
-attribution/dedupe, birth-state refusal, the arc through the routes, STEP-UP on accept only,
-one status per cause, hostile callers, identity in body and query, mutations-off, secret-like
-content, 404 sub-routes, founder_only through the gate and withheld from the artifact, entity
-route, control advertisement incl. withdrawal on a disabled row), `truth-surfaces` (5: optional
-section absence, derived states + both wire guards + no fabricated key, Security/Founder rooms,
-Company Memory counts, dark zero), `truth-console` (6, JSDOM against the real control API:
+(21: no newest-wins incl. verified-but-contested, timestamp-blind judgement, evidence/relation
+existence, engine immutability on all four tables — UPDATE/DELETE, REPLACE/upsert on the `id`
+target, and REPLACE on every SECONDARY unique index with `recursive_triggers` switched OFF on
+the connection — op_evidence chain grows only, src-wide rewrite-spelling guard, superseded
+auditability and Founder-tier supersession, categorical staleness, memory-never-grants incl.
+memory-as-evidence refusal and founder_only inheritance, no-second-evidence-store
+canonical-inertness, pure reads, hostile-patch ×3), `truth-durability` (2: real file reopen
+with identical derivation and identical refusals; read-only pre-Phase-7 absence),
+`live-truth-routes` (15: write surface, attribution/dedupe, birth-state refusal, the arc through
+the routes, STEP-UP on accept only, one status per cause, hostile callers, identity in body and
+query, mutations-off, secret-like content, 404 sub-routes, founder_only through the gate and
+withheld from the artifact by statement AND by id, a founder_only contradiction of a PUBLIC
+record leaving no id in the artifact while the gated state keeps it, entity route, control
+advertisement incl. withdrawal on a disabled row), `truth-surfaces` (6: optional section
+absence, derived states + both wire guards + no fabricated key, the artifact privacy
+projection over supports/derived_from/contradicts/supersession with the withheld count,
+Security/Founder rooms, Company Memory counts, dark zero), `truth-console` (6, JSDOM against the real control API:
 inert static markup, forms only under grants, record from the page, contradiction-first +
 limitations + step-up refusal then acceptance with password, entity lookup, non-Founder off +
 hostile text inert), hq-host `host-contract` (+2: Fastify-wired record/entity/query-scan/
 self-verify/accept-refusal arc, NO_IDENTITY sweep of all five truth routes). Full-matrix results
 are recorded in the wave PR; merge stays gated on independent review and the Founder.
+
+## Independent review round 1 — corrections (head `20d70ef` → this head)
+
+An independent hostile review of the exact head `20d70ef` (CI green, every test count
+confirmed) returned CHANGES REQUIRED with working exploits. Each finding sat inside a stated
+guarantee and outside what the green suite asserted. The Phase 7 items and their fixes:
+
+- **High — `INSERT OR REPLACE` bypassed the insert-only triggers through SECONDARY unique
+  indexes.** The `*_no_replace` BEFORE INSERT guards tested only `NEW.id`/`NEW.seq`; a REPLACE
+  colliding on `hq_truth_records.idempotency_key`, `hq_truth_records.supersedes`,
+  `hq_truth_verifications.idempotency_key` or `hq_truth_acceptances.truth_id` deleted the
+  standing row, and SQLite fires no BEFORE DELETE for that delete unless `recursive_triggers`
+  is on (it was not set; it is connection-scoped and binds no foreign writer anyway). Proven:
+  the Founder's acceptance row replaced by an attacker's with a forged digest, the record still
+  deriving `accepted`; a legitimate successor deleted and `supersededBy` re-pointed at a
+  forgery. **Fix (`truth-command.ts`):** three ADDITIVE triggers
+  (`trg_hq_truth_records_no_replace_unique`, `trg_hq_truth_verifications_no_replace_unique`,
+  `trg_hq_truth_acceptances_no_replace_unique`) close every remaining unique index — new names
+  so a file created at the old head gains them on the next ensure. `hq_truth_relations` has no
+  secondary unique index. Belt to those braces (`store/db.ts`): the application connection
+  now sets `PRAGMA recursive_triggers = ON`, so on OUR connection REPLACE also reaches the
+  BEFORE DELETE guards; checked before enabling it: no trigger anywhere in the schema writes
+  (all bodies are `RAISE(ABORT)`), so nothing recurses; no source path spells `REPLACE INTO` /
+  `INSERT OR REPLACE` (the src-wide spelling guards); every `ON CONFLICT DO UPDATE` in `src/`
+  targets a table with no triggers and UPSERT is unaffected by the pragma regardless; no
+  existing test pins the pragma set. The legitimate write paths pre-check idempotency and
+  supersession inside the IMMEDIATE lock, so no accepted path ever reaches the new guards.
+  Pinned in `truth-graph-hardening` with the pragma switched OFF on the connection, so the
+  test proves the trigger and not the pragma; verified to fail against the old DDL.
+- **Same flaw in `hq_memory` (accepted Phase 5, `idx_hq_memory_idem`) — hardened here as
+  directly adjacent, additive and behaviour-preserving:** `trg_hq_memory_no_replace_idem`
+  (`memory/store.ts`, new name, `HARDENING_DDL` already runs on every construction). The
+  facade dedupes by key BEFORE inserting (`findIdByIdempotencyKey`), so the only writer that
+  can trip it is a forger or a raced foreign insert; no memory code path catches
+  `SQLITE_CONSTRAINT_UNIQUE` specifically, so the changed engine error shape on that race
+  alters no behaviour. Pinned in `memory-engine-hardening`; verified to fail against the old DDL.
+- **Medium — founder_only leakage through relation ids in the unauthenticated artifact.**
+  `truthSummary` withheld the records and the pair list, but a carried PUBLIC record still
+  shipped the private record's id in `contradictedBy` / `contradictions[].withId` (and by the
+  same shape `supportedBy`, `derivations`, `supersededBy`). **Fix:** the pure
+  `withholdFounderOnlyRelations` projection (`truth-command.ts`), applied in `truthSummary`
+  when `includeFounderOnly` is false, with the count `withheldFounderOnlyRelations` and a
+  provenance note; the Surfaces section above now states exactly what is and is not withheld.
+  Pinned in `live-truth-routes` (the id never appears in the blob; the gated state keeps the
+  relation) and `truth-surfaces` (all four relation families, count per counterpart);
+  verified to fail against the unscrubbed summary.
+- **Low — overstated test name.** The `truth-graph-hardening` engine-abort test claimed
+  "every REPLACE/upsert spelling on all four truth tables" while asserting two spellings on
+  two tables at the `id` target — the name that let the High ship. Renamed to what it proves;
+  the secondary-index cases are a separate, real test.
