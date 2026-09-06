@@ -23,11 +23,15 @@ import { openMemoryHqDatabase, HeadquarterStore } from '@factoryos/headquarter/s
 import {
   HeadquarterOperations,
   HumanPrincipalRegistry,
+  MEMORY_COMMAND_CAPABILITY,
   MISSION_COMMAND_CAPABILITY,
+  MISSION_ORCHESTRATE_CAPABILITY,
   MemberRegistryNominationSource,
   PROJECT_COMMAND_CAPABILITY,
   WORKFORCE_ASSIGN_CAPABILITY,
+  registerMemoryCommandCapability,
   registerMissionCommandCapability,
+  registerMissionOrchestrateCapability,
   registerProjectCommandCapability,
   registerWorkforceAssignCapability,
 } from '@factoryos/headquarter/application';
@@ -476,6 +480,164 @@ describe('the Phase 4 surfaces travel through the same two wildcards, wired as c
       workers: { id: string; member: { identityKey: string } | null }[];
     };
     expect(body.workers[0]!.member!.identityKey).toBe('anthropic:claude-fable-5:1');
+    await app.close();
+  });
+});
+
+describe('the Phase 5/6 surfaces travel through the same two wildcards, Fastify-wired', () => {
+  async function wave1App(): Promise<{ app: FastifyInstance; ops: HeadquarterOperations }> {
+    const db = openMemoryHqDatabase();
+    registerMissionCommandCapability(db);
+    registerMemoryCommandCapability(db);
+    registerMissionOrchestrateCapability(db);
+    new CapabilityRegistry(db).register({
+      id: 'repo.read_status',
+      description: 'Read repo/CI status',
+      riskClass: 'read_only',
+      sideEffect: false,
+      idempotent: true,
+    });
+    const store = new HeadquarterStore(db);
+    store.upsertSpecialist({
+      id: 'claude',
+      displayName: 'Claude',
+      vendor: 'anthropic',
+      role: 'build_lead',
+      allowedCapabilities: ['repo.read_status'],
+      active: true,
+    });
+    const ops = new HeadquarterOperations(db, { store });
+    new HumanPrincipalRegistry(db).register({
+      id: 'founder',
+      displayName: 'Proof Founder',
+      originateCapabilities: [
+        MISSION_COMMAND_CAPABILITY.id,
+        MEMORY_COMMAND_CAPABILITY.id,
+        MISSION_ORCHESTRATE_CAPABILITY.id,
+        'repo.read_status',
+      ],
+      approvalAuthority: true,
+      active: true,
+    });
+    const app = Fastify({ logger: false });
+    registerHeadquarterRoutes(
+      app,
+      {
+        ops,
+        founderMap: [{ realmId: 'realm', accountId: 'acc-1', principalId: 'founder' }],
+        allowedOrigins: [ORIGIN],
+        secretsEnv: {},
+        mutationsEnabled: true,
+      },
+      identityFor(FOUNDER),
+    );
+    await app.ready();
+    return { app, ops };
+  }
+
+  it('records memory, previews and applies orchestration end to end — and never approves or claims', async () => {
+    const { app, ops } = await wave1App();
+    const commanded = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.missions,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: {
+        title: 'Faster QOS site',
+        objective: 'Reduce page load times',
+        plan: [{ summary: 'Measure', capabilityId: 'repo.read_status', payload: { intent: 'go' } }],
+      },
+    });
+    expect(commanded.statusCode).toBe(201);
+    const missionId = (commanded.json() as { mission: { id: string } }).mission.id;
+
+    const recorded = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.memory,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: {
+        kind: 'founder_note',
+        title: 'Landing page first',
+        body: 'Profile the landing page before touching anything else.',
+        project: 'QOS',
+        missionId,
+      },
+    });
+    expect(recorded.statusCode).toBe(201);
+    expect(recorded.headers['cache-control']).toBe('no-store');
+
+    // The QUERY reaches the boundary and is identity-scanned (the one
+    // Phase 5 contract widening) — a ?principalId= attempt is refused.
+    const injected = await app.inject({
+      method: 'GET',
+      url: `${CONTROL_ROUTES.memoryContext}?scope=mission&id=${missionId}&principalId=someone-else`,
+    });
+    expect(injected.statusCode).toBe(400);
+    expect((injected.json() as { error: { code: string } }).error.code).toBe('client_identity_supplied');
+    const context = await app.inject({
+      method: 'GET',
+      url: `${CONTROL_ROUTES.memoryContext}?scope=mission&id=${missionId}`,
+    });
+    expect(context.statusCode).toBe(200);
+
+    const preview = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.missionOrchestrate,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: { missionId, mode: 'preview' },
+    });
+    expect(preview.statusCode).toBe(200);
+    const apply = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.missionOrchestrate,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: {
+        missionId,
+        mode: 'apply',
+        fingerprint: (preview.json() as { report: { fingerprint: string } }).report.fingerprint,
+      },
+    });
+    expect(apply.statusCode).toBe(200);
+    const decisions = (apply.json() as { report: { decisions: { decision: string }[] } }).report.decisions;
+    expect(decisions.map((d) => d.decision)).toEqual(['task_created', 'item_linked']);
+
+    // The anti-execution pin, at the Fastify-wired layer: orchestration
+    // created and linked — nothing is approved, claimed or running.
+    const task = ops.queue.listByStatus('queued')[0]!;
+    expect(task.claimedBy).toBeNull();
+    expect(ops.getMission(missionId)!.status).toBe('planned');
+    await app.close();
+  });
+
+  it('refuses the whole Wave 1 surface to nobody, exactly as it refuses the rest', async () => {
+    const app = await (async () => {
+      const db = openMemoryHqDatabase();
+      const ops = new HeadquarterOperations(db, { store: new HeadquarterStore(db) });
+      const instance = Fastify({ logger: false });
+      registerHeadquarterRoutes(
+        instance,
+        {
+          ops,
+          founderMap: [],
+          allowedOrigins: [ORIGIN],
+          secretsEnv: {},
+          mutationsEnabled: true,
+        },
+        NO_IDENTITY,
+      );
+      await instance.ready();
+      return instance;
+    })();
+    for (const url of [CONTROL_ROUTES.memory, `${CONTROL_ROUTES.memorySearch}?text=x`]) {
+      const res = await app.inject({ method: 'GET', url });
+      expect(res.statusCode, url).toBe(401);
+    }
+    const orchestrate = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.missionOrchestrate,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: { missionId: 'any', mode: 'apply' },
+    });
+    expect(orchestrate.statusCode).toBe(401);
     await app.close();
   });
 });

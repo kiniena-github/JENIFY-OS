@@ -197,7 +197,10 @@ const ROOMS = [
   ['founder-office', 11, 'Founder Office', 'attention', 'live'],
   ['projects', 12, 'Projects', 'quiet', 'live'],
   ['product-factory', 13, 'Product Factory', 'dark', 'later_phase'],
-  ['company-memory', 14, 'Company Memory', 'dark', 'later_phase'],
+  // Phase 5 (issue #265): Company Memory is live on the 'memory' section —
+  // dark here because the fixture's HQ remembers nothing, which is exactly
+  // what an empty live room renders as.
+  ['company-memory', 14, 'Company Memory', 'dark', 'live'],
   ['research', 15, 'Research / R&D', 'dark', 'not_recorded'],
   ['security-center', 16, 'Security Center', 'quiet', 'live'],
   ['connections', 17, 'Settings / Connections', 'quiet', 'live'],
