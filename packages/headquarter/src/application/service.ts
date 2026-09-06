@@ -72,8 +72,14 @@ import { nowIso } from '../store/db.js';
 import { HeadquarterStore } from '../store/headquarter.js';
 import { QUEUED_UNREACHABLE_STATUSES, type ActivityStatus } from '../contracts/events.js';
 import type { WorkerDescriptor, WorkerRole } from '../contracts/workers.js';
-import { evaluatePolicy, type PolicyContext, type PolicyDecision } from '../operator/policy.js';
-import { canonicalJson, taskActionDigest, type ApprovalRejection } from '../operator/approvals.js';
+import { approvalRequired, evaluatePolicy, type PolicyContext, type PolicyDecision } from '../operator/policy.js';
+import {
+  approvalExpiredAt,
+  canonicalJson,
+  taskActionDigest,
+  validateApprovalClaimBinding,
+  type ApprovalRejection,
+} from '../operator/approvals.js';
 import { assertNoSecretLikeContent, type EvidenceEntry } from '../operator/evidence.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import {
@@ -87,8 +93,10 @@ import {
   ProviderBindingViolation,
   ProviderDeclarationRejected,
   WorkerProviderDirectory,
+  readProviderBinding,
   type WorkerProviderRecord,
 } from '../operator/provider-binding.js';
+import { assertBrowserSafe } from '../live/redaction.js';
 import { PROVIDERS, type ProviderId } from '../routing/providers.js';
 
 /**
@@ -524,6 +532,92 @@ import {
   type ObservedPlanItem,
   type OrchestrationDecision,
 } from './orchestrator-command.js';
+import {
+  MAX_ACCEPTANCE_NOTE_LENGTH,
+  MAX_TRUTH_ENTITY_ID_LENGTH,
+  MAX_TRUTH_STATEMENT_LENGTH,
+  MAX_VERIFICATION_LIMITATIONS_LENGTH,
+  TRUTH_BORN_STATES,
+  TRUTH_ENTITY_KINDS,
+  TRUTH_RECORD_CAPABILITY,
+  TRUTH_SNAPSHOT_LIMIT,
+  TRUTH_VERIFY_CAPABILITY,
+  VERIFICATION_METHODS,
+  VERIFICATION_VERDICTS,
+  deriveTruthRecord,
+  ensureTruthSchema,
+  entityCurrentState,
+  establishedTruthTier,
+  isTruthBornState,
+  isTruthEntityKind,
+  isVerificationMethod,
+  isVerificationVerdict,
+  listContradictions,
+  loadTruthGraph,
+  truthRecordCapabilityState,
+  truthRecordContractDrift,
+  truthRecordIdempotencyKey,
+  truthSchemaPresent,
+  truthVerificationIdempotencyKey,
+  truthVerifyCapabilityState,
+  truthVerifyContractDrift,
+  withholdFounderOnlyRelations,
+  type EntityTruthView,
+  type SubjectDrift,
+  type TruthAcceptanceView,
+  type TruthBornState,
+  type TruthContradictionPair,
+  type TruthEntityKind,
+  type TruthGraph,
+  type TruthRecordRow,
+  type TruthRecordView,
+  type TruthSnapshotView,
+  type TruthState,
+  type TruthVerificationView,
+  type VerificationMethod,
+  type VerificationVerdict,
+} from './truth-command.js';
+import {
+  ACTION_READ_LIMIT,
+  EXTERNAL_ACTION_KILL_SCOPE,
+  MAX_ACTION_CONTEXT_REFS,
+  MAX_ACTION_NOTE_LENGTH,
+  MAX_ACTION_PAYLOAD_CHARS,
+  MAX_ACTION_TARGET_LENGTH,
+  ACTION_TYPE_PATTERN,
+  actionGatewaySchemaPresent,
+  actionIdempotencyKey,
+  actionPayloadDigest,
+  adapterContractProblems,
+  adapterKillSwitchScope,
+  assessActionRisk,
+  authorizationDigest,
+  deriveActionView,
+  ensureActionGatewaySchema,
+  isActionBlastRadius,
+  isActionReconcileDecision,
+  isActionState,
+  loadActionEvents,
+  loadActionIntent,
+  loadActionIntents,
+  providerKillSwitchScope,
+  riskRequiresApproval,
+  sideEffectGeneration,
+  sideEffectHolder,
+  sideEffectKey,
+  sideEffectKeyBase,
+  snapshotDrift,
+  stateAdmitsAttempt,
+  stateAdmitsReconciliation,
+  type ActionIntentRow,
+  type ActionReconcileDecision,
+  type ActionRiskEscalations,
+  type ActionState,
+  type ActionView,
+  type AdapterOutcome,
+  type AuthorizedSnapshot,
+  type ExternalActionAdapter,
+} from './action-gateway.js';
 import { CLIENT_IDENTITY_KEYS } from '../live/auth.js';
 import { ensureMemoryTables, memorySchemaPresent, MemoryStore, searchMemory } from '../memory/store.js';
 import {
@@ -577,7 +671,25 @@ export type OpsErrorCode =
   | 'unknown_memory'
   | 'memory_conflict'
   | 'mission_not_orchestratable'
-  | 'orchestrate_fingerprint_mismatch';
+  | 'orchestrate_fingerprint_mismatch'
+  // Phase 7 — the truth/evidence projection.
+  | 'unknown_truth'
+  | 'unknown_evidence'
+  | 'unknown_entity'
+  | 'truth_conflict'
+  | 'truth_not_verified'
+  | 'truth_contested'
+  // Phase 8 — the authority/risk/external-action gateway.
+  | 'unknown_action'
+  | 'unknown_adapter'
+  | 'action_state_conflict'
+  | 'action_outcome_unknown'
+  | 'duplicate_external_action'
+  | 'action_approval_stale'
+  | 'approval_required_by_risk'
+  | 'intent_changed'
+  | 'task_not_executing'
+  | 'mission_not_active';
 
 export interface OpsError {
   code: OpsErrorCode;
@@ -785,6 +897,24 @@ function memoryList(
     out.push(trimmed);
   }
   return { ok: true, value: out };
+}
+
+/**
+ * A bounded list of ids for the truth projection (evidence ids, truth record
+ * ids): the memory-list rules, plus duplicates collapsed in order so a
+ * repeated id cannot mint a duplicate relation row.
+ */
+function truthIdList(
+  field: string,
+  values: string[] | undefined,
+): { ok: true; value: string[]; message?: never } | { ok: false; message: string } {
+  const list = memoryList(field, values, MAX_TRUTH_ENTITY_ID_LENGTH);
+  if (!list.ok) return list;
+  return { ok: true, value: [...new Set(list.value)] };
+}
+
+function emptyTruthGraph(): TruthGraph {
+  return { records: [], relations: [], verifications: [], acceptances: [] };
 }
 
 /**
@@ -1155,6 +1285,16 @@ export interface HeadquarterOperationsOptions {
    * dispatch lane; a worker handed the resulting `ops` has no way to obtain it.
    */
   grantDispatchEvidence?: (grant: DispatchEvidenceGrant) => void;
+  /**
+   * The external-action adapters this deployment may execute through (Phase
+   * 8). Supplied ONLY by the composition root, exactly like the dispatch
+   * evidence grant: an adapter is an execution mechanism, and nothing holding
+   * `ops` may register one. A contract that fails `adapterContractProblems`
+   * refuses construction loudly rather than becoming a silently unusable lane.
+   * Omitted ⇒ the gateway records nothing executable and every execute refuses
+   * `unknown_adapter`.
+   */
+  actionAdapters?: readonly ExternalActionAdapter[];
 }
 
 /** Who an actor turned out to be, once resolved against both registries. */
@@ -1203,6 +1343,23 @@ function bindGet(db: HqDatabase, sql: string): (...params: unknown[]) => unknown
  * an enforcement-safe path rather than another patchable surface.
  */
 let readCapabilityRow: (ops: HeadquarterOperations, capabilityId: string) => Capability | null;
+
+/**
+ * Module-private, same recipe as `readCapabilityRow` (Phase 8, Low 7): the
+ * canonical kill-switch read published to `killSwitchEngagedFor` and nothing
+ * else, so a provider lane deciding dispatch eligibility can read the row
+ * through a function binding instead of the patchable queue delegate.
+ */
+let readKillSwitchEngaged: (ops: HeadquarterOperations, capabilityId?: string) => boolean;
+/** Same recipe for the gateway's attempt history (the dispatch lane's one-external-path verdict). */
+let readGatewayActionHistory: (ops: HeadquarterOperations, taskId: string) => GatewayActionHistory;
+/**
+ * Same recipe for a task's canonical `op_evidence` rows (review round 2): the
+ * dispatch lane's duplicate-publication read (`dispatchHistory`) decides whether
+ * a public GitHub issue is published again, so it must not read the patchable
+ * `queue.evidence.list` display surface.
+ */
+let readTaskEvidenceRows: (ops: HeadquarterOperations, taskId: string) => CanonicalEvidenceRow[];
 
 export class HeadquarterOperations {
   readonly queue: OperatorQueue;
@@ -1358,6 +1515,20 @@ export class HeadquarterOperations {
   /** The Phase 5 memory schema, same truth-recording as missions above. */
   readonly #memoryStorePresent: boolean;
 
+  /** The Phase 7 truth/evidence schema, same truth-recording as missions above. */
+  readonly #truthStorePresent: boolean;
+
+  /** The Phase 8 action ledger schema, same truth-recording as missions above. */
+  readonly #actionStorePresent: boolean;
+
+  /**
+   * The external-action adapters, keyed by id — `#private`, handed in by the
+   * composition root once, and read by the gateway's execute path ONLY. There
+   * is deliberately no register/unregister method: an adapter is an execution
+   * mechanism, so adding one is a construction-time act, never a runtime one.
+   */
+  readonly #actionAdapters: ReadonlyMap<string, ExternalActionAdapter>;
+
   /**
    * The Phase 5 company-memory store (issue #120 wired by #265), or null over
    * a read-only pre-Phase-5 file. `#private` and read by the memory facade
@@ -1410,19 +1581,57 @@ export class HeadquarterOperations {
    */
   readonly #killSwitchEngagedFromStore: (capabilityId?: string) => boolean;
 
+  /**
+   * The same canonical `op_kill_switch` read over an ARBITRARY scope list
+   * (Phase 8). The gateway honours four scope families at once — global, the
+   * task's capability, `external_action`, `provider:<id>` and `adapter:<id>`
+   * — and reads them through this closure, never through the patchable public
+   * delegate. Returns the FIRST engaged scope so a refusal can name it.
+   *
+   * Phase 8 also migrated the load-bearing Low-7 call sites onto the
+   * single-capability closure above: `approveTask` (an approval primed to
+   * run the instant a switch releases), `claimNext` (a claim/dispatch
+   * decision) and the `orchestrateMission` apply precheck. The one call site
+   * deliberately LEFT on `queue.killSwitchEngaged` is `#missionExecutionState`,
+   * which is a derived read projection (the Mission Room's picture) that
+   * decides no write — a lie there misinforms the patcher's own display and
+   * changes nothing that is enforced.
+   */
+  readonly #engagedKillSwitchScopeFromStore: (scopes: readonly string[]) => string | null;
+
   constructor(db: HqDatabase, options: HeadquarterOperationsOptions = {}) {
     this.#db = db;
-    this.#killSwitchEngagedFromStore = (capabilityId?: string): boolean => {
-      const scopes = [GLOBAL_SCOPE, ...(capabilityId ? [capabilityId] : [])];
+    this.#engagedKillSwitchScopeFromStore = (scopes: readonly string[]): string | null => {
+      const list = [...new Set(scopes)];
+      if (list.length === 0) return null;
       const row = db
         .prepare(
-          `SELECT 1 AS hit FROM op_kill_switch WHERE engaged = 1 AND scope IN (${scopes
+          `SELECT scope FROM op_kill_switch WHERE engaged = 1 AND scope IN (${list
             .map(() => '?')
-            .join(',')}) LIMIT 1`,
+            .join(',')}) ORDER BY scope LIMIT 1`,
         )
-        .get(...scopes);
-      return row !== undefined;
+        .get(...list) as { scope: string } | undefined;
+      return row?.scope ?? null;
     };
+    this.#killSwitchEngagedFromStore = (capabilityId?: string): boolean =>
+      this.#engagedKillSwitchScopeFromStore([GLOBAL_SCOPE, ...(capabilityId ? [capabilityId] : [])]) !== null;
+    // Adapters are validated at construction: a broken contract is a
+    // composition error and must surface where the composition happened.
+    const adapters = new Map<string, ExternalActionAdapter>();
+    for (const adapter of options.actionAdapters ?? []) {
+      const problems = adapterContractProblems(adapter);
+      if (problems.length > 0) {
+        throw new Error(
+          `External-action adapter ${String(adapter?.id)} has an invalid contract: ${problems.join('; ')}. ` +
+            'Nothing was constructed: an adapter that cannot state its own reversibility is not an adapter HQ will execute through.',
+        );
+      }
+      if (adapters.has(adapter.id)) {
+        throw new Error(`External-action adapter id ${adapter.id} is declared twice; adapter identity must be unique.`);
+      }
+      adapters.set(adapter.id, adapter);
+    }
+    this.#actionAdapters = adapters;
     this.#capabilityFromStore = (capabilityId: string): Capability | null => {
       const row = db.prepare(`SELECT * FROM op_capabilities WHERE id = ?`).get(capabilityId) as
         | Record<string, unknown>
@@ -1442,6 +1651,8 @@ export class HeadquarterOperations {
     ensureProjectCommandSchema(db);
     ensureMemoryTables(db);
     ensureOrchestratorSchema(db);
+    ensureTruthSchema(db);
+    ensureActionGatewaySchema(db);
     // A writable construction just ensured the mission/project/memory tables.
     // A READ-ONLY one (the hq:snapshot path) may be observing an older file
     // that has some or none of them — the ensures above deliberately write
@@ -1451,6 +1662,8 @@ export class HeadquarterOperations {
     this.#missionStorePresent = db.readonly ? missionSchemaPresent(db) : true;
     this.#projectStorePresent = db.readonly ? projectCommandSchemaPresent(db) : true;
     this.#memoryStorePresent = db.readonly ? memorySchemaPresent(db) : true;
+    this.#truthStorePresent = db.readonly ? truthSchemaPresent(db) : true;
+    this.#actionStorePresent = db.readonly ? actionGatewaySchemaPresent(db) : true;
     this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
     // Company memory (Phase 5, issue #265): the issue-#120 store, finally
@@ -1836,7 +2049,12 @@ export class HeadquarterOperations {
     const cap = this.queue.capabilities.get(task.capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${task.capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${cap.id} is disabled`);
-    if (this.queue.killSwitchEngaged(task.capabilityId)) {
+    // Enforcement-safe read (Phase 8, the carried-forward Low 7): this answer
+    // decides whether an approval row is WRITTEN, so it may not come from the
+    // patchable `queue.killSwitchEngaged` convenience delegate. A forged
+    // delegate used to let an approval land while the switch was engaged —
+    // approved work sitting primed to run the instant the switch released.
+    if (this.#killSwitchEngagedFromStore(task.capabilityId)) {
       // Refuse rather than let approved work sit primed to run the instant the
       // switch is released.
       return fail('kill_switch_engaged', `Kill switch is engaged for ${task.capabilityId}`);
@@ -1975,7 +2193,13 @@ export class HeadquarterOperations {
         `Worker ${workerId} is not allowed capability ${capabilityId} (least privilege)`,
       );
     }
-    if (this.queue.killSwitchEngaged(capabilityId)) {
+    // Enforcement-safe read (Phase 8, Low 7): a claim is an execution decision
+    // and the typed `kill_switch_engaged` refusal is what the dispatch lane
+    // reports. The canonical `OperatorQueue.claim` re-reads its own private
+    // row check below regardless, so a forged delegate never produced a claim
+    // — but it did turn "stopped" into "nothing_claimable", which misreports
+    // an emergency stop as an empty queue.
+    if (this.#killSwitchEngagedFromStore(capabilityId)) {
       return fail('kill_switch_engaged', `Kill switch is engaged for ${capabilityId}`);
     }
 
@@ -2308,6 +2532,12 @@ export class HeadquarterOperations {
   static {
     readCapabilityRow = (ops: HeadquarterOperations, capabilityId: string): Capability | null =>
       ops.#capabilityFromStore(capabilityId);
+    readKillSwitchEngaged = (ops: HeadquarterOperations, capabilityId?: string): boolean =>
+      ops.#killSwitchEngagedFromStore(capabilityId);
+    readGatewayActionHistory = (ops: HeadquarterOperations, taskId: string): GatewayActionHistory =>
+      ops.#gatewayActionHistoryFromStore(taskId);
+    readTaskEvidenceRows = (ops: HeadquarterOperations, taskId: string): CanonicalEvidenceRow[] =>
+      ops.#taskEvidenceRowsFromStore(taskId);
   }
 
   /**
@@ -4255,10 +4485,11 @@ export class HeadquarterOperations {
         { status: mission.status },
       );
     }
-    if (
-      input.mode === 'apply' &&
-      (this.queue.killSwitchEngaged() || this.queue.killSwitchEngaged(MISSION_ORCHESTRATE_CAPABILITY.id))
-    ) {
+    // Enforcement-safe read (Phase 8, Low 7). The locked revalidation below
+    // already reads the canonical row, so a forged delegate could never make
+    // apply WRITE on an engaged switch — but this precheck decides a refusal
+    // outcome, and the rule is that no decision reads the patchable delegate.
+    if (input.mode === 'apply' && this.#killSwitchEngagedFromStore(MISSION_ORCHESTRATE_CAPABILITY.id)) {
       // Wholesale, before any write: an orchestrated read-only task would
       // land `queued` — primed to run the moment the switch releases.
       return fail(
@@ -5632,6 +5863,2068 @@ export class HeadquarterOperations {
     return this.#memoryStorePresent;
   }
 
+  // ---- truth + evidence (Phase 7 — the truth/evidence projection) ----
+
+  /**
+   * Record one truth record — a CLAIMED or OBSERVED statement about a
+   * canonical entity — the one write path into `hq_truth_records` from the
+   * application layer.
+   *
+   * A truth record is a projection over evidence, never authority and never
+   * execution: it changes no task status, burns no approval, dispatches
+   * nothing, and no gate anywhere reads it. It is born `claimed` or
+   * `observed` and can NEVER upgrade itself — `verified` and `accepted` are
+   * derived from OTHER actors' records (`verifyTruth`, `acceptTruth`).
+   *
+   * Order (the recordMemory shape): bounds/vocabulary → actor gate (a
+   * resolved worker or human holding `hq.truth_record`; `system` refused) →
+   * capability trio (fail closed, never repaired) → subject existence (AFTER
+   * authority — no existence oracle) → secret scan → derived idempotency key
+   * → ONE IMMEDIATE reserve transaction: dedupe read, every evidence ref
+   * must EXIST in `op_evidence` (fail closed), every related record must
+   * exist and privacy must not leak downward, supersession authority, then
+   * insert + stated relations + hq_events audit + op_evidence
+   * `truth_recorded`, atomically.
+   */
+  recordTruth(input: {
+    entityKind: TruthEntityKind;
+    entityId: string;
+    statement: string;
+    /** Birth state, default `claimed`. `observed` requires at least one evidence ref. */
+    bornState?: TruthBornState;
+    /** `op_evidence` ids. References only — a truth record never carries an evidence body. */
+    evidenceRefs?: string[];
+    supports?: string[];
+    contradicts?: string[];
+    derivedFrom?: string[];
+    supersedes?: string;
+    privacy?: MemoryPrivacy;
+    /** Resolved actor id. Set by the boundary, never read from a body. */
+    requestedBy: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ record: TruthRecordView; deduplicated: boolean }> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    if (!isTruthEntityKind(input.entityKind)) {
+      return fail('invalid_input', `entityKind must be one of: ${TRUTH_ENTITY_KINDS.join(', ')}`);
+    }
+    const bornState = input.bornState ?? 'claimed';
+    if (!isTruthBornState(bornState)) {
+      return fail(
+        'invalid_input',
+        `bornState must be one of: ${TRUTH_BORN_STATES.join(', ')} — verified and accepted are derived, never asserted`,
+      );
+    }
+    const privacy = input.privacy ?? 'internal';
+    if (!isMemoryPrivacy(privacy)) {
+      return fail('invalid_input', `privacy must be one of: ${MEMORY_PRIVACY_LEVELS.join(', ')}`);
+    }
+    const entityId = missionText('entityId', input.entityId, MAX_TRUTH_ENTITY_ID_LENGTH, true);
+    if (!entityId.ok) return fail('invalid_input', entityId.message);
+    const statement = missionText('statement', input.statement, MAX_TRUTH_STATEMENT_LENGTH, true);
+    if (!statement.ok) return fail('invalid_input', statement.message);
+    const evidenceRefs = truthIdList('evidenceRefs', input.evidenceRefs);
+    if (!evidenceRefs.ok) return fail('invalid_input', evidenceRefs.message);
+    const supports = truthIdList('supports', input.supports);
+    if (!supports.ok) return fail('invalid_input', supports.message);
+    const contradicts = truthIdList('contradicts', input.contradicts);
+    if (!contradicts.ok) return fail('invalid_input', contradicts.message);
+    const derivedFrom = truthIdList('derivedFrom', input.derivedFrom);
+    if (!derivedFrom.ok) return fail('invalid_input', derivedFrom.message);
+    const supersedes = input.supersedes?.trim() || null;
+    if (bornState === 'observed' && evidenceRefs.value.length === 0) {
+      return fail(
+        'invalid_input',
+        'an observation must reference at least one existing evidence entry; a statement with no evidence is a claim',
+      );
+    }
+    if (supports.value.some((id) => contradicts.value.includes(id))) {
+      return fail('invalid_input', 'a record cannot both support and contradict the same record');
+    }
+    if (supersedes && (supports.value.includes(supersedes) || contradicts.value.includes(supersedes))) {
+      return fail('invalid_input', 'a record cannot supersede a record it also supports or contradicts');
+    }
+
+    const refusedActor = this.#resolveTruthActor(input.requestedBy, 'record truth', TRUTH_RECORD_CAPABILITY.id);
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#truthRecordCapabilityGate('record truth');
+    if (refusedCapability) return refusedCapability;
+    if (!this.#truthStorePresent) return fail('invalid_input', 'truth store unavailable on this database handle');
+
+    // Subject existence, probed only AFTER the authority gates above.
+    const subject = this.#truthSubject(input.entityKind, entityId.value!);
+    if (!subject.exists) {
+      return fail('unknown_entity', `Unknown ${input.entityKind}: ${entityId.value}`, {
+        entityKind: input.entityKind,
+        entityId: entityId.value,
+      });
+    }
+    if (subject.founderOnly && privacy !== 'founder_only') {
+      return fail(
+        'invalid_input',
+        `a truth record about founder_only ${input.entityKind} ${entityId.value} must itself be founder_only`,
+      );
+    }
+    try {
+      assertNoSecretLikeContent({ statement: statement.value });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+
+    const idempotencyKey = truthRecordIdempotencyKey({
+      requestedBy: input.requestedBy,
+      entityKind: input.entityKind,
+      entityId: entityId.value!,
+      statement: statement.value!,
+      bornState,
+      evidenceRefs: evidenceRefs.value,
+      privacy,
+      supersedes,
+      supports: supports.value,
+      contradicts: contradicts.value,
+      derivedFrom: derivedFrom.value,
+      idempotencyKey: input.idempotencyKey ?? null,
+    });
+
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let dedupedTo: string | null = null;
+    let recordedId: string | null = null;
+    privileged.reserve(() => {
+      const existing = this.#db
+        .prepare(`SELECT id FROM hq_truth_records WHERE idempotency_key = ?`)
+        .get(idempotencyKey) as { id: string } | undefined;
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      // Every evidence ref must name a REAL op_evidence entry — fail closed.
+      const missingEvidence = this.#missingEvidenceIds(evidenceRefs.value);
+      if (missingEvidence.length > 0) {
+        refusal = {
+          code: 'unknown_evidence',
+          message: `Unknown evidence id(s): ${missingEvidence.join(', ')} — a truth record may only reference evidence that exists`,
+          details: { missing: missingEvidence },
+        };
+        return;
+      }
+      const graph = loadTruthGraph(this.#db);
+      const byId = new Map(graph.records.map((r) => [r.id, r]));
+      const related = [
+        ...supports.value.map((id) => ({ id, via: 'supports' })),
+        ...contradicts.value.map((id) => ({ id, via: 'contradicts' })),
+        ...derivedFrom.value.map((id) => ({ id, via: 'derivedFrom' })),
+        ...(supersedes ? [{ id: supersedes, via: 'supersedes' }] : []),
+      ];
+      for (const { id, via } of related) {
+        const target = byId.get(id);
+        if (!target) {
+          refusal = { code: 'unknown_truth', message: `Unknown truth record in ${via}: ${id}` };
+          return;
+        }
+        if (target.privacy === 'founder_only' && privacy !== 'founder_only') {
+          refusal = {
+            code: 'invalid_input',
+            message: `a record that ${via} founder_only truth record ${id} must itself be founder_only`,
+          };
+          return;
+        }
+      }
+      if (supersedes) {
+        const predecessor = byId.get(supersedes)!;
+        if (predecessor.entityKind !== input.entityKind || predecessor.entityId !== entityId.value) {
+          refusal = {
+            code: 'truth_conflict',
+            message: `Cannot supersede ${supersedes}: it is about ${predecessor.entityKind} ${predecessor.entityId}, not ${input.entityKind} ${entityId.value}`,
+          };
+          return;
+        }
+        const alreadyBy = graph.records.find((r) => r.supersedes === supersedes);
+        if (alreadyBy) {
+          refusal = {
+            code: 'truth_conflict',
+            message: `Cannot supersede ${supersedes}: already superseded by ${alreadyBy.id}. Contradict or supersede that record instead — history is never rewritten.`,
+          };
+          return;
+        }
+        // Superseding a record that was EVER verified or EVER accepted
+        // displaces truth that other actors established; only the canonical
+        // Founder gate may do that. Read from the immutable rows
+        // (`establishedTruthTier`), NOT from the derived `state`: a later
+        // refutation or contest lowers the state a record presents, and it
+        // must never lower the authority needed to retire that record.
+        const tier = establishedTruthTier(predecessor, graph);
+        if (tier !== null) {
+          const gate = this.#assertApprovalAuthority(
+            input.requestedBy,
+            `supersede ${tier} truth record ${supersedes}`,
+          );
+          if (gate && !gate.ok) {
+            refusal = gate.error;
+            return;
+          }
+        }
+      }
+      const id = uuid();
+      const at = nowIso();
+      this.#db
+        .prepare(
+          `INSERT INTO hq_truth_records (id, entity_kind, entity_id, statement, born_state, recorded_by,
+             recorded_at, evidence_refs, privacy, supersedes, idempotency_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.entityKind,
+          entityId.value,
+          statement.value,
+          bornState,
+          input.requestedBy,
+          at,
+          JSON.stringify(evidenceRefs.value),
+          privacy,
+          supersedes,
+          idempotencyKey,
+        );
+      const insertRelation = this.#db.prepare(
+        `INSERT INTO hq_truth_relations (id, from_id, kind, to_kind, to_id, recorded_by, recorded_at)
+         VALUES (?, ?, ?, 'truth', ?, ?, ?)`,
+      );
+      for (const toId of supports.value) insertRelation.run(uuid(), id, 'supports', toId, input.requestedBy, at);
+      for (const toId of contradicts.value) {
+        insertRelation.run(uuid(), id, 'contradicts', toId, input.requestedBy, at);
+      }
+      for (const toId of derivedFrom.value) {
+        insertRelation.run(uuid(), id, 'derived_from', toId, input.requestedBy, at);
+      }
+      if (supersedes) insertRelation.run(uuid(), id, 'supersedes', supersedes, input.requestedBy, at);
+      recordedId = id;
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `truth:${id}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `Truth ${bornState}: ${input.entityKind} ${entityId.value}`,
+        detail: { bornState, entityKind: input.entityKind, entityId: entityId.value, supersedes },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'truth_recorded',
+        payload: {
+          truthId: id,
+          bornState,
+          entityKind: input.entityKind,
+          entityId: entityId.value,
+          evidenceRefs: evidenceRefs.value,
+          supersedes,
+          contradicts: contradicts.value,
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    if (dedupedTo) return ok({ record: this.#deriveTruthById(dedupedTo)!, deduplicated: true });
+    return ok({ record: this.#deriveTruthById(recordedId!)!, deduplicated: false });
+  }
+
+  /**
+   * Record one VERIFICATION over an existing truth record — the only way a
+   * `claimed`/`observed` record becomes `verified` (derived: at least one
+   * `confirmed` verdict and no `refuted` one).
+   *
+   * Real verification authority: the actor must resolve (worker or human)
+   * and hold `hq.truth_verify` from its registry, the capability trio must
+   * be intact, and the actor must NOT be the one who recorded the target —
+   * a claim never verifies itself, and its author never verifies it. Every
+   * verification carries verifier, target, method, evidence refs (which
+   * must exist), timestamp, verdict and stated limitations. A `refuted`
+   * verdict never erases anything: the record stays, visibly refuted.
+   */
+  verifyTruth(input: {
+    truthId: string;
+    method: VerificationMethod;
+    verdict: VerificationVerdict;
+    evidenceRefs: string[];
+    limitations: string;
+    requestedBy: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ verification: TruthVerificationView; record: TruthRecordView; deduplicated: boolean }> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    const truthId = input.truthId?.trim() ?? '';
+    if (!truthId) return fail('invalid_input', 'truthId is required');
+    if (!isVerificationMethod(input.method)) {
+      return fail('invalid_input', `method must be one of: ${VERIFICATION_METHODS.join(', ')}`);
+    }
+    if (!isVerificationVerdict(input.verdict)) {
+      return fail('invalid_input', `verdict must be one of: ${VERIFICATION_VERDICTS.join(', ')}`);
+    }
+    const evidenceRefs = truthIdList('evidenceRefs', input.evidenceRefs);
+    if (!evidenceRefs.ok) return fail('invalid_input', evidenceRefs.message);
+    if (evidenceRefs.value.length === 0) {
+      return fail('invalid_input', 'a verification must reference at least one existing evidence entry');
+    }
+    const limitations = missionText('limitations', input.limitations, MAX_VERIFICATION_LIMITATIONS_LENGTH, true);
+    if (!limitations.ok) {
+      return fail(
+        'invalid_input',
+        `${limitations.message} — every verification states its limitations; write "none known" if that is the honest answer`,
+      );
+    }
+
+    const refusedActor = this.#resolveTruthActor(input.requestedBy, 'verify truth', TRUTH_VERIFY_CAPABILITY.id);
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#truthVerifyCapabilityGate('verify truth');
+    if (refusedCapability) return refusedCapability;
+    if (!this.#truthStorePresent) return fail('invalid_input', 'truth store unavailable on this database handle');
+    try {
+      assertNoSecretLikeContent({ limitations: limitations.value });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+
+    const idempotencyKey = truthVerificationIdempotencyKey({
+      verifiedBy: input.requestedBy,
+      truthId,
+      method: input.method,
+      verdict: input.verdict,
+      evidenceRefs: evidenceRefs.value,
+      limitations: limitations.value!,
+      idempotencyKey: input.idempotencyKey ?? null,
+    });
+
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let dedupedTo: string | null = null;
+    let verificationId: string | null = null;
+    privileged.reserve(() => {
+      const target = this.#db.prepare(`SELECT * FROM hq_truth_records WHERE id = ?`).get(truthId) as
+        | Record<string, unknown>
+        | undefined;
+      if (!target) {
+        refusal = { code: 'unknown_truth', message: `Unknown truth record: ${truthId}` };
+        return;
+      }
+      const existing = this.#db
+        .prepare(`SELECT id FROM hq_truth_verifications WHERE idempotency_key = ?`)
+        .get(idempotencyKey) as { id: string } | undefined;
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      if ((target.recorded_by as string) === input.requestedBy) {
+        refusal = {
+          code: 'not_permitted',
+          message: `${input.requestedBy} recorded truth record ${truthId} and cannot verify it: a claim never upgrades itself`,
+          details: { actor: input.requestedBy },
+        };
+        return;
+      }
+      const successor = this.#db
+        .prepare(`SELECT id FROM hq_truth_records WHERE supersedes = ?`)
+        .get(truthId) as { id: string } | undefined;
+      if (successor) {
+        refusal = {
+          code: 'truth_conflict',
+          message: `Truth record ${truthId} is superseded by ${successor.id}; verify the current record instead`,
+        };
+        return;
+      }
+      const missingEvidence = this.#missingEvidenceIds(evidenceRefs.value);
+      if (missingEvidence.length > 0) {
+        refusal = {
+          code: 'unknown_evidence',
+          message: `Unknown evidence id(s): ${missingEvidence.join(', ')} — a verification may only reference evidence that exists`,
+          details: { missing: missingEvidence },
+        };
+        return;
+      }
+      const id = uuid();
+      const at = nowIso();
+      this.#db
+        .prepare(
+          `INSERT INTO hq_truth_verifications (id, truth_id, verified_by, at, method, verdict, evidence_refs,
+             limitations, idempotency_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          truthId,
+          input.requestedBy,
+          at,
+          input.method,
+          input.verdict,
+          JSON.stringify(evidenceRefs.value),
+          limitations.value,
+          idempotencyKey,
+        );
+      this.#db
+        .prepare(
+          `INSERT INTO hq_truth_relations (id, from_id, kind, to_kind, to_id, recorded_by, recorded_at)
+           VALUES (?, ?, 'verified_by', 'verification', ?, ?, ?)`,
+        )
+        .run(uuid(), truthId, id, input.requestedBy, at);
+      verificationId = id;
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `truth:${truthId}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `Truth verification ${input.verdict}: ${truthId}`,
+        detail: { verificationId: id, method: input.method, verdict: input.verdict },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'truth_verified',
+        payload: {
+          truthId,
+          verificationId: id,
+          method: input.method,
+          verdict: input.verdict,
+          evidenceRefs: evidenceRefs.value,
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    const record = this.#deriveTruthById(truthId)!;
+    const id = dedupedTo ?? verificationId!;
+    return ok({
+      verification: record.verifications.find((v) => v.id === id)!,
+      record,
+      deduplicated: dedupedTo !== null,
+    });
+  }
+
+  /**
+   * Founder ACCEPTANCE of a verified truth record — the only way a record
+   * becomes `accepted`, and an explicit Founder-gated act on the canonical
+   * mechanics (nothing parallel):
+   *
+   * - `#assertApprovalAuthority`: the SAME positive Founder gate approve/deny
+   *   and the kill switch use — a registered, active human principal holding
+   *   approval authority; workers, `system` and unknown ids refused, audited;
+   * - `expectedDigest`: the approve-route rule — the Founder accepts exactly
+   *   the basis the console showed; a moved basis refuses before any row;
+   * - independence: the acceptor is neither the record's author nor any of
+   *   its confirming verifiers (the requester-cannot-approve rule);
+   * - the record must be exactly `verified` (derived through the PRIVATE
+   *   enforcement-safe read, never a public projection), current, and free
+   *   of unresolved contradictions — a contested record is refused, so the
+   *   Founder resolves the contradiction explicitly rather than by accepting
+   *   one side while the other still stands;
+   * - an acceptance already on file deduplicates (same acceptor) or conflicts
+   *   (another) ONLY while it still stands (`acceptanceStanding`); once a
+   *   later refutation, supersession or contest lowered it, the request is
+   *   judged on the record's current standing through the same ladder and
+   *   refused there — "it was accepted before" is never a shortcut, and the
+   *   engine's one-acceptance index means no second row can ever exist;
+   * - the route additionally demands STEP-UP (live/control-api.ts).
+   *
+   * Acceptance executes nothing: no task, approval row, claim or dispatch is
+   * touched, and no gate reads the acceptance to decide anything.
+   */
+  acceptTruth(input: {
+    truthId: string;
+    expectedDigest: string;
+    note?: string;
+    requestedBy: string;
+  }): OpsResult<{ acceptance: TruthAcceptanceView; record: TruthRecordView; deduplicated: boolean }> {
+    const truthId = input.truthId?.trim() ?? '';
+    if (!truthId) return fail('invalid_input', 'truthId is required');
+    const gate = this.#assertApprovalAuthority(input.requestedBy, 'accept a truth record');
+    if (gate) return gate;
+    if (!this.#truthStorePresent) return fail('invalid_input', 'truth store unavailable on this database handle');
+    const note = missionText('note', input.note, MAX_ACCEPTANCE_NOTE_LENGTH, false);
+    if (!note.ok) return fail('invalid_input', note.message);
+    if (note.value) {
+      try {
+        assertNoSecretLikeContent({ note: note.value });
+      } catch {
+        return fail(
+          'invalid_input',
+          'The acceptance note looks like it contains a credential. Notes are stored permanently, so nothing was accepted.',
+        );
+      }
+    }
+
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let dedupedTo: string | null = null;
+    let acceptanceId: string | null = null;
+    privileged.reserve(() => {
+      // Re-derived INSIDE the write lock through the private path: the
+      // decision below reads canonical rows, never a public read surface.
+      const view = this.#deriveTruthById(truthId);
+      if (!view) {
+        refusal = { code: 'unknown_truth', message: `Unknown truth record: ${truthId}` };
+        return;
+      }
+      const prior = view.acceptances[0];
+      if (prior && view.acceptanceStanding === 'standing') {
+        if (prior.acceptedBy === input.requestedBy) {
+          dedupedTo = prior.id;
+          return;
+        }
+        refusal = {
+          code: 'truth_conflict',
+          message: `Truth record ${truthId} is already accepted by ${prior.acceptedBy}; acceptance is one explicit act, never repeated`,
+        };
+        return;
+      }
+      // An acceptance that no longer STANDS (a later refutation, supersession
+      // or contest) is never a shortcut: the request falls through to the
+      // ordinary ladder below and is refused on the record's CURRENT
+      // standing — one status per cause, exactly as a never-accepted record
+      // in the same shape — never answered "already accepted".
+      if (view.lifecycle === 'superseded') {
+        refusal = {
+          code: 'truth_conflict',
+          message: `Truth record ${truthId} is superseded by ${view.supersededBy}; a superseded record cannot be accepted`,
+        };
+        return;
+      }
+      if (view.state !== 'verified') {
+        refusal = {
+          code: 'truth_not_verified',
+          message:
+            `Truth record ${truthId} is ${view.state} (verification: ${view.verification}); ` +
+            'only a verified record can be accepted, and nothing here verifies it',
+          details: { state: view.state, verification: view.verification, acceptanceStanding: view.acceptanceStanding },
+        };
+        return;
+      }
+      if (view.contested) {
+        refusal = {
+          code: 'truth_contested',
+          message:
+            `Truth record ${truthId} has an unresolved contradiction with ` +
+            `${view.contradictions
+              .filter((c) => c.resolution === 'unresolved')
+              .map((c) => c.withId)
+              .join(', ')}; resolve it explicitly (supersede or refute) before accepting`,
+        };
+        return;
+      }
+      if (view.recordedBy === input.requestedBy) {
+        refusal = {
+          code: 'not_permitted',
+          message: `${input.requestedBy} recorded truth record ${truthId} and cannot accept it`,
+          details: { actor: input.requestedBy },
+        };
+        return;
+      }
+      const confirming = view.verifications.filter((v) => v.verdict === 'confirmed');
+      if (confirming.some((v) => v.verifiedBy === input.requestedBy)) {
+        refusal = {
+          code: 'not_permitted',
+          message: `${input.requestedBy} verified truth record ${truthId} and cannot also accept it: verification and acceptance are separate authorities`,
+          details: { actor: input.requestedBy },
+        };
+        return;
+      }
+      if (prior) {
+        // Unreachable by derivation (a degraded acceptance always fails one of
+        // the checks above) and closed by the engine's one-acceptance index
+        // regardless; stated so no future reordering can insert a second row.
+        refusal = {
+          code: 'truth_conflict',
+          message: `Truth record ${truthId} already carries an acceptance by ${prior.acceptedBy} (standing: ${view.acceptanceStanding}); acceptance is one explicit act, never repeated`,
+        };
+        return;
+      }
+      if (!input.expectedDigest || input.expectedDigest !== view.acceptanceDigest) {
+        privileged.appendEvidence({
+          actor: input.requestedBy,
+          kind: 'truth_acceptance_refused_basis_changed',
+          payload: { truthId, expected: input.expectedDigest ?? null, current: view.acceptanceDigest },
+        });
+        refusal = {
+          code: 'action_digest_mismatch',
+          message: `Truth record ${truthId}: the verification basis changed since it was presented; nothing was accepted`,
+          details: { expected: input.expectedDigest ?? null, current: view.acceptanceDigest },
+        };
+        return;
+      }
+      const id = uuid();
+      const at = nowIso();
+      this.#db
+        .prepare(
+          `INSERT INTO hq_truth_acceptances (id, truth_id, accepted_by, at, digest, verification_ids, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          truthId,
+          input.requestedBy,
+          at,
+          view.acceptanceDigest,
+          JSON.stringify(confirming.map((v) => v.id)),
+          note.value,
+        );
+      this.#db
+        .prepare(
+          `INSERT INTO hq_truth_relations (id, from_id, kind, to_kind, to_id, recorded_by, recorded_at)
+           VALUES (?, ?, 'accepted_by', 'acceptance', ?, ?, ?)`,
+        )
+        .run(uuid(), truthId, id, input.requestedBy, at);
+      acceptanceId = id;
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `truth:${truthId}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `Truth accepted: ${truthId}`,
+        detail: { acceptanceId: id, digest: view.acceptanceDigest },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'truth_accepted',
+        payload: {
+          truthId,
+          acceptanceId: id,
+          digest: view.acceptanceDigest,
+          verificationIds: confirming.map((v) => v.id),
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    const record = this.#deriveTruthById(truthId)!;
+    const id = dedupedTo ?? acceptanceId!;
+    return ok({
+      acceptance: record.acceptances.find((a) => a.id === id)!,
+      record,
+      deduplicated: dedupedTo !== null,
+    });
+  }
+
+  /** One record's derived view, or null (including over a pre-Phase-7 read-only file). */
+  getTruthRecord(id: string): TruthRecordView | null {
+    if (!id || !this.#truthStorePresent) return null;
+    return this.#deriveTruthById(id);
+  }
+
+  /**
+   * Every truth record, newest first, with its derived state. Privacy is NOT
+   * filtered here (the memory rule): the Founder-gated route may show
+   * founder_only, the snapshot artifact excludes it — each reading layer
+   * enforces its own disclosure.
+   */
+  listTruth(filter?: {
+    entityKind?: TruthEntityKind;
+    entityId?: string;
+    state?: TruthState;
+    lifecycle?: 'current' | 'superseded';
+  }): TruthRecordView[] {
+    if (!this.#truthStorePresent) return [];
+    let views = [...this.#deriveAllTruth(loadTruthGraph(this.#db)).values()];
+    if (filter?.entityKind) views = views.filter((v) => v.entityKind === filter.entityKind);
+    if (filter?.entityId) views = views.filter((v) => v.entityId === filter.entityId);
+    if (filter?.state) views = views.filter((v) => v.state === filter.state);
+    if (filter?.lifecycle) views = views.filter((v) => v.lifecycle === filter.lifecycle);
+    return views.sort((a, b) => b.seq - a.seq);
+  }
+
+  /**
+   * Entity truth: the current records, the full history (oldest first,
+   * bounded with the true total), the headline state and every unresolved
+   * contradiction touching the entity. Read-time composition; writes nothing.
+   */
+  getEntityTruth(
+    entityKind: TruthEntityKind,
+    entityId: string,
+    options: { limit?: number } = {},
+  ): OpsResult<EntityTruthView> {
+    if (!isTruthEntityKind(entityKind)) {
+      return fail('invalid_input', `entityKind must be one of: ${TRUTH_ENTITY_KINDS.join(', ')}`);
+    }
+    if (!entityId) return fail('invalid_input', 'entityId is required');
+    if (!this.#truthSubject(entityKind, entityId).exists) {
+      return fail('unknown_entity', `Unknown ${entityKind}: ${entityId}`, { entityKind, entityId });
+    }
+    const at = nowIso();
+    const limit = options.limit ?? TRUTH_SNAPSHOT_LIMIT;
+    const graph = this.#truthStorePresent ? loadTruthGraph(this.#db) : emptyTruthGraph();
+    const all = this.#deriveAllTruth(graph);
+    const history = [...all.values()]
+      .filter((v) => v.entityKind === entityKind && v.entityId === entityId)
+      .sort((a, b) => a.seq - b.seq);
+    const current = history.filter((v) => v.lifecycle === 'current');
+    const ids = new Set(history.map((v) => v.id));
+    const unresolved = listContradictions(graph, (id) => all.get(id) ?? null).filter(
+      (pair) => pair.resolution === 'unresolved' && (ids.has(pair.a) || ids.has(pair.b)),
+    );
+    return ok({
+      entityKind,
+      entityId,
+      currentState: entityCurrentState(current),
+      current,
+      history: history.slice(Math.max(0, history.length - limit)),
+      total: history.length,
+      truncated: history.length > limit,
+      unresolvedContradictions: unresolved,
+      provenance: {
+        mode: 'live',
+        source:
+          'hq_truth_records / hq_truth_verifications / hq_truth_acceptances / hq_truth_relations via ' +
+          'HeadquarterOperations (derived projection; evidence ids reference op_evidence)',
+        asOf: at,
+      },
+    });
+  }
+
+  /** Every stated contradiction, judged — unresolved ones stay visible here until an explicit act settles them. */
+  listTruthContradictions(): TruthContradictionPair[] {
+    if (!this.#truthStorePresent) return [];
+    const graph = loadTruthGraph(this.#db);
+    const all = this.#deriveAllTruth(graph);
+    return listContradictions(graph, (id) => all.get(id) ?? null);
+  }
+
+  /**
+   * The bounded snapshot view. The reading layer's privacy decision is made
+   * by the caller (`includeFounderOnly`); withheld rows stay in `total` and
+   * are counted in `withheldFounderOnly`, and NOTHING else is aggregated over
+   * them (review round 2): `byState`, `unresolvedContradictions` and
+   * `awaitingAcceptance` span the set the reader may see, so arithmetic on
+   * the artifact discloses no categorical fact about a private record.
+   */
+  truthSummary(options: { includeFounderOnly: boolean; limit?: number }): TruthSnapshotView {
+    const limit = options.limit ?? TRUTH_SNAPSHOT_LIMIT;
+    const all = this.listTruth();
+    const founderOnlyIds = new Set(all.filter((v) => v.privacy === 'founder_only').map((v) => v.id));
+    const isFounderOnly = (id: string) => founderOnlyIds.has(id);
+    const visible = options.includeFounderOnly ? all : all.filter((v) => !isFounderOnly(v.id));
+    // A carried PUBLIC record still names its founder_only counterparts by id
+    // through its relations; for a reader without the Founder gate those ids
+    // are withheld too (and counted), never just the records.
+    let withheldRelations = 0;
+    const carried = visible.slice(0, limit).map((view) => {
+      if (options.includeFounderOnly) return view;
+      const projected = withholdFounderOnlyRelations(view, isFounderOnly);
+      withheldRelations += projected.withheld;
+      return projected.view;
+    });
+    // Aggregates over the FULL visible set (not the carried page), never over
+    // withheld rows.
+    const byState: Record<TruthState, number> = { claimed: 0, observed: 0, verified: 0, accepted: 0 };
+    let awaitingAcceptance = 0;
+    for (const view of visible) {
+      // The CURRENT derived state: an acceptance that no longer stands is
+      // counted under what the record derives now, never under `accepted`.
+      byState[view.state] += 1;
+      // Verified, current and uncontested — exactly the records the server
+      // issued an acceptance digest for. A degraded acceptance never gets one.
+      if (view.acceptanceDigest !== null) awaitingAcceptance += 1;
+    }
+    const unresolved = this.listTruthContradictions().filter((pair) => {
+      if (pair.resolution !== 'unresolved') return false;
+      if (options.includeFounderOnly) return true;
+      return !isFounderOnly(pair.a) && !isFounderOnly(pair.b);
+    });
+    return {
+      total: all.length,
+      byState,
+      unresolvedContradictions: unresolved.length,
+      awaitingAcceptance,
+      withheldFounderOnly: all.length - visible.length,
+      withheldFounderOnlyRelations: withheldRelations,
+      records: carried,
+      contradictions: unresolved.slice(0, limit),
+    };
+  }
+
+  /** Whether this database carries the Phase 7 truth schema (false only for a read-only pre-Phase-7 file). */
+  truthStorePresent(): boolean {
+    return this.#truthStorePresent;
+  }
+
+  /**
+   * Actor resolution for the two truth capabilities. Unlike the Founder-gate
+   * trio, a WORKER may hold these (a reviewer worker verifies a builder's
+   * claim) — but only through its directory grant, never by self-assertion,
+   * and `system` is refused outright because an unattributed truth act is
+   * exactly the fabrication this phase exists to make impossible.
+   */
+  #resolveTruthActor(actor: string, action: string, capabilityId: string): OpsResult<never> | null {
+    if (!actor) return fail('invalid_input', `An actor is required to ${action}`);
+    if (actor === 'system') {
+      return fail('not_permitted', `'system' cannot ${action}: a resolved worker or human principal is required`);
+    }
+    const resolved = this.#resolveRequester(actor, action);
+    if (!resolved.ok) return resolved;
+    if (!resolved.data.allowedCapabilities.includes(capabilityId)) {
+      return fail(
+        'not_permitted',
+        `${actor} may not ${action}: ${
+          resolved.data.kind === 'worker' ? 'the worker directory grants' : 'the principal holds'
+        } no ${capabilityId}`,
+        { actor },
+      );
+    }
+    return null;
+  }
+
+  #truthRecordCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      TRUTH_RECORD_CAPABILITY.id,
+      truthRecordCapabilityState,
+      truthRecordContractDrift,
+      'recording truth',
+    );
+  }
+
+  #truthVerifyCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      TRUTH_VERIFY_CAPABILITY.id,
+      truthVerifyCapabilityState,
+      truthVerifyContractDrift,
+      'verifying truth',
+    );
+  }
+
+  /** Which of these ids name no op_evidence entry. Reads the canonical chain table directly. */
+  #missingEvidenceIds(ids: readonly string[]): string[] {
+    const probe = this.#db.prepare(`SELECT 1 FROM op_evidence WHERE id = ?`);
+    return ids.filter((id) => probe.get(id) === undefined);
+  }
+
+  /**
+   * Does the subject exist, and is it founder_only (memory)? Reads the
+   * canonical tables directly; a store absent on a read-only handle answers
+   * "does not exist" truthfully rather than throwing at the first prepare.
+   */
+  #truthSubject(kind: TruthEntityKind, id: string): { exists: boolean; founderOnly: boolean; updatedAt: string | null; superseded: boolean } {
+    const none = { exists: false, founderOnly: false, updatedAt: null, superseded: false };
+    switch (kind) {
+      case 'mission': {
+        if (!this.#missionStorePresent) return none;
+        const row = this.#db.prepare(`SELECT updated_at FROM hq_missions WHERE id = ?`).get(id) as
+          | { updated_at: string }
+          | undefined;
+        return row ? { exists: true, founderOnly: false, updatedAt: row.updated_at, superseded: false } : none;
+      }
+      case 'project': {
+        if (!this.#projectStorePresent) return none;
+        const row = this.#db.prepare(`SELECT updated_at FROM hq_projects WHERE id = ?`).get(id) as
+          | { updated_at: string }
+          | undefined;
+        return row ? { exists: true, founderOnly: false, updatedAt: row.updated_at, superseded: false } : none;
+      }
+      case 'task': {
+        const row = this.#db.prepare(`SELECT updated_at FROM op_tasks WHERE id = ?`).get(id) as
+          | { updated_at: string }
+          | undefined;
+        return row ? { exists: true, founderOnly: false, updatedAt: row.updated_at, superseded: false } : none;
+      }
+      case 'memory': {
+        if (!this.#memoryStorePresent) return none;
+        const row = this.#db.prepare(`SELECT privacy, status FROM hq_memory WHERE id = ?`).get(id) as
+          | { privacy: string; status: string }
+          | undefined;
+        return row
+          ? { exists: true, founderOnly: row.privacy === 'founder_only', updatedAt: null, superseded: row.status !== 'CURRENT' }
+          : none;
+      }
+      case 'worker':
+        return this.#db.prepare(`SELECT 1 FROM hq_specialists WHERE id = ?`).get(id) !== undefined
+          ? { exists: true, founderOnly: false, updatedAt: null, superseded: false }
+          : none;
+      case 'capability':
+        return this.#db.prepare(`SELECT 1 FROM op_capabilities WHERE id = ?`).get(id) !== undefined
+          ? { exists: true, founderOnly: false, updatedAt: null, superseded: false }
+          : none;
+    }
+  }
+
+  /** Categorical staleness of a record against its subject's canonical row. Never a tie-breaker. */
+  #truthSubjectDrift(record: TruthRecordRow): SubjectDrift {
+    const subject = this.#truthSubject(record.entityKind, record.entityId);
+    if (!subject.exists) return 'subject_missing';
+    if (subject.superseded) return 'subject_superseded';
+    if (subject.updatedAt == null) return 'not_evaluated';
+    return subject.updatedAt > record.recordedAt ? 'subject_changed_since_record' : 'none';
+  }
+
+  /** Derive every record in the graph once — the one implementation every read and every gate shares. */
+  #deriveAllTruth(graph: TruthGraph): Map<string, TruthRecordView> {
+    const out = new Map<string, TruthRecordView>();
+    for (const record of graph.records) {
+      out.set(record.id, deriveTruthRecord(record, graph, this.#truthSubjectDrift(record)));
+    }
+    return out;
+  }
+
+  /**
+   * PRIVATE, enforcement-safe derivation of one record — reads canonical rows
+   * through `#db` and the module's pure function only. `acceptTruth` decides
+   * on THIS; the public `getTruthRecord` merely calls it, so patching the
+   * public surface changes what the patcher sees and nothing that is decided.
+   */
+  #deriveTruthById(id: string): TruthRecordView | null {
+    const graph = loadTruthGraph(this.#db);
+    const record = graph.records.find((r) => r.id === id);
+    if (!record) return null;
+    return deriveTruthRecord(record, graph, this.#truthSubjectDrift(record));
+  }
+
+  // ---- Phase 8: authority + risk + external action gateway ----
+
+  /**
+   * Propose one external action against a canonical task — the ONLY way an
+   * action intent comes into existence. Executes nothing.
+   *
+   * The proposer must resolve (worker or human, never `system`) and hold the
+   * task's capability from its own registry. The adapter and action type must
+   * be ones this deployment was constructed with; the provider the task is
+   * bound to must be the provider the adapter executes as (no substitution,
+   * decided here and again at execution); every context ref must name a real
+   * `op_evidence` entry or `hq_truth_records` row (referenced, never copied,
+   * and never granting anything). Risk is assessed by the one deterministic
+   * function from the CANONICAL capability row and the adapter's declared
+   * contract — the proposer's inputs can only escalate it.
+   */
+  proposeAction(input: {
+    taskId: string;
+    adapterId: string;
+    actionType: string;
+    target: string;
+    payload: Record<string, unknown>;
+    missionId?: string;
+    risk?: ActionRiskEscalations;
+    contextEvidenceRefs?: string[];
+    contextTruthRefs?: string[];
+    /** Resolved actor id. Set by the boundary, never read from a body. */
+    requestedBy: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ action: ActionView; deduplicated: boolean }> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    const taskId = input.taskId?.trim() ?? '';
+    if (!taskId) return fail('invalid_input', 'taskId is required');
+    const adapterId = input.adapterId?.trim() ?? '';
+    const actionType = input.actionType?.trim() ?? '';
+    if (!adapterId || !actionType || !ACTION_TYPE_PATTERN.test(actionType)) {
+      return fail('invalid_input', 'adapterId and a well-formed actionType are required');
+    }
+    const target = missionText('target', input.target, MAX_ACTION_TARGET_LENGTH, true);
+    if (!target.ok) return fail('invalid_input', target.message);
+    if (input.payload == null || typeof input.payload !== 'object' || Array.isArray(input.payload)) {
+      return fail('invalid_input', 'payload must be a plain object');
+    }
+    const payloadJson = canonicalJson(input.payload);
+    if (payloadJson.length > MAX_ACTION_PAYLOAD_CHARS) {
+      return fail('invalid_input', `payload exceeds ${MAX_ACTION_PAYLOAD_CHARS} canonical characters`);
+    }
+    // BOTH guards, deliberately: the evidence heuristic catches `token: value`
+    // in free text, and the browser guard's KEY rule catches `{ token: '…' }`
+    // as a field — which the JSON encoding hides from the first pattern. The
+    // payload is stored permanently and handed verbatim to an adapter.
+    try {
+      assertNoSecretLikeContent(input.payload);
+      assertBrowserSafe(input.payload, 'payload');
+      assertBrowserSafe({ target: target.value }, 'target');
+    } catch {
+      return fail(
+        'invalid_input',
+        'The action payload or target looks like it contains a credential. An action intent is stored permanently and its digest travels to the browser, so nothing was proposed.',
+      );
+    }
+    const escalations = input.risk ?? {};
+    for (const key of ['productionScope', 'spend', 'credentialSensitivity', 'legalCompliance'] as const) {
+      if (escalations[key] !== undefined && typeof escalations[key] !== 'boolean') {
+        return fail('invalid_input', `risk.${key} must be a boolean`);
+      }
+    }
+    if (escalations.blastRadius !== undefined && !isActionBlastRadius(escalations.blastRadius)) {
+      return fail('invalid_input', 'risk.blastRadius must be single, many or system');
+    }
+    const evidenceRefs = memoryList('contextEvidenceRefs', input.contextEvidenceRefs, 200);
+    if (!evidenceRefs.ok) return fail('invalid_input', evidenceRefs.message);
+    const truthRefs = memoryList('contextTruthRefs', input.contextTruthRefs, 200);
+    if (!truthRefs.ok) return fail('invalid_input', truthRefs.message);
+    if (evidenceRefs.value.length > MAX_ACTION_CONTEXT_REFS || truthRefs.value.length > MAX_ACTION_CONTEXT_REFS) {
+      return fail('invalid_input', `context refs are bounded to ${MAX_ACTION_CONTEXT_REFS} entries each`);
+    }
+    const missionId = input.missionId?.trim() || null;
+
+    // Identity first: an unknown actor learns nothing about which tasks exist.
+    const actor = this.#resolveActor(input.requestedBy, 'propose an external action');
+    if (!actor.ok) return actor;
+    if (!this.#actionStorePresent) return fail('invalid_input', 'action ledger unavailable on this database handle');
+
+    const task = this.#taskRowFromStore(taskId);
+    if (!task) return fail('unknown_task', `Unknown task: ${taskId}`);
+    if (!actor.data.allowedCapabilities.includes(task.capabilityId)) {
+      return fail(
+        'not_permitted',
+        `${input.requestedBy} may not propose an external action for ${task.capabilityId}: ${
+          actor.data.kind === 'worker' ? 'the worker directory grants' : 'the principal holds'
+        } no such capability`,
+        { actor: input.requestedBy, capabilityId: task.capabilityId },
+      );
+    }
+    if (task.status === 'completed' || task.status === 'blocked') {
+      return fail(
+        'task_not_executing',
+        `Task ${taskId} is ${task.status}; no external action can be proposed for it`,
+        { status: task.status },
+      );
+    }
+    const adapter = this.#actionAdapters.get(adapterId);
+    if (!adapter) return fail('unknown_adapter', `Unknown external-action adapter: ${adapterId}`);
+    const contract = adapter.actions[actionType];
+    if (!contract) {
+      return fail('unknown_adapter', `Adapter ${adapterId} declares no action type ${actionType}`, { adapterId });
+    }
+    const cap = this.#capabilityFromStore(task.capabilityId);
+    if (!cap) return fail('unknown_capability', `Unknown capability: ${task.capabilityId}`);
+    if (!cap.enabled) return fail('capability_disabled', `Capability ${cap.id} is disabled`);
+
+    const binding = readProviderBinding(task.payload);
+    if (binding.bound && binding.provider == null) {
+      return fail('provider_binding_mismatch', `Task ${taskId} declares a malformed executionProvider; nobody may act on it`);
+    }
+    if (binding.bound && adapter.provider !== binding.provider) {
+      return fail(
+        'provider_binding_mismatch',
+        `Task ${taskId} is bound to provider ${binding.provider} and adapter ${adapterId} executes as ${
+          adapter.provider ?? 'no provider (local)'
+        }. No substitution is made.`,
+        { requiredProvider: binding.provider, adapterProvider: adapter.provider },
+      );
+    }
+    const providerId = binding.bound ? binding.provider : adapter.provider;
+    const dispatched = this.#claudeDispatchState(taskId);
+    if (dispatched !== 'none') {
+      return fail(
+        'duplicate_external_action',
+        `Task ${taskId} was already handed to the Claude GitHub dispatch lane (${dispatched}); one canonical task has one external execution path`,
+        { dispatch: dispatched },
+      );
+    }
+    if (missionId) {
+      const mission = this.#missionStatusFromStore(missionId);
+      if (!mission) return fail('unknown_mission', `Unknown mission: ${missionId}`);
+      if (isMissionTerminal(mission.status) || mission.status === 'blocked') {
+        return fail('mission_not_active', `Mission ${missionId} is ${mission.status}; it directs no external action`, {
+          status: mission.status,
+        });
+      }
+      const linked = this.#db
+        .prepare(`SELECT 1 FROM hq_mission_plan_items WHERE mission_id = ? AND task_id = ?`)
+        .get(missionId, taskId);
+      if (!linked) {
+        return fail('invalid_input', `Task ${taskId} is not linked to a plan item of mission ${missionId}`);
+      }
+    }
+    const missingEvidence = this.#missingEvidenceIds(evidenceRefs.value);
+    if (missingEvidence.length > 0) {
+      return fail('unknown_evidence', `Unknown evidence id(s): ${missingEvidence.join(', ')}`, { missing: missingEvidence });
+    }
+    if (truthRefs.value.length > 0) {
+      const probe = this.#truthStorePresent ? this.#db.prepare(`SELECT 1 FROM hq_truth_records WHERE id = ?`) : null;
+      const missingTruth = truthRefs.value.filter((id) => probe == null || probe.get(id) === undefined);
+      if (missingTruth.length > 0) {
+        return fail('unknown_truth', `Unknown truth record(s): ${missingTruth.join(', ')}`, { missing: missingTruth });
+      }
+    }
+
+    const risk = assessActionRisk({
+      capability: { riskClass: cap.riskClass, sideEffect: cap.sideEffect },
+      contract,
+      escalations: {
+        productionScope: escalations.productionScope === true,
+        spend: escalations.spend === true,
+        credentialSensitivity: escalations.credentialSensitivity === true,
+        legalCompliance: escalations.legalCompliance === true,
+        blastRadius: escalations.blastRadius,
+      },
+    });
+    const payloadDigest = actionPayloadDigest(input.payload);
+    const effectBase = sideEffectKeyBase({ taskId, adapterId, actionType, target: target.value!, payloadDigest });
+
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    let createdId: string | null = null;
+    privileged.reserve(() => {
+      // The generation is part of the dedupe key: an identical proposal
+      // dedupes while the side effect's attempt stands, and derives a FRESH
+      // key only after a human reconciled that attempt as not executed.
+      const generation = sideEffectGeneration(this.#db, effectBase);
+      const idempotencyKey = actionIdempotencyKey({
+        requestedBy: input.requestedBy,
+        taskId,
+        adapterId,
+        actionType,
+        target: target.value!,
+        payloadDigest,
+        missionId,
+        idempotencyKey: input.idempotencyKey ?? null,
+      }) + `:g${generation}`;
+      const existing = this.#db
+        .prepare(`SELECT id FROM hq_action_intents WHERE idempotency_key = ?`)
+        .get(idempotencyKey) as { id: string } | undefined;
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      const id = `act-${uuid()}`;
+      const at = nowIso();
+      this.#db
+        .prepare(
+          `INSERT INTO hq_action_intents (id, task_id, mission_id, capability_id, provider_id, adapter_id, action_type,
+             target, payload, payload_digest, risk_level, risk_factors, visibility, reversibility, compensation,
+             context_evidence_refs, context_truth_refs, requested_by, requested_at, side_effect_key_base, idempotency_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          taskId,
+          missionId,
+          cap.id,
+          providerId,
+          adapterId,
+          actionType,
+          target.value,
+          payloadJson,
+          payloadDigest,
+          risk.level,
+          JSON.stringify(risk.factors),
+          contract.visibility,
+          contract.reversibility,
+          contract.compensation ? JSON.stringify(contract.compensation) : null,
+          JSON.stringify(evidenceRefs.value),
+          JSON.stringify(truthRefs.value),
+          input.requestedBy,
+          at,
+          effectBase,
+          idempotencyKey,
+        );
+      this.#appendActionEvent(id, 'proposed', input.requestedBy, at, {
+        riskLevel: risk.level,
+        riskFactors: risk.factors,
+        generation,
+      });
+      createdId = id;
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `action:${id}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `External action proposed: ${adapterId}/${actionType} for task ${taskId} (${risk.level})`,
+        detail: { taskId, adapterId, actionType, riskLevel: risk.level, missionId },
+      });
+      privileged.appendEvidence({
+        taskId,
+        actor: input.requestedBy,
+        kind: 'action_proposed',
+        payload: {
+          actionId: id,
+          adapterId,
+          actionType,
+          target: target.value,
+          payloadDigest,
+          providerId,
+          riskLevel: risk.level,
+          riskFactors: risk.factors,
+          reversibility: contract.reversibility,
+          compensationDeclared: contract.compensation != null,
+          contextEvidenceRefs: evidenceRefs.value,
+          contextTruthRefs: truthRefs.value,
+          executable: false,
+        },
+      });
+    });
+    if (dedupedTo) return ok({ action: this.#actionView(dedupedTo)!, deduplicated: true });
+    return ok({ action: this.#actionView(createdId!)!, deduplicated: false });
+  }
+
+  /**
+   * Record that CURRENT canonical truth admits this action — the `authorized`
+   * ledger event, written ONCE per action, carrying the exact snapshot the
+   * Intent Guard will compare at execution. It is a record of what canonical
+   * authority says right now, not a grant: every fact in it is re-derived
+   * from the database rows inside the write lock, and nothing here consults a
+   * patchable read.
+   *
+   * Only the worker holding the task's LIVE fenced claim may authorize (it is
+   * the identity that will execute); humans never execute and are refused.
+   */
+  authorizeAction(input: { actionId: string; workerId: string; fence: number; now?: Date }): OpsResult<{ action: ActionView }> {
+    const actionId = input.actionId?.trim() ?? '';
+    if (!actionId) return fail('invalid_input', 'actionId is required');
+    if (!input.workerId) return fail('invalid_input', 'workerId is required');
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    if (!this.#actionStorePresent) return fail('invalid_input', 'action ledger unavailable on this database handle');
+    const now = input.now ?? new Date();
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let taskId: string | null = null;
+    privileged.reserve(() => {
+      const intent = loadActionIntent(this.#db, actionId);
+      if (!intent) {
+        refusal = { code: 'unknown_action', message: `Unknown action: ${actionId}` };
+        return;
+      }
+      taskId = intent.taskId;
+      const state = deriveActionView(intent, loadActionEvents(this.#db, actionId)).state;
+      if (state !== 'proposed') {
+        refusal = {
+          code: 'action_state_conflict',
+          message: `Action ${actionId} is ${state}; authorization is written once, on a proposed action`,
+          details: { state },
+        };
+        return;
+      }
+      const gate = this.#gatewayGate(intent, input.workerId, input.fence, now);
+      if (!gate.ok) {
+        refusal = gate.error;
+        return;
+      }
+      const at = nowIso();
+      const digest = authorizationDigest(gate.snapshot);
+      this.#appendActionEvent(actionId, 'authorized', input.workerId, at, {
+        digest,
+        approvalId: gate.snapshot.approvalId,
+        snapshot: gate.snapshot,
+      });
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `action:${actionId}`,
+        status: null,
+        actor: input.workerId,
+        summary: `External action authorized: ${intent.adapterId}/${intent.actionType} (${intent.riskLevel})`,
+        detail: { taskId: intent.taskId, digest, approvalId: gate.snapshot.approvalId },
+      });
+      privileged.appendEvidence({
+        taskId: intent.taskId,
+        actor: input.workerId,
+        kind: 'action_authorized',
+        payload: {
+          actionId,
+          digest,
+          approvalId: gate.snapshot.approvalId,
+          taskActionDigest: gate.snapshot.taskActionDigest,
+          providerId: gate.snapshot.providerId,
+          adapterId: gate.snapshot.adapterId,
+          missionIntentSeq: gate.snapshot.missionIntentSeq,
+          riskLevel: gate.snapshot.riskLevel,
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return this.#refuseAction(actionId, taskId, 'authorize', refusal);
+    return ok({ action: this.#actionView(actionId)! });
+  }
+
+  /**
+   * Execute one authorized action through its adapter — the ONLY path in HQ
+   * that performs a gateway side effect.
+   *
+   * Three steps, and the boundaries between them are the whole design:
+   *
+   *   1. INSIDE one IMMEDIATE write transaction: the Intent Guard re-derives
+   *      the authorization snapshot from CURRENT canonical truth and refuses
+   *      on any drift (payload/task digest, provider/adapter, approval identity
+   *      or claim binding, mission intent version or status, capability
+   *      contract); the kill switches are read from the row; the durable
+   *      side-effect key is reserved by UNIQUE index; the `attempted` event is
+   *      committed. If this cannot be written, nothing is executed.
+   *   2. OUTSIDE the transaction: the adapter is called once. A throw is an
+   *      UNKNOWN outcome, not a failure.
+   *   3. INSIDE a second transaction: the terminal event. If it cannot be
+   *      written the attempt stays open — retry-blocked — and the caller is
+   *      told the outcome is unknown rather than handed a success no ledger
+   *      supports.
+   *
+   * An action whose last event is `attempted` or `outcome_unknown` is refused
+   * with `action_outcome_unknown`: an external side effect whose prior outcome
+   * is unknown is NEVER retried automatically. Reconciliation is the only way
+   * out, and it is a human act.
+   */
+  executeAction(input: {
+    actionId: string;
+    workerId: string;
+    fence: number;
+    now?: Date;
+  }): OpsResult<{ action: ActionView; outcome: 'succeeded' | 'failed' | 'outcome_unknown' }> {
+    const actionId = input.actionId?.trim() ?? '';
+    if (!actionId) return fail('invalid_input', 'actionId is required');
+    if (!input.workerId) return fail('invalid_input', 'workerId is required');
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    if (!this.#actionStorePresent) return fail('invalid_input', 'action ledger unavailable on this database handle');
+    const now = input.now ?? new Date();
+    const privileged = this.#requirePrivilegedQueue();
+
+    // ---- step 1: guard + reservation, atomically ----
+    let refusal: OpsError | null = null;
+    let reserved: {
+      intent: ActionIntentRow;
+      adapter: ExternalActionAdapter;
+      correlationId: string;
+      effectKey: string;
+      generation: number;
+    } | null = null;
+    let taskId: string | null = null;
+    try {
+      privileged.reserve(() => {
+        const intent = loadActionIntent(this.#db, actionId);
+        if (!intent) {
+          refusal = { code: 'unknown_action', message: `Unknown action: ${actionId}` };
+          return;
+        }
+        taskId = intent.taskId;
+        const view = deriveActionView(intent, loadActionEvents(this.#db, actionId));
+        if (view.state === 'attempted' || view.state === 'outcome_unknown') {
+          refusal = {
+            code: 'action_outcome_unknown',
+            message:
+              `Action ${actionId} has an external attempt whose outcome is ${
+                view.state === 'attempted' ? 'not yet recorded' : 'unknown'
+              } (correlation ${view.attempt?.correlationId ?? 'n/a'}). It is never retried automatically: ` +
+              'reconcile it explicitly after checking the external system.',
+            details: { state: view.state, correlationId: view.attempt?.correlationId ?? null },
+          };
+          return;
+        }
+        if (!stateAdmitsAttempt(view.state)) {
+          refusal = {
+            code: 'action_state_conflict',
+            message:
+              view.state === 'proposed'
+                ? `Action ${actionId} is proposed and not yet authorized; authorization is a separate recorded step`
+                : `Action ${actionId} is ${view.state}; a terminal action is never re-executed — propose a new one`,
+            details: { state: view.state },
+          };
+          return;
+        }
+        const gate = this.#gatewayGate(intent, input.workerId, input.fence, now);
+        if (!gate.ok) {
+          refusal = gate.error;
+          return;
+        }
+        // The Intent Guard proper: the authorized snapshot against the current one.
+        const authorizedEvent = loadActionEvents(this.#db, actionId).find((e) => e.state === 'authorized')!;
+        const authorizedSnapshot = authorizedEvent.detail.snapshot as AuthorizedSnapshot;
+        const drift = snapshotDrift(authorizedSnapshot, gate.snapshot);
+        if (drift.length > 0) {
+          refusal = this.#classifyDrift(actionId, drift);
+          return;
+        }
+        const generation = sideEffectGeneration(this.#db, intent.sideEffectKeyBase);
+        const effectKey = sideEffectKey(intent.sideEffectKeyBase, generation);
+        const holder = sideEffectHolder(this.#db, effectKey);
+        if (holder) {
+          refusal = {
+            code: 'duplicate_external_action',
+            message:
+              `The same external side effect (task ${intent.taskId}, ${intent.adapterId}/${intent.actionType} on ` +
+              `${intent.target}) was already attempted by action ${holder.actionId} at ${holder.at}. Not repeated.`,
+            details: { holderActionId: holder.actionId, attemptedAt: holder.at },
+          };
+          return;
+        }
+        const correlationId = `${actionId}#${generation}`;
+        const at = nowIso();
+        this.#appendActionEvent(
+          actionId,
+          'attempted',
+          input.workerId,
+          at,
+          { correlationId, generation, adapterId: gate.adapter.id, providerId: gate.snapshot.providerId },
+          effectKey,
+        );
+        this.#store.appendEvent({
+          subjectKind: 'system',
+          subjectId: `action:${actionId}`,
+          status: null,
+          actor: input.workerId,
+          summary: `External action attempted: ${intent.adapterId}/${intent.actionType} (${correlationId})`,
+          detail: { taskId: intent.taskId, correlationId, generation },
+        });
+        privileged.appendEvidence({
+          taskId: intent.taskId,
+          actor: input.workerId,
+          kind: 'action_attempted',
+          payload: {
+            actionId,
+            correlationId,
+            generation,
+            adapterId: gate.adapter.id,
+            providerId: gate.snapshot.providerId,
+            authorizationDigest: authorizationDigest(gate.snapshot),
+          },
+        });
+        reserved = { intent, adapter: gate.adapter, correlationId, effectKey, generation };
+      });
+    } catch (error) {
+      // A UNIQUE violation on the side-effect key is the engine refusing a
+      // concurrent duplicate — surfaced either by the index itself or, since
+      // the secondary-index guard, by the BEFORE INSERT trigger that fires
+      // first and names the key; anything else means the reservation could
+      // not be written, and an unrecorded guard is no guard — nothing executes.
+      const code = (error as { code?: string }).code;
+      const reservedByTrigger =
+        code === 'SQLITE_CONSTRAINT_TRIGGER' && errorMessage(error).includes('side_effect_key');
+      if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT' || reservedByTrigger) {
+        return this.#refuseAction(actionId, taskId, 'execute', {
+          code: 'duplicate_external_action',
+          message: 'The side-effect key was reserved concurrently by another attempt; nothing was executed.',
+        });
+      }
+      return fail('operator_rejected', `The attempt could not be recorded (${errorMessage(error)}); nothing was executed.`, {
+        actionId,
+      });
+    }
+    if (refusal) return this.#refuseAction(actionId, taskId, 'execute', refusal);
+    const run = reserved!;
+
+    // ---- step 2: the external call, exactly once ----
+    let outcome: AdapterOutcome;
+    try {
+      outcome = run.adapter.execute({
+        actionId,
+        taskId: run.intent.taskId,
+        actionType: run.intent.actionType,
+        target: run.intent.target,
+        payload: run.intent.payload,
+        correlationId: run.correlationId,
+        sideEffectKey: run.effectKey,
+      });
+    } catch (error) {
+      outcome = { ok: false, kind: 'unknown', message: `adapter threw: ${errorMessage(error).slice(0, 200)}` };
+    }
+    if (outcome == null || typeof outcome !== 'object' || typeof (outcome as { ok?: unknown }).ok !== 'boolean') {
+      outcome = { ok: false, kind: 'unknown', message: 'adapter returned no recognisable outcome' };
+    }
+
+    // ---- step 3: the terminal record ----
+    const terminal: 'succeeded' | 'failed' | 'outcome_unknown' = outcome.ok
+      ? 'succeeded'
+      : outcome.kind === 'unknown'
+        ? 'outcome_unknown'
+        : 'failed';
+    let externalRef: Record<string, unknown> | null = null;
+    let externalRefWithheld = false;
+    if (outcome.ok && outcome.externalRef != null) {
+      try {
+        assertBrowserSafe(outcome.externalRef, 'externalRef');
+        externalRef = outcome.externalRef;
+      } catch {
+        externalRefWithheld = true;
+      }
+    }
+    // The adapter's message — whether it RETURNED one or THREW it (step 2 folds
+    // the thrown text into `outcome.message`, so one scan here covers both
+    // paths) — goes through the same guard as `externalRef` BEFORE storage.
+    // Real APIs echo the token or the Authorization header in auth errors;
+    // both stores below are engine-immutable and the evidence chain is hashed,
+    // so a credential written here could never be removed (review round 2
+    // proved it landed). Withheld is flagged, never silent.
+    let message: string | null = outcome.ok ? null : String(outcome.message ?? '').slice(0, 500);
+    let messageWithheld = false;
+    if (message !== null) {
+      try {
+        assertBrowserSafe({ message }, 'message');
+      } catch {
+        message = null;
+        messageWithheld = true;
+      }
+    }
+    try {
+      privileged.reserve(() => {
+        const at = nowIso();
+        this.#appendActionEvent(actionId, terminal, input.workerId, at, {
+          correlationId: run.correlationId,
+          externalRef,
+          externalRefWithheld,
+          message,
+          messageWithheld,
+        });
+        this.#store.appendEvent({
+          subjectKind: 'system',
+          subjectId: `action:${actionId}`,
+          status: null,
+          actor: input.workerId,
+          summary: `External action ${terminal}: ${run.intent.adapterId}/${run.intent.actionType} (${run.correlationId})`,
+          detail: { taskId: run.intent.taskId, correlationId: run.correlationId, externalRefWithheld, messageWithheld },
+        });
+        privileged.appendEvidence({
+          taskId: run.intent.taskId,
+          actor: input.workerId,
+          kind: `action_${terminal}`,
+          payload: { actionId, correlationId: run.correlationId, externalRef, externalRefWithheld, message, messageWithheld },
+        });
+      });
+    } catch (error) {
+      return fail(
+        'action_outcome_unknown',
+        `The adapter reported ${terminal} but the outcome could not be recorded (${errorMessage(error)}). ` +
+          'The attempt stays open and retry-blocked; reconcile it after checking the external system.',
+        { actionId, correlationId: run.correlationId, reported: terminal },
+      );
+    }
+    return ok({ action: this.#actionView(actionId)!, outcome: terminal });
+  }
+
+  /**
+   * Close an open or unknown external attempt after a HUMAN checked the real
+   * world. The same authority as reconciling an unknown dispatch: approval
+   * authority, positively resolved; `system`, workers and the action's own
+   * proposer are refused. `confirmed_not_executed` reopens a fresh side-effect
+   * generation ONLY for an idempotent capability — for anything else the
+   * uncertain execution is closed as done or failed after investigation.
+   */
+  reconcileAction(input: {
+    actionId: string;
+    decision: ActionReconcileDecision;
+    note: string;
+    requestedBy: string;
+  }): OpsResult<{ action: ActionView }> {
+    const actionId = input.actionId?.trim() ?? '';
+    if (!actionId) return fail('invalid_input', 'actionId is required');
+    if (!isActionReconcileDecision(input.decision)) {
+      return fail('invalid_input', 'decision must be confirmed_succeeded, confirmed_failed or confirmed_not_executed');
+    }
+    const note = missionText('note', input.note, MAX_ACTION_NOTE_LENGTH, true);
+    if (!note.ok) return fail('invalid_input', note.message);
+    try {
+      assertNoSecretLikeContent({ note: note.value });
+    } catch {
+      return fail('invalid_input', 'The reconciliation note looks like it contains a credential; nothing was recorded.');
+    }
+    const gate = this.#assertApprovalAuthority(input.requestedBy, 'reconcile an external action outcome');
+    if (gate) return gate;
+    if (!this.#actionStorePresent) return fail('invalid_input', 'action ledger unavailable on this database handle');
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let taskId: string | null = null;
+    privileged.reserve(() => {
+      const intent = loadActionIntent(this.#db, actionId);
+      if (!intent) {
+        refusal = { code: 'unknown_action', message: `Unknown action: ${actionId}` };
+        return;
+      }
+      taskId = intent.taskId;
+      const view = deriveActionView(intent, loadActionEvents(this.#db, actionId));
+      if (!stateAdmitsReconciliation(view.state)) {
+        refusal = {
+          code: 'action_state_conflict',
+          message: `Action ${actionId} is ${view.state}; only an open or unknown attempt is reconciled`,
+          details: { state: view.state },
+        };
+        return;
+      }
+      if (intent.requestedBy === input.requestedBy) {
+        refusal = {
+          code: 'not_permitted',
+          message: `${input.requestedBy} proposed action ${actionId} and cannot reconcile its outcome: reconciliation requires an independent principal`,
+          details: { actor: input.requestedBy },
+        };
+        return;
+      }
+      if (input.decision === 'confirmed_not_executed') {
+        const cap = this.#capabilityFromStore(intent.capabilityId);
+        if (!cap?.idempotent) {
+          refusal = {
+            code: 'not_permitted',
+            message: `Capability ${intent.capabilityId} is not idempotent; an uncertain external execution cannot be reopened for another attempt — close it as succeeded or failed after investigation`,
+            details: { capabilityId: intent.capabilityId },
+          };
+          return;
+        }
+      }
+      const at = nowIso();
+      this.#appendActionEvent(actionId, 'reconciled', input.requestedBy, at, {
+        decision: input.decision,
+        note: note.value,
+        correlationId: view.attempt?.correlationId ?? null,
+      });
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `action:${actionId}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `External action reconciled ${input.decision}: ${intent.adapterId}/${intent.actionType}`,
+        detail: { taskId: intent.taskId, decision: input.decision },
+      });
+      privileged.appendEvidence({
+        taskId: intent.taskId,
+        actor: input.requestedBy,
+        kind: 'action_reconciled',
+        payload: {
+          actionId,
+          decision: input.decision,
+          note: note.value,
+          correlationId: view.attempt?.correlationId ?? null,
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return this.#refuseAction(actionId, taskId, 'reconcile', refusal);
+    return ok({ action: this.#actionView(actionId)! });
+  }
+
+  /** One action's derived view, or null (including over a pre-Phase-8 read-only file). */
+  getAction(id: string): ActionView | null {
+    if (!id || !this.#actionStorePresent) return null;
+    return this.#actionView(id);
+  }
+
+  /** Every action, newest first, with its derived state; optionally narrowed. */
+  listActions(filter?: { taskId?: string; missionId?: string; state?: ActionState }): ActionView[] {
+    if (!this.#actionStorePresent) return [];
+    if (filter?.state !== undefined && !isActionState(filter.state)) return [];
+    return loadActionIntents(this.#db)
+      .filter((row) => (filter?.taskId ? row.taskId === filter.taskId : true))
+      .filter((row) => (filter?.missionId ? row.missionId === filter.missionId : true))
+      .map((row) => deriveActionView(row, loadActionEvents(this.#db, row.id)))
+      .filter((view) => (filter?.state ? view.state === filter.state : true));
+  }
+
+  /** Bounded list plus the true total, for the wire. */
+  listActionsBounded(filter?: { taskId?: string; missionId?: string; state?: ActionState }): {
+    actions: ActionView[];
+    total: number;
+    truncated: boolean;
+  } {
+    const all = this.listActions(filter);
+    return { actions: all.slice(0, ACTION_READ_LIMIT), total: all.length, truncated: all.length > ACTION_READ_LIMIT };
+  }
+
+  /** Whether this database handle carries the Phase 8 ledger tables. */
+  actionStorePresent(): boolean {
+    return this.#actionStorePresent;
+  }
+
+  /**
+   * Whether the gateway has ATTEMPTED an external action for this task —
+   * open, unknown or succeeded. The Claude GitHub dispatch lane asks this so
+   * one canonical task never has two external execution paths; a `failed` or
+   * reconciled-not-executed attempt leaves nothing in flight.
+   */
+  gatewayActionHistory(taskId: string): GatewayActionHistory {
+    return this.#gatewayActionHistoryFromStore(taskId);
+  }
+
+  /**
+   * The same answer read from the ledger rows through `#db` — never through
+   * the public `listActions`, which lives on the prototype and is patchable.
+   * Published to the dispatch lane as the `gatewayActionHistoryFor` function
+   * binding (the `killSwitchEngagedFor` recipe): that verdict decides whether
+   * a public issue is published for a task the gateway already executed.
+   */
+  #gatewayActionHistoryFromStore(taskId: string): GatewayActionHistory {
+    if (!taskId || !this.#actionStorePresent) return { state: 'none' };
+    for (const row of loadActionIntents(this.#db)) {
+      if (row.taskId !== taskId) continue;
+      const view = deriveActionView(row, loadActionEvents(this.#db, row.id));
+      if (view.state === 'attempted' || view.state === 'outcome_unknown' || view.state === 'succeeded') {
+        return { state: view.state, actionId: view.id };
+      }
+      if (view.state === 'reconciled' && view.reconciliation?.decision === 'confirmed_succeeded') {
+        return { state: 'succeeded', actionId: view.id };
+      }
+    }
+    return { state: 'none' };
+  }
+
+  // ---- gateway internals ----
+
+  #actionView(id: string): ActionView | null {
+    const row = loadActionIntent(this.#db, id);
+    if (!row) return null;
+    return deriveActionView(row, loadActionEvents(this.#db, id));
+  }
+
+  #appendActionEvent(
+    actionId: string,
+    state: ActionState,
+    actor: string,
+    at: string,
+    detail: Record<string, unknown>,
+    effectKey: string | null = null,
+  ): void {
+    this.#db
+      .prepare(
+        `INSERT INTO hq_action_events (id, action_id, state, actor, at, detail, side_effect_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(uuid(), actionId, state, actor, at, JSON.stringify(detail), effectKey);
+  }
+
+  /** A refusal is a fact worth keeping: best-effort evidence, then the typed error. Writes no ledger event. */
+  #refuseAction(actionId: string, taskId: string | null, phase: string, error: OpsError): OpsResult<never> {
+    try {
+      this.#requirePrivilegedQueue().appendEvidence({
+        taskId,
+        actor: 'system',
+        kind: 'action_refused',
+        payload: { actionId, phase, code: error.code, details: error.details ?? null },
+      });
+    } catch {
+      // A lost refusal diagnostic costs nothing; the refusal itself stands.
+    }
+    return { ok: false, error };
+  }
+
+  /** The canonical op_tasks row, read directly — never the patchable public `queue.get`. */
+  #taskRowFromStore(taskId: string): {
+    id: string;
+    capabilityId: string;
+    payload: Record<string, unknown>;
+    idempotencyKey: string | null;
+    status: ActivityStatus;
+    fence: number;
+    claimedBy: string | null;
+    claimNonce: string | null;
+    approvalId: string | null;
+    createdBy: string;
+  } | null {
+    const row = this.#db.prepare(`SELECT * FROM op_tasks WHERE id = ?`).get(taskId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(row.payload as string) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+    return {
+      id: row.id as string,
+      capabilityId: row.capability_id as string,
+      payload,
+      idempotencyKey: (row.idempotency_key as string | null) ?? null,
+      status: row.status as ActivityStatus,
+      fence: row.fence as number,
+      claimedBy: (row.claimed_by as string | null) ?? null,
+      claimNonce: (row.claim_nonce as string | null) ?? null,
+      approvalId: (row.approval_id as string | null) ?? null,
+      createdBy: row.created_by as string,
+    };
+  }
+
+  #missionStatusFromStore(missionId: string): { status: MissionStatus; intentSeq: number } | null {
+    if (!this.#missionStorePresent) return null;
+    const row = this.#db.prepare(`SELECT status FROM hq_missions WHERE id = ?`).get(missionId) as
+      | { status: MissionStatus }
+      | undefined;
+    if (!row) return null;
+    const seq = this.#db.prepare(`SELECT MAX(seq) AS seq FROM hq_mission_intents WHERE mission_id = ?`).get(missionId) as
+      | { seq: number | null }
+      | undefined;
+    return { status: row.status, intentSeq: seq?.seq ?? 0 };
+  }
+
+  /**
+   * What the Claude GitHub dispatch lane already did with this task, read
+   * from the canonical `op_evidence` rows through `#db` by the same rule
+   * `dispatchHistory` applies (an `attempted` with no terminal is unknown;
+   * `failed` closes it). This fact decides whether HQ executes an external
+   * action, so it never reads `queue.evidence` — that handle is the
+   * deliberately patchable convenience read for DISPLAY, and a forged
+   * `queue.evidence.list` that hid the lane's entries used to let the gateway
+   * execute a second external path for the same task (the reintroduced Low 7,
+   * closed by the correction pass). Duplicated here rather than imported so
+   * the application layer keeps not depending on a provider adapter;
+   * `integration-seams` pins the kinds agree.
+   */
+  #claudeDispatchState(taskId: string): 'none' | 'unknown' | 'dispatched' {
+    let pending = false;
+    let dispatched = false;
+    const kinds = this.#db.prepare(`SELECT kind FROM op_evidence WHERE task_id = ? ORDER BY seq`).all(taskId) as {
+      kind: string;
+    }[];
+    for (const { kind } of kinds) {
+      if (kind === 'claude_github_dispatch_attempted') pending = true;
+      else if (kind === 'claude_github_dispatch_succeeded') {
+        pending = false;
+        dispatched = true;
+      } else if (kind === 'claude_github_dispatch_failed') pending = false;
+    }
+    if (dispatched) return 'dispatched';
+    return pending ? 'unknown' : 'none';
+  }
+
+  /**
+   * A task's evidence rows read through `#db` in chain order — kind, time and
+   * payload only, which is all a lane folding a history needs. Published as
+   * the `taskEvidenceRowsFor` function binding (review round 2) so the Claude
+   * dispatch lane's `dispatchHistory` — the read that gates a duplicate PUBLIC
+   * publication — never goes through `queue.evidence.list`, the deliberately
+   * patchable display surface. The same rows `EvidenceLog.list(taskId)` maps;
+   * a payload that does not parse is an empty object rather than a throw, so a
+   * corrupt row cannot turn a "dispatched" answer into an exception.
+   */
+  #taskEvidenceRowsFromStore(taskId: string): CanonicalEvidenceRow[] {
+    if (!taskId) return [];
+    const rows = this.#db
+      .prepare(`SELECT kind, at, payload FROM op_evidence WHERE task_id = ? ORDER BY seq`)
+      .all(taskId) as { kind: string; at: string; payload: string }[];
+    return rows.map((row) => {
+      let payload: Record<string, unknown> = {};
+      try {
+        const parsed: unknown = JSON.parse(row.payload);
+        if (parsed != null && typeof parsed === 'object' && !Array.isArray(parsed)) payload = parsed as Record<string, unknown>;
+      } catch {
+        payload = {};
+      }
+      return { kind: row.kind, at: row.at, payload };
+    });
+  }
+
+  /** Turn snapshot drift into the one refusal whose cause outranks the others. */
+  #classifyDrift(actionId: string, drift: readonly (keyof AuthorizedSnapshot)[]): OpsError {
+    const has = (...keys: (keyof AuthorizedSnapshot)[]) => keys.some((k) => drift.includes(k));
+    const details = { actionId, changed: [...drift] };
+    if (has('taskActionDigest', 'payloadDigest')) {
+      return {
+        code: 'action_digest_mismatch',
+        message: `Action ${actionId}: the approved action changed after authorization; nothing was executed`,
+        details,
+      };
+    }
+    if (has('providerId', 'adapterId')) {
+      return {
+        code: 'provider_binding_mismatch',
+        message: `Action ${actionId}: the provider or adapter moved after authorization; no substitution is made`,
+        details,
+      };
+    }
+    if (has('approvalId', 'approvalDecidedBy', 'workerId', 'fence', 'claimNonce')) {
+      return {
+        code: 'action_approval_stale',
+        message: `Action ${actionId}: the approval or the claim it was consumed by is not the one authorized; nothing was executed`,
+        details,
+      };
+    }
+    return {
+      code: 'intent_changed',
+      message: `Action ${actionId}: the mission intent, status or capability contract changed after authorization; re-propose against current intent`,
+      details,
+    };
+  }
+
+  /**
+   * The gate every authorization AND every execution passes, over CURRENT
+   * canonical rows read through `#db` and the enforcement-safe closures only:
+   *
+   *   worker permissions ∩ mission permissions ∩ policy ∩ approvals
+   *
+   * — the executing worker resolves, is assignable and holds the capability;
+   * the adapter/action type are declared; the task is `running` under THIS
+   * worker's live fenced claim; the capability row is intact and enabled;
+   * the provider binding admits the adapter and the worker (no substitution);
+   * the approval (where policy OR risk requires one) is approved, digest-bound
+   * to the current task, consumed by this exact claim, unexpired, and not the
+   * proposer's own decision; no kill-switch scope is engaged; the mission (if
+   * referenced) is active; the Claude dispatch lane has not taken the task.
+   * Returns the snapshot the Intent Guard binds and compares.
+   */
+  #gatewayGate(
+    intent: ActionIntentRow,
+    workerId: string,
+    fence: number,
+    now: Date,
+  ):
+    | { ok: true; snapshot: AuthorizedSnapshot; adapter: ExternalActionAdapter }
+    | { ok: false; error: OpsError } {
+    const refuse = (error: OpsResult<never> | OpsError): { ok: false; error: OpsError } =>
+      'ok' in error ? { ok: false, error: (error as { ok: false; error: OpsError }).error } : { ok: false, error };
+    const human = this.#rejectHumanExecution(workerId, 'execute an external action');
+    if (human) return refuse(human);
+    const assignability = this.#workers.assignability(workerId);
+    if (!assignability.assignable) return refuse(this.#rejectNotAssignable(workerId, assignability, 'execute an external action'));
+    if (!this.#grantOf(workerId).includes(intent.capabilityId)) {
+      return refuse({
+        code: 'not_permitted',
+        message: `Worker ${workerId} is not allowed capability ${intent.capabilityId} (least privilege)`,
+        details: { workerId, capabilityId: intent.capabilityId },
+      });
+    }
+    const adapter = this.#actionAdapters.get(intent.adapterId);
+    if (!adapter) return refuse({ code: 'unknown_adapter', message: `Unknown external-action adapter: ${intent.adapterId}` });
+    if (!adapter.actions[intent.actionType]) {
+      return refuse({ code: 'unknown_adapter', message: `Adapter ${intent.adapterId} declares no action type ${intent.actionType}` });
+    }
+    const task = this.#taskRowFromStore(intent.taskId);
+    if (!task) return refuse({ code: 'unknown_task', message: `Unknown task: ${intent.taskId}` });
+    if (task.capabilityId !== intent.capabilityId) {
+      return refuse({
+        code: 'action_digest_mismatch',
+        message: `Task ${task.id} no longer names capability ${intent.capabilityId}; the action does not match its task`,
+      });
+    }
+    if (task.status !== 'running' || task.claimedBy !== workerId || task.fence !== fence) {
+      return refuse({
+        code: 'task_not_executing',
+        message:
+          `Task ${task.id} is ${task.status}, claimed by ${task.claimedBy ?? 'nobody'} at fence ${task.fence}; ` +
+          `an external action executes only under the live, started claim of the worker performing it`,
+        details: { status: task.status, claimedBy: task.claimedBy, fence: task.fence },
+      });
+    }
+    const cap = this.#capabilityFromStore(task.capabilityId);
+    if (!cap) return refuse({ code: 'unknown_capability', message: `Unknown capability: ${task.capabilityId}` });
+    if (!cap.enabled) return refuse({ code: 'capability_disabled', message: `Capability ${cap.id} is disabled` });
+
+    const binding = readProviderBinding(task.payload);
+    if (binding.bound && binding.provider == null) {
+      return refuse({ code: 'provider_binding_mismatch', message: `Task ${task.id} declares a malformed executionProvider` });
+    }
+    if (binding.bound && (adapter.provider !== binding.provider || intent.providerId !== binding.provider)) {
+      return refuse({
+        code: 'provider_binding_mismatch',
+        message: `Task ${task.id} is bound to provider ${binding.provider}; adapter ${adapter.id} executes as ${
+          adapter.provider ?? 'no provider'
+        }. No substitution is made.`,
+        details: { requiredProvider: binding.provider, adapterProvider: adapter.provider, intentProvider: intent.providerId },
+      });
+    }
+    if (adapter.provider !== null) {
+      const declared = this.#db
+        .prepare(`SELECT provider_id FROM op_worker_providers WHERE worker_id = ?`)
+        .get(workerId) as { provider_id: string } | undefined;
+      if (declared?.provider_id !== adapter.provider) {
+        return refuse({
+          code: 'provider_binding_mismatch',
+          message: `Adapter ${adapter.id} executes as ${adapter.provider} and worker ${workerId} is declared as ${
+            declared?.provider_id ?? 'no provider'
+          }. Provider identity is declared, never inferred, and never substituted.`,
+          details: { adapterProvider: adapter.provider, workerProvider: declared?.provider_id ?? null },
+        });
+      }
+    }
+    const providerId = binding.bound ? binding.provider : adapter.provider;
+
+    const currentDigest = taskActionDigest(task);
+    const policyRequires = approvalRequired(cap, this.#policyCtx);
+    const riskRequires = riskRequiresApproval(intent.riskLevel);
+    let approvalId: string | null = null;
+    let approvalDecidedBy: string | null = null;
+    if (policyRequires || riskRequires) {
+      const approval = task.approvalId
+        ? (this.#db
+            .prepare(
+              `SELECT id, decision, decided_by, action_digest, expires_at, consumed_at, consumed_by, consumed_task_id,
+                      consumed_fence, consumed_claim_nonce FROM hq_approvals WHERE id = ?`,
+            )
+            .get(task.approvalId) as Record<string, unknown> | undefined)
+        : undefined;
+      if (!approval) {
+        return refuse(
+          riskRequires && !policyRequires
+            ? {
+                code: 'approval_required_by_risk',
+                message:
+                  `Action ${intent.id} is ${intent.riskLevel} risk and requires a bound Founder approval; task ${task.id} ` +
+                  'carries none (its capability runs on standing policy). Risk escalation adds an approval requirement — it never removes one.',
+                details: { riskLevel: intent.riskLevel, riskFactors: intent.riskFactors },
+              }
+            : { code: 'action_approval_stale', message: `Task ${task.id} carries no approval; nothing executes on none` },
+        );
+      }
+      if (approval.decision !== 'approved') {
+        return refuse({ code: 'action_approval_stale', message: `Task ${task.id}: the bound approval record is not an approval` });
+      }
+      if (approval.action_digest !== currentDigest) {
+        return refuse({
+          code: 'action_digest_mismatch',
+          message: `Task ${task.id}: the action changed after Founder approval; the approval no longer binds it`,
+        });
+      }
+      if (approvalExpiredAt({ expiresAt: (approval.expires_at as string | null) ?? null }, now)) {
+        return refuse({ code: 'action_approval_stale', message: `Task ${task.id}: the Founder approval has expired; nothing executes on it` });
+      }
+      const bindingRejection = validateApprovalClaimBinding(
+        {
+          consumedAt: (approval.consumed_at as string | null) ?? null,
+          consumedBy: (approval.consumed_by as string | null) ?? null,
+          consumedTaskId: (approval.consumed_task_id as string | null) ?? null,
+          consumedFence: (approval.consumed_fence as number | null) ?? null,
+          consumedClaimNonce: (approval.consumed_claim_nonce as string | null) ?? null,
+        },
+        { taskId: task.id, workerId, fence, claimNonce: task.claimNonce },
+      );
+      if (bindingRejection) {
+        return refuse({
+          code: 'action_approval_stale',
+          message: `Task ${task.id}: the approval was not consumed by this claim (${bindingRejection}); nothing executes on it`,
+        });
+      }
+      approvalId = approval.id as string;
+      approvalDecidedBy = (approval.decided_by as string | null) ?? null;
+      if (approvalDecidedBy === intent.requestedBy || approvalDecidedBy === workerId) {
+        return refuse({
+          code: 'not_permitted',
+          message: `${approvalDecidedBy} approved task ${task.id} and also ${
+            approvalDecidedBy === workerId ? 'executes' : 'proposed'
+          } action ${intent.id}: the requesting/executing party may not approve its own external action`,
+          details: { approvedBy: approvalDecidedBy },
+        });
+      }
+    }
+
+    const engaged = this.#engagedKillSwitchScopeFromStore([
+      GLOBAL_SCOPE,
+      cap.id,
+      EXTERNAL_ACTION_KILL_SCOPE,
+      ...(providerId ? [providerKillSwitchScope(providerId)] : []),
+      adapterKillSwitchScope(adapter.id),
+    ]);
+    if (engaged) {
+      return refuse({
+        code: 'kill_switch_engaged',
+        message: `Kill switch is engaged for scope ${engaged}; no external action executes`,
+        details: { scope: engaged },
+      });
+    }
+
+    let missionIntentSeq: number | null = null;
+    let missionStatus: string | null = null;
+    if (intent.missionId) {
+      const mission = this.#missionStatusFromStore(intent.missionId);
+      if (!mission) return refuse({ code: 'unknown_mission', message: `Unknown mission: ${intent.missionId}` });
+      if (isMissionTerminal(mission.status) || mission.status === 'blocked') {
+        return refuse({
+          code: 'mission_not_active',
+          message: `Mission ${intent.missionId} is ${mission.status}; it directs no external action`,
+          details: { status: mission.status },
+        });
+      }
+      missionIntentSeq = mission.intentSeq;
+      missionStatus = mission.status;
+    }
+    const dispatched = this.#claudeDispatchState(task.id);
+    if (dispatched !== 'none') {
+      return refuse({
+        code: 'duplicate_external_action',
+        message: `Task ${task.id} was already handed to the Claude GitHub dispatch lane (${dispatched}); one canonical task has one external execution path`,
+        details: { dispatch: dispatched },
+      });
+    }
+
+    return {
+      ok: true,
+      adapter,
+      snapshot: {
+        taskActionDigest: currentDigest,
+        payloadDigest: intent.payloadDigest,
+        approvalId,
+        approvalDecidedBy,
+        workerId,
+        fence,
+        claimNonce: task.claimNonce,
+        providerId,
+        adapterId: adapter.id,
+        missionIntentSeq,
+        missionStatus,
+        capabilityRiskClass: cap.riskClass,
+        riskLevel: intent.riskLevel,
+      },
+    };
+  }
+
   // ---- task metadata (console labels + advisory assignment) ----
 
   readMeta(taskId: string): TaskMeta | null {
@@ -5869,6 +8162,54 @@ export function capabilityRowFor(
   capabilityId: string,
 ): Capability | null {
   return readCapabilityRow(ops, capabilityId);
+}
+
+/**
+ * The canonical `op_kill_switch` answer for the global scope plus an optional
+ * capability scope, for callers making an ENFORCEMENT decision (Phase 8,
+ * Low 7). A FUNCTION BINDING for the reason `capabilityRowFor` is one: an ES
+ * module binding cannot be reassigned by an importer, and the private closure
+ * it calls is not a property of the class or of any instance. The Claude
+ * dispatch lane's eligibility check reads through this; `queue.killSwitchEngaged`
+ * stays as the deliberately patchable convenience read for DISPLAY.
+ */
+export function killSwitchEngagedFor(ops: HeadquarterOperations, capabilityId?: string): boolean {
+  return readKillSwitchEngaged(ops, capabilityId);
+}
+
+/** What the gateway has attempted for a task: open, unknown, succeeded, or nothing. */
+export type GatewayActionHistory =
+  | { state: 'none' }
+  | { state: 'attempted' | 'outcome_unknown' | 'succeeded'; actionId: string };
+
+/**
+ * The gateway's attempt history for a task read from the ledger rows, for the
+ * Claude dispatch lane's one-external-path check — a FUNCTION BINDING like
+ * `killSwitchEngagedFor`, because that verdict decides whether a public issue
+ * is published and the public `gatewayActionHistory` method is a prototype
+ * slot an importer can patch.
+ */
+export function gatewayActionHistoryFor(ops: HeadquarterOperations, taskId: string): GatewayActionHistory {
+  return readGatewayActionHistory(ops, taskId);
+}
+
+/** One canonical `op_evidence` row as a deciding read needs it: kind, time, payload. */
+export interface CanonicalEvidenceRow {
+  kind: string;
+  at: string;
+  payload: Record<string, unknown>;
+}
+
+/**
+ * A task's canonical evidence rows for a caller making an ENFORCEMENT decision
+ * (review round 2): a FUNCTION BINDING like `killSwitchEngagedFor`, because the
+ * Claude dispatch lane's `dispatchHistory` decides whether a public issue is
+ * published a second time, and `queue.evidence.list` — which it used to read —
+ * is the deliberately patchable convenience read for DISPLAY. That handle stays
+ * exactly as it is for display callers.
+ */
+export function taskEvidenceRowsFor(ops: HeadquarterOperations, taskId: string): CanonicalEvidenceRow[] {
+  return readTaskEvidenceRows(ops, taskId);
 }
 
 export function createHeadquarterOperations(

@@ -89,6 +89,12 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
   // Phase 6 (issue #265): the orchestrate route on projects.html's mission
   // console — preview and apply, one POST path.
   CONTROL_ROUTES.missionOrchestrate,
+  // Phase 7: the truth/evidence console on archive.html — the bounded read,
+  // the parameterized entity read, and the record/verify/accept writes.
+  CONTROL_ROUTES.truth,
+  CONTROL_ROUTES.truthEntity,
+  CONTROL_ROUTES.truthVerify,
+  CONTROL_ROUTES.truthAccept,
 ];
 
 /**
@@ -103,7 +109,7 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
  * server's words rather than guessing.
  */
 export const CONTROL_GRANT_JS = `function grantedControls(session) {
-  var off = { directOrder: false, approve: false, deny: false, missionCommand: false, projectCommand: false, workforceAssign: false, memoryCommand: false, missionOrchestrate: false, reason: '' };
+  var off = { directOrder: false, approve: false, deny: false, missionCommand: false, projectCommand: false, workforceAssign: false, memoryCommand: false, missionOrchestrate: false, truthRecord: false, truthVerify: false, truthAccept: false, reason: '' };
   if (session == null || typeof session !== 'object') {
     off.reason = 'The control API gave no readable answer, so no control is drawn.';
     return off;
@@ -122,6 +128,9 @@ export const CONTROL_GRANT_JS = `function grantedControls(session) {
     workforceAssign: session.controls.workforceAssign === true,
     memoryCommand: session.controls.memoryCommand === true,
     missionOrchestrate: session.controls.missionOrchestrate === true,
+    truthRecord: session.controls.truthRecord === true,
+    truthVerify: session.controls.truthVerify === true,
+    truthAccept: session.controls.truthAccept === true,
     reason: stated !== '' ? stated : ungrantedReason(session.controls)
   };
 }
@@ -2402,6 +2411,406 @@ export function memoryConsoleScript(
       if (result.body == null || typeof result.body !== 'object' || result.body.founder !== true) {
         var grant = grantedControls(result.body);
         stayOff(grant.reason);
+        return;
+      }
+      reload();
+    })
+    .catch(function (error) {
+      stayOff('the HQ control API is not reachable from this page (' + error.message + ').');
+    });
+})();
+</script>`;
+}
+
+/**
+ * Archive page: the Truth + Evidence console (Phase 7).
+ *
+ * Static markup stays inert. Any resolved Founder gets the live /truth READ:
+ * every record with its DERIVED categorical state, born state, lifecycle,
+ * verification picture, contradictions (with their resolution, never a
+ * winner by recency), evidence refs, verifications with limitations, and
+ * acceptance provenance — rendered via textContent only. The unresolved
+ * contradictions are listed FIRST, so no record is read without its dispute.
+ * An entity lookup reads the parameterized entity route. The record, verify
+ * and accept forms are built only under their respective granted controls;
+ * accept carries the record's acceptance digest verbatim and a step-up
+ * password field (never stored, never echoed).
+ */
+export function truthConsoleScript(vocabulary: {
+  entityKinds: readonly string[];
+  bornStates: readonly string[];
+  methods: readonly string[];
+  verdicts: readonly string[];
+  privacyLevels: readonly string[];
+}): string {
+  return `<script>
+(function () {
+  var mount = document.querySelector('[data-truth-console]');
+  if (!mount || typeof window.fetch !== 'function') return;
+
+  ${CONTROL_GRANT_JS}
+  ${DOM_HELPERS_JS}
+
+  var SESSION_PATH = ${jsonForScript(CONTROL_ROUTES.session)};
+  var TRUTH_PATH = ${jsonForScript(CONTROL_ROUTES.truth)};
+  var TRUTH_ENTITY_PATH = ${jsonForScript(CONTROL_ROUTES.truthEntity)};
+  var TRUTH_VERIFY_PATH = ${jsonForScript(CONTROL_ROUTES.truthVerify)};
+  var TRUTH_ACCEPT_PATH = ${jsonForScript(CONTROL_ROUTES.truthAccept)};
+  var ENTITY_KINDS = ${jsonForScript(vocabulary.entityKinds)};
+  var BORN_STATES = ${jsonForScript(vocabulary.bornStates)};
+  var METHODS = ${jsonForScript(vocabulary.methods)};
+  var VERDICTS = ${jsonForScript(vocabulary.verdicts)};
+  var PRIVACY_LEVELS = ${jsonForScript(vocabulary.privacyLevels)};
+
+  var note = el('p', 'readonly-note console-state', 'Checking with the control API whether this session can read the truth projection\\u2026');
+  note.setAttribute('data-truth-console-state', 'checking');
+  note.setAttribute('role', 'status');
+  mount.appendChild(note);
+
+  var box = el('div', 'memory-live truth-live');
+  box.setAttribute('data-truth-list', '');
+  mount.appendChild(box);
+
+  function stayOff(reason) {
+    box.textContent = '';
+    note.setAttribute('data-truth-console-state', 'off');
+    note.className = 'readonly-note console-state console-state-off';
+    note.textContent = 'THE TRUTH PROJECTION IS NOT READABLE FROM THIS PAGE \\u2014 ' + reason;
+  }
+  function textLine(parent, cls, text) { parent.appendChild(el('p', cls, text)); }
+  function select(label, values) {
+    var node = document.createElement('select');
+    node.setAttribute('aria-label', label);
+    for (var i = 0; i < values.length; i++) {
+      var option = document.createElement('option');
+      option.value = values[i];
+      option.textContent = values[i];
+      node.appendChild(option);
+    }
+    return node;
+  }
+  function input(label, placeholder) {
+    var node = document.createElement('input');
+    node.type = 'text';
+    node.setAttribute('aria-label', label);
+    node.placeholder = placeholder;
+    return node;
+  }
+  function idList(text) {
+    return text.split(',').map(function (t) { return t.trim(); }).filter(function (t) { return t !== ''; });
+  }
+
+  function renderRecord(record) {
+    var card = el('article', 'panel memory-card truth-card');
+    card.setAttribute('data-truth-card', record.id);
+    card.setAttribute('data-truth-state', record.state);
+    card.setAttribute('data-truth-acceptance-standing', record.acceptanceStanding);
+    var head = el('p', 'row');
+    head.appendChild(el('b', '', record.statement));
+    head.appendChild(el('span', 'chip', record.state.toUpperCase()));
+    head.appendChild(el('span', 'chip', 'born ' + record.bornState));
+    head.appendChild(el('span', 'chip', record.lifecycle));
+    if (record.contested) head.appendChild(el('span', 'chip', 'CONTESTED'));
+    if (record.acceptances.length > 0 && record.acceptanceStanding !== 'standing') head.appendChild(el('span', 'chip', 'ACCEPTANCE NO LONGER STANDS'));
+    if (record.privacy === 'founder_only') head.appendChild(el('span', 'chip', 'founder_only'));
+    card.appendChild(head);
+    textLine(card, 'faint', 'About ' + record.entityKind + ' ' + record.entityId + ' \\u00b7 recorded ' + record.recordedAt +
+      ' by ' + record.recordedBy + ' \\u00b7 id ' + record.id);
+    textLine(card, 'muted', 'Verification: ' + record.verification + ' \\u00b7 subject drift: ' + record.subjectDrift +
+      (record.acceptanceDigest ? ' \\u00b7 ACCEPTABLE (digest ' + record.acceptanceDigest + ')' : ''));
+    textLine(card, 'faint', record.evidenceRefs.length > 0
+      ? 'Evidence (op_evidence ids, referenced never copied): ' + record.evidenceRefs.join(' \\u00b7 ')
+      : 'Evidence: none referenced \\u2014 this is a bare claim.');
+    var i;
+    for (i = 0; i < record.verifications.length; i++) {
+      var v = record.verifications[i];
+      textLine(card, 'muted', 'Verified ' + v.verdict.toUpperCase() + ' by ' + v.verifiedBy + ' at ' + v.at + ' via ' + v.method +
+        ' \\u00b7 evidence ' + v.evidenceRefs.join(', ') + ' \\u00b7 limitations: ' + v.limitations);
+    }
+    for (i = 0; i < record.acceptances.length; i++) {
+      var a = record.acceptances[i];
+      textLine(card, 'muted', 'ACCEPTED by ' + a.acceptedBy + ' at ' + a.at + ' over verification(s) ' + a.verificationIds.join(', ') +
+        ' \\u00b7 digest ' + a.digest + (a.note ? ' \\u00b7 note: ' + a.note : ''));
+    }
+    if (record.acceptances.length > 0 && record.acceptanceStanding !== 'standing') {
+      textLine(card, 'muted', 'That acceptance no longer stands (' + record.acceptanceStanding + '): the record now derives ' + record.state.toUpperCase() +
+        '. The acceptance above is immutable history \\u2014 nothing was erased, and nothing here re-accepts it.');
+    }
+    for (i = 0; i < record.contradictions.length; i++) {
+      var c = record.contradictions[i];
+      textLine(card, c.resolution === 'unresolved' ? 'muted' : 'faint',
+        (c.direction === 'stated' ? 'Contradicts ' : 'Contradicted by ') + c.withId + ' \\u2014 ' + c.resolution +
+        (c.resolution === 'unresolved' ? ' (neither side is preferred by recency)' : ''));
+    }
+    if (record.supersedes) textLine(card, 'faint', 'Supersedes ' + record.supersedes);
+    if (record.supersededBy) textLine(card, 'faint', 'Superseded by ' + record.supersededBy + ' \\u2014 retained as history, never rewritten.');
+    if (record.supports.length > 0) textLine(card, 'faint', 'Supports ' + record.supports.join(', '));
+    if (record.supportedBy.length > 0) textLine(card, 'faint', 'Supported by ' + record.supportedBy.join(', '));
+    if (record.derivedFrom.length > 0) textLine(card, 'faint', 'Derived from ' + record.derivedFrom.join(', '));
+    return card;
+  }
+
+  function renderContradictions(parent, pairs) {
+    var list = el('div', 'truth-contradictions');
+    list.setAttribute('data-truth-contradictions', '');
+    if (pairs.length === 0) {
+      textLine(list, 'faint', 'No unresolved contradiction. 0 means 0.');
+    } else {
+      textLine(list, 'order-label', pairs.length + ' UNRESOLVED CONTRADICTION(S) \\u2014 HQ holds two current, unrefuted statements and picks neither');
+      for (var i = 0; i < pairs.length; i++) {
+        var p = pairs[i];
+        textLine(list, 'muted', p.entityKind + ' ' + p.entityId + ': ' + p.a + ' contradicts ' + p.b + ' (stated by ' + p.statedBy + ' at ' + p.statedAt + ')');
+      }
+    }
+    parent.appendChild(list);
+  }
+
+  function buildRecordForm(reload) {
+    var form = el('div', 'order-field');
+    form.setAttribute('data-truth-record-form', '');
+    textLine(form, 'order-label', 'Record a claim or observation \\u2014 born claimed/observed; verified and accepted are earned from other actors, never asserted');
+    var kind = select('Entity kind', ENTITY_KINDS);
+    var entityId = input('Entity id', 'entity id');
+    var statement = document.createElement('textarea');
+    statement.setAttribute('aria-label', 'Statement');
+    statement.placeholder = 'what is claimed or observed';
+    var born = select('Born state', BORN_STATES);
+    var evidence = input('Evidence ids, comma separated (required for an observation)', 'op_evidence ids, comma separated');
+    var contradicts = input('Contradicts truth ids, comma separated (optional)', 'contradicts truth ids (optional)');
+    var supersedes = input('Supersedes truth id (optional)', 'supersedes truth id (optional)');
+    var privacy = select('Privacy', PRIVACY_LEVELS);
+    var outcome = el('p', 'muted', '');
+    outcome.setAttribute('role', 'status');
+    var submit = document.createElement('button');
+    submit.type = 'button';
+    submit.className = 'order-live-submit';
+    submit.textContent = 'Record truth';
+    submit.addEventListener('click', function () {
+      if (entityId.value.trim() === '' || statement.value.trim() === '') {
+        outcome.textContent = 'Entity id and statement are required. Nothing was sent.';
+        return;
+      }
+      var payload = { entityKind: kind.value, entityId: entityId.value.trim(), statement: statement.value.trim(), bornState: born.value, privacy: privacy.value };
+      var refs = idList(evidence.value);
+      if (refs.length > 0) payload.evidenceRefs = refs;
+      var against = idList(contradicts.value);
+      if (against.length > 0) payload.contradicts = against;
+      if (supersedes.value.trim() !== '') payload.supersedes = supersedes.value.trim();
+      submit.disabled = true;
+      outcome.textContent = 'Recording\\u2026';
+      postJson(TRUTH_PATH, payload).then(function (result) {
+        submit.disabled = false;
+        var answer = result.body || {};
+        if (answer.ok === true) {
+          outcome.textContent = answer.deduplicated === true
+            ? 'Already recorded \\u2014 deduplicated onto the stored record.'
+            : 'Recorded as ' + (answer.record ? answer.record.state : 'a record') + '. It cannot upgrade itself.';
+          statement.value = ''; supersedes.value = ''; contradicts.value = '';
+          notifyStateChanged();
+          reload();
+          return;
+        }
+        var error = answer.error || {};
+        outcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given');
+      }).catch(function (error) {
+        submit.disabled = false;
+        outcome.textContent = 'Not recorded (' + error.message + ').';
+      });
+    });
+    form.appendChild(kind); form.appendChild(entityId); form.appendChild(statement); form.appendChild(born);
+    form.appendChild(evidence); form.appendChild(contradicts); form.appendChild(supersedes); form.appendChild(privacy);
+    form.appendChild(submit); form.appendChild(outcome);
+    return form;
+  }
+
+  function buildVerifyForm(reload) {
+    var form = el('div', 'order-field');
+    form.setAttribute('data-truth-verify-form', '');
+    textLine(form, 'order-label', 'Verify a record \\u2014 independent only: the author of a record is refused; every verification states its limitations');
+    var truthId = input('Truth record id to verify', 'truth record id');
+    var method = select('Verification method', METHODS);
+    var verdict = select('Verdict', VERDICTS);
+    var evidence = input('Evidence ids, comma separated (required)', 'op_evidence ids, comma separated');
+    var limitations = document.createElement('textarea');
+    limitations.setAttribute('aria-label', 'Limitations');
+    limitations.placeholder = 'limitations of this verification (required; write "none known" if honest)';
+    var outcome = el('p', 'muted', '');
+    outcome.setAttribute('role', 'status');
+    var submit = document.createElement('button');
+    submit.type = 'button';
+    submit.className = 'order-live-submit';
+    submit.textContent = 'Record verification';
+    submit.addEventListener('click', function () {
+      var refs = idList(evidence.value);
+      if (truthId.value.trim() === '' || refs.length === 0 || limitations.value.trim() === '') {
+        outcome.textContent = 'Truth id, at least one evidence id and limitations are required. Nothing was sent.';
+        return;
+      }
+      submit.disabled = true;
+      outcome.textContent = 'Recording verification\\u2026';
+      postJson(TRUTH_VERIFY_PATH, { truthId: truthId.value.trim(), method: method.value, verdict: verdict.value, evidenceRefs: refs, limitations: limitations.value.trim() })
+        .then(function (result) {
+          submit.disabled = false;
+          var answer = result.body || {};
+          if (answer.ok === true) {
+            outcome.textContent = 'Verification recorded (' + verdict.value + '). Record now derives as ' + (answer.record ? answer.record.state : 'unknown') + '.';
+            notifyStateChanged();
+            reload();
+            return;
+          }
+          var error = answer.error || {};
+          outcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given');
+        }).catch(function (error) {
+          submit.disabled = false;
+          outcome.textContent = 'Not recorded (' + error.message + ').';
+        });
+    });
+    form.appendChild(truthId); form.appendChild(method); form.appendChild(verdict); form.appendChild(evidence);
+    form.appendChild(limitations); form.appendChild(submit); form.appendChild(outcome);
+    return form;
+  }
+
+  function buildAcceptForm(records, reload) {
+    var form = el('div', 'order-field');
+    form.setAttribute('data-truth-accept-form', '');
+    var acceptable = records.filter(function (r) { return r.acceptanceDigest; });
+    textLine(form, 'order-label', 'Founder acceptance \\u2014 only a verified, current, uncontested record; the digest shown is what you accept, and step-up is demanded');
+    if (acceptable.length === 0) {
+      textLine(form, 'muted', 'Nothing is acceptable right now: no record is verified, current and uncontested. Nothing is drawn that would only refuse.');
+      return form;
+    }
+    var choice = document.createElement('select');
+    choice.setAttribute('aria-label', 'Truth record to accept');
+    for (var i = 0; i < acceptable.length; i++) {
+      var option = document.createElement('option');
+      option.value = acceptable[i].id;
+      option.textContent = acceptable[i].statement + ' (' + acceptable[i].entityKind + ' ' + acceptable[i].entityId + ')';
+      choice.appendChild(option);
+    }
+    var noteInput = input('Acceptance note (optional)', 'note (optional)');
+    textLine(form, 'order-label', 'Step-up: acceptance is your irreversible signature on truth, so it demands a fresh credential. Re-enter your JENIFY OS password.');
+    var stepUp = document.createElement('input');
+    stepUp.type = 'password';
+    stepUp.autocomplete = 'current-password';
+    stepUp.setAttribute('aria-label', 'Step-up password for truth acceptance');
+    var outcome = el('p', 'muted', '');
+    outcome.setAttribute('role', 'status');
+    var submit = document.createElement('button');
+    submit.type = 'button';
+    submit.className = 'order-live-submit';
+    submit.textContent = 'Accept truth';
+    submit.addEventListener('click', function () {
+      var chosen = null;
+      for (var j = 0; j < acceptable.length; j++) if (acceptable[j].id === choice.value) chosen = acceptable[j];
+      if (!chosen) { outcome.textContent = 'No record chosen.'; return; }
+      var payload = { truthId: chosen.id, expectedDigest: chosen.acceptanceDigest };
+      if (noteInput.value.trim() !== '') payload.note = noteInput.value.trim();
+      if (stepUp.value !== '') payload.stepUpPassword = stepUp.value;
+      submit.disabled = true;
+      outcome.textContent = 'Accepting\\u2026';
+      postJson(TRUTH_ACCEPT_PATH, payload).then(function (result) {
+        submit.disabled = false;
+        stepUp.value = '';
+        var answer = result.body || {};
+        if (answer.ok === true) {
+          outcome.textContent = answer.deduplicated === true ? 'Already accepted by you.' : 'Accepted. The acceptance is recorded once and never rewritten.';
+          notifyStateChanged();
+          reload();
+          return;
+        }
+        var error = answer.error || {};
+        outcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given');
+      }).catch(function (error) {
+        submit.disabled = false;
+        outcome.textContent = 'Not accepted (' + error.message + ').';
+      });
+    });
+    form.appendChild(choice); form.appendChild(noteInput); form.appendChild(stepUp); form.appendChild(submit); form.appendChild(outcome);
+    return form;
+  }
+
+  function buildEntityLookup() {
+    var form = el('div', 'order-field');
+    form.setAttribute('data-truth-entity-form', '');
+    textLine(form, 'order-label', 'Entity truth history \\u2014 current records, full history and unresolved contradictions for one canonical entity');
+    var kind = select('Entity kind to look up', ENTITY_KINDS);
+    var id = input('Entity id to look up', 'entity id');
+    var outcome = el('p', 'muted', '');
+    outcome.setAttribute('role', 'status');
+    var results = el('div', 'memory-cards');
+    results.setAttribute('data-truth-entity-history', '');
+    var go = document.createElement('button');
+    go.type = 'button';
+    go.className = 'order-live-submit';
+    go.textContent = 'Read entity truth';
+    go.addEventListener('click', function () {
+      results.textContent = '';
+      if (id.value.trim() === '') { outcome.textContent = 'An entity id is required.'; return; }
+      outcome.textContent = 'Reading\\u2026';
+      jsonExchange(fetch(TRUTH_ENTITY_PATH + '?kind=' + encodeURIComponent(kind.value) + '&id=' + encodeURIComponent(id.value.trim()), { headers: { accept: 'application/json' } }))
+        .then(function (result) {
+          var body = result.body || {};
+          if (body.ok !== true || !body.truth) {
+            var error = body.error || {};
+            outcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given');
+            return;
+          }
+          var truth = body.truth;
+          outcome.textContent = truth.entityKind + ' ' + truth.entityId + ': current state ' + truth.currentState.toUpperCase() + ' \\u00b7 ' +
+            truth.current.length + ' current record(s) \\u00b7 ' + truth.total + ' in history' + (truth.truncated ? ' (bounded)' : '');
+          renderContradictions(results, truth.unresolvedContradictions);
+          for (var i = 0; i < truth.history.length; i++) results.appendChild(renderRecord(truth.history[i]));
+        }).catch(function (error) {
+          outcome.textContent = 'Not read (' + error.message + ').';
+        });
+    });
+    form.appendChild(kind); form.appendChild(id); form.appendChild(go); form.appendChild(outcome); form.appendChild(results);
+    return form;
+  }
+
+  var sessionAnswer = null;
+  function reload() {
+    jsonExchange(fetch(TRUTH_PATH, { headers: { accept: 'application/json' } }))
+      .then(function (result) {
+        var body = result.body || {};
+        if (body.ok !== true || !Array.isArray(body.records)) {
+          var error = body.error || {};
+          stayOff('the truth read was refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given'));
+          return;
+        }
+        var records = body.records;
+        var grant = grantedControls(sessionAnswer);
+        note.setAttribute('data-truth-console-state', 'live');
+        note.className = 'readonly-note console-state console-state-live';
+        note.textContent = 'Live: ' + body.total + ' truth record(s)' + (body.truncated ? ' (newest ' + records.length + ' shown)' : '') +
+          ', derived from hq_truth_* just now. States are categorical \\u2014 claimed, observed, verified, accepted \\u2014 and never a score.';
+        box.textContent = '';
+        renderContradictions(box, Array.isArray(body.unresolvedContradictions) ? body.unresolvedContradictions : []);
+        var cards = el('div', 'memory-cards');
+        cards.setAttribute('data-truth-cards', '');
+        box.appendChild(cards);
+        if (records.length === 0) {
+          textLine(cards, 'muted', 'HQ holds no truth record yet. 0 means 0 \\u2014 nothing is invented to fill this page.');
+        }
+        for (var i = 0; i < records.length; i++) cards.appendChild(renderRecord(records[i]));
+        box.appendChild(buildEntityLookup());
+        if (grant.truthRecord) box.appendChild(buildRecordForm(reload));
+        else textLine(box, 'readonly-note', 'The record form is off for this session \\u2014 ' + grant.reason);
+        if (grant.truthVerify) box.appendChild(buildVerifyForm(reload));
+        else textLine(box, 'readonly-note', 'The verify form is off for this session \\u2014 ' + grant.reason);
+        if (grant.truthAccept) box.appendChild(buildAcceptForm(records, reload));
+        else textLine(box, 'readonly-note', 'Acceptance is off for this session \\u2014 it requires approval authority. ' + grant.reason);
+      })
+      .catch(function (error) {
+        stayOff('the HQ control API is not reachable from this page (' + error.message + ').');
+      });
+  }
+
+  jsonExchange(fetch(SESSION_PATH, { headers: { accept: 'application/json' } }))
+    .then(function (result) {
+      sessionAnswer = result.body;
+      if (result.body == null || typeof result.body !== 'object' || result.body.founder !== true) {
+        stayOff(grantedControls(result.body).reason);
         return;
       }
       reload();

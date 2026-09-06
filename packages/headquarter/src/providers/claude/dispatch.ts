@@ -76,7 +76,13 @@ import {
 } from '../../operator/approvals.js';
 import { EXECUTION_PROVIDER_KEY, readProviderBinding } from '../../operator/provider-binding.js';
 import type { OperatorTask } from '../../operator/queue.js';
-import { assertDispatchEvidenceGrant, writeDispatchOutcome } from '../../application/service.js';
+import {
+  assertDispatchEvidenceGrant,
+  gatewayActionHistoryFor,
+  killSwitchEngagedFor,
+  taskEvidenceRowsFor,
+  writeDispatchOutcome,
+} from '../../application/service.js';
 import type {
   DispatchEvidenceGrant,
   SystemEvidenceKind,
@@ -269,11 +275,31 @@ export function claudeDispatchEligibility(
         'a capability somebody switched off.',
     };
   }
-  if (ops.queue.killSwitchEngaged(task.capabilityId)) {
+  // Enforcement-safe read (Phase 8, the carried-forward Low 7): this verdict
+  // decides whether a public issue is published, so it reads the canonical
+  // `op_kill_switch` row through the function binding, never the patchable
+  // `queue.killSwitchEngaged` convenience delegate.
+  if (killSwitchEngagedFor(ops, task.capabilityId)) {
     return {
       eligible: false,
       code: 'kill_switch_engaged',
       message: `The kill switch is engaged for ${task.capabilityId}; nothing is dispatched.`,
+    };
+  }
+  // One canonical task, ONE external execution path (Phase 8). A task whose
+  // external side effect the action gateway has attempted, left unknown or
+  // completed is not also handed to this lane; the gateway refuses the
+  // mirror-image case from its side. Read through the function binding, not
+  // the patchable public method: this verdict decides a publication.
+  const gateway = gatewayActionHistoryFor(ops, taskId);
+  if (gateway.state !== 'none') {
+    return {
+      eligible: false,
+      code: 'task_not_eligible',
+      message:
+        `Task ${taskId} already has an external action ${gateway.state} through the action gateway ` +
+        `(${gateway.actionId}); it is not dispatched a second way.`,
+      details: { gatewayActionId: gateway.actionId, gatewayState: gateway.state },
     };
   }
 
@@ -568,11 +594,18 @@ export type DispatchHistory =
  * learned the outcome — a crash, a timeout, an unreadable response. Re-sending
  * would risk a duplicate public issue, so it is refused until somebody resolves
  * it, the same rule `outcome_unknown` applies to executions.
+ *
+ * Read through the `taskEvidenceRowsFor` function binding over the canonical
+ * rows (review round 2), never `ops.queue.evidence.list` — that is the
+ * deliberately patchable DISPLAY surface, and this answer gates the
+ * publication of a public GitHub issue (`dispatchClaudeTask`) and the close of
+ * an unresolved attempt (`resolveUnknownDispatch`). Same defect class round 1
+ * closed in the gateway's `#claudeDispatchState`, one function over.
  */
 export function dispatchHistory(ops: HeadquarterOperations, taskId: string): DispatchHistory {
   let pendingAt: string | null = null;
   let dispatched: DispatchHistory | null = null;
-  for (const entry of ops.queue.evidence.list(taskId)) {
+  for (const entry of taskEvidenceRowsFor(ops, taskId)) {
     if (entry.kind === CLAUDE_DISPATCH_EVIDENCE.attempted) {
       pendingAt = entry.at;
       continue;

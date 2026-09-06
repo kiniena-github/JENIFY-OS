@@ -65,8 +65,15 @@ import {
   missionsConsoleScript,
   projectsConsoleScript,
   memoryConsoleScript,
+  truthConsoleScript,
   workforceConsoleScript,
 } from './control-console.js';
+import {
+  TRUTH_BORN_STATES,
+  TRUTH_ENTITY_KINDS,
+  VERIFICATION_METHODS,
+  VERIFICATION_VERDICTS,
+} from '../application/truth-command.js';
 import {
   AUTH_MECHANISM_LABELS,
   CONNECTION_STATE_LABELS,
@@ -1410,8 +1417,23 @@ ${tableWrap(
 <div data-memory-console></div>
 </div>`;
 
+  // Phase 7: the Truth + Evidence live console. A mount and a note — no
+  // control in the static markup; the script draws the read for any resolved
+  // Founder and each form only under its granted control.
+  const liveTruth = `<div class="panel">
+<p class="readonly-note">The truth projection (Phase 7): what HQ holds as claimed, observed, verified and Founder-accepted about its own entities — each record referencing real evidence ids, each verification naming its verifier, method and limitations, each acceptance naming the Founder and the exact basis accepted. States are categorical and derived from other actors’ records: a claim never upgrades itself, and a contradiction is listed until an explicit act resolves it — never settled by which record is newer.</p>
+<div data-truth-console></div>
+</div>`;
+
   const body = `${ARCHIVE_BANNER}
 ${section('COMPANY MEMORY — LIVE RECORD', liveMemory, 'memory-live-section')}${memoryConsoleScript(MEMORY_KINDS, MEMORY_PRIVACY_LEVELS)}
+${section('TRUTH + EVIDENCE — LIVE PROJECTION', liveTruth, 'truth-live-section')}${truthConsoleScript({
+    entityKinds: TRUTH_ENTITY_KINDS,
+    bornStates: TRUTH_BORN_STATES,
+    methods: VERIFICATION_METHODS,
+    verdicts: VERIFICATION_VERDICTS,
+    privacyLevels: MEMORY_PRIVACY_LEVELS,
+  })}
 ${section('SEARCH', `<div class="panel">${filters}<p class="faint">${escapeHtml(searchNote)}</p></div>`)}
 ${section('RECORDS', `${results}${browse}`)}
 ${section('EVOLUTION', evolutionHtml)}

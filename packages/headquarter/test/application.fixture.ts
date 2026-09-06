@@ -11,6 +11,7 @@ import { HeadquarterStore } from '../src/store/headquarter.js';
 import { HeadquarterOperations, type DispatchEvidenceGrant } from '../src/application/service.js';
 import type { NominationSourcePort, WorkerNomination } from '../src/application/ports.js';
 import { HumanPrincipalRegistry } from '../src/application/principals.js';
+import type { ExternalActionAdapter } from '../src/application/action-gateway.js';
 
 /** Capability ids used across the lane F tests. */
 export const CAPS = {
@@ -42,7 +43,11 @@ export interface Fixture {
 }
 
 export function setupFixture(
-  options: { nominationSources?: readonly NominationSourcePort[] } = {},
+  options: {
+    nominationSources?: readonly NominationSourcePort[];
+    /** Phase 8: external-action adapters, supplied here because the fixture is the composition root. */
+    actionAdapters?: readonly ExternalActionAdapter[];
+  } = {},
 ): Fixture {
   const db = openMemoryHqDatabase();
   const store = new HeadquarterStore(db);
@@ -51,6 +56,7 @@ export function setupFixture(
     store,
     policyCtx: { preApprovedCapabilities: new Set<string>([CAPS.openPr]) },
     nominationSources: options.nominationSources,
+    actionAdapters: options.actionAdapters,
     grantDispatchEvidence: (grant) => {
       dispatchEvidence = grant;
     },

@@ -297,7 +297,9 @@ export const HQ_ROOMS: readonly HqRoom[] = [
     binding: {
       kind: 'live',
       section: 'founder',
-      source: 'GET /api/hq/control/session — the resolved principal and its granted controls',
+      source:
+        'GET /api/hq/control/session — the resolved principal and its granted controls; plus the ' +
+        'truth section’s verified-awaiting-acceptance and accepted counts (Phase 7)',
     },
     placement: { ring: 2, slot: 1 },
     page: 'approvals.html',
@@ -342,11 +344,15 @@ export const HQ_ROOMS: readonly HqRoom[] = [
     // natural-language layer that remains a later, Founder-gated milestone.
     // What EXISTS now — and what this room truthfully shows — is the durable
     // company memory record itself, with provenance and deterministic search.
-    purpose: 'Company memory: recorded decisions, notes, sources and summaries over HQ’s own record.',
+    purpose:
+      'Company memory: recorded decisions, notes, sources and summaries over HQ’s own record — and ' +
+      'the truth projection beside it: what was claimed, observed, verified and Founder-accepted.',
     binding: {
       kind: 'live',
       section: 'memory',
-      source: 'hq_memory via HeadquarterOperations.listMemory — the canonical company memory record',
+      source:
+        'hq_memory via HeadquarterOperations.listMemory — the canonical company memory record; truth ' +
+        'counts from the truth section (hq_truth_* via truthSummary, Phase 7)',
     },
     placement: { ring: 2, slot: 4 },
     page: 'archive.html',
@@ -375,7 +381,8 @@ export const HQ_ROOMS: readonly HqRoom[] = [
       section: 'security',
       source:
         'GET /api/hq/control/session controls + the kill switch and connection auth mechanisms ' +
-        'from the state document. Secret PRESENCE only; no value ever crosses this boundary.',
+        'from the state document, plus unresolved truth contradictions from the truth section ' +
+        '(Phase 7). Secret PRESENCE only; no value ever crosses this boundary.',
     },
     placement: { ring: 2, slot: 6 },
     page: 'connections.html',

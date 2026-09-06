@@ -75,10 +75,17 @@ const COLUMN_UPGRADES: readonly { column: string; ddl: string }[] = [
  *    membership, which is exactly the "outside the supersede path" claim);
  *  - the one legal status move is CURRENT -> SUPERSEDED, held by the engine
  *    for every writer, not just this module;
- *  - BEFORE INSERT abort-on-existing-id closes the REPLACE / INSERT OR
- *    REPLACE / UPSERT path that skips BEFORE DELETE triggers while
- *    recursive_triggers is off (the Phase 4 §G finding — that pragma is
- *    connection-scoped and cannot bind a foreign writer).
+ *  - BEFORE INSERT guards close the REPLACE / INSERT OR REPLACE / UPSERT
+ *    path that skips BEFORE DELETE triggers while recursive_triggers is off
+ *    (the Phase 4 §G finding — that pragma is connection-scoped and cannot
+ *    bind a foreign writer) on EVERY conflict target of this table: the `id`
+ *    primary key (trg_hq_memory_no_replace), the `idx_hq_memory_idem` unique
+ *    index (trg_hq_memory_no_replace_idem, review round 1) and — because the
+ *    primary key is TEXT, so the table keeps a separate implicit rowid — the
+ *    rowid itself (trg_hq_memory_no_replace_rowid, review round 2). Until
+ *    round 2 the id guard alone was described as closing the path; it did
+ *    not: a REPLACE naming an existing rowid deleted the standing row with
+ *    no BEFORE DELETE firing.
  *
  * Documented residual: superseded_by and updated_at stay engine-mutable
  * because the legitimate supersede rides one UPDATE. The immutable forward
@@ -112,6 +119,32 @@ CREATE TRIGGER IF NOT EXISTS trg_hq_memory_no_replace
 BEFORE INSERT ON hq_memory
 WHEN EXISTS (SELECT 1 FROM hq_memory WHERE id = NEW.id)
 BEGIN SELECT RAISE(ABORT, 'hq_memory is insert-only'); END;
+
+-- Phase 7/8 correction, carried back as pure hardening: the guard above
+-- tests only the id, but idx_hq_memory_idem is a second unique index, and a
+-- REPLACE colliding on it deletes the standing row with no BEFORE DELETE
+-- firing (recursive_triggers off / connection-scoped). Additive trigger, new
+-- name, so an existing file gains it on the next ensure; the legitimate
+-- writer dedupes by key BEFORE inserting (findIdByIdempotencyKey), so no
+-- accepted path ever reaches this guard.
+CREATE TRIGGER IF NOT EXISTS trg_hq_memory_no_replace_idem
+BEFORE INSERT ON hq_memory
+WHEN NEW.idempotency_key IS NOT NULL
+  AND EXISTS (SELECT 1 FROM hq_memory WHERE idempotency_key = NEW.idempotency_key)
+BEGIN SELECT RAISE(ABORT, 'hq_memory is insert-only (unique idempotency_key already held)'); END;
+
+-- Review round 2: hq_memory's primary key is TEXT, so the table has a
+-- separate implicit rowid — a third conflict target neither guard above
+-- tests. A REPLACE naming an existing rowid deleted a founder_only row and
+-- landed a forged internal one in its place with recursive_triggers OFF.
+-- In a BEFORE INSERT trigger an auto-assigned rowid reads as -1, so the
+-- legitimate writer (which never names a rowid) never matches an existing
+-- row; only an explicit rowid collision aborts. Additive, new name.
+CREATE TRIGGER IF NOT EXISTS trg_hq_memory_no_replace_rowid
+BEFORE INSERT ON hq_memory
+WHEN TYPEOF(NEW.rowid) = 'integer'
+  AND EXISTS (SELECT 1 FROM hq_memory WHERE rowid = NEW.rowid)
+BEGIN SELECT RAISE(ABORT, 'hq_memory is insert-only (rowid already held)'); END;
 `;
 
 /**
