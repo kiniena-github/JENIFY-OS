@@ -82,6 +82,10 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
   CONTROL_ROUTES.workforce,
   CONTROL_ROUTES.workforceRoute,
   CONTROL_ROUTES.workforceAssign,
+  // Phase 5 (issue #265): the company memory surface on archive.html. The
+  // search/context reads exist on the API; this page filters the fetched
+  // records locally instead of issuing per-keystroke requests.
+  CONTROL_ROUTES.memory,
 ];
 
 /**
@@ -96,7 +100,7 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
  * server's words rather than guessing.
  */
 export const CONTROL_GRANT_JS = `function grantedControls(session) {
-  var off = { directOrder: false, approve: false, deny: false, missionCommand: false, projectCommand: false, workforceAssign: false, reason: '' };
+  var off = { directOrder: false, approve: false, deny: false, missionCommand: false, projectCommand: false, workforceAssign: false, memoryCommand: false, reason: '' };
   if (session == null || typeof session !== 'object') {
     off.reason = 'The control API gave no readable answer, so no control is drawn.';
     return off;
@@ -113,6 +117,7 @@ export const CONTROL_GRANT_JS = `function grantedControls(session) {
     missionCommand: session.controls.missionCommand === true,
     projectCommand: session.controls.projectCommand === true,
     workforceAssign: session.controls.workforceAssign === true,
+    memoryCommand: session.controls.memoryCommand === true,
     reason: stated !== '' ? stated : ungrantedReason(session.controls)
   };
 }
@@ -2001,6 +2006,268 @@ export function workforceConsoleScript(): string {
         note.textContent = 'Live: ' + body.workers.length + ' registered worker(s), from the canonical directory just now.' +
           (body.memberRegistryConfigured === true ? '' : ' No AI member registry is configured on this deployment \\u2014 stated, not guessed.');
         renderWorkforce(body, grant.workforceAssign, grant.reason);
+      })
+      .catch(function (error) {
+        stayOff('the HQ control API is not reachable from this page (' + error.message + ').');
+      });
+  }
+
+  jsonExchange(fetch(SESSION_PATH, { headers: { accept: 'application/json' } }))
+    .then(function (result) {
+      sessionAnswer = result.body;
+      if (result.body == null || typeof result.body !== 'object' || result.body.founder !== true) {
+        var grant = grantedControls(result.body);
+        stayOff(grant.reason);
+        return;
+      }
+      reload();
+    })
+    .catch(function (error) {
+      stayOff('the HQ control API is not reachable from this page (' + error.message + ').');
+    });
+})();
+</script>`;
+}
+
+/**
+ * Archive page: the Company Memory console (Phase 5, issue #265).
+ *
+ * Static markup stays inert. Any resolved Founder gets the live /memory
+ * READ — every record with its provenance (recorded date + confidence +
+ * source, recordedBy, entity links, supersede chain, derivation), rendered
+ * via textContent only. The record form is built only under a granted
+ * `memoryCommand`. Filtering is local and deterministic over the fetched
+ * rows — no per-keystroke network, no semantic scoring, no invention.
+ */
+export function memoryConsoleScript(
+  kinds: readonly string[],
+  privacyLevels: readonly string[],
+): string {
+  return `<script>
+(function () {
+  var mount = document.querySelector('[data-memory-console]');
+  if (!mount || typeof window.fetch !== 'function') return;
+
+  ${CONTROL_GRANT_JS}
+  ${DOM_HELPERS_JS}
+
+  var SESSION_PATH = ${jsonForScript(CONTROL_ROUTES.session)};
+  var MEMORY_PATH = ${jsonForScript(CONTROL_ROUTES.memory)};
+  var KINDS = ${jsonForScript(kinds)};
+  var PRIVACY_LEVELS = ${jsonForScript(privacyLevels)};
+
+  var note = el('p', 'readonly-note console-state', 'Checking with the control API whether this session can read company memory\\u2026');
+  note.setAttribute('data-memory-console-state', 'checking');
+  note.setAttribute('role', 'status');
+  mount.appendChild(note);
+
+  var listBox = el('div', 'memory-live');
+  listBox.setAttribute('data-memory-list', '');
+  mount.appendChild(listBox);
+
+  function stayOff(reason) {
+    listBox.textContent = '';
+    note.setAttribute('data-memory-console-state', 'off');
+    note.className = 'readonly-note console-state console-state-off';
+    note.textContent = 'COMPANY MEMORY IS NOT READABLE FROM THIS PAGE \\u2014 ' + reason;
+  }
+
+  function textLine(parent, cls, text) {
+    parent.appendChild(el('p', cls, text));
+  }
+
+  // Local, deterministic filter: every space-separated token must appear in
+  // the record's title/body/kind/project/tags (case-insensitive). Filtering
+  // hides rows from view; it never re-ranks, scores or fetches.
+  function matchesFilter(record, filterText) {
+    var tokens = filterText.toLowerCase().split(/\\s+/).filter(function (t) { return t !== ''; });
+    if (tokens.length === 0) return true;
+    var haystack = (record.title + ' ' + record.body + ' ' + record.kind + ' ' + record.project + ' ' +
+      (Array.isArray(record.tags) ? record.tags.join(' ') : '')).toLowerCase();
+    for (var i = 0; i < tokens.length; i++) {
+      if (haystack.indexOf(tokens[i]) === -1) return false;
+    }
+    return true;
+  }
+
+  function renderRecords(records, filterText) {
+    var cards = listBox.querySelector('[data-memory-cards]');
+    if (!cards) return;
+    cards.textContent = '';
+    var shown = 0;
+    for (var i = 0; i < records.length; i++) {
+      var record = records[i];
+      if (!matchesFilter(record, filterText)) continue;
+      shown++;
+      var card = el('article', 'panel memory-card');
+      card.setAttribute('data-memory-card', record.id);
+      var head = el('p', 'row');
+      head.appendChild(el('b', '', record.title));
+      head.appendChild(el('span', 'chip', record.kind));
+      head.appendChild(el('span', 'chip', record.status));
+      if (record.privacy === 'founder_only') head.appendChild(el('span', 'chip', 'founder_only'));
+      card.appendChild(head);
+      textLine(card, 'faint', 'recorded ' + record.recorded.date + ' (' + record.recorded.confidence + ')' +
+        (record.recorded.source ? ' via ' + record.recorded.source : '') + ' by ' + record.recordedBy +
+        ' \\u00b7 project label: ' + record.project);
+      textLine(card, 'muted', record.body);
+      var links = [];
+      if (record.missionId) links.push('mission ' + record.missionId);
+      if (record.projectId) links.push('project ' + record.projectId);
+      if (record.taskId) links.push('task ' + record.taskId);
+      if (links.length > 0) textLine(card, 'muted', 'Linked to: ' + links.join(' \\u00b7 '));
+      if (record.supersedes) textLine(card, 'faint', 'Supersedes ' + record.supersedes);
+      if (Array.isArray(record.supersededBy) && record.supersededBy.length > 0) {
+        textLine(card, 'faint', 'Superseded by ' + record.supersededBy.join(', '));
+      }
+      if (Array.isArray(record.derivedFrom) && record.derivedFrom.length > 0) {
+        textLine(card, 'faint', 'SUMMARY \\u2014 derived from ' + record.derivedFrom.join(', ') +
+          '; the originals are retained and this record never replaces them.');
+      }
+      if (Array.isArray(record.sourceRefs) && record.sourceRefs.length > 0) {
+        textLine(card, 'faint', 'Sources (pointers, never copies): ' + record.sourceRefs.join(' \\u00b7 '));
+      }
+      cards.appendChild(card);
+    }
+    if (shown === 0) {
+      textLine(cards, 'muted', records.length === 0
+        ? 'HQ remembers nothing yet. 0 means 0 \\u2014 no demo memory is invented to fill this page.'
+        : 'No record matches this filter. ' + records.length + ' record(s) exist unfiltered.');
+    }
+  }
+
+  function buildRecordForm(reload) {
+    var form = el('div', 'order-field');
+    form.setAttribute('data-memory-record-form', '');
+    textLine(form, 'order-label', 'Record company memory \\u2014 insert-only; changing a record means superseding it with a successor');
+    var kindSelect = document.createElement('select');
+    kindSelect.setAttribute('aria-label', 'Memory kind');
+    for (var i = 0; i < KINDS.length; i++) {
+      var option = document.createElement('option');
+      option.value = KINDS[i];
+      option.textContent = KINDS[i];
+      kindSelect.appendChild(option);
+    }
+    var titleInput = document.createElement('input');
+    titleInput.type = 'text';
+    titleInput.setAttribute('aria-label', 'Title');
+    titleInput.placeholder = 'title';
+    var bodyInput = document.createElement('textarea');
+    bodyInput.setAttribute('aria-label', 'Body');
+    bodyInput.placeholder = 'what HQ should remember';
+    var projectInput = document.createElement('input');
+    projectInput.type = 'text';
+    projectInput.setAttribute('aria-label', 'Project label (free text, never matched against the register)');
+    projectInput.placeholder = 'project label';
+    var missionInput = document.createElement('input');
+    missionInput.type = 'text';
+    missionInput.setAttribute('aria-label', 'Mission id (optional canonical link)');
+    missionInput.placeholder = 'mission id (optional)';
+    var tagsInput = document.createElement('input');
+    tagsInput.type = 'text';
+    tagsInput.setAttribute('aria-label', 'Tags, comma separated (optional)');
+    tagsInput.placeholder = 'tags, comma separated (optional)';
+    var supersedesInput = document.createElement('input');
+    supersedesInput.type = 'text';
+    supersedesInput.setAttribute('aria-label', 'Supersedes record id (optional)');
+    supersedesInput.placeholder = 'supersedes record id (optional)';
+    var privacySelect = document.createElement('select');
+    privacySelect.setAttribute('aria-label', 'Privacy');
+    for (var p = 0; p < PRIVACY_LEVELS.length; p++) {
+      var pOption = document.createElement('option');
+      pOption.value = PRIVACY_LEVELS[p];
+      pOption.textContent = PRIVACY_LEVELS[p];
+      privacySelect.appendChild(pOption);
+    }
+    var outcome = el('p', 'muted', '');
+    outcome.setAttribute('role', 'status');
+    outcome.setAttribute('aria-live', 'polite');
+    var submit = document.createElement('button');
+    submit.type = 'button';
+    submit.className = 'order-live-submit';
+    submit.textContent = 'Record memory';
+    submit.addEventListener('click', function () {
+      var title = titleInput.value.trim();
+      var bodyText = bodyInput.value.trim();
+      var project = projectInput.value.trim();
+      if (title === '' || bodyText === '' || project === '') {
+        outcome.textContent = 'Title, body and project label are required. Nothing was sent.';
+        return;
+      }
+      var payload = { kind: kindSelect.value, title: title, body: bodyText, project: project, privacy: privacySelect.value };
+      if (missionInput.value.trim() !== '') payload.missionId = missionInput.value.trim();
+      if (supersedesInput.value.trim() !== '') payload.supersedes = supersedesInput.value.trim();
+      var tags = tagsInput.value.split(',').map(function (t) { return t.trim(); }).filter(function (t) { return t !== ''; });
+      if (tags.length > 0) payload.tags = tags;
+      submit.disabled = true;
+      outcome.textContent = 'Recording\\u2026';
+      postJson(MEMORY_PATH, payload).then(function (result) {
+        submit.disabled = false;
+        var answer = result.body || {};
+        if (answer.ok === true) {
+          outcome.textContent = answer.deduplicated === true
+            ? 'Already recorded \\u2014 this exact memory deduplicated onto the stored record.'
+            : 'Recorded. The store is insert-only; this record can be superseded but never rewritten.';
+          titleInput.value = ''; bodyInput.value = ''; supersedesInput.value = '';
+          notifyStateChanged();
+          reload();
+          return;
+        }
+        var error = answer.error || {};
+        outcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given');
+      }).catch(function (error) {
+        submit.disabled = false;
+        outcome.textContent = 'Not recorded (' + error.message + ').';
+      });
+    });
+    form.appendChild(kindSelect);
+    form.appendChild(titleInput);
+    form.appendChild(bodyInput);
+    form.appendChild(projectInput);
+    form.appendChild(missionInput);
+    form.appendChild(tagsInput);
+    form.appendChild(supersedesInput);
+    form.appendChild(privacySelect);
+    form.appendChild(submit);
+    form.appendChild(outcome);
+    return form;
+  }
+
+  var sessionAnswer = null;
+  function reload() {
+    jsonExchange(fetch(MEMORY_PATH, { headers: { accept: 'application/json' } }))
+      .then(function (result) {
+        var body = result.body || {};
+        if (body.ok !== true || !Array.isArray(body.records)) {
+          var error = body.error || {};
+          stayOff('the memory read was refused (' + (error.code || ('HTTP ' + result.status)) + '): ' +
+            (error.message || 'no detail was given'));
+          return;
+        }
+        var records = body.records;
+        var grant = grantedControls(sessionAnswer);
+        note.setAttribute('data-memory-console-state', 'live');
+        note.className = 'readonly-note console-state console-state-live';
+        note.textContent = 'Live: ' + records.length + ' memory record(s), read from hq_memory just now. ' +
+          'Superseded history is retained; a summary is a record that names its sources.';
+        listBox.textContent = '';
+        var filterInput = document.createElement('input');
+        filterInput.type = 'text';
+        filterInput.setAttribute('aria-label', 'Filter memory records');
+        filterInput.placeholder = 'filter records (local, deterministic)';
+        listBox.appendChild(filterInput);
+        var cards = el('div', 'memory-cards');
+        cards.setAttribute('data-memory-cards', '');
+        listBox.appendChild(cards);
+        filterInput.addEventListener('input', function () {
+          renderRecords(records, filterInput.value);
+        });
+        renderRecords(records, '');
+        if (grant.memoryCommand) {
+          listBox.appendChild(buildRecordForm(reload));
+        } else {
+          textLine(listBox, 'readonly-note', 'The record form is off for this session \\u2014 ' + grant.reason);
+        }
       })
       .catch(function (error) {
         stayOff('the HQ control API is not reachable from this page (' + error.message + ').');

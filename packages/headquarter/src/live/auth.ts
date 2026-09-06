@@ -132,6 +132,14 @@ export interface ControlRequest {
   headers: Readonly<Record<string, string | undefined>>;
   /** Parsed JSON body, or undefined. */
   body?: unknown;
+  /**
+   * Parsed query parameters, or undefined (Phase 5, issue #265 — the one
+   * boundary widening: the memory search/context reads are parameterized).
+   * The boundary identity-scans this exactly like the body: a
+   * `?principalId=...` attempt is refused, never ignored. A host that sends
+   * no query leaves the parameterized reads answering 400, fail closed.
+   */
+  query?: Readonly<Record<string, string | undefined>>;
 }
 
 /**

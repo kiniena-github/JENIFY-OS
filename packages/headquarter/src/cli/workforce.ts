@@ -81,6 +81,11 @@ import {
   registerWorkforceAssignCapability,
   workforceAssignCapabilityState,
 } from '../application/workforce-command.js';
+import {
+  MEMORY_COMMAND_CAPABILITY,
+  memoryCommandCapabilityState,
+  registerMemoryCommandCapability,
+} from '../application/memory-command.js';
 import { AiMemberRegistry } from '../registry/members.js';
 import { MemberCapabilityRegistry } from '../registry/capabilities.js';
 import { ProviderDirectory } from '../providers/directory.js';
@@ -110,6 +115,11 @@ const REGISTRABLE = {
   [WORKFORCE_ASSIGN_CAPABILITY.id]: {
     register: registerWorkforceAssignCapability,
     state: workforceAssignCapabilityState,
+  },
+  // Phase 5 (issue #265): the memory-command trio joins the fail-closed list.
+  [MEMORY_COMMAND_CAPABILITY.id]: {
+    register: registerMemoryCommandCapability,
+    state: memoryCommandCapabilityState,
   },
 } as const;
 

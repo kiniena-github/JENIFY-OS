@@ -47,6 +47,7 @@ function sources(overrides: Partial<SnapshotSources> = {}): SnapshotSources {
     activity: { data: [], provenance },
     missions: { data: [], provenance },
     projects: { data: [], provenance },
+    memory: { data: [], provenance },
     ...overrides,
   };
 }

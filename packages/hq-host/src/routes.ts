@@ -75,7 +75,18 @@ export function registerHeadquarterRoutes(
       headers[name.toLowerCase()] = Array.isArray(value) ? value[0] : (value as string | undefined);
     }
     const path = req.url.split('?')[0]!;
-    const control: ControlRequest = { method, path, headers, body: req.body };
+    // Query parameters reach the boundary as a plain string map (Phase 5,
+    // issue #265 — the memory search/context reads are parameterized) and are
+    // identity-scanned there exactly like the body. Repeated keys keep their
+    // FIRST value: a second `?scope=` cannot shadow the one the scan saw.
+    const query: Record<string, string | undefined> = {};
+    const rawQuery = req.url.slice(path.length + 1);
+    if (rawQuery) {
+      for (const [key, value] of new URLSearchParams(rawQuery)) {
+        if (!(key in query)) query[key] = value;
+      }
+    }
+    const control: ControlRequest = { method, path, headers, body: req.body, query };
 
     // The async pre-pass, for an identity source whose credential check is a
     // network call. It must run BEFORE the synchronous core, and an outage must

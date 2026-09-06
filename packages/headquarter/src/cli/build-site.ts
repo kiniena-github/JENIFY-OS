@@ -185,6 +185,17 @@ const snapshot = buildHqSnapshot({
       asOf,
     },
   },
+  memory: {
+    // Same rule again (Phase 5): a static build opens no hq_memory store, so
+    // zero records is a statement about this build, never live state — and
+    // certainly never demo memory.
+    data: [],
+    provenance: {
+      mode: staticSectionMode(data.sourceMode),
+      source: 'no memory store is open in a static build',
+      asOf,
+    },
+  },
 });
 
 writeFileSync(join(outDir, SNAPSHOT_FILENAME), `${JSON.stringify(snapshot, null, 2)}\n`);

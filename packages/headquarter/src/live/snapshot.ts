@@ -41,6 +41,7 @@ import { dispatchHistory } from '../providers/claude/dispatch.js';
 import type { HeadquarterOperations } from '../application/service.js';
 import { missionBrowserView, type MissionBrowserView } from '../application/mission-command.js';
 import { projectBrowserView, type ProjectBrowserView } from '../application/project-command.js';
+import type { MemoryBrowserView } from '../application/memory-command.js';
 import type { ProviderId, SecretsEnv } from '../routing/providers.js';
 import { assessConnections, type ConnectionProbe, type ConnectionStatus } from './connections.js';
 import { assertBrowserSafe, assertNoFabricatedFields } from './redaction.js';
@@ -73,6 +74,15 @@ export const SNAPSHOT_ACTIVITY_LIMIT = 40;
  * reports the TOTAL and the section's provenance says what was trimmed.
  */
 export const SNAPSHOT_MISSION_LIMIT = 40;
+
+/**
+ * How many memory records the WRITTEN snapshot artefact carries (Phase 5,
+ * issue #265 — the mission-limit policy applied to memory). Opt-in exactly
+ * like `missionLimit`: the live `/state` route passes no limit. When rows are
+ * trimmed or excluded, `counts.memory` still reports the TOTAL and the
+ * section's provenance says what was withheld.
+ */
+export const SNAPSHOT_MEMORY_LIMIT = 40;
 
 /**
  * Bound a mission list to the NEWEST `limit`, returned oldest-first (the
@@ -155,6 +165,12 @@ export interface SnapshotCounts {
   missions: number;
   /** Canonical project register entries (Phase 4). 0 means 0. */
   projects: number;
+  /**
+   * ALL company memory records (Phase 5) — including rows the section's data
+   * excludes (founder_only in the unauthenticated artifact) or trims. The
+   * count-only disclosure is deliberate and stated in the section provenance.
+   */
+  memory: number;
 }
 
 export interface HqSnapshot {
@@ -185,6 +201,13 @@ export interface HqSnapshot {
    * `HQ_SNAPSHOT_VERSION` policy above.
    */
   projects: SnapshotSection<ProjectBrowserView[]>;
+  /**
+   * Company memory (Phase 5, issue #265) — the shared `memoryBrowserView`
+   * projection, same one-implementation rule as missions/projects. The
+   * Founder-gated `/state` route carries every record; the unauthenticated
+   * artifact excludes founder_only rows and states the exclusion.
+   */
+  memory: SnapshotSection<MemoryBrowserView[]>;
 }
 
 /**
@@ -246,6 +269,11 @@ export interface SnapshotSources {
   missions: { data: MissionBrowserView[]; provenance: Provenance };
   projects: { data: ProjectBrowserView[]; provenance: Provenance };
   /**
+   * Company memory (Phase 5). `data` may already be privacy-filtered by the
+   * building context; `memoryTotal` (below) keeps `counts.memory` truthful.
+   */
+  memory: { data: MemoryBrowserView[]; provenance: Provenance };
+  /**
    * Per-worker provider declarations (Phase 4). Optional: an omitted map
    * means the building context holds no declaration truth — every worker's
    * `provider` reads null, which is the honest static-build answer, not a
@@ -261,6 +289,13 @@ export interface SnapshotSources {
   activityLimit?: number;
   /** Opt-in mission bound — see SNAPSHOT_MISSION_LIMIT. Omitted = unbounded. */
   missionLimit?: number;
+  /** Opt-in memory bound — see SNAPSHOT_MEMORY_LIMIT. Omitted = unbounded. */
+  memoryLimit?: number;
+  /**
+   * TRUE total of memory records, when `memory.data` was privacy-filtered by
+   * the building context. Omitted = data.length (nothing was withheld).
+   */
+  memoryTotal?: number;
 }
 
 /**
@@ -282,6 +317,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       sources.activity.provenance.mode,
       sources.missions.provenance.mode,
       sources.projects.provenance.mode,
+      sources.memory.provenance.mode,
     ]),
     note: sources.note ?? null,
     counts: {
@@ -293,6 +329,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       queued: console_.queued.length,
       missions: sources.missions.data.length,
       projects: sources.projects.data.length,
+      memory: sources.memoryTotal ?? sources.memory.data.length,
     },
     operations: section(sources.console.provenance, console_),
     connections: section(sources.connections.provenance, sources.connections.data),
@@ -338,6 +375,24 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
           )
         : section(sources.missions.provenance, sources.missions.data),
     projects: section(sources.projects.provenance, sources.projects.data),
+    memory:
+      sources.memoryLimit != null && sources.memory.data.length > sources.memoryLimit
+        ? section(
+            {
+              ...sources.memory.provenance,
+              note: [
+                sources.memory.provenance.note,
+                `Trimmed to the newest ${sources.memoryLimit} of ` +
+                  `${sources.memory.data.length} carried records; counts.memory still reports the total.`,
+              ]
+                .filter(Boolean)
+                .join(' '),
+            },
+            // listMemory() already orders newest-first, so the bound keeps
+            // the newest rows without re-sorting.
+            sources.memory.data.slice(0, sources.memoryLimit),
+          )
+        : section(sources.memory.provenance, sources.memory.data),
   };
 
   // Fail closed: prove it before anyone can publish it.
@@ -361,6 +416,16 @@ export interface LiveSnapshotOptions {
   activityLimit?: number;
   /** Opt-in mission bound — see SNAPSHOT_MISSION_LIMIT. Omitted = unbounded. */
   missionLimit?: number;
+  /** Opt-in memory bound — see SNAPSHOT_MEMORY_LIMIT. Omitted = unbounded. */
+  memoryLimit?: number;
+  /**
+   * Whether founder_only memory rows ride this snapshot (Phase 5). Default
+   * FALSE — fail closed: the unauthenticated artifact (`hq:snapshot`, the
+   * static build) never sets it, and only the Founder-gated `/state` route
+   * passes true. Excluded rows stay in `counts.memory` and the exclusion is
+   * stated in the section provenance.
+   */
+  includeFounderOnlyMemory?: boolean;
   /**
    * Connection probes to assess with (issue #221, Codex P2 on `1d5b3bf`).
    *
@@ -465,6 +530,16 @@ export function liveSnapshotFromOperations(
     }
   }
 
+  // Phase 5 memory section inputs: the reading layer's privacy decision is
+  // made HERE, before the pure builder sees the rows, and the true total is
+  // carried separately so counts.memory never understates.
+  const allMemory = ops.memoryStorePresent() ? ops.listMemory() : [];
+  const carriedMemory =
+    options.includeFounderOnlyMemory === true
+      ? allMemory
+      : allMemory.filter((record) => record.privacy !== 'founder_only');
+  const withheldMemory = allMemory.length - carriedMemory.length;
+
   return buildHqSnapshot({
     workerProviders,
     workerMembers,
@@ -473,6 +548,8 @@ export function liveSnapshotFromOperations(
     policyContext: ops.policyContext,
     activityLimit: options.activityLimit,
     missionLimit: options.missionLimit,
+    memoryLimit: options.memoryLimit,
+    memoryTotal: allMemory.length,
     console: {
       data: withDispatchBlocked(founderConsole(ops, new Date(at)), ops, env, options.dispatchAvailability),
       provenance: provenanceFor('op_tasks / hq_approvals via application/console.founderConsole'),
@@ -537,6 +614,35 @@ export function liveSnapshotFromOperations(
             note:
               'This database predates the Phase 4 project schema and was opened read-only, so no ' +
               'project register exists to read. 0 rows states that absence; nothing was migrated.',
+          },
+        },
+    memory: ops.memoryStorePresent()
+      ? {
+          data: carriedMemory,
+          provenance: {
+            mode,
+            source: 'hq_memory via HeadquarterOperations.listMemory',
+            asOf: at,
+            ...(withheldMemory > 0
+              ? {
+                  note:
+                    `${withheldMemory} founder_only record(s) are counted in counts.memory but not ` +
+                    'carried by this artifact; they are readable only through the ' +
+                    'Founder-authenticated /state route.',
+                }
+              : {}),
+          },
+        }
+      : {
+          // The mission/project absence rule, applied to Phase 5 memory.
+          data: [],
+          provenance: {
+            mode,
+            source: 'hq_memory via HeadquarterOperations.listMemory',
+            asOf: at,
+            note:
+              'This database predates the Phase 5 memory schema and was opened read-only, so no ' +
+              'memory store exists to read. 0 rows states that absence; nothing was migrated.',
           },
         },
   });

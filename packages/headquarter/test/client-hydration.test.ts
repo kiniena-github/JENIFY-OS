@@ -41,6 +41,7 @@ function emptyState(): HqSnapshot {
   return buildHqSnapshot({
     generatedAt: AT,
     projects: { data: [], provenance: PROVENANCE },
+    memory: { data: [], provenance: PROVENANCE },
     console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
     connections: { data: [], provenance: PROVENANCE },
     workforce: { data: [], provenance: PROVENANCE },
@@ -198,6 +199,7 @@ describe('a populated HQ is copied, never re-derived', () => {
     return buildHqSnapshot({
       generatedAt: AT,
       projects: { data: [], provenance: PROVENANCE },
+    memory: { data: [], provenance: PROVENANCE },
       console: { data: console_, provenance: PROVENANCE },
       connections: { data: [], provenance: PROVENANCE },
       workforce: { data: [], provenance: PROVENANCE },
@@ -241,6 +243,7 @@ describe('a populated HQ is copied, never re-derived', () => {
     const withWorkers = buildHqSnapshot({
       generatedAt: AT,
       projects: { data: [], provenance: PROVENANCE },
+    memory: { data: [], provenance: PROVENANCE },
       console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
       connections: { data: [], provenance: PROVENANCE },
       workforce: {
@@ -277,6 +280,7 @@ describe('a populated HQ is copied, never re-derived', () => {
     const snapshot = buildHqSnapshot({
       generatedAt: AT,
       projects: { data: [], provenance: PROVENANCE },
+    memory: { data: [], provenance: PROVENANCE },
       console: { data: many, provenance: PROVENANCE },
       connections: { data: [], provenance: PROVENANCE },
       workforce: { data: [], provenance: PROVENANCE },
@@ -299,6 +303,7 @@ describe('a room is dark only when everything it counts is empty', () => {
     const withRecords = buildHqSnapshot({
       generatedAt: AT,
       projects: { data: [], provenance: PROVENANCE },
+    memory: { data: [], provenance: PROVENANCE },
       console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
       connections: { data: [], provenance: PROVENANCE },
       workforce: {
@@ -420,6 +425,7 @@ describe('the Mission Room shows commanded missions, and only those (Phase 3)', 
     return buildHqSnapshot({
       generatedAt: AT,
       projects: { data: [], provenance: PROVENANCE },
+    memory: { data: [], provenance: PROVENANCE },
       console: { data: console_, provenance: PROVENANCE },
       connections: { data: [], provenance: PROVENANCE },
       workforce: { data: [], provenance: PROVENANCE },
@@ -593,6 +599,7 @@ describe('Analytics ranks an approval the way every other room does', () => {
     return buildHqSnapshot({
       generatedAt: AT,
       projects: { data: [], provenance: PROVENANCE },
+    memory: { data: [], provenance: PROVENANCE },
       console: { data: console_, provenance: PROVENANCE },
       connections: { data: [], provenance: PROVENANCE },
       workforce: { data: [], provenance: PROVENANCE },
@@ -674,6 +681,7 @@ describe('no room contradicts its own displayed numbers', () => {
       return buildHqSnapshot({
         generatedAt: AT,
         projects: { data: [], provenance: PROVENANCE },
+        memory: { data: [], provenance: PROVENANCE },
         console: { data: console_, provenance: PROVENANCE },
         connections: { data: [], provenance: PROVENANCE },
         workforce: { data: [], provenance: PROVENANCE },
@@ -779,6 +787,7 @@ describe('connection attention follows the canonical tone mapping', () => {
     return buildHqSnapshot({
       generatedAt: AT,
       projects: { data: [], provenance: PROVENANCE },
+    memory: { data: [], provenance: PROVENANCE },
       console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
       connections: {
         data: [
@@ -886,6 +895,7 @@ describe('reachability comes from one list, not two that agree', () => {
       const state = buildHqSnapshot({
         generatedAt: AT,
         projects: { data: [], provenance: PROVENANCE },
+        memory: { data: [], provenance: PROVENANCE },
         console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
         connections: {
           data: [
@@ -926,6 +936,7 @@ describe('the attention count and its hint describe the same set of states', () 
     const state = buildHqSnapshot({
       generatedAt: AT,
       projects: { data: [], provenance: PROVENANCE },
+    memory: { data: [], provenance: PROVENANCE },
       console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
       connections: {
         data: [
@@ -1012,11 +1023,13 @@ describe('a room names every state section that can change what it shows', () =>
         capabilities: { data: [], provenance: PROVENANCE },
         activity: { data: [], provenance: PROVENANCE },
         missions: { data: [], provenance: PROVENANCE },
+        memory: { data: [], provenance: PROVENANCE },
       }),
     workforce: () =>
       buildHqSnapshot({
         generatedAt: AT,
         projects: { data: [], provenance: PROVENANCE },
+        memory: { data: [], provenance: PROVENANCE },
         console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
         connections: { data: [], provenance: PROVENANCE },
         workforce: {
@@ -1033,6 +1046,7 @@ describe('a room names every state section that can change what it shows', () =>
       buildHqSnapshot({
         generatedAt: AT,
         projects: { data: [], provenance: PROVENANCE },
+        memory: { data: [], provenance: PROVENANCE },
         console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
         connections: { data: [], provenance: PROVENANCE },
         workforce: { data: [], provenance: PROVENANCE },
@@ -1065,6 +1079,7 @@ describe('a room names every state section that can change what it shows', () =>
       buildHqSnapshot({
         generatedAt: AT,
         projects: { data: [], provenance: PROVENANCE },
+        memory: { data: [], provenance: PROVENANCE },
         console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
         connections: {
           data: [
@@ -1081,6 +1096,7 @@ describe('a room names every state section that can change what it shows', () =>
       buildHqSnapshot({
         generatedAt: AT,
         projects: { data: [], provenance: PROVENANCE },
+        memory: { data: [], provenance: PROVENANCE },
         console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
         connections: { data: [], provenance: PROVENANCE },
         workforce: { data: [], provenance: PROVENANCE },
@@ -1179,6 +1195,7 @@ describe('the Projects room shows the canonical register, and only that (Phase 4
       capabilities: { data: [], provenance: PROVENANCE },
       activity: { data: [], provenance: PROVENANCE },
       missions: { data: [], provenance: PROVENANCE },
+      memory: { data: [], provenance: PROVENANCE },
     });
   }
   const projectsRoom = (state: HqSnapshot) =>
@@ -1201,6 +1218,7 @@ describe('the Projects room shows the canonical register, and only that (Phase 4
     const withLabels = buildHqSnapshot({
       generatedAt: AT,
       projects: { data: [], provenance: PROVENANCE },
+    memory: { data: [], provenance: PROVENANCE },
       console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
       connections: { data: [], provenance: PROVENANCE },
       workforce: { data: [], provenance: PROVENANCE },

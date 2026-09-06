@@ -136,6 +136,12 @@ import {
   WORKFORCE_ASSIGN_CAPABILITY,
   workforceAssignCapabilityState,
 } from '../application/workforce-command.js';
+import {
+  MEMORY_COMMAND_CAPABILITY,
+  memoryCommandCapabilityState,
+} from '../application/memory-command.js';
+import { MEMORY_KINDS, isMemoryKind, isMemoryPrivacy } from '../memory/schema.js';
+import { isArchiveStatus } from '../archive/schema.js';
 import { PROVIDERS, providerConnectivity } from '../routing/providers.js';
 
 export const CONTROL_API_PREFIX = '/api/hq/control';
@@ -201,6 +207,19 @@ export const CONTROL_ROUTES = {
   workforce: `${CONTROL_API_PREFIX}/workforce`,
   workforceRoute: `${CONTROL_API_PREFIX}/workforce/route`,
   workforceAssign: `${CONTROL_API_PREFIX}/workforce/assign`,
+  /**
+   * Phase 5 (issue #265): the company memory surface. GET lists every memory
+   * record with full browser-safe detail INCLUDING founder_only rows — this
+   * route sits behind the Founder gate, which is exactly the reading API
+   * layer the memory schema says must enforce privacy (the unauthenticated
+   * snapshot artifact excludes them instead). POST records one memory entry
+   * idempotently (superseding via `supersedes` — the store is insert-only by
+   * engine, so there is no edit to offer). The search and context reads are
+   * the two parameterized GETs the `query` boundary field exists for.
+   */
+  memory: `${CONTROL_API_PREFIX}/memory`,
+  memorySearch: `${CONTROL_API_PREFIX}/memory/search`,
+  memoryContext: `${CONTROL_API_PREFIX}/memory/context`,
 } as const;
 
 /**
@@ -222,6 +241,7 @@ export const CONTROL_WRITE_ROUTES: readonly string[] = [
   CONTROL_ROUTES.missionLinkPlanItem,
   CONTROL_ROUTES.workforceRoute,
   CONTROL_ROUTES.workforceAssign,
+  CONTROL_ROUTES.memory,
 ];
 
 export interface ControlResponse {
@@ -424,7 +444,10 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.state ||
         path === CONTROL_ROUTES.missions ||
         path === CONTROL_ROUTES.projects ||
-        path === CONTROL_ROUTES.workforce)) ||
+        path === CONTROL_ROUTES.workforce ||
+        path === CONTROL_ROUTES.memory ||
+        path === CONTROL_ROUTES.memorySearch ||
+        path === CONTROL_ROUTES.memoryContext)) ||
     (method === 'POST' &&
       (path === CONTROL_ROUTES.orders ||
         path === CONTROL_ROUTES.approve ||
@@ -438,7 +461,8 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.missionAssignProject ||
         path === CONTROL_ROUTES.missionLinkPlanItem ||
         path === CONTROL_ROUTES.workforceRoute ||
-        path === CONTROL_ROUTES.workforceAssign));
+        path === CONTROL_ROUTES.workforceAssign ||
+        path === CONTROL_ROUTES.memory));
   if (!known) {
     // Deny by default, and say nothing about what does exist.
     return refusal(404, 'not_found', 'No such HQ control route.');
@@ -499,16 +523,21 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     return refusal(403, origin.reason, origin.message);
   }
 
-  const identity = scanForClientIdentity(request.body);
-  if (!identity.ok) {
-    audit('refused', 'client_identity_supplied');
-    return refusal(
-      400,
-      'client_identity_supplied',
-      `This request tries to supply '${identity.key}'. Who is acting is decided by the ` +
-        'server session and the configured Founder map only; a request that names an actor is ' +
-        'refused rather than silently re-attributed.',
-    );
+  // Body AND query (Phase 5): a `?principalId=...` attempt is the same
+  // weaker-security-model client as a body naming an actor, and is refused
+  // on the same terms rather than silently ignored.
+  for (const carrier of [request.body, request.query]) {
+    const identity = scanForClientIdentity(carrier);
+    if (!identity.ok) {
+      audit('refused', 'client_identity_supplied');
+      return refusal(
+        400,
+        'client_identity_supplied',
+        `This request tries to supply '${identity.key}'. Who is acting is decided by the ` +
+          'server session and the configured Founder map only; a request that names an actor is ' +
+          'refused rather than silently re-attributed.',
+      );
+    }
   }
 
   const resolution = resolveFounderPrincipal(request, {
@@ -647,6 +676,10 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
       now: now().toISOString(),
       env: deps.secretsEnv,
       dispatchAvailability: deps.dispatchAvailability,
+      // This response exists only past the Founder gate — the reading layer
+      // that IS allowed to disclose founder_only memory (Phase 5). The
+      // unauthenticated artifact paths never set this.
+      includeFounderOnlyMemory: true,
     });
     const rooms = hydrateRooms(state, {
       ok: true,
@@ -697,6 +730,28 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     return workforceReport(deps, founder, audit, now);
   }
 
+  if (method === 'GET' && path === CONTROL_ROUTES.memory) {
+    audit('allowed', 'list_memory', founder);
+    return safe(
+      json(200, {
+        ok: true,
+        generatedAt: now().toISOString(),
+        // founder_only INCLUDED: this response exists only past the Founder
+        // gate, which is the privacy-enforcing reading layer.
+        records: deps.ops.listMemory() as unknown as Record<string, unknown>[],
+        storePresent: deps.ops.memoryStorePresent(),
+      }),
+    );
+  }
+
+  if (method === 'GET' && path === CONTROL_ROUTES.memorySearch) {
+    return searchMemoryRoute(request, deps, founder, audit, now);
+  }
+
+  if (method === 'GET' && path === CONTROL_ROUTES.memoryContext) {
+    return memoryContextRoute(request, deps, founder, audit, now);
+  }
+
   if (path === CONTROL_ROUTES.orders) return createOrder(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.approve) return approve(request, deps, founder, audit, now);
   if (path === CONTROL_ROUTES.missions) return commandMission(request, deps, founder, audit);
@@ -719,6 +774,7 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
   if (path === CONTROL_ROUTES.workforceAssign) {
     return workforceAssign(request, deps, founder, audit);
   }
+  if (path === CONTROL_ROUTES.memory) return recordMemoryRoute(request, deps, founder, audit);
   return deny(request, deps, founder, audit);
 }
 
@@ -790,6 +846,12 @@ function controlAvailability(
     workforceAssign:
       mayAssignWorkforce &&
       workforceAssignCapabilityState(capabilityRowFor(deps.ops, WORKFORCE_ASSIGN_CAPABILITY.id)) ===
+        'enabled',
+    // Phase 5: advertised from exactly the conditions that decide the write.
+    memoryCommand:
+      writable &&
+      principal?.originateCapabilities.includes(MEMORY_COMMAND_CAPABILITY.id) === true &&
+      memoryCommandCapabilityState(capabilityRowFor(deps.ops, MEMORY_COMMAND_CAPABILITY.id)) ===
         'enabled',
     mutationsEnabled: deps.mutationsEnabled !== false,
     trustedOriginConfigured: originsUsable,
@@ -974,6 +1036,7 @@ function controlErrorStatus(code: string): number {
     case 'unknown_mission':
     case 'unknown_project':
     case 'unknown_task':
+    case 'unknown_memory':
       return 404;
     case 'invalid_mission_transition':
     case 'mission_status_changed':
@@ -986,6 +1049,7 @@ function controlErrorStatus(code: string): number {
     case 'task_already_claimed':
     case 'task_beyond_claiming':
     case 'worker_not_assignable':
+    case 'memory_conflict':
       return 409;
     case 'unknown_capability':
     case 'capability_disabled':
@@ -996,6 +1060,165 @@ function controlErrorStatus(code: string): number {
     default:
       return 400;
   }
+}
+
+/** Search results are bounded on the wire; the true hit count is stated. */
+const MEMORY_SEARCH_LIMIT = 50;
+
+function searchMemoryRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const query = request.query ?? {};
+  const text = query.text?.trim();
+  const project = query.project?.trim();
+  const category = query.category?.trim();
+  const status = query.status?.trim();
+  const tag = query.tag?.trim();
+  const year = query.year?.trim();
+  if (!text && !project && !category && !status && !tag && !year) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(
+      400,
+      'invalid_input',
+      'Supply at least one of text, project, category, status, tag or year.',
+    );
+  }
+  if (status !== undefined && status !== '' && !isArchiveStatus(status)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'status is not a known archive status.');
+  }
+  const { hits, total } = deps.ops.searchMemoryRecords({
+    text: text || undefined,
+    project: project || undefined,
+    category: category || undefined,
+    status: status ? (status as Parameters<typeof deps.ops.searchMemoryRecords>[0]['status']) : undefined,
+    tag: tag || undefined,
+    year: year || undefined,
+  });
+  audit('allowed', 'search_memory', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      hits: hits.slice(0, MEMORY_SEARCH_LIMIT) as unknown as Record<string, unknown>[],
+      total,
+      truncated: total > MEMORY_SEARCH_LIMIT,
+    }),
+  );
+}
+
+function memoryContextRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const query = request.query ?? {};
+  const scope = query.scope?.trim();
+  const id = query.id?.trim();
+  if (!id || (scope !== 'mission' && scope !== 'project' && scope !== 'task')) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', "Supply scope=mission|project|task and id=<entity id>.");
+  }
+  const result =
+    scope === 'mission'
+      ? deps.ops.getMissionContext(id)
+      : scope === 'project'
+        ? deps.ops.getProjectContext(id)
+        : deps.ops.getTaskContext(id);
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', `memory_context_${scope}`, founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      context: result.data as unknown as Record<string, unknown>,
+    }),
+  );
+}
+
+function recordMemoryRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const kind = stringField(request.body, 'kind') ?? '';
+  if (!isMemoryKind(kind)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', `kind must be one of: ${MEMORY_KINDS.join(', ')}.`);
+  }
+  const privacy = stringField(request.body, 'privacy');
+  if (privacy !== undefined && !isMemoryPrivacy(privacy)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'privacy must be internal or founder_only.');
+  }
+  const tags = stringArrayField(request.body, 'tags');
+  const sourceRefs = stringArrayField(request.body, 'sourceRefs');
+  const derivedFrom = stringArrayField(request.body, 'derivedFrom');
+  if (tags === 'invalid' || sourceRefs === 'invalid' || derivedFrom === 'invalid') {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'tags, sourceRefs and derivedFrom must be lists of text entries.');
+  }
+  const title = stringField(request.body, 'title') ?? '';
+  const body = stringField(request.body, 'body') ?? '';
+  const project = stringField(request.body, 'project') ?? '';
+  const missionId = stringField(request.body, 'missionId');
+  const projectId = stringField(request.body, 'projectId');
+  const taskId = stringField(request.body, 'taskId');
+  const supersedes = stringField(request.body, 'supersedes');
+  const clientKey = stringField(request.body, 'idempotencyKey');
+
+  // The browser boundary's stricter scan, BEFORE anything persists — raw
+  // provider-token shapes included (the mission-intake precedent).
+  try {
+    assertBrowserSafe({ title, body, project, tags, sourceRefs }, 'memory');
+  } catch {
+    audit('refused', 'unsafe_memory_content', founder);
+    return refusal(
+      400,
+      'unsafe_memory_content',
+      'The memory text looks like it contains credential material, so it was refused rather than stored.',
+    );
+  }
+
+  const result = deps.ops.recordMemory({
+    kind,
+    title,
+    body,
+    project,
+    missionId,
+    projectId,
+    taskId,
+    tags,
+    sourceRefs,
+    derivedFrom,
+    supersedes,
+    privacy,
+    // The server-resolved principal, never a body field.
+    requestedBy: founder.principal.id,
+    idempotencyKey: clientKey,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', result.data.deduplicated ? 'memory_deduplicated' : 'memory_recorded', founder);
+  return safe(
+    json(result.data.deduplicated ? 200 : 201, {
+      ok: true,
+      deduplicated: result.data.deduplicated,
+      record: result.data.record as unknown as Record<string, unknown>,
+    }),
+  );
 }
 
 function commandMission(

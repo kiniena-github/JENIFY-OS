@@ -415,19 +415,22 @@ describe('every hostile caller is refused, and nothing is written', () => {
     }
   });
 
-  it('exposes no generic mutation surface — the whole route table is seventeen entries', () => {
-    // Nine since Phase 3 (issue #254); seventeen since Phase 4 (issue #262):
-    // `/projects` GET+POST with its two lifecycle POSTs, the two mission
-    // linkage POSTs, and the workforce read + two advisory POSTs. Each
-    // widening of the write surface beyond the 2026-08-28 three is itself
-    // Founder-approved and recorded in docs/JENIFY_DECISIONS.md. What this
-    // assertion protects is unchanged — no route takes a table, a column, a
-    // capability id to register, a principal to grant, or a SQL fragment,
-    // and a route added without amending this list fails here.
+  it('exposes no generic mutation surface — the whole route table is twenty entries', () => {
+    // Nine since Phase 3 (issue #254); seventeen since Phase 4 (issue #262);
+    // twenty since Phase 5 (issue #265): the memory GET+POST plus the two
+    // parameterized memory reads (search, context). Each widening of the
+    // write surface beyond the 2026-08-28 three is itself Founder-approved
+    // and recorded in docs/JENIFY_DECISIONS.md. What this assertion protects
+    // is unchanged — no route takes a table, a column, a capability id to
+    // register, a principal to grant, or a SQL fragment, and a route added
+    // without amending this list fails here.
     expect(Object.values(CONTROL_ROUTES).sort()).toEqual([
       '/api/hq/control/approvals',
       '/api/hq/control/approvals/approve',
       '/api/hq/control/approvals/deny',
+      '/api/hq/control/memory',
+      '/api/hq/control/memory/context',
+      '/api/hq/control/memory/search',
       '/api/hq/control/missions',
       '/api/hq/control/missions/amend',
       '/api/hq/control/missions/assign-project',
