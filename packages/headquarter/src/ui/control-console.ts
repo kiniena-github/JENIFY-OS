@@ -72,6 +72,16 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
   CONTROL_ROUTES.missions,
   CONTROL_ROUTES.missionTransition,
   CONTROL_ROUTES.missionAmend,
+  // Phase 4 (issue #262): the project register, the mission-linkage writes
+  // and the workforce surface.
+  CONTROL_ROUTES.projects,
+  CONTROL_ROUTES.projectTransition,
+  CONTROL_ROUTES.projectUpdate,
+  CONTROL_ROUTES.missionAssignProject,
+  CONTROL_ROUTES.missionLinkPlanItem,
+  CONTROL_ROUTES.workforce,
+  CONTROL_ROUTES.workforceRoute,
+  CONTROL_ROUTES.workforceAssign,
 ];
 
 /**
@@ -86,7 +96,7 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
  * server's words rather than guessing.
  */
 export const CONTROL_GRANT_JS = `function grantedControls(session) {
-  var off = { directOrder: false, approve: false, deny: false, missionCommand: false, reason: '' };
+  var off = { directOrder: false, approve: false, deny: false, missionCommand: false, projectCommand: false, workforceAssign: false, reason: '' };
   if (session == null || typeof session !== 'object') {
     off.reason = 'The control API gave no readable answer, so no control is drawn.';
     return off;
@@ -101,6 +111,8 @@ export const CONTROL_GRANT_JS = `function grantedControls(session) {
     approve: session.controls.approve === true,
     deny: session.controls.deny === true,
     missionCommand: session.controls.missionCommand === true,
+    projectCommand: session.controls.projectCommand === true,
+    workforceAssign: session.controls.workforceAssign === true,
     reason: stated !== '' ? stated : ungrantedReason(session.controls)
   };
 }
@@ -985,6 +997,10 @@ export function missionsConsoleScript(): string {
   var MISSIONS_PATH = ${jsonForScript(CONTROL_ROUTES.missions)};
   var TRANSITION_PATH = ${jsonForScript(CONTROL_ROUTES.missionTransition)};
   var AMEND_PATH = ${jsonForScript(CONTROL_ROUTES.missionAmend)};
+  var PROJECTS_PATH = ${jsonForScript(CONTROL_ROUTES.projects)};
+  var ORDERS_PATH = ${jsonForScript(CONTROL_ROUTES.orders)};
+  var ASSIGN_PROJECT_PATH = ${jsonForScript(CONTROL_ROUTES.missionAssignProject)};
+  var LINK_ITEM_PATH = ${jsonForScript(CONTROL_ROUTES.missionLinkPlanItem)};
   var ALLOWED = ${jsonForScript(MISSION_ALLOWED_TRANSITIONS)};
   var NOTE_REQUIRED = ${jsonForScript(MISSION_NOTE_REQUIRED_TARGETS)};
 
@@ -1034,7 +1050,7 @@ export function missionsConsoleScript(): string {
     parent.appendChild(el('p', cls, text));
   }
 
-  function renderList(missions, canCommand, reason) {
+  function renderList(missions, canCommand, reason, activeProjects) {
     listBox.textContent = '';
     if (!Array.isArray(missions)) return;
     if (missions.length === 0) {
@@ -1045,11 +1061,11 @@ export function missionsConsoleScript(): string {
       textLine(listBox, 'readonly-note', 'Lifecycle controls are off for this session \\u2014 ' + reason);
     }
     for (var i = 0; i < missions.length; i++) {
-      renderMission(missions[i], canCommand);
+      renderMission(missions[i], canCommand, activeProjects);
     }
   }
 
-  function renderMission(mission, canCommand) {
+  function renderMission(mission, canCommand, activeProjects) {
     var card = el('article', 'panel mission-card');
     card.setAttribute('data-mission-card', mission.id);
 
@@ -1059,7 +1075,10 @@ export function missionsConsoleScript(): string {
     statusChip.setAttribute('data-mission-status', String(mission.status));
     head.appendChild(statusChip);
     if (mission.priority) head.appendChild(el('span', 'chip', 'priority: ' + mission.priority));
-    if (mission.project) head.appendChild(el('span', 'chip', mission.project));
+    // Two DIFFERENT claims, worded apart (Phase 4): the canonical register
+    // relationship versus the free-text label the order happened to carry.
+    if (mission.projectName) head.appendChild(el('span', 'chip', 'project: ' + mission.projectName));
+    if (mission.project) head.appendChild(el('span', 'chip', 'label: ' + mission.project));
     card.appendChild(head);
 
     textLine(card, 'faint', mission.id + ' \\u00b7 commanded by ' + mission.createdBy + ' \\u00b7 ' + mission.createdAt);
@@ -1090,7 +1109,10 @@ export function missionsConsoleScript(): string {
         var itemLine = item.seq + '. ' + item.summary + ' \\u2014 ' + item.state;
         if (item.rawTaskStatus) itemLine += ' (task ' + item.taskId + ': ' + item.rawTaskStatus + ')';
         else if (item.kind === 'work' && !item.taskId && item.state !== 'superseded') itemLine += ' (no task exists for this item yet)';
-        li.textContent = itemLine;
+        li.appendChild(el('span', '', itemLine));
+        if (canCommand && item.kind === 'work' && !item.taskId && item.state !== 'superseded') {
+          li.appendChild(planItemControls(mission, item));
+        }
         planList.appendChild(li);
       }
       card.appendChild(planList);
@@ -1242,9 +1264,162 @@ export function missionsConsoleScript(): string {
       amendBox.appendChild(amendSubmit);
       amendBox.appendChild(amendOutcome);
       card.appendChild(amendBox);
+
+      // Phase 4: bind (or clear) the canonical mission -> project link. The
+      // choices are REAL active register entries read from /projects just
+      // now; an empty register offers nothing and says so.
+      var assignBox = el('div', 'order-field');
+      textLine(assignBox, 'order-label', 'Project assignment (canonical register link)');
+      var projects = Array.isArray(activeProjects) ? activeProjects : [];
+      if (projects.length === 0 && !mission.projectId) {
+        textLine(assignBox, 'muted', 'No active project exists in the register, so there is nothing to assign to.');
+      } else {
+        var projectSelect = document.createElement('select');
+        projectSelect.setAttribute('aria-label', 'Assign this mission to a project');
+        var noneOption = document.createElement('option');
+        noneOption.value = '';
+        noneOption.textContent = mission.projectId ? '\\u2014 clear the assignment \\u2014' : '\\u2014 choose a project \\u2014';
+        projectSelect.appendChild(noneOption);
+        for (var pj = 0; pj < projects.length; pj++) {
+          var option = document.createElement('option');
+          option.value = projects[pj].id;
+          option.textContent = projects[pj].name;
+          if (mission.projectId === projects[pj].id) option.selected = true;
+          projectSelect.appendChild(option);
+        }
+        var assignSubmit = document.createElement('button');
+        assignSubmit.type = 'button';
+        assignSubmit.className = 'order-live-submit';
+        assignSubmit.textContent = 'Record assignment';
+        var assignOutcome = el('p', 'muted', '');
+        assignOutcome.setAttribute('role', 'status');
+        assignOutcome.setAttribute('aria-live', 'polite');
+        assignSubmit.addEventListener('click', function () {
+          var chosen = projectSelect.value === '' ? null : projectSelect.value;
+          if (chosen === (mission.projectId || null)) {
+            assignOutcome.textContent = 'The assignment is already exactly that. Nothing was sent.';
+            return;
+          }
+          assignSubmit.disabled = true;
+          assignOutcome.textContent = 'Submitting\\u2026';
+          postJson(ASSIGN_PROJECT_PATH, { missionId: mission.id, projectId: chosen }).then(function (result) {
+            assignSubmit.disabled = false;
+            var body = result.body || {};
+            if (body.ok === true) { assignOutcome.textContent = 'Recorded.'; notifyStateChanged(); reload(); return; }
+            var error = body.error || {};
+            assignOutcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' +
+              (error.message || 'no detail was given');
+            if (result.status === 401 || result.status === 403) {
+              recheckAfterWriteRefusal(result.status, error);
+            }
+          }).catch(function (error) {
+            assignSubmit.disabled = false;
+            assignOutcome.textContent = 'Not submitted (' + error.message + ').';
+          });
+        });
+        assignBox.appendChild(projectSelect);
+        assignBox.appendChild(assignSubmit);
+        assignBox.appendChild(assignOutcome);
+      }
+      card.appendChild(assignBox);
     }
 
     listBox.appendChild(card);
+  }
+
+  // Phase 4: controls for an unlinked work item. Two explicit, truthful
+  // paths and no third: LINK an existing task by its exact id, or CREATE a
+  // task through the ordinary /orders route (full direct-order gating,
+  // idempotency and approval flow \\u2014 the plan item summary only PREFILLS an
+  // instruction draft the Founder still owns and edits) and then link the
+  // returned id. The two steps stay two steps; a link refusal after a
+  // created order is reported exactly, never papered over.
+  function planItemControls(mission, item) {
+    var box = el('div', 'order-field');
+    var linkInput = document.createElement('input');
+    linkInput.type = 'text';
+    linkInput.setAttribute('aria-label', 'Task id to link to plan item ' + item.seq);
+    linkInput.placeholder = 'existing task id';
+    var linkButton = document.createElement('button');
+    linkButton.type = 'button';
+    linkButton.className = 'order-live-submit';
+    linkButton.textContent = 'Link task';
+    var outcome = el('p', 'muted', '');
+    outcome.setAttribute('role', 'status');
+    outcome.setAttribute('aria-live', 'polite');
+    function linkTask(taskId, after) {
+      postJson(LINK_ITEM_PATH, { missionId: mission.id, planItemSeq: item.seq, taskId: taskId }).then(function (result) {
+        var body = result.body || {};
+        if (body.ok === true) { outcome.textContent = after || 'Linked.'; notifyStateChanged(); reload(); return; }
+        var error = body.error || {};
+        outcome.textContent = (after ? after + ' But the link was refused (' : 'Link refused (') +
+          (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given') +
+          (after ? ' Retry the link with task id ' + taskId + '.' : '');
+        if (result.status === 401 || result.status === 403) {
+          recheckAfterWriteRefusal(result.status, error);
+        }
+      }).catch(function (error) {
+        outcome.textContent = 'The link was not submitted (' + error.message + ').' +
+          (after ? ' ' + after + ' Retry the link with task id ' + taskId + '.' : '');
+      });
+    }
+    linkButton.addEventListener('click', function () {
+      var taskId = linkInput.value.trim();
+      if (taskId === '') { outcome.textContent = 'A task id is required to link. Nothing was sent.'; return; }
+      outcome.textContent = 'Linking\\u2026';
+      linkTask(taskId, '');
+    });
+    box.appendChild(linkInput);
+    box.appendChild(linkButton);
+
+    var routes = (sessionAnswer && Array.isArray(sessionAnswer.routes)) ? sessionAnswer.routes : [];
+    var granted = grantedControls(sessionAnswer);
+    if (granted.directOrder && routes.length > 0) {
+      var instruction = document.createElement('textarea');
+      instruction.rows = 2;
+      instruction.setAttribute('aria-label', 'Order instruction for plan item ' + item.seq);
+      instruction.value = item.summary;
+      var routeSelect = document.createElement('select');
+      routeSelect.setAttribute('aria-label', 'Route for the new order');
+      for (var r = 0; r < routes.length; r++) {
+        var routeOption = document.createElement('option');
+        routeOption.value = String(routes[r].requested);
+        routeOption.textContent = String(routes[r].requested) + (routes[r].connected === true ? '' : ' (not connected)');
+        routeSelect.appendChild(routeOption);
+      }
+      var createButton = document.createElement('button');
+      createButton.type = 'button';
+      createButton.className = 'order-live-submit';
+      createButton.textContent = 'Create task via direct order, then link';
+      createButton.addEventListener('click', function () {
+        var text = instruction.value.trim();
+        if (text === '') { outcome.textContent = 'The order needs an instruction. Nothing was sent.'; return; }
+        createButton.disabled = true;
+        outcome.textContent = 'Creating the order\\u2026';
+        postJson(ORDERS_PATH, { instruction: text, route: routeSelect.value, title: 'Plan item ' + item.seq + ': ' + item.summary }).then(function (result) {
+          createButton.disabled = false;
+          var body = result.body || {};
+          if (body.ok !== true || typeof body.taskId !== 'string') {
+            var error = body.error || {};
+            outcome.textContent = 'The order was refused (' + (error.code || ('HTTP ' + result.status)) + '): ' +
+              (error.message || 'no detail was given') + ' Nothing was linked.';
+            if (result.status === 401 || result.status === 403) {
+              recheckAfterWriteRefusal(result.status, error);
+            }
+            return;
+          }
+          linkTask(body.taskId, 'Task ' + body.taskId + ' was created' + (body.deduplicated === true ? ' (deduplicated)' : '') + '.');
+        }).catch(function (error) {
+          createButton.disabled = false;
+          outcome.textContent = 'The order was not submitted (' + error.message + '). Nothing was linked.';
+        });
+      });
+      box.appendChild(instruction);
+      box.appendChild(routeSelect);
+      box.appendChild(createButton);
+    }
+    box.appendChild(outcome);
+    return box;
   }
 
   var sessionAnswer = null;
@@ -1262,7 +1437,570 @@ export function missionsConsoleScript(): string {
         note.setAttribute('data-missions-console-state', 'live');
         note.className = 'readonly-note console-state console-state-live';
         note.textContent = 'Live: ' + body.missions.length + ' commanded mission(s), from the canonical record just now.';
-        renderList(body.missions, grant.missionCommand, grant.reason);
+        if (!grant.missionCommand) {
+          renderList(body.missions, false, grant.reason, []);
+          return;
+        }
+        // The assignment select needs the REAL register. A failed project
+        // read degrades to no choices — never to invented ones — and the
+        // missions still render.
+        jsonExchange(fetch(PROJECTS_PATH, { headers: { accept: 'application/json' } }))
+          .then(function (projectsResult) {
+            var projectsBody = projectsResult.body || {};
+            var active = [];
+            if (projectsBody.ok === true && Array.isArray(projectsBody.projects)) {
+              for (var p = 0; p < projectsBody.projects.length; p++) {
+                if (projectsBody.projects[p].status === 'active') active.push(projectsBody.projects[p]);
+              }
+            }
+            renderList(body.missions, true, grant.reason, active);
+          })
+          .catch(function () {
+            renderList(body.missions, true, grant.reason, []);
+          });
+      })
+      .catch(function (error) {
+        stayOff('the HQ control API is not reachable from this page (' + error.message + ').');
+      });
+  }
+
+  jsonExchange(fetch(SESSION_PATH, { headers: { accept: 'application/json' } }))
+    .then(function (result) {
+      sessionAnswer = result.body;
+      if (result.body == null || typeof result.body !== 'object' || result.body.founder !== true) {
+        var grant = grantedControls(result.body);
+        stayOff(grant.reason);
+        return;
+      }
+      reload();
+    })
+    .catch(function (error) {
+      stayOff('the HQ control API is not reachable from this page (' + error.message + ').');
+    });
+})();
+</script>`;
+}
+
+
+/**
+ * Projects page: the canonical Project register console (Phase 4).
+ *
+ * Static markup stays inert. This script asks `/session`; any resolved
+ * Founder gets the live register READ; the create/close/reopen/update
+ * controls are built only under a granted `projectCommand`. Authorization
+ * loss is honest in both directions, exactly like the mission console:
+ * safe/off clears every rendered register row by construction, and a
+ * 401/403 on a write re-asks /session and lets the read path decide.
+ */
+export function projectsConsoleScript(): string {
+  return `<script>
+(function () {
+  var mount = document.querySelector('[data-projects-console]');
+  if (!mount || typeof window.fetch !== 'function') return;
+
+  ${CONTROL_GRANT_JS}
+  ${DOM_HELPERS_JS}
+
+  var SESSION_PATH = ${jsonForScript(CONTROL_ROUTES.session)};
+  var PROJECTS_PATH = ${jsonForScript(CONTROL_ROUTES.projects)};
+  var TRANSITION_PATH = ${jsonForScript(CONTROL_ROUTES.projectTransition)};
+  var UPDATE_PATH = ${jsonForScript(CONTROL_ROUTES.projectUpdate)};
+
+  var note = el('p', 'readonly-note console-state', 'Checking with the control API whether this session can read the project register\\u2026');
+  note.setAttribute('data-projects-console-state', 'checking');
+  note.setAttribute('role', 'status');
+  mount.appendChild(note);
+
+  var listBox = el('div', 'projects-live');
+  listBox.setAttribute('data-projects-list', '');
+  mount.appendChild(listBox);
+
+  function stayOff(reason) {
+    // Safe/off clears the record BY CONSTRUCTION (the mission-console rule).
+    listBox.textContent = '';
+    note.setAttribute('data-projects-console-state', 'off');
+    note.className = 'readonly-note console-state console-state-off';
+    note.textContent = 'PROJECT REGISTER IS NOT READABLE FROM THIS PAGE \\u2014 ' + reason;
+  }
+
+  function recheckAfterWriteRefusal(status, error) {
+    jsonExchange(fetch(SESSION_PATH, { headers: { accept: 'application/json' } }))
+      .then(function (result) {
+        sessionAnswer = result.body;
+        if (result.body == null || typeof result.body !== 'object' || result.body.founder !== true) {
+          stayOff('the session no longer resolves to the Founder (a write was refused: ' +
+            (error.code || ('HTTP ' + status)) + ')');
+          return;
+        }
+        reload();
+      })
+      .catch(function (err) {
+        stayOff('the HQ control API is not reachable from this page (' + err.message + ').');
+      });
+  }
+
+  function textLine(parent, cls, text) {
+    parent.appendChild(el('p', cls, text));
+  }
+
+  function handleWrite(path, payload, button, outcome, successText) {
+    button.disabled = true;
+    outcome.textContent = 'Submitting\\u2026';
+    postJson(path, payload).then(function (result) {
+      button.disabled = false;
+      var body = result.body || {};
+      if (body.ok === true) { outcome.textContent = successText; notifyStateChanged(); reload(); return; }
+      var error = body.error || {};
+      outcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' +
+        (error.message || 'no detail was given');
+      if (result.status === 401 || result.status === 403) {
+        recheckAfterWriteRefusal(result.status, error);
+      }
+    }).catch(function (error) {
+      button.disabled = false;
+      outcome.textContent = 'Not submitted (' + error.message + ').';
+    });
+  }
+
+  function renderProject(project, canCommand) {
+    var card = el('article', 'panel project-card');
+    card.setAttribute('data-project-register-card', project.id);
+
+    var head = el('p', 'row');
+    head.appendChild(el('b', '', project.name));
+    var statusChip = el('span', 'chip', String(project.status));
+    statusChip.setAttribute('data-project-status', String(project.status));
+    head.appendChild(statusChip);
+    if (project.stream) head.appendChild(el('span', 'chip', project.stream));
+    card.appendChild(head);
+
+    textLine(card, 'faint', project.id + ' \\u00b7 registered by ' + (project.createdBy || 'not recorded (pre-Phase-4 row)') + ' \\u00b7 ' + project.createdAt);
+    textLine(card, '', 'Purpose: ' + project.purpose);
+
+    var missions = Array.isArray(project.missions) ? project.missions : [];
+    if (missions.length === 0) {
+      textLine(card, 'muted', 'Missions: none are assigned to this project. 0 means 0.');
+    } else {
+      textLine(card, 'order-label', 'Missions (canonical project_id relationship)');
+      var missionList = document.createElement('ul');
+      missionList.className = 'timeline';
+      for (var m = 0; m < missions.length; m++) {
+        var li = document.createElement('li');
+        li.textContent = missions[m].title + ' \\u2014 ' + missions[m].status + ' (' + missions[m].missionId + ')';
+        missionList.appendChild(li);
+      }
+      card.appendChild(missionList);
+    }
+
+    var counts = Array.isArray(project.taskCounts) ? project.taskCounts : [];
+    if (counts.length > 0) {
+      var parts = [];
+      for (var c = 0; c < counts.length; c++) parts.push(counts[c].status + ': ' + counts[c].count);
+      textLine(card, 'muted', 'Linked tasks by canonical status \\u2014 counts only, never a percentage: ' + parts.join(' \\u00b7 '));
+    } else {
+      textLine(card, 'muted', 'Linked tasks: none. No figure is invented for work that is not recorded.');
+    }
+
+    if (canCommand) {
+      var controls = el('div', 'decision-controls');
+      controls.setAttribute('role', 'group');
+      controls.setAttribute('aria-label', 'Project register controls');
+      var noteInput = document.createElement('input');
+      noteInput.type = 'text';
+      noteInput.setAttribute('aria-label', 'Reason / note for closing or reopening');
+      noteInput.placeholder = 'note \\u2014 required to close or reopen';
+      var outcome = el('p', 'muted', '');
+      outcome.setAttribute('role', 'status');
+      outcome.setAttribute('aria-live', 'polite');
+      var target = project.status === 'active' ? 'closed' : 'active';
+      var moveButton = document.createElement('button');
+      moveButton.type = 'button';
+      moveButton.className = 'order-live-submit';
+      moveButton.textContent = target === 'closed' ? 'close \\u2014 with a recorded reason' : 'reopen \\u2014 with a recorded reason';
+      moveButton.addEventListener('click', function () {
+        var noteText = noteInput.value.trim();
+        if (noteText === '') {
+          outcome.textContent = 'Moving a project to ' + target + ' requires a recorded note. Nothing was sent.';
+          return;
+        }
+        handleWrite(TRANSITION_PATH, { projectId: project.id, to: target, note: noteText, expectedStatus: project.status }, moveButton, outcome, 'Recorded.');
+      });
+      controls.appendChild(moveButton);
+      controls.appendChild(noteInput);
+      card.appendChild(controls);
+
+      if (project.status === 'active') {
+        var editBox = el('div', 'order-field');
+        textLine(editBox, 'order-label', 'Edit the register entry (audited \\u2014 the event log records what changed)');
+        var nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.setAttribute('aria-label', 'New name (optional)');
+        nameInput.placeholder = 'new name (optional)';
+        var purposeInput = document.createElement('input');
+        purposeInput.type = 'text';
+        purposeInput.setAttribute('aria-label', 'New purpose (optional)');
+        purposeInput.placeholder = 'new purpose (optional)';
+        var editButton = document.createElement('button');
+        editButton.type = 'button';
+        editButton.className = 'order-live-submit';
+        editButton.textContent = 'Update entry';
+        editButton.addEventListener('click', function () {
+          var payload = { projectId: project.id };
+          if (nameInput.value.trim() !== '') payload.name = nameInput.value.trim();
+          if (purposeInput.value.trim() !== '') payload.purpose = purposeInput.value.trim();
+          if (payload.name == null && payload.purpose == null) {
+            outcome.textContent = 'Nothing to update \\u2014 supply a new name or purpose. Nothing was sent.';
+            return;
+          }
+          handleWrite(UPDATE_PATH, payload, editButton, outcome, 'Updated.');
+        });
+        editBox.appendChild(nameInput);
+        editBox.appendChild(purposeInput);
+        editBox.appendChild(editButton);
+        card.appendChild(editBox);
+      }
+      card.appendChild(outcome);
+    }
+
+    listBox.appendChild(card);
+  }
+
+  function renderRegister(projects, canCommand, reason) {
+    listBox.textContent = '';
+    if (!Array.isArray(projects)) return;
+    if (canCommand) {
+      var createBox = el('div', 'order-field');
+      createBox.setAttribute('data-project-create', '');
+      textLine(createBox, 'order-label', 'Register a project');
+      var nameInput = document.createElement('input');
+      nameInput.type = 'text';
+      nameInput.setAttribute('aria-label', 'Project name');
+      nameInput.placeholder = 'name (required)';
+      var purposeInput = document.createElement('input');
+      purposeInput.type = 'text';
+      purposeInput.setAttribute('aria-label', 'Project purpose');
+      purposeInput.placeholder = 'purpose (required)';
+      var streamInput = document.createElement('input');
+      streamInput.type = 'text';
+      streamInput.setAttribute('aria-label', 'Stream label (optional)');
+      streamInput.placeholder = 'stream label (optional)';
+      var createButton = document.createElement('button');
+      createButton.type = 'button';
+      createButton.className = 'order-live-submit';
+      createButton.textContent = 'Create register entry';
+      var createOutcome = el('p', 'muted', '');
+      createOutcome.setAttribute('role', 'status');
+      createOutcome.setAttribute('aria-live', 'polite');
+      createButton.addEventListener('click', function () {
+        var name = nameInput.value.trim();
+        var purpose = purposeInput.value.trim();
+        if (name === '' || purpose === '') {
+          createOutcome.textContent = 'A project needs a name and a purpose. Nothing was sent.';
+          return;
+        }
+        var payload = { name: name, purpose: purpose };
+        if (streamInput.value.trim() !== '') payload.stream = streamInput.value.trim();
+        handleWrite(PROJECTS_PATH, payload, createButton, createOutcome, 'Registered.');
+      });
+      createBox.appendChild(nameInput);
+      createBox.appendChild(purposeInput);
+      createBox.appendChild(streamInput);
+      createBox.appendChild(createButton);
+      createBox.appendChild(createOutcome);
+      listBox.appendChild(createBox);
+    } else {
+      textLine(listBox, 'readonly-note', 'Register controls are off for this session \\u2014 ' + reason);
+    }
+    if (projects.length === 0) {
+      textLine(listBox, 'muted', 'HQ holds no registered project. 0 means 0 \\u2014 nothing is invented to fill this register.');
+      return;
+    }
+    for (var i = 0; i < projects.length; i++) {
+      renderProject(projects[i], canCommand);
+    }
+  }
+
+  var sessionAnswer = null;
+  function reload() {
+    jsonExchange(fetch(PROJECTS_PATH, { headers: { accept: 'application/json' } }))
+      .then(function (result) {
+        var body = result.body || {};
+        if (body.ok !== true || !Array.isArray(body.projects)) {
+          var error = body.error || {};
+          stayOff('the register read was refused (' + (error.code || ('HTTP ' + result.status)) + '): ' +
+            (error.message || 'no detail was given'));
+          return;
+        }
+        var grant = grantedControls(sessionAnswer);
+        note.setAttribute('data-projects-console-state', 'live');
+        note.className = 'readonly-note console-state console-state-live';
+        note.textContent = 'Live: ' + body.projects.length + ' registered project(s), from the canonical register just now.';
+        renderRegister(body.projects, grant.projectCommand, grant.reason);
+      })
+      .catch(function (error) {
+        stayOff('the HQ control API is not reachable from this page (' + error.message + ').');
+      });
+  }
+
+  jsonExchange(fetch(SESSION_PATH, { headers: { accept: 'application/json' } }))
+    .then(function (result) {
+      sessionAnswer = result.body;
+      if (result.body == null || typeof result.body !== 'object' || result.body.founder !== true) {
+        var grant = grantedControls(result.body);
+        stayOff(grant.reason);
+        return;
+      }
+      reload();
+    })
+    .catch(function (error) {
+      stayOff('the HQ control API is not reachable from this page (' + error.message + ').');
+    });
+})();
+</script>`;
+}
+
+/**
+ * Specialist Directory page: the workforce truth console (Phase 4).
+ *
+ * Static markup stays inert. Any resolved Founder gets the live /workforce
+ * READ — enforcement, transport and member truth with nothing inferred. The
+ * eligibility and assignment controls are built only under a granted
+ * `workforceAssign`. Assignment is ADVISORY and drawn as exactly that.
+ */
+export function workforceConsoleScript(): string {
+  return `<script>
+(function () {
+  var mount = document.querySelector('[data-workforce-console]');
+  if (!mount || typeof window.fetch !== 'function') return;
+
+  ${CONTROL_GRANT_JS}
+  ${DOM_HELPERS_JS}
+
+  var SESSION_PATH = ${jsonForScript(CONTROL_ROUTES.session)};
+  var WORKFORCE_PATH = ${jsonForScript(CONTROL_ROUTES.workforce)};
+  var ROUTE_PATH = ${jsonForScript(CONTROL_ROUTES.workforceRoute)};
+  var ASSIGN_PATH = ${jsonForScript(CONTROL_ROUTES.workforceAssign)};
+
+  var note = el('p', 'readonly-note console-state', 'Checking with the control API whether this session can read the workforce record\\u2026');
+  note.setAttribute('data-workforce-console-state', 'checking');
+  note.setAttribute('role', 'status');
+  mount.appendChild(note);
+
+  var listBox = el('div', 'workforce-live');
+  listBox.setAttribute('data-workforce-list', '');
+  mount.appendChild(listBox);
+
+  function stayOff(reason) {
+    listBox.textContent = '';
+    note.setAttribute('data-workforce-console-state', 'off');
+    note.className = 'readonly-note console-state console-state-off';
+    note.textContent = 'WORKFORCE RECORD IS NOT READABLE FROM THIS PAGE \\u2014 ' + reason;
+  }
+
+  function recheckAfterWriteRefusal(status, error) {
+    jsonExchange(fetch(SESSION_PATH, { headers: { accept: 'application/json' } }))
+      .then(function (result) {
+        sessionAnswer = result.body;
+        if (result.body == null || typeof result.body !== 'object' || result.body.founder !== true) {
+          stayOff('the session no longer resolves to the Founder (a write was refused: ' +
+            (error.code || ('HTTP ' + status)) + ')');
+          return;
+        }
+        reload();
+      })
+      .catch(function (err) {
+        stayOff('the HQ control API is not reachable from this page (' + err.message + ').');
+      });
+  }
+
+  function textLine(parent, cls, text) {
+    parent.appendChild(el('p', cls, text));
+  }
+
+  function renderWorkforce(body, canAssign, reason) {
+    listBox.textContent = '';
+    var workers = Array.isArray(body.workers) ? body.workers : [];
+    if (workers.length === 0) {
+      textLine(listBox, 'muted', 'No worker is registered in the canonical directory. 0 means 0.');
+    }
+    for (var i = 0; i < workers.length; i++) {
+      var worker = workers[i];
+      var card = el('article', 'panel workforce-card');
+      card.setAttribute('data-workforce-card', worker.id);
+      var head = el('p', 'row');
+      head.appendChild(el('b', '', worker.displayName));
+      head.appendChild(el('span', 'chip', worker.active ? 'active' : 'inactive'));
+      head.appendChild(el('span', 'chip', String(worker.role)));
+      card.appendChild(head);
+      textLine(card, 'faint', worker.id + ' \\u00b7 vendor: ' + worker.vendor + ' \\u00b7 ' +
+        (Array.isArray(worker.allowedCapabilities) ? worker.allowedCapabilities.length : 0) + ' granted capability(ies)');
+      if (worker.providerDeclared) {
+        var transportLine = 'Execution provider (declared): ' + worker.providerDeclared;
+        if (worker.transport) {
+          transportLine += ' \\u2014 ' + worker.transport.reason;
+          if (worker.transport.dispatchable === true) transportLine += ' Dispatchable from this host.';
+          else if (worker.transport.dispatchable === false) transportLine += ' NOT dispatchable from this host.';
+          else transportLine += ' Dispatchability was not observed from this host.';
+        }
+        textLine(card, 'muted', transportLine);
+      } else {
+        textLine(card, 'muted', 'No execution provider is declared. The vendor name is who MAKES this worker, never an execution claim.');
+      }
+      if (worker.member) {
+        textLine(card, 'muted', 'Member record: ' + worker.member.identityKey + ' \\u00b7 status ' + worker.member.status +
+          ' \\u00b7 health ' + worker.member.health + (worker.member.healthCheckedAt ? ' (declared ' + worker.member.healthCheckedAt + ')' : ' (never declared)'));
+      }
+      listBox.appendChild(card);
+    }
+    var membersOnly = Array.isArray(body.membersNotEnrolledForExecution) ? body.membersNotEnrolledForExecution : [];
+    if (membersOnly.length > 0) {
+      textLine(listBox, 'order-label', 'Registered members NOT enrolled for execution (a registry row enrols nobody)');
+      for (var mo = 0; mo < membersOnly.length; mo++) {
+        textLine(listBox, 'muted', membersOnly[mo].displayName + ' \\u2014 ' + membersOnly[mo].identityKey +
+          ' \\u00b7 status ' + membersOnly[mo].status + ' \\u00b7 health ' + membersOnly[mo].health);
+      }
+    }
+
+    if (!canAssign) {
+      textLine(listBox, 'readonly-note', 'Assignment controls are off for this session \\u2014 ' + reason);
+      return;
+    }
+    var assignBox = el('div', 'order-field');
+    assignBox.setAttribute('data-workforce-assign', '');
+    textLine(assignBox, 'order-label', 'Advisory assignment \\u2014 narrows claiming only; the task still goes through policy, approval and review');
+    var taskInput = document.createElement('input');
+    taskInput.type = 'text';
+    taskInput.setAttribute('aria-label', 'Task id');
+    taskInput.placeholder = 'task id';
+    var workerSelect = document.createElement('select');
+    workerSelect.setAttribute('aria-label', 'Worker to assign');
+    // Only workers the register marks active are offered. The server is the
+    // authority either way (an inactive target is refused with
+    // worker_not_assignable); the dropdown just stops offering what cannot
+    // be accepted.
+    var assignableWorkers = [];
+    for (var w = 0; w < workers.length; w++) {
+      if (workers[w].active === true) assignableWorkers.push(workers[w]);
+    }
+    for (var aw = 0; aw < assignableWorkers.length; aw++) {
+      var option = document.createElement('option');
+      option.value = assignableWorkers[aw].id;
+      option.textContent = assignableWorkers[aw].displayName;
+      workerSelect.appendChild(option);
+    }
+    if (assignableWorkers.length === 0) workerSelect.disabled = true;
+    var rationaleInput = document.createElement('input');
+    rationaleInput.type = 'text';
+    rationaleInput.setAttribute('aria-label', 'Rationale (optional)');
+    rationaleInput.placeholder = 'rationale (optional)';
+    var outcome = el('p', 'muted', '');
+    outcome.setAttribute('role', 'status');
+    outcome.setAttribute('aria-live', 'polite');
+    var checkButton = document.createElement('button');
+    checkButton.type = 'button';
+    checkButton.className = 'order-live-submit';
+    checkButton.textContent = 'Evaluate eligibility';
+    checkButton.addEventListener('click', function () {
+      var taskId = taskInput.value.trim();
+      if (taskId === '') { outcome.textContent = 'A task id is required. Nothing was sent.'; return; }
+      checkButton.disabled = true;
+      outcome.textContent = 'Evaluating\\u2026';
+      postJson(ROUTE_PATH, { taskId: taskId }).then(function (result) {
+        checkButton.disabled = false;
+        var body2 = result.body || {};
+        if (body2.ok !== true || body2.report == null) {
+          var error = body2.error || {};
+          outcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given');
+          if (result.status === 401 || result.status === 403) recheckAfterWriteRefusal(result.status, error);
+          return;
+        }
+        var lines = [];
+        // Canonical task state first: when the write path would refuse the
+        // assignment, say so before listing per-worker eligibility.
+        var taskState = body2.report.taskState || {};
+        var statePrefix = '';
+        if (taskState.assignmentOpen === false) {
+          statePrefix = 'ASSIGNMENT CLOSED \\u2014 ' + (taskState.reason || 'the task is not in an assignable state') + ' \\u00b7 ';
+        }
+        var reportWorkers = Array.isArray(body2.report.workers) ? body2.report.workers : [];
+        for (var rw = 0; rw < reportWorkers.length; rw++) {
+          var entry = reportWorkers[rw];
+          var verdict = entry.eligible === true ? 'ELIGIBLE' : 'not eligible';
+          var why = '';
+          if (entry.eligible !== true) {
+            if (entry.holdsCapability !== true) why = ' \\u2014 does not hold ' + body2.report.capabilityId;
+            else if (entry.assignability && entry.assignability.assignable !== true) why = ' \\u2014 ' + String(entry.assignability.reason);
+            else if (entry.denyReason) why = ' \\u2014 ' + entry.denyReason;
+          }
+          lines.push(entry.workerId + ': ' + verdict + why);
+        }
+        outcome.textContent = statePrefix + 'Eligibility for ' + body2.report.capabilityId + ' \\u2014 ' + lines.join(' \\u00b7 ');
+      }).catch(function (error) {
+        checkButton.disabled = false;
+        outcome.textContent = 'Not evaluated (' + error.message + ').';
+      });
+    });
+    var assignButton = document.createElement('button');
+    assignButton.type = 'button';
+    assignButton.className = 'order-live-submit';
+    assignButton.textContent = 'Record advisory assignment';
+    assignButton.addEventListener('click', function () {
+      var taskId = taskInput.value.trim();
+      if (taskId === '') { outcome.textContent = 'A task id is required. Nothing was sent.'; return; }
+      var payload = { taskId: taskId, workerId: workerSelect.value };
+      if (rationaleInput.value.trim() !== '') payload.rationale = rationaleInput.value.trim();
+      assignButton.disabled = true;
+      outcome.textContent = 'Submitting\\u2026';
+      postJson(ASSIGN_PATH, payload).then(function (result) {
+        assignButton.disabled = false;
+        var body2 = result.body || {};
+        if (body2.ok === true) {
+          // Truthful because assignTask now refuses once a live claim exists
+          // or the task can never return to the queue: success here means the
+          // narrowing genuinely applies to future claiming.
+          outcome.textContent = 'Advisory assignment recorded for ' + payload.workerId +
+            '. The task status is unchanged; future claiming from the queue is narrowed to that worker.';
+          notifyStateChanged();
+          return;
+        }
+        var error = body2.error || {};
+        outcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given');
+        if (result.status === 401 || result.status === 403) recheckAfterWriteRefusal(result.status, error);
+      }).catch(function (error) {
+        assignButton.disabled = false;
+        outcome.textContent = 'Not submitted (' + error.message + ').';
+      });
+    });
+    if (assignableWorkers.length === 0) {
+      assignButton.disabled = true;
+      textLine(assignBox, 'muted', 'No active worker can be offered \\u2014 every registered worker is marked inactive. Eligibility can still be evaluated.');
+    }
+    assignBox.appendChild(taskInput);
+    assignBox.appendChild(workerSelect);
+    assignBox.appendChild(rationaleInput);
+    assignBox.appendChild(checkButton);
+    assignBox.appendChild(assignButton);
+    assignBox.appendChild(outcome);
+    listBox.appendChild(assignBox);
+  }
+
+  var sessionAnswer = null;
+  function reload() {
+    jsonExchange(fetch(WORKFORCE_PATH, { headers: { accept: 'application/json' } }))
+      .then(function (result) {
+        var body = result.body || {};
+        if (body.ok !== true || !Array.isArray(body.workers)) {
+          var error = body.error || {};
+          stayOff('the workforce read was refused (' + (error.code || ('HTTP ' + result.status)) + '): ' +
+            (error.message || 'no detail was given'));
+          return;
+        }
+        var grant = grantedControls(sessionAnswer);
+        note.setAttribute('data-workforce-console-state', 'live');
+        note.className = 'readonly-note console-state console-state-live';
+        note.textContent = 'Live: ' + body.workers.length + ' registered worker(s), from the canonical directory just now.' +
+          (body.memberRegistryConfigured === true ? '' : ' No AI member registry is configured on this deployment \\u2014 stated, not guessed.');
+        renderWorkforce(body, grant.workforceAssign, grant.reason);
       })
       .catch(function (error) {
         stayOff('the HQ control API is not reachable from this page (' + error.message + ').');

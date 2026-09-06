@@ -26,9 +26,13 @@
  *   operator queue (which stays strictly FIFO).
  * - `hq_mission_intents` and `hq_mission_events` are APPEND-ONLY: this
  *   module contains INSERT statements for them and nothing else, and the
- *   schema carries BEFORE UPDATE / BEFORE DELETE triggers that make SQLite
- *   itself abort a history rewrite from ANY writer. Amendments append; the
- *   original Founder order (intent seq 0) is immutable.
+ *   schema carries BEFORE UPDATE / BEFORE DELETE triggers plus BEFORE INSERT
+ *   guards against inserts landing on an existing row, so SQLite itself
+ *   aborts a history rewrite — UPDATE, DELETE, REPLACE, INSERT OR REPLACE
+ *   and UPSERT alike — from ANY writer (Phase 4 §G closed the REPLACE path,
+ *   which the default-off recursive_triggers setting let slip past the
+ *   DELETE trigger). Amendments append; the original Founder order (intent
+ *   seq 0) is immutable.
  * - `hq_mission_intents.body` is the canonical JSON of the full submitted
  *   command/amendment, INCLUDING optional free-text instruction and
  *   amendment rationale. It is SERVER-SIDE ONLY: no route response and no
@@ -219,6 +223,46 @@ BEGIN SELECT RAISE(ABORT, 'hq_mission_events is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS trg_hq_mission_events_no_erase
 BEFORE DELETE ON hq_mission_events
 BEGIN SELECT RAISE(ABORT, 'hq_mission_events is append-only'); END;
+
+-- REPLACE/UPSERT closure (Phase 4 §G). SQLite's REPLACE conflict resolution
+-- deletes a colliding row WITHOUT firing BEFORE DELETE triggers while
+-- recursive_triggers is off (the engine default, and connection-scoped — a
+-- pragma cannot bind a foreign writer). So the four triggers above alone did
+-- not stop "INSERT OR REPLACE" from silently overwriting history, including
+-- the immutable intent seq 0. A BEFORE INSERT trigger fires BEFORE conflict
+-- resolution, so an insert that would land on an existing row aborts in the
+-- engine for every writer and every conflict clause — REPLACE, INSERT OR
+-- REPLACE, and ON CONFLICT ... DO UPDATE alike. Ordinary appends never
+-- collide and are untouched.
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_intents_no_replace
+BEFORE INSERT ON hq_mission_intents
+WHEN EXISTS (SELECT 1 FROM hq_mission_intents WHERE mission_id = NEW.mission_id AND seq = NEW.seq)
+  OR EXISTS (SELECT 1 FROM hq_mission_intents WHERE id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'hq_mission_intents is append-only'); END;
+-- TYPEOF guards the autoincrement key: in a BEFORE INSERT trigger an
+-- auto-assigned NEW.seq is not yet an integer, and only an EXPLICITLY
+-- supplied seq can collide.
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_events_no_replace
+BEFORE INSERT ON hq_mission_events
+WHEN EXISTS (SELECT 1 FROM hq_mission_events WHERE id = NEW.id)
+  OR (TYPEOF(NEW.seq) = 'integer'
+      AND EXISTS (SELECT 1 FROM hq_mission_events WHERE seq = NEW.seq))
+BEGIN SELECT RAISE(ABORT, 'hq_mission_events is append-only'); END;
+
+-- Plan items are not append-only as a table (supersede and link legitimately
+-- UPDATE their own columns), but two of their facts are write-once and the
+-- engine now holds both: a row's identity can never be replaced out from
+-- under its mission, and a linked task id can never be re-pointed. The link
+-- path sets task_id only WHERE task_id IS NULL, so it never trips this.
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_plan_items_no_replace
+BEFORE INSERT ON hq_mission_plan_items
+WHEN EXISTS (SELECT 1 FROM hq_mission_plan_items WHERE mission_id = NEW.mission_id AND seq = NEW.seq)
+  OR EXISTS (SELECT 1 FROM hq_mission_plan_items WHERE id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'hq_mission_plan_items seq is write-once'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_plan_items_no_relink
+BEFORE UPDATE OF task_id ON hq_mission_plan_items
+WHEN OLD.task_id IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'hq_mission_plan_items task link is write-once'); END;
 `;
 
 /**
@@ -232,6 +276,15 @@ BEGIN SELECT RAISE(ABORT, 'hq_mission_events is append-only'); END;
 export function ensureMissionCommandSchema(db: HqDatabase): void {
   if (db.readonly) return;
   db.exec(MISSION_COMMAND_DDL);
+  // Phase 4: the canonical mission -> project relationship. Additive,
+  // idempotent, module-owned (this module owns hq_missions). Distinct from
+  // the free-text `project` LABEL column above it, which stays a label —
+  // `project_id` references the canonical register (`hq_projects`, owned by
+  // application/project-command.ts) and is validated at the facade.
+  const cols = db.prepare(`PRAGMA table_info(hq_missions)`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === 'project_id')) {
+    db.exec(`ALTER TABLE hq_missions ADD COLUMN project_id TEXT`);
+  }
 }
 
 /**
@@ -320,6 +373,10 @@ export interface MissionRecord {
   /** null = honestly not supplied (an explicit unknown, not an empty list). */
   acceptanceCriteria: string[] | null;
   project: string | null;
+  /** Canonical project relationship — a register id, validated at the facade. */
+  projectId: string | null;
+  /** DERIVED read-time join from the register; null when projectId is null. */
+  projectName: string | null;
   priority: MissionPriority | null;
   status: MissionStatus;
   blockReason: string | null;
@@ -362,6 +419,8 @@ export interface MissionBrowserView {
   constraints: string[];
   acceptanceCriteria: string[] | null;
   project: string | null;
+  projectId: string | null;
+  projectName: string | null;
   priority: MissionPriority | null;
   status: MissionStatus;
   blockReason: string | null;
@@ -399,6 +458,8 @@ export function missionBrowserView(mission: MissionRecord): MissionBrowserView {
     constraints: mission.constraints,
     acceptanceCriteria: mission.acceptanceCriteria,
     project: mission.project,
+    projectId: mission.projectId,
+    projectName: mission.projectName,
     priority: mission.priority,
     status: mission.status,
     blockReason: mission.blockReason,
@@ -434,7 +495,7 @@ export interface MissionEventRecord {
   missionId: string;
   at: string;
   actor: string;
-  kind: 'commanded' | 'transitioned' | 'intent_amended' | 'plan_item_linked';
+  kind: 'commanded' | 'transitioned' | 'intent_amended' | 'plan_item_linked' | 'project_assigned';
   fromStatus: MissionStatus | null;
   toStatus: MissionStatus | null;
   note: string | null;
@@ -457,6 +518,8 @@ export function missionCommandIdempotencyKey(input: {
   constraints: string[];
   acceptanceCriteria: string[] | null;
   project: string | null;
+  /** Canonical project relationship (Phase 4). See the field note below. */
+  projectId?: string | null;
   priority: MissionPriority | null;
   sourceOrderTaskId: string | null;
   dependsOn: string[];
@@ -471,25 +534,28 @@ export function missionCommandIdempotencyKey(input: {
   instruction: string | null;
   idempotencyKey: string | null;
 }): string {
-  const digest = createHash('sha256')
-    .update(
-      canonicalJson({
-        requestedBy: input.requestedBy,
-        title: input.title,
-        objective: input.objective,
-        scope: input.scope,
-        constraints: input.constraints,
-        acceptanceCriteria: input.acceptanceCriteria,
-        project: input.project,
-        priority: input.priority,
-        sourceOrderTaskId: input.sourceOrderTaskId,
-        dependsOn: input.dependsOn,
-        planItems: input.planItems,
-        instruction: input.instruction,
-        idempotencyKey: input.idempotencyKey,
-      }),
-    )
-    .digest('hex');
+  const fields: Record<string, unknown> = {
+    requestedBy: input.requestedBy,
+    title: input.title,
+    objective: input.objective,
+    scope: input.scope,
+    constraints: input.constraints,
+    acceptanceCriteria: input.acceptanceCriteria,
+    project: input.project,
+    priority: input.priority,
+    sourceOrderTaskId: input.sourceOrderTaskId,
+    dependsOn: input.dependsOn,
+    planItems: input.planItems,
+    instruction: input.instruction,
+    idempotencyKey: input.idempotencyKey,
+  };
+  // `projectId` joins the digest ONLY when stated. Unconditionally adding
+  // `projectId: null` would change every digest and a byte-identical
+  // re-command of a Phase 3 order would then DUPLICATE the mission instead of
+  // deduping onto it — the stored Phase 3 keys never contained the field.
+  // Pinned by test: key(without) === key(projectId: null).
+  if (input.projectId != null) fields.projectId = input.projectId;
+  const digest = createHash('sha256').update(canonicalJson(fields)).digest('hex');
   return `mission:${digest.slice(0, 32)}`;
 }
 
@@ -588,6 +654,21 @@ export function readMissionRecord(
 
   const verificationMethod = (row.verification_method as string | null) ?? null;
 
+  // The canonical project relationship, joined at read time. `project` (the
+  // free-text label) and `projectId` (the register reference) are different
+  // claims and both travel; the name is a projection of the register, never
+  // stored here. A dangling id (register row gone is impossible — projects
+  // are never hard-deleted — but a pre-adoption raw write could dangle)
+  // reports its id with a null name rather than hiding the link.
+  const projectId = (row.project_id as string | null) ?? null;
+  const projectName = projectId
+    ? ((
+        db.prepare(`SELECT name FROM hq_projects WHERE id = ?`).get(projectId) as
+          | { name: string }
+          | undefined
+      )?.name ?? null)
+    : null;
+
   return {
     id: row.id as string,
     title: row.title as string,
@@ -597,6 +678,8 @@ export function readMissionRecord(
     acceptanceCriteria:
       row.acceptance_criteria == null ? null : parseStringArray(row.acceptance_criteria as string),
     project: (row.project as string | null) ?? null,
+    projectId,
+    projectName,
     priority: (row.priority as MissionPriority | null) ?? null,
     status: row.status as MissionStatus,
     blockReason: (row.block_reason as string | null) ?? null,

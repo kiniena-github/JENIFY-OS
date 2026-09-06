@@ -16,27 +16,43 @@
  *
  * Matched exactly, deny-by-default on everything else:
  *
- *   GET  /api/hq/control/session             who am I, and are the controls on
- *   GET  /api/hq/control/approvals           the pending approvals + digests
- *   GET  /api/hq/control/state               canonical state, room-projected
- *   GET  /api/hq/control/missions            the canonical missions, full detail
- *   POST /api/hq/control/orders              create a canonical direct order
- *   POST /api/hq/control/approvals/approve   approve the exact rendered action
- *   POST /api/hq/control/approvals/deny      deny, with a reason
- *   POST /api/hq/control/missions            command a canonical mission (Phase 3)
- *   POST /api/hq/control/missions/transition move a mission through its lifecycle
- *   POST /api/hq/control/missions/amend      amend mission intent, append-only
+ *   GET  /api/hq/control/session                  who am I, and are the controls on
+ *   GET  /api/hq/control/approvals                the pending approvals + digests
+ *   GET  /api/hq/control/state                    canonical state, room-projected
+ *   GET  /api/hq/control/missions                 the canonical missions, full detail
+ *   GET  /api/hq/control/projects                 the canonical project register (Phase 4)
+ *   GET  /api/hq/control/workforce                registered workers + transport/member truth
+ *   POST /api/hq/control/orders                   create a canonical direct order
+ *   POST /api/hq/control/approvals/approve        approve the exact rendered action
+ *   POST /api/hq/control/approvals/deny           deny, with a reason
+ *   POST /api/hq/control/missions                 command a canonical mission (Phase 3)
+ *   POST /api/hq/control/missions/transition      move a mission through its lifecycle
+ *   POST /api/hq/control/missions/amend           amend mission intent, append-only
+ *   POST /api/hq/control/missions/assign-project  bind/clear the mission -> project link
+ *   POST /api/hq/control/missions/link-plan-item  link a plan item to a real task (write-once)
+ *   POST /api/hq/control/projects                 create a register entry idempotently
+ *   POST /api/hq/control/projects/transition      close/reopen, note required
+ *   POST /api/hq/control/projects/update          audited register edit
+ *   POST /api/hq/control/workforce/route          evaluate eligibility (records evidence)
+ *   POST /api/hq/control/workforce/assign         record an ADVISORY assignment intent
  *
- * The three mission writes widen the browser write surface the 2026-08-28
- * Founder decision pinned at exactly orders/approve/deny. That widening is
- * itself Founder-approved (issue #254, Phase 3) and recorded in
- * `docs/JENIFY_DECISIONS.md`; every other clause of the original decision —
- * identity derivation, fail-closed map, no generic mutation endpoint —
- * applies to the new routes unchanged. Mission writes take no step-up: they
- * release no execution authority (a mission executes nothing in Phase 3),
- * and step-up stays bound to what it protects — execution-granting
- * approvals. That exemption must be revisited the moment any autonomous
- * consumer reads mission state (Phase ≥ 4).
+ * The mission writes (Phase 3) and the project/workforce writes (Phase 4)
+ * widen the browser write surface the 2026-08-28 Founder decision pinned at
+ * exactly orders/approve/deny. Each widening is Founder-approved (issues
+ * #254 and #262) and recorded in `docs/JENIFY_DECISIONS.md`; every other
+ * clause of the original decision — identity derivation, fail-closed map, no
+ * generic mutation endpoint — applies to every new route unchanged.
+ *
+ * STEP-UP, RE-EVALUATED AT PHASE 4 (the obligation the Phase 3 decision
+ * recorded): none of the new writes takes step-up, and the exemption is
+ * re-affirmed rather than inherited. Phase 4 still adds NO autonomous
+ * consumer of mission or project state — nomination is advisory and inert
+ * without the directory + policy engine's own verdict, an assignment intent
+ * changes no status and burns no approval, and nothing reads a mission to
+ * create/claim/dispatch anything. Step-up stays bound to what it protects:
+ * execution-granting approvals. This must be re-evaluated AGAIN the moment
+ * a consumer can turn mission/project state into execution (Phase >= 6, or
+ * any earlier wiring of the mission watchdog).
  *
  * There is **no ask-for-changes route**, and its absence is a decision rather
  * than an omission. The canonical approval model has exactly two outcomes:
@@ -110,6 +126,17 @@ import {
   missionCommandCapabilityState,
   type MissionRecord,
 } from '../application/mission-command.js';
+import {
+  PROJECT_COMMAND_CAPABILITY,
+  projectBrowserView,
+  projectCommandCapabilityState,
+  type ProjectRecord,
+} from '../application/project-command.js';
+import {
+  WORKFORCE_ASSIGN_CAPABILITY,
+  workforceAssignCapabilityState,
+} from '../application/workforce-command.js';
+import { PROVIDERS, providerConnectivity } from '../routing/providers.js';
 
 export const CONTROL_API_PREFIX = '/api/hq/control';
 
@@ -151,6 +178,29 @@ export const CONTROL_ROUTES = {
   missions: `${CONTROL_API_PREFIX}/missions`,
   missionTransition: `${CONTROL_API_PREFIX}/missions/transition`,
   missionAmend: `${CONTROL_API_PREFIX}/missions/amend`,
+  /**
+   * Phase 4 (issue #262): the canonical Project register surface. GET lists
+   * every register entry with full browser-safe detail (exact-match routing
+   * preserved — no path parameters; a Founder-typed register needs no
+   * pagination); POST creates one idempotently. The two mission additions
+   * bind the existing facade seams — `assignMissionToProject` and the
+   * previously route-less `linkMissionPlanItem` — to the browser.
+   */
+  projects: `${CONTROL_API_PREFIX}/projects`,
+  projectTransition: `${CONTROL_API_PREFIX}/projects/transition`,
+  projectUpdate: `${CONTROL_API_PREFIX}/projects/update`,
+  missionAssignProject: `${CONTROL_API_PREFIX}/missions/assign-project`,
+  missionLinkPlanItem: `${CONTROL_API_PREFIX}/missions/link-plan-item`,
+  /**
+   * Phase 4: the workforce surface. GET reports every registered worker with
+   * enforcement/transport/member truth; the two POSTs record evidence — an
+   * eligibility evaluation (`routing_evaluated`) and an ADVISORY assignment
+   * intent — which is why both sit on the write surface despite executing
+   * nothing.
+   */
+  workforce: `${CONTROL_API_PREFIX}/workforce`,
+  workforceRoute: `${CONTROL_API_PREFIX}/workforce/route`,
+  workforceAssign: `${CONTROL_API_PREFIX}/workforce/assign`,
 } as const;
 
 /**
@@ -165,6 +215,13 @@ export const CONTROL_WRITE_ROUTES: readonly string[] = [
   CONTROL_ROUTES.missions,
   CONTROL_ROUTES.missionTransition,
   CONTROL_ROUTES.missionAmend,
+  CONTROL_ROUTES.projects,
+  CONTROL_ROUTES.projectTransition,
+  CONTROL_ROUTES.projectUpdate,
+  CONTROL_ROUTES.missionAssignProject,
+  CONTROL_ROUTES.missionLinkPlanItem,
+  CONTROL_ROUTES.workforceRoute,
+  CONTROL_ROUTES.workforceAssign,
 ];
 
 export interface ControlResponse {
@@ -365,14 +422,23 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
       (path === CONTROL_ROUTES.session ||
         path === CONTROL_ROUTES.approvals ||
         path === CONTROL_ROUTES.state ||
-        path === CONTROL_ROUTES.missions)) ||
+        path === CONTROL_ROUTES.missions ||
+        path === CONTROL_ROUTES.projects ||
+        path === CONTROL_ROUTES.workforce)) ||
     (method === 'POST' &&
       (path === CONTROL_ROUTES.orders ||
         path === CONTROL_ROUTES.approve ||
         path === CONTROL_ROUTES.deny ||
         path === CONTROL_ROUTES.missions ||
         path === CONTROL_ROUTES.missionTransition ||
-        path === CONTROL_ROUTES.missionAmend));
+        path === CONTROL_ROUTES.missionAmend ||
+        path === CONTROL_ROUTES.projects ||
+        path === CONTROL_ROUTES.projectTransition ||
+        path === CONTROL_ROUTES.projectUpdate ||
+        path === CONTROL_ROUTES.missionAssignProject ||
+        path === CONTROL_ROUTES.missionLinkPlanItem ||
+        path === CONTROL_ROUTES.workforceRoute ||
+        path === CONTROL_ROUTES.workforceAssign));
   if (!known) {
     // Deny by default, and say nothing about what does exist.
     return refusal(404, 'not_found', 'No such HQ control route.');
@@ -616,6 +682,21 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     );
   }
 
+  if (method === 'GET' && path === CONTROL_ROUTES.projects) {
+    audit('allowed', 'list_projects', founder);
+    return safe(
+      json(200, {
+        ok: true,
+        generatedAt: now().toISOString(),
+        projects: deps.ops.listProjects().map(projectView),
+      }),
+    );
+  }
+
+  if (method === 'GET' && path === CONTROL_ROUTES.workforce) {
+    return workforceReport(deps, founder, audit, now);
+  }
+
   if (path === CONTROL_ROUTES.orders) return createOrder(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.approve) return approve(request, deps, founder, audit, now);
   if (path === CONTROL_ROUTES.missions) return commandMission(request, deps, founder, audit);
@@ -623,6 +704,21 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     return transitionMission(request, deps, founder, audit);
   }
   if (path === CONTROL_ROUTES.missionAmend) return amendMission(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.projects) return createProject(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.projectTransition) {
+    return transitionProject(request, deps, founder, audit);
+  }
+  if (path === CONTROL_ROUTES.projectUpdate) return updateProject(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.missionAssignProject) {
+    return assignMissionProject(request, deps, founder, audit);
+  }
+  if (path === CONTROL_ROUTES.missionLinkPlanItem) {
+    return linkPlanItem(request, deps, founder, audit);
+  }
+  if (path === CONTROL_ROUTES.workforceRoute) return workforceRoute(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.workforceAssign) {
+    return workforceAssign(request, deps, founder, audit);
+  }
   return deny(request, deps, founder, audit);
 }
 
@@ -671,6 +767,10 @@ function controlAvailability(
     writable && principal?.originateCapabilities.includes(DIRECT_ORDER_CAPABILITY.id) === true;
   const mayCommandMissions =
     writable && principal?.originateCapabilities.includes(MISSION_COMMAND_CAPABILITY.id) === true;
+  const mayCommandProjects =
+    writable && principal?.originateCapabilities.includes(PROJECT_COMMAND_CAPABILITY.id) === true;
+  const mayAssignWorkforce =
+    writable && principal?.originateCapabilities.includes(WORKFORCE_ASSIGN_CAPABILITY.id) === true;
   return {
     directOrder: mayOriginate && directOrderCapabilityState(deps.ops) === 'enabled',
     approve: mayApprove,
@@ -681,6 +781,15 @@ function controlAvailability(
     missionCommand:
       mayCommandMissions &&
       missionCommandCapabilityState(capabilityRowFor(deps.ops, MISSION_COMMAND_CAPABILITY.id)) ===
+        'enabled',
+    // The two Phase 4 controls, derived exactly the same way.
+    projectCommand:
+      mayCommandProjects &&
+      projectCommandCapabilityState(capabilityRowFor(deps.ops, PROJECT_COMMAND_CAPABILITY.id)) ===
+        'enabled',
+    workforceAssign:
+      mayAssignWorkforce &&
+      workforceAssignCapabilityState(capabilityRowFor(deps.ops, WORKFORCE_ASSIGN_CAPABILITY.id)) ===
         'enabled',
     mutationsEnabled: deps.mutationsEnabled !== false,
     trustedOriginConfigured: originsUsable,
@@ -849,27 +958,40 @@ function createOrder(
 }
 
 /**
- * One status per refusal class, shared by the three mission writes so the
- * browser is told the same thing for the same cause everywhere:
+ * One status per refusal class, shared by every mission, project and
+ * workforce write so the browser is told the same thing for the same cause
+ * everywhere:
  * - 400 invalid input — fix the request;
  * - 403 authority/capability — nothing in this request will help;
- * - 404 unknown mission — same non-oracle shape as an unknown route;
- * - 409 state conflict — the mission moved, or the act conflicts with a
- *   terminal/current state; re-read and decide again.
+ * - 404 unknown mission/project/task — same non-oracle shape as an unknown
+ *   route (and reachable only AFTER the authority gates, so a caller without
+ *   the grant cannot probe which records exist);
+ * - 409 state conflict — the record moved, or the act conflicts with a
+ *   terminal/closed/current state; re-read and decide again.
  */
-function missionErrorStatus(code: string): number {
+function controlErrorStatus(code: string): number {
   switch (code) {
     case 'unknown_mission':
+    case 'unknown_project':
+    case 'unknown_task':
       return 404;
     case 'invalid_mission_transition':
     case 'mission_status_changed':
     case 'mission_terminal':
     case 'mission_intent_conflict':
+    case 'invalid_project_transition':
+    case 'project_status_changed':
+    case 'project_closed':
+    case 'assigned_to_other_worker':
+    case 'task_already_claimed':
+    case 'task_beyond_claiming':
+    case 'worker_not_assignable':
       return 409;
     case 'unknown_capability':
     case 'capability_disabled':
     case 'not_permitted':
     case 'unknown_principal':
+    case 'workforce_registry_unconfigured':
       return 403;
     default:
       return 400;
@@ -946,7 +1068,7 @@ function commandMission(
   if (!result.ok) {
     audit('refused', result.error.code, founder);
     return safe(
-      json(missionErrorStatus(result.error.code), {
+      json(controlErrorStatus(result.error.code), {
         ok: false,
         error: { code: result.error.code, message: result.error.message },
       }),
@@ -998,7 +1120,7 @@ function transitionMission(
   if (!result.ok) {
     audit('refused', result.error.code, founder);
     return safe(
-      json(missionErrorStatus(result.error.code), {
+      json(controlErrorStatus(result.error.code), {
         ok: false,
         error: { code: result.error.code, message: result.error.message },
       }),
@@ -1065,7 +1187,7 @@ function amendMission(
   if (!result.ok) {
     audit('refused', result.error.code, founder);
     return safe(
-      json(missionErrorStatus(result.error.code), {
+      json(controlErrorStatus(result.error.code), {
         ok: false,
         error: { code: result.error.code, message: result.error.message },
       }),
@@ -1073,6 +1195,412 @@ function amendMission(
   }
   audit('allowed', 'mission_amended', founder);
   return safe(json(200, { ok: true, mission: missionView(result.data) }));
+}
+
+function projectView(project: ProjectRecord): Record<string, unknown> {
+  return projectBrowserView(project) as unknown as Record<string, unknown>;
+}
+
+function createProject(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const name = stringField(request.body, 'name') ?? '';
+  const purpose = stringField(request.body, 'purpose') ?? '';
+  const stream = stringField(request.body, 'stream');
+  const clientKey = stringField(request.body, 'idempotencyKey');
+  // The browser boundary's stricter scan BEFORE anything persists — the
+  // mission-command precedent.
+  try {
+    assertBrowserSafe({ name, purpose, stream }, 'project');
+  } catch {
+    audit('refused', 'unsafe_project_content', founder);
+    return refusal(
+      400,
+      'unsafe_project_content',
+      'The project text looks like it contains credential material, so it was refused rather than stored.',
+    );
+  }
+  const result = deps.ops.createProject({
+    name,
+    purpose,
+    stream,
+    // The ONLY place the acting principal comes from — never the body.
+    requestedBy: founder.principal.id,
+    idempotencyKey: clientKey,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return safe(
+      json(controlErrorStatus(result.error.code), {
+        ok: false,
+        error: { code: result.error.code, message: result.error.message },
+      }),
+    );
+  }
+  audit('allowed', result.data.deduplicated ? 'project_deduplicated' : 'project_created', founder);
+  return safe(
+    json(result.data.deduplicated ? 200 : 201, {
+      ok: true,
+      deduplicated: result.data.deduplicated,
+      project: projectView(result.data.project),
+    }),
+  );
+}
+
+function transitionProject(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const projectId = stringField(request.body, 'projectId') ?? '';
+  const to = stringField(request.body, 'to') ?? '';
+  const note = stringField(request.body, 'note');
+  const expectedStatus = stringField(request.body, 'expectedStatus');
+  if (!projectId || !to) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'projectId and to are required.');
+  }
+  if (note) {
+    try {
+      assertBrowserSafe({ note }, 'project');
+    } catch {
+      audit('refused', 'unsafe_project_content', founder);
+      return refusal(
+        400,
+        'unsafe_project_content',
+        'The note looks like it contains credential material, so it was refused rather than stored.',
+      );
+    }
+  }
+  const result = deps.ops.transitionProject({
+    projectId,
+    to,
+    note,
+    expectedStatus,
+    requestedBy: founder.principal.id,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return safe(
+      json(controlErrorStatus(result.error.code), {
+        ok: false,
+        error: { code: result.error.code, message: result.error.message },
+      }),
+    );
+  }
+  audit('allowed', `project_transitioned_${result.data.status}`, founder);
+  return safe(json(200, { ok: true, project: projectView(result.data) }));
+}
+
+function updateProject(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const projectId = stringField(request.body, 'projectId') ?? '';
+  const name = stringField(request.body, 'name');
+  const purpose = stringField(request.body, 'purpose');
+  // `stream` is TRI-STATE and must stay so across the wire: absent =
+  // unchanged, null = clear the label, string = set it. `stringField` would
+  // silently fold null into "absent" and answer 200 with the old stream kept
+  // — a false clear (Opus Low on PR #263). A non-string non-null is refused
+  // rather than coerced (the assignMissionProject precedent below).
+  const rawStream =
+    request.body != null && typeof request.body === 'object'
+      ? (request.body as Record<string, unknown>).stream
+      : undefined;
+  if (rawStream !== undefined && rawStream !== null && typeof rawStream !== 'string') {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'stream must be a string, null, or absent.');
+  }
+  const stream = rawStream as string | null | undefined;
+  if (!projectId) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'projectId is required.');
+  }
+  try {
+    assertBrowserSafe({ name, purpose, stream: stream ?? undefined }, 'project');
+  } catch {
+    audit('refused', 'unsafe_project_content', founder);
+    return refusal(
+      400,
+      'unsafe_project_content',
+      'The project text looks like it contains credential material, so it was refused rather than stored.',
+    );
+  }
+  const result = deps.ops.updateProject({
+    projectId,
+    name,
+    purpose,
+    stream,
+    requestedBy: founder.principal.id,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return safe(
+      json(controlErrorStatus(result.error.code), {
+        ok: false,
+        error: { code: result.error.code, message: result.error.message },
+      }),
+    );
+  }
+  audit('allowed', 'project_updated', founder);
+  return safe(json(200, { ok: true, project: projectView(result.data) }));
+}
+
+function assignMissionProject(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const missionId = stringField(request.body, 'missionId') ?? '';
+  if (!missionId) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'missionId is required.');
+  }
+  // `projectId: null` (or absent) clears the assignment; a non-string,
+  // non-null value is refused rather than coerced.
+  const rawProjectId =
+    request.body != null && typeof request.body === 'object'
+      ? (request.body as Record<string, unknown>).projectId
+      : undefined;
+  if (rawProjectId != null && typeof rawProjectId !== 'string') {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'projectId must be a string or null.');
+  }
+  const result = deps.ops.assignMissionToProject({
+    missionId,
+    projectId: (rawProjectId as string | undefined) ?? null,
+    requestedBy: founder.principal.id,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return safe(
+      json(controlErrorStatus(result.error.code), {
+        ok: false,
+        error: { code: result.error.code, message: result.error.message },
+      }),
+    );
+  }
+  audit('allowed', 'mission_project_assigned', founder);
+  return safe(json(200, { ok: true, mission: missionView(result.data) }));
+}
+
+function linkPlanItem(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const missionId = stringField(request.body, 'missionId') ?? '';
+  const taskId = stringField(request.body, 'taskId') ?? '';
+  const rawSeq =
+    request.body != null && typeof request.body === 'object'
+      ? (request.body as Record<string, unknown>).planItemSeq
+      : undefined;
+  if (!missionId || !taskId || typeof rawSeq !== 'number' || !Number.isInteger(rawSeq)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(
+      400,
+      'invalid_input',
+      'missionId, an integer planItemSeq and a taskId are required.',
+    );
+  }
+  const result = deps.ops.linkMissionPlanItem({
+    missionId,
+    planItemSeq: rawSeq,
+    taskId,
+    requestedBy: founder.principal.id,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return safe(
+      json(controlErrorStatus(result.error.code), {
+        ok: false,
+        error: { code: result.error.code, message: result.error.message },
+      }),
+    );
+  }
+  audit('allowed', 'mission_plan_item_linked', founder);
+  return safe(json(200, { ok: true, mission: missionView(result.data) }));
+}
+
+/**
+ * GET /workforce — every registered worker with its enforcement, transport
+ * and member truth, composed HERE because this is the one layer that holds
+ * all three: the facade answers grants/assignability, the routing contract
+ * plus the host's transport seam answer dispatchability (three-valued —
+ * true/false when genuinely observed, null when this host cannot observe),
+ * and the member registry answers identity/health enrichment. Nothing is
+ * inferred: an undeclared provider reads null, an unobserved transport reads
+ * null, an unconfigured registry says so.
+ */
+function workforceReport(
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const declared = new Map(
+    deps.ops.workerProviderDeclarations().map((d) => [d.workerId, d.providerId] as const),
+  );
+  const roster = deps.ops.listAiMembers();
+  const memberById = new Map(roster.members.map((member) => [member.id, member] as const));
+  const workers = deps.ops.directory.listSpecialists().map((worker) => {
+    const providerId = declared.get(worker.id) ?? null;
+    const transport =
+      providerId && (PROVIDERS as readonly string[]).includes(providerId)
+        ? (() => {
+            const connectivity = providerConnectivity(providerId as ProviderId, deps.secretsEnv);
+            // `contractSatisfied` is a CONFIGURATION fact — the routing
+            // contract's required secrets/local facts are all present.
+            // Nothing was asked of the vendor, so it is deliberately not
+            // called "connected" here (Opus Low on PR #263). The truth
+            // asymmetry: a NEGATIVE reason (missing requirement) genuinely
+            // proves non-executability and passes through verbatim; the
+            // positive claim is restated as exactly what was checked. Live
+            // observation stays where it belongs — `dispatchable` is
+            // three-valued and only ever non-null when genuinely observed.
+            return {
+              contractSatisfied: connectivity.connected,
+              reason: connectivity.connected
+                ? 'Routing-contract requirements are satisfied by configuration; nothing was probed.'
+                : connectivity.reason,
+              missingSecrets: connectivity.missingSecrets,
+              missingLocalFacts: connectivity.missingLocalFacts,
+              dispatchable: deps.dispatchAvailability?.(providerId as ProviderId) ?? null,
+            };
+          })()
+        : null;
+    const member = memberById.get(worker.id);
+    return {
+      id: worker.id,
+      displayName: worker.displayName,
+      vendor: worker.vendor,
+      role: worker.role,
+      active: worker.active,
+      allowedCapabilities: [...worker.allowedCapabilities],
+      providerDeclared: providerId,
+      transport,
+      member: member
+        ? {
+            identityKey: member.identityKey,
+            status: member.status,
+            health: member.health,
+            healthCheckedAt: member.healthCheckedAt,
+            workerType: member.workerType,
+            locality: member.locality,
+            costClass: member.costClass,
+          }
+        : null,
+    };
+  });
+  // Members with no matching execution worker are listed separately and
+  // labeled: registered in the member registry, NOT enrolled for execution
+  // (issue #182 — a registry row enrols nobody).
+  const specialistIds = new Set(workers.map((worker) => worker.id));
+  const membersOnly = roster.members
+    .filter((member) => !specialistIds.has(member.id))
+    .map((member) => ({
+      id: member.id,
+      displayName: member.displayName,
+      identityKey: member.identityKey,
+      status: member.status,
+      health: member.health,
+      healthCheckedAt: member.healthCheckedAt,
+      workerType: member.workerType,
+      executionWorker: false,
+    }));
+  audit('allowed', 'read_workforce', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      workers,
+      memberRegistryConfigured: roster.configured,
+      membersNotEnrolledForExecution: membersOnly,
+    }),
+  );
+}
+
+function workforceRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const taskId = stringField(request.body, 'taskId') ?? '';
+  if (!taskId) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'taskId is required.');
+  }
+  const result = deps.ops.evaluateTaskEligibility(taskId);
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return safe(
+      json(controlErrorStatus(result.error.code), {
+        ok: false,
+        error: { code: result.error.code, message: result.error.message },
+      }),
+    );
+  }
+  audit('allowed', 'workforce_route_evaluated', founder);
+  return safe(json(200, { ok: true, report: result.data as unknown as Record<string, unknown> }));
+}
+
+function workforceAssign(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const taskId = stringField(request.body, 'taskId') ?? '';
+  const workerId = stringField(request.body, 'workerId') ?? '';
+  const rationale = stringField(request.body, 'rationale');
+  if (!taskId || !workerId) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'taskId and workerId are required.');
+  }
+  if (rationale) {
+    try {
+      assertBrowserSafe({ rationale }, 'workforce');
+    } catch {
+      audit('refused', 'unsafe_rationale_content', founder);
+      return refusal(
+        400,
+        'unsafe_rationale_content',
+        'The rationale looks like it contains credential material, so it was refused rather than stored.',
+      );
+    }
+  }
+  const result = deps.ops.assignTaskAsFounder({
+    taskId,
+    workerId,
+    founderId: founder.principal.id,
+    rationale,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return safe(
+      json(controlErrorStatus(result.error.code), {
+        ok: false,
+        error: { code: result.error.code, message: result.error.message },
+      }),
+    );
+  }
+  audit('allowed', 'workforce_assigned', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      assignment: result.data as unknown as Record<string, unknown>,
+    }),
+  );
 }
 
 function approve(

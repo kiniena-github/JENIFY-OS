@@ -40,6 +40,7 @@ import { directOrderDispatchBlocked } from './orders.js';
 import { dispatchHistory } from '../providers/claude/dispatch.js';
 import type { HeadquarterOperations } from '../application/service.js';
 import { missionBrowserView, type MissionBrowserView } from '../application/mission-command.js';
+import { projectBrowserView, type ProjectBrowserView } from '../application/project-command.js';
 import type { ProviderId, SecretsEnv } from '../routing/providers.js';
 import { assessConnections, type ConnectionProbe, type ConnectionStatus } from './connections.js';
 import { assertBrowserSafe, assertNoFabricatedFields } from './redaction.js';
@@ -113,6 +114,24 @@ export interface SnapshotWorker {
   active: boolean;
   /** GRANTED capability ids from the directory — never advertised claims. */
   allowedCapabilities: string[];
+  /**
+   * Declared execution provider (Phase 4). Null = no declaration exists —
+   * never inferred from the vendor string. `dispatchable` is transport truth
+   * three-valued: true/false when the building context genuinely observed
+   * it, null when it could not (a static build observes nothing).
+   */
+  provider: { declaredId: string; dispatchable: boolean | null } | null;
+  /**
+   * AI member enrichment (Phase 4): the registry record sharing this worker
+   * id, when one exists. Identity/status/health truth only; health is
+   * 'unknown' until somebody explicitly declared otherwise.
+   */
+  member: {
+    identityKey: string;
+    status: string;
+    health: string;
+    healthCheckedAt: string | null;
+  } | null;
 }
 
 export interface SnapshotCapability {
@@ -134,6 +153,8 @@ export interface SnapshotCounts {
   queued: number;
   /** Canonical missions commanded by the Founder (Phase 3). 0 means 0. */
   missions: number;
+  /** Canonical project register entries (Phase 4). 0 means 0. */
+  projects: number;
 }
 
 export interface HqSnapshot {
@@ -155,6 +176,15 @@ export interface HqSnapshot {
    * idempotency keys, no invented metrics.
    */
   missions: SnapshotSection<MissionBrowserView[]>;
+  /**
+   * The canonical Project register (Phase 4, issue #262) — the shared
+   * `projectBrowserView` projection, same one-implementation rule as
+   * missions. Unbounded deliberately: a Founder-typed register is inherently
+   * small, so a trim limit would be machinery for a scale the data cannot
+   * reach. Added WITHOUT a version bump — purely additive, per the
+   * `HQ_SNAPSHOT_VERSION` policy above.
+   */
+  projects: SnapshotSection<ProjectBrowserView[]>;
 }
 
 /**
@@ -214,6 +244,19 @@ export interface SnapshotSources {
   capabilities: { data: Capability[]; provenance: Provenance };
   activity: { data: ActivityEvent[]; provenance: Provenance };
   missions: { data: MissionBrowserView[]; provenance: Provenance };
+  projects: { data: ProjectBrowserView[]; provenance: Provenance };
+  /**
+   * Per-worker provider declarations (Phase 4). Optional: an omitted map
+   * means the building context holds no declaration truth — every worker's
+   * `provider` reads null, which is the honest static-build answer, not a
+   * claim that no declaration exists.
+   */
+  workerProviders?: Record<string, { declaredId: string; dispatchable: boolean | null }>;
+  /** Per-worker AI member enrichment (Phase 4). Same optional semantics. */
+  workerMembers?: Record<
+    string,
+    { identityKey: string; status: string; health: string; healthCheckedAt: string | null }
+  >;
   policyContext?: Parameters<typeof classifyCapability>[1];
   activityLimit?: number;
   /** Opt-in mission bound — see SNAPSHOT_MISSION_LIMIT. Omitted = unbounded. */
@@ -238,6 +281,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       sources.capabilities.provenance.mode,
       sources.activity.provenance.mode,
       sources.missions.provenance.mode,
+      sources.projects.provenance.mode,
     ]),
     note: sources.note ?? null,
     counts: {
@@ -248,6 +292,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       inFlight: console_.inFlight.length,
       queued: console_.queued.length,
       missions: sources.missions.data.length,
+      projects: sources.projects.data.length,
     },
     operations: section(sources.console.provenance, console_),
     connections: section(sources.connections.provenance, sources.connections.data),
@@ -260,6 +305,8 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
         role: worker.role,
         active: worker.active,
         allowedCapabilities: [...worker.allowedCapabilities],
+        provider: sources.workerProviders?.[worker.id] ?? null,
+        member: sources.workerMembers?.[worker.id] ?? null,
       })),
     ),
     capabilities: section(
@@ -290,6 +337,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
             trimMissions(sources.missions.data, sources.missionLimit),
           )
         : section(sources.missions.provenance, sources.missions.data),
+    projects: section(sources.projects.provenance, sources.projects.data),
   };
 
   // Fail closed: prove it before anyone can publish it.
@@ -393,7 +441,33 @@ export function liveSnapshotFromOperations(
   const env = options.env ?? {};
   const provenanceFor = (source: string): Provenance => ({ mode, source, asOf: at });
 
+  // Phase 4 workforce enrichment, from the same canonical reads the routes
+  // use: declarations declared-or-absent (never inferred from vendor),
+  // dispatchability three-valued through the same transport seam the console
+  // uses, member records only where a registry is genuinely configured.
+  const workerProviders: NonNullable<SnapshotSources['workerProviders']> = {};
+  for (const declaration of ops.workerProviderDeclarations()) {
+    workerProviders[declaration.workerId] = {
+      declaredId: declaration.providerId,
+      dispatchable: options.dispatchAvailability?.(declaration.providerId as ProviderId) ?? null,
+    };
+  }
+  const workerMembers: NonNullable<SnapshotSources['workerMembers']> = {};
+  const roster = ops.listAiMembers();
+  if (roster.configured) {
+    for (const member of roster.members) {
+      workerMembers[member.id] = {
+        identityKey: member.identityKey,
+        status: member.status,
+        health: member.health,
+        healthCheckedAt: member.healthCheckedAt,
+      };
+    }
+  }
+
   return buildHqSnapshot({
+    workerProviders,
+    workerMembers,
     generatedAt: at,
     note: options.note,
     policyContext: ops.policyContext,
@@ -444,6 +518,25 @@ export function liveSnapshotFromOperations(
             note:
               'This database predates the Phase 3 mission tables and was opened read-only, so no ' +
               'mission store exists to read. 0 rows states that absence; nothing was migrated.',
+          },
+        },
+    projects: ops.projectStorePresent()
+      ? {
+          data: ops.listProjects().map(projectBrowserView),
+          provenance: provenanceFor('hq_projects via HeadquarterOperations.listProjects'),
+        }
+      : {
+          // The mission absence rule, applied to the Phase 4 register: a
+          // read-only pre-Phase-4 file has no project schema to read, and
+          // stating that absence is different from claiming an empty register.
+          data: [],
+          provenance: {
+            mode,
+            source: 'hq_projects via HeadquarterOperations.listProjects',
+            asOf: at,
+            note:
+              'This database predates the Phase 4 project schema and was opened read-only, so no ' +
+              'project register exists to read. 0 rows states that absence; nothing was migrated.',
           },
         },
   });

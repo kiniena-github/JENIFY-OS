@@ -118,14 +118,24 @@ function commanded(h: Harness): string {
 }
 
 describe('the write surface is stated, not inferred', () => {
-  it('names every state-changing route, the mission writes included', () => {
+  it('names every state-changing route — mission, project and workforce writes included', () => {
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.orders);
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.approve);
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.deny);
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.missions);
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.missionTransition);
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.missionAmend);
-    expect(CONTROL_WRITE_ROUTES).toHaveLength(6);
+    // Phase 4 (issue #262): the project register and mission-linkage writes,
+    // plus the two workforce POSTs — on the write surface because they
+    // record evidence, even though they execute nothing.
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.projects);
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.projectTransition);
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.projectUpdate);
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.missionAssignProject);
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.missionLinkPlanItem);
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.workforceRoute);
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.workforceAssign);
+    expect(CONTROL_WRITE_ROUTES).toHaveLength(13);
   });
 });
 

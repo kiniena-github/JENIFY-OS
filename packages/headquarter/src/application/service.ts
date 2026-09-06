@@ -70,7 +70,7 @@ import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
 import { HeadquarterStore } from '../store/headquarter.js';
-import type { ActivityStatus } from '../contracts/events.js';
+import { QUEUED_UNREACHABLE_STATUSES, type ActivityStatus } from '../contracts/events.js';
 import type { WorkerDescriptor, WorkerRole } from '../contracts/workers.js';
 import { evaluatePolicy, type PolicyContext, type PolicyDecision } from '../operator/policy.js';
 import { canonicalJson, taskActionDigest, type ApprovalRejection } from '../operator/approvals.js';
@@ -444,6 +444,44 @@ import {
   type MissionPriority,
   type MissionStatus,
 } from '../contracts/mission.js';
+import {
+  MAX_PROJECT_NAME_LENGTH,
+  MAX_PROJECT_NOTE_LENGTH,
+  MAX_PROJECT_PURPOSE_LENGTH,
+  MAX_PROJECT_STREAM_LENGTH,
+  PROJECT_COMMAND_CAPABILITY,
+  appendProjectEvent,
+  encodeStream,
+  ensureProjectCommandSchema,
+  findProjectIdByIdempotencyKey,
+  listProjectIds,
+  projectCommandCapabilityState,
+  projectCommandContractDrift,
+  projectCommandIdempotencyKey,
+  projectCommandSchemaPresent,
+  readProjectRecord,
+  type ProjectRecord,
+} from './project-command.js';
+import {
+  PROJECT_ALLOWED_TRANSITIONS,
+  canTransitionProject,
+  isProjectStatus,
+  type ProjectStatus,
+} from '../contracts/project.js';
+import {
+  MAX_ASSIGNMENT_RATIONALE_LENGTH,
+  WORKFORCE_ASSIGN_CAPABILITY,
+  workforceAssignCapabilityState,
+  workforceAssignContractDrift,
+} from './workforce-command.js';
+import {
+  MEMBER_HEALTHS,
+  type AiMember,
+  type AiMemberRegistry,
+  type MemberAssignment,
+  type MemberHealth,
+  type RegisterMemberInput,
+} from '../registry/members.js';
 
 // ---- result contract ----
 
@@ -458,6 +496,8 @@ export type OpsErrorCode =
   | 'action_digest_mismatch'
   | 'task_not_awaiting_approval'
   | 'assigned_to_other_worker'
+  | 'task_already_claimed'
+  | 'task_beyond_claiming'
   | 'provider_binding_mismatch'
   | 'unknown_provider'
   | 'nothing_claimable'
@@ -473,7 +513,12 @@ export type OpsErrorCode =
   | 'invalid_mission_transition'
   | 'mission_status_changed'
   | 'mission_terminal'
-  | 'mission_intent_conflict';
+  | 'mission_intent_conflict'
+  | 'unknown_project'
+  | 'invalid_project_transition'
+  | 'project_status_changed'
+  | 'project_closed'
+  | 'workforce_registry_unconfigured';
 
 export interface OpsError {
   code: OpsErrorCode;
@@ -489,6 +534,64 @@ function fail(code: OpsErrorCode, message: string, details?: Record<string, unkn
 
 function ok<T>(data: T): OpsResult<T> {
   return { ok: true, data };
+}
+
+/**
+ * Live-claim statuses: the task is genuinely held by its claimant right now.
+ * The SAME predicate as `replacementPlan()` and the handover inventory
+ * (`claimed_by` set AND status in this list) — `complete()` deliberately
+ * leaves `claimed_by` on the finished row for attribution, so the column
+ * alone is not a claim.
+ */
+const LIVE_CLAIM_STATUSES: readonly ActivityStatus[] = ['assigned', 'running', 'outcome_unknown'];
+
+/**
+ * Why an advisory assignment intent may NOT be recorded for this task, or
+ * null when it may. ONE predicate with two consumers — `assignTask` (the
+ * write refusal) and `evaluateTaskEligibility` (the read) — so the browser
+ * is never told an assignment is open that the write path would refuse
+ * (GPT-5.6 Sol M1 on PR #263).
+ *
+ * An assignment intent's only operational effect is to narrow FUTURE
+ * claiming from the queue, so it is allowed exactly while that effect is
+ * genuinely possible:
+ * - a task under a live fenced claim is refused — recording "meant for B"
+ *   while A holds the claim narrows nothing now and would silently misroute
+ *   a re-claim after a later release;
+ * - a task whose status can never reach `queued` again is refused — no
+ *   statement about its future claiming can be true;
+ * - `blocked` / `needs_approval` / `review_failed` with no live claim stay
+ *   assignable: `queued` is reachable from all three, so the narrowing is
+ *   real. (A `needs_approval` task that arrived there from `running` may
+ *   resume under its original claimant, in which case the intent simply
+ *   never fires — advisory means advisory.)
+ *
+ * A live claim whose lease has expired but has not been reaped yet is still
+ * refused (consistent with `replacementPlan`); the lease expiry is included
+ * in the details so a stale claim is legible. The lease is NOT released
+ * here — a refusal must never change state.
+ */
+function assignmentBarrier(task: OperatorTask): OpsError | null {
+  if (task.claimedBy != null && LIVE_CLAIM_STATUSES.includes(task.status)) {
+    return {
+      code: 'task_already_claimed',
+      message: `Task ${task.id} is already claimed by ${task.claimedBy} (status ${task.status}); an assignment intent recorded now could not narrow claiming`,
+      details: {
+        taskId: task.id,
+        claimedBy: task.claimedBy,
+        status: task.status,
+        leaseExpiresAt: task.leaseExpiresAt,
+      },
+    };
+  }
+  if (QUEUED_UNREACHABLE_STATUSES.has(task.status)) {
+    return {
+      code: 'task_beyond_claiming',
+      message: `Task ${task.id} is ${task.status} and can never return to the queue; there is no future claiming to narrow`,
+      details: { taskId: task.id, status: task.status },
+    };
+  }
+  return null;
 }
 
 /** Trim + bound one mission text field. Absent optional fields become null. */
@@ -535,16 +638,23 @@ function missionList(
 }
 
 /**
- * A UNIQUE(mission_id, seq) violation from a raced concurrent amendment.
+ * A (mission_id, seq) collision from a raced concurrent amendment.
  * With the amendment's reads inside an IMMEDIATE transaction this should be
  * unreachable; it is kept so that any writer which nevertheless collides
  * surfaces as a typed conflict rather than an opaque 500.
+ *
+ * Two engine shapes describe the same collision: the UNIQUE constraint, and
+ * — since Phase 4 §G — the BEFORE INSERT append-only guard, which fires
+ * FIRST (it aborts an insert landing on an existing row before conflict
+ * resolution or the UNIQUE check can run) and surfaces as
+ * SQLITE_CONSTRAINT_TRIGGER carrying the table name in its message.
  */
 function isMissionSequenceConflict(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = (error as { code?: string }).code;
+  if (code !== 'SQLITE_CONSTRAINT_UNIQUE' && code !== 'SQLITE_CONSTRAINT_TRIGGER') return false;
   return (
-    error instanceof Error &&
-    (error as { code?: string }).code === 'SQLITE_CONSTRAINT_UNIQUE' &&
-    (error.message.includes('hq_mission_intents') || error.message.includes('hq_mission_plan_items'))
+    error.message.includes('hq_mission_intents') || error.message.includes('hq_mission_plan_items')
   );
 }
 
@@ -597,6 +707,52 @@ export interface AssignmentIntent {
   assignedBy: string;
   assignedAt: string;
   rationale: string | null;
+}
+
+/**
+ * One registered worker's standing toward one task (Phase 4). Everything here
+ * is enforcement truth or its verbatim refusal reason — nothing advisory can
+ * change `eligible`, and nothing here fabricates availability: transport/
+ * connectivity truth deliberately lives at the control-api layer, where the
+ * secrets environment does.
+ */
+export interface WorkerEligibility {
+  workerId: string;
+  displayName: string;
+  role: string;
+  /** The directory grants the task's capability id (enforcement read). */
+  holdsCapability: boolean;
+  assignability: WorkerAssignability;
+  operatorOutcome: PolicyDecision['outcome'];
+  denyReason: string | null;
+  /** Declared execution provider — declared or null, never inferred. */
+  providerDeclared: string | null;
+  /** Advisory only: which sources nominated this worker, and why. */
+  nominatedBy: string[];
+  rationales: string[];
+  eligible: boolean;
+}
+
+/**
+ * Canonical task/claim state on the eligibility read, so the browser can
+ * never be shown "eligible" workers for a task the write path would refuse:
+ * `assignmentOpen` is computed by the SAME `assignmentBarrier` predicate
+ * `assignTask` enforces, and `reason` is that refusal verbatim (null while
+ * assignment is genuinely open).
+ */
+export interface TaskAssignmentState {
+  status: ActivityStatus;
+  claimedBy: string | null;
+  assignmentOpen: boolean;
+  reason: string | null;
+}
+
+export interface TaskEligibilityReport {
+  taskId: string;
+  capabilityId: string;
+  classification: TaskClassification;
+  taskState: TaskAssignmentState;
+  workers: WorkerEligibility[];
 }
 
 export interface TaskMeta {
@@ -732,6 +888,19 @@ export interface HeadquarterOperationsOptions {
    * is already a deliberate override of this whole resolution.
    */
   memberRegistry?: MemberDirectorySource;
+  /**
+   * Lane C's full AI Member Registry, for the Phase 4 workforce LIFECYCLE
+   * facade (`registerAiMember`, `disableAiMember`, `setAiMemberHealth`,
+   * `listAiMembers`) — registration, display and advisory truth only.
+   *
+   * DELIBERATELY NOT the same thing as `memberRegistry` above, and NEVER
+   * consulted for capability narrowing, worker resolution or any enforcement
+   * read: wiring narrowing on is the recorded authority migration
+   * (registry-directory.ts, issue #182) and remains a separate Founder
+   * decision. Omitting this leaves the workforce facade truthfully
+   * unconfigured (`workforce_registry_unconfigured`), never silently active.
+   */
+  aiMemberRegistry?: AiMemberRegistry;
   /**
    * Receives the dispatch-only evidence capability, once, at construction — and
    * nobody else ever does (issue #219, Founder decision approving Option B).
@@ -940,6 +1109,16 @@ export class HeadquarterOperations {
    */
   readonly #missionStorePresent: boolean;
 
+  /** The Phase 4 project schema, same truth-recording as missions above. */
+  readonly #projectStorePresent: boolean;
+
+  /**
+   * The Phase 4 workforce lifecycle registry (or null: unconfigured, stated).
+   * `#private` and read by the workforce facade methods ONLY — never by
+   * `#grantOf`, `#workers`, policy evaluation or any enforcement path.
+   */
+  readonly #aiMemberRegistry: AiMemberRegistry | null;
+
   /**
    * The capability ROW, read from the database (issue #219, Codex P1 on
    * `9c2a474`).
@@ -973,12 +1152,16 @@ export class HeadquarterOperations {
     };
     ensureApplicationSchema(db);
     ensureMissionCommandSchema(db);
-    // A writable construction just ensured the mission tables. A READ-ONLY
-    // one (the hq:snapshot path) may be observing a pre-Phase-3 file that has
-    // none — the ensure above deliberately writes nothing through a read-only
-    // handle — so record what is actually there and let every mission read
-    // answer truthfully instead of throwing at the first prepare.
+    ensureProjectCommandSchema(db);
+    // A writable construction just ensured the mission and project tables. A
+    // READ-ONLY one (the hq:snapshot path) may be observing a pre-Phase-3/4
+    // file that has none — the ensures above deliberately write nothing
+    // through a read-only handle — so record what is actually there and let
+    // every mission/project read answer truthfully instead of throwing at
+    // the first prepare.
     this.#missionStorePresent = db.readonly ? missionSchemaPresent(db) : true;
+    this.#projectStorePresent = db.readonly ? projectCommandSchemaPresent(db) : true;
+    this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
     // The approval mutations are handed to whoever CONSTRUCTS the queue and to
     // nobody else, so they are unreachable from a queue handle a worker holds.
@@ -1261,6 +1444,11 @@ export class HeadquarterOperations {
    * Its one operational effect is a NARROWING one: `claimNext()` refuses to
    * hand the head-of-queue task to a different worker (see that method for the
    * benign race it can lose).
+   *
+   * Because that is its ONLY effect, the intent is refused whenever the
+   * effect is impossible — a live fenced claim already exists, or the task
+   * can never return to the queue. See `assignmentBarrier` for the exact
+   * canonical predicate (Sol M1 on PR #263).
    */
   assignTask(
     taskId: string,
@@ -1277,6 +1465,11 @@ export class HeadquarterOperations {
     // actor-attributed annotation event and evidence entry.
     const actor = this.#resolveActor(assignedBy, 'record an assignment intent');
     if (!actor.ok) return actor;
+
+    // Canonical task/claim truth, checked AFTER the actor gate so record
+    // state (claimant, lease) is only disclosed to a resolved identity.
+    const barrier = assignmentBarrier(task);
+    if (barrier) return { ok: false, error: barrier };
 
     const assignability = this.#workers.assignability(workerId);
     if (!assignability.assignable) {
@@ -2208,6 +2401,329 @@ export class HeadquarterOperations {
     return plan;
   }
 
+  // ---- dynamic AI workforce (Phase 4 — issue #262) ----
+
+  /**
+   * Deactivate an execution worker. Founder-gated and strictly NARROWING:
+   * the worker keeps its row and its history, loses assignability, and there
+   * is deliberately NO reactivate method — turning a worker back on would be
+   * a widening, and stays a separate recorded act (re-registration is
+   * create-only and will refuse the id, so reactivation today means a
+   * deliberate configuration change, not an API call).
+   *
+   * In-flight work is protected: `assertReplacementSafe` refuses while the
+   * worker holds assigned/running/outcome_unknown tasks, so deactivation can
+   * never orphan a claim.
+   */
+  deactivateExecutionWorker(input: {
+    workerId: string;
+    reason: string;
+    founderId: string;
+  }): OpsResult<WorkerDescriptor> {
+    const refused = this.#assertApprovalAuthority(input.founderId, 'deactivate an execution worker');
+    if (refused) return refused;
+    const reason = missionText('reason', input.reason, MAX_ASSIGNMENT_RATIONALE_LENGTH, true);
+    if (!reason.ok) return fail('invalid_input', reason.message);
+    try {
+      assertNoSecretLikeContent({ reason: reason.value });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+    const specialist = this.#store.getSpecialist(input.workerId);
+    if (!specialist) {
+      return fail('invalid_input', `Unknown worker: ${input.workerId}`, {
+        workerId: input.workerId,
+      });
+    }
+    if (!specialist.active) {
+      return fail('invalid_input', `Worker ${input.workerId} is already inactive`, {
+        workerId: input.workerId,
+      });
+    }
+    const safe = this.assertReplacementSafe(input.workerId);
+    if (!safe.ok) return safe;
+    const deactivated: WorkerDescriptor = { ...specialist, active: false };
+    const privileged = this.#requirePrivilegedQueue();
+    return ok(
+      privileged.reserve(() => {
+        this.#store.upsertSpecialist(deactivated);
+        privileged.appendEvidence({
+          actor: input.founderId,
+          kind: 'execution_worker_deactivated',
+          payload: { workerId: deactivated.id, reason: reason.value },
+        });
+        return deactivated;
+      }),
+    );
+  }
+
+  /**
+   * Record an ADVISORY assignment intent from the Founder surface.
+   *
+   * The browser-facing wrapper around `assignTask`: same advisory semantics
+   * (no status change, narrowing-only at claim), gated by the
+   * `hq.workforce_assign` trio instead of bare actor resolution, and the
+   * rationale is bounded and secret-scanned BEFORE the first write — the
+   * underlying method writes its meta row before its evidence append, so a
+   * scan there would refuse after a partial commit.
+   */
+  assignTaskAsFounder(input: {
+    taskId: string;
+    workerId: string;
+    founderId: string;
+    rationale?: string;
+  }): OpsResult<AssignmentIntent> {
+    if (!input.taskId || !input.workerId) {
+      return fail('invalid_input', 'taskId and workerId are required');
+    }
+    const rationale = missionText(
+      'rationale',
+      input.rationale,
+      MAX_ASSIGNMENT_RATIONALE_LENGTH,
+      false,
+    );
+    if (!rationale.ok) return fail('invalid_input', rationale.message);
+    if (rationale.value) {
+      try {
+        assertNoSecretLikeContent({ rationale: rationale.value });
+      } catch (error) {
+        return fail('invalid_input', errorMessage(error));
+      }
+    }
+    const refusedActor = this.#resolveFounderGateActor(
+      input.founderId,
+      `assign task ${input.taskId}`,
+      WORKFORCE_ASSIGN_CAPABILITY.id,
+      'assigning workforce',
+    );
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#founderGateCapabilityGate(
+      'assign a task to a worker',
+      WORKFORCE_ASSIGN_CAPABILITY.id,
+      workforceAssignCapabilityState,
+      workforceAssignContractDrift,
+      'assigning workforce',
+    );
+    if (refusedCapability) return refusedCapability;
+    return this.assignTask(input.taskId, input.workerId, input.founderId, rationale.value ?? undefined);
+  }
+
+  /**
+   * Which registered workers could take this task, and why not — the
+   * eligible-worker calculation. A READ over enforcement-safe truth plus one
+   * `routeTask` evaluation (which records its `routing_evaluated` evidence),
+   * merged per worker. Deliberately absent: transport/connectivity truth —
+   * the facade holds no secrets environment, so "is the executor wired up"
+   * belongs to the control-api layer, which composes it in from
+   * `providerConnectivity` where that truth actually lives.
+   */
+  evaluateTaskEligibility(taskId: string): OpsResult<TaskEligibilityReport> {
+    const routed = this.routeTask(taskId);
+    if (!routed.ok) return routed;
+    const task = this.queue.get(taskId)!;
+    const cap = this.queue.capabilities.get(task.capabilityId)!;
+    const declaredProviders = new Map(
+      this.queue.listWorkerProviders().map((d) => [d.workerId, d.providerId] as const),
+    );
+    const nominationByWorker = new Map(routed.data.nominations.map((n) => [n.workerId, n] as const));
+    const workers: WorkerEligibility[] = this.#store
+      .listSpecialists()
+      .map((specialist) => {
+        const granted = this.#grantOf(specialist.id);
+        const assignability = this.#workers.assignability(specialist.id);
+        const decision = evaluatePolicy(
+          cap,
+          { workerId: specialist.id, allowedCapabilities: [...granted] },
+          this.#policyCtx,
+        );
+        const nomination = nominationByWorker.get(specialist.id);
+        const holdsCapability = granted.includes(task.capabilityId);
+        return {
+          workerId: specialist.id,
+          displayName: specialist.displayName,
+          role: specialist.role,
+          holdsCapability,
+          assignability,
+          operatorOutcome: decision.outcome,
+          denyReason: decision.outcome === 'deny' ? decision.reason : null,
+          providerDeclared: declaredProviders.get(specialist.id) ?? null,
+          nominatedBy: nomination?.nominatedBy ?? [],
+          rationales: nomination?.rationales ?? [],
+          eligible: holdsCapability && assignability.assignable && decision.outcome !== 'deny',
+        };
+      })
+      .sort((a, b) => a.workerId.localeCompare(b.workerId));
+    // The same predicate assignTask refuses with — read and write truth
+    // cannot drift (Sol M1 on PR #263).
+    const barrier = assignmentBarrier(task);
+    return ok({
+      taskId,
+      capabilityId: task.capabilityId,
+      classification: routed.data.classification,
+      taskState: {
+        status: task.status,
+        claimedBy: task.claimedBy,
+        assignmentOpen: barrier === null,
+        reason: barrier?.message ?? null,
+      },
+      workers,
+    });
+  }
+
+  /**
+   * Register an AI member — the rich provider/model/capability record behind
+   * the workforce display and advisory nomination. Founder-gated (approval
+   * authority, the same bar as registering an execution worker).
+   *
+   * NOT an execution enrolment: a member row grants nothing and is never
+   * consulted by enforcement. When the id matches a registered execution
+   * worker the result says `enrichesExecutionWorker: true` — the same
+   * identity described in both layers. An id registered as a HUMAN principal
+   * is refused outright: the narrowing directory's `isRegistered` ORs the
+   * member registry in, and a member row under a human's id would flip that
+   * human into "worker identity" and silently strip their approval
+   * authority.
+   */
+  registerAiMember(
+    input: RegisterMemberInput & { founderId: string },
+  ): OpsResult<{ member: AiMember; warnings: string[]; enrichesExecutionWorker: boolean }> {
+    const refused = this.#assertApprovalAuthority(input.founderId, 'register an AI member');
+    if (refused) return refused;
+    const registry = this.#aiMemberRegistry;
+    if (!registry) {
+      return fail(
+        'workforce_registry_unconfigured',
+        'No AI member registry is configured on this deployment. Wiring one is a composition-root act, not something registration performs.',
+      );
+    }
+    const memberId = input.id?.trim();
+    if (!memberId) return fail('invalid_input', 'A member id is required.');
+    if (this.#principals.get(memberId) != null) {
+      return fail(
+        'not_permitted',
+        `${memberId} is registered as a HUMAN principal. A member row under that id would make ` +
+          'the id read as worker identity and silently strip the human of approval authority. ' +
+          'Choose a distinct member id.',
+        { memberId },
+      );
+    }
+    const enrichesExecutionWorker = this.#store.getSpecialist(memberId) != null;
+    try {
+      const privileged = this.#requirePrivilegedQueue();
+      return ok(
+        privileged.reserve(() => {
+          const result = registry.register({ ...input, id: memberId }, input.founderId);
+          privileged.appendEvidence({
+            actor: input.founderId,
+            kind: 'ai_member_registered',
+            payload: {
+              memberId,
+              identityKey: result.member.identityKey,
+              workerType: result.member.workerType,
+              grantedCapabilities: result.member.grantedCapabilities,
+              enrichesExecutionWorker,
+            },
+          });
+          return { member: result.member, warnings: result.warnings, enrichesExecutionWorker };
+        }),
+      );
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error), { memberId });
+    }
+  }
+
+  /** Disable an AI member (Founder-gated; display/advisory layer only). */
+  disableAiMember(input: {
+    memberId: string;
+    reason: string;
+    founderId: string;
+  }): OpsResult<{ member: AiMember; handoverRequired: MemberAssignment[] }> {
+    const refused = this.#assertApprovalAuthority(input.founderId, 'disable an AI member');
+    if (refused) return refused;
+    const registry = this.#aiMemberRegistry;
+    if (!registry) {
+      return fail(
+        'workforce_registry_unconfigured',
+        'No AI member registry is configured on this deployment.',
+      );
+    }
+    const reason = missionText('reason', input.reason, MAX_ASSIGNMENT_RATIONALE_LENGTH, true);
+    if (!reason.ok) return fail('invalid_input', reason.message);
+    try {
+      const privileged = this.#requirePrivilegedQueue();
+      return ok(
+        privileged.reserve(() => {
+          const result = registry.disable(input.memberId, reason.value!, input.founderId);
+          privileged.appendEvidence({
+            actor: input.founderId,
+            kind: 'ai_member_disabled',
+            payload: {
+              memberId: input.memberId,
+              reason: reason.value,
+              handoverRequired: result.handoverRequired.map((a) => a.id),
+            },
+          });
+          return result;
+        }),
+      );
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error), { memberId: input.memberId });
+    }
+  }
+
+  /**
+   * Declare an AI member's health. An explicit Founder statement, never a
+   * probe: HQ asked nothing, so HQ records what the Founder observed, with
+   * the timestamp of the declaration.
+   */
+  setAiMemberHealth(input: {
+    memberId: string;
+    health: string;
+    founderId: string;
+  }): OpsResult<AiMember> {
+    const refused = this.#assertApprovalAuthority(input.founderId, "declare an AI member's health");
+    if (refused) return refused;
+    const registry = this.#aiMemberRegistry;
+    if (!registry) {
+      return fail(
+        'workforce_registry_unconfigured',
+        'No AI member registry is configured on this deployment.',
+      );
+    }
+    if (!(MEMBER_HEALTHS as readonly string[]).includes(input.health)) {
+      return fail('invalid_input', `Unknown member health: ${input.health}`);
+    }
+    try {
+      const privileged = this.#requirePrivilegedQueue();
+      return ok(
+        privileged.reserve(() => {
+          const member = registry.setHealth(
+            input.memberId,
+            input.health as MemberHealth,
+            input.founderId,
+          );
+          privileged.appendEvidence({
+            actor: input.founderId,
+            kind: 'ai_member_health_declared',
+            payload: { memberId: input.memberId, health: input.health },
+          });
+          return member;
+        }),
+      );
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error), { memberId: input.memberId });
+    }
+  }
+
+  /**
+   * The member roster, or the truthful statement that none is configured.
+   * A read, available to any caller — member rows grant nothing.
+   */
+  listAiMembers(): { configured: boolean; members: AiMember[] } {
+    if (!this.#aiMemberRegistry) return { configured: false, members: [] };
+    return { configured: true, members: this.#aiMemberRegistry.list() };
+  }
+
   // ---- group-room mission intake ----
 
   /**
@@ -2471,7 +2987,10 @@ export class HeadquarterOperations {
     constraints?: string[];
     acceptanceCriteria?: string[];
     planItems?: string[];
+    /** Free-text console LABEL — never authority, never matched to the register. */
     project?: string;
+    /** Canonical register id (Phase 4). Validated: must exist and be active. */
+    projectId?: string;
     priority?: string;
     dependsOn?: string[];
     sourceOrderTaskId?: string;
@@ -2537,6 +3056,11 @@ export class HeadquarterOperations {
     ) {
       return fail('invalid_input', `sourceOrderTaskId names an unknown task: ${sourceOrderTaskId}`);
     }
+    // The project-active check moved INSIDE the transaction below: the
+    // project register is the one read here that can go stale (missions and
+    // tasks are append-only, so the dependsOn/sourceOrderTaskId existence
+    // checks above cannot regress outside it).
+    const projectId = input.projectId?.trim() || null;
 
     // Everything that will be PERSISTED is scanned before anything is
     // written — a credential-looking order is refused, never stored.
@@ -2563,6 +3087,7 @@ export class HeadquarterOperations {
       constraints: constraints.value ?? [],
       acceptanceCriteria: acceptance.value,
       project: project.value,
+      projectId,
       priority,
       sourceOrderTaskId,
       dependsOn,
@@ -2582,6 +3107,7 @@ export class HeadquarterOperations {
       acceptanceCriteria: acceptance.value,
       planItems: planItems.value ?? [],
       project: project.value,
+      projectId,
       priority,
       dependsOn,
       sourceOrderTaskId,
@@ -2608,7 +3134,26 @@ export class HeadquarterOperations {
     // concurrent writer past the UNIQUE idempotency key.
     const privileged = this.#requirePrivilegedQueue();
     let dedupedTo: string | null = null;
+    let refusal: OpsResult<never> | null = null;
     privileged.reserve(() => {
+      // Project state is read inside the write lock so a concurrent close
+      // cannot land between the check and the INSERT (Opus Low on PR #263).
+      // Checked BEFORE the dedupe read, deliberately: a replayed command
+      // into a since-closed project refuses exactly as a fresh one does.
+      if (projectId) {
+        const target = this.#projectRecord(projectId);
+        if (!target) {
+          refusal = fail('unknown_project', `Unknown project: ${projectId}`);
+          return;
+        }
+        if (target.status === 'closed') {
+          refusal = fail(
+            'project_closed',
+            `Project ${projectId} is closed; reopen it before assigning missions to it`,
+          );
+          return;
+        }
+      }
       const existing = findMissionIdByIdempotencyKey(this.#db, idempotencyKey);
       if (existing) {
         dedupedTo = existing;
@@ -2617,10 +3162,10 @@ export class HeadquarterOperations {
       this.#db
         .prepare(
           `INSERT INTO hq_missions
-             (id, title, objective, scope, constraints, acceptance_criteria, project, priority,
+             (id, title, objective, scope, constraints, acceptance_criteria, project, project_id, priority,
               status, depends_on, source_order_task_id, idempotency_key,
               created_by, created_at, updated_at, status_changed_at, status_changed_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -2630,6 +3175,7 @@ export class HeadquarterOperations {
           JSON.stringify(constraints.value ?? []),
           acceptance.value == null ? null : JSON.stringify(acceptance.value),
           project.value,
+          projectId,
           priority,
           JSON.stringify(dependsOn),
           sourceOrderTaskId,
@@ -2673,6 +3219,7 @@ export class HeadquarterOperations {
         payload: { missionId: id, idempotencyKey, planItemCount: items.length, executable: false },
       });
     });
+    if (refusal) return refusal;
     if (dedupedTo) {
       return ok({ mission: this.#missionRecord(dedupedTo)!, deduplicated: true });
     }
@@ -3156,12 +3703,132 @@ export class HeadquarterOperations {
   }
 
   /**
-   * Missions are commanded by an active HUMAN principal holding the
-   * `hq.mission_command` originate grant. Deny by default; a registered
-   * worker is refused outright — commanding company direction is a Founder
-   * act, and worker identity never carries it.
+   * Assign a mission to a canonical project register entry, or clear the
+   * assignment (`projectId: null`). A mission-directing act, so it carries
+   * the MISSION gate (`hq.mission_command`), not the project one. The target
+   * must exist and be `active`; terminal missions refuse (their record is
+   * history). Changes the relationship column only — never the mission's
+   * free-text `project` label, status, plan or intent history — and records
+   * the move in the append-only mission event log plus the evidence chain.
    */
-  #resolveMissionCommander(actor: string, action: string): OpsResult<never> | null {
+  assignMissionToProject(input: {
+    missionId: string;
+    projectId: string | null;
+    requestedBy: string;
+  }): OpsResult<MissionRecord> {
+    if (!input.missionId || !input.requestedBy) {
+      return fail('invalid_input', 'missionId and requestedBy are required');
+    }
+    const refusedCommander = this.#resolveMissionCommander(
+      input.requestedBy,
+      `assign mission ${input.missionId} to a project`,
+    );
+    if (refusedCommander) return refusedCommander;
+    const refusedCapability = this.#missionCapabilityGate('assign a mission to a project');
+    if (refusedCapability) return refusedCapability;
+
+    const projectId = input.projectId?.trim() || null;
+    const at = nowIso();
+    const privileged = this.#requirePrivilegedQueue();
+    // Mission and project state are read INSIDE the IMMEDIATE transaction
+    // (the amendMissionIntent precedent, issue #224): the write lock is taken
+    // at BEGIN, so a concurrent project close — itself a reserve() write —
+    // can no longer land between the active-project check and the UPDATE
+    // (Opus Low on PR #263). An in-process interleave is unscriptable
+    // (better-sqlite3 is synchronous); the lock is the cross-connection
+    // defense, exactly as evidence.ts records.
+    let refusal: OpsResult<MissionRecord> | null = null;
+    privileged.reserve(() => {
+      const current = this.#missionRecord(input.missionId);
+      if (!current) {
+        refusal = fail('unknown_mission', `Unknown mission: ${input.missionId}`);
+        return;
+      }
+      if (isMissionTerminal(current.status)) {
+        refusal = fail(
+          'mission_terminal',
+          `Mission ${input.missionId} is ${current.status}; its record is history`,
+        );
+        return;
+      }
+      if (projectId) {
+        const target = this.#projectRecord(projectId);
+        if (!target) {
+          refusal = fail('unknown_project', `Unknown project: ${projectId}`);
+          return;
+        }
+        if (target.status === 'closed') {
+          refusal = fail(
+            'project_closed',
+            `Project ${projectId} is closed; reopen it before assigning missions to it`,
+          );
+          return;
+        }
+      }
+      if (current.projectId === projectId) {
+        // A replayed assignment is refused rather than re-applied: appending a
+        // second identical event would forge history (the transition rule).
+        refusal = fail(
+          'invalid_input',
+          projectId
+            ? `Mission ${input.missionId} is already assigned to ${projectId}`
+            : `Mission ${input.missionId} is not assigned to any project`,
+        );
+        return;
+      }
+      // `IS ?` is null-safe equality in SQLite, so one guarded UPDATE covers
+      // both "currently unassigned" and "currently assigned to X". With the
+      // reads inside the same transaction this CAS can no longer lose a
+      // race; it stays as a cheap invariant, not the primary defense.
+      const result = this.#db
+        .prepare(
+          `UPDATE hq_missions SET project_id = ?, updated_at = ?
+           WHERE id = ? AND project_id IS ?`,
+        )
+        .run(projectId, at, input.missionId, current.projectId);
+      if (result.changes === 0) {
+        refusal = fail(
+          'mission_status_changed',
+          `Mission ${input.missionId} changed while the assignment was being decided`,
+        );
+        return;
+      }
+      appendMissionEvent(this.#db, {
+        missionId: input.missionId,
+        actor: input.requestedBy,
+        kind: 'project_assigned',
+        detail: { from: current.projectId, to: projectId },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'mission_project_assigned',
+        payload: {
+          missionId: input.missionId,
+          from: current.projectId,
+          to: projectId,
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return refusal;
+    return ok(this.#missionRecord(input.missionId)!);
+  }
+
+  /**
+   * The shared Founder-gate actor resolution behind mission AND project
+   * commands (Phase 4 extracted it; the mission refusal texts are
+   * byte-identical to their Phase 3 originals). An active HUMAN principal
+   * holding the named originate grant; deny by default; a registered worker
+   * is refused outright — `founderActNoun` names the act in the refusal
+   * ("commanding a mission is a Founder act, and worker identity never
+   * carries it").
+   */
+  #resolveFounderGateActor(
+    actor: string,
+    action: string,
+    capabilityId: string,
+    founderActNoun: string,
+  ): OpsResult<never> | null {
     if (!actor) return fail('invalid_input', `An actor is required to ${action}`);
     if (actor === 'system') {
       return fail('not_permitted', `'system' cannot ${action}: a human principal is required`);
@@ -3171,14 +3838,14 @@ export class HeadquarterOperations {
     if (resolved.data.kind === 'worker') {
       return fail(
         'not_permitted',
-        `Registered worker ${actor} cannot ${action}: commanding a mission is a Founder act, and worker identity never carries it`,
+        `Registered worker ${actor} cannot ${action}: ${founderActNoun} is a Founder act, and worker identity never carries it`,
         { actor },
       );
     }
-    if (!resolved.data.allowedCapabilities.includes(MISSION_COMMAND_CAPABILITY.id)) {
+    if (!resolved.data.allowedCapabilities.includes(capabilityId)) {
       return fail(
         'not_permitted',
-        `${actor} may not ${action}: the principal does not hold ${MISSION_COMMAND_CAPABILITY.id}`,
+        `${actor} may not ${action}: the principal does not hold ${capabilityId}`,
         { actor },
       );
     }
@@ -3186,33 +3853,79 @@ export class HeadquarterOperations {
   }
 
   /**
-   * Fail closed while the `hq.mission_command` registry row is missing,
-   * weakened or disabled. Reads the DATABASE row (never `queue.capabilities`)
-   * and never repairs — registration is a separate configuration act.
+   * The shared fail-closed capability gate behind mission AND project
+   * commands. Reads the DATABASE row (never `queue.capabilities`) and never
+   * repairs — registration is a separate configuration act. `classify` and
+   * `drift` come from the owning module so each contract stays test-pinned
+   * where it is defined.
    */
-  #missionCapabilityGate(action: string): OpsResult<never> | null {
-    const row = this.#capabilityFromStore(MISSION_COMMAND_CAPABILITY.id);
-    const state = missionCommandCapabilityState(row);
+  #founderGateCapabilityGate(
+    action: string,
+    capabilityId: string,
+    classify: (row: Capability | null) => 'missing' | 'altered' | 'disabled' | 'enabled',
+    drift: (row: Capability) => string[],
+    founderActNoun: string,
+  ): OpsResult<never> | null {
+    const row = this.#capabilityFromStore(capabilityId);
+    const state = classify(row);
     if (state === 'enabled') return null;
     if (state === 'missing') {
       return fail(
         'unknown_capability',
-        `Cannot ${action}: ${MISSION_COMMAND_CAPABILITY.id} is not registered. ` +
-          `Registering it is a separate, deliberate configuration action — commanding a mission never performs it.`,
+        `Cannot ${action}: ${capabilityId} is not registered. ` +
+          `Registering it is a separate, deliberate configuration action — ${founderActNoun} never performs it.`,
       );
     }
     if (state === 'altered') {
-      const drift = missionCommandContractDrift(row!);
+      const driftFields = drift(row!);
       return fail(
         'not_permitted',
-        `Cannot ${action}: the ${MISSION_COMMAND_CAPABILITY.id} definition no longer matches its reserved contract ` +
-          `(drift: ${drift.join(', ')}). Re-registering it is a separate configuration action.`,
-        { drift },
+        `Cannot ${action}: the ${capabilityId} definition no longer matches its reserved contract ` +
+          `(drift: ${driftFields.join(', ')}). Re-registering it is a separate configuration action.`,
+        { drift: driftFields },
       );
     }
     return fail(
       'capability_disabled',
-      `Cannot ${action}: ${MISSION_COMMAND_CAPABILITY.id} is disabled. Re-enabling it is a separate configuration action.`,
+      `Cannot ${action}: ${capabilityId} is disabled. Re-enabling it is a separate configuration action.`,
+    );
+  }
+
+  #resolveMissionCommander(actor: string, action: string): OpsResult<never> | null {
+    return this.#resolveFounderGateActor(
+      actor,
+      action,
+      MISSION_COMMAND_CAPABILITY.id,
+      'commanding a mission',
+    );
+  }
+
+  #missionCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      MISSION_COMMAND_CAPABILITY.id,
+      missionCommandCapabilityState,
+      missionCommandContractDrift,
+      'commanding a mission',
+    );
+  }
+
+  #resolveProjectCommander(actor: string, action: string): OpsResult<never> | null {
+    return this.#resolveFounderGateActor(
+      actor,
+      action,
+      PROJECT_COMMAND_CAPABILITY.id,
+      'commanding a project record',
+    );
+  }
+
+  #projectCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      PROJECT_COMMAND_CAPABILITY.id,
+      projectCommandCapabilityState,
+      projectCommandContractDrift,
+      'commanding a project record',
     );
   }
 
@@ -3234,6 +3947,335 @@ export class HeadquarterOperations {
     if (!row) return null;
     return { status: row.status as ActivityStatus, reviewPending: row.review_state === 'pending' };
   };
+
+  // ---- projects (Phase 4 — Projects + Tasks + Dynamic AI Workforce, #262) ----
+
+  /**
+   * Create a canonical project register entry.
+   *
+   * A project organizes missions and executes nothing: no task, no approval,
+   * no worker, no dispatch. Founder-only via the `hq.project_command`
+   * originate grant and the fail-closed capability gate (the mission
+   * CONFIGURATION-vs-INVOCATION trio). Transactional and idempotent on a
+   * derived digest key; the client key is an input, never the key.
+   */
+  createProject(input: {
+    name: string;
+    purpose: string;
+    stream?: string;
+    /** Resolved principal id. Set by the boundary, never read from a body. */
+    requestedBy: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ project: ProjectRecord; deduplicated: boolean }> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    const name = missionText('name', input.name, MAX_PROJECT_NAME_LENGTH, true);
+    if (!name.ok) return fail('invalid_input', name.message);
+    const purpose = missionText('purpose', input.purpose, MAX_PROJECT_PURPOSE_LENGTH, true);
+    if (!purpose.ok) return fail('invalid_input', purpose.message);
+    const stream = missionText('stream', input.stream, MAX_PROJECT_STREAM_LENGTH, false);
+    if (!stream.ok) return fail('invalid_input', stream.message);
+    const refusedCommander = this.#resolveProjectCommander(input.requestedBy, 'create a project');
+    if (refusedCommander) return refusedCommander;
+    const refusedCapability = this.#projectCapabilityGate('create a project');
+    if (refusedCapability) return refusedCapability;
+    // Everything that will be PERSISTED is scanned before anything is written.
+    try {
+      assertNoSecretLikeContent({ name: name.value, purpose: purpose.value, stream: stream.value });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+    const idempotencyKey = projectCommandIdempotencyKey({
+      requestedBy: input.requestedBy,
+      name: name.value!,
+      purpose: purpose.value!,
+      stream: stream.value,
+      idempotencyKey: input.idempotencyKey ?? null,
+    });
+    const id = `project-${uuid()}`;
+    const at = nowIso();
+    // Dedupe read, register write, module event and evidence in ONE IMMEDIATE
+    // transaction (the commandMission shape): a service holding no privileged
+    // grant refuses before any row exists, a failing evidence append rolls
+    // the project back, and the dedupe decision cannot race a concurrent
+    // writer past the UNIQUE idempotency index.
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    privileged.reserve(() => {
+      const existing = findProjectIdByIdempotencyKey(this.#db, idempotencyKey);
+      if (existing) {
+        dedupedTo = existing;
+        return;
+      }
+      this.#db
+        .prepare(
+          `INSERT INTO hq_projects
+             (id, name, stream, summary, status, created_at, updated_at,
+              created_by, status_changed_at, status_changed_by, idempotency_key)
+           VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          name.value,
+          encodeStream(stream.value),
+          purpose.value,
+          at,
+          at,
+          input.requestedBy,
+          at,
+          input.requestedBy,
+          idempotencyKey,
+        );
+      appendProjectEvent(this.#db, {
+        projectId: id,
+        actor: input.requestedBy,
+        kind: 'created',
+        toStatus: 'active',
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'project_created',
+        payload: { projectId: id, idempotencyKey, executable: false },
+      });
+    });
+    if (dedupedTo) {
+      return ok({ project: this.#projectRecord(dedupedTo)!, deduplicated: true });
+    }
+    return ok({ project: this.#projectRecord(id)!, deduplicated: false });
+  }
+
+  /**
+   * Update a project's register fields. An AUDITED register edit — the event
+   * records which fields changed — not a history rewrite: `hq_project_events`
+   * is append-only and untouched by this method's UPDATE. Closed projects
+   * refuse edits (reopen first); an update that changes nothing writes
+   * nothing, because an 'updated' event with no change would forge history.
+   */
+  updateProject(input: {
+    projectId: string;
+    name?: string;
+    purpose?: string;
+    /** undefined = unchanged; '' or null = clear the stream label. */
+    stream?: string | null;
+    requestedBy: string;
+  }): OpsResult<ProjectRecord> {
+    if (!input.projectId || !input.requestedBy) {
+      return fail('invalid_input', 'projectId and requestedBy are required');
+    }
+    const nameSupplied = input.name !== undefined;
+    const purposeSupplied = input.purpose !== undefined;
+    const streamSupplied = input.stream !== undefined;
+    if (!nameSupplied && !purposeSupplied && !streamSupplied) {
+      return fail('invalid_input', 'Nothing to update: supply name, purpose or stream');
+    }
+    const name = nameSupplied
+      ? missionText('name', input.name, MAX_PROJECT_NAME_LENGTH, true)
+      : null;
+    if (name && !name.ok) return fail('invalid_input', name.message);
+    const purpose = purposeSupplied
+      ? missionText('purpose', input.purpose, MAX_PROJECT_PURPOSE_LENGTH, true)
+      : null;
+    if (purpose && !purpose.ok) return fail('invalid_input', purpose.message);
+    const stream = streamSupplied
+      ? missionText('stream', input.stream ?? undefined, MAX_PROJECT_STREAM_LENGTH, false)
+      : null;
+    if (stream && !stream.ok) return fail('invalid_input', stream.message);
+
+    const refusedCommander = this.#resolveProjectCommander(input.requestedBy, 'update a project');
+    if (refusedCommander) return refusedCommander;
+    const refusedCapability = this.#projectCapabilityGate('update a project');
+    if (refusedCapability) return refusedCapability;
+
+    const current = this.#projectRecord(input.projectId);
+    if (!current) return fail('unknown_project', `Unknown project: ${input.projectId}`);
+    if (current.status === 'closed') {
+      return fail(
+        'project_closed',
+        `Project ${input.projectId} is closed; reopen it before editing the register entry`,
+      );
+    }
+    const nextName = name ? name.value! : current.name;
+    const nextPurpose = purpose ? purpose.value! : current.purpose;
+    const nextStream = stream ? stream.value : current.stream;
+    const changed: string[] = [];
+    if (nextName !== current.name) changed.push('name');
+    if (nextPurpose !== current.purpose) changed.push('purpose');
+    if (nextStream !== current.stream) changed.push('stream');
+    if (changed.length === 0) return ok(current);
+    try {
+      assertNoSecretLikeContent({ name: nextName, purpose: nextPurpose, stream: nextStream });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+
+    const at = nowIso();
+    let raced = false;
+    const privileged = this.#requirePrivilegedQueue();
+    privileged.reserve(() => {
+      const result = this.#db
+        .prepare(
+          `UPDATE hq_projects SET name = ?, summary = ?, stream = ?, updated_at = ?
+           WHERE id = ? AND status = 'active'`,
+        )
+        .run(nextName, nextPurpose, encodeStream(nextStream), at, input.projectId);
+      if (result.changes === 0) {
+        raced = true;
+        return;
+      }
+      appendProjectEvent(this.#db, {
+        projectId: input.projectId,
+        actor: input.requestedBy,
+        kind: 'updated',
+        detail: { changed },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'project_updated',
+        payload: { projectId: input.projectId, changed, executable: false },
+      });
+    });
+    if (raced) {
+      return fail(
+        'project_status_changed',
+        `Project ${input.projectId} changed while the update was being decided`,
+      );
+    }
+    return ok(this.#projectRecord(input.projectId)!);
+  }
+
+  /**
+   * Move a project between `active` and `closed`. Every move demands a note
+   * (two states means every move is a decision with a reason); a replayed
+   * same-status move is refused rather than re-applied.
+   */
+  transitionProject(input: {
+    projectId: string;
+    to: string;
+    note?: string;
+    /** Optimistic guard: refuse if the project moved since it was read. */
+    expectedStatus?: string;
+    requestedBy: string;
+  }): OpsResult<ProjectRecord> {
+    if (!input.projectId || !input.requestedBy) {
+      return fail('invalid_input', 'projectId and requestedBy are required');
+    }
+    if (!isProjectStatus(input.to)) {
+      return fail('invalid_input', `Unknown project status: ${input.to}`);
+    }
+    if (input.expectedStatus != null && !isProjectStatus(input.expectedStatus)) {
+      return fail('invalid_input', `Unknown project status: ${input.expectedStatus}`);
+    }
+    const noteField = missionText('note', input.note, MAX_PROJECT_NOTE_LENGTH, false);
+    if (!noteField.ok) return fail('invalid_input', noteField.message);
+    const note = noteField.value;
+    if (!note) {
+      return fail('invalid_input', `Moving a project to ${input.to} requires a note`);
+    }
+
+    const refusedCommander = this.#resolveProjectCommander(
+      input.requestedBy,
+      `move project ${input.projectId} to ${input.to}`,
+    );
+    if (refusedCommander) return refusedCommander;
+    const refusedCapability = this.#projectCapabilityGate('transition a project');
+    if (refusedCapability) return refusedCapability;
+
+    const current = this.#projectRecord(input.projectId);
+    if (!current) return fail('unknown_project', `Unknown project: ${input.projectId}`);
+    if (input.expectedStatus && current.status !== input.expectedStatus) {
+      return fail(
+        'project_status_changed',
+        `Project ${input.projectId} is ${current.status}, not ${input.expectedStatus}`,
+        { status: current.status },
+      );
+    }
+    if (current.status === input.to) {
+      return fail('project_status_changed', `Project ${input.projectId} is already ${input.to}`, {
+        status: current.status,
+      });
+    }
+    if (!canTransitionProject(current.status, input.to)) {
+      return fail(
+        'invalid_project_transition',
+        `Illegal project transition: ${current.status} -> ${input.to}`,
+        {
+          from: current.status,
+          to: input.to,
+          allowed: [...PROJECT_ALLOWED_TRANSITIONS[current.status]],
+        },
+      );
+    }
+    try {
+      assertNoSecretLikeContent({ note });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+
+    const at = nowIso();
+    let raced = false;
+    const privileged = this.#requirePrivilegedQueue();
+    privileged.reserve(() => {
+      const result = this.#db
+        .prepare(
+          `UPDATE hq_projects
+           SET status = ?, updated_at = ?, status_changed_at = ?, status_changed_by = ?
+           WHERE id = ? AND status = ?`,
+        )
+        .run(input.to, at, at, input.requestedBy, input.projectId, current.status);
+      if (result.changes === 0) {
+        raced = true;
+        return;
+      }
+      appendProjectEvent(this.#db, {
+        projectId: input.projectId,
+        actor: input.requestedBy,
+        kind: 'transitioned',
+        fromStatus: current.status,
+        toStatus: input.to as ProjectStatus,
+        note,
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'project_transitioned',
+        payload: {
+          projectId: input.projectId,
+          from: current.status,
+          to: input.to,
+          executable: false,
+        },
+      });
+    });
+    if (raced) {
+      return fail(
+        'project_status_changed',
+        `Project ${input.projectId} changed status while the transition was being decided`,
+      );
+    }
+    return ok(this.#projectRecord(input.projectId)!);
+  }
+
+  getProject(id: string): ProjectRecord | null {
+    if (!id) return null;
+    return this.#projectRecord(id);
+  }
+
+  listProjects(status?: ProjectStatus): ProjectRecord[] {
+    if (!this.#projectStorePresent) return [];
+    return listProjectIds(this.#db, status).map((id) => this.#projectRecord(id)!);
+  }
+
+  /**
+   * Whether this database carries the Phase 4 project schema. False only for
+   * a read-only handle over a pre-Phase-4 file; project reads then answer
+   * empty/null and the snapshot's projects provenance states the absence.
+   */
+  projectStorePresent(): boolean {
+    return this.#projectStorePresent;
+  }
+
+  #projectRecord(id: string): ProjectRecord | null {
+    if (!this.#projectStorePresent) return null;
+    return readProjectRecord(this.#db, id, this.#capabilityFromStore(PROJECT_COMMAND_CAPABILITY.id));
+  }
 
   // ---- task metadata (console labels + advisory assignment) ----
 

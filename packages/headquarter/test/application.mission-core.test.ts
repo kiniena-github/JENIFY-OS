@@ -21,8 +21,13 @@ import type { MissionStatus } from '../src/contracts/mission.js';
 import {
   MISSION_COMMAND_CAPABILITY,
   MISSION_PLAN_NOT_DECIDED_SUMMARY,
+  missionCommandIdempotencyKey,
   registerMissionCommandCapability,
 } from '../src/application/mission-command.js';
+import {
+  PROJECT_COMMAND_CAPABILITY,
+  registerProjectCommandCapability,
+} from '../src/application/project-command.js';
 
 const FOUNDER = 'mission-founder';
 /** Holds the mission grant but NOT approval authority — cannot verify. */
@@ -497,13 +502,22 @@ describe('the intent lock and append-only amendment history', () => {
     );
   });
 
-  it('no source file anywhere contains an UPDATE or DELETE for the history tables', () => {
+  it('no source file anywhere contains a rewrite spelling for mission intents/events, plan-item links or project events', () => {
     // The previous guard scanned only mission-command.ts while every mission
     // UPDATE statement lives in service.ts (Opus second-pass finding on
     // `cee771f`) — it could not see the file where a history rewrite would
     // most naturally be written. Scan all of src/ instead. Tests are excluded
-    // deliberately: the tamper test below must be free to ATTEMPT the
-    // forbidden statements to prove the engine refuses them.
+    // deliberately: the tamper tests must be free to ATTEMPT the forbidden
+    // statements to prove the engine refuses them.
+    // Phase 4 §G widened the patterns: REPLACE and UPSERT rewrite history via
+    // conflict resolution without ever spelling UPDATE or DELETE.
+    // The correction pass widened the TABLE SET to the guard's real blast
+    // radius (Opus Low on PR #263): plan items and project events carry the
+    // same claimed invariant. Only never-legitimate spellings are grepped —
+    // plain UPDATE on hq_mission_plan_items is the one-shot linker
+    // (`... WHERE task_id IS NULL`), so relink protection stays with the
+    // engine trigger and the behavioral tamper test below, not a grep that
+    // would flag the legitimate writer.
     for (const file of missionSourceFiles(join(packageRoot, 'src'))) {
       const source = readFileSync(file, 'utf8');
       for (const pattern of [
@@ -511,8 +525,20 @@ describe('the intent lock and append-only amendment history', () => {
         /DELETE\s+FROM\s+hq_mission_intents/i,
         /UPDATE\s+hq_mission_events/i,
         /DELETE\s+FROM\s+hq_mission_events/i,
+        /INSERT\s+OR\s+\w+\s+INTO\s+hq_mission_(intents|events)/i,
+        /REPLACE\s+INTO\s+hq_mission_(intents|events)/i,
+        /hq_mission_(intents|events)[^;]{0,200}ON\s+CONFLICT/i,
+        /DELETE\s+FROM\s+hq_mission_plan_items/i,
+        /INSERT\s+OR\s+\w+\s+INTO\s+hq_mission_plan_items/i,
+        /REPLACE\s+INTO\s+hq_mission_plan_items/i,
+        /hq_mission_plan_items[^;]{0,200}ON\s+CONFLICT/i,
+        /UPDATE\s+hq_project_events/i,
+        /DELETE\s+FROM\s+hq_project_events/i,
+        /INSERT\s+OR\s+\w+\s+INTO\s+hq_project_events/i,
+        /REPLACE\s+INTO\s+hq_project_events/i,
+        /hq_project_events[^;]{0,200}ON\s+CONFLICT/i,
       ]) {
-        expect(source, `${file} must not rewrite mission history`).not.toMatch(pattern);
+        expect(source, `${file} must not rewrite append-only history`).not.toMatch(pattern);
       }
     }
   });
@@ -544,6 +570,101 @@ describe('the intent lock and append-only amendment history', () => {
     expect(history[0]!.objective).toBe(
       'Reduce QOS page load times without changing the visual design',
     );
+  });
+
+  it('SQLite itself aborts REPLACE and UPSERT against history — the recursive_triggers bypass is closed', () => {
+    // SQLite's REPLACE conflict resolution deletes the colliding row WITHOUT
+    // firing BEFORE DELETE triggers while recursive_triggers is off (the
+    // engine default), so before Phase 4 §G these statements silently
+    // overwrote history — including the immutable intent seq 0 — past the
+    // UPDATE/DELETE triggers the previous test proves. The BEFORE INSERT
+    // guards fire before conflict resolution and close every clause.
+    const { mission } = expectOk(command(fx));
+    const originalObjective = 'Reduce QOS page load times without changing the visual design';
+
+    // INSERT OR REPLACE landing on the intent lock (mission_id, seq 0).
+    expect(() =>
+      fx.db
+        .prepare(
+          `INSERT OR REPLACE INTO hq_mission_intents
+             (id, mission_id, seq, kind, body, objective, constraints, acceptance_criteria, actor, at)
+           VALUES ('forged-intent', ?, 0, 'founder_order', '{}', 'forged', '[]', NULL, 'attacker', 'now')`,
+        )
+        .run(mission.id),
+    ).toThrow(/append-only/);
+
+    // Bare REPLACE INTO is the same statement in different spelling.
+    const eventId = (
+      fx.db
+        .prepare(`SELECT id FROM hq_mission_events WHERE mission_id = ? ORDER BY seq LIMIT 1`)
+        .get(mission.id) as { id: string }
+    ).id;
+    expect(() =>
+      fx.db
+        .prepare(
+          `REPLACE INTO hq_mission_events (id, mission_id, at, actor, kind)
+           VALUES (?, ?, 'now', 'attacker', 'forged')`,
+        )
+        .run(eventId, mission.id),
+    ).toThrow(/append-only/);
+
+    // UPSERT never reaches its DO UPDATE arm either.
+    expect(() =>
+      fx.db
+        .prepare(
+          `INSERT INTO hq_mission_intents
+             (id, mission_id, seq, kind, body, objective, constraints, acceptance_criteria, actor, at)
+           VALUES ('forged-upsert', ?, 0, 'founder_order', '{}', 'forged', '[]', NULL, 'attacker', 'now')
+           ON CONFLICT (mission_id, seq) DO UPDATE SET objective = 'forged'`,
+        )
+        .run(mission.id),
+    ).toThrow(/append-only/);
+
+    // Refused means intact: seq 0 survives byte-identical, the event survives.
+    const history = fx.ops.getMissionIntentHistory(mission.id);
+    expect(history).toHaveLength(1);
+    expect(history[0]!.objective).toBe(originalObjective);
+    const event = fx.db
+      .prepare(`SELECT actor, kind FROM hq_mission_events WHERE id = ?`)
+      .get(eventId) as { actor: string; kind: string };
+    expect(event.actor).not.toBe('attacker');
+    expect(event.kind).toBe('commanded');
+  });
+
+  it('SQLite itself refuses to re-point a linked plan item or replace its row', () => {
+    // The task link is write-once at the ENGINE, not only in the facade's
+    // WHERE clause: once a plan item names a real task, no writer can quietly
+    // point it at a different one, and REPLACE cannot resurrect the row blank.
+    const missionId = expectOk(command(fx, { planItems: ['Measure current load times'] })).mission
+      .id;
+    const taskId = expectOk(
+      fx.ops.createTask({
+        capabilityId: CAPS.readStatus,
+        payload: { kind: 'measure' },
+        requestedBy: FOUNDER,
+      }),
+    ).task.id;
+    expectOk(fx.ops.linkMissionPlanItem({ missionId, planItemSeq: 1, taskId, requestedBy: FOUNDER }));
+
+    expect(() =>
+      fx.db
+        .prepare(`UPDATE hq_mission_plan_items SET task_id = 'other-task' WHERE mission_id = ?`)
+        .run(missionId),
+    ).toThrow(/write-once/);
+    expect(() =>
+      fx.db
+        .prepare(
+          `INSERT OR REPLACE INTO hq_mission_plan_items
+             (id, mission_id, seq, summary, kind, created_in_intent_seq)
+           VALUES ('forged-item', ?, 1, 'forged', 'work', 0)`,
+        )
+        .run(missionId),
+    ).toThrow(/write-once/);
+
+    const item = fx.db
+      .prepare(`SELECT task_id FROM hq_mission_plan_items WHERE mission_id = ? AND seq = 1`)
+      .get(missionId) as { task_id: string };
+    expect(item.task_id).toBe(taskId);
   });
 
   it('a raced amendment surfaces as a typed conflict with nothing written, never an opaque failure', () => {
@@ -582,6 +703,39 @@ describe('the intent lock and append-only amendment history', () => {
     expect(fx.ops.getMission(mission.id)!.objective).toBe(
       'Reduce QOS page load times without changing the visual design',
     );
+  });
+
+  it('a raced amendment stopped by the §G BEFORE INSERT guard is the same typed conflict', () => {
+    // Since Phase 4 §G the append-only BEFORE INSERT trigger fires before
+    // the UNIQUE check, so a genuinely raced duplicate seq now aborts as
+    // SQLITE_CONSTRAINT_TRIGGER. Same collision, second engine shape — the
+    // caller must still receive the typed 409, never an opaque 500.
+    const { mission } = expectOk(command(fx));
+    const realPrepare = fx.db.prepare.bind(fx.db);
+    const dbPatched = fx.db as unknown as { prepare: (sql: string) => unknown };
+    dbPatched.prepare = (sql: string) => {
+      if (/INSERT INTO hq_mission_intents/.test(sql)) {
+        const collision = new Error('hq_mission_intents is append-only') as Error & {
+          code: string;
+        };
+        collision.code = 'SQLITE_CONSTRAINT_TRIGGER';
+        throw collision;
+      }
+      return realPrepare(sql);
+    };
+    try {
+      const result = fx.ops.amendMissionIntent({
+        missionId: mission.id,
+        amendment: 'This amendment loses the race to the trigger.',
+        objective: 'Never applied',
+        requestedBy: FOUNDER,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe('mission_intent_conflict');
+    } finally {
+      dbPatched.prepare = realPrepare;
+    }
+    expect(fx.ops.getMissionIntentHistory(mission.id)).toHaveLength(1);
   });
 });
 
@@ -833,6 +987,255 @@ describe('linking plan items to real operator tasks', () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.message).toContain('open question');
+  });
+});
+
+describe('mission <-> project linkage (Phase 4)', () => {
+  let fx: Fixture;
+  beforeEach(() => {
+    fx = missionFixture();
+    registerProjectCommandCapability(fx.db);
+    // The mission founder also holds the project grant, so one actor can
+    // exercise both registers in these linkage tests.
+    fx.principals.register({
+      id: FOUNDER,
+      displayName: 'Mission Founder',
+      originateCapabilities: [
+        MISSION_COMMAND_CAPABILITY.id,
+        PROJECT_COMMAND_CAPABILITY.id,
+        CAPS.readStatus,
+      ],
+      approvalAuthority: true,
+      active: true,
+    });
+  });
+
+  function project(overrides: Record<string, unknown> = {}): string {
+    return expectOk(
+      fx.ops.createProject({
+        name: 'QOS program',
+        purpose: 'Everything QOS',
+        requestedBy: FOUNDER,
+        ...overrides,
+      }),
+    ).project.id;
+  }
+
+  it('commands a mission into a project, and both sides read the one relationship', () => {
+    const projectId = project();
+    const { mission } = expectOk(command(fx, { projectId, project: 'qos-label' }));
+    expect(mission.projectId).toBe(projectId);
+    expect(mission.projectName).toBe('QOS program');
+    // The free-text label is a different claim and is untouched.
+    expect(mission.project).toBe('qos-label');
+    const view = fx.ops.getProject(projectId)!;
+    expect(view.missions).toEqual([
+      { missionId: mission.id, title: mission.title, status: 'planned' },
+    ]);
+  });
+
+  it('the projectId joins the idempotency digest only when stated — Phase 3 keys still dedupe', () => {
+    // A byte-identical Phase 3 command (no projectId field existed) must keep
+    // producing its stored digest, or every pre-Phase-4 mission would
+    // duplicate on re-command. Pinned as the equality that guarantees it.
+    const base = {
+      requestedBy: FOUNDER,
+      title: 'T',
+      objective: 'O',
+      scope: null,
+      constraints: [],
+      acceptanceCriteria: null,
+      project: null,
+      priority: null,
+      sourceOrderTaskId: null,
+      dependsOn: [],
+      planItems: [],
+      instruction: null,
+      idempotencyKey: null,
+    };
+    expect(missionCommandIdempotencyKey(base)).toBe(
+      missionCommandIdempotencyKey({ ...base, projectId: null }),
+    );
+    expect(missionCommandIdempotencyKey({ ...base, projectId: 'project-x' })).not.toBe(
+      missionCommandIdempotencyKey(base),
+    );
+    // Behaviorally: a no-project command still dedupes onto itself.
+    const first = expectOk(command(fx));
+    const again = expectOk(command(fx));
+    expect(again.deduplicated).toBe(true);
+    expect(again.mission.id).toBe(first.mission.id);
+  });
+
+  it('refuses to command a mission into an unknown or closed project', () => {
+    const unknown = command(fx, { projectId: 'project-never' });
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.error.code).toBe('unknown_project');
+
+    const closedId = project({ name: 'Closed program' });
+    expectOk(
+      fx.ops.transitionProject({
+        projectId: closedId,
+        to: 'closed',
+        note: 'wound down',
+        requestedBy: FOUNDER,
+      }),
+    );
+    const closed = command(fx, { projectId: closedId, title: 'Late mission' });
+    expect(closed.ok).toBe(false);
+    if (!closed.ok) expect(closed.error.code).toBe('project_closed');
+  });
+
+  it('the project-active check holds INSIDE the write transaction for command and assign (TOCTOU closed)', () => {
+    // Both writers now read the project register inside privileged.reserve()
+    // — an IMMEDIATE transaction whose write lock is taken at BEGIN — so a
+    // concurrent close (itself a reserve() write) is fully serialized against
+    // the check (Opus Low on PR #263). A true interleave is unscriptable
+    // in-process (better-sqlite3 is synchronous); these cases prove the moved
+    // checks still answer with the exact same typed refusals.
+    const closedId = project({ name: 'Closing program' });
+    expectOk(
+      fx.ops.transitionProject({
+        projectId: closedId,
+        to: 'closed',
+        note: 'closed before the writes land',
+        requestedBy: FOUNDER,
+      }),
+    );
+    const commanded = command(fx, { projectId: closedId, title: 'Raced command' });
+    expect(commanded.ok).toBe(false);
+    if (!commanded.ok) expect(commanded.error.code).toBe('project_closed');
+
+    const missionId = expectOk(command(fx, { title: 'Assignable mission' })).mission.id;
+    const assigned = fx.ops.assignMissionToProject({
+      missionId,
+      projectId: closedId,
+      requestedBy: FOUNDER,
+    });
+    expect(assigned.ok).toBe(false);
+    if (!assigned.ok) expect(assigned.error.code).toBe('project_closed');
+    expect(fx.ops.getMission(missionId)!.projectId).toBeNull();
+  });
+
+  it('assigns, reassigns and clears the relationship, recording every move', () => {
+    const a = project({ name: 'Program A' });
+    const b = project({ name: 'Program B' });
+    const missionId = expectOk(command(fx)).mission.id;
+
+    const assigned = expectOk(
+      fx.ops.assignMissionToProject({ missionId, projectId: a, requestedBy: FOUNDER }),
+    );
+    expect(assigned.projectId).toBe(a);
+    // Replay refused — an identical second event would forge history.
+    expect(fx.ops.assignMissionToProject({ missionId, projectId: a, requestedBy: FOUNDER }).ok).toBe(
+      false,
+    );
+    const moved = expectOk(
+      fx.ops.assignMissionToProject({ missionId, projectId: b, requestedBy: FOUNDER }),
+    );
+    expect(moved.projectId).toBe(b);
+    expect(moved.projectName).toBe('Program B');
+    const cleared = expectOk(
+      fx.ops.assignMissionToProject({ missionId, projectId: null, requestedBy: FOUNDER }),
+    );
+    expect(cleared.projectId).toBeNull();
+    expect(cleared.projectName).toBeNull();
+
+    const events = fx.db
+      .prepare(
+        `SELECT kind, detail FROM hq_mission_events WHERE mission_id = ? AND kind = 'project_assigned' ORDER BY seq`,
+      )
+      .all(missionId) as { kind: string; detail: string }[];
+    expect(events.map((e) => JSON.parse(e.detail))).toEqual([
+      { from: null, to: a },
+      { from: a, to: b },
+      { from: b, to: null },
+    ]);
+    const evidence = fx.db
+      .prepare(`SELECT COUNT(*) AS n FROM op_evidence WHERE kind = 'mission_project_assigned'`)
+      .get() as { n: number };
+    expect(evidence.n).toBe(3);
+  });
+
+  it('refuses assignment on terminal missions, unknown projects and by non-mission actors', () => {
+    const missionId = expectOk(command(fx)).mission.id;
+    expectOk(
+      fx.ops.transitionMission({
+        missionId,
+        to: 'cancelled',
+        note: 'stood down',
+        requestedBy: FOUNDER,
+      }),
+    );
+    const terminal = fx.ops.assignMissionToProject({
+      missionId,
+      projectId: project(),
+      requestedBy: FOUNDER,
+    });
+    expect(terminal.ok).toBe(false);
+    if (!terminal.ok) expect(terminal.error.code).toBe('mission_terminal');
+
+    const live = expectOk(command(fx, { title: 'Live mission' })).mission.id;
+    const unknown = fx.ops.assignMissionToProject({
+      missionId: live,
+      projectId: 'project-never',
+      requestedBy: FOUNDER,
+    });
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.error.code).toBe('unknown_project');
+
+    const worker = fx.ops.assignMissionToProject({
+      missionId: live,
+      projectId: null,
+      requestedBy: 'claude',
+    });
+    expect(worker.ok).toBe(false);
+  });
+
+  it('project task counts derive from linked plan items through the one canonical status', () => {
+    const projectId = project();
+    const missionId = expectOk(
+      command(fx, { projectId, planItems: ['Measure', 'Optimize'] }),
+    ).mission.id;
+    const taskId = expectOk(
+      fx.ops.createTask({
+        capabilityId: CAPS.readStatus,
+        payload: { kind: 'measure' },
+        requestedBy: FOUNDER,
+      }),
+    ).task.id;
+    expectOk(fx.ops.linkMissionPlanItem({ missionId, planItemSeq: 1, taskId, requestedBy: FOUNDER }));
+    const view = fx.ops.getProject(projectId)!;
+    // One linked task, queued; the unlinked item has no task and counts nowhere.
+    expect(view.taskCounts).toEqual([{ status: 'queued', count: 1 }]);
+    expect(JSON.stringify(view)).not.toMatch(/percent|progress/i);
+  });
+
+  it('one task linked to two plan items counts ONCE — COUNT(*) would have said 2 (Sol M2)', () => {
+    // Plan-item linkage is deliberately flexible: nothing makes task_id
+    // unique across rows, so the SAME canonical task can satisfy two plan
+    // items. The figure the register shows is "linked tasks", so the derived
+    // count must be over DISTINCT canonical tasks, never linked rows.
+    const projectId = project();
+    const missionId = expectOk(
+      command(fx, { projectId, planItems: ['Measure', 'Optimize'] }),
+    ).mission.id;
+    const taskId = expectOk(
+      fx.ops.createTask({
+        capabilityId: CAPS.readStatus,
+        payload: { kind: 'measure-and-optimize' },
+        requestedBy: FOUNDER,
+      }),
+    ).task.id;
+    expectOk(fx.ops.linkMissionPlanItem({ missionId, planItemSeq: 1, taskId, requestedBy: FOUNDER }));
+    expectOk(fx.ops.linkMissionPlanItem({ missionId, planItemSeq: 2, taskId, requestedBy: FOUNDER }));
+    // Storage truth: two linked rows, one canonical task.
+    expect(
+      count(fx, `SELECT COUNT(*) AS n FROM hq_mission_plan_items WHERE task_id = '${taskId}'`),
+    ).toBe(2);
+    const view = fx.ops.getProject(projectId)!;
+    expect(view.taskCounts).toEqual([{ status: 'queued', count: 1 }]);
+    // The bucket is the task's canonical ActivityStatus, read from op_tasks.
+    expect(fx.ops.queue.get(taskId)!.status).toBe('queued');
   });
 });
 

@@ -14,6 +14,7 @@ export * from './contracts.js';
 export * from './directory.js';
 export * from './known.js';
 export * from './mock.js';
+export * from './declared.js';
 
 export * as codex from './codex/index.js';
 export * as claude from './claude/index.js';

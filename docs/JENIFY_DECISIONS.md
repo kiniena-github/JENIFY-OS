@@ -207,3 +207,91 @@ Append-only. Each entry: date, decision, rationale. Newest last.
      named in provenance; the live `/state` route stays unbounded on purpose.
   Priority still never touches operator FIFO order (now proven behaviorally, not just by
   grep), and the hosted restart proof now drives the real `commandMission` path.
+
+- **2026-09-05 — Phase 4 (Projects + Tasks + Dynamic AI Workforce, issue #262) widens the HQ
+  browser write surface and makes the register, linkage and workforce first-class.**
+  Founder-approved via the #262 handoff; recorded here so nothing about it is silent
+  (canonical doc: `docs/HEADQUARTER/PHASE_4_PROJECTS_TASKS_AI_WORKFORCE.md`):
+  1. **Write surface.** The browser write surface widens from six routes to additionally
+     `POST /api/hq/control/projects` (+ `/transition`, `/update`),
+     `/missions/assign-project`, `/missions/link-plan-item`, `/workforce/route` and
+     `/workforce/assign` (thirteen total; route table seventeen). This supersedes ONLY the
+     surface-count clause of the Phase 3 entry; every other clause — identity from the
+     server session and Founder map only, fail-closed on a broken map, no generic mutation
+     endpoint, no ask-for-changes route — stands and applies to the new routes unchanged.
+  2. **`hq_projects` is adopted as THE canonical project register**, owned by
+     `application/project-command.ts`; the store's ungated `upsertProject` is deleted and
+     its absence pinned. One project system — the alternative was a second table with a
+     worse name forever. The lifecycle is deliberately two states (`active ⇄ closed`, notes
+     both ways, closed not terminal); absent states are anti-fabrication decisions, the
+     reasoning in the contract docstring. The legacy NOT NULL `stream` column keeps a
+     documented `''⇔null` encoding rather than a table rebuild.
+  3. **One relationship truth.** `hq_missions.project_id` is the canonical mission→project
+     link; the free-text `project` labels on missions and task meta stay labels, never
+     matched against the register, and the UI words the two claims apart. Project→task is
+     derived only through plan-item links. The idempotency digest gains `projectId` only
+     when stated, so Phase 3 stored keys keep deduping.
+  4. **The Projects room is rebound** from the activity-label counter to the canonical
+     register (the Mission-Room-rebind treatment), with liveness computed from register
+     missions by the same status sets the Mission Room uses.
+  5. **The AI member registry is wired for lifecycle/display/advisory truth only.** The
+     capability-narrowing seam (`memberRegistry`, issue #182) stays OFF: the operator and
+     member capability vocabularies are disjoint, so narrowing would empty same-id workers'
+     grants and move the enforcement read out of its hardened closure. Turning it on is a
+     separate, deliberate authority migration — a Founder decision — and the anti-emptying
+     regression pins that wiring the lifecycle registry does not flip it. Assignment is
+     advisory (narrowing-only at claim); nomination is advisory by contract and maps no
+     vocabulary (exact operator capability ids only); no worker reaches any Founder-gated
+     method; no member is ever seeded from a vendor catalog; provider health is declared or
+     `unknown`, never probed, never fabricated.
+  6. **Worker deactivation exists; reactivation deliberately does not.**
+     `deactivateExecutionWorker` is Founder-gated and narrowing-only with in-flight work
+     protected; turning a worker back on is a widening and stays a separate recorded act.
+     Member ids may equal a live worker id (enrichment, reported as such) and may never
+     equal a human principal id (the identity-flip guard, refused at registration).
+  7. **Step-up re-evaluated at Phase 4, re-affirmed** (the item-4 obligation of the Phase 3
+     entry): none of the new writes takes step-up because Phase 4 still adds no autonomous
+     consumer that can turn mission/project state into execution — nomination is inert
+     without the operator's own verdict, an assignment intent changes no status and burns
+     no approval, and nothing reads a mission to create/claim/dispatch anything. To be
+     re-evaluated AGAIN the moment such a consumer exists (Phase ≥ 6, or any earlier wiring
+     of the mission watchdog). **Kill-switch parity extends to project writes** — the
+     switch stops execution reachability, never the recording of Founder direction — pinned
+     by named tests.
+  8. **The §G hardening is engine truth.** The Phase 3 Low (REPLACE bypassing the
+     append-only triggers under default-off `recursive_triggers`) was verified real and
+     closed with BEFORE INSERT abort-on-existing triggers that bind every writer and every
+     conflict clause; the PRAGMA was rejected as connection-scoped. Plan-item task links are
+     write-once at the engine; `hq_project_events` was born with the complete trigger set;
+     documentation claims now state exactly the engine guarantee.
+  9. **Configuration paths exist without raw writes.** `hq:workforce` (trusted-local-admin,
+     the `hq:order` model verbatim) registers the three Founder-gated capabilities
+     (fail-closed list), bootstraps principals (stated plainly as the bootstrap path), and
+     drives member/worker lifecycle through the ordinary Founder-gated facade.
+
+- **2026-09-06 — Phase 4 correction pass (GPT-5.6 Sol exact-head gate on PR #263 +
+  the Opus Lows), one consolidated pass on the same branch.** The two reclassified Mediums
+  and the eight Lows, dispositioned (canonical detail: the Correction-pass paragraph of
+  `docs/HEADQUARTER/PHASE_4_PROJECTS_TASKS_AI_WORKFORCE.md`):
+  1. **Assignment obeys canonical claim truth (M1).** An advisory assignment is allowed
+     ONLY while it can genuinely narrow future claiming: a live fenced claim answers
+     `task_already_claimed` and a queued-unreachable status (`completed`/`review_passed`,
+     derived from `ALLOWED_TRANSITIONS`, drift-pinned) answers `task_beyond_claiming` —
+     both 409, both refused before any write, event or evidence. The eligibility read
+     carries the identical truth through the same predicate, and the console success line
+     commits only to what is guaranteed. No reassignment/claim-transfer machinery was
+     built — that stays later scope.
+  2. **Project task counts are DISTINCT canonical tasks (M2).** Plan-item linkage stays
+     deliberately flexible (no uniqueness on `task_id`); the derived figure changed, not
+     the model.
+  3. **The eight Lows**: workforce transport says `contractSatisfied` (configuration truth,
+     nothing probed; ORDERS-lane wording deliberately untouched — a recorded follow-up);
+     the CLI principal path is stated and pinned as an UPSERT that reports REPLACED; the
+     update route carries `stream: null` as a real clear; the project-close TOCTOU is
+     closed by validating inside the IMMEDIATE `reserve()` transaction (the
+     `amendMissionIntent` precedent — no new locking); the workforce kill-switch posture is
+     pinned by a named test (advisory writes stay open, claiming stays blocked — the
+     switch stops execution, not direction); the append-only source guard covers its real
+     table set; the assign dropdown offers only active workers (the server stays
+     authoritative); and both anti-emptying regression layers are named in the canonical
+     doc. Issue #182 narrowing stays OFF.

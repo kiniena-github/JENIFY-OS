@@ -18,7 +18,6 @@ import type {
   CommandCenterItem,
   CommandCenterLane,
   CommandCenterSnapshot,
-  ProjectRecord,
 } from '../contracts/modules.js';
 import type { WorkerDescriptor } from '../contracts/workers.js';
 
@@ -133,41 +132,13 @@ export class HeadquarterStore {
     return { generatedAt: nowIso(), lanes };
   }
 
-  // ---- Projects ----
-
-  upsertProject(p: Omit<ProjectRecord, 'createdAt' | 'updatedAt'>): ProjectRecord {
-    const at = nowIso();
-    this.#db
-      .prepare(
-        `INSERT INTO hq_projects (id, name, stream, summary, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name, stream = excluded.stream,
-           summary = excluded.summary, status = excluded.status, updated_at = excluded.updated_at`,
-      )
-      .run(p.id, p.name, p.stream, p.summary, p.status, at, at);
-    return this.getProject(p.id)!;
-  }
-
-  getProject(id: string): ProjectRecord | null {
-    const r = this.#db.prepare(`SELECT * FROM hq_projects WHERE id = ?`).get(id) as
-      | Record<string, unknown>
-      | undefined;
-    if (!r) return null;
-    return {
-      id: r.id as string,
-      name: r.name as string,
-      stream: r.stream as string,
-      summary: r.summary as string,
-      status: r.status as string,
-      createdAt: r.created_at as string,
-      updatedAt: r.updated_at as string,
-    };
-  }
-
-  listProjects(): ProjectRecord[] {
-    const rows = this.#db.prepare(`SELECT id FROM hq_projects ORDER BY name`).all() as { id: string }[];
-    return rows.map((r) => this.getProject(r.id)!);
-  }
+  // ---- Projects: NO methods here, deliberately (Phase 4, issue #262) ----
+  // `hq_projects` is the canonical project register, adopted and owned by
+  // `application/project-command.ts`. The ungated `upsertProject` that used
+  // to live here was an ON CONFLICT overwrite reachable by any holder of a
+  // HeadquarterStore — exactly the raw write path around the facade this
+  // codebase forbids — and was deleted when the register became canonical.
+  // Every project read and write goes through `HeadquarterOperations`.
 
   // ---- Founder Approval Center ----
 

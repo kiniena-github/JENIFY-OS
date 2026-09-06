@@ -40,6 +40,7 @@ const PROVENANCE: Provenance = { mode: 'live', source: 'test', asOf: AT };
 function emptyState(): HqSnapshot {
   return buildHqSnapshot({
     generatedAt: AT,
+    projects: { data: [], provenance: PROVENANCE },
     console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
     connections: { data: [], provenance: PROVENANCE },
     workforce: { data: [], provenance: PROVENANCE },
@@ -196,6 +197,7 @@ describe('a populated HQ is copied, never re-derived', () => {
     console_.blocked = [{ ...console_.inFlight[0]!, taskId: 't-blocked', status: 'blocked', blockReason: 'upstream down' }];
     return buildHqSnapshot({
       generatedAt: AT,
+      projects: { data: [], provenance: PROVENANCE },
       console: { data: console_, provenance: PROVENANCE },
       connections: { data: [], provenance: PROVENANCE },
       workforce: { data: [], provenance: PROVENANCE },
@@ -238,6 +240,7 @@ describe('a populated HQ is copied, never re-derived', () => {
     // that flag would animate a worker nothing says is working.
     const withWorkers = buildHqSnapshot({
       generatedAt: AT,
+      projects: { data: [], provenance: PROVENANCE },
       console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
       connections: { data: [], provenance: PROVENANCE },
       workforce: {
@@ -273,6 +276,7 @@ describe('a populated HQ is copied, never re-derived', () => {
     }));
     const snapshot = buildHqSnapshot({
       generatedAt: AT,
+      projects: { data: [], provenance: PROVENANCE },
       console: { data: many, provenance: PROVENANCE },
       connections: { data: [], provenance: PROVENANCE },
       workforce: { data: [], provenance: PROVENANCE },
@@ -294,6 +298,7 @@ describe('a room is dark only when everything it counts is empty', () => {
     // non-zero counts directly underneath (Codex round 3).
     const withRecords = buildHqSnapshot({
       generatedAt: AT,
+      projects: { data: [], provenance: PROVENANCE },
       console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
       connections: { data: [], provenance: PROVENANCE },
       workforce: {
@@ -369,6 +374,8 @@ describe('the Mission Room shows commanded missions, and only those (Phase 3)', 
       constraints: ['No visual changes'],
       acceptanceCriteria: null,
       project: 'qos',
+      projectId: null,
+      projectName: null,
       priority: null,
       status: status as HqSnapshot['missions']['data'][number]['status'],
       blockReason: status === 'blocked' ? 'Waiting on the hosting decision.' : null,
@@ -412,6 +419,7 @@ describe('the Mission Room shows commanded missions, and only those (Phase 3)', 
     mutateConsole(console_);
     return buildHqSnapshot({
       generatedAt: AT,
+      projects: { data: [], provenance: PROVENANCE },
       console: { data: console_, provenance: PROVENANCE },
       connections: { data: [], provenance: PROVENANCE },
       workforce: { data: [], provenance: PROVENANCE },
@@ -584,6 +592,7 @@ describe('Analytics ranks an approval the way every other room does', () => {
     }
     return buildHqSnapshot({
       generatedAt: AT,
+      projects: { data: [], provenance: PROVENANCE },
       console: { data: console_, provenance: PROVENANCE },
       connections: { data: [], provenance: PROVENANCE },
       workforce: { data: [], provenance: PROVENANCE },
@@ -664,6 +673,7 @@ describe('no room contradicts its own displayed numbers', () => {
       mutate(console_);
       return buildHqSnapshot({
         generatedAt: AT,
+        projects: { data: [], provenance: PROVENANCE },
         console: { data: console_, provenance: PROVENANCE },
         connections: { data: [], provenance: PROVENANCE },
         workforce: { data: [], provenance: PROVENANCE },
@@ -768,6 +778,7 @@ describe('connection attention follows the canonical tone mapping', () => {
   function stateWithConnection(connectionState: string): HqSnapshot {
     return buildHqSnapshot({
       generatedAt: AT,
+      projects: { data: [], provenance: PROVENANCE },
       console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
       connections: {
         data: [
@@ -874,6 +885,7 @@ describe('reachability comes from one list, not two that agree', () => {
     for (const connectionState of Object.keys(MAY_BE_DRAWN_REACHABLE) as ConnectionState[]) {
       const state = buildHqSnapshot({
         generatedAt: AT,
+        projects: { data: [], provenance: PROVENANCE },
         console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
         connections: {
           data: [
@@ -913,6 +925,7 @@ describe('the attention count and its hint describe the same set of states', () 
     // is named and no settled one is.
     const state = buildHqSnapshot({
       generatedAt: AT,
+      projects: { data: [], provenance: PROVENANCE },
       console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
       connections: {
         data: [
@@ -965,9 +978,45 @@ describe('a room names every state section that can change what it shows', () =>
    * code rather than to the comment.
    */
   const SECTION_FIXTURES: Record<string, () => HqSnapshot> = {
+    projects: () =>
+      buildHqSnapshot({
+        generatedAt: AT,
+        projects: {
+          data: [
+            {
+              id: 'project-1',
+              name: 'JENIFY OS',
+              purpose: 'Platform program',
+              stream: null,
+              status: 'active',
+              createdBy: 'founder',
+              createdAt: AT,
+              updatedAt: AT,
+              statusChangedAt: AT,
+              statusChangedBy: 'founder',
+              authority: {
+                riskClass: 'founder_gate',
+                founderOnly: true,
+                approvalFlow: 'originate_gated_no_approval_row',
+              },
+              missions: [],
+              taskCounts: [],
+              history: [],
+            },
+          ] as never,
+          provenance: PROVENANCE,
+        },
+        console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
+        connections: { data: [], provenance: PROVENANCE },
+        workforce: { data: [], provenance: PROVENANCE },
+        capabilities: { data: [], provenance: PROVENANCE },
+        activity: { data: [], provenance: PROVENANCE },
+        missions: { data: [], provenance: PROVENANCE },
+      }),
     workforce: () =>
       buildHqSnapshot({
         generatedAt: AT,
+        projects: { data: [], provenance: PROVENANCE },
         console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
         connections: { data: [], provenance: PROVENANCE },
         workforce: {
@@ -983,6 +1032,7 @@ describe('a room names every state section that can change what it shows', () =>
     capabilities: () =>
       buildHqSnapshot({
         generatedAt: AT,
+        projects: { data: [], provenance: PROVENANCE },
         console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
         connections: { data: [], provenance: PROVENANCE },
         workforce: { data: [], provenance: PROVENANCE },
@@ -1014,6 +1064,7 @@ describe('a room names every state section that can change what it shows', () =>
     connections: () =>
       buildHqSnapshot({
         generatedAt: AT,
+        projects: { data: [], provenance: PROVENANCE },
         console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
         connections: {
           data: [
@@ -1029,6 +1080,7 @@ describe('a room names every state section that can change what it shows', () =>
     activity: () =>
       buildHqSnapshot({
         generatedAt: AT,
+        projects: { data: [], provenance: PROVENANCE },
         console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
         connections: { data: [], provenance: PROVENANCE },
         workforce: { data: [], provenance: PROVENANCE },
@@ -1054,6 +1106,7 @@ describe('a room names every state section that can change what it shows', () =>
    * wrong direction for a line whose whole job is to be read.
    */
   const NAMES: Record<string, readonly string[]> = {
+    projects: ['project'],
     workforce: ['workforce', 'worker'],
     capabilities: ['capabilit'],
     connections: ['connection', 'integration'],
@@ -1079,5 +1132,112 @@ describe('a room names every state section that can change what it shows', () =>
       }
     }
     expect(unnamed, unnamed.join(' | ')).toEqual([]);
+  });
+});
+
+describe('the Projects room shows the canonical register, and only that (Phase 4)', () => {
+  // PHASE 4 REPLACEMENT of the label-counter reading, deliberate and on
+  // record (issue #262; docs/JENIFY_DECISIONS.md; the comment at
+  // projectsSection()). The replacement invariant mirrors the Mission Room's:
+  // liveness derives ONLY from the register's missions by the stated status
+  // sets, so this room and the Mission Room can never describe the same
+  // missions differently.
+  function registerState(
+    missions: { missionId: string; title: string; status: string }[],
+    status: 'active' | 'closed' = 'active',
+  ): HqSnapshot {
+    return buildHqSnapshot({
+      generatedAt: AT,
+      projects: {
+        data: [
+          {
+            id: 'project-1',
+            name: 'JENIFY OS',
+            purpose: 'Platform program',
+            stream: 'jenify-os',
+            status,
+            createdBy: 'founder',
+            createdAt: AT,
+            updatedAt: AT,
+            statusChangedAt: AT,
+            statusChangedBy: 'founder',
+            authority: {
+              riskClass: 'founder_gate',
+              founderOnly: true,
+              approvalFlow: 'originate_gated_no_approval_row',
+            },
+            missions,
+            taskCounts: [],
+            history: [],
+          },
+        ] as never,
+        provenance: PROVENANCE,
+      },
+      console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
+      connections: { data: [], provenance: PROVENANCE },
+      workforce: { data: [], provenance: PROVENANCE },
+      capabilities: { data: [], provenance: PROVENANCE },
+      activity: { data: [], provenance: PROVENANCE },
+      missions: { data: [], provenance: PROVENANCE },
+    });
+  }
+  const projectsRoom = (state: HqSnapshot) =>
+    hydrateRooms(state, FOUNDER_SESSION).find((view) => view.roomId === 'projects')!;
+
+  it('renders register entries with truthful metrics and no fabricated figure', () => {
+    const view = projectsRoom(registerState([]));
+    const byLabel = new Map(view.metrics.map((m) => [m.label, m.value]));
+    expect(byLabel.get('Projects registered')).toBe(1);
+    expect(byLabel.get('Active')).toBe(1);
+    expect(byLabel.get('Closed')).toBe(0);
+    expect(byLabel.get('Missions assigned')).toBe(0);
+    expect(view.rows[0]!.primary).toBe('JENIFY OS');
+    expect(JSON.stringify(view)).not.toMatch(/percent|progress|eta/i);
+    // A register with no working/attention mission holds records quietly.
+    expect(view.liveness).toBe('quiet');
+  });
+
+  it('ignores activity project labels entirely — labels are not the register', () => {
+    const withLabels = buildHqSnapshot({
+      generatedAt: AT,
+      projects: { data: [], provenance: PROVENANCE },
+      console: { data: emptyFounderConsole(AT), provenance: PROVENANCE },
+      connections: { data: [], provenance: PROVENANCE },
+      workforce: { data: [], provenance: PROVENANCE },
+      capabilities: { data: [], provenance: PROVENANCE },
+      activity: {
+        data: [
+          {
+            seq: 1,
+            subjectKind: 'task',
+            subjectId: 't1',
+            status: 'queued',
+            actor: 'x',
+            summary: 'labelled work',
+            at: AT,
+            detail: { project: 'label-only-project' },
+          },
+        ] as never,
+        provenance: PROVENANCE,
+      },
+      missions: { data: [], provenance: PROVENANCE },
+    });
+    const view = projectsRoom(withLabels);
+    expect(view.metrics.find((m) => m.label === 'Projects registered')!.value).toBe(0);
+    expect(view.rows).toHaveLength(0);
+    expect(view.liveness).toBe('dark');
+    expect(view.emptyMessage).toContain('labels, not this register');
+  });
+
+  it('derives liveness from the register missions by the shared mission status sets', () => {
+    expect(
+      projectsRoom(registerState([{ missionId: 'm1', title: 'M', status: 'working' }])).liveness,
+    ).toBe('active');
+    expect(
+      projectsRoom(registerState([{ missionId: 'm1', title: 'M', status: 'blocked' }])).liveness,
+    ).toBe('attention');
+    expect(
+      projectsRoom(registerState([{ missionId: 'm1', title: 'M', status: 'complete' }])).liveness,
+    ).toBe('quiet');
   });
 });

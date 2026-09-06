@@ -1726,3 +1726,71 @@ the hydration fixture (M3), the widened append-only guard (L1), and the two rewr
 host/durability tests (L6/L9). Full-matrix results, the new exact SHA and the honest
 environmental caveats are recorded on PR #260; the new head awaits a fresh Opus exact-head
 review, and merge remains gated on independent review and the Founder.
+
+## Phase 4 — Projects + Tasks + Dynamic AI Workforce (local Fable integrator, 2026-09-05)
+
+**2026-09-05.** Branch `local/phase-4-projects-tasks-ai-workforce` from accepted main
+`c3a907a` (issue #262 handoff — this lane is the sole Phase 4 integrator; subscription only,
+no paid API). Main builder: genuine Fable 5, stated per the model requirement.
+
+**What was built.** The canonical Project register (`hq_projects` adopted and owned by
+`application/project-command.ts`; the store's ungated upsert deleted; two-state lifecycle
+with mandatory notes; append-only `hq_project_events` born with the complete trigger set;
+Founder-gated `hq.project_command` trio; idempotent creation; audited updates). The
+canonical mission→project relationship (`hq_missions.project_id`; labels stay labels;
+digest back-compat pinned) plus `assignMissionToProject` and the previously route-less
+`linkMissionPlanItem` bound to the browser. The Dynamic AI Workforce wired advisory-only:
+AiMemberRegistry + declared-only provider adapters + a rankMembers-backed nomination source
+in the production host, `assignTaskAsFounder`/`evaluateTaskEligibility`/member lifecycle/
+`deactivateExecutionWorker` on the facade, the capability-NARROWING seam deliberately left
+OFF (issue #182 authority migration — a Founder decision) with the anti-emptying regression
+pinning it. Nine new exact-match control routes (table 9→17, writes 6→13), session controls
+`projectCommand`/`workforceAssign`, the snapshot's additive projects section + worker
+provider/member enrichment, the Projects room rebound to the register, workforce truth chips
+under the no-pulse rule, three script-created consoles, and the `hq:workforce` local-admin
+configuration CLI. The Phase 3 §G Low (REPLACE bypassing append-only triggers) verified real
+and closed at the engine with BEFORE INSERT guards + widened source guards + behavioral
+tamper regressions; plan-item task links made write-once at the engine. Decisions recorded
+in `docs/JENIFY_DECISIONS.md` (2026-09-05, Phase 4 entry); canonical doc
+`docs/HEADQUARTER/PHASE_4_PROJECTS_TASKS_AI_WORKFORCE.md`.
+
+**What is deliberately NOT here.** No Phase 5 context/memory, no Phase 6 orchestrator, no
+autonomous consumer of mission/project state, no queue priority (FIFO stays test-pinned),
+no worker reactivation, no member-registry authority migration, no probed provider health,
+no seeded workers, no fabricated metric (counts, never percentages). Step-up on the new
+writes re-evaluated and re-affirmed exempt; kill-switch parity extended to project writes;
+both pinned by named tests.
+
+**Local verification on the Founder workstation (Windows).** New focused suites all green:
+application.project-core 22, live-project-routes 11, live-workforce-routes 8,
+workforce-command 20, phase4-consoles 9 (JSDOM against the real control API), workforce-cli
+7, project-durability 2 (real file reopen); application.mission-core grew to 52 with the §G
+and linkage regressions; host-contract grew the Fastify-wired Phase 4 surface + the
+anti-emptying pin. Full headquarter suite green at every commit; known environmental caveats
+identical to the Phase 3 baseline (6 POSIX-only hq-host persistence tests; Linux-gated
+hosted restart; Ubuntu exact-head CI authoritative). Full-matrix results and the exact
+frozen SHA are recorded in the Phase 4 PR; merge remains gated on independent review and the
+Founder.
+
+## 2026-09-06 — Phase 4 correction pass (Sol M1/M2 + the Opus Lows), same branch
+
+The GPT-5.6 Sol independent exact-head gate on PR #263 reclassified two Opus Lows as
+Medium (canonical-truth violations) and required one consolidated Fable correction pass.
+Delivered on `local/phase-4-projects-tasks-ai-workforce`: **M1** — `assignTask` refuses
+over a live fenced claim (`task_already_claimed`) or a queued-unreachable status
+(`task_beyond_claiming`, derived from `ALLOWED_TRANSITIONS` and drift-pinned), with the
+shared predicate surfaced on the eligibility read (`taskState`) and the console success
+line reworded to exactly the guaranteed effect; the mandate's full regression sequence runs
+at service, route and JSDOM-console level. **M2** — project `taskCounts` counts DISTINCT
+canonical tasks (one task on two plan items counts once, pinned; linkage stays flexible).
+**Lows swept in the same pass**: workforce transport `contractSatisfied` vocabulary
+(ORDERS lane untouched, recorded follow-up); CLI principal-UPSERT stated + pinned
+(REPLACED output with previous truth); `stream: null` tri-state at the update route
+(+route tests); project-close TOCTOU closed inside the IMMEDIATE `reserve()` transaction
+in `assignMissionToProject` AND `commandMission` (amendMissionIntent precedent, no new
+locking); workforce kill-switch posture pinned by a named test (advisory writes open,
+claiming blocked); source-guard table set widened to plan items + project events with an
+honest retitle; inactive workers filtered from the assign dropdown (server authoritative);
+dual-registry anti-emptying pins named at both layers. Decisions entry appended; canonical
+doc updated. The exact corrected SHA, full-matrix results and honest deferrals are recorded
+on PR #263; next step is one fresh Opus 5 exact-head review.

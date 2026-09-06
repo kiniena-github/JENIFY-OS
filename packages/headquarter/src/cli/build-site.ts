@@ -175,6 +175,16 @@ const snapshot = buildHqSnapshot({
       asOf,
     },
   },
+  projects: {
+    // Same rule as missions: a static build opens no hq_projects register,
+    // so zero projects is a statement about this build, never live state.
+    data: [],
+    provenance: {
+      mode: staticSectionMode(data.sourceMode),
+      source: 'no project register is open in a static build',
+      asOf,
+    },
+  },
 });
 
 writeFileSync(join(outDir, SNAPSHOT_FILENAME), `${JSON.stringify(snapshot, null, 2)}\n`);

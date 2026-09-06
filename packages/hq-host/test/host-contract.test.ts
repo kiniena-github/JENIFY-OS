@@ -24,8 +24,23 @@ import {
   HeadquarterOperations,
   HumanPrincipalRegistry,
   MISSION_COMMAND_CAPABILITY,
+  MemberRegistryNominationSource,
+  PROJECT_COMMAND_CAPABILITY,
+  WORKFORCE_ASSIGN_CAPABILITY,
   registerMissionCommandCapability,
+  registerProjectCommandCapability,
+  registerWorkforceAssignCapability,
 } from '@factoryos/headquarter/application';
+import { CapabilityRegistry } from '@factoryos/headquarter/operator';
+import {
+  AiMemberRegistry,
+  MemberCapabilityRegistry,
+} from '@factoryos/headquarter/registry';
+import {
+  KNOWN_PROVIDERS,
+  ProviderDirectory,
+  declaredOnlyAdapter,
+} from '@factoryos/headquarter/providers';
 import {
   CONTROL_ROUTES,
   DIRECT_ORDER_CAPABILITY,
@@ -331,6 +346,136 @@ describe('the Phase 3 mission surface travels through the same two wildcards', (
     const app = await build(NO_IDENTITY);
     const res = await app.inject({ method: 'GET', url: CONTROL_ROUTES.missions });
     expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+});
+
+describe('the Phase 4 surfaces travel through the same two wildcards, wired as config.ts wires them', () => {
+  // The EXACT composition loadHeadquarterHost performs (minus persistence):
+  // AiMemberRegistry over declared-only provider adapters, an advisory
+  // nomination source — and NO `memberRegistry`, because the narrowing seam
+  // is the recorded authority migration (issue #182) and stays off.
+  async function phase4App(): Promise<{
+    app: FastifyInstance;
+    ops: HeadquarterOperations;
+  }> {
+    const db = openMemoryHqDatabase();
+    registerDirectOrderCapability(db);
+    registerMissionCommandCapability(db);
+    registerProjectCommandCapability(db);
+    registerWorkforceAssignCapability(db);
+    new CapabilityRegistry(db).register({
+      id: 'repo.read_status',
+      description: 'Read repo/CI status',
+      riskClass: 'read_only',
+      sideEffect: false,
+      idempotent: true,
+    });
+    const store = new HeadquarterStore(db);
+    store.upsertSpecialist({
+      id: 'claude',
+      displayName: 'Claude',
+      vendor: 'anthropic',
+      role: 'build_lead',
+      allowedCapabilities: ['repo.read_status'],
+      active: true,
+    });
+    const providers = new ProviderDirectory();
+    for (const descriptor of KNOWN_PROVIDERS) providers.register(declaredOnlyAdapter(descriptor));
+    const aiMembers = new AiMemberRegistry(db, providers, new MemberCapabilityRegistry(db));
+    const ops = new HeadquarterOperations(db, {
+      store,
+      aiMemberRegistry: aiMembers,
+      nominationSources: [new MemberRegistryNominationSource(aiMembers)],
+    });
+    new HumanPrincipalRegistry(db).register({
+      id: 'founder',
+      displayName: 'Proof Founder',
+      originateCapabilities: [
+        DIRECT_ORDER_CAPABILITY.id,
+        MISSION_COMMAND_CAPABILITY.id,
+        PROJECT_COMMAND_CAPABILITY.id,
+        WORKFORCE_ASSIGN_CAPABILITY.id,
+        'repo.read_status',
+      ],
+      approvalAuthority: true,
+      active: true,
+    });
+    const app = Fastify({ logger: false });
+    registerHeadquarterRoutes(
+      app,
+      {
+        ops,
+        founderMap: [{ realmId: 'realm', accountId: 'acc-1', principalId: 'founder' }],
+        allowedOrigins: [ORIGIN],
+        secretsEnv: {},
+        mutationsEnabled: true,
+      },
+      identityFor(FOUNDER),
+    );
+    await app.ready();
+    return { app, ops };
+  }
+
+  it('creates a project and reads the workforce through the real Fastify instance', async () => {
+    const { app } = await phase4App();
+    const created = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.projects,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: { name: 'JENIFY OS', purpose: 'The platform program' },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.headers['cache-control']).toBe('no-store');
+
+    const workforce = await app.inject({ method: 'GET', url: CONTROL_ROUTES.workforce });
+    expect(workforce.statusCode).toBe(200);
+    const body = workforce.json() as {
+      workers: { id: string; providerDeclared: string | null }[];
+      memberRegistryConfigured: boolean;
+    };
+    expect(body.workers.map((worker) => worker.id)).toEqual(['claude']);
+    expect(body.workers[0]!.providerDeclared).toBeNull();
+    expect(body.memberRegistryConfigured).toBe(true);
+    await app.close();
+  });
+
+  it('ANTI-EMPTYING: a member row under a live worker id changes no grant and no claim', async () => {
+    // The regression this pins: passing `memberRegistry` (the narrowing
+    // seam) would intersect claude's operator grants with the member
+    // registry's DISJOINT vocabulary and empty them — every claim would
+    // then refuse. The host wiring must never flip that on as a side effect
+    // of configuring the lifecycle registry.
+    const { app, ops } = await phase4App();
+    const registered = ops.registerAiMember({
+      id: 'claude', // same id as the live execution worker, zero member grants
+      displayName: 'Claude member record',
+      providerId: 'anthropic',
+      modelId: 'claude-fable-5',
+      modelVersion: '1',
+      workerType: 'execution',
+      locality: 'cloud',
+      privacyClass: 'internal',
+      costClass: 'high',
+      founderId: 'founder',
+    });
+    expect(registered.ok).toBe(true);
+
+    const created = ops.createTask({
+      capabilityId: 'repo.read_status',
+      payload: { kind: 'status' },
+      requestedBy: 'founder',
+    });
+    expect(created.ok).toBe(true);
+    const claimed = ops.claimNext('claude', 'repo.read_status');
+    expect(claimed.ok).toBe(true);
+
+    // And the enrichment is visible where it should be — display, not authority.
+    const workforce = await app.inject({ method: 'GET', url: CONTROL_ROUTES.workforce });
+    const body = workforce.json() as {
+      workers: { id: string; member: { identityKey: string } | null }[];
+    };
+    expect(body.workers[0]!.member!.identityKey).toBe('anthropic:claude-fable-5:1');
     await app.close();
   });
 });
