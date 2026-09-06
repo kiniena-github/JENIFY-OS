@@ -119,8 +119,23 @@ state :=
   unresolved contradiction ⇒ `verified`, `contested: true`, standing `contested` (and the entity
   headline shows the born state, as for any contested record); accepted → superseded ⇒
   `verified`, `lifecycle: 'superseded'`, standing `superseded`. The ladder names the FIRST
-  broken precondition, basis first; a contest is by construction never simultaneous with the
-  other two (a refuted or superseded record is `out` of every contradiction, `judgeContradiction`).
+  broken precondition, basis first — and the preconditions CAN break together. A superseded
+  record is `out` of every contradiction (`standingOf` → `judgeContradiction`), so `superseded`
+  and `contested` never co-occur; but a record whose verification summary is `contested` (≥1
+  confirmed AND ≥1 refuted) is NOT out — `standingOf` withdraws a record only for a summary of
+  exactly `refuted` — so a live rival can still contradict it and the contradiction stays
+  `unresolved`. Reproduced through the facade: claim → confirm → accept → refute → a live rival
+  contradicts it derives `{state: 'claimed', verification: 'contested', contested: true,
+  lifecycle: 'current', acceptanceStanding: 'verification_refuted', acceptanceDigest: null}` —
+  the verification precondition and the contest precondition broken at the same time. The rule
+  then simply names the basis and says nothing about the contest in `acceptanceStanding`; a
+  reader loses nothing by that, because the same view carries `contested: true` (and the
+  `contradictions[]` entry) beside the named standing, the console draws the `CONTESTED` chip
+  beside `ACCEPTANCE NO LONGER STANDS`, the accept ladder refuses in the same basis-first order
+  (`truth_not_verified`, `details` naming the standing), and the snapshot counts the dispute.
+  Pinned through the facade in `truth-acceptance-standing`. (An earlier version of this
+  sentence claimed a contest was "by construction never simultaneous with the other two"; that
+  was false for the refuted case and is corrected in the round 3 accuracy correction below.)
 - **What is final and what can return.** Refutation and supersession are irreversible acts, so
   those standings are final. A contest resolves only by an explicit act (a refuting
   verification or a supersession of the OTHER side); resolved in the record's favour, the
@@ -390,7 +405,14 @@ with the acceptance row still readable; and a second acceptor on that record was
 current standing) with the acceptance count pinned at 1 — a refusal in both directions, now
 for the true cause. `TruthRecordView` gained one additive categorical field
 (`acceptanceStanding`). No test was deleted or relaxed; no `counts` pin, no `ROOM_SECTIONS`
-change, no `HQ_SNAPSHOT_VERSION` bump, no route-table or write-surface change.
+change, no `HQ_SNAPSHOT_VERSION` bump, no route-table or write-surface change. The round 3
+accuracy correction RENAMED one test in `truth-acceptance-standing` to what it proves (the
+pure-ladder precedence test had claimed a contest is never simultaneous with a refutation, which
+is false), REPLACED its one vacuous assertion (`contested === false` on two records that no
+contradiction touched) with a genuine one (a live record now contradicts both superseded
+records and each contradiction is pinned `resolved_by_supersession`), and ADDED one test
+pinning the refuted-and-contested co-occurrence through the facade. Every assertion the renamed
+test already carried is unchanged; no source line changed; no test was deleted or relaxed.
 
 ## Deployment runbook (configuration acts, never automatic)
 
@@ -431,13 +453,16 @@ inert static markup, forms only under grants, record from the page, contradictio
 limitations + step-up refusal then acceptance with password, entity lookup, non-Founder off +
 hostile text inert), hq-host `host-contract` (+2: Fastify-wired record/entity/query-scan/
 self-verify/accept-refusal arc, NO_IDENTITY sweep of all five truth routes),
-`truth-acceptance-standing` (12, review round 3: accepted → later refuted; accepted → later
-confirmed + refuted; accepted → later unresolved contradiction and its explicit resolution
-restoring the standing; accepted → superseded; the pure ladder's precedence and the
-history-based tier; supersession authority never lowered for the once-accepted and the
-once-verified, with the never-verified needing no gate; re-acceptance of a degraded record
-refused through the ordinary ladder in all three shapes and a standing one still deduplicating;
-snapshot counts, Founder Office, Company Memory and the entity headline agreeing), plus one
+`truth-acceptance-standing` (13, review round 3 and its accuracy correction: accepted → later
+refuted; accepted → later confirmed + refuted; accepted → later refuted AND contradicted by a
+live rival, the two preconditions broken at once and the basis named first with the contest
+still visible; accepted → later unresolved contradiction and its explicit resolution restoring
+the standing; accepted → superseded; the pure ladder's precedence with a superseded record
+pinned out of every contradiction, and the history-based tier; supersession authority never
+lowered for the once-accepted and the once-verified, with the never-verified needing no gate;
+re-acceptance of a degraded record refused through the ordinary ladder in all three shapes and
+a standing one still deduplicating — the one preserved-behaviour pin, which passes pre-fix by
+design; snapshot counts, Founder Office, Company Memory and the entity headline agreeing), plus one
 `truth-console` test (the card shows the acceptance as history beside the state derived now,
 and draws no accept control). Full-matrix results
 are recorded in the wave PR; merge stays gated on independent review and the Founder.
@@ -551,7 +576,7 @@ a regression test verified to fail against the code before it:
   staying truthfully `contested` while `withheldFounderOnlyRelations > 0` (see Known
   limitations).
 
-## Independent review round 3 — correction (head `ba16bf3` → this head)
+## Independent review round 3 — correction (head `ba16bf3` → `6849f87`)
 
 A third independent review of head `ba16bf3` returned one Medium against Phase 7 (the three
 recorded Lows and the Phase 8 gateway are untouched by this round):
@@ -579,9 +604,69 @@ recorded Lows and the Phase 8 gateway are untouched by this round):
   to the ordinary ladder inside the write lock and is refused on the record's current standing,
   never answered "already accepted"; a belt-and-braces refusal before the insert closes any
   future reordering, beside the engine's one-acceptance index. Pinned in the new suite
-  `truth-acceptance-standing` (12) and one new `truth-console` test; every behavioural
-  assertion was run against the pre-fix code and failed on its substantive claim (`'accepted'`
-  where `'claimed'`/`'verified'` is now derived, the dedupe answering `ok`, `byState.accepted: 1`,
-  the analyst allowed to supersede once-verified truth), and the two supersession-authority pins
-  were additionally run against a naive state-based gate and failed there (the analyst allowed
+  `truth-acceptance-standing` (12 at that head; 13 after the accuracy correction below) and one
+  new `truth-console` test. **Measured pre-fix result: 11 of the 12 tests fail against the
+  pre-fix code (`ba16bf3`), not all 12.** Method: `packages/headquarter` at `ba16bf3` was
+  extracted with `git archive` into a scratch directory (no checkout), the suite as committed
+  at `6849f87` was copied in, and the assertions on the then-absent additive field
+  `acceptanceStanding` were neutralised (pure field assertions deleted, the key stripped from
+  `toMatchObject` shapes) so that only behavioural claims were measured — run raw, all 12 fail,
+  but 9 of them only on `expected undefined to be 'standing'`, i.e. the field's absence. With
+  that noise removed, 11 fail on their substantive claim (`'accepted'` where `'claimed'`/
+  `'verified'`/`'observed'` is now derived, a refusal expected where the pre-fix code answered
+  `ok`, `byState.accepted: 1`, the analyst allowed to supersede once-verified truth; the
+  history-based-tier test fails on its `state` assertion before reaching `establishedTruthTier`,
+  which did not exist pre-fix and so cannot be evaluated there). The twelfth — *"a standing
+  acceptance still deduplicates for its acceptor and conflicts for another — including after a
+  contest resolved in its favour"* — PASSES against the pre-fix code on its substantive claim:
+  it is a deliberate non-regression pin of behaviour the correction preserved (dedupe/conflict
+  while the acceptance stands), not a regression pin. The earlier wording of this paragraph
+  said "every behavioural assertion … failed"; that was an overstatement. The message of commit
+  `9bb44c6` carries the same overstatement and cannot be corrected — history is not rewritten —
+  so this document is the correction of record. The two supersession-authority pins were
+  additionally run against a naive state-based gate and failed there (the analyst allowed
   through) before passing against the history-based one.
+
+## Independent review round 3 — accuracy corrections (head `6849f87` → this head)
+
+An independent review of head `6849f87` returned PASS (0 Critical / 0 High / 0 Medium) on the
+round 3 correction and three Low **accuracy** defects — no behavioural bug. All three are
+corrected here; no source line under `src/` changed, and nothing in Phase 8, the three recorded
+Low residuals, or the accepted Phase 1–6 code was touched.
+
+- **Low 1 — a false mechanical claim in this document.** The current-standing rule said a
+  contest was "by construction never simultaneous with the other two (a refuted or superseded
+  record is `out` of every contradiction)". False for the refuted case: `standingOf` sets
+  `refuted` only for a verification summary of exactly `refuted`, so a record with summary
+  `contested` (confirmed AND refuted) is not out and `judgeContradiction` still returns
+  `unresolved` against a live rival. Reproduced through the facade before rewording (claim →
+  confirm → accept → refute → live rival contradicts): `{state: 'claimed', verification:
+  'contested', contested: true, lifecycle: 'current', acceptanceStanding:
+  'verification_refuted', acceptanceDigest: null}`. **Correction:** the sentence now states
+  what the rule does — the preconditions can break together, the ladder is basis-first and
+  names the first broken one, `superseded` and `contested` genuinely never co-occur (a
+  superseded record IS out), and nothing is hidden because the view, the console chip, the
+  accept ladder and the snapshot all still carry the contest beside the named standing.
+- **Low 2 — a test named for that false property, with a vacuous supporting assertion.** The
+  pure-ladder test in `truth-acceptance-standing` ended "…and a contest is by construction never
+  simultaneous with either", supported only by `contested === false` on records `A` and `B` —
+  vacuous, since neither appeared in any `contradicts` relation. **Correction:** RENAMED to
+  what its body proves (verification_refuted before superseded; a superseded record is out of
+  every contradiction, so superseded and contested never co-occur); the vacuous loop is
+  REPLACED by a genuine one — a live record `F` now contradicts the superseded `A` and `B`, and
+  the test asserts each contradiction resolves `resolved_by_supersession` with `contested:
+  false` on both and on `F`; and ONE test ADDED through the facade pinning the co-occurrence:
+  `verification: 'contested'` with `contested: true`, `state: 'claimed'` (born state),
+  `lifecycle: 'current'`, `acceptanceStanding: 'verification_refuted'`, `acceptanceDigest:
+  null`, the `contradictions[]` entry `unresolved`, the rival contested, the list filter and
+  entity headline agreeing, re-acceptance refused `truth_not_verified` with the standing in
+  `details`, and the snapshot at `byState.accepted: 0` / `unresolvedContradictions: 1`. Suite
+  count 12 → 13. The added test was run against `ba16bf3` by the same method and fails there on
+  its `state` assertion (`'accepted'` where `'claimed'` is derived), so the measured pre-fix
+  result after this correction is 12 of 13, with the same single preserved-behaviour pass. No
+  test deleted or relaxed; every prior assertion in the renamed test stands.
+- **Low 3 — an overstated evidence claim.** The round 3 entry said every behavioural assertion
+  in the new suite failed pre-fix; independently re-measured at 11 of 12 (method and the
+  preserved-behaviour exception recorded in the round 3 entry above). Corrected in place; the
+  `9bb44c6` commit message keeps the overstatement and this document is the correction of
+  record.
