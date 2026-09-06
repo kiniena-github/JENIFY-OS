@@ -26,7 +26,18 @@ import {
   type RelatedRefs,
 } from '../archive/schema.js';
 
-/** What a piece of company memory captures. */
+/**
+ * What a piece of company memory captures.
+ *
+ * Phase 5 additions (issue #265), all additive so every stored row keeps its
+ * meaning: `founder_note` (a note the Founder recorded directly),
+ * `source_material` (a pointer-plus-description of an external source — the
+ * material itself stays at its sourceRefs, never copied), and `summary` (a
+ * DERIVED record that compresses other memory records; it must name them in
+ * `derivedFrom`, and recording one never alters or deletes the originals).
+ * Observed system facts continue to use `evidence_note` — an observation is a
+ * note about evidence, not a new epistemic tier.
+ */
 export const MEMORY_KINDS = [
   'decision',
   'rationale',
@@ -36,6 +47,9 @@ export const MEMORY_KINDS = [
   'dependency',
   'next_action',
   'evidence_note',
+  'founder_note',
+  'source_material',
+  'summary',
 ] as const;
 
 export type MemoryKind = (typeof MEMORY_KINDS)[number];
@@ -72,7 +86,27 @@ export interface MemoryRecord {
   recorded: DatedValue;
   /** Provenance only — see module doc comment. Never treat as ownership. */
   recordedBy: string;
+  /**
+   * Free-text project LABEL (the Phase 4 wording: labels stay labels). This
+   * field is NEVER matched against the canonical `hq_projects` register —
+   * `projectId` below is the canonical reference.
+   */
   project: string;
+  /**
+   * Canonical entity references (Phase 5, issue #265). Each names a real row
+   * in `hq_missions` / `hq_projects` / `op_tasks`; existence is validated at
+   * the facade (the store knows only its own table). All optional — memory
+   * without an entity link is global/company memory.
+   */
+  missionId?: string | null;
+  projectId?: string | null;
+  taskId?: string | null;
+  /**
+   * Memory-record ids this record was DERIVED from (Phase 5). Required
+   * non-empty for kind 'summary' — a summary must name its sources, and the
+   * named records are retained untouched; a summary is never a replacement.
+   */
+  derivedFrom?: string[];
   /** Cross-links to issues/PRs/commits/artifacts (reused RelatedRefs). */
   related: RelatedRefs;
   /** Pointers to evidence — locations, never copies (mirrors ArchiveRecord.sourceRef). */
@@ -121,6 +155,26 @@ export function validateMemoryRecord(record: MemoryRecord): string[] {
   if (!Array.isArray(record.tags)) errors.push('tags must be an array');
   if (!isMemoryPrivacy(record.privacy)) {
     errors.push(`privacy must be one of: ${MEMORY_PRIVACY_LEVELS.join(', ')}`);
+  }
+  for (const [name, value] of [
+    ['missionId', record.missionId],
+    ['projectId', record.projectId],
+    ['taskId', record.taskId],
+  ] as const) {
+    if (value !== undefined && value !== null && (typeof value !== 'string' || value.length === 0)) {
+      errors.push(`${name} must be a non-empty string when stated`);
+    }
+  }
+  if (record.derivedFrom !== undefined) {
+    if (
+      !Array.isArray(record.derivedFrom) ||
+      record.derivedFrom.some((id) => typeof id !== 'string' || id.length === 0)
+    ) {
+      errors.push('derivedFrom must be an array of non-empty memory record ids');
+    }
+  }
+  if (record.kind === 'summary' && (record.derivedFrom ?? []).length === 0) {
+    errors.push('a summary must name the records it derives from (non-empty derivedFrom)');
   }
   return errors;
 }

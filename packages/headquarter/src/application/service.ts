@@ -427,10 +427,12 @@ import {
   missionCommandCapabilityState,
   missionCommandContractDrift,
   missionCommandIdempotencyKey,
+  missionBrowserView,
   missionSchemaPresent,
   readMissionIntentEntries,
   readMissionRecord,
   type LinkedTaskLookup,
+  type MissionBrowserView,
   type MissionIntentEntry,
   type MissionRecord,
 } from './mission-command.js';
@@ -458,8 +460,10 @@ import {
   projectCommandCapabilityState,
   projectCommandContractDrift,
   projectCommandIdempotencyKey,
+  projectBrowserView,
   projectCommandSchemaPresent,
   readProjectRecord,
+  type ProjectBrowserView,
   type ProjectRecord,
 } from './project-command.js';
 import {
@@ -482,6 +486,38 @@ import {
   type MemberHealth,
   type RegisterMemberInput,
 } from '../registry/members.js';
+import {
+  MAX_MEMORY_BODY_LENGTH,
+  MAX_MEMORY_LIST_ITEMS,
+  MAX_MEMORY_PROJECT_LABEL_LENGTH,
+  MAX_MEMORY_SOURCE_REF_LENGTH,
+  MAX_MEMORY_TAG_LENGTH,
+  MAX_MEMORY_TITLE_LENGTH,
+  MEMORY_COMMAND_CAPABILITY,
+  memoryBrowserView,
+  memoryCommandCapabilityState,
+  memoryCommandContractDrift,
+  memoryCommandIdempotencyKey,
+  type MemoryBrowserView,
+} from './memory-command.js';
+import {
+  assembleMemoryGroups,
+  memoryContextProvenance,
+  type EntityContextView,
+  type MemoryContextGroup,
+} from './context-assembly.js';
+import { ensureMemoryTables, memorySchemaPresent, MemoryStore, searchMemory } from '../memory/store.js';
+import {
+  MEMORY_KINDS,
+  MEMORY_PRIVACY_LEVELS,
+  isMemoryKind,
+  isMemoryPrivacy,
+  type MemoryKind,
+  type MemoryPrivacy,
+  type MemoryRecord as CompanyMemoryRecord,
+} from '../memory/schema.js';
+import type { SearchQuery } from '../archive/search.js';
+import { isArchiveStatus, type ArchiveStatus, type DatedValue, type RelatedRefs } from '../archive/schema.js';
 
 // ---- result contract ----
 
@@ -518,7 +554,9 @@ export type OpsErrorCode =
   | 'invalid_project_transition'
   | 'project_status_changed'
   | 'project_closed'
-  | 'workforce_registry_unconfigured';
+  | 'workforce_registry_unconfigured'
+  | 'unknown_memory'
+  | 'memory_conflict';
 
 export interface OpsError {
   code: OpsErrorCode;
@@ -527,6 +565,17 @@ export interface OpsError {
 }
 
 export type OpsResult<T> = { ok: true; data: T } | { ok: false; error: OpsError };
+
+/**
+ * Minimal browser-safe canonical element for a task-scoped context view:
+ * never the payload, never the result (the snapshot's no-task-payload rule).
+ */
+export interface TaskContextRef {
+  taskId: string;
+  capabilityId: string;
+  status: ActivityStatus;
+  createdAt: string;
+}
 
 function fail(code: OpsErrorCode, message: string, details?: Record<string, unknown>): OpsResult<never> {
   return { ok: false, error: { code, message, details } };
@@ -633,6 +682,67 @@ function missionList(
       return { ok: false, message: `${field} entries exceed ${MAX_MISSION_ITEM_LENGTH} characters` };
     }
     out.push(trimmed);
+  }
+  return { ok: true, value: out };
+}
+
+/**
+ * Trim + bound one memory list field with a caller-supplied per-entry bound
+ * (memory lists carry tags AND locators, whose sane lengths differ —
+ * `missionList` above hard-binds the mission bounds). `undefined` becomes an
+ * empty list: memory lists have no supplied-vs-absent distinction to record.
+ */
+function memoryList(
+  field: string,
+  values: string[] | undefined,
+  maxEntryLength: number,
+): { ok: true; value: string[]; message?: never } | { ok: false; message: string } {
+  if (values == null) return { ok: true, value: [] };
+  if (!Array.isArray(values)) return { ok: false, message: `${field} must be a list` };
+  if (values.length > MAX_MEMORY_LIST_ITEMS) {
+    return { ok: false, message: `${field} exceeds ${MAX_MEMORY_LIST_ITEMS} entries` };
+  }
+  const out: string[] = [];
+  for (const entry of values) {
+    if (typeof entry !== 'string') return { ok: false, message: `${field} entries must be text` };
+    const trimmed = entry.trim();
+    if (!trimmed) return { ok: false, message: `${field} entries must not be empty` };
+    if (trimmed.length > maxEntryLength) {
+      return { ok: false, message: `${field} entries exceed ${maxEntryLength} characters` };
+    }
+    out.push(trimmed);
+  }
+  return { ok: true, value: out };
+}
+
+/**
+ * Shape-check a RelatedRefs object from the boundary: known keys only, each a
+ * bounded array of the right primitive. Refusal names the offending key — an
+ * unknown key is refused rather than dropped, because silently discarding a
+ * cross-link would record less than the Founder stated.
+ */
+function memoryRelatedRefs(
+  value: RelatedRefs | undefined,
+): { ok: true; value: RelatedRefs; message?: never } | { ok: false; message: string } {
+  if (value == null) return { ok: true, value: {} };
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, message: 'related must be an object' };
+  }
+  const out: RelatedRefs = {};
+  for (const [key, entries] of Object.entries(value)) {
+    if (!['issues', 'pullRequests', 'commits', 'artifacts'].includes(key)) {
+      return { ok: false, message: `related.${key} is not a known reference list` };
+    }
+    if (!Array.isArray(entries) || entries.length > MAX_MEMORY_LIST_ITEMS) {
+      return { ok: false, message: `related.${key} must be a list of at most ${MAX_MEMORY_LIST_ITEMS} entries` };
+    }
+    const wantNumber = key === 'issues' || key === 'pullRequests';
+    for (const entry of entries) {
+      if (wantNumber ? typeof entry !== 'number' : typeof entry !== 'string') {
+        return { ok: false, message: `related.${key} entries have the wrong type` };
+      }
+    }
+    (out as Record<string, unknown>)[key] = [...entries];
   }
   return { ok: true, value: out };
 }
@@ -1112,6 +1222,16 @@ export class HeadquarterOperations {
   /** The Phase 4 project schema, same truth-recording as missions above. */
   readonly #projectStorePresent: boolean;
 
+  /** The Phase 5 memory schema, same truth-recording as missions above. */
+  readonly #memoryStorePresent: boolean;
+
+  /**
+   * The Phase 5 company-memory store (issue #120 wired by #265), or null over
+   * a read-only pre-Phase-5 file. `#private` and read by the memory facade
+   * methods ONLY — no gate, grant, policy or enforcement path consults it.
+   */
+  readonly #memory: MemoryStore | null;
+
   /**
    * The Phase 4 workforce lifecycle registry (or null: unconfigured, stated).
    * `#private` and read by the workforce facade methods ONLY — never by
@@ -1153,16 +1273,26 @@ export class HeadquarterOperations {
     ensureApplicationSchema(db);
     ensureMissionCommandSchema(db);
     ensureProjectCommandSchema(db);
-    // A writable construction just ensured the mission and project tables. A
-    // READ-ONLY one (the hq:snapshot path) may be observing a pre-Phase-3/4
-    // file that has none — the ensures above deliberately write nothing
-    // through a read-only handle — so record what is actually there and let
-    // every mission/project read answer truthfully instead of throwing at
-    // the first prepare.
+    ensureMemoryTables(db);
+    // A writable construction just ensured the mission/project/memory tables.
+    // A READ-ONLY one (the hq:snapshot path) may be observing an older file
+    // that has some or none of them — the ensures above deliberately write
+    // nothing through a read-only handle — so record what is actually there
+    // and let every read answer truthfully instead of throwing at the first
+    // prepare.
     this.#missionStorePresent = db.readonly ? missionSchemaPresent(db) : true;
     this.#projectStorePresent = db.readonly ? projectCommandSchemaPresent(db) : true;
+    this.#memoryStorePresent = db.readonly ? memorySchemaPresent(db) : true;
     this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
+    // Company memory (Phase 5, issue #265): the issue-#120 store, finally
+    // wired. Constructed ONLY when the schema exists (a read-only pre-Phase-5
+    // file has no table and the reads answer empty/null truthfully). The
+    // onEvent hook lands memory audit entries in hq_events via the store —
+    // live for the first time.
+    this.#memory = this.#memoryStorePresent
+      ? new MemoryStore(db, (e) => this.#store.appendEvent(e))
+      : null;
     // The approval mutations are handed to whoever CONSTRUCTS the queue and to
     // nobody else, so they are unreachable from a queue handle a worker holds.
     // When a queue is supplied (tests, composition), no grant arrives and this
@@ -3929,6 +4059,25 @@ export class HeadquarterOperations {
     );
   }
 
+  #resolveMemoryRecorder(actor: string, action: string): OpsResult<never> | null {
+    return this.#resolveFounderGateActor(
+      actor,
+      action,
+      MEMORY_COMMAND_CAPABILITY.id,
+      'recording company memory',
+    );
+  }
+
+  #memoryCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      MEMORY_COMMAND_CAPABILITY.id,
+      memoryCommandCapabilityState,
+      memoryCommandContractDrift,
+      'recording company memory',
+    );
+  }
+
   #missionRecord(id: string): MissionRecord | null {
     if (!this.#missionStorePresent) return null;
     return readMissionRecord(
@@ -4275,6 +4424,383 @@ export class HeadquarterOperations {
   #projectRecord(id: string): ProjectRecord | null {
     if (!this.#projectStorePresent) return null;
     return readProjectRecord(this.#db, id, this.#capabilityFromStore(PROJECT_COMMAND_CAPABILITY.id));
+  }
+
+  // ---- company memory (Phase 5 — Context + Mission Memory, #265) ----
+
+  /**
+   * Record one company memory entry — the ONE write path into hq_memory from
+   * the application layer (issue #120's store, wired at last).
+   *
+   * A memory record is knowledge, never authority and never execution: it
+   * changes no task status, burns no approval, dispatches nothing, and no
+   * gate anywhere reads it. Founder-only via the `hq.memory_command`
+   * originate grant and the fail-closed capability trio. "Changing" memory is
+   * recording a successor via `supersedes`; the store is insert-only BY
+   * ENGINE, so history cannot be rewritten by anyone, including this method.
+   *
+   * Order (the createProject/commandMission shape): bounds/vocabulary →
+   * actor gate → capability gate → entity-existence probes (AFTER authority —
+   * no existence oracle) → secret scan → derived idempotency key → one
+   * IMMEDIATE reserve transaction (dedupe read, supersede/derivation
+   * validation, insert, hq_events audit, op_evidence entry — atomically).
+   */
+  recordMemory(input: {
+    kind: MemoryKind;
+    title: string;
+    body: string;
+    /** Free-text project LABEL, never matched against the register. */
+    project: string;
+    missionId?: string;
+    projectId?: string;
+    taskId?: string;
+    related?: RelatedRefs;
+    sourceRefs?: string[];
+    tags?: string[];
+    derivedFrom?: string[];
+    supersedes?: string;
+    privacy?: MemoryPrivacy;
+    /** Default CURRENT. SUPERSEDED refused — history is earned by a successor, not asserted. */
+    status?: ArchiveStatus;
+    recorded?: DatedValue;
+    /** Resolved principal id. Set by the boundary, never read from a body. */
+    requestedBy: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ record: MemoryBrowserView; deduplicated: boolean }> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    if (!isMemoryKind(input.kind)) {
+      return fail('invalid_input', `kind must be one of: ${MEMORY_KINDS.join(', ')}`);
+    }
+    const privacy = input.privacy ?? 'internal';
+    if (!isMemoryPrivacy(privacy)) {
+      return fail('invalid_input', `privacy must be one of: ${MEMORY_PRIVACY_LEVELS.join(', ')}`);
+    }
+    const status = input.status ?? 'CURRENT';
+    if (!isArchiveStatus(status)) {
+      return fail('invalid_input', 'status is not a known archive status');
+    }
+    if (status === 'SUPERSEDED') {
+      return fail(
+        'invalid_input',
+        'a record cannot be born SUPERSEDED — supersession is earned by recording a successor',
+      );
+    }
+    const title = missionText('title', input.title, MAX_MEMORY_TITLE_LENGTH, true);
+    if (!title.ok) return fail('invalid_input', title.message);
+    const body = missionText('body', input.body, MAX_MEMORY_BODY_LENGTH, true);
+    if (!body.ok) return fail('invalid_input', body.message);
+    const project = missionText('project', input.project, MAX_MEMORY_PROJECT_LABEL_LENGTH, true);
+    if (!project.ok) return fail('invalid_input', project.message);
+    const tags = memoryList('tags', input.tags, MAX_MEMORY_TAG_LENGTH);
+    if (!tags.ok) return fail('invalid_input', tags.message);
+    const sourceRefs = memoryList('sourceRefs', input.sourceRefs, MAX_MEMORY_SOURCE_REF_LENGTH);
+    if (!sourceRefs.ok) return fail('invalid_input', sourceRefs.message);
+    const derivedFrom = memoryList('derivedFrom', input.derivedFrom, MAX_MEMORY_SOURCE_REF_LENGTH);
+    if (!derivedFrom.ok) return fail('invalid_input', derivedFrom.message);
+    const related = memoryRelatedRefs(input.related);
+    if (!related.ok) return fail('invalid_input', related.message);
+    if (input.kind === 'summary' && derivedFrom.value.length === 0) {
+      return fail('invalid_input', 'a summary must name the records it derives from (derivedFrom)');
+    }
+    const missionId = input.missionId?.trim() || null;
+    const projectId = input.projectId?.trim() || null;
+    const taskId = input.taskId?.trim() || null;
+    const supersedes = input.supersedes?.trim() || null;
+
+    const refusedRecorder = this.#resolveMemoryRecorder(input.requestedBy, 'record memory');
+    if (refusedRecorder) return refusedRecorder;
+    const refusedCapability = this.#memoryCapabilityGate('record memory');
+    if (refusedCapability) return refusedCapability;
+
+    // Entity refs must name real canonical rows — existence probed only after
+    // the authority gates above (no existence oracle for the ungranted).
+    if (missionId && !this.#db.prepare(`SELECT 1 FROM hq_missions WHERE id = ?`).get(missionId)) {
+      return fail('unknown_mission', `Unknown mission: ${missionId}`);
+    }
+    if (projectId && !this.#db.prepare(`SELECT 1 FROM hq_projects WHERE id = ?`).get(projectId)) {
+      return fail('unknown_project', `Unknown project: ${projectId}`);
+    }
+    if (taskId && !this.#db.prepare(`SELECT 1 FROM op_tasks WHERE id = ?`).get(taskId)) {
+      return fail('unknown_task', `Unknown task: ${taskId}`);
+    }
+
+    // Everything that will be PERSISTED is scanned before anything is written
+    // (the store scans again — deliberate defense in depth, not redundancy).
+    try {
+      assertNoSecretLikeContent({
+        title: title.value,
+        body: body.value,
+        project: project.value,
+        tags: tags.value,
+        sourceRefs: sourceRefs.value,
+        related: related.value,
+      });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+
+    const memory = this.#memory;
+    if (!memory) return fail('invalid_input', 'memory store unavailable on this database handle');
+    const recorded: DatedValue =
+      input.recorded ?? { date: nowIso(), confidence: 'exact', source: 'HQ control boundary' };
+    const idempotencyKey = memoryCommandIdempotencyKey({
+      requestedBy: input.requestedBy,
+      kind: input.kind,
+      title: title.value!,
+      body: body.value!,
+      project: project.value!,
+      missionId,
+      projectId,
+      taskId,
+      supersedes,
+      derivedFrom: derivedFrom.value,
+      privacy,
+      idempotencyKey: input.idempotencyKey ?? null,
+    });
+
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let dedupedTo: string | null = null;
+    let recordedId: string | null = null;
+    privileged.reserve(() => {
+      const existing = memory.findIdByIdempotencyKey(idempotencyKey);
+      if (existing) {
+        dedupedTo = existing;
+        return;
+      }
+      if (supersedes) {
+        const predecessor = memory.get(supersedes);
+        if (!predecessor) {
+          refusal = { code: 'unknown_memory', message: `Cannot supersede unknown memory record: ${supersedes}` };
+          return;
+        }
+        if (predecessor.status !== 'CURRENT') {
+          refusal = {
+            code: 'memory_conflict',
+            message: `Cannot supersede memory record ${supersedes}: it is ${predecessor.status}, not CURRENT`,
+          };
+          return;
+        }
+      }
+      for (const dep of derivedFrom.value) {
+        if (!memory.get(dep)) {
+          refusal = { code: 'unknown_memory', message: `Cannot derive from unknown memory record: ${dep}` };
+          return;
+        }
+      }
+      try {
+        const record = memory.record({
+          kind: input.kind,
+          title: title.value!,
+          body: body.value!,
+          status,
+          recorded,
+          recordedBy: input.requestedBy,
+          project: project.value!,
+          missionId,
+          projectId,
+          taskId,
+          derivedFrom: derivedFrom.value,
+          related: related.value,
+          sourceRefs: sourceRefs.value,
+          tags: tags.value,
+          supersedes,
+          privacy,
+          idempotencyKey,
+        });
+        recordedId = record.id;
+      } catch (error) {
+        const message = errorMessage(error);
+        refusal = {
+          code: message.startsWith('Invalid memory record') ? 'invalid_input' : 'memory_conflict',
+          message,
+        };
+        return;
+      }
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'memory_recorded',
+        payload: {
+          memoryId: recordedId,
+          memoryKind: input.kind,
+          supersedes,
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    if (dedupedTo) {
+      return ok({ record: memoryBrowserView(memory.get(dedupedTo)!), deduplicated: true });
+    }
+    return ok({ record: memoryBrowserView(memory.get(recordedId!)!), deduplicated: false });
+  }
+
+  /** One record by id, or null (including over a pre-Phase-5 read-only file). */
+  getMemoryRecord(id: string): MemoryBrowserView | null {
+    if (!id || !this.#memory) return null;
+    const record = this.#memory.get(id);
+    return record ? memoryBrowserView(record) : null;
+  }
+
+  /**
+   * Browser-safe memory listing, newest recorded first. Empty over a
+   * pre-Phase-5 file — zero records means zero records; nothing is invented.
+   * Privacy is NOT filtered here: the Founder-gated route may show
+   * founder_only, the snapshot artifact excludes it — each reading layer
+   * enforces its own disclosure, per the schema's stated rule.
+   */
+  listMemory(filter?: {
+    kind?: MemoryKind;
+    status?: ArchiveStatus;
+    missionId?: string;
+    projectId?: string;
+    taskId?: string;
+    project?: string;
+  }): MemoryBrowserView[] {
+    if (!this.#memory) return [];
+    let records = this.#memory.listAll();
+    if (filter?.kind) records = records.filter((r) => r.kind === filter.kind);
+    if (filter?.status) records = records.filter((r) => r.status === filter.status);
+    if (filter?.missionId) records = records.filter((r) => r.missionId === filter.missionId);
+    if (filter?.projectId) records = records.filter((r) => r.projectId === filter.projectId);
+    if (filter?.taskId) records = records.filter((r) => r.taskId === filter.taskId);
+    if (filter?.project) records = records.filter((r) => r.project === filter.project);
+    return records
+      .sort((a, b) => b.recorded.date.localeCompare(a.recorded.date) || a.id.localeCompare(b.id))
+      .map(memoryBrowserView);
+  }
+
+  /**
+   * Deterministic text search over memory via the EXISTING archive engine
+   * (asArchiveRecord/searchMemory — no second index, no semantic scoring).
+   */
+  searchMemoryRecords(query: SearchQuery): { hits: { record: MemoryBrowserView; score: number }[]; total: number } {
+    if (!this.#memory) return { hits: [], total: 0 };
+    const all = this.#memory.listAll();
+    const byProjectedId = new Map<string, CompanyMemoryRecord>(all.map((r) => [`memory-${r.id}`, r]));
+    const hits = searchMemory(all, query).flatMap((hit) => {
+      const record = byProjectedId.get(hit.record.id);
+      return record ? [{ record: memoryBrowserView(record), score: hit.score }] : [];
+    });
+    return { hits, total: hits.length };
+  }
+
+  /**
+   * Mission-scoped context: the canonical mission (its existing browser
+   * projection — context invents no second projection) plus entity-linked
+   * memory in deterministic groups. READ-TIME composition only: this method
+   * writes nothing, and re-reading the mission afterwards returns identical
+   * canonical truth. Context informs; it never grants.
+   */
+  getMissionContext(missionId: string): OpsResult<EntityContextView<MissionBrowserView>> {
+    if (!missionId) return fail('invalid_input', 'missionId is required');
+    const mission = this.getMission(missionId);
+    if (!mission) return fail('unknown_mission', `Unknown mission: ${missionId}`);
+    const at = nowIso();
+    const memory = this.#memory;
+    const taskIds = mission.planItems
+      .map((item) => item.taskId)
+      .filter((taskId): taskId is string => taskId != null);
+    const groups = assembleMemoryGroups({
+      direct: memory?.listByMissionId(missionId) ?? [],
+      directLinkage: 'mission',
+      taskLinked: memory ? taskIds.flatMap((taskId) => memory.listByTaskId(taskId)) : [],
+      projectLinked:
+        memory && mission.projectId ? memory.listByProjectRef(mission.projectId) : [],
+      lookup: (id) => memory?.get(id) ?? null,
+    });
+    return ok({
+      scope: 'mission',
+      entityId: missionId,
+      assembledAt: at,
+      entity: {
+        provenance: {
+          mode: 'live',
+          source: 'hq_missions via HeadquarterOperations.getMission (canonical aggregate, browser projection)',
+          asOf: at,
+        },
+        data: missionBrowserView(mission),
+      },
+      memory: { provenance: memoryContextProvenance(`mission ${missionId}`, at), data: groups },
+    });
+  }
+
+  /** Project-scoped context — direct project-linked memory plus the one-hop related walk. */
+  getProjectContext(projectId: string): OpsResult<EntityContextView<ProjectBrowserView>> {
+    if (!projectId) return fail('invalid_input', 'projectId is required');
+    const project = this.getProject(projectId);
+    if (!project) return fail('unknown_project', `Unknown project: ${projectId}`);
+    const at = nowIso();
+    const memory = this.#memory;
+    const groups = assembleMemoryGroups({
+      direct: memory?.listByProjectRef(projectId) ?? [],
+      directLinkage: 'project',
+      lookup: (id) => memory?.get(id) ?? null,
+    });
+    return ok({
+      scope: 'project',
+      entityId: projectId,
+      assembledAt: at,
+      entity: {
+        provenance: {
+          mode: 'live',
+          source: 'hq_projects via HeadquarterOperations.getProject (canonical register, browser projection)',
+          asOf: at,
+        },
+        data: projectBrowserView(project),
+      },
+      memory: { provenance: memoryContextProvenance(`project ${projectId}`, at), data: groups },
+    });
+  }
+
+  /**
+   * Task-scoped context. The canonical element is a MINIMAL browser-safe ref
+   * — id, capability, status, createdAt — never the payload (the snapshot's
+   * no-task-payload rule applies to context too).
+   */
+  getTaskContext(taskId: string): OpsResult<EntityContextView<TaskContextRef>> {
+    if (!taskId) return fail('invalid_input', 'taskId is required');
+    const row = this.#db
+      .prepare(`SELECT id, capability_id, status, created_at FROM op_tasks WHERE id = ?`)
+      .get(taskId) as
+      | { id: string; capability_id: string; status: string; created_at: string }
+      | undefined;
+    if (!row) return fail('unknown_task', `Unknown task: ${taskId}`);
+    const at = nowIso();
+    const memory = this.#memory;
+    const groups = assembleMemoryGroups({
+      direct: memory?.listByTaskId(taskId) ?? [],
+      directLinkage: 'task',
+      lookup: (id) => memory?.get(id) ?? null,
+    });
+    return ok({
+      scope: 'task',
+      entityId: taskId,
+      assembledAt: at,
+      entity: {
+        provenance: {
+          mode: 'live',
+          source: 'op_tasks minimal browser-safe columns (id, capability, status, createdAt — never the payload)',
+          asOf: at,
+        },
+        data: {
+          taskId: row.id,
+          capabilityId: row.capability_id,
+          status: row.status as ActivityStatus,
+          createdAt: row.created_at,
+        },
+      },
+      memory: { provenance: memoryContextProvenance(`task ${taskId}`, at), data: groups },
+    });
+  }
+
+  /**
+   * Whether this database carries the Phase 5 memory schema. False only for
+   * a read-only handle over a pre-Phase-5 file; memory reads then answer
+   * empty/null and the snapshot's memory provenance states the absence.
+   */
+  memoryStorePresent(): boolean {
+    return this.#memoryStorePresent;
   }
 
   // ---- task metadata (console labels + advisory assignment) ----

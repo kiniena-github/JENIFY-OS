@@ -103,10 +103,16 @@ export function generateHandoverPackage(db: HqDatabase, memoryStore: MemoryStore
     .map(toRef);
   const outcomeUnknownTaskIds = taskRows.filter((r) => r.status === 'outcome_unknown').map((r) => r.id);
 
-  const decisions = memoryStore.listCurrent().filter((r) => ownedBy(r, workerId));
-  const blockers = memoryStore.listCurrent('blocker').filter((r) => ownedBy(r, workerId));
-  const dependencies = memoryStore.listCurrent('dependency').filter((r) => ownedBy(r, workerId));
-  const nextActions = memoryStore.listCurrent('next_action').filter((r) => ownedBy(r, workerId));
+  // Privacy boundary (Phase 5, issue #265): a handover package is consumed by
+  // a SUCCESSOR WORKER, and `founder_only` marks records whose disclosure the
+  // reading layer must gate — so they never enter a worker-facing package,
+  // even when the departing worker recorded them itself. The Founder reads
+  // them through the Founder-gated memory surface instead.
+  const workerVisible = (r: MemoryRecord): boolean => ownedBy(r, workerId) && r.privacy !== 'founder_only';
+  const decisions = memoryStore.listCurrent().filter(workerVisible);
+  const blockers = memoryStore.listCurrent('blocker').filter(workerVisible);
+  const dependencies = memoryStore.listCurrent('dependency').filter(workerVisible);
+  const nextActions = memoryStore.listCurrent('next_action').filter(workerVisible);
 
   const refs = collectRefs(decisions);
   const evidence = new Set(refs.evidence);
