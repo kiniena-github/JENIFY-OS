@@ -29,6 +29,7 @@ import type { ApprovalRequest, ChatMessage } from '../contracts/modules.js';
 import type { WorkerDescriptor, WorkerRole } from '../contracts/workers.js';
 import type { ArchiveRecord } from '../archive/schema.js';
 import type { MonthlyGroup, EvolutionChain } from '../archive/views.js';
+import { MEMORY_KINDS, MEMORY_PRIVACY_LEVELS } from '../memory/schema.js';
 import type { TaskState } from './model.js';
 import type {
   FounderDashboard,
@@ -63,6 +64,7 @@ import {
   missionCommandConsoleScript,
   missionsConsoleScript,
   projectsConsoleScript,
+  memoryConsoleScript,
   workforceConsoleScript,
 } from './control-console.js';
 import {
@@ -1400,7 +1402,16 @@ ${tableWrap(
   const searchNote =
     'Search is literal token matching over title, summary, project, category and tags — there is no semantic model behind it. Filters and search apply to the results list and to the Evolution chains at the same time, so the page never shows a record as filtered out in one place and present in another.';
 
+  // Phase 5 (issue #265): the Company Memory live console. The static markup
+  // is a mount and a note — no control; the script builds everything after a
+  // real /session grant, exactly like the workforce console on specialists.
+  const liveMemory = `<div class="panel">
+<p class="readonly-note">The live company memory record (Phase 5): every durable memory entry with its provenance — recorded date and confidence, who recorded it, canonical mission/project/task links, supersede chains and summary derivations — read live from the same-origin control API. The record form appears only for a session the server granted it to. The store is insert-only by engine: memory is superseded, never rewritten.</p>
+<div data-memory-console></div>
+</div>`;
+
   const body = `${ARCHIVE_BANNER}
+${section('COMPANY MEMORY — LIVE RECORD', liveMemory, 'memory-live-section')}${memoryConsoleScript(MEMORY_KINDS, MEMORY_PRIVACY_LEVELS)}
 ${section('SEARCH', `<div class="panel">${filters}<p class="faint">${escapeHtml(searchNote)}</p></div>`)}
 ${section('RECORDS', `${results}${browse}`)}
 ${section('EVOLUTION', evolutionHtml)}

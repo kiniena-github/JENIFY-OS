@@ -1794,3 +1794,63 @@ honest retitle; inactive workers filtered from the assign dropdown (server autho
 dual-registry anti-emptying pins named at both layers. Decisions entry appended; canonical
 doc updated. The exact corrected SHA, full-matrix results and honest deferrals are recorded
 on PR #263; next step is one fresh Opus 5 exact-head review.
+
+## Wave 1 — Phase 5 + 6: Context + Mission Memory, Real Mission Orchestrator (local Fable integrator, 2026-09-06)
+
+**2026-09-06.** Branch `local/phase-5-6-context-memory-orchestrator` from accepted main
+`ccaaa21` (issue #265 — the combined-wave handoff; this lane is the sole Wave 1 main
+integrator; existing subscriptions only, no paid API, $0 extra spend). Main builder:
+genuine Fable 5 (`claude-fable-5`), stated per the model requirement.
+
+**Phase 5 — what was built.** The issue-#120 Company Memory module — complete, tested and
+constructed nowhere in src/ — WIRED as the one memory truth, never duplicated: additive
+kinds (founder_note / source_material / summary with mandatory real sources), canonical
+mission/project/task entity refs (validated at the facade, after authority), insert-only BY
+ENGINE (content-column UPDATE and DELETE abort; status only CURRENT->SUPERSEDED; the SG
+BEFORE INSERT guard closes REPLACE/UPSERT; readonly-safe ensure + presence probe), the
+Founder-gated `hq.memory_command` write path (bounds -> gates -> entity existence -> secret
+scan -> derived-key dedupe -> one IMMEDIATE transaction with hq_events + op_evidence),
+deterministic read-time context assembly (mission -> task -> project -> one-hop related,
+bounded with honest totals, provenance on every element, zero writes, no global dump), the
+memory routes (GET/POST /memory, /memory/search, /memory/context — founder_only carried
+only through the Founder gate), the identity-scanned ControlRequest.query widening, the
+required snapshot memory section (artifact excludes founder_only with stated counts; no
+version bump), room 14 Company Memory rebound later_phase -> live (purpose text drops "Ask
+Jenify" honestly), the archive.html live memory console, and the handover founder_only
+exclusion (a real pre-existing gap, closed).
+
+**Phase 6 — what was built.** The first REAL Mission Orchestrator, Founder-commanded and
+bounded: write-once Founder work specs on plan items (object-form `plan` at command,
+`specifyPlanItems` at amendment; full spec verbatim in the append-only intent body; payload
+server-side only; digest gains specs only when stated — stored keys keep deduping), the
+`hq.mission_orchestrate` trio, POST /missions/orchestrate with mode preview|apply. Preview
+is a pure read (zero writes, evidence-free eligibility). Apply runs in ONE IMMEDIATE
+transaction — createTask through THE approved origination path (payload verbatim, policy
+deciding queued vs needs_approval, derived key -> queue dedupe) then the engine's
+write-once link, with INSERT-only run records (full SG trigger set), an `orchestrated`
+mission event and `mission_orchestrated` evidence, atomically — and takes STEP-UP (the
+recorded Phase>=6 re-evaluation, resolved as a demand; preview exempt). Kill switch:
+apply refuses wholesale under global/orchestrate scope, per-item under a spec scope;
+preview reports. Categorical MissionExecutionState (counts, statuses, blockers,
+ready_review RECOMMENDATION that transitions nothing; no percentage anywhere), the Mission
+Room orchestration panel + derived x/y-linked row summary, CLI registration for both new
+capabilities. Wave 1 records no assignment intent and writes nothing into hq_memory — both
+pinned. FIFO proven behaviorally again at the orchestrated boundary.
+
+**Boundary and debt.** The P5/P6 contract is stated in the canonical doc and proven by the
+seam suite (hostile memory record changes no verdict; retrieval pure; orchestrator never
+writes memory; reserved-key smuggling refused at any payload depth) and the full
+directive-section-15 arc on a real reopened file (context relevance, single-creation,
+restart identity, rerun no-duplication, seq-0 byte-identity, kill-switch honesty).
+Accepted Phase 4 Lows dispositioned: #1 pinned at the orchestration boundary; #2/#3
+untouched recorded follow-ups; #4 preserved; #5 narrowing stays OFF; #6 no reactivation.
+Mission watchdog stays unwired; no schedule trigger; no Phase 7+ machinery.
+
+**Local verification on the Founder workstation (Windows).** Full headquarter suite green
+at every layer commit — final 115 files / 2256 tests (baseline 101/2158; every pin update
+deliberate and recorded in the pin ledger of the canonical doc). hq-host 23 files green
+incl. the new Fastify-wired Wave 1 composition; only the 6 known POSIX-only persistence
+failures on Windows (Ubuntu exact-head CI authoritative). Typechecks clean (headquarter,
+hq-host). Full-matrix results, evidence artifacts and the exact frozen SHA are recorded on
+the Wave 1 PR; merge remains gated on the fresh Opus 5 exact-head review, the Sol/Codex
+gate and the Founder.

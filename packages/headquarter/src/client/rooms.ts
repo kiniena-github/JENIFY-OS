@@ -77,6 +77,7 @@ export const ROOM_SECTIONS = [
   'analytics',
   'security',
   'founder',
+  'memory',
 ] as const;
 
 /**
@@ -336,14 +337,16 @@ export const HQ_ROOMS: readonly HqRoom[] = [
     id: 'company-memory',
     ordinal: 14,
     name: 'Company Memory',
-    purpose: 'Ask Jenify: the retrieval layer over HQ’s own record.',
+    // Reworded at the Phase 5 rebind (issue #265, recorded in
+    // docs/JENIFY_DECISIONS.md): the earlier "Ask Jenify" phrasing promised a
+    // natural-language layer that remains a later, Founder-gated milestone.
+    // What EXISTS now — and what this room truthfully shows — is the durable
+    // company memory record itself, with provenance and deterministic search.
+    purpose: 'Company memory: recorded decisions, notes, sources and summaries over HQ’s own record.',
     binding: {
-      kind: 'later_phase',
-      reason:
-        'The AI layer is a later roadmap phase and is gated on the Founder AI milestone. HQ’s ' +
-        'memory module has no query surface on the authenticated client boundary, and no ' +
-        'natural-language route exists on the control API. Drawing an ask box here would be a ' +
-        'button that cannot act.',
+      kind: 'live',
+      section: 'memory',
+      source: 'hq_memory via HeadquarterOperations.listMemory — the canonical company memory record',
     },
     placement: { ring: 2, slot: 4 },
     page: 'archive.html',

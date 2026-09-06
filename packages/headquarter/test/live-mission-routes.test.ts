@@ -135,7 +135,15 @@ describe('the write surface is stated, not inferred', () => {
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.missionLinkPlanItem);
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.workforceRoute);
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.workforceAssign);
-    expect(CONTROL_WRITE_ROUTES).toHaveLength(13);
+    // Phase 5 (issue #265): the one memory write — record/supersede. The two
+    // parameterized memory reads (search, context) are GETs and stay off the
+    // write surface.
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.memory);
+    // Phase 6 (issue #265): the orchestrate POST — preview is a pure read,
+    // but the route is a POST whose apply mode writes, so the whole route
+    // sits on the stated write surface.
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.missionOrchestrate);
+    expect(CONTROL_WRITE_ROUTES).toHaveLength(15);
   });
 });
 

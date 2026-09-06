@@ -115,6 +115,11 @@ describe('the room registry holds the seventeen approved destinations', () => {
         'analytics',
         'approvals',
         'command-room',
+        // Phase 5 (issue #265): Company Memory rebound later_phase → live on
+        // the new 'memory' section — the hq_memory store finally has a query
+        // surface on the authenticated boundary. Recorded in
+        // docs/JENIFY_DECISIONS.md.
+        'company-memory',
         'connections',
         'departments',
         'founder-office',
@@ -127,7 +132,7 @@ describe('the room registry holds the seventeen approved destinations', () => {
       ].sort(),
     );
     expect(HQ_ROOMS.filter((room) => room.binding.kind !== 'live').map((room) => room.id).sort()).toEqual(
-      ['company-memory', 'meeting-room', 'product-factory', 'research'].sort(),
+      ['meeting-room', 'product-factory', 'research'].sort(),
     );
   });
 

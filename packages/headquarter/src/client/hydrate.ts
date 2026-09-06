@@ -298,13 +298,24 @@ function missionRow(mission: HqStateDocument['missions']['data'][number]): RoomR
   ];
   if (mission.priority) chips.push({ label: mission.priority, tone: 'neutral' });
   if (mission.project) chips.push({ label: mission.project, tone: 'neutral' });
-  const openPlanItems = mission.planItems.filter((item) => item.state !== 'superseded').length;
+  // Phase 6 (issue #265): the derived execution summary, from per-item data
+  // this document already carries — counts, never a percentage. "unspecified"
+  // = live work items with no Founder work spec, which the orchestrator
+  // truthfully cannot action (nothing is parsed out of summaries).
+  const live = mission.planItems.filter((item) => item.state !== 'superseded');
+  const work = live.filter((item) => item.kind === 'work');
+  const linked = work.filter((item) => item.taskId != null).length;
+  const unspecified = work.filter((item) => item.taskId == null && item.specCapabilityId == null).length;
+  const execution =
+    work.length > 0
+      ? ` · ${linked}/${work.length} work item(s) linked${unspecified > 0 ? ` · ${unspecified} unspecified` : ''}`
+      : '';
   return {
     id: mission.id,
     primary: mission.title,
     secondary: mission.blockReason
       ? `${mission.objective} — blocked: ${mission.blockReason}`
-      : `${mission.objective} · ${openPlanItems} plan item(s) · updated ${mission.updatedAt}`,
+      : `${mission.objective} · ${live.length} plan item(s)${execution} · updated ${mission.updatedAt}`,
     chips,
   };
 }
@@ -815,6 +826,56 @@ function securitySection(state: HqStateDocument, session: ClientSession | null):
   };
 }
 
+function memorySection(state: HqStateDocument): Section {
+  // Phase 5 (issue #265): the Company Memory room, rebound from later_phase to
+  // the canonical hq_memory record. Everything here is a projection of rows
+  // the state document already carries; nothing is inferred, summarized on
+  // the fly, or invented. A summary shown here is a RECORD of kind 'summary'
+  // that names its sources — never a rendering-time compression.
+  const records = state.memory.data;
+  const current = records.filter((record) => record.status === 'CURRENT').length;
+  const summaries = records.filter((record) => record.kind === 'summary').length;
+  const founderOnly = records.filter((record) => record.privacy === 'founder_only').length;
+  return {
+    metrics: [
+      metric('Records', state.counts.memory, 'All company memory records, superseded history included. 0 means 0.', tone(state.counts.memory, 'info')),
+      metric('Current', current, 'Records not yet superseded, carried by this document.', tone(current, 'accent')),
+      metric('Superseded', records.length - current, 'History retained by the insert-only store — never rewritten, never deleted.', 'neutral'),
+      metric('Summaries', summaries, 'A summary is its own record; the originals it derives from are retained and linked.', tone(summaries, 'violet')),
+      metric('Founder-only', founderOnly, 'Records carried only through the Founder-authenticated route.', tone(founderOnly, 'neutral')),
+    ],
+    rows: limited(
+      records.map((record) => ({
+        id: record.id,
+        primary: record.title,
+        secondary: `${record.kind} · recorded ${record.recorded.date} (${record.recorded.confidence}) by ${record.recordedBy}`,
+        chips: [
+          { label: record.kind, tone: record.kind === 'summary' ? ('violet' as RoomTone) : ('info' as RoomTone) },
+          {
+            label: record.status,
+            tone: record.status === 'CURRENT' ? ('accent' as RoomTone) : ('neutral' as RoomTone),
+          },
+          ...(record.privacy === 'founder_only'
+            ? [{ label: 'founder_only', tone: 'warn' as RoomTone }]
+            : []),
+          ...(record.missionId ? [{ label: 'mission-linked', tone: 'info' as RoomTone }] : []),
+          ...(record.projectId ? [{ label: 'project-linked', tone: 'info' as RoomTone }] : []),
+          ...(record.taskId ? [{ label: 'task-linked', tone: 'info' as RoomTone }] : []),
+          ...(record.derivedFrom.length > 0
+            ? [{ label: `derived from ${record.derivedFrom.length}`, tone: 'violet' as RoomTone }]
+            : []),
+        ],
+      })),
+    ),
+    emptyMessage:
+      'HQ remembers nothing yet. 0 means 0 — no demo memory is invented to fill the room; a ' +
+      'record appears here when the Founder (or a gated act) records one.',
+    // Memory never demands a human and is never "working": present-only
+    // liveness, so a populated record renders quiet and an empty one dark.
+    liveness: livenessFrom({ attention: 0, active: 0, present: records.length }),
+  };
+}
+
 function sectionFor(
   section: RoomSection,
   state: HqStateDocument,
@@ -845,6 +906,8 @@ function sectionFor(
       return founderSection(state, session);
     case 'security':
       return securitySection(state, session);
+    case 'memory':
+      return memorySection(state);
   }
 }
 

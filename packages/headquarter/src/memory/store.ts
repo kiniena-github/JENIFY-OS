@@ -49,17 +49,114 @@ CREATE INDEX IF NOT EXISTS idx_hq_memory_project_kind ON hq_memory(project, kind
 CREATE INDEX IF NOT EXISTS idx_hq_memory_status ON hq_memory(status);
 `;
 
-/** Idempotent — safe to call on every MemoryStore construction. */
+/**
+ * Phase 5 additive columns (issue #265): canonical entity references, the
+ * derivation list for summaries, and the facade-derived idempotency key.
+ * Applied via PRAGMA table_info so an already-upgraded file is untouched —
+ * the project-command.ts column-upgrade pattern.
+ */
+const COLUMN_UPGRADES: readonly { column: string; ddl: string }[] = [
+  { column: 'mission_id', ddl: `ALTER TABLE hq_memory ADD COLUMN mission_id TEXT` },
+  { column: 'project_id', ddl: `ALTER TABLE hq_memory ADD COLUMN project_id TEXT` },
+  { column: 'task_id', ddl: `ALTER TABLE hq_memory ADD COLUMN task_id TEXT` },
+  { column: 'derived_from', ddl: `ALTER TABLE hq_memory ADD COLUMN derived_from TEXT NOT NULL DEFAULT '[]'` },
+  { column: 'idempotency_key', ddl: `ALTER TABLE hq_memory ADD COLUMN idempotency_key TEXT` },
+];
+
+/**
+ * Phase 5 engine hardening (issue #265) — the §G lesson applied to memory.
+ *
+ * hq_memory is insert-only BY ENGINE with exactly one legitimate mutation:
+ * the supersede UPDATE in record(), which touches only status /
+ * superseded_by / updated_at. So:
+ *  - DELETE always aborts;
+ *  - an UPDATE naming any OTHER column in its SET clause aborts
+ *    (trg_hq_memory_no_rewrite — SQLite's UPDATE OF fires on SET-clause
+ *    membership, which is exactly the "outside the supersede path" claim);
+ *  - the one legal status move is CURRENT -> SUPERSEDED, held by the engine
+ *    for every writer, not just this module;
+ *  - BEFORE INSERT abort-on-existing-id closes the REPLACE / INSERT OR
+ *    REPLACE / UPSERT path that skips BEFORE DELETE triggers while
+ *    recursive_triggers is off (the Phase 4 §G finding — that pragma is
+ *    connection-scoped and cannot bind a foreign writer).
+ *
+ * Documented residual: superseded_by and updated_at stay engine-mutable
+ * because the legitimate supersede rides one UPDATE. The immutable forward
+ * pointer (`supersedes` on the successor) plus history()'s backward walk keep
+ * every chain reconstructable even if a hostile writer corrupted a
+ * superseded_by list.
+ */
+const HARDENING_DDL = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hq_memory_idem ON hq_memory(idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_hq_memory_mission ON hq_memory(mission_id) WHERE mission_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_hq_memory_project_ref ON hq_memory(project_id) WHERE project_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_hq_memory_task ON hq_memory(task_id) WHERE task_id IS NOT NULL;
+
+CREATE TRIGGER IF NOT EXISTS trg_hq_memory_no_erase
+BEFORE DELETE ON hq_memory
+BEGIN SELECT RAISE(ABORT, 'hq_memory is insert-only'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_hq_memory_no_rewrite
+BEFORE UPDATE OF id, kind, title, body, recorded_date, recorded_confidence, recorded_source,
+  recorded_by, project, related, source_refs, tags, supersedes, privacy, created_at,
+  mission_id, project_id, task_id, derived_from, idempotency_key
+ON hq_memory
+BEGIN SELECT RAISE(ABORT, 'hq_memory rows are immutable outside the supersede path'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_hq_memory_supersede_only
+BEFORE UPDATE OF status ON hq_memory
+WHEN NOT (OLD.status = 'CURRENT' AND NEW.status = 'SUPERSEDED')
+BEGIN SELECT RAISE(ABORT, 'hq_memory status may only move CURRENT -> SUPERSEDED'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_hq_memory_no_replace
+BEFORE INSERT ON hq_memory
+WHEN EXISTS (SELECT 1 FROM hq_memory WHERE id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'hq_memory is insert-only'); END;
+`;
+
+/**
+ * Idempotent — safe to call on every MemoryStore construction.
+ *
+ * Readonly-safe since Phase 5: a read-only handle (hq:snapshot over an old
+ * file) observes the schema truthfully via memorySchemaPresent() instead of
+ * attempting DDL — the post-Phase-3 ensure*Schema pattern.
+ */
 export function ensureMemoryTables(db: HqDatabase): void {
+  if (db.readonly) return;
   db.exec(DDL);
+  const existing = new Set(
+    (db.prepare(`PRAGMA table_info(hq_memory)`).all() as { name: string }[]).map((c) => c.name),
+  );
+  for (const upgrade of COLUMN_UPGRADES) {
+    if (!existing.has(upgrade.column)) db.exec(upgrade.ddl);
+  }
+  db.exec(HARDENING_DDL);
 }
 
-export type MemoryRecordInput = Omit<MemoryRecord, 'id' | 'supersededBy' | 'related' | 'sourceRefs' | 'tags' | 'privacy'> & {
+/** True when the hq_memory table exists in this file — observation, never migration. */
+export function memorySchemaPresent(db: HqDatabase): boolean {
+  const row = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'hq_memory'`)
+    .get() as { name: string } | undefined;
+  return row !== undefined;
+}
+
+export type MemoryRecordInput = Omit<
+  MemoryRecord,
+  'id' | 'supersededBy' | 'related' | 'sourceRefs' | 'tags' | 'privacy' | 'missionId' | 'projectId' | 'taskId' | 'derivedFrom'
+> & {
   id?: string;
   related?: MemoryRecord['related'];
   sourceRefs?: string[];
   tags?: string[];
   privacy?: MemoryPrivacy;
+  /** Canonical entity refs — existence is the FACADE's job; the store only persists. */
+  missionId?: string | null;
+  projectId?: string | null;
+  taskId?: string | null;
+  derivedFrom?: string[];
+  /** Facade-derived dedupe key; a unique partial index refuses a raced duplicate. */
+  idempotencyKey?: string | null;
 };
 
 function rowToMemory(r: Record<string, unknown>): MemoryRecord {
@@ -82,6 +179,10 @@ function rowToMemory(r: Record<string, unknown>): MemoryRecord {
     supersedes: (r.supersedes as string | null) ?? null,
     supersededBy: JSON.parse((r.superseded_by as string | null) ?? '[]'),
     privacy: r.privacy as MemoryPrivacy,
+    missionId: (r.mission_id as string | null) ?? null,
+    projectId: (r.project_id as string | null) ?? null,
+    taskId: (r.task_id as string | null) ?? null,
+    derivedFrom: JSON.parse((r.derived_from as string | null) ?? '[]'),
   };
 }
 
@@ -133,6 +234,10 @@ export class MemoryStore {
       supersedes: input.supersedes ?? null,
       supersededBy: [],
       privacy: input.privacy ?? 'internal',
+      missionId: input.missionId ?? null,
+      projectId: input.projectId ?? null,
+      taskId: input.taskId ?? null,
+      derivedFrom: input.derivedFrom ?? [],
     };
     const errors = validateMemoryRecord(candidate);
     if (errors.length > 0) {
@@ -140,6 +245,15 @@ export class MemoryStore {
     }
     if (this.get(id)) {
       throw new Error(`Memory record ${id} already exists`);
+    }
+
+    // Every derivation source must be a real memory record (defense in depth
+    // beside the facade's checks — a summary naming a phantom source would be
+    // an invented provenance chain).
+    for (const sourceId of candidate.derivedFrom ?? []) {
+      if (!this.get(sourceId)) {
+        throw new Error(`Cannot derive from unknown memory record: ${sourceId}`);
+      }
     }
 
     let predecessor: MemoryRecord | null = null;
@@ -173,8 +287,8 @@ export class MemoryStore {
         .prepare(
           `INSERT INTO hq_memory (id, kind, title, body, status, recorded_date, recorded_confidence,
              recorded_source, recorded_by, project, related, source_refs, tags, supersedes, superseded_by,
-             privacy, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             privacy, created_at, updated_at, mission_id, project_id, task_id, derived_from, idempotency_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           candidate.id,
@@ -195,6 +309,11 @@ export class MemoryStore {
           candidate.privacy,
           at,
           at,
+          candidate.missionId,
+          candidate.projectId,
+          candidate.taskId,
+          JSON.stringify(candidate.derivedFrom ?? []),
+          input.idempotencyKey ?? null,
         );
 
       if (predecessor) {
@@ -257,6 +376,41 @@ export class MemoryStore {
       string,
       unknown
     >[];
+    return rows.map(rowToMemory);
+  }
+
+  /** The record previously written with this facade-derived dedupe key, if any. */
+  findIdByIdempotencyKey(key: string): string | null {
+    const row = this.db
+      .prepare(`SELECT id FROM hq_memory WHERE idempotency_key = ?`)
+      .get(key) as { id: string } | undefined;
+    return row?.id ?? null;
+  }
+
+  /**
+   * Entity-scoped reads (Phase 5 retrieval): CURRENT records first, then
+   * newest recorded first — the deterministic relevance order the context
+   * assembler documents. Indexed; no text matching here.
+   */
+  listByMissionId(missionId: string): MemoryRecord[] {
+    return this.#listByEntity('mission_id', missionId);
+  }
+
+  listByProjectRef(projectId: string): MemoryRecord[] {
+    return this.#listByEntity('project_id', projectId);
+  }
+
+  listByTaskId(taskId: string): MemoryRecord[] {
+    return this.#listByEntity('task_id', taskId);
+  }
+
+  #listByEntity(column: 'mission_id' | 'project_id' | 'task_id', value: string): MemoryRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM hq_memory WHERE ${column} = ?
+         ORDER BY CASE WHEN status = 'CURRENT' THEN 0 ELSE 1 END, recorded_date DESC, id`,
+      )
+      .all(value) as Record<string, unknown>[];
     return rows.map(rowToMemory);
   }
 

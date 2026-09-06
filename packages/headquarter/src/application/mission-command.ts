@@ -285,6 +285,30 @@ export function ensureMissionCommandSchema(db: HqDatabase): void {
   if (!cols.some((c) => c.name === 'project_id')) {
     db.exec(`ALTER TABLE hq_missions ADD COLUMN project_id TEXT`);
   }
+  // Phase 6 (issue #265): the Founder work SPEC on a plan item — the explicit
+  // structured statement (capability id + canonical-JSON payload) that lets
+  // the orchestrator turn THIS item into a real gated task. Additive and
+  // WRITE-ONCE like the task link: Phase 3's law that no text is ever parsed
+  // into tasks/capabilities/providers stands — an item without a spec is
+  // truthfully not actionable, and the spec is Founder input, never
+  // inference. `spec_set_in_intent_seq` records which intent entry carried
+  // it, so the append-only history explains every spec.
+  const itemCols = db.prepare(`PRAGMA table_info(hq_mission_plan_items)`).all() as { name: string }[];
+  if (!itemCols.some((c) => c.name === 'spec_capability_id')) {
+    db.exec(`ALTER TABLE hq_mission_plan_items ADD COLUMN spec_capability_id TEXT`);
+    db.exec(`ALTER TABLE hq_mission_plan_items ADD COLUMN spec_payload TEXT`);
+    db.exec(`ALTER TABLE hq_mission_plan_items ADD COLUMN spec_set_in_intent_seq INTEGER`);
+  }
+  // Engine-held, the relink-guard recipe: a spec, once stated, is never
+  // re-pointed — changing the work means superseding the item and adding a
+  // new one, which the append-only intent history then records.
+  db.exec(`
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_plan_items_no_respec
+BEFORE UPDATE OF spec_capability_id, spec_payload, spec_set_in_intent_seq
+ON hq_mission_plan_items
+WHEN OLD.spec_capability_id IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'hq_mission_plan_items work spec is write-once'); END;
+`);
 }
 
 /**
@@ -316,6 +340,21 @@ export interface MissionPlanItem {
   state: MissionPlanItemState;
   /** The linked task's canonical status, so compression never hides. */
   rawTaskStatus: ActivityStatus | null;
+  /**
+   * The Founder work spec (Phase 6, issue #265): the EXPLICIT capability id
+   * this item's task would exercise. Null = unspecified — the item is
+   * truthfully not actionable by the orchestrator, and NOTHING infers a
+   * capability from the summary text (the Phase 3 no-parsing law).
+   */
+  specCapabilityId: string | null;
+  /**
+   * Canonical-JSON payload of the spec — SERVER-SIDE ONLY, like intent
+   * bodies: `missionBrowserView` deliberately drops it (the raw-order
+   * isolation precedent), carrying only the capability id and provenance seq.
+   */
+  specPayload: string | null;
+  /** Which append-only intent entry stated this spec. */
+  specSetInIntentSeq: number | null;
 }
 
 /**
@@ -444,6 +483,9 @@ export interface MissionBrowserView {
     supersededInIntentSeq: number | null;
     linkedBy: string | null;
     linkedAt: string | null;
+    /** Spec PRESENCE for the browser: the capability id and provenance seq. The payload stays server-side. */
+    specCapabilityId: string | null;
+    specSetInIntentSeq: number | null;
   }[];
   intentHistory: MissionIntentRef[];
   blockHistory: MissionBlockRecord[];
@@ -483,6 +525,10 @@ export function missionBrowserView(mission: MissionRecord): MissionBrowserView {
       supersededInIntentSeq: item.supersededInIntentSeq,
       linkedBy: item.linkedBy,
       linkedAt: item.linkedAt,
+      // The spec payload is deliberately ABSENT here — server-side only, the
+      // raw-order isolation precedent. Presence and provenance travel.
+      specCapabilityId: item.specCapabilityId,
+      specSetInIntentSeq: item.specSetInIntentSeq,
     })),
     intentHistory: mission.intentHistory,
     blockHistory: mission.blockHistory,
@@ -495,7 +541,13 @@ export interface MissionEventRecord {
   missionId: string;
   at: string;
   actor: string;
-  kind: 'commanded' | 'transitioned' | 'intent_amended' | 'plan_item_linked' | 'project_assigned';
+  kind:
+    | 'commanded'
+    | 'transitioned'
+    | 'intent_amended'
+    | 'plan_item_linked'
+    | 'project_assigned'
+    | 'orchestrated';
   fromStatus: MissionStatus | null;
   toStatus: MissionStatus | null;
   note: string | null;
@@ -533,6 +585,13 @@ export function missionCommandIdempotencyKey(input: {
    */
   instruction: string | null;
   idempotencyKey: string | null;
+  /**
+   * Founder work specs on the plan (Phase 6, issue #265). Joins the digest
+   * ONLY when at least one spec is stated — the `projectId` back-compat rule
+   * below, applied again: stored Phase 3/4 keys never contained the field,
+   * so a byte-identical spec-less re-command must keep deduping onto them.
+   */
+  planItemSpecs?: { seq: number; capabilityId: string; payload: string }[] | null;
 }): string {
   const fields: Record<string, unknown> = {
     requestedBy: input.requestedBy,
@@ -555,6 +614,9 @@ export function missionCommandIdempotencyKey(input: {
   // deduping onto it — the stored Phase 3 keys never contained the field.
   // Pinned by test: key(without) === key(projectId: null).
   if (input.projectId != null) fields.projectId = input.projectId;
+  if (input.planItemSpecs != null && input.planItemSpecs.length > 0) {
+    fields.planItemSpecs = input.planItemSpecs;
+  }
   const digest = createHash('sha256').update(canonicalJson(fields)).digest('hex');
   return `mission:${digest.slice(0, 32)}`;
 }
@@ -633,6 +695,9 @@ export function readMissionRecord(
       linkedAt: (r.linked_at as string | null) ?? null,
       state: derived.state,
       rawTaskStatus: derived.rawTaskStatus,
+      specCapabilityId: (r.spec_capability_id as string | null) ?? null,
+      specPayload: (r.spec_payload as string | null) ?? null,
+      specSetInIntentSeq: (r.spec_set_in_intent_seq as number | null) ?? null,
     };
   });
 
@@ -852,10 +917,53 @@ export function insertMissionPlanItem(
     summary: string;
     kind: 'work' | 'needs_clarification';
     createdInIntentSeq: number;
+    /** Founder work spec (Phase 6). Both present or both absent — validated at the facade. */
+    specCapabilityId?: string | null;
+    specPayload?: string | null;
   },
 ): void {
   db.prepare(
-    `INSERT INTO hq_mission_plan_items (id, mission_id, seq, summary, kind, created_in_intent_seq)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(uuid(), input.missionId, input.seq, input.summary, input.kind, input.createdInIntentSeq);
+    `INSERT INTO hq_mission_plan_items
+       (id, mission_id, seq, summary, kind, created_in_intent_seq,
+        spec_capability_id, spec_payload, spec_set_in_intent_seq)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    uuid(),
+    input.missionId,
+    input.seq,
+    input.summary,
+    input.kind,
+    input.createdInIntentSeq,
+    input.specCapabilityId ?? null,
+    input.specPayload ?? null,
+    input.specCapabilityId != null ? input.createdInIntentSeq : null,
+  );
+}
+
+/**
+ * The one-shot spec writer for an EXISTING unlinked work item (Phase 6, the
+ * `linkMissionPlanItem` recipe): sets the spec columns only where no spec
+ * exists — the engine trigger aborts any re-point anyway, and the WHERE
+ * clause turns a raced second write into `changes === 0` for a typed refusal
+ * at the facade. All authority/validity checks live at the facade; this
+ * touches exactly one row's spec columns.
+ */
+export function setMissionPlanItemSpec(
+  db: HqDatabase,
+  input: {
+    missionId: string;
+    seq: number;
+    specCapabilityId: string;
+    specPayload: string;
+    specSetInIntentSeq: number;
+  },
+): boolean {
+  const result = db
+    .prepare(
+      `UPDATE hq_mission_plan_items
+         SET spec_capability_id = ?, spec_payload = ?, spec_set_in_intent_seq = ?
+       WHERE mission_id = ? AND seq = ? AND spec_capability_id IS NULL`,
+    )
+    .run(input.specCapabilityId, input.specPayload, input.specSetInIntentSeq, input.missionId, input.seq);
+  return result.changes === 1;
 }

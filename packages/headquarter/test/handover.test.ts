@@ -260,4 +260,35 @@ describe('handover / replacement lifecycle', () => {
     );
     expect(() => generateHandoverPackage(db, memory, 'claude')).toThrow(/secret-like content/);
   });
+
+  // Phase 5 (issue #265): a handover package is consumed by a SUCCESSOR
+  // WORKER, so founder_only memory never enters it — even when the departing
+  // worker recorded that memory itself. The Founder reads such records
+  // through the Founder-gated memory surface, not through a worker package.
+  it('excludes founder_only memory from the handover package, including the worker\'s own records', () => {
+    const { db, memory } = ctx;
+    memory.record({
+      kind: 'decision',
+      title: 'Shared decision',
+      body: 'Successor should know this.',
+      status: 'CURRENT',
+      recorded: { date: '2026-09-06', confidence: 'exact' },
+      recordedBy: 'claude',
+      project: 'JENIFY-OS',
+    });
+    memory.record({
+      kind: 'blocker',
+      title: 'Founder-only blocker',
+      body: 'Compensation discussion pending — not for worker eyes.',
+      status: 'CURRENT',
+      recorded: { date: '2026-09-06', confidence: 'exact' },
+      recordedBy: 'claude',
+      project: 'JENIFY-OS',
+      privacy: 'founder_only',
+    });
+    const pkg = generateHandoverPackage(db, memory, 'claude');
+    expect(pkg.decisions.map((r) => r.title)).toEqual(['Shared decision']);
+    expect(pkg.blockers).toEqual([]);
+    expect(JSON.stringify(pkg)).not.toContain('Compensation discussion');
+  });
 });

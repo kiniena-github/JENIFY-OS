@@ -502,7 +502,7 @@ describe('the intent lock and append-only amendment history', () => {
     );
   });
 
-  it('no source file anywhere contains a rewrite spelling for mission intents/events, plan-item links or project events', () => {
+  it('no source file anywhere contains a rewrite spelling for mission intents/events, plan-item links, project events or memory', () => {
     // The previous guard scanned only mission-command.ts while every mission
     // UPDATE statement lives in service.ts (Opus second-pass finding on
     // `cee771f`) — it could not see the file where a history rewrite would
@@ -537,6 +537,17 @@ describe('the intent lock and append-only amendment history', () => {
         /INSERT\s+OR\s+\w+\s+INTO\s+hq_project_events/i,
         /REPLACE\s+INTO\s+hq_project_events/i,
         /hq_project_events[^;]{0,200}ON\s+CONFLICT/i,
+        // Phase 5 (issue #265): hq_memory joins with its never-legitimate
+        // spellings only. Plain UPDATE is not grepped — the supersede path in
+        // memory/store.ts legitimately updates status/superseded_by/updated_at,
+        // and every other column is refused by the engine triggers
+        // (trg_hq_memory_no_rewrite / _supersede_only) plus the behavioral
+        // tamper tests in memory-engine-hardening.test.ts — the exact
+        // plan-item-relink precedent recorded above.
+        /DELETE\s+FROM\s+hq_memory/i,
+        /INSERT\s+OR\s+\w+\s+INTO\s+hq_memory/i,
+        /REPLACE\s+INTO\s+hq_memory/i,
+        /hq_memory[^;]{0,200}ON\s+CONFLICT/i,
       ]) {
         expect(source, `${file} must not rewrite append-only history`).not.toMatch(pattern);
       }

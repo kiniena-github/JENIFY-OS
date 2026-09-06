@@ -77,6 +77,7 @@ import { canonicalJson, taskActionDigest, type ApprovalRejection } from '../oper
 import { assertNoSecretLikeContent, type EvidenceEntry } from '../operator/evidence.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import {
+  GLOBAL_SCOPE,
   OperatorQueue,
   type OperatorTask,
   type PrivilegedQueueApi,
@@ -427,11 +428,15 @@ import {
   missionCommandCapabilityState,
   missionCommandContractDrift,
   missionCommandIdempotencyKey,
+  missionBrowserView,
   missionSchemaPresent,
   readMissionIntentEntries,
   readMissionRecord,
+  setMissionPlanItemSpec,
   type LinkedTaskLookup,
+  type MissionBrowserView,
   type MissionIntentEntry,
+  type MissionPlanItem,
   type MissionRecord,
 } from './mission-command.js';
 import {
@@ -458,8 +463,10 @@ import {
   projectCommandCapabilityState,
   projectCommandContractDrift,
   projectCommandIdempotencyKey,
+  projectBrowserView,
   projectCommandSchemaPresent,
   readProjectRecord,
+  type ProjectBrowserView,
   type ProjectRecord,
 } from './project-command.js';
 import {
@@ -482,6 +489,54 @@ import {
   type MemberHealth,
   type RegisterMemberInput,
 } from '../registry/members.js';
+import {
+  MAX_MEMORY_BODY_LENGTH,
+  MAX_MEMORY_LIST_ITEMS,
+  MAX_MEMORY_PROJECT_LABEL_LENGTH,
+  MAX_MEMORY_SOURCE_REF_LENGTH,
+  MAX_MEMORY_TAG_LENGTH,
+  MAX_MEMORY_TITLE_LENGTH,
+  MEMORY_COMMAND_CAPABILITY,
+  memoryBrowserView,
+  memoryCommandCapabilityState,
+  memoryCommandContractDrift,
+  memoryCommandIdempotencyKey,
+  type MemoryBrowserView,
+} from './memory-command.js';
+import {
+  assembleMemoryGroups,
+  memoryContextProvenance,
+  type EntityContextView,
+  type MemoryContextGroup,
+} from './context-assembly.js';
+import {
+  MAX_MISSION_SPEC_CAPABILITY_LENGTH,
+  MAX_MISSION_SPEC_PAYLOAD_LENGTH,
+  MISSION_ORCHESTRATE_CAPABILITY,
+  ensureOrchestratorSchema,
+  insertOrchestrationRun,
+  insertOrchestrationRunItem,
+  missionOrchestrateCapabilityState,
+  missionOrchestrateContractDrift,
+  orchestrationObservedDigest,
+  orchestrationTaskIdempotencyKey,
+  planOrchestration,
+  type ObservedPlanItem,
+  type OrchestrationDecision,
+} from './orchestrator-command.js';
+import { CLIENT_IDENTITY_KEYS } from '../live/auth.js';
+import { ensureMemoryTables, memorySchemaPresent, MemoryStore, searchMemory } from '../memory/store.js';
+import {
+  MEMORY_KINDS,
+  MEMORY_PRIVACY_LEVELS,
+  isMemoryKind,
+  isMemoryPrivacy,
+  type MemoryKind,
+  type MemoryPrivacy,
+  type MemoryRecord as CompanyMemoryRecord,
+} from '../memory/schema.js';
+import type { SearchQuery } from '../archive/search.js';
+import { isArchiveStatus, type ArchiveStatus, type DatedValue, type RelatedRefs } from '../archive/schema.js';
 
 // ---- result contract ----
 
@@ -518,7 +573,11 @@ export type OpsErrorCode =
   | 'invalid_project_transition'
   | 'project_status_changed'
   | 'project_closed'
-  | 'workforce_registry_unconfigured';
+  | 'workforce_registry_unconfigured'
+  | 'unknown_memory'
+  | 'memory_conflict'
+  | 'mission_not_orchestratable'
+  | 'orchestrate_fingerprint_mismatch';
 
 export interface OpsError {
   code: OpsErrorCode;
@@ -527,6 +586,68 @@ export interface OpsError {
 }
 
 export type OpsResult<T> = { ok: true; data: T } | { ok: false; error: OpsError };
+
+/**
+ * Minimal browser-safe canonical element for a task-scoped context view:
+ * never the payload, never the result (the snapshot's no-task-payload rule).
+ */
+export interface TaskContextRef {
+  taskId: string;
+  capabilityId: string;
+  status: ActivityStatus;
+  createdAt: string;
+}
+
+/**
+ * Truthful, CATEGORICAL mission execution state (Phase 6, issue #265).
+ * Counts and canonical statuses only — no percentage, no ETA, no invented
+ * figure; the wire format actively refuses those shapes. `recommendation` is
+ * derived readiness the Founder may act on; it transitions NOTHING.
+ */
+export interface MissionExecutionState {
+  missionId: string;
+  status: MissionStatus;
+  planItems: {
+    total: number;
+    superseded: number;
+    needsClarification: number;
+    workUnspecified: number;
+    workSpecified: number;
+    linked: number;
+  };
+  linkedTasks: {
+    planItemSeq: number;
+    taskId: string;
+    status: ActivityStatus;
+    reviewPending: boolean;
+    claimedBy: string | null;
+    assignment: { workerId: string; assignedBy: string; assignedAt: string } | null;
+    /** Evidence-free read through the SAME predicates enforcement uses. */
+    eligibleWorkers: string[];
+  }[];
+  blockers: {
+    unspecifiedWorkItems: number[];
+    needsClarification: number[];
+    approvalPending: string[];
+    outcomeUnknown: string[];
+    blocked: string[];
+  };
+  killSwitch: { global: boolean; orchestrate: boolean; engagedSpecScopes: string[] };
+  /** Advisory, reported only — nothing schedules on it. */
+  dependsOn: { missionId: string; status: MissionStatus | null }[];
+  recommendation: 'none' | 'ready_review';
+}
+
+export interface OrchestrationReport {
+  missionId: string;
+  mode: 'preview' | 'apply';
+  /** Null for preview — a preview writes nothing, so there is no run. */
+  runId: string | null;
+  /** Echo this into apply: a mission that moved since the preview refuses. */
+  fingerprint: string;
+  state: MissionExecutionState;
+  decisions: OrchestrationDecision[];
+}
 
 function fail(code: OpsErrorCode, message: string, details?: Record<string, unknown>): OpsResult<never> {
   return { ok: false, error: { code, message, details } };
@@ -635,6 +756,128 @@ function missionList(
     out.push(trimmed);
   }
   return { ok: true, value: out };
+}
+
+/**
+ * Trim + bound one memory list field with a caller-supplied per-entry bound
+ * (memory lists carry tags AND locators, whose sane lengths differ —
+ * `missionList` above hard-binds the mission bounds). `undefined` becomes an
+ * empty list: memory lists have no supplied-vs-absent distinction to record.
+ */
+function memoryList(
+  field: string,
+  values: string[] | undefined,
+  maxEntryLength: number,
+): { ok: true; value: string[]; message?: never } | { ok: false; message: string } {
+  if (values == null) return { ok: true, value: [] };
+  if (!Array.isArray(values)) return { ok: false, message: `${field} must be a list` };
+  if (values.length > MAX_MEMORY_LIST_ITEMS) {
+    return { ok: false, message: `${field} exceeds ${MAX_MEMORY_LIST_ITEMS} entries` };
+  }
+  const out: string[] = [];
+  for (const entry of values) {
+    if (typeof entry !== 'string') return { ok: false, message: `${field} entries must be text` };
+    const trimmed = entry.trim();
+    if (!trimmed) return { ok: false, message: `${field} entries must not be empty` };
+    if (trimmed.length > maxEntryLength) {
+      return { ok: false, message: `${field} entries exceed ${maxEntryLength} characters` };
+    }
+    out.push(trimmed);
+  }
+  return { ok: true, value: out };
+}
+
+/**
+ * Shape-check a RelatedRefs object from the boundary: known keys only, each a
+ * bounded array of the right primitive. Refusal names the offending key — an
+ * unknown key is refused rather than dropped, because silently discarding a
+ * cross-link would record less than the Founder stated.
+ */
+function memoryRelatedRefs(
+  value: RelatedRefs | undefined,
+): { ok: true; value: RelatedRefs; message?: never } | { ok: false; message: string } {
+  if (value == null) return { ok: true, value: {} };
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, message: 'related must be an object' };
+  }
+  const out: RelatedRefs = {};
+  for (const [key, entries] of Object.entries(value)) {
+    if (!['issues', 'pullRequests', 'commits', 'artifacts'].includes(key)) {
+      return { ok: false, message: `related.${key} is not a known reference list` };
+    }
+    if (!Array.isArray(entries) || entries.length > MAX_MEMORY_LIST_ITEMS) {
+      return { ok: false, message: `related.${key} must be a list of at most ${MAX_MEMORY_LIST_ITEMS} entries` };
+    }
+    const wantNumber = key === 'issues' || key === 'pullRequests';
+    for (const entry of entries) {
+      if (wantNumber ? typeof entry !== 'number' : typeof entry !== 'string') {
+        return { ok: false, message: `related.${key} entries have the wrong type` };
+      }
+    }
+    (out as Record<string, unknown>)[key] = [...entries];
+  }
+  return { ok: true, value: out };
+}
+
+/** One normalized Founder work spec from the plan intake. */
+interface NormalizedWorkSpec {
+  capabilityId: string;
+  /** Canonical JSON — the exact bytes the orchestrator will hand to createTask. */
+  payload: string;
+}
+
+/**
+ * Validate one Founder work spec (Phase 6, issue #265). Shape/bounds only —
+ * whether the capability is REGISTERED/ENABLED/GRANTED is an
+ * orchestration-time verdict, because a capability may legitimately be
+ * registered after the mission was commanded.
+ *
+ * The payload is a plain JSON object, at most three levels deep, and no key
+ * at ANY depth may be a client-identity key — the boundary's scan stops at
+ * depth three, so this facade check is the defense-in-depth that keeps a
+ * spec from smuggling a `requestedBy` past it inside a nested object.
+ */
+function normalizeWorkSpec(
+  field: string,
+  capabilityId: unknown,
+  payload: unknown,
+): { ok: true; value: NormalizedWorkSpec; message?: never } | { ok: false; message: string } {
+  if (typeof capabilityId !== 'string' || capabilityId.trim() === '') {
+    return { ok: false, message: `${field}: a spec needs a capabilityId` };
+  }
+  const trimmedCapability = capabilityId.trim();
+  if (trimmedCapability.length > MAX_MISSION_SPEC_CAPABILITY_LENGTH) {
+    return { ok: false, message: `${field}: capabilityId exceeds ${MAX_MISSION_SPEC_CAPABILITY_LENGTH} characters` };
+  }
+  if (payload == null || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { ok: false, message: `${field}: a spec payload must be a JSON object` };
+  }
+  const walk = (value: unknown, depth: number): string | null => {
+    if (value == null || typeof value !== 'object') return null;
+    if (depth > 3) return `${field}: a spec payload may nest at most three levels deep`;
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        const problem = walk(entry, depth + 1);
+        if (problem) return problem;
+      }
+      return null;
+    }
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (CLIENT_IDENTITY_KEYS.includes(key)) {
+        return `${field}: a spec payload may not carry the reserved key '${key}'`;
+      }
+      const problem = walk(entry, depth + 1);
+      if (problem) return problem;
+    }
+    return null;
+  };
+  const problem = walk(payload, 1);
+  if (problem) return { ok: false, message: problem };
+  const encoded = canonicalJson(payload);
+  if (encoded.length > MAX_MISSION_SPEC_PAYLOAD_LENGTH) {
+    return { ok: false, message: `${field}: the spec payload exceeds ${MAX_MISSION_SPEC_PAYLOAD_LENGTH} characters` };
+  }
+  return { ok: true, value: { capabilityId: trimmedCapability, payload: encoded } };
 }
 
 /**
@@ -1112,6 +1355,16 @@ export class HeadquarterOperations {
   /** The Phase 4 project schema, same truth-recording as missions above. */
   readonly #projectStorePresent: boolean;
 
+  /** The Phase 5 memory schema, same truth-recording as missions above. */
+  readonly #memoryStorePresent: boolean;
+
+  /**
+   * The Phase 5 company-memory store (issue #120 wired by #265), or null over
+   * a read-only pre-Phase-5 file. `#private` and read by the memory facade
+   * methods ONLY — no gate, grant, policy or enforcement path consults it.
+   */
+  readonly #memory: MemoryStore | null;
+
   /**
    * The Phase 4 workforce lifecycle registry (or null: unconfigured, stated).
    * `#private` and read by the workforce facade methods ONLY — never by
@@ -1134,8 +1387,42 @@ export class HeadquarterOperations {
    */
   readonly #capabilityFromStore: (id: string) => Capability | null;
 
+  /**
+   * The kill-switch ROW read, from the database (Sol M1, PR #266 review
+   * 5124774932).
+   *
+   * `queue.killSwitchEngaged` is the read-only delegate that #200 documents
+   * as safe to patch because enforcement never dispatches through it — a
+   * caller who lies to itself about a read harms only itself. That stops
+   * being true the moment such a read becomes the authority a WRITE path
+   * acts on: the locked orchestration cycle refuses or proceeds on this
+   * answer. So the locked revalidation reads the `op_kill_switch` rows
+   * through this `#private` closure (the `#capabilityFromStore` recipe)
+   * and never through the patchable public delegate. The fast prechecks
+   * may keep using the delegate — after the locked revalidation they are
+   * an optimization, not the boundary.
+   *
+   * Sol M2 (same review cycle): `#observeOrchestration`'s per-spec
+   * `specScopeKillSwitchEngaged` fact reads through this closure too —
+   * `planOrchestration` turns that fact into `ready`, and `ready` creates
+   * canonical work inside the locked apply cycle, so it is a write
+   * authority, not a peek.
+   */
+  readonly #killSwitchEngagedFromStore: (capabilityId?: string) => boolean;
+
   constructor(db: HqDatabase, options: HeadquarterOperationsOptions = {}) {
     this.#db = db;
+    this.#killSwitchEngagedFromStore = (capabilityId?: string): boolean => {
+      const scopes = [GLOBAL_SCOPE, ...(capabilityId ? [capabilityId] : [])];
+      const row = db
+        .prepare(
+          `SELECT 1 AS hit FROM op_kill_switch WHERE engaged = 1 AND scope IN (${scopes
+            .map(() => '?')
+            .join(',')}) LIMIT 1`,
+        )
+        .get(...scopes);
+      return row !== undefined;
+    };
     this.#capabilityFromStore = (capabilityId: string): Capability | null => {
       const row = db.prepare(`SELECT * FROM op_capabilities WHERE id = ?`).get(capabilityId) as
         | Record<string, unknown>
@@ -1153,16 +1440,27 @@ export class HeadquarterOperations {
     ensureApplicationSchema(db);
     ensureMissionCommandSchema(db);
     ensureProjectCommandSchema(db);
-    // A writable construction just ensured the mission and project tables. A
-    // READ-ONLY one (the hq:snapshot path) may be observing a pre-Phase-3/4
-    // file that has none — the ensures above deliberately write nothing
-    // through a read-only handle — so record what is actually there and let
-    // every mission/project read answer truthfully instead of throwing at
-    // the first prepare.
+    ensureMemoryTables(db);
+    ensureOrchestratorSchema(db);
+    // A writable construction just ensured the mission/project/memory tables.
+    // A READ-ONLY one (the hq:snapshot path) may be observing an older file
+    // that has some or none of them — the ensures above deliberately write
+    // nothing through a read-only handle — so record what is actually there
+    // and let every read answer truthfully instead of throwing at the first
+    // prepare.
     this.#missionStorePresent = db.readonly ? missionSchemaPresent(db) : true;
     this.#projectStorePresent = db.readonly ? projectCommandSchemaPresent(db) : true;
+    this.#memoryStorePresent = db.readonly ? memorySchemaPresent(db) : true;
     this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
+    // Company memory (Phase 5, issue #265): the issue-#120 store, finally
+    // wired. Constructed ONLY when the schema exists (a read-only pre-Phase-5
+    // file has no table and the reads answer empty/null truthfully). The
+    // onEvent hook lands memory audit entries in hq_events via the store —
+    // live for the first time.
+    this.#memory = this.#memoryStorePresent
+      ? new MemoryStore(db, (e) => this.#store.appendEvent(e))
+      : null;
     // The approval mutations are handed to whoever CONSTRUCTS the queue and to
     // nobody else, so they are unreachable from a queue handle a worker holds.
     // When a queue is supplied (tests, composition), no grant arrives and this
@@ -2987,6 +3285,15 @@ export class HeadquarterOperations {
     constraints?: string[];
     acceptanceCriteria?: string[];
     planItems?: string[];
+    /**
+     * Object-form plan (Phase 6, issue #265) — mutually exclusive with the
+     * legacy `planItems` strings. A plan entry MAY carry a Founder work spec
+     * (capabilityId + payload, both or neither): the explicit structured
+     * statement that lets the orchestrator turn the item into a real gated
+     * task. No spec = truthfully not actionable; nothing is ever parsed out
+     * of the summary text.
+     */
+    plan?: { summary: string; capabilityId?: string; payload?: Record<string, unknown> }[];
     /** Free-text console LABEL — never authority, never matched to the register. */
     project?: string;
     /** Canonical register id (Phase 4). Validated: must exist and be active. */
@@ -3021,8 +3328,35 @@ export class HeadquarterOperations {
     if (!constraints.ok) return fail('invalid_input', constraints.message);
     const acceptance = missionList('acceptanceCriteria', input.acceptanceCriteria);
     if (!acceptance.ok) return fail('invalid_input', acceptance.message);
-    const planItems = missionList('planItems', input.planItems);
+    // One plan, one shape: the legacy summary strings OR the object form with
+    // optional specs — both at once would be two competing plans.
+    if (input.plan !== undefined && input.planItems !== undefined) {
+      return fail('invalid_input', 'Supply plan OR planItems, not both');
+    }
+    const planItems = missionList(
+      'planItems',
+      input.plan !== undefined ? input.plan.map((entry) => entry?.summary as string) : input.planItems,
+    );
     if (!planItems.ok) return fail('invalid_input', planItems.message);
+    // Per-entry specs, aligned with the summaries by index. capabilityId and
+    // payload travel together or not at all.
+    const planSpecs: (NormalizedWorkSpec | null)[] = [];
+    if (input.plan !== undefined) {
+      for (const [i, entry] of input.plan.entries()) {
+        const hasCapability = entry?.capabilityId !== undefined;
+        const hasPayload = entry?.payload !== undefined;
+        if (!hasCapability && !hasPayload) {
+          planSpecs.push(null);
+          continue;
+        }
+        if (hasCapability !== hasPayload) {
+          return fail('invalid_input', `plan[${i}]: a spec needs BOTH capabilityId and payload`);
+        }
+        const spec = normalizeWorkSpec(`plan[${i}]`, entry.capabilityId, entry.payload);
+        if (!spec.ok) return fail('invalid_input', spec.message);
+        planSpecs.push(spec.value);
+      }
+    }
     let priority: MissionPriority | null = null;
     if (input.priority != null && input.priority !== '') {
       if (!isMissionPriority(input.priority)) {
@@ -3063,7 +3397,9 @@ export class HeadquarterOperations {
     const projectId = input.projectId?.trim() || null;
 
     // Everything that will be PERSISTED is scanned before anything is
-    // written — a credential-looking order is refused, never stored.
+    // written — a credential-looking order is refused, never stored. Spec
+    // payloads are Founder input headed for storage, so they are scanned on
+    // exactly the same terms.
     try {
       assertNoSecretLikeContent({
         title: title.value,
@@ -3074,11 +3410,18 @@ export class HeadquarterOperations {
         constraints: constraints.value,
         acceptanceCriteria: acceptance.value,
         planItems: planItems.value,
+        planSpecs: planSpecs.map((spec) => spec?.payload ?? null),
       });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
 
+    // Specs join the digest ONLY when at least one is stated (the projectId
+    // back-compat rule): stored Phase 3/4 keys keep deduping byte-identical
+    // spec-less re-commands.
+    const statedSpecs = planSpecs
+      .map((spec, i) => (spec ? { seq: i + 1, capabilityId: spec.capabilityId, payload: spec.payload } : null))
+      .filter((spec): spec is { seq: number; capabilityId: string; payload: string } => spec != null);
     const idempotencyKey = missionCommandIdempotencyKey({
       requestedBy: input.requestedBy,
       title: title.value!,
@@ -3094,6 +3437,7 @@ export class HeadquarterOperations {
       planItems: planItems.value ?? [],
       instruction: instruction.value,
       idempotencyKey: input.idempotencyKey ?? null,
+      planItemSpecs: statedSpecs,
     });
 
     const id = `mission-${uuid()}`;
@@ -3114,6 +3458,9 @@ export class HeadquarterOperations {
       instruction: instruction.value,
       requestedBy: input.requestedBy,
       clientIdempotencyKey: input.idempotencyKey ?? null,
+      // Full specs live in the SERVER-SIDE intent body (the raw-order rule),
+      // so the append-only history explains every spec verbatim.
+      planItemSpecs: statedSpecs,
       at,
     });
     const items =
@@ -3122,8 +3469,16 @@ export class HeadquarterOperations {
             summary,
             kind: 'work' as const,
             seq: i + 1,
+            spec: planSpecs[i] ?? null,
           }))
-        : [{ summary: MISSION_PLAN_NOT_DECIDED_SUMMARY, kind: 'needs_clarification' as const, seq: 1 }];
+        : [
+            {
+              summary: MISSION_PLAN_NOT_DECIDED_SUMMARY,
+              kind: 'needs_clarification' as const,
+              seq: 1,
+              spec: null,
+            },
+          ];
 
     // The dedupe read, the mission write, its event and its evidence commit
     // inside ONE IMMEDIATE transaction (the declareWorkerProvider precedent,
@@ -3204,6 +3559,8 @@ export class HeadquarterOperations {
           summary: item.summary,
           kind: item.kind,
           createdInIntentSeq: 0,
+          specCapabilityId: item.spec?.capabilityId ?? null,
+          specPayload: item.spec?.payload ?? null,
         });
       }
       appendMissionEvent(this.#db, {
@@ -3419,6 +3776,15 @@ export class HeadquarterOperations {
     constraints?: string[];
     acceptanceCriteria?: string[];
     addPlanItems?: string[];
+    /** Object-form additions (Phase 6) — mutually exclusive with addPlanItems. */
+    addPlan?: { summary: string; capabilityId?: string; payload?: Record<string, unknown> }[];
+    /**
+     * State the Founder work spec on an EXISTING unlinked, unsuperseded work
+     * item (Phase 6). Write-once — the engine holds that — so changing a
+     * stated spec means superseding the item and adding a new one, which
+     * this same amendment path already offers.
+     */
+    specifyPlanItems?: { seq: number; capabilityId: string; payload: Record<string, unknown> }[];
     supersedePlanItemSeqs?: number[];
     requestedBy: string;
   }): OpsResult<MissionRecord> {
@@ -3438,8 +3804,43 @@ export class HeadquarterOperations {
     if (!constraints.ok) return fail('invalid_input', constraints.message);
     const acceptance = missionList('acceptanceCriteria', input.acceptanceCriteria);
     if (!acceptance.ok) return fail('invalid_input', acceptance.message);
-    const addPlanItems = missionList('addPlanItems', input.addPlanItems);
+    if (input.addPlan !== undefined && input.addPlanItems !== undefined) {
+      return fail('invalid_input', 'Supply addPlan OR addPlanItems, not both');
+    }
+    const addPlanItems = missionList(
+      'addPlanItems',
+      input.addPlan !== undefined ? input.addPlan.map((entry) => entry?.summary as string) : input.addPlanItems,
+    );
     if (!addPlanItems.ok) return fail('invalid_input', addPlanItems.message);
+    const addSpecs: (NormalizedWorkSpec | null)[] = [];
+    if (input.addPlan !== undefined) {
+      for (const [i, entry] of input.addPlan.entries()) {
+        const hasCapability = entry?.capabilityId !== undefined;
+        const hasPayload = entry?.payload !== undefined;
+        if (!hasCapability && !hasPayload) {
+          addSpecs.push(null);
+          continue;
+        }
+        if (hasCapability !== hasPayload) {
+          return fail('invalid_input', `addPlan[${i}]: a spec needs BOTH capabilityId and payload`);
+        }
+        const spec = normalizeWorkSpec(`addPlan[${i}]`, entry.capabilityId, entry.payload);
+        if (!spec.ok) return fail('invalid_input', spec.message);
+        addSpecs.push(spec.value);
+      }
+    }
+    const specifyItems: { seq: number; spec: NormalizedWorkSpec }[] = [];
+    for (const [i, entry] of (input.specifyPlanItems ?? []).entries()) {
+      if (!Number.isInteger(entry?.seq)) {
+        return fail('invalid_input', `specifyPlanItems[${i}]: seq must be an integer`);
+      }
+      const spec = normalizeWorkSpec(`specifyPlanItems[${i}]`, entry.capabilityId, entry.payload);
+      if (!spec.ok) return fail('invalid_input', spec.message);
+      if (specifyItems.some((existing) => existing.seq === entry.seq)) {
+        return fail('invalid_input', `specifyPlanItems names plan item ${entry.seq} twice`);
+      }
+      specifyItems.push({ seq: entry.seq, spec: spec.value });
+    }
 
     const refusedCommander = this.#resolveMissionCommander(
       input.requestedBy,
@@ -3463,6 +3864,8 @@ export class HeadquarterOperations {
         constraints: constraints.value,
         acceptanceCriteria: acceptance.value,
         addPlanItems: addPlanItems.value,
+        addSpecs: addSpecs.map((spec) => spec?.payload ?? null),
+        specifyPlanItems: specifyItems.map((entry) => entry.spec.payload),
       });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
@@ -3505,6 +3908,37 @@ export class HeadquarterOperations {
             return;
           }
         }
+        // Spec targets validated INSIDE the write lock, against the same
+        // rules linkMissionPlanItem enforces for links: the item must exist,
+        // be work, not be superseded (including by THIS amendment), not be
+        // linked, and not already carry a spec (write-once — supersede and
+        // re-add to change the work).
+        for (const { seq } of specifyItems) {
+          const item = current.planItems.find((p) => p.seq === seq);
+          if (!item) {
+            refusal = fail('invalid_input', `Mission ${input.missionId} has no plan item ${seq}`);
+            return;
+          }
+          if (item.kind !== 'work') {
+            refusal = fail('invalid_input', `Plan item ${seq} is ${item.kind}, not work — it cannot carry a spec`);
+            return;
+          }
+          if (item.supersededInIntentSeq != null || supersedeSeqs.includes(seq)) {
+            refusal = fail('invalid_input', `Plan item ${seq} is superseded — spec the replacement item instead`);
+            return;
+          }
+          if (item.taskId != null) {
+            refusal = fail('invalid_input', `Plan item ${seq} is already linked to task ${item.taskId}`);
+            return;
+          }
+          if (item.specCapabilityId != null) {
+            refusal = fail(
+              'invalid_input',
+              `Plan item ${seq} already carries a spec (write-once) — supersede it and add a re-specified item`,
+            );
+            return;
+          }
+        }
 
         const nextObjective = objective.value ?? current.objective;
         const nextConstraints = constraints.value ?? current.constraints;
@@ -3528,6 +3962,10 @@ export class HeadquarterOperations {
           constraints: constraints.value,
           acceptanceCriteria: acceptance.value,
           addPlanItems: addPlanItems.value,
+          // Full specs in the SERVER-SIDE body: the append-only history
+          // explains every spec verbatim (the raw-order rule).
+          addPlanSpecs: addSpecs.map((spec, i) => (spec ? { index: i, ...spec } : null)).filter(Boolean),
+          specifyPlanItems: specifyItems.map((entry) => ({ seq: entry.seq, ...entry.spec })),
           supersedePlanItemSeqs: supersedeSeqs,
           requestedBy: input.requestedBy,
           at,
@@ -3573,8 +4011,29 @@ export class HeadquarterOperations {
             summary,
             kind: 'work',
             createdInIntentSeq: nextIntentSeq,
+            specCapabilityId: addSpecs[i]?.capabilityId ?? null,
+            specPayload: addSpecs[i]?.payload ?? null,
           });
         });
+        for (const { seq, spec } of specifyItems) {
+          const stated = setMissionPlanItemSpec(this.#db, {
+            missionId: input.missionId,
+            seq,
+            specCapabilityId: spec.capabilityId,
+            specPayload: spec.payload,
+            specSetInIntentSeq: nextIntentSeq,
+          });
+          if (!stated) {
+            // Validated above inside the same lock — reaching here means a
+            // writer outside this transaction raced us anyway; surface it as
+            // the same typed conflict a raced amendment gets
+            // (isMissionSequenceConflict matches the table name + code).
+            throw Object.assign(
+              new Error(`hq_mission_plan_items work spec for item ${seq} was stated concurrently`),
+              { code: 'SQLITE_CONSTRAINT_TRIGGER' },
+            );
+          }
+        }
         appendMissionEvent(this.#db, {
           missionId: input.missionId,
           actor: input.requestedBy,
@@ -3583,6 +4042,7 @@ export class HeadquarterOperations {
             intentSeq: nextIntentSeq,
             addedPlanItems: addPlanItems.value?.length ?? 0,
             supersededPlanItems: supersedeSeqs.length,
+            specifiedPlanItems: specifyItems.length,
           },
         });
         privileged.appendEvidence({
@@ -3700,6 +4160,505 @@ export class HeadquarterOperations {
       return fail('invalid_input', `Plan item ${input.planItemSeq} was linked concurrently`);
     }
     return ok(this.#missionRecord(input.missionId)!);
+  }
+
+  // ---- mission orchestration (Phase 6 — Real Mission Orchestrator, #265) ----
+
+  /**
+   * One bounded orchestration cycle over an already-commanded mission.
+   *
+   * PREVIEW is a pure read: it observes canonical state, classifies every
+   * plan item through the deterministic decision core, and writes NOTHING —
+   * no task, no link, no run record, no evidence (it deliberately does not
+   * call routeTask/evaluateTaskEligibility, whose evidence writes are why
+   * /workforce/route sits on the write surface; eligibility here reads the
+   * SAME directory/policy predicates evidence-free).
+   *
+   * APPLY is the act, inside ONE IMMEDIATE transaction: for each READY item
+   * (work-kind, unsuperseded, unlinked, Founder-spec'd, capability
+   * registered+enabled, originate grant held, scope switch off) it creates
+   * the task through `createTask` — THE approved origination path, policy
+   * deciding queued vs needs_approval exactly as for a manual order — with a
+   * DERIVED idempotency key, then links it write-once. Rerun-safe by
+   * construction: the queue dedupes on (capability_id, key), the link never
+   * re-points, and an in-cycle crash rolls the whole transaction back.
+   *
+   * Authority boundaries, stated: the orchestrator approves nothing, claims
+   * nothing, dispatches nothing, transitions no mission, invents no work
+   * (an unspec'd item is truthfully not actionable — the Phase 3 no-parsing
+   * law), never touches hq_memory, and under an engaged global/orchestrate
+   * kill switch APPLY refuses wholesale — an orchestrated `queued` task
+   * would sit primed to run on release (the approveTask precedent), while
+   * PREVIEW stays available because reading is not reachability. Mission
+   * priority still never reorders operator FIFO: created tasks join the
+   * queue in arrival order like every other task.
+   *
+   * The gates run TWICE on apply, deliberately: once before the lock for
+   * fast refusal, and again inside the outer IMMEDIATE transaction from
+   * canonical store truth (`#revalidateOrchestrationAuthorityLocked`,
+   * Sol M1) — a revocation or kill-switch engagement another connection
+   * commits between precheck and lock refuses the whole cycle with zero
+   * orchestration writes.
+   */
+  orchestrateMission(input: {
+    missionId: string;
+    mode: 'preview' | 'apply';
+    /** From a prior preview; when supplied, apply refuses if the mission moved. */
+    fingerprint?: string;
+    /** Resolved principal id. Set by the boundary, never read from a body. */
+    requestedBy: string;
+  }): OpsResult<OrchestrationReport> {
+    if (!input.missionId || !input.requestedBy) {
+      return fail('invalid_input', 'missionId and requestedBy are required');
+    }
+    if (input.mode !== 'preview' && input.mode !== 'apply') {
+      return fail('invalid_input', "mode must be 'preview' or 'apply'");
+    }
+    const refusedOrchestrator = this.#resolveFounderGateActor(
+      input.requestedBy,
+      'orchestrate a mission',
+      MISSION_ORCHESTRATE_CAPABILITY.id,
+      'orchestrating a mission',
+    );
+    if (refusedOrchestrator) return refusedOrchestrator;
+    const refusedCapability = this.#founderGateCapabilityGate(
+      'orchestrate a mission',
+      MISSION_ORCHESTRATE_CAPABILITY.id,
+      missionOrchestrateCapabilityState,
+      missionOrchestrateContractDrift,
+      'orchestrating a mission',
+    );
+    if (refusedCapability) return refusedCapability;
+    if (input.mode === 'apply') {
+      // Linking is a mission-directing act, so apply pre-checks the MISSION
+      // gate up front rather than failing per-item halfway through.
+      const refusedCommander = this.#resolveMissionCommander(input.requestedBy, 'orchestrate a mission');
+      if (refusedCommander) return refusedCommander;
+      const refusedMissionCapability = this.#missionCapabilityGate('orchestrate a mission');
+      if (refusedMissionCapability) return refusedMissionCapability;
+    }
+
+    const mission = this.#missionRecord(input.missionId);
+    if (!mission) return fail('unknown_mission', `Unknown mission: ${input.missionId}`);
+    if (isMissionTerminal(mission.status)) {
+      return fail(
+        'mission_terminal',
+        `Mission ${input.missionId} is ${mission.status} — a terminal mission has no work to orchestrate`,
+        { status: mission.status },
+      );
+    }
+    if (input.mode === 'apply' && mission.status !== 'planned' && mission.status !== 'working') {
+      return fail(
+        'mission_not_orchestratable',
+        `Mission ${input.missionId} is ${mission.status} — apply orchestrates only planned/working missions ` +
+          '(blocked records a Founder stop; ready_review/verified are past building)',
+        { status: mission.status },
+      );
+    }
+    if (
+      input.mode === 'apply' &&
+      (this.queue.killSwitchEngaged() || this.queue.killSwitchEngaged(MISSION_ORCHESTRATE_CAPABILITY.id))
+    ) {
+      // Wholesale, before any write: an orchestrated read-only task would
+      // land `queued` — primed to run the moment the switch releases.
+      return fail(
+        'kill_switch_engaged',
+        'The kill switch is engaged: orchestrate-apply refuses wholesale so no orchestrated task sits primed. Preview remains available.',
+      );
+    }
+
+    const observedNow = this.#observeOrchestration(mission, input.requestedBy);
+    const fingerprint = orchestrationObservedDigest(observedNow);
+    const decisionsNow = planOrchestration(observedNow.items);
+
+    if (input.mode === 'preview') {
+      return ok({
+        missionId: mission.id,
+        mode: 'preview',
+        runId: null,
+        fingerprint,
+        state: this.#missionExecutionState(mission),
+        decisions: decisionsNow,
+      });
+    }
+
+    if (input.fingerprint !== undefined && input.fingerprint !== fingerprint) {
+      return fail(
+        'orchestrate_fingerprint_mismatch',
+        'The mission moved since the preview this apply echoes — re-preview and decide again',
+      );
+    }
+
+    const privileged = this.#requirePrivilegedQueue();
+    const runId = `orch-${uuid()}`;
+    let refusal: OpsResult<never> | null = null;
+    const enacted: OrchestrationDecision[] = [];
+    privileged.reserve(() => {
+      // Revalidated INSIDE the write lock, before anything else (Sol M1,
+      // PR #266 review 5124774932): the prechecks above ran on a picture a
+      // second connection could still move — a revocation or kill-switch
+      // engagement committed between them and this lock must refuse the
+      // whole cycle, never let it act on stale authority. Nothing below —
+      // no task, no link, no run item, no run, no event, no evidence — may
+      // be written until the CURRENT canonical truth re-admits the act.
+      const staleAuthority = this.#revalidateOrchestrationAuthorityLocked(input.requestedBy);
+      if (staleAuthority) {
+        refusal = staleAuthority;
+        return;
+      }
+      // Re-observed INSIDE the write lock (the assignMissionToProject
+      // precedent): the decisions acted on are the decisions of the locked
+      // picture, not the pre-lock one.
+      const current = this.#missionRecord(input.missionId)!;
+      if (current.status !== 'planned' && current.status !== 'working') {
+        refusal = fail('mission_status_changed', `Mission ${input.missionId} moved to ${current.status} concurrently`);
+        return;
+      }
+      const observed = this.#observeOrchestration(current, input.requestedBy);
+      if (input.fingerprint !== undefined && orchestrationObservedDigest(observed) !== input.fingerprint) {
+        refusal = fail(
+          'orchestrate_fingerprint_mismatch',
+          'The mission moved since the preview this apply echoes — re-preview and decide again',
+        );
+        return;
+      }
+      const decisions = planOrchestration(observed.items);
+      const specBySeq = new Map(current.planItems.map((item) => [item.seq, item] as const));
+      for (const decision of decisions) {
+        if (decision.decision !== 'ready') {
+          enacted.push(decision);
+          insertOrchestrationRunItem(this.#db, {
+            runId,
+            missionId: current.id,
+            planItemSeq: decision.planItemSeq,
+            decision: decision.decision,
+            detail: decision.detail,
+          });
+          continue;
+        }
+        const seq = decision.planItemSeq!;
+        const item = specBySeq.get(seq)!;
+        const idempotencyKey = orchestrationTaskIdempotencyKey({
+          missionId: current.id,
+          planItemSeq: seq,
+          capabilityId: item.specCapabilityId!,
+          payload: item.specPayload!,
+        });
+        // THE approved origination path — the same facade gate every manual
+        // order passes, payload VERBATIM from the Founder's stored spec.
+        const created = this.createTask({
+          capabilityId: item.specCapabilityId!,
+          payload: JSON.parse(item.specPayload!) as Record<string, unknown>,
+          idempotencyKey,
+          project: current.project ?? undefined,
+          title: item.summary,
+          requestedBy: input.requestedBy,
+        });
+        if (!created.ok) {
+          const refused: OrchestrationDecision = {
+            planItemSeq: seq,
+            decision: 'enqueue_refused',
+            detail: { capabilityId: item.specCapabilityId, code: created.error.code },
+          };
+          enacted.push(refused);
+          insertOrchestrationRunItem(this.#db, {
+            runId,
+            missionId: current.id,
+            planItemSeq: seq,
+            decision: refused.decision,
+            detail: refused.detail,
+          });
+          continue;
+        }
+        const taskId = created.data.task.id;
+        const madeDecision: OrchestrationDecision = {
+          planItemSeq: seq,
+          decision: created.data.deduplicated ? 'task_deduplicated' : 'task_created',
+          detail: {
+            taskId,
+            capabilityId: item.specCapabilityId,
+            taskStatus: created.data.task.status,
+          },
+        };
+        enacted.push(madeDecision);
+        insertOrchestrationRunItem(this.#db, {
+          runId,
+          missionId: current.id,
+          planItemSeq: seq,
+          decision: madeDecision.decision,
+          detail: madeDecision.detail,
+        });
+        const linked = this.linkMissionPlanItem({
+          missionId: current.id,
+          planItemSeq: seq,
+          taskId,
+          requestedBy: input.requestedBy,
+        });
+        const linkDecision: OrchestrationDecision = linked.ok
+          ? { planItemSeq: seq, decision: 'item_linked', detail: { taskId } }
+          : {
+              planItemSeq: seq,
+              decision: 'link_refused',
+              detail: { taskId, code: linked.error.code, message: linked.error.message },
+            };
+        enacted.push(linkDecision);
+        insertOrchestrationRunItem(this.#db, {
+          runId,
+          missionId: current.id,
+          planItemSeq: seq,
+          decision: linkDecision.decision,
+          detail: linkDecision.detail,
+        });
+      }
+      const counts = {
+        decisions: enacted.length,
+        created: enacted.filter((d) => d.decision === 'task_created').length,
+        deduplicated: enacted.filter((d) => d.decision === 'task_deduplicated').length,
+        linked: enacted.filter((d) => d.decision === 'item_linked').length,
+        refused: enacted.filter((d) => d.decision === 'enqueue_refused' || d.decision === 'link_refused').length,
+        notActionable: enacted.filter(
+          (d) =>
+            d.decision === 'not_actionable_unspecified' || d.decision === 'not_actionable_needs_clarification',
+        ).length,
+      };
+      // The run row lands LAST, its summary complete — an aborted cycle
+      // leaves no half-run record because the whole transaction rolls back.
+      insertOrchestrationRun(this.#db, {
+        id: runId,
+        missionId: current.id,
+        requestedBy: input.requestedBy,
+        observedDigest: orchestrationObservedDigest(observed),
+        summary: counts,
+      });
+      appendMissionEvent(this.#db, {
+        missionId: current.id,
+        actor: input.requestedBy,
+        kind: 'orchestrated',
+        detail: { runId, ...counts },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'mission_orchestrated',
+        payload: { missionId: current.id, runId, ...counts, executable: false },
+      });
+    });
+    if (refusal) return refusal;
+
+    const after = this.#missionRecord(input.missionId)!;
+    return ok({
+      missionId: after.id,
+      mode: 'apply',
+      runId,
+      fingerprint: orchestrationObservedDigest(this.#observeOrchestration(after, input.requestedBy)),
+      state: this.#missionExecutionState(after),
+      decisions: enacted,
+    });
+  }
+
+  /**
+   * Every load-bearing orchestrate gate, re-proven from CURRENT canonical
+   * enforcement truth INSIDE the outer IMMEDIATE write transaction (Sol M1,
+   * PR #266 review 5124774932).
+   *
+   * Why it exists: `orchestrateMission`'s prechecks run BEFORE the lock, so a
+   * second connection could commit an authority revocation or engage the
+   * orchestrate kill switch after the precheck observed them clear and before
+   * the apply acquired its write lock — and the locked cycle would then create
+   * real tasks on stale authority. The same window let `createTask` succeed
+   * before `linkMissionPlanItem` observed a concurrently revoked Mission gate,
+   * leaving a real unlinked task. Holding the lock while re-proving all five
+   * gates closes both: nothing can move between this check and the writes.
+   *
+   * The five gates, in precheck order:
+   *   1. the acting principal still holds `hq.mission_orchestrate`
+   *      (`#resolveFounderGateActor` → the database principal row);
+   *   2. the canonical `hq.mission_orchestrate` row is still present, enabled
+   *      and contract-correct (`#founderGateCapabilityGate` → `#capabilityFromStore`);
+   *   3. the Mission actor and `hq.mission_command` gate still admit the
+   *      linking act (`#resolveMissionCommander` + `#missionCapabilityGate`);
+   *   4./5. the global and `hq.mission_orchestrate` kill-switch scopes are
+   *      still clear — read through `#killSwitchEngagedFromStore`, never the
+   *      patchable `queue.killSwitchEngaged` convenience delegate.
+   *
+   * A refusal is the canonical precheck refusal with `revalidation:
+   * 'post_lock'` added to its details — truthful provenance of WHERE the
+   * refusal was decided, so audit and the concurrency proofs can tell a
+   * precheck refusal from a raced one. The caller returns it before any
+   * orchestration write, so a failed revalidation leaves ZERO mutations.
+   */
+  #revalidateOrchestrationAuthorityLocked(requestedBy: string): OpsResult<never> | null {
+    const refused =
+      this.#resolveFounderGateActor(
+        requestedBy,
+        'orchestrate a mission',
+        MISSION_ORCHESTRATE_CAPABILITY.id,
+        'orchestrating a mission',
+      ) ??
+      this.#founderGateCapabilityGate(
+        'orchestrate a mission',
+        MISSION_ORCHESTRATE_CAPABILITY.id,
+        missionOrchestrateCapabilityState,
+        missionOrchestrateContractDrift,
+        'orchestrating a mission',
+      ) ??
+      this.#resolveMissionCommander(requestedBy, 'orchestrate a mission') ??
+      this.#missionCapabilityGate('orchestrate a mission');
+    if (refused && !refused.ok) {
+      return fail(refused.error.code, refused.error.message, {
+        ...(refused.error.details ?? {}),
+        revalidation: 'post_lock',
+      });
+    }
+    if (this.#killSwitchEngagedFromStore(MISSION_ORCHESTRATE_CAPABILITY.id)) {
+      return fail(
+        'kill_switch_engaged',
+        'The kill switch engaged while orchestrate-apply waited for the write lock: the locked cycle refuses wholesale so no orchestrated task sits primed. Preview remains available.',
+        { revalidation: 'post_lock' },
+      );
+    }
+    return null;
+  }
+
+  /** Observe the facts the decision core classifies — reads only, no clock beyond `nowIso` provenance. */
+  #observeOrchestration(
+    mission: MissionRecord,
+    requestedBy: string,
+  ): { missionId: string; missionStatus: string; items: ObservedPlanItem[] } {
+    const originate = this.#principals.get(requestedBy)?.originateCapabilities ?? [];
+    const items: ObservedPlanItem[] = mission.planItems.map((item) => {
+      const taskRow = item.taskId
+        ? (this.#db
+            .prepare(`SELECT status, review_state, claimed_by FROM op_tasks WHERE id = ?`)
+            .get(item.taskId) as { status: string; review_state: string | null; claimed_by: string | null } | undefined)
+        : undefined;
+      const specCapability =
+        item.specCapabilityId != null ? this.#capabilityFromStore(item.specCapabilityId) : null;
+      return {
+        seq: item.seq,
+        kind: item.kind,
+        superseded: item.supersededInIntentSeq != null,
+        taskId: item.taskId,
+        taskStatus: (taskRow?.status as ActivityStatus | undefined) ?? null,
+        reviewPending: taskRow?.review_state === 'pending',
+        claimedBy: taskRow?.claimed_by ?? null,
+        specCapabilityId: item.specCapabilityId,
+        specPayload: item.specPayload,
+        specCapabilityState:
+          item.specCapabilityId == null
+            ? null
+            : specCapability == null
+              ? 'missing'
+              : specCapability.enabled
+                ? 'enabled'
+                : 'disabled',
+        founderHoldsOriginate:
+          item.specCapabilityId != null && originate.includes(item.specCapabilityId),
+        specScopeKillSwitchEngaged:
+          item.specCapabilityId != null &&
+          this.#killSwitchEngagedFromStore(item.specCapabilityId),
+      };
+    });
+    return { missionId: mission.id, missionStatus: mission.status, items };
+  }
+
+  /** Evidence-free eligible-worker read — the SAME directory/policy predicates enforcement uses. */
+  #workerEligibilityFor(capabilityId: string): string[] {
+    const cap = this.#capabilityFromStore(capabilityId);
+    if (!cap) return [];
+    return this.#store
+      .listSpecialists()
+      .filter((specialist) => {
+        const granted = this.#grantOf(specialist.id);
+        const assignability = this.#workers.assignability(specialist.id);
+        const decision = evaluatePolicy(
+          cap,
+          { workerId: specialist.id, allowedCapabilities: [...granted] },
+          this.#policyCtx,
+        );
+        return granted.includes(capabilityId) && assignability.assignable && decision.outcome !== 'deny';
+      })
+      .map((specialist) => specialist.id)
+      .sort();
+  }
+
+  #missionExecutionState(mission: MissionRecord): MissionExecutionState {
+    const live = mission.planItems.filter((item) => item.supersededInIntentSeq == null);
+    const work = live.filter((item) => item.kind === 'work');
+    const clarification = live.filter((item) => item.kind === 'needs_clarification');
+    const linkedItems = work.filter((item) => item.taskId != null);
+    const linkedTasks: MissionExecutionState['linkedTasks'] = linkedItems.map((item) => {
+      const row = this.#db
+        .prepare(`SELECT status, review_state, claimed_by, capability_id FROM op_tasks WHERE id = ?`)
+        .get(item.taskId!) as
+        | { status: string; review_state: string | null; claimed_by: string | null; capability_id: string }
+        | undefined;
+      const assignment = this.readMeta(item.taskId!)?.assignment ?? null;
+      return {
+        planItemSeq: item.seq,
+        taskId: item.taskId!,
+        status: (row?.status as ActivityStatus | undefined) ?? 'outcome_unknown',
+        reviewPending: row?.review_state === 'pending',
+        claimedBy: row?.claimed_by ?? null,
+        assignment: assignment
+          ? { workerId: assignment.workerId, assignedBy: assignment.assignedBy, assignedAt: assignment.assignedAt }
+          : null,
+        eligibleWorkers: row ? this.#workerEligibilityFor(row.capability_id) : [],
+      };
+    });
+    const unspecified = work.filter((item) => item.taskId == null && item.specCapabilityId == null);
+    const specified = work.filter((item) => item.specCapabilityId != null);
+    const engagedSpecScopes = [
+      ...new Set(
+        specified
+          .map((item) => item.specCapabilityId!)
+          .filter((capabilityId) => this.queue.killSwitchEngaged(capabilityId)),
+      ),
+    ].sort();
+    // Derived readiness, CATEGORICAL: every live work item is linked, every
+    // linked task is terminal-complete, nothing awaits clarification and at
+    // least one real work item exists. A recommendation, never a transition.
+    const allWorkLinked = work.length > 0 && work.every((item) => item.taskId != null);
+    const allComplete = linkedTasks.length > 0 && linkedTasks.every((task) => task.status === 'completed');
+    const recommendation: MissionExecutionState['recommendation'] =
+      allWorkLinked && allComplete && clarification.length === 0 ? 'ready_review' : 'none';
+    return {
+      missionId: mission.id,
+      status: mission.status,
+      planItems: {
+        total: mission.planItems.length,
+        superseded: mission.planItems.length - live.length,
+        needsClarification: clarification.length,
+        workUnspecified: unspecified.length,
+        workSpecified: specified.length,
+        linked: linkedItems.length,
+      },
+      linkedTasks,
+      blockers: {
+        unspecifiedWorkItems: unspecified.map((item) => item.seq),
+        needsClarification: clarification.map((item) => item.seq),
+        approvalPending: linkedTasks.filter((task) => task.status === 'needs_approval').map((task) => task.taskId),
+        outcomeUnknown: linkedTasks.filter((task) => task.status === 'outcome_unknown').map((task) => task.taskId),
+        blocked: linkedTasks.filter((task) => task.status === 'blocked').map((task) => task.taskId),
+      },
+      killSwitch: {
+        global: this.queue.killSwitchEngaged(),
+        orchestrate: this.queue.killSwitchEngaged(MISSION_ORCHESTRATE_CAPABILITY.id),
+        engagedSpecScopes,
+      },
+      dependsOn: mission.dependsOn.map((missionId) => ({
+        missionId,
+        status: this.getMission(missionId)?.status ?? null,
+      })),
+      recommendation,
+    };
+  }
+
+  /** The categorical execution-state read on its own — the Mission Room's truth. */
+  getMissionExecutionState(missionId: string): OpsResult<MissionExecutionState> {
+    if (!missionId) return fail('invalid_input', 'missionId is required');
+    const mission = this.#missionRecord(missionId);
+    if (!mission) return fail('unknown_mission', `Unknown mission: ${missionId}`);
+    return ok(this.#missionExecutionState(mission));
   }
 
   /**
@@ -3926,6 +4885,25 @@ export class HeadquarterOperations {
       projectCommandCapabilityState,
       projectCommandContractDrift,
       'commanding a project record',
+    );
+  }
+
+  #resolveMemoryRecorder(actor: string, action: string): OpsResult<never> | null {
+    return this.#resolveFounderGateActor(
+      actor,
+      action,
+      MEMORY_COMMAND_CAPABILITY.id,
+      'recording company memory',
+    );
+  }
+
+  #memoryCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      MEMORY_COMMAND_CAPABILITY.id,
+      memoryCommandCapabilityState,
+      memoryCommandContractDrift,
+      'recording company memory',
     );
   }
 
@@ -4275,6 +5253,383 @@ export class HeadquarterOperations {
   #projectRecord(id: string): ProjectRecord | null {
     if (!this.#projectStorePresent) return null;
     return readProjectRecord(this.#db, id, this.#capabilityFromStore(PROJECT_COMMAND_CAPABILITY.id));
+  }
+
+  // ---- company memory (Phase 5 — Context + Mission Memory, #265) ----
+
+  /**
+   * Record one company memory entry — the ONE write path into hq_memory from
+   * the application layer (issue #120's store, wired at last).
+   *
+   * A memory record is knowledge, never authority and never execution: it
+   * changes no task status, burns no approval, dispatches nothing, and no
+   * gate anywhere reads it. Founder-only via the `hq.memory_command`
+   * originate grant and the fail-closed capability trio. "Changing" memory is
+   * recording a successor via `supersedes`; the store is insert-only BY
+   * ENGINE, so history cannot be rewritten by anyone, including this method.
+   *
+   * Order (the createProject/commandMission shape): bounds/vocabulary →
+   * actor gate → capability gate → entity-existence probes (AFTER authority —
+   * no existence oracle) → secret scan → derived idempotency key → one
+   * IMMEDIATE reserve transaction (dedupe read, supersede/derivation
+   * validation, insert, hq_events audit, op_evidence entry — atomically).
+   */
+  recordMemory(input: {
+    kind: MemoryKind;
+    title: string;
+    body: string;
+    /** Free-text project LABEL, never matched against the register. */
+    project: string;
+    missionId?: string;
+    projectId?: string;
+    taskId?: string;
+    related?: RelatedRefs;
+    sourceRefs?: string[];
+    tags?: string[];
+    derivedFrom?: string[];
+    supersedes?: string;
+    privacy?: MemoryPrivacy;
+    /** Default CURRENT. SUPERSEDED refused — history is earned by a successor, not asserted. */
+    status?: ArchiveStatus;
+    recorded?: DatedValue;
+    /** Resolved principal id. Set by the boundary, never read from a body. */
+    requestedBy: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ record: MemoryBrowserView; deduplicated: boolean }> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    if (!isMemoryKind(input.kind)) {
+      return fail('invalid_input', `kind must be one of: ${MEMORY_KINDS.join(', ')}`);
+    }
+    const privacy = input.privacy ?? 'internal';
+    if (!isMemoryPrivacy(privacy)) {
+      return fail('invalid_input', `privacy must be one of: ${MEMORY_PRIVACY_LEVELS.join(', ')}`);
+    }
+    const status = input.status ?? 'CURRENT';
+    if (!isArchiveStatus(status)) {
+      return fail('invalid_input', 'status is not a known archive status');
+    }
+    if (status === 'SUPERSEDED') {
+      return fail(
+        'invalid_input',
+        'a record cannot be born SUPERSEDED — supersession is earned by recording a successor',
+      );
+    }
+    const title = missionText('title', input.title, MAX_MEMORY_TITLE_LENGTH, true);
+    if (!title.ok) return fail('invalid_input', title.message);
+    const body = missionText('body', input.body, MAX_MEMORY_BODY_LENGTH, true);
+    if (!body.ok) return fail('invalid_input', body.message);
+    const project = missionText('project', input.project, MAX_MEMORY_PROJECT_LABEL_LENGTH, true);
+    if (!project.ok) return fail('invalid_input', project.message);
+    const tags = memoryList('tags', input.tags, MAX_MEMORY_TAG_LENGTH);
+    if (!tags.ok) return fail('invalid_input', tags.message);
+    const sourceRefs = memoryList('sourceRefs', input.sourceRefs, MAX_MEMORY_SOURCE_REF_LENGTH);
+    if (!sourceRefs.ok) return fail('invalid_input', sourceRefs.message);
+    const derivedFrom = memoryList('derivedFrom', input.derivedFrom, MAX_MEMORY_SOURCE_REF_LENGTH);
+    if (!derivedFrom.ok) return fail('invalid_input', derivedFrom.message);
+    const related = memoryRelatedRefs(input.related);
+    if (!related.ok) return fail('invalid_input', related.message);
+    if (input.kind === 'summary' && derivedFrom.value.length === 0) {
+      return fail('invalid_input', 'a summary must name the records it derives from (derivedFrom)');
+    }
+    const missionId = input.missionId?.trim() || null;
+    const projectId = input.projectId?.trim() || null;
+    const taskId = input.taskId?.trim() || null;
+    const supersedes = input.supersedes?.trim() || null;
+
+    const refusedRecorder = this.#resolveMemoryRecorder(input.requestedBy, 'record memory');
+    if (refusedRecorder) return refusedRecorder;
+    const refusedCapability = this.#memoryCapabilityGate('record memory');
+    if (refusedCapability) return refusedCapability;
+
+    // Entity refs must name real canonical rows — existence probed only after
+    // the authority gates above (no existence oracle for the ungranted).
+    if (missionId && !this.#db.prepare(`SELECT 1 FROM hq_missions WHERE id = ?`).get(missionId)) {
+      return fail('unknown_mission', `Unknown mission: ${missionId}`);
+    }
+    if (projectId && !this.#db.prepare(`SELECT 1 FROM hq_projects WHERE id = ?`).get(projectId)) {
+      return fail('unknown_project', `Unknown project: ${projectId}`);
+    }
+    if (taskId && !this.#db.prepare(`SELECT 1 FROM op_tasks WHERE id = ?`).get(taskId)) {
+      return fail('unknown_task', `Unknown task: ${taskId}`);
+    }
+
+    // Everything that will be PERSISTED is scanned before anything is written
+    // (the store scans again — deliberate defense in depth, not redundancy).
+    try {
+      assertNoSecretLikeContent({
+        title: title.value,
+        body: body.value,
+        project: project.value,
+        tags: tags.value,
+        sourceRefs: sourceRefs.value,
+        related: related.value,
+      });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+
+    const memory = this.#memory;
+    if (!memory) return fail('invalid_input', 'memory store unavailable on this database handle');
+    const recorded: DatedValue =
+      input.recorded ?? { date: nowIso(), confidence: 'exact', source: 'HQ control boundary' };
+    const idempotencyKey = memoryCommandIdempotencyKey({
+      requestedBy: input.requestedBy,
+      kind: input.kind,
+      title: title.value!,
+      body: body.value!,
+      project: project.value!,
+      missionId,
+      projectId,
+      taskId,
+      supersedes,
+      derivedFrom: derivedFrom.value,
+      privacy,
+      idempotencyKey: input.idempotencyKey ?? null,
+    });
+
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let dedupedTo: string | null = null;
+    let recordedId: string | null = null;
+    privileged.reserve(() => {
+      const existing = memory.findIdByIdempotencyKey(idempotencyKey);
+      if (existing) {
+        dedupedTo = existing;
+        return;
+      }
+      if (supersedes) {
+        const predecessor = memory.get(supersedes);
+        if (!predecessor) {
+          refusal = { code: 'unknown_memory', message: `Cannot supersede unknown memory record: ${supersedes}` };
+          return;
+        }
+        if (predecessor.status !== 'CURRENT') {
+          refusal = {
+            code: 'memory_conflict',
+            message: `Cannot supersede memory record ${supersedes}: it is ${predecessor.status}, not CURRENT`,
+          };
+          return;
+        }
+      }
+      for (const dep of derivedFrom.value) {
+        if (!memory.get(dep)) {
+          refusal = { code: 'unknown_memory', message: `Cannot derive from unknown memory record: ${dep}` };
+          return;
+        }
+      }
+      try {
+        const record = memory.record({
+          kind: input.kind,
+          title: title.value!,
+          body: body.value!,
+          status,
+          recorded,
+          recordedBy: input.requestedBy,
+          project: project.value!,
+          missionId,
+          projectId,
+          taskId,
+          derivedFrom: derivedFrom.value,
+          related: related.value,
+          sourceRefs: sourceRefs.value,
+          tags: tags.value,
+          supersedes,
+          privacy,
+          idempotencyKey,
+        });
+        recordedId = record.id;
+      } catch (error) {
+        const message = errorMessage(error);
+        refusal = {
+          code: message.startsWith('Invalid memory record') ? 'invalid_input' : 'memory_conflict',
+          message,
+        };
+        return;
+      }
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'memory_recorded',
+        payload: {
+          memoryId: recordedId,
+          memoryKind: input.kind,
+          supersedes,
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    if (dedupedTo) {
+      return ok({ record: memoryBrowserView(memory.get(dedupedTo)!), deduplicated: true });
+    }
+    return ok({ record: memoryBrowserView(memory.get(recordedId!)!), deduplicated: false });
+  }
+
+  /** One record by id, or null (including over a pre-Phase-5 read-only file). */
+  getMemoryRecord(id: string): MemoryBrowserView | null {
+    if (!id || !this.#memory) return null;
+    const record = this.#memory.get(id);
+    return record ? memoryBrowserView(record) : null;
+  }
+
+  /**
+   * Browser-safe memory listing, newest recorded first. Empty over a
+   * pre-Phase-5 file — zero records means zero records; nothing is invented.
+   * Privacy is NOT filtered here: the Founder-gated route may show
+   * founder_only, the snapshot artifact excludes it — each reading layer
+   * enforces its own disclosure, per the schema's stated rule.
+   */
+  listMemory(filter?: {
+    kind?: MemoryKind;
+    status?: ArchiveStatus;
+    missionId?: string;
+    projectId?: string;
+    taskId?: string;
+    project?: string;
+  }): MemoryBrowserView[] {
+    if (!this.#memory) return [];
+    let records = this.#memory.listAll();
+    if (filter?.kind) records = records.filter((r) => r.kind === filter.kind);
+    if (filter?.status) records = records.filter((r) => r.status === filter.status);
+    if (filter?.missionId) records = records.filter((r) => r.missionId === filter.missionId);
+    if (filter?.projectId) records = records.filter((r) => r.projectId === filter.projectId);
+    if (filter?.taskId) records = records.filter((r) => r.taskId === filter.taskId);
+    if (filter?.project) records = records.filter((r) => r.project === filter.project);
+    return records
+      .sort((a, b) => b.recorded.date.localeCompare(a.recorded.date) || a.id.localeCompare(b.id))
+      .map(memoryBrowserView);
+  }
+
+  /**
+   * Deterministic text search over memory via the EXISTING archive engine
+   * (asArchiveRecord/searchMemory — no second index, no semantic scoring).
+   */
+  searchMemoryRecords(query: SearchQuery): { hits: { record: MemoryBrowserView; score: number }[]; total: number } {
+    if (!this.#memory) return { hits: [], total: 0 };
+    const all = this.#memory.listAll();
+    const byProjectedId = new Map<string, CompanyMemoryRecord>(all.map((r) => [`memory-${r.id}`, r]));
+    const hits = searchMemory(all, query).flatMap((hit) => {
+      const record = byProjectedId.get(hit.record.id);
+      return record ? [{ record: memoryBrowserView(record), score: hit.score }] : [];
+    });
+    return { hits, total: hits.length };
+  }
+
+  /**
+   * Mission-scoped context: the canonical mission (its existing browser
+   * projection — context invents no second projection) plus entity-linked
+   * memory in deterministic groups. READ-TIME composition only: this method
+   * writes nothing, and re-reading the mission afterwards returns identical
+   * canonical truth. Context informs; it never grants.
+   */
+  getMissionContext(missionId: string): OpsResult<EntityContextView<MissionBrowserView>> {
+    if (!missionId) return fail('invalid_input', 'missionId is required');
+    const mission = this.getMission(missionId);
+    if (!mission) return fail('unknown_mission', `Unknown mission: ${missionId}`);
+    const at = nowIso();
+    const memory = this.#memory;
+    const taskIds = mission.planItems
+      .map((item) => item.taskId)
+      .filter((taskId): taskId is string => taskId != null);
+    const groups = assembleMemoryGroups({
+      direct: memory?.listByMissionId(missionId) ?? [],
+      directLinkage: 'mission',
+      taskLinked: memory ? taskIds.flatMap((taskId) => memory.listByTaskId(taskId)) : [],
+      projectLinked:
+        memory && mission.projectId ? memory.listByProjectRef(mission.projectId) : [],
+      lookup: (id) => memory?.get(id) ?? null,
+    });
+    return ok({
+      scope: 'mission',
+      entityId: missionId,
+      assembledAt: at,
+      entity: {
+        provenance: {
+          mode: 'live',
+          source: 'hq_missions via HeadquarterOperations.getMission (canonical aggregate, browser projection)',
+          asOf: at,
+        },
+        data: missionBrowserView(mission),
+      },
+      memory: { provenance: memoryContextProvenance(`mission ${missionId}`, at), data: groups },
+    });
+  }
+
+  /** Project-scoped context — direct project-linked memory plus the one-hop related walk. */
+  getProjectContext(projectId: string): OpsResult<EntityContextView<ProjectBrowserView>> {
+    if (!projectId) return fail('invalid_input', 'projectId is required');
+    const project = this.getProject(projectId);
+    if (!project) return fail('unknown_project', `Unknown project: ${projectId}`);
+    const at = nowIso();
+    const memory = this.#memory;
+    const groups = assembleMemoryGroups({
+      direct: memory?.listByProjectRef(projectId) ?? [],
+      directLinkage: 'project',
+      lookup: (id) => memory?.get(id) ?? null,
+    });
+    return ok({
+      scope: 'project',
+      entityId: projectId,
+      assembledAt: at,
+      entity: {
+        provenance: {
+          mode: 'live',
+          source: 'hq_projects via HeadquarterOperations.getProject (canonical register, browser projection)',
+          asOf: at,
+        },
+        data: projectBrowserView(project),
+      },
+      memory: { provenance: memoryContextProvenance(`project ${projectId}`, at), data: groups },
+    });
+  }
+
+  /**
+   * Task-scoped context. The canonical element is a MINIMAL browser-safe ref
+   * — id, capability, status, createdAt — never the payload (the snapshot's
+   * no-task-payload rule applies to context too).
+   */
+  getTaskContext(taskId: string): OpsResult<EntityContextView<TaskContextRef>> {
+    if (!taskId) return fail('invalid_input', 'taskId is required');
+    const row = this.#db
+      .prepare(`SELECT id, capability_id, status, created_at FROM op_tasks WHERE id = ?`)
+      .get(taskId) as
+      | { id: string; capability_id: string; status: string; created_at: string }
+      | undefined;
+    if (!row) return fail('unknown_task', `Unknown task: ${taskId}`);
+    const at = nowIso();
+    const memory = this.#memory;
+    const groups = assembleMemoryGroups({
+      direct: memory?.listByTaskId(taskId) ?? [],
+      directLinkage: 'task',
+      lookup: (id) => memory?.get(id) ?? null,
+    });
+    return ok({
+      scope: 'task',
+      entityId: taskId,
+      assembledAt: at,
+      entity: {
+        provenance: {
+          mode: 'live',
+          source: 'op_tasks minimal browser-safe columns (id, capability, status, createdAt — never the payload)',
+          asOf: at,
+        },
+        data: {
+          taskId: row.id,
+          capabilityId: row.capability_id,
+          status: row.status as ActivityStatus,
+          createdAt: row.created_at,
+        },
+      },
+      memory: { provenance: memoryContextProvenance(`task ${taskId}`, at), data: groups },
+    });
+  }
+
+  /**
+   * Whether this database carries the Phase 5 memory schema. False only for
+   * a read-only handle over a pre-Phase-5 file; memory reads then answer
+   * empty/null and the snapshot's memory provenance states the absence.
+   */
+  memoryStorePresent(): boolean {
+    return this.#memoryStorePresent;
   }
 
   // ---- task metadata (console labels + advisory assignment) ----

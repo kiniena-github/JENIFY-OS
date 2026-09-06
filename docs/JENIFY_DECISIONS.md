@@ -295,3 +295,78 @@ Append-only. Each entry: date, decision, rationale. Newest last.
      table set; the assign dropdown offers only active workers (the server stays
      authoritative); and both anti-emptying regression layers are named in the canonical
      doc. Issue #182 narrowing stays OFF.
+
+- **2026-09-06 — Wave 1: Phase 5 (Context + Mission Memory) + Phase 6 (Real Mission
+  Orchestrator), issue #265.** Founder-approved via the #265 handoff; recorded here so
+  nothing about it is silent (canonical doc:
+  `docs/HEADQUARTER/PHASE_5_6_CONTEXT_MEMORY_AND_ORCHESTRATOR.md`):
+  1. **Write surface.** The browser write surface widens from thirteen routes to fifteen
+     (`POST /api/hq/control/memory` — record/supersede — and
+     `POST /api/hq/control/missions/orchestrate`, mode preview|apply); the route table
+     grows 17 → 21 with the three memory reads (list, search, context). This supersedes
+     ONLY the surface-count clause of the Phase 4 entry; every other clause — identity
+     from the server session and Founder map only, fail-closed on a broken map, no generic
+     mutation endpoint — stands and applies to the new routes unchanged. ONE boundary
+     widening rides along: `ControlRequest` gains an optional identity-scanned `query`
+     map (a `?principalId=` attempt is refused exactly like a body actor).
+  2. **The step-up re-evaluation owed at "Phase ≥ 6" is RESOLVED as a demand.**
+     Orchestrate-APPLY is the first act that turns stored mission state into
+     execution-reachable tasks, in bulk, so it takes step-up with the approve-route
+     mechanics verbatim (canonical registry row via `capabilityRowFor`, fresh-session
+     pass, stale session demands the JENIFY OS password). PREVIEW is a pure read and
+     takes none. Memory writes stay exempt (append-only knowledge, reversible by
+     supersede). All other recorded exemptions stand unchanged.
+  3. **Kill-switch posture.** Orchestrate-apply refuses WHOLESALE under a global or
+     orchestrate-scope engagement — an orchestrated `queued` task would sit primed to run
+     on release (the approveTask precedent) — and per-item under a spec-capability scope.
+     Preview stays available (reading is not reachability) and reports the switch.
+     Memory writes are not kill-switch-gated (intake parity: recording direction
+     survives an emergency stop). All pinned by named tests.
+  4. **One memory truth.** The issue-#120 module is WIRED, never duplicated: additive
+     kinds (founder_note, source_material, summary — a summary must name real sources and
+     never touches them), canonical entity refs (mission/project/task, validated to
+     exist; the free-text `project` column stays a label), insert-only BY ENGINE (content
+     UPDATEs and DELETEs abort; status moves only CURRENT→SUPERSEDED; the §G
+     BEFORE INSERT guard closes REPLACE/UPSERT), and the one Founder-gated write path
+     under the new `hq.memory_command` trio. `founder_only` privacy is enforced at the
+     reading layers: the Founder-gated routes carry those rows, the unauthenticated
+     snapshot artifact excludes them (count-only disclosure, stated in provenance), and
+     handover packages now exclude them too — a package is consumed by a successor
+     WORKER (a real pre-existing gap, closed and pinned).
+  5. **Context is read-time composition, never storage**, relationship-scoped with a
+     one-hop related walk, bounded with honest totals, provenance on every element, and
+     deterministic ($0 — the existing archive search engine; no embeddings, no external
+     calls). No gate anywhere reads hq_memory; a hostile record claiming grants changes
+     no verdict (pinned against a memory-free control run). Room 14 Company Memory is
+     rebound later_phase → live on the new `memory` section; its purpose text drops
+     "Ask Jenify" honestly — the NL layer remains a later, Founder-gated milestone.
+  6. **Task creation stays specified, never inferred.** A plan item becomes a canonical
+     task ONLY from its explicit write-once Founder work spec (capability id +
+     canonical-JSON payload, stated at command time or via
+     `amendMissionIntent.specifyPlanItems`, recorded verbatim in the append-only intent
+     body, payload server-side only). Phase 3's no-parsing law stands; unspec'd items are
+     truthfully not actionable; commanding with specs still creates no task; the mission
+     idempotency digest gains specs only when stated so stored keys keep deduping.
+  7. **The orchestrator holds no new authority.** It creates and links through the
+     existing gated facades only (derived idempotency keys → the queue's own dedupe +
+     the engine's write-once link = rerun/crash-safe); approves nothing (orchestrated
+     tasks are created BY the Founder, so approval-gated specs need a SECOND
+     approval-authority principal — the canonical self-approval rule, stated in the
+     doc); claims, dispatches and transitions nothing (readiness is a categorical
+     RECOMMENDATION); records no Wave-1 assignment intent (no canonical assignment-rule
+     store exists — inventing one would be new decision authority); writes nothing into
+     hq_memory (run records `hq_orchestration_runs`/`_run_items` are INSERT-only derived
+     audit, and nothing reads them to decide); and never touches `outcome_unknown` (it
+     stays unknown). Mission priority still never reorders operator FIFO — proven
+     behaviorally again at the orchestrated boundary.
+  8. **Accepted Phase 4 Low debt, dispositioned.** #1 hostile-rejection blocked+claimant:
+     pinned at the orchestration boundary (reported verbatim, execution-inert, never
+     duplicated). #2 `dispatchable` terminology and #3 ORDERS-lane `connected` wording:
+     untouched (neither lane was migrated this wave — recorded follow-ups stand).
+     #4 superseded plan items retaining task links: preserved. #5 member↔operator
+     vocabulary bridge: stays OFF. #6 worker reactivation: still deliberately absent.
+  9. **Not automated, deliberately.** No daemon/timer/schedule (the mission watchdog
+     stays unwired; its wiring-truth pin is untouched); no mission lifecycle automation;
+     no Phase 7+ machinery (no evidence-engine replacement, external action gateway,
+     risk engine, multi-AI room, or chief of staff). Capability registration remains an
+     explicit `hq:workforce` configuration act; invocation fails closed until it happens.

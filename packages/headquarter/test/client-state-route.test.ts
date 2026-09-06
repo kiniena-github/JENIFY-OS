@@ -167,6 +167,7 @@ describe('what the state route publishes', () => {
       queued: 0,
       missions: 0,
       projects: 0, // Phase 4: the register counts as a zero, never as absence
+      memory: 0, // Phase 5: company memory counts as a zero, never as absence
     });
     const home = rooms(response).find((room) => room.roomId === 'home')!;
     expect(home.status).toBe('live');

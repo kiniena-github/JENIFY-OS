@@ -188,3 +188,25 @@ Regression coverage: `test/handover-freeze-enforcement.test.ts`.
 
 - **UI.** No Jules-owned surface for browsing memory or driving a handover
   through its states — this issue is the data/lifecycle layer only.
+
+## Phase 5 wiring (issue #265, 2026-09-06)
+
+This module is no longer unwired. Phase 5 made it the one memory truth of
+JENIFY HQ — canonical entity refs, engine-held insert-only guarantees, the
+Founder-gated `hq.memory_command` write path, deterministic context assembly,
+routes, a snapshot section and the live Company Memory room. Canonical
+detail: `docs/HEADQUARTER/PHASE_5_6_CONTEXT_MEMORY_AND_ORCHESTRATOR.md`.
+
+Two interactions recorded here because they touch THIS lane's semantics:
+
+- **founder_only never enters a handover package** (a package is consumed by
+  a successor WORKER; the Founder-gated memory surface is the reading layer
+  for those rows). This closes a real gap this document's original design
+  left open — `generateHandoverPackage` previously carried a worker's own
+  founder_only records.
+- **The `ownedBy()` open question stands, updated.** Phase 4 built the
+  canonical project register this document said did not exist, but memory's
+  worker-attribution interpretation (recordedBy-or-tag) was deliberately NOT
+  migrated to project-level ownership in Phase 5 — no worker→project
+  ownership model exists yet, so the documented interpretation remains the
+  honest one. Revisit if such a model is ever a Founder decision.
