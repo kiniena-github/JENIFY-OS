@@ -547,6 +547,7 @@ import {
   deriveTruthRecord,
   ensureTruthSchema,
   entityCurrentState,
+  establishedTruthTier,
   isTruthBornState,
   isTruthEntityKind,
   isVerificationMethod,
@@ -6045,13 +6046,17 @@ export class HeadquarterOperations {
           };
           return;
         }
-        // Superseding a VERIFIED or ACCEPTED record displaces truth that other
-        // actors established; only the canonical Founder gate may do that.
-        const state = deriveTruthRecord(predecessor, graph, 'not_evaluated').state;
-        if (state === 'verified' || state === 'accepted') {
+        // Superseding a record that was EVER verified or EVER accepted
+        // displaces truth that other actors established; only the canonical
+        // Founder gate may do that. Read from the immutable rows
+        // (`establishedTruthTier`), NOT from the derived `state`: a later
+        // refutation or contest lowers the state a record presents, and it
+        // must never lower the authority needed to retire that record.
+        const tier = establishedTruthTier(predecessor, graph);
+        if (tier !== null) {
           const gate = this.#assertApprovalAuthority(
             input.requestedBy,
-            `supersede ${state} truth record ${supersedes}`,
+            `supersede ${tier} truth record ${supersedes}`,
           );
           if (gate && !gate.ok) {
             refusal = gate.error;
@@ -6306,6 +6311,12 @@ export class HeadquarterOperations {
    *   of unresolved contradictions — a contested record is refused, so the
    *   Founder resolves the contradiction explicitly rather than by accepting
    *   one side while the other still stands;
+   * - an acceptance already on file deduplicates (same acceptor) or conflicts
+   *   (another) ONLY while it still stands (`acceptanceStanding`); once a
+   *   later refutation, supersession or contest lowered it, the request is
+   *   judged on the record's current standing through the same ladder and
+   *   refused there — "it was accepted before" is never a shortcut, and the
+   *   engine's one-acceptance index means no second row can ever exist;
    * - the route additionally demands STEP-UP (live/control-api.ts).
    *
    * Acceptance executes nothing: no task, approval row, claim or dispatch is
@@ -6348,7 +6359,7 @@ export class HeadquarterOperations {
         return;
       }
       const prior = view.acceptances[0];
-      if (prior) {
+      if (prior && view.acceptanceStanding === 'standing') {
         if (prior.acceptedBy === input.requestedBy) {
           dedupedTo = prior.id;
           return;
@@ -6359,6 +6370,11 @@ export class HeadquarterOperations {
         };
         return;
       }
+      // An acceptance that no longer STANDS (a later refutation, supersession
+      // or contest) is never a shortcut: the request falls through to the
+      // ordinary ladder below and is refused on the record's CURRENT
+      // standing — one status per cause, exactly as a never-accepted record
+      // in the same shape — never answered "already accepted".
       if (view.lifecycle === 'superseded') {
         refusal = {
           code: 'truth_conflict',
@@ -6372,7 +6388,7 @@ export class HeadquarterOperations {
           message:
             `Truth record ${truthId} is ${view.state} (verification: ${view.verification}); ` +
             'only a verified record can be accepted, and nothing here verifies it',
-          details: { state: view.state, verification: view.verification },
+          details: { state: view.state, verification: view.verification, acceptanceStanding: view.acceptanceStanding },
         };
         return;
       }
@@ -6402,6 +6418,16 @@ export class HeadquarterOperations {
           code: 'not_permitted',
           message: `${input.requestedBy} verified truth record ${truthId} and cannot also accept it: verification and acceptance are separate authorities`,
           details: { actor: input.requestedBy },
+        };
+        return;
+      }
+      if (prior) {
+        // Unreachable by derivation (a degraded acceptance always fails one of
+        // the checks above) and closed by the engine's one-acceptance index
+        // regardless; stated so no future reordering can insert a second row.
+        refusal = {
+          code: 'truth_conflict',
+          message: `Truth record ${truthId} already carries an acceptance by ${prior.acceptedBy} (standing: ${view.acceptanceStanding}); acceptance is one explicit act, never repeated`,
         };
         return;
       }
@@ -6583,9 +6609,11 @@ export class HeadquarterOperations {
     const byState: Record<TruthState, number> = { claimed: 0, observed: 0, verified: 0, accepted: 0 };
     let awaitingAcceptance = 0;
     for (const view of visible) {
+      // The CURRENT derived state: an acceptance that no longer stands is
+      // counted under what the record derives now, never under `accepted`.
       byState[view.state] += 1;
       // Verified, current and uncontested — exactly the records the server
-      // issued an acceptance digest for.
+      // issued an acceptance digest for. A degraded acceptance never gets one.
       if (view.acceptanceDigest !== null) awaitingAcceptance += 1;
     }
     const unresolved = this.listTruthContradictions().filter((pair) => {

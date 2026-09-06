@@ -91,6 +91,47 @@ export function isVerificationVerdict(value: unknown): value is VerificationVerd
 /** Lifecycle of a record as a projection: superseded history stays auditable, never erased. */
 export type TruthLifecycle = 'current' | 'superseded';
 
+/**
+ * The CURRENT standing of a record's Founder acceptance — categorical, derived,
+ * never stored. The acceptance row is immutable history (who, when, over
+ * which digest and verification ids); whether it still STANDS is a fact of
+ * the graph now. An acceptance stands only while every precondition the
+ * acceptance required still holds: verification `confirmed` (≥1 confirmed
+ * and 0 refuted), lifecycle `current`, no unresolved contradiction. The
+ * first broken precondition, in that order, is what is named:
+ *
+ * - `none`                  — the record was never accepted;
+ * - `standing`              — accepted and every precondition still holds;
+ *                             the record's `state` is `accepted`;
+ * - `verification_refuted`  — a later verification refuted the record, so the
+ *                             confirming basis the digest covered no longer
+ *                             stands unopposed;
+ * - `superseded`            — the record was superseded (an explicit,
+ *                             Founder-gated act); its lifecycle is history;
+ * - `contested`             — an unresolved contradiction now touches it.
+ *
+ * Whenever the standing is not `standing`, `state` derives exactly what the
+ * record would derive WITHOUT the acceptance — `verified` while the
+ * verification basis is intact, else the born state — so a later refutation,
+ * contest or supersession can never keep presenting stale `accepted` truth.
+ * Refutation and supersession are irreversible acts, so those standings are
+ * final; a contest resolves only by an explicit act (a refutation or a
+ * supersession of the other side), and a contest resolved in the record's
+ * favour restores `standing` by derivation alone — the basis never moved and
+ * nothing is written to restore it.
+ */
+export const TRUTH_ACCEPTANCE_STANDINGS = ['none', 'standing', 'verification_refuted', 'superseded', 'contested'] as const;
+export type TruthAcceptanceStanding = (typeof TRUTH_ACCEPTANCE_STANDINGS)[number];
+
+/**
+ * The tier of truth a record EVER established, read by the supersession gate:
+ * `accepted` if it holds an acceptance, else `verified` if any verification
+ * confirmed it, else null. HISTORY-based on purpose: a later refutation or
+ * contest lowers the record's current `state`, never the authority needed to
+ * displace it from "current" (`#assertApprovalAuthority` in the facade).
+ */
+export type EstablishedTruthTier = 'verified' | 'accepted' | null;
+
 /** The categorical verification picture of one record. `contested` = confirmed AND refuted both exist. */
 export type TruthVerificationSummary = 'none' | 'confirmed' | 'refuted' | 'contested' | 'inconclusive';
 
@@ -587,12 +628,23 @@ export interface TruthRecordView {
   entityId: string;
   statement: string;
   bornState: TruthBornState;
-  /** DERIVED from other actors' records — never stored, never self-asserted. */
+  /**
+   * DERIVED from other actors' records — never stored, never self-asserted.
+   * `accepted` only while the acceptance STANDS (`acceptanceStanding`); a
+   * record whose acceptance was later refuted, contested or superseded
+   * derives what it would without the acceptance.
+   */
   state: TruthState;
   lifecycle: TruthLifecycle;
   verification: TruthVerificationSummary;
   /** True while at least one contradiction involving this record is unresolved. */
   contested: boolean;
+  /**
+   * Whether the acceptance in `acceptances` still stands NOW, and if not, the
+   * first broken precondition. `none` for a record never accepted. The
+   * acceptance row itself stays in `acceptances` whatever the standing.
+   */
+  acceptanceStanding: TruthAcceptanceStanding;
   recordedBy: string;
   recordedAt: string;
   /** `op_evidence` ids — references, never copies. */
@@ -612,8 +664,11 @@ export interface TruthRecordView {
   subjectDrift: SubjectDrift;
   /**
    * The digest a Founder must echo to accept this record — present ONLY
-   * while the record is exactly `verified` and uncontested; null otherwise,
-   * so the browser cannot even draw an acceptance for anything else.
+   * while the record is exactly `verified`, current and uncontested; null
+   * otherwise, so the browser cannot even draw an acceptance for anything
+   * else. A record whose acceptance no longer stands never gets one: by
+   * derivation it is either refuted (born state), superseded (not current)
+   * or contested — never acceptable, and never re-accepted by a shortcut.
    */
   acceptanceDigest: string | null;
 }
@@ -688,10 +743,26 @@ export function deriveTruthRecord(
     })),
   ];
   const contested = contradictions.some((c) => c.resolution === 'unresolved');
-
-  const state: TruthState =
-    acceptances.length > 0 ? 'accepted' : summary === 'confirmed' ? 'verified' : record.bornState;
   const lifecycle: TruthLifecycle = successor ? 'superseded' : 'current';
+
+  // The current-standing rule (see TruthAcceptanceStanding): the acceptance
+  // row is immutable history; it STANDS only while every precondition the
+  // acceptance required still holds, and `state` is `accepted` only then.
+  // Otherwise the record derives exactly what it would without it. The
+  // ladder below names the first broken precondition, basis first.
+  const verificationBasisHolds = summary === 'confirmed';
+  const acceptanceStanding: TruthAcceptanceStanding =
+    acceptances.length === 0
+      ? 'none'
+      : !verificationBasisHolds
+        ? 'verification_refuted'
+        : lifecycle !== 'current'
+          ? 'superseded'
+          : contested
+            ? 'contested'
+            : 'standing';
+  const state: TruthState =
+    acceptanceStanding === 'standing' ? 'accepted' : verificationBasisHolds ? 'verified' : record.bornState;
   const confirmingIds = verifications.filter((v) => v.verdict === 'confirmed').map((v) => v.id);
   const acceptable = state === 'verified' && lifecycle === 'current' && !contested;
 
@@ -706,6 +777,7 @@ export function deriveTruthRecord(
     lifecycle,
     verification: summary,
     contested,
+    acceptanceStanding,
     recordedBy: record.recordedBy,
     recordedAt: record.recordedAt,
     evidenceRefs: [...record.evidenceRefs],
@@ -750,6 +822,20 @@ export function deriveTruthRecord(
         })
       : null,
   };
+}
+
+/**
+ * What tier of truth this record EVER established — the input to the
+ * supersession gate. Reads the immutable rows, not the derived `state`, so
+ * that a record once verified or once accepted keeps taking the Founder gate
+ * to displace after its current standing fell (a later refutation lowers the
+ * state; it must never lower the authority needed to retire the record).
+ * PURE: no I/O, no clock.
+ */
+export function establishedTruthTier(record: TruthRecordRow, graph: TruthGraph): EstablishedTruthTier {
+  if (graph.acceptances.some((a) => a.truthId === record.id)) return 'accepted';
+  if (graph.verifications.some((v) => v.truthId === record.id && v.verdict === 'confirmed')) return 'verified';
+  return null;
 }
 
 // ---- bounded read shapes ----
@@ -806,7 +892,9 @@ export interface EntityTruthView {
  * The headline state for an entity from its CURRENT records: the strongest
  * state any current record holds — but never `accepted`/`verified` while
  * that record is contested (a contested record's state is shown on the
- * record; the headline does not launder it).
+ * record; the headline does not launder it). `state` already carries the
+ * acceptance standing (an acceptance that no longer stands is not
+ * `accepted`), so a degraded acceptance never reaches the headline either.
  */
 export function entityCurrentState(current: readonly TruthRecordView[]): TruthState | 'none' {
   const rank: Record<TruthState, number> = { claimed: 0, observed: 1, verified: 2, accepted: 3 };
@@ -826,7 +914,9 @@ export interface TruthSnapshotView {
    * gate; the non-founder_only records in the unauthenticated artifact), NOT
    * bounded by the carried `records` page. Sums to `total - withheldFounderOnly`.
    * Scoped that way since review round 2: aggregate categorical facts about
-   * withheld rows are still facts about them.
+   * withheld rows are still facts about them. Counts the CURRENT derived
+   * state: a record whose acceptance no longer stands is counted under the
+   * state it derives now, never under `accepted`.
    */
   byState: Record<TruthState, number>;
   /** Unresolved pairs with BOTH sides in the set the reader may see — the count of what `contradictions` summarises. */

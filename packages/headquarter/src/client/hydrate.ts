@@ -812,7 +812,12 @@ function founderSection(state: HqStateDocument, session: ClientSession | null): 
               'Truth records independently verified, current and uncontested. Acceptance is an explicit Founder act behind step-up; nothing here accepts itself.',
               tone(truth.awaitingAcceptance, 'warn'),
             ),
-            metric('Founder-accepted', truth.accepted, 'Truth records carrying one explicit acceptance record.', tone(truth.accepted, 'accent')),
+            metric(
+              'Founder-accepted',
+              truth.accepted,
+              'Truth records whose one explicit Founder acceptance currently stands. A later refutation, contest or supersession lowers the record to what it derives without the acceptance; the acceptance stays readable in its history.',
+              tone(truth.accepted, 'accent'),
+            ),
           ]
         : []),
     ],
@@ -936,7 +941,7 @@ function memorySection(state: HqStateDocument): Section {
         ? [
             metric('Truth records', truth.total, 'Claimed, observed, verified or accepted statements referencing real evidence. Memory grants none of these states.', tone(truth.total, 'info')),
             metric('Verified', truth.verified, 'Independently verified, not yet Founder-accepted.', tone(truth.verified, 'violet')),
-            metric('Accepted', truth.accepted, 'Carrying one explicit Founder acceptance.', tone(truth.accepted, 'accent')),
+            metric('Accepted', truth.accepted, 'Carrying one explicit Founder acceptance that currently stands.', tone(truth.accepted, 'accent')),
           ]
         : []),
     ],

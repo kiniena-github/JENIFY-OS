@@ -147,8 +147,15 @@ describe('truth across a full close and reopen', () => {
     expect(reader.ops.listTruth()).toEqual(beforeAll);
     expect(reader.ops.listTruthContradictions()).toEqual(beforeContradictions);
     const after = reader.ops.getTruthRecord(claim.id)!;
-    expect(after.state).toBe('accepted');
+    // Deliberately changed with the acceptance-standing correction: the rival
+    // contests the accepted record, so its acceptance no longer STANDS and the
+    // reopened file derives `verified` + contested — the acceptance row itself
+    // is still fully readable. Before the correction this pinned `accepted`
+    // beside `contested: true`, which was the defect.
+    expect(after.state).toBe('verified');
     expect(after.contested).toBe(true);
+    expect(after.acceptanceStanding).toBe('contested');
+    expect(after.acceptances).toHaveLength(1);
     expect(after.acceptances[0]!.acceptedBy).toBe(FOUNDER);
     expect(after.verifications[0]!.verifiedBy).toBe('codex');
     expect(reader.ops.getTruthRecord(rival.id)!.contradictions[0]!.resolution).toBe('unresolved');
@@ -162,9 +169,15 @@ describe('truth across a full close and reopen', () => {
       requestedBy: 'claude',
     });
     expect(selfVerify.ok).toBe(false);
+    // Deliberately changed with the acceptance-standing correction: the
+    // acceptance is contested, so a second acceptor is refused on the record's
+    // CURRENT standing (`truth_contested`) rather than as "already accepted"
+    // (`truth_conflict`, the pre-correction answer). A refusal either way; the
+    // cause is now the true one, and no row is written.
     const secondAcceptor = reader.ops.acceptTruth({ truthId: claim.id, expectedDigest: 'x', requestedBy: COO });
     expect(secondAcceptor.ok).toBe(false);
-    if (!secondAcceptor.ok) expect(secondAcceptor.error.code).toBe('truth_conflict');
+    if (!secondAcceptor.ok) expect(secondAcceptor.error.code).toBe('truth_contested');
+    expect((reader.db.prepare(`SELECT COUNT(*) AS n FROM hq_truth_acceptances`).get() as { n: number }).n).toBe(1);
     // Idempotency survives: the identical re-record dedupes onto the stored row.
     const again = reader.ops.recordTruth({
       entityKind: 'task',

@@ -2504,12 +2504,14 @@ export function truthConsoleScript(vocabulary: {
     var card = el('article', 'panel memory-card truth-card');
     card.setAttribute('data-truth-card', record.id);
     card.setAttribute('data-truth-state', record.state);
+    card.setAttribute('data-truth-acceptance-standing', record.acceptanceStanding);
     var head = el('p', 'row');
     head.appendChild(el('b', '', record.statement));
     head.appendChild(el('span', 'chip', record.state.toUpperCase()));
     head.appendChild(el('span', 'chip', 'born ' + record.bornState));
     head.appendChild(el('span', 'chip', record.lifecycle));
     if (record.contested) head.appendChild(el('span', 'chip', 'CONTESTED'));
+    if (record.acceptances.length > 0 && record.acceptanceStanding !== 'standing') head.appendChild(el('span', 'chip', 'ACCEPTANCE NO LONGER STANDS'));
     if (record.privacy === 'founder_only') head.appendChild(el('span', 'chip', 'founder_only'));
     card.appendChild(head);
     textLine(card, 'faint', 'About ' + record.entityKind + ' ' + record.entityId + ' \\u00b7 recorded ' + record.recordedAt +
@@ -2529,6 +2531,10 @@ export function truthConsoleScript(vocabulary: {
       var a = record.acceptances[i];
       textLine(card, 'muted', 'ACCEPTED by ' + a.acceptedBy + ' at ' + a.at + ' over verification(s) ' + a.verificationIds.join(', ') +
         ' \\u00b7 digest ' + a.digest + (a.note ? ' \\u00b7 note: ' + a.note : ''));
+    }
+    if (record.acceptances.length > 0 && record.acceptanceStanding !== 'standing') {
+      textLine(card, 'muted', 'That acceptance no longer stands (' + record.acceptanceStanding + '): the record now derives ' + record.state.toUpperCase() +
+        '. The acceptance above is immutable history \\u2014 nothing was erased, and nothing here re-accepts it.');
     }
     for (i = 0; i < record.contradictions.length; i++) {
       var c = record.contradictions[i];

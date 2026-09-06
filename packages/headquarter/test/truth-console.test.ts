@@ -180,6 +180,30 @@ describe('the Truth + Evidence console on the emitted Archive page', () => {
     expect((acceptForm.querySelector('input[type="password"]') as HTMLInputElement).value).toBe('');
   });
 
+  it('shows an acceptance that no longer stands as history beside the state the record derives now, and draws no accept control for it', async () => {
+    const { api, fixture } = deployment();
+    const record = claim(fixture);
+    confirm(fixture, record.id);
+    const accepted = fixture.ops.acceptTruth({
+      truthId: record.id,
+      expectedDigest: fixture.ops.getTruthRecord(record.id)!.acceptanceDigest!,
+      requestedBy: 'coo',
+    });
+    expect(accepted.ok).toBe(true);
+    confirm(fixture, record.id, { verdict: 'refuted', evidenceRefs: [fixture.evidenceId2], limitations: 'The rerun shows a failing job.' });
+    const dom = await loadPage(api);
+    const doc = dom.window.document;
+    const card = doc.querySelector(`[data-truth-card="${record.id}"]`)!;
+    expect(card.getAttribute('data-truth-state')).toBe('claimed');
+    expect(card.getAttribute('data-truth-acceptance-standing')).toBe('verification_refuted');
+    expect(card.textContent).toContain('ACCEPTED by coo');
+    expect(card.textContent).toContain('ACCEPTANCE NO LONGER STANDS');
+    expect(card.textContent).toContain('no longer stands (verification_refuted): the record now derives CLAIMED');
+    expect(card.textContent).toContain('Verified REFUTED by codex');
+    expect(card.textContent).not.toContain('ACCEPTABLE (digest');
+    expect(doc.querySelector('[data-truth-accept-form]')!.querySelector('button')).toBeNull();
+  });
+
   it('reads one entity’s history through the parameterized route', async () => {
     const { api, fixture } = deployment();
     const first = claim(fixture);
