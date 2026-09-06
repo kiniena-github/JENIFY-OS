@@ -149,7 +149,12 @@ describe('the write surface is stated, not inferred', () => {
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.truthVerify);
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.truthAccept);
     expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.truthEntity);
-    expect(CONTROL_WRITE_ROUTES).toHaveLength(18);
+    // Phase 8: the action propose and reconcile POSTs. The detail read is a
+    // GET and stays off the write surface; authorize/execute have no route.
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.actions);
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.actionReconcile);
+    expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.actionDetail);
+    expect(CONTROL_WRITE_ROUTES).toHaveLength(20);
   });
 });
 

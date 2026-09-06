@@ -415,18 +415,24 @@ describe('every hostile caller is refused, and nothing is written', () => {
     }
   });
 
-  it('exposes no generic mutation surface — the whole route table is twenty-five entries', () => {
+  it('exposes no generic mutation surface — the whole route table is twenty-eight entries', () => {
     // Nine since Phase 3 (issue #254); seventeen since Phase 4 (issue #262);
     // twenty-one since Phase 5+6 (issue #265): the memory GET+POST, the two
     // parameterized memory reads (search, context), and the one orchestrate
     // POST (mode preview|apply). Twenty-five since Phase 7: the truth
     // GET+POST, the parameterized entity read, and the verify/accept POSTs.
+    // Twenty-eight since Phase 8: the action-ledger GET+POST (list/propose),
+    // the parameterized detail read, and the reconcile POST — authorization
+    // and execution have NO route, because humans never execute.
     // Each widening of the write surface beyond the 2026-08-28 three is
     // itself Founder-approved and recorded in docs/JENIFY_DECISIONS.md. What
     // this assertion protects is unchanged — no route takes a table, a
     // column, a capability id to register, a principal to grant, or a SQL
     // fragment, and a route added without amending this list fails here.
     expect(Object.values(CONTROL_ROUTES).sort()).toEqual([
+      '/api/hq/control/actions',
+      '/api/hq/control/actions/detail',
+      '/api/hq/control/actions/reconcile',
       '/api/hq/control/approvals',
       '/api/hq/control/approvals/approve',
       '/api/hq/control/approvals/deny',

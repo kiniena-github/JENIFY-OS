@@ -159,6 +159,15 @@ import {
   truthRecordCapabilityState,
   truthVerifyCapabilityState,
 } from '../application/truth-command.js';
+import {
+  ACTION_RECONCILE_DECISIONS,
+  ACTION_STATES,
+  isActionBlastRadius,
+  isActionReconcileDecision,
+  isActionState,
+  type ActionRiskEscalations,
+  type ActionState,
+} from '../application/action-gateway.js';
 import { MEMORY_KINDS, isMemoryKind, isMemoryPrivacy } from '../memory/schema.js';
 import { isArchiveStatus } from '../archive/schema.js';
 import { PROVIDERS, providerConnectivity } from '../routing/providers.js';
@@ -264,6 +273,20 @@ export const CONTROL_ROUTES = {
   truthEntity: `${CONTROL_API_PREFIX}/truth/entity`,
   truthVerify: `${CONTROL_API_PREFIX}/truth/verify`,
   truthAccept: `${CONTROL_API_PREFIX}/truth/accept`,
+  /**
+   * Phase 8: the external-action ledger. GET lists every action intent with
+   * its DERIVED ledger state (bounded, newest first; `?taskId=`/`?state=`
+   * narrow it); the detail read is the parameterized GET (`?id=`). POST
+   * PROPOSES one action against a canonical task — a record, executing
+   * nothing; authorization and execution are worker acts under a live fenced
+   * claim and have NO browser route, because humans never execute.
+   * `reconcile` is the Founder act that closes an open/unknown external
+   * attempt and takes STEP-UP always: it is a judgement about whether an
+   * irreversible external side effect happened.
+   */
+  actions: `${CONTROL_API_PREFIX}/actions`,
+  actionDetail: `${CONTROL_API_PREFIX}/actions/detail`,
+  actionReconcile: `${CONTROL_API_PREFIX}/actions/reconcile`,
 } as const;
 
 /**
@@ -290,6 +313,8 @@ export const CONTROL_WRITE_ROUTES: readonly string[] = [
   CONTROL_ROUTES.truth,
   CONTROL_ROUTES.truthVerify,
   CONTROL_ROUTES.truthAccept,
+  CONTROL_ROUTES.actions,
+  CONTROL_ROUTES.actionReconcile,
 ];
 
 export interface ControlResponse {
@@ -570,7 +595,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.memorySearch ||
         path === CONTROL_ROUTES.memoryContext ||
         path === CONTROL_ROUTES.truth ||
-        path === CONTROL_ROUTES.truthEntity)) ||
+        path === CONTROL_ROUTES.truthEntity ||
+        path === CONTROL_ROUTES.actions ||
+        path === CONTROL_ROUTES.actionDetail)) ||
     (method === 'POST' &&
       (path === CONTROL_ROUTES.orders ||
         path === CONTROL_ROUTES.approve ||
@@ -589,7 +616,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.missionOrchestrate ||
         path === CONTROL_ROUTES.truth ||
         path === CONTROL_ROUTES.truthVerify ||
-        path === CONTROL_ROUTES.truthAccept));
+        path === CONTROL_ROUTES.truthAccept ||
+        path === CONTROL_ROUTES.actions ||
+        path === CONTROL_ROUTES.actionReconcile));
   if (!known) {
     // Deny by default, and say nothing about what does exist.
     return refusal(404, 'not_found', 'No such HQ control route.');
@@ -887,6 +916,14 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     return entityTruthRoute(request, deps, founder, audit, now);
   }
 
+  if (method === 'GET' && path === CONTROL_ROUTES.actions) {
+    return listActionsRoute(request, deps, founder, audit, now);
+  }
+
+  if (method === 'GET' && path === CONTROL_ROUTES.actionDetail) {
+    return actionDetailRoute(request, deps, founder, audit, now);
+  }
+
   if (path === CONTROL_ROUTES.orders) return createOrder(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.approve) return approve(request, deps, founder, audit, now);
   if (path === CONTROL_ROUTES.missions) return commandMission(request, deps, founder, audit);
@@ -916,6 +953,8 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
   if (path === CONTROL_ROUTES.truth) return recordTruthRoute(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.truthVerify) return verifyTruthRoute(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.truthAccept) return acceptTruthRoute(request, deps, founder, audit, now);
+  if (path === CONTROL_ROUTES.actions) return proposeActionRoute(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.actionReconcile) return reconcileActionRoute(request, deps, founder, audit, now);
   return deny(request, deps, founder, audit);
 }
 
@@ -1017,6 +1056,12 @@ function controlAvailability(
       principal?.originateCapabilities.includes(TRUTH_VERIFY_CAPABILITY.id) === true &&
       truthVerifyCapabilityState(capabilityRowFor(deps.ops, TRUTH_VERIFY_CAPABILITY.id)) === 'enabled',
     truthAccept: mayApprove,
+    // Phase 8: reconciling an external outcome is the Founder gate itself
+    // (approval authority, plus step-up at the route). Proposing is NOT
+    // advertised as a single flag: its deciding condition is per task (the
+    // principal must hold THAT task's capability), and a flag that ignored
+    // the task would tell the console a button works when the route refuses.
+    actionReconcile: mayApprove,
     mutationsEnabled: deps.mutationsEnabled !== false,
     trustedOriginConfigured: originsUsable,
     // Stated separately from `trustedOriginConfigured`, because they answer
@@ -1204,6 +1249,7 @@ function controlErrorStatus(code: string): number {
     case 'unknown_truth':
     case 'unknown_evidence':
     case 'unknown_entity':
+    case 'unknown_action':
       return 404;
     case 'invalid_mission_transition':
     case 'mission_status_changed':
@@ -1224,11 +1270,22 @@ function controlErrorStatus(code: string): number {
     case 'truth_not_verified':
     case 'truth_contested':
       return 409;
+    // Phase 8: the ledger moved, or the act conflicts with what it records.
+    case 'action_state_conflict':
+    case 'action_outcome_unknown':
+    case 'duplicate_external_action':
+    case 'action_approval_stale':
+    case 'intent_changed':
+    case 'task_not_executing':
+    case 'mission_not_active':
+      return 409;
     case 'unknown_capability':
     case 'capability_disabled':
     case 'not_permitted':
     case 'unknown_principal':
     case 'workforce_registry_unconfigured':
+    // Risk added an approval requirement the request cannot satisfy by itself.
+    case 'approval_required_by_risk':
     // The switch stops execution reachability; a 403 says "nothing in this
     // request will help until it is released" (the order-path mapping).
     case 'kill_switch_engaged':
@@ -1686,6 +1743,187 @@ function acceptTruthRoute(
       record: result.data.record as unknown as Record<string, unknown>,
     }),
   );
+}
+
+/**
+ * Phase 8 reads. Bounded on the wire (`ACTION_READ_LIMIT`, newest first) with
+ * the true total stated; `?taskId=` and `?state=` narrow. Every view is the
+ * one shared projection — payload BODY absent by shape, digest present.
+ */
+function listActionsRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const query = request.query ?? {};
+  const state = query.state?.trim();
+  if (state !== undefined && state !== '' && !isActionState(state)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', `state must be one of: ${ACTION_STATES.join(', ')}.`);
+  }
+  const page = deps.ops.listActionsBounded({
+    taskId: query.taskId?.trim() || undefined,
+    state: state ? (state as ActionState) : undefined,
+  });
+  audit('allowed', 'list_actions', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      actions: page.actions as unknown as Record<string, unknown>[],
+      total: page.total,
+      truncated: page.truncated,
+      storePresent: deps.ops.actionStorePresent(),
+    }),
+  );
+}
+
+function actionDetailRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const id = request.query?.id?.trim() ?? '';
+  if (!id) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'Supply id=<action id>.');
+  }
+  const action = deps.ops.getAction(id);
+  if (!action) {
+    audit('refused', 'unknown_action', founder);
+    return refusal(404, 'unknown_action', `Unknown action: ${id}`);
+  }
+  audit('allowed', 'action_detail', founder);
+  return safe(json(200, { ok: true, generatedAt: now().toISOString(), action: action as unknown as Record<string, unknown> }));
+}
+
+/** Read the optional risk-escalation object off a body; `'invalid'` when malformed. */
+function riskField(body: unknown): ActionRiskEscalations | undefined | 'invalid' {
+  if (body == null || typeof body !== 'object') return undefined;
+  const value = (body as Record<string, unknown>)['risk'];
+  if (value === undefined) return undefined;
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return 'invalid';
+  const record = value as Record<string, unknown>;
+  const out: ActionRiskEscalations = {};
+  for (const key of ['productionScope', 'spend', 'credentialSensitivity', 'legalCompliance'] as const) {
+    if (record[key] === undefined) continue;
+    if (typeof record[key] !== 'boolean') return 'invalid';
+    out[key] = record[key] as boolean;
+  }
+  if (record.blastRadius !== undefined) {
+    if (!isActionBlastRadius(record.blastRadius)) return 'invalid';
+    out.blastRadius = record.blastRadius;
+  }
+  return out;
+}
+
+function proposeActionRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const evidenceRefs = stringArrayField(request.body, 'contextEvidenceRefs');
+  const truthRefs = stringArrayField(request.body, 'contextTruthRefs');
+  const risk = riskField(request.body);
+  if (evidenceRefs === 'invalid' || truthRefs === 'invalid' || risk === 'invalid') {
+    audit('refused', 'invalid_input', founder);
+    return refusal(
+      400,
+      'invalid_input',
+      'contextEvidenceRefs and contextTruthRefs must be lists of ids; risk must be an object of boolean flags plus an optional blastRadius (single|many|system).',
+    );
+  }
+  const payloadValue = request.body != null && typeof request.body === 'object' ? (request.body as Record<string, unknown>).payload : undefined;
+  if (payloadValue == null || typeof payloadValue !== 'object' || Array.isArray(payloadValue)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'payload must be a plain object.');
+  }
+  const target = stringField(request.body, 'target') ?? '';
+  try {
+    // The browser boundary's stricter scan BEFORE anything persists — the
+    // facade scans again with the same guard, so the two cannot drift.
+    assertBrowserSafe({ target, payload: payloadValue }, 'action');
+  } catch {
+    audit('refused', 'unsafe_action_content', founder);
+    return refusal(400, 'unsafe_action_content', 'The action payload or target looks like it contains credential material, so it was refused rather than stored.');
+  }
+  const result = deps.ops.proposeAction({
+    taskId: stringField(request.body, 'taskId') ?? '',
+    adapterId: stringField(request.body, 'adapterId') ?? '',
+    actionType: stringField(request.body, 'actionType') ?? '',
+    target,
+    payload: payloadValue as Record<string, unknown>,
+    missionId: stringField(request.body, 'missionId'),
+    risk,
+    contextEvidenceRefs: evidenceRefs,
+    contextTruthRefs: truthRefs,
+    // The server-resolved principal, never a body field.
+    requestedBy: founder.principal.id,
+    idempotencyKey: stringField(request.body, 'idempotencyKey'),
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', result.data.deduplicated ? 'action_deduplicated' : 'action_proposed', founder);
+  return safe(
+    json(result.data.deduplicated ? 200 : 201, {
+      ok: true,
+      deduplicated: result.data.deduplicated,
+      action: result.data.action as unknown as Record<string, unknown>,
+    }),
+  );
+}
+
+function reconcileActionRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const actionId = stringField(request.body, 'actionId') ?? '';
+  const decision = stringField(request.body, 'decision') ?? '';
+  const note = stringField(request.body, 'note') ?? '';
+  if (!actionId || !isActionReconcileDecision(decision) || !note.trim()) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(
+      400,
+      'invalid_input',
+      `actionId, a decision (${ACTION_RECONCILE_DECISIONS.join(' | ')}) and a note are required.`,
+    );
+  }
+  try {
+    assertBrowserSafe({ note }, 'action');
+  } catch {
+    audit('refused', 'unsafe_action_content', founder);
+    return refusal(400, 'unsafe_action_content', 'The note looks like it contains credential material.');
+  }
+  // STEP-UP, unconditionally. Reconciling declares whether an irreversible
+  // external side effect happened — the same class of judgement as an
+  // execution-granting approval, decided here before the facade's own
+  // Founder gate, exactly like the approve and accept routes.
+  const stepUp = verifyStepUp(founder, stringField(request.body, 'stepUpPassword'), {
+    credentials: deps.credentials,
+    now: now(),
+  });
+  if (!stepUp.ok) {
+    audit('refused', stepUp.reason, founder);
+    const status = stepUp.reason === 'step_up_rate_limited' ? 429 : stepUp.reason === 'step_up_failed' ? 403 : 401;
+    return refusal(status, stepUp.reason, stepUp.message);
+  }
+  const result = deps.ops.reconcileAction({ actionId, decision, note, requestedBy: founder.principal.id });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', 'action_reconciled', founder);
+  return safe(json(200, { ok: true, action: result.data.action as unknown as Record<string, unknown> }));
 }
 
 function commandMission(

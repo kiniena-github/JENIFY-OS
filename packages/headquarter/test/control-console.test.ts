@@ -134,13 +134,15 @@ describe('every page script speaks only to the control API and the snapshot', ()
     }
   });
 
-  it('allow-lists every postJson call site against the eighteen write routes', () => {
+  it('allow-lists every postJson call site against the twenty write routes', () => {
     // Three until Phase 3; the mission command/transition/amend writes joined
     // with issue #254; the project register, mission-linkage and workforce
     // writes joined with issue #262; the memory record write and the
     // orchestrate route joined with issue #265; the truth record/verify/accept
     // writes joined with Phase 7 — each the same Founder-approved widening
-    // the route-table test records. (TRANSITION_PATH
+    // the route-table test records. Phase 8 widened the surface to twenty
+    // (action propose/reconcile) with NO console call site yet, so the
+    // allow-list below deliberately gains nothing. (TRANSITION_PATH
     // and UPDATE_PATH name the mission transition on projects.html's mission
     // console and the project transition/update on its register console
     // respectively — the variable-binding test below pins each to its

@@ -38,6 +38,7 @@ import {
   TRUTH_VERIFY_CAPABILITY,
   registerTruthRecordCapability,
   registerTruthVerifyCapability,
+  type ExternalActionAdapter,
 } from '@factoryos/headquarter/application';
 import { CapabilityRegistry } from '@factoryos/headquarter/operator';
 import {
@@ -763,6 +764,153 @@ describe('Phase 7 — the truth routes through the Fastify host', () => {
         url,
         headers: { origin: ORIGIN, 'content-type': 'application/json' },
         payload: { truthId: 'any', expectedDigest: 'x' },
+      });
+      expect(res.statusCode, url).toBe(401);
+    }
+    await app.close();
+  });
+});
+
+describe('Phase 8 — the action-ledger routes through the Fastify host', () => {
+  /** A deterministic local adapter; nothing here reaches any real system. */
+  const localAdapter: ExternalActionAdapter = {
+    id: 'fake.local',
+    provider: null,
+    actions: {
+      write_note: {
+        description: 'Write an internal note.',
+        visibility: 'internal',
+        reversibility: 'reversible',
+        compensation: { supported: true, method: 'delete_note', description: 'Deletes the note.' },
+      },
+    },
+    execute: () => ({ ok: true, externalRef: { noteId: 'n-1' } }),
+  };
+
+  async function phase8App(): Promise<{ app: FastifyInstance; ops: HeadquarterOperations; taskId: string; fence: number }> {
+    const db = openMemoryHqDatabase();
+    new CapabilityRegistry(db).register({
+      id: 'repo.read_status',
+      description: 'Read repo/CI status',
+      riskClass: 'read_only',
+      sideEffect: false,
+      idempotent: true,
+    });
+    const store = new HeadquarterStore(db);
+    store.upsertSpecialist({
+      id: 'claude',
+      displayName: 'Claude',
+      vendor: 'anthropic',
+      role: 'build_lead',
+      allowedCapabilities: ['repo.read_status'],
+      active: true,
+    });
+    const ops = new HeadquarterOperations(db, { store, actionAdapters: [localAdapter] });
+    new HumanPrincipalRegistry(db).register({
+      id: 'founder',
+      displayName: 'Proof Founder',
+      originateCapabilities: ['repo.read_status'],
+      approvalAuthority: true,
+      active: true,
+    });
+    const created = ops.createTask({
+      capabilityId: 'repo.read_status',
+      payload: { check: 'ci' },
+      idempotencyKey: 'host-action-1',
+      requestedBy: 'claude',
+    });
+    if (!created.ok) throw new Error(created.error.message);
+    const claimed = ops.claimNext('claude', 'repo.read_status');
+    if (!claimed.ok) throw new Error(claimed.error.message);
+    const started = ops.startTask(claimed.data.id, 'claude', claimed.data.fence);
+    if (!started.ok) throw new Error(started.error.message);
+    const app = Fastify({ logger: false });
+    registerHeadquarterRoutes(
+      app,
+      {
+        ops,
+        founderMap: [{ realmId: 'realm', accountId: 'acc-1', principalId: 'founder' }],
+        allowedOrigins: [ORIGIN],
+        secretsEnv: {},
+        mutationsEnabled: true,
+      },
+      identityFor(FOUNDER),
+    );
+    await app.ready();
+    return { app, ops, taskId: created.data.task.id, fence: claimed.data.fence };
+  }
+
+  it('proposes through the host attributed to the mapped principal, reads the ledger, and offers no execute route; the worker step stays outside HTTP', async () => {
+    const { app, ops, taskId, fence } = await phase8App();
+    const proposed = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.actions,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: { taskId, adapterId: 'fake.local', actionType: 'write_note', target: 'notes/board', payload: { text: 'hello' } },
+    });
+    expect(proposed.statusCode).toBe(201);
+    expect(proposed.headers['cache-control']).toBe('no-store');
+    const action = (proposed.json() as { action: { id: string; state: string; requestedBy: string; riskLevel: string } }).action;
+    expect(action).toMatchObject({ state: 'proposed', requestedBy: 'founder', riskLevel: 'low' });
+    expect(JSON.stringify(proposed.json())).not.toContain('"payload"');
+
+    const injected = await app.inject({ method: 'GET', url: `${CONTROL_ROUTES.actionDetail}?id=${action.id}&principalId=someone-else` });
+    expect(injected.statusCode).toBe(400);
+    expect((injected.json() as { error: { code: string } }).error.code).toBe('client_identity_supplied');
+
+    // No HTTP route executes: the browser cannot authorize or execute.
+    for (const url of [`${CONTROL_ROUTES.actions}/authorize`, `${CONTROL_ROUTES.actions}/execute`]) {
+      const res = await app.inject({
+        method: 'POST',
+        url,
+        headers: { origin: ORIGIN, 'content-type': 'application/json' },
+        payload: { actionId: action.id },
+      });
+      expect(res.statusCode, url).toBe(404);
+    }
+    expect(ops.getAction(action.id)!.state).toBe('proposed');
+
+    // The worker acts through the facade, under its live fenced claim; the host then reads the truthful ledger.
+    const authorized = ops.authorizeAction({ actionId: action.id, workerId: 'claude', fence });
+    expect(authorized.ok).toBe(true);
+    const executed = ops.executeAction({ actionId: action.id, workerId: 'claude', fence });
+    expect(executed.ok && executed.data.outcome).toBe('succeeded');
+    const detail = await app.inject({ method: 'GET', url: `${CONTROL_ROUTES.actionDetail}?id=${action.id}` });
+    expect(detail.statusCode).toBe(200);
+    expect((detail.json() as { action: { state: string } }).action.state).toBe('succeeded');
+    const list = await app.inject({ method: 'GET', url: `${CONTROL_ROUTES.actions}?taskId=${taskId}` });
+    expect((list.json() as { total: number }).total).toBe(1);
+    // Nothing to reconcile on a succeeded action: 409, and step-up is demanded first on a stale session elsewhere.
+    const reconcile = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.actionReconcile,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: { actionId: action.id, decision: 'confirmed_failed', note: 'checked' },
+    });
+    expect(reconcile.statusCode).toBe(409);
+    await app.close();
+  });
+
+  it('refuses the whole action surface to nobody, exactly as it refuses the rest', async () => {
+    const db = openMemoryHqDatabase();
+    const ops = new HeadquarterOperations(db, { store: new HeadquarterStore(db) });
+    const app = Fastify({ logger: false });
+    registerHeadquarterRoutes(
+      app,
+      { ops, founderMap: [], allowedOrigins: [ORIGIN], secretsEnv: {}, mutationsEnabled: true },
+      NO_IDENTITY,
+    );
+    await app.ready();
+    for (const url of [CONTROL_ROUTES.actions, `${CONTROL_ROUTES.actionDetail}?id=x`]) {
+      const res = await app.inject({ method: 'GET', url });
+      expect(res.statusCode, url).toBe(401);
+    }
+    for (const url of [CONTROL_ROUTES.actions, CONTROL_ROUTES.actionReconcile]) {
+      const res = await app.inject({
+        method: 'POST',
+        url,
+        headers: { origin: ORIGIN, 'content-type': 'application/json' },
+        payload: { actionId: 'any', decision: 'confirmed_failed', note: 'n' },
       });
       expect(res.statusCode, url).toBe(401);
     }
