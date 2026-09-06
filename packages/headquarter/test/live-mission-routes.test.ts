@@ -143,7 +143,13 @@ describe('the write surface is stated, not inferred', () => {
     // but the route is a POST whose apply mode writes, so the whole route
     // sits on the stated write surface.
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.missionOrchestrate);
-    expect(CONTROL_WRITE_ROUTES).toHaveLength(15);
+    // Phase 7: the truth record, verify and accept POSTs. The entity read is
+    // a GET and stays off the write surface.
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.truth);
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.truthVerify);
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.truthAccept);
+    expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.truthEntity);
+    expect(CONTROL_WRITE_ROUTES).toHaveLength(18);
   });
 });
 

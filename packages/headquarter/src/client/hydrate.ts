@@ -734,11 +734,55 @@ function analyticsSection(state: HqStateDocument): Section {
   };
 }
 
+/**
+ * Phase 7: the truth/evidence projection, when the state document carries
+ * it. Every number here is a COUNT of derived categorical states the server
+ * already computed; an absent section contributes nothing (not a zero) —
+ * a static build opens no truth store and says so by omission.
+ */
+function truthFacts(state: HqStateDocument): {
+  present: boolean;
+  total: number;
+  accepted: number;
+  verified: number;
+  awaitingAcceptance: number;
+  unresolved: number;
+  contradictionRows: RoomRow[];
+} {
+  const truth = state.truth?.data;
+  if (!truth) {
+    return { present: false, total: 0, accepted: 0, verified: 0, awaitingAcceptance: 0, unresolved: 0, contradictionRows: [] };
+  }
+  return {
+    present: true,
+    total: truth.total,
+    accepted: truth.byState.accepted,
+    verified: truth.byState.verified,
+    // Verified, current and uncontested — exactly the records the server
+    // issued an acceptance digest for, so this count and the Founder's
+    // acceptable set cannot disagree.
+    awaitingAcceptance: truth.records.filter((record) => record.acceptanceDigest !== null).length,
+    unresolved: truth.unresolvedContradictions,
+    contradictionRows: truth.contradictions.map((pair) => ({
+      id: `contradiction-${pair.a}-${pair.b}`,
+      primary: `Unresolved contradiction on ${pair.entityKind} ${pair.entityId}`,
+      secondary:
+        `${pair.a} contradicts ${pair.b} (stated by ${pair.statedBy} at ${pair.statedAt}). Neither side is preferred ` +
+        'by recency; it resolves only by an explicit supersession or a refuting verification.',
+      chips: [
+        { label: 'unresolved', tone: 'danger' as RoomTone },
+        { label: pair.entityKind, tone: 'info' as RoomTone },
+      ],
+    })),
+  };
+}
+
 function founderSection(state: HqStateDocument, session: ClientSession | null): Section {
   const approvals = state.operations.data.approvals.length;
   const principal = typeof session?.principalId === 'string' ? session.principalId : null;
   const display = typeof session?.displayName === 'string' ? session.displayName : null;
   const approvalAuthority = session?.approvalAuthority === true;
+  const truth = truthFacts(state);
   const rows: RoomRow[] = [];
   if (principal) {
     rows.push({
@@ -754,6 +798,20 @@ function founderSection(state: HqStateDocument, session: ClientSession | null): 
     metrics: [
       metric('Held at your gate', approvals, 'Tasks recorded needs_approval.', tone(approvals, 'warn')),
       metric('Approval authority', approvalAuthority ? 'yes' : 'no', 'From the registered principal, not from being signed in.', approvalAuthority ? 'accent' : 'neutral'),
+      // Phase 7: verified truth waiting on the Founder's explicit acceptance —
+      // the truth-projection analogue of "held at your gate". Only when the
+      // document carries the section; a static build shows no such metric.
+      ...(truth.present
+        ? [
+            metric(
+              'Verified, awaiting acceptance',
+              truth.awaitingAcceptance,
+              'Truth records independently verified, current and uncontested. Acceptance is an explicit Founder act behind step-up; nothing here accepts itself.',
+              tone(truth.awaitingAcceptance, 'warn'),
+            ),
+            metric('Founder-accepted', truth.accepted, 'Truth records carrying one explicit acceptance record.', tone(truth.accepted, 'accent')),
+          ]
+        : []),
     ],
     rows,
     emptyMessage:
@@ -762,8 +820,13 @@ function founderSection(state: HqStateDocument, session: ClientSession | null): 
     // Lit by what is WAITING at the gate, not by the fact that somebody is
     // standing in the room. The identity row above comes from the session, not
     // from anything HQ recorded, and letting it light the office would make an
-    // empty HQ show one room that is not dark.
-    liveness: livenessFrom({ attention: approvals, active: 0, present: approvals }),
+    // empty HQ show one room that is not dark. Verified truth awaiting the
+    // Founder is waiting at the gate too (Phase 7).
+    liveness: livenessFrom({
+      attention: approvals + truth.awaitingAcceptance,
+      active: 0,
+      present: approvals + truth.awaitingAcceptance + truth.accepted,
+    }),
   };
 }
 
@@ -812,13 +875,32 @@ function securitySection(state: HqStateDocument, session: ClientSession | null):
         chips: [],
       })),
   ];
+  // Phase 7: unresolved truth contradictions are a SECURITY posture fact —
+  // HQ holds two current, unrefuted statements about the same entity and
+  // refuses to pick one by recency. Each is listed, and each is attention.
+  const truth = truthFacts(state);
+  rows.push(...truth.contradictionRows);
   const attention =
-    (kill.globalEngaged || engagedScopes > 0 ? 1 : 0) + (controls.requestOriginAllowed === true ? 0 : 1);
+    (kill.globalEngaged || engagedScopes > 0 ? 1 : 0) +
+    (controls.requestOriginAllowed === true ? 0 : 1) +
+    truth.unresolved;
   return {
     metrics: [
       metric('Kill switch', kill.globalEngaged ? 'global' : engagedScopes > 0 ? `${engagedScopes} scope(s)` : 'released', 'Canonical kill-switch record.', kill.globalEngaged || engagedScopes > 0 ? 'danger' : 'accent'),
       metric('Write routes', controls.mutationsEnabled === true ? 'enabled' : 'off', 'What the server said, not what this page assumes.', controls.mutationsEnabled === true ? 'info' : 'neutral'),
       metric('Origin trusted', controls.requestOriginAllowed === true ? 'yes' : 'no', 'Decided by the same check that would refuse a write.', controls.requestOriginAllowed === true ? 'accent' : 'warn'),
+      ...(truth.present
+        ? [
+            // Stated as a condition, like the room's other metrics, so the
+            // numeric-metric invariant keeps treating this room as it does.
+            metric(
+              'Truth contradictions',
+              truth.unresolved > 0 ? `${truth.unresolved} unresolved` : 'none unresolved',
+              'Two current, unrefuted truth records about one entity. Never settled by recency; listed below until an explicit act resolves it.',
+              truth.unresolved > 0 ? 'danger' : 'accent',
+            ),
+          ]
+        : []),
     ],
     rows,
     emptyMessage: '',
@@ -836,6 +918,10 @@ function memorySection(state: HqStateDocument): Section {
   const current = records.filter((record) => record.status === 'CURRENT').length;
   const summaries = records.filter((record) => record.kind === 'summary').length;
   const founderOnly = records.filter((record) => record.privacy === 'founder_only').length;
+  // Phase 7: the truth projection sits beside memory in this room — memory
+  // informs, truth is what was claimed/observed/verified/accepted about it.
+  // Counts only; a memory record never becomes truth by being remembered.
+  const truth = truthFacts(state);
   return {
     metrics: [
       metric('Records', state.counts.memory, 'All company memory records, superseded history included. 0 means 0.', tone(state.counts.memory, 'info')),
@@ -843,6 +929,13 @@ function memorySection(state: HqStateDocument): Section {
       metric('Superseded', records.length - current, 'History retained by the insert-only store — never rewritten, never deleted.', 'neutral'),
       metric('Summaries', summaries, 'A summary is its own record; the originals it derives from are retained and linked.', tone(summaries, 'violet')),
       metric('Founder-only', founderOnly, 'Records carried only through the Founder-authenticated route.', tone(founderOnly, 'neutral')),
+      ...(truth.present
+        ? [
+            metric('Truth records', truth.total, 'Claimed, observed, verified or accepted statements referencing real evidence. Memory grants none of these states.', tone(truth.total, 'info')),
+            metric('Verified', truth.verified, 'Independently verified, not yet Founder-accepted.', tone(truth.verified, 'violet')),
+            metric('Accepted', truth.accepted, 'Carrying one explicit Founder acceptance.', tone(truth.accepted, 'accent')),
+          ]
+        : []),
     ],
     rows: limited(
       records.map((record) => ({
@@ -872,7 +965,9 @@ function memorySection(state: HqStateDocument): Section {
       'record appears here when the Founder (or a gated act) records one.',
     // Memory never demands a human and is never "working": present-only
     // liveness, so a populated record renders quiet and an empty one dark.
-    liveness: livenessFrom({ attention: 0, active: 0, present: records.length }),
+    // Truth records count as presence too; they demand nothing here (the
+    // Founder Office carries the awaiting-acceptance signal).
+    liveness: livenessFrom({ attention: 0, active: 0, present: records.length + truth.total }),
   };
 }
 

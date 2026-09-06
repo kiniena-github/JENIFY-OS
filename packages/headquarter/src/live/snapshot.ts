@@ -42,6 +42,7 @@ import type { HeadquarterOperations } from '../application/service.js';
 import { missionBrowserView, type MissionBrowserView } from '../application/mission-command.js';
 import { projectBrowserView, type ProjectBrowserView } from '../application/project-command.js';
 import type { MemoryBrowserView } from '../application/memory-command.js';
+import { TRUTH_SNAPSHOT_LIMIT, type TruthSnapshotView } from '../application/truth-command.js';
 import type { ProviderId, SecretsEnv } from '../routing/providers.js';
 import { assessConnections, type ConnectionProbe, type ConnectionStatus } from './connections.js';
 import { assertBrowserSafe, assertNoFabricatedFields } from './redaction.js';
@@ -208,6 +209,16 @@ export interface HqSnapshot {
    * artifact excludes founder_only rows and states the exclusion.
    */
   memory: SnapshotSection<MemoryBrowserView[]>;
+  /**
+   * The truth/evidence projection (Phase 7) — the shared `TruthRecordView`
+   * derivation, bounded (`TRUTH_SNAPSHOT_LIMIT`, newest first) with the true
+   * totals stated. OPTIONAL by shape, deliberately: a static site build opens
+   * no truth store and states nothing rather than an invented zero section,
+   * and every pre-Phase-7 fixture stays valid. When present, the
+   * Founder-gated `/state` route carries founder_only rows; the
+   * unauthenticated artifact withholds them and counts the exclusion.
+   */
+  truth?: SnapshotSection<TruthSnapshotView>;
 }
 
 /**
@@ -273,6 +284,8 @@ export interface SnapshotSources {
    * building context; `memoryTotal` (below) keeps `counts.memory` truthful.
    */
   memory: { data: MemoryBrowserView[]; provenance: Provenance };
+  /** The truth/evidence projection (Phase 7). Optional — omitted means no truth store was read. */
+  truth?: { data: TruthSnapshotView; provenance: Provenance };
   /**
    * Per-worker provider declarations (Phase 4). Optional: an omitted map
    * means the building context holds no declaration truth — every worker's
@@ -318,6 +331,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       sources.missions.provenance.mode,
       sources.projects.provenance.mode,
       sources.memory.provenance.mode,
+      ...(sources.truth ? [sources.truth.provenance.mode] : []),
     ]),
     note: sources.note ?? null,
     counts: {
@@ -393,6 +407,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
             sources.memory.data.slice(0, sources.memoryLimit),
           )
         : section(sources.memory.provenance, sources.memory.data),
+    ...(sources.truth ? { truth: section(sources.truth.provenance, sources.truth.data) } : {}),
   };
 
   // Fail closed: prove it before anyone can publish it.
@@ -540,6 +555,16 @@ export function liveSnapshotFromOperations(
       : allMemory.filter((record) => record.privacy !== 'founder_only');
   const withheldMemory = allMemory.length - carriedMemory.length;
 
+  // Phase 7 truth section: the SAME reading-layer privacy decision as memory
+  // (founder_only rides only the Founder-gated /state route), bounded to the
+  // newest TRUTH_SNAPSHOT_LIMIT with every total stated inside the view.
+  const truth = ops.truthStorePresent()
+    ? ops.truthSummary({
+        includeFounderOnly: options.includeFounderOnlyMemory === true,
+        limit: TRUTH_SNAPSHOT_LIMIT,
+      })
+    : null;
+
   return buildHqSnapshot({
     workerProviders,
     workerMembers,
@@ -643,6 +668,46 @@ export function liveSnapshotFromOperations(
             note:
               'This database predates the Phase 5 memory schema and was opened read-only, so no ' +
               'memory store exists to read. 0 rows states that absence; nothing was migrated.',
+          },
+        },
+    truth: truth
+      ? {
+          data: truth,
+          provenance: {
+            mode,
+            source:
+              'hq_truth_records / hq_truth_verifications / hq_truth_acceptances / hq_truth_relations via ' +
+              'HeadquarterOperations.truthSummary (derived projection; evidence ids reference op_evidence)',
+            asOf: at,
+            note: [
+              truth.withheldFounderOnly > 0
+                ? `${truth.withheldFounderOnly} founder_only record(s) are counted in total but not carried by ` +
+                  'this artifact; they are readable only through the Founder-authenticated /state route.'
+                : null,
+              truth.total > truth.records.length
+                ? `Carries the newest ${truth.records.length} of ${truth.total} records; total states the count.`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(' ') || undefined,
+          },
+        }
+      : {
+          data: {
+            total: 0,
+            byState: { claimed: 0, observed: 0, verified: 0, accepted: 0 },
+            unresolvedContradictions: 0,
+            withheldFounderOnly: 0,
+            records: [],
+            contradictions: [],
+          },
+          provenance: {
+            mode,
+            source: 'hq_truth_records via HeadquarterOperations.truthSummary',
+            asOf: at,
+            note:
+              'This database predates the Phase 7 truth schema and was opened read-only, so no truth ' +
+              'store exists to read. 0 rows states that absence; nothing was migrated.',
           },
         },
   });

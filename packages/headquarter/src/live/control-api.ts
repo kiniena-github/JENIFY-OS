@@ -144,6 +144,21 @@ import {
   MISSION_ORCHESTRATE_CAPABILITY,
   missionOrchestrateCapabilityState,
 } from '../application/orchestrator-command.js';
+import {
+  TRUTH_BORN_STATES,
+  TRUTH_ENTITY_KINDS,
+  TRUTH_READ_LIMIT,
+  TRUTH_RECORD_CAPABILITY,
+  TRUTH_VERIFY_CAPABILITY,
+  VERIFICATION_METHODS,
+  VERIFICATION_VERDICTS,
+  isTruthBornState,
+  isTruthEntityKind,
+  isVerificationMethod,
+  isVerificationVerdict,
+  truthRecordCapabilityState,
+  truthVerifyCapabilityState,
+} from '../application/truth-command.js';
 import { MEMORY_KINDS, isMemoryKind, isMemoryPrivacy } from '../memory/schema.js';
 import { isArchiveStatus } from '../archive/schema.js';
 import { PROVIDERS, providerConnectivity } from '../routing/providers.js';
@@ -234,6 +249,21 @@ export const CONTROL_ROUTES = {
    * Phase 3/4 decisions recorded as owed at "Phase >= 6" resolves here.
    */
   missionOrchestrate: `${CONTROL_API_PREFIX}/missions/orchestrate`,
+  /**
+   * Phase 7: the truth/evidence projection. GET lists every truth record
+   * with its DERIVED categorical state, its verifications, acceptances and
+   * contradictions — founder_only rows INCLUDED, because this route sits
+   * behind the Founder gate (the memory rule). POST records one claimed or
+   * observed statement that must reference existing evidence. The entity
+   * read is the parameterized GET the `query` field exists for. `verify`
+   * records an independent verification; `accept` is the Founder act and
+   * is the ONE Phase 7 route that takes STEP-UP — always, not by risk class:
+   * an acceptance is the Founder's irreversible signature on truth.
+   */
+  truth: `${CONTROL_API_PREFIX}/truth`,
+  truthEntity: `${CONTROL_API_PREFIX}/truth/entity`,
+  truthVerify: `${CONTROL_API_PREFIX}/truth/verify`,
+  truthAccept: `${CONTROL_API_PREFIX}/truth/accept`,
 } as const;
 
 /**
@@ -257,6 +287,9 @@ export const CONTROL_WRITE_ROUTES: readonly string[] = [
   CONTROL_ROUTES.workforceAssign,
   CONTROL_ROUTES.memory,
   CONTROL_ROUTES.missionOrchestrate,
+  CONTROL_ROUTES.truth,
+  CONTROL_ROUTES.truthVerify,
+  CONTROL_ROUTES.truthAccept,
 ];
 
 export interface ControlResponse {
@@ -535,7 +568,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.workforce ||
         path === CONTROL_ROUTES.memory ||
         path === CONTROL_ROUTES.memorySearch ||
-        path === CONTROL_ROUTES.memoryContext)) ||
+        path === CONTROL_ROUTES.memoryContext ||
+        path === CONTROL_ROUTES.truth ||
+        path === CONTROL_ROUTES.truthEntity)) ||
     (method === 'POST' &&
       (path === CONTROL_ROUTES.orders ||
         path === CONTROL_ROUTES.approve ||
@@ -551,7 +586,10 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.workforceRoute ||
         path === CONTROL_ROUTES.workforceAssign ||
         path === CONTROL_ROUTES.memory ||
-        path === CONTROL_ROUTES.missionOrchestrate));
+        path === CONTROL_ROUTES.missionOrchestrate ||
+        path === CONTROL_ROUTES.truth ||
+        path === CONTROL_ROUTES.truthVerify ||
+        path === CONTROL_ROUTES.truthAccept));
   if (!known) {
     // Deny by default, and say nothing about what does exist.
     return refusal(404, 'not_found', 'No such HQ control route.');
@@ -841,6 +879,14 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     return memoryContextRoute(request, deps, founder, audit, now);
   }
 
+  if (method === 'GET' && path === CONTROL_ROUTES.truth) {
+    return listTruthRoute(deps, founder, audit, now);
+  }
+
+  if (method === 'GET' && path === CONTROL_ROUTES.truthEntity) {
+    return entityTruthRoute(request, deps, founder, audit, now);
+  }
+
   if (path === CONTROL_ROUTES.orders) return createOrder(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.approve) return approve(request, deps, founder, audit, now);
   if (path === CONTROL_ROUTES.missions) return commandMission(request, deps, founder, audit);
@@ -867,6 +913,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
   if (path === CONTROL_ROUTES.missionOrchestrate) {
     return orchestrateMissionRoute(request, deps, founder, audit, now);
   }
+  if (path === CONTROL_ROUTES.truth) return recordTruthRoute(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.truthVerify) return verifyTruthRoute(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.truthAccept) return acceptTruthRoute(request, deps, founder, audit, now);
   return deny(request, deps, founder, audit);
 }
 
@@ -955,6 +1004,19 @@ function controlAvailability(
       missionOrchestrateCapabilityState(
         capabilityRowFor(deps.ops, MISSION_ORCHESTRATE_CAPABILITY.id),
       ) === 'enabled',
+    // Phase 7: the three truth controls, each advertised from exactly the
+    // conditions that decide its write. Record/verify need the grant AND an
+    // intact registry row (enforcement-safe read); accept is the Founder gate
+    // itself — approval authority, the same condition as approve/deny.
+    truthRecord:
+      writable &&
+      principal?.originateCapabilities.includes(TRUTH_RECORD_CAPABILITY.id) === true &&
+      truthRecordCapabilityState(capabilityRowFor(deps.ops, TRUTH_RECORD_CAPABILITY.id)) === 'enabled',
+    truthVerify:
+      writable &&
+      principal?.originateCapabilities.includes(TRUTH_VERIFY_CAPABILITY.id) === true &&
+      truthVerifyCapabilityState(capabilityRowFor(deps.ops, TRUTH_VERIFY_CAPABILITY.id)) === 'enabled',
+    truthAccept: mayApprove,
     mutationsEnabled: deps.mutationsEnabled !== false,
     trustedOriginConfigured: originsUsable,
     // Stated separately from `trustedOriginConfigured`, because they answer
@@ -1139,6 +1201,9 @@ function controlErrorStatus(code: string): number {
     case 'unknown_project':
     case 'unknown_task':
     case 'unknown_memory':
+    case 'unknown_truth':
+    case 'unknown_evidence':
+    case 'unknown_entity':
       return 404;
     case 'invalid_mission_transition':
     case 'mission_status_changed':
@@ -1155,6 +1220,9 @@ function controlErrorStatus(code: string): number {
       return 409;
     case 'mission_not_orchestratable':
     case 'orchestrate_fingerprint_mismatch':
+    case 'truth_conflict':
+    case 'truth_not_verified':
+    case 'truth_contested':
       return 409;
     case 'unknown_capability':
     case 'capability_disabled':
@@ -1386,6 +1454,238 @@ function orchestrateMissionRoute(
   }
   audit('allowed', mode === 'apply' ? 'mission_orchestrated' : 'orchestration_previewed', founder);
   return safe(json(200, { ok: true, report: result.data as unknown as Record<string, unknown> }));
+}
+
+/**
+ * Phase 7 reads. Bounded on the wire (`TRUTH_READ_LIMIT`, newest first) with
+ * the true total stated; founder_only INCLUDED past the Founder gate, which
+ * is the privacy-enforcing reading layer. Unresolved contradictions ride
+ * alongside so the browser cannot show a record without its dispute.
+ */
+function listTruthRoute(deps: ControlApiDeps, founder: ResolvedFounder, audit: Audit, now: () => Date): ControlResponse {
+  const records = deps.ops.listTruth();
+  const contradictions = deps.ops.listTruthContradictions();
+  audit('allowed', 'list_truth', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      records: records.slice(0, TRUTH_READ_LIMIT) as unknown as Record<string, unknown>[],
+      total: records.length,
+      truncated: records.length > TRUTH_READ_LIMIT,
+      unresolvedContradictions: contradictions.filter((c) => c.resolution === 'unresolved') as unknown as Record<
+        string,
+        unknown
+      >[],
+      storePresent: deps.ops.truthStorePresent(),
+    }),
+  );
+}
+
+function entityTruthRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const query = request.query ?? {};
+  const kind = query.kind?.trim();
+  const id = query.id?.trim();
+  if (!id || !isTruthEntityKind(kind)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', `Supply kind=${TRUTH_ENTITY_KINDS.join('|')} and id=<entity id>.`);
+  }
+  const result = deps.ops.getEntityTruth(kind, id, { limit: TRUTH_READ_LIMIT });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', `truth_entity_${kind}`, founder);
+  return safe(json(200, { ok: true, generatedAt: now().toISOString(), truth: result.data as unknown as Record<string, unknown> }));
+}
+
+function recordTruthRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const entityKind = stringField(request.body, 'entityKind') ?? '';
+  if (!isTruthEntityKind(entityKind)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', `entityKind must be one of: ${TRUTH_ENTITY_KINDS.join(', ')}.`);
+  }
+  const bornState = stringField(request.body, 'bornState');
+  if (bornState !== undefined && !isTruthBornState(bornState)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(
+      400,
+      'invalid_input',
+      `bornState must be one of: ${TRUTH_BORN_STATES.join(', ')} — verified and accepted are derived, never asserted.`,
+    );
+  }
+  const privacy = stringField(request.body, 'privacy');
+  if (privacy !== undefined && !isMemoryPrivacy(privacy)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'privacy must be internal or founder_only.');
+  }
+  const evidenceRefs = stringArrayField(request.body, 'evidenceRefs');
+  const supports = stringArrayField(request.body, 'supports');
+  const contradicts = stringArrayField(request.body, 'contradicts');
+  const derivedFrom = stringArrayField(request.body, 'derivedFrom');
+  if (evidenceRefs === 'invalid' || supports === 'invalid' || contradicts === 'invalid' || derivedFrom === 'invalid') {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'evidenceRefs, supports, contradicts and derivedFrom must be lists of ids.');
+  }
+  const entityId = stringField(request.body, 'entityId') ?? '';
+  const statement = stringField(request.body, 'statement') ?? '';
+  try {
+    assertBrowserSafe({ statement, entityId }, 'truth');
+  } catch {
+    audit('refused', 'unsafe_truth_content', founder);
+    return refusal(
+      400,
+      'unsafe_truth_content',
+      'The statement looks like it contains credential material, so it was refused rather than stored.',
+    );
+  }
+  const result = deps.ops.recordTruth({
+    entityKind,
+    entityId,
+    statement,
+    bornState,
+    evidenceRefs,
+    supports,
+    contradicts,
+    derivedFrom,
+    supersedes: stringField(request.body, 'supersedes'),
+    privacy,
+    // The server-resolved principal, never a body field.
+    requestedBy: founder.principal.id,
+    idempotencyKey: stringField(request.body, 'idempotencyKey'),
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', result.data.deduplicated ? 'truth_deduplicated' : 'truth_recorded', founder);
+  return safe(
+    json(result.data.deduplicated ? 200 : 201, {
+      ok: true,
+      deduplicated: result.data.deduplicated,
+      record: result.data.record as unknown as Record<string, unknown>,
+    }),
+  );
+}
+
+function verifyTruthRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const method = stringField(request.body, 'method') ?? '';
+  const verdict = stringField(request.body, 'verdict') ?? '';
+  if (!isVerificationMethod(method) || !isVerificationVerdict(verdict)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(
+      400,
+      'invalid_input',
+      `method must be one of: ${VERIFICATION_METHODS.join(', ')}; verdict one of: ${VERIFICATION_VERDICTS.join(', ')}.`,
+    );
+  }
+  const evidenceRefs = stringArrayField(request.body, 'evidenceRefs');
+  if (evidenceRefs === 'invalid' || evidenceRefs === undefined) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'evidenceRefs must be a non-empty list of evidence ids.');
+  }
+  const limitations = stringField(request.body, 'limitations') ?? '';
+  try {
+    assertBrowserSafe({ limitations }, 'truth');
+  } catch {
+    audit('refused', 'unsafe_truth_content', founder);
+    return refusal(400, 'unsafe_truth_content', 'The limitations text looks like it contains credential material.');
+  }
+  const result = deps.ops.verifyTruth({
+    truthId: stringField(request.body, 'truthId') ?? '',
+    method,
+    verdict,
+    evidenceRefs,
+    limitations,
+    requestedBy: founder.principal.id,
+    idempotencyKey: stringField(request.body, 'idempotencyKey'),
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', result.data.deduplicated ? 'truth_verification_deduplicated' : 'truth_verified', founder);
+  return safe(
+    json(result.data.deduplicated ? 200 : 201, {
+      ok: true,
+      deduplicated: result.data.deduplicated,
+      verification: result.data.verification as unknown as Record<string, unknown>,
+      record: result.data.record as unknown as Record<string, unknown>,
+    }),
+  );
+}
+
+function acceptTruthRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const truthId = stringField(request.body, 'truthId') ?? '';
+  const expectedDigest = stringField(request.body, 'expectedDigest') ?? '';
+  if (!truthId || !expectedDigest) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'truthId and expectedDigest are required.');
+  }
+  const note = stringField(request.body, 'note');
+  if (note !== undefined) {
+    try {
+      assertBrowserSafe({ note }, 'truth');
+    } catch {
+      audit('refused', 'unsafe_truth_content', founder);
+      return refusal(400, 'unsafe_truth_content', 'The note looks like it contains credential material.');
+    }
+  }
+  // STEP-UP, unconditionally. Acceptance is the Founder's irreversible
+  // signature on a truth record (append-only; withdrawn only by a later
+  // Founder-gated supersession), so it takes the same fresh-credential bar
+  // as an execution-granting approval — decided here, before the facade's
+  // own Founder gate, exactly like the approve route.
+  const stepUp = verifyStepUp(founder, stringField(request.body, 'stepUpPassword'), {
+    credentials: deps.credentials,
+    now: now(),
+  });
+  if (!stepUp.ok) {
+    audit('refused', stepUp.reason, founder);
+    const status = stepUp.reason === 'step_up_rate_limited' ? 429 : stepUp.reason === 'step_up_failed' ? 403 : 401;
+    return refusal(status, stepUp.reason, stepUp.message);
+  }
+  const result = deps.ops.acceptTruth({
+    truthId,
+    expectedDigest,
+    note,
+    requestedBy: founder.principal.id,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', result.data.deduplicated ? 'truth_acceptance_deduplicated' : 'truth_accepted', founder);
+  return safe(
+    json(result.data.deduplicated ? 200 : 201, {
+      ok: true,
+      deduplicated: result.data.deduplicated,
+      acceptance: result.data.acceptance as unknown as Record<string, unknown>,
+      record: result.data.record as unknown as Record<string, unknown>,
+    }),
+  );
 }
 
 function commandMission(
