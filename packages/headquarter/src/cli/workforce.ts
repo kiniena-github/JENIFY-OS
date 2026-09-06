@@ -86,6 +86,11 @@ import {
   memoryCommandCapabilityState,
   registerMemoryCommandCapability,
 } from '../application/memory-command.js';
+import {
+  MISSION_ORCHESTRATE_CAPABILITY,
+  missionOrchestrateCapabilityState,
+  registerMissionOrchestrateCapability,
+} from '../application/orchestrator-command.js';
 import { AiMemberRegistry } from '../registry/members.js';
 import { MemberCapabilityRegistry } from '../registry/capabilities.js';
 import { ProviderDirectory } from '../providers/directory.js';
@@ -120,6 +125,11 @@ const REGISTRABLE = {
   [MEMORY_COMMAND_CAPABILITY.id]: {
     register: registerMemoryCommandCapability,
     state: memoryCommandCapabilityState,
+  },
+  // Phase 6 (issue #265): the mission-orchestrate trio.
+  [MISSION_ORCHESTRATE_CAPABILITY.id]: {
+    register: registerMissionOrchestrateCapability,
+    state: missionOrchestrateCapabilityState,
   },
 } as const;
 

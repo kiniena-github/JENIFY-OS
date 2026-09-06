@@ -298,13 +298,24 @@ function missionRow(mission: HqStateDocument['missions']['data'][number]): RoomR
   ];
   if (mission.priority) chips.push({ label: mission.priority, tone: 'neutral' });
   if (mission.project) chips.push({ label: mission.project, tone: 'neutral' });
-  const openPlanItems = mission.planItems.filter((item) => item.state !== 'superseded').length;
+  // Phase 6 (issue #265): the derived execution summary, from per-item data
+  // this document already carries — counts, never a percentage. "unspecified"
+  // = live work items with no Founder work spec, which the orchestrator
+  // truthfully cannot action (nothing is parsed out of summaries).
+  const live = mission.planItems.filter((item) => item.state !== 'superseded');
+  const work = live.filter((item) => item.kind === 'work');
+  const linked = work.filter((item) => item.taskId != null).length;
+  const unspecified = work.filter((item) => item.taskId == null && item.specCapabilityId == null).length;
+  const execution =
+    work.length > 0
+      ? ` · ${linked}/${work.length} work item(s) linked${unspecified > 0 ? ` · ${unspecified} unspecified` : ''}`
+      : '';
   return {
     id: mission.id,
     primary: mission.title,
     secondary: mission.blockReason
       ? `${mission.objective} — blocked: ${mission.blockReason}`
-      : `${mission.objective} · ${openPlanItems} plan item(s) · updated ${mission.updatedAt}`,
+      : `${mission.objective} · ${live.length} plan item(s)${execution} · updated ${mission.updatedAt}`,
     chips,
   };
 }

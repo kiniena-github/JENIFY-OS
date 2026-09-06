@@ -132,15 +132,16 @@ describe('every page script speaks only to the control API and the snapshot', ()
     }
   });
 
-  it('allow-lists every postJson call site against the fourteen write routes', () => {
+  it('allow-lists every postJson call site against the fifteen write routes', () => {
     // Three until Phase 3; the mission command/transition/amend writes joined
     // with issue #254; the project register, mission-linkage and workforce
-    // writes joined with issue #262; the memory record write joined with
-    // issue #265 — each the same Founder-approved widening the route-table
-    // test records. (TRANSITION_PATH and UPDATE_PATH name the mission
-    // transition on projects.html's mission console and the project
-    // transition/update on its register console respectively — the
-    // variable-binding test below pins each to its canonical route.)
+    // writes joined with issue #262; the memory record write and the
+    // orchestrate route joined with issue #265 — each the same
+    // Founder-approved widening the route-table test records. (TRANSITION_PATH
+    // and UPDATE_PATH name the mission transition on projects.html's mission
+    // console and the project transition/update on its register console
+    // respectively — the variable-binding test below pins each to its
+    // canonical route.)
     for (const page of HQ_PAGES) {
       const scripts = scriptsOf(site.get(page.file)!);
       for (const match of scripts.matchAll(/postJson\((\w+)[,)]/g)) {
@@ -159,6 +160,7 @@ describe('every page script speaks only to the control API and the snapshot', ()
             'ROUTE_PATH',
             'ASSIGN_PATH',
             'MEMORY_PATH',
+            'ORCHESTRATE_PATH',
             'path',
           ].includes(match[1]!),
           `${page.file}: unexpected postJson target: ${match[1]}`,

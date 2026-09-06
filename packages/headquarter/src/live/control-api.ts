@@ -140,6 +140,10 @@ import {
   MEMORY_COMMAND_CAPABILITY,
   memoryCommandCapabilityState,
 } from '../application/memory-command.js';
+import {
+  MISSION_ORCHESTRATE_CAPABILITY,
+  missionOrchestrateCapabilityState,
+} from '../application/orchestrator-command.js';
 import { MEMORY_KINDS, isMemoryKind, isMemoryPrivacy } from '../memory/schema.js';
 import { isArchiveStatus } from '../archive/schema.js';
 import { PROVIDERS, providerConnectivity } from '../routing/providers.js';
@@ -220,6 +224,16 @@ export const CONTROL_ROUTES = {
   memory: `${CONTROL_API_PREFIX}/memory`,
   memorySearch: `${CONTROL_API_PREFIX}/memory/search`,
   memoryContext: `${CONTROL_API_PREFIX}/memory/context`,
+  /**
+   * Phase 6 (issue #265): ONE orchestration route, mode 'preview' | 'apply'
+   * in the body. Preview is a pure read that still rides the POST pipeline
+   * (one route, one console flow, and the mode is data the write-shaped
+   * pipeline scans like everything else). Apply is the act — the first write
+   * that turns mission state into execution-reachable tasks, which is
+   * exactly why it (and it alone) takes STEP-UP: the re-evaluation the
+   * Phase 3/4 decisions recorded as owed at "Phase >= 6" resolves here.
+   */
+  missionOrchestrate: `${CONTROL_API_PREFIX}/missions/orchestrate`,
 } as const;
 
 /**
@@ -242,6 +256,7 @@ export const CONTROL_WRITE_ROUTES: readonly string[] = [
   CONTROL_ROUTES.workforceRoute,
   CONTROL_ROUTES.workforceAssign,
   CONTROL_ROUTES.memory,
+  CONTROL_ROUTES.missionOrchestrate,
 ];
 
 export interface ControlResponse {
@@ -382,6 +397,79 @@ function numberArrayField(body: unknown, key: string): number[] | undefined | 'i
   return value as number[];
 }
 
+/** One object-form plan entry (Phase 6): a summary plus an optional Founder work spec. */
+interface PlanEntryField {
+  summary: string;
+  capabilityId?: string;
+  payload?: Record<string, unknown>;
+}
+
+/**
+ * The object-form plan field, same contract as `stringArrayField`: absent =
+ * undefined, malformed = 'invalid' (the caller refuses, never coerces).
+ * Structural shape only — depth/bounds/reserved-key rules stay at the facade.
+ */
+function planArrayField(body: unknown, key: string): PlanEntryField[] | undefined | 'invalid' {
+  if (body == null || typeof body !== 'object') return undefined;
+  const value = (body as Record<string, unknown>)[key];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return 'invalid';
+  const out: PlanEntryField[] = [];
+  for (const entry of value) {
+    if (entry == null || typeof entry !== 'object' || Array.isArray(entry)) return 'invalid';
+    const record = entry as Record<string, unknown>;
+    if (typeof record.summary !== 'string') return 'invalid';
+    const hasCapability = record.capabilityId !== undefined;
+    const hasPayload = record.payload !== undefined;
+    if (hasCapability !== hasPayload) return 'invalid';
+    if (hasCapability && typeof record.capabilityId !== 'string') return 'invalid';
+    if (hasPayload && (record.payload == null || typeof record.payload !== 'object' || Array.isArray(record.payload))) {
+      return 'invalid';
+    }
+    out.push(
+      hasCapability
+        ? {
+            summary: record.summary,
+            capabilityId: record.capabilityId as string,
+            payload: record.payload as Record<string, unknown>,
+          }
+        : { summary: record.summary },
+    );
+  }
+  return out;
+}
+
+/** The specify-existing-items field (Phase 6), same absent/'invalid' contract. */
+function specifyArrayField(
+  body: unknown,
+  key: string,
+): { seq: number; capabilityId: string; payload: Record<string, unknown> }[] | undefined | 'invalid' {
+  if (body == null || typeof body !== 'object') return undefined;
+  const value = (body as Record<string, unknown>)[key];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return 'invalid';
+  const out: { seq: number; capabilityId: string; payload: Record<string, unknown> }[] = [];
+  for (const entry of value) {
+    if (entry == null || typeof entry !== 'object' || Array.isArray(entry)) return 'invalid';
+    const record = entry as Record<string, unknown>;
+    if (
+      !Number.isInteger(record.seq) ||
+      typeof record.capabilityId !== 'string' ||
+      record.payload == null ||
+      typeof record.payload !== 'object' ||
+      Array.isArray(record.payload)
+    ) {
+      return 'invalid';
+    }
+    out.push({
+      seq: record.seq as number,
+      capabilityId: record.capabilityId,
+      payload: record.payload as Record<string, unknown>,
+    });
+  }
+  return out;
+}
+
 /**
  * Everything the browser is told about a mission — the ONE shared projection
  * (`missionBrowserView`), so this route and the snapshot's missions section
@@ -462,7 +550,8 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.missionLinkPlanItem ||
         path === CONTROL_ROUTES.workforceRoute ||
         path === CONTROL_ROUTES.workforceAssign ||
-        path === CONTROL_ROUTES.memory));
+        path === CONTROL_ROUTES.memory ||
+        path === CONTROL_ROUTES.missionOrchestrate));
   if (!known) {
     // Deny by default, and say nothing about what does exist.
     return refusal(404, 'not_found', 'No such HQ control route.');
@@ -775,6 +864,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     return workforceAssign(request, deps, founder, audit);
   }
   if (path === CONTROL_ROUTES.memory) return recordMemoryRoute(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.missionOrchestrate) {
+    return orchestrateMissionRoute(request, deps, founder, audit, now);
+  }
   return deny(request, deps, founder, audit);
 }
 
@@ -853,6 +945,16 @@ function controlAvailability(
       principal?.originateCapabilities.includes(MEMORY_COMMAND_CAPABILITY.id) === true &&
       memoryCommandCapabilityState(capabilityRowFor(deps.ops, MEMORY_COMMAND_CAPABILITY.id)) ===
         'enabled',
+    // Phase 6: preview needs the orchestrate grant alone; apply additionally
+    // needs the MISSION grant at the facade — advertised from the union the
+    // console draws (the panel appears when orchestration is usable at all,
+    // and apply's extra refusals surface verbatim).
+    missionOrchestrate:
+      writable &&
+      principal?.originateCapabilities.includes(MISSION_ORCHESTRATE_CAPABILITY.id) === true &&
+      missionOrchestrateCapabilityState(
+        capabilityRowFor(deps.ops, MISSION_ORCHESTRATE_CAPABILITY.id),
+      ) === 'enabled',
     mutationsEnabled: deps.mutationsEnabled !== false,
     trustedOriginConfigured: originsUsable,
     // Stated separately from `trustedOriginConfigured`, because they answer
@@ -1051,11 +1153,17 @@ function controlErrorStatus(code: string): number {
     case 'worker_not_assignable':
     case 'memory_conflict':
       return 409;
+    case 'mission_not_orchestratable':
+    case 'orchestrate_fingerprint_mismatch':
+      return 409;
     case 'unknown_capability':
     case 'capability_disabled':
     case 'not_permitted':
     case 'unknown_principal':
     case 'workforce_registry_unconfigured':
+    // The switch stops execution reachability; a 403 says "nothing in this
+    // request will help until it is released" (the order-path mapping).
+    case 'kill_switch_engaged':
       return 403;
     default:
       return 400;
@@ -1221,6 +1329,65 @@ function recordMemoryRoute(
   );
 }
 
+function orchestrateMissionRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const missionId = stringField(request.body, 'missionId') ?? '';
+  const mode = stringField(request.body, 'mode') ?? '';
+  const fingerprint = stringField(request.body, 'fingerprint');
+  if (!missionId || (mode !== 'preview' && mode !== 'apply')) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', "missionId and mode ('preview' or 'apply') are required.");
+  }
+
+  if (mode === 'apply') {
+    // STEP-UP — the re-evaluation the Phase 3/4 decisions recorded as owed
+    // "the moment a consumer can turn mission/project state into execution
+    // (Phase >= 6)" resolves HERE, as a demand: apply is that first consumer,
+    // and one apply can originate many tasks from stored state, so it takes
+    // the same fresh-credential bar as an execution-granting approval.
+    // Decided from the CANONICAL registry row via `capabilityRowFor` (the
+    // approve-route rule — never queue.capabilities, never a client-sent
+    // class); PREVIEW is a pure read and takes none. A missing/altered row
+    // falls through to the facade's fail-closed trio refusal.
+    const capability = capabilityRowFor(deps.ops, MISSION_ORCHESTRATE_CAPABILITY.id);
+    if (capability && STEP_UP_RISK_CLASSES.includes(capability.riskClass)) {
+      const stepUp = verifyStepUp(founder, stringField(request.body, 'stepUpPassword'), {
+        credentials: deps.credentials,
+        now: now(),
+      });
+      if (!stepUp.ok) {
+        audit('refused', stepUp.reason, founder);
+        const status =
+          stepUp.reason === 'step_up_rate_limited'
+            ? 429
+            : stepUp.reason === 'step_up_failed'
+              ? 403
+              : 401;
+        return refusal(status, stepUp.reason, stepUp.message);
+      }
+    }
+  }
+
+  const result = deps.ops.orchestrateMission({
+    missionId,
+    mode,
+    fingerprint,
+    // The server-resolved principal, never a body field.
+    requestedBy: founder.principal.id,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', mode === 'apply' ? 'mission_orchestrated' : 'orchestration_previewed', founder);
+  return safe(json(200, { ok: true, report: result.data as unknown as Record<string, unknown> }));
+}
+
 function commandMission(
   request: ControlRequest,
   deps: ControlApiDeps,
@@ -1231,17 +1398,20 @@ function commandMission(
   const acceptanceCriteria = stringArrayField(request.body, 'acceptanceCriteria');
   const planItems = stringArrayField(request.body, 'planItems');
   const dependsOn = stringArrayField(request.body, 'dependsOn');
+  const plan = planArrayField(request.body, 'plan');
   if (
     constraints === 'invalid' ||
     acceptanceCriteria === 'invalid' ||
     planItems === 'invalid' ||
-    dependsOn === 'invalid'
+    dependsOn === 'invalid' ||
+    plan === 'invalid'
   ) {
     audit('refused', 'invalid_input', founder);
     return refusal(
       400,
       'invalid_input',
-      'constraints, acceptanceCriteria, planItems and dependsOn must be lists of text entries.',
+      'constraints, acceptanceCriteria, planItems and dependsOn must be lists of text entries; ' +
+        'plan entries need a summary and, when specified, BOTH capabilityId and a payload object.',
     );
   }
   const title = stringField(request.body, 'title') ?? '';
@@ -1259,7 +1429,7 @@ function commandMission(
   // stored, whatever table it would land in (the direct-order precedent).
   try {
     assertBrowserSafe(
-      { title, objective, scope, project, instruction, constraints, acceptanceCriteria, planItems },
+      { title, objective, scope, project, instruction, constraints, acceptanceCriteria, planItems, plan },
       'mission',
     );
   } catch {
@@ -1278,6 +1448,7 @@ function commandMission(
     constraints,
     acceptanceCriteria,
     planItems,
+    plan,
     project,
     priority,
     dependsOn,
@@ -1363,18 +1534,23 @@ function amendMission(
   const acceptanceCriteria = stringArrayField(request.body, 'acceptanceCriteria');
   const addPlanItems = stringArrayField(request.body, 'addPlanItems');
   const supersedePlanItemSeqs = numberArrayField(request.body, 'supersedePlanItemSeqs');
+  const addPlan = planArrayField(request.body, 'addPlan');
+  const specifyPlanItems = specifyArrayField(request.body, 'specifyPlanItems');
   if (
     constraints === 'invalid' ||
     acceptanceCriteria === 'invalid' ||
     addPlanItems === 'invalid' ||
-    supersedePlanItemSeqs === 'invalid'
+    supersedePlanItemSeqs === 'invalid' ||
+    addPlan === 'invalid' ||
+    specifyPlanItems === 'invalid'
   ) {
     audit('refused', 'invalid_input', founder);
     return refusal(
       400,
       'invalid_input',
       'constraints, acceptanceCriteria and addPlanItems must be lists of text entries; ' +
-        'supersedePlanItemSeqs must be a list of integers.',
+        'supersedePlanItemSeqs must be a list of integers; addPlan/specifyPlanItems entries need ' +
+        'a summary or seq plus BOTH capabilityId and a payload object when specified.',
     );
   }
   const missionId = stringField(request.body, 'missionId') ?? '';
@@ -1386,7 +1562,7 @@ function amendMission(
   }
   try {
     assertBrowserSafe(
-      { amendment, objective, constraints, acceptanceCriteria, addPlanItems },
+      { amendment, objective, constraints, acceptanceCriteria, addPlanItems, addPlan, specifyPlanItems },
       'mission',
     );
   } catch {
@@ -1404,6 +1580,8 @@ function amendMission(
     constraints,
     acceptanceCriteria,
     addPlanItems,
+    addPlan,
+    specifyPlanItems,
     supersedePlanItemSeqs,
     requestedBy: founder.principal.id,
   });

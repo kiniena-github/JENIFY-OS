@@ -86,6 +86,9 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
   // search/context reads exist on the API; this page filters the fetched
   // records locally instead of issuing per-keystroke requests.
   CONTROL_ROUTES.memory,
+  // Phase 6 (issue #265): the orchestrate route on projects.html's mission
+  // console — preview and apply, one POST path.
+  CONTROL_ROUTES.missionOrchestrate,
 ];
 
 /**
@@ -100,7 +103,7 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
  * server's words rather than guessing.
  */
 export const CONTROL_GRANT_JS = `function grantedControls(session) {
-  var off = { directOrder: false, approve: false, deny: false, missionCommand: false, projectCommand: false, workforceAssign: false, memoryCommand: false, reason: '' };
+  var off = { directOrder: false, approve: false, deny: false, missionCommand: false, projectCommand: false, workforceAssign: false, memoryCommand: false, missionOrchestrate: false, reason: '' };
   if (session == null || typeof session !== 'object') {
     off.reason = 'The control API gave no readable answer, so no control is drawn.';
     return off;
@@ -118,6 +121,7 @@ export const CONTROL_GRANT_JS = `function grantedControls(session) {
     projectCommand: session.controls.projectCommand === true,
     workforceAssign: session.controls.workforceAssign === true,
     memoryCommand: session.controls.memoryCommand === true,
+    missionOrchestrate: session.controls.missionOrchestrate === true,
     reason: stated !== '' ? stated : ungrantedReason(session.controls)
   };
 }
@@ -1006,6 +1010,7 @@ export function missionsConsoleScript(): string {
   var ORDERS_PATH = ${jsonForScript(CONTROL_ROUTES.orders)};
   var ASSIGN_PROJECT_PATH = ${jsonForScript(CONTROL_ROUTES.missionAssignProject)};
   var LINK_ITEM_PATH = ${jsonForScript(CONTROL_ROUTES.missionLinkPlanItem)};
+  var ORCHESTRATE_PATH = ${jsonForScript(CONTROL_ROUTES.missionOrchestrate)};
   var ALLOWED = ${jsonForScript(MISSION_ALLOWED_TRANSITIONS)};
   var NOTE_REQUIRED = ${jsonForScript(MISSION_NOTE_REQUIRED_TARGETS)};
 
@@ -1114,6 +1119,11 @@ export function missionsConsoleScript(): string {
         var itemLine = item.seq + '. ' + item.summary + ' \\u2014 ' + item.state;
         if (item.rawTaskStatus) itemLine += ' (task ' + item.taskId + ': ' + item.rawTaskStatus + ')';
         else if (item.kind === 'work' && !item.taskId && item.state !== 'superseded') itemLine += ' (no task exists for this item yet)';
+        // Phase 6: spec PRESENCE (the payload stays server-side, like intent
+        // bodies). An unlinked work item without one is truthfully not
+        // actionable by the orchestrator.
+        if (item.specCapabilityId) itemLine += ' [work spec: ' + item.specCapabilityId + ']';
+        else if (item.kind === 'work' && !item.taskId && item.state !== 'superseded') itemLine += ' [no Founder work spec \\u2014 not orchestratable]';
         li.appendChild(el('span', '', itemLine));
         if (canCommand && item.kind === 'work' && !item.taskId && item.state !== 'superseded') {
           li.appendChild(planItemControls(mission, item));
@@ -1121,6 +1131,10 @@ export function missionsConsoleScript(): string {
         planList.appendChild(li);
       }
       card.appendChild(planList);
+    }
+
+    if (currentGrant && currentGrant.missionOrchestrate === true) {
+      card.appendChild(orchestrateControls(mission));
     }
 
     if (mission.verification) {
@@ -1428,6 +1442,113 @@ export function missionsConsoleScript(): string {
   }
 
   var sessionAnswer = null;
+  var currentGrant = null;
+
+  // Phase 6: the orchestration panel — preview derives the cycle truthfully,
+  // apply creates real gated tasks through the canonical origination path.
+  // Apply demands STEP-UP (the first mission-state -> execution write), so a
+  // password field appears with it; a stale preview fingerprint refuses.
+  function orchestrateControls(mission) {
+    var box = el('div', 'order-field');
+    box.setAttribute('data-mission-orchestrate', mission.id);
+    textLine(box, 'order-label', 'Orchestration \\u2014 preview shows what a cycle would do; apply creates real tasks that still pass every canonical gate. Nothing is approved, claimed or transitioned by orchestration.');
+    var outcome = el('p', 'muted', '');
+    outcome.setAttribute('role', 'status');
+    outcome.setAttribute('aria-live', 'polite');
+    var fingerprint = null;
+    var previewButton = document.createElement('button');
+    previewButton.type = 'button';
+    previewButton.className = 'order-live-submit';
+    previewButton.textContent = 'Preview cycle';
+    var applyButton = document.createElement('button');
+    applyButton.type = 'button';
+    applyButton.className = 'order-live-submit';
+    applyButton.textContent = 'Apply cycle';
+    applyButton.disabled = true;
+    var stepUpLabel = el('p', 'order-label', 'Step-up: applying turns mission state into real gated tasks, so it demands a fresh credential. Re-enter your JENIFY OS password.');
+    var stepUp = document.createElement('input');
+    stepUp.type = 'password';
+    stepUp.autocomplete = 'current-password';
+    stepUp.setAttribute('aria-label', 'Step-up password for orchestrate apply');
+
+    function describeReport(report, prefix) {
+      var lines = [];
+      var decisions = Array.isArray(report.decisions) ? report.decisions : [];
+      for (var d = 0; d < decisions.length; d++) {
+        var entry = decisions[d];
+        var lineText = 'item ' + entry.planItemSeq + ': ' + entry.decision;
+        if (entry.detail && entry.detail.taskId) lineText += ' (task ' + entry.detail.taskId + ')';
+        if (entry.detail && entry.detail.capabilityId && !entry.detail.taskId) lineText += ' (' + entry.detail.capabilityId + ')';
+        lines.push(lineText);
+      }
+      var state = report.state || {};
+      var counts = state.planItems || {};
+      var summary = prefix + ' ' + lines.join(' \\u00b7 ') +
+        ' \\u2014 plan: ' + counts.linked + '/' + (counts.workSpecified + counts.workUnspecified) + ' work item(s) linked, ' +
+        counts.workUnspecified + ' unspecified.';
+      if (state.recommendation === 'ready_review') {
+        summary += ' Derived recommendation: ready_review \\u2014 a recommendation only; nothing transitions without the Founder.';
+      }
+      if (state.killSwitch && (state.killSwitch.global || state.killSwitch.orchestrate)) {
+        summary += ' KILL SWITCH ENGAGED \\u2014 apply is refused while it holds.';
+      }
+      outcome.textContent = summary;
+    }
+
+    previewButton.addEventListener('click', function () {
+      previewButton.disabled = true;
+      outcome.textContent = 'Previewing\\u2026';
+      postJson(ORCHESTRATE_PATH, { missionId: mission.id, mode: 'preview' }).then(function (result) {
+        previewButton.disabled = false;
+        var body = result.body || {};
+        if (body.ok !== true || body.report == null) {
+          var error = body.error || {};
+          outcome.textContent = 'Preview refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given');
+          if (result.status === 401 || result.status === 403) recheckAfterWriteRefusal(result.status, error);
+          return;
+        }
+        fingerprint = body.report.fingerprint || null;
+        applyButton.disabled = false;
+        describeReport(body.report, 'Preview \\u2014');
+      }).catch(function (error) {
+        previewButton.disabled = false;
+        outcome.textContent = 'Not previewed (' + error.message + ').';
+      });
+    });
+
+    applyButton.addEventListener('click', function () {
+      var payload = { missionId: mission.id, mode: 'apply' };
+      if (fingerprint) payload.fingerprint = fingerprint;
+      if (stepUp.value !== '') payload.stepUpPassword = stepUp.value;
+      applyButton.disabled = true;
+      outcome.textContent = 'Applying\\u2026';
+      postJson(ORCHESTRATE_PATH, payload).then(function (result) {
+        applyButton.disabled = false;
+        stepUp.value = '';
+        var body = result.body || {};
+        if (body.ok !== true || body.report == null) {
+          var error = body.error || {};
+          outcome.textContent = 'Apply refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given');
+          if (result.status === 401 || result.status === 403) recheckAfterWriteRefusal(result.status, error);
+          return;
+        }
+        describeReport(body.report, 'Applied \\u2014');
+        notifyStateChanged();
+        reload();
+      }).catch(function (error) {
+        applyButton.disabled = false;
+        outcome.textContent = 'Not applied (' + error.message + ').';
+      });
+    });
+
+    box.appendChild(previewButton);
+    box.appendChild(stepUpLabel);
+    box.appendChild(stepUp);
+    box.appendChild(applyButton);
+    box.appendChild(outcome);
+    return box;
+  }
+
   function reload() {
     jsonExchange(fetch(MISSIONS_PATH, { headers: { accept: 'application/json' } }))
       .then(function (result) {
@@ -1439,6 +1560,7 @@ export function missionsConsoleScript(): string {
           return;
         }
         var grant = grantedControls(sessionAnswer);
+        currentGrant = grant;
         note.setAttribute('data-missions-console-state', 'live');
         note.className = 'readonly-note console-state console-state-live';
         note.textContent = 'Live: ' + body.missions.length + ' commanded mission(s), from the canonical record just now.';
