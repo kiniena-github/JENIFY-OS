@@ -170,9 +170,20 @@ intact row, enforcement-safe read) and `truthAccept` (= approval authority), eac
 from exactly the conditions that decide the write.
 
 Snapshot: an OPTIONAL `truth` section (`TruthSnapshotView`: total, byState, unresolved count,
-withheld founder_only count, newest `TRUTH_SNAPSHOT_LIMIT`=20 records, unresolved pairs).
-Optional by shape on purpose — a static build opens no truth store and states nothing rather
-than an invented zero, every pre-Phase-7 fixture stays valid, and no `counts` pin moved. The
+verified-awaiting-acceptance count, withheld founder_only count, newest
+`TRUTH_SNAPSHOT_LIMIT`=20 records, unresolved pairs). Optional by shape on purpose — a static
+build opens no truth store and states nothing rather than an invented zero, every pre-Phase-7
+fixture stays valid, and no `counts` pin moved. **What each count spans (review round 2):**
+`total` counts every record, founder_only included, and `withheldFounderOnly` says how many of
+those the reader may not see; `byState`, `unresolvedContradictions` and `awaitingAcceptance`
+span ONLY the set the reader may see (all records past the Founder gate; the non-founder_only
+records in the unauthenticated artifact) — over all of that set, never bounded by the carried
+page, so `byState` sums to `total − withheldFounderOnly` and `unresolvedContradictions` is
+exactly the count of pairs `contradictions[]` summarises. (At heads `20d70ef` and `8ad1c92`
+`byState` and `unresolvedContradictions` were computed over ALL records including withheld
+ones, so arithmetic on the artifact — `total`, `withheldFounderOnly`, `byState.accepted`
+against the carried records — disclosed how many PRIVATE records were accepted, and a dispute
+between two private records was counted as existing.) The
 Founder-gated `/state` carries founder_only rows; the unauthenticated artifact withholds them,
 withholds the pair-level contradictions touching them, AND projects every carried public
 record through `withholdFounderOnlyRelations` so no relation id (`supports`/`contradicts`/
@@ -191,9 +202,14 @@ pre-Phase-7 file projects absence with provenance saying why; no `HQ_SNAPSHOT_VE
 Rooms (server-side `hydrate.ts`, counts only, present-only when the section exists): **Security
 Center** gains a `Truth contradictions` condition metric and one attention row per unresolved
 contradiction ("neither side is preferred by recency"); **Founder Office** gains
-`Verified, awaiting acceptance` (exactly the records the server issued a digest for — the
-count and the acceptable set cannot disagree) and `Founder-accepted`, both waiting-at-the-gate
-liveness; **Company Memory** gains `Truth records / Verified / Accepted` beside memory. Room
+`Verified, awaiting acceptance` (the server-side `awaitingAcceptance` count: exactly the
+records the server issued an acceptance digest for, counted over EVERY record the reader may
+see — since review round 2; before it the room counted `acceptanceDigest !== null` over the
+bounded `records` page while `Founder-accepted` beside it used `byState` over all records, so
+past twenty records the metric UNDERSTATED the verified truth waiting at the gate and the
+"cannot disagree" claim that stood here was false) and `Founder-accepted`, both
+waiting-at-the-gate liveness; **Company Memory** gains `Truth records / Verified / Accepted`
+beside memory. Room
 `binding.source` texts name the truth section. An empty projection renders dark; zero is zero.
 
 UI: archive.html gains the Truth + Evidence live console (`truthConsoleScript`): a mount and a
@@ -245,6 +261,11 @@ to act; the truth projection is read by humans and by nothing that decides.
   is the price of stating the omission honestly rather than silently. The private record's
   id, statement, direction and resolution never appear. If the Founder prefers the artifact
   to carry no count, that is a one-line policy change, recorded here as an open choice.
+  Review round 2 considered this residual and dismissed it: laundering the record would
+  present a disputed statement as clean, which is worse. It stays as documented. A visible
+  consequence since round 2's count scoping: such an artifact can show `contested: true` on a
+  carried record while `unresolvedContradictions` is 0 — the pair is withheld, the record's
+  own standing is not.
 
 ## Deliberate pin ledger
 
@@ -257,7 +278,15 @@ deleted or relaxed; no `counts` pin, no `ROOM_SECTIONS` change, no `HQ_SNAPSHOT_
 Review round 1 RENAMED one test to what it proves (`truth-graph-hardening`: the engine-abort
 test covered UPDATE/DELETE on all four tables but REPLACE/upsert only on the `id` target — it
 is now named exactly that, and a second test carries the secondary-index cases); its
-assertions were not changed.
+assertions were not changed. Review round 2 CHANGED two expected values in `live-truth-routes`
+and added assertions beside them, deliberately and in the stricter direction: the
+unauthenticated artifact's `unresolvedContradictions` for (a) a dispute between two
+founder_only records and (b) a founder_only record disputing a public one was pinned at `1`
+(the count spanned withheld rows) and is now pinned at `0`, with the Founder-gated state
+pinned at `1` and the gated/artifact `byState` pinned explicitly in the same tests — the
+count is now pinned in both directions rather than loosened. `TruthSnapshotView` gained one
+additive field (`awaitingAcceptance`); the read-only pre-Phase-7 absence projection states
+it as 0 like its siblings. No test was deleted or relaxed.
 
 ## Deployment runbook (configuration acts, never automatic)
 
@@ -288,10 +317,12 @@ the routes, STEP-UP on accept only, one status per cause, hostile callers, ident
 query, mutations-off, secret-like content, 404 sub-routes, founder_only through the gate and
 withheld from the artifact by statement AND by id, a founder_only contradiction of a PUBLIC
 record leaving no id in the artifact while the gated state keeps it, entity route, control
-advertisement incl. withdrawal on a disabled row), `truth-surfaces` (6: optional section
+advertisement incl. withdrawal on a disabled row), `truth-surfaces` (8: optional section
 absence, derived states + both wire guards + no fabricated key, the artifact privacy
-projection over supports/derived_from/contradicts/supersession with the withheld count,
-Security/Founder rooms, Company Memory counts, dark zero), `truth-console` (6, JSDOM against the real control API:
+projection over supports/derived_from/contradicts/supersession with the withheld count, the
+artifact's aggregate counts spanning the carried set only (round 2), Security/Founder rooms,
+Founder Office counting awaiting-acceptance over `TRUTH_SNAPSHOT_LIMIT + 1` verified records
+(round 2), Company Memory counts, dark zero), `truth-console` (6, JSDOM against the real control API:
 inert static markup, forms only under grants, record from the page, contradiction-first +
 limitations + step-up refusal then acceptance with password, entity lookup, non-Founder off +
 hostile text inert), hq-host `host-contract` (+2: Fastify-wired record/entity/query-scan/
@@ -333,6 +364,8 @@ guarantee and outside what the green suite asserted. The Phase 7 items and their
   can trip it is a forger or a raced foreign insert; no memory code path catches
   `SQLITE_CONSTRAINT_UNIQUE` specifically, so the changed engine error shape on that race
   alters no behaviour. Pinned in `memory-engine-hardening`; verified to fail against the old DDL.
+  (Round 2 found this left the table's THIRD conflict target — its implicit rowid — open; see
+  the round 2 corrections below.)
 - **Medium — founder_only leakage through relation ids in the unauthenticated artifact.**
   `truthSummary` withheld the records and the pair list, but a carried PUBLIC record still
   shipped the private record's id in `contradictedBy` / `contradictions[].withId` (and by the
@@ -347,3 +380,60 @@ guarantee and outside what the green suite asserted. The Phase 7 items and their
   "every REPLACE/upsert spelling on all four truth tables" while asserting two spellings on
   two tables at the `id` target — the name that let the High ship. Renamed to what it proves;
   the secondary-index cases are a separate, real test.
+
+## Independent review round 2 — corrections (head `8ad1c92` → this head)
+
+A second, independent hostile review of the exact head `8ad1c92` (CI run #519 green, every
+test count confirmed) verified round 1's corrections as genuinely fixed — the trigger sweep on
+the six new tables complete on all conflict targets, the pragma safe on all three claims, the
+relation scrub covering all nine id-bearing fields — and returned CHANGES REQUIRED. The
+Phase 7 items and their fixes (the Phase 8 items — the unscanned adapter message and the
+`dispatchHistory` read — are in `PHASE_8_AUTHORITY_RISK_ACTION_GATEWAY.md`); every fix carries
+a regression test verified to fail against the code before it:
+
+- **Low — `hq_memory` implicit-rowid conflict target still open.** `hq_memory` is the only one
+  of the seven tables hardened in this wave with a TEXT primary key, so it keeps a separate
+  implicit rowid — a conflict target that `trg_hq_memory_no_replace` (`id`) and
+  `trg_hq_memory_no_replace_idem` (`idempotency_key`) do not test. Proven with
+  `recursive_triggers = OFF`: `INSERT OR REPLACE INTO hq_memory (rowid, id, …) VALUES (1, 'mZ',
+  …)` deleted a `founder_only` record and landed a forged `internal` one in its place, no
+  BEFORE DELETE firing. On HQ's own connection the round 1 pragma makes it abort, so only a
+  foreign writer at SQLite's default is exposed — hence Low. The comment in `memory/store.ts`
+  claimed the id guard closed the REPLACE path "while recursive_triggers is off"; that was
+  false for this target. **Fix (`memory/store.ts`):** one additive trigger,
+  `trg_hq_memory_no_replace_rowid` (`WHEN TYPEOF(NEW.rowid) = 'integer' AND EXISTS (SELECT 1
+  FROM hq_memory WHERE rowid = NEW.rowid)`); an auto-assigned rowid reads as `-1` inside a
+  BEFORE INSERT trigger, so the legitimate writer — which never names a rowid — never matches
+  an existing row (pinned: a note records normally after the forged REPLACE is refused). The
+  module comment now names all three targets and says when the claim was false. Pinned in
+  `memory-engine-hardening` with the pragma OFF: the REPLACE aborts, every row byte-identical,
+  the founder_only record still founder_only, no forged row. Fails against the old DDL (the
+  REPLACE succeeds). The same shape exists on three accepted-main tables outside this wave and
+  is recorded as carry-forward debt in the Phase 8 document's Known limitations — not fixed
+  here, by the reviewer's framing.
+- **Low — `awaitingAcceptance` was a bounded count under an unbounded claim.**
+  `client/hydrate.ts` counted `acceptanceDigest !== null` over the artifact's newest
+  `TRUTH_SNAPSHOT_LIMIT` = 20 records while the sibling `Founder-accepted` metric used
+  `byState.accepted` over all records; the comment claimed the two "cannot disagree". False
+  past 20 records, and in the direction that hid pending Founder work. **Fix:** computed
+  server-side in `truthSummary` over the full set the reader may see and carried as
+  `TruthSnapshotView.awaitingAcceptance`; the room reads it, and the comment says what was
+  wrong. Pinned in `truth-surfaces` with 21 verified records: `records` carries 20,
+  `awaitingAcceptance` and the Founder Office metric say 21. Fails against the bounded count.
+- **Low — artifact aggregate counts spanned withheld founder_only rows.** In the
+  unauthenticated artifact `byState` and `unresolvedContradictions` were computed over all
+  records while `records` and `contradictions[]` were filtered, so arithmetic disclosed
+  aggregate categorical facts about private records (how many are `accepted`; that a private
+  dispute exists). No id, statement, subject or actor leaked. The reviewer offered either
+  scoping the counts or documenting the span; **scoping was chosen** — a dispute between two
+  founder_only records is an internal dispute, which is the very substance round 1 said
+  founder_only protects when it scrubbed relation ids, and `total` + `withheldFounderOnly`
+  still state the omission. **Fix (`service.ts` `truthSummary`):** `byState`,
+  `unresolvedContradictions` and the new `awaitingAcceptance` span the visible set; `total`
+  is unchanged. Surfaces above states exactly what each count spans. Pinned in
+  `truth-surfaces` (gated vs artifact counts side by side; `byState` sums to `total −
+  withheldFounderOnly`) and by the two changed `live-truth-routes` expectations recorded in
+  the pin ledger. Fails against the all-rows aggregate.
+- **Considered and dismissed by the reviewer — left as documented:** a carried public record
+  staying truthfully `contested` while `withheldFounderOnlyRelations > 0` (see Known
+  limitations).

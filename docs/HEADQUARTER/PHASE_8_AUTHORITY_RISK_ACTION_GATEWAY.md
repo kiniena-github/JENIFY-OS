@@ -79,8 +79,8 @@ decision and every write (`proposeAction`, `authorizeAction`, `executeAction`,
       ▼
   attempted ── step 2, OUTSIDE the transaction: adapter.execute() exactly once
       │           ok → succeeded | rejected/unavailable → failed | unknown or THROW → outcome_unknown
-      ▼        step 3, second transaction: the terminal event (secret-like externalRef WITHHELD)
-  succeeded | failed | outcome_unknown
+      ▼        step 3, second transaction: the terminal event (secret-like externalRef AND
+  succeeded | failed | outcome_unknown       secret-like message WITHHELD before storage, each flagged)
                           │
       attempted | outcome_unknown ──reconcileAction (approval authority; not the proposer)──► reconciled
                                      confirmed_succeeded | confirmed_failed | confirmed_not_executed*
@@ -166,6 +166,7 @@ read for DISPLAY. Audit of every call site in `src/`:
 | Phase 8 gateway (`#gatewayGate`) | — | `#engagedKillSwitchScopeFromStore([...5 scopes])` | New; canonical by construction. |
 | `service.ts` `#claudeDispatchState` (`#gatewayGate` step 9 and `proposeAction`) | `this.queue.evidence.list(taskId)` at `20d70ef` | `#db` → `SELECT kind FROM op_evidence WHERE task_id = ?` | **Migrated in review round 1.** Not a kill-switch read, but the same class of defect reintroduced in the new gate: a fact deciding whether HQ EXECUTES an external action was read from the patchable display surface. Proven: a forged `queue.evidence.list` hiding the lane's entries turned `refused:duplicate_external_action` into a real adapter call. |
 | `providers/claude/dispatch.ts` `claudeDispatchEligibility` gateway mirror check | `ops.gatewayActionHistory(taskId)` (a prototype method) | `gatewayActionHistoryFor(ops, taskId)` — a function binding over the private `#gatewayActionHistoryFromStore`, which reads the ledger rows through `#db` and not through the public `listActions` | **Hardened in review round 1, minimally.** Not a regression from this wave (the same verdict already reads `ops.queue.get` / `ops.queue.capabilities.get` on accepted main), but the mirror check decides whether a public issue is published, and the recipe already existed. |
+| `providers/claude/dispatch.ts` `dispatchHistory` (consumed by `dispatchClaudeTask` before publishing, inside its reservation, by `resolveUnknownDispatch`, and by the `alreadyDispatched` display reads) | `ops.queue.evidence.list(taskId)` | `taskEvidenceRowsFor(ops, taskId)` — a function binding over the private `#taskEvidenceRowsFromStore` (`SELECT kind, at, payload FROM op_evidence WHERE task_id = ? ORDER BY seq` through `#db`); the folding logic stays in `dispatch.ts` | **Migrated in review round 2.** Not a regression from this wave (accepted main read the same surface), but the identical defect class round 1 closed in `#claudeDispatchState`, one function over, in a file this wave edited — and the fact it reads decides duplicate publication of a PUBLIC issue. Defended in depth (the reservation re-check and the canonical `claimNext`), so no working double-publish was constructed; the read still had to be canonical. Round 1's table and limitations omitted it; this row corrects that. |
 
 Pinned in `kill-switch-enforcement-safe` (5): each site is exercised with the delegate forged
 on BOTH the instance and `OperatorQueue.prototype`, the lie proven to have taken
@@ -177,7 +178,9 @@ import and pins that it throws `TypeError` (its earlier name claimed this withou
 it; the name now says exactly what is attempted — note that a bundler/test transform may
 differ from native ESM on `Object.defineProperty`, which is why only the assignment form is
 pinned). The gateway's own forged-delegate pin, the forged-`queue.evidence` pin and the
-forged-`gatewayActionHistory`/`listActions` pin live in `action-gateway-authority`.
+forged-`gatewayActionHistory`/`listActions` pin live in `action-gateway-authority`; the
+`dispatchHistory` forged-`queue.evidence.list` pin (history still `dispatched`, a repeat
+answered `deduplicated: true`, one transport call) lives in `dispatch-concurrency`.
 
 ## What is canonical vs projection
 
@@ -211,8 +214,10 @@ never migrated (pinned).
   `attempted | outcome_unknown | succeeded` (`gatewayActionHistoryFor`, a function binding over
   the ledger rows, asked before the lane's own binding checks). The existing lane's
   claim/start/publish/reconcile behaviour, evidence kinds and correlation block are unchanged;
-  the two narrowing checks are the ONLY edits to `dispatch.ts`. No Claude/GitHub adapter is
-  wired into the gateway in this phase — see limitations.
+  the two narrowing checks, plus (review round 2) `dispatchHistory` reading its rows through
+  the `taskEvidenceRowsFor` binding instead of `queue.evidence.list`, are the ONLY edits to
+  `dispatch.ts`. No Claude/GitHub adapter is wired into the gateway in this phase — see
+  limitations.
 
 ## Surfaces
 
@@ -231,7 +236,12 @@ POST /api/hq/control/actions/reconcile  Founder reconciliation — STEP-UP alway
 
 There is deliberately NO route for `authorizeAction` or `executeAction`: humans never execute,
 and both take a worker's fenced claim. The payload BODY never returns to the browser (the view
-is digest-only by shape); credential-like adapter results are withheld before storage. One
+is digest-only by shape); credential-like adapter results are withheld before storage — BOTH
+`outcome.externalRef` and `outcome.message` (including the text of an adapter that threw),
+each with its own visible `…Withheld` flag. (At heads `20d70ef` and `8ad1c92` this sentence
+was FALSE for the message: only `externalRef` was scanned, and a token in an adapter's error
+text went unscanned into the immutable ledger, the hash-chained evidence entry and the view,
+after which `/actions/detail` answered a permanent 500 for that action — review round 2.) One
 status per cause: 404 `unknown_action`; 409 `action_state_conflict | action_outcome_unknown |
 duplicate_external_action | action_approval_stale | intent_changed | task_not_executing |
 mission_not_active`; 403 `approval_required_by_risk` (with the existing authority codes); 400
@@ -283,14 +293,33 @@ text against constraint prose would be an invented rule.
   action's proposer only; the task creator is not refused (the queue's own reconcile refuses
   the task creator for task-level reconciliation, and a task-level rule here would refuse the
   legitimate case of a Founder who ordered the work and later checks the remote).
-- **`claudeDispatchEligibility` is only partly enforcement-safe.** Its kill-switch read and
-  (since review round 1) its gateway-history read go through function bindings over `#db`,
-  but the task and capability it reasons about still come from `ops.queue.get` and
-  `ops.queue.capabilities.get` — patchable reads inherited from accepted main, not introduced
-  by this wave. The claim/start the lane performs afterwards re-reads canonical rows, so a lie
-  there cannot mint a claim, but it can mis-shape the eligibility verdict. Recorded as
-  carry-forward debt, not fixed here (out of this correction's scope by the reviewer's own
-  framing).
+- **`claudeDispatchEligibility` is only partly enforcement-safe.** Its kill-switch read,
+  (since review round 1) its gateway-history read and (since review round 2) the lane's
+  `dispatchHistory` go through function bindings over `#db`, but the task and capability the
+  verdict reasons about still come from `ops.queue.get` and `ops.queue.capabilities.get` —
+  patchable reads inherited from accepted main, not introduced by this wave. The claim/start
+  the lane performs afterwards re-reads canonical rows, so a lie there cannot mint a claim,
+  but it can mis-shape the eligibility verdict. Recorded as carry-forward debt, not fixed here
+  (out of this correction's scope by the reviewer's own framing).
+- **Newly discovered carry-forward debt (review round 2, accepted main, NOT fixed here):
+  implicit-rowid REPLACE on three TEXT-primary-key insert-only tables.** A table whose primary
+  key is TEXT keeps a separate implicit `rowid`, which is a conflict target of its own; a
+  BEFORE INSERT guard that tests only the declared unique columns does not close it, and with
+  `recursive_triggers` OFF (a foreign writer at SQLite's default) `INSERT OR REPLACE …
+  (rowid, …)` deletes the standing row with no BEFORE DELETE firing. Round 2 proved and closed
+  this on `hq_memory` (`trg_hq_memory_no_replace_rowid`, recorded in
+  `PHASE_7_TRUTH_AND_EVIDENCE.md`). The reviewer found — and deliberately did not exploit —
+  the same shape on **`hq_mission_intents`**, **`hq_mission_plan_items`**
+  (`mission-command.ts`: guards test `(mission_id, seq)` and `id`) and
+  **`hq_orchestration_runs`** (`orchestrator-command.ts`: guard tests `id`). All three are
+  accepted-main tables outside this wave; they are written here so the next wave inherits a
+  note rather than a surprise. The fix shape is known and additive (one new trigger per table,
+  `TYPEOF(NEW.rowid) = 'integer' AND EXISTS (SELECT 1 FROM <t> WHERE rowid = NEW.rowid)`; an
+  auto-assigned rowid reads as `-1` in BEFORE INSERT, so the legitimate writer never matches).
+  On HQ's own connection `PRAGMA recursive_triggers = ON` (round 1) already makes the REPLACE
+  reach the BEFORE DELETE guards, so the exposure is to a foreign writer only. The Phase 7/8
+  tables use `seq INTEGER PRIMARY KEY` and are not affected (the rowid IS `seq`, which the
+  guards test).
 
 ## Deliberate pin ledger
 
@@ -305,6 +334,15 @@ or the dispatch evidence kinds. Review round 1 renamed one test in `kill-switch-
 to match a reassignment attempt it now actually makes (assertions added, none removed), and
 added one exported function binding (`gatewayActionHistoryFor`) plus its module-private reader;
 `gatewayActionHistory` keeps its public shape and now delegates to the same private read.
+Review round 2 added a second exported binding (`taskEvidenceRowsFor`, with the
+`CanonicalEvidenceRow` type) and one field on the action view (`outcome.messageWithheld`,
+additive, defaults false on pre-round-2 rows). One existing test moved its injection point
+without changing an assertion: `dispatch-concurrency` "re-reads the state INSIDE the
+transaction" drove its race by patching `queue.evidence.list`, which — being exactly the
+surface `dispatchHistory` no longer reads — could no longer fire; it now patches the instance's
+`reserveEvidence` to land the competing reconciliation after the pre-check and before the
+transaction, the same interleaving, and still pins the loser refused with one terminal record.
+No test was deleted or relaxed.
 
 ## Deployment runbook (configuration acts, never automatic)
 
@@ -321,7 +359,7 @@ proposer's own registry, and reconciling requires approval authority.
 
 ## Evidence
 
-New suites: `action-gateway-authority` (31: categorical/monotone risk engine + contract
+New suites: `action-gateway-authority` (32: categorical/monotone risk engine + contract
 validation; proposal identity/grant/adapter/provider/refs/secrets/dedupe; the recorded arc with
 one adapter call and a payload-free view; truthful `failed`; stale approval, mutated task,
 provider redeclaration, mission amendment and blocked mission refusals; duplicate side effect
@@ -330,21 +368,25 @@ and reconciliation authority/independence/idempotency rules; adapter throw = unk
 generation after `confirmed_not_executed`; every kill-switch scope incl. provider scope and the
 forged-delegate pin; risk-required approval on a pre-approved capability; proposer ≠ approver;
 authority intersection incl. revoked grant and disabled capability; secret-like adapter result
-withheld everywhere; engine immutability on both tables incl. REPLACE on the secondary unique
+withheld everywhere — `externalRef`, AND (round 2) a rejected outcome's `message` and a thrown
+error's text, flagged `messageWithheld`, the view passing the browser guard, an honest message
+still recorded; engine immutability on both tables incl. REPLACE on the secondary unique
 indexes with `recursive_triggers` OFF and the attempt reservation surviving; the dispatch-lane
 mutual exclusion in both directions, under a forged `queue.evidence.list` at execute AND
 propose, and under forged `gatewayActionHistory`/`listActions` on instance and prototype; pure
 bounded reads), `kill-switch-enforcement-safe` (5: the Low-7 migration
 audit above), `action-gateway-durability` (2: real file close/reopen with an unknown outcome
 that stays unknown, identical refusals, no retry, then human reconciliation; read-only
-pre-Phase-8 absence), `live-action-routes` (11: write surface and the ABSENCE of
+pre-Phase-8 absence), `live-action-routes` (12: write surface and the ABSENCE of
 authorize/execute routes; attribution/dedupe/no payload on the wire; identity in body and query;
 one status per cause; risk escalation from the body; bounded list/detail; secret withheld on the
-wire; reconcile step-up 401/403/200 + proposer refused + 409 replay + password never audited;
+wire — in `externalRef` and (round 2) in `message`, the detail route answering 200 rather than
+the permanent 500; reconcile step-up 401/403/200 + proposer refused + 409 replay + password never audited;
 reconcile input/404/409; `actionReconcile` control; nobody/staff/mutations-off sweep), hq-host
 `host-contract` (+2: Fastify-wired propose/read/no-execute-route/worker-step arc; NO_IDENTITY
-sweep of all four action routes). Full-matrix results are recorded in the wave PR; merge stays
-gated on independent review and the Founder.
+sweep of all four action routes), and (round 2) `dispatch-concurrency` (+1: `dispatchHistory`
+under a forged `queue.evidence.list`). Full-matrix results are recorded in the wave PR; merge
+stays gated on independent review and the Founder.
 
 ## Independent review round 1 — corrections (head `20d70ef` → this head)
 
@@ -392,3 +434,53 @@ recorded in `PHASE_7_TRUTH_AND_EVIDENCE.md`):
 - **Low — overstated test name** in `kill-switch-enforcement-safe` ("cannot be reassigned" with
   no attempt). The test now makes the plain reassignment through a namespace import, pins the
   `TypeError`, pins the binding identity afterwards, and is named for exactly that.
+
+## Independent review round 2 — corrections (head `8ad1c92` → this head)
+
+A second, independent hostile review of the exact head `8ad1c92` (CI run #519 green, every
+test count confirmed) verified round 1's corrections as genuinely fixed and returned CHANGES
+REQUIRED: one Medium with a working probe and four Lows. The Medium sat inside a stated
+guarantee and outside what the green suite asserted. The Phase 8 items and their fixes (the
+Phase 7 items — the `hq_memory` rowid target and the two snapshot-count claims — are recorded
+in `PHASE_7_TRUTH_AND_EVIDENCE.md`); every fix carries a regression test verified to fail
+against the code before it:
+
+- **Medium — adapter `outcome.message` and thrown-error text stored UNSCANNED into immutable,
+  hash-chained stores.** Step 3 scanned only `outcome.externalRef`. Proven against the real
+  fixture: an adapter returning `{ ok: false, kind: 'rejected', message: 'remote said: token
+  ghp_… is invalid' }` put the token in `hq_action_events` (engine-immutable), in `op_evidence`
+  (immutable AND hash-chained — by Law 6's own design it could never be removed) and in
+  `ActionView.outcome.message`; an adapter that THREW with a token in the message put it in
+  `op_evidence` through the `adapter threw:` text. `/actions/detail` then answered a permanent
+  500 for that action because `safe()` refused the response. Real APIs echo the token or the
+  `Authorization` header in auth errors, so this fires on the first real adapter. **Fix
+  (`service.ts` step 3, `action-gateway.ts`):** `message` goes through `assertBrowserSafe`
+  before storage exactly as `externalRef` does — the thrown text is folded into
+  `outcome.message` in step 2, so the one scan covers both paths — and a refused message is
+  stored as `message: null, messageWithheld: true` in the ledger event, the evidence payload,
+  the `hq_events` detail and the derived view (new additive field `outcome.messageWithheld`,
+  false on older rows). Withheld is visible, never silent, and never stored. Pinned in
+  `action-gateway-authority` (rejected path AND throw path: token absent from both tables, the
+  evidence chain, `hq_events` and the view; the flags set; the view passing the browser guard;
+  unknown still unknown and retry-blocked; an honest message still recorded with the flag
+  false) and in `live-action-routes` (detail 200 with the token absent from detail and list).
+  Both fail against the unscanned code (detail answered 500; the token was present).
+- **Low — `dispatchHistory` read the patchable surface and gated a public publication.**
+  `providers/claude/dispatch.ts` read `ops.queue.evidence.list(taskId)` and `dispatchClaudeTask`
+  decided duplicate publication of a public GitHub issue on that answer — the defect class
+  round 1 closed in `#claudeDispatchState`, one function over, in a file this wave edited, and
+  absent from round 1's audit table and limitations. Defended in depth (the reservation
+  transaction re-checks and `claimNext` refuses a `running` task), so no working double-publish
+  existed; a deciding read still may not read the display surface. **Fix:** a new function
+  binding `taskEvidenceRowsFor(ops, taskId)` published from the `static {}` block over the
+  private `#taskEvidenceRowsFromStore` (`SELECT kind, at, payload FROM op_evidence WHERE
+  task_id = ? ORDER BY seq` through `#db`, payload parsed defensively); `dispatchHistory` folds
+  those rows and its logic is otherwise unchanged. Chosen over a `dispatchHistoryFor` in the
+  application layer so `service.ts` keeps not depending on the provider adapter's
+  `DispatchHistory` type. Pinned in `dispatch-concurrency`: with the lane's entries hidden from
+  `queue.evidence.list` (the lie proven to have taken) the history still answers `dispatched`
+  with the issue number, a repeat `dispatchClaudeTask` returns `deduplicated: true` and the
+  transport is called once. Fails against the old read (history `none`). One existing race
+  test moved its hook to `reserveEvidence` — see the pin ledger.
+- **Recorded, not fixed:** the three accepted-main TEXT-primary-key tables with the same
+  implicit-rowid shape as `hq_memory` — see Known limitations.
