@@ -524,6 +524,49 @@ import {
   type ObservedPlanItem,
   type OrchestrationDecision,
 } from './orchestrator-command.js';
+import {
+  MAX_ACCEPTANCE_NOTE_LENGTH,
+  MAX_TRUTH_ENTITY_ID_LENGTH,
+  MAX_TRUTH_STATEMENT_LENGTH,
+  MAX_VERIFICATION_LIMITATIONS_LENGTH,
+  TRUTH_BORN_STATES,
+  TRUTH_ENTITY_KINDS,
+  TRUTH_RECORD_CAPABILITY,
+  TRUTH_SNAPSHOT_LIMIT,
+  TRUTH_VERIFY_CAPABILITY,
+  VERIFICATION_METHODS,
+  VERIFICATION_VERDICTS,
+  deriveTruthRecord,
+  ensureTruthSchema,
+  entityCurrentState,
+  isTruthBornState,
+  isTruthEntityKind,
+  isVerificationMethod,
+  isVerificationVerdict,
+  listContradictions,
+  loadTruthGraph,
+  truthRecordCapabilityState,
+  truthRecordContractDrift,
+  truthRecordIdempotencyKey,
+  truthSchemaPresent,
+  truthVerificationIdempotencyKey,
+  truthVerifyCapabilityState,
+  truthVerifyContractDrift,
+  type EntityTruthView,
+  type SubjectDrift,
+  type TruthAcceptanceView,
+  type TruthBornState,
+  type TruthContradictionPair,
+  type TruthEntityKind,
+  type TruthGraph,
+  type TruthRecordRow,
+  type TruthRecordView,
+  type TruthSnapshotView,
+  type TruthState,
+  type TruthVerificationView,
+  type VerificationMethod,
+  type VerificationVerdict,
+} from './truth-command.js';
 import { CLIENT_IDENTITY_KEYS } from '../live/auth.js';
 import { ensureMemoryTables, memorySchemaPresent, MemoryStore, searchMemory } from '../memory/store.js';
 import {
@@ -577,7 +620,14 @@ export type OpsErrorCode =
   | 'unknown_memory'
   | 'memory_conflict'
   | 'mission_not_orchestratable'
-  | 'orchestrate_fingerprint_mismatch';
+  | 'orchestrate_fingerprint_mismatch'
+  // Phase 7 — the truth/evidence projection.
+  | 'unknown_truth'
+  | 'unknown_evidence'
+  | 'unknown_entity'
+  | 'truth_conflict'
+  | 'truth_not_verified'
+  | 'truth_contested';
 
 export interface OpsError {
   code: OpsErrorCode;
@@ -785,6 +835,24 @@ function memoryList(
     out.push(trimmed);
   }
   return { ok: true, value: out };
+}
+
+/**
+ * A bounded list of ids for the truth projection (evidence ids, truth record
+ * ids): the memory-list rules, plus duplicates collapsed in order so a
+ * repeated id cannot mint a duplicate relation row.
+ */
+function truthIdList(
+  field: string,
+  values: string[] | undefined,
+): { ok: true; value: string[]; message?: never } | { ok: false; message: string } {
+  const list = memoryList(field, values, MAX_TRUTH_ENTITY_ID_LENGTH);
+  if (!list.ok) return list;
+  return { ok: true, value: [...new Set(list.value)] };
+}
+
+function emptyTruthGraph(): TruthGraph {
+  return { records: [], relations: [], verifications: [], acceptances: [] };
 }
 
 /**
@@ -1358,6 +1426,9 @@ export class HeadquarterOperations {
   /** The Phase 5 memory schema, same truth-recording as missions above. */
   readonly #memoryStorePresent: boolean;
 
+  /** The Phase 7 truth/evidence schema, same truth-recording as missions above. */
+  readonly #truthStorePresent: boolean;
+
   /**
    * The Phase 5 company-memory store (issue #120 wired by #265), or null over
    * a read-only pre-Phase-5 file. `#private` and read by the memory facade
@@ -1442,6 +1513,7 @@ export class HeadquarterOperations {
     ensureProjectCommandSchema(db);
     ensureMemoryTables(db);
     ensureOrchestratorSchema(db);
+    ensureTruthSchema(db);
     // A writable construction just ensured the mission/project/memory tables.
     // A READ-ONLY one (the hq:snapshot path) may be observing an older file
     // that has some or none of them — the ensures above deliberately write
@@ -1451,6 +1523,7 @@ export class HeadquarterOperations {
     this.#missionStorePresent = db.readonly ? missionSchemaPresent(db) : true;
     this.#projectStorePresent = db.readonly ? projectCommandSchemaPresent(db) : true;
     this.#memoryStorePresent = db.readonly ? memorySchemaPresent(db) : true;
+    this.#truthStorePresent = db.readonly ? truthSchemaPresent(db) : true;
     this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
     // Company memory (Phase 5, issue #265): the issue-#120 store, finally
@@ -5630,6 +5703,860 @@ export class HeadquarterOperations {
    */
   memoryStorePresent(): boolean {
     return this.#memoryStorePresent;
+  }
+
+  // ---- truth + evidence (Phase 7 — the truth/evidence projection) ----
+
+  /**
+   * Record one truth record — a CLAIMED or OBSERVED statement about a
+   * canonical entity — the one write path into `hq_truth_records` from the
+   * application layer.
+   *
+   * A truth record is a projection over evidence, never authority and never
+   * execution: it changes no task status, burns no approval, dispatches
+   * nothing, and no gate anywhere reads it. It is born `claimed` or
+   * `observed` and can NEVER upgrade itself — `verified` and `accepted` are
+   * derived from OTHER actors' records (`verifyTruth`, `acceptTruth`).
+   *
+   * Order (the recordMemory shape): bounds/vocabulary → actor gate (a
+   * resolved worker or human holding `hq.truth_record`; `system` refused) →
+   * capability trio (fail closed, never repaired) → subject existence (AFTER
+   * authority — no existence oracle) → secret scan → derived idempotency key
+   * → ONE IMMEDIATE reserve transaction: dedupe read, every evidence ref
+   * must EXIST in `op_evidence` (fail closed), every related record must
+   * exist and privacy must not leak downward, supersession authority, then
+   * insert + stated relations + hq_events audit + op_evidence
+   * `truth_recorded`, atomically.
+   */
+  recordTruth(input: {
+    entityKind: TruthEntityKind;
+    entityId: string;
+    statement: string;
+    /** Birth state, default `claimed`. `observed` requires at least one evidence ref. */
+    bornState?: TruthBornState;
+    /** `op_evidence` ids. References only — a truth record never carries an evidence body. */
+    evidenceRefs?: string[];
+    supports?: string[];
+    contradicts?: string[];
+    derivedFrom?: string[];
+    supersedes?: string;
+    privacy?: MemoryPrivacy;
+    /** Resolved actor id. Set by the boundary, never read from a body. */
+    requestedBy: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ record: TruthRecordView; deduplicated: boolean }> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    if (!isTruthEntityKind(input.entityKind)) {
+      return fail('invalid_input', `entityKind must be one of: ${TRUTH_ENTITY_KINDS.join(', ')}`);
+    }
+    const bornState = input.bornState ?? 'claimed';
+    if (!isTruthBornState(bornState)) {
+      return fail(
+        'invalid_input',
+        `bornState must be one of: ${TRUTH_BORN_STATES.join(', ')} — verified and accepted are derived, never asserted`,
+      );
+    }
+    const privacy = input.privacy ?? 'internal';
+    if (!isMemoryPrivacy(privacy)) {
+      return fail('invalid_input', `privacy must be one of: ${MEMORY_PRIVACY_LEVELS.join(', ')}`);
+    }
+    const entityId = missionText('entityId', input.entityId, MAX_TRUTH_ENTITY_ID_LENGTH, true);
+    if (!entityId.ok) return fail('invalid_input', entityId.message);
+    const statement = missionText('statement', input.statement, MAX_TRUTH_STATEMENT_LENGTH, true);
+    if (!statement.ok) return fail('invalid_input', statement.message);
+    const evidenceRefs = truthIdList('evidenceRefs', input.evidenceRefs);
+    if (!evidenceRefs.ok) return fail('invalid_input', evidenceRefs.message);
+    const supports = truthIdList('supports', input.supports);
+    if (!supports.ok) return fail('invalid_input', supports.message);
+    const contradicts = truthIdList('contradicts', input.contradicts);
+    if (!contradicts.ok) return fail('invalid_input', contradicts.message);
+    const derivedFrom = truthIdList('derivedFrom', input.derivedFrom);
+    if (!derivedFrom.ok) return fail('invalid_input', derivedFrom.message);
+    const supersedes = input.supersedes?.trim() || null;
+    if (bornState === 'observed' && evidenceRefs.value.length === 0) {
+      return fail(
+        'invalid_input',
+        'an observation must reference at least one existing evidence entry; a statement with no evidence is a claim',
+      );
+    }
+    if (supports.value.some((id) => contradicts.value.includes(id))) {
+      return fail('invalid_input', 'a record cannot both support and contradict the same record');
+    }
+    if (supersedes && (supports.value.includes(supersedes) || contradicts.value.includes(supersedes))) {
+      return fail('invalid_input', 'a record cannot supersede a record it also supports or contradicts');
+    }
+
+    const refusedActor = this.#resolveTruthActor(input.requestedBy, 'record truth', TRUTH_RECORD_CAPABILITY.id);
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#truthRecordCapabilityGate('record truth');
+    if (refusedCapability) return refusedCapability;
+    if (!this.#truthStorePresent) return fail('invalid_input', 'truth store unavailable on this database handle');
+
+    // Subject existence, probed only AFTER the authority gates above.
+    const subject = this.#truthSubject(input.entityKind, entityId.value!);
+    if (!subject.exists) {
+      return fail('unknown_entity', `Unknown ${input.entityKind}: ${entityId.value}`, {
+        entityKind: input.entityKind,
+        entityId: entityId.value,
+      });
+    }
+    if (subject.founderOnly && privacy !== 'founder_only') {
+      return fail(
+        'invalid_input',
+        `a truth record about founder_only ${input.entityKind} ${entityId.value} must itself be founder_only`,
+      );
+    }
+    try {
+      assertNoSecretLikeContent({ statement: statement.value });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+
+    const idempotencyKey = truthRecordIdempotencyKey({
+      requestedBy: input.requestedBy,
+      entityKind: input.entityKind,
+      entityId: entityId.value!,
+      statement: statement.value!,
+      bornState,
+      evidenceRefs: evidenceRefs.value,
+      privacy,
+      supersedes,
+      supports: supports.value,
+      contradicts: contradicts.value,
+      derivedFrom: derivedFrom.value,
+      idempotencyKey: input.idempotencyKey ?? null,
+    });
+
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let dedupedTo: string | null = null;
+    let recordedId: string | null = null;
+    privileged.reserve(() => {
+      const existing = this.#db
+        .prepare(`SELECT id FROM hq_truth_records WHERE idempotency_key = ?`)
+        .get(idempotencyKey) as { id: string } | undefined;
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      // Every evidence ref must name a REAL op_evidence entry — fail closed.
+      const missingEvidence = this.#missingEvidenceIds(evidenceRefs.value);
+      if (missingEvidence.length > 0) {
+        refusal = {
+          code: 'unknown_evidence',
+          message: `Unknown evidence id(s): ${missingEvidence.join(', ')} — a truth record may only reference evidence that exists`,
+          details: { missing: missingEvidence },
+        };
+        return;
+      }
+      const graph = loadTruthGraph(this.#db);
+      const byId = new Map(graph.records.map((r) => [r.id, r]));
+      const related = [
+        ...supports.value.map((id) => ({ id, via: 'supports' })),
+        ...contradicts.value.map((id) => ({ id, via: 'contradicts' })),
+        ...derivedFrom.value.map((id) => ({ id, via: 'derivedFrom' })),
+        ...(supersedes ? [{ id: supersedes, via: 'supersedes' }] : []),
+      ];
+      for (const { id, via } of related) {
+        const target = byId.get(id);
+        if (!target) {
+          refusal = { code: 'unknown_truth', message: `Unknown truth record in ${via}: ${id}` };
+          return;
+        }
+        if (target.privacy === 'founder_only' && privacy !== 'founder_only') {
+          refusal = {
+            code: 'invalid_input',
+            message: `a record that ${via} founder_only truth record ${id} must itself be founder_only`,
+          };
+          return;
+        }
+      }
+      if (supersedes) {
+        const predecessor = byId.get(supersedes)!;
+        if (predecessor.entityKind !== input.entityKind || predecessor.entityId !== entityId.value) {
+          refusal = {
+            code: 'truth_conflict',
+            message: `Cannot supersede ${supersedes}: it is about ${predecessor.entityKind} ${predecessor.entityId}, not ${input.entityKind} ${entityId.value}`,
+          };
+          return;
+        }
+        const alreadyBy = graph.records.find((r) => r.supersedes === supersedes);
+        if (alreadyBy) {
+          refusal = {
+            code: 'truth_conflict',
+            message: `Cannot supersede ${supersedes}: already superseded by ${alreadyBy.id}. Contradict or supersede that record instead — history is never rewritten.`,
+          };
+          return;
+        }
+        // Superseding a VERIFIED or ACCEPTED record displaces truth that other
+        // actors established; only the canonical Founder gate may do that.
+        const state = deriveTruthRecord(predecessor, graph, 'not_evaluated').state;
+        if (state === 'verified' || state === 'accepted') {
+          const gate = this.#assertApprovalAuthority(
+            input.requestedBy,
+            `supersede ${state} truth record ${supersedes}`,
+          );
+          if (gate && !gate.ok) {
+            refusal = gate.error;
+            return;
+          }
+        }
+      }
+      const id = uuid();
+      const at = nowIso();
+      this.#db
+        .prepare(
+          `INSERT INTO hq_truth_records (id, entity_kind, entity_id, statement, born_state, recorded_by,
+             recorded_at, evidence_refs, privacy, supersedes, idempotency_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.entityKind,
+          entityId.value,
+          statement.value,
+          bornState,
+          input.requestedBy,
+          at,
+          JSON.stringify(evidenceRefs.value),
+          privacy,
+          supersedes,
+          idempotencyKey,
+        );
+      const insertRelation = this.#db.prepare(
+        `INSERT INTO hq_truth_relations (id, from_id, kind, to_kind, to_id, recorded_by, recorded_at)
+         VALUES (?, ?, ?, 'truth', ?, ?, ?)`,
+      );
+      for (const toId of supports.value) insertRelation.run(uuid(), id, 'supports', toId, input.requestedBy, at);
+      for (const toId of contradicts.value) {
+        insertRelation.run(uuid(), id, 'contradicts', toId, input.requestedBy, at);
+      }
+      for (const toId of derivedFrom.value) {
+        insertRelation.run(uuid(), id, 'derived_from', toId, input.requestedBy, at);
+      }
+      if (supersedes) insertRelation.run(uuid(), id, 'supersedes', supersedes, input.requestedBy, at);
+      recordedId = id;
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `truth:${id}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `Truth ${bornState}: ${input.entityKind} ${entityId.value}`,
+        detail: { bornState, entityKind: input.entityKind, entityId: entityId.value, supersedes },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'truth_recorded',
+        payload: {
+          truthId: id,
+          bornState,
+          entityKind: input.entityKind,
+          entityId: entityId.value,
+          evidenceRefs: evidenceRefs.value,
+          supersedes,
+          contradicts: contradicts.value,
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    if (dedupedTo) return ok({ record: this.#deriveTruthById(dedupedTo)!, deduplicated: true });
+    return ok({ record: this.#deriveTruthById(recordedId!)!, deduplicated: false });
+  }
+
+  /**
+   * Record one VERIFICATION over an existing truth record — the only way a
+   * `claimed`/`observed` record becomes `verified` (derived: at least one
+   * `confirmed` verdict and no `refuted` one).
+   *
+   * Real verification authority: the actor must resolve (worker or human)
+   * and hold `hq.truth_verify` from its registry, the capability trio must
+   * be intact, and the actor must NOT be the one who recorded the target —
+   * a claim never verifies itself, and its author never verifies it. Every
+   * verification carries verifier, target, method, evidence refs (which
+   * must exist), timestamp, verdict and stated limitations. A `refuted`
+   * verdict never erases anything: the record stays, visibly refuted.
+   */
+  verifyTruth(input: {
+    truthId: string;
+    method: VerificationMethod;
+    verdict: VerificationVerdict;
+    evidenceRefs: string[];
+    limitations: string;
+    requestedBy: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ verification: TruthVerificationView; record: TruthRecordView; deduplicated: boolean }> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    const truthId = input.truthId?.trim() ?? '';
+    if (!truthId) return fail('invalid_input', 'truthId is required');
+    if (!isVerificationMethod(input.method)) {
+      return fail('invalid_input', `method must be one of: ${VERIFICATION_METHODS.join(', ')}`);
+    }
+    if (!isVerificationVerdict(input.verdict)) {
+      return fail('invalid_input', `verdict must be one of: ${VERIFICATION_VERDICTS.join(', ')}`);
+    }
+    const evidenceRefs = truthIdList('evidenceRefs', input.evidenceRefs);
+    if (!evidenceRefs.ok) return fail('invalid_input', evidenceRefs.message);
+    if (evidenceRefs.value.length === 0) {
+      return fail('invalid_input', 'a verification must reference at least one existing evidence entry');
+    }
+    const limitations = missionText('limitations', input.limitations, MAX_VERIFICATION_LIMITATIONS_LENGTH, true);
+    if (!limitations.ok) {
+      return fail(
+        'invalid_input',
+        `${limitations.message} — every verification states its limitations; write "none known" if that is the honest answer`,
+      );
+    }
+
+    const refusedActor = this.#resolveTruthActor(input.requestedBy, 'verify truth', TRUTH_VERIFY_CAPABILITY.id);
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#truthVerifyCapabilityGate('verify truth');
+    if (refusedCapability) return refusedCapability;
+    if (!this.#truthStorePresent) return fail('invalid_input', 'truth store unavailable on this database handle');
+    try {
+      assertNoSecretLikeContent({ limitations: limitations.value });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+
+    const idempotencyKey = truthVerificationIdempotencyKey({
+      verifiedBy: input.requestedBy,
+      truthId,
+      method: input.method,
+      verdict: input.verdict,
+      evidenceRefs: evidenceRefs.value,
+      limitations: limitations.value!,
+      idempotencyKey: input.idempotencyKey ?? null,
+    });
+
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let dedupedTo: string | null = null;
+    let verificationId: string | null = null;
+    privileged.reserve(() => {
+      const target = this.#db.prepare(`SELECT * FROM hq_truth_records WHERE id = ?`).get(truthId) as
+        | Record<string, unknown>
+        | undefined;
+      if (!target) {
+        refusal = { code: 'unknown_truth', message: `Unknown truth record: ${truthId}` };
+        return;
+      }
+      const existing = this.#db
+        .prepare(`SELECT id FROM hq_truth_verifications WHERE idempotency_key = ?`)
+        .get(idempotencyKey) as { id: string } | undefined;
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      if ((target.recorded_by as string) === input.requestedBy) {
+        refusal = {
+          code: 'not_permitted',
+          message: `${input.requestedBy} recorded truth record ${truthId} and cannot verify it: a claim never upgrades itself`,
+          details: { actor: input.requestedBy },
+        };
+        return;
+      }
+      const successor = this.#db
+        .prepare(`SELECT id FROM hq_truth_records WHERE supersedes = ?`)
+        .get(truthId) as { id: string } | undefined;
+      if (successor) {
+        refusal = {
+          code: 'truth_conflict',
+          message: `Truth record ${truthId} is superseded by ${successor.id}; verify the current record instead`,
+        };
+        return;
+      }
+      const missingEvidence = this.#missingEvidenceIds(evidenceRefs.value);
+      if (missingEvidence.length > 0) {
+        refusal = {
+          code: 'unknown_evidence',
+          message: `Unknown evidence id(s): ${missingEvidence.join(', ')} — a verification may only reference evidence that exists`,
+          details: { missing: missingEvidence },
+        };
+        return;
+      }
+      const id = uuid();
+      const at = nowIso();
+      this.#db
+        .prepare(
+          `INSERT INTO hq_truth_verifications (id, truth_id, verified_by, at, method, verdict, evidence_refs,
+             limitations, idempotency_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          truthId,
+          input.requestedBy,
+          at,
+          input.method,
+          input.verdict,
+          JSON.stringify(evidenceRefs.value),
+          limitations.value,
+          idempotencyKey,
+        );
+      this.#db
+        .prepare(
+          `INSERT INTO hq_truth_relations (id, from_id, kind, to_kind, to_id, recorded_by, recorded_at)
+           VALUES (?, ?, 'verified_by', 'verification', ?, ?, ?)`,
+        )
+        .run(uuid(), truthId, id, input.requestedBy, at);
+      verificationId = id;
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `truth:${truthId}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `Truth verification ${input.verdict}: ${truthId}`,
+        detail: { verificationId: id, method: input.method, verdict: input.verdict },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'truth_verified',
+        payload: {
+          truthId,
+          verificationId: id,
+          method: input.method,
+          verdict: input.verdict,
+          evidenceRefs: evidenceRefs.value,
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    const record = this.#deriveTruthById(truthId)!;
+    const id = dedupedTo ?? verificationId!;
+    return ok({
+      verification: record.verifications.find((v) => v.id === id)!,
+      record,
+      deduplicated: dedupedTo !== null,
+    });
+  }
+
+  /**
+   * Founder ACCEPTANCE of a verified truth record — the only way a record
+   * becomes `accepted`, and an explicit Founder-gated act on the canonical
+   * mechanics (nothing parallel):
+   *
+   * - `#assertApprovalAuthority`: the SAME positive Founder gate approve/deny
+   *   and the kill switch use — a registered, active human principal holding
+   *   approval authority; workers, `system` and unknown ids refused, audited;
+   * - `expectedDigest`: the approve-route rule — the Founder accepts exactly
+   *   the basis the console showed; a moved basis refuses before any row;
+   * - independence: the acceptor is neither the record's author nor any of
+   *   its confirming verifiers (the requester-cannot-approve rule);
+   * - the record must be exactly `verified` (derived through the PRIVATE
+   *   enforcement-safe read, never a public projection), current, and free
+   *   of unresolved contradictions — a contested record is refused, so the
+   *   Founder resolves the contradiction explicitly rather than by accepting
+   *   one side while the other still stands;
+   * - the route additionally demands STEP-UP (live/control-api.ts).
+   *
+   * Acceptance executes nothing: no task, approval row, claim or dispatch is
+   * touched, and no gate reads the acceptance to decide anything.
+   */
+  acceptTruth(input: {
+    truthId: string;
+    expectedDigest: string;
+    note?: string;
+    requestedBy: string;
+  }): OpsResult<{ acceptance: TruthAcceptanceView; record: TruthRecordView; deduplicated: boolean }> {
+    const truthId = input.truthId?.trim() ?? '';
+    if (!truthId) return fail('invalid_input', 'truthId is required');
+    const gate = this.#assertApprovalAuthority(input.requestedBy, 'accept a truth record');
+    if (gate) return gate;
+    if (!this.#truthStorePresent) return fail('invalid_input', 'truth store unavailable on this database handle');
+    const note = missionText('note', input.note, MAX_ACCEPTANCE_NOTE_LENGTH, false);
+    if (!note.ok) return fail('invalid_input', note.message);
+    if (note.value) {
+      try {
+        assertNoSecretLikeContent({ note: note.value });
+      } catch {
+        return fail(
+          'invalid_input',
+          'The acceptance note looks like it contains a credential. Notes are stored permanently, so nothing was accepted.',
+        );
+      }
+    }
+
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let dedupedTo: string | null = null;
+    let acceptanceId: string | null = null;
+    privileged.reserve(() => {
+      // Re-derived INSIDE the write lock through the private path: the
+      // decision below reads canonical rows, never a public read surface.
+      const view = this.#deriveTruthById(truthId);
+      if (!view) {
+        refusal = { code: 'unknown_truth', message: `Unknown truth record: ${truthId}` };
+        return;
+      }
+      const prior = view.acceptances[0];
+      if (prior) {
+        if (prior.acceptedBy === input.requestedBy) {
+          dedupedTo = prior.id;
+          return;
+        }
+        refusal = {
+          code: 'truth_conflict',
+          message: `Truth record ${truthId} is already accepted by ${prior.acceptedBy}; acceptance is one explicit act, never repeated`,
+        };
+        return;
+      }
+      if (view.lifecycle === 'superseded') {
+        refusal = {
+          code: 'truth_conflict',
+          message: `Truth record ${truthId} is superseded by ${view.supersededBy}; a superseded record cannot be accepted`,
+        };
+        return;
+      }
+      if (view.state !== 'verified') {
+        refusal = {
+          code: 'truth_not_verified',
+          message:
+            `Truth record ${truthId} is ${view.state} (verification: ${view.verification}); ` +
+            'only a verified record can be accepted, and nothing here verifies it',
+          details: { state: view.state, verification: view.verification },
+        };
+        return;
+      }
+      if (view.contested) {
+        refusal = {
+          code: 'truth_contested',
+          message:
+            `Truth record ${truthId} has an unresolved contradiction with ` +
+            `${view.contradictions
+              .filter((c) => c.resolution === 'unresolved')
+              .map((c) => c.withId)
+              .join(', ')}; resolve it explicitly (supersede or refute) before accepting`,
+        };
+        return;
+      }
+      if (view.recordedBy === input.requestedBy) {
+        refusal = {
+          code: 'not_permitted',
+          message: `${input.requestedBy} recorded truth record ${truthId} and cannot accept it`,
+          details: { actor: input.requestedBy },
+        };
+        return;
+      }
+      const confirming = view.verifications.filter((v) => v.verdict === 'confirmed');
+      if (confirming.some((v) => v.verifiedBy === input.requestedBy)) {
+        refusal = {
+          code: 'not_permitted',
+          message: `${input.requestedBy} verified truth record ${truthId} and cannot also accept it: verification and acceptance are separate authorities`,
+          details: { actor: input.requestedBy },
+        };
+        return;
+      }
+      if (!input.expectedDigest || input.expectedDigest !== view.acceptanceDigest) {
+        privileged.appendEvidence({
+          actor: input.requestedBy,
+          kind: 'truth_acceptance_refused_basis_changed',
+          payload: { truthId, expected: input.expectedDigest ?? null, current: view.acceptanceDigest },
+        });
+        refusal = {
+          code: 'action_digest_mismatch',
+          message: `Truth record ${truthId}: the verification basis changed since it was presented; nothing was accepted`,
+          details: { expected: input.expectedDigest ?? null, current: view.acceptanceDigest },
+        };
+        return;
+      }
+      const id = uuid();
+      const at = nowIso();
+      this.#db
+        .prepare(
+          `INSERT INTO hq_truth_acceptances (id, truth_id, accepted_by, at, digest, verification_ids, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          truthId,
+          input.requestedBy,
+          at,
+          view.acceptanceDigest,
+          JSON.stringify(confirming.map((v) => v.id)),
+          note.value,
+        );
+      this.#db
+        .prepare(
+          `INSERT INTO hq_truth_relations (id, from_id, kind, to_kind, to_id, recorded_by, recorded_at)
+           VALUES (?, ?, 'accepted_by', 'acceptance', ?, ?, ?)`,
+        )
+        .run(uuid(), truthId, id, input.requestedBy, at);
+      acceptanceId = id;
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `truth:${truthId}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `Truth accepted: ${truthId}`,
+        detail: { acceptanceId: id, digest: view.acceptanceDigest },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'truth_accepted',
+        payload: {
+          truthId,
+          acceptanceId: id,
+          digest: view.acceptanceDigest,
+          verificationIds: confirming.map((v) => v.id),
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    const record = this.#deriveTruthById(truthId)!;
+    const id = dedupedTo ?? acceptanceId!;
+    return ok({
+      acceptance: record.acceptances.find((a) => a.id === id)!,
+      record,
+      deduplicated: dedupedTo !== null,
+    });
+  }
+
+  /** One record's derived view, or null (including over a pre-Phase-7 read-only file). */
+  getTruthRecord(id: string): TruthRecordView | null {
+    if (!id || !this.#truthStorePresent) return null;
+    return this.#deriveTruthById(id);
+  }
+
+  /**
+   * Every truth record, newest first, with its derived state. Privacy is NOT
+   * filtered here (the memory rule): the Founder-gated route may show
+   * founder_only, the snapshot artifact excludes it — each reading layer
+   * enforces its own disclosure.
+   */
+  listTruth(filter?: {
+    entityKind?: TruthEntityKind;
+    entityId?: string;
+    state?: TruthState;
+    lifecycle?: 'current' | 'superseded';
+  }): TruthRecordView[] {
+    if (!this.#truthStorePresent) return [];
+    let views = [...this.#deriveAllTruth(loadTruthGraph(this.#db)).values()];
+    if (filter?.entityKind) views = views.filter((v) => v.entityKind === filter.entityKind);
+    if (filter?.entityId) views = views.filter((v) => v.entityId === filter.entityId);
+    if (filter?.state) views = views.filter((v) => v.state === filter.state);
+    if (filter?.lifecycle) views = views.filter((v) => v.lifecycle === filter.lifecycle);
+    return views.sort((a, b) => b.seq - a.seq);
+  }
+
+  /**
+   * Entity truth: the current records, the full history (oldest first,
+   * bounded with the true total), the headline state and every unresolved
+   * contradiction touching the entity. Read-time composition; writes nothing.
+   */
+  getEntityTruth(
+    entityKind: TruthEntityKind,
+    entityId: string,
+    options: { limit?: number } = {},
+  ): OpsResult<EntityTruthView> {
+    if (!isTruthEntityKind(entityKind)) {
+      return fail('invalid_input', `entityKind must be one of: ${TRUTH_ENTITY_KINDS.join(', ')}`);
+    }
+    if (!entityId) return fail('invalid_input', 'entityId is required');
+    if (!this.#truthSubject(entityKind, entityId).exists) {
+      return fail('unknown_entity', `Unknown ${entityKind}: ${entityId}`, { entityKind, entityId });
+    }
+    const at = nowIso();
+    const limit = options.limit ?? TRUTH_SNAPSHOT_LIMIT;
+    const graph = this.#truthStorePresent ? loadTruthGraph(this.#db) : emptyTruthGraph();
+    const all = this.#deriveAllTruth(graph);
+    const history = [...all.values()]
+      .filter((v) => v.entityKind === entityKind && v.entityId === entityId)
+      .sort((a, b) => a.seq - b.seq);
+    const current = history.filter((v) => v.lifecycle === 'current');
+    const ids = new Set(history.map((v) => v.id));
+    const unresolved = listContradictions(graph, (id) => all.get(id) ?? null).filter(
+      (pair) => pair.resolution === 'unresolved' && (ids.has(pair.a) || ids.has(pair.b)),
+    );
+    return ok({
+      entityKind,
+      entityId,
+      currentState: entityCurrentState(current),
+      current,
+      history: history.slice(Math.max(0, history.length - limit)),
+      total: history.length,
+      truncated: history.length > limit,
+      unresolvedContradictions: unresolved,
+      provenance: {
+        mode: 'live',
+        source:
+          'hq_truth_records / hq_truth_verifications / hq_truth_acceptances / hq_truth_relations via ' +
+          'HeadquarterOperations (derived projection; evidence ids reference op_evidence)',
+        asOf: at,
+      },
+    });
+  }
+
+  /** Every stated contradiction, judged — unresolved ones stay visible here until an explicit act settles them. */
+  listTruthContradictions(): TruthContradictionPair[] {
+    if (!this.#truthStorePresent) return [];
+    const graph = loadTruthGraph(this.#db);
+    const all = this.#deriveAllTruth(graph);
+    return listContradictions(graph, (id) => all.get(id) ?? null);
+  }
+
+  /**
+   * The bounded snapshot view. The reading layer's privacy decision is made
+   * by the caller (`includeFounderOnly`); withheld rows stay in the totals.
+   */
+  truthSummary(options: { includeFounderOnly: boolean; limit?: number }): TruthSnapshotView {
+    const limit = options.limit ?? TRUTH_SNAPSHOT_LIMIT;
+    const all = this.listTruth();
+    const carried = options.includeFounderOnly ? all : all.filter((v) => v.privacy !== 'founder_only');
+    const byState: Record<TruthState, number> = { claimed: 0, observed: 0, verified: 0, accepted: 0 };
+    for (const view of all) byState[view.state] += 1;
+    const contradictions = this.listTruthContradictions().filter((pair) => {
+      if (options.includeFounderOnly) return true;
+      const a = all.find((v) => v.id === pair.a);
+      const b = all.find((v) => v.id === pair.b);
+      return a?.privacy !== 'founder_only' && b?.privacy !== 'founder_only';
+    });
+    return {
+      total: all.length,
+      byState,
+      unresolvedContradictions: this.listTruthContradictions().filter((p) => p.resolution === 'unresolved').length,
+      withheldFounderOnly: all.length - carried.length,
+      records: carried.slice(0, limit),
+      contradictions: contradictions.filter((p) => p.resolution === 'unresolved').slice(0, limit),
+    };
+  }
+
+  /** Whether this database carries the Phase 7 truth schema (false only for a read-only pre-Phase-7 file). */
+  truthStorePresent(): boolean {
+    return this.#truthStorePresent;
+  }
+
+  /**
+   * Actor resolution for the two truth capabilities. Unlike the Founder-gate
+   * trio, a WORKER may hold these (a reviewer worker verifies a builder's
+   * claim) — but only through its directory grant, never by self-assertion,
+   * and `system` is refused outright because an unattributed truth act is
+   * exactly the fabrication this phase exists to make impossible.
+   */
+  #resolveTruthActor(actor: string, action: string, capabilityId: string): OpsResult<never> | null {
+    if (!actor) return fail('invalid_input', `An actor is required to ${action}`);
+    if (actor === 'system') {
+      return fail('not_permitted', `'system' cannot ${action}: a resolved worker or human principal is required`);
+    }
+    const resolved = this.#resolveRequester(actor, action);
+    if (!resolved.ok) return resolved;
+    if (!resolved.data.allowedCapabilities.includes(capabilityId)) {
+      return fail(
+        'not_permitted',
+        `${actor} may not ${action}: ${
+          resolved.data.kind === 'worker' ? 'the worker directory grants' : 'the principal holds'
+        } no ${capabilityId}`,
+        { actor },
+      );
+    }
+    return null;
+  }
+
+  #truthRecordCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      TRUTH_RECORD_CAPABILITY.id,
+      truthRecordCapabilityState,
+      truthRecordContractDrift,
+      'recording truth',
+    );
+  }
+
+  #truthVerifyCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      TRUTH_VERIFY_CAPABILITY.id,
+      truthVerifyCapabilityState,
+      truthVerifyContractDrift,
+      'verifying truth',
+    );
+  }
+
+  /** Which of these ids name no op_evidence entry. Reads the canonical chain table directly. */
+  #missingEvidenceIds(ids: readonly string[]): string[] {
+    const probe = this.#db.prepare(`SELECT 1 FROM op_evidence WHERE id = ?`);
+    return ids.filter((id) => probe.get(id) === undefined);
+  }
+
+  /**
+   * Does the subject exist, and is it founder_only (memory)? Reads the
+   * canonical tables directly; a store absent on a read-only handle answers
+   * "does not exist" truthfully rather than throwing at the first prepare.
+   */
+  #truthSubject(kind: TruthEntityKind, id: string): { exists: boolean; founderOnly: boolean; updatedAt: string | null; superseded: boolean } {
+    const none = { exists: false, founderOnly: false, updatedAt: null, superseded: false };
+    switch (kind) {
+      case 'mission': {
+        if (!this.#missionStorePresent) return none;
+        const row = this.#db.prepare(`SELECT updated_at FROM hq_missions WHERE id = ?`).get(id) as
+          | { updated_at: string }
+          | undefined;
+        return row ? { exists: true, founderOnly: false, updatedAt: row.updated_at, superseded: false } : none;
+      }
+      case 'project': {
+        if (!this.#projectStorePresent) return none;
+        const row = this.#db.prepare(`SELECT updated_at FROM hq_projects WHERE id = ?`).get(id) as
+          | { updated_at: string }
+          | undefined;
+        return row ? { exists: true, founderOnly: false, updatedAt: row.updated_at, superseded: false } : none;
+      }
+      case 'task': {
+        const row = this.#db.prepare(`SELECT updated_at FROM op_tasks WHERE id = ?`).get(id) as
+          | { updated_at: string }
+          | undefined;
+        return row ? { exists: true, founderOnly: false, updatedAt: row.updated_at, superseded: false } : none;
+      }
+      case 'memory': {
+        if (!this.#memoryStorePresent) return none;
+        const row = this.#db.prepare(`SELECT privacy, status FROM hq_memory WHERE id = ?`).get(id) as
+          | { privacy: string; status: string }
+          | undefined;
+        return row
+          ? { exists: true, founderOnly: row.privacy === 'founder_only', updatedAt: null, superseded: row.status !== 'CURRENT' }
+          : none;
+      }
+      case 'worker':
+        return this.#db.prepare(`SELECT 1 FROM hq_specialists WHERE id = ?`).get(id) !== undefined
+          ? { exists: true, founderOnly: false, updatedAt: null, superseded: false }
+          : none;
+      case 'capability':
+        return this.#db.prepare(`SELECT 1 FROM op_capabilities WHERE id = ?`).get(id) !== undefined
+          ? { exists: true, founderOnly: false, updatedAt: null, superseded: false }
+          : none;
+    }
+  }
+
+  /** Categorical staleness of a record against its subject's canonical row. Never a tie-breaker. */
+  #truthSubjectDrift(record: TruthRecordRow): SubjectDrift {
+    const subject = this.#truthSubject(record.entityKind, record.entityId);
+    if (!subject.exists) return 'subject_missing';
+    if (subject.superseded) return 'subject_superseded';
+    if (subject.updatedAt == null) return 'not_evaluated';
+    return subject.updatedAt > record.recordedAt ? 'subject_changed_since_record' : 'none';
+  }
+
+  /** Derive every record in the graph once — the one implementation every read and every gate shares. */
+  #deriveAllTruth(graph: TruthGraph): Map<string, TruthRecordView> {
+    const out = new Map<string, TruthRecordView>();
+    for (const record of graph.records) {
+      out.set(record.id, deriveTruthRecord(record, graph, this.#truthSubjectDrift(record)));
+    }
+    return out;
+  }
+
+  /**
+   * PRIVATE, enforcement-safe derivation of one record — reads canonical rows
+   * through `#db` and the module's pure function only. `acceptTruth` decides
+   * on THIS; the public `getTruthRecord` merely calls it, so patching the
+   * public surface changes what the patcher sees and nothing that is decided.
+   */
+  #deriveTruthById(id: string): TruthRecordView | null {
+    const graph = loadTruthGraph(this.#db);
+    const record = graph.records.find((r) => r.id === id);
+    if (!record) return null;
+    return deriveTruthRecord(record, graph, this.#truthSubjectDrift(record));
   }
 
   // ---- task metadata (console labels + advisory assignment) ----
