@@ -134,6 +134,46 @@ describe('a Founder acceptance stands only while its basis stands — and histor
     expect(expectOk(fx.ops.getEntityTruth('task', fx.taskId)).currentState).toBe('claimed');
   });
 
+  it('accepted → later refuted AND contradicted by a live rival: verification `contested` and `contested: true` co-occur; the ladder names the basis first and hides nothing', () => {
+    // A record whose verification summary is `contested` (confirmed AND refuted) is NOT `out` of a
+    // contradiction — only a summary of exactly `refuted` withdraws it (`standingOf`) — so a live
+    // rival can still contradict it and the dispute stays `unresolved`. Two preconditions of the
+    // acceptance are broken at once; the standing names the basis (`verification_refuted`) and
+    // the view still says `contested: true` beside it.
+    const fx = truthFixture();
+    const { record, acceptance } = acceptedRecord(fx);
+    confirm(fx, record.id, { verdict: 'refuted', evidenceRefs: [fx.evidenceId2], limitations: 'The rerun shows a failing job.' });
+    const rival = claim(fx, { statement: 'CI is red on the release branch.', contradicts: [record.id], requestedBy: 'analyst', evidenceRefs: [fx.evidenceId2] });
+
+    const view = fx.ops.getTruthRecord(record.id)!;
+    expect(view.verification).toBe('contested');
+    expect(view.contested).toBe(true);
+    expect(view.contradictions).toEqual([{ withId: rival.id, direction: 'stated_by', resolution: 'unresolved' }]);
+    expect(fx.ops.getTruthRecord(rival.id)!.contested).toBe(true);
+    // Basis first: the standing names the refutation, the state is the born state, nothing is acceptable.
+    expect(view.state).toBe('claimed');
+    expect(view.lifecycle).toBe('current');
+    expect(view.acceptanceStanding).toBe('verification_refuted');
+    expect(view.acceptanceDigest).toBeNull();
+    expect(view.acceptances).toHaveLength(1);
+    expect(fx.ops.listTruth({ state: 'accepted' })).toEqual([]);
+    expect(expectOk(fx.ops.getEntityTruth('task', fx.taskId)).currentState).toBe('claimed');
+    // The accept ladder reads the same order: refused on the basis, with the contest still visible in the details' state.
+    const again = fx.ops.acceptTruth({ truthId: record.id, expectedDigest: acceptance.digest, requestedBy: 'founder' });
+    expect(again.ok).toBe(false);
+    if (!again.ok) {
+      expect(again.error.code).toBe('truth_not_verified');
+      expect(again.error.details).toMatchObject({ state: 'claimed', verification: 'contested', acceptanceStanding: 'verification_refuted' });
+    }
+    expect(count(fx, 'hq_truth_acceptances')).toBe(1);
+    // The snapshot carries both facts too: no accepted record, and the dispute counted.
+    const snapshot = liveSnapshotFromOperations(fx.ops, { now: AT, includeFounderOnlyMemory: true }).truth!.data;
+    expect(snapshot.byState).toEqual({ claimed: 2, observed: 0, verified: 0, accepted: 0 });
+    expect(snapshot.awaitingAcceptance).toBe(0);
+    expect(snapshot.unresolvedContradictions).toBe(1);
+    expect(snapshot.records.find((r) => r.id === record.id)).toMatchObject({ contested: true, acceptanceStanding: 'verification_refuted' });
+  });
+
   it('accepted → a later unresolved contradiction: the acceptance is contested (state verified, contested); an explicit resolution in its favour restores it, because the basis never moved', () => {
     const fx = truthFixture();
     const { record, acceptance } = acceptedRecord(fx);
@@ -221,7 +261,7 @@ describe('the pure derivation: precedence and the never-accepted case', () => {
     return { seq: 1, id, truthId, acceptedBy: 'founder', at: AT, digest: `truth-accept:${id}`, verificationIds, note: null };
   }
 
-  it('names the first broken precondition — verification_refuted before superseded before contested — and a contest is by construction never simultaneous with either', () => {
+  it('names the first broken precondition — verification_refuted before superseded (a refuted-and-superseded record names the basis) — and a superseded record is out of every contradiction, so superseded and contested never co-occur', () => {
     const graph: TruthGraph = {
       records: [
         record('A'),
@@ -231,9 +271,13 @@ describe('the pure derivation: precedence and the never-accepted case', () => {
         record('C'),
         record('D', { recordedBy: 'analyst' }),
         record('E'),
+        record('F', { recordedBy: 'analyst' }),
       ],
       relations: [
         { seq: 1, id: 'r1', fromId: 'D', kind: 'contradicts', toKind: 'truth', toId: 'C', recordedBy: 'analyst', recordedAt: AT },
+        // F, a live record, contradicts the two SUPERSEDED records A and B.
+        { seq: 2, id: 'r2', fromId: 'F', kind: 'contradicts', toKind: 'truth', toId: 'A', recordedBy: 'analyst', recordedAt: AT },
+        { seq: 3, id: 'r3', fromId: 'F', kind: 'contradicts', toKind: 'truth', toId: 'B', recordedBy: 'analyst', recordedAt: AT },
       ],
       verifications: [
         verification('vA1', 'A', 'confirmed'),
@@ -258,9 +302,16 @@ describe('the pure derivation: precedence and the never-accepted case', () => {
     expect(e.acceptanceStanding).toBe('none');
     expect(e.state).toBe('verified');
     expect(e.acceptanceDigest).not.toBeNull();
-    // A superseded or refuted record is `out` of any contradiction, so `contested` can only be
-    // reached with the verification intact and the record current (judgeContradiction).
-    for (const id of ['A', 'B']) expect(derive(id).contested).toBe(false);
+    // A SUPERSEDED record is `out` of every contradiction (`standingOf` → `judgeContradiction`): F's
+    // contradictions of A and B are resolved by that supersession, so neither is contested and
+    // `superseded` and `contested` never co-occur. (A refuted-but-once-confirmed record — summary
+    // `contested` — is NOT out; that co-occurrence is pinned through the facade above.)
+    for (const id of ['A', 'B']) {
+      const view = derive(id);
+      expect(view.contested).toBe(false);
+      expect(view.contradictions).toEqual([{ withId: 'F', direction: 'stated_by', resolution: 'resolved_by_supersession' }]);
+    }
+    expect(derive('F')).toMatchObject({ contested: false, acceptanceStanding: 'none' });
     // The headline over the current records: C is contested → its born state; D likewise; E verified.
     expect(entityCurrentState([derive('C'), derive('D'), derive('E')])).toBe('verified');
     expect(entityCurrentState([derive('C'), derive('D')])).toBe('observed');
