@@ -454,9 +454,11 @@ import {
   isMissionPriority,
   isMissionStatus,
   isMissionTerminal,
+  type MissionPlanItemState,
   type MissionPriority,
   type MissionStatus,
 } from '../contracts/mission.js';
+import type { Provenance } from '../live/provenance.js';
 import {
   MAX_PROJECT_NAME_LENGTH,
   MAX_PROJECT_NOTE_LENGTH,
@@ -618,6 +620,59 @@ import {
   type AuthorizedSnapshot,
   type ExternalActionAdapter,
 } from './action-gateway.js';
+import {
+  COLLABORATION_COMMAND_CAPABILITY,
+  COLLABORATION_CONTEXT_LIMIT,
+  COLLABORATION_CONTRIBUTE_CAPABILITY,
+  COLLABORATION_READ_LIMIT,
+  COLLABORATION_ROLES,
+  COLLABORATION_SNAPSHOT_LIMIT,
+  CONTEXT_SECTIONS_BY_ROLE,
+  CONTRIBUTION_KINDS,
+  MAX_COLLABORATION_PURPOSE_LENGTH,
+  MAX_COLLABORATION_REF_LENGTH,
+  MAX_COLLABORATION_TITLE_LENGTH,
+  MAX_CONTRIBUTION_CONTENT_LENGTH,
+  MAX_HANDOFF_REASON_LENGTH,
+  MISSION_ROOM_CONTRIBUTION_LIMIT,
+  MISSION_ROOM_RUN_LIMIT,
+  collaborationCommandCapabilityState,
+  collaborationCommandContractDrift,
+  collaborationContributeCapabilityState,
+  collaborationContributeContractDrift,
+  collaborationSchemaPresent,
+  collaborationSessionIdempotencyKey,
+  contributionIdempotencyKey,
+  deriveContributionView,
+  deriveDisagreements,
+  deriveHandoffRequests,
+  deriveSessionView,
+  ensureCollaborationSchema,
+  isCollaborationRole,
+  isContributionKind,
+  loadCollaborationSession,
+  loadCollaborationSessions,
+  loadContribution,
+  loadContributions,
+  loadParticipants,
+  loadSessionRelations,
+  participantView,
+  sessionStandingFor,
+  type BindingSource,
+  type CollaborationRole,
+  type CollaborationSessionRow,
+  type CollaborationSessionView,
+  type CollaborationSnapshotView,
+  type ContextSection,
+  type ContributionDerivationContext,
+  type ContributionKind,
+  type ContributionView,
+  type DisagreementView,
+  type HandoffCanonicalTaskState,
+  type HandoffRequestView,
+  type ParticipantView,
+} from './collaboration-command.js';
+import { listOrchestrationRuns } from './orchestrator-command.js';
 import { CLIENT_IDENTITY_KEYS } from '../live/auth.js';
 import { ensureMemoryTables, memorySchemaPresent, MemoryStore, searchMemory } from '../memory/store.js';
 import {
@@ -689,7 +744,12 @@ export type OpsErrorCode =
   | 'approval_required_by_risk'
   | 'intent_changed'
   | 'task_not_executing'
-  | 'mission_not_active';
+  | 'mission_not_active'
+  // Phase 9 — the Mission Room / multi-AI collaboration record.
+  | 'unknown_session'
+  | 'session_closed'
+  | 'not_a_participant'
+  | 'unknown_contribution';
 
 export interface OpsError {
   code: OpsErrorCode;
@@ -748,6 +808,107 @@ export interface MissionExecutionState {
   /** Advisory, reported only — nothing schedules on it. */
   dependsOn: { missionId: string; status: MissionStatus | null }[];
   recommendation: 'none' | 'ready_review';
+}
+
+/**
+ * The Founder's Mission Room (Phase 9): ONE read composing what canonical
+ * truth holds about a mission and its collaboration — never a second record
+ * of any of it. Every element is a canonical projection HQ already makes
+ * (`missionBrowserView`, `MissionExecutionState`, `TruthRecordView`,
+ * `ActionView`, run records) or a derived collaboration view; every list is
+ * bounded with its true total stated. There is no worker "activity" here
+ * that is not an attributed, stored contribution.
+ */
+export interface MissionRoomView {
+  missionId: string;
+  mission: MissionBrowserView;
+  execution: MissionExecutionState;
+  sessions: CollaborationSessionView[];
+  /** Distinct admitted workers across every session of the mission, each with the roles held. */
+  participants: { workerId: string; roles: CollaborationRole[]; providerId: string | null; memberIdentityKey: string | null }[];
+  contributions: { items: ContributionView[]; total: number; truncated: boolean };
+  disagreements: DisagreementView[];
+  handoffRequests: HandoffRequestView[];
+  /** Truth records ABOUT the mission or its linked tasks, newest first, bounded. Founder-gated reader: founder_only included. */
+  truth: { records: TruthRecordView[]; total: number; truncated: boolean; unresolvedContradictions: number };
+  /** Pending Founder approvals on the mission's linked tasks — the canonical `hq_approvals` rows, referenced. */
+  approvals: { approvalId: string; taskId: string; riskClass: string; requestedBy: string; requestedAt: string }[];
+  /** Orchestration run records for this mission, newest first, bounded. */
+  recentRuns: { runId: string; requestedBy: string; at: string; summary: Record<string, unknown> }[];
+  /** External-action ledger entries bound to the mission or its linked tasks, newest first, bounded. */
+  externalActions: {
+    items: {
+      id: string;
+      taskId: string;
+      adapterId: string;
+      actionType: string;
+      riskLevel: string;
+      state: string;
+      requestedBy: string;
+      requestedAt: string;
+    }[];
+    total: number;
+    truncated: boolean;
+  };
+  assembledAt: string;
+  provenance: Provenance;
+}
+
+/**
+ * A bounded, role/task/mission-scoped context bundle (Phase 9) — what a
+ * worker admitted under `role` receives. Read-time composition that persists
+ * nothing. Absent by construction: founder_only memory and truth (counted in
+ * `withheld`), raw intent bodies, task payloads, and every other session's
+ * contributions. `sections` names what THIS role's policy assembled; a
+ * section outside the policy is null, never an empty list pretending to be a
+ * read.
+ */
+export interface CollaborationContextBundle {
+  sessionId: string;
+  missionId: string;
+  role: CollaborationRole;
+  taskId: string | null;
+  assembledAt: string;
+  sections: readonly ContextSection[];
+  mission: {
+    id: string;
+    title: string;
+    objective: string;
+    scope: string | null;
+    constraints: string[];
+    acceptanceCriteria: string[] | null;
+    status: MissionStatus;
+    priority: MissionPriority | null;
+    blockReason: string | null;
+    /** The current intent version — what a contribution is made against. */
+    intentSeq: number;
+    planItems: {
+      seq: number;
+      summary: string;
+      kind: 'work' | 'needs_clarification';
+      state: MissionPlanItemState;
+      taskId: string | null;
+      specCapabilityId: string | null;
+    }[];
+  };
+  task: TaskContextRef | null;
+  participants: ParticipantView[] | null;
+  contributions: { items: ContributionView[]; total: number } | null;
+  truth: {
+    items: {
+      id: string;
+      entityKind: TruthEntityKind;
+      entityId: string;
+      statement: string;
+      state: TruthState;
+      contested: boolean;
+      evidenceRefs: string[];
+    }[];
+    total: number;
+  } | null;
+  memory: { groups: MemoryContextGroup[] } | null;
+  withheld: { founderOnlyMemory: number; founderOnlyTruth: number; otherSessionContributions: number };
+  provenance: Provenance;
 }
 
 export interface OrchestrationReport {
@@ -1521,6 +1682,10 @@ export class HeadquarterOperations {
   /** The Phase 8 action ledger schema, same truth-recording as missions above. */
   readonly #actionStorePresent: boolean;
 
+  /** The Phase 9 collaboration schema, same truth-recording as missions above. */
+  readonly #collaborationStorePresent: boolean;
+
+
   /**
    * The external-action adapters, keyed by id — `#private`, handed in by the
    * composition root once, and read by the gateway's execute path ONLY. There
@@ -1653,6 +1818,7 @@ export class HeadquarterOperations {
     ensureOrchestratorSchema(db);
     ensureTruthSchema(db);
     ensureActionGatewaySchema(db);
+    ensureCollaborationSchema(db);
     // A writable construction just ensured the mission/project/memory tables.
     // A READ-ONLY one (the hq:snapshot path) may be observing an older file
     // that has some or none of them — the ensures above deliberately write
@@ -1664,6 +1830,7 @@ export class HeadquarterOperations {
     this.#memoryStorePresent = db.readonly ? memorySchemaPresent(db) : true;
     this.#truthStorePresent = db.readonly ? truthSchemaPresent(db) : true;
     this.#actionStorePresent = db.readonly ? actionGatewaySchemaPresent(db) : true;
+    this.#collaborationStorePresent = db.readonly ? collaborationSchemaPresent(db) : true;
     this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
     // Company memory (Phase 5, issue #265): the issue-#120 store, finally
@@ -7921,6 +8088,1167 @@ export class HeadquarterOperations {
         missionStatus,
         capabilityRiskClass: cap.riskClass,
         riskLevel: intent.riskLevel,
+      },
+    };
+  }
+
+  // ---- collaboration (Phase 9 — Mission Room + Multi-AI Collaboration) ----
+
+  /**
+   * Open a collaboration session on ONE canonical mission — the only way a
+   * session comes into existence. A Founder act (`hq.collaboration_command`,
+   * the founder-gate trio): a human principal holding the grant; workers,
+   * `system` and unknown ids refused. The mission must exist and be
+   * non-terminal (a finished mission opens no room). The session carries no
+   * lifecycle of its own: its standing is derived from the mission on every
+   * read. Executes nothing, assigns nothing, creates no task.
+   */
+  openCollaborationSession(input: {
+    missionId: string;
+    title: string;
+    purpose?: string;
+    /** Resolved actor id. Set by the boundary, never read from a body. */
+    requestedBy: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ session: CollaborationSessionView; deduplicated: boolean }> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    const missionId = input.missionId?.trim() ?? '';
+    if (!missionId) return fail('invalid_input', 'missionId is required');
+    const title = missionText('title', input.title, MAX_COLLABORATION_TITLE_LENGTH, true);
+    if (!title.ok) return fail('invalid_input', title.message);
+    const purpose = missionText('purpose', input.purpose, MAX_COLLABORATION_PURPOSE_LENGTH, false);
+    if (!purpose.ok) return fail('invalid_input', purpose.message);
+
+    const refusedActor = this.#resolveCollaborationCommander(input.requestedBy, 'open a collaboration session');
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#collaborationCommandCapabilityGate('open a collaboration session');
+    if (refusedCapability) return refusedCapability;
+    if (!this.#collaborationStorePresent) {
+      return fail('invalid_input', 'collaboration store unavailable on this database handle');
+    }
+    try {
+      assertNoSecretLikeContent({ title: title.value, purpose: purpose.value });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+    const idempotencyKey = collaborationSessionIdempotencyKey({
+      requestedBy: input.requestedBy,
+      missionId,
+      title: title.value!,
+      purpose: purpose.value,
+      idempotencyKey: input.idempotencyKey ?? null,
+    });
+
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let dedupedTo: string | null = null;
+    let createdId: string | null = null;
+    privileged.reserve(() => {
+      const existing = this.#db
+        .prepare(`SELECT id FROM hq_collab_sessions WHERE idempotency_key = ?`)
+        .get(idempotencyKey) as { id: string } | undefined;
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      // The mission's canonical status, read INSIDE the write lock through
+      // `#db` — never `getMission`, a prototype method a same-realm caller
+      // can patch. Probed only after the authority gates (no oracle).
+      const mission = this.#missionStatusFromStore(missionId);
+      if (!mission) {
+        refusal = { code: 'unknown_mission', message: `Unknown mission: ${missionId}` };
+        return;
+      }
+      if (isMissionTerminal(mission.status)) {
+        refusal = {
+          code: 'mission_terminal',
+          message: `Mission ${missionId} is ${mission.status}; a finished mission opens no collaboration session`,
+          details: { status: mission.status },
+        };
+        return;
+      }
+      const id = `collab-${uuid()}`;
+      const at = nowIso();
+      this.#db
+        .prepare(
+          `INSERT INTO hq_collab_sessions (id, mission_id, title, purpose, opened_by, opened_at, idempotency_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, missionId, title.value, purpose.value, input.requestedBy, at, idempotencyKey);
+      createdId = id;
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `collaboration:${id}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `Collaboration session opened on mission ${missionId}: ${title.value}`,
+        detail: { sessionId: id, missionId },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'collaboration_session_opened',
+        payload: { sessionId: id, missionId, missionIntentSeq: mission.intentSeq, executable: false },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    const id = dedupedTo ?? createdId!;
+    return ok({ session: this.#sessionView(loadCollaborationSession(this.#db, id)!), deduplicated: dedupedTo !== null });
+  }
+
+  /**
+   * Admit a REGISTERED execution worker to a session under one bounded role.
+   * A Founder act (the same trio as opening). The worker must be a real,
+   * assignable `hq_specialists` row — never a human principal, never an
+   * unknown id, never an inactive worker — so no fake worker can ever appear
+   * in a room. The role is assignment metadata: it grants no capability and
+   * is read by nothing but this module's own membership check. The binding
+   * recorded beside the admission is the CANONICAL one (declared provider,
+   * registered model identity), read from the database, never asserted.
+   * A repeated admission of the same (session, worker, role) deduplicates.
+   */
+  admitCollaborator(input: {
+    sessionId: string;
+    workerId: string;
+    role: CollaborationRole;
+    requestedBy: string;
+  }): OpsResult<{ participant: ParticipantView; session: CollaborationSessionView; deduplicated: boolean }> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    const sessionId = input.sessionId?.trim() ?? '';
+    if (!sessionId) return fail('invalid_input', 'sessionId is required');
+    const workerId = input.workerId?.trim() ?? '';
+    if (!workerId) return fail('invalid_input', 'workerId is required');
+    if (!isCollaborationRole(input.role)) {
+      return fail('invalid_input', `role must be one of: ${COLLABORATION_ROLES.join(', ')}`);
+    }
+    const refusedActor = this.#resolveCollaborationCommander(input.requestedBy, 'admit a collaborator');
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#collaborationCommandCapabilityGate('admit a collaborator');
+    if (refusedCapability) return refusedCapability;
+    if (!this.#collaborationStorePresent) {
+      return fail('invalid_input', 'collaboration store unavailable on this database handle');
+    }
+    const refusedWorker = this.#rejectNotACollaboratingWorker(workerId, 'be admitted to a collaboration session');
+    if (refusedWorker) return refusedWorker;
+
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let dedupedTo: string | null = null;
+    let createdId: string | null = null;
+    privileged.reserve(() => {
+      const session = loadCollaborationSession(this.#db, sessionId);
+      if (!session) {
+        refusal = { code: 'unknown_session', message: `Unknown collaboration session: ${sessionId}` };
+        return;
+      }
+      const mission = this.#missionStatusFromStore(session.missionId);
+      if (sessionStandingFor(mission?.status ?? null) === 'closed') {
+        refusal = {
+          code: 'session_closed',
+          message: `Collaboration session ${sessionId} is closed: mission ${session.missionId} is ${mission?.status ?? 'gone'}`,
+          details: { missionStatus: mission?.status ?? null },
+        };
+        return;
+      }
+      const existing = this.#db
+        .prepare(`SELECT id FROM hq_collab_participants WHERE session_id = ? AND worker_id = ? AND role = ?`)
+        .get(sessionId, workerId, input.role) as { id: string } | undefined;
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      const binding = this.#workerBindingFromStore(workerId);
+      const id = `collab-p-${uuid()}`;
+      const at = nowIso();
+      this.#db
+        .prepare(
+          `INSERT INTO hq_collab_participants (id, session_id, worker_id, role, provider_id, member_identity_key, admitted_by, admitted_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, sessionId, workerId, input.role, binding.providerId, binding.member?.identityKey ?? null, input.requestedBy, at);
+      createdId = id;
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `collaboration:${sessionId}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `Worker ${workerId} admitted as ${input.role} to collaboration session ${sessionId}`,
+        detail: { sessionId, workerId, role: input.role, missionId: session.missionId },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'collaboration_participant_admitted',
+        payload: {
+          sessionId,
+          missionId: session.missionId,
+          workerId,
+          role: input.role,
+          providerId: binding.providerId,
+          memberIdentityKey: binding.member?.identityKey ?? null,
+          bindingSource: binding.source,
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    const id = dedupedTo ?? createdId!;
+    const row = this.#db.prepare(`SELECT * FROM hq_collab_participants WHERE id = ?`).get(id) as Record<string, unknown>;
+    const participants = loadParticipants(this.#db, sessionId);
+    const participant = participants.find((p) => p.id === (row.id as string))!;
+    return ok({
+      participant: participantView(participant),
+      session: this.#sessionView(loadCollaborationSession(this.#db, sessionId)!),
+      deduplicated: dedupedTo !== null,
+    });
+  }
+
+  /**
+   * Record one attributed contribution — the only way a contribution comes
+   * into existence, and a WORKER act only:
+   *
+   * - identity: `requestedBy` must be a registered, assignable execution
+   *   worker holding `hq.collaboration_contribute` in its directory grant;
+   *   `system`, human principals and unknown ids are refused. The worker on
+   *   the record IS the resolved actor — there is no field to name another;
+   * - membership: the worker must have been admitted to THIS session, and
+   *   `role` (when named) must be one it holds there; a worker holding one
+   *   role need not name it, one holding several must;
+   * - binding: the recorded provider/model is the CANONICAL binding read
+   *   from `op_worker_providers` / `hq_ai_members` at write time. A
+   *   `declaredBinding` must match it exactly or the write is refused
+   *   (`provider_binding_mismatch`) — nothing is substituted or inferred;
+   * - references: `taskId` (and a handoff's task) must be a task the
+   *   session's mission links through a plan item; every evidence ref must
+   *   exist; every truth ref must exist and not be founder_only; every stance
+   *   target must be a contribution of the SAME session;
+   * - handoff: `kind: 'handoff_request'` carries a structured request naming
+   *   ANOTHER registered, assignable worker. It is a recommendation: it
+   *   changes no claim, no fence, no `hq_op_task_meta.assignment`, and the
+   *   canonical `assignTaskAsFounder` / `claimNext` read nothing here;
+   * - authority: recording a contribution changes no mission field, no
+   *   intent row, no plan item, no task, no approval and no truth state.
+   *   Agreement stances are stored as stances, never as verification.
+   */
+  recordContribution(input: {
+    sessionId: string;
+    kind: ContributionKind;
+    content: string;
+    role?: CollaborationRole;
+    taskId?: string;
+    artifactRefs?: string[];
+    /** `op_evidence` ids. References only. */
+    evidenceRefs?: string[];
+    /** `hq_truth_records` ids. References only — reading them decides nothing. */
+    truthRefs?: string[];
+    agreesWith?: string[];
+    disagreesWith?: string[];
+    respondsTo?: string[];
+    /** What the worker CLAIMS to be. Must equal the canonical binding; never stored in its own right. */
+    declaredBinding?: { providerId?: string; modelId?: string; modelVersion?: string };
+    handoff?: { taskId: string; toWorkerId: string; reason: string };
+    /** Resolved actor id. Set by the boundary, never read from a body. */
+    requestedBy: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ contribution: ContributionView; deduplicated: boolean }> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    const sessionId = input.sessionId?.trim() ?? '';
+    if (!sessionId) return fail('invalid_input', 'sessionId is required');
+    if (!isContributionKind(input.kind)) {
+      return fail('invalid_input', `kind must be one of: ${CONTRIBUTION_KINDS.join(', ')}`);
+    }
+    if (input.role !== undefined && !isCollaborationRole(input.role)) {
+      return fail('invalid_input', `role must be one of: ${COLLABORATION_ROLES.join(', ')}`);
+    }
+    const content = missionText('content', input.content, MAX_CONTRIBUTION_CONTENT_LENGTH, true);
+    if (!content.ok) return fail('invalid_input', content.message);
+    const taskId = input.taskId?.trim() || null;
+    const artifactRefs = memoryList('artifactRefs', input.artifactRefs, MAX_COLLABORATION_REF_LENGTH);
+    if (!artifactRefs.ok) return fail('invalid_input', artifactRefs.message);
+    const evidenceRefs = truthIdList('evidenceRefs', input.evidenceRefs);
+    if (!evidenceRefs.ok) return fail('invalid_input', evidenceRefs.message);
+    const truthRefs = truthIdList('truthRefs', input.truthRefs);
+    if (!truthRefs.ok) return fail('invalid_input', truthRefs.message);
+    const agreesWith = truthIdList('agreesWith', input.agreesWith);
+    if (!agreesWith.ok) return fail('invalid_input', agreesWith.message);
+    const disagreesWith = truthIdList('disagreesWith', input.disagreesWith);
+    if (!disagreesWith.ok) return fail('invalid_input', disagreesWith.message);
+    const respondsTo = truthIdList('respondsTo', input.respondsTo);
+    if (!respondsTo.ok) return fail('invalid_input', respondsTo.message);
+    if (agreesWith.value.some((id) => disagreesWith.value.includes(id))) {
+      return fail('invalid_input', 'a contribution cannot both agree and disagree with the same contribution');
+    }
+    let handoff: { taskId: string; toWorkerId: string; reason: string } | null = null;
+    if (input.kind === 'handoff_request') {
+      if (!input.handoff || typeof input.handoff !== 'object') {
+        return fail('invalid_input', 'a handoff_request must carry handoff: { taskId, toWorkerId, reason }');
+      }
+      const handoffTask = input.handoff.taskId?.trim() ?? '';
+      const toWorkerId = input.handoff.toWorkerId?.trim() ?? '';
+      const reason = missionText('handoff.reason', input.handoff.reason, MAX_HANDOFF_REASON_LENGTH, true);
+      if (!handoffTask || !toWorkerId) return fail('invalid_input', 'a handoff names a taskId and a toWorkerId');
+      if (!reason.ok) return fail('invalid_input', reason.message);
+      if (toWorkerId === input.requestedBy) {
+        return fail('invalid_input', 'a handoff names ANOTHER worker; a worker cannot hand a task to itself');
+      }
+      handoff = { taskId: handoffTask, toWorkerId, reason: reason.value! };
+    } else if (input.handoff !== undefined) {
+      return fail('invalid_input', 'only a handoff_request carries a handoff');
+    }
+    const declared = input.declaredBinding;
+    if (declared !== undefined) {
+      if (declared == null || typeof declared !== 'object' || Array.isArray(declared)) {
+        return fail('invalid_input', 'declaredBinding must be an object');
+      }
+      if ((declared.modelId === undefined) !== (declared.modelVersion === undefined)) {
+        return fail('invalid_input', 'declaredBinding names modelId and modelVersion together, or neither');
+      }
+    }
+
+    const refusedActor = this.#resolveContributor(input.requestedBy, 'record a contribution');
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#collaborationContributeCapabilityGate('record a contribution');
+    if (refusedCapability) return refusedCapability;
+    if (!this.#collaborationStorePresent) {
+      return fail('invalid_input', 'collaboration store unavailable on this database handle');
+    }
+    try {
+      assertNoSecretLikeContent({
+        content: content.value,
+        artifactRefs: artifactRefs.value,
+        reason: handoff?.reason ?? null,
+      });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+    if (handoff) {
+      const refusedTarget = this.#rejectNotACollaboratingWorker(handoff.toWorkerId, 'receive a handoff');
+      if (refusedTarget) return refusedTarget;
+    }
+
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let dedupedTo: string | null = null;
+    let createdId: string | null = null;
+    privileged.reserve(() => {
+      const session = loadCollaborationSession(this.#db, sessionId);
+      if (!session) {
+        refusal = { code: 'unknown_session', message: `Unknown collaboration session: ${sessionId}` };
+        return;
+      }
+      const mission = this.#missionStatusFromStore(session.missionId);
+      if (sessionStandingFor(mission?.status ?? null) === 'closed') {
+        refusal = {
+          code: 'session_closed',
+          message: `Collaboration session ${sessionId} is closed: mission ${session.missionId} is ${mission?.status ?? 'gone'}`,
+          details: { missionStatus: mission?.status ?? null },
+        };
+        return;
+      }
+      // Membership: the roles THIS worker holds in THIS session, from the
+      // canonical rows. A worker cannot contribute under a role it was not
+      // admitted to, and cannot contribute at all where it was not admitted.
+      const held = (
+        this.#db
+          .prepare(`SELECT role FROM hq_collab_participants WHERE session_id = ? AND worker_id = ? ORDER BY seq`)
+          .all(sessionId, input.requestedBy) as { role: CollaborationRole }[]
+      ).map((r) => r.role);
+      if (held.length === 0) {
+        refusal = {
+          code: 'not_a_participant',
+          message: `${input.requestedBy} was not admitted to collaboration session ${sessionId}; a contribution is recorded only for an admitted worker`,
+          details: { workerId: input.requestedBy, sessionId },
+        };
+        return;
+      }
+      let role: CollaborationRole;
+      if (input.role !== undefined) {
+        if (!held.includes(input.role)) {
+          refusal = {
+            code: 'not_a_participant',
+            message: `${input.requestedBy} holds role(s) ${held.join(', ')} in session ${sessionId}, not ${input.role}; a role is admission metadata and cannot be self-assigned`,
+            details: { workerId: input.requestedBy, held, requested: input.role },
+          };
+          return;
+        }
+        role = input.role;
+      } else if (held.length === 1) {
+        role = held[0]!;
+      } else {
+        refusal = {
+          code: 'invalid_input',
+          message: `${input.requestedBy} holds several roles in session ${sessionId} (${held.join(', ')}); name the one this contribution is made in`,
+          details: { held },
+        };
+        return;
+      }
+      // Provider/model truth, from the canonical rows — never from the input.
+      const binding = this.#workerBindingFromStore(input.requestedBy);
+      if (declared) {
+        if (declared.providerId !== undefined && declared.providerId !== binding.providerId) {
+          refusal = {
+            code: 'provider_binding_mismatch',
+            message:
+              `${input.requestedBy} declares execution provider ${declared.providerId} but HQ's canonical declaration ` +
+              `for it is ${binding.providerId ?? 'none (undeclared)'}. Provider identity is declared by the Founder, never ` +
+              'asserted by the worker, and never substituted.',
+            details: { declaredProvider: declared.providerId, canonicalProvider: binding.providerId },
+          };
+          return;
+        }
+        if (declared.modelId !== undefined) {
+          const registered = binding.member;
+          if (!registered || registered.modelId !== declared.modelId || registered.modelVersion !== declared.modelVersion) {
+            refusal = {
+              code: 'provider_binding_mismatch',
+              message:
+                `${input.requestedBy} declares model ${declared.modelId}@${declared.modelVersion} but HQ's registered identity ` +
+                `for it is ${registered ? registered.identityKey : 'none (no registered AI member under this worker id)'}. ` +
+                'Model identity is fixed at registration, never asserted by the worker, and never substituted.',
+              details: {
+                declaredModel: `${declared.modelId}@${declared.modelVersion}`,
+                registeredIdentityKey: registered?.identityKey ?? null,
+              },
+            };
+            return;
+          }
+        }
+      }
+      // Every reference must be real — and a task reference must be one the
+      // session's mission actually links (one canonical task truth).
+      const linkedProbe = this.#db.prepare(`SELECT 1 FROM hq_mission_plan_items WHERE mission_id = ? AND task_id = ?`);
+      if (taskId && !linkedProbe.get(session.missionId, taskId)) {
+        refusal = {
+          code: 'invalid_input',
+          message: `Task ${taskId} is not linked to a plan item of mission ${session.missionId}; a contribution references only the mission's own tasks`,
+        };
+        return;
+      }
+      if (handoff && !linkedProbe.get(session.missionId, handoff.taskId)) {
+        refusal = {
+          code: 'invalid_input',
+          message: `Task ${handoff.taskId} is not linked to a plan item of mission ${session.missionId}; a handoff names only the mission's own tasks`,
+        };
+        return;
+      }
+      const missingEvidence = this.#missingEvidenceIds(evidenceRefs.value);
+      if (missingEvidence.length > 0) {
+        refusal = {
+          code: 'unknown_evidence',
+          message: `Unknown evidence id(s): ${missingEvidence.join(', ')} — a contribution may only reference evidence that exists`,
+          details: { missing: missingEvidence },
+        };
+        return;
+      }
+      if (truthRefs.value.length > 0) {
+        // founder_only truth is refused with the SAME code as an absent id: a
+        // worker learns nothing about private records by probing.
+        const probe = this.#truthStorePresent
+          ? this.#db.prepare(`SELECT privacy FROM hq_truth_records WHERE id = ?`)
+          : null;
+        const missingTruth = truthRefs.value.filter((id) => {
+          const row = probe?.get(id) as { privacy: string } | undefined;
+          return row === undefined || row.privacy === 'founder_only';
+        });
+        if (missingTruth.length > 0) {
+          refusal = {
+            code: 'unknown_truth',
+            message: `Unknown truth record(s): ${missingTruth.join(', ')}`,
+            details: { missing: missingTruth },
+          };
+          return;
+        }
+      }
+      const sameSession = this.#db.prepare(`SELECT 1 FROM hq_collab_contributions WHERE id = ? AND session_id = ?`);
+      for (const [via, ids] of [
+        ['agreesWith', agreesWith.value],
+        ['disagreesWith', disagreesWith.value],
+        ['respondsTo', respondsTo.value],
+      ] as const) {
+        const missing = ids.filter((id) => sameSession.get(id, sessionId) === undefined);
+        if (missing.length > 0) {
+          refusal = {
+            code: 'unknown_contribution',
+            message: `Unknown contribution(s) in ${via}: ${missing.join(', ')} — a stance names a contribution of the same session`,
+            details: { via, missing },
+          };
+          return;
+        }
+      }
+      const idempotencyKey = contributionIdempotencyKey({
+        workerId: input.requestedBy,
+        sessionId,
+        role,
+        kind: input.kind,
+        taskId,
+        content: content.value!,
+        artifactRefs: artifactRefs.value,
+        evidenceRefs: evidenceRefs.value,
+        truthRefs: truthRefs.value,
+        agreesWith: agreesWith.value,
+        disagreesWith: disagreesWith.value,
+        respondsTo: respondsTo.value,
+        handoff,
+        idempotencyKey: input.idempotencyKey ?? null,
+      });
+      const existing = this.#db
+        .prepare(`SELECT id FROM hq_collab_contributions WHERE idempotency_key = ?`)
+        .get(idempotencyKey) as { id: string } | undefined;
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      const id = `collab-c-${uuid()}`;
+      const at = nowIso();
+      this.#db
+        .prepare(
+          `INSERT INTO hq_collab_contributions (id, session_id, mission_id, task_id, worker_id, role, kind, content,
+             artifact_refs, evidence_refs, truth_refs, provider_id, member_identity_key, binding_source,
+             handoff_task_id, handoff_to_worker_id, handoff_reason, at, idempotency_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          sessionId,
+          session.missionId,
+          taskId,
+          input.requestedBy,
+          role,
+          input.kind,
+          content.value,
+          JSON.stringify(artifactRefs.value),
+          JSON.stringify(evidenceRefs.value),
+          JSON.stringify(truthRefs.value),
+          binding.providerId,
+          binding.member?.identityKey ?? null,
+          binding.source,
+          handoff?.taskId ?? null,
+          handoff?.toWorkerId ?? null,
+          handoff?.reason ?? null,
+          at,
+          idempotencyKey,
+        );
+      const insertRelation = this.#db.prepare(
+        `INSERT INTO hq_collab_relations (id, from_id, kind, to_id, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      );
+      for (const toId of agreesWith.value) insertRelation.run(uuid(), id, 'agrees_with', toId, input.requestedBy, at);
+      for (const toId of disagreesWith.value) insertRelation.run(uuid(), id, 'disagrees_with', toId, input.requestedBy, at);
+      for (const toId of respondsTo.value) insertRelation.run(uuid(), id, 'responds_to', toId, input.requestedBy, at);
+      createdId = id;
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `collaboration:${sessionId}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `Contribution (${input.kind}) by ${input.requestedBy} as ${role} in session ${sessionId}`,
+        detail: { contributionId: id, sessionId, missionId: session.missionId, kind: input.kind, role, taskId },
+      });
+      privileged.appendEvidence({
+        taskId,
+        actor: input.requestedBy,
+        kind: 'collaboration_contributed',
+        payload: {
+          contributionId: id,
+          sessionId,
+          missionId: session.missionId,
+          missionIntentSeq: mission?.intentSeq ?? null,
+          taskId,
+          kind: input.kind,
+          role,
+          providerId: binding.providerId,
+          memberIdentityKey: binding.member?.identityKey ?? null,
+          bindingSource: binding.source,
+          evidenceRefs: evidenceRefs.value,
+          truthRefs: truthRefs.value,
+          agreesWith: agreesWith.value,
+          disagreesWith: disagreesWith.value,
+          handoff: handoff ? { taskId: handoff.taskId, toWorkerId: handoff.toWorkerId, advisory: true } : null,
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    const id = dedupedTo ?? createdId!;
+    return ok({ contribution: this.#contributionViewById(id)!, deduplicated: dedupedTo !== null });
+  }
+
+  getCollaborationSession(id: string): CollaborationSessionView | null {
+    if (!id || !this.#collaborationStorePresent) return null;
+    const row = loadCollaborationSession(this.#db, id);
+    return row ? this.#sessionView(row) : null;
+  }
+
+  /** Every session, newest first, with its derived standing; optionally one mission's. */
+  listCollaborationSessions(filter?: { missionId?: string }): CollaborationSessionView[] {
+    if (!this.#collaborationStorePresent) return [];
+    return loadCollaborationSessions(this.#db, filter?.missionId?.trim() || undefined).map((row) => this.#sessionView(row));
+  }
+
+  /** Bounded list plus the true total, for the wire. */
+  listCollaborationSessionsBounded(filter?: { missionId?: string }): {
+    sessions: CollaborationSessionView[];
+    total: number;
+    truncated: boolean;
+  } {
+    const all = this.listCollaborationSessions(filter);
+    return {
+      sessions: all.slice(0, COLLABORATION_READ_LIMIT),
+      total: all.length,
+      truncated: all.length > COLLABORATION_READ_LIMIT,
+    };
+  }
+
+  /** One session's contributions, newest first, with the true total. */
+  listContributions(sessionId: string): { contributions: ContributionView[]; total: number } {
+    if (!sessionId || !this.#collaborationStorePresent) return { contributions: [], total: 0 };
+    const rows = loadContributions(this.#db, sessionId);
+    const relations = loadSessionRelations(this.#db, sessionId);
+    const ctx = this.#contributionContext(true);
+    const views = rows.map((row) => deriveContributionView(row, rows, relations, ctx)).sort((a, b) => b.seq - a.seq);
+    return { contributions: views, total: views.length };
+  }
+
+  /**
+   * The Founder's Mission Room: the canonical mission, its execution state
+   * (linked tasks, blockers, kill switches — the Phase 6 read), every
+   * session with its admitted workers, the actual contributions, the
+   * explicit disagreements, handoff requests beside the canonical claim /
+   * assignment they did not change, the truth records about the mission and
+   * its tasks, pending approvals, recent orchestration runs and the external
+   * actions on the ledger. Composition only — writes nothing, transitions
+   * nothing, and invents no activity.
+   */
+  getMissionRoom(missionId: string): OpsResult<MissionRoomView> {
+    const id = missionId?.trim() ?? '';
+    if (!id) return fail('invalid_input', 'missionId is required');
+    const mission = this.#missionRecord(id);
+    if (!mission) return fail('unknown_mission', `Unknown mission: ${id}`);
+    const at = nowIso();
+    const execution = this.#missionExecutionState(mission);
+    const linkedTaskIds = execution.linkedTasks.map((task) => task.taskId);
+    const ctx = this.#contributionContext(true);
+
+    const sessionRows = this.#collaborationStorePresent ? loadCollaborationSessions(this.#db, id) : [];
+    const sessions: CollaborationSessionView[] = [];
+    const contributions: ContributionView[] = [];
+    const disagreements: DisagreementView[] = [];
+    const handoffs: HandoffRequestView[] = [];
+    const participants = new Map<string, MissionRoomView['participants'][number]>();
+    for (const row of sessionRows) {
+      const people = loadParticipants(this.#db, row.id);
+      const rows = loadContributions(this.#db, row.id);
+      const relations = loadSessionRelations(this.#db, row.id);
+      sessions.push(deriveSessionView(row, mission.status, people, rows, relations));
+      for (const person of people) {
+        const entry = participants.get(person.workerId) ?? {
+          workerId: person.workerId,
+          roles: [],
+          providerId: person.providerId,
+          memberIdentityKey: person.memberIdentityKey,
+        };
+        if (!entry.roles.includes(person.role)) entry.roles.push(person.role);
+        participants.set(person.workerId, entry);
+      }
+      for (const c of rows) contributions.push(deriveContributionView(c, rows, relations, ctx));
+      disagreements.push(...deriveDisagreements(rows, relations));
+      handoffs.push(...deriveHandoffRequests(rows, ctx.taskStateOf));
+    }
+    contributions.sort((a, b) => b.seq - a.seq);
+    disagreements.sort((a, b) => b.at.localeCompare(a.at));
+    handoffs.sort((a, b) => b.at.localeCompare(a.at));
+
+    const truthAll = this.listTruth().filter(
+      (view) =>
+        (view.entityKind === 'mission' && view.entityId === id) ||
+        (view.entityKind === 'task' && linkedTaskIds.includes(view.entityId)),
+    );
+    const truthIds = new Set(truthAll.map((view) => view.id));
+    const unresolved = this.listTruthContradictions().filter(
+      (pair) => pair.resolution === 'unresolved' && (truthIds.has(pair.a) || truthIds.has(pair.b)),
+    ).length;
+
+    const approvals =
+      linkedTaskIds.length === 0
+        ? []
+        : (this.#db
+            .prepare(
+              `SELECT id, task_id, risk_class, requested_by, requested_at FROM hq_approvals
+               WHERE decision = 'pending' AND task_id IN (${linkedTaskIds.map(() => '?').join(',')})
+               ORDER BY requested_at`,
+            )
+            .all(...linkedTaskIds) as Record<string, unknown>[]).map((r) => ({
+            approvalId: r.id as string,
+            taskId: r.task_id as string,
+            riskClass: r.risk_class as string,
+            requestedBy: r.requested_by as string,
+            requestedAt: r.requested_at as string,
+          }));
+
+    const runs = listOrchestrationRuns(this.#db, id)
+      .reverse()
+      .slice(0, MISSION_ROOM_RUN_LIMIT)
+      .map((run) => ({ runId: run.id, requestedBy: run.requestedBy, at: run.at, summary: run.summary }));
+
+    const actionRows = this.#actionStorePresent
+      ? loadActionIntents(this.#db).filter((row) => row.missionId === id || linkedTaskIds.includes(row.taskId))
+      : [];
+    const actions = actionRows.map((row) => {
+      const view = deriveActionView(row, loadActionEvents(this.#db, row.id));
+      return {
+        id: view.id,
+        taskId: view.taskId,
+        adapterId: view.adapterId,
+        actionType: view.actionType,
+        riskLevel: view.riskLevel,
+        state: view.state,
+        requestedBy: view.requestedBy,
+        requestedAt: view.requestedAt,
+      };
+    });
+
+    return ok({
+      missionId: id,
+      mission: missionBrowserView(mission),
+      execution,
+      sessions,
+      participants: [...participants.values()].sort((a, b) => a.workerId.localeCompare(b.workerId)),
+      contributions: {
+        items: contributions.slice(0, MISSION_ROOM_CONTRIBUTION_LIMIT),
+        total: contributions.length,
+        truncated: contributions.length > MISSION_ROOM_CONTRIBUTION_LIMIT,
+      },
+      disagreements,
+      handoffRequests: handoffs,
+      truth: {
+        records: truthAll.slice(0, TRUTH_SNAPSHOT_LIMIT),
+        total: truthAll.length,
+        truncated: truthAll.length > TRUTH_SNAPSHOT_LIMIT,
+        unresolvedContradictions: unresolved,
+      },
+      approvals,
+      recentRuns: runs,
+      externalActions: {
+        items: actions.slice(0, MISSION_ROOM_RUN_LIMIT),
+        total: actions.length,
+        truncated: actions.length > MISSION_ROOM_RUN_LIMIT,
+      },
+      assembledAt: at,
+      provenance: {
+        mode: 'live',
+        source:
+          'hq_missions / op_tasks / hq_collab_* / hq_truth_* / hq_approvals / hq_orchestration_runs / hq_action_intents ' +
+          'via HeadquarterOperations.getMissionRoom (read-time composition of canonical projections; writes nothing)',
+        asOf: at,
+      },
+    });
+  }
+
+  /**
+   * Assemble the bounded context bundle a worker admitted under `role`
+   * receives for a session — or, for a human holding the collaboration
+   * command grant, an audit of exactly what that role would receive. A
+   * worker may request only a role it holds in that session. Read-time
+   * composition: persists nothing and changes no canonical truth.
+   *
+   * Scope is the whole design: the ONE mission's current structured intent
+   * (never the raw order text), the ONE task's minimal ref when named (never
+   * its payload), the session's own participants and contributions (never
+   * another session's), truth records about the mission/its tasks that are
+   * not founder_only, and entity-linked memory that is not founder_only —
+   * each section only where `CONTEXT_SECTIONS_BY_ROLE` grants it, each list
+   * bounded to `COLLABORATION_CONTEXT_LIMIT` with the true total stated, and
+   * everything withheld counted rather than silently dropped.
+   */
+  assembleCollaborationContext(input: {
+    sessionId: string;
+    role: CollaborationRole;
+    taskId?: string;
+    requestedBy: string;
+  }): OpsResult<CollaborationContextBundle> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    const sessionId = input.sessionId?.trim() ?? '';
+    if (!sessionId) return fail('invalid_input', 'sessionId is required');
+    if (!isCollaborationRole(input.role)) {
+      return fail('invalid_input', `role must be one of: ${COLLABORATION_ROLES.join(', ')}`);
+    }
+    const taskId = input.taskId?.trim() || null;
+    // Identity first — an unknown id learns nothing about which sessions exist.
+    if (input.requestedBy === 'system') {
+      return fail('not_permitted', "'system' cannot assemble a context bundle: a resolved worker or human principal is required");
+    }
+    const isWorker = this.#isRegisteredWorker(input.requestedBy);
+    if (isWorker) {
+      const assignability = this.#workers.assignability(input.requestedBy);
+      if (!assignability.assignable) return this.#rejectNotAssignable(input.requestedBy, assignability, 'assemble a context bundle');
+    } else {
+      const refused = this.#resolveCollaborationCommander(input.requestedBy, 'assemble a context bundle');
+      if (refused) return refused;
+    }
+    if (!this.#collaborationStorePresent) {
+      return fail('invalid_input', 'collaboration store unavailable on this database handle');
+    }
+    const session = loadCollaborationSession(this.#db, sessionId);
+    if (!session) return fail('unknown_session', `Unknown collaboration session: ${sessionId}`);
+    if (isWorker) {
+      const held = this.#db
+        .prepare(`SELECT 1 FROM hq_collab_participants WHERE session_id = ? AND worker_id = ? AND role = ?`)
+        .get(sessionId, input.requestedBy, input.role);
+      if (!held) {
+        return fail(
+          'not_permitted',
+          `${input.requestedBy} was not admitted to session ${sessionId} as ${input.role}; a worker receives only the bundle of a role it holds`,
+          { workerId: input.requestedBy, role: input.role },
+        );
+      }
+    }
+    const mission = this.#missionRecord(session.missionId);
+    if (!mission) return fail('unknown_mission', `Unknown mission: ${session.missionId}`);
+    const linkedTaskIds = mission.planItems.map((item) => item.taskId).filter((t): t is string => t != null);
+    if (taskId && !linkedTaskIds.includes(taskId)) {
+      return fail('invalid_input', `Task ${taskId} is not linked to a plan item of mission ${mission.id}`);
+    }
+    const sections = CONTEXT_SECTIONS_BY_ROLE[input.role];
+    const has = (section: ContextSection) => sections.includes(section);
+    const at = nowIso();
+
+    let task: TaskContextRef | null = null;
+    if (has('task') && taskId) {
+      const row = this.#db
+        .prepare(`SELECT id, capability_id, status, created_at FROM op_tasks WHERE id = ?`)
+        .get(taskId) as { id: string; capability_id: string; status: string; created_at: string } | undefined;
+      if (row) task = { taskId: row.id, capabilityId: row.capability_id, status: row.status as ActivityStatus, createdAt: row.created_at };
+    }
+
+    const participants = has('participants') ? loadParticipants(this.#db, sessionId).map(participantView) : null;
+
+    let contributions: CollaborationContextBundle['contributions'] = null;
+    if (has('contributions')) {
+      const rows = loadContributions(this.#db, sessionId);
+      const relations = loadSessionRelations(this.#db, sessionId);
+      const ctx = this.#contributionContext(false);
+      const relevant = rows
+        .filter((row) => (taskId ? row.taskId === taskId || row.taskId === null : true))
+        .map((row) => deriveContributionView(row, rows, relations, ctx))
+        .sort((a, b) => b.seq - a.seq);
+      contributions = { items: relevant.slice(0, COLLABORATION_CONTEXT_LIMIT), total: relevant.length };
+    }
+    const otherSessionContributions = (
+      this.#db
+        .prepare(`SELECT COUNT(*) AS n FROM hq_collab_contributions WHERE mission_id = ? AND session_id <> ?`)
+        .get(mission.id, sessionId) as { n: number }
+    ).n;
+
+    let truth: CollaborationContextBundle['truth'] = null;
+    let founderOnlyTruth = 0;
+    if (has('truth')) {
+      const scopeTasks = taskId ? [taskId] : linkedTaskIds;
+      const about = this.listTruth().filter(
+        (view) =>
+          (view.entityKind === 'mission' && view.entityId === mission.id) ||
+          (view.entityKind === 'task' && scopeTasks.includes(view.entityId)),
+      );
+      const visible = about.filter((view) => view.privacy !== 'founder_only');
+      founderOnlyTruth = about.length - visible.length;
+      truth = {
+        items: visible.slice(0, COLLABORATION_CONTEXT_LIMIT).map((view) => ({
+          id: view.id,
+          entityKind: view.entityKind,
+          entityId: view.entityId,
+          statement: view.statement,
+          state: view.state,
+          contested: view.contested,
+          evidenceRefs: [...view.evidenceRefs],
+        })),
+        total: visible.length,
+      };
+    }
+
+    let memory: CollaborationContextBundle['memory'] = null;
+    let founderOnlyMemory = 0;
+    if (has('memory')) {
+      const store = this.#memory;
+      const notPrivate = (records: CompanyMemoryRecord[]): CompanyMemoryRecord[] => {
+        const visible = records.filter((record) => record.privacy !== 'founder_only');
+        founderOnlyMemory += records.length - visible.length;
+        return visible;
+      };
+      const groups = taskId
+        ? assembleMemoryGroups({
+            direct: notPrivate(store?.listByTaskId(taskId) ?? []),
+            directLinkage: 'task',
+            lookup: (memoryId) => {
+              const record = store?.get(memoryId) ?? null;
+              if (record?.privacy === 'founder_only') {
+                founderOnlyMemory += 1;
+                return null;
+              }
+              return record;
+            },
+          })
+        : assembleMemoryGroups({
+            direct: notPrivate(store?.listByMissionId(mission.id) ?? []),
+            directLinkage: 'mission',
+            taskLinked: notPrivate(store ? linkedTaskIds.flatMap((t) => store.listByTaskId(t)) : []),
+            projectLinked: notPrivate(store && mission.projectId ? store.listByProjectRef(mission.projectId) : []),
+            lookup: (memoryId) => {
+              const record = store?.get(memoryId) ?? null;
+              if (record?.privacy === 'founder_only') {
+                founderOnlyMemory += 1;
+                return null;
+              }
+              return record;
+            },
+          });
+      memory = { groups };
+    }
+
+    const view = missionBrowserView(mission);
+    return ok({
+      sessionId,
+      missionId: mission.id,
+      role: input.role,
+      taskId,
+      assembledAt: at,
+      sections,
+      mission: {
+        id: view.id,
+        title: view.title,
+        objective: view.objective,
+        scope: view.scope,
+        constraints: [...view.constraints],
+        acceptanceCriteria: view.acceptanceCriteria ? [...view.acceptanceCriteria] : null,
+        status: view.status,
+        priority: view.priority,
+        blockReason: view.blockReason,
+        intentSeq: view.intentHistory.reduce((max, entry) => Math.max(max, entry.seq), 0),
+        planItems: view.planItems.map((item) => ({
+          seq: item.seq,
+          summary: item.summary,
+          kind: item.kind,
+          state: item.state,
+          taskId: item.taskId,
+          specCapabilityId: item.specCapabilityId,
+        })),
+      },
+      task,
+      participants,
+      contributions,
+      truth,
+      memory,
+      withheld: { founderOnlyMemory, founderOnlyTruth, otherSessionContributions },
+      provenance: {
+        mode: 'live',
+        source:
+          `bounded role-scoped assembly for ${input.role} over hq_missions, hq_collab_* (this session only), ` +
+          'hq_truth_records (internal only), hq_memory (entity-linked, internal only) via HeadquarterOperations.assembleCollaborationContext; ' +
+          'raw intent bodies, task payloads and founder_only records never travel',
+        asOf: at,
+      },
+    });
+  }
+
+  /** The bounded snapshot view: counts HQ made over every session, plus the newest sessions. */
+  collaborationSummary(options: { limit?: number } = {}): CollaborationSnapshotView {
+    const limit = options.limit ?? COLLABORATION_SNAPSHOT_LIMIT;
+    const sessions = this.listCollaborationSessions();
+    const workers = new Set<string>();
+    let contributions = 0;
+    let disagreements = 0;
+    let handoffRequests = 0;
+    for (const session of sessions) {
+      for (const participant of session.participants) workers.add(participant.workerId);
+      contributions += session.contributionCount;
+      disagreements += session.disagreementCount;
+      handoffRequests += session.handoffRequestCount;
+    }
+    return {
+      sessions: sessions.length,
+      activeSessions: sessions.filter((session) => session.standing === 'active').length,
+      workersAdmitted: workers.size,
+      contributions,
+      disagreements,
+      handoffRequests,
+      recent: sessions.slice(0, limit),
+    };
+  }
+
+  /** Whether this database handle carries the Phase 9 collaboration tables. */
+  collaborationStorePresent(): boolean {
+    return this.#collaborationStorePresent;
+  }
+
+  // ---- collaboration internals ----
+
+  #resolveCollaborationCommander(actor: string, action: string): OpsResult<never> | null {
+    return this.#resolveFounderGateActor(actor, action, COLLABORATION_COMMAND_CAPABILITY.id, 'commanding a collaboration');
+  }
+
+  #collaborationCommandCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      COLLABORATION_COMMAND_CAPABILITY.id,
+      collaborationCommandCapabilityState,
+      collaborationCommandContractDrift,
+      'commanding a collaboration',
+    );
+  }
+
+  #collaborationContributeCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      COLLABORATION_CONTRIBUTE_CAPABILITY.id,
+      collaborationContributeCapabilityState,
+      collaborationContributeContractDrift,
+      'contributing to a collaboration',
+    );
+  }
+
+  /**
+   * Actor resolution for a contribution: a registered, assignable WORKER
+   * holding `hq.collaboration_contribute` through its directory grant.
+   * `system` is refused (an unattributed contribution is the fabricated
+   * activity this phase forbids); a human principal is refused because
+   * humans direct missions through mission command and a room's
+   * contributions are worker acts; an unknown id is nobody.
+   */
+  #resolveContributor(actor: string, action: string): OpsResult<never> | null {
+    if (!actor) return fail('invalid_input', `An actor is required to ${action}`);
+    if (actor === 'system') {
+      return fail('not_permitted', `'system' cannot ${action}: a resolved worker is required`);
+    }
+    const resolved = this.#resolveRequester(actor, action);
+    if (!resolved.ok) return resolved;
+    if (resolved.data.kind === 'human') {
+      return fail(
+        'not_permitted',
+        `Human principal ${actor} cannot ${action}: contributions are worker acts; the Founder directs a mission through mission command`,
+        { actor },
+      );
+    }
+    if (!this.#grantOf(actor).includes(COLLABORATION_CONTRIBUTE_CAPABILITY.id)) {
+      return fail(
+        'not_permitted',
+        `${actor} may not ${action}: the worker directory grants no ${COLLABORATION_CONTRIBUTE_CAPABILITY.id}`,
+        { actor },
+      );
+    }
+    return null;
+  }
+
+  /**
+   * Whether `workerId` may appear in a room at all: a registered, assignable
+   * execution worker — read through the enforcement closures — and never a
+   * human principal (a human admitted "as a worker" would let human identity
+   * read as worker identity). Unknown ids are nobody; nothing is invented.
+   */
+  #rejectNotACollaboratingWorker(workerId: string, action: string): OpsResult<never> | null {
+    if (this.#principalOf(workerId)) {
+      return fail(
+        'not_permitted',
+        `${workerId} is a human principal and cannot ${action}: humans direct missions and are never admitted as a collaborating worker`,
+        { workerId },
+      );
+    }
+    if (!this.#isRegisteredWorker(workerId)) {
+      return fail(
+        'unknown_principal',
+        `Unknown worker ${workerId} cannot ${action}: only a registered execution worker can, and no worker is invented`,
+        { workerId },
+      );
+    }
+    const assignability = this.#workers.assignability(workerId);
+    if (!assignability.assignable) return this.#rejectNotAssignable(workerId, assignability, action);
+    return null;
+  }
+
+  /**
+   * The canonical provider/model binding of a worker, read from the rows
+   * through `#db`: the operator's declared execution provider
+   * (`op_worker_providers`, routing vocabulary) and, when the registry schema
+   * exists, the ACTIVE registered AI member under the same id
+   * (`hq_ai_members`, registry vocabulary). The two vocabularies are disjoint
+   * and are reported side by side — never compared, never inferred from the
+   * specialist's vendor string. Absence is reported as absence.
+   */
+  #workerBindingFromStore(workerId: string): {
+    providerId: string | null;
+    member: { identityKey: string; modelId: string; modelVersion: string } | null;
+    source: BindingSource;
+  } {
+    const declared = this.#db
+      .prepare(`SELECT provider_id FROM op_worker_providers WHERE worker_id = ?`)
+      .get(workerId) as { provider_id: string } | undefined;
+    let member: { identityKey: string; modelId: string; modelVersion: string } | null = null;
+    // The issue-#119 registry schema is ensured by whoever constructs an
+    // `AiMemberRegistry` — possibly after this service. Probed at read time
+    // so the ROW (never the registry object) answers, and a file with no such
+    // table truthfully reports no registered model identity.
+    const registryTable = this.#db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'hq_ai_members'`)
+      .get();
+    if (registryTable !== undefined) {
+      const row = this.#db
+        .prepare(`SELECT identity_key, model_id, model_version FROM hq_ai_members WHERE id = ? AND status = 'active' AND enabled = 1`)
+        .get(workerId) as { identity_key: string; model_id: string; model_version: string } | undefined;
+      if (row) member = { identityKey: row.identity_key, modelId: row.model_id, modelVersion: row.model_version };
+    }
+    const providerId = declared?.provider_id ?? null;
+    return {
+      providerId,
+      member,
+      source: providerId ? (member ? 'declared_provider_and_registered_model' : 'declared_provider') : 'undeclared',
+    };
+  }
+
+  #sessionView(row: CollaborationSessionRow): CollaborationSessionView {
+    const mission = this.#missionStatusFromStore(row.missionId);
+    return deriveSessionView(
+      row,
+      mission?.status ?? null,
+      loadParticipants(this.#db, row.id),
+      loadContributions(this.#db, row.id),
+      loadSessionRelations(this.#db, row.id),
+    );
+  }
+
+  #contributionViewById(id: string): ContributionView | null {
+    const row = loadContribution(this.#db, id);
+    if (!row) return null;
+    const rows = loadContributions(this.#db, row.sessionId);
+    return deriveContributionView(row, rows, loadSessionRelations(this.#db, row.sessionId), this.#contributionContext(true));
+  }
+
+  /**
+   * The lookups a contribution derivation needs: the truth state each
+   * referenced record derives NOW (through the Phase 7 derivation — so a
+   * room full of agreement visibly moved nothing), withheld for founder_only
+   * records unless the reader is past the Founder gate; and the canonical
+   * task row beside a handoff (status, claim, Founder assignment).
+   */
+  #contributionContext(includeFounderOnly: boolean): ContributionDerivationContext {
+    const truthStates = new Map<string, { state: TruthState; founderOnly: boolean }>();
+    if (this.#truthStorePresent) {
+      for (const view of this.#deriveAllTruth(loadTruthGraph(this.#db)).values()) {
+        truthStates.set(view.id, { state: view.state, founderOnly: view.privacy === 'founder_only' });
+      }
+    }
+    return {
+      truthStateOf: (truthId) => {
+        const entry = truthStates.get(truthId);
+        if (!entry) return null;
+        if (entry.founderOnly && !includeFounderOnly) return null;
+        return entry.state;
+      },
+      taskStateOf: (taskId): HandoffCanonicalTaskState | null => {
+        const row = this.#db.prepare(`SELECT status, claimed_by FROM op_tasks WHERE id = ?`).get(taskId) as
+          | { status: string; claimed_by: string | null }
+          | undefined;
+        if (!row) return null;
+        const assignment = this.readMeta(taskId)?.assignment ?? null;
+        return {
+          status: row.status as ActivityStatus,
+          claimedBy: row.claimed_by ?? null,
+          assignedWorkerId: assignment?.workerId ?? null,
+          assignedBy: assignment?.assignedBy ?? null,
+        };
       },
     };
   }

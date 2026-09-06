@@ -168,6 +168,12 @@ import {
   type ActionRiskEscalations,
   type ActionState,
 } from '../application/action-gateway.js';
+import {
+  COLLABORATION_COMMAND_CAPABILITY,
+  COLLABORATION_ROLES,
+  collaborationCommandCapabilityState,
+  isCollaborationRole,
+} from '../application/collaboration-command.js';
 import { MEMORY_KINDS, isMemoryKind, isMemoryPrivacy } from '../memory/schema.js';
 import { isArchiveStatus } from '../archive/schema.js';
 import { PROVIDERS, providerConnectivity } from '../routing/providers.js';
@@ -287,6 +293,22 @@ export const CONTROL_ROUTES = {
   actions: `${CONTROL_API_PREFIX}/actions`,
   actionDetail: `${CONTROL_API_PREFIX}/actions/detail`,
   actionReconcile: `${CONTROL_API_PREFIX}/actions/reconcile`,
+  /**
+   * Phase 9: the Mission Room / multi-AI collaboration record. GET lists
+   * every collaboration session with its DERIVED standing (bounded, newest
+   * first; `?missionId=` narrows); POST OPENS one session on a canonical
+   * mission (a Founder act). `room` is the parameterized Founder read
+   * (`?missionId=`) composing everything the Mission Room shows; `context`
+   * (`?sessionId=&collaborationRole=&taskId=`) audits the bounded bundle a
+   * role would receive; `admit` admits a REGISTERED worker under a role. A
+   * contribution is a worker act under its own resolved identity and has NO
+   * browser route, exactly as authorize/execute have none — the Founder
+   * directs a mission; workers contribute through the facade.
+   */
+  collaboration: `${CONTROL_API_PREFIX}/collaboration`,
+  collaborationRoom: `${CONTROL_API_PREFIX}/collaboration/room`,
+  collaborationContext: `${CONTROL_API_PREFIX}/collaboration/context`,
+  collaborationAdmit: `${CONTROL_API_PREFIX}/collaboration/admit`,
 } as const;
 
 /**
@@ -315,6 +337,8 @@ export const CONTROL_WRITE_ROUTES: readonly string[] = [
   CONTROL_ROUTES.truthAccept,
   CONTROL_ROUTES.actions,
   CONTROL_ROUTES.actionReconcile,
+  CONTROL_ROUTES.collaboration,
+  CONTROL_ROUTES.collaborationAdmit,
 ];
 
 export interface ControlResponse {
@@ -597,7 +621,10 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.truth ||
         path === CONTROL_ROUTES.truthEntity ||
         path === CONTROL_ROUTES.actions ||
-        path === CONTROL_ROUTES.actionDetail)) ||
+        path === CONTROL_ROUTES.actionDetail ||
+        path === CONTROL_ROUTES.collaboration ||
+        path === CONTROL_ROUTES.collaborationRoom ||
+        path === CONTROL_ROUTES.collaborationContext)) ||
     (method === 'POST' &&
       (path === CONTROL_ROUTES.orders ||
         path === CONTROL_ROUTES.approve ||
@@ -618,7 +645,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.truthVerify ||
         path === CONTROL_ROUTES.truthAccept ||
         path === CONTROL_ROUTES.actions ||
-        path === CONTROL_ROUTES.actionReconcile));
+        path === CONTROL_ROUTES.actionReconcile ||
+        path === CONTROL_ROUTES.collaboration ||
+        path === CONTROL_ROUTES.collaborationAdmit));
   if (!known) {
     // Deny by default, and say nothing about what does exist.
     return refusal(404, 'not_found', 'No such HQ control route.');
@@ -924,6 +953,18 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     return actionDetailRoute(request, deps, founder, audit, now);
   }
 
+  if (method === 'GET' && path === CONTROL_ROUTES.collaboration) {
+    return listCollaborationRoute(request, deps, founder, audit, now);
+  }
+
+  if (method === 'GET' && path === CONTROL_ROUTES.collaborationRoom) {
+    return missionRoomRoute(request, deps, founder, audit, now);
+  }
+
+  if (method === 'GET' && path === CONTROL_ROUTES.collaborationContext) {
+    return collaborationContextRoute(request, deps, founder, audit, now);
+  }
+
   if (path === CONTROL_ROUTES.orders) return createOrder(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.approve) return approve(request, deps, founder, audit, now);
   if (path === CONTROL_ROUTES.missions) return commandMission(request, deps, founder, audit);
@@ -955,6 +996,8 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
   if (path === CONTROL_ROUTES.truthAccept) return acceptTruthRoute(request, deps, founder, audit, now);
   if (path === CONTROL_ROUTES.actions) return proposeActionRoute(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.actionReconcile) return reconcileActionRoute(request, deps, founder, audit, now);
+  if (path === CONTROL_ROUTES.collaboration) return openCollaborationRoute(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.collaborationAdmit) return admitCollaboratorRoute(request, deps, founder, audit);
   return deny(request, deps, founder, audit);
 }
 
@@ -1062,6 +1105,15 @@ function controlAvailability(
     // principal must hold THAT task's capability), and a flag that ignored
     // the task would tell the console a button works when the route refuses.
     actionReconcile: mayApprove,
+    // Phase 9: opening a session and admitting a worker are one Founder act
+    // (`hq.collaboration_command`), advertised from exactly the conditions
+    // that decide the write — the originate grant AND the intact registry
+    // row, read enforcement-safe. Contributing has no route, so no flag.
+    collaborationCommand:
+      writable &&
+      principal?.originateCapabilities.includes(COLLABORATION_COMMAND_CAPABILITY.id) === true &&
+      collaborationCommandCapabilityState(capabilityRowFor(deps.ops, COLLABORATION_COMMAND_CAPABILITY.id)) ===
+        'enabled',
     mutationsEnabled: deps.mutationsEnabled !== false,
     trustedOriginConfigured: originsUsable,
     // Stated separately from `trustedOriginConfigured`, because they answer
@@ -1250,6 +1302,8 @@ function controlErrorStatus(code: string): number {
     case 'unknown_evidence':
     case 'unknown_entity':
     case 'unknown_action':
+    case 'unknown_session':
+    case 'unknown_contribution':
       return 404;
     case 'invalid_mission_transition':
     case 'mission_status_changed':
@@ -1278,12 +1332,17 @@ function controlErrorStatus(code: string): number {
     case 'intent_changed':
     case 'task_not_executing':
     case 'mission_not_active':
+    // Phase 9: the session's mission finished, or the act conflicts with
+    // what the record holds.
+    case 'session_closed':
       return 409;
     case 'unknown_capability':
     case 'capability_disabled':
     case 'not_permitted':
     case 'unknown_principal':
     case 'workforce_registry_unconfigured':
+    // Phase 9: a worker asking for a role it was not admitted under.
+    case 'not_a_participant':
     // Risk added an approval requirement the request cannot satisfy by itself.
     case 'approval_required_by_risk':
     // The switch stops execution reachability; a 403 says "nothing in this
@@ -1924,6 +1983,162 @@ function reconcileActionRoute(
   }
   audit('allowed', 'action_reconciled', founder);
   return safe(json(200, { ok: true, action: result.data.action as unknown as Record<string, unknown> }));
+}
+
+/**
+ * Phase 9 reads. The session list is bounded (`COLLABORATION_READ_LIMIT`,
+ * newest first) with the true total stated; `?missionId=` narrows. Every
+ * session view carries its DERIVED standing — no session stores a status.
+ */
+function listCollaborationRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const page = deps.ops.listCollaborationSessionsBounded({ missionId: request.query?.missionId?.trim() || undefined });
+  audit('allowed', 'list_collaboration', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      sessions: page.sessions as unknown as Record<string, unknown>[],
+      total: page.total,
+      truncated: page.truncated,
+      storePresent: deps.ops.collaborationStorePresent(),
+    }),
+  );
+}
+
+/** The Founder's Mission Room for one mission: `?missionId=`. 404 for an unknown mission. */
+function missionRoomRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const missionId = request.query?.missionId?.trim() ?? '';
+  if (!missionId) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'Supply missionId=<mission id>.');
+  }
+  const result = deps.ops.getMissionRoom(missionId);
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', 'mission_room', founder);
+  return safe(json(200, { ok: true, generatedAt: now().toISOString(), room: result.data as unknown as Record<string, unknown> }));
+}
+
+/**
+ * The bounded bundle a role would receive: `?sessionId=&collaborationRole=`
+ * plus an optional `taskId=`. The query key is `collaborationRole`, NOT
+ * `role`: `role` is a client-identity key the boundary refuses on sight, and
+ * a collaboration role is admission metadata, not who is acting — the acting
+ * principal is the mapped Founder, whose command grant the facade checks.
+ */
+function collaborationContextRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const query = request.query ?? {};
+  const sessionId = query.sessionId?.trim() ?? '';
+  const role = query.collaborationRole?.trim() ?? '';
+  if (!sessionId || !isCollaborationRole(role)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(
+      400,
+      'invalid_input',
+      `Supply sessionId=<session id> and collaborationRole=<${COLLABORATION_ROLES.join('|')}> (taskId optional).`,
+    );
+  }
+  const result = deps.ops.assembleCollaborationContext({
+    sessionId,
+    role,
+    taskId: query.taskId?.trim() || undefined,
+    requestedBy: founder.principal.id,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', `collaboration_context_${role}`, founder);
+  return safe(json(200, { ok: true, generatedAt: now().toISOString(), bundle: result.data as unknown as Record<string, unknown> }));
+}
+
+function openCollaborationRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const title = stringField(request.body, 'title') ?? '';
+  const purpose = stringField(request.body, 'purpose');
+  try {
+    assertBrowserSafe({ title, purpose: purpose ?? null }, 'collaboration');
+  } catch {
+    audit('refused', 'unsafe_collaboration_content', founder);
+    return refusal(400, 'unsafe_collaboration_content', 'The title or purpose looks like it contains credential material, so it was refused rather than stored.');
+  }
+  const result = deps.ops.openCollaborationSession({
+    missionId: stringField(request.body, 'missionId') ?? '',
+    title,
+    purpose,
+    // The server-resolved principal, never a body field.
+    requestedBy: founder.principal.id,
+    idempotencyKey: stringField(request.body, 'idempotencyKey'),
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', result.data.deduplicated ? 'collaboration_session_deduplicated' : 'collaboration_session_opened', founder);
+  return safe(
+    json(result.data.deduplicated ? 200 : 201, {
+      ok: true,
+      deduplicated: result.data.deduplicated,
+      session: result.data.session as unknown as Record<string, unknown>,
+    }),
+  );
+}
+
+/** Admit a registered worker under a role. Body key `collaborationRole` — `role` is an identity key the scan refuses. */
+function admitCollaboratorRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const role = stringField(request.body, 'collaborationRole') ?? '';
+  if (!isCollaborationRole(role)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', `collaborationRole must be one of: ${COLLABORATION_ROLES.join(', ')}.`);
+  }
+  const result = deps.ops.admitCollaborator({
+    sessionId: stringField(request.body, 'sessionId') ?? '',
+    workerId: stringField(request.body, 'workerId') ?? '',
+    role,
+    requestedBy: founder.principal.id,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', result.data.deduplicated ? 'collaborator_admission_deduplicated' : 'collaborator_admitted', founder);
+  return safe(
+    json(result.data.deduplicated ? 200 : 201, {
+      ok: true,
+      deduplicated: result.data.deduplicated,
+      participant: result.data.participant as unknown as Record<string, unknown>,
+      session: result.data.session as unknown as Record<string, unknown>,
+    }),
+  );
 }
 
 function commandMission(

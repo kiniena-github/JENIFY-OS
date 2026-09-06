@@ -38,6 +38,10 @@ import {
   TRUTH_VERIFY_CAPABILITY,
   registerTruthRecordCapability,
   registerTruthVerifyCapability,
+  COLLABORATION_COMMAND_CAPABILITY,
+  COLLABORATION_CONTRIBUTE_CAPABILITY,
+  registerCollaborationCommandCapability,
+  registerCollaborationContributeCapability,
   type ExternalActionAdapter,
 } from '@factoryos/headquarter/application';
 import { CapabilityRegistry } from '@factoryos/headquarter/operator';
@@ -911,6 +915,142 @@ describe('Phase 8 — the action-ledger routes through the Fastify host', () => 
         url,
         headers: { origin: ORIGIN, 'content-type': 'application/json' },
         payload: { actionId: 'any', decision: 'confirmed_failed', note: 'n' },
+      });
+      expect(res.statusCode, url).toBe(401);
+    }
+    await app.close();
+  });
+});
+
+describe('Phase 9 — the collaboration routes through the Fastify host', () => {
+  async function phase9App(): Promise<{ app: FastifyInstance; ops: HeadquarterOperations; missionId: string }> {
+    const db = openMemoryHqDatabase();
+    registerMissionCommandCapability(db);
+    registerCollaborationCommandCapability(db);
+    registerCollaborationContributeCapability(db);
+    const store = new HeadquarterStore(db);
+    store.upsertSpecialist({
+      id: 'claude',
+      displayName: 'Claude',
+      vendor: 'anthropic',
+      role: 'build_lead',
+      allowedCapabilities: [COLLABORATION_CONTRIBUTE_CAPABILITY.id],
+      active: true,
+    });
+    const ops = new HeadquarterOperations(db, { store });
+    new HumanPrincipalRegistry(db).register({
+      id: 'founder',
+      displayName: 'Proof Founder',
+      originateCapabilities: [MISSION_COMMAND_CAPABILITY.id, COLLABORATION_COMMAND_CAPABILITY.id],
+      approvalAuthority: true,
+      active: true,
+    });
+    const mission = ops.commandMission({ title: 'Host mission', objective: 'Prove the wiring', requestedBy: 'founder' });
+    if (!mission.ok) throw new Error(mission.error.message);
+    const app = Fastify({ logger: false });
+    registerHeadquarterRoutes(
+      app,
+      {
+        ops,
+        founderMap: [{ realmId: 'realm', accountId: 'acc-1', principalId: 'founder' }],
+        allowedOrigins: [ORIGIN],
+        secretsEnv: {},
+        mutationsEnabled: true,
+      },
+      identityFor(FOUNDER),
+    );
+    await app.ready();
+    return { app, ops, missionId: mission.data.mission.id };
+  }
+
+  it('opens and admits through the host attributed to the mapped principal, refuses `role` as an identity key in body and query, reads the room, and offers no contribute route — the worker contribution stays outside HTTP', async () => {
+    const { app, ops, missionId } = await phase9App();
+    const opened = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.collaboration,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: { missionId, title: 'Host room' },
+    });
+    expect(opened.statusCode).toBe(201);
+    expect(opened.headers['cache-control']).toBe('no-store');
+    const session = (opened.json() as { session: { id: string; openedBy: string; standing: string } }).session;
+    expect(session).toMatchObject({ openedBy: 'founder', standing: 'active' });
+
+    const identityInBody = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.collaborationAdmit,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: { sessionId: session.id, workerId: 'claude', role: 'builder' },
+    });
+    expect(identityInBody.statusCode).toBe(400);
+    expect((identityInBody.json() as { error: { code: string } }).error.code).toBe('client_identity_supplied');
+    const identityInQuery = await app.inject({
+      method: 'GET',
+      url: `${CONTROL_ROUTES.collaborationContext}?sessionId=${session.id}&role=builder`,
+    });
+    expect(identityInQuery.statusCode).toBe(400);
+
+    const admitted = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.collaborationAdmit,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: { sessionId: session.id, workerId: 'claude', collaborationRole: 'builder' },
+    });
+    expect(admitted.statusCode).toBe(201);
+    expect((admitted.json() as { participant: { workerId: string; admittedBy: string } }).participant).toMatchObject({ workerId: 'claude', admittedBy: 'founder' });
+
+    // No HTTP route contributes: the browser cannot record a contribution under any worker's name.
+    const contribute = await app.inject({
+      method: 'POST',
+      url: `${CONTROL_ROUTES.collaboration}/contribute`,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: { sessionId: session.id, kind: 'finding', content: 'from the browser' },
+    });
+    expect(contribute.statusCode).toBe(404);
+    expect(ops.listContributions(session.id).total).toBe(0);
+
+    // The worker acts through the facade under its own resolved identity; the host then reads the truthful room.
+    const recorded = ops.recordContribution({ sessionId: session.id, kind: 'finding', content: 'Recorded by the worker.', requestedBy: 'claude' });
+    expect(recorded.ok).toBe(true);
+    const room = await app.inject({ method: 'GET', url: `${CONTROL_ROUTES.collaborationRoom}?missionId=${missionId}` });
+    expect(room.statusCode).toBe(200);
+    const view = (room.json() as { room: { participants: { workerId: string }[]; contributions: { total: number; items: { workerId: string; kind: string }[] } } }).room;
+    expect(view.participants.map((p) => p.workerId)).toEqual(['claude']);
+    expect(view.contributions.total).toBe(1);
+    expect(view.contributions.items[0]).toMatchObject({ workerId: 'claude', kind: 'finding' });
+    const context = await app.inject({
+      method: 'GET',
+      url: `${CONTROL_ROUTES.collaborationContext}?sessionId=${session.id}&collaborationRole=builder`,
+    });
+    expect(context.statusCode).toBe(200);
+    expect((context.json() as { bundle: { role: string } }).bundle.role).toBe('builder');
+    await app.close();
+  });
+
+  it('refuses the whole collaboration surface to nobody, exactly as it refuses the rest', async () => {
+    const db = openMemoryHqDatabase();
+    const ops = new HeadquarterOperations(db, { store: new HeadquarterStore(db) });
+    const app = Fastify({ logger: false });
+    registerHeadquarterRoutes(
+      app,
+      { ops, founderMap: [], allowedOrigins: [ORIGIN], secretsEnv: {}, mutationsEnabled: true },
+      NO_IDENTITY,
+    );
+    await app.ready();
+    for (const url of [
+      CONTROL_ROUTES.collaboration,
+      `${CONTROL_ROUTES.collaborationRoom}?missionId=x`,
+      `${CONTROL_ROUTES.collaborationContext}?sessionId=x&collaborationRole=builder`,
+    ]) {
+      const res = await app.inject({ method: 'GET', url });
+      expect(res.statusCode, url).toBe(401);
+    }
+    for (const url of [CONTROL_ROUTES.collaboration, CONTROL_ROUTES.collaborationAdmit]) {
+      const res = await app.inject({
+        method: 'POST',
+        url,
+        headers: { origin: ORIGIN, 'content-type': 'application/json' },
+        payload: { missionId: 'any', title: 't', sessionId: 'any', workerId: 'claude', collaborationRole: 'builder' },
       });
       expect(res.statusCode, url).toBe(401);
     }

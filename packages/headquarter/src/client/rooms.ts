@@ -170,7 +170,10 @@ export const HQ_ROOMS: readonly HqRoom[] = [
       // Phase 3 (issue #254) deliberately rebound this room: mission stopped
       // meaning "an open op_tasks row" and became the canonical Mission
       // aggregate. Recorded in docs/JENIFY_DECISIONS.md, not slipped in.
-      source: 'hq_missions via HeadquarterOperations.listMissions — the canonical command-level missions',
+      source:
+        'hq_missions via HeadquarterOperations.listMissions — the canonical command-level missions; ' +
+        'the optional collaboration section (Phase 9) rides beside them: sessions, admitted workers, ' +
+        'contributions, disagreements and handoff requests, each referencing one mission',
     },
     placement: { ring: 1, slot: 1 },
     page: 'projects.html',

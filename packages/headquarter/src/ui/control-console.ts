@@ -95,6 +95,12 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
   CONTROL_ROUTES.truthEntity,
   CONTROL_ROUTES.truthVerify,
   CONTROL_ROUTES.truthAccept,
+  // Phase 9: the Mission Room collaboration console on projects.html — the
+  // bounded session list, the per-mission room read, and the open/admit
+  // writes. The context read exists on the API and is not fetched by a page.
+  CONTROL_ROUTES.collaboration,
+  CONTROL_ROUTES.collaborationRoom,
+  CONTROL_ROUTES.collaborationAdmit,
 ];
 
 /**
@@ -109,7 +115,7 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
  * server's words rather than guessing.
  */
 export const CONTROL_GRANT_JS = `function grantedControls(session) {
-  var off = { directOrder: false, approve: false, deny: false, missionCommand: false, projectCommand: false, workforceAssign: false, memoryCommand: false, missionOrchestrate: false, truthRecord: false, truthVerify: false, truthAccept: false, reason: '' };
+  var off = { directOrder: false, approve: false, deny: false, missionCommand: false, projectCommand: false, workforceAssign: false, memoryCommand: false, missionOrchestrate: false, truthRecord: false, truthVerify: false, truthAccept: false, collaborationCommand: false, reason: '' };
   if (session == null || typeof session !== 'object') {
     off.reason = 'The control API gave no readable answer, so no control is drawn.';
     return off;
@@ -131,6 +137,7 @@ export const CONTROL_GRANT_JS = `function grantedControls(session) {
     truthRecord: session.controls.truthRecord === true,
     truthVerify: session.controls.truthVerify === true,
     truthAccept: session.controls.truthAccept === true,
+    collaborationCommand: session.controls.collaborationCommand === true,
     reason: stated !== '' ? stated : ungrantedReason(session.controls)
   };
 }
@@ -2800,6 +2807,406 @@ export function truthConsoleScript(vocabulary: {
         else textLine(box, 'readonly-note', 'The verify form is off for this session \\u2014 ' + grant.reason);
         if (grant.truthAccept) box.appendChild(buildAcceptForm(records, reload));
         else textLine(box, 'readonly-note', 'Acceptance is off for this session \\u2014 it requires approval authority. ' + grant.reason);
+      })
+      .catch(function (error) {
+        stayOff('the HQ control API is not reachable from this page (' + error.message + ').');
+      });
+  }
+
+  jsonExchange(fetch(SESSION_PATH, { headers: { accept: 'application/json' } }))
+    .then(function (result) {
+      sessionAnswer = result.body;
+      if (result.body == null || typeof result.body !== 'object' || result.body.founder !== true) {
+        stayOff(grantedControls(result.body).reason);
+        return;
+      }
+      reload();
+    })
+    .catch(function (error) {
+      stayOff('the HQ control API is not reachable from this page (' + error.message + ').');
+    });
+})();
+</script>`;
+}
+
+
+/**
+ * Mission Room collaboration console on projects.html (Phase 9).
+ *
+ * The static markup is a mount and a note — no control. This script asks
+ * `/session`; any resolved Founder gets the live READ: the bounded session
+ * list, and for each mission with a session the full Mission Room read
+ * (canonical tasks with their live claim/assignment, admitted workers with
+ * the binding HQ recorded, the actual contributions with their explicit
+ * agreement/disagreement stances and the truth state each referenced record
+ * derives NOW, disagreements listed first, handoff requests beside the
+ * canonical claim they did not change, truth records, pending approvals,
+ * blockers, recent orchestration runs and external actions). The open and
+ * admit forms are drawn only under a granted `collaborationCommand`. Nothing
+ * animates; nothing is invented; zero renders as an explicit zero; every
+ * server string lands through textContent.
+ */
+export function collaborationConsoleScript(roles: readonly string[]): string {
+  return `<script>
+(function () {
+  var mount = document.querySelector('[data-collaboration-console]');
+  if (!mount || typeof window.fetch !== 'function') return;
+
+  ${CONTROL_GRANT_JS}
+  ${DOM_HELPERS_JS}
+
+  var SESSION_PATH = ${jsonForScript(CONTROL_ROUTES.session)};
+  var COLLAB_PATH = ${jsonForScript(CONTROL_ROUTES.collaboration)};
+  var COLLAB_ROOM_PATH = ${jsonForScript(CONTROL_ROUTES.collaborationRoom)};
+  var COLLAB_ADMIT_PATH = ${jsonForScript(CONTROL_ROUTES.collaborationAdmit)};
+  var MISSIONS_PATH = ${jsonForScript(CONTROL_ROUTES.missions)};
+  var ROLES = ${jsonForScript(roles)};
+  var ROOM_LIMIT = 12;
+
+  var note = el('p', 'readonly-note console-state', 'Checking with the control API whether this session can read the collaboration record\\u2026');
+  note.setAttribute('data-collaboration-console-state', 'checking');
+  note.setAttribute('role', 'status');
+  mount.appendChild(note);
+
+  var box = el('div', 'missions-live collaboration-live');
+  box.setAttribute('data-collaboration-rooms', '');
+  mount.appendChild(box);
+
+  var sessionAnswer = null;
+
+  function stayOff(reason) {
+    box.textContent = '';
+    note.setAttribute('data-collaboration-console-state', 'off');
+    note.className = 'readonly-note console-state console-state-off';
+    note.textContent = 'COLLABORATION RECORD IS NOT READABLE FROM THIS PAGE \\u2014 ' + reason;
+  }
+
+  function textLine(parent, cls, text) {
+    parent.appendChild(el('p', cls, text));
+  }
+
+  function chip(parent, text, attr, value) {
+    var c = el('span', 'chip', text);
+    if (attr) c.setAttribute(attr, value);
+    parent.appendChild(c);
+  }
+
+  function listOf(parent, label, items, render, emptyText) {
+    textLine(parent, 'order-label', label);
+    if (!Array.isArray(items) || items.length === 0) {
+      textLine(parent, 'muted', emptyText);
+      return;
+    }
+    var ul = document.createElement('ul');
+    ul.className = 'timeline';
+    for (var i = 0; i < items.length; i++) {
+      var li = document.createElement('li');
+      render(li, items[i]);
+      ul.appendChild(li);
+    }
+    parent.appendChild(ul);
+  }
+
+  function bindingText(binding) {
+    if (!binding) return 'binding: not recorded';
+    var provider = binding.providerId ? 'provider ' + binding.providerId : 'provider undeclared';
+    var model = binding.memberIdentityKey ? 'model ' + binding.memberIdentityKey : 'no registered model identity';
+    return provider + ' \\u00b7 ' + model + ' (' + (binding.source || 'unknown') + ')';
+  }
+
+  function canonicalText(canonical) {
+    if (!canonical) return 'canonical task row: absent';
+    return 'canonical: status ' + canonical.status + ', claimed by ' + (canonical.claimedBy || 'nobody') +
+      ', Founder assignment ' + (canonical.assignedWorkerId ? canonical.assignedWorkerId + ' (by ' + canonical.assignedBy + ')' : 'none');
+  }
+
+  function renderRoom(room, canCommand, reason) {
+    var card = el('article', 'panel mission-card collaboration-room');
+    card.setAttribute('data-collaboration-room', room.missionId);
+    var mission = room.mission || {};
+    var head = el('p', 'row');
+    head.appendChild(el('b', '', 'MISSION ROOM \\u2014 ' + (mission.title || room.missionId)));
+    chip(head, String(mission.status), 'data-mission-status', String(mission.status));
+    card.appendChild(head);
+    textLine(card, 'faint', room.missionId + ' \\u00b7 commanded by ' + mission.createdBy + ' \\u00b7 assembled ' + room.assembledAt);
+    textLine(card, '', 'Objective (current): ' + mission.objective);
+    var constraints = Array.isArray(mission.constraints) ? mission.constraints : [];
+    textLine(card, 'muted', constraints.length > 0 ? 'Constraints (non-negotiable): ' + constraints.join(' \\u00b7 ') : 'Constraints: none were stated.');
+
+    var execution = room.execution || {};
+    listOf(card, 'Canonical tasks (op_tasks, the one task truth)', execution.linkedTasks, function (li, task) {
+      li.textContent = 'plan item ' + task.planItemSeq + ' \\u2192 task ' + task.taskId + ': ' + task.status +
+        (task.reviewPending ? ' (review pending)' : '') +
+        ' \\u00b7 claimed by ' + (task.claimedBy || 'nobody') +
+        ' \\u00b7 Founder assignment ' + (task.assignment ? task.assignment.workerId : 'none') +
+        ' \\u00b7 eligible: ' + (Array.isArray(task.eligibleWorkers) && task.eligibleWorkers.length > 0 ? task.eligibleWorkers.join(', ') : 'nobody');
+      li.setAttribute('data-collaboration-task', task.taskId);
+    }, 'No plan item of this mission is linked to a real task. 0 means 0.');
+
+    var blockers = execution.blockers || {};
+    var blockerLines = [];
+    if (Array.isArray(blockers.unspecifiedWorkItems) && blockers.unspecifiedWorkItems.length > 0) blockerLines.push('unspecified work items: ' + blockers.unspecifiedWorkItems.join(', '));
+    if (Array.isArray(blockers.needsClarification) && blockers.needsClarification.length > 0) blockerLines.push('needs clarification: ' + blockers.needsClarification.join(', '));
+    if (Array.isArray(blockers.approvalPending) && blockers.approvalPending.length > 0) blockerLines.push('approval pending: ' + blockers.approvalPending.join(', '));
+    if (Array.isArray(blockers.outcomeUnknown) && blockers.outcomeUnknown.length > 0) blockerLines.push('outcome unknown: ' + blockers.outcomeUnknown.join(', '));
+    if (Array.isArray(blockers.blocked) && blockers.blocked.length > 0) blockerLines.push('blocked: ' + blockers.blocked.join(', '));
+    var killSwitch = execution.killSwitch || {};
+    if (killSwitch.global === true) blockerLines.push('GLOBAL KILL SWITCH ENGAGED');
+    if (killSwitch.orchestrate === true) blockerLines.push('orchestration kill switch engaged');
+    listOf(card, 'Blockers', blockerLines, function (li, line) { li.textContent = line; }, 'No blocker is recorded.');
+
+    listOf(card, 'Participating workers (admitted by the Founder; a role is metadata, never authority)', room.participants, function (li, p) {
+      li.textContent = p.workerId + ' \\u2014 ' + (Array.isArray(p.roles) ? p.roles.join(', ') : '') + ' \\u00b7 ' +
+        bindingText({ providerId: p.providerId, memberIdentityKey: p.memberIdentityKey, source: p.providerId ? (p.memberIdentityKey ? 'declared_provider_and_registered_model' : 'declared_provider') : 'undeclared' });
+      li.setAttribute('data-collaboration-participant', p.workerId);
+    }, 'No worker is admitted. 0 means 0 \\u2014 nothing is drawn that was not recorded.');
+
+    listOf(card, 'Disagreements (explicit; never settled by count or recency)', room.disagreements, function (li, d) {
+      li.textContent = d.workerId + ' (' + d.role + ') disagrees with ' + d.disputedWorkerId + ' (' + d.disputedRole + ') \\u2014 contribution ' + d.contributionId + ' vs ' + d.disputesId + ' at ' + d.at;
+      li.setAttribute('data-collaboration-disagreement', d.contributionId);
+    }, 'No disagreement is recorded.');
+
+    listOf(card, 'Handoff requests (recommendations \\u2014 canonical assignment unchanged)', room.handoffRequests, function (li, h) {
+      li.textContent = h.fromWorkerId + ' requests handoff of task ' + h.taskId + ' to ' + h.toWorkerId + ': ' + h.reason + ' \\u00b7 ' + canonicalText(h.canonical);
+      li.setAttribute('data-collaboration-handoff', h.contributionId);
+    }, 'No handoff is requested.');
+
+    var contributions = room.contributions || { items: [], total: 0 };
+    textLine(card, 'order-label', 'Contributions (' + contributions.total + ' recorded' + (contributions.truncated ? ', newest ' + contributions.items.length + ' shown' : '') + ')');
+    if (!Array.isArray(contributions.items) || contributions.items.length === 0) {
+      textLine(card, 'muted', 'No contribution is recorded. 0 means 0 \\u2014 no worker activity is invented.');
+    } else {
+      var list = el('div', 'memory-cards');
+      for (var i = 0; i < contributions.items.length; i++) {
+        var c = contributions.items[i];
+        var item = el('article', 'panel memory-card collaboration-contribution');
+        item.setAttribute('data-collaboration-contribution', c.id);
+        item.setAttribute('data-collaboration-standing', String(c.standing));
+        var row = el('p', 'row');
+        row.appendChild(el('b', '', c.kind.toUpperCase() + ' by ' + c.workerId + ' as ' + c.role));
+        chip(row, String(c.standing), 'data-contribution-standing', String(c.standing));
+        if (c.taskId) chip(row, 'task ' + c.taskId);
+        item.appendChild(row);
+        textLine(item, '', c.content);
+        textLine(item, 'faint', c.id + ' \\u00b7 ' + c.at + ' \\u00b7 ' + bindingText(c.binding));
+        var stances = [];
+        if (Array.isArray(c.agreesWith) && c.agreesWith.length > 0) stances.push('agrees with ' + c.agreesWith.join(', '));
+        if (Array.isArray(c.disagreesWith) && c.disagreesWith.length > 0) stances.push('disagrees with ' + c.disagreesWith.join(', '));
+        if (Array.isArray(c.respondsTo) && c.respondsTo.length > 0) stances.push('responds to ' + c.respondsTo.join(', '));
+        if (Array.isArray(c.agreedBy) && c.agreedBy.length > 0) stances.push('agreed by ' + c.agreedBy.map(function (s) { return s.workerId; }).join(', '));
+        if (Array.isArray(c.disputedBy) && c.disputedBy.length > 0) stances.push('disputed by ' + c.disputedBy.map(function (s) { return s.workerId; }).join(', '));
+        if (stances.length > 0) textLine(item, 'muted', stances.join(' \\u00b7 '));
+        if (Array.isArray(c.truthRefs) && c.truthRefs.length > 0) {
+          textLine(item, 'muted', 'Truth refs (state derived now, unmoved by any agreement here): ' + c.truthRefs.map(function (t) { return t.id + ' = ' + (t.state || 'not visible'); }).join(' \\u00b7 '));
+        }
+        if (Array.isArray(c.evidenceRefs) && c.evidenceRefs.length > 0) textLine(item, 'muted', 'Evidence (op_evidence ids, referenced never copied): ' + c.evidenceRefs.join(', '));
+        if (Array.isArray(c.artifactRefs) && c.artifactRefs.length > 0) textLine(item, 'muted', 'Artifacts: ' + c.artifactRefs.join(', '));
+        if (c.handoff) textLine(item, 'muted', 'Handoff requested to ' + c.handoff.toWorkerId + ' for task ' + c.handoff.taskId + ' \\u2014 advisory. ' + canonicalText(c.handoff.canonical));
+        list.appendChild(item);
+      }
+      card.appendChild(list);
+    }
+
+    var truth = room.truth || { records: [], total: 0, unresolvedContradictions: 0 };
+    listOf(card, 'Truth + evidence about this mission and its tasks (' + truth.total + ' record(s), ' + truth.unresolvedContradictions + ' unresolved contradiction(s))', truth.records, function (li, t) {
+      li.textContent = t.state.toUpperCase() + (t.contested ? ' \\u00b7 CONTESTED' : '') + ' \\u2014 ' + t.entityKind + ' ' + t.entityId + ': ' + t.statement + ' (recorded by ' + t.recordedBy + ')';
+      li.setAttribute('data-collaboration-truth', t.id);
+    }, 'No truth record is about this mission or its tasks.');
+
+    listOf(card, 'Approvals pending at the Founder gate', room.approvals, function (li, a) {
+      li.textContent = 'task ' + a.taskId + ' \\u2014 approval ' + a.approvalId + ' (' + a.riskClass + ') requested by ' + a.requestedBy + ' at ' + a.requestedAt;
+    }, 'No approval is pending on this mission\\u2019s tasks.');
+
+    listOf(card, 'Recent orchestration runs', room.recentRuns, function (li, r) {
+      li.textContent = r.runId + ' by ' + r.requestedBy + ' at ' + r.at;
+    }, 'No orchestration run is recorded.');
+
+    var actions = room.externalActions || { items: [], total: 0 };
+    listOf(card, 'External actions on the ledger (' + actions.total + ')', actions.items, function (li, a) {
+      li.textContent = a.id + ' \\u2014 ' + a.adapterId + '/' + a.actionType + ' for task ' + a.taskId + ': ' + a.state + ' (' + a.riskLevel + ' risk) proposed by ' + a.requestedBy;
+    }, 'No external action is on the ledger for this mission.');
+
+    listOf(card, 'Sessions', room.sessions, function (li, sn) {
+      li.textContent = sn.title + ' (' + sn.id + ') \\u2014 ' + sn.standing + ' \\u00b7 ' + sn.participants.length + ' admitted \\u00b7 ' + sn.contributionCount + ' contribution(s) \\u00b7 opened by ' + sn.openedBy + ' at ' + sn.openedAt;
+      li.setAttribute('data-collaboration-session', sn.id);
+      if (canCommand && sn.standing === 'active') li.appendChild(admitForm(sn));
+    }, 'No session is open on this mission.');
+
+    if (!canCommand) textLine(card, 'readonly-note', 'Admission controls are off for this session \\u2014 ' + reason);
+    box.appendChild(card);
+  }
+
+  function admitForm(session) {
+    var form = el('div', 'order-field');
+    form.setAttribute('data-collaboration-admit-form', session.id);
+    var worker = document.createElement('input');
+    worker.type = 'text';
+    worker.setAttribute('aria-label', 'Registered worker id to admit to ' + session.id);
+    worker.placeholder = 'registered worker id';
+    var role = document.createElement('select');
+    role.setAttribute('aria-label', 'Collaboration role for the admitted worker');
+    for (var r = 0; r < ROLES.length; r++) {
+      var option = document.createElement('option');
+      option.value = ROLES[r];
+      option.textContent = ROLES[r];
+      role.appendChild(option);
+    }
+    var submit = document.createElement('button');
+    submit.type = 'button';
+    submit.className = 'order-live-submit';
+    submit.textContent = 'Admit worker';
+    var outcome = el('p', 'muted', '');
+    outcome.setAttribute('role', 'status');
+    outcome.setAttribute('aria-live', 'polite');
+    submit.addEventListener('click', function () {
+      var workerId = worker.value.trim();
+      if (workerId === '') { outcome.textContent = 'A registered worker id is required. Nothing was sent.'; return; }
+      submit.disabled = true;
+      outcome.textContent = 'Submitting\\u2026';
+      postJson(COLLAB_ADMIT_PATH, { sessionId: session.id, workerId: workerId, collaborationRole: role.value }).then(function (result) {
+        submit.disabled = false;
+        var body = result.body || {};
+        if (body.ok === true) { outcome.textContent = body.deduplicated ? 'Already admitted.' : 'Admitted.'; notifyStateChanged(); reload(); return; }
+        var error = body.error || {};
+        outcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given');
+      }).catch(function (error) {
+        submit.disabled = false;
+        outcome.textContent = 'Not submitted (' + error.message + ').';
+      });
+    });
+    form.appendChild(worker);
+    form.appendChild(role);
+    form.appendChild(submit);
+    form.appendChild(outcome);
+    return form;
+  }
+
+  function openForm(missions) {
+    var form = el('div', 'order-field');
+    form.setAttribute('data-collaboration-open-form', '');
+    textLine(form, 'order-label', 'Open a collaboration session on a canonical mission');
+    var open = [];
+    for (var i = 0; i < missions.length; i++) {
+      var st = missions[i].status;
+      if (st !== 'complete' && st !== 'failed' && st !== 'cancelled') open.push(missions[i]);
+    }
+    if (open.length === 0) {
+      textLine(form, 'muted', 'No non-terminal mission exists, so there is nothing to open a session on.');
+      return form;
+    }
+    var select = document.createElement('select');
+    select.setAttribute('aria-label', 'Mission to open a collaboration session on');
+    for (var m = 0; m < open.length; m++) {
+      var option = document.createElement('option');
+      option.value = open[m].id;
+      option.textContent = open[m].title + ' (' + open[m].status + ')';
+      select.appendChild(option);
+    }
+    var title = document.createElement('input');
+    title.type = 'text';
+    title.setAttribute('aria-label', 'Session title');
+    title.placeholder = 'session title (required)';
+    var purpose = document.createElement('input');
+    purpose.type = 'text';
+    purpose.setAttribute('aria-label', 'Session purpose (optional)');
+    purpose.placeholder = 'purpose (optional)';
+    var submit = document.createElement('button');
+    submit.type = 'button';
+    submit.className = 'order-live-submit';
+    submit.textContent = 'Open session';
+    var outcome = el('p', 'muted', '');
+    outcome.setAttribute('role', 'status');
+    outcome.setAttribute('aria-live', 'polite');
+    submit.addEventListener('click', function () {
+      var titleText = title.value.trim();
+      if (titleText === '') { outcome.textContent = 'A session title is required. Nothing was sent.'; return; }
+      var payload = { missionId: select.value, title: titleText };
+      if (purpose.value.trim() !== '') payload.purpose = purpose.value.trim();
+      submit.disabled = true;
+      outcome.textContent = 'Submitting\\u2026';
+      postJson(COLLAB_PATH, payload).then(function (result) {
+        submit.disabled = false;
+        var body = result.body || {};
+        if (body.ok === true) { outcome.textContent = body.deduplicated ? 'That session already exists.' : 'Session opened.'; notifyStateChanged(); reload(); return; }
+        var error = body.error || {};
+        outcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given');
+      }).catch(function (error) {
+        submit.disabled = false;
+        outcome.textContent = 'Not submitted (' + error.message + ').';
+      });
+    });
+    form.appendChild(select);
+    form.appendChild(title);
+    form.appendChild(purpose);
+    form.appendChild(submit);
+    form.appendChild(outcome);
+    return form;
+  }
+
+  function renderRooms(sessions, grant) {
+    var missionIds = [];
+    for (var i = 0; i < sessions.length; i++) {
+      if (missionIds.indexOf(sessions[i].missionId) === -1) missionIds.push(sessions[i].missionId);
+    }
+    var shown = missionIds.slice(0, ROOM_LIMIT);
+    if (missionIds.length > shown.length) {
+      textLine(box, 'muted', 'Rooms are shown for the newest ' + shown.length + ' of ' + missionIds.length + ' missions with sessions.');
+    }
+    if (shown.length === 0) {
+      textLine(box, 'muted', 'No collaboration session is open on any mission. 0 means 0 \\u2014 no room and no worker activity is invented.');
+    }
+    var pending = shown.length;
+    for (var m = 0; m < shown.length; m++) {
+      (function (missionId) {
+        jsonExchange(fetch(COLLAB_ROOM_PATH + '?missionId=' + encodeURIComponent(missionId), { headers: { accept: 'application/json' } }))
+          .then(function (result) {
+            var body = result.body || {};
+            if (body.ok === true && body.room) renderRoom(body.room, grant.collaborationCommand, grant.reason);
+            else textLine(box, 'muted', 'The room for mission ' + missionId + ' could not be read (' + ((body.error && body.error.code) || ('HTTP ' + result.status)) + ').');
+          })
+          .catch(function (error) {
+            textLine(box, 'muted', 'The room for mission ' + missionId + ' could not be read (' + error.message + ').');
+          })
+          .then(function () {
+            pending -= 1;
+            if (pending === 0) drawOpenForm(grant);
+          });
+      })(shown[m]);
+    }
+    if (shown.length === 0) drawOpenForm(grant);
+  }
+
+  function drawOpenForm(grant) {
+    if (!grant.collaborationCommand) {
+      textLine(box, 'readonly-note', 'The open-session form is off for this session \\u2014 ' + grant.reason);
+      return;
+    }
+    jsonExchange(fetch(MISSIONS_PATH, { headers: { accept: 'application/json' } }))
+      .then(function (result) {
+        var body = result.body || {};
+        box.appendChild(openForm(body.ok === true && Array.isArray(body.missions) ? body.missions : []));
+      })
+      .catch(function () {
+        box.appendChild(openForm([]));
+      });
+  }
+
+  function reload() {
+    jsonExchange(fetch(COLLAB_PATH, { headers: { accept: 'application/json' } }))
+      .then(function (result) {
+        var body = result.body || {};
+        if (body.ok !== true || !Array.isArray(body.sessions)) {
+          var error = body.error || {};
+          stayOff('the collaboration read was refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given'));
+          return;
+        }
+        var grant = grantedControls(sessionAnswer);
+        note.setAttribute('data-collaboration-console-state', 'live');
+        note.className = 'readonly-note console-state console-state-live';
+        note.textContent = 'Live: ' + body.total + ' collaboration session(s)' + (body.truncated ? ' (newest ' + body.sessions.length + ' shown)' : '') +
+          ', from the canonical record just now. Every worker shown was admitted by the Founder; every contribution shown was recorded under a resolved worker identity.';
+        box.textContent = '';
+        renderRooms(body.sessions, grant);
       })
       .catch(function (error) {
         stayOff('the HQ control API is not reachable from this page (' + error.message + ').');

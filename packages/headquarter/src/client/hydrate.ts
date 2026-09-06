@@ -320,6 +320,60 @@ function missionRow(mission: HqStateDocument['missions']['data'][number]): RoomR
   };
 }
 
+/**
+ * Phase 9: the Mission Room collaboration record, when the state document
+ * carries it. Every number is a COUNT the server made over stored, attributed
+ * contributions and admissions; an absent section contributes nothing (not a
+ * zero) — a static build opens no collaboration store and says so by omission.
+ * Nothing here is worker "activity": a session with no contribution is zero.
+ */
+function collaborationFacts(state: HqStateDocument): {
+  present: boolean;
+  sessions: number;
+  activeSessions: number;
+  workersAdmitted: number;
+  contributions: number;
+  disagreements: number;
+  handoffRequests: number;
+  sessionRows: RoomRow[];
+} {
+  const collaboration = state.collaboration?.data;
+  if (!collaboration) {
+    return {
+      present: false,
+      sessions: 0,
+      activeSessions: 0,
+      workersAdmitted: 0,
+      contributions: 0,
+      disagreements: 0,
+      handoffRequests: 0,
+      sessionRows: [],
+    };
+  }
+  return {
+    present: true,
+    sessions: collaboration.sessions,
+    activeSessions: collaboration.activeSessions,
+    workersAdmitted: collaboration.workersAdmitted,
+    contributions: collaboration.contributions,
+    disagreements: collaboration.disagreements,
+    handoffRequests: collaboration.handoffRequests,
+    sessionRows: collaboration.recent.map((session) => ({
+      id: `collaboration-${session.id}`,
+      primary: `Collaboration: ${session.title}`,
+      secondary:
+        `Mission ${session.missionId} · ${session.participants.length} admitted worker(s)` +
+        ` · ${session.contributionCount} contribution(s) · ${session.disagreementCount} disagreement(s)` +
+        ` · ${session.handoffRequestCount} handoff request(s) · opened by ${session.openedBy} at ${session.openedAt}`,
+      chips: [
+        { label: session.standing, tone: (session.standing === 'active' ? 'info' : 'neutral') as RoomTone },
+        ...(session.disagreementCount > 0 ? [{ label: 'disagreement', tone: 'warn' as RoomTone }] : []),
+        ...(session.handoffRequestCount > 0 ? [{ label: 'handoff requested', tone: 'warn' as RoomTone }] : []),
+      ],
+    })),
+  };
+}
+
 function missionsSection(state: HqStateDocument): Section {
   // PHASE 3 SEMANTIC CHANGE, recorded here deliberately (issue #254 and the
   // matching docs/JENIFY_DECISIONS.md entry). Until Phase 3 this room
@@ -352,6 +406,13 @@ function missionsSection(state: HqStateDocument): Section {
     ...missions.filter((mission) => mission.status === 'verified'),
     ...missions.filter((mission) => terminal.has(mission.status)),
   ];
+  // Phase 9: the collaboration record rides this room beside the missions
+  // it references. Counts only, present-only. An explicit disagreement or a
+  // handoff request is something the Founder decides on (resolve it by an
+  // act elsewhere; assign the task canonically) — so it lights attention;
+  // an active session with contributions is activity that was RECORDED, not
+  // inferred, and lights active.
+  const collaboration = collaborationFacts(state);
   return {
     metrics: [
       metric('Missions commanded', missions.length, 'Canonical missions the Founder has commanded. 0 means 0.', tone(missions.length, 'info')),
@@ -365,13 +426,26 @@ function missionsSection(state: HqStateDocument): Section {
             MISSION_ATTENTION_STATUSES.has(status) ? 'warn' : status === 'failed' ? 'danger' : 'neutral',
           ),
         ),
+      ...(collaboration.present
+        ? [
+            metric('Collaboration sessions', collaboration.sessions, 'Sessions opened on canonical missions; each references exactly one mission and holds no lifecycle of its own.', tone(collaboration.sessions, 'info')),
+            metric('Workers admitted', collaboration.workersAdmitted, 'Distinct registered workers the Founder admitted under a bounded role. A role is admission metadata, never authority.', tone(collaboration.workersAdmitted, 'violet')),
+            metric('Contributions', collaboration.contributions, 'Attributed, stored contributions with bound provider/model truth. Nothing here verifies or executes anything.', tone(collaboration.contributions, 'accent')),
+            metric('Open disagreements', collaboration.disagreements, 'Explicit disagrees-with stances between contributions. Agreement never auto-verifies; disagreement is listed until an act elsewhere resolves it.', tone(collaboration.disagreements, 'warn')),
+            metric('Handoff requests', collaboration.handoffRequests, 'Recommendations only — canonical claim, fence and Founder assignment are unchanged by any of them.', tone(collaboration.handoffRequests, 'warn')),
+          ]
+        : []),
     ],
-    rows: limited(ordered.map(missionRow)),
+    rows: limited([...ordered.map(missionRow), ...collaboration.sessionRows]),
     emptyMessage:
       'HQ holds no commanded mission. 0 means 0 — the Founder has commanded nothing yet, and ' +
       'nothing is invented to fill the room. Open tasks are the Command Room’s subject and are ' +
       'not restated here as missions.',
-    liveness: livenessFrom({ attention, active, present: missions.length }),
+    liveness: livenessFrom({
+      attention: attention + collaboration.disagreements + collaboration.handoffRequests,
+      active: active + (collaboration.contributions > 0 ? collaboration.activeSessions : 0),
+      present: missions.length + collaboration.sessions,
+    }),
   };
 }
 

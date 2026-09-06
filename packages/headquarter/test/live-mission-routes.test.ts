@@ -154,7 +154,13 @@ describe('the write surface is stated, not inferred', () => {
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.actions);
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.actionReconcile);
     expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.actionDetail);
-    expect(CONTROL_WRITE_ROUTES).toHaveLength(20);
+    // Phase 9: the collaboration open and admit POSTs. The room and context
+    // reads are GETs and stay off the write surface; contribute has no route.
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.collaboration);
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.collaborationAdmit);
+    expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.collaborationRoom);
+    expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.collaborationContext);
+    expect(CONTROL_WRITE_ROUTES).toHaveLength(22);
   });
 });
 

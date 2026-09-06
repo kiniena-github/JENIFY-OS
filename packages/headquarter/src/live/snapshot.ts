@@ -43,6 +43,7 @@ import { missionBrowserView, type MissionBrowserView } from '../application/miss
 import { projectBrowserView, type ProjectBrowserView } from '../application/project-command.js';
 import type { MemoryBrowserView } from '../application/memory-command.js';
 import { TRUTH_SNAPSHOT_LIMIT, type TruthSnapshotView } from '../application/truth-command.js';
+import { COLLABORATION_SNAPSHOT_LIMIT, type CollaborationSnapshotView } from '../application/collaboration-command.js';
 import type { ProviderId, SecretsEnv } from '../routing/providers.js';
 import { assessConnections, type ConnectionProbe, type ConnectionStatus } from './connections.js';
 import { assertBrowserSafe, assertNoFabricatedFields } from './redaction.js';
@@ -219,6 +220,15 @@ export interface HqSnapshot {
    * unauthenticated artifact withholds them and counts the exclusion.
    */
   truth?: SnapshotSection<TruthSnapshotView>;
+  /**
+   * The Mission Room collaboration record (Phase 9) — counts HQ made over
+   * every session plus the newest `COLLABORATION_SNAPSHOT_LIMIT` session
+   * views, each with its DERIVED standing and admitted workers. OPTIONAL by
+   * shape for the truth section's reason: a static build opens no store and
+   * states nothing rather than an invented zero section. No participant
+   * activity is invented; a session with no contribution counts zero.
+   */
+  collaboration?: SnapshotSection<CollaborationSnapshotView>;
 }
 
 /**
@@ -286,6 +296,8 @@ export interface SnapshotSources {
   memory: { data: MemoryBrowserView[]; provenance: Provenance };
   /** The truth/evidence projection (Phase 7). Optional — omitted means no truth store was read. */
   truth?: { data: TruthSnapshotView; provenance: Provenance };
+  /** The collaboration record (Phase 9). Optional — omitted means no collaboration store was read. */
+  collaboration?: { data: CollaborationSnapshotView; provenance: Provenance };
   /**
    * Per-worker provider declarations (Phase 4). Optional: an omitted map
    * means the building context holds no declaration truth — every worker's
@@ -332,6 +344,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       sources.projects.provenance.mode,
       sources.memory.provenance.mode,
       ...(sources.truth ? [sources.truth.provenance.mode] : []),
+      ...(sources.collaboration ? [sources.collaboration.provenance.mode] : []),
     ]),
     note: sources.note ?? null,
     counts: {
@@ -408,6 +421,9 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
           )
         : section(sources.memory.provenance, sources.memory.data),
     ...(sources.truth ? { truth: section(sources.truth.provenance, sources.truth.data) } : {}),
+    ...(sources.collaboration
+      ? { collaboration: section(sources.collaboration.provenance, sources.collaboration.data) }
+      : {}),
   };
 
   // Fail closed: prove it before anyone can publish it.
@@ -565,6 +581,14 @@ export function liveSnapshotFromOperations(
       })
     : null;
 
+  // Phase 9 collaboration section: counts over every session plus the newest
+  // views. Founder-gated and unauthenticated readers see the same counts —
+  // a session view carries no founder_only material by construction (worker
+  // ids, roles, bindings, titles, counts).
+  const collaboration = ops.collaborationStorePresent()
+    ? ops.collaborationSummary({ limit: COLLABORATION_SNAPSHOT_LIMIT })
+    : null;
+
   return buildHqSnapshot({
     workerProviders,
     workerMembers,
@@ -714,6 +738,40 @@ export function liveSnapshotFromOperations(
             note:
               'This database predates the Phase 7 truth schema and was opened read-only, so no truth ' +
               'store exists to read. 0 rows states that absence; nothing was migrated.',
+          },
+        },
+    collaboration: collaboration
+      ? {
+          data: collaboration,
+          provenance: {
+            mode,
+            source:
+              'hq_collab_sessions / hq_collab_participants / hq_collab_contributions / hq_collab_relations via ' +
+              'HeadquarterOperations.collaborationSummary (derived projection; a session references one hq_missions row)',
+            asOf: at,
+            note:
+              collaboration.sessions > collaboration.recent.length
+                ? `Carries the newest ${collaboration.recent.length} of ${collaboration.sessions} sessions; sessions states the count.`
+                : undefined,
+          },
+        }
+      : {
+          data: {
+            sessions: 0,
+            activeSessions: 0,
+            workersAdmitted: 0,
+            contributions: 0,
+            disagreements: 0,
+            handoffRequests: 0,
+            recent: [],
+          },
+          provenance: {
+            mode,
+            source: 'hq_collab_sessions via HeadquarterOperations.collaborationSummary',
+            asOf: at,
+            note:
+              'This database predates the Phase 9 collaboration schema and was opened read-only, so no ' +
+              'collaboration store exists to read. 0 rows states that absence; nothing was migrated.',
           },
         },
   });

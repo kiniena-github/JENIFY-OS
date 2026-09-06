@@ -415,7 +415,7 @@ describe('every hostile caller is refused, and nothing is written', () => {
     }
   });
 
-  it('exposes no generic mutation surface — the whole route table is twenty-eight entries', () => {
+  it('exposes no generic mutation surface — the whole route table is thirty-two entries', () => {
     // Nine since Phase 3 (issue #254); seventeen since Phase 4 (issue #262);
     // twenty-one since Phase 5+6 (issue #265): the memory GET+POST, the two
     // parameterized memory reads (search, context), and the one orchestrate
@@ -424,6 +424,10 @@ describe('every hostile caller is refused, and nothing is written', () => {
     // Twenty-eight since Phase 8: the action-ledger GET+POST (list/propose),
     // the parameterized detail read, and the reconcile POST — authorization
     // and execution have NO route, because humans never execute.
+    // Thirty-two since Phase 9: the collaboration GET+POST (list/open), the
+    // parameterized room and context reads, and the admit POST — a
+    // contribution is a worker act under its own resolved identity and has
+    // NO route, for the reason authorize/execute have none.
     // Each widening of the write surface beyond the 2026-08-28 three is
     // itself Founder-approved and recorded in docs/JENIFY_DECISIONS.md. What
     // this assertion protects is unchanged — no route takes a table, a
@@ -436,6 +440,10 @@ describe('every hostile caller is refused, and nothing is written', () => {
       '/api/hq/control/approvals',
       '/api/hq/control/approvals/approve',
       '/api/hq/control/approvals/deny',
+      '/api/hq/control/collaboration',
+      '/api/hq/control/collaboration/admit',
+      '/api/hq/control/collaboration/context',
+      '/api/hq/control/collaboration/room',
       '/api/hq/control/memory',
       '/api/hq/control/memory/context',
       '/api/hq/control/memory/search',

@@ -103,6 +103,14 @@ import {
   resolveLocalAdminInvocation,
 } from '../live/local-trust.js';
 import { readFlag, missingFlagValueMessage } from './flags.js';
+import {
+  COLLABORATION_COMMAND_CAPABILITY,
+  COLLABORATION_CONTRIBUTE_CAPABILITY,
+  collaborationCommandCapabilityState,
+  collaborationContributeCapabilityState,
+  registerCollaborationCommandCapability,
+  registerCollaborationContributeCapability,
+} from '../application/collaboration-command.js';
 
 /**
  * The capabilities this command may register — fail closed: an id outside
@@ -130,6 +138,16 @@ const REGISTRABLE = {
   [MISSION_ORCHESTRATE_CAPABILITY.id]: {
     register: registerMissionOrchestrateCapability,
     state: missionOrchestrateCapabilityState,
+  },
+  // Phase 9: the two collaboration trios — the Founder's command trio and
+  // the worker-holdable contribute trio — join the fail-closed list.
+  [COLLABORATION_COMMAND_CAPABILITY.id]: {
+    register: registerCollaborationCommandCapability,
+    state: collaborationCommandCapabilityState,
+  },
+  [COLLABORATION_CONTRIBUTE_CAPABILITY.id]: {
+    register: registerCollaborationContributeCapability,
+    state: collaborationContributeCapabilityState,
   },
 } as const;
 

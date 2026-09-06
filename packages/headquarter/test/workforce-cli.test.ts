@@ -15,6 +15,13 @@ import { HeadquarterOperations } from '../src/application/service.js';
 import { HumanPrincipalRegistry } from '../src/application/principals.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { PROJECT_COMMAND_CAPABILITY } from '../src/application/project-command.js';
+import {
+  COLLABORATION_COMMAND_CAPABILITY,
+  COLLABORATION_CONTRIBUTE_CAPABILITY,
+  collaborationCommandCapabilityState,
+  collaborationContributeCapabilityState,
+} from '../src/application/collaboration-command.js';
+import { capabilityRowFor } from '../src/application/service.js';
 
 /** One shared in-memory db per test, reopened by every openDb call. */
 function harness(): { db: HqDatabase; openDb: () => HqDatabase } {
@@ -44,6 +51,24 @@ describe('capability registration is fail-closed to the known trio', () => {
     expect(
       db.prepare(`SELECT enabled FROM op_capabilities WHERE id = ?`).get(PROJECT_COMMAND_CAPABILITY.id),
     ).toBeDefined();
+  });
+
+  it('registers the two Phase 9 collaboration trios with their reserved contracts, one per run, and reports the state honestly', () => {
+    const { db, openDb } = harness();
+    for (const [id, state] of [
+      [COLLABORATION_COMMAND_CAPABILITY.id, collaborationCommandCapabilityState],
+      [COLLABORATION_CONTRIBUTE_CAPABILITY.id, collaborationContributeCapabilityState],
+    ] as const) {
+      const result = executeWorkforceCommand(['--register-capability', id], openDb);
+      expect(result.ok, id).toBe(true);
+      expect(result.lines.join('\n')).toContain('missing → enabled');
+      const ops = new HeadquarterOperations(db, { store: new HeadquarterStore(db) });
+      expect(state(capabilityRowFor(ops, id))).toBe('enabled');
+    }
+    const command = db.prepare(`SELECT risk_class, side_effect, idempotent FROM op_capabilities WHERE id = ?`).get(COLLABORATION_COMMAND_CAPABILITY.id);
+    expect(command).toEqual({ risk_class: 'founder_gate', side_effect: 0, idempotent: 1 });
+    const contribute = db.prepare(`SELECT risk_class, side_effect, idempotent FROM op_capabilities WHERE id = ?`).get(COLLABORATION_CONTRIBUTE_CAPABILITY.id);
+    expect(contribute).toEqual({ risk_class: 'reversible', side_effect: 0, idempotent: 1 });
   });
 
   it('refuses an id outside the trio and never enables a disabled row', () => {

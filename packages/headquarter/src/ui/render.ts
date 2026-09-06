@@ -30,6 +30,7 @@ import type { WorkerDescriptor, WorkerRole } from '../contracts/workers.js';
 import type { ArchiveRecord } from '../archive/schema.js';
 import type { MonthlyGroup, EvolutionChain } from '../archive/views.js';
 import { MEMORY_KINDS, MEMORY_PRIVACY_LEVELS } from '../memory/schema.js';
+import { COLLABORATION_ROLES } from '../application/collaboration-command.js';
 import type { TaskState } from './model.js';
 import type {
   FounderDashboard,
@@ -63,6 +64,7 @@ import {
   connectionsLiveScript,
   missionCommandConsoleScript,
   missionsConsoleScript,
+  collaborationConsoleScript,
   projectsConsoleScript,
   memoryConsoleScript,
   truthConsoleScript,
@@ -718,6 +720,10 @@ ${
   const missionRoom = `<div class="panel">
 <p class="readonly-note">The canonical missions the Founder has commanded — objective, constraints, plan, blockers and lifecycle, read live from the same-origin control API. This static render holds no mission data and claims none; the list below is drawn only from a live, Founder-authenticated read. Zero commanded missions renders as an explicit zero.</p>
 <div data-missions-console></div>
+</div>
+<div class="panel">
+<p class="readonly-note">The Mission Room’s collaboration record (Phase 9): for each mission with a collaboration session — the canonical tasks with their live claim and Founder assignment, the workers the Founder admitted (with the provider/model binding HQ recorded, never inferred), the actual contributions with their explicit agreement and disagreement stances, handoff requests beside the canonical assignment they did not change, the truth records about the mission, pending approvals, blockers, recent orchestration runs and external actions. Read live from the same-origin control API; this static render holds none of it. Agreement between workers never verifies anything; a role is admission metadata, never authority; no worker activity is animated or invented.</p>
+<div data-collaboration-console></div>
 </div>`;
 
   const projectRegister = `<div class="panel">
@@ -731,7 +737,7 @@ ${
     eyebrow: 'Company portfolio board',
     lede: 'The canonical project register, the missions each project carries, and the archive-derived activity board.',
     asOf: nowIso,
-    body: `${section('PROJECT REGISTER — CANONICAL', projectRegister, 'project-register')}${projectsConsoleScript()}${section('MISSION ROOM — FOUNDER COMMAND RECORD', missionRoom, 'mission-room')}${missionsConsoleScript()}${section('ACTIVITY BY PROJECT LABEL — ARCHIVE-DERIVED', board)}${timelineHtml}`,
+    body: `${section('PROJECT REGISTER — CANONICAL', projectRegister, 'project-register')}${projectsConsoleScript()}${section('MISSION ROOM — FOUNDER COMMAND RECORD', missionRoom, 'mission-room')}${missionsConsoleScript()}${collaborationConsoleScript(COLLABORATION_ROLES)}${section('ACTIVITY BY PROJECT LABEL — ARCHIVE-DERIVED', board)}${timelineHtml}`,
     provenanceNote,
     sourceMode,
   });
