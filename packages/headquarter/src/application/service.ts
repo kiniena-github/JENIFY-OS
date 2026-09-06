@@ -72,8 +72,14 @@ import { nowIso } from '../store/db.js';
 import { HeadquarterStore } from '../store/headquarter.js';
 import { QUEUED_UNREACHABLE_STATUSES, type ActivityStatus } from '../contracts/events.js';
 import type { WorkerDescriptor, WorkerRole } from '../contracts/workers.js';
-import { evaluatePolicy, type PolicyContext, type PolicyDecision } from '../operator/policy.js';
-import { canonicalJson, taskActionDigest, type ApprovalRejection } from '../operator/approvals.js';
+import { approvalRequired, evaluatePolicy, type PolicyContext, type PolicyDecision } from '../operator/policy.js';
+import {
+  approvalExpiredAt,
+  canonicalJson,
+  taskActionDigest,
+  validateApprovalClaimBinding,
+  type ApprovalRejection,
+} from '../operator/approvals.js';
 import { assertNoSecretLikeContent, type EvidenceEntry } from '../operator/evidence.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import {
@@ -87,8 +93,10 @@ import {
   ProviderBindingViolation,
   ProviderDeclarationRejected,
   WorkerProviderDirectory,
+  readProviderBinding,
   type WorkerProviderRecord,
 } from '../operator/provider-binding.js';
+import { assertBrowserSafe } from '../live/redaction.js';
 import { PROVIDERS, type ProviderId } from '../routing/providers.js';
 
 /**
@@ -567,6 +575,47 @@ import {
   type VerificationMethod,
   type VerificationVerdict,
 } from './truth-command.js';
+import {
+  ACTION_READ_LIMIT,
+  EXTERNAL_ACTION_KILL_SCOPE,
+  MAX_ACTION_CONTEXT_REFS,
+  MAX_ACTION_NOTE_LENGTH,
+  MAX_ACTION_PAYLOAD_CHARS,
+  MAX_ACTION_TARGET_LENGTH,
+  ACTION_TYPE_PATTERN,
+  actionGatewaySchemaPresent,
+  actionIdempotencyKey,
+  actionPayloadDigest,
+  adapterContractProblems,
+  adapterKillSwitchScope,
+  assessActionRisk,
+  authorizationDigest,
+  deriveActionView,
+  ensureActionGatewaySchema,
+  isActionBlastRadius,
+  isActionReconcileDecision,
+  isActionState,
+  loadActionEvents,
+  loadActionIntent,
+  loadActionIntents,
+  providerKillSwitchScope,
+  riskRequiresApproval,
+  sideEffectGeneration,
+  sideEffectHolder,
+  sideEffectKey,
+  sideEffectKeyBase,
+  snapshotDrift,
+  stateAdmitsAttempt,
+  stateAdmitsReconciliation,
+  type ActionIntentRow,
+  type ActionReconcileDecision,
+  type ActionRiskEscalations,
+  type ActionState,
+  type ActionView,
+  type AdapterOutcome,
+  type AuthorizedSnapshot,
+  type ExternalActionAdapter,
+} from './action-gateway.js';
 import { CLIENT_IDENTITY_KEYS } from '../live/auth.js';
 import { ensureMemoryTables, memorySchemaPresent, MemoryStore, searchMemory } from '../memory/store.js';
 import {
@@ -627,7 +676,18 @@ export type OpsErrorCode =
   | 'unknown_entity'
   | 'truth_conflict'
   | 'truth_not_verified'
-  | 'truth_contested';
+  | 'truth_contested'
+  // Phase 8 — the authority/risk/external-action gateway.
+  | 'unknown_action'
+  | 'unknown_adapter'
+  | 'action_state_conflict'
+  | 'action_outcome_unknown'
+  | 'duplicate_external_action'
+  | 'action_approval_stale'
+  | 'approval_required_by_risk'
+  | 'intent_changed'
+  | 'task_not_executing'
+  | 'mission_not_active';
 
 export interface OpsError {
   code: OpsErrorCode;
@@ -1223,6 +1283,16 @@ export interface HeadquarterOperationsOptions {
    * dispatch lane; a worker handed the resulting `ops` has no way to obtain it.
    */
   grantDispatchEvidence?: (grant: DispatchEvidenceGrant) => void;
+  /**
+   * The external-action adapters this deployment may execute through (Phase
+   * 8). Supplied ONLY by the composition root, exactly like the dispatch
+   * evidence grant: an adapter is an execution mechanism, and nothing holding
+   * `ops` may register one. A contract that fails `adapterContractProblems`
+   * refuses construction loudly rather than becoming a silently unusable lane.
+   * Omitted ⇒ the gateway records nothing executable and every execute refuses
+   * `unknown_adapter`.
+   */
+  actionAdapters?: readonly ExternalActionAdapter[];
 }
 
 /** Who an actor turned out to be, once resolved against both registries. */
@@ -1271,6 +1341,14 @@ function bindGet(db: HqDatabase, sql: string): (...params: unknown[]) => unknown
  * an enforcement-safe path rather than another patchable surface.
  */
 let readCapabilityRow: (ops: HeadquarterOperations, capabilityId: string) => Capability | null;
+
+/**
+ * Module-private, same recipe as `readCapabilityRow` (Phase 8, Low 7): the
+ * canonical kill-switch read published to `killSwitchEngagedFor` and nothing
+ * else, so a provider lane deciding dispatch eligibility can read the row
+ * through a function binding instead of the patchable queue delegate.
+ */
+let readKillSwitchEngaged: (ops: HeadquarterOperations, capabilityId?: string) => boolean;
 
 export class HeadquarterOperations {
   readonly queue: OperatorQueue;
@@ -1429,6 +1507,17 @@ export class HeadquarterOperations {
   /** The Phase 7 truth/evidence schema, same truth-recording as missions above. */
   readonly #truthStorePresent: boolean;
 
+  /** The Phase 8 action ledger schema, same truth-recording as missions above. */
+  readonly #actionStorePresent: boolean;
+
+  /**
+   * The external-action adapters, keyed by id — `#private`, handed in by the
+   * composition root once, and read by the gateway's execute path ONLY. There
+   * is deliberately no register/unregister method: an adapter is an execution
+   * mechanism, so adding one is a construction-time act, never a runtime one.
+   */
+  readonly #actionAdapters: ReadonlyMap<string, ExternalActionAdapter>;
+
   /**
    * The Phase 5 company-memory store (issue #120 wired by #265), or null over
    * a read-only pre-Phase-5 file. `#private` and read by the memory facade
@@ -1481,19 +1570,57 @@ export class HeadquarterOperations {
    */
   readonly #killSwitchEngagedFromStore: (capabilityId?: string) => boolean;
 
+  /**
+   * The same canonical `op_kill_switch` read over an ARBITRARY scope list
+   * (Phase 8). The gateway honours four scope families at once — global, the
+   * task's capability, `external_action`, `provider:<id>` and `adapter:<id>`
+   * — and reads them through this closure, never through the patchable public
+   * delegate. Returns the FIRST engaged scope so a refusal can name it.
+   *
+   * Phase 8 also migrated the load-bearing Low-7 call sites onto the
+   * single-capability closure above: `approveTask` (an approval primed to
+   * run the instant a switch releases), `claimNext` (a claim/dispatch
+   * decision) and the `orchestrateMission` apply precheck. The one call site
+   * deliberately LEFT on `queue.killSwitchEngaged` is `#missionExecutionState`,
+   * which is a derived read projection (the Mission Room's picture) that
+   * decides no write — a lie there misinforms the patcher's own display and
+   * changes nothing that is enforced.
+   */
+  readonly #engagedKillSwitchScopeFromStore: (scopes: readonly string[]) => string | null;
+
   constructor(db: HqDatabase, options: HeadquarterOperationsOptions = {}) {
     this.#db = db;
-    this.#killSwitchEngagedFromStore = (capabilityId?: string): boolean => {
-      const scopes = [GLOBAL_SCOPE, ...(capabilityId ? [capabilityId] : [])];
+    this.#engagedKillSwitchScopeFromStore = (scopes: readonly string[]): string | null => {
+      const list = [...new Set(scopes)];
+      if (list.length === 0) return null;
       const row = db
         .prepare(
-          `SELECT 1 AS hit FROM op_kill_switch WHERE engaged = 1 AND scope IN (${scopes
+          `SELECT scope FROM op_kill_switch WHERE engaged = 1 AND scope IN (${list
             .map(() => '?')
-            .join(',')}) LIMIT 1`,
+            .join(',')}) ORDER BY scope LIMIT 1`,
         )
-        .get(...scopes);
-      return row !== undefined;
+        .get(...list) as { scope: string } | undefined;
+      return row?.scope ?? null;
     };
+    this.#killSwitchEngagedFromStore = (capabilityId?: string): boolean =>
+      this.#engagedKillSwitchScopeFromStore([GLOBAL_SCOPE, ...(capabilityId ? [capabilityId] : [])]) !== null;
+    // Adapters are validated at construction: a broken contract is a
+    // composition error and must surface where the composition happened.
+    const adapters = new Map<string, ExternalActionAdapter>();
+    for (const adapter of options.actionAdapters ?? []) {
+      const problems = adapterContractProblems(adapter);
+      if (problems.length > 0) {
+        throw new Error(
+          `External-action adapter ${String(adapter?.id)} has an invalid contract: ${problems.join('; ')}. ` +
+            'Nothing was constructed: an adapter that cannot state its own reversibility is not an adapter HQ will execute through.',
+        );
+      }
+      if (adapters.has(adapter.id)) {
+        throw new Error(`External-action adapter id ${adapter.id} is declared twice; adapter identity must be unique.`);
+      }
+      adapters.set(adapter.id, adapter);
+    }
+    this.#actionAdapters = adapters;
     this.#capabilityFromStore = (capabilityId: string): Capability | null => {
       const row = db.prepare(`SELECT * FROM op_capabilities WHERE id = ?`).get(capabilityId) as
         | Record<string, unknown>
@@ -1514,6 +1641,7 @@ export class HeadquarterOperations {
     ensureMemoryTables(db);
     ensureOrchestratorSchema(db);
     ensureTruthSchema(db);
+    ensureActionGatewaySchema(db);
     // A writable construction just ensured the mission/project/memory tables.
     // A READ-ONLY one (the hq:snapshot path) may be observing an older file
     // that has some or none of them — the ensures above deliberately write
@@ -1524,6 +1652,7 @@ export class HeadquarterOperations {
     this.#projectStorePresent = db.readonly ? projectCommandSchemaPresent(db) : true;
     this.#memoryStorePresent = db.readonly ? memorySchemaPresent(db) : true;
     this.#truthStorePresent = db.readonly ? truthSchemaPresent(db) : true;
+    this.#actionStorePresent = db.readonly ? actionGatewaySchemaPresent(db) : true;
     this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
     // Company memory (Phase 5, issue #265): the issue-#120 store, finally
@@ -1909,7 +2038,12 @@ export class HeadquarterOperations {
     const cap = this.queue.capabilities.get(task.capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${task.capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${cap.id} is disabled`);
-    if (this.queue.killSwitchEngaged(task.capabilityId)) {
+    // Enforcement-safe read (Phase 8, the carried-forward Low 7): this answer
+    // decides whether an approval row is WRITTEN, so it may not come from the
+    // patchable `queue.killSwitchEngaged` convenience delegate. A forged
+    // delegate used to let an approval land while the switch was engaged —
+    // approved work sitting primed to run the instant the switch released.
+    if (this.#killSwitchEngagedFromStore(task.capabilityId)) {
       // Refuse rather than let approved work sit primed to run the instant the
       // switch is released.
       return fail('kill_switch_engaged', `Kill switch is engaged for ${task.capabilityId}`);
@@ -2048,7 +2182,13 @@ export class HeadquarterOperations {
         `Worker ${workerId} is not allowed capability ${capabilityId} (least privilege)`,
       );
     }
-    if (this.queue.killSwitchEngaged(capabilityId)) {
+    // Enforcement-safe read (Phase 8, Low 7): a claim is an execution decision
+    // and the typed `kill_switch_engaged` refusal is what the dispatch lane
+    // reports. The canonical `OperatorQueue.claim` re-reads its own private
+    // row check below regardless, so a forged delegate never produced a claim
+    // — but it did turn "stopped" into "nothing_claimable", which misreports
+    // an emergency stop as an empty queue.
+    if (this.#killSwitchEngagedFromStore(capabilityId)) {
       return fail('kill_switch_engaged', `Kill switch is engaged for ${capabilityId}`);
     }
 
@@ -2381,6 +2521,8 @@ export class HeadquarterOperations {
   static {
     readCapabilityRow = (ops: HeadquarterOperations, capabilityId: string): Capability | null =>
       ops.#capabilityFromStore(capabilityId);
+    readKillSwitchEngaged = (ops: HeadquarterOperations, capabilityId?: string): boolean =>
+      ops.#killSwitchEngagedFromStore(capabilityId);
   }
 
   /**
@@ -4328,10 +4470,11 @@ export class HeadquarterOperations {
         { status: mission.status },
       );
     }
-    if (
-      input.mode === 'apply' &&
-      (this.queue.killSwitchEngaged() || this.queue.killSwitchEngaged(MISSION_ORCHESTRATE_CAPABILITY.id))
-    ) {
+    // Enforcement-safe read (Phase 8, Low 7). The locked revalidation below
+    // already reads the canonical row, so a forged delegate could never make
+    // apply WRITE on an engaged switch — but this precheck decides a refusal
+    // outcome, and the rule is that no decision reads the patchable delegate.
+    if (input.mode === 'apply' && this.#killSwitchEngagedFromStore(MISSION_ORCHESTRATE_CAPABILITY.id)) {
       // Wholesale, before any write: an orchestrated read-only task would
       // land `queued` — primed to run the moment the switch releases.
       return fail(
@@ -6559,6 +6702,1092 @@ export class HeadquarterOperations {
     return deriveTruthRecord(record, graph, this.#truthSubjectDrift(record));
   }
 
+  // ---- Phase 8: authority + risk + external action gateway ----
+
+  /**
+   * Propose one external action against a canonical task — the ONLY way an
+   * action intent comes into existence. Executes nothing.
+   *
+   * The proposer must resolve (worker or human, never `system`) and hold the
+   * task's capability from its own registry. The adapter and action type must
+   * be ones this deployment was constructed with; the provider the task is
+   * bound to must be the provider the adapter executes as (no substitution,
+   * decided here and again at execution); every context ref must name a real
+   * `op_evidence` entry or `hq_truth_records` row (referenced, never copied,
+   * and never granting anything). Risk is assessed by the one deterministic
+   * function from the CANONICAL capability row and the adapter's declared
+   * contract — the proposer's inputs can only escalate it.
+   */
+  proposeAction(input: {
+    taskId: string;
+    adapterId: string;
+    actionType: string;
+    target: string;
+    payload: Record<string, unknown>;
+    missionId?: string;
+    risk?: ActionRiskEscalations;
+    contextEvidenceRefs?: string[];
+    contextTruthRefs?: string[];
+    /** Resolved actor id. Set by the boundary, never read from a body. */
+    requestedBy: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ action: ActionView; deduplicated: boolean }> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    const taskId = input.taskId?.trim() ?? '';
+    if (!taskId) return fail('invalid_input', 'taskId is required');
+    const adapterId = input.adapterId?.trim() ?? '';
+    const actionType = input.actionType?.trim() ?? '';
+    if (!adapterId || !actionType || !ACTION_TYPE_PATTERN.test(actionType)) {
+      return fail('invalid_input', 'adapterId and a well-formed actionType are required');
+    }
+    const target = missionText('target', input.target, MAX_ACTION_TARGET_LENGTH, true);
+    if (!target.ok) return fail('invalid_input', target.message);
+    if (input.payload == null || typeof input.payload !== 'object' || Array.isArray(input.payload)) {
+      return fail('invalid_input', 'payload must be a plain object');
+    }
+    const payloadJson = canonicalJson(input.payload);
+    if (payloadJson.length > MAX_ACTION_PAYLOAD_CHARS) {
+      return fail('invalid_input', `payload exceeds ${MAX_ACTION_PAYLOAD_CHARS} canonical characters`);
+    }
+    // BOTH guards, deliberately: the evidence heuristic catches `token: value`
+    // in free text, and the browser guard's KEY rule catches `{ token: '…' }`
+    // as a field — which the JSON encoding hides from the first pattern. The
+    // payload is stored permanently and handed verbatim to an adapter.
+    try {
+      assertNoSecretLikeContent(input.payload);
+      assertBrowserSafe(input.payload, 'payload');
+      assertBrowserSafe({ target: target.value }, 'target');
+    } catch {
+      return fail(
+        'invalid_input',
+        'The action payload or target looks like it contains a credential. An action intent is stored permanently and its digest travels to the browser, so nothing was proposed.',
+      );
+    }
+    const escalations = input.risk ?? {};
+    for (const key of ['productionScope', 'spend', 'credentialSensitivity', 'legalCompliance'] as const) {
+      if (escalations[key] !== undefined && typeof escalations[key] !== 'boolean') {
+        return fail('invalid_input', `risk.${key} must be a boolean`);
+      }
+    }
+    if (escalations.blastRadius !== undefined && !isActionBlastRadius(escalations.blastRadius)) {
+      return fail('invalid_input', 'risk.blastRadius must be single, many or system');
+    }
+    const evidenceRefs = memoryList('contextEvidenceRefs', input.contextEvidenceRefs, 200);
+    if (!evidenceRefs.ok) return fail('invalid_input', evidenceRefs.message);
+    const truthRefs = memoryList('contextTruthRefs', input.contextTruthRefs, 200);
+    if (!truthRefs.ok) return fail('invalid_input', truthRefs.message);
+    if (evidenceRefs.value.length > MAX_ACTION_CONTEXT_REFS || truthRefs.value.length > MAX_ACTION_CONTEXT_REFS) {
+      return fail('invalid_input', `context refs are bounded to ${MAX_ACTION_CONTEXT_REFS} entries each`);
+    }
+    const missionId = input.missionId?.trim() || null;
+
+    // Identity first: an unknown actor learns nothing about which tasks exist.
+    const actor = this.#resolveActor(input.requestedBy, 'propose an external action');
+    if (!actor.ok) return actor;
+    if (!this.#actionStorePresent) return fail('invalid_input', 'action ledger unavailable on this database handle');
+
+    const task = this.#taskRowFromStore(taskId);
+    if (!task) return fail('unknown_task', `Unknown task: ${taskId}`);
+    if (!actor.data.allowedCapabilities.includes(task.capabilityId)) {
+      return fail(
+        'not_permitted',
+        `${input.requestedBy} may not propose an external action for ${task.capabilityId}: ${
+          actor.data.kind === 'worker' ? 'the worker directory grants' : 'the principal holds'
+        } no such capability`,
+        { actor: input.requestedBy, capabilityId: task.capabilityId },
+      );
+    }
+    if (task.status === 'completed' || task.status === 'blocked') {
+      return fail(
+        'task_not_executing',
+        `Task ${taskId} is ${task.status}; no external action can be proposed for it`,
+        { status: task.status },
+      );
+    }
+    const adapter = this.#actionAdapters.get(adapterId);
+    if (!adapter) return fail('unknown_adapter', `Unknown external-action adapter: ${adapterId}`);
+    const contract = adapter.actions[actionType];
+    if (!contract) {
+      return fail('unknown_adapter', `Adapter ${adapterId} declares no action type ${actionType}`, { adapterId });
+    }
+    const cap = this.#capabilityFromStore(task.capabilityId);
+    if (!cap) return fail('unknown_capability', `Unknown capability: ${task.capabilityId}`);
+    if (!cap.enabled) return fail('capability_disabled', `Capability ${cap.id} is disabled`);
+
+    const binding = readProviderBinding(task.payload);
+    if (binding.bound && binding.provider == null) {
+      return fail('provider_binding_mismatch', `Task ${taskId} declares a malformed executionProvider; nobody may act on it`);
+    }
+    if (binding.bound && adapter.provider !== binding.provider) {
+      return fail(
+        'provider_binding_mismatch',
+        `Task ${taskId} is bound to provider ${binding.provider} and adapter ${adapterId} executes as ${
+          adapter.provider ?? 'no provider (local)'
+        }. No substitution is made.`,
+        { requiredProvider: binding.provider, adapterProvider: adapter.provider },
+      );
+    }
+    const providerId = binding.bound ? binding.provider : adapter.provider;
+    const dispatched = this.#claudeDispatchState(taskId);
+    if (dispatched !== 'none') {
+      return fail(
+        'duplicate_external_action',
+        `Task ${taskId} was already handed to the Claude GitHub dispatch lane (${dispatched}); one canonical task has one external execution path`,
+        { dispatch: dispatched },
+      );
+    }
+    if (missionId) {
+      const mission = this.#missionStatusFromStore(missionId);
+      if (!mission) return fail('unknown_mission', `Unknown mission: ${missionId}`);
+      if (isMissionTerminal(mission.status) || mission.status === 'blocked') {
+        return fail('mission_not_active', `Mission ${missionId} is ${mission.status}; it directs no external action`, {
+          status: mission.status,
+        });
+      }
+      const linked = this.#db
+        .prepare(`SELECT 1 FROM hq_mission_plan_items WHERE mission_id = ? AND task_id = ?`)
+        .get(missionId, taskId);
+      if (!linked) {
+        return fail('invalid_input', `Task ${taskId} is not linked to a plan item of mission ${missionId}`);
+      }
+    }
+    const missingEvidence = this.#missingEvidenceIds(evidenceRefs.value);
+    if (missingEvidence.length > 0) {
+      return fail('unknown_evidence', `Unknown evidence id(s): ${missingEvidence.join(', ')}`, { missing: missingEvidence });
+    }
+    if (truthRefs.value.length > 0) {
+      const probe = this.#truthStorePresent ? this.#db.prepare(`SELECT 1 FROM hq_truth_records WHERE id = ?`) : null;
+      const missingTruth = truthRefs.value.filter((id) => probe == null || probe.get(id) === undefined);
+      if (missingTruth.length > 0) {
+        return fail('unknown_truth', `Unknown truth record(s): ${missingTruth.join(', ')}`, { missing: missingTruth });
+      }
+    }
+
+    const risk = assessActionRisk({
+      capability: { riskClass: cap.riskClass, sideEffect: cap.sideEffect },
+      contract,
+      escalations: {
+        productionScope: escalations.productionScope === true,
+        spend: escalations.spend === true,
+        credentialSensitivity: escalations.credentialSensitivity === true,
+        legalCompliance: escalations.legalCompliance === true,
+        blastRadius: escalations.blastRadius,
+      },
+    });
+    const payloadDigest = actionPayloadDigest(input.payload);
+    const effectBase = sideEffectKeyBase({ taskId, adapterId, actionType, target: target.value!, payloadDigest });
+
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    let createdId: string | null = null;
+    privileged.reserve(() => {
+      // The generation is part of the dedupe key: an identical proposal
+      // dedupes while the side effect's attempt stands, and derives a FRESH
+      // key only after a human reconciled that attempt as not executed.
+      const generation = sideEffectGeneration(this.#db, effectBase);
+      const idempotencyKey = actionIdempotencyKey({
+        requestedBy: input.requestedBy,
+        taskId,
+        adapterId,
+        actionType,
+        target: target.value!,
+        payloadDigest,
+        missionId,
+        idempotencyKey: input.idempotencyKey ?? null,
+      }) + `:g${generation}`;
+      const existing = this.#db
+        .prepare(`SELECT id FROM hq_action_intents WHERE idempotency_key = ?`)
+        .get(idempotencyKey) as { id: string } | undefined;
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      const id = `act-${uuid()}`;
+      const at = nowIso();
+      this.#db
+        .prepare(
+          `INSERT INTO hq_action_intents (id, task_id, mission_id, capability_id, provider_id, adapter_id, action_type,
+             target, payload, payload_digest, risk_level, risk_factors, visibility, reversibility, compensation,
+             context_evidence_refs, context_truth_refs, requested_by, requested_at, side_effect_key_base, idempotency_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          taskId,
+          missionId,
+          cap.id,
+          providerId,
+          adapterId,
+          actionType,
+          target.value,
+          payloadJson,
+          payloadDigest,
+          risk.level,
+          JSON.stringify(risk.factors),
+          contract.visibility,
+          contract.reversibility,
+          contract.compensation ? JSON.stringify(contract.compensation) : null,
+          JSON.stringify(evidenceRefs.value),
+          JSON.stringify(truthRefs.value),
+          input.requestedBy,
+          at,
+          effectBase,
+          idempotencyKey,
+        );
+      this.#appendActionEvent(id, 'proposed', input.requestedBy, at, {
+        riskLevel: risk.level,
+        riskFactors: risk.factors,
+        generation,
+      });
+      createdId = id;
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `action:${id}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `External action proposed: ${adapterId}/${actionType} for task ${taskId} (${risk.level})`,
+        detail: { taskId, adapterId, actionType, riskLevel: risk.level, missionId },
+      });
+      privileged.appendEvidence({
+        taskId,
+        actor: input.requestedBy,
+        kind: 'action_proposed',
+        payload: {
+          actionId: id,
+          adapterId,
+          actionType,
+          target: target.value,
+          payloadDigest,
+          providerId,
+          riskLevel: risk.level,
+          riskFactors: risk.factors,
+          reversibility: contract.reversibility,
+          compensationDeclared: contract.compensation != null,
+          contextEvidenceRefs: evidenceRefs.value,
+          contextTruthRefs: truthRefs.value,
+          executable: false,
+        },
+      });
+    });
+    if (dedupedTo) return ok({ action: this.#actionView(dedupedTo)!, deduplicated: true });
+    return ok({ action: this.#actionView(createdId!)!, deduplicated: false });
+  }
+
+  /**
+   * Record that CURRENT canonical truth admits this action — the `authorized`
+   * ledger event, written ONCE per action, carrying the exact snapshot the
+   * Intent Guard will compare at execution. It is a record of what canonical
+   * authority says right now, not a grant: every fact in it is re-derived
+   * from the database rows inside the write lock, and nothing here consults a
+   * patchable read.
+   *
+   * Only the worker holding the task's LIVE fenced claim may authorize (it is
+   * the identity that will execute); humans never execute and are refused.
+   */
+  authorizeAction(input: { actionId: string; workerId: string; fence: number; now?: Date }): OpsResult<{ action: ActionView }> {
+    const actionId = input.actionId?.trim() ?? '';
+    if (!actionId) return fail('invalid_input', 'actionId is required');
+    if (!input.workerId) return fail('invalid_input', 'workerId is required');
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    if (!this.#actionStorePresent) return fail('invalid_input', 'action ledger unavailable on this database handle');
+    const now = input.now ?? new Date();
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let taskId: string | null = null;
+    privileged.reserve(() => {
+      const intent = loadActionIntent(this.#db, actionId);
+      if (!intent) {
+        refusal = { code: 'unknown_action', message: `Unknown action: ${actionId}` };
+        return;
+      }
+      taskId = intent.taskId;
+      const state = deriveActionView(intent, loadActionEvents(this.#db, actionId)).state;
+      if (state !== 'proposed') {
+        refusal = {
+          code: 'action_state_conflict',
+          message: `Action ${actionId} is ${state}; authorization is written once, on a proposed action`,
+          details: { state },
+        };
+        return;
+      }
+      const gate = this.#gatewayGate(intent, input.workerId, input.fence, now);
+      if (!gate.ok) {
+        refusal = gate.error;
+        return;
+      }
+      const at = nowIso();
+      const digest = authorizationDigest(gate.snapshot);
+      this.#appendActionEvent(actionId, 'authorized', input.workerId, at, {
+        digest,
+        approvalId: gate.snapshot.approvalId,
+        snapshot: gate.snapshot,
+      });
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `action:${actionId}`,
+        status: null,
+        actor: input.workerId,
+        summary: `External action authorized: ${intent.adapterId}/${intent.actionType} (${intent.riskLevel})`,
+        detail: { taskId: intent.taskId, digest, approvalId: gate.snapshot.approvalId },
+      });
+      privileged.appendEvidence({
+        taskId: intent.taskId,
+        actor: input.workerId,
+        kind: 'action_authorized',
+        payload: {
+          actionId,
+          digest,
+          approvalId: gate.snapshot.approvalId,
+          taskActionDigest: gate.snapshot.taskActionDigest,
+          providerId: gate.snapshot.providerId,
+          adapterId: gate.snapshot.adapterId,
+          missionIntentSeq: gate.snapshot.missionIntentSeq,
+          riskLevel: gate.snapshot.riskLevel,
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return this.#refuseAction(actionId, taskId, 'authorize', refusal);
+    return ok({ action: this.#actionView(actionId)! });
+  }
+
+  /**
+   * Execute one authorized action through its adapter — the ONLY path in HQ
+   * that performs a gateway side effect.
+   *
+   * Three steps, and the boundaries between them are the whole design:
+   *
+   *   1. INSIDE one IMMEDIATE write transaction: the Intent Guard re-derives
+   *      the authorization snapshot from CURRENT canonical truth and refuses
+   *      on any drift (payload/task digest, provider/adapter, approval identity
+   *      or claim binding, mission intent version or status, capability
+   *      contract); the kill switches are read from the row; the durable
+   *      side-effect key is reserved by UNIQUE index; the `attempted` event is
+   *      committed. If this cannot be written, nothing is executed.
+   *   2. OUTSIDE the transaction: the adapter is called once. A throw is an
+   *      UNKNOWN outcome, not a failure.
+   *   3. INSIDE a second transaction: the terminal event. If it cannot be
+   *      written the attempt stays open — retry-blocked — and the caller is
+   *      told the outcome is unknown rather than handed a success no ledger
+   *      supports.
+   *
+   * An action whose last event is `attempted` or `outcome_unknown` is refused
+   * with `action_outcome_unknown`: an external side effect whose prior outcome
+   * is unknown is NEVER retried automatically. Reconciliation is the only way
+   * out, and it is a human act.
+   */
+  executeAction(input: {
+    actionId: string;
+    workerId: string;
+    fence: number;
+    now?: Date;
+  }): OpsResult<{ action: ActionView; outcome: 'succeeded' | 'failed' | 'outcome_unknown' }> {
+    const actionId = input.actionId?.trim() ?? '';
+    if (!actionId) return fail('invalid_input', 'actionId is required');
+    if (!input.workerId) return fail('invalid_input', 'workerId is required');
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    if (!this.#actionStorePresent) return fail('invalid_input', 'action ledger unavailable on this database handle');
+    const now = input.now ?? new Date();
+    const privileged = this.#requirePrivilegedQueue();
+
+    // ---- step 1: guard + reservation, atomically ----
+    let refusal: OpsError | null = null;
+    let reserved: {
+      intent: ActionIntentRow;
+      adapter: ExternalActionAdapter;
+      correlationId: string;
+      effectKey: string;
+      generation: number;
+    } | null = null;
+    let taskId: string | null = null;
+    try {
+      privileged.reserve(() => {
+        const intent = loadActionIntent(this.#db, actionId);
+        if (!intent) {
+          refusal = { code: 'unknown_action', message: `Unknown action: ${actionId}` };
+          return;
+        }
+        taskId = intent.taskId;
+        const view = deriveActionView(intent, loadActionEvents(this.#db, actionId));
+        if (view.state === 'attempted' || view.state === 'outcome_unknown') {
+          refusal = {
+            code: 'action_outcome_unknown',
+            message:
+              `Action ${actionId} has an external attempt whose outcome is ${
+                view.state === 'attempted' ? 'not yet recorded' : 'unknown'
+              } (correlation ${view.attempt?.correlationId ?? 'n/a'}). It is never retried automatically: ` +
+              'reconcile it explicitly after checking the external system.',
+            details: { state: view.state, correlationId: view.attempt?.correlationId ?? null },
+          };
+          return;
+        }
+        if (!stateAdmitsAttempt(view.state)) {
+          refusal = {
+            code: 'action_state_conflict',
+            message:
+              view.state === 'proposed'
+                ? `Action ${actionId} is proposed and not yet authorized; authorization is a separate recorded step`
+                : `Action ${actionId} is ${view.state}; a terminal action is never re-executed — propose a new one`,
+            details: { state: view.state },
+          };
+          return;
+        }
+        const gate = this.#gatewayGate(intent, input.workerId, input.fence, now);
+        if (!gate.ok) {
+          refusal = gate.error;
+          return;
+        }
+        // The Intent Guard proper: the authorized snapshot against the current one.
+        const authorizedEvent = loadActionEvents(this.#db, actionId).find((e) => e.state === 'authorized')!;
+        const authorizedSnapshot = authorizedEvent.detail.snapshot as AuthorizedSnapshot;
+        const drift = snapshotDrift(authorizedSnapshot, gate.snapshot);
+        if (drift.length > 0) {
+          refusal = this.#classifyDrift(actionId, drift);
+          return;
+        }
+        const generation = sideEffectGeneration(this.#db, intent.sideEffectKeyBase);
+        const effectKey = sideEffectKey(intent.sideEffectKeyBase, generation);
+        const holder = sideEffectHolder(this.#db, effectKey);
+        if (holder) {
+          refusal = {
+            code: 'duplicate_external_action',
+            message:
+              `The same external side effect (task ${intent.taskId}, ${intent.adapterId}/${intent.actionType} on ` +
+              `${intent.target}) was already attempted by action ${holder.actionId} at ${holder.at}. Not repeated.`,
+            details: { holderActionId: holder.actionId, attemptedAt: holder.at },
+          };
+          return;
+        }
+        const correlationId = `${actionId}#${generation}`;
+        const at = nowIso();
+        this.#appendActionEvent(
+          actionId,
+          'attempted',
+          input.workerId,
+          at,
+          { correlationId, generation, adapterId: gate.adapter.id, providerId: gate.snapshot.providerId },
+          effectKey,
+        );
+        this.#store.appendEvent({
+          subjectKind: 'system',
+          subjectId: `action:${actionId}`,
+          status: null,
+          actor: input.workerId,
+          summary: `External action attempted: ${intent.adapterId}/${intent.actionType} (${correlationId})`,
+          detail: { taskId: intent.taskId, correlationId, generation },
+        });
+        privileged.appendEvidence({
+          taskId: intent.taskId,
+          actor: input.workerId,
+          kind: 'action_attempted',
+          payload: {
+            actionId,
+            correlationId,
+            generation,
+            adapterId: gate.adapter.id,
+            providerId: gate.snapshot.providerId,
+            authorizationDigest: authorizationDigest(gate.snapshot),
+          },
+        });
+        reserved = { intent, adapter: gate.adapter, correlationId, effectKey, generation };
+      });
+    } catch (error) {
+      // A UNIQUE violation on the side-effect key is the engine refusing a
+      // concurrent duplicate; anything else means the reservation could not
+      // be written, and an unrecorded guard is no guard — nothing executes.
+      const code = (error as { code?: string }).code;
+      if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT') {
+        return this.#refuseAction(actionId, taskId, 'execute', {
+          code: 'duplicate_external_action',
+          message: 'The side-effect key was reserved concurrently by another attempt; nothing was executed.',
+        });
+      }
+      return fail('operator_rejected', `The attempt could not be recorded (${errorMessage(error)}); nothing was executed.`, {
+        actionId,
+      });
+    }
+    if (refusal) return this.#refuseAction(actionId, taskId, 'execute', refusal);
+    const run = reserved!;
+
+    // ---- step 2: the external call, exactly once ----
+    let outcome: AdapterOutcome;
+    try {
+      outcome = run.adapter.execute({
+        actionId,
+        taskId: run.intent.taskId,
+        actionType: run.intent.actionType,
+        target: run.intent.target,
+        payload: run.intent.payload,
+        correlationId: run.correlationId,
+        sideEffectKey: run.effectKey,
+      });
+    } catch (error) {
+      outcome = { ok: false, kind: 'unknown', message: `adapter threw: ${errorMessage(error).slice(0, 200)}` };
+    }
+    if (outcome == null || typeof outcome !== 'object' || typeof (outcome as { ok?: unknown }).ok !== 'boolean') {
+      outcome = { ok: false, kind: 'unknown', message: 'adapter returned no recognisable outcome' };
+    }
+
+    // ---- step 3: the terminal record ----
+    const terminal: 'succeeded' | 'failed' | 'outcome_unknown' = outcome.ok
+      ? 'succeeded'
+      : outcome.kind === 'unknown'
+        ? 'outcome_unknown'
+        : 'failed';
+    let externalRef: Record<string, unknown> | null = null;
+    let externalRefWithheld = false;
+    if (outcome.ok && outcome.externalRef != null) {
+      try {
+        assertBrowserSafe(outcome.externalRef, 'externalRef');
+        externalRef = outcome.externalRef;
+      } catch {
+        externalRefWithheld = true;
+      }
+    }
+    const message = outcome.ok ? null : String(outcome.message ?? '').slice(0, 500);
+    try {
+      privileged.reserve(() => {
+        const at = nowIso();
+        this.#appendActionEvent(actionId, terminal, input.workerId, at, {
+          correlationId: run.correlationId,
+          externalRef,
+          externalRefWithheld,
+          message,
+        });
+        this.#store.appendEvent({
+          subjectKind: 'system',
+          subjectId: `action:${actionId}`,
+          status: null,
+          actor: input.workerId,
+          summary: `External action ${terminal}: ${run.intent.adapterId}/${run.intent.actionType} (${run.correlationId})`,
+          detail: { taskId: run.intent.taskId, correlationId: run.correlationId, externalRefWithheld },
+        });
+        privileged.appendEvidence({
+          taskId: run.intent.taskId,
+          actor: input.workerId,
+          kind: `action_${terminal}`,
+          payload: { actionId, correlationId: run.correlationId, externalRef, externalRefWithheld, message },
+        });
+      });
+    } catch (error) {
+      return fail(
+        'action_outcome_unknown',
+        `The adapter reported ${terminal} but the outcome could not be recorded (${errorMessage(error)}). ` +
+          'The attempt stays open and retry-blocked; reconcile it after checking the external system.',
+        { actionId, correlationId: run.correlationId, reported: terminal },
+      );
+    }
+    return ok({ action: this.#actionView(actionId)!, outcome: terminal });
+  }
+
+  /**
+   * Close an open or unknown external attempt after a HUMAN checked the real
+   * world. The same authority as reconciling an unknown dispatch: approval
+   * authority, positively resolved; `system`, workers and the action's own
+   * proposer are refused. `confirmed_not_executed` reopens a fresh side-effect
+   * generation ONLY for an idempotent capability — for anything else the
+   * uncertain execution is closed as done or failed after investigation.
+   */
+  reconcileAction(input: {
+    actionId: string;
+    decision: ActionReconcileDecision;
+    note: string;
+    requestedBy: string;
+  }): OpsResult<{ action: ActionView }> {
+    const actionId = input.actionId?.trim() ?? '';
+    if (!actionId) return fail('invalid_input', 'actionId is required');
+    if (!isActionReconcileDecision(input.decision)) {
+      return fail('invalid_input', 'decision must be confirmed_succeeded, confirmed_failed or confirmed_not_executed');
+    }
+    const note = missionText('note', input.note, MAX_ACTION_NOTE_LENGTH, true);
+    if (!note.ok) return fail('invalid_input', note.message);
+    try {
+      assertNoSecretLikeContent({ note: note.value });
+    } catch {
+      return fail('invalid_input', 'The reconciliation note looks like it contains a credential; nothing was recorded.');
+    }
+    const gate = this.#assertApprovalAuthority(input.requestedBy, 'reconcile an external action outcome');
+    if (gate) return gate;
+    if (!this.#actionStorePresent) return fail('invalid_input', 'action ledger unavailable on this database handle');
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let taskId: string | null = null;
+    privileged.reserve(() => {
+      const intent = loadActionIntent(this.#db, actionId);
+      if (!intent) {
+        refusal = { code: 'unknown_action', message: `Unknown action: ${actionId}` };
+        return;
+      }
+      taskId = intent.taskId;
+      const view = deriveActionView(intent, loadActionEvents(this.#db, actionId));
+      if (!stateAdmitsReconciliation(view.state)) {
+        refusal = {
+          code: 'action_state_conflict',
+          message: `Action ${actionId} is ${view.state}; only an open or unknown attempt is reconciled`,
+          details: { state: view.state },
+        };
+        return;
+      }
+      if (intent.requestedBy === input.requestedBy) {
+        refusal = {
+          code: 'not_permitted',
+          message: `${input.requestedBy} proposed action ${actionId} and cannot reconcile its outcome: reconciliation requires an independent principal`,
+          details: { actor: input.requestedBy },
+        };
+        return;
+      }
+      if (input.decision === 'confirmed_not_executed') {
+        const cap = this.#capabilityFromStore(intent.capabilityId);
+        if (!cap?.idempotent) {
+          refusal = {
+            code: 'not_permitted',
+            message: `Capability ${intent.capabilityId} is not idempotent; an uncertain external execution cannot be reopened for another attempt — close it as succeeded or failed after investigation`,
+            details: { capabilityId: intent.capabilityId },
+          };
+          return;
+        }
+      }
+      const at = nowIso();
+      this.#appendActionEvent(actionId, 'reconciled', input.requestedBy, at, {
+        decision: input.decision,
+        note: note.value,
+        correlationId: view.attempt?.correlationId ?? null,
+      });
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `action:${actionId}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `External action reconciled ${input.decision}: ${intent.adapterId}/${intent.actionType}`,
+        detail: { taskId: intent.taskId, decision: input.decision },
+      });
+      privileged.appendEvidence({
+        taskId: intent.taskId,
+        actor: input.requestedBy,
+        kind: 'action_reconciled',
+        payload: {
+          actionId,
+          decision: input.decision,
+          note: note.value,
+          correlationId: view.attempt?.correlationId ?? null,
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return this.#refuseAction(actionId, taskId, 'reconcile', refusal);
+    return ok({ action: this.#actionView(actionId)! });
+  }
+
+  /** One action's derived view, or null (including over a pre-Phase-8 read-only file). */
+  getAction(id: string): ActionView | null {
+    if (!id || !this.#actionStorePresent) return null;
+    return this.#actionView(id);
+  }
+
+  /** Every action, newest first, with its derived state; optionally narrowed. */
+  listActions(filter?: { taskId?: string; missionId?: string; state?: ActionState }): ActionView[] {
+    if (!this.#actionStorePresent) return [];
+    if (filter?.state !== undefined && !isActionState(filter.state)) return [];
+    return loadActionIntents(this.#db)
+      .filter((row) => (filter?.taskId ? row.taskId === filter.taskId : true))
+      .filter((row) => (filter?.missionId ? row.missionId === filter.missionId : true))
+      .map((row) => deriveActionView(row, loadActionEvents(this.#db, row.id)))
+      .filter((view) => (filter?.state ? view.state === filter.state : true));
+  }
+
+  /** Bounded list plus the true total, for the wire. */
+  listActionsBounded(filter?: { taskId?: string; missionId?: string; state?: ActionState }): {
+    actions: ActionView[];
+    total: number;
+    truncated: boolean;
+  } {
+    const all = this.listActions(filter);
+    return { actions: all.slice(0, ACTION_READ_LIMIT), total: all.length, truncated: all.length > ACTION_READ_LIMIT };
+  }
+
+  /** Whether this database handle carries the Phase 8 ledger tables. */
+  actionStorePresent(): boolean {
+    return this.#actionStorePresent;
+  }
+
+  /**
+   * Whether the gateway has ATTEMPTED an external action for this task —
+   * open, unknown or succeeded. The Claude GitHub dispatch lane asks this so
+   * one canonical task never has two external execution paths; a `failed` or
+   * reconciled-not-executed attempt leaves nothing in flight.
+   */
+  gatewayActionHistory(taskId: string): { state: 'none' } | { state: 'attempted' | 'outcome_unknown' | 'succeeded'; actionId: string } {
+    if (!taskId || !this.#actionStorePresent) return { state: 'none' };
+    for (const view of this.listActions({ taskId })) {
+      if (view.state === 'attempted' || view.state === 'outcome_unknown' || view.state === 'succeeded') {
+        return { state: view.state, actionId: view.id };
+      }
+      if (view.state === 'reconciled' && view.reconciliation?.decision === 'confirmed_succeeded') {
+        return { state: 'succeeded', actionId: view.id };
+      }
+    }
+    return { state: 'none' };
+  }
+
+  // ---- gateway internals ----
+
+  #actionView(id: string): ActionView | null {
+    const row = loadActionIntent(this.#db, id);
+    if (!row) return null;
+    return deriveActionView(row, loadActionEvents(this.#db, id));
+  }
+
+  #appendActionEvent(
+    actionId: string,
+    state: ActionState,
+    actor: string,
+    at: string,
+    detail: Record<string, unknown>,
+    effectKey: string | null = null,
+  ): void {
+    this.#db
+      .prepare(
+        `INSERT INTO hq_action_events (id, action_id, state, actor, at, detail, side_effect_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(uuid(), actionId, state, actor, at, JSON.stringify(detail), effectKey);
+  }
+
+  /** A refusal is a fact worth keeping: best-effort evidence, then the typed error. Writes no ledger event. */
+  #refuseAction(actionId: string, taskId: string | null, phase: string, error: OpsError): OpsResult<never> {
+    try {
+      this.#requirePrivilegedQueue().appendEvidence({
+        taskId,
+        actor: 'system',
+        kind: 'action_refused',
+        payload: { actionId, phase, code: error.code, details: error.details ?? null },
+      });
+    } catch {
+      // A lost refusal diagnostic costs nothing; the refusal itself stands.
+    }
+    return { ok: false, error };
+  }
+
+  /** The canonical op_tasks row, read directly — never the patchable public `queue.get`. */
+  #taskRowFromStore(taskId: string): {
+    id: string;
+    capabilityId: string;
+    payload: Record<string, unknown>;
+    idempotencyKey: string | null;
+    status: ActivityStatus;
+    fence: number;
+    claimedBy: string | null;
+    claimNonce: string | null;
+    approvalId: string | null;
+    createdBy: string;
+  } | null {
+    const row = this.#db.prepare(`SELECT * FROM op_tasks WHERE id = ?`).get(taskId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(row.payload as string) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+    return {
+      id: row.id as string,
+      capabilityId: row.capability_id as string,
+      payload,
+      idempotencyKey: (row.idempotency_key as string | null) ?? null,
+      status: row.status as ActivityStatus,
+      fence: row.fence as number,
+      claimedBy: (row.claimed_by as string | null) ?? null,
+      claimNonce: (row.claim_nonce as string | null) ?? null,
+      approvalId: (row.approval_id as string | null) ?? null,
+      createdBy: row.created_by as string,
+    };
+  }
+
+  #missionStatusFromStore(missionId: string): { status: MissionStatus; intentSeq: number } | null {
+    if (!this.#missionStorePresent) return null;
+    const row = this.#db.prepare(`SELECT status FROM hq_missions WHERE id = ?`).get(missionId) as
+      | { status: MissionStatus }
+      | undefined;
+    if (!row) return null;
+    const seq = this.#db.prepare(`SELECT MAX(seq) AS seq FROM hq_mission_intents WHERE mission_id = ?`).get(missionId) as
+      | { seq: number | null }
+      | undefined;
+    return { status: row.status, intentSeq: seq?.seq ?? 0 };
+  }
+
+  /**
+   * What the Claude GitHub dispatch lane already did with this task, read
+   * from the canonical evidence chain by the same rule `dispatchHistory`
+   * applies (an `attempted` with no terminal is unknown; `failed` closes it).
+   * Duplicated here rather than imported so the application layer keeps not
+   * depending on a provider adapter; `integration-seams` pins the kinds agree.
+   */
+  #claudeDispatchState(taskId: string): 'none' | 'unknown' | 'dispatched' {
+    let pending = false;
+    let dispatched = false;
+    for (const entry of this.queue.evidence.list(taskId)) {
+      if (entry.kind === 'claude_github_dispatch_attempted') pending = true;
+      else if (entry.kind === 'claude_github_dispatch_succeeded') {
+        pending = false;
+        dispatched = true;
+      } else if (entry.kind === 'claude_github_dispatch_failed') pending = false;
+    }
+    if (dispatched) return 'dispatched';
+    return pending ? 'unknown' : 'none';
+  }
+
+  /** Turn snapshot drift into the one refusal whose cause outranks the others. */
+  #classifyDrift(actionId: string, drift: readonly (keyof AuthorizedSnapshot)[]): OpsError {
+    const has = (...keys: (keyof AuthorizedSnapshot)[]) => keys.some((k) => drift.includes(k));
+    const details = { actionId, changed: [...drift] };
+    if (has('taskActionDigest', 'payloadDigest')) {
+      return {
+        code: 'action_digest_mismatch',
+        message: `Action ${actionId}: the approved action changed after authorization; nothing was executed`,
+        details,
+      };
+    }
+    if (has('providerId', 'adapterId')) {
+      return {
+        code: 'provider_binding_mismatch',
+        message: `Action ${actionId}: the provider or adapter moved after authorization; no substitution is made`,
+        details,
+      };
+    }
+    if (has('approvalId', 'approvalDecidedBy', 'workerId', 'fence', 'claimNonce')) {
+      return {
+        code: 'action_approval_stale',
+        message: `Action ${actionId}: the approval or the claim it was consumed by is not the one authorized; nothing was executed`,
+        details,
+      };
+    }
+    return {
+      code: 'intent_changed',
+      message: `Action ${actionId}: the mission intent, status or capability contract changed after authorization; re-propose against current intent`,
+      details,
+    };
+  }
+
+  /**
+   * The gate every authorization AND every execution passes, over CURRENT
+   * canonical rows read through `#db` and the enforcement-safe closures only:
+   *
+   *   worker permissions ∩ mission permissions ∩ policy ∩ approvals
+   *
+   * — the executing worker resolves, is assignable and holds the capability;
+   * the adapter/action type are declared; the task is `running` under THIS
+   * worker's live fenced claim; the capability row is intact and enabled;
+   * the provider binding admits the adapter and the worker (no substitution);
+   * the approval (where policy OR risk requires one) is approved, digest-bound
+   * to the current task, consumed by this exact claim, unexpired, and not the
+   * proposer's own decision; no kill-switch scope is engaged; the mission (if
+   * referenced) is active; the Claude dispatch lane has not taken the task.
+   * Returns the snapshot the Intent Guard binds and compares.
+   */
+  #gatewayGate(
+    intent: ActionIntentRow,
+    workerId: string,
+    fence: number,
+    now: Date,
+  ):
+    | { ok: true; snapshot: AuthorizedSnapshot; adapter: ExternalActionAdapter }
+    | { ok: false; error: OpsError } {
+    const refuse = (error: OpsResult<never> | OpsError): { ok: false; error: OpsError } =>
+      'ok' in error ? { ok: false, error: (error as { ok: false; error: OpsError }).error } : { ok: false, error };
+    const human = this.#rejectHumanExecution(workerId, 'execute an external action');
+    if (human) return refuse(human);
+    const assignability = this.#workers.assignability(workerId);
+    if (!assignability.assignable) return refuse(this.#rejectNotAssignable(workerId, assignability, 'execute an external action'));
+    if (!this.#grantOf(workerId).includes(intent.capabilityId)) {
+      return refuse({
+        code: 'not_permitted',
+        message: `Worker ${workerId} is not allowed capability ${intent.capabilityId} (least privilege)`,
+        details: { workerId, capabilityId: intent.capabilityId },
+      });
+    }
+    const adapter = this.#actionAdapters.get(intent.adapterId);
+    if (!adapter) return refuse({ code: 'unknown_adapter', message: `Unknown external-action adapter: ${intent.adapterId}` });
+    if (!adapter.actions[intent.actionType]) {
+      return refuse({ code: 'unknown_adapter', message: `Adapter ${intent.adapterId} declares no action type ${intent.actionType}` });
+    }
+    const task = this.#taskRowFromStore(intent.taskId);
+    if (!task) return refuse({ code: 'unknown_task', message: `Unknown task: ${intent.taskId}` });
+    if (task.capabilityId !== intent.capabilityId) {
+      return refuse({
+        code: 'action_digest_mismatch',
+        message: `Task ${task.id} no longer names capability ${intent.capabilityId}; the action does not match its task`,
+      });
+    }
+    if (task.status !== 'running' || task.claimedBy !== workerId || task.fence !== fence) {
+      return refuse({
+        code: 'task_not_executing',
+        message:
+          `Task ${task.id} is ${task.status}, claimed by ${task.claimedBy ?? 'nobody'} at fence ${task.fence}; ` +
+          `an external action executes only under the live, started claim of the worker performing it`,
+        details: { status: task.status, claimedBy: task.claimedBy, fence: task.fence },
+      });
+    }
+    const cap = this.#capabilityFromStore(task.capabilityId);
+    if (!cap) return refuse({ code: 'unknown_capability', message: `Unknown capability: ${task.capabilityId}` });
+    if (!cap.enabled) return refuse({ code: 'capability_disabled', message: `Capability ${cap.id} is disabled` });
+
+    const binding = readProviderBinding(task.payload);
+    if (binding.bound && binding.provider == null) {
+      return refuse({ code: 'provider_binding_mismatch', message: `Task ${task.id} declares a malformed executionProvider` });
+    }
+    if (binding.bound && (adapter.provider !== binding.provider || intent.providerId !== binding.provider)) {
+      return refuse({
+        code: 'provider_binding_mismatch',
+        message: `Task ${task.id} is bound to provider ${binding.provider}; adapter ${adapter.id} executes as ${
+          adapter.provider ?? 'no provider'
+        }. No substitution is made.`,
+        details: { requiredProvider: binding.provider, adapterProvider: adapter.provider, intentProvider: intent.providerId },
+      });
+    }
+    if (adapter.provider !== null) {
+      const declared = this.#db
+        .prepare(`SELECT provider_id FROM op_worker_providers WHERE worker_id = ?`)
+        .get(workerId) as { provider_id: string } | undefined;
+      if (declared?.provider_id !== adapter.provider) {
+        return refuse({
+          code: 'provider_binding_mismatch',
+          message: `Adapter ${adapter.id} executes as ${adapter.provider} and worker ${workerId} is declared as ${
+            declared?.provider_id ?? 'no provider'
+          }. Provider identity is declared, never inferred, and never substituted.`,
+          details: { adapterProvider: adapter.provider, workerProvider: declared?.provider_id ?? null },
+        });
+      }
+    }
+    const providerId = binding.bound ? binding.provider : adapter.provider;
+
+    const currentDigest = taskActionDigest(task);
+    const policyRequires = approvalRequired(cap, this.#policyCtx);
+    const riskRequires = riskRequiresApproval(intent.riskLevel);
+    let approvalId: string | null = null;
+    let approvalDecidedBy: string | null = null;
+    if (policyRequires || riskRequires) {
+      const approval = task.approvalId
+        ? (this.#db
+            .prepare(
+              `SELECT id, decision, decided_by, action_digest, expires_at, consumed_at, consumed_by, consumed_task_id,
+                      consumed_fence, consumed_claim_nonce FROM hq_approvals WHERE id = ?`,
+            )
+            .get(task.approvalId) as Record<string, unknown> | undefined)
+        : undefined;
+      if (!approval) {
+        return refuse(
+          riskRequires && !policyRequires
+            ? {
+                code: 'approval_required_by_risk',
+                message:
+                  `Action ${intent.id} is ${intent.riskLevel} risk and requires a bound Founder approval; task ${task.id} ` +
+                  'carries none (its capability runs on standing policy). Risk escalation adds an approval requirement — it never removes one.',
+                details: { riskLevel: intent.riskLevel, riskFactors: intent.riskFactors },
+              }
+            : { code: 'action_approval_stale', message: `Task ${task.id} carries no approval; nothing executes on none` },
+        );
+      }
+      if (approval.decision !== 'approved') {
+        return refuse({ code: 'action_approval_stale', message: `Task ${task.id}: the bound approval record is not an approval` });
+      }
+      if (approval.action_digest !== currentDigest) {
+        return refuse({
+          code: 'action_digest_mismatch',
+          message: `Task ${task.id}: the action changed after Founder approval; the approval no longer binds it`,
+        });
+      }
+      if (approvalExpiredAt({ expiresAt: (approval.expires_at as string | null) ?? null }, now)) {
+        return refuse({ code: 'action_approval_stale', message: `Task ${task.id}: the Founder approval has expired; nothing executes on it` });
+      }
+      const bindingRejection = validateApprovalClaimBinding(
+        {
+          consumedAt: (approval.consumed_at as string | null) ?? null,
+          consumedBy: (approval.consumed_by as string | null) ?? null,
+          consumedTaskId: (approval.consumed_task_id as string | null) ?? null,
+          consumedFence: (approval.consumed_fence as number | null) ?? null,
+          consumedClaimNonce: (approval.consumed_claim_nonce as string | null) ?? null,
+        },
+        { taskId: task.id, workerId, fence, claimNonce: task.claimNonce },
+      );
+      if (bindingRejection) {
+        return refuse({
+          code: 'action_approval_stale',
+          message: `Task ${task.id}: the approval was not consumed by this claim (${bindingRejection}); nothing executes on it`,
+        });
+      }
+      approvalId = approval.id as string;
+      approvalDecidedBy = (approval.decided_by as string | null) ?? null;
+      if (approvalDecidedBy === intent.requestedBy || approvalDecidedBy === workerId) {
+        return refuse({
+          code: 'not_permitted',
+          message: `${approvalDecidedBy} approved task ${task.id} and also ${
+            approvalDecidedBy === workerId ? 'executes' : 'proposed'
+          } action ${intent.id}: the requesting/executing party may not approve its own external action`,
+          details: { approvedBy: approvalDecidedBy },
+        });
+      }
+    }
+
+    const engaged = this.#engagedKillSwitchScopeFromStore([
+      GLOBAL_SCOPE,
+      cap.id,
+      EXTERNAL_ACTION_KILL_SCOPE,
+      ...(providerId ? [providerKillSwitchScope(providerId)] : []),
+      adapterKillSwitchScope(adapter.id),
+    ]);
+    if (engaged) {
+      return refuse({
+        code: 'kill_switch_engaged',
+        message: `Kill switch is engaged for scope ${engaged}; no external action executes`,
+        details: { scope: engaged },
+      });
+    }
+
+    let missionIntentSeq: number | null = null;
+    let missionStatus: string | null = null;
+    if (intent.missionId) {
+      const mission = this.#missionStatusFromStore(intent.missionId);
+      if (!mission) return refuse({ code: 'unknown_mission', message: `Unknown mission: ${intent.missionId}` });
+      if (isMissionTerminal(mission.status) || mission.status === 'blocked') {
+        return refuse({
+          code: 'mission_not_active',
+          message: `Mission ${intent.missionId} is ${mission.status}; it directs no external action`,
+          details: { status: mission.status },
+        });
+      }
+      missionIntentSeq = mission.intentSeq;
+      missionStatus = mission.status;
+    }
+    const dispatched = this.#claudeDispatchState(task.id);
+    if (dispatched !== 'none') {
+      return refuse({
+        code: 'duplicate_external_action',
+        message: `Task ${task.id} was already handed to the Claude GitHub dispatch lane (${dispatched}); one canonical task has one external execution path`,
+        details: { dispatch: dispatched },
+      });
+    }
+
+    return {
+      ok: true,
+      adapter,
+      snapshot: {
+        taskActionDigest: currentDigest,
+        payloadDigest: intent.payloadDigest,
+        approvalId,
+        approvalDecidedBy,
+        workerId,
+        fence,
+        claimNonce: task.claimNonce,
+        providerId,
+        adapterId: adapter.id,
+        missionIntentSeq,
+        missionStatus,
+        capabilityRiskClass: cap.riskClass,
+        riskLevel: intent.riskLevel,
+      },
+    };
+  }
+
   // ---- task metadata (console labels + advisory assignment) ----
 
   readMeta(taskId: string): TaskMeta | null {
@@ -6796,6 +8025,19 @@ export function capabilityRowFor(
   capabilityId: string,
 ): Capability | null {
   return readCapabilityRow(ops, capabilityId);
+}
+
+/**
+ * The canonical `op_kill_switch` answer for the global scope plus an optional
+ * capability scope, for callers making an ENFORCEMENT decision (Phase 8,
+ * Low 7). A FUNCTION BINDING for the reason `capabilityRowFor` is one: an ES
+ * module binding cannot be reassigned by an importer, and the private closure
+ * it calls is not a property of the class or of any instance. The Claude
+ * dispatch lane's eligibility check reads through this; `queue.killSwitchEngaged`
+ * stays as the deliberately patchable convenience read for DISPLAY.
+ */
+export function killSwitchEngagedFor(ops: HeadquarterOperations, capabilityId?: string): boolean {
+  return readKillSwitchEngaged(ops, capabilityId);
 }
 
 export function createHeadquarterOperations(
