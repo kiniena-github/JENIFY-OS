@@ -1401,6 +1401,12 @@ export class HeadquarterOperations {
    * and never through the patchable public delegate. The fast prechecks
    * may keep using the delegate — after the locked revalidation they are
    * an optimization, not the boundary.
+   *
+   * Sol M2 (same review cycle): `#observeOrchestration`'s per-spec
+   * `specScopeKillSwitchEngaged` fact reads through this closure too —
+   * `planOrchestration` turns that fact into `ready`, and `ready` creates
+   * canonical work inside the locked apply cycle, so it is a write
+   * authority, not a peek.
    */
   readonly #killSwitchEngagedFromStore: (capabilityId?: string) => boolean;
 
@@ -4548,7 +4554,8 @@ export class HeadquarterOperations {
         founderHoldsOriginate:
           item.specCapabilityId != null && originate.includes(item.specCapabilityId),
         specScopeKillSwitchEngaged:
-          item.specCapabilityId != null && this.queue.killSwitchEngaged(item.specCapabilityId),
+          item.specCapabilityId != null &&
+          this.#killSwitchEngagedFromStore(item.specCapabilityId),
       };
     });
     return { missionId: mission.id, missionStatus: mission.status, items };

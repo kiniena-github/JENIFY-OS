@@ -21,6 +21,7 @@ import {
   registerMissionOrchestrateCapability,
 } from '../src/application/orchestrator-command.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
+import { OperatorQueue } from '../src/operator/queue.js';
 import { taskActionDigest } from '../src/operator/approvals.js';
 
 function orchestratorFixture(
@@ -203,6 +204,50 @@ describe('the kill switch stops apply wholesale', () => {
     expect(bySeq.has('1:task_created')).toBe(true);
     expect(bySeq.has('2:kill_switch_scope_engaged')).toBe(true);
     expect((fx.db.prepare(`SELECT COUNT(*) AS n FROM op_tasks`).get() as { n: number }).n).toBe(1);
+  });
+
+  it('a lying public killSwitchEngaged cannot smuggle an engaged spec scope past apply (Sol M2)', () => {
+    const fx = orchestratorFixture();
+    const mission = speccedMission(fx);
+    expectOk(fx.ops.engageKillSwitch(CAPS.readStatus, 'founder', 'spec lane paused'));
+
+    // Patch the public convenience read on BOTH the instance and the prototype
+    // so it lies about the engaged scope. Enforcement must not care: the
+    // per-spec orchestration fact reads the canonical op_kill_switch rows.
+    const proto = OperatorQueue.prototype as unknown as Record<string, unknown>;
+    const queue = fx.ops.queue as unknown as Record<string, unknown>;
+    const hadProto = Object.prototype.hasOwnProperty.call(proto, 'killSwitchEngaged');
+    const savedProto = proto.killSwitchEngaged;
+    const hadOwn = Object.prototype.hasOwnProperty.call(queue, 'killSwitchEngaged');
+    const savedOwn = queue.killSwitchEngaged;
+    proto.killSwitchEngaged = () => false;
+    try {
+      queue.killSwitchEngaged = () => false;
+    } catch {
+      /* a non-writable instance slot is a pass — the prototype patch stands */
+    }
+    try {
+      expect(fx.ops.queue.killSwitchEngaged(CAPS.readStatus)).toBe(false);
+      const report = expectOk(
+        fx.ops.orchestrateMission({ missionId: mission.id, mode: 'apply', requestedBy: 'founder' }),
+      );
+      expect(report.decisions).toEqual([
+        expect.objectContaining({ planItemSeq: 1, decision: 'kill_switch_scope_engaged' }),
+      ]);
+      expect((fx.db.prepare(`SELECT COUNT(*) AS n FROM op_tasks`).get() as { n: number }).n).toBe(0);
+      expect(
+        (
+          fx.db
+            .prepare(`SELECT COUNT(*) AS n FROM hq_mission_plan_items WHERE task_id IS NOT NULL`)
+            .get() as { n: number }
+        ).n,
+      ).toBe(0);
+    } finally {
+      if (hadProto) proto.killSwitchEngaged = savedProto;
+      else delete proto.killSwitchEngaged;
+      if (hadOwn) queue.killSwitchEngaged = savedOwn;
+      else delete queue.killSwitchEngaged;
+    }
   });
 });
 
