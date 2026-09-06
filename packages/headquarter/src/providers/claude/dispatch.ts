@@ -80,6 +80,7 @@ import {
   assertDispatchEvidenceGrant,
   gatewayActionHistoryFor,
   killSwitchEngagedFor,
+  taskEvidenceRowsFor,
   writeDispatchOutcome,
 } from '../../application/service.js';
 import type {
@@ -593,11 +594,18 @@ export type DispatchHistory =
  * learned the outcome — a crash, a timeout, an unreadable response. Re-sending
  * would risk a duplicate public issue, so it is refused until somebody resolves
  * it, the same rule `outcome_unknown` applies to executions.
+ *
+ * Read through the `taskEvidenceRowsFor` function binding over the canonical
+ * rows (review round 2), never `ops.queue.evidence.list` — that is the
+ * deliberately patchable DISPLAY surface, and this answer gates the
+ * publication of a public GitHub issue (`dispatchClaudeTask`) and the close of
+ * an unresolved attempt (`resolveUnknownDispatch`). Same defect class round 1
+ * closed in the gateway's `#claudeDispatchState`, one function over.
  */
 export function dispatchHistory(ops: HeadquarterOperations, taskId: string): DispatchHistory {
   let pendingAt: string | null = null;
   let dispatched: DispatchHistory | null = null;
-  for (const entry of ops.queue.evidence.list(taskId)) {
+  for (const entry of taskEvidenceRowsFor(ops, taskId)) {
     if (entry.kind === CLAUDE_DISPATCH_EVIDENCE.attempted) {
       pendingAt = entry.at;
       continue;

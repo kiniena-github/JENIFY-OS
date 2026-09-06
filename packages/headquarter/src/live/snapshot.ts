@@ -701,6 +701,7 @@ export function liveSnapshotFromOperations(
             total: 0,
             byState: { claimed: 0, observed: 0, verified: 0, accepted: 0 },
             unresolvedContradictions: 0,
+            awaitingAcceptance: 0,
             withheldFounderOnly: 0,
             withheldFounderOnlyRelations: 0,
             records: [],

@@ -759,9 +759,12 @@ function truthFacts(state: HqStateDocument): {
     accepted: truth.byState.accepted,
     verified: truth.byState.verified,
     // Verified, current and uncontested — exactly the records the server
-    // issued an acceptance digest for, so this count and the Founder's
-    // acceptable set cannot disagree.
-    awaitingAcceptance: truth.records.filter((record) => record.acceptanceDigest !== null).length,
+    // issued an acceptance digest for, counted SERVER-SIDE over every record
+    // the reader may see. Until review round 2 this was counted here over the
+    // bounded `records` page (newest TRUTH_SNAPSHOT_LIMIT) while the sibling
+    // `Founder-accepted` metric used `byState` over all records, so past
+    // twenty records it understated the verified truth waiting at the gate.
+    awaitingAcceptance: truth.awaitingAcceptance,
     unresolved: truth.unresolvedContradictions,
     contradictionRows: truth.contradictions.map((pair) => ({
       id: `contradiction-${pair.a}-${pair.b}`,

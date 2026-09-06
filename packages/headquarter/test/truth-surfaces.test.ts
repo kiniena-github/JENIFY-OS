@@ -12,6 +12,7 @@ import { buildHqSnapshot, emptyFounderConsole, liveSnapshotFromOperations, type 
 import { FABRICATED_FIELD_NAMES, assertBrowserSafe, assertNoFabricatedFields } from '../src/live/redaction.js';
 import type { ClientSession } from '../src/client/contracts.js';
 import type { Provenance } from '../src/live/provenance.js';
+import { TRUTH_SNAPSHOT_LIMIT } from '../src/application/truth-command.js';
 import { claim, confirm, truthFixture } from './truth.fixture.js';
 
 const AT = '2026-09-06T12:00:00.000Z';
@@ -135,6 +136,37 @@ describe('the artifact privacy projection', () => {
     // The private records themselves are untouched by the projection.
     expect(fx.ops.getTruthRecord(secret.id)!.supports).toEqual([open.id]);
   });
+
+  it('the artifact\'s aggregate counts span only the carried set — byState and the unresolved-contradiction count disclose nothing about withheld founder_only rows', () => {
+    // Review round 2: `total=10, withheldFounderOnly=2, byState.accepted=3` with
+    // one carried accepted record ⇒ two PRIVATE records are accepted. Aggregate
+    // categorical facts about founder_only rows are still facts about them.
+    const fx = truthFixture();
+    claim(fx, { statement: 'Public claim.' });
+    const privateVerified = claim(fx, { statement: 'Private, verified.', privacy: 'founder_only', idempotencyKey: 'p-1' });
+    confirm(fx, privateVerified.id);
+    const privateA = claim(fx, { statement: 'Private A.', privacy: 'founder_only', idempotencyKey: 'p-2' });
+    claim(fx, { statement: 'Private B, disputing A.', privacy: 'founder_only', contradicts: [privateA.id], requestedBy: 'analyst', idempotencyKey: 'p-3' });
+
+    const gated = fx.ops.truthSummary({ includeFounderOnly: true });
+    expect(gated.total).toBe(4);
+    expect(gated.byState).toEqual({ claimed: 3, observed: 0, verified: 1, accepted: 0 });
+    expect(gated.unresolvedContradictions).toBe(1);
+    expect(gated.contradictions).toHaveLength(1);
+    expect(gated.awaitingAcceptance).toBe(1);
+
+    const artifact = fx.ops.truthSummary({ includeFounderOnly: false });
+    expect(artifact.total).toBe(4);
+    expect(artifact.withheldFounderOnly).toBe(3);
+    expect(artifact.records.map((r) => r.statement)).toEqual(['Public claim.']);
+    // Counts over the carried set only: they sum to total − withheldFounderOnly.
+    expect(artifact.byState).toEqual({ claimed: 1, observed: 0, verified: 0, accepted: 0 });
+    expect(Object.values(artifact.byState).reduce((a, b) => a + b, 0)).toBe(artifact.total - artifact.withheldFounderOnly);
+    // The private dispute is an internal dispute — exactly what founder_only protects.
+    expect(artifact.unresolvedContradictions).toBe(0);
+    expect(artifact.contradictions).toEqual([]);
+    expect(artifact.awaitingAcceptance).toBe(0);
+  });
 });
 
 describe('the rooms', () => {
@@ -183,6 +215,26 @@ describe('the rooms', () => {
     const founder = room(state, 'founder-office');
     expect(founder.metrics.find((m) => m.label === 'Founder-accepted')!.value).toBe(1);
     expect(founder.metrics.find((m) => m.label === 'Verified, awaiting acceptance')!.value).toBe(0);
+  });
+
+  it('Founder Office counts verified-awaiting-acceptance over ALL records, not only the newest TRUTH_SNAPSHOT_LIMIT the artifact carries', () => {
+    // Review round 2: the count was taken over the bounded `records` while the
+    // sibling `Founder-accepted` metric used `byState` over every record — past
+    // twenty records it UNDERSTATED how much verified truth waits at the gate.
+    const fx = truthFixture();
+    const n = TRUTH_SNAPSHOT_LIMIT + 1;
+    for (let i = 0; i < n; i += 1) {
+      const record = claim(fx, { statement: `Verified fact ${i}.`, idempotencyKey: `awaiting-${i}` });
+      confirm(fx, record.id);
+    }
+    const state = liveSnapshotFromOperations(fx.ops, { now: AT, includeFounderOnlyMemory: true });
+    const truth = state.truth!.data;
+    expect(truth.records).toHaveLength(TRUTH_SNAPSHOT_LIMIT);
+    expect(truth.byState.verified).toBe(n);
+    expect(truth.awaitingAcceptance).toBe(n);
+    const founder = room(state, 'founder-office');
+    expect(founder.metrics.find((m) => m.label === 'Verified, awaiting acceptance')!.value).toBe(n);
+    expect(founder.liveness).toBe('attention');
   });
 
   it('a room with no truth rows and no other state stays dark — zero is zero', () => {

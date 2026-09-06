@@ -217,18 +217,19 @@ describe('exactly one reconciliation of an uncertain attempt wins', () => {
     const fixture = ordersFixture();
     const taskId = taskWithUnknownDispatch(fixture);
 
-    const realList = fixture.ops.queue.evidence.list.bind(fixture.ops.queue.evidence);
+    // Fire the competing resolution AFTER the caller's read-only pre-check and
+    // BEFORE its transaction opens — so the caller enters `reserveEvidence`
+    // believing the attempt is still unresolved. The hook is the reservation
+    // entry itself: since review round 2 `dispatchHistory` reads the canonical
+    // rows through a function binding, so the patchable `queue.evidence.list`
+    // (the previous hook) is no longer on its path at all.
+    const realReserve = fixture.ops.reserveEvidence.bind(fixture.ops);
     let raced = false;
-    // Fire the competing resolution during the FIRST history read, which is the
-    // read-only pre-check — so the caller enters its transaction believing the
-    // attempt is still unresolved.
-    (fixture.ops.queue.evidence as unknown as { list: typeof realList }).list = ((
-      id?: string,
-    ) => {
-      const rows = realList(id);
+    (fixture.ops as unknown as { reserveEvidence: typeof realReserve }).reserveEvidence = (<T>(fn: () => T): T => {
       if (!raced) {
         raced = true;
-        (fixture.ops.queue.evidence as unknown as { list: typeof realList }).list = realList;
+        // Restore the prototype method before the competitor runs, so it reserves for real.
+        delete (fixture.ops as unknown as { reserveEvidence?: typeof realReserve }).reserveEvidence;
         resolveUnknownDispatch(fixture.ops, {
           evidence: fixture.dispatchEvidence,
           taskId,
@@ -236,8 +237,8 @@ describe('exactly one reconciliation of an uncertain attempt wins', () => {
           resolvedBy: 'founder',
         });
       }
-      return rows;
-    }) as typeof realList;
+      return realReserve(fn);
+    }) as typeof realReserve;
 
     const loser = resolveUnknownDispatch(fixture.ops, {
       evidence: fixture.dispatchEvidence,
@@ -459,5 +460,55 @@ describe('the handoff claims the canonical task before publishing', () => {
     // The older one is untouched.
     expect(fixture.ops.queue.get(first)!.status).toBe('queued');
     expect(fixture.ops.queue.get(first)!.claimedBy).toBeNull();
+  });
+});
+
+describe('the duplicate-publication guard reads canonical op_evidence rows', () => {
+  it('a forged queue.evidence.list that hides the dispatch changes nothing: dispatchHistory still answers from the rows and a repeat is deduplicated, not republished', () => {
+    // Review round 2: `dispatchHistory` read `ops.queue.evidence.list`, the
+    // deliberately patchable DISPLAY surface, and `dispatchClaudeTask` gated
+    // duplicate publication of a public GitHub issue on that read — the class
+    // of defect round 1 closed in `#claudeDispatchState`, one function over.
+    const fixture = ordersFixture();
+    const taskId = approvedTask(fixture);
+    const calls: unknown[] = [];
+    const transport: DispatchCapableTransport = {
+      id: 'stub-gh',
+      ensureLabel: () => ({ ok: true, created: false }),
+      status: (): GitHubTransportStatus => AUTHENTICATED,
+      createIssue: (request): GitHubIssueResult => {
+        calls.push(request);
+        return { ok: true, issueNumber: ISSUE, issueUrl: GOOD_URL };
+      },
+    };
+    const first = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+    expect(first.ok).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(dispatchHistory(fixture.ops, taskId)).toMatchObject({ state: 'dispatched', issueNumber: ISSUE });
+
+    const evidence = fixture.ops.queue.evidence as unknown as { list: (taskId?: string) => { kind: string }[] };
+    const originalList = evidence.list;
+    const realList = fixture.ops.queue.evidence.list.bind(fixture.ops.queue.evidence);
+    evidence.list = (id?: string) => realList(id).filter((entry) => !entry.kind.startsWith('claude_github_dispatch'));
+    try {
+      // The lie took on the convenience read...
+      expect(fixture.ops.queue.evidence.list(taskId).some((e) => e.kind.startsWith('claude_github_dispatch'))).toBe(false);
+      expect(realList(taskId).some((e) => e.kind === 'claude_github_dispatch_succeeded')).toBe(true);
+      // ...and the history still comes from the canonical rows.
+      const history = dispatchHistory(fixture.ops, taskId);
+      expect(history).toMatchObject({ state: 'dispatched', issueNumber: ISSUE, issueUrl: GOOD_URL });
+      // A repeat is answered from what was ALREADY published: one issue, a deduplicated receipt, no second transport call.
+      const repeat = dispatchClaudeTask(fixture.ops, { evidence: fixture.dispatchEvidence, executorWorkerId: EXECUTOR, taskId, target: TARGET, transport });
+      expect(repeat.ok).toBe(true);
+      if (repeat.ok) {
+        expect(repeat.data.deduplicated).toBe(true);
+        expect(repeat.data.issueNumber).toBe(ISSUE);
+      }
+      expect(calls).toHaveLength(1);
+      expect(realList(taskId).filter((e) => e.kind === 'claude_github_dispatch_attempted')).toHaveLength(1);
+    } finally {
+      evidence.list = originalList;
+    }
+    expect(fixture.ops.queue.evidence.list(taskId).some((e) => e.kind === 'claude_github_dispatch_succeeded')).toBe(true);
   });
 });

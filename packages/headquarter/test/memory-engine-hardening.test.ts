@@ -137,6 +137,39 @@ describe('hq_memory engine triggers', () => {
     }
   });
 
+  it('aborts REPLACE landing on the implicit rowid — a founder_only row cannot be swapped for a forged internal one, whatever the connection pragma says', () => {
+    // hq_memory has a TEXT primary key, so its rowid is a separate, implicit
+    // conflict target that neither the id guard nor the idempotency guard
+    // tests. Review round 2 proved this REPLACE succeeded with the pragma OFF.
+    const fx = memoryFixture();
+    fx.db.pragma('recursive_triggers = OFF');
+    try {
+      const secret = recordNote(fx, { title: 'Founder-only note', body: 'Private.', privacy: 'founder_only' });
+      const { rowid } = fx.db.prepare(`SELECT rowid FROM hq_memory WHERE id = ?`).get(secret.id) as { rowid: number };
+      expect(typeof rowid).toBe('number');
+      const before = JSON.stringify(fx.db.prepare(`SELECT rowid, * FROM hq_memory ORDER BY rowid`).all());
+      expect(() =>
+        fx.db
+          .prepare(
+            `INSERT OR REPLACE INTO hq_memory
+               (rowid, id, kind, title, body, status, recorded_date, recorded_confidence, recorded_by,
+                project, related, source_refs, tags, superseded_by, privacy, created_at, updated_at)
+             VALUES (?, 'forged-memory', 'founder_note', 'forged', 'forged', 'CURRENT', '2026-01-01', 'exact', 'attacker',
+                     'X', '{}', '[]', '[]', '[]', 'internal', 'now', 'now')`,
+          )
+          .run(rowid),
+      ).toThrow(/insert-only/);
+      expect(JSON.stringify(fx.db.prepare(`SELECT rowid, * FROM hq_memory ORDER BY rowid`).all())).toBe(before);
+      expect(fx.ops.getMemoryRecord(secret.id)!.privacy).toBe('founder_only');
+      expect(fx.ops.getMemoryRecord('forged-memory')).toBeNull();
+      // The guard does not obstruct the legitimate writer (auto-assigned rowids keep flowing).
+      const next = recordNote(fx, { title: 'Another note', body: 'Public.' });
+      expect(fx.ops.getMemoryRecord(next.id)!.title).toBe('Another note');
+    } finally {
+      fx.db.pragma('recursive_triggers = ON');
+    }
+  });
+
   it('permits exactly the CURRENT -> SUPERSEDED status move and nothing else', () => {
     const fx = memoryFixture();
     const record = recordNote(fx);

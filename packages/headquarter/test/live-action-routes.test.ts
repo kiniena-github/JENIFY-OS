@@ -207,6 +207,30 @@ describe('the reads', () => {
     expect(JSON.stringify(detail.body)).not.toContain(token);
     expect((detail.body.action as { outcome: { externalRefWithheld: boolean } }).outcome.externalRefWithheld).toBe(true);
   });
+
+  it('a credential in an adapter MESSAGE is withheld on the wire too — the detail route answers 200, not a permanent 500', () => {
+    // Review round 2: the message went into the immutable ledger unscanned and
+    // `safe()` then refused the detail response for that action forever.
+    const token = `ghp_${'d'.repeat(30)}`;
+    const adapter = fakeAdapter();
+    adapter.execute = (request) => {
+      adapter.calls.push(request);
+      return { ok: false, kind: 'rejected', message: `401: token ${token} rejected` };
+    };
+    const fixture = gatewayFixture({ adapter });
+    const h = harness({ fixture });
+    const started = startedTask(fixture);
+    const a = authorizedAction(fixture, started);
+    expectOk(fixture.ops.executeAction({ actionId: a, workerId: 'claude', fence: started.fence }));
+    const detail = h.call({ method: 'GET', path: CONTROL_ROUTES.actionDetail, query: { id: a } });
+    expect(detail.status).toBe(200);
+    expect(JSON.stringify(detail.body)).not.toContain(token);
+    const outcome = (detail.body.action as { outcome: { state: string; message: string | null; messageWithheld: boolean } }).outcome;
+    expect(outcome).toMatchObject({ state: 'failed', message: null, messageWithheld: true });
+    const list = h.call({ method: 'GET', query: { taskId: started.taskId } });
+    expect(list.status).toBe(200);
+    expect(JSON.stringify(list.body)).not.toContain(token);
+  });
 });
 
 describe('reconcile takes STEP-UP always and the Founder gate', () => {

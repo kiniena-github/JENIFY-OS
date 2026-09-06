@@ -327,12 +327,18 @@ describe('the Founder-gated reads and the privacy boundary', () => {
     const gated = liveSnapshotFromOperations(h.fixture.ops, { now: NOW.toISOString(), includeFounderOnlyMemory: true });
     expect(gated.truth!.data.records).toHaveLength(3);
     expect(gated.truth!.data.withheldFounderOnly).toBe(0);
+    expect(gated.truth!.data.unresolvedContradictions).toBe(1);
+    expect(gated.truth!.data.byState).toEqual({ claimed: 3, observed: 0, verified: 0, accepted: 0 });
     const artifact = liveSnapshotFromOperations(h.fixture.ops, { now: NOW.toISOString() });
     expect(artifact.truth!.data.records).toHaveLength(1);
     expect(artifact.truth!.data.records[0]!.privacy).toBe('internal');
     expect(artifact.truth!.data.total).toBe(3);
     expect(artifact.truth!.data.withheldFounderOnly).toBe(2);
-    expect(artifact.truth!.data.unresolvedContradictions).toBe(1);
+    // Review round 2: the aggregate counts span the CARRIED set only — a dispute
+    // between two founder_only records is an internal dispute, and its count
+    // said one existed. `total` + `withheldFounderOnly` still state the omission.
+    expect(artifact.truth!.data.unresolvedContradictions).toBe(0);
+    expect(artifact.truth!.data.byState).toEqual({ claimed: 1, observed: 0, verified: 0, accepted: 0 });
     expect(artifact.truth!.data.contradictions).toEqual([]);
     expect(artifact.truth!.provenance.note).toContain('2 founder_only record(s)');
     const blob = JSON.stringify(artifact);
@@ -362,6 +368,7 @@ describe('the Founder-gated reads and the privacy boundary', () => {
     expect(gatedOpen.contradictedBy).toEqual([secretId]);
     expect(gatedOpen.contradictions).toEqual([{ withId: secretId, direction: 'stated_by', resolution: 'unresolved' }]);
     expect(gated.truth!.data.withheldFounderOnlyRelations).toBe(0);
+    expect(gated.truth!.data.unresolvedContradictions).toBe(1);
 
     const artifact = liveSnapshotFromOperations(h.fixture.ops, { now: NOW.toISOString() });
     const blob = JSON.stringify(artifact);
@@ -376,7 +383,9 @@ describe('the Founder-gated reads and the privacy boundary', () => {
     expect(carried.contested).toBe(true);
     expect(artifact.truth!.data.withheldFounderOnly).toBe(1);
     expect(artifact.truth!.data.withheldFounderOnlyRelations).toBe(1);
-    expect(artifact.truth!.data.unresolvedContradictions).toBe(1);
+    // The pair count matches the pair list it summarises (both scoped to the
+    // carried set since review round 2); the record's own `contested` stays true.
+    expect(artifact.truth!.data.unresolvedContradictions).toBe(0);
     expect(artifact.truth!.data.contradictions).toEqual([]);
     expect(artifact.truth!.provenance.note).toContain('1 relation(s)');
   });

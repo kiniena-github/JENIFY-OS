@@ -644,13 +644,20 @@ export interface ActionView {
   authorization: { by: string; at: string; digest: string; approvalId: string | null } | null;
   /** The external attempt, or null before one. `correlationId` is unique per attempt. */
   attempt: { by: string; at: string; correlationId: string; generation: number } | null;
-  /** The recorded external result, or null. Secret-like refs are withheld, never stored. */
+  /**
+   * The recorded external result, or null. Secret-like refs AND secret-like
+   * messages are withheld before storage, never stored: both ledger tables are
+   * engine-immutable and `op_evidence` is hash-chained, so a credential that
+   * landed there could never be removed. A withheld field is flagged, so the
+   * omission is visible rather than silent.
+   */
   outcome: {
     state: 'succeeded' | 'failed' | 'outcome_unknown';
     at: string;
     externalRef: Record<string, unknown> | null;
     externalRefWithheld: boolean;
     message: string | null;
+    messageWithheld: boolean;
   } | null;
   reconciliation: { by: string; at: string; decision: ActionReconcileDecision; note: string } | null;
   /**
@@ -722,6 +729,7 @@ export function deriveActionView(row: ActionIntentRow, events: readonly ActionEv
               : null,
           externalRefWithheld: outcomeEvent.detail.externalRefWithheld === true,
           message: str(outcomeEvent.detail, 'message'),
+          messageWithheld: outcomeEvent.detail.messageWithheld === true,
         }
       : null,
     reconciliation: reconciledEvent

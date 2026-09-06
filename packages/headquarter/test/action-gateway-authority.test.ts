@@ -36,6 +36,7 @@ import {
   riskRequiresApproval,
 } from '../src/application/action-gateway.js';
 import { HeadquarterOperations, gatewayActionHistoryFor, writeDispatchOutcome } from '../src/application/service.js';
+import { assertBrowserSafe } from '../src/live/redaction.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { OperatorQueue } from '../src/operator/queue.js';
 import { openMemoryHqDatabase } from '../src/store/db.js';
@@ -762,6 +763,69 @@ describe('secrets, immutability and the one-execution-path seam', () => {
     ].join('');
     expect(everything).not.toContain(token);
     expect(fx.ops.queue.evidence.verifyChain()).toBeNull();
+  });
+
+  it('a credential in an adapter MESSAGE — a rejected outcome or a thrown error — is withheld the same way, and visibly so', () => {
+    // Real APIs echo the token or the Authorization header in auth errors, so
+    // this is the first thing a real adapter will hand back. Both stores are
+    // engine-immutable and op_evidence is hash-chained: a token that lands
+    // there can never be removed. Review round 2 proved it landed.
+    const token = `ghp_${'c'.repeat(30)}`;
+    const everythingIn = (fx: ReturnType<typeof gatewayFixture>, actionId: string) =>
+      [
+        JSON.stringify(fx.db.prepare(`SELECT * FROM hq_action_events`).all()),
+        JSON.stringify(fx.db.prepare(`SELECT * FROM hq_action_intents`).all()),
+        JSON.stringify(fx.ops.queue.evidence.list()),
+        JSON.stringify(fx.db.prepare(`SELECT * FROM hq_events`).all()),
+        JSON.stringify(fx.ops.getAction(actionId)),
+      ].join('');
+
+    // 1. The rejected path: outcome.message carries the token.
+    const rejecting = fakeAdapter();
+    rejecting.execute = (request) => {
+      rejecting.calls.push(request);
+      return { ok: false, kind: 'rejected', message: `remote said: token ${token} is invalid` };
+    };
+    const fx1 = gatewayFixture({ adapter: rejecting });
+    const started1 = startedTask(fx1);
+    const action1 = authorizedAction(fx1, started1);
+    const failed = expectOk(fx1.ops.executeAction({ actionId: action1, workerId: 'claude', fence: started1.fence }));
+    expect(failed.outcome).toBe('failed');
+    expect(failed.action.outcome).toMatchObject({ state: 'failed', message: null, messageWithheld: true });
+    expect(everythingIn(fx1, action1)).not.toContain(token);
+    expect(fx1.ops.queue.evidence.verifyChain()).toBeNull();
+    // Withheld, not silent: the ledger event, the evidence entry and the audit row all say so.
+    const event1 = fx1.db.prepare(`SELECT detail FROM hq_action_events WHERE action_id = ? AND state = 'failed'`).get(action1) as { detail: string };
+    expect(JSON.parse(event1.detail)).toMatchObject({ message: null, messageWithheld: true });
+    const evidence1 = fx1.ops.queue.evidence.list(started1.taskId).find((e) => e.kind === 'action_failed')!;
+    expect(evidence1.payload).toMatchObject({ message: null, messageWithheld: true });
+    // ...and the view passes the browser guard `safe()` applies on the wire (it used to 500).
+    expect(() => assertBrowserSafe(fx1.ops.getAction(action1), 'action')).not.toThrow();
+
+    // 2. The throw path: the error text carries the token.
+    const throwing = fakeAdapter();
+    throwing.execute = (request) => {
+      throwing.calls.push(request);
+      throw new Error(`401 Unauthorized for bearer ${token}`);
+    };
+    const fx2 = gatewayFixture({ adapter: throwing });
+    const started2 = startedTask(fx2);
+    const action2 = authorizedAction(fx2, started2);
+    const unknown = expectOk(fx2.ops.executeAction({ actionId: action2, workerId: 'claude', fence: started2.fence }));
+    expect(unknown.outcome).toBe('outcome_unknown');
+    expect(unknown.action.outcome).toMatchObject({ state: 'outcome_unknown', message: null, messageWithheld: true });
+    expect(everythingIn(fx2, action2)).not.toContain(token);
+    expect(fx2.ops.queue.evidence.verifyChain()).toBeNull();
+    expect(() => assertBrowserSafe(fx2.ops.getAction(action2), 'action')).not.toThrow();
+    // Unknown stays unknown and retry-blocked — withholding the text changes no state.
+    expect(errorCode(fx2.ops.executeAction({ actionId: action2, workerId: 'claude', fence: started2.fence }))).toBe('action_outcome_unknown');
+
+    // 3. An honest message is still recorded, and says it was not withheld.
+    const fx3 = gatewayFixture({ adapter: fakeAdapter({ mode: 'reject' }) });
+    const started3 = startedTask(fx3);
+    const action3 = authorizedAction(fx3, started3);
+    const honest = expectOk(fx3.ops.executeAction({ actionId: action3, workerId: 'claude', fence: started3.fence }));
+    expect(honest.action.outcome).toMatchObject({ state: 'failed', message: 'the remote refused the request', messageWithheld: false });
   });
 
   it('both ledger tables are append-only by engine', () => {

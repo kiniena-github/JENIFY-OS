@@ -1352,6 +1352,13 @@ let readCapabilityRow: (ops: HeadquarterOperations, capabilityId: string) => Cap
 let readKillSwitchEngaged: (ops: HeadquarterOperations, capabilityId?: string) => boolean;
 /** Same recipe for the gateway's attempt history (the dispatch lane's one-external-path verdict). */
 let readGatewayActionHistory: (ops: HeadquarterOperations, taskId: string) => GatewayActionHistory;
+/**
+ * Same recipe for a task's canonical `op_evidence` rows (review round 2): the
+ * dispatch lane's duplicate-publication read (`dispatchHistory`) decides whether
+ * a public GitHub issue is published again, so it must not read the patchable
+ * `queue.evidence.list` display surface.
+ */
+let readTaskEvidenceRows: (ops: HeadquarterOperations, taskId: string) => CanonicalEvidenceRow[];
 
 export class HeadquarterOperations {
   readonly queue: OperatorQueue;
@@ -2528,6 +2535,8 @@ export class HeadquarterOperations {
       ops.#killSwitchEngagedFromStore(capabilityId);
     readGatewayActionHistory = (ops: HeadquarterOperations, taskId: string): GatewayActionHistory =>
       ops.#gatewayActionHistoryFromStore(taskId);
+    readTaskEvidenceRows = (ops: HeadquarterOperations, taskId: string): CanonicalEvidenceRow[] =>
+      ops.#taskEvidenceRowsFromStore(taskId);
   }
 
   /**
@@ -6547,7 +6556,11 @@ export class HeadquarterOperations {
 
   /**
    * The bounded snapshot view. The reading layer's privacy decision is made
-   * by the caller (`includeFounderOnly`); withheld rows stay in the totals.
+   * by the caller (`includeFounderOnly`); withheld rows stay in `total` and
+   * are counted in `withheldFounderOnly`, and NOTHING else is aggregated over
+   * them (review round 2): `byState`, `unresolvedContradictions` and
+   * `awaitingAcceptance` span the set the reader may see, so arithmetic on
+   * the artifact discloses no categorical fact about a private record.
    */
   truthSummary(options: { includeFounderOnly: boolean; limit?: number }): TruthSnapshotView {
     const limit = options.limit ?? TRUTH_SNAPSHOT_LIMIT;
@@ -6565,20 +6578,30 @@ export class HeadquarterOperations {
       withheldRelations += projected.withheld;
       return projected.view;
     });
+    // Aggregates over the FULL visible set (not the carried page), never over
+    // withheld rows.
     const byState: Record<TruthState, number> = { claimed: 0, observed: 0, verified: 0, accepted: 0 };
-    for (const view of all) byState[view.state] += 1;
-    const contradictions = this.listTruthContradictions().filter((pair) => {
+    let awaitingAcceptance = 0;
+    for (const view of visible) {
+      byState[view.state] += 1;
+      // Verified, current and uncontested — exactly the records the server
+      // issued an acceptance digest for.
+      if (view.acceptanceDigest !== null) awaitingAcceptance += 1;
+    }
+    const unresolved = this.listTruthContradictions().filter((pair) => {
+      if (pair.resolution !== 'unresolved') return false;
       if (options.includeFounderOnly) return true;
       return !isFounderOnly(pair.a) && !isFounderOnly(pair.b);
     });
     return {
       total: all.length,
       byState,
-      unresolvedContradictions: this.listTruthContradictions().filter((p) => p.resolution === 'unresolved').length,
+      unresolvedContradictions: unresolved.length,
+      awaitingAcceptance,
       withheldFounderOnly: all.length - visible.length,
       withheldFounderOnlyRelations: withheldRelations,
       records: carried,
-      contradictions: contradictions.filter((p) => p.resolution === 'unresolved').slice(0, limit),
+      contradictions: unresolved.slice(0, limit),
     };
   }
 
@@ -7264,7 +7287,23 @@ export class HeadquarterOperations {
         externalRefWithheld = true;
       }
     }
-    const message = outcome.ok ? null : String(outcome.message ?? '').slice(0, 500);
+    // The adapter's message — whether it RETURNED one or THREW it (step 2 folds
+    // the thrown text into `outcome.message`, so one scan here covers both
+    // paths) — goes through the same guard as `externalRef` BEFORE storage.
+    // Real APIs echo the token or the Authorization header in auth errors;
+    // both stores below are engine-immutable and the evidence chain is hashed,
+    // so a credential written here could never be removed (review round 2
+    // proved it landed). Withheld is flagged, never silent.
+    let message: string | null = outcome.ok ? null : String(outcome.message ?? '').slice(0, 500);
+    let messageWithheld = false;
+    if (message !== null) {
+      try {
+        assertBrowserSafe({ message }, 'message');
+      } catch {
+        message = null;
+        messageWithheld = true;
+      }
+    }
     try {
       privileged.reserve(() => {
         const at = nowIso();
@@ -7273,6 +7312,7 @@ export class HeadquarterOperations {
           externalRef,
           externalRefWithheld,
           message,
+          messageWithheld,
         });
         this.#store.appendEvent({
           subjectKind: 'system',
@@ -7280,13 +7320,13 @@ export class HeadquarterOperations {
           status: null,
           actor: input.workerId,
           summary: `External action ${terminal}: ${run.intent.adapterId}/${run.intent.actionType} (${run.correlationId})`,
-          detail: { taskId: run.intent.taskId, correlationId: run.correlationId, externalRefWithheld },
+          detail: { taskId: run.intent.taskId, correlationId: run.correlationId, externalRefWithheld, messageWithheld },
         });
         privileged.appendEvidence({
           taskId: run.intent.taskId,
           actor: input.workerId,
           kind: `action_${terminal}`,
-          payload: { actionId, correlationId: run.correlationId, externalRef, externalRefWithheld, message },
+          payload: { actionId, correlationId: run.correlationId, externalRef, externalRefWithheld, message, messageWithheld },
         });
       });
     } catch (error) {
@@ -7576,6 +7616,33 @@ export class HeadquarterOperations {
     }
     if (dispatched) return 'dispatched';
     return pending ? 'unknown' : 'none';
+  }
+
+  /**
+   * A task's evidence rows read through `#db` in chain order — kind, time and
+   * payload only, which is all a lane folding a history needs. Published as
+   * the `taskEvidenceRowsFor` function binding (review round 2) so the Claude
+   * dispatch lane's `dispatchHistory` — the read that gates a duplicate PUBLIC
+   * publication — never goes through `queue.evidence.list`, the deliberately
+   * patchable display surface. The same rows `EvidenceLog.list(taskId)` maps;
+   * a payload that does not parse is an empty object rather than a throw, so a
+   * corrupt row cannot turn a "dispatched" answer into an exception.
+   */
+  #taskEvidenceRowsFromStore(taskId: string): CanonicalEvidenceRow[] {
+    if (!taskId) return [];
+    const rows = this.#db
+      .prepare(`SELECT kind, at, payload FROM op_evidence WHERE task_id = ? ORDER BY seq`)
+      .all(taskId) as { kind: string; at: string; payload: string }[];
+    return rows.map((row) => {
+      let payload: Record<string, unknown> = {};
+      try {
+        const parsed: unknown = JSON.parse(row.payload);
+        if (parsed != null && typeof parsed === 'object' && !Array.isArray(parsed)) payload = parsed as Record<string, unknown>;
+      } catch {
+        payload = {};
+      }
+      return { kind: row.kind, at: row.at, payload };
+    });
   }
 
   /** Turn snapshot drift into the one refusal whose cause outranks the others. */
@@ -8096,6 +8163,25 @@ export type GatewayActionHistory =
  */
 export function gatewayActionHistoryFor(ops: HeadquarterOperations, taskId: string): GatewayActionHistory {
   return readGatewayActionHistory(ops, taskId);
+}
+
+/** One canonical `op_evidence` row as a deciding read needs it: kind, time, payload. */
+export interface CanonicalEvidenceRow {
+  kind: string;
+  at: string;
+  payload: Record<string, unknown>;
+}
+
+/**
+ * A task's canonical evidence rows for a caller making an ENFORCEMENT decision
+ * (review round 2): a FUNCTION BINDING like `killSwitchEngagedFor`, because the
+ * Claude dispatch lane's `dispatchHistory` decides whether a public issue is
+ * published a second time, and `queue.evidence.list` — which it used to read —
+ * is the deliberately patchable convenience read for DISPLAY. That handle stays
+ * exactly as it is for display callers.
+ */
+export function taskEvidenceRowsFor(ops: HeadquarterOperations, taskId: string): CanonicalEvidenceRow[] {
+  return readTaskEvidenceRows(ops, taskId);
 }
 
 export function createHeadquarterOperations(

@@ -819,9 +819,24 @@ export function entityCurrentState(current: readonly TruthRecordView[]): TruthSt
 }
 
 export interface TruthSnapshotView {
+  /** Every record, founder_only included; `total - withheldFounderOnly` is the set the reader may see. */
   total: number;
+  /**
+   * Counted over the set the reader may see (every record past the Founder
+   * gate; the non-founder_only records in the unauthenticated artifact), NOT
+   * bounded by the carried `records` page. Sums to `total - withheldFounderOnly`.
+   * Scoped that way since review round 2: aggregate categorical facts about
+   * withheld rows are still facts about them.
+   */
   byState: Record<TruthState, number>;
+  /** Unresolved pairs with BOTH sides in the set the reader may see — the count of what `contradictions` summarises. */
   unresolvedContradictions: number;
+  /**
+   * Verified, current and uncontested records in the set the reader may see —
+   * exactly those the server issued an acceptance digest for — counted over
+   * ALL of them, not the bounded `records` page (review round 2).
+   */
+  awaitingAcceptance: number;
   /** founder_only records counted in `total` but not carried by this artifact. */
   withheldFounderOnly: number;
   /**
