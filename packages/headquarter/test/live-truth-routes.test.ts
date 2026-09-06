@@ -335,7 +335,50 @@ describe('the Founder-gated reads and the privacy boundary', () => {
     expect(artifact.truth!.data.unresolvedContradictions).toBe(1);
     expect(artifact.truth!.data.contradictions).toEqual([]);
     expect(artifact.truth!.provenance.note).toContain('2 founder_only record(s)');
-    expect(JSON.stringify(artifact)).not.toContain('The private decision was made.');
+    const blob = JSON.stringify(artifact);
+    expect(blob).not.toContain('The private decision was made.');
+    expect(blob).not.toContain(privateId);
+    for (const r of gated.truth!.data.records.filter((v) => v.privacy === 'founder_only')) expect(blob).not.toContain(r.id);
+  });
+
+  it('the unauthenticated artifact carries no founder_only id through a PUBLIC record\'s relations either; the Founder-gated state keeps them', () => {
+    const h = harness();
+    const open = (h.call({ body: claimBody(h, { statement: 'The release shipped on time.' }) }).body.record as { id: string }).id;
+    const secret = h.call(
+      {
+        body: claimBody(h, {
+          statement: 'CONFIDENTIAL: the release slipped and legal was notified.',
+          privacy: 'founder_only',
+          contradicts: [open],
+        }),
+      },
+      account('user-analyst'),
+    );
+    expect(secret.status).toBe(201);
+    const secretId = (secret.body.record as { id: string }).id;
+
+    const gated = liveSnapshotFromOperations(h.fixture.ops, { now: NOW.toISOString(), includeFounderOnlyMemory: true });
+    const gatedOpen = gated.truth!.data.records.find((r) => r.id === open)!;
+    expect(gatedOpen.contradictedBy).toEqual([secretId]);
+    expect(gatedOpen.contradictions).toEqual([{ withId: secretId, direction: 'stated_by', resolution: 'unresolved' }]);
+    expect(gated.truth!.data.withheldFounderOnlyRelations).toBe(0);
+
+    const artifact = liveSnapshotFromOperations(h.fixture.ops, { now: NOW.toISOString() });
+    const blob = JSON.stringify(artifact);
+    expect(blob).not.toContain('CONFIDENTIAL');
+    expect(blob).not.toContain(secretId);
+    const carried = artifact.truth!.data.records.find((r) => r.id === open)!;
+    expect(carried.contradictedBy).toEqual([]);
+    expect(carried.contradictions).toEqual([]);
+    // The public record's own categorical standing is not laundered: it IS
+    // contested. What is withheld is who by, in which direction, and how
+    // that stands — the private record's identity and substance.
+    expect(carried.contested).toBe(true);
+    expect(artifact.truth!.data.withheldFounderOnly).toBe(1);
+    expect(artifact.truth!.data.withheldFounderOnlyRelations).toBe(1);
+    expect(artifact.truth!.data.unresolvedContradictions).toBe(1);
+    expect(artifact.truth!.data.contradictions).toEqual([]);
+    expect(artifact.truth!.provenance.note).toContain('1 relation(s)');
   });
 
   it('GET /truth/entity answers history and 404s an unknown entity only after the gate', () => {

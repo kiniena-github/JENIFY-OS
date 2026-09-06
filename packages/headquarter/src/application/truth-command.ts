@@ -386,6 +386,32 @@ BEFORE INSERT ON hq_truth_acceptances
 WHEN EXISTS (SELECT 1 FROM hq_truth_acceptances WHERE id = NEW.id)
   OR (TYPEOF(NEW.seq) = 'integer' AND EXISTS (SELECT 1 FROM hq_truth_acceptances WHERE seq = NEW.seq))
 BEGIN SELECT RAISE(ABORT, 'hq_truth_acceptances is append-only'); END;
+
+-- REPLACE resolves a conflict on ANY unique index by deleting the standing
+-- row, and BEFORE DELETE does not fire for that delete on a connection with
+-- recursive_triggers off (the default, and connection-scoped — nothing here
+-- binds a foreign writer). The guards above test only id/seq, so a REPLACE
+-- colliding on a SECONDARY unique index (idempotency_key, supersedes, the
+-- one-acceptance-per-record index) used to erase the standing row and land
+-- the forgery. These guards close every remaining unique index on the four
+-- tables; they are ADDITIVE (new names) so a file created before them gains
+-- them on the next ensure. hq_truth_relations has no secondary unique index.
+CREATE TRIGGER IF NOT EXISTS trg_hq_truth_records_no_replace_unique
+BEFORE INSERT ON hq_truth_records
+WHEN (NEW.idempotency_key IS NOT NULL
+      AND EXISTS (SELECT 1 FROM hq_truth_records WHERE idempotency_key = NEW.idempotency_key))
+  OR (NEW.supersedes IS NOT NULL
+      AND EXISTS (SELECT 1 FROM hq_truth_records WHERE supersedes = NEW.supersedes))
+BEGIN SELECT RAISE(ABORT, 'hq_truth_records is append-only (unique idempotency_key / supersedes already held)'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_truth_verifications_no_replace_unique
+BEFORE INSERT ON hq_truth_verifications
+WHEN NEW.idempotency_key IS NOT NULL
+  AND EXISTS (SELECT 1 FROM hq_truth_verifications WHERE idempotency_key = NEW.idempotency_key)
+BEGIN SELECT RAISE(ABORT, 'hq_truth_verifications is append-only (unique idempotency_key already held)'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_truth_acceptances_no_replace_unique
+BEFORE INSERT ON hq_truth_acceptances
+WHEN EXISTS (SELECT 1 FROM hq_truth_acceptances WHERE truth_id = NEW.truth_id)
+BEGIN SELECT RAISE(ABORT, 'hq_truth_acceptances is append-only (one acceptance per record already held)'); END;
 `;
 
 /** Idempotent; readonly-safe (the post-Phase-3 ensure*Schema pattern). */
@@ -798,6 +824,62 @@ export interface TruthSnapshotView {
   unresolvedContradictions: number;
   /** founder_only records counted in `total` but not carried by this artifact. */
   withheldFounderOnly: number;
+  /**
+   * founder_only counterparts dropped from the carried records' relations
+   * (supports / contradicts / derived_from / supersession, either direction,
+   * and the per-record `contradictions` entries): one per withheld counterpart
+   * per carried record. 0 when the reader may see founder_only.
+   */
+  withheldFounderOnlyRelations: number;
   records: TruthRecordView[];
   contradictions: TruthContradictionPair[];
+}
+
+/**
+ * Project a carried record for a reader who may NOT see founder_only records.
+ *
+ * Withholding the founder_only RECORDS is not enough: a public record's view
+ * carries its relations by id (`contradictedBy`, `supportedBy`, `derivations`,
+ * `supersededBy`, and the judged `contradictions` entries), so the artifact
+ * still named the private record and stated that it unresolvedly disputes the
+ * public one — the existence of an internal dispute, which is the substance
+ * founder_only protects. Every id pointing at a founder_only record is dropped
+ * and counted once per counterpart. The record's own categorical standing
+ * (`contested`, `lifecycle`, `state`) is NOT rewritten: a contested public
+ * statement stays contested rather than being laundered for the public view.
+ * Pure; the input view is not mutated.
+ */
+export function withholdFounderOnlyRelations(
+  view: TruthRecordView,
+  isFounderOnly: (id: string) => boolean,
+): { view: TruthRecordView; withheld: number } {
+  const dropped = new Set<string>();
+  const keep = (ids: readonly string[]): string[] =>
+    ids.filter((id) => {
+      if (!isFounderOnly(id)) return true;
+      dropped.add(id);
+      return false;
+    });
+  const keepOne = (id: string | null): string | null => {
+    if (id === null || !isFounderOnly(id)) return id;
+    dropped.add(id);
+    return null;
+  };
+  const projected: TruthRecordView = {
+    ...view,
+    supersedes: keepOne(view.supersedes),
+    supersededBy: keepOne(view.supersededBy),
+    supports: keep(view.supports),
+    contradicts: keep(view.contradicts),
+    derivedFrom: keep(view.derivedFrom),
+    supportedBy: keep(view.supportedBy),
+    contradictedBy: keep(view.contradictedBy),
+    derivations: keep(view.derivations),
+    contradictions: view.contradictions.filter((c) => {
+      if (!isFounderOnly(c.withId)) return true;
+      dropped.add(c.withId);
+      return false;
+    }),
+  };
+  return { view: projected, withheld: dropped.size };
 }

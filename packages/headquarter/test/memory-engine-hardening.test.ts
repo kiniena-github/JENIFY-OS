@@ -107,6 +107,36 @@ describe('hq_memory engine triggers', () => {
     expect(fx.ops.getMemoryRecord(record.id)!.title).toBe('Line 2 stays manual');
   });
 
+  it('aborts REPLACE landing on the idempotency_key unique index — the original row survives, whatever the connection pragma says', () => {
+    const fx = memoryFixture();
+    // recursive_triggers is connection-scoped and binds no foreign writer;
+    // with it OFF, only the BEFORE INSERT guard on the secondary index holds.
+    fx.db.pragma('recursive_triggers = OFF');
+    try {
+      const record = recordNote(fx);
+      const key = (fx.db.prepare(`SELECT idempotency_key FROM hq_memory WHERE id = ?`).get(record.id) as { idempotency_key: string | null })
+        .idempotency_key;
+      expect(key).toBeTruthy();
+      const before = JSON.stringify(fx.db.prepare(`SELECT * FROM hq_memory`).all());
+      expect(() =>
+        fx.db
+          .prepare(
+            `INSERT OR REPLACE INTO hq_memory
+               (id, kind, title, body, status, recorded_date, recorded_confidence, recorded_by,
+                project, related, source_refs, tags, superseded_by, privacy, created_at, updated_at, idempotency_key)
+             VALUES ('forged-memory', 'founder_note', 'forged', 'forged', 'CURRENT', '2026-01-01', 'exact', 'attacker',
+                     'X', '{}', '[]', '[]', '[]', 'internal', 'now', 'now', ?)`,
+          )
+          .run(key),
+      ).toThrow(/insert-only/);
+      expect(JSON.stringify(fx.db.prepare(`SELECT * FROM hq_memory`).all())).toBe(before);
+      expect(fx.ops.getMemoryRecord(record.id)!.title).toBe('Line 2 stays manual');
+      expect(fx.ops.getMemoryRecord('forged-memory')).toBeNull();
+    } finally {
+      fx.db.pragma('recursive_triggers = ON');
+    }
+  });
+
   it('permits exactly the CURRENT -> SUPERSEDED status move and nothing else', () => {
     const fx = memoryFixture();
     const record = recordNote(fx);

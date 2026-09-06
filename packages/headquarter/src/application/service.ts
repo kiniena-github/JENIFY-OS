@@ -560,6 +560,7 @@ import {
   truthVerificationIdempotencyKey,
   truthVerifyCapabilityState,
   truthVerifyContractDrift,
+  withholdFounderOnlyRelations,
   type EntityTruthView,
   type SubjectDrift,
   type TruthAcceptanceView,
@@ -1349,6 +1350,8 @@ let readCapabilityRow: (ops: HeadquarterOperations, capabilityId: string) => Cap
  * through a function binding instead of the patchable queue delegate.
  */
 let readKillSwitchEngaged: (ops: HeadquarterOperations, capabilityId?: string) => boolean;
+/** Same recipe for the gateway's attempt history (the dispatch lane's one-external-path verdict). */
+let readGatewayActionHistory: (ops: HeadquarterOperations, taskId: string) => GatewayActionHistory;
 
 export class HeadquarterOperations {
   readonly queue: OperatorQueue;
@@ -2523,6 +2526,8 @@ export class HeadquarterOperations {
       ops.#capabilityFromStore(capabilityId);
     readKillSwitchEngaged = (ops: HeadquarterOperations, capabilityId?: string): boolean =>
       ops.#killSwitchEngagedFromStore(capabilityId);
+    readGatewayActionHistory = (ops: HeadquarterOperations, taskId: string): GatewayActionHistory =>
+      ops.#gatewayActionHistoryFromStore(taskId);
   }
 
   /**
@@ -6547,21 +6552,32 @@ export class HeadquarterOperations {
   truthSummary(options: { includeFounderOnly: boolean; limit?: number }): TruthSnapshotView {
     const limit = options.limit ?? TRUTH_SNAPSHOT_LIMIT;
     const all = this.listTruth();
-    const carried = options.includeFounderOnly ? all : all.filter((v) => v.privacy !== 'founder_only');
+    const founderOnlyIds = new Set(all.filter((v) => v.privacy === 'founder_only').map((v) => v.id));
+    const isFounderOnly = (id: string) => founderOnlyIds.has(id);
+    const visible = options.includeFounderOnly ? all : all.filter((v) => !isFounderOnly(v.id));
+    // A carried PUBLIC record still names its founder_only counterparts by id
+    // through its relations; for a reader without the Founder gate those ids
+    // are withheld too (and counted), never just the records.
+    let withheldRelations = 0;
+    const carried = visible.slice(0, limit).map((view) => {
+      if (options.includeFounderOnly) return view;
+      const projected = withholdFounderOnlyRelations(view, isFounderOnly);
+      withheldRelations += projected.withheld;
+      return projected.view;
+    });
     const byState: Record<TruthState, number> = { claimed: 0, observed: 0, verified: 0, accepted: 0 };
     for (const view of all) byState[view.state] += 1;
     const contradictions = this.listTruthContradictions().filter((pair) => {
       if (options.includeFounderOnly) return true;
-      const a = all.find((v) => v.id === pair.a);
-      const b = all.find((v) => v.id === pair.b);
-      return a?.privacy !== 'founder_only' && b?.privacy !== 'founder_only';
+      return !isFounderOnly(pair.a) && !isFounderOnly(pair.b);
     });
     return {
       total: all.length,
       byState,
       unresolvedContradictions: this.listTruthContradictions().filter((p) => p.resolution === 'unresolved').length,
-      withheldFounderOnly: all.length - carried.length,
-      records: carried.slice(0, limit),
+      withheldFounderOnly: all.length - visible.length,
+      withheldFounderOnlyRelations: withheldRelations,
+      records: carried,
       contradictions: contradictions.filter((p) => p.resolution === 'unresolved').slice(0, limit),
     };
   }
@@ -7193,10 +7209,14 @@ export class HeadquarterOperations {
       });
     } catch (error) {
       // A UNIQUE violation on the side-effect key is the engine refusing a
-      // concurrent duplicate; anything else means the reservation could not
-      // be written, and an unrecorded guard is no guard — nothing executes.
+      // concurrent duplicate — surfaced either by the index itself or, since
+      // the secondary-index guard, by the BEFORE INSERT trigger that fires
+      // first and names the key; anything else means the reservation could
+      // not be written, and an unrecorded guard is no guard — nothing executes.
       const code = (error as { code?: string }).code;
-      if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT') {
+      const reservedByTrigger =
+        code === 'SQLITE_CONSTRAINT_TRIGGER' && errorMessage(error).includes('side_effect_key');
+      if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT' || reservedByTrigger) {
         return this.#refuseAction(actionId, taskId, 'execute', {
           code: 'duplicate_external_action',
           message: 'The side-effect key was reserved concurrently by another attempt; nothing was executed.',
@@ -7416,9 +7436,22 @@ export class HeadquarterOperations {
    * one canonical task never has two external execution paths; a `failed` or
    * reconciled-not-executed attempt leaves nothing in flight.
    */
-  gatewayActionHistory(taskId: string): { state: 'none' } | { state: 'attempted' | 'outcome_unknown' | 'succeeded'; actionId: string } {
+  gatewayActionHistory(taskId: string): GatewayActionHistory {
+    return this.#gatewayActionHistoryFromStore(taskId);
+  }
+
+  /**
+   * The same answer read from the ledger rows through `#db` — never through
+   * the public `listActions`, which lives on the prototype and is patchable.
+   * Published to the dispatch lane as the `gatewayActionHistoryFor` function
+   * binding (the `killSwitchEngagedFor` recipe): that verdict decides whether
+   * a public issue is published for a task the gateway already executed.
+   */
+  #gatewayActionHistoryFromStore(taskId: string): GatewayActionHistory {
     if (!taskId || !this.#actionStorePresent) return { state: 'none' };
-    for (const view of this.listActions({ taskId })) {
+    for (const row of loadActionIntents(this.#db)) {
+      if (row.taskId !== taskId) continue;
+      const view = deriveActionView(row, loadActionEvents(this.#db, row.id));
       if (view.state === 'attempted' || view.state === 'outcome_unknown' || view.state === 'succeeded') {
         return { state: view.state, actionId: view.id };
       }
@@ -7517,20 +7550,29 @@ export class HeadquarterOperations {
 
   /**
    * What the Claude GitHub dispatch lane already did with this task, read
-   * from the canonical evidence chain by the same rule `dispatchHistory`
-   * applies (an `attempted` with no terminal is unknown; `failed` closes it).
-   * Duplicated here rather than imported so the application layer keeps not
-   * depending on a provider adapter; `integration-seams` pins the kinds agree.
+   * from the canonical `op_evidence` rows through `#db` by the same rule
+   * `dispatchHistory` applies (an `attempted` with no terminal is unknown;
+   * `failed` closes it). This fact decides whether HQ executes an external
+   * action, so it never reads `queue.evidence` — that handle is the
+   * deliberately patchable convenience read for DISPLAY, and a forged
+   * `queue.evidence.list` that hid the lane's entries used to let the gateway
+   * execute a second external path for the same task (the reintroduced Low 7,
+   * closed by the correction pass). Duplicated here rather than imported so
+   * the application layer keeps not depending on a provider adapter;
+   * `integration-seams` pins the kinds agree.
    */
   #claudeDispatchState(taskId: string): 'none' | 'unknown' | 'dispatched' {
     let pending = false;
     let dispatched = false;
-    for (const entry of this.queue.evidence.list(taskId)) {
-      if (entry.kind === 'claude_github_dispatch_attempted') pending = true;
-      else if (entry.kind === 'claude_github_dispatch_succeeded') {
+    const kinds = this.#db.prepare(`SELECT kind FROM op_evidence WHERE task_id = ? ORDER BY seq`).all(taskId) as {
+      kind: string;
+    }[];
+    for (const { kind } of kinds) {
+      if (kind === 'claude_github_dispatch_attempted') pending = true;
+      else if (kind === 'claude_github_dispatch_succeeded') {
         pending = false;
         dispatched = true;
-      } else if (entry.kind === 'claude_github_dispatch_failed') pending = false;
+      } else if (kind === 'claude_github_dispatch_failed') pending = false;
     }
     if (dispatched) return 'dispatched';
     return pending ? 'unknown' : 'none';
@@ -8038,6 +8080,22 @@ export function capabilityRowFor(
  */
 export function killSwitchEngagedFor(ops: HeadquarterOperations, capabilityId?: string): boolean {
   return readKillSwitchEngaged(ops, capabilityId);
+}
+
+/** What the gateway has attempted for a task: open, unknown, succeeded, or nothing. */
+export type GatewayActionHistory =
+  | { state: 'none' }
+  | { state: 'attempted' | 'outcome_unknown' | 'succeeded'; actionId: string };
+
+/**
+ * The gateway's attempt history for a task read from the ledger rows, for the
+ * Claude dispatch lane's one-external-path check — a FUNCTION BINDING like
+ * `killSwitchEngagedFor`, because that verdict decides whether a public issue
+ * is published and the public `gatewayActionHistory` method is a prototype
+ * slot an importer can patch.
+ */
+export function gatewayActionHistoryFor(ops: HeadquarterOperations, taskId: string): GatewayActionHistory {
+  return readGatewayActionHistory(ops, taskId);
 }
 
 export function createHeadquarterOperations(

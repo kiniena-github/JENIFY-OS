@@ -25,6 +25,7 @@ import { CAPS, expectOk, setupFixture, type Fixture } from './application.fixtur
 import { taskActionDigest } from '../src/operator/approvals.js';
 import { OperatorQueue } from '../src/operator/queue.js';
 import { killSwitchEngagedFor } from '../src/application/service.js';
+import * as serviceModule from '../src/application/service.js';
 import { claudeDispatchEligibility } from '../src/providers/claude/dispatch.js';
 import { DIRECT_ORDER_CAPABILITY, registerDirectOrderCapability, submitDirectOrder } from '../src/live/orders.js';
 import {
@@ -185,7 +186,15 @@ describe('orchestrateMission apply precheck reads the canonical kill-switch row'
 });
 
 describe('the Claude dispatch eligibility reads the canonical row through the function binding', () => {
-  it('reports kill_switch_engaged under a forged delegate; killSwitchEngagedFor cannot be reassigned', () => {
+  it('reports kill_switch_engaged under a forged delegate; a plain reassignment of the killSwitchEngagedFor module binding throws and changes nothing', () => {
+    // An ES module namespace slot has no setter: the assignment an importer
+    // could write to swap the binding throws, and the eligibility check below
+    // (which imports the same binding) keeps reading the canonical row.
+    const namespace = serviceModule as unknown as Record<string, unknown>;
+    expect(() => {
+      namespace.killSwitchEngagedFor = () => false;
+    }).toThrow(TypeError);
+    expect(serviceModule.killSwitchEngagedFor).toBe(killSwitchEngagedFor);
     const fx = setupFixture();
     registerDirectOrderCapability(fx.db);
     fx.principals.register({

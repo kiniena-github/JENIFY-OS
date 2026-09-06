@@ -211,6 +211,15 @@ export function connectHqDatabaseUnmigrated(path: string = DEFAULT_HQ_DB_PATH): 
   // open, but setting FULL here closes the initialization crash window itself.
   db.pragma('synchronous = FULL');
   db.pragma('foreign_keys = ON');
+  // Belt to the triggers' braces: with recursive triggers on, a REPLACE that
+  // resolves a unique-index conflict by deleting the standing row also fires
+  // that table's BEFORE DELETE guard on THIS connection. It is connection-
+  // scoped and writes nothing to the file, so it binds no foreign writer —
+  // the engine-held guarantee stays the BEFORE INSERT guards on every unique
+  // index of each append-only table. No trigger in the schema writes, so
+  // nothing recurses; no source path spells REPLACE INTO / INSERT OR REPLACE
+  // (the src-wide spelling guards), and UPSERT is unaffected by this setting.
+  db.pragma('recursive_triggers = ON');
   return db;
 }
 

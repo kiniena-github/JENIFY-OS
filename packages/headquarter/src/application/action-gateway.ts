@@ -444,6 +444,23 @@ BEFORE INSERT ON hq_action_events
 WHEN EXISTS (SELECT 1 FROM hq_action_events WHERE id = NEW.id)
   OR (TYPEOF(NEW.seq) = 'integer' AND EXISTS (SELECT 1 FROM hq_action_events WHERE seq = NEW.seq))
 BEGIN SELECT RAISE(ABORT, 'hq_action_events is append-only'); END;
+
+-- The secondary unique indexes (the hq_truth_* correction): REPLACE colliding
+-- on an intent's idempotency_key or on an event's side_effect_key deletes the
+-- standing row without a BEFORE DELETE firing (recursive_triggers is off by
+-- default and connection-scoped). On hq_action_events that row IS the durable
+-- attempt reservation — erasing it and landing a forged
+-- "reconciled: confirmed_not_executed" would free the side effect for a second
+-- real execution. Additive trigger names so an existing file gains them.
+CREATE TRIGGER IF NOT EXISTS trg_hq_action_intents_no_replace_unique
+BEFORE INSERT ON hq_action_intents
+WHEN EXISTS (SELECT 1 FROM hq_action_intents WHERE idempotency_key = NEW.idempotency_key)
+BEGIN SELECT RAISE(ABORT, 'hq_action_intents is append-only (unique idempotency_key already held)'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_action_events_no_replace_unique
+BEFORE INSERT ON hq_action_events
+WHEN NEW.side_effect_key IS NOT NULL
+  AND EXISTS (SELECT 1 FROM hq_action_events WHERE side_effect_key = NEW.side_effect_key)
+BEGIN SELECT RAISE(ABORT, 'hq_action_events is append-only (UNIQUE side_effect_key already reserved)'); END;
 `;
 
 /** Idempotent; readonly-safe (the post-Phase-3 ensure*Schema pattern). */

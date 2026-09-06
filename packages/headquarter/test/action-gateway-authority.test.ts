@@ -35,7 +35,7 @@ import {
   providerKillSwitchScope,
   riskRequiresApproval,
 } from '../src/application/action-gateway.js';
-import { HeadquarterOperations, writeDispatchOutcome } from '../src/application/service.js';
+import { HeadquarterOperations, gatewayActionHistoryFor, writeDispatchOutcome } from '../src/application/service.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { OperatorQueue } from '../src/operator/queue.js';
 import { openMemoryHqDatabase } from '../src/store/db.js';
@@ -778,6 +778,137 @@ describe('secrets, immutability and the one-execution-path seam', () => {
         .run(actionId),
     ).toThrow(/append-only/);
     expect(fx.ops.getAction(actionId)!.state).toBe('authorized');
+  });
+
+  it('REPLACE landing on a secondary unique index — intents idempotency_key, events side_effect_key — aborts; the attempt reservation survives and nothing re-executes', () => {
+    const fx = gatewayFixture();
+    // The connection pragma binds no foreign writer: prove the trigger alone holds.
+    fx.db.pragma('recursive_triggers = OFF');
+    try {
+      const started = startedTask(fx);
+      const actionId = authorizedAction(fx, started);
+      expectOk(fx.ops.executeAction({ actionId, workerId: 'claude', fence: started.fence }));
+      const key = (fx.db.prepare(`SELECT side_effect_key FROM hq_action_events WHERE side_effect_key IS NOT NULL`).get() as { side_effect_key: string })
+        .side_effect_key;
+      const idem = (fx.db.prepare(`SELECT idempotency_key FROM hq_action_intents WHERE id = ?`).get(actionId) as { idempotency_key: string })
+        .idempotency_key;
+      const rows = () =>
+        JSON.stringify([
+          fx.db.prepare(`SELECT * FROM hq_action_intents ORDER BY seq`).all(),
+          fx.db.prepare(`SELECT * FROM hq_action_events ORDER BY seq`).all(),
+        ]);
+      const before = rows();
+      // A forged "reconciled: confirmed_not_executed" event carrying the reserved
+      // key would erase the durable attempt and open a second generation.
+      expect(() =>
+        fx.db
+          .prepare(
+            `INSERT OR REPLACE INTO hq_action_events (id, action_id, state, actor, at, detail, side_effect_key)
+             VALUES ('forged-event', ?, 'reconciled', 'attacker', 'now', '{"decision":"confirmed_not_executed"}', ?)`,
+          )
+          .run(actionId, key),
+      ).toThrow(/append-only/);
+      expect(() =>
+        fx.db
+          .prepare(
+            `REPLACE INTO hq_action_intents (id, task_id, capability_id, adapter_id, action_type, target, payload, payload_digest, risk_level, risk_factors, visibility, reversibility, context_evidence_refs, context_truth_refs, requested_by, requested_at, side_effect_key_base, idempotency_key)
+             VALUES ('forged-intent', 't', 'c', 'a', 'x', 't', '{}', 'd', 'low', '[]', 'internal', 'irreversible', '[]', '[]', 'r', 'now', 'b', ?)`,
+          )
+          .run(idem),
+      ).toThrow(/append-only/);
+      expect(rows()).toBe(before);
+      const view = fx.ops.getAction(actionId)!;
+      expect(view.events.map((e) => e.state)).toEqual(['proposed', 'authorized', 'attempted', 'succeeded']);
+      expect(view.state).toBe('succeeded');
+      expect(view.attempt?.generation).toBe(1);
+      expect(errorCode(fx.ops.executeAction({ actionId, workerId: 'claude', fence: started.fence }))).toBe('action_state_conflict');
+      expect(fx.adapter.calls).toHaveLength(1);
+    } finally {
+      fx.db.pragma('recursive_triggers = ON');
+    }
+  });
+
+  it('the dispatch-lane exclusion reads canonical op_evidence rows: a forged queue.evidence.list changes nothing the gateway decides, at execute and at propose', () => {
+    const fx = gatewayFixture();
+    const started = startedTask(fx);
+    const actionId = authorizedAction(fx, started);
+    // The Claude lane publishes for this task (claim-bound kinds, written through the grant).
+    writeDispatchOutcome(fx.ops, fx.dispatchEvidence, {
+      taskId: started.taskId,
+      actor: 'hq-claude-dispatch',
+      kind: 'claude_github_dispatch_attempted',
+      payload: { provider: 'CLAUDE' },
+    });
+    writeDispatchOutcome(fx.ops, fx.dispatchEvidence, {
+      taskId: started.taskId,
+      actor: 'hq-claude-dispatch',
+      kind: 'claude_github_dispatch_succeeded',
+      payload: { provider: 'CLAUDE', issueNumber: 1 },
+    });
+    expect(errorCode(fx.ops.executeAction({ actionId, workerId: 'claude', fence: started.fence }))).toBe('duplicate_external_action');
+    expect(fx.adapter.calls).toHaveLength(0);
+
+    // Forge the deliberately patchable public evidence READ to hide the lane's entries.
+    const evidence = fx.ops.queue.evidence as unknown as Record<string, unknown>;
+    const realList = fx.ops.queue.evidence.list;
+    evidence.list = (taskId?: string) =>
+      realList.call(fx.ops.queue.evidence, taskId).filter((e) => !e.kind.startsWith('claude_github_dispatch'));
+    try {
+      // The lie took: the convenience read no longer shows the dispatch.
+      expect(fx.ops.queue.evidence.list(started.taskId).some((e) => e.kind.startsWith('claude_github_dispatch'))).toBe(false);
+      expect(realList.call(fx.ops.queue.evidence, started.taskId).some((e) => e.kind === 'claude_github_dispatch_succeeded')).toBe(true);
+      // ...and the gate still refuses, because it read the canonical rows.
+      expect(errorCode(fx.ops.executeAction({ actionId, workerId: 'claude', fence: started.fence }))).toBe('duplicate_external_action');
+      expect(fx.adapter.calls).toHaveLength(0);
+      expect(fx.ops.getAction(actionId)!.state).toBe('authorized');
+      const proposal = fx.ops.proposeAction({
+        taskId: started.taskId,
+        adapterId: fx.adapter.id,
+        actionType: 'write_note',
+        target: 'notes/other',
+        payload: { text: 'again' },
+        requestedBy: 'founder',
+      });
+      expect(errorCode(proposal)).toBe('duplicate_external_action');
+    } finally {
+      evidence.list = realList;
+    }
+  });
+
+  it('the dispatch lane reads the gateway history through the function binding: forged gatewayActionHistory / listActions on instance and prototype change nothing', () => {
+    const fx = gatewayFixture();
+    const started = startedTask(fx, { capabilityId: CAPS.readStatus, payload: { check: 'ci' } });
+    const actionId = authorizedAction(fx, started);
+    expectOk(fx.ops.executeAction({ actionId, workerId: 'claude', fence: started.fence }));
+    const proto = HeadquarterOperations.prototype as unknown as Record<string, unknown>;
+    const instance = fx.ops as unknown as Record<string, unknown>;
+    const saved = { history: proto.gatewayActionHistory, list: proto.listActions };
+    proto.gatewayActionHistory = () => ({ state: 'none' });
+    proto.listActions = () => [];
+    try {
+      instance.gatewayActionHistory = () => ({ state: 'none' });
+      instance.listActions = () => [];
+    } catch {
+      /* a non-writable instance slot is a pass — the prototype patch stands */
+    }
+    try {
+      // The lie took on the public method...
+      expect(fx.ops.gatewayActionHistory(started.taskId)).toEqual({ state: 'none' });
+      // ...the binding still answers from the ledger rows...
+      expect(gatewayActionHistoryFor(fx.ops, started.taskId)).toEqual({ state: 'succeeded', actionId });
+      // ...and the lane stays refused.
+      const verdict = claudeDispatchEligibility(fx.ops, started.taskId);
+      expect(verdict.eligible).toBe(false);
+      if (!verdict.eligible) {
+        expect(verdict.code).toBe('task_not_eligible');
+        expect(verdict.details?.gatewayActionId).toBe(actionId);
+      }
+    } finally {
+      proto.gatewayActionHistory = saved.history;
+      proto.listActions = saved.list;
+      delete instance.gatewayActionHistory;
+      delete instance.listActions;
+    }
   });
 
   it('a task the Claude dispatch lane already took is refused by the gateway; a task the gateway executed is refused by the dispatch lane', () => {

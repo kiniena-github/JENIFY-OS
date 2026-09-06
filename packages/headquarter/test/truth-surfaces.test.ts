@@ -80,6 +80,63 @@ describe('the snapshot section', () => {
   });
 });
 
+describe('the artifact privacy projection', () => {
+  it('drops every relation id pointing at a founder_only record — supports, derived_from, contradicts and supersession alike — and counts each withheld counterpart once', () => {
+    const fx = truthFixture();
+    const open = claim(fx, { statement: 'Public statement.' });
+    const secret = claim(fx, {
+      statement: 'Private corroboration.',
+      privacy: 'founder_only',
+      supports: [open.id],
+      derivedFrom: [open.id],
+      idempotencyKey: 'secret-1',
+    });
+    const dispute = claim(fx, {
+      statement: 'Private dispute.',
+      privacy: 'founder_only',
+      contradicts: [open.id],
+      requestedBy: 'analyst',
+      idempotencyKey: 'secret-2',
+    });
+    const successor = claim(fx, {
+      statement: 'Private successor.',
+      privacy: 'founder_only',
+      supersedes: open.id,
+      idempotencyKey: 'secret-3',
+    });
+
+    const gated = fx.ops.truthSummary({ includeFounderOnly: true });
+    const gatedOpen = gated.records.find((r) => r.id === open.id)!;
+    expect(gatedOpen.supportedBy).toEqual([secret.id]);
+    expect(gatedOpen.derivations).toEqual([secret.id]);
+    expect(gatedOpen.contradictedBy).toEqual([dispute.id]);
+    expect(gatedOpen.supersededBy).toBe(successor.id);
+    expect(gated.withheldFounderOnly).toBe(0);
+    expect(gated.withheldFounderOnlyRelations).toBe(0);
+
+    const artifact = fx.ops.truthSummary({ includeFounderOnly: false });
+    expect(artifact.records.map((r) => r.id)).toEqual([open.id]);
+    const carried = artifact.records[0]!;
+    expect(carried.supportedBy).toEqual([]);
+    expect(carried.derivations).toEqual([]);
+    expect(carried.contradictedBy).toEqual([]);
+    expect(carried.contradictions).toEqual([]);
+    expect(carried.supersededBy).toBeNull();
+    // Categorical standing stays truthful and is derived exactly as for the
+    // gated reader: the record IS superseded, and that supersession resolved
+    // the private dispute, so it is not contested — the same answer the
+    // Founder-gated view gives, with the counterpart's identity withheld.
+    expect(carried.lifecycle).toBe('superseded');
+    expect(carried.contested).toBe(gatedOpen.contested);
+    expect(carried.contested).toBe(false);
+    expect(artifact.withheldFounderOnly).toBe(3);
+    expect(artifact.withheldFounderOnlyRelations).toBe(3);
+    for (const id of [secret.id, dispute.id, successor.id]) expect(JSON.stringify(artifact)).not.toContain(id);
+    // The private records themselves are untouched by the projection.
+    expect(fx.ops.getTruthRecord(secret.id)!.supports).toEqual([open.id]);
+  });
+});
+
 describe('the rooms', () => {
   it('Security Center lists each unresolved contradiction as attention; Founder Office counts verified-awaiting-acceptance', () => {
     const fx = truthFixture();

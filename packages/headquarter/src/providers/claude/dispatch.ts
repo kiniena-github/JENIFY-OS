@@ -78,6 +78,7 @@ import { EXECUTION_PROVIDER_KEY, readProviderBinding } from '../../operator/prov
 import type { OperatorTask } from '../../operator/queue.js';
 import {
   assertDispatchEvidenceGrant,
+  gatewayActionHistoryFor,
   killSwitchEngagedFor,
   writeDispatchOutcome,
 } from '../../application/service.js';
@@ -287,8 +288,9 @@ export function claudeDispatchEligibility(
   // One canonical task, ONE external execution path (Phase 8). A task whose
   // external side effect the action gateway has attempted, left unknown or
   // completed is not also handed to this lane; the gateway refuses the
-  // mirror-image case from its side.
-  const gateway = ops.gatewayActionHistory(taskId);
+  // mirror-image case from its side. Read through the function binding, not
+  // the patchable public method: this verdict decides a publication.
+  const gateway = gatewayActionHistoryFor(ops, taskId);
   if (gateway.state !== 'none') {
     return {
       eligible: false,

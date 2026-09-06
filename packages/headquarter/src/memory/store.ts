@@ -112,6 +112,19 @@ CREATE TRIGGER IF NOT EXISTS trg_hq_memory_no_replace
 BEFORE INSERT ON hq_memory
 WHEN EXISTS (SELECT 1 FROM hq_memory WHERE id = NEW.id)
 BEGIN SELECT RAISE(ABORT, 'hq_memory is insert-only'); END;
+
+-- Phase 7/8 correction, carried back as pure hardening: the guard above
+-- tests only the id, but idx_hq_memory_idem is a second unique index, and a
+-- REPLACE colliding on it deletes the standing row with no BEFORE DELETE
+-- firing (recursive_triggers off / connection-scoped). Additive trigger, new
+-- name, so an existing file gains it on the next ensure; the legitimate
+-- writer dedupes by key BEFORE inserting (findIdByIdempotencyKey), so no
+-- accepted path ever reaches this guard.
+CREATE TRIGGER IF NOT EXISTS trg_hq_memory_no_replace_idem
+BEFORE INSERT ON hq_memory
+WHEN NEW.idempotency_key IS NOT NULL
+  AND EXISTS (SELECT 1 FROM hq_memory WHERE idempotency_key = NEW.idempotency_key)
+BEGIN SELECT RAISE(ABORT, 'hq_memory is insert-only (unique idempotency_key already held)'); END;
 `;
 
 /**

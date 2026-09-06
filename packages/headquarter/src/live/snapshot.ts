@@ -684,6 +684,10 @@ export function liveSnapshotFromOperations(
                 ? `${truth.withheldFounderOnly} founder_only record(s) are counted in total but not carried by ` +
                   'this artifact; they are readable only through the Founder-authenticated /state route.'
                 : null,
+              truth.withheldFounderOnlyRelations > 0
+                ? `${truth.withheldFounderOnlyRelations} relation(s) from carried records to founder_only ` +
+                  'records are withheld by id; the carried records’ own categorical standing is unchanged.'
+                : null,
               truth.total > truth.records.length
                 ? `Carries the newest ${truth.records.length} of ${truth.total} records; total states the count.`
                 : null,
@@ -698,6 +702,7 @@ export function liveSnapshotFromOperations(
             byState: { claimed: 0, observed: 0, verified: 0, accepted: 0 },
             unresolvedContradictions: 0,
             withheldFounderOnly: 0,
+            withheldFounderOnlyRelations: 0,
             records: [],
             contradictions: [],
           },

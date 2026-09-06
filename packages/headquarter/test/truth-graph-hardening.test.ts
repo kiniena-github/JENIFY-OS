@@ -135,7 +135,7 @@ describe('evidence refs must exist, or the write is refused', () => {
 });
 
 describe('evidence and history cannot be rewritten via the truth projection', () => {
-  it('the engine aborts UPDATE, DELETE and every REPLACE/upsert spelling on all four truth tables', () => {
+  it('the engine aborts UPDATE and DELETE on all four truth tables, and REPLACE/upsert landing on the primary conflict target (id)', () => {
     const fx = truthFixture();
     const record = claim(fx);
     confirm(fx, record.id);
@@ -183,6 +183,90 @@ describe('evidence and history cannot be rewritten via the truth projection', ()
     expect(view.statement).toBe('CI is green on the release branch.');
     expect(view.state).toBe('accepted');
     expect(view.acceptances[0]!.acceptedBy).toBe('founder');
+  });
+
+  it('REPLACE landing on a SECONDARY unique index aborts too — idempotency_key and supersedes on records, idempotency_key on verifications, truth_id on acceptances — with the connection pragma OFF so the trigger, not the pragma, is what holds', () => {
+    const fx = truthFixture();
+    // The application's own connection enables recursive_triggers (so REPLACE
+    // also reaches the BEFORE DELETE guard), but that pragma is connection-
+    // scoped and binds no foreign writer. Switch it OFF here: what must hold
+    // for EVERY writer is the BEFORE INSERT guard on every unique index.
+    expect(fx.db.pragma('recursive_triggers', { simple: true })).toBe(1);
+    fx.db.pragma('recursive_triggers = OFF');
+    try {
+      const a = claim(fx, { statement: 'Statement A.', idempotencyKey: 'client-a' });
+      const b = claim(fx, { statement: 'Statement B supersedes A.', supersedes: a.id, idempotencyKey: 'client-b' });
+      confirm(fx, b.id);
+      const accepted = fx.ops.acceptTruth({
+        truthId: b.id,
+        expectedDigest: fx.ops.getTruthRecord(b.id)!.acceptanceDigest!,
+        requestedBy: 'founder',
+      });
+      expect(accepted.ok).toBe(true);
+      const recordKey = (fx.db.prepare(`SELECT idempotency_key FROM hq_truth_records WHERE id = ?`).get(a.id) as { idempotency_key: string })
+        .idempotency_key;
+      const verificationKey = (fx.db.prepare(`SELECT idempotency_key FROM hq_truth_verifications`).get() as { idempotency_key: string })
+        .idempotency_key;
+      expect(recordKey).toBeTruthy();
+      expect(verificationKey).toBeTruthy();
+      const rows = () =>
+        JSON.stringify(
+          ['hq_truth_records', 'hq_truth_relations', 'hq_truth_verifications', 'hq_truth_acceptances'].map((table) =>
+            fx.db.prepare(`SELECT * FROM ${table} ORDER BY seq`).all(),
+          ),
+        );
+      const before = rows();
+
+      // (A) acceptances: unique(truth_id) — the Founder's acceptance row seized by an attacker.
+      expect(() =>
+        fx.db
+          .prepare(
+            `INSERT OR REPLACE INTO hq_truth_acceptances (id, truth_id, accepted_by, at, digest, verification_ids, note)
+             VALUES ('forged-acceptance', ?, 'attacker', 'now', 'forged-digest', '[]', 'seized')`,
+          )
+          .run(b.id),
+      ).toThrow(/append-only/);
+      // (B) records: unique(supersedes) — the legitimate successor erased and history rewritten.
+      expect(() =>
+        fx.db
+          .prepare(
+            `INSERT OR REPLACE INTO hq_truth_records (id, entity_kind, entity_id, statement, born_state, recorded_by,
+               recorded_at, evidence_refs, privacy, supersedes, idempotency_key)
+             VALUES ('forged-successor', 'task', ?, 'FORGED successor', 'claimed', 'attacker', 'now', '[]', 'internal', ?, NULL)`,
+          )
+          .run(fx.taskId, a.id),
+      ).toThrow(/append-only/);
+      // records: unique(idempotency_key), bare REPLACE INTO spelling.
+      expect(() =>
+        fx.db
+          .prepare(
+            `REPLACE INTO hq_truth_records (id, entity_kind, entity_id, statement, born_state, recorded_by,
+               recorded_at, evidence_refs, privacy, supersedes, idempotency_key)
+             VALUES ('forged-record', 'task', ?, 'FORGED', 'claimed', 'attacker', 'now', '[]', 'internal', NULL, ?)`,
+          )
+          .run(fx.taskId, recordKey),
+      ).toThrow(/append-only/);
+      // verifications: unique(idempotency_key).
+      expect(() =>
+        fx.db
+          .prepare(
+            `INSERT OR REPLACE INTO hq_truth_verifications (id, truth_id, verified_by, at, method, verdict, evidence_refs, limitations, idempotency_key)
+             VALUES ('forged-verification', ?, 'attacker', 'now', 'tested', 'refuted', '[]', 'none', ?)`,
+          )
+          .run(b.id, verificationKey),
+      ).toThrow(/append-only/);
+
+      // Refused means intact: byte-identical rows, and the derived picture unchanged.
+      expect(rows()).toBe(before);
+      expect(fx.ops.getTruthRecord(b.id)).not.toBeNull();
+      expect(fx.ops.getTruthRecord(a.id)!.supersededBy).toBe(b.id);
+      const view = fx.ops.getTruthRecord(b.id)!;
+      expect(view.state).toBe('accepted');
+      expect(view.acceptances.map((x) => x.acceptedBy)).toEqual(['founder']);
+      expect(view.verification).toBe('confirmed');
+    } finally {
+      fx.db.pragma('recursive_triggers = ON');
+    }
   });
 
   it('verify and accept never touch the record row, and the op_evidence chain stays intact and append-only', () => {
