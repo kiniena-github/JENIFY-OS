@@ -252,8 +252,56 @@ describe('the workforce console on the emitted Specialist Directory page', () =>
     (buttons[1] as HTMLButtonElement).click(); // [evaluate, assign]
     await settle();
     expect(assignBox.textContent).toContain('Advisory assignment recorded for claude');
+    // The success sentence commits only to what is now guaranteed: with the
+    // live-claim refusal in place, success means FUTURE claiming from the
+    // queue is genuinely narrowed — never a claim about the present.
+    expect(assignBox.textContent).toContain('future claiming from the queue is narrowed to that worker');
     expect(fixture.ops.queue.get(taskId)!.status).toBe('queued');
     expect(fixture.ops.readMeta(taskId)!.assignment!.workerId).toBe('claude');
+  });
+
+  it('shows the server refusal when a live claim already exists, and eligibility says ASSIGNMENT CLOSED', async () => {
+    const { api, fixture } = deployment();
+    const taskId = expectOk(
+      fixture.ops.createTask({
+        capabilityId: CAPS.readStatus,
+        payload: { kind: 'status' },
+        requestedBy: 'hq-phase4-founder',
+      }),
+    ).task.id;
+    // Worker A claims through the real fenced path before the Founder acts.
+    expectOk(fixture.ops.claimNext('claude', CAPS.readStatus));
+    const dom = await loadPage('specialists.html', api);
+    const assignBox = dom.window.document.querySelector('[data-workforce-assign]')!;
+    setValue(assignBox.querySelector('input[aria-label="Task id"]'), taskId);
+    const select = assignBox.querySelector('select') as HTMLSelectElement;
+    select.value = 'jules';
+    const buttons = assignBox.querySelectorAll('button');
+    (buttons[1] as HTMLButtonElement).click(); // assign
+    await settle();
+    expect(assignBox.textContent).toContain('Refused (task_already_claimed)');
+    expect(assignBox.textContent).not.toContain('narrowed to that worker');
+    // Canonical truth untouched by the refused browser act.
+    expect(fixture.ops.queue.get(taskId)!.claimedBy).toBe('claude');
+    expect(fixture.ops.readMeta(taskId)!.assignment).toBeNull();
+    // The eligibility read leads with the same closed-assignment truth.
+    (buttons[0] as HTMLButtonElement).click(); // evaluate
+    await settle();
+    expect(assignBox.textContent).toContain('ASSIGNMENT CLOSED');
+    expect(assignBox.textContent).toContain('already claimed by claude');
+  });
+
+  it('offers only active workers in the assign dropdown — the inactive card still renders', async () => {
+    const { api } = deployment();
+    const dom = await loadPage('specialists.html', api);
+    // All four workers render as cards — deactivation hides nobody's record.
+    const list = dom.window.document.querySelector('[data-workforce-list]')!;
+    expect(list.querySelectorAll('[data-workforce-card]')).toHaveLength(4);
+    // But the dropdown offers only what the server would accept: the three
+    // active workers, never retired-bot (which would 409 worker_not_assignable).
+    const assignBox = dom.window.document.querySelector('[data-workforce-assign]')!;
+    const options = [...assignBox.querySelectorAll('option')].map((o) => (o as HTMLOptionElement).value);
+    expect(options.sort()).toEqual(['claude', 'codex', 'jules']);
   });
 
   it('evaluates eligibility with the server’s own refusal reasons', async () => {

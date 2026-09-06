@@ -41,8 +41,12 @@ change; `test/headquarter.test.ts` pins that no project method grows back on the
 - **Legacy wart, stated**: the adopted `stream` column is NOT NULL; an unstated stream is
   stored as `''` and read back as `null` via the single `encodeStream`/`decodeStream` pair,
   test-pinned. A 12-step table rebuild was judged more dangerous than a documented encoding.
+  The update route carries the tri-state across the wire (correction pass): absent =
+  unchanged, `null` = clear, string = set; a non-string non-null refuses rather than being
+  silently coerced into "not supplied".
 - **Derived truth only**: `missions[]` (the canonical relationship) and `taskCounts[]`
-  (counts by canonical `ActivityStatus` across linked plan items — counts, never a share or
+  (counts of DISTINCT canonical tasks by `ActivityStatus` across linked plan items — one
+  real task linked to two plan items counts ONCE (Sol M2), and counts are never a share or
   percentage) are computed at read time and never stored.
 
 ## The linkage truth table
@@ -63,7 +67,10 @@ ONLY when stated, so byte-identical Phase 3 re-commands keep deduping onto their
 (pinned by key-equality and behavioral tests). `assignMissionToProject` binds/clears the
 relationship under the MISSION gate (it directs a mission), refuses terminal missions and
 closed projects, refuses replayed no-op assignments, and records every move in the
-append-only mission event log plus the evidence chain.
+append-only mission event log plus the evidence chain. Both writers read the project's
+status INSIDE the IMMEDIATE `reserve()` transaction (correction pass, the
+`amendMissionIntent` precedent): a concurrent close can no longer land between the
+active-project check and the write.
 
 ## Tasks — one stored truth, unchanged
 
@@ -87,13 +94,22 @@ What was WIRED ON in the production host (`hq-host/src/config.ts`):
 | `MemberRegistryNominationSource` | ON (advisory) | `rankMembers` over the EXACT operator capability id — no domain mapping, ever; empty until a registrar performs that configuration act |
 | `assignTaskAsFounder` / `evaluateTaskEligibility` | ON | Founder-gated advisory assignment + the eligible-worker calculation from enforcement truth |
 | `deactivateExecutionWorker` | ON | Founder-gated, narrowing-only, in-flight work protected by `assertReplacementSafe`; NO reactivate method |
-| `options.memberRegistry` (capability narrowing) | **OFF — recorded** | The authority migration of issue #182: disjoint vocabularies would empty same-id grants, and the enforcement read would leave its hardened closure. A separate Founder decision. Pinned by the ANTI-EMPTYING regression in `hq-host/test/host-contract.test.ts` |
+| `options.memberRegistry` (capability narrowing) | **OFF — recorded** | The authority migration of issue #182: disjoint vocabularies would empty same-id grants, and the enforcement read would leave its hardened closure. A separate Founder decision. Pinned by the ANTI-EMPTYING regressions at BOTH layers: `hq-host/test/host-contract.test.ts` (Fastify-wired) and `test/workforce-command.test.ts` (service) |
 | `hq_ai_member_assignments` task binding | OFF | `hq_op_task_meta.assignment` stays the ONE assignment truth; dual truth would diverge on claim races |
 | Seeding members from `KNOWN_PROVIDERS` | NEVER | Fabricated workers |
 
 Assignment is advisory BY CONSTRUCTION: it changes no task status, burns no approval,
 dispatches nothing; its one operational effect is narrowing (`claimNext` refuses the head
-task to a different worker). Nomination is advisory BY CONTRACT: `routeTask` recomputes
+task to a different worker). Because that is its ONLY effect, the correction pass (Sol M1)
+made the write refuse whenever the effect is impossible: a task under a live fenced claim
+answers `task_already_claimed` (409) — the same canonical predicate `replacementPlan` uses,
+`claimed_by` set AND status in `assigned/running/outcome_unknown` — and a task whose status
+can never reach `queued` again (`completed`/`review_passed`, DERIVED from
+`ALLOWED_TRANSITIONS` and drift-pinned) answers `task_beyond_claiming` (409). The
+eligibility read carries the identical truth (`taskState`, computed by the SAME predicate),
+so the browser is never shown an open assignment the write would refuse; the console success
+line commits only to narrowing FUTURE claiming. Nomination is advisory BY CONTRACT:
+`routeTask` recomputes
 `eligible` from the worker directory and policy engine alone; a registry-only nominee reports
 `worker_unknown` and `eligible: false` (a registry row enrols nobody). No worker can assign
 work, register members, declare health, or otherwise reach any Founder-gated method — worker
@@ -101,9 +117,13 @@ identity is refused outright at every one.
 
 `GET /workforce` composes the three truths honestly: enforcement (grants, assignability,
 policy outcome with the verbatim deny reason), transport (declared-or-null provider — the
-vendor string is never turned into a provider claim — plus routing-contract connectivity
-naming missing FACTS, and three-valued dispatchability: true/false only when genuinely
+vendor string is never turned into a provider claim — plus routing-contract configuration
+truth naming missing FACTS, and three-valued dispatchability: true/false only when genuinely
 observed, null otherwise), and member enrichment (identity key, status, declared health).
+The transport field is `contractSatisfied`, not `connected` (correction pass): a satisfied
+routing contract is a CONFIGURATION fact — "requirements satisfied by configuration;
+nothing was probed" — never worded as a live observation; negative reasons (missing facts)
+pass through verbatim because a missing requirement genuinely proves non-executability.
 Members with no matching execution worker are listed separately as NOT enrolled for
 execution.
 
@@ -133,8 +153,12 @@ recorded): none of the new writes takes step-up, and the exemption is RE-AFFIRME
 than inherited — Phase 4 still adds no autonomous consumer that can turn mission/project
 state into execution. It must be re-evaluated again the moment one exists (Phase ≥ 6, or any
 earlier wiring of the mission watchdog). **Kill-switch parity** extends to project writes
-(the switch stops execution reachability, never the recording of Founder direction), pinned
-by named tests.
+AND to the workforce advisory writes (the switch stops execution reachability, never the
+recording of Founder direction): an engaged switch leaves `/workforce/assign` open —
+recording an advisory intent executes nothing — while claiming keeps refusing
+`kill_switch_engaged` at the canonical boundary, so the intent cannot become execution.
+Both postures are pinned by named tests; the workforce posture was made explicit in the
+correction pass rather than left accidental.
 
 Snapshot: additive `projects` section + `counts.projects` through the shared
 `projectBrowserView` (no version bump — the recorded additive policy); `SnapshotWorker`
@@ -165,7 +189,12 @@ engine-enforced write-once task links and non-replaceable row identity. The src-
 regex was widened to the REPLACE/UPSERT spellings, behavioral tamper regressions attempt all
 three shapes, `isMissionSequenceConflict` accepts the trigger's error shape so a raced
 amendment stays a typed 409, and every documentation claim now states exactly the engine
-guarantee. `hq_project_events` was born with the complete trigger set.
+guarantee. `hq_project_events` was born with the complete trigger set. The correction pass
+widened the guard's TABLE SET to its real blast radius — never-legitimate spellings for
+`hq_mission_plan_items` and `hq_project_events` joined the grep, and the test title now
+states exactly what it covers; plan-item relink protection stays with the engine trigger
+plus the behavioral tamper test (a grep on plain UPDATE would flag the legitimate one-shot
+linker).
 
 ## Configuration paths
 
@@ -173,8 +202,11 @@ guarantee. `hq_project_events` was born with the complete trigger set.
 recorded registration gap: `--register-capability` (fail-closed to exactly
 `hq.mission_command` / `hq.project_command` / `hq.workforce_assign`; never enables a
 disabled row), `--register-principal` (the stated BOOTSTRAP path — the first principal
-cannot be gated on a principal existing), and `--register-member` / `--disable-member` /
-`--set-member-health` / `--deactivate-worker` through the ordinary Founder-gated facade.
+cannot be gated on a principal existing; an UPSERT, stated loudly since the correction
+pass: re-running an existing id replaces the row wholesale from that invocation's flags,
+forces `active` true, and the command reports REPLACED with the previous truth — pinned),
+and `--register-member` / `--disable-member` / `--set-member-health` /
+`--deactivate-worker` through the ordinary Founder-gated facade.
 
 ## What is deliberately NOT here
 
@@ -200,3 +232,17 @@ updates: route table 9 → 17, write surface 6 → 13, control-console fetch/pos
 PATH bindings, snapshot/hydration fixtures (+projects source, +worker fields), `/state`
 counts (+`projects: 0`). Full-matrix results and the exact frozen SHA are recorded in the
 Phase 4 PR; merge remains gated on independent review and the Founder.
+
+**Correction pass** (GPT-5.6 Sol exact-head gate on PR #263 + the Opus Lows, one
+consolidated pass): M1 — assignment refuses over a live claim or a queued-unreachable
+status, with the shared read/write predicate and the mandate's full regression sequence
+(claim by A → assign B refused → claimant/meta/events/evidence unchanged) at service,
+route and JSDOM-console level; M2 — `COUNT(DISTINCT t.id)` with the one-task-two-plan-items
+pin; plus the eight Lows: transport `contractSatisfied` vocabulary at the workforce
+boundary, CLI principal-UPSERT stated and pinned, `stream: null` tri-state at the update
+route, the project-close TOCTOU closed inside `reserve()`, the workforce kill-switch
+posture pinned, the source-guard table set widened, inactive workers no longer offered in
+the assign dropdown (server stays authoritative), and both anti-emptying layers named
+here. Deliberately unchanged: the ORDERS-lane `providerConnectivity` wording (a recorded
+follow-up, migrating it means migrating that lane's surfaces together), and superseded
+plan items retaining their `task_id` in counts (pre-existing linkage semantics, recorded).

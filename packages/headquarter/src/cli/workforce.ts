@@ -21,6 +21,16 @@
  * through the ordinary Founder-gated facade methods and is refused for a
  * caller whose asserted principal lacks the authority.
  *
+ * register() is an UPSERT, and this command inherits that: re-running it
+ * against an EXISTING id REPLACES all four fields from the flags given on
+ * THIS invocation — omitting `--grants` wipes the grants to [], omitting
+ * `--approval-authority` drops approval authority to false, and `active` is
+ * always written true (so it reactivates a deactivated principal). No merge
+ * with the previous row happens, and no evidence row is written (the
+ * local-trust model, same as above). The command detects the pre-existing
+ * row and says "replaced" instead of "registered" so the overwrite is never
+ * silent.
+ *
  * ## Usage
  *
  *   hq:workforce --local-admin --register-capability <id> [--db <path>]
@@ -31,6 +41,8 @@
  *   hq:workforce --local-admin --register-principal <id>
  *       [--display-name "<name>"] [--grants <cap>[,<cap>…]]
  *       [--approval-authority] [--db <path>]
+ *       UPSERT: an existing id is REPLACED wholesale from this invocation's
+ *       flags (omitted flags become the defaults, active is forced true).
  *
  *   hq:workforce --local-admin --register-member <id> --as <principalId>
  *       --member-provider <vendorId> --member-model <modelId> --member-version <v>
@@ -200,6 +212,10 @@ export function executeWorkforceCommand(
       .filter((id) => id !== '');
     const displayName = flag('display-name') ?? registerPrincipal;
     const approvalAuthority = argv.includes('--approval-authority');
+    // register() is an UPSERT: read first so the output can say what
+    // actually happened — a wholesale replace is never reported as a fresh
+    // registration.
+    const existing = registry.get(registerPrincipal);
     registry.register({
       id: registerPrincipal,
       displayName,
@@ -208,9 +224,17 @@ export function executeWorkforceCommand(
       active: true,
     });
     lines.push(
-      `Principal ${registerPrincipal} registered (${displayName}): ` +
+      `Principal ${registerPrincipal} ${existing ? 'REPLACED' : 'registered'} (${displayName}): ` +
         `originate=[${grants.join(', ')}], approvalAuthority=${approvalAuthority}.`,
     );
+    if (existing) {
+      lines.push(
+        'UPSERT: the existing row was replaced wholesale from THIS invocation — previous ' +
+          `grants [${existing.originateCapabilities.join(', ')}], approvalAuthority=` +
+          `${existing.approvalAuthority}, active=${existing.active} no longer apply, and ` +
+          'active was written true.',
+      );
+    }
     lines.push(
       'BOOTSTRAP PATH: this wrote the principal registry directly — the local-trust model, not ' +
         'an authenticated act. The very first principal cannot be gated on a principal existing.',

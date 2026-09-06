@@ -502,15 +502,22 @@ describe('the intent lock and append-only amendment history', () => {
     );
   });
 
-  it('no source file anywhere contains an UPDATE, DELETE, REPLACE or UPSERT for the history tables', () => {
+  it('no source file anywhere contains a rewrite spelling for mission intents/events, plan-item links or project events', () => {
     // The previous guard scanned only mission-command.ts while every mission
     // UPDATE statement lives in service.ts (Opus second-pass finding on
     // `cee771f`) — it could not see the file where a history rewrite would
     // most naturally be written. Scan all of src/ instead. Tests are excluded
-    // deliberately: the tamper test below must be free to ATTEMPT the
-    // forbidden statements to prove the engine refuses them.
+    // deliberately: the tamper tests must be free to ATTEMPT the forbidden
+    // statements to prove the engine refuses them.
     // Phase 4 §G widened the patterns: REPLACE and UPSERT rewrite history via
     // conflict resolution without ever spelling UPDATE or DELETE.
+    // The correction pass widened the TABLE SET to the guard's real blast
+    // radius (Opus Low on PR #263): plan items and project events carry the
+    // same claimed invariant. Only never-legitimate spellings are grepped —
+    // plain UPDATE on hq_mission_plan_items is the one-shot linker
+    // (`... WHERE task_id IS NULL`), so relink protection stays with the
+    // engine trigger and the behavioral tamper test below, not a grep that
+    // would flag the legitimate writer.
     for (const file of missionSourceFiles(join(packageRoot, 'src'))) {
       const source = readFileSync(file, 'utf8');
       for (const pattern of [
@@ -521,8 +528,17 @@ describe('the intent lock and append-only amendment history', () => {
         /INSERT\s+OR\s+\w+\s+INTO\s+hq_mission_(intents|events)/i,
         /REPLACE\s+INTO\s+hq_mission_(intents|events)/i,
         /hq_mission_(intents|events)[^;]{0,200}ON\s+CONFLICT/i,
+        /DELETE\s+FROM\s+hq_mission_plan_items/i,
+        /INSERT\s+OR\s+\w+\s+INTO\s+hq_mission_plan_items/i,
+        /REPLACE\s+INTO\s+hq_mission_plan_items/i,
+        /hq_mission_plan_items[^;]{0,200}ON\s+CONFLICT/i,
+        /UPDATE\s+hq_project_events/i,
+        /DELETE\s+FROM\s+hq_project_events/i,
+        /INSERT\s+OR\s+\w+\s+INTO\s+hq_project_events/i,
+        /REPLACE\s+INTO\s+hq_project_events/i,
+        /hq_project_events[^;]{0,200}ON\s+CONFLICT/i,
       ]) {
-        expect(source, `${file} must not rewrite mission history`).not.toMatch(pattern);
+        expect(source, `${file} must not rewrite append-only history`).not.toMatch(pattern);
       }
     }
   });
@@ -1069,6 +1085,37 @@ describe('mission <-> project linkage (Phase 4)', () => {
     if (!closed.ok) expect(closed.error.code).toBe('project_closed');
   });
 
+  it('the project-active check holds INSIDE the write transaction for command and assign (TOCTOU closed)', () => {
+    // Both writers now read the project register inside privileged.reserve()
+    // — an IMMEDIATE transaction whose write lock is taken at BEGIN — so a
+    // concurrent close (itself a reserve() write) is fully serialized against
+    // the check (Opus Low on PR #263). A true interleave is unscriptable
+    // in-process (better-sqlite3 is synchronous); these cases prove the moved
+    // checks still answer with the exact same typed refusals.
+    const closedId = project({ name: 'Closing program' });
+    expectOk(
+      fx.ops.transitionProject({
+        projectId: closedId,
+        to: 'closed',
+        note: 'closed before the writes land',
+        requestedBy: FOUNDER,
+      }),
+    );
+    const commanded = command(fx, { projectId: closedId, title: 'Raced command' });
+    expect(commanded.ok).toBe(false);
+    if (!commanded.ok) expect(commanded.error.code).toBe('project_closed');
+
+    const missionId = expectOk(command(fx, { title: 'Assignable mission' })).mission.id;
+    const assigned = fx.ops.assignMissionToProject({
+      missionId,
+      projectId: closedId,
+      requestedBy: FOUNDER,
+    });
+    expect(assigned.ok).toBe(false);
+    if (!assigned.ok) expect(assigned.error.code).toBe('project_closed');
+    expect(fx.ops.getMission(missionId)!.projectId).toBeNull();
+  });
+
   it('assigns, reassigns and clears the relationship, recording every move', () => {
     const a = project({ name: 'Program A' });
     const b = project({ name: 'Program B' });
@@ -1161,6 +1208,34 @@ describe('mission <-> project linkage (Phase 4)', () => {
     // One linked task, queued; the unlinked item has no task and counts nowhere.
     expect(view.taskCounts).toEqual([{ status: 'queued', count: 1 }]);
     expect(JSON.stringify(view)).not.toMatch(/percent|progress/i);
+  });
+
+  it('one task linked to two plan items counts ONCE — COUNT(*) would have said 2 (Sol M2)', () => {
+    // Plan-item linkage is deliberately flexible: nothing makes task_id
+    // unique across rows, so the SAME canonical task can satisfy two plan
+    // items. The figure the register shows is "linked tasks", so the derived
+    // count must be over DISTINCT canonical tasks, never linked rows.
+    const projectId = project();
+    const missionId = expectOk(
+      command(fx, { projectId, planItems: ['Measure', 'Optimize'] }),
+    ).mission.id;
+    const taskId = expectOk(
+      fx.ops.createTask({
+        capabilityId: CAPS.readStatus,
+        payload: { kind: 'measure-and-optimize' },
+        requestedBy: FOUNDER,
+      }),
+    ).task.id;
+    expectOk(fx.ops.linkMissionPlanItem({ missionId, planItemSeq: 1, taskId, requestedBy: FOUNDER }));
+    expectOk(fx.ops.linkMissionPlanItem({ missionId, planItemSeq: 2, taskId, requestedBy: FOUNDER }));
+    // Storage truth: two linked rows, one canonical task.
+    expect(
+      count(fx, `SELECT COUNT(*) AS n FROM hq_mission_plan_items WHERE task_id = '${taskId}'`),
+    ).toBe(2);
+    const view = fx.ops.getProject(projectId)!;
+    expect(view.taskCounts).toEqual([{ status: 'queued', count: 1 }]);
+    // The bucket is the task's canonical ActivityStatus, read from op_tasks.
+    expect(fx.ops.queue.get(taskId)!.status).toBe('queued');
   });
 });
 

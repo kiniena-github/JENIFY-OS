@@ -84,6 +84,31 @@ export function isTerminal(status: ActivityStatus): boolean {
   return ALLOWED_TRANSITIONS[status].length === 0;
 }
 
+/**
+ * Statuses from which `queued` can never be reached again — derived from
+ * ALLOWED_TRANSITIONS itself (a fixpoint over the table), never
+ * hand-maintained, so the two cannot drift. Claiming only ever takes work
+ * from `queued` (operator/queue.ts), so for a task in one of these statuses
+ * no statement about its future claiming can be true.
+ */
+export const QUEUED_UNREACHABLE_STATUSES: ReadonlySet<ActivityStatus> = (() => {
+  // Grow the set of statuses that can eventually reach 'queued' until it
+  // stops changing; everything left outside is beyond claiming forever.
+  const canReachQueued = new Set<ActivityStatus>(['queued']);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const status of ACTIVITY_STATUSES) {
+      if (canReachQueued.has(status)) continue;
+      if (ALLOWED_TRANSITIONS[status].some((next) => canReachQueued.has(next))) {
+        canReachQueued.add(status);
+        grew = true;
+      }
+    }
+  }
+  return new Set(ACTIVITY_STATUSES.filter((status) => !canReachQueued.has(status)));
+})();
+
 /** What kind of thing an event is about. */
 export type ActivitySubjectKind = 'task' | 'project' | 'worker' | 'approval' | 'system';
 

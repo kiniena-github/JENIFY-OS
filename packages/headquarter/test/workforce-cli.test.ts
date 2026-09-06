@@ -101,6 +101,42 @@ describe('principal bootstrap', () => {
     expect(principal.approvalAuthority).toBe(true);
     expect(principal.originateCapabilities).toEqual(['hq.mission_command', 'hq.project_command']);
   });
+
+  it('re-running against an existing id is an UPSERT, stated loudly — never reported as a fresh registration', () => {
+    // register() replaces the row wholesale; the CLI inherits that. This pin
+    // makes the overwrite semantics INTENTIONAL (Opus Low on PR #263): a
+    // re-run with omitted flags wipes grants to [], drops approval
+    // authority, and forces active back to true — and the output says
+    // REPLACED with the previous truth, so nothing happens silently.
+    const { db, openDb } = harness();
+    executeWorkforceCommand(
+      [
+        '--register-principal',
+        'founder',
+        '--display-name',
+        'The Founder',
+        '--grants',
+        'hq.mission_command',
+        '--approval-authority',
+      ],
+      openDb,
+    );
+    // Deactivate directly (registry-level state, as a maintenance act would).
+    db.prepare(`UPDATE hq_human_principals SET active = 0 WHERE id = 'founder'`).run();
+
+    const rerun = executeWorkforceCommand(['--register-principal', 'founder'], openDb);
+    expect(rerun.ok).toBe(true);
+    const output = rerun.lines.join('\n');
+    expect(output).toContain('Principal founder REPLACED');
+    expect(output).toContain('replaced wholesale');
+    expect(output).toContain('previous grants [hq.mission_command]');
+    expect(output).not.toContain('Principal founder registered');
+
+    const principal = new HumanPrincipalRegistry(db).get('founder')!;
+    expect(principal.originateCapabilities).toEqual([]); // --grants omitted → wiped
+    expect(principal.approvalAuthority).toBe(false); // flag omitted → dropped
+    expect(principal.active).toBe(true); // always written true → reactivated
+  });
 });
 
 describe('facade-gated actions refuse an unauthorized asserted principal', () => {

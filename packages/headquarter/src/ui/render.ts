@@ -946,11 +946,15 @@ export function renderSpecialistDirectory(
       : `<div class="grid grid-cards">${profiles
           .map(({ descriptor, status }) => {
             const busy = (status?.activeCount ?? 0) > 0;
+            // Workload-axis labels only: the registry's active flag plus the
+            // recorded task count. Deliberately NOT "Available" — this static
+            // card observes no transport and must not imply an AI service is
+            // reachable (Opus Low on PR #263).
             const availability = !descriptor.active
               ? { label: 'Inactive', tone: 'neutral' as Tone }
               : busy
                 ? { label: 'On assignment', tone: 'info' as Tone }
-                : { label: 'Available', tone: 'accent' as Tone };
+                : { label: 'No active assignment', tone: 'accent' as Tone };
             return `<article class="card" data-specialist="${escapeHtml(descriptor.id)}">
 <p class="row-between">${identity(descriptor.id, descriptor.displayName, `${descriptor.vendor} · ${ROLE_LABELS[descriptor.role]}`)}${chip(availability.label, availability.tone, true)}</p>
 <p class="faint">${escapeHtml(descriptor.id)}</p>
@@ -980,7 +984,7 @@ ${
     'Capabilities shown are the ones granted in the worker descriptor and the capability registry — a worker’s own self-description is never a permission. Cost and token usage are not part of these contracts, so this page does not show them rather than estimating them.';
 
   const liveWorkforce = `<div class="panel">
-<p class="readonly-note">The live workforce record (Phase 4): each registered worker with its declared execution provider, observed transport truth and AI-member enrichment — read live from the same-origin control API, nothing inferred. Eligibility evaluation and ADVISORY assignment appear only for a session the server granted them to; an assignment narrows claiming and changes nothing else.</p>
+<p class="readonly-note">The live workforce record (Phase 4): each registered worker with its declared execution provider, its routing-contract configuration state, dispatchability where this host genuinely observed it, and AI-member enrichment — read live from the same-origin control API, nothing inferred. Eligibility evaluation and ADVISORY assignment appear only for a session the server granted them to; an assignment narrows future claiming and changes nothing else.</p>
 <div data-workforce-console></div>
 </div>`;
 

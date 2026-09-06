@@ -196,6 +196,39 @@ describe('a mapped Founder commands the project register through the facade', ()
     expect((refused.body.error as { code: string }).code).toBe('project_closed');
   });
 
+  it('carries `stream: null` across the wire as a real clear — never silently folded into "not supplied"', () => {
+    const h = harness();
+    const projectId = created(h); // CREATE_BODY sets stream 'jenify-os'
+    expect(
+      (h.call({ method: 'GET', path: CONTROL_ROUTES.projects }).body.projects as { stream: string | null }[])[0]!
+        .stream,
+    ).toBe('jenify-os');
+
+    const cleared = h.call({
+      path: CONTROL_ROUTES.projectUpdate,
+      body: { projectId, stream: null },
+    });
+    expect(cleared.status).toBe(200);
+    expect((cleared.body.project as { stream: string | null }).stream).toBeNull();
+
+    // Absent stays "unchanged": an update touching only the purpose leaves
+    // the cleared stream cleared and does not resurrect anything.
+    const untouched = h.call({
+      path: CONTROL_ROUTES.projectUpdate,
+      body: { projectId, purpose: 'Still the platform program' },
+    });
+    expect(untouched.status).toBe(200);
+    expect((untouched.body.project as { stream: string | null }).stream).toBeNull();
+
+    // A non-string non-null is refused rather than coerced into "absent".
+    const refused = h.call({
+      path: CONTROL_ROUTES.projectUpdate,
+      body: { projectId, stream: 42 },
+    });
+    expect(refused.status).toBe(400);
+    expect((refused.body.error as { code: string }).code).toBe('invalid_input');
+  });
+
   it('assigns a mission to a project and links a plan item to a real task', () => {
     const h = harness();
     const projectId = created(h);

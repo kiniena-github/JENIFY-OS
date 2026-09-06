@@ -60,6 +60,7 @@ function harness(
     account?: AuthenticatedAccount | null;
     grant?: boolean;
     withMemberRegistry?: boolean;
+    secretsEnv?: Record<string, string>;
   } = {},
 ): Harness {
   const fixture = setupFixture();
@@ -103,7 +104,7 @@ function harness(
     ops,
     founderMap: MAP,
     allowedOrigins: [ORIGIN],
-    secretsEnv: {},
+    secretsEnv: options.secretsEnv ?? {},
     sessions: { resolve: () => current },
     audit: { record: (event) => audit.push(event) },
     now: () => NOW,
@@ -173,15 +174,47 @@ describe('GET /workforce — real workers, real truth, nothing invented', () => 
     )!;
     expect(claude.providerDeclared).toBe('CLAUDE');
     const transport = claude.transport as {
-      connected: boolean;
+      contractSatisfied: boolean;
+      reason: string;
       dispatchable: boolean | null;
       missingSecrets: string[];
     };
-    // Empty secrets environment: the routing contract answers NOT connected,
-    // names the missing FACTS (never values), and dispatchability is null
-    // because no transport seam was supplied to observe it.
-    expect(transport.connected).toBe(false);
+    // Empty secrets environment: the routing contract is NOT satisfied,
+    // the reason names the missing FACTS (never values), and dispatchability
+    // is null because no transport seam was supplied to observe it. The
+    // field is `contractSatisfied`, not `connected`: configuration truth
+    // must never read as a live observation (Opus Low on PR #263).
+    expect(transport.contractSatisfied).toBe(false);
     expect(transport.missingSecrets.length).toBeGreaterThan(0);
+    expect(transport.dispatchable).toBeNull();
+    expect(JSON.stringify(claude.transport)).not.toContain('"connected"');
+  });
+
+  it('a satisfied routing contract is reported as configuration, never as a connection', () => {
+    // Supply exactly the facts the CLAUDE routing contract requires
+    // (PROVIDER_REGISTRY: CLAUDE_ROUTINE_URL + CLAUDE_ROUTINE_TOKEN, no
+    // local facts) so the positive branch runs deterministically. The reason
+    // must state config-satisfaction and that nothing was probed — never
+    // "is connected" — and dispatchability stays null (unobserved).
+    const h = harness({
+      secretsEnv: { CLAUDE_ROUTINE_URL: 'https://example.invalid/routine', CLAUDE_ROUTINE_TOKEN: 'x' },
+    });
+    expectOk(
+      h.ops.declareWorkerProvider({ workerId: 'claude', providerId: 'CLAUDE', founderId: 'founder' }),
+    );
+    const response = h.call({ method: 'GET' });
+    const claude = (response.body.workers as Record<string, unknown>[]).find(
+      (worker) => worker.id === 'claude',
+    )!;
+    const transport = claude.transport as {
+      contractSatisfied: boolean;
+      reason: string;
+      dispatchable: boolean | null;
+    };
+    expect(transport.contractSatisfied).toBe(true);
+    expect(transport.reason).toContain('satisfied by configuration');
+    expect(transport.reason).toContain('nothing was probed');
+    expect(transport.reason.toLowerCase()).not.toContain('is connected');
     expect(transport.dispatchable).toBeNull();
   });
 
@@ -295,5 +328,57 @@ describe('POST /workforce/assign — advisory, gated, honest', () => {
     const ungranted = harness({ grant: false });
     const off = ungranted.call({ method: 'GET', path: CONTROL_ROUTES.session });
     expect((off.body.controls as { workforceAssign: boolean }).workforceAssign).toBe(false);
+  });
+
+  it('refuses assignment once a live claim exists — the canonical claimant and the meta stay untouched (Sol M1)', () => {
+    const h = harness();
+    const taskId = queuedTask(h);
+    const claimed = expectOk(h.ops.claimNext('claude', CAPS.readStatus));
+    expect(claimed.id).toBe(taskId);
+    const response = h.call({
+      path: CONTROL_ROUTES.workforceAssign,
+      body: { taskId, workerId: 'jules', rationale: 'reroute attempt while claude holds the claim' },
+    });
+    expect(response.status).toBe(409);
+    expect((response.body.error as { code: string }).code).toBe('task_already_claimed');
+    // Canonical truth unchanged: claude still owns the fenced claim, and no
+    // advisory meta was recorded for jules.
+    expect(h.ops.queue.get(taskId)!.claimedBy).toBe('claude');
+    expect(h.ops.queue.get(taskId)!.status).toBe('assigned');
+    expect(h.ops.readMeta(taskId)?.assignment ?? null).toBeNull();
+  });
+
+  it('the eligibility read reports the same closed-assignment truth the write refuses with', () => {
+    const h = harness();
+    const taskId = queuedTask(h);
+    expectOk(h.ops.claimNext('claude', CAPS.readStatus));
+    const response = h.call({ path: CONTROL_ROUTES.workforceRoute, body: { taskId } });
+    expect(response.status).toBe(200);
+    const taskState = (response.body.report as { taskState: Record<string, unknown> }).taskState;
+    expect(taskState.assignmentOpen).toBe(false);
+    expect(taskState.claimedBy).toBe('claude');
+    expect(String(taskState.reason)).toContain('already claimed by claude');
+  });
+});
+
+describe('the recorded Phase 4 postures hold behaviorally', () => {
+  it('advisory workforce writes stay open under an engaged kill switch while claiming stays blocked — the switch stops execution, not direction (decisions item 5, extended)', () => {
+    const h = harness();
+    const taskId = queuedTask(h);
+    expectOk(h.ops.engageKillSwitch('*', 'founder', 'emergency stop'));
+    // Recording the ADVISORY intent is direction, not execution: it stays
+    // open, exactly like mission and project writes under the same switch.
+    const response = h.call({
+      path: CONTROL_ROUTES.workforceAssign,
+      body: { taskId, workerId: 'claude' },
+    });
+    expect(response.status).toBe(200);
+    // And it released nothing: the canonical claim boundary still refuses
+    // while the switch is engaged, so the intent cannot become execution.
+    const claim = h.ops.claimNext('claude', CAPS.readStatus);
+    expect(claim.ok).toBe(false);
+    if (!claim.ok) expect(claim.error.code).toBe('kill_switch_engaged');
+    expect(h.ops.queue.get(taskId)!.status).toBe('queued');
+    expect(h.ops.queue.get(taskId)!.claimedBy).toBeNull();
   });
 });

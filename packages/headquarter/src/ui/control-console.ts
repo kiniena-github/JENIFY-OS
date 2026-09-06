@@ -1874,12 +1874,21 @@ export function workforceConsoleScript(): string {
     taskInput.placeholder = 'task id';
     var workerSelect = document.createElement('select');
     workerSelect.setAttribute('aria-label', 'Worker to assign');
+    // Only workers the register marks active are offered. The server is the
+    // authority either way (an inactive target is refused with
+    // worker_not_assignable); the dropdown just stops offering what cannot
+    // be accepted.
+    var assignableWorkers = [];
     for (var w = 0; w < workers.length; w++) {
+      if (workers[w].active === true) assignableWorkers.push(workers[w]);
+    }
+    for (var aw = 0; aw < assignableWorkers.length; aw++) {
       var option = document.createElement('option');
-      option.value = workers[w].id;
-      option.textContent = workers[w].displayName + (workers[w].active ? '' : ' (inactive)');
+      option.value = assignableWorkers[aw].id;
+      option.textContent = assignableWorkers[aw].displayName;
       workerSelect.appendChild(option);
     }
+    if (assignableWorkers.length === 0) workerSelect.disabled = true;
     var rationaleInput = document.createElement('input');
     rationaleInput.type = 'text';
     rationaleInput.setAttribute('aria-label', 'Rationale (optional)');
@@ -1906,6 +1915,13 @@ export function workforceConsoleScript(): string {
           return;
         }
         var lines = [];
+        // Canonical task state first: when the write path would refuse the
+        // assignment, say so before listing per-worker eligibility.
+        var taskState = body2.report.taskState || {};
+        var statePrefix = '';
+        if (taskState.assignmentOpen === false) {
+          statePrefix = 'ASSIGNMENT CLOSED \\u2014 ' + (taskState.reason || 'the task is not in an assignable state') + ' \\u00b7 ';
+        }
         var reportWorkers = Array.isArray(body2.report.workers) ? body2.report.workers : [];
         for (var rw = 0; rw < reportWorkers.length; rw++) {
           var entry = reportWorkers[rw];
@@ -1918,7 +1934,7 @@ export function workforceConsoleScript(): string {
           }
           lines.push(entry.workerId + ': ' + verdict + why);
         }
-        outcome.textContent = 'Eligibility for ' + body2.report.capabilityId + ' \\u2014 ' + lines.join(' \\u00b7 ');
+        outcome.textContent = statePrefix + 'Eligibility for ' + body2.report.capabilityId + ' \\u2014 ' + lines.join(' \\u00b7 ');
       }).catch(function (error) {
         checkButton.disabled = false;
         outcome.textContent = 'Not evaluated (' + error.message + ').';
@@ -1939,8 +1955,11 @@ export function workforceConsoleScript(): string {
         assignButton.disabled = false;
         var body2 = result.body || {};
         if (body2.ok === true) {
+          // Truthful because assignTask now refuses once a live claim exists
+          // or the task can never return to the queue: success here means the
+          // narrowing genuinely applies to future claiming.
           outcome.textContent = 'Advisory assignment recorded for ' + payload.workerId +
-            '. The task status is unchanged; claiming is narrowed to that worker.';
+            '. The task status is unchanged; future claiming from the queue is narrowed to that worker.';
           notifyStateChanged();
           return;
         }
@@ -1952,6 +1971,10 @@ export function workforceConsoleScript(): string {
         outcome.textContent = 'Not submitted (' + error.message + ').';
       });
     });
+    if (assignableWorkers.length === 0) {
+      assignButton.disabled = true;
+      textLine(assignBox, 'muted', 'No active worker can be offered \\u2014 every registered worker is marked inactive. Eligibility can still be evaluated.');
+    }
     assignBox.appendChild(taskInput);
     assignBox.appendChild(workerSelect);
     assignBox.appendChild(rationaleInput);

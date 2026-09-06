@@ -1771,3 +1771,26 @@ identical to the Phase 3 baseline (6 POSIX-only hq-host persistence tests; Linux
 hosted restart; Ubuntu exact-head CI authoritative). Full-matrix results and the exact
 frozen SHA are recorded in the Phase 4 PR; merge remains gated on independent review and the
 Founder.
+
+## 2026-09-06 — Phase 4 correction pass (Sol M1/M2 + the Opus Lows), same branch
+
+The GPT-5.6 Sol independent exact-head gate on PR #263 reclassified two Opus Lows as
+Medium (canonical-truth violations) and required one consolidated Fable correction pass.
+Delivered on `local/phase-4-projects-tasks-ai-workforce`: **M1** — `assignTask` refuses
+over a live fenced claim (`task_already_claimed`) or a queued-unreachable status
+(`task_beyond_claiming`, derived from `ALLOWED_TRANSITIONS` and drift-pinned), with the
+shared predicate surfaced on the eligibility read (`taskState`) and the console success
+line reworded to exactly the guaranteed effect; the mandate's full regression sequence runs
+at service, route and JSDOM-console level. **M2** — project `taskCounts` counts DISTINCT
+canonical tasks (one task on two plan items counts once, pinned; linkage stays flexible).
+**Lows swept in the same pass**: workforce transport `contractSatisfied` vocabulary
+(ORDERS lane untouched, recorded follow-up); CLI principal-UPSERT stated + pinned
+(REPLACED output with previous truth); `stream: null` tri-state at the update route
+(+route tests); project-close TOCTOU closed inside the IMMEDIATE `reserve()` transaction
+in `assignMissionToProject` AND `commandMission` (amendMissionIntent precedent, no new
+locking); workforce kill-switch posture pinned by a named test (advisory writes open,
+claiming blocked); source-guard table set widened to plan items + project events with an
+honest retitle; inactive workers filtered from the assign dropdown (server authoritative);
+dual-registry anti-emptying pins named at both layers. Decisions entry appended; canonical
+doc updated. The exact corrected SHA, full-matrix results and honest deferrals are recorded
+on PR #263; next step is one fresh Opus 5 exact-head review.

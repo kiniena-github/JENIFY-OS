@@ -5,6 +5,7 @@ import {
   assertTransition,
   canTransition,
   isTerminal,
+  QUEUED_UNREACHABLE_STATUSES,
 } from '../src/contracts/events.js';
 
 describe('canonical activity model', () => {
@@ -54,5 +55,14 @@ describe('canonical activity model', () => {
     expect([...ALLOWED_TRANSITIONS.outcome_unknown].sort()).toEqual(
       ['completed', 'queued', 'review_failed'].sort(),
     );
+  });
+
+  it('exactly completed and review_passed can never reach the queue again — the drift alarm for the derived set', () => {
+    // QUEUED_UNREACHABLE_STATUSES is DERIVED from ALLOWED_TRANSITIONS (a
+    // fixpoint), never hand-maintained. This pin exists so a future edit to
+    // the transition table that silently changes which statuses are beyond
+    // claiming fails loudly here instead of quietly changing assignment
+    // refusals.
+    expect([...QUEUED_UNREACHABLE_STATUSES].sort()).toEqual(['completed', 'review_passed']);
   });
 });

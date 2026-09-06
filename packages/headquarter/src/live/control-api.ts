@@ -983,6 +983,8 @@ function controlErrorStatus(code: string): number {
     case 'project_status_changed':
     case 'project_closed':
     case 'assigned_to_other_worker':
+    case 'task_already_claimed':
+    case 'task_beyond_claiming':
     case 'worker_not_assignable':
       return 409;
     case 'unknown_capability':
@@ -1303,13 +1305,26 @@ function updateProject(
   const projectId = stringField(request.body, 'projectId') ?? '';
   const name = stringField(request.body, 'name');
   const purpose = stringField(request.body, 'purpose');
-  const stream = stringField(request.body, 'stream');
+  // `stream` is TRI-STATE and must stay so across the wire: absent =
+  // unchanged, null = clear the label, string = set it. `stringField` would
+  // silently fold null into "absent" and answer 200 with the old stream kept
+  // — a false clear (Opus Low on PR #263). A non-string non-null is refused
+  // rather than coerced (the assignMissionProject precedent below).
+  const rawStream =
+    request.body != null && typeof request.body === 'object'
+      ? (request.body as Record<string, unknown>).stream
+      : undefined;
+  if (rawStream !== undefined && rawStream !== null && typeof rawStream !== 'string') {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'stream must be a string, null, or absent.');
+  }
+  const stream = rawStream as string | null | undefined;
   if (!projectId) {
     audit('refused', 'invalid_input', founder);
     return refusal(400, 'invalid_input', 'projectId is required.');
   }
   try {
-    assertBrowserSafe({ name, purpose, stream }, 'project');
+    assertBrowserSafe({ name, purpose, stream: stream ?? undefined }, 'project');
   } catch {
     audit('refused', 'unsafe_project_content', founder);
     return refusal(
@@ -1443,9 +1458,20 @@ function workforceReport(
       providerId && (PROVIDERS as readonly string[]).includes(providerId)
         ? (() => {
             const connectivity = providerConnectivity(providerId as ProviderId, deps.secretsEnv);
+            // `contractSatisfied` is a CONFIGURATION fact — the routing
+            // contract's required secrets/local facts are all present.
+            // Nothing was asked of the vendor, so it is deliberately not
+            // called "connected" here (Opus Low on PR #263). The truth
+            // asymmetry: a NEGATIVE reason (missing requirement) genuinely
+            // proves non-executability and passes through verbatim; the
+            // positive claim is restated as exactly what was checked. Live
+            // observation stays where it belongs — `dispatchable` is
+            // three-valued and only ever non-null when genuinely observed.
             return {
-              connected: connectivity.connected,
-              reason: connectivity.reason,
+              contractSatisfied: connectivity.connected,
+              reason: connectivity.connected
+                ? 'Routing-contract requirements are satisfied by configuration; nothing was probed.'
+                : connectivity.reason,
               missingSecrets: connectivity.missingSecrets,
               missingLocalFacts: connectivity.missingLocalFacts,
               dispatchable: deps.dispatchAvailability?.(providerId as ProviderId) ?? null,

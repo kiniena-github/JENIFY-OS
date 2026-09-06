@@ -70,7 +70,7 @@ import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
 import { HeadquarterStore } from '../store/headquarter.js';
-import type { ActivityStatus } from '../contracts/events.js';
+import { QUEUED_UNREACHABLE_STATUSES, type ActivityStatus } from '../contracts/events.js';
 import type { WorkerDescriptor, WorkerRole } from '../contracts/workers.js';
 import { evaluatePolicy, type PolicyContext, type PolicyDecision } from '../operator/policy.js';
 import { canonicalJson, taskActionDigest, type ApprovalRejection } from '../operator/approvals.js';
@@ -496,6 +496,8 @@ export type OpsErrorCode =
   | 'action_digest_mismatch'
   | 'task_not_awaiting_approval'
   | 'assigned_to_other_worker'
+  | 'task_already_claimed'
+  | 'task_beyond_claiming'
   | 'provider_binding_mismatch'
   | 'unknown_provider'
   | 'nothing_claimable'
@@ -532,6 +534,64 @@ function fail(code: OpsErrorCode, message: string, details?: Record<string, unkn
 
 function ok<T>(data: T): OpsResult<T> {
   return { ok: true, data };
+}
+
+/**
+ * Live-claim statuses: the task is genuinely held by its claimant right now.
+ * The SAME predicate as `replacementPlan()` and the handover inventory
+ * (`claimed_by` set AND status in this list) — `complete()` deliberately
+ * leaves `claimed_by` on the finished row for attribution, so the column
+ * alone is not a claim.
+ */
+const LIVE_CLAIM_STATUSES: readonly ActivityStatus[] = ['assigned', 'running', 'outcome_unknown'];
+
+/**
+ * Why an advisory assignment intent may NOT be recorded for this task, or
+ * null when it may. ONE predicate with two consumers — `assignTask` (the
+ * write refusal) and `evaluateTaskEligibility` (the read) — so the browser
+ * is never told an assignment is open that the write path would refuse
+ * (GPT-5.6 Sol M1 on PR #263).
+ *
+ * An assignment intent's only operational effect is to narrow FUTURE
+ * claiming from the queue, so it is allowed exactly while that effect is
+ * genuinely possible:
+ * - a task under a live fenced claim is refused — recording "meant for B"
+ *   while A holds the claim narrows nothing now and would silently misroute
+ *   a re-claim after a later release;
+ * - a task whose status can never reach `queued` again is refused — no
+ *   statement about its future claiming can be true;
+ * - `blocked` / `needs_approval` / `review_failed` with no live claim stay
+ *   assignable: `queued` is reachable from all three, so the narrowing is
+ *   real. (A `needs_approval` task that arrived there from `running` may
+ *   resume under its original claimant, in which case the intent simply
+ *   never fires — advisory means advisory.)
+ *
+ * A live claim whose lease has expired but has not been reaped yet is still
+ * refused (consistent with `replacementPlan`); the lease expiry is included
+ * in the details so a stale claim is legible. The lease is NOT released
+ * here — a refusal must never change state.
+ */
+function assignmentBarrier(task: OperatorTask): OpsError | null {
+  if (task.claimedBy != null && LIVE_CLAIM_STATUSES.includes(task.status)) {
+    return {
+      code: 'task_already_claimed',
+      message: `Task ${task.id} is already claimed by ${task.claimedBy} (status ${task.status}); an assignment intent recorded now could not narrow claiming`,
+      details: {
+        taskId: task.id,
+        claimedBy: task.claimedBy,
+        status: task.status,
+        leaseExpiresAt: task.leaseExpiresAt,
+      },
+    };
+  }
+  if (QUEUED_UNREACHABLE_STATUSES.has(task.status)) {
+    return {
+      code: 'task_beyond_claiming',
+      message: `Task ${task.id} is ${task.status} and can never return to the queue; there is no future claiming to narrow`,
+      details: { taskId: task.id, status: task.status },
+    };
+  }
+  return null;
 }
 
 /** Trim + bound one mission text field. Absent optional fields become null. */
@@ -673,10 +733,25 @@ export interface WorkerEligibility {
   eligible: boolean;
 }
 
+/**
+ * Canonical task/claim state on the eligibility read, so the browser can
+ * never be shown "eligible" workers for a task the write path would refuse:
+ * `assignmentOpen` is computed by the SAME `assignmentBarrier` predicate
+ * `assignTask` enforces, and `reason` is that refusal verbatim (null while
+ * assignment is genuinely open).
+ */
+export interface TaskAssignmentState {
+  status: ActivityStatus;
+  claimedBy: string | null;
+  assignmentOpen: boolean;
+  reason: string | null;
+}
+
 export interface TaskEligibilityReport {
   taskId: string;
   capabilityId: string;
   classification: TaskClassification;
+  taskState: TaskAssignmentState;
   workers: WorkerEligibility[];
 }
 
@@ -1369,6 +1444,11 @@ export class HeadquarterOperations {
    * Its one operational effect is a NARROWING one: `claimNext()` refuses to
    * hand the head-of-queue task to a different worker (see that method for the
    * benign race it can lose).
+   *
+   * Because that is its ONLY effect, the intent is refused whenever the
+   * effect is impossible — a live fenced claim already exists, or the task
+   * can never return to the queue. See `assignmentBarrier` for the exact
+   * canonical predicate (Sol M1 on PR #263).
    */
   assignTask(
     taskId: string,
@@ -1385,6 +1465,11 @@ export class HeadquarterOperations {
     // actor-attributed annotation event and evidence entry.
     const actor = this.#resolveActor(assignedBy, 'record an assignment intent');
     if (!actor.ok) return actor;
+
+    // Canonical task/claim truth, checked AFTER the actor gate so record
+    // state (claimant, lease) is only disclosed to a resolved identity.
+    const barrier = assignmentBarrier(task);
+    if (barrier) return { ok: false, error: barrier };
 
     const assignability = this.#workers.assignability(workerId);
     if (!assignability.assignable) {
@@ -2468,10 +2553,19 @@ export class HeadquarterOperations {
         };
       })
       .sort((a, b) => a.workerId.localeCompare(b.workerId));
+    // The same predicate assignTask refuses with — read and write truth
+    // cannot drift (Sol M1 on PR #263).
+    const barrier = assignmentBarrier(task);
     return ok({
       taskId,
       capabilityId: task.capabilityId,
       classification: routed.data.classification,
+      taskState: {
+        status: task.status,
+        claimedBy: task.claimedBy,
+        assignmentOpen: barrier === null,
+        reason: barrier?.message ?? null,
+      },
       workers,
     });
   }
@@ -2962,17 +3056,11 @@ export class HeadquarterOperations {
     ) {
       return fail('invalid_input', `sourceOrderTaskId names an unknown task: ${sourceOrderTaskId}`);
     }
+    // The project-active check moved INSIDE the transaction below: the
+    // project register is the one read here that can go stale (missions and
+    // tasks are append-only, so the dependsOn/sourceOrderTaskId existence
+    // checks above cannot regress outside it).
     const projectId = input.projectId?.trim() || null;
-    if (projectId) {
-      const target = this.#projectRecord(projectId);
-      if (!target) return fail('unknown_project', `Unknown project: ${projectId}`);
-      if (target.status === 'closed') {
-        return fail(
-          'project_closed',
-          `Project ${projectId} is closed; reopen it before assigning missions to it`,
-        );
-      }
-    }
 
     // Everything that will be PERSISTED is scanned before anything is
     // written — a credential-looking order is refused, never stored.
@@ -3046,7 +3134,26 @@ export class HeadquarterOperations {
     // concurrent writer past the UNIQUE idempotency key.
     const privileged = this.#requirePrivilegedQueue();
     let dedupedTo: string | null = null;
+    let refusal: OpsResult<never> | null = null;
     privileged.reserve(() => {
+      // Project state is read inside the write lock so a concurrent close
+      // cannot land between the check and the INSERT (Opus Low on PR #263).
+      // Checked BEFORE the dedupe read, deliberately: a replayed command
+      // into a since-closed project refuses exactly as a fresh one does.
+      if (projectId) {
+        const target = this.#projectRecord(projectId);
+        if (!target) {
+          refusal = fail('unknown_project', `Unknown project: ${projectId}`);
+          return;
+        }
+        if (target.status === 'closed') {
+          refusal = fail(
+            'project_closed',
+            `Project ${projectId} is closed; reopen it before assigning missions to it`,
+          );
+          return;
+        }
+      }
       const existing = findMissionIdByIdempotencyKey(this.#db, idempotencyKey);
       if (existing) {
         dedupedTo = existing;
@@ -3112,6 +3219,7 @@ export class HeadquarterOperations {
         payload: { missionId: id, idempotencyKey, planItemCount: items.length, executable: false },
       });
     });
+    if (refusal) return refusal;
     if (dedupedTo) {
       return ok({ mission: this.#missionRecord(dedupedTo)!, deduplicated: true });
     }
@@ -3619,42 +3727,59 @@ export class HeadquarterOperations {
     const refusedCapability = this.#missionCapabilityGate('assign a mission to a project');
     if (refusedCapability) return refusedCapability;
 
-    const current = this.#missionRecord(input.missionId);
-    if (!current) return fail('unknown_mission', `Unknown mission: ${input.missionId}`);
-    if (isMissionTerminal(current.status)) {
-      return fail(
-        'mission_terminal',
-        `Mission ${input.missionId} is ${current.status}; its record is history`,
-      );
-    }
     const projectId = input.projectId?.trim() || null;
-    if (projectId) {
-      const target = this.#projectRecord(projectId);
-      if (!target) return fail('unknown_project', `Unknown project: ${projectId}`);
-      if (target.status === 'closed') {
-        return fail(
-          'project_closed',
-          `Project ${projectId} is closed; reopen it before assigning missions to it`,
-        );
-      }
-    }
-    if (current.projectId === projectId) {
-      // A replayed assignment is refused rather than re-applied: appending a
-      // second identical event would forge history (the transition rule).
-      return fail(
-        'invalid_input',
-        projectId
-          ? `Mission ${input.missionId} is already assigned to ${projectId}`
-          : `Mission ${input.missionId} is not assigned to any project`,
-      );
-    }
-
     const at = nowIso();
-    let raced = false;
     const privileged = this.#requirePrivilegedQueue();
+    // Mission and project state are read INSIDE the IMMEDIATE transaction
+    // (the amendMissionIntent precedent, issue #224): the write lock is taken
+    // at BEGIN, so a concurrent project close — itself a reserve() write —
+    // can no longer land between the active-project check and the UPDATE
+    // (Opus Low on PR #263). An in-process interleave is unscriptable
+    // (better-sqlite3 is synchronous); the lock is the cross-connection
+    // defense, exactly as evidence.ts records.
+    let refusal: OpsResult<MissionRecord> | null = null;
     privileged.reserve(() => {
+      const current = this.#missionRecord(input.missionId);
+      if (!current) {
+        refusal = fail('unknown_mission', `Unknown mission: ${input.missionId}`);
+        return;
+      }
+      if (isMissionTerminal(current.status)) {
+        refusal = fail(
+          'mission_terminal',
+          `Mission ${input.missionId} is ${current.status}; its record is history`,
+        );
+        return;
+      }
+      if (projectId) {
+        const target = this.#projectRecord(projectId);
+        if (!target) {
+          refusal = fail('unknown_project', `Unknown project: ${projectId}`);
+          return;
+        }
+        if (target.status === 'closed') {
+          refusal = fail(
+            'project_closed',
+            `Project ${projectId} is closed; reopen it before assigning missions to it`,
+          );
+          return;
+        }
+      }
+      if (current.projectId === projectId) {
+        // A replayed assignment is refused rather than re-applied: appending a
+        // second identical event would forge history (the transition rule).
+        refusal = fail(
+          'invalid_input',
+          projectId
+            ? `Mission ${input.missionId} is already assigned to ${projectId}`
+            : `Mission ${input.missionId} is not assigned to any project`,
+        );
+        return;
+      }
       // `IS ?` is null-safe equality in SQLite, so one guarded UPDATE covers
-      // both "currently unassigned" and "currently assigned to X".
+      // both "currently unassigned" and "currently assigned to X". With the
+      // reads inside the same transaction this CAS can no longer lose a
+      // race; it stays as a cheap invariant, not the primary defense.
       const result = this.#db
         .prepare(
           `UPDATE hq_missions SET project_id = ?, updated_at = ?
@@ -3662,7 +3787,10 @@ export class HeadquarterOperations {
         )
         .run(projectId, at, input.missionId, current.projectId);
       if (result.changes === 0) {
-        raced = true;
+        refusal = fail(
+          'mission_status_changed',
+          `Mission ${input.missionId} changed while the assignment was being decided`,
+        );
         return;
       }
       appendMissionEvent(this.#db, {
@@ -3682,12 +3810,7 @@ export class HeadquarterOperations {
         },
       });
     });
-    if (raced) {
-      return fail(
-        'mission_status_changed',
-        `Mission ${input.missionId} changed while the assignment was being decided`,
-      );
-    }
+    if (refusal) return refusal;
     return ok(this.#missionRecord(input.missionId)!);
   }
 

@@ -193,6 +193,93 @@ describe('assignTaskAsFounder — the gated advisory assignment', () => {
     // No assignment was written (createTask leaves a labels-only meta row).
     expect(fx.ops.readMeta(taskId)!.assignment).toBeNull();
   });
+
+  it('refuses assignment once a live fenced claim exists — nothing changes and nothing is appended (Sol M1)', () => {
+    const taskId = queuedTask(fx);
+    // Worker A genuinely claims through the atomic fenced claim path.
+    const claimed = expectOk(fx.ops.claimNext('claude', CAPS.readStatus));
+    expect(claimed.id).toBe(taskId);
+    expect(claimed.claimedBy).toBe('claude');
+    const eventsBefore = fx.db
+      .prepare(`SELECT COUNT(*) AS n FROM hq_events WHERE subject_id = ?`)
+      .get(taskId) as { n: number };
+    const evidenceBefore = fx.db
+      .prepare(`SELECT COUNT(*) AS n FROM op_evidence WHERE kind = 'assignment_intent_recorded'`)
+      .get() as { n: number };
+
+    // The Founder attempts to assign worker B over the live claim.
+    const result = fx.ops.assignTaskAsFounder({ taskId, workerId: 'jules', founderId: FOUNDER });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('task_already_claimed');
+      expect(result.error.details).toMatchObject({ taskId, claimedBy: 'claude', status: 'assigned' });
+    }
+    // Canonical claimant unchanged; no advisory meta appeared for jules.
+    const task = fx.ops.queue.get(taskId)!;
+    expect(task.claimedBy).toBe('claude');
+    expect(task.status).toBe('assigned');
+    expect(fx.ops.readMeta(taskId)!.assignment).toBeNull();
+    // No false assignment event or evidence was appended by the refusal.
+    expect(
+      (fx.db.prepare(`SELECT COUNT(*) AS n FROM hq_events WHERE subject_id = ?`).get(taskId) as { n: number }).n,
+    ).toBe(eventsBefore.n);
+    expect(
+      (
+        fx.db
+          .prepare(`SELECT COUNT(*) AS n FROM op_evidence WHERE kind = 'assignment_intent_recorded'`)
+          .get() as { n: number }
+      ).n,
+    ).toBe(evidenceBefore.n);
+  });
+
+  it('a running claim refuses the same way — the claim survives into execution', () => {
+    const taskId = queuedTask(fx);
+    const claimed = expectOk(fx.ops.claimNext('claude', CAPS.readStatus));
+    expectOk(fx.ops.startTask(claimed.id, 'claude', claimed.fence));
+    const result = fx.ops.assignTaskAsFounder({ taskId, workerId: 'jules', founderId: FOUNDER });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('task_already_claimed');
+    expect(fx.ops.queue.get(taskId)!.claimedBy).toBe('claude');
+  });
+
+  it('refuses a task that can never return to the queue — completed keeps claimed_by, and that is not a live claim', () => {
+    const created = expectOk(
+      fx.ops.createTask({ capabilityId: CAPS.readStatus, payload: {}, requestedBy: FOUNDER }),
+    );
+    const claimed = expectOk(fx.ops.claimNext('claude', CAPS.readStatus));
+    const running = expectOk(fx.ops.startTask(claimed.id, 'claude', claimed.fence));
+    expectOk(fx.ops.submitResult(created.task.id, 'claude', running.fence, { ci: 'green' }));
+    expect(fx.ops.queue.get(created.task.id)!.status).toBe('completed');
+    // complete() leaves claimed_by for attribution — the refusal must come
+    // from the queued-unreachable rule, not the live-claim rule.
+    const result = fx.ops.assignTaskAsFounder({
+      taskId: created.task.id,
+      workerId: 'jules',
+      founderId: FOUNDER,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('task_beyond_claiming');
+    expect(fx.ops.readMeta(created.task.id)!.assignment).toBeNull();
+  });
+
+  it('a reaped expired lease reopens assignment — the refusal was temporal, not terminal', () => {
+    const taskId = queuedTask(fx);
+    expectOk(fx.ops.claimNext('claude', CAPS.readStatus, -1_000));
+    const blockedWhileClaimed = fx.ops.assignTaskAsFounder({
+      taskId,
+      workerId: 'jules',
+      founderId: FOUNDER,
+    });
+    expect(blockedWhileClaimed.ok).toBe(false); // still refused: unreaped claim rows stay live truth
+    fx.ops.queue.sweepExpiredLeases();
+    expect(fx.ops.queue.get(taskId)!.status).toBe('queued');
+    // Back in the queue, assignment genuinely narrows future claiming again.
+    const intent = expectOk(fx.ops.assignTaskAsFounder({ taskId, workerId: 'jules', founderId: FOUNDER }));
+    expect(intent.workerId).toBe('jules');
+    const wrong = fx.ops.claimNext('claude', CAPS.readStatus);
+    expect(wrong.ok).toBe(false);
+    if (!wrong.ok) expect(wrong.error.code).toBe('assigned_to_other_worker');
+  });
 });
 
 describe('evaluateTaskEligibility — enforcement truth per registered worker', () => {
@@ -234,6 +321,28 @@ describe('evaluateTaskEligibility — enforcement truth per registered worker', 
     const result = fx.ops.evaluateTaskEligibility('task-never');
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe('unknown_task');
+  });
+
+  it('carries the canonical task state, computed by the same predicate the assign write refuses with', () => {
+    const taskId = queuedTask(fx);
+    const open = expectOk(fx.ops.evaluateTaskEligibility(taskId));
+    expect(open.taskState).toEqual({
+      status: 'queued',
+      claimedBy: null,
+      assignmentOpen: true,
+      reason: null,
+    });
+
+    expectOk(fx.ops.claimNext('claude', CAPS.readStatus));
+    const closed = expectOk(fx.ops.evaluateTaskEligibility(taskId));
+    expect(closed.taskState.assignmentOpen).toBe(false);
+    expect(closed.taskState.claimedBy).toBe('claude');
+    expect(closed.taskState.status).toBe('assigned');
+    expect(closed.taskState.reason).toContain('already claimed by claude');
+    // And the write path agrees — the whole point of the shared predicate.
+    const write = fx.ops.assignTaskAsFounder({ taskId, workerId: 'jules', founderId: FOUNDER });
+    expect(write.ok).toBe(false);
+    if (!write.ok) expect(write.error.message).toBe(closed.taskState.reason);
   });
 });
 

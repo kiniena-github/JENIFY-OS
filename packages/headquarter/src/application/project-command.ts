@@ -398,9 +398,14 @@ export function readProjectRecord(
 
   // Linked tasks only: an unlinked plan item has no task and therefore no
   // status to count. Counts, never shares — see ProjectTaskCount.
+  // DISTINCT canonical tasks: plan-item linkage is deliberately flexible
+  // (nothing makes task_id unique across rows), so one real task linked to
+  // two plan items must still count ONCE — the figure is "linked tasks",
+  // not "linked rows" (Sol M2 on PR #263). Exact within each group because
+  // a task has exactly one canonical status row.
   const countRows = db
     .prepare(
-      `SELECT t.status AS status, COUNT(*) AS n
+      `SELECT t.status AS status, COUNT(DISTINCT t.id) AS n
        FROM hq_mission_plan_items p
        JOIN hq_missions m ON m.id = p.mission_id
        JOIN op_tasks t ON t.id = p.task_id

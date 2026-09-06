@@ -268,3 +268,30 @@ Append-only. Each entry: date, decision, rationale. Newest last.
      the `hq:order` model verbatim) registers the three Founder-gated capabilities
      (fail-closed list), bootstraps principals (stated plainly as the bootstrap path), and
      drives member/worker lifecycle through the ordinary Founder-gated facade.
+
+- **2026-09-06 — Phase 4 correction pass (GPT-5.6 Sol exact-head gate on PR #263 +
+  the Opus Lows), one consolidated pass on the same branch.** The two reclassified Mediums
+  and the eight Lows, dispositioned (canonical detail: the Correction-pass paragraph of
+  `docs/HEADQUARTER/PHASE_4_PROJECTS_TASKS_AI_WORKFORCE.md`):
+  1. **Assignment obeys canonical claim truth (M1).** An advisory assignment is allowed
+     ONLY while it can genuinely narrow future claiming: a live fenced claim answers
+     `task_already_claimed` and a queued-unreachable status (`completed`/`review_passed`,
+     derived from `ALLOWED_TRANSITIONS`, drift-pinned) answers `task_beyond_claiming` —
+     both 409, both refused before any write, event or evidence. The eligibility read
+     carries the identical truth through the same predicate, and the console success line
+     commits only to what is guaranteed. No reassignment/claim-transfer machinery was
+     built — that stays later scope.
+  2. **Project task counts are DISTINCT canonical tasks (M2).** Plan-item linkage stays
+     deliberately flexible (no uniqueness on `task_id`); the derived figure changed, not
+     the model.
+  3. **The eight Lows**: workforce transport says `contractSatisfied` (configuration truth,
+     nothing probed; ORDERS-lane wording deliberately untouched — a recorded follow-up);
+     the CLI principal path is stated and pinned as an UPSERT that reports REPLACED; the
+     update route carries `stream: null` as a real clear; the project-close TOCTOU is
+     closed by validating inside the IMMEDIATE `reserve()` transaction (the
+     `amendMissionIntent` precedent — no new locking); the workforce kill-switch posture is
+     pinned by a named test (advisory writes stay open, claiming stays blocked — the
+     switch stops execution, not direction); the append-only source guard covers its real
+     table set; the assign dropdown offers only active workers (the server stays
+     authoritative); and both anti-emptying regression layers are named in the canonical
+     doc. Issue #182 narrowing stays OFF.
