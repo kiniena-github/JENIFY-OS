@@ -70,15 +70,105 @@ the browser views; `HeadquarterOperations` owns every authority decision and eve
   at its born state. Confirmed AND refuted together is `contested` and the record stays at its
   born state with `acceptanceDigest: null`.
 - **`accepted` is one explicit act**: exactly one acceptance per record (unique by engine); the
-  same acceptor deduplicates, a different one conflicts. Acceptance executes nothing — no task
-  status, approval row, claim, dispatch or kill switch moves (pinned).
+  same acceptor deduplicates, a different one conflicts — while the acceptance STANDS (see the
+  current-standing rule below). Acceptance executes nothing — no task status, approval row,
+  claim, dispatch or kill switch moves (pinned).
+- **`accepted` is a CURRENT standing, not a permanent label** (review round 3). The acceptance
+  row is immutable history; whether the record still presents as `accepted` is re-derived from
+  the graph on every read by the current-standing rule below.
 - **Supersession** is an explicit, attributed act with a unique successor per predecessor (a
   second "supersession" is a contradiction and must be recorded as one). The predecessor row
   never changes; its lifecycle is derived from the immutable forward pointer and it stays in
-  the entity's history with its verifications intact. Superseding a `verified` or `accepted`
-  record takes the Founder gate (`#assertApprovalAuthority`) — a worker's fresh claim cannot
-  displace established truth from "current". A superseded record can be neither verified nor
-  accepted (`truth_conflict`).
+  the entity's history with its verifications intact. Superseding a record that was EVER
+  verified or EVER accepted takes the Founder gate (`#assertApprovalAuthority`, reading the
+  history-based `establishedTruthTier`, never the derived `state`) — a worker's fresh claim
+  cannot displace established truth from "current", and a later refutation or contest lowers
+  the record's state but never the authority needed to retire it. A superseded record can be
+  neither verified nor accepted (`truth_conflict`).
+
+### The current-standing rule for a Founder acceptance (review round 3)
+
+Verification is append-only and a later refutation is deliberately kept beside the acceptance
+it undermines, so the projection must say which of the two stands NOW. The rule, as one
+predicate over the graph (`deriveTruthRecord`, pure, the same function every read and every
+gate uses):
+
+```
+verificationBasisHolds := verificationSummary(record) = 'confirmed'     (≥1 confirmed AND 0 refuted)
+current                := no record supersedes this one                 (lifecycle = 'current')
+uncontested            := no unresolved contradiction touches this one  (contested = false)
+
+acceptanceStanding :=
+    'none'                  if the record holds no acceptance row
+    'verification_refuted'  else if ¬verificationBasisHolds
+    'superseded'            else if ¬current
+    'contested'             else if ¬uncontested
+    'standing'              otherwise
+
+state :=
+    'accepted'      if acceptanceStanding = 'standing'
+    'verified'      else if verificationBasisHolds
+    bornState       otherwise
+```
+
+- **What degrades to what.** An acceptance stands only while every precondition the acceptance
+  itself required still holds; the moment one breaks, the record derives exactly what it would
+  derive WITHOUT the acceptance: `verified` while the verification basis is intact (superseded
+  or contested), else its born state (refuted). So: accepted → later refuted verification ⇒
+  born state, `verification: 'contested'`, standing `verification_refuted`; accepted → later
+  unresolved contradiction ⇒ `verified`, `contested: true`, standing `contested` (and the entity
+  headline shows the born state, as for any contested record); accepted → superseded ⇒
+  `verified`, `lifecycle: 'superseded'`, standing `superseded`. The ladder names the FIRST
+  broken precondition, basis first; a contest is by construction never simultaneous with the
+  other two (a refuted or superseded record is `out` of every contradiction, `judgeContradiction`).
+- **What is final and what can return.** Refutation and supersession are irreversible acts, so
+  those standings are final. A contest resolves only by an explicit act (a refuting
+  verification or a supersession of the OTHER side); resolved in the record's favour, the
+  standing returns to `standing` and the state to `accepted` by derivation alone — the basis
+  never moved and nothing is written to restore it. There is no timestamp, score or
+  tie-break anywhere in this rule.
+- **History is never erased and stays reachable.** The `hq_truth_acceptances` row (acceptor,
+  timestamp, digest, the confirming verification ids it rested on, note) is byte-identical
+  after degradation (pinned), the `truth_accepted` evidence entry and the `truth:<id>` audit
+  event remain in the chain, and every view still carries it in `acceptances[]` whatever the
+  standing — the reader can always see that the Founder DID accept, when, and on which
+  verifications. The console card keeps the `ACCEPTED by …` line and adds an
+  `ACCEPTANCE NO LONGER STANDS` chip plus one line naming the standing and the state the record
+  derives now.
+- **Nothing is acceptable in a degraded standing.** `acceptanceDigest` is issued only for a
+  record that is exactly `verified`, current and uncontested; a degraded acceptance is either
+  refuted (born state), superseded (not current) or contested — never acceptable, so the
+  console draws no accept control and `awaitingAcceptance` never counts it.
+- **Re-acceptance is never a shortcut (fail closed).** `acceptTruth` deduplicates (same
+  acceptor) or conflicts (another acceptor) ONLY while the acceptance stands. Once degraded,
+  the request falls through to the ordinary ladder, re-derived inside the IMMEDIATE write lock,
+  and is refused on the record's CURRENT standing with the true cause — `truth_conflict`
+  (superseded), `truth_not_verified` (refuted; `details.acceptanceStanding` names it),
+  `truth_contested` — exactly as a never-accepted record in the same shape. No second acceptance
+  row can exist (the engine's one-acceptance index; a belt-and-braces refusal stands before the
+  insert regardless).
+- **Authority is never lowered by degradation.** The supersession gate reads
+  `establishedTruthTier` — HISTORY-based: `accepted` if any acceptance row exists, else
+  `verified` if any verification ever confirmed the record, else nothing — never the derived
+  `state`. A record once verified or once accepted takes the Founder gate to displace from
+  "current" for as long as it exists, whatever its current standing. This is deliberately
+  STRICTER than the head before the correction, where a verified record whose verification was
+  later contested (confirmed + refuted) derived its born state and any claimant could supersede
+  it; now that too takes the Founder. A record only ever refuted or inconclusive established
+  nothing and needs no gate (pinned in both directions).
+- **Every surface reads the same `state`,** so none disagrees: the list filter, the entity
+  headline (`entityCurrentState`), the snapshot `byState` (counts the current standing; a degraded
+  acceptance is counted under what it derives now, never under `accepted`), `awaitingAcceptance`,
+  the Founder Office `Founder-accepted` metric (its description now says "currently stands") and
+  Company Memory's `Accepted`. `TruthRecordView` gained ONE additive categorical field,
+  `acceptanceStanding` (`none | standing | verification_refuted | superseded | contested`); no
+  schema, migration or write-path change, no `HQ_SNAPSHOT_VERSION` bump.
+
+Before this rule (heads `20d70ef` through `ba16bf3`) `deriveTruthRecord` computed
+`state = acceptances.length > 0 ? 'accepted' : …` before considering any later refutation,
+contest or supersession, so a historical acceptance kept projecting as CURRENT `accepted` truth
+after new evidence refuted or contested its basis, while the same derivation already
+(correctly) withdrew `acceptanceDigest` — the projection and the acceptability disagreed.
 
 ### Contradictions and staleness — never newest-wins
 
@@ -266,6 +356,11 @@ to act; the truth projection is read by humans and by nothing that decides.
   consequence since round 2's count scoping: such an artifact can show `contested: true` on a
   carried record while `unresolvedContradictions` is 0 — the pair is withheld, the record's
   own standing is not.
+- The snapshot carries no aggregate count of acceptances that no longer stand (review round 3).
+  `byState.accepted` drops when an acceptance is degraded and the record's card names why, but
+  no room metric says "N Founder acceptances were later refuted/contested/superseded". Adding
+  one is a one-field additive change to `TruthSnapshotView`; it was left out of the correction
+  to keep the round to the reviewed defect, and is recorded here as an open choice.
 
 ## Deliberate pin ledger
 
@@ -286,7 +381,16 @@ founder_only records and (b) a founder_only record disputing a public one was pi
 pinned at `1` and the gated/artifact `byState` pinned explicitly in the same tests — the
 count is now pinned in both directions rather than loosened. `TruthSnapshotView` gained one
 additive field (`awaitingAcceptance`); the read-only pre-Phase-7 absence projection states
-it as 0 like its siblings. No test was deleted or relaxed.
+it as 0 like its siblings. No test was deleted or relaxed. Review round 3 CHANGED two
+expectations in `truth-durability` deliberately, both of which encoded the defect: after the
+reopen, the accepted-then-contradicted record was pinned `state: 'accepted'` beside
+`contested: true` and is now pinned `verified` + `contested` + `acceptanceStanding: 'contested'`
+with the acceptance row still readable; and a second acceptor on that record was pinned
+`truth_conflict` ("already accepted") and is now pinned `truth_contested` (refused on the
+current standing) with the acceptance count pinned at 1 — a refusal in both directions, now
+for the true cause. `TruthRecordView` gained one additive categorical field
+(`acceptanceStanding`). No test was deleted or relaxed; no `counts` pin, no `ROOM_SECTIONS`
+change, no `HQ_SNAPSHOT_VERSION` bump, no route-table or write-surface change.
 
 ## Deployment runbook (configuration acts, never automatic)
 
@@ -326,7 +430,16 @@ Founder Office counting awaiting-acceptance over `TRUTH_SNAPSHOT_LIMIT + 1` veri
 inert static markup, forms only under grants, record from the page, contradiction-first +
 limitations + step-up refusal then acceptance with password, entity lookup, non-Founder off +
 hostile text inert), hq-host `host-contract` (+2: Fastify-wired record/entity/query-scan/
-self-verify/accept-refusal arc, NO_IDENTITY sweep of all five truth routes). Full-matrix results
+self-verify/accept-refusal arc, NO_IDENTITY sweep of all five truth routes),
+`truth-acceptance-standing` (12, review round 3: accepted → later refuted; accepted → later
+confirmed + refuted; accepted → later unresolved contradiction and its explicit resolution
+restoring the standing; accepted → superseded; the pure ladder's precedence and the
+history-based tier; supersession authority never lowered for the once-accepted and the
+once-verified, with the never-verified needing no gate; re-acceptance of a degraded record
+refused through the ordinary ladder in all three shapes and a standing one still deduplicating;
+snapshot counts, Founder Office, Company Memory and the entity headline agreeing), plus one
+`truth-console` test (the card shows the acceptance as history beside the state derived now,
+and draws no accept control). Full-matrix results
 are recorded in the wave PR; merge stays gated on independent review and the Founder.
 
 ## Independent review round 1 — corrections (head `20d70ef` → this head)
@@ -437,3 +550,38 @@ a regression test verified to fail against the code before it:
 - **Considered and dismissed by the reviewer — left as documented:** a carried public record
   staying truthfully `contested` while `withheldFounderOnlyRelations > 0` (see Known
   limitations).
+
+## Independent review round 3 — correction (head `ba16bf3` → this head)
+
+A third independent review of head `ba16bf3` returned one Medium against Phase 7 (the three
+recorded Lows and the Phase 8 gateway are untouched by this round):
+
+- **Medium — a historical Founder acceptance stayed projected as CURRENT `accepted` after later
+  evidence invalidated its basis.** `deriveTruthRecord` set `state` from the mere existence of
+  an acceptance row before considering a later `refuted` verification (summary `contested`), an
+  unresolved contradiction, or supersession; the same derivation correctly withdrew
+  `acceptanceDigest`, so the projected state and the acceptability disagreed, and a stale
+  `accepted` could mislead any later projection while the acceptance event itself had to stay
+  immutable. **Fix (derivation only — no schema, migration or write-path change):** the
+  current-standing rule stated in full under *The current-standing rule for a Founder
+  acceptance* above — `state` is `accepted` only while the acceptance STANDS, the additive
+  categorical `acceptanceStanding` names the first broken precondition, the acceptance row and
+  its evidence/audit entries stay byte-identical and readable, and every read surface (list
+  filter, entity headline, snapshot `byState` / `awaitingAcceptance`, Founder Office, Company
+  Memory, the console card) reads the one derived `state`. **Two adjacent closures were
+  required to keep the rule coherent and fail-closed, both made explicitly:** (a) the
+  supersession gate in `recordTruth` now reads the history-based `establishedTruthTier`
+  rather than the derived `state` — with the naive degradation alone a once-accepted record
+  whose acceptance fell to its born state would have stopped requiring Founder authority to
+  displace, a real authority downgrade; the gate is now also stricter than before for a
+  once-verified, later-contested record (recorded above); (b) `acceptTruth` deduplicates or
+  conflicts on an existing acceptance ONLY while it stands — a degraded acceptance falls through
+  to the ordinary ladder inside the write lock and is refused on the record's current standing,
+  never answered "already accepted"; a belt-and-braces refusal before the insert closes any
+  future reordering, beside the engine's one-acceptance index. Pinned in the new suite
+  `truth-acceptance-standing` (12) and one new `truth-console` test; every behavioural
+  assertion was run against the pre-fix code and failed on its substantive claim (`'accepted'`
+  where `'claimed'`/`'verified'` is now derived, the dedupe answering `ok`, `byState.accepted: 1`,
+  the analyst allowed to supersede once-verified truth), and the two supersession-authority pins
+  were additionally run against a naive state-based gate and failed there (the analyst allowed
+  through) before passing against the history-based one.
