@@ -672,7 +672,45 @@ import {
   type HandoffRequestView,
   type ParticipantView,
 } from './collaboration-command.js';
-import { listOrchestrationRuns } from './orchestrator-command.js';
+import { listOrchestrationRuns, orchestratorSchemaPresent } from './orchestrator-command.js';
+import {
+  BRIEFING_SECTION_LIMIT,
+  BRIEF_READ_LIMIT,
+  COMMAND_CENTER_SNAPSHOT_LIMIT,
+  FOUNDER_BRIEF_CAPABILITY,
+  INBOX_ORDERING_STATEMENT,
+  INBOX_READ_LIMIT,
+  bounded,
+  briefCountsOf,
+  briefIdempotencyKey,
+  briefSchemaPresent,
+  briefView,
+  contentDigest,
+  countByKind,
+  deriveBlocked,
+  deriveChanged,
+  deriveDepartments,
+  deriveFounderInbox,
+  deriveRecommendations,
+  deriveSafeNext,
+  deriveUnknown,
+  deriveVerified,
+  ensureBriefSchema,
+  founderBriefCapabilityState,
+  founderBriefContractDrift,
+  loadBrief,
+  loadBriefs,
+  loadLatestBrief,
+  type AttentionItem,
+  type BriefView,
+  type CanonicalWatermark,
+  type ChangedEventRef,
+  type CommandCenterSnapshotView,
+  type CommandFacts,
+  type FounderBriefingView,
+  type FounderInboxView,
+  type MissionFact,
+} from './chief-of-staff.js';
 import { CLIENT_IDENTITY_KEYS } from '../live/auth.js';
 import { ensureMemoryTables, memorySchemaPresent, MemoryStore, searchMemory } from '../memory/store.js';
 import {
@@ -749,7 +787,9 @@ export type OpsErrorCode =
   | 'unknown_session'
   | 'session_closed'
   | 'not_a_participant'
-  | 'unknown_contribution';
+  | 'unknown_contribution'
+  // Phase 10 — the Chief of Staff / Command Center brief ledger.
+  | 'unknown_brief';
 
 export interface OpsError {
   code: OpsErrorCode;
@@ -1685,6 +1725,9 @@ export class HeadquarterOperations {
   /** The Phase 9 collaboration schema, same truth-recording as missions above. */
   readonly #collaborationStorePresent: boolean;
 
+  /** The Phase 10 brief ledger, same truth-recording as missions above. */
+  readonly #briefStorePresent: boolean;
+
 
   /**
    * The external-action adapters, keyed by id — `#private`, handed in by the
@@ -1819,6 +1862,7 @@ export class HeadquarterOperations {
     ensureTruthSchema(db);
     ensureActionGatewaySchema(db);
     ensureCollaborationSchema(db);
+    ensureBriefSchema(db);
     // A writable construction just ensured the mission/project/memory tables.
     // A READ-ONLY one (the hq:snapshot path) may be observing an older file
     // that has some or none of them — the ensures above deliberately write
@@ -1831,6 +1875,7 @@ export class HeadquarterOperations {
     this.#truthStorePresent = db.readonly ? truthSchemaPresent(db) : true;
     this.#actionStorePresent = db.readonly ? actionGatewaySchemaPresent(db) : true;
     this.#collaborationStorePresent = db.readonly ? collaborationSchemaPresent(db) : true;
+    this.#briefStorePresent = db.readonly ? briefSchemaPresent(db) : true;
     this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
     // Company memory (Phase 5, issue #265): the issue-#120 store, finally
