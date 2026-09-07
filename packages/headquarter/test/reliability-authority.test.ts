@@ -188,17 +188,53 @@ describe('duplicate runs and duplicate attempts', () => {
     );
     expect(fx.ops.getRun(run.id)!.needsReconciliation).toBe(true);
 
-    // The one-character rename deduplicates onto the standing run rather than
-    // opening a second one.
-    const relabelled = expectOk(openRun(fx, { label: 'publish the thing.' }));
-    expect(relabelled.deduplicated).toBe(true);
-    expect(relabelled.run.id).toBe(run.id);
+    // The one-character rename opens NO second run. Since Wave 5 Medium 4 it
+    // is refused rather than silently folded onto the standing run: the key
+    // collided, but nothing established that this is the same work.
+    const relabelled = expectError(openRun(fx, { label: 'publish the thing.' }));
+    expect(relabelled.code).toBe('run_key_conflict');
+    expect(relabelled.details!.runId).toBe(run.id);
     expect(fx.ops.listRuns()).toHaveLength(1);
+    // Re-opening the SAME work still finds the standing run — the
+    // cross-restart inherit the key exists for, unchanged.
+    const reopened = expectOk(openRun(fx, { label: 'publish the thing' }));
+    expect(reopened.deduplicated).toBe(true);
+    expect(reopened.run.id).toBe(run.id);
     // And no fresh generation is admitted on it.
     expect(
       expectError(fx.ops.startRunAttempt({ runId: run.id, workerId: 'claude', fence: fx.claim.fence }))
         .code,
     ).toBe('run_attempt_refused');
+  });
+
+  /**
+   * Wave 5 Medium 4, as the executed regression. `label` left the run key
+   * (Medium 2, correctly) but `idempotencyKey` is optional, so the DEFAULT
+   * shape of two DIFFERENT runs on one task derives one key. The second open
+   * returned `ok`, `deduplicated: true`, and a record carrying the FIRST
+   * work's label — a caller asking to roll a release back was told, with an
+   * `ok`, that it had a run for publishing the release note.
+   */
+  it('refuses two different pieces of work that collide on one run key', () => {
+    const fx = reliabilityFixture();
+    const first = expectOk(openRun(fx, { label: 'publish the release note' }));
+    const second = openRun(fx, { label: 'roll the release back' });
+    expect(second.ok).toBe(false);
+    if (second.ok) throw new Error('the two runs were silently merged');
+    expect(second.error.code).toBe('run_key_conflict');
+    expect(second.error.details!.runId).toBe(first.run.id);
+    // The refusal names the standing run and does NOT echo its stored label.
+    expect(second.error.message).not.toContain('publish the release note');
+    expect(fx.ops.listRuns()).toHaveLength(1);
+    expect(fx.ops.getRun(first.run.id)!.label).toBe('publish the release note');
+
+    // The stated way out: separate work carries a separate idempotency key.
+    const separate = expectOk(
+      openRun(fx, { label: 'roll the release back', idempotencyKey: 'the-rollback' }),
+    );
+    expect(separate.deduplicated).toBe(false);
+    expect(separate.run.label).toBe('roll the release back');
+    expect(fx.ops.listRuns()).toHaveLength(2);
   });
 
   /**

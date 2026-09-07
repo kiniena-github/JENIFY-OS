@@ -1050,15 +1050,18 @@ export type OpsErrorCode =
   | 'unrecognized_product_type'
   | 'product_lifecycle_conflict'
   | 'invalid_product_lifecycle_move'
-  // Phase 13 — advanced reliability. Six codes, and deliberately none that
+  // Phase 13 — advanced reliability. Seven codes, and deliberately none that
   // names a retry: there is no path here that reopens an uncertain outcome,
   // so there is nothing for a refusal to be the opposite of.
   // `safe_mode_engaged` is the one refusal HQ gives about ITSELF — it does not
   // mean the request was wrong, it means HQ will not add to a record it cannot
-  // currently stand behind.
+  // currently stand behind. `run_key_conflict` is the seventh (Wave 5 Medium
+  // 4): two different pieces of work that derive the same run key are refused
+  // rather than silently folded onto one run.
   | 'safe_mode_engaged'
   | 'unknown_run'
   | 'run_state_conflict'
+  | 'run_key_conflict'
   | 'run_attempt_refused'
   | 'stale_run_claim'
   | 'backup_verification_failed'
@@ -7263,6 +7266,34 @@ export class HeadquarterOperations {
     privileged.reserve(() => {
       const existing = loadRunByKey(this.#db, runKey);
       if (existing) {
+        // Dedupe is for the SAME work being opened again — the crash-and-
+        // re-claim case the key exists for. It is not for two different pieces
+        // of work that happen to collide (Wave 5 Medium 4). Dropping `label`
+        // from the key was right (a "never retried" law cannot be keyed on
+        // caller free text) but it made the DEFAULT shape of two different
+        // runs on one task — `idempotencyKey` is optional — collide onto one
+        // key, and the collision returned `ok`, `deduplicated: true`, and the
+        // OTHER work's record. A caller that asked to roll a release back was
+        // handed a run labelled "publish the release note" and told it
+        // succeeded. Fail-closed at the attempt, but a correctness and
+        // auditability regression on the way there.
+        //
+        // So: same label, same work, dedupe as designed. Different label, a
+        // distinct refusal naming the standing run, and the caller supplies an
+        // `idempotencyKey` if the two are genuinely separate work. The stored
+        // label is NOT interpolated into the message — the caller can read the
+        // named run — so this refusal cannot become an echo channel.
+        if (existing.label !== label.value) {
+          refusal = {
+            code: 'run_key_conflict',
+            message:
+              `Task ${input.taskId} already carries run ${existing.id} under this run key, opened for ` +
+              'different work. A run key identifies the WORK, not its description: pass a distinct ' +
+              'idempotencyKey if this is genuinely a separate run, or reuse the standing one.',
+            details: { runId: existing.id, runKind: existing.runKind },
+          };
+          return;
+        }
         dedupedTo = existing.id;
         return;
       }

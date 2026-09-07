@@ -1676,6 +1676,7 @@ function controlErrorStatus(code: string): number {
     // Phase 13: the run moved, or the request conflicts with what the ledger
     // records about it.
     case 'run_state_conflict':
+    case 'run_key_conflict':
     case 'run_attempt_refused':
     case 'stale_run_claim':
     // Phase 14: the recorded policy conflicts with what was asked for. A

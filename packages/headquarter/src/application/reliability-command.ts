@@ -484,6 +484,16 @@ export function reliabilitySchemaPresent(db: HqDatabase): boolean {
  * `needs_reconciliation` / `outcome_unknown` for that very work. A law that
  * says "never retried" cannot be keyed on a description. The label remains a
  * stored, bounded, secret-scanned human note on the run; it identifies nothing.
+ *
+ * That left a collision the correction did not state, and `openRun` now closes
+ * it (Wave 5 Medium 4). `idempotencyKey` is optional, so the DEFAULT shape of
+ * two different runs on one task derives one key — and the second open was
+ * silently deduplicated onto the first, returning `ok` with the other work's
+ * label. `openRun` compares the stored label before deduplicating and refuses
+ * a mismatch as `run_key_conflict`; a caller with genuinely separate work on
+ * one task passes a distinct `idempotencyKey`. Dedupe still happens for the
+ * case the key exists for: the same work opened again after a crash and a
+ * re-claim, where the label is the same because the work is.
  */
 export function runIdempotencyKey(input: {
   taskId: string;
