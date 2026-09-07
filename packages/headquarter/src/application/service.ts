@@ -706,6 +706,7 @@ import {
   SAFE_MODE_STATEMENT,
   fullIntegrity,
   observeImmutabilityAsFound,
+  recordHqSchemaEnsured,
   restoredImmutableTables,
   structuralIntegrity,
   verifyHqBackupFile,
@@ -2543,6 +2544,17 @@ export class HeadquarterOperations {
     // other ensure and after the observation above, so a dropped guard is
     // reported before it is repaired — see `ensureEvidenceGuards`.
     ensureEvidenceGuards(db);
+    // The durable "HQ has ensured this file" mark, stamped into
+    // `PRAGMA user_version` AFTER the ensures and read BEFORE them, next time
+    // (Wave 5 correction round four, High 1). It is the half of the
+    // first-boot discriminator that no `DROP TABLE` can reach: dropping every
+    // declared ledger used to empty the ledger half of the discriminator,
+    // which read as a first boot and returned a completely silent census over
+    // a database whose workers, capabilities, principals, tasks and kill
+    // switch were all still there. Written by the writable facade
+    // construction and by nothing else, so a fresh file HQ's own components
+    // have already written rows to is still correctly read as a first boot.
+    recordHqSchemaEnsured(db);
     // A writable construction just ensured the mission/project/memory tables.
     // A READ-ONLY one (the hq:snapshot path) may be observing an older file
     // that has some or none of them — the ensures above deliberately write

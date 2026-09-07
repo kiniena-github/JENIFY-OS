@@ -12,7 +12,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import { expectOk } from './application.fixture.js';
+import { CAPS, expectOk } from './application.fixture.js';
 import { fileFixture } from './reliability.fixture.js';
 import { openHqDatabase, openHqDatabaseReadOnly, openMemoryHqDatabase } from '../src/store/db.js';
 import {
@@ -22,9 +22,12 @@ import {
   REQUIRED_IMMUTABILITY_GUARDS,
   SAFE_MODE_BLOCKING_FINDINGS,
   declaredGuardsFor,
+  establishedImmutableTables,
   findingIsBlocking,
   fullIntegrity,
+  hqSchemaEnsuredMarkPresent,
   missingImmutabilityGuards,
+  observeImmutabilityAsFound,
   readDurabilityPosture,
   structuralIntegrity,
   verifyHqBackupFile,
@@ -32,6 +35,8 @@ import {
 import { verifyEvidenceChain } from '../src/operator/evidence.js';
 import { reliabilitySchemaPresent } from '../src/application/reliability-command.js';
 import { HeadquarterOperations } from '../src/application/service.js';
+import { HeadquarterStore } from '../src/store/headquarter.js';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
 
 function openedRun(fx: ReturnType<typeof fileFixture>, label = 'the one run') {
   return expectOk(
@@ -851,6 +856,233 @@ describe('the finding vocabulary and what blocks', () => {
       expect(posture.integrity.observations.map((o) => o.finding)).toContain(
         'append_only_guard_missing',
       );
+      reopened.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * The inversion the first-boot discriminator left open: MORE damage bought
+   * LESS detection (Wave 5 correction round four, High 1).
+   *
+   * The discriminator read "does this file still carry an ensure-created
+   * declared ledger", so dropping SEVEN of them was reported (the test above)
+   * and dropping ALL of them emptied the set, read as a first boot, and
+   * returned a completely silent census at BOTH depths — while the workers,
+   * capabilities, principals, tasks, approvals and kill switch were all still
+   * there and `releaseKillSwitch` was handed back.
+   */
+  it('reports EVERY declared ledger dropped, so widening the attack does not buy silence', () => {
+    const fx = fileFixture();
+    const dbPath = fx.dbPath;
+    try {
+      fx.db.close();
+      const raw = new Database(dbPath);
+      raw.exec('PRAGMA foreign_keys = OFF');
+      const present = new Set(
+        (
+          raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as {
+            name: string;
+          }[]
+        ).map((row) => row.name),
+      );
+      let dropped = 0;
+      for (const entry of ENGINE_IMMUTABLE_TABLES) {
+        if (!present.has(entry.table)) continue;
+        raw.exec(`DROP TABLE ${entry.table}`);
+        dropped += 1;
+      }
+      // Every one of them, `op_evidence` included — the widest form of the
+      // attack, not a subset.
+      expect(dropped).toBe(ENGINE_IMMUTABLE_TABLES.length);
+      // And the operational half survives, which is the whole point of the
+      // attack: there is authority left in the file to smuggle past safe mode.
+      expect((raw.prepare(`SELECT COUNT(*) AS n FROM hq_specialists`).get() as { n: number }).n)
+        .toBeGreaterThan(0);
+      expect(
+        (raw.prepare(`SELECT COUNT(*) AS n FROM hq_human_principals`).get() as { n: number }).n,
+      ).toBeGreaterThan(0);
+      raw.close();
+
+      const reopened = openHqDatabase(dbPath);
+      // The mark HQ leaves in the database header survives `DROP TABLE`, so the
+      // file is still read as one HQ has ensured before.
+      expect(observeImmutabilityAsFound(reopened).established).toBe(true);
+      expect(establishedImmutableTables(reopened)).toEqual([]);
+      expect(hqSchemaEnsuredMarkPresent(reopened)).toBe(true);
+      const ops = new HeadquarterOperations(reopened);
+      const posture = ops.hqReliabilityPosture();
+      expect(posture.integrity.safeMode).toBe(true);
+      const finding = posture.integrity.observations.find(
+        (o) => o.finding === 'append_only_guard_missing',
+      );
+      expect(finding).toBeDefined();
+      // Named, so the Founder is told which ledgers went missing.
+      expect(finding!.detail).toContain('hq_reliability_verdicts');
+      expect(finding!.detail).toContain('hq_intel_budgets');
+      expect(finding!.detail).toContain('hq_truth_records');
+      // And the act safe mode exists to refuse is refused.
+      const released = ops.releaseKillSwitch('global', 'founder');
+      expect(released.ok).toBe(false);
+      reopened.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * The other direction of the same discriminator, pinned so the fix above can
+   * never be re-implemented as a content check.
+   *
+   * HQ's own components legitimately write rows to a brand-new file BEFORE a
+   * facade is constructed over it — the specialist directory, the capability
+   * registry and the human-principal registry all do, and several suites
+   * compose exactly that way. "This file has rows" is therefore NOT evidence of
+   * a previous boot, and reading it as such put a first construction into safe
+   * mode with every declared ledger reported absent.
+   */
+  it('still reads a fresh file HQ has already written rows to as a first boot', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-first-boot-rows-'));
+    try {
+      const dbPath = path.join(dir, 'hq.sqlite');
+      const db = openHqDatabase(dbPath);
+      // Rows first, facade second — the supported composition order.
+      new CapabilityRegistry(db).register({
+        id: 'repo.read_status',
+        description: 'Read repo/CI status',
+        riskClass: 'read_only',
+        sideEffect: false,
+        idempotent: true,
+      });
+      new HeadquarterStore(db).upsertSpecialist({
+        id: 'claude',
+        displayName: 'Claude',
+        vendor: 'anthropic',
+        role: 'build_lead',
+        allowedCapabilities: ['repo.read_status'],
+        active: true,
+      });
+      expect(hqSchemaEnsuredMarkPresent(db)).toBe(false);
+      expect(observeImmutabilityAsFound(db).established).toBe(false);
+      const ops = new HeadquarterOperations(db);
+      expect(ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
+      expect(ops.hqReliabilityPosture().integrity.observations).toEqual([]);
+      // The facade leaves the mark, so the NEXT construction is established.
+      expect(hqSchemaEnsuredMarkPresent(db)).toBe(true);
+      db.close();
+      const reopened = openHqDatabase(dbPath);
+      expect(observeImmutabilityAsFound(reopened).established).toBe(true);
+      reopened.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The length commitment has to survive the NEXT WRITE (Wave 5 correction
+   * round four, High 2).
+   *
+   * The high-water comparison alone did not: it compares the largest `seq`
+   * present against `sqlite_sequence`, so one further append raised the largest
+   * present back to the mark and the deleted seqs simply became a hole in the
+   * middle — and the links do not object, because the appended entries chained
+   * from the SURVIVING tip. Executed against the previous head, a tail deletion
+   * that verified as BROKEN at the instant it happened verified as CLEAN one
+   * append later.
+   */
+  it('keeps detecting a deleted entry after a later, perfectly well-formed append', () => {
+    const fx = fileFixture();
+    try {
+      const raw = fx.raw();
+      raw.exec('DROP TRIGGER trg_op_evidence_no_erase');
+      raw.exec('DELETE FROM op_evidence WHERE seq = (SELECT MAX(seq) FROM op_evidence)');
+      const tip = raw.prepare(`SELECT * FROM op_evidence ORDER BY seq DESC LIMIT 1`).get() as
+        Record<string, unknown>;
+      const missing = verifyEvidenceChain(fx.db);
+      expect(missing).not.toBeNull();
+
+      // One further append, formed exactly as `append()` forms one: chained
+      // from the surviving tip, hashed with the same formula. Nothing about it
+      // is malformed — that is the point.
+      const id = 'later-entry';
+      const at = new Date().toISOString();
+      const payload = JSON.stringify({ ok: true });
+      const hash = createHash('sha256')
+        .update([tip.hash as string, id, at, '', 'hq', 'anything', payload].join('|'))
+        .digest('hex');
+      raw
+        .prepare(
+          `INSERT INTO op_evidence (id, at, task_id, actor, kind, payload, prev_hash, hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, at, null, 'hq', 'anything', payload, tip.hash as string, hash);
+      const seqs = (raw.prepare(`SELECT seq FROM op_evidence ORDER BY seq`).all() as {
+        seq: number;
+      }[]).map((row) => row.seq);
+      // The high-water mark is satisfied again — the largest seq present now
+      // equals it — and the seq that was deleted is still absent.
+      expect(seqs).not.toContain(missing);
+      expect(Math.max(...seqs)).toBe(
+        (raw.prepare(`SELECT seq FROM sqlite_sequence WHERE name = 'op_evidence'`).get() as {
+          seq: number;
+        }).seq,
+      );
+      raw.close();
+
+      // STRONGER than "still non-null": the same seq, because the answer is
+      // "the log stops being true here" and the append did not change where.
+      expect(verifyEvidenceChain(fx.db)).toBe(missing);
+      const report = fullIntegrity(fx.db, { verifyEvidenceChain: () => verifyEvidenceChain(fx.db) });
+      expect(report.safeMode).toBe(true);
+      expect(report.observations.map((o) => o.finding)).toContain('evidence_chain_broken');
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * The same thing end to end, through the remedy the residual list tells the
+   * Founder to run. HQ's OWN boot appends were the laundering write: a log of
+   * six entries robbed of two booted with `append_only_guard_missing`, and the
+   * one full assessment that is supposed to clear that finding certified the
+   * robbed log as intact.
+   */
+  it('refuses to certify a robbed evidence log through the full assessment that clears a boot finding', () => {
+    const fx = fileFixture();
+    const dbPath = fx.dbPath;
+    try {
+      // Real history, so the erasure removes committed audit entries rather
+      // than the whole log.
+      for (let i = 0; i < 3; i += 1) {
+        expectOk(
+          fx.ops.createTask({
+            capabilityId: CAPS.openPr,
+            payload: { i },
+            idempotencyKey: `history-${i}`,
+            requestedBy: 'founder',
+          }),
+        );
+      }
+      fx.db.close();
+      const raw = new Database(dbPath);
+      const before = (
+        raw.prepare(`SELECT seq FROM op_evidence ORDER BY seq`).all() as { seq: number }[]
+      ).map((row) => row.seq);
+      expect(before.length).toBeGreaterThan(2);
+      raw.exec('DROP TRIGGER trg_op_evidence_no_erase');
+      raw.exec('DELETE FROM op_evidence WHERE seq >= (SELECT MAX(seq) - 1 FROM op_evidence)');
+      raw.close();
+
+      const reopened = openHqDatabase(dbPath);
+      const ops = new HeadquarterOperations(reopened);
+      // The boot looks exactly like the benign one-time guard finding.
+      expect(ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+      // The documented remedy. It must NOT clear, because the log itself is
+      // short two committed entries and no later append repairs that.
+      const assessed = expectOk(ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(assessed.safeMode).toBe(true);
+      expect(assessed.observations.map((o) => o.finding)).toContain('evidence_chain_broken');
       reopened.close();
     } finally {
       fx.cleanup();

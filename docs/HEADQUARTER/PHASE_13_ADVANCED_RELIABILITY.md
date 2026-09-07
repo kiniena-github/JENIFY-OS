@@ -633,7 +633,7 @@ The strongest claim in the phase, established three ways — the Phase 12 recipe
 | the SAFE-MODE verdict | the `#private` `#integrityReport` field, latched from the structural assessment AND from the last row of `hq_reliability_verdicts` | whether a Founder-gated write, an approval, an external-action authorization, a kill-switch release, a claim or an external execution proceeds | canonical. Pinned against a patch of `hqReliabilityPosture` and `reliabilitySummary` on instance, prototype, and a later-constructed facade — and, **since the Wave 5 correction of HIGH 1**, against a plain RESTART, which used to clear it. |
 | the RECORDED verdict a construction re-reads | `latestIntegrityVerdict(db)` — a direct read of the append-only `hq_reliability_verdicts` ledger | whether a blocking verdict survives a restart | canonical. The ledger carries the full append-only trio; a raw connection can APPEND a `safe_mode = 1` row (the fail-closed direction) and can neither rewrite nor erase one. |
 | the APPEND-ONLY GUARDS ON THE AUDIT LOG ITSELF | the same `missingImmutabilityGuards` census, now that `op_evidence` is a declared `ENGINE_IMMUTABLE_TABLES` member | whether removing the guards on the hash-chained log is a blocking finding | canonical **since the third correction round (High A2)**. The table used to carry NO triggers at all, on the argument that "its guarantee is the chain rather than the engine" — so a raw `DELETE FROM op_evidence WHERE seq > 1` was simply permitted, and the chain then verified perfectly over what was left. |
-| the EVIDENCE-CHAIN verification that PRODUCES that verdict | `#verifyEvidenceChainFromStore` — a `#private` closure over `#db` and the module-level `verifyEvidenceChain`, deliberately NOT `queue.evidence.verifyChain()` | whether `evidence_chain_broken` engages safe mode, and whether an already-latched safe mode survives the next assessment | canonical **since the Wave 5 correction**; it previously read the patchable delegate. Pinned against a patch on the instance and on `EvidenceLog.prototype`, and against a facade constructed after it. Since the third correction round it verifies the chain's LENGTH as well as its links, against the AUTOINCREMENT high-water mark SQLite maintains — because walking forward from the genesis value proved that the entries PRESENT link to one another and said nothing about where the chain was supposed to END, so deleting the NEWEST entries left a log that verified perfectly. |
+| the EVIDENCE-CHAIN verification that PRODUCES that verdict | `#verifyEvidenceChainFromStore` — a `#private` closure over `#db` and the module-level `verifyEvidenceChain`, deliberately NOT `queue.evidence.verifyChain()` | whether `evidence_chain_broken` engages safe mode, and whether an already-latched safe mode survives the next assessment | canonical **since the Wave 5 correction**; it previously read the patchable delegate. Pinned against a patch on the instance and on `EvidenceLog.prototype`, and against a facade constructed after it. Since the third correction round it verifies the chain's LENGTH as well as its links, against the AUTOINCREMENT high-water mark SQLite maintains — because walking forward from the genesis value proved that the entries PRESENT link to one another and said nothing about where the chain was supposed to END, so deleting the NEWEST entries left a log that verified perfectly. Since the FOURTH it also requires the seqs present to be CONTIGUOUS from 1, because the high-water comparison alone was erased by the next ordinary append: one entry later the largest seq present reached the mark again, the deleted seqs became a hole in the middle, and the appended entries chained from the surviving tip so the links did not object either. |
 | the APPEND-ONLY GUARD census that produces the other schema finding | `missingImmutabilityGuards(db)` over `ENGINE_IMMUTABLE_TABLES`, observed as the file was FOUND | whether `append_only_guard_missing` engages safe mode | canonical, and **widened twice by the Wave 5 review** — to the secondary-unique guards and `hq_memory`'s supersede rule (Medium 2), and to `hq_mission_plan_items`' three own guards (Medium 6). The declaration is **deep-frozen at module scope** (HIGH 2): it is public package API, `readonly` erases at runtime, and one `ENGINE_IMMUTABLE_TABLES.length = 0` used to empty the census and make a tampered file read clean. |
 | store presence | the constructor's `#reliabilityStorePresent` flag | whether a 0 means "absent" or "empty" | canonical, observed, never migrated. |
 | the ledger, for the unauthenticated snapshot | `#listRunsFromStore` and the `#private` report — deliberately NOT `listRuns()` or `hqReliabilityPosture()` | what `hq-snapshot.json`'s `reliability` section publishes | canonical. |
@@ -1354,8 +1354,8 @@ names what was actually wrong, not what was thought to be wrong.
 
 | Finding | What was reproduced | What changed |
 |---|---|---|
-| **HIGH A1** — a DROPPED ledger read as a clean store | `DROP TABLE` is DDL: no BEFORE trigger refuses it, and the guard census SKIPPED a declared table that was absent. Dropping `hq_action_intents`, `hq_action_events`, `hq_truth_records`, `hq_truth_verifications`, `hq_truth_acceptances`, `hq_memory` and `hq_intel_budgets` produced a structural pass AND a full assessment with ZERO observations, while the facade's ensures recreated each one EMPTY. Dropping `hq_reliability_verdicts` erased a latched safe mode outright and `releaseKillSwitch` was admitted with the evidence chain still broken. | The absence is OBSERVED as found, before any ensure runs, and is a finding when HQ's own schema then re-creates the ledger. `establishedImmutableTables` discriminates a first construction — where every phase's ledger is legitimately absent — from a file that has lost one. |
-| **HIGH A2** — the hash chain did not detect DELETION | `op_evidence` carried no append-only triggers at all, so a raw `DELETE` was permitted; and the verifier walked forward from the genesis value with no commitment to where the chain should END, so deleting the NEWEST entries left a chain that verified perfectly. `DROP TABLE op_evidence` and `DELETE FROM op_evidence WHERE seq > 1` both read CLEAN at full depth. | Three independent holds: the engine refuses UPDATE/DELETE/REPLACE; `op_evidence` is a declared engine-immutable ledger, so removing those guards is a blocking finding; and the verification compares the entries present against the AUTOINCREMENT high-water mark, which a DELETE does not lower. The module header's "deletion breaks the chain" and "the only blocking finding that detects tampering with HQ's own audit record" are corrected rather than restated. |
+| **HIGH A1** — a DROPPED ledger read as a clean store | `DROP TABLE` is DDL: no BEFORE trigger refuses it, and the guard census SKIPPED a declared table that was absent. Dropping `hq_action_intents`, `hq_action_events`, `hq_truth_records`, `hq_truth_verifications`, `hq_truth_acceptances`, `hq_memory` and `hq_intel_budgets` produced a structural pass AND a full assessment with ZERO observations, while the facade's ensures recreated each one EMPTY. Dropping `hq_reliability_verdicts` erased a latched safe mode outright and `releaseKillSwitch` was admitted with the evidence chain still broken. | The absence is OBSERVED as found, before any ensure runs, and is a finding when HQ's own schema then re-creates the ledger. `establishedImmutableTables` discriminates a first construction — where every phase's ledger is legitimately absent — from a file that has lost one. **Corrected in the fourth round (High 1):** that discriminator on its own was bypassed by doing MORE damage — dropping ALL the declared ledgers emptied the set, read as a first boot and silenced the census entirely while the operational half of the database survived. The discriminator now also reads a mark HQ stamps into `PRAGMA user_version` after its ensure pass, which lives in the database header where no `DROP TABLE` reaches it. A content check over the tables was tried and rejected: HQ's own components legitimately write rows to a fresh file BEFORE the facade is constructed over it, so "this file has rows" cannot tell a first boot from an operated file. |
+| **HIGH A2** — the hash chain did not detect DELETION | `op_evidence` carried no append-only triggers at all, so a raw `DELETE` was permitted; and the verifier walked forward from the genesis value with no commitment to where the chain should END, so deleting the NEWEST entries left a chain that verified perfectly. `DROP TABLE op_evidence` and `DELETE FROM op_evidence WHERE seq > 1` both read CLEAN at full depth. | Three independent holds: the engine refuses UPDATE/DELETE/REPLACE; `op_evidence` is a declared engine-immutable ledger, so removing those guards is a blocking finding; and the verification compares the entries present against the AUTOINCREMENT high-water mark, which a DELETE does not lower. The module header's "deletion breaks the chain" and "the only blocking finding that detects tampering with HQ's own audit record" are corrected rather than restated. **Corrected again in the fourth round (High 2):** the high-water half alone did not survive the next append, so the header's unqualified "commits to its own LENGTH" was false at that head; the verification now requires seq contiguity as well. |
 | **HIGH A3** — a second run lineage opened while the first attempt was still in flight | Both halves of the duplicate-run guard keyed on `needsReconciliation`, and a crashed attempt sits at `attempting` until the Founder-gated recovery classifies it. A second `openRun` under a distinct `idempotencyKey` derived a distinct `run_key`, passed both guards, and `startRunAttempt` ADMITTED generation 1 on a `sideEffect: true` capability while the first worker held the live fence. | One guard over both unsettled states, applied at the ATTEMPT as well as at the OPEN — two runs can both stand at `open` and then attempt one after the other. `open` stays admissible, so two genuinely separate pieces of work on one task remain expressible. |
 | **MEDIUM A4** — a hard link to the live database verified as a backup | The sidecar refusal is keyed on the resolved PATH; a hard link is a second name for the same inode with no sidecars beside it. Recorded permanently in the append-only register as a verified recovery point, missing WAL-resident committed data. | `nlink` from the opened descriptor; `file_has_multiple_links`. The shipped "the live database is therefore refused" is scoped to what is true, and the `cp` case is disclosed rather than implied away. |
 | **MEDIUM A5** — a fabricated durability defect on every snapshot | `synchronous` is a connection pragma SQLite records nothing about in the file, and `openHqDatabaseReadOnly` — the `hq:snapshot` open — never set it. Every world-readable snapshot of a healthy WAL + FULL store published `durabilityMeetsRequirement: false` and a `durability_below_requirement` finding, permanently masking a genuine degradation. | Both HQ opens establish the declared posture, spelled the same way. The posture documents what it is a statement about: the journal mode is the FILE's, `synchronous` is this CONNECTION's, and a read-only handle does not speak for the writer's. |
@@ -1378,17 +1378,47 @@ as well as here:
   against the chained `op_evidence` entry. A raw, well-formed, recognized append
   still moves a run's derived state; the engine guards refuse UPDATE, DELETE and
   REPLACE, not a forged new row.
-- The evidence chain's LENGTH commitment is SQLite's own AUTOINCREMENT
-  high-water mark in `sqlite_sequence`, which a DELETE does not lower. That is a
-  durable commitment the engine maintains and it is not a signed one: a writer
-  that drops the guard, deletes the tail and then rewrites `sqlite_sequence` is
-  not detected by it. Each of those is a further deliberate step and the first is
-  itself a blocking finding.
+- The evidence chain's LENGTH commitment is two checks, not one: the seqs
+  present must be CONTIGUOUS from 1, and the largest one present must reach
+  SQLite's own AUTOINCREMENT high-water mark in `sqlite_sequence`, which a DELETE
+  does not lower. **The earlier wording of this item understated the cost of
+  getting past it, and the fourth correction round corrects both the wording and
+  the code.** It said a `sqlite_sequence` rewrite was needed; in fact NO rewrite
+  was needed at all, because the high-water check alone was erased by the next
+  ordinary append — HQ's own boot appends did it — and a tail deletion that
+  verified as BROKEN at the instant it happened verified as CLEAN one entry
+  later, with the documented remedy (one Founder full assessment) then certifying
+  the robbed log. The contiguity requirement is a property of the record that no
+  later write repairs. What is still NOT detected, stated exactly: a writer that
+  drops the guard and rewrites the WHOLE log coherently — deleting entries,
+  RENUMBERING the survivors so no seq is missing, recomputing every hash forward
+  from the genesis value and lowering `sqlite_sequence` to match. The renumbering
+  needs the UPDATE the engine guard refuses, dropping that guard is itself a
+  blocking finding, and HQ holds no key a foreign writer does not also have. A
+  real barrier, not a cryptographic boundary.
 - A DROPPED declared ledger is a finding only on a handle that can WRITE, because
   the discriminator between "this file lost a ledger" and "this file predates
   it" is that HQ's own ensure pass re-creates what its schema declares. A
   read-only handle re-creates nothing and therefore cannot tell the two apart;
-  it reports neither rather than inventing one.
+  it reports neither rather than inventing one. **The earlier wording of this
+  item said only that, and it was incomplete in the direction that mattered.**
+  Until the fourth correction round the "has HQ been here before" half of the
+  discriminator was "does this file still carry an ensure-created declared
+  ledger", which meant dropping a SUBSET of the ledgers was reported and dropping
+  ALL of them emptied the set, read as a first boot, and returned a completely
+  SILENT census at both depths — while the workers, capabilities, principals,
+  tasks, approvals and kill switch all survived and `releaseKillSwitch` was
+  handed back. More damage bought less detection. That half is now answered a
+  second way as well, by a mark HQ stamps into `PRAGMA user_version` after its
+  ensure pass: it lives in the database header, no `DROP TABLE` reaches it, and
+  `VACUUM` preserves it. What remains, and is genuinely a residual: a writer that
+  ZEROES `PRAGMA user_version` puts the file back to unmarked and a census over a
+  file with every ledger dropped goes silent again. That is a deliberate forgery
+  of HQ's own mark rather than a further drop — the same residual class as
+  rewriting `sqlite_sequence` — and it is a different act from the one that used
+  to succeed, which needed nothing but more `DROP TABLE`. A file no writer of
+  this build has ever opened carries no mark either, and is read as a first boot;
+  that is the same read-only/older-file limit as the sentence above.
 - The verdict ledger is durable only where it EXISTS: a database written before
   this wave, or a read-only handle over one, carries no `hq_reliability_verdicts`
   table and the verdict is process-local there. `SAFE_MODE_STATEMENT` says so.
@@ -1433,6 +1463,29 @@ as well as here:
   asserted by construction rather than by being crossed.
 - `verifyHqBackupFile` now writes a full copy of the candidate into the OS temp
   directory, so verification needs free space equal to the file and is slower.
+- `file_has_multiple_links` refuses on `nlink > 1` from the opened descriptor,
+  and that is DELIBERATELY broader than "is this the live database". The
+  refusal was added because a hard link to the live inode under a name with no
+  sidecars beside it passed, and the check that catches it cannot know which
+  other name is on the other end of the link. Two costs are accepted rather than
+  narrowed, and they are real: anyone who can create a hard link in the backup
+  directory can make an already-recorded backup unverifiable — a
+  denial-of-verification, never a false pass — and a hardlink-based rotation
+  scheme (`rsync --link-dest`, borg and the like) is refused wholesale, so HQ
+  backups must be verified from a file that carries exactly one name. Narrowing
+  it to "the same inode as the live database" was considered and rejected: it
+  would weaken the standing assertion that a verified backup is a file no other
+  name can be written through, and it would make the answer depend on which
+  database HQ happens to have open rather than on the candidate's own bytes.
+- The credential-shape scan folds away invisible/zero-ink characters, NFKC
+  compatibility forms, and Cyrillic and Greek Latin-lookalike letters. It is NOT
+  a Unicode confusables implementation: a lookalike drawn from Cherokee,
+  Armenian, Coptic, Lisu or any other script still defeats the shape while
+  leaving the credential intact. The two folded scripts are the ones homoglyph
+  substitution is actually written in; the rest is disclosed rather than
+  claimed. Ordinary whitespace is deliberately not folded either — a space
+  inside a credential is a break a reader can see, and folding it would start
+  matching prose.
 - A credential split across two search fields still passes both scans.
 - A `cp` of a live WAL-mode database still verifies as a backup, and always
   will: it is a different inode with no sidecars beside it and its bytes are a

@@ -113,8 +113,8 @@ export class BrowserSafetyError extends Error {
 }
 
 /**
- * Every code point that renders as nothing and is therefore usable to break a
- * credential pattern without changing what a reader sees.
+ * Every code point that carries NO INK and is therefore usable to break a
+ * credential pattern while leaving every character of the credential present.
  *
  * Defined by PROPERTY, not by a hand-listed range (Wave 5 correction round
  * three, Medium B7). The previous version stripped five ranges somebody chose,
@@ -137,31 +137,113 @@ export class BrowserSafetyError extends Error {
  *  - U+034F and U+2028/U+2029 are named explicitly because they are in neither:
  *    the combining grapheme joiner is a combining mark and the line and
  *    paragraph separators are `Zl`/`Zp`, and all three split a pattern in
- *    exactly the same invisible way.
+ *    exactly the same invisible way;
+ *  - U+2800 BRAILLE PATTERN BLANK is named for the same reason and is the one
+ *    member with an advance WIDTH. It is `So`, not `Cf` and not
+ *    `Default_Ignorable`, and it went straight through this class while
+ *    splitting `sk-…` in two (Wave 5 correction round four, Low 2). The rule
+ *    the class actually follows is zero INK, not zero width — see
+ *    `normalizeForScan`.
  *
  * Naming a property rather than a range is what makes this hold for code points
  * nobody enumerated, which is why the pinning test uses characters this comment
  * does not list.
  */
 const INVISIBLE_CODE_POINTS =
-  /[\p{Default_Ignorable_Code_Point}\p{Cf}\u034F\u2028\u2029]/gu;
+  /[\p{Default_Ignorable_Code_Point}\p{Cf}\u034F\u2028\u2029\u2800]/gu;
 
 /**
- * Fold away the two cheap ways to hide a credential shape from a regex:
- * invisible characters inside it, and compatibility variants of its separators.
+ * Latin lookalikes from the two scripts a homoglyph substitution is actually
+ * written in, folded onto the ASCII the credential patterns are written in.
+ *
+ * **Why this exists** (Wave 5 correction round four, Low 3). The value rule
+ * matches SHAPES, and a shape is defeated by one character that reads the same
+ * and encodes differently: executed against the previous head, Cyrillic
+ * `\u0455` in `\u0455k-ABCDEFGHIJKLMNOP0123` and Cyrillic `\u0430` in
+ * `AIz\u0430ABCDEFGHIJKLMNOPQRSTUV` both PASSED with the whole key material
+ * intact, while the ASCII spellings of both were refused.
+ *
+ * **What it deliberately is not.** This is not a Unicode confusables
+ * implementation — HQ carries no confusables table, and inventing a partial
+ * one while calling it complete would be the overclaim. It is a curated map
+ * over Cyrillic and Greek, the two scripts that carry a full set of
+ * ASCII-identical letters, sit on common keyboard layouts, and are what
+ * homoglyph substitution is written in. Cherokee, Armenian, Coptic, Lisu and
+ * the rest are NOT folded and a substitution drawn from them still defeats the
+ * shape; that limit is stated in the phase document's residual list rather than
+ * papered over.
+ *
+ * **What bounds the false-positive risk, by construction rather than by
+ * hope.** Only glyphs that are identical or all-but-identical are included, and
+ * the omissions are what matter: Cyrillic `\u043A`, `\u043C`, `\u0442`,
+ * `\u0432`, `\u043D` and `\u0433` are NOT mapped, because their glyphs differ
+ * from `k`, `m`, `t`, `b`, `h` and `r`; and Cyrillic `\u041D` folds to `H`,
+ * `\u0420` to `P` and `\u0421` to `C`, by SHAPE. The consequence is that no
+ * Cyrillic word can fold into any of the English keywords the free-text
+ * heuristic looks for — `\u0421\u0415\u041A\u0420\u0415\u0422` folds to
+ * `CEKPET`, not `SECRET`, and `\u0422\u041E\u041A\u0415\u041D` folds to
+ * `TOKEH`, not `TOKEN` — so ordinary Cyrillic prose cannot become a match by
+ * being folded. Greek `\u03A4\u039F\u039A\u0395\u039D` does fold to `TOKEN`,
+ * which the case-insensitive free-text heuristic then treats exactly as it
+ * already treats the English `TOKEN: …`. That is the pre-existing behaviour
+ * of that heuristic applied consistently, not a new class of refusal.
+ */
+const CONFUSABLE_TO_ASCII: ReadonlyMap<string, string> = new Map<string, string>([
+  // Cyrillic capitals whose glyph is the Latin capital.
+  ['\u0410', 'A'], ['\u0412', 'B'], ['\u0415', 'E'], ['\u0405', 'S'],
+  ['\u0406', 'I'], ['\u0408', 'J'], ['\u041A', 'K'], ['\u041C', 'M'],
+  ['\u041D', 'H'], ['\u041E', 'O'], ['\u0420', 'P'], ['\u0421', 'C'],
+  ['\u0422', 'T'], ['\u0423', 'Y'], ['\u04AE', 'Y'], ['\u0425', 'X'],
+  ['\u051A', 'Q'], ['\u051C', 'W'],
+  // Cyrillic smalls whose glyph is the Latin small letter.
+  ['\u0430', 'a'], ['\u0435', 'e'], ['\u0455', 's'], ['\u0456', 'i'],
+  ['\u0458', 'j'], ['\u043E', 'o'], ['\u0440', 'p'], ['\u0441', 'c'],
+  ['\u0443', 'y'], ['\u0445', 'x'], ['\u051B', 'q'], ['\u051D', 'w'],
+  // Greek capitals whose glyph is the Latin capital.
+  ['\u0391', 'A'], ['\u0392', 'B'], ['\u0395', 'E'], ['\u0396', 'Z'],
+  ['\u0397', 'H'], ['\u0399', 'I'], ['\u039A', 'K'], ['\u039C', 'M'],
+  ['\u039D', 'N'], ['\u039F', 'O'], ['\u03A1', 'P'], ['\u03A4', 'T'],
+  ['\u03A5', 'Y'], ['\u03A7', 'X'],
+  // Greek smalls whose glyph is the Latin small letter.
+  ['\u03BF', 'o'], ['\u03C1', 'p'], ['\u03F2', 'c'],
+]);
+
+const CONFUSABLE_CODE_POINTS = new RegExp(`[${[...CONFUSABLE_TO_ASCII.keys()].join('')}]`, 'gu');
+
+/**
+ * Fold away the three cheap ways to hide a credential shape from a regex:
+ * invisible characters inside it, compatibility variants of its separators, and
+ * letters from another script that read as the ASCII ones.
  *
  * `NFKC` maps the fullwidth forms (`－`, `＿`, `．`) onto the ASCII
- * the patterns look for; the strip removes every invisible code point NFKC
- * leaves alone. Scanning the normalized form only — the ORIGINAL string is
- * what gets refused or published, so this widens what is caught and never
- * rewrites what is carried.
+ * the patterns look for; the strip removes every zero-ink code point NFKC
+ * leaves alone; the confusable fold maps the Cyrillic and Greek lookalikes onto
+ * their ASCII counterparts. Scanning the normalized form only — the ORIGINAL
+ * string is what gets refused or published, so this widens what is caught and
+ * never rewrites what is carried.
  *
  * NFKC runs FIRST and the strip SECOND, deliberately: a compatibility form can
  * decompose around an invisible character, so stripping afterwards catches a
- * shape that only becomes contiguous once the folding has happened.
+ * shape that only becomes contiguous once the folding has happened. The
+ * confusable fold runs LAST, over the text those two have already made
+ * contiguous, for the same reason.
+ *
+ * **U+2800 BRAILLE PATTERN BLANK is stripped, and it is the one member of the
+ * stripped class that is not `Default_Ignorable`** (Wave 5 correction round
+ * four, Low 2). It carries an advance width, so it is arguably not "invisible"
+ * — but it has no ink, and executed against the previous head it broke
+ * `sk-ABCDEFGHIJKLMNOP0123` into two unmatched halves while leaving every
+ * character of the key present and usable. What this class is for is ZERO-INK
+ * characters, whatever their width, because those are the ones that defeat a
+ * shape without removing the credential. Ordinary whitespace is deliberately
+ * NOT folded: a space inside a credential is a break a reader can see, and
+ * folding whitespace away would start matching prose.
  */
 function normalizeForScan(value: string): string {
-  return value.normalize('NFKC').replace(INVISIBLE_CODE_POINTS, '');
+  return value
+    .normalize('NFKC')
+    .replace(INVISIBLE_CODE_POINTS, '')
+    .replace(CONFUSABLE_CODE_POINTS, (character) => CONFUSABLE_TO_ASCII.get(character) ?? character);
 }
 
 /** Trivial values are exempt from the key rule so `{ token: null }` is fine. */
@@ -191,7 +273,10 @@ function walk(value: unknown, path: string, visit: (value: unknown, path: string
  */
 export function assertBrowserSafe(payload: unknown, rootPath = 'snapshot'): void {
   walk(payload, rootPath, (value, path, key) => {
-    if (key != null && SECRET_KEY_PATTERN.test(key) && !isTrivial(value)) {
+    // The key rule reads the normalized form too, for the same reason the
+    // value rule does: a field named with one Cyrillic lookalike is still a
+    // field that names a credential holder.
+    if (key != null && !isTrivial(value) && (SECRET_KEY_PATTERN.test(key) || SECRET_KEY_PATTERN.test(normalizeForScan(key)))) {
       if (typeof value === 'string' || typeof value === 'number') {
         throw new BrowserSafetyError(
           `Field "${key}" names a credential holder and carries a value; HQ snapshots carry secret PRESENCE, never secret values`,
