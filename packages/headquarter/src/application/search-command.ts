@@ -53,6 +53,7 @@ import {
 } from '../archive/search.js';
 import type { ArchiveRecord, ArchiveStatus } from '../archive/schema.js';
 import type { MemoryPrivacy } from '../memory/schema.js';
+import { assertBrowserSafe } from '../live/redaction.js';
 import { TRUTH_STATES, type TruthState } from './truth-command.js';
 
 /* ------------------------------------------------------------------ */
@@ -461,6 +462,111 @@ export const LEXICAL_RETRIEVAL_ADAPTER: RetrievalAdapter = {
  */
 export const SEMANTIC_RETRIEVAL_ADAPTERS: readonly RetrievalAdapter[] = [];
 
+/* ------------------------------------------------------------------ */
+/* The adapter GUARD — closing the pre-real-adapter hole               */
+/* ------------------------------------------------------------------ */
+
+export const RETRIEVAL_GUARD_STATEMENT =
+  'Every retrieval adapter is reached through a guard that scans the free text handed to it for credential ' +
+  'shapes first. The guard is applied by the resolver, not by the caller, so an in-process caller cannot ' +
+  'obtain an unguarded adapter and no adapter — installed now or installed later — can be handed text HQ ' +
+  'has not scanned.';
+
+/**
+ * Raised when free text reaching a retrieval adapter fails the browser-safety
+ * scan. A distinct type so a caller can turn it into its own stated refusal
+ * rather than a 500 — the same shape `BrowserSafetyError` has at the route.
+ */
+export class RetrievalSafetyError extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+    this.name = 'RetrievalSafetyError';
+  }
+}
+
+/**
+ * Scan the free text of a search or a question BEFORE anything is matched.
+ *
+ * ## The hole this closes
+ *
+ * Phase 11 scanned `text`, `project`, `tag` and `question` at the BROWSER
+ * ROUTE only. That was safe exactly while `SEMANTIC_RETRIEVAL_ADAPTERS` was
+ * empty — the one installed adapter is a local inverted index that sends
+ * nothing anywhere, so unscanned text reaching it could at worst be echoed
+ * back, and the route's own response guard caught that.
+ *
+ * It stops being safe the moment a real adapter exists. `RetrievalAdapter` is
+ * a seam a semantic retriever plugs into, and a semantic retriever is a thing
+ * that TRANSMITS the query — to a local model process, or to a service. An
+ * in-process caller of `searchCompany`/`askJenify` (a CLI, a lane, a future
+ * orchestrator) bypasses the route, so on the day an adapter is installed, a
+ * credential pasted into a question would be handed straight to it. The
+ * Founder recorded that as a Low to resolve BEFORE any real adapter ships, and
+ * Phase 14 is exactly the layer that would introduce one.
+ *
+ * ## Why it is fixed here rather than at each caller
+ *
+ * A guard every caller must remember to apply is a guard that one caller will
+ * eventually forget. This one is applied by `resolveRetrievalAdapter` itself,
+ * so the ONLY adapter any caller can obtain is a wrapped one, and the wrapper
+ * scans before it delegates. Adding an adapter to
+ * `SEMANTIC_RETRIEVAL_ADAPTERS` cannot opt out of it: the resolver wraps the
+ * candidate it selects, whatever it is.
+ *
+ * The facade scans the same four fields on the way in as well, so an in-process
+ * caller gets a stated refusal instead of an exception from deep inside a
+ * retrieval. Both layers are kept: the outer one gives a good error, the inner
+ * one is the guarantee.
+ */
+export function assertRetrievalTextSafe(
+  fields: Record<string, string | null | undefined>,
+  scope: string,
+): void {
+  const scanned: Record<string, string> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (typeof value === 'string' && value.trim() !== '') scanned[key] = value;
+  }
+  if (Object.keys(scanned).length === 0) return;
+  try {
+    assertBrowserSafe(scanned, scope);
+  } catch {
+    throw new RetrievalSafetyError(
+      `The ${scope} free text looks like it contains credential material, so it was refused rather than ` +
+        'matched. HQ scans it before any retrieval adapter can see it.',
+    );
+  }
+}
+
+/**
+ * Wrap an adapter so it can never be handed unscanned free text.
+ *
+ * The wrapper is transparent in every other respect — same id, same mode, same
+ * availability, same reason — so nothing downstream can tell a guarded adapter
+ * from the adapter it guards, and no code path gains a reason to reach for the
+ * unguarded one.
+ */
+export function guardRetrievalAdapter(adapter: RetrievalAdapter): RetrievalAdapter {
+  return {
+    id: adapter.id,
+    mode: adapter.mode,
+    available: adapter.available,
+    unavailableReason: adapter.unavailableReason,
+    retrieve(input) {
+      // The terms ARE the free text by the time retrieval sees it: they are
+      // what `normalizeSearchQuery`/`tokenize` produced from `text` or from a
+      // question, and they are the only caller-supplied material that crosses
+      // this boundary. The corpus does not need scanning — it is canonical
+      // rows HQ already published to this reader.
+      const offending: Record<string, string> = {};
+      input.terms.forEach((term, index) => {
+        offending[`term${index}`] = term;
+      });
+      assertRetrievalTextSafe(offending, 'retrieval');
+      return adapter.retrieve(input);
+    },
+  };
+}
+
 /** What actually answered, what was asked for, and why they differ. */
 export interface RetrievalStatement {
   /** The mode that ACTUALLY answered. */
@@ -477,6 +583,13 @@ export interface RetrievalStatement {
  * Resolve the adapter for a requested mode. Never throws and never activates
  * anything: an unavailable mode falls back to the deterministic adapter and
  * the fallback is stated on every response that used it.
+ *
+ * Every adapter it hands out is GUARDED (`guardRetrievalAdapter`), including
+ * the deterministic one and including any semantic adapter installed later.
+ * That is the structural half of the pre-real-adapter fix: there is no code
+ * path through this resolver that yields an adapter which has not scanned its
+ * free text, so an in-process caller cannot obtain one and a future adapter
+ * cannot opt out by being added to the list.
  */
 export function resolveRetrievalAdapter(requested: RetrievalMode = 'deterministic_lexical'): {
   adapter: RetrievalAdapter;
@@ -484,7 +597,7 @@ export function resolveRetrievalAdapter(requested: RetrievalMode = 'deterministi
 } {
   if (requested === 'deterministic_lexical') {
     return {
-      adapter: LEXICAL_RETRIEVAL_ADAPTER,
+      adapter: guardRetrievalAdapter(LEXICAL_RETRIEVAL_ADAPTER),
       statement: {
         mode: 'deterministic_lexical',
         adapterId: LEXICAL_RETRIEVAL_ADAPTER.id,
@@ -499,20 +612,22 @@ export function resolveRetrievalAdapter(requested: RetrievalMode = 'deterministi
   const candidate = SEMANTIC_RETRIEVAL_ADAPTERS.find((adapter) => adapter.available) ?? null;
   if (candidate) {
     return {
-      adapter: candidate,
+      // Guarded exactly like the lexical one. A semantic retriever is a thing
+      // that TRANSMITS the query, so this is the wrapper that matters most.
+      adapter: guardRetrievalAdapter(candidate),
       statement: {
         mode: candidate.mode,
         adapterId: candidate.id,
         requested,
         fallbackReason: null,
-        note: 'Answered by an installed semantic retrieval adapter.',
+        note: `Answered by an installed semantic retrieval adapter. ${RETRIEVAL_GUARD_STATEMENT}`,
       },
     };
   }
   const reason: RetrievalUnavailableReason =
     SEMANTIC_RETRIEVAL_ADAPTERS[0]?.unavailableReason ?? 'no_adapter_installed';
   return {
-    adapter: LEXICAL_RETRIEVAL_ADAPTER,
+    adapter: guardRetrievalAdapter(LEXICAL_RETRIEVAL_ADAPTER),
     statement: {
       mode: 'deterministic_lexical',
       adapterId: LEXICAL_RETRIEVAL_ADAPTER.id,

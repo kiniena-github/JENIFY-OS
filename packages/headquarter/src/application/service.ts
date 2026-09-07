@@ -81,7 +81,7 @@ import {
   type ApprovalRejection,
 } from '../operator/approvals.js';
 import { assertNoSecretLikeContent, type EvidenceEntry } from '../operator/evidence.js';
-import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
+import { CapabilityRegistry, type Capability, type RiskClass } from '../operator/capabilities.js';
 import {
   GLOBAL_SCOPE,
   OperatorQueue,
@@ -577,6 +577,109 @@ import {
   type RunRecord,
 } from './reliability-command.js';
 import {
+  BUDGET_POLICY_STATEMENT,
+  BUDGET_SCOPES,
+  BUDGET_WINDOWS,
+  BUDGET_READ_LIMIT,
+  CONTEXT_SIZES,
+  COST_READ_LIMIT,
+  DECISION_READ_LIMIT,
+  DECISION_RESULTS,
+  DEFAULT_PERMITTED_TIERS,
+  ESCALATION_STATEMENT,
+  ESCALATION_TRIGGERS,
+  INTELLIGENCE_COMMAND_CAPABILITY,
+  INTELLIGENCE_LATENCY_STATEMENT,
+  INTELLIGENCE_ROUTING_STATEMENT,
+  INTELLIGENCE_TIERS,
+  LATENCY_REQUIREMENTS,
+  MAX_COST_MINOR_UNITS,
+  MAX_DECISION_LABEL_LENGTH,
+  MAX_INTEL_NOTE_LENGTH,
+  MAX_MODEL_ID_LENGTH,
+  MAX_PROVIDER_ID_LENGTH,
+  MODEL_AVAILABILITY_STATES,
+  MODEL_CAPABILITY_FACTS,
+  MODEL_LOCALITIES,
+  OBSERVATION_READ_LIMIT,
+  OBSERVATION_SOURCES,
+  PRIVACY_REQUIREMENTS,
+  TASK_COMPLEXITIES,
+  WORK_KINDS,
+  COST_LEDGER_STATEMENT,
+  budgetKey,
+  budgetRowToRecord,
+  computeRoutingProposal,
+  costEntryKey,
+  costEntryToRecord,
+  decisionIdempotencyKey,
+  decisionOutcomeKey,
+  deriveDecisionRecord,
+  deriveEscalation,
+  emptyIntelligenceSnapshot,
+  ensureIntelligenceSchema,
+  evaluateBudget,
+  intelligenceCommandCapabilityState,
+  intelligenceCommandContractDrift,
+  intelligenceSchemaPresent,
+  isBudgetScope,
+  isBudgetWindow,
+  isCurrencyCode,
+  isDecisionResult,
+  isEscalationTrigger,
+  isIdentifierSlug,
+  isIntelligenceTier,
+  isModelAvailability,
+  isModelCapabilityFact,
+  isModelLocality,
+  isObservationSource,
+  latestBudgetFor,
+  loadBudgets,
+  loadCostEntries,
+  loadDecision,
+  loadDecisionByKey,
+  loadDecisionOutcomes,
+  loadDecisions,
+  loadModelObservations,
+  normalizeCostFact,
+  observationIdempotencyKey,
+  proposalSatisfiesReviewRequirement,
+  summarizeIntelligence,
+  summarizeIntelligenceAnalytics,
+  tierRank,
+  type BudgetDecision,
+  type BudgetEvaluation,
+  type BudgetRecord,
+  type BudgetRow,
+  type BudgetScope,
+  type BudgetWindow,
+  type ContextSize,
+  type CostEntryRecord,
+  type CostEntryRow,
+  type CostFactRefusal,
+  type CostProvenance,
+  type CostUnitKind,
+  type DecisionRecord,
+  type DecisionResult,
+  type EscalationProposal,
+  type EscalationTrigger,
+  type IntelligenceAnalyticsView,
+  type IntelligencePostureView,
+  type IntelligenceSnapshotView,
+  type IntelligenceTier,
+  type LatencyRequirement,
+  type ModelAvailability,
+  type ModelCapabilityFact,
+  type ModelLocality,
+  type ModelObservationRow,
+  type ObservationSource,
+  type PrivacyRequirement,
+  type RoutingProposal,
+  type TaskCharacteristics,
+  type TaskComplexity,
+  type WorkKind,
+} from './intelligence-command.js';
+import {
   INTEGRITY_DEPTH_STATEMENT,
   SAFE_MODE_STATEMENT,
   fullIntegrity,
@@ -828,8 +931,10 @@ import {
   MAX_QUESTION_LENGTH,
   SEARCH_SOURCES,
   assembleAnswer,
+  assertRetrievalTextSafe,
   normalizeSearchQuery,
   resolveRetrievalAdapter,
+  RetrievalSafetyError,
   runCompanySearch,
   searchSourceDescriptor,
   sourceStatuses,
@@ -943,7 +1048,20 @@ export type OpsErrorCode =
   | 'run_state_conflict'
   | 'run_attempt_refused'
   | 'stale_run_claim'
-  | 'backup_verification_failed';
+  | 'backup_verification_failed'
+  // Phase 14 — cost + intelligence optimization. Eight codes, and deliberately
+  // none that names an activation, a purchase or a spend: no path here can
+  // attempt one, so no path here can refuse one either. Every code below is a
+  // refusal to RECORD something HQ could not stand behind, or a refusal to
+  // route below what the policy requires.
+  | 'unknown_intelligence_decision'
+  | 'cost_provenance_conflict'
+  | 'budget_ceiling_blocks'
+  | 'tier_not_permitted'
+  | 'tier_below_policy_floor'
+  | 'review_tier_required'
+  | 'intelligence_routing_refused'
+  | 'escalation_refused';
 // Phase 10 adds NO refusal code: its two reads cannot fail (a derivation over
 // whatever the canonical stores hold), `getBrief` answers null for an id that
 // is not in the ledger, and `issueBrief` refuses only through the codes the
@@ -1254,6 +1372,60 @@ function assignmentBarrier(task: OperatorTask): OpsError | null {
     };
   }
   return null;
+}
+
+/**
+ * The scope a routing proposal is measured against when the caller names none.
+ *
+ * `deployment`/`total` deliberately: the widest, longest-lived ceiling, so an
+ * un-scoped question is answered against the policy that constrains
+ * EVERYTHING rather than against one that happens to be silent. With no
+ * ceiling recorded there at all, the answer is `requires_founder_decision` and
+ * the permitted set is the free local tier alone — never permission.
+ */
+const DEPLOYMENT_BUDGET_SCOPE = {
+  scopeKind: 'deployment' as const,
+  scopeId: 'deployment',
+  window: 'total' as const,
+};
+
+/**
+ * Turn a cost-fact refusal into a sentence a Founder can act on. One place, so
+ * the wording of "HQ will not invent a price" cannot drift between the
+ * observation registry and the cost ledger.
+ */
+function costRefusalMessage(refusal: CostFactRefusal): string {
+  switch (refusal) {
+    case 'unknown_provenance_carries_amount':
+      return 'An unknown cost may not carry an amount. Unknown stays unknown: record the provenance you ' +
+        'actually have, or record no amount at all.';
+    case 'known_provenance_without_amount':
+      return 'A cost with a stated provenance must carry an amount. If HQ does not know the amount, the ' +
+        'provenance is unknown — which is a real answer, not a failure.';
+    case 'amount_not_a_whole_number':
+      return 'amountMinorUnits must be a whole number of minor units; HQ stores no floating-point money.';
+    case 'amount_negative':
+      return 'amountMinorUnits may not be negative.';
+    case 'amount_out_of_bounds':
+      return `amountMinorUnits exceeds the recorded bound of ${MAX_COST_MINOR_UNITS} minor units.`;
+    case 'currency_missing':
+      return 'A recorded amount must name its currency; HQ never converts between currencies and cannot ' +
+        'infer one.';
+    case 'currency_malformed':
+      return 'currency must be a three-letter uppercase code.';
+    case 'unrecognized_provenance':
+      return 'provenance must be one of: estimated, provider_reported, billed, unknown.';
+    case 'unrecognized_unit_kind':
+      return 'unitKind must be a recognized unit; use unknown when the unit was not observed.';
+    case 'estimate_without_basis':
+      return 'An estimated amount must name its BASIS. An estimate whose origin nobody recorded is a ' +
+        'fabricated price with a label on it, and HQ will not store one.';
+    case 'basis_on_non_estimate':
+      return 'A basis belongs to an estimate; it may not accompany an unknown cost and may not exceed its ' +
+        'length bound on a reported or billed one.';
+    default:
+      return 'The cost figure was refused.';
+  }
 }
 
 /** Trim + bound one mission text field. Absent optional fields become null. */
@@ -2043,6 +2215,16 @@ export class HeadquarterOperations {
    */
   readonly #reliabilityStorePresent: boolean;
 
+  /**
+   * The Phase 14 model-observation registry, budget policy, routing-decision
+   * ledger and cost ledger, same read-only-handle rule as every store flag
+   * above. Note what it does NOT gate: nothing in the operator queue, the
+   * policy engine, the approval path, the provider binding or the action
+   * gateway reads any of these tables, so a handle without this schema
+   * executes exactly as much as a handle with it.
+   */
+  readonly #intelligenceStorePresent: boolean;
+
   /** This process's identity. Written onto every run and every recovery. */
   readonly #processIdentity: string;
 
@@ -2215,6 +2397,7 @@ export class HeadquarterOperations {
     ensureBriefSchema(db);
     ensureProductFactorySchema(db);
     ensureReliabilitySchema(db);
+    ensureIntelligenceSchema(db);
     // A writable construction just ensured the mission/project/memory tables.
     // A READ-ONLY one (the hq:snapshot path) may be observing an older file
     // that has some or none of them — the ensures above deliberately write
@@ -2230,6 +2413,7 @@ export class HeadquarterOperations {
     this.#briefStorePresent = db.readonly ? briefSchemaPresent(db) : true;
     this.#productStorePresent = db.readonly ? productFactorySchemaPresent(db) : true;
     this.#reliabilityStorePresent = db.readonly ? reliabilitySchemaPresent(db) : true;
+    this.#intelligenceStorePresent = db.readonly ? intelligenceSchemaPresent(db) : true;
     this.#processIdentity = options.processIdentity?.trim() || HQ_PROCESS_IDENTITY;
     // The cheap half, at every construction. See the field's own note for why
     // the expensive half is an explicit act instead.
@@ -7737,6 +7921,1266 @@ export class HeadquarterOperations {
     return this.#processIdentity;
   }
 
+  // ---- cost + intelligence optimization (Phase 14) ----
+
+  /**
+   * The Founder gate behind the two INTELLIGENCE COMMAND acts — recording a
+   * model/provider observation, and setting a budget policy.
+   *
+   * Recording a routing decision, an outcome and a cost entry deliberately do
+   * NOT come through here: they sit behind the live fenced claim on the
+   * canonical task, exactly like a Phase 13 run event, because the worker
+   * carrying the work is the one entity that can honestly say what it used.
+   */
+  #resolveIntelligenceCommander(actor: string, action: string): OpsResult<never> | null {
+    return this.#resolveFounderGateActor(
+      actor,
+      action,
+      INTELLIGENCE_COMMAND_CAPABILITY.id,
+      'commanding HQ intelligence policy',
+    );
+  }
+
+  /**
+   * The fail-closed capability gate for the same two acts, with
+   * `permittedInSafeMode` FALSE — the default. Both ADD to the canonical
+   * record (a cost fact, a spending ceiling), and HQ does not add to a record
+   * it cannot currently stand behind.
+   */
+  #intelligenceCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      INTELLIGENCE_COMMAND_CAPABILITY.id,
+      intelligenceCommandCapabilityState,
+      intelligenceCommandContractDrift,
+      'commanding HQ intelligence policy',
+    );
+  }
+
+  /**
+   * The CURRENT budget ceiling for a scope, read PRIVATELY.
+   *
+   * ENFORCEMENT-SAFE, and it is the single most important read in the phase:
+   * this row decides whether a proposal is blocked, whether it needs a Founder
+   * decision, and which tiers are permitted at all. A same-realm patch of
+   * `listIntelligenceBudgets` or `intelligenceBudgetDecision` must therefore
+   * buy nothing — pinned on the instance, on the prototype, and against a
+   * facade constructed AFTER the patch.
+   */
+  #budgetFromStore(scope: {
+    scopeKind: BudgetScope;
+    scopeId: string;
+    window: BudgetWindow;
+  }): BudgetRow | null {
+    if (!this.#intelligenceStorePresent) return null;
+    return latestBudgetFor(loadBudgets(this.#db), scope);
+  }
+
+  /** Every cost entry, read privately. Feeds the budget evaluation. */
+  #costEntriesFromStore(): CostEntryRow[] {
+    if (!this.#intelligenceStorePresent) return [];
+    return loadCostEntries(this.#db);
+  }
+
+  /**
+   * The entries a scope's ceiling is measured against.
+   *
+   * The window filter is a PREFIX comparison on the recorded `occurredAt`
+   * instant, so it needs no timezone rule and no arithmetic: a `day` ceiling
+   * counts entries whose instant starts with today's date, a `month` ceiling
+   * this month's. `total` counts everything ever recorded for the scope.
+   */
+  #entriesForScope(
+    scope: { scopeKind: BudgetScope; scopeId: string; window: BudgetWindow },
+    at: string,
+  ): CostEntryRow[] {
+    const prefix = scope.window === 'day' ? at.slice(0, 10) : scope.window === 'month' ? at.slice(0, 7) : '';
+    return this.#costEntriesFromStore()
+      .filter((entry) => {
+        switch (scope.scopeKind) {
+          case 'mission':
+            return entry.missionId === scope.scopeId;
+          case 'project':
+            return entry.projectId === scope.scopeId;
+          case 'provider':
+            return entry.providerId === scope.scopeId;
+          case 'model':
+            return entry.modelId === scope.scopeId;
+          case 'deployment':
+            return true;
+          default:
+            // Fail closed: an unrecognized scope matches NOTHING, so a ceiling
+            // it might carry can never be reported as "within".
+            return false;
+        }
+      })
+      .filter((entry) => prefix === '' || entry.occurredAt.startsWith(prefix));
+  }
+
+  /**
+   * The budget answer, computed from ENFORCEMENT-SAFE reads only.
+   *
+   * `#private` and used by every write that is spend-adjacent, so the public
+   * `intelligenceBudgetDecision()` below is a projection of this and never the
+   * other way round.
+   */
+  #budgetEvaluation(scope: {
+    scopeKind: BudgetScope;
+    scopeId: string;
+    window: BudgetWindow;
+  }): BudgetEvaluation {
+    const at = nowIso();
+    return evaluateBudget({
+      budget: this.#budgetFromStore(scope),
+      entries: this.#entriesForScope(scope, at).map((entry) => ({
+        amountMinorUnits: entry.fact.amountMinorUnits,
+        currency: entry.fact.currency,
+      })),
+    });
+  }
+
+  #decisionRecordFromStore(id: string): DecisionRecord | null {
+    if (!this.#intelligenceStorePresent) return null;
+    const row = loadDecision(this.#db, id);
+    if (!row) return null;
+    return deriveDecisionRecord(row, {
+      outcomes: loadDecisionOutcomes(this.#db),
+      escalations: loadDecisions(this.#db),
+    });
+  }
+
+  #listDecisionRecordsFromStore(filter?: { taskId?: string }): DecisionRecord[] {
+    if (!this.#intelligenceStorePresent) return [];
+    const rows = loadDecisions(this.#db);
+    const outcomes = loadDecisionOutcomes(this.#db);
+    return rows
+      .filter((row) => (filter?.taskId ? row.taskId === filter.taskId : true))
+      .map((row) => deriveDecisionRecord(row, { outcomes, escalations: rows }));
+  }
+
+  #observationsFromStore(): ModelObservationRow[] {
+    if (!this.#intelligenceStorePresent) return [];
+    return loadModelObservations(this.#db);
+  }
+
+  /**
+   * The provider the CANONICAL payload binds this task to — read straight off
+   * `op_tasks` through `#db`, deliberately NOT through `queue.get()`.
+   *
+   * A routing decision RECORDS this; it never proposes a different one, and
+   * there is no parameter anywhere in the phase that could. `readProviderBinding`
+   * is the same function the queue's own claim/start enforcement uses, so the
+   * value recorded here is by construction the value that decides execution.
+   */
+  #taskBoundProvider(taskId: string): string | null {
+    const row = this.#db.prepare(`SELECT payload FROM op_tasks WHERE id = ?`).get(taskId) as
+      | { payload: string | null }
+      | undefined;
+    if (!row) return null;
+    let payload: Record<string, unknown> | null = null;
+    try {
+      const parsed: unknown = JSON.parse(row.payload ?? 'null');
+      payload = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      payload = null;
+    }
+    const binding = readProviderBinding(payload);
+    return binding.bound ? binding.provider : null;
+  }
+
+  /**
+   * Record one OBSERVATION about a provider/model — capability, availability
+   * and unit cost, with provenance.
+   *
+   * HQ never invents a price. The cost half of this write goes through
+   * `normalizeCostFact`, so an `unknown` provenance may not carry an amount, a
+   * known provenance may not omit one, and an `estimated` amount must name its
+   * BASIS. A registry entry that could not say where its number came from
+   * would be the exact fabrication this phase exists to prevent.
+   *
+   * The registry is metadata: registering an observation activates nothing,
+   * connects nothing, authenticates nothing and grants nothing. It does not
+   * make a provider available, and no routing path reads it to decide who
+   * executes — that is the canonical binding's job and only its job.
+   */
+  recordModelObservation(input: {
+    providerId: string;
+    /** The exact model id when it was OBSERVED; null when it was not. */
+    modelId?: string | null;
+    locality: ModelLocality;
+    availability: ModelAvailability;
+    capabilityFacts?: readonly ModelCapabilityFact[];
+    contextWindowTokens?: number | null;
+    unitCostProvenance: CostProvenance;
+    unitCostMinorUnits?: number | null;
+    unitCostCurrency?: string | null;
+    unitCostUnitKind: CostUnitKind;
+    unitCostBasis?: string;
+    source: ObservationSource;
+    observedBy: string;
+    note?: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ observation: ModelObservationRow; deduplicated: boolean }> {
+    const providerId = (input.providerId ?? '').trim();
+    if (!isIdentifierSlug(providerId, MAX_PROVIDER_ID_LENGTH)) {
+      return fail(
+        'invalid_input',
+        'providerId must be a lowercase slug of letters, digits, dot, colon, dash or underscore',
+      );
+    }
+    const modelIdRaw = (input.modelId ?? '').trim();
+    if (modelIdRaw !== '' && !isIdentifierSlug(modelIdRaw, MAX_MODEL_ID_LENGTH)) {
+      return fail('invalid_input', 'modelId must be a lowercase slug, or omitted when it was not observed');
+    }
+    const modelId = modelIdRaw === '' ? null : modelIdRaw;
+    if (!isModelLocality(input.locality)) {
+      return fail('invalid_input', `locality must be one of: ${MODEL_LOCALITIES.join(', ')}`);
+    }
+    if (!isModelAvailability(input.availability)) {
+      return fail('invalid_input', `availability must be one of: ${MODEL_AVAILABILITY_STATES.join(', ')}`);
+    }
+    if (!isObservationSource(input.source)) {
+      return fail('invalid_input', `source must be one of: ${OBSERVATION_SOURCES.join(', ')}`);
+    }
+    const facts = [...(input.capabilityFacts ?? [])];
+    if (facts.some((fact) => !isModelCapabilityFact(fact))) {
+      return fail('invalid_input', `capabilityFacts must be drawn from: ${MODEL_CAPABILITY_FACTS.join(', ')}`);
+    }
+    const contextWindowTokens = input.contextWindowTokens ?? null;
+    if (
+      contextWindowTokens != null &&
+      (!Number.isInteger(contextWindowTokens) || contextWindowTokens < 0)
+    ) {
+      return fail('invalid_input', 'contextWindowTokens must be a whole number of tokens, or omitted');
+    }
+    const cost = normalizeCostFact({
+      provenance: input.unitCostProvenance,
+      amountMinorUnits: input.unitCostMinorUnits ?? null,
+      currency: input.unitCostCurrency ?? null,
+      unitKind: input.unitCostUnitKind,
+      basis: input.unitCostBasis,
+    });
+    if (!cost.ok) {
+      return fail('cost_provenance_conflict', costRefusalMessage(cost.refusal), { refusal: cost.refusal });
+    }
+    const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
+    if (!note.ok) return fail('invalid_input', note.message);
+    try {
+      assertNoSecretLikeContent({ note: note.value ?? '', basis: cost.fact.basis ?? '' });
+    } catch {
+      return fail('invalid_input', 'The note or basis looks like it contains a credential; nothing was recorded.');
+    }
+
+    const refusedActor = this.#resolveIntelligenceCommander(input.observedBy, 'record a model observation');
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#intelligenceCapabilityGate('record a model observation');
+    if (refusedCapability) return refusedCapability;
+    if (!this.#intelligenceStorePresent) {
+      return fail('invalid_input', 'intelligence registry unavailable on this database handle');
+    }
+
+    const at = nowIso();
+    const key = observationIdempotencyKey({
+      providerId,
+      modelId,
+      observedAt: at.slice(0, 10),
+      source: input.source,
+      idempotencyKey: input.idempotencyKey?.trim() || null,
+    });
+    const id = `intelobs-${uuid()}`;
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    privileged.reserve(() => {
+      const existing = this.#db
+        .prepare(`SELECT id FROM hq_intel_model_observations WHERE observation_key = ?`)
+        .get(key) as { id: string } | undefined;
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      this.#db
+        .prepare(
+          `INSERT INTO hq_intel_model_observations
+             (id, provider_id, model_id, locality, availability, capability_facts, context_window_tokens,
+              unit_cost_provenance, unit_cost_minor_units, unit_cost_currency, unit_cost_unit_kind,
+              unit_cost_basis, source, observed_at, observed_by, note, observation_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          providerId,
+          modelId,
+          input.locality,
+          input.availability,
+          canonicalJson(facts),
+          contextWindowTokens,
+          cost.fact.provenance,
+          cost.fact.amountMinorUnits,
+          cost.fact.currency,
+          cost.fact.unitKind,
+          cost.fact.basis,
+          input.source,
+          at,
+          input.observedBy,
+          note.value ?? null,
+          key,
+        );
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `intel_observation:${id}`,
+        status: null,
+        actor: input.observedBy,
+        summary: `Model observation recorded for ${providerId}`,
+        detail: {
+          providerId,
+          modelObserved: modelId != null,
+          unitCostState: cost.fact.state,
+          activatesProvider: false,
+          executable: false,
+        },
+      });
+      privileged.appendEvidence({
+        actor: input.observedBy,
+        kind: 'intelligence_observation_recorded',
+        payload: {
+          observationId: id,
+          providerId,
+          unitCostProvenance: cost.fact.provenance,
+          unitCostState: cost.fact.state,
+          activatesProvider: false,
+          executable: false,
+        },
+      });
+    });
+    const resolvedId = dedupedTo ?? id;
+    const observation =
+      this.#observationsFromStore().find((row) => row.id === resolvedId) ?? null;
+    if (!observation) return fail('invalid_input', 'the observation could not be read back');
+    return ok({ observation, deduplicated: dedupedTo != null });
+  }
+
+  /**
+   * Set a BUDGET POLICY for a scope: a ceiling, a currency, and the tiers
+   * permitted under it.
+   *
+   * A ceiling BLOCKS or DEMANDS A DECISION; it never grants. Setting one
+   * activates no provider, enables no paid service, and authorizes no spend —
+   * `authorizesSpend: false` rides on every evaluation, and nothing in HQ
+   * treats a ceiling as permission. Raising a ceiling does not make a paid
+   * provider available; only the Founder, outside HQ, can do that.
+   *
+   * Append-only versioned: a new policy is a new row at the next version, and
+   * the old one stays readable. The permitted tier list is stored as CHECKED
+   * members, so a policy carrying a tier outside the vocabulary is refused
+   * here rather than read back as one.
+   */
+  setIntelligenceBudget(input: {
+    scopeKind: BudgetScope;
+    scopeId: string;
+    window: BudgetWindow;
+    ceilingMinorUnits: number;
+    currency: string;
+    permittedTiers: readonly IntelligenceTier[];
+    setBy: string;
+    note?: string;
+  }): OpsResult<{ budget: BudgetRecord }> {
+    if (!isBudgetScope(input.scopeKind)) {
+      return fail('invalid_input', `scopeKind must be one of: ${BUDGET_SCOPES.join(', ')}`);
+    }
+    if (!isBudgetWindow(input.window)) {
+      return fail('invalid_input', `window must be one of: ${BUDGET_WINDOWS.join(', ')}`);
+    }
+    const scopeId = (input.scopeId ?? '').trim();
+    if (scopeId === '' || scopeId.length > MAX_MODEL_ID_LENGTH) {
+      return fail('invalid_input', 'scopeId is required');
+    }
+    if (!Number.isInteger(input.ceilingMinorUnits) || input.ceilingMinorUnits < 0) {
+      return fail('invalid_input', 'ceilingMinorUnits must be a whole, non-negative number of minor units');
+    }
+    if (input.ceilingMinorUnits > MAX_COST_MINOR_UNITS) {
+      return fail('invalid_input', `ceilingMinorUnits exceeds ${MAX_COST_MINOR_UNITS}`);
+    }
+    const currency = (input.currency ?? '').trim();
+    if (!isCurrencyCode(currency)) {
+      return fail('invalid_input', 'currency must be a three-letter uppercase code; HQ never converts between them');
+    }
+    const permitted = [...(input.permittedTiers ?? [])];
+    if (permitted.some((tier) => !isIntelligenceTier(tier))) {
+      return fail('invalid_input', `permittedTiers must be drawn from: ${INTELLIGENCE_TIERS.join(', ')}`);
+    }
+    const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
+    if (!note.ok) return fail('invalid_input', note.message);
+    try {
+      assertNoSecretLikeContent({ note: note.value ?? '' });
+    } catch {
+      return fail('invalid_input', 'The note looks like it contains a credential; nothing was recorded.');
+    }
+
+    const refusedActor = this.#resolveIntelligenceCommander(input.setBy, 'set a budget policy');
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#intelligenceCapabilityGate('set a budget policy');
+    if (refusedCapability) return refusedCapability;
+    if (!this.#intelligenceStorePresent) {
+      return fail('invalid_input', 'budget policy unavailable on this database handle');
+    }
+
+    const scope = { scopeKind: input.scopeKind, scopeId, window: input.window };
+    const id = `intelbudget-${uuid()}`;
+    const at = nowIso();
+    const privileged = this.#requirePrivilegedQueue();
+    let recordedId = id;
+    privileged.reserve(() => {
+      const current = latestBudgetFor(loadBudgets(this.#db), scope);
+      const version = (current?.version ?? 0) + 1;
+      const key = budgetKey({ ...scope, version });
+      this.#db
+        .prepare(
+          `INSERT INTO hq_intel_budgets
+             (id, scope_kind, scope_id, window_kind, ceiling_minor_units, currency, permitted_tiers,
+              version, set_at, set_by, note, budget_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          scope.scopeKind,
+          scope.scopeId,
+          scope.window,
+          input.ceilingMinorUnits,
+          currency,
+          canonicalJson(permitted),
+          version,
+          at,
+          input.setBy,
+          note.value ?? null,
+          key,
+        );
+      recordedId = id;
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `intel_budget:${id}`,
+        status: null,
+        actor: input.setBy,
+        summary: `Budget policy v${version} set for ${scope.scopeKind} ${scope.scopeId} (${scope.window})`,
+        detail: {
+          scopeKind: scope.scopeKind,
+          window: scope.window,
+          version,
+          grantsSpend: false,
+          activatesPaidProvider: false,
+          executable: false,
+        },
+      });
+      privileged.appendEvidence({
+        actor: input.setBy,
+        kind: 'intelligence_budget_set',
+        payload: {
+          budgetId: id,
+          scopeKind: scope.scopeKind,
+          window: scope.window,
+          version,
+          permittedTiers: permitted,
+          grantsSpend: false,
+          activatesPaidProvider: false,
+          executable: false,
+        },
+      });
+    });
+    const row = loadBudgets(this.#db).find((entry) => entry.id === recordedId);
+    if (!row) return fail('invalid_input', 'the budget policy could not be read back');
+    return ok({ budget: budgetRowToRecord(row) });
+  }
+
+  /**
+   * The budget answer for a scope. A pure READ that writes nothing and grants
+   * nothing: `grantsSpend` and `authorizesPaidActivation` are literal `false`
+   * on every branch, including `within_ceiling`.
+   */
+  intelligenceBudgetDecision(input: {
+    scopeKind: BudgetScope;
+    scopeId: string;
+    window: BudgetWindow;
+  }): OpsResult<BudgetEvaluation> {
+    if (!isBudgetScope(input.scopeKind)) {
+      return fail('invalid_input', `scopeKind must be one of: ${BUDGET_SCOPES.join(', ')}`);
+    }
+    if (!isBudgetWindow(input.window)) {
+      return fail('invalid_input', `window must be one of: ${BUDGET_WINDOWS.join(', ')}`);
+    }
+    const scopeId = (input.scopeId ?? '').trim();
+    if (scopeId === '') return fail('invalid_input', 'scopeId is required');
+    return ok(this.#budgetEvaluation({ scopeKind: input.scopeKind, scopeId, window: input.window }));
+  }
+
+  /**
+   * The routing PROPOSAL for a canonical task — a read, and a recommendation.
+   *
+   * The risk class is NOT a parameter: it is read from the task's canonical
+   * capability through `#capabilityFromStore`, so a caller cannot describe
+   * risky work as harmless to get a cheaper tier. Everything the caller does
+   * supply is a description of the WORK, and none of it can lower the floor
+   * below what the canonical risk class imposes.
+   *
+   * There is deliberately no provider or model parameter, and the returned
+   * shape has no field that could name one. Provider truth is the canonical
+   * binding's; a proposal that disagreed with it would simply be ignored by
+   * `OperatorQueue.claim`/`start`.
+   */
+  intelligenceRoutingProposal(input: {
+    taskId: string;
+    complexity: TaskComplexity;
+    contextSize: ContextSize;
+    workKind: WorkKind;
+    latency?: LatencyRequirement;
+    privacy?: PrivacyRequirement;
+    budgetScope?: { scopeKind: BudgetScope; scopeId: string; window: BudgetWindow };
+  }): OpsResult<RoutingProposal & { taskId: string; boundProvider: string | null }> {
+    const characteristics = this.#characteristicsFor(input);
+    if (!characteristics.ok) return characteristics;
+    const scope = input.budgetScope ?? DEPLOYMENT_BUDGET_SCOPE;
+    if (!isBudgetScope(scope.scopeKind) || !isBudgetWindow(scope.window) || !scope.scopeId) {
+      return fail('invalid_input', 'budgetScope must name a recognized scope kind, id and window');
+    }
+    const evaluation = this.#budgetEvaluation(scope);
+    const proposal = computeRoutingProposal({
+      characteristics: characteristics.data,
+      permittedTiers: evaluation.permittedTiers,
+      budgetDecision: evaluation.decision,
+    });
+    return ok({
+      ...proposal,
+      taskId: input.taskId,
+      // OBSERVED from the canonical payload, never chosen here.
+      boundProvider: this.#taskBoundProvider(input.taskId),
+    });
+  }
+
+  /**
+   * Build the task characteristics, taking the RISK CLASS from canonical truth.
+   *
+   * Fail closed: a task whose capability row cannot be read is treated as
+   * `founder_gate`, the strictest class — which forces the highest floor and a
+   * `critical_review` requirement. An unreadable capability must never be the
+   * cheap path.
+   */
+  #characteristicsFor(input: {
+    taskId: string;
+    complexity: TaskComplexity;
+    contextSize: ContextSize;
+    workKind: WorkKind;
+    latency?: LatencyRequirement;
+    privacy?: PrivacyRequirement;
+  }): OpsResult<TaskCharacteristics> {
+    const taskId = (input.taskId ?? '').trim();
+    if (taskId === '') return fail('invalid_input', 'taskId is required');
+    if (!(TASK_COMPLEXITIES as readonly string[]).includes(input.complexity)) {
+      return fail('invalid_input', `complexity must be one of: ${TASK_COMPLEXITIES.join(', ')}`);
+    }
+    if (!(CONTEXT_SIZES as readonly string[]).includes(input.contextSize)) {
+      return fail('invalid_input', `contextSize must be one of: ${CONTEXT_SIZES.join(', ')}`);
+    }
+    if (!(WORK_KINDS as readonly string[]).includes(input.workKind)) {
+      return fail('invalid_input', `workKind must be one of: ${WORK_KINDS.join(', ')}`);
+    }
+    const latency = input.latency ?? 'unspecified';
+    if (!(LATENCY_REQUIREMENTS as readonly string[]).includes(latency)) {
+      return fail('invalid_input', `latency must be one of: ${LATENCY_REQUIREMENTS.join(', ')}`);
+    }
+    const privacy = input.privacy ?? 'unrestricted';
+    if (!(PRIVACY_REQUIREMENTS as readonly string[]).includes(privacy)) {
+      return fail('invalid_input', `privacy must be one of: ${PRIVACY_REQUIREMENTS.join(', ')}`);
+    }
+    const fact = this.#runClaimFact(taskId);
+    if (!fact.exists) return fail('unknown_task', `Unknown task: ${taskId}`);
+    const capability = this.#capabilityFromStore(fact.capabilityId);
+    // Fail closed on an unreadable capability: the strictest class, never the
+    // convenient one.
+    const riskClass: RiskClass = capability ? capability.riskClass : 'founder_gate';
+    return ok({
+      complexity: input.complexity,
+      contextSize: input.contextSize,
+      workKind: input.workKind,
+      riskClass,
+      latency,
+      privacy,
+    });
+  }
+
+  /**
+   * RECORD a routing decision against a canonical task the calling worker is
+   * executing.
+   *
+   * Authority is the LIVE FENCED CLAIM, exactly as for a Phase 13 run: the
+   * worker carrying the work is the one entity that can honestly say which
+   * tier it used. It grants nothing — holding a claim already lets a worker
+   * execute; this only lets it record what kind of intelligence it applied.
+   *
+   * The tier is bounded in ONE direction only. A caller may record a tier
+   * STRONGER than the computed floor (a lane that used more than it needed
+   * should be able to say so, and the analytics then count it as provably
+   * avoidable when the work succeeded), and may never record one weaker, one
+   * outside the permitted set, or one below a required reviewer tier. That is
+   * law 6, and it is enforced here rather than advertised: there is no
+   * parameter that bypasses it and no code path that skips it.
+   */
+  recordIntelligenceDecision(input: {
+    taskId: string;
+    workerId: string;
+    fence: number;
+    label: string;
+    complexity: TaskComplexity;
+    contextSize: ContextSize;
+    workKind: WorkKind;
+    latency?: LatencyRequirement;
+    privacy?: PrivacyRequirement;
+    /** Optional, and bounded BELOW by the policy floor. Never below it. */
+    tier?: IntelligenceTier;
+    missionId?: string;
+    projectId?: string;
+    budgetScope?: { scopeKind: BudgetScope; scopeId: string; window: BudgetWindow };
+    idempotencyKey?: string;
+  }): OpsResult<{ decision: DecisionRecord; deduplicated: boolean }> {
+    const label = missionText('label', input.label, MAX_DECISION_LABEL_LENGTH, true);
+    if (!label.ok) return fail('invalid_input', label.message);
+    try {
+      assertNoSecretLikeContent({ label: label.value });
+    } catch {
+      return fail('invalid_input', 'The decision label looks like it contains a credential; nothing was recorded.');
+    }
+    if (!input.workerId) return fail('invalid_input', 'workerId is required');
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    const characteristics = this.#characteristicsFor(input);
+    if (!characteristics.ok) return characteristics;
+    if (!this.#intelligenceStorePresent) {
+      return fail('invalid_input', 'intelligence ledger unavailable on this database handle');
+    }
+    // Safe mode refuses a spend-adjacent append, like every other write that
+    // adds to a record HQ cannot currently stand behind.
+    const safeMode = this.#safeModeRefusal('record an intelligence routing decision');
+    if (safeMode) return safeMode;
+    const claim = this.#runClaimRefusal(
+      input.taskId,
+      input.workerId,
+      input.fence,
+      'record an intelligence routing decision',
+    );
+    if (claim) return claim;
+
+    const scope = input.budgetScope ?? DEPLOYMENT_BUDGET_SCOPE;
+    if (!isBudgetScope(scope.scopeKind) || !isBudgetWindow(scope.window) || !scope.scopeId) {
+      return fail('invalid_input', 'budgetScope must name a recognized scope kind, id and window');
+    }
+    const evaluation = this.#budgetEvaluation(scope);
+    const proposal = computeRoutingProposal({
+      characteristics: characteristics.data,
+      permittedTiers: evaluation.permittedTiers,
+      budgetDecision: evaluation.decision,
+    });
+    const chosen = this.#resolveRecordedTier(proposal, input.tier);
+    if (!chosen.ok) return chosen;
+
+    return this.#insertDecision({
+      taskId: input.taskId,
+      missionId: input.missionId?.trim() || null,
+      projectId: input.projectId?.trim() || null,
+      tier: chosen.data,
+      floorTier: proposal.floorTier,
+      requiredReviewTier: proposal.requiredReviewTier,
+      escalatedFrom: null,
+      escalationTrigger: null,
+      characteristics: characteristics.data,
+      permittedTiers: evaluation.permittedTiers,
+      budgetDecision: evaluation.decision,
+      label: label.value!,
+      issuedBy: input.workerId,
+      idempotencyKey: input.idempotencyKey?.trim() || null,
+    });
+  }
+
+  /**
+   * The one place a recorded tier is checked against the policy — law 6.
+   *
+   * Four refusals, and no path around them: a proposal that named no tier at
+   * all, a tier the policy does not permit, a tier below the computed floor,
+   * and a tier that does not satisfy a required reviewer tier.
+   */
+  #resolveRecordedTier(
+    proposal: RoutingProposal,
+    requested: IntelligenceTier | undefined,
+  ): OpsResult<IntelligenceTier> {
+    if (requested === undefined) {
+      if (proposal.tier == null) {
+        return fail(
+          'intelligence_routing_refused',
+          `No tier is admissible for this work under the current policy (${proposal.refusal}). ` +
+            BUDGET_POLICY_STATEMENT,
+          { refusal: proposal.refusal, floorTier: proposal.floorTier },
+        );
+      }
+      return ok(proposal.tier);
+    }
+    if (!isIntelligenceTier(requested)) {
+      return fail('invalid_input', `tier must be one of: ${INTELLIGENCE_TIERS.join(', ')}`);
+    }
+    if (proposal.budgetDecision === 'blocked') {
+      return fail(
+        'budget_ceiling_blocks',
+        'The budget ceiling for this scope has been reached, so no tier is recorded. A ceiling blocks; ' +
+          'raising it is a Founder act and it still grants no spend.',
+      );
+    }
+    if (!proposal.permittedTiers.includes(requested)) {
+      return fail(
+        'tier_not_permitted',
+        `Tier ${requested} is not in the permitted set for this scope ` +
+          `(${proposal.permittedTiers.join(', ') || 'none recorded'}). ` +
+          'Widening it is a Founder policy act, and it still activates no paid provider.',
+        { permittedTiers: [...proposal.permittedTiers] },
+      );
+    }
+    // The REVIEW requirement is checked BEFORE the floor, deliberately. The
+    // floor already includes the review requirement (it is one of the terms
+    // the max is taken over), so a tier that fails the review check always
+    // fails the floor check too — and `tier_below_policy_floor` would then be
+    // the only refusal a caller ever saw for the most important rule in the
+    // phase. Naming the actual reason is worth the ordering.
+    if (!proposalSatisfiesReviewRequirement({ tier: requested, requiredReviewTier: proposal.requiredReviewTier })) {
+      return fail(
+        'review_tier_required',
+        `This work requires an independent review at ${proposal.requiredReviewTier}, and tier ${requested} ` +
+          'does not satisfy it. A cheaper tier never bypasses a required reviewer tier, and this refusal ' +
+          'does not replace the canonical approval the Phase 8 gateway still requires.',
+        { requiredReviewTier: proposal.requiredReviewTier },
+      );
+    }
+    if (tierRank(requested) < tierRank(proposal.floorTier)) {
+      return fail(
+        'tier_below_policy_floor',
+        `Tier ${requested} is below the floor ${proposal.floorTier} this work's own recorded ` +
+          'characteristics and canonical risk class impose. Cheapest is bounded by "still meets the ' +
+          'requirement", never the other way round.',
+        { floorTier: proposal.floorTier },
+      );
+    }
+    return ok(requested);
+  }
+
+  /** The shared decision INSERT, used by both the first record and an escalation. */
+  #insertDecision(input: {
+    taskId: string;
+    missionId: string | null;
+    projectId: string | null;
+    tier: IntelligenceTier;
+    floorTier: IntelligenceTier;
+    requiredReviewTier: IntelligenceTier | null;
+    escalatedFrom: string | null;
+    escalationTrigger: EscalationTrigger | null;
+    characteristics: TaskCharacteristics | null;
+    permittedTiers: readonly IntelligenceTier[];
+    budgetDecision: BudgetDecision;
+    label: string;
+    issuedBy: string;
+    idempotencyKey: string | null;
+  }): OpsResult<{ decision: DecisionRecord; deduplicated: boolean }> {
+    const key = decisionIdempotencyKey({
+      taskId: input.taskId,
+      tier: input.tier,
+      escalatedFrom: input.escalatedFrom,
+      label: input.label,
+      idempotencyKey: input.idempotencyKey,
+    });
+    const id = `inteldec-${uuid()}`;
+    const at = nowIso();
+    const boundProvider = this.#taskBoundProvider(input.taskId);
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    privileged.reserve(() => {
+      const existing = loadDecisionByKey(this.#db, key);
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      this.#db
+        .prepare(
+          `INSERT INTO hq_intel_decisions
+             (id, task_id, mission_id, project_id, tier, floor_tier, required_review_tier, escalated_from,
+              escalation_trigger, bound_provider, characteristics, permitted_tiers, budget_decision, label,
+              issued_at, issued_by, process_id, decision_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.taskId,
+          input.missionId,
+          input.projectId,
+          input.tier,
+          input.floorTier,
+          input.requiredReviewTier,
+          input.escalatedFrom,
+          input.escalationTrigger,
+          boundProvider,
+          canonicalJson(input.characteristics ?? {}),
+          canonicalJson([...input.permittedTiers]),
+          input.budgetDecision,
+          input.label,
+          at,
+          input.issuedBy,
+          this.#processIdentity,
+          key,
+        );
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `intel_decision:${id}`,
+        status: null,
+        actor: input.issuedBy,
+        summary: `Intelligence routing decision recorded at tier ${input.tier} for task ${input.taskId}`,
+        detail: {
+          taskId: input.taskId,
+          tier: input.tier,
+          escalatedFrom: input.escalatedFrom,
+          boundProviderUnchanged: true,
+          executable: false,
+        },
+      });
+      privileged.appendEvidence({
+        taskId: input.taskId,
+        actor: input.issuedBy,
+        kind: input.escalatedFrom ? 'intelligence_decision_escalated' : 'intelligence_decision_recorded',
+        payload: {
+          decisionId: id,
+          tier: input.tier,
+          floorTier: input.floorTier,
+          requiredReviewTier: input.requiredReviewTier,
+          escalatedFrom: input.escalatedFrom,
+          boundProvider,
+          substitutedProvider: false,
+          executable: false,
+        },
+      });
+    });
+    const resolvedId = dedupedTo ?? id;
+    const decision = this.#decisionRecordFromStore(resolvedId);
+    if (!decision) return fail('invalid_input', 'the routing decision could not be read back');
+    return ok({ decision, deduplicated: dedupedTo != null });
+  }
+
+  /**
+   * Escalate a recorded decision to a stronger tier — law 7.
+   *
+   * The canonical identity is carried by REFERENCE off the prior decision:
+   * this method takes a decision id and a trigger, and has NO parameter for a
+   * task, mission or project, so an escalation is structurally incapable of
+   * moving work to different canonical work. It creates no authority: the new
+   * row is another recommendation, the claim it was recorded under is the same
+   * claim, and no approval, capability or binding changes.
+   */
+  escalateIntelligenceDecision(input: {
+    decisionId: string;
+    workerId: string;
+    fence: number;
+    trigger: EscalationTrigger;
+    idempotencyKey?: string;
+  }): OpsResult<{ decision: DecisionRecord; deduplicated: boolean; escalation: EscalationProposal }> {
+    if (!input.decisionId || !input.workerId) {
+      return fail('invalid_input', 'decisionId and workerId are required');
+    }
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    if (!isEscalationTrigger(input.trigger)) {
+      return fail('invalid_input', `trigger must be one of: ${ESCALATION_TRIGGERS.join(', ')}`);
+    }
+    if (!this.#intelligenceStorePresent) {
+      return fail('invalid_input', 'intelligence ledger unavailable on this database handle');
+    }
+    const safeMode = this.#safeModeRefusal('escalate an intelligence routing decision');
+    if (safeMode) return safeMode;
+    const prior = this.#decisionRecordFromStore(input.decisionId);
+    if (!prior) return fail('unknown_intelligence_decision', `Unknown routing decision: ${input.decisionId}`);
+    const claim = this.#runClaimRefusal(
+      prior.taskId,
+      input.workerId,
+      input.fence,
+      'escalate an intelligence routing decision',
+    );
+    if (claim) return claim;
+
+    const scope = DEPLOYMENT_BUDGET_SCOPE;
+    const evaluation = this.#budgetEvaluation(scope);
+    const escalation = deriveEscalation({
+      from: {
+        id: prior.id,
+        tier: prior.tier,
+        identity: { taskId: prior.taskId, missionId: prior.missionId, projectId: prior.projectId },
+        requiredReviewTier: prior.requiredReviewTier,
+      },
+      trigger: input.trigger,
+      permittedTiers: evaluation.permittedTiers,
+      budgetDecision: evaluation.decision,
+    });
+    if (!escalation.ok) {
+      return fail(
+        'escalation_refused',
+        `The decision was not escalated (${escalation.refusal}). ${ESCALATION_STATEMENT}`,
+        { refusal: escalation.refusal },
+      );
+    }
+    const inserted = this.#insertDecision({
+      // Copied from the ESCALATION, which copied them from the prior decision.
+      taskId: escalation.escalation.identity.taskId,
+      missionId: escalation.escalation.identity.missionId,
+      projectId: escalation.escalation.identity.projectId,
+      tier: escalation.escalation.toTier,
+      floorTier: isIntelligenceTier(prior.floorTier) ? prior.floorTier : escalation.escalation.toTier,
+      requiredReviewTier: prior.requiredReviewTier,
+      escalatedFrom: prior.id,
+      escalationTrigger: input.trigger,
+      characteristics: prior.characteristics,
+      permittedTiers: evaluation.permittedTiers,
+      budgetDecision: evaluation.decision,
+      label: prior.label,
+      issuedBy: input.workerId,
+      idempotencyKey: input.idempotencyKey?.trim() || null,
+    });
+    if (!inserted.ok) return inserted;
+    return ok({ ...inserted.data, escalation: escalation.escalation });
+  }
+
+  /**
+   * Record what the work at a recorded tier actually produced.
+   *
+   * Authorized by the live fenced claim on the DECISION's canonical task, so
+   * the entity that did the work is the one that reports on it. Exactly one
+   * outcome per decision, by construction: the key IS the decision id, backed
+   * by a UNIQUE index and the append-only trigger, so a second report cannot
+   * quietly overwrite the first.
+   */
+  recordIntelligenceOutcome(input: {
+    decisionId: string;
+    workerId: string;
+    fence: number;
+    result: DecisionResult;
+    reviewedByTier?: IntelligenceTier;
+    note?: string;
+  }): OpsResult<{ decision: DecisionRecord; deduplicated: boolean }> {
+    if (!input.decisionId || !input.workerId) {
+      return fail('invalid_input', 'decisionId and workerId are required');
+    }
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    if (!isDecisionResult(input.result)) {
+      return fail('invalid_input', `result must be one of: ${DECISION_RESULTS.join(', ')}`);
+    }
+    if (input.reviewedByTier !== undefined && !isIntelligenceTier(input.reviewedByTier)) {
+      return fail('invalid_input', `reviewedByTier must be one of: ${INTELLIGENCE_TIERS.join(', ')}`);
+    }
+    const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
+    if (!note.ok) return fail('invalid_input', note.message);
+    if (!this.#intelligenceStorePresent) {
+      return fail('invalid_input', 'intelligence ledger unavailable on this database handle');
+    }
+    const safeMode = this.#safeModeRefusal('record an intelligence outcome');
+    if (safeMode) return safeMode;
+    const decision = this.#decisionRecordFromStore(input.decisionId);
+    if (!decision) return fail('unknown_intelligence_decision', `Unknown routing decision: ${input.decisionId}`);
+    const claim = this.#runClaimRefusal(
+      decision.taskId,
+      input.workerId,
+      input.fence,
+      'record an intelligence outcome',
+    );
+    if (claim) return claim;
+
+    const key = decisionOutcomeKey(decision.id);
+    const id = `intelout-${uuid()}`;
+    const at = nowIso();
+    const privileged = this.#requirePrivilegedQueue();
+    let deduplicated = false;
+    privileged.reserve(() => {
+      const existing = this.#db
+        .prepare(`SELECT id FROM hq_intel_decision_outcomes WHERE outcome_key = ?`)
+        .get(key) as { id: string } | undefined;
+      if (existing) {
+        deduplicated = true;
+        return;
+      }
+      this.#db
+        .prepare(
+          `INSERT INTO hq_intel_decision_outcomes
+             (id, decision_id, result, reviewed_by_tier, note, recorded_at, recorded_by, outcome_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, decision.id, input.result, input.reviewedByTier ?? null, note.value ?? null, at, input.workerId, key);
+      privileged.appendEvidence({
+        taskId: decision.taskId,
+        actor: input.workerId,
+        kind: 'intelligence_outcome_recorded',
+        payload: {
+          decisionId: decision.id,
+          tier: decision.tier,
+          result: input.result,
+          reviewedByTier: input.reviewedByTier ?? null,
+          executable: false,
+        },
+      });
+    });
+    const updated = this.#decisionRecordFromStore(decision.id);
+    if (!updated) return fail('invalid_input', 'the routing decision could not be read back');
+    return ok({ decision: updated, deduplicated });
+  }
+
+  /**
+   * Record ONE observed usage/cost entry against a canonical task.
+   *
+   * Law 2 lands here. `normalizeCostFact` refuses an `unknown` provenance
+   * carrying an amount, a known provenance without one, an `estimated` amount
+   * with no stated basis, a negative or non-integer amount, and a missing or
+   * malformed currency. What that adds up to is that HQ can record "we do not
+   * know what this cost" and can record "we were billed 1234 minor units of
+   * USD", and cannot record anything in between that looks like the second
+   * while being the first.
+   *
+   * Authorized by the live fenced claim, like every other execution-audit
+   * write: the worker that made the call is the one that can say what it used.
+   */
+  recordIntelligenceCost(input: {
+    taskId: string;
+    workerId: string;
+    fence: number;
+    providerId: string;
+    modelId?: string | null;
+    decisionId?: string;
+    missionId?: string;
+    projectId?: string;
+    provenance: CostProvenance;
+    amountMinorUnits?: number | null;
+    currency?: string | null;
+    unitKind: CostUnitKind;
+    unitsObserved?: number | null;
+    basis?: string;
+    occurredAt?: string;
+    note?: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ entry: CostEntryRecord; deduplicated: boolean }> {
+    if (!input.workerId) return fail('invalid_input', 'workerId is required');
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    const providerId = (input.providerId ?? '').trim();
+    if (!isIdentifierSlug(providerId, MAX_PROVIDER_ID_LENGTH)) {
+      return fail('invalid_input', 'providerId must be a lowercase slug');
+    }
+    const modelIdRaw = (input.modelId ?? '').trim();
+    if (modelIdRaw !== '' && !isIdentifierSlug(modelIdRaw, MAX_MODEL_ID_LENGTH)) {
+      return fail('invalid_input', 'modelId must be a lowercase slug, or omitted when it was not observed');
+    }
+    const modelId = modelIdRaw === '' ? null : modelIdRaw;
+    const cost = normalizeCostFact({
+      provenance: input.provenance,
+      amountMinorUnits: input.amountMinorUnits ?? null,
+      currency: input.currency ?? null,
+      unitKind: input.unitKind,
+      basis: input.basis,
+    });
+    if (!cost.ok) {
+      return fail('cost_provenance_conflict', costRefusalMessage(cost.refusal), { refusal: cost.refusal });
+    }
+    const unitsObserved = input.unitsObserved ?? null;
+    if (unitsObserved != null && (!Number.isInteger(unitsObserved) || unitsObserved < 0)) {
+      return fail('invalid_input', 'unitsObserved must be a whole, non-negative count, or omitted when unobserved');
+    }
+    const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
+    if (!note.ok) return fail('invalid_input', note.message);
+    try {
+      assertNoSecretLikeContent({ note: note.value ?? '', basis: cost.fact.basis ?? '' });
+    } catch {
+      return fail('invalid_input', 'The note or basis looks like it contains a credential; nothing was recorded.');
+    }
+    if (!this.#intelligenceStorePresent) {
+      return fail('invalid_input', 'cost ledger unavailable on this database handle');
+    }
+    const safeMode = this.#safeModeRefusal('record an intelligence cost entry');
+    if (safeMode) return safeMode;
+    const claim = this.#runClaimRefusal(
+      input.taskId,
+      input.workerId,
+      input.fence,
+      'record an intelligence cost entry',
+    );
+    if (claim) return claim;
+
+    const at = nowIso();
+    const occurredAt = (input.occurredAt ?? '').trim() || at;
+    if (!/^\d{4}-\d{2}-\d{2}T/.test(occurredAt)) {
+      return fail('invalid_input', 'occurredAt must be an ISO-8601 instant, or omitted');
+    }
+    const key = costEntryKey({
+      taskId: input.taskId,
+      providerId,
+      modelId,
+      occurredAt,
+      unitKind: cost.fact.unitKind,
+      idempotencyKey: input.idempotencyKey?.trim() || null,
+    });
+    const id = `intelcost-${uuid()}`;
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    privileged.reserve(() => {
+      const existing = this.#db.prepare(`SELECT id FROM hq_intel_cost_entries WHERE entry_key = ?`).get(key) as
+        | { id: string }
+        | undefined;
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      this.#db
+        .prepare(
+          `INSERT INTO hq_intel_cost_entries
+             (id, task_id, mission_id, project_id, decision_id, provider_id, model_id, provenance,
+              amount_minor_units, currency, unit_kind, units_observed, basis, occurred_at, recorded_at,
+              recorded_by, note, entry_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.taskId,
+          input.missionId?.trim() || null,
+          input.projectId?.trim() || null,
+          input.decisionId?.trim() || null,
+          providerId,
+          modelId,
+          cost.fact.provenance,
+          cost.fact.amountMinorUnits,
+          cost.fact.currency,
+          cost.fact.unitKind,
+          unitsObserved,
+          cost.fact.basis,
+          occurredAt,
+          at,
+          input.workerId,
+          note.value ?? null,
+          key,
+        );
+      privileged.appendEvidence({
+        taskId: input.taskId,
+        actor: input.workerId,
+        kind: 'intelligence_cost_recorded',
+        payload: {
+          entryId: id,
+          providerId,
+          provenance: cost.fact.provenance,
+          amountKnown: cost.fact.state === 'known',
+          executable: false,
+        },
+      });
+    });
+    const resolvedId = dedupedTo ?? id;
+    const row = this.#costEntriesFromStore().find((entry) => entry.id === resolvedId);
+    if (!row) return fail('invalid_input', 'the cost entry could not be read back');
+    return ok({ entry: costEntryToRecord(row), deduplicated: dedupedTo != null });
+  }
+
+  /** One recorded routing decision, or null. A read; grants nothing. */
+  getIntelligenceDecision(id: string): DecisionRecord | null {
+    return this.#decisionRecordFromStore(id);
+  }
+
+  /** Bounded reads. The true total is always stated beside the page. */
+  listModelObservationsBounded(): {
+    observations: ModelObservationRow[];
+    total: number;
+    truncated: boolean;
+  } {
+    const all = this.#observationsFromStore().reverse();
+    const page = all.slice(0, OBSERVATION_READ_LIMIT);
+    return { observations: page, total: all.length, truncated: all.length > page.length };
+  }
+
+  listIntelligenceDecisionsBounded(filter?: { taskId?: string }): {
+    decisions: DecisionRecord[];
+    total: number;
+    truncated: boolean;
+  } {
+    const all = this.#listDecisionRecordsFromStore(filter).reverse();
+    const page = all.slice(0, DECISION_READ_LIMIT);
+    return { decisions: page, total: all.length, truncated: all.length > page.length };
+  }
+
+  listIntelligenceCostEntriesBounded(): {
+    entries: CostEntryRecord[];
+    total: number;
+    truncated: boolean;
+  } {
+    const all = this.#costEntriesFromStore().reverse().map(costEntryToRecord);
+    const page = all.slice(0, COST_READ_LIMIT);
+    return { entries: page, total: all.length, truncated: all.length > page.length };
+  }
+
+  listIntelligenceBudgetsBounded(): { budgets: BudgetRecord[]; total: number; truncated: boolean } {
+    if (!this.#intelligenceStorePresent) return { budgets: [], total: 0, truncated: false };
+    const all = loadBudgets(this.#db).reverse().map(budgetRowToRecord);
+    const page = all.slice(0, BUDGET_READ_LIMIT);
+    return { budgets: page, total: all.length, truncated: all.length > page.length };
+  }
+
+  /**
+   * Truthful analytics over what was actually recorded. A read: it computes no
+   * projection, converts no currency and invents no confidence.
+   */
+  intelligenceAnalytics(): IntelligenceAnalyticsView {
+    return summarizeIntelligenceAnalytics({
+      decisions: this.#listDecisionRecordsFromStore(),
+      costs: this.#costEntriesFromStore(),
+      observations: this.#observationsFromStore(),
+    });
+  }
+
+  /** The Founder-gated picture. Statements, counts, and two literal falses. */
+  hqIntelligencePosture(): IntelligencePostureView {
+    return {
+      storePresent: this.#intelligenceStorePresent,
+      defaultPermittedTiers: [...DEFAULT_PERMITTED_TIERS],
+      observations: this.#observationsFromStore().length,
+      decisions: this.#listDecisionRecordsFromStore().length,
+      costEntries: this.#costEntriesFromStore().length,
+      budgets: this.#intelligenceStorePresent ? loadBudgets(this.#db).length : 0,
+      routingStatement: INTELLIGENCE_ROUTING_STATEMENT,
+      costStatement: COST_LEDGER_STATEMENT,
+      budgetStatement: BUDGET_POLICY_STATEMENT,
+      escalationStatement: ESCALATION_STATEMENT,
+      latencyStatement: INTELLIGENCE_LATENCY_STATEMENT,
+      canActivatePaidProvider: false,
+      canSpend: false,
+    };
+  }
+
+  /**
+   * Counts over closed vocabularies for the UNAUTHENTICATED artifact.
+   *
+   * ENFORCEMENT-SAFE, and it has to be for the Phase 13 reason: this is the
+   * read on the path that produces `hq-snapshot.json`, so it uses the
+   * `#private` loaders and deliberately not `listIntelligenceDecisionsBounded()`
+   * or `hqIntelligencePosture()`.
+   *
+   * NO amount, currency, ceiling, provider id, model id, label, basis or note
+   * crosses — the section has no field that could carry one.
+   */
+  intelligenceSummary(): IntelligenceSnapshotView {
+    if (!this.#intelligenceStorePresent) return emptyIntelligenceSnapshot(false);
+    return summarizeIntelligence({
+      storePresent: true,
+      decisions: this.#listDecisionRecordsFromStore(),
+      costs: this.#costEntriesFromStore(),
+      observations: this.#observationsFromStore(),
+      budgets: loadBudgets(this.#db),
+    });
+  }
+
+  /**
+   * Whether this database carries the Phase 14 ledgers. False only for a
+   * read-only handle over a pre-Phase-14 file; the reads then answer
+   * empty/null and the snapshot states the absence rather than an empty store.
+   */
+  intelligenceStorePresent(): boolean {
+    return this.#intelligenceStorePresent;
+  }
+
   // ---- company memory (Phase 5 — Context + Mission Memory, #265) ----
 
   /**
@@ -12607,6 +14051,20 @@ export class HeadquarterOperations {
     query: CompanySearchQuery,
     options: { includeFounderOnly?: boolean } = {},
   ): OpsResult<CompanySearchView> {
+    // Phase 14: the free-text scan the BROWSER route already performed, moved
+    // to the facade so an in-process caller — a CLI, a lane, an orchestrator —
+    // cannot reach retrieval with unscanned text. The route keeps its own scan
+    // (it has a better refusal to give); this is the one every caller passes.
+    // See `assertRetrievalTextSafe` for why the seam matters more than it did
+    // while no real adapter existed.
+    try {
+      assertRetrievalTextSafe(
+        { text: query.text, project: query.project, tag: query.tag },
+        'search',
+      );
+    } catch (error) {
+      return fail('invalid_input', (error as RetrievalSafetyError).message);
+    }
     const normalized = normalizeSearchQuery(query);
     if (!normalized.ok) return fail('invalid_input', normalized.message);
     return ok(
@@ -12651,6 +14109,14 @@ export class HeadquarterOperations {
     if (question === '') return fail('invalid_input', 'question is required');
     if (question.length > MAX_QUESTION_LENGTH) {
       return fail('invalid_input', `question exceeds ${MAX_QUESTION_LENGTH} characters`);
+    }
+    // Phase 14: same reason as `searchCompany` above. A question is the field
+    // most likely to carry a pasted credential, and it is the field a semantic
+    // adapter would transmit.
+    try {
+      assertRetrievalTextSafe({ question }, 'ask');
+    } catch (error) {
+      return fail('invalid_input', (error as RetrievalSafetyError).message);
     }
     const askedAt = nowIso();
     const corpus = this.#searchCorpus();
