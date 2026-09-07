@@ -47,6 +47,10 @@ import { COLLABORATION_SNAPSHOT_LIMIT, type CollaborationSnapshotView } from '..
 import { SEARCH_SNAPSHOT_NOTE, type SearchIndexSnapshotView } from '../application/search-command.js';
 import { PRODUCT_SNAPSHOT_NOTE, type ProductFactorySnapshotView } from '../application/product-command.js';
 import {
+  RELIABILITY_SNAPSHOT_NOTE,
+  type ReliabilitySnapshotView,
+} from '../application/reliability-command.js';
+import {
   COMMAND_CENTER_PROVENANCE,
   COMMAND_CENTER_SNAPSHOT_LIMIT,
   type CommandCenterSnapshotView,
@@ -281,6 +285,24 @@ export interface HqSnapshot {
    * do any of those, and the note says so on the artifact itself.
    */
   productFactory?: SnapshotSection<ProductFactorySnapshotView>;
+  /**
+   * The Phase 13 reliability posture: COUNTS over closed vocabularies and
+   * three booleans, and nothing else.
+   *
+   * Deliberately carries no run label, task/mission/action id, worker id,
+   * correlation id, process identity, backup path, digest or finding DETAIL.
+   * Each of those is either an operational identifier a stranger has no
+   * business correlating, or free text — and the Phase 9/11/12 rule applies
+   * unchanged: an unauthenticated artifact has no vocabulary that classifies
+   * free text for an unauthenticated reader, so it publishes none.
+   *
+   * `safeMode` crosses because it is a statement HQ makes about ITSELF, and a
+   * reader who is told everything is fine while it is not has been lied to.
+   * A concluded count is a count of RECORDS, not evidence that anything
+   * reached the outside world — no reliability path can perform an external
+   * action, and the note says so on the artifact itself.
+   */
+  reliability?: SnapshotSection<ReliabilitySnapshotView>;
 }
 
 /**
@@ -356,6 +378,8 @@ export interface SnapshotSources {
   search?: { data: SearchIndexSnapshotView; provenance: Provenance };
   /** The Product Factory counts (Phase 12). Optional — omitted means no canonical handle was read. */
   productFactory?: { data: ProductFactorySnapshotView; provenance: Provenance };
+  /** The reliability counts (Phase 13). Optional — omitted means no canonical handle was read. */
+  reliability?: { data: ReliabilitySnapshotView; provenance: Provenance };
   /**
    * Per-worker provider declarations (Phase 4). Optional: an omitted map
    * means the building context holds no declaration truth — every worker's
@@ -406,6 +430,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       ...(sources.commandCenter ? [sources.commandCenter.provenance.mode] : []),
       ...(sources.search ? [sources.search.provenance.mode] : []),
       ...(sources.productFactory ? [sources.productFactory.provenance.mode] : []),
+      ...(sources.reliability ? [sources.reliability.provenance.mode] : []),
     ]),
     note: sources.note ?? null,
     counts: {
@@ -491,6 +516,9 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
     ...(sources.search ? { search: section(sources.search.provenance, sources.search.data) } : {}),
     ...(sources.productFactory
       ? { productFactory: section(sources.productFactory.provenance, sources.productFactory.data) }
+      : {}),
+    ...(sources.reliability
+      ? { reliability: section(sources.reliability.provenance, sources.reliability.data) }
       : {}),
   };
 
@@ -700,6 +728,13 @@ export function liveSnapshotFromOperations(
   // safe is therefore not a filter but the SHAPE of the section: it is
   // incapable of carrying a name, a locator, a digest or an id.
   const productFactory = ops.productFactorySummary();
+  // Phase 13 reliability: counts, three booleans and a finding map keyed by
+  // the closed integrity vocabulary. Same shape argument as Phase 12 — the
+  // section is incapable of carrying an id, a path, a digest or a detail
+  // string — plus one deliberate addition: safeMode crosses, because a
+  // reader told everything is fine while HQ has said otherwise about itself
+  // has been lied to, and that is the one thing this phase exists to prevent.
+  const reliability = ops.reliabilitySummary();
 
   return buildHqSnapshot({
     workerProviders,
@@ -929,6 +964,39 @@ export function liveSnapshotFromOperations(
               ? null
               : 'The hq_briefs ledger does not exist on this database handle, so no brief was ever issued ' +
                 'through it and none can be; briefs.total states that as 0 rather than implying an empty ledger.',
+          ]
+            .filter(Boolean)
+            .join(' ') || undefined,
+      },
+    },
+    reliability: {
+      data: reliability,
+      provenance: {
+        mode,
+        source:
+          'hq_reliability_runs / hq_reliability_run_events / hq_reliability_backups plus the latched ' +
+          'integrity verdict, via HeadquarterOperations.reliabilitySummary',
+        asOf: at,
+        note:
+          [
+            RELIABILITY_SNAPSHOT_NOTE,
+            reliability.storePresent
+              ? null
+              : 'This database predates the Phase 13 run ledger and was opened read-only, so no run store ' +
+                'exists to read. 0 states that absence; nothing was migrated.',
+            reliability.safeMode
+              ? 'HQ is in SAFE MODE: it has found that its own stored record cannot currently be trusted, ' +
+                'and it is refusing the acts that would add to, approve, release or execute against that ' +
+                'record. The findings map names the categories; no detail crosses.'
+              : null,
+            reliability.assessmentDepth === 'structural'
+              ? 'The verdict behind these counts came from a STRUCTURAL assessment — the schema catalogue and ' +
+                'the durability pragmas. It is not a claim that a full integrity_check has been run.'
+              : null,
+            reliability.needsReconciliation > 0
+              ? `${reliability.needsReconciliation} run(s) stand at an unknown outcome awaiting explicit ` +
+                'reconciliation. HQ never retries an uncertain outcome automatically.'
+              : null,
           ]
             .filter(Boolean)
             .join(' ') || undefined,

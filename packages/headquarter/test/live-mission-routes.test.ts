@@ -182,7 +182,17 @@ describe('the write surface is stated, not inferred', () => {
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.productLifecycle);
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.productArtifacts);
     expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.productDetail);
-    expect(CONTROL_WRITE_ROUTES).toHaveLength(26);
+    // Phase 13: two reliability writes — classify the runs whose carrying
+    // process is gone, and reconcile one whose outcome HQ does not know. Both
+    // append to an append-only ledger and reach nothing outside HQ; neither
+    // retries anything, and there is no third write, because opening a run and
+    // recording its attempts are worker acts under a live fenced claim and a
+    // browser holds no claim. The reliability READ is a GET and stays off the
+    // write surface.
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.reliabilityRecover);
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.reliabilityReconcile);
+    expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.reliability);
+    expect(CONTROL_WRITE_ROUTES).toHaveLength(28);
   });
 });
 

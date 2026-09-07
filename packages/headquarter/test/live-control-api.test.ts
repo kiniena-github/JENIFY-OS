@@ -415,7 +415,7 @@ describe('every hostile caller is refused, and nothing is written', () => {
     }
   });
 
-  it('exposes no generic mutation surface — the whole route table is forty-one entries', () => {
+  it('exposes no generic mutation surface — the whole route table is forty-four entries', () => {
     // Nine since Phase 3 (issue #254); seventeen since Phase 4 (issue #262);
     // twenty-one since Phase 5+6 (issue #265): the memory GET+POST, the two
     // parameterized memory reads (search, context), and the one orchestrate
@@ -446,6 +446,17 @@ describe('every hostile caller is refused, and nothing is written', () => {
     // release is an external action and the Phase 8 gateway is its only
     // path. No product route takes an adapter, a provider, a target or a
     // payload.
+    // Forty-four since Phase 13: the reliability GET, the recovery POST and
+    // the run-reconcile POST — write surface twenty-six to twenty-eight. What
+    // is NOT here is again the point. There is no route that opens a run,
+    // starts an attempt or records an outcome, because those are worker acts
+    // under a live fenced claim and a browser holds no claim — the same reason
+    // authorize and execute have no route. There is no route that runs the
+    // full integrity assessment or records a verified backup, because both
+    // read the local filesystem and re-latch a safety posture and belong to a
+    // process with the machine in front of it. And there is no route, and no
+    // facade method, that CLEARS safe mode by assertion: only an assessment
+    // that finds nothing blocking clears it.
     // Each widening of the write surface beyond the 2026-08-28 three is
     // itself Founder-approved and recorded in docs/JENIFY_DECISIONS.md. What
     // this assertion protects is unchanged — no route takes a table, a
@@ -483,6 +494,9 @@ describe('every hostile caller is refused, and nothing is written', () => {
       '/api/hq/control/projects',
       '/api/hq/control/projects/transition',
       '/api/hq/control/projects/update',
+      '/api/hq/control/reliability',
+      '/api/hq/control/reliability/reconcile',
+      '/api/hq/control/reliability/recover',
       '/api/hq/control/search',
       '/api/hq/control/session',
       '/api/hq/control/state',

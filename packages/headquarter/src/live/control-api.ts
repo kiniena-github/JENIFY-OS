@@ -193,6 +193,21 @@ import {
   type ProductLifecycleState,
   type ProductRecord,
 } from '../application/product-command.js';
+import {
+  RELIABILITY_COMMAND_CAPABILITY,
+  RUN_FAILURE_CATEGORIES,
+  RUN_INTERRUPTION_REASONS,
+  RUN_KINDS,
+  RUN_OUTCOMES,
+  RUN_RECONCILE_DECISIONS,
+  RUN_STATES,
+  isRunInterruptionReason,
+  isRunReconcileDecision,
+  reliabilityCommandCapabilityState,
+  type RunInterruptionReason,
+  type RunRecord,
+} from '../application/reliability-command.js';
+import { HQ_INTEGRITY_FINDINGS } from '../store/integrity.js';
 import { MEMORY_KINDS, isMemoryKind, isMemoryPrivacy } from '../memory/schema.js';
 import { isArchiveStatus } from '../archive/schema.js';
 import { PROVIDERS, providerConnectivity } from '../routing/providers.js';
@@ -387,6 +402,38 @@ export const CONTROL_ROUTES = {
   productDetail: `${CONTROL_API_PREFIX}/products/detail`,
   productLifecycle: `${CONTROL_API_PREFIX}/products/lifecycle`,
   productArtifacts: `${CONTROL_API_PREFIX}/products/artifacts`,
+  /**
+   * Phase 13: advanced reliability. The GET is the Founder's whole picture of
+   * whether HQ can currently be believed — the latched integrity verdict and
+   * its categorical findings, the durability posture, this process's identity,
+   * what the run ledger is holding, the verified recovery points, and a COUNT
+   * of interrupted canonical work owned by other ledgers with the canonical
+   * path that resolves each. It re-assesses nothing and latches nothing: a GET
+   * must never be the thing that changes a safety posture.
+   *
+   * Two POSTs, and deliberately no more. `recover` classifies this ledger's
+   * runs whose carrying process is gone; `reconcile` closes one whose outcome
+   * HQ does not know, after a human checked the real world.
+   *
+   * What has NO route, and why:
+   *  - opening a run, starting an attempt and recording an outcome are WORKER
+   *    acts performed under a live fenced claim, exactly like authorize and
+   *    execute in Phase 8. A browser holds no claim, so it gets no route;
+   *  - a full integrity assessment and a verified-backup record are Founder
+   *    acts that read the local filesystem and re-latch a safety posture. They
+   *    belong to a process with the machine in front of it, not to a page;
+   *  - there is no route, and no facade method, that CLEARS safe mode by
+   *    assertion. Only an assessment that finds nothing blocking clears it.
+   *
+   * `reconcile` takes no step-up and `recover` takes none either, and that is
+   * a decision rather than an omission: neither can execute anything, both are
+   * appends to an append-only ledger, and a reconciliation is the act that
+   * RESOLVES an irreversible effect somebody already checked rather than one
+   * that causes it.
+   */
+  reliability: `${CONTROL_API_PREFIX}/reliability`,
+  reliabilityRecover: `${CONTROL_API_PREFIX}/reliability/recover`,
+  reliabilityReconcile: `${CONTROL_API_PREFIX}/reliability/reconcile`,
 } as const;
 
 /**
@@ -424,6 +471,11 @@ export const CONTROL_WRITE_ROUTES: readonly string[] = [
   CONTROL_ROUTES.products,
   CONTROL_ROUTES.productLifecycle,
   CONTROL_ROUTES.productArtifacts,
+  // Phase 13: recovery classification and run reconciliation. Both append to
+  // an append-only ledger and reach nothing outside HQ; the reliability READ
+  // is a GET and stays off the write surface.
+  CONTROL_ROUTES.reliabilityRecover,
+  CONTROL_ROUTES.reliabilityReconcile,
 ];
 
 export interface ControlResponse {
@@ -715,7 +767,8 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.search ||
         path === CONTROL_ROUTES.ask ||
         path === CONTROL_ROUTES.products ||
-        path === CONTROL_ROUTES.productDetail)) ||
+        path === CONTROL_ROUTES.productDetail ||
+        path === CONTROL_ROUTES.reliability)) ||
     (method === 'POST' &&
       (path === CONTROL_ROUTES.orders ||
         path === CONTROL_ROUTES.approve ||
@@ -742,7 +795,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.commandCenterBrief ||
         path === CONTROL_ROUTES.products ||
         path === CONTROL_ROUTES.productLifecycle ||
-        path === CONTROL_ROUTES.productArtifacts));
+        path === CONTROL_ROUTES.productArtifacts ||
+        path === CONTROL_ROUTES.reliabilityRecover ||
+        path === CONTROL_ROUTES.reliabilityReconcile));
   if (!known) {
     // Deny by default, and say nothing about what does exist.
     return refusal(404, 'not_found', 'No such HQ control route.');
@@ -1084,6 +1139,10 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     return productDetailRoute(request, deps, founder, audit, now);
   }
 
+  if (method === 'GET' && path === CONTROL_ROUTES.reliability) {
+    return reliabilityRoute(deps, founder, audit, now);
+  }
+
   if (path === CONTROL_ROUTES.orders) return createOrder(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.approve) return approve(request, deps, founder, audit, now);
   if (path === CONTROL_ROUTES.missions) return commandMission(request, deps, founder, audit);
@@ -1121,6 +1180,12 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
   if (path === CONTROL_ROUTES.products) return createProductRoute(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.productLifecycle) return moveProductLifecycleRoute(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.productArtifacts) return registerArtifactRoute(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.reliabilityRecover) {
+    return recoverRunsRoute(request, deps, founder, audit, now);
+  }
+  if (path === CONTROL_ROUTES.reliabilityReconcile) {
+    return reconcileRunRoute(request, deps, founder, audit);
+  }
   return deny(request, deps, founder, audit);
 }
 
@@ -1258,6 +1323,22 @@ function controlAvailability(
       writable &&
       principal?.originateCapabilities.includes(PRODUCT_COMMAND_CAPABILITY.id) === true &&
       productCommandCapabilityState(capabilityRowFor(deps.ops, PRODUCT_COMMAND_CAPABILITY.id)) === 'enabled',
+    // Phase 13: recovering interrupted runs and reconciling one are the
+    // Founder gate itself (approval authority), so they ride `mayApprove`
+    // exactly as `actionReconcile` does — neither takes a capability grant,
+    // because neither is an origination of work.
+    reliabilityRecover: mayApprove,
+    // The reliability COMMAND capability (`hq.reliability_command`) gates the
+    // two acts that have no route at all — the full integrity assessment and
+    // the verified-backup record — so it is advertised as a fact about this
+    // principal, never as a button. Stated rather than omitted: a console that
+    // could not see the capability was missing would have no way to explain
+    // why an assessment it was told to run does not exist as a control.
+    reliabilityCommand:
+      writable &&
+      principal?.originateCapabilities.includes(RELIABILITY_COMMAND_CAPABILITY.id) === true &&
+      reliabilityCommandCapabilityState(capabilityRowFor(deps.ops, RELIABILITY_COMMAND_CAPABILITY.id)) ===
+        'enabled',
     mutationsEnabled: deps.mutationsEnabled !== false,
     trustedOriginConfigured: originsUsable,
     // Stated separately from `trustedOriginConfigured`, because they answer
@@ -1449,6 +1530,8 @@ function controlErrorStatus(code: string): number {
     case 'unknown_session':
     case 'unknown_contribution':
     case 'unknown_product':
+    // Phase 13: the run ledger does not hold that id.
+    case 'unknown_run':
       return 404;
     case 'invalid_mission_transition':
     case 'mission_status_changed':
@@ -1484,6 +1567,11 @@ function controlErrorStatus(code: string): number {
     // lifecycle admits.
     case 'product_lifecycle_conflict':
     case 'invalid_product_lifecycle_move':
+    // Phase 13: the run moved, or the request conflicts with what the ledger
+    // records about it.
+    case 'run_state_conflict':
+    case 'run_attempt_refused':
+    case 'stale_run_claim':
       return 409;
     case 'unknown_capability':
     case 'capability_disabled':
@@ -1497,6 +1585,10 @@ function controlErrorStatus(code: string): number {
     // The switch stops execution reachability; a 403 says "nothing in this
     // request will help until it is released" (the order-path mapping).
     case 'kill_switch_engaged':
+    // Phase 13: HQ has said, about ITSELF, that its stored record cannot
+    // currently be trusted. Like the kill switch, nothing in the request will
+    // help until that is resolved, so it is a 403 rather than a 400.
+    case 'safe_mode_engaged':
       return 403;
     default:
       return 400;
@@ -3560,4 +3652,193 @@ function deny(
   }
   audit('allowed', 'denied', founder);
   return safe(json(200, { ok: true, taskId, status: result.data.status }));
+}
+
+/* ------------------------------------------------------------------ */
+/* Phase 13 — advanced reliability                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Everything the browser is told about one run.
+ *
+ * The derived record is already free of the durable reservation identities —
+ * `run_key` and `attempt_key` never leave the store, because a reservation is
+ * not a thing a reader needs and not a thing a caller should be able to echo
+ * back. What this projection additionally does is BOUND the history, so one
+ * long-lived run cannot make the response unbounded, and state the true total
+ * beside the page (the standing bounded-read rule).
+ */
+const RUN_EVENT_WIRE_LIMIT = 50;
+
+function runView(run: RunRecord): Record<string, unknown> {
+  const events = run.events.slice(-RUN_EVENT_WIRE_LIMIT);
+  return {
+    id: run.id,
+    runKind: run.runKind,
+    taskId: run.taskId,
+    missionId: run.missionId,
+    actionId: run.actionId,
+    capabilityId: run.capabilityId,
+    workerId: run.workerId,
+    claimFence: run.claimFence,
+    processId: run.processId,
+    label: run.label,
+    openedAt: run.openedAt,
+    state: run.state,
+    outcome: run.outcome,
+    failureCategory: run.failureCategory,
+    attempts: run.attempts,
+    nextGeneration: run.nextGeneration,
+    lastCorrelationId: run.lastCorrelationId,
+    interruption: run.interruption,
+    reconciliation: run.reconciliation,
+    admitsAttempt: run.admitsAttempt,
+    needsReconciliation: run.needsReconciliation,
+    events,
+    eventTotal: run.events.length,
+    eventsTruncated: run.events.length > events.length,
+    externalActionTaken: false,
+  };
+}
+
+/**
+ * The reliability picture. A pure READ: it re-assesses nothing, latches
+ * nothing and writes nothing, so refreshing the page can never change what HQ
+ * refuses.
+ *
+ * It carries `safeMode` and the finding DETAIL, which the unauthenticated
+ * snapshot deliberately does not — this route is behind the resolved Founder,
+ * and a Founder who cannot see WHY HQ stopped trusting itself cannot fix it.
+ */
+function reliabilityRoute(
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const posture = deps.ops.hqReliabilityPosture();
+  const runs = deps.ops.listRunsBounded();
+  const backups = deps.ops.listVerifiedBackupsBounded();
+  audit('allowed', 'reliability_posture', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      posture,
+      runs: runs.runs.map(runView),
+      runTotal: runs.total,
+      runsTruncated: runs.truncated,
+      backups: backups.backups,
+      backupTotal: backups.total,
+      backupsTruncated: backups.truncated,
+      vocabulary: {
+        runKinds: [...RUN_KINDS],
+        runStates: [...RUN_STATES],
+        runOutcomes: [...RUN_OUTCOMES],
+        failureCategories: [...RUN_FAILURE_CATEGORIES],
+        interruptionReasons: [...RUN_INTERRUPTION_REASONS],
+        reconcileDecisions: [...RUN_RECONCILE_DECISIONS],
+        integrityFindings: [...HQ_INTEGRITY_FINDINGS],
+      },
+    }),
+  );
+}
+
+/**
+ * Classify the runs whose carrying process is gone.
+ *
+ * It never retries anything and it cannot: an interrupted attempt that could
+ * have reached the outside world becomes `outcome_unknown`, and the only path
+ * out of that is an explicit reconciliation by an independent principal.
+ */
+function recoverRunsRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const reason = stringField(request.body, 'reason');
+  if (reason !== undefined && !isRunInterruptionReason(reason)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(
+      400,
+      'invalid_input',
+      `reason must be one of: ${RUN_INTERRUPTION_REASONS.join(', ')}.`,
+    );
+  }
+  const result = deps.ops.recoverInterruptedRuns({
+    requestedBy: founder.principal.id,
+    reason: reason as RunInterruptionReason | undefined,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', `runs_recovered_${result.data.interruptedTotal}`, founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      report: result.data,
+      retriedAnything: false,
+      externalActionTaken: false,
+    }),
+  );
+}
+
+/**
+ * Close a run whose outcome HQ does not know, after a human checked the real
+ * world. Independence and the idempotency rule are enforced by the facade, not
+ * here — this route resolves the Founder and forwards.
+ */
+function reconcileRunRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const runId = stringField(request.body, 'runId') ?? '';
+  const decision = stringField(request.body, 'decision') ?? '';
+  const note = stringField(request.body, 'note') ?? '';
+  if (!runId || !decision) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'runId and decision are required.');
+  }
+  if (!isRunReconcileDecision(decision)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(
+      400,
+      'invalid_input',
+      `decision must be one of: ${RUN_RECONCILE_DECISIONS.join(', ')}.`,
+    );
+  }
+  try {
+    assertBrowserSafe({ note }, 'reliability');
+  } catch {
+    audit('refused', 'unsafe_reliability_content', founder);
+    return refusal(
+      400,
+      'unsafe_reliability_content',
+      'The note looks like it contains credential material, so it was refused rather than stored.',
+    );
+  }
+  const result = deps.ops.reconcileRun({
+    runId,
+    decision,
+    note,
+    requestedBy: founder.principal.id,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', `run_reconciled_${decision}`, founder);
+  return safe(
+    json(200, {
+      ok: true,
+      run: runView(result.data.run),
+      externalActionTaken: false,
+    }),
+  );
 }
