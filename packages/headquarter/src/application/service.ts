@@ -580,6 +580,7 @@ import {
   INTEGRITY_DEPTH_STATEMENT,
   SAFE_MODE_STATEMENT,
   fullIntegrity,
+  missingImmutabilityGuards,
   structuralIntegrity,
   verifyHqBackupFile,
   type HqIntegrityReport,
@@ -2194,6 +2195,15 @@ export class HeadquarterOperations {
         enabled: !!row.enabled,
       };
     };
+    // Phase 13: observe the append-only guards AS THE FILE WAS FOUND, before
+    // any `ensure*Schema` call below re-creates a missing one. Those calls are
+    // `CREATE TRIGGER IF NOT EXISTS` and therefore repair a dropped guard on
+    // every construction; a check run after them would find a healthy file and
+    // report one, which would mean HQ silently repaired a tamper and then said
+    // nothing about it. HQ can re-create the guards it declares; it cannot know
+    // what was written to the file while they were absent, and safe mode is
+    // exactly the posture for that.
+    const guardsMissingAsFound = missingImmutabilityGuards(db);
     ensureApplicationSchema(db);
     ensureMissionCommandSchema(db);
     ensureProjectCommandSchema(db);
@@ -2224,6 +2234,7 @@ export class HeadquarterOperations {
     // The cheap half, at every construction. See the field's own note for why
     // the expensive half is an explicit act instead.
     this.#integrityReport = structuralIntegrity(db, {
+      guardsMissingAsFound,
       reliabilitySchemaPresent: this.#reliabilityStorePresent,
     });
     this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
@@ -7465,6 +7476,11 @@ export class HeadquarterOperations {
     if (refusedCapability) return refusedCapability;
 
     const before = this.#integrityReport.safeMode;
+    // Deliberately WITHOUT `guardsMissingAsFound`: a fresh assessment asks
+    // about the file as it stands NOW, which is the only way a boot-time
+    // finding can ever be cleared. That is also why clearing takes an
+    // assessment rather than a restart — a restart would re-create the guards
+    // and then report the file it had just repaired.
     const report = fullIntegrity(this.#db, {
       verifyEvidenceChain: () => this.queue.evidence.verifyChain(),
       reliabilitySchemaPresent: this.#reliabilityStorePresent,

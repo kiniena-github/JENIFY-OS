@@ -278,17 +278,39 @@ export function missingImmutabilityGuards(db: HqDatabase): string[] {
  */
 export function structuralIntegrity(
   db: HqDatabase,
-  options: { reliabilitySchemaPresent?: boolean } = {},
+  options: {
+    reliabilitySchemaPresent?: boolean;
+    /**
+     * The missing-guard list AS THE FILE WAS FOUND, observed before this
+     * process re-ensured any schema.
+     *
+     * This matters because the ensure functions are `CREATE TRIGGER IF NOT
+     * EXISTS` and therefore RESTORE a dropped guard on every construction. A
+     * check run after them would find a healthy file and report one — HQ would
+     * silently repair the tamper and then say nothing about it. So the
+     * observation is taken first and passed in here, and safe mode engages on
+     * what was found rather than on what was subsequently repaired: HQ can
+     * re-create the guards it declares, but it cannot know what was done to
+     * the file while they were absent.
+     */
+    guardsMissingAsFound?: readonly string[];
+  } = {},
 ): HqIntegrityReport {
   const observations: HqIntegrityObservation[] = [];
   const durability = readDurabilityPosture(db);
 
-  const missing = missingImmutabilityGuards(db);
+  const missing = options.guardsMissingAsFound
+    ? [...options.guardsMissingAsFound]
+    : missingImmutabilityGuards(db);
   if (missing.length > 0) {
     observations.push({
       finding: 'append_only_guard_missing',
       blocking: true,
-      detail: `${missing.length} append-only guard(s) declared by the schema are absent from this file: ${missing.join(', ')}`,
+      detail:
+        `${missing.length} append-only guard(s) declared by the schema were absent from this file: ` +
+        `${missing.join(', ')}. HQ re-creates the guards it declares on every boot, so they may stand again ` +
+        `now — but it cannot know what was written while they were gone, so the finding stands until a full ` +
+        `assessment says otherwise.`,
     });
   }
 
@@ -336,6 +358,8 @@ export function fullIntegrity(
   options: {
     verifyEvidenceChain?: () => number | null;
     reliabilitySchemaPresent?: boolean;
+    /** See `structuralIntegrity`. Omitted here means "check the file as it stands now". */
+    guardsMissingAsFound?: readonly string[];
   } = {},
 ): HqIntegrityReport {
   const structural = structuralIntegrity(db, options);
@@ -530,15 +554,28 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
     return { ...empty, refusals: ['not_a_readable_sqlite_database'], digest, sizeBytes };
   }
   try {
+    // Readability FIRST, and as a real query rather than as an assumption:
+    // better-sqlite3 opens lazily, so a file of poetry becomes an error at the
+    // first statement rather than at `new Database`. Distinguishing "not a
+    // database at all" from "a database that fails its integrity check" is the
+    // difference between a wrong path and a lost backup, so the two refusals
+    // stay separate.
+    let tables: Set<string>;
+    try {
+      tables = tableNames(db);
+    } catch {
+      return { ...empty, refusals: ['not_a_readable_sqlite_database'], digest, sizeBytes };
+    }
+
     let integrityVerdict: string;
     try {
       const rows = db.prepare(`PRAGMA integrity_check`).all() as Record<string, unknown>[];
       const values = rows.map((row) => String(Object.values(row)[0] ?? '')).filter((value) => value !== '');
       integrityVerdict = values.length === 1 && values[0] === 'ok' ? 'ok' : values.join('; ');
     } catch (error) {
+      // A check that could not run is not a check that passed.
       integrityVerdict = `integrity_check could not run: ${error instanceof Error ? error.message : 'unknown error'}`;
     }
-    const tables = tableNames(db);
     const refusals: BackupRefusalReason[] = [];
     if (integrityVerdict !== 'ok') refusals.push('integrity_check_failed');
     if (!tables.has(HQ_MARKER_TABLE)) refusals.push('not_an_hq_database');

@@ -78,6 +78,18 @@ export function isRunKind(value: unknown): value is RunKind {
 }
 
 /**
+ * What a STORED run kind can be once it has been read back — the same shape,
+ * and the same reason, as `StoredRunEventKind` below. An append-only table
+ * admits an APPEND, so a row carrying a kind outside the vocabulary is
+ * representable even though no facade path produces one. It is carried as
+ * `unrecognized` rather than quietly coerced into a real kind, because a count
+ * that silently reported a forged string as `orchestration` would be a wrong
+ * count published to an unauthenticated reader.
+ */
+export const STORED_RUN_KIND_UNRECOGNIZED = 'unrecognized' as const;
+export type StoredRunKind = RunKind | typeof STORED_RUN_KIND_UNRECOGNIZED;
+
+/**
  * The run's own categorical state, DERIVED from its append-only events.
  *
  * Deliberately disjoint from `ActivityStatus` (the canonical task vocabulary),
@@ -167,6 +179,21 @@ export const RUN_EVENT_KINDS = [
   'reconciled',
 ] as const;
 export type RunEventKind = (typeof RUN_EVENT_KINDS)[number];
+
+/**
+ * What a STORED event kind can be once it has been read back.
+ *
+ * `unrecognized` is not writable and is not a kind of event — it is the
+ * reading HQ gives to a row whose `kind` is outside the closed vocabulary.
+ * `hq_reliability_run_events` is append-only, and an APPEND is the write its
+ * triggers deliberately permit, so a forged kind is representable in the file
+ * even though no facade path can produce one. Carrying it as a distinct
+ * reading rather than silently coercing it to a real kind is what lets the
+ * derivation FAIL CLOSED on it: an event HQ cannot interpret means HQ does not
+ * know what happened, which is `needs_reconciliation`, not a conclusion.
+ */
+export const STORED_RUN_EVENT_UNRECOGNIZED = 'unrecognized' as const;
+export type StoredRunEventKind = RunEventKind | typeof STORED_RUN_EVENT_UNRECOGNIZED;
 
 /**
  * Reconciliation reuses the Phase 8 vocabulary VERBATIM rather than defining a
@@ -466,7 +493,7 @@ export function backupRecordKey(input: { backupPath: string; contentDigest: stri
 export interface RunRow {
   seq: number;
   id: string;
-  runKind: RunKind;
+  runKind: StoredRunKind;
   taskId: string;
   missionId: string | null;
   actionId: string | null;
@@ -484,7 +511,7 @@ export interface RunEventRow {
   seq: number;
   id: string;
   runId: string;
-  kind: RunEventKind;
+  kind: StoredRunEventKind;
   actor: string;
   at: string;
   processId: string;
@@ -510,8 +537,10 @@ function rowToRun(r: Record<string, unknown>): RunRow {
     seq: r.seq as number,
     id: r.id as string,
     // Read through the vocabulary check: a legal APPEND carrying a string
-    // outside the closed set must not become a typed member by assertion.
-    runKind: (isRunKind(r.run_kind) ? r.run_kind : 'orchestration') as RunKind,
+    // outside the closed set must not become a typed member by assertion, and
+    // must not be coerced into a real kind either — see
+    // `STORED_RUN_KIND_UNRECOGNIZED`.
+    runKind: (isRunKind(r.run_kind) ? r.run_kind : STORED_RUN_KIND_UNRECOGNIZED) as StoredRunKind,
     taskId: r.task_id as string,
     missionId: (r.mission_id as string | null) ?? null,
     actionId: (r.action_id as string | null) ?? null,
@@ -532,10 +561,12 @@ function rowToRunEvent(r: Record<string, unknown>): RunEventRow {
     seq: r.seq as number,
     id: r.id as string,
     runId: r.run_id as string,
-    // An unrecognized kind is read as `interrupted` with no detail, which is
-    // the FAIL-CLOSED reading: an event HQ cannot interpret must not be able
-    // to conclude a run, and must not be able to look like an attempt either.
-    kind: ((RUN_EVENT_KINDS as readonly string[]).includes(kind) ? kind : 'interrupted') as RunEventKind,
+    // Read through the vocabulary, never asserted into it. See
+    // `STORED_RUN_EVENT_UNRECOGNIZED` for why an unreadable kind is carried as
+    // such rather than coerced into a real one.
+    kind: ((RUN_EVENT_KINDS as readonly string[]).includes(kind)
+      ? kind
+      : STORED_RUN_EVENT_UNRECOGNIZED) as StoredRunEventKind,
     actor: r.actor as string,
     at: r.at as string,
     processId: r.process_id as string,
@@ -610,7 +641,7 @@ export function loadBackupRecords(db: HqDatabase): BackupRow[] {
 /* ------------------------------------------------------------------ */
 
 export interface RunEventView {
-  kind: RunEventKind;
+  kind: StoredRunEventKind;
   actor: string;
   at: string;
   processId: string;
@@ -628,7 +659,7 @@ export interface RunEventView {
 export interface RunRecord {
   id: string;
   seq: number;
-  runKind: RunKind;
+  runKind: StoredRunKind;
   taskId: string;
   missionId: string | null;
   actionId: string | null;
@@ -750,6 +781,17 @@ export function deriveRunRecord(row: RunRow, events: readonly RunEventRow[]): Ru
               : 'not_executed';
         state = 'concluded';
         reopened = value === 'confirmed_not_executed';
+        break;
+      }
+      default: {
+        // FAIL CLOSED. An event HQ cannot interpret is not an attempt, is not
+        // a conclusion, and is emphatically not permission to try again: it
+        // means HQ does not know what happened, which is exactly what
+        // `needs_reconciliation` says and what a human then resolves.
+        outcome = 'outcome_unknown';
+        failureCategory = 'unknown';
+        state = 'needs_reconciliation';
+        reopened = false;
         break;
       }
     }
@@ -1029,6 +1071,7 @@ export function summarizeReliability(input: {
   const byOutcome = zeroed(RUN_OUTCOMES);
   let needsReconciliation = 0;
   for (const run of input.runs) {
+    // The CHECKED value is the key, never the stored string.
     byKind[isRunKind(run.runKind) ? run.runKind : UNRECOGNIZED_BUCKET] += 1;
     byState[isRunState(run.state) ? run.state : UNRECOGNIZED_BUCKET] += 1;
     byOutcome[isRunOutcome(run.outcome) ? run.outcome : UNRECOGNIZED_BUCKET] += 1;
