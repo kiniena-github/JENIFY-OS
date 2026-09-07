@@ -223,7 +223,7 @@ database) to check. Nine categorical refusals, never an exception:
 `path_not_absolute`, `path_missing`, `path_is_symlink`,
 `path_not_a_regular_file`, `file_empty`, `file_too_large`,
 `not_a_readable_sqlite_database`, `integrity_check_failed`,
-`not_an_hq_database`. Six of the nine are exercised against real files on
+`not_an_hq_database`. Eight of the nine are exercised against real files on
 disk — a relative path, a missing one, a directory, an empty file, a symlink,
 a file of prose, a corrupted SQLite image and a perfectly valid SQLite
 database that is simply somebody else's. `file_too_large` is NOT exercised: it
