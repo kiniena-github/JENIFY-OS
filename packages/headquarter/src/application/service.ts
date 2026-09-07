@@ -7309,6 +7309,70 @@ export class HeadquarterOperations {
   }
 
   /**
+   * The run on this task whose outcome is NOT settled, if there is one — the
+   * whole duplicate-lineage guard, in one place.
+   *
+   * Both halves of that guard used to key on `needsReconciliation` alone, and
+   * that left the exact window the phase exists to close (Wave 5 correction
+   * round three, High A3). A crashed attempt does not reach
+   * `needs_reconciliation` on its own: it sits at `attempting` until the
+   * Founder-gated `recoverInterruptedRuns` classifies it. So after a genuine
+   * process death — and in-process too — a second `openRun` with a distinct
+   * `idempotencyKey` derived a distinct `run_key` (no `run_key_conflict`),
+   * passed both guards, and `startRunAttempt` ADMITTED a fresh attempt at
+   * generation 1 on a `sideEffect: true` capability while the first attempt was
+   * still in flight and its worker still held the live fence. Recovery then
+   * admitted it never knew what the first attempt had done. That is the
+   * duplicate irreversible act, in the exact scenario Phase 13 was built for.
+   *
+   * `attempting` is included for the reason `needs_reconciliation` always was:
+   * both mean HQ cannot say what the last attempt did, and the honest answer to
+   * "may a second lineage start" is no in both. `open` is deliberately NOT
+   * included — a run with no attempt reserved has nothing in flight, and two
+   * genuinely separate pieces of work on one task remain expressible.
+   */
+  #unsettledRunOnTask(taskId: string, exceptRunId?: string): RunRecord | null {
+    return (
+      this.#listRunsFromStore({ taskId }).find(
+        (run) =>
+          run.id !== exceptRunId && (run.needsReconciliation || run.state === 'attempting'),
+      ) ?? null
+    );
+  }
+
+  /**
+   * The refusal that guard produces, worded for whichever of the two states
+   * stands.
+   *
+   * The CODE is the caller's, because the two `openRun` guards deliberately
+   * report different ones and always have: the pre-reservation guard says
+   * `run_state_conflict` (the task is in a state that admits no new run) and
+   * the in-reservation one says `run_attempt_refused` (the never-retried law,
+   * reached at the write). Widening WHICH runs the guard sees does not change
+   * what either site has always answered.
+   */
+  #unsettledRunRefusal(run: RunRecord, act: string, code: OpsError['code']): OpsError {
+    return run.needsReconciliation
+      ? {
+          code,
+          message:
+            `Task ${run.taskId} already carries run ${run.id} standing at ${run.state}, whose outcome is ` +
+            `unresolved (${run.outcome}); HQ will not ${act} on the same work. An uncertain outcome is ` +
+            'never retried automatically — establish what actually happened and reconcile that run first.',
+          details: { runId: run.id, state: run.state, outcome: run.outcome },
+        }
+      : {
+          code,
+          message:
+            `Task ${run.taskId} already carries run ${run.id} with an attempt OPEN (generation ` +
+            `${run.attempts}); HQ will not ${act} on the same work while it stands. Record that ` +
+            'attempt’s outcome, or — if the process carrying it is gone — run recovery, which classifies ' +
+            'it and demands a human reconciliation before anything else is attempted.',
+          details: { runId: run.id, state: run.state, outcome: run.outcome },
+        };
+  }
+
+  /**
    * Does this capability reach outside HQ? FAIL-CLOSED: a capability row that
    * cannot be read is treated as side-effecting, so an interrupted attempt on
    * it is uncertain rather than conveniently harmless. Read through the
@@ -7406,17 +7470,15 @@ export class HeadquarterOperations {
     // work. `needs_reconciliation` means a human has to establish what happened
     // in the world before anything else is attempted, so opening a run against
     // that task is refused until they have.
-    const unreconciled = this.#listRunsFromStore({ taskId: input.taskId }).find(
-      (run) => run.needsReconciliation,
-    );
-    if (unreconciled) {
-      return fail(
-        'run_state_conflict',
-        `Task ${input.taskId} already carries run ${unreconciled.id}, whose outcome is unresolved ` +
-          `(${unreconciled.outcome}). A new run is not opened against work whose last attempt nobody has ` +
-          'reconciled — establish what actually happened and reconcile that run first.',
-        { runId: unreconciled.id, outcome: unreconciled.outcome },
-      );
+    const unsettled = this.#unsettledRunOnTask(input.taskId);
+    if (unsettled) {
+      // `#unsettledRunOnTask` covers BOTH unsettled states now, not
+      // `needsReconciliation` alone — see its note for the window that left
+      // open (Wave 5 correction round three, High A3).
+      return {
+        ok: false,
+        error: this.#unsettledRunRefusal(unsettled, 'open a second run', 'run_state_conflict'),
+      };
     }
 
     const runKey = runIdempotencyKey({
@@ -7472,19 +7534,9 @@ export class HeadquarterOperations {
       // could be walked around simply by opening again under a deliberately
       // different idempotency key. A task whose last word is "HQ does not know
       // what happened" needs a human, not another run.
-      const unresolved = this.#listRunsFromStore({ taskId: input.taskId }).find(
-        (run) => run.needsReconciliation,
-      );
+      const unresolved = this.#unsettledRunOnTask(input.taskId);
       if (unresolved) {
-        refusal = {
-          code: 'run_attempt_refused',
-          message:
-            `Task ${input.taskId} already carries run ${unresolved.id} standing at ` +
-            `${unresolved.state} with outcome ${unresolved.outcome}; a new run on the same work is ` +
-            'refused. An uncertain outcome is never retried automatically — reconcile it explicitly ' +
-            'after checking the external system.',
-          details: { runId: unresolved.id, state: unresolved.state, outcome: unresolved.outcome },
-        };
+        refusal = this.#unsettledRunRefusal(unresolved, 'open a second run', 'run_attempt_refused');
         return;
       }
       this.#db
@@ -7592,6 +7644,21 @@ export class HeadquarterOperations {
             'checking the external system, and only a confirmed_not_executed opens another attempt.',
           details: { state: record.state, outcome: record.outcome },
         };
+        return;
+      }
+      // The same lineage guard, at the ATTEMPT (Wave 5 correction round three,
+      // High A3). `openRun` refuses a second lineage while one stands
+      // unsettled, but two runs can both stand at `open` — where nothing is in
+      // flight and nothing is refused — and then attempt one after the other.
+      // The result would be two live attempts on one task, which is the same
+      // duplicate act reached one step later.
+      const sibling = this.#unsettledRunOnTask(row.taskId, row.id);
+      if (sibling) {
+        refusal = this.#unsettledRunRefusal(
+          sibling,
+          'start an attempt on a second run',
+          'run_attempt_refused',
+        );
         return;
       }
       generation = runAttemptGeneration(events);

@@ -72,6 +72,18 @@ export const HQ_DURABILITY_REQUIREMENT = {
  * `inMemory` travels beside it on every authenticated view — and why the
  * unauthenticated snapshot's note says so in words, since that artifact
  * carries `durabilityMeetsRequirement` alone (Wave 5 review, Low finding 10).
+ *
+ * **What this posture is a statement ABOUT, exactly.** `journalMode` is a
+ * persistent property of the FILE and is read verbatim from it. `synchronous`
+ * is a property of the CONNECTION — SQLite stores nothing about it in the file
+ * — so what is reported is what THIS handle runs under. Both HQ opens now
+ * establish the declared value (`connectHqDatabaseUnmigrated` and
+ * `openHqDatabaseReadOnly`), which is why this reads what it does; a read-only
+ * handle still cannot speak for the writer's connection, and does not claim to.
+ * Until the Wave 5 correction round three the read-only open set nothing, so
+ * every unauthenticated snapshot of a healthy store published a
+ * `durability_below_requirement` finding about a defect that was not there
+ * (Medium A5).
  */
 export interface HqDurabilityPosture {
   journalMode: string;
@@ -1006,8 +1018,8 @@ export function fullIntegrity(
  *    beside the candidate. SQLite resolves those together with the main file,
  *    so the main file alone may not be the whole database, and an operator who
  *    restored the directory would get content this verification never saw. The
- *    live HQ database is WAL-mode and is therefore refused here, which is the
- *    honest answer for it;
+ *    live HQ database is WAL-mode and is therefore refused AT ITS OWN PATH;
+ *    see `verifyHqBackupFile` for what that does and does not cover;
  *  - `verification_copy_failed` — HQ could not take the scratch copy it checks
  *    (see `verifyHqBackupFile`). A verification that could not be performed is
  *    reported as such, never as a pass.
@@ -1021,6 +1033,25 @@ export const BACKUP_REFUSAL_REASONS = Object.freeze([
   'path_not_readable',
   'file_empty',
   'file_too_large',
+  /**
+   * The candidate is a HARD LINK to another name — most importantly, to the
+   * LIVE HQ database.
+   *
+   * The sidecar refusal is keyed on the resolved PATH, and a hard link is a
+   * second name for the same inode with no sidecars beside IT. So
+   * `ln data/headquarter.sqlite /tmp/backup.sqlite` verified `true`, and the
+   * "verified recovery point" recorded permanently in the append-only register
+   * was the live database itself — a file whose committed content was
+   * demonstrably NOT all in the bytes that were digested, because the WAL holds
+   * the rest (Wave 5 correction round three, Medium A4). `nlink` is taken from
+   * the DESCRIPTOR that was actually opened, so it settles the question about
+   * the inode rather than about the name.
+   *
+   * A backup is a snapshot of bytes that stands still. A file some other name
+   * can still be written through is not one, whether or not that other name is
+   * HQ's own.
+   */
+  'file_has_multiple_links',
   /**
    * A `-wal`, `-shm` or `-journal` sidecar sits beside the candidate.
    *
@@ -1147,9 +1178,27 @@ function digestFile(
  * A sidecar beside the candidate is still a categorical REFUSAL rather than
  * something to check around, because the main file alone may then not be the
  * whole database and an operator restoring the directory would get content this
- * verification never saw. Pointing this at the LIVE HQ database is therefore
- * refused — a live HQ database is WAL-mode — which is a more honest answer than
- * the "safe as well as useless" pass it used to give.
+ * verification never saw.
+ *
+ * **What that does and does not cover, stated exactly** (Wave 5 correction
+ * round three, Medium A4). It refuses the live HQ database AT ITS OWN PATH,
+ * because a live HQ database is WAL-mode and its `-wal` sits beside it. It used
+ * to be described, here and in the phase document, as refusing "the live
+ * database" full stop, and that was wrong in two ways the review executed:
+ *
+ *  - a HARD LINK to the live inode under a name with no sidecars beside it
+ *    passed, because the sidecar check is keyed on the PATH. That is closed
+ *    now, from the descriptor, by `file_has_multiple_links`;
+ *  - a plain `cp` of a live WAL database still verifies, and it always will.
+ *    It is a different inode with no sidecars, and its bytes are a valid,
+ *    integrity-clean HQ database — just one that is missing whatever the WAL
+ *    had not yet checkpointed. Nothing in the bytes distinguishes it from a
+ *    properly consolidated backup, so HQ does not pretend to distinguish it.
+ *    `verified` means "these bytes are a sound HQ database", and it has never
+ *    meant "this is the whole of what was committed at the moment it was
+ *    taken". Take a backup with SQLite's own backup API or after a checkpoint;
+ *    a `cp` of a live database is not a backup, and this function is not the
+ *    thing that can tell you so.
  *
  * Path protections are refusals, not exceptions, so a caller gets a
  * categorical reason it can record — see `BACKUP_REFUSAL_REASONS` for the
@@ -1261,8 +1310,15 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
         return { ...empty, refusals: ['path_not_a_regular_file'], resolvedPath: resolved };
       }
       // Taken from the DESCRIPTOR: from here on the path is never consulted.
-      if (!fs.fstatSync(fd).isFile()) {
+      const opened = fs.fstatSync(fd);
+      if (!opened.isFile()) {
         return { ...empty, refusals: ['path_not_a_regular_file'], resolvedPath: resolved };
+      }
+      // One inode, one name. See `file_has_multiple_links`: this is what closes
+      // the hard link to the live database, which the path-keyed sidecar
+      // refusal cannot see.
+      if (opened.nlink > 1) {
+        return { ...empty, refusals: ['file_has_multiple_links'], resolvedPath: resolved };
       }
       try {
         sinkFd = fs.openSync(scratchPath, 'wx', 0o600);

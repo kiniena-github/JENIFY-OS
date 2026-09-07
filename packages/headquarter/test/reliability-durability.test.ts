@@ -660,6 +660,49 @@ describe('the durability posture is reported, never pretended', () => {
  * "everything is fine" while HQ had latched safe mode with blocking findings.
  */
 describe('the unauthenticated snapshot never publishes optimism HQ does not hold', () => {
+  /**
+   * The mirror image, and a fabrication in the direction of ALARM (Wave 5
+   * correction round three, Medium A5). `synchronous` is a connection pragma
+   * that SQLite stores nothing about in the file, and `openHqDatabaseReadOnly`
+   * — which IS the `hq:snapshot` open — never set it. So the writer read
+   * `synchronous: 2` and the snapshot read `1`, and every world-readable
+   * snapshot of a perfectly healthy WAL + FULL store published
+   * `durabilityMeetsRequirement: false` plus a `durability_below_requirement`
+   * finding about a defect that was not there — which also made a genuine
+   * degradation permanently indistinguishable from the noise.
+   */
+  it('reports a HEALTHY store as healthy through the read-only snapshot open', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-snapshot-durability-'));
+    try {
+      const dbPath = path.join(dir, 'hq.sqlite');
+      const built = openHqDatabase(dbPath);
+      const writer = new HeadquarterOperations(built);
+      const writerPosture = writer.hqReliabilityPosture().integrity.durability;
+      expect(writerPosture.meetsRequirement).toBe(true);
+      built.close();
+
+      const readOnly = openHqDatabaseReadOnly(dbPath);
+      const ops = new HeadquarterOperations(readOnly);
+      const posture = ops.hqReliabilityPosture().integrity;
+      // The same posture the writer reports, on an untampered store.
+      expect(posture.durability.journalMode).toBe(writerPosture.journalMode);
+      expect(posture.durability.synchronous).toBe(writerPosture.synchronous);
+      expect(posture.durability.readonly).toBe(true);
+      expect(posture.durability.meetsRequirement).toBe(true);
+      expect(posture.observations.map((o) => o.finding)).not.toContain(
+        'durability_below_requirement',
+      );
+      expect(posture.safeMode).toBe(false);
+      const published = ops.reliabilitySummary();
+      expect(published.durabilityMeetsRequirement).toBe(true);
+      expect(published.findings.durability_below_requirement).toBeUndefined();
+      expect(published.safeMode).toBe(false);
+      readOnly.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('carries the latched safe-mode verdict on a handle with no run ledger', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-snapshot-failopen-'));
     try {
@@ -1120,6 +1163,66 @@ describe('backup verification, against real bytes on disk', () => {
         createHash('sha256').update(fs.readFileSync(candidate)).digest('hex'),
       );
       expect(accepted.schemaTables).toBeGreaterThanOrEqual(2);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * Wave 5 correction round three, Medium A4. The sidecar refusal is keyed on
+   * the resolved PATH, so a HARD LINK to the live inode under a name with no
+   * sidecars beside it verified `true` — and that "verified recovery point" was
+   * recorded permanently in the append-only register while its committed
+   * content demonstrably was NOT all in the bytes that had been digested.
+   */
+  it('refuses a hard link to the LIVE database, which the path-keyed sidecar check cannot see', () => {
+    const fx = fileFixture();
+    try {
+      const alias = path.join(fx.dir, 'looks-like-a-backup.sqlite');
+      fs.linkSync(fx.dbPath, alias);
+      // Same inode, and no `-wal` beside THIS name, which is exactly why the
+      // sidecar refusal had nothing to say about it.
+      expect(fs.statSync(alias).ino).toBe(fs.statSync(fx.dbPath).ino);
+      expect(fs.existsSync(`${alias}-wal`)).toBe(false);
+      expect(fs.existsSync(`${fx.dbPath}-wal`)).toBe(true);
+
+      const verification = verifyHqBackupFile(alias);
+      expect(verification.verified).toBe(false);
+      expect(verification.refusals).toEqual(['file_has_multiple_links']);
+      // Nothing is published about a file HQ will not stand behind.
+      expect(verification.digest).toBeNull();
+      expect(verification.schemaTables).toBeNull();
+
+      // And the register refuses to record it as a recovery point.
+      const refusal = fx.ops.recordVerifiedBackup({ backupPath: alias, requestedBy: 'founder' });
+      expect(refusal.ok).toBe(false);
+      expect(!refusal.ok && refusal.error.code).toBe('backup_verification_failed');
+      expect(!refusal.ok && (refusal.error.details?.refusals as string[])).toContain(
+        'file_has_multiple_links',
+      );
+      expect(fx.ops.listVerifiedBackupsBounded().total).toBe(0);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('refuses a hard link even to an otherwise sound consolidated backup', async () => {
+    const fx = fileFixture();
+    try {
+      const backupPath = path.join(fx.dir, 'hq-backup.sqlite');
+      await fx.db.backup(backupPath);
+      // The backup alone verifies.
+      expect(verifyHqBackupFile(backupPath).verified).toBe(true);
+      // A second name for the same bytes does not: a snapshot that another name
+      // can still be written through is not a snapshot.
+      const alias = path.join(fx.dir, 'second-name.sqlite');
+      fs.linkSync(backupPath, alias);
+      expect(verifyHqBackupFile(alias).refusals).toEqual(['file_has_multiple_links']);
+      expect(verifyHqBackupFile(backupPath).refusals).toEqual(['file_has_multiple_links']);
+      // Removing the extra name restores the property, so the refusal is about
+      // the file's real shape and not about its name.
+      fs.unlinkSync(alias);
+      expect(verifyHqBackupFile(backupPath).verified).toBe(true);
     } finally {
       fx.cleanup();
     }

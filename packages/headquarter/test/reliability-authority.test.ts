@@ -145,6 +145,63 @@ describe('duplicate runs and duplicate attempts', () => {
     expect(second.code).toBe('run_attempt_refused');
   });
 
+  /**
+   * Wave 5 correction round three, High A3 — and the window the previous two
+   * rounds left open.
+   *
+   * Every duplicate-run assertion above waits for the run to reach
+   * `needs_reconciliation` first, and BOTH halves of the `openRun` guard keyed
+   * on exactly that. A crashed attempt does not get there on its own: it sits at
+   * `attempting` until the Founder-gated `recoverInterruptedRuns` classifies it.
+   * So a second `openRun` under a distinct `idempotencyKey` derived a distinct
+   * `run_key` — no `run_key_conflict` either — passed both guards, and
+   * `startRunAttempt` ADMITTED a fresh attempt at generation 1 on the same
+   * `sideEffect: true` capability while the first attempt was still open and its
+   * worker still held the live fence. That is the duplicate irreversible act the
+   * phase exists to prevent, in the exact scenario it was built for.
+   */
+  it('refuses a second run lineage while the FIRST attempt is still open, not merely unreconciled', () => {
+    const fx = reliabilityFixture();
+    const first = expectOk(openRun(fx)).run;
+    const attempt = expectOk(
+      fx.ops.startRunAttempt({ runId: first.id, workerId: 'claude', fence: fx.claim.fence }),
+    );
+    expect(attempt.generation).toBe(1);
+    // The state nothing used to guard: an attempt is OPEN and nobody has said
+    // it failed, so `needsReconciliation` is false.
+    expect(fx.ops.getRun(first.id)!.state).toBe('attempting');
+    expect(fx.ops.getRun(first.id)!.needsReconciliation).toBe(false);
+
+    const second = expectError(openRun(fx, { idempotencyKey: 'a-deliberately-fresh-key' }));
+    expect(second.code).toBe('run_state_conflict');
+    expect(second.details!.runId).toBe(first.id);
+    expect(second.message).toMatch(/attempt OPEN/);
+    expect(fx.ops.listRuns({ taskId: fx.claim.taskId })).toHaveLength(1);
+  });
+
+  /**
+   * The same act one step later. `openRun` refuses a second lineage while one
+   * stands unsettled — but two runs can both stand at `open`, where nothing is
+   * in flight and nothing is refused, and then attempt one after the other.
+   */
+  it('refuses an attempt on a SECOND run whose sibling already has one open', () => {
+    const fx = reliabilityFixture();
+    const first = expectOk(openRun(fx)).run;
+    // Both lineages are created BEFORE either attempts, so the open-run guard
+    // has nothing to see.
+    const second = expectOk(openRun(fx, { idempotencyKey: 'second-lineage' })).run;
+    expect(second.id).not.toBe(first.id);
+    expectOk(fx.ops.startRunAttempt({ runId: first.id, workerId: 'claude', fence: fx.claim.fence }));
+    const refused = expectError(
+      fx.ops.startRunAttempt({ runId: second.id, workerId: 'claude', fence: fx.claim.fence }),
+    );
+    expect(refused.code).toBe('run_attempt_refused');
+    expect(refused.details!.runId).toBe(first.id);
+    // Exactly one attempt was ever reserved across BOTH lineages.
+    expect(fx.ops.getRun(first.id)!.attempts).toBe(1);
+    expect(fx.ops.getRun(second.id)!.attempts).toBe(0);
+  });
+
   it('NEVER admits another attempt after an unknown outcome — the law of the phase', () => {
     const fx = reliabilityFixture();
     const run = expectOk(openRun(fx)).run;

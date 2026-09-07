@@ -261,6 +261,28 @@ export function openHqDatabaseReadOnly(path: string = DEFAULT_HQ_DB_PATH): HqDat
   const db = new Database(path, { readonly: true, fileMustExist: true });
   // A connection-scoped read setting; it writes nothing to the file.
   db.pragma('foreign_keys = ON');
+  // The SAME durability posture the writing open establishes, and for the same
+  // reason it is set there: `synchronous` is a property of the CONNECTION, not
+  // of the file, so a handle that never sets it reports whatever the SQLite
+  // build happens to default to.
+  //
+  // Leaving it unset was a fabricated defect claim (Wave 5 correction round
+  // three, Medium A5). `hq:snapshot` is this open, and this open reported
+  // `synchronous = 1` where the writer reports 2 — so EVERY unauthenticated
+  // snapshot of a perfectly healthy WAL + FULL store published
+  // `durabilityMeetsRequirement: false` and a `durability_below_requirement`
+  // finding about a store that met the requirement, and a genuine degradation
+  // was permanently indistinguishable from that noise.
+  //
+  // Setting it writes nothing (executed: a read-only handle accepts the pragma
+  // and the file is untouched) and claims nothing the handle cannot see: WAL is
+  // a real, persistent property of the FILE and is read verbatim, while
+  // `synchronous` is this connection's own and is now the declared one. What a
+  // read-only handle still cannot speak for is the WRITER's connection —
+  // `readDurabilityPosture` says so on the posture itself.
+  // Spelled exactly as `connectHqDatabaseUnmigrated` spells it, so the two HQ
+  // opens cannot drift into establishing different postures.
+  db.pragma('synchronous = FULL');
   return db;
 }
 
