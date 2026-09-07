@@ -250,10 +250,25 @@ WHEN EXISTS (SELECT 1 FROM hq_mission_events WHERE id = NEW.id)
 BEGIN SELECT RAISE(ABORT, 'hq_mission_events is append-only'); END;
 
 -- Plan items are not append-only as a table (supersede and link legitimately
--- UPDATE their own columns), but two of their facts are write-once and the
--- engine now holds both: a row's identity can never be replaced out from
--- under its mission, and a linked task id can never be re-pointed. The link
--- path sets task_id only WHERE task_id IS NULL, so it never trips this.
+-- UPDATE their own columns), but three of their facts are write-once and the
+-- engine holds all three: a row's identity can never be replaced out from
+-- under its mission, a linked task id can never be re-pointed, and -- since
+-- Wave 5 Medium 3 -- a row can never be DELETED. The link path sets task_id
+-- only WHERE task_id IS NULL, so it never trips the relink guard.
+--
+-- no_erase is not symmetry for its own sake. hq_mission_plan_items.task_id
+-- is the ONLY link from a task to its mission, and Phase 14 derives a task's
+-- budget scope through it (HeadquarterOperations #canonicalWorkIdentity). The
+-- pre-existing readers check that a row EXISTS, so a delete fails those
+-- closed; the budget derivation reads the absence as "this task belongs to no
+-- mission" and fails OPEN -- one DELETE unbound a task from an exhausted
+-- mission/project ceiling and turned a blocked proposal into within_ceiling
+-- with the full tier set. No code path in this repository deletes from this
+-- table (pinned by the source scan in application.mission-core.test.ts), so
+-- the guard costs nothing and closes that.
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_plan_items_no_erase
+BEFORE DELETE ON hq_mission_plan_items
+BEGIN SELECT RAISE(ABORT, 'hq_mission_plan_items rows are never erased'); END;
 CREATE TRIGGER IF NOT EXISTS trg_hq_mission_plan_items_no_replace
 BEFORE INSERT ON hq_mission_plan_items
 WHEN EXISTS (SELECT 1 FROM hq_mission_plan_items WHERE mission_id = NEW.mission_id AND seq = NEW.seq)

@@ -881,6 +881,69 @@ describe('the applicable budget scope and the spend attribution are derived, not
     expect(foreign.ok).toBe(false);
     expect(!foreign.ok && foreign.error.message).toMatch(/belongs to task/);
   });
+
+  /**
+   * Wave 5 Medium 3, as the exploit that found it.
+   *
+   * The whole mission/project half of `BUDGET_SCOPES` reaches a task through
+   * ONE row: `hq_mission_plan_items.task_id`. The older readers of that link
+   * check that a row EXISTS, so a delete fails them closed. The Phase 14
+   * budget derivation reads its ABSENCE as "this task belongs to no mission"
+   * and fails OPEN — so with an exhausted `mission/mission-alpha/total`
+   * ceiling, one DELETE turned a `blocked` proposal restricted to
+   * `deterministic_local` into `within_ceiling` with the full tier set. And
+   * because `hq_mission_plan_items` was outside `ENGINE_IMMUTABLE_TABLES`
+   * entirely, the integrity census reported nothing about it either.
+   *
+   * The engine now refuses the DELETE, from any writer, and the census sees
+   * the guard.
+   */
+  it('cannot have a mission ceiling unbound by deleting the plan-item link', () => {
+    const fx = intelligenceFixture();
+    linkTaskToMission(fx, 'mission-alpha', null);
+    fx.budget([...INTELLIGENCE_TIERS]);
+    expectOk(
+      cost(fx, {
+        provenance: 'billed',
+        amountMinorUnits: 250,
+        currency: 'USD',
+        unitKind: 'requests',
+      }),
+    );
+    fx.budget(['deterministic_local'], {
+      scopeKind: 'mission',
+      scopeId: 'mission-alpha',
+      ceilingMinorUnits: 200,
+    });
+    const blocked = expectOk(
+      fx.ops.intelligenceRoutingProposal({
+        taskId: fx.claim.taskId,
+        complexity: 'routine',
+        contextSize: 'medium',
+        workKind: 'coding',
+      }),
+    );
+    expect(blocked.budgetDecision).toBe('blocked');
+    expect([...blocked.permittedTiers]).toEqual(['deterministic_local']);
+
+    // THE EXPLOIT. The link row is the only thing binding this task to the
+    // exhausted ceiling, and the engine — not this module's discipline —
+    // refuses to let it go.
+    expect(() =>
+      fx.db.prepare(`DELETE FROM hq_mission_plan_items WHERE task_id = ?`).run(fx.claim.taskId),
+    ).toThrow(/never erased/);
+
+    const after = expectOk(
+      fx.ops.intelligenceRoutingProposal({
+        taskId: fx.claim.taskId,
+        complexity: 'routine',
+        contextSize: 'medium',
+        workKind: 'coding',
+      }),
+    );
+    expect(after.budgetDecision).toBe('blocked');
+    expect([...after.permittedTiers]).toEqual(['deterministic_local']);
+  });
 });
 
 describe('escalation preserves canonical task identity through the facade', () => {

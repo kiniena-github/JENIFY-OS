@@ -117,6 +117,21 @@ export interface EngineImmutableTable {
    * only the trio.
    */
   secondaryGuards: readonly string[];
+  /**
+   * The BASE guards required of this table, when the universal trio is not the
+   * right requirement for it.
+   *
+   * Exactly one table uses it, and only because the alternative was worse.
+   * `hq_mission_plan_items` legitimately UPDATEs its own columns — linking a
+   * task, superseding an item, stating a work spec — so a blanket `no_rewrite`
+   * would break the real writers. Until Wave 5 Medium 3 that was taken as a
+   * reason to leave the table out of this list entirely, which made the census
+   * blind to the guards it DOES have and to the one it was missing. A reduced,
+   * declared base is the honest middle: the census checks exactly the guards
+   * the schema really declares, and drift is caught by the same live-schema
+   * test that binds every other entry.
+   */
+  requiredGuards?: readonly string[];
 }
 
 /**
@@ -154,10 +169,21 @@ export interface EngineImmutableTable {
  * every listed prefix — so a phase that adds a guard and forgets to declare it
  * fails there rather than escaping the check forever.
  *
- * `hq_mission_plan_items` is deliberately ABSENT: it is legitimately updated
- * when an item is linked to a task, so it carries `no_relink` / `no_respec`
- * guards instead of the trio, and demanding the trio of it would be a false
- * finding.
+ * `hq_mission_plan_items` used to be deliberately ABSENT, on the reasoning
+ * that it is legitimately UPDATEd (linking a task, superseding an item,
+ * stating a work spec) and that demanding the trio of it would be a false
+ * finding. The premise was right and the conclusion was wrong (Wave 5 Medium
+ * 3). Being outside this list did not merely excuse it from `no_rewrite` — it
+ * made the census blind to the table entirely, including to the fact that it
+ * carried no `no_erase` guard at all. That mattered because
+ * `hq_mission_plan_items.task_id` is the ONLY link from a task to its mission,
+ * and Phase 14 derives a task's budget scope through it: the older readers
+ * check that a row EXISTS and so fail closed on a delete, but the budget
+ * derivation reads absence as "belongs to no mission" and fails OPEN. One
+ * DELETE unbound a task from an exhausted mission ceiling — `blocked` became
+ * `within_ceiling` with the full tier set — and the census reported nothing.
+ * The table now carries `no_erase` and is listed with a REDUCED base
+ * (`requiredGuards`), so what is checked is exactly what the schema declares.
  */
 export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = [
   { table: 'hq_action_intents', triggerPrefix: 'hq_action_intents', secondaryGuards: ['no_replace_unique'] },
@@ -177,6 +203,15 @@ export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = [
   },
   { table: 'hq_mission_intents', triggerPrefix: 'hq_mission_intents', secondaryGuards: [] },
   { table: 'hq_mission_events', triggerPrefix: 'hq_mission_events', secondaryGuards: [] },
+  {
+    table: 'hq_mission_plan_items',
+    triggerPrefix: 'hq_mission_plan_items',
+    // NO `no_rewrite`: the link, supersede and work-spec writers legitimately
+    // UPDATE their own columns, and each of those columns is write-once by its
+    // own guard below. `no_erase` IS required — see the header.
+    requiredGuards: ['no_erase', 'no_replace'],
+    secondaryGuards: ['no_relink', 'no_respec'],
+  },
   { table: 'hq_orchestration_runs', triggerPrefix: 'hq_orch_runs', secondaryGuards: [] },
   { table: 'hq_orchestration_run_items', triggerPrefix: 'hq_orch_run_items', secondaryGuards: [] },
   { table: 'hq_project_events', triggerPrefix: 'hq_project_events', secondaryGuards: [] },
@@ -246,19 +281,21 @@ export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = [
 ];
 
 /**
- * The three guards EVERY engine-immutable table must carry, by suffix.
+ * The three guards every engine-immutable table must carry, by suffix — the
+ * DEFAULT base, and the base for every entry but one.
  *
- * Universal, and therefore still the trio. A table's further guards are
- * declared per table in `ENGINE_IMMUTABLE_TABLES.secondaryGuards`, because
- * requiring `no_replace_unique` of a table that has no secondary unique index
- * would be a false finding — the same reason `hq_mission_plan_items` is not
- * held to the trio.
+ * A table's further guards are declared per table in
+ * `ENGINE_IMMUTABLE_TABLES.secondaryGuards`, because requiring
+ * `no_replace_unique` of a table that has no secondary unique index would be a
+ * false finding. A table whose columns are legitimately updated declares a
+ * reduced base in `requiredGuards` for the same reason —
+ * `hq_mission_plan_items`, and only it.
  */
 export const REQUIRED_IMMUTABILITY_GUARDS = ['no_rewrite', 'no_erase', 'no_replace'] as const;
 
-/** Every guard name the schema declares on one listed table. Trio plus its own. */
+/** Every guard name the schema declares on one listed table. Base plus its own. */
 export function declaredGuardsFor(entry: EngineImmutableTable): string[] {
-  return [...REQUIRED_IMMUTABILITY_GUARDS, ...entry.secondaryGuards].map(
+  return [...(entry.requiredGuards ?? REQUIRED_IMMUTABILITY_GUARDS), ...entry.secondaryGuards].map(
     (guard) => `trg_${entry.triggerPrefix}_${guard}`,
   );
 }

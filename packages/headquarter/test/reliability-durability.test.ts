@@ -262,11 +262,24 @@ describe('the engine-immutable inventory is checked against the live schema, not
       .filter((name) => name.endsWith('_no_rewrite'))
       .map((name) => name.replace(/^trg_/, '').replace(/_no_rewrite$/, ''))
       .sort();
-    const listed = ENGINE_IMMUTABLE_TABLES.map((entry) => entry.triggerPrefix).sort();
+    const listed = ENGINE_IMMUTABLE_TABLES.filter((entry) =>
+      (entry.requiredGuards ?? REQUIRED_IMMUTABILITY_GUARDS).includes('no_rewrite'),
+    )
+      .map((entry) => entry.triggerPrefix)
+      .sort();
     // Every table with a `no_rewrite` guard is on the list. A future phase that
     // adds an append-only ledger and forgets to list it fails HERE, rather than
     // silently escaping the integrity check forever.
     expect(declared).toEqual(listed);
+    // A REDUCED base is a deliberate, named exception, never a quiet omission
+    // (Wave 5 Medium 3). Exactly one table has one, and adding a second is a
+    // change this assertion forces a reviewer to see.
+    expect(
+      ENGINE_IMMUTABLE_TABLES.filter((entry) => entry.requiredGuards).map((entry) => ({
+        table: entry.table,
+        requiredGuards: [...entry.requiredGuards!],
+      })),
+    ).toEqual([{ table: 'hq_mission_plan_items', requiredGuards: ['no_erase', 'no_replace'] }]);
     db.close();
   });
 
@@ -388,11 +401,25 @@ describe('the engine-immutable inventory is checked against the live schema, not
     bare.close();
   });
 
-  it('requires exactly the trio of EVERY table, and the rest per table', () => {
-    // The universal requirement is unchanged: requiring `no_replace_unique` of
-    // a table with no secondary unique index would be a false finding, the
-    // same reason `hq_mission_plan_items` is not held to the trio at all.
+  it('requires exactly the trio by default, and the rest per table', () => {
+    // The universal DEFAULT is unchanged: requiring `no_replace_unique` of a
+    // table with no secondary unique index would be a false finding, and a
+    // table whose own columns are legitimately updated declares a reduced base
+    // rather than being left out of the census entirely (Wave 5 Medium 3).
     expect([...REQUIRED_IMMUTABILITY_GUARDS]).toEqual(['no_rewrite', 'no_erase', 'no_replace']);
+    expect(
+      declaredGuardsFor({
+        table: 'hq_mission_plan_items',
+        triggerPrefix: 'hq_mission_plan_items',
+        requiredGuards: ['no_erase', 'no_replace'],
+        secondaryGuards: ['no_relink', 'no_respec'],
+      }),
+    ).toEqual([
+      'trg_hq_mission_plan_items_no_erase',
+      'trg_hq_mission_plan_items_no_replace',
+      'trg_hq_mission_plan_items_no_relink',
+      'trg_hq_mission_plan_items_no_respec',
+    ]);
     // The rest are declared where they exist, and the census reads both.
     expect(declaredGuardsFor({
       table: 'hq_intel_budgets',
