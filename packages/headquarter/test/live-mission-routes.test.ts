@@ -192,7 +192,17 @@ describe('the write surface is stated, not inferred', () => {
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.reliabilityRecover);
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.reliabilityReconcile);
     expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.reliability);
-    expect(CONTROL_WRITE_ROUTES).toHaveLength(28);
+    // Phase 14: two intelligence writes — record a model/provider observation,
+    // and set a budget policy. Both append to an append-only ledger and reach
+    // nothing outside HQ; neither activates a provider, enables a paid service
+    // or authorizes spend, and there is no third write, because recording a
+    // routing decision, escalating one, recording its outcome and recording a
+    // cost entry are worker acts under a live fenced claim and a browser holds
+    // no claim. The intelligence READ is a GET and stays off the write surface.
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.intelligenceObserve);
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.intelligenceBudget);
+    expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.intelligence);
+    expect(CONTROL_WRITE_ROUTES).toHaveLength(30);
   });
 });
 

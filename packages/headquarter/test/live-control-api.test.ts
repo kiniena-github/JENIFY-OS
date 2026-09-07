@@ -415,7 +415,7 @@ describe('every hostile caller is refused, and nothing is written', () => {
     }
   });
 
-  it('exposes no generic mutation surface — the whole route table is forty-four entries', () => {
+  it('exposes no generic mutation surface — the whole route table is forty-seven entries', () => {
     // Nine since Phase 3 (issue #254); seventeen since Phase 4 (issue #262);
     // twenty-one since Phase 5+6 (issue #265): the memory GET+POST, the two
     // parameterized memory reads (search, context), and the one orchestrate
@@ -457,6 +457,18 @@ describe('every hostile caller is refused, and nothing is written', () => {
     // process with the machine in front of it. And there is no route, and no
     // facade method, that CLEARS safe mode by assertion: only an assessment
     // that finds nothing blocking clears it.
+    // Forty-seven since Phase 14: the intelligence GET, the model-observation
+    // POST and the budget-policy POST — write surface twenty-eight to thirty.
+    // What is NOT here is once again the point. There is no route that
+    // activates a provider, enables a paid service, buys credits or authorizes
+    // spend, and no facade method sits behind one: a budget ceiling BLOCKS or
+    // asks for a Founder decision, and it never grants. There is no route that
+    // records a routing decision, escalates one, records its outcome or
+    // records a cost entry, because those are worker acts under a live fenced
+    // claim and a browser holds no claim — the same reason authorize, execute
+    // and the run writes have none. And no route anywhere takes a provider or
+    // model to route work TO: provider truth is the canonical binding's, and a
+    // tier proposal cannot substitute one.
     // Each widening of the write surface beyond the 2026-08-28 three is
     // itself Founder-approved and recorded in docs/JENIFY_DECISIONS.md. What
     // this assertion protects is unchanged — no route takes a table, a
@@ -477,6 +489,9 @@ describe('every hostile caller is refused, and nothing is written', () => {
       '/api/hq/control/command-center',
       '/api/hq/control/command-center/brief',
       '/api/hq/control/command-center/inbox',
+      '/api/hq/control/intelligence',
+      '/api/hq/control/intelligence/budget',
+      '/api/hq/control/intelligence/observe',
       '/api/hq/control/memory',
       '/api/hq/control/memory/context',
       '/api/hq/control/memory/search',

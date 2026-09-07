@@ -207,6 +207,38 @@ import {
   type RunInterruptionReason,
   type RunRecord,
 } from '../application/reliability-command.js';
+import {
+  BUDGET_DECISIONS,
+  BUDGET_SCOPES,
+  BUDGET_WINDOWS,
+  CONTEXT_SIZES,
+  COST_PROVENANCES,
+  COST_UNIT_KINDS,
+  DECISION_RESULTS,
+  DECISION_STATES,
+  ESCALATION_TRIGGERS,
+  INTELLIGENCE_COMMAND_CAPABILITY,
+  INTELLIGENCE_TIERS,
+  LATENCY_REQUIREMENTS,
+  MODEL_AVAILABILITY_STATES,
+  MODEL_CAPABILITY_FACTS,
+  MODEL_LOCALITIES,
+  OBSERVATION_SOURCES,
+  PRIVACY_REQUIREMENTS,
+  TASK_COMPLEXITIES,
+  WORK_KINDS,
+  intelligenceCommandCapabilityState,
+  type BudgetScope,
+  type BudgetWindow,
+  type CostProvenance,
+  type CostUnitKind,
+  type DecisionRecord,
+  type IntelligenceTier,
+  type ModelAvailability,
+  type ModelCapabilityFact,
+  type ModelLocality,
+  type ObservationSource,
+} from '../application/intelligence-command.js';
 import { HQ_INTEGRITY_FINDINGS } from '../store/integrity.js';
 import { MEMORY_KINDS, isMemoryKind, isMemoryPrivacy } from '../memory/schema.js';
 import { isArchiveStatus } from '../archive/schema.js';
@@ -434,6 +466,37 @@ export const CONTROL_ROUTES = {
   reliability: `${CONTROL_API_PREFIX}/reliability`,
   reliabilityRecover: `${CONTROL_API_PREFIX}/reliability/recover`,
   reliabilityReconcile: `${CONTROL_API_PREFIX}/reliability/reconcile`,
+  /**
+   * Phase 14: cost + intelligence optimization. The GET is the Founder's whole
+   * picture of what HQ knows about the intelligence it uses — the observation
+   * registry, the recorded budget policies, the routing decisions and their
+   * results, the cost ledger with every amount's provenance beside it, the
+   * truthful analytics, and the closed vocabularies a console would need to
+   * draw a form without inventing one. It writes nothing and activates
+   * nothing.
+   *
+   * Two POSTs, and deliberately no more. `observe` records what HQ has
+   * OBSERVED about a provider/model, including a unit cost with its
+   * provenance; `budget` records a ceiling and the tiers permitted under it.
+   *
+   * What has NO route, and why:
+   *  - recording a routing decision, escalating one, recording its outcome and
+   *    recording a cost entry are WORKER acts performed under a live fenced
+   *    claim, exactly like Phase 13's run writes and Phase 8's authorize and
+   *    execute. A browser holds no claim, so it gets no route;
+   *  - there is no route, and no facade method, that ACTIVATES a provider,
+   *    enables a paid service, buys credits or authorizes spend. A ceiling
+   *    blocks or asks; it never grants, and there is nothing here for a grant
+   *    to be expressed through.
+   *
+   * Neither POST takes step-up, and that is a decision rather than an
+   * omission: both append a row to an append-only ledger that reaches nothing
+   * outside HQ, neither can execute anything, and a ceiling that has to be
+   * lowered urgently should not need a fresh credential to lower.
+   */
+  intelligence: `${CONTROL_API_PREFIX}/intelligence`,
+  intelligenceObserve: `${CONTROL_API_PREFIX}/intelligence/observe`,
+  intelligenceBudget: `${CONTROL_API_PREFIX}/intelligence/budget`,
 } as const;
 
 /**
@@ -476,6 +539,14 @@ export const CONTROL_WRITE_ROUTES: readonly string[] = [
   // is a GET and stays off the write surface.
   CONTROL_ROUTES.reliabilityRecover,
   CONTROL_ROUTES.reliabilityReconcile,
+  // Phase 14: recording a model/provider observation and setting a budget
+  // policy. Both append to an append-only ledger and reach nothing outside HQ;
+  // neither activates a provider or authorizes spend. The intelligence READ is
+  // a GET and stays off the write surface, and there is no third write,
+  // because routing decisions, escalations, outcomes and cost entries are
+  // worker acts under a live fenced claim and a browser holds no claim.
+  CONTROL_ROUTES.intelligenceObserve,
+  CONTROL_ROUTES.intelligenceBudget,
 ];
 
 export interface ControlResponse {
@@ -768,7 +839,8 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.ask ||
         path === CONTROL_ROUTES.products ||
         path === CONTROL_ROUTES.productDetail ||
-        path === CONTROL_ROUTES.reliability)) ||
+        path === CONTROL_ROUTES.reliability ||
+        path === CONTROL_ROUTES.intelligence)) ||
     (method === 'POST' &&
       (path === CONTROL_ROUTES.orders ||
         path === CONTROL_ROUTES.approve ||
@@ -797,7 +869,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.productLifecycle ||
         path === CONTROL_ROUTES.productArtifacts ||
         path === CONTROL_ROUTES.reliabilityRecover ||
-        path === CONTROL_ROUTES.reliabilityReconcile));
+        path === CONTROL_ROUTES.reliabilityReconcile ||
+        path === CONTROL_ROUTES.intelligenceObserve ||
+        path === CONTROL_ROUTES.intelligenceBudget));
   if (!known) {
     // Deny by default, and say nothing about what does exist.
     return refusal(404, 'not_found', 'No such HQ control route.');
@@ -1143,6 +1217,10 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     return reliabilityRoute(deps, founder, audit, now);
   }
 
+  if (method === 'GET' && path === CONTROL_ROUTES.intelligence) {
+    return intelligenceRoute(deps, founder, audit, now);
+  }
+
   if (path === CONTROL_ROUTES.orders) return createOrder(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.approve) return approve(request, deps, founder, audit, now);
   if (path === CONTROL_ROUTES.missions) return commandMission(request, deps, founder, audit);
@@ -1185,6 +1263,12 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
   }
   if (path === CONTROL_ROUTES.reliabilityReconcile) {
     return reconcileRunRoute(request, deps, founder, audit);
+  }
+  if (path === CONTROL_ROUTES.intelligenceObserve) {
+    return recordModelObservationRoute(request, deps, founder, audit);
+  }
+  if (path === CONTROL_ROUTES.intelligenceBudget) {
+    return setIntelligenceBudgetRoute(request, deps, founder, audit);
   }
   return deny(request, deps, founder, audit);
 }
@@ -1339,6 +1423,19 @@ function controlAvailability(
       principal?.originateCapabilities.includes(RELIABILITY_COMMAND_CAPABILITY.id) === true &&
       reliabilityCommandCapabilityState(capabilityRowFor(deps.ops, RELIABILITY_COMMAND_CAPABILITY.id)) ===
         'enabled',
+    // Phase 14: the intelligence COMMAND capability (`hq.intelligence_command`)
+    // gates recording a model observation and setting a budget policy. It is
+    // advertised from exactly the conditions that decide those two writes —
+    // the originate grant AND the intact registry row, read enforcement-safe.
+    // There is deliberately no spend flag and no activation flag, because
+    // there is no such act here to grant: a ceiling blocks or asks, and no
+    // route or facade method can enable a paid provider.
+    intelligenceCommand:
+      writable &&
+      principal?.originateCapabilities.includes(INTELLIGENCE_COMMAND_CAPABILITY.id) === true &&
+      intelligenceCommandCapabilityState(
+        capabilityRowFor(deps.ops, INTELLIGENCE_COMMAND_CAPABILITY.id),
+      ) === 'enabled',
     mutationsEnabled: deps.mutationsEnabled !== false,
     trustedOriginConfigured: originsUsable,
     // Stated separately from `trustedOriginConfigured`, because they answer
@@ -1532,6 +1629,8 @@ function controlErrorStatus(code: string): number {
     case 'unknown_product':
     // Phase 13: the run ledger does not hold that id.
     case 'unknown_run':
+    // Phase 14: the routing-decision ledger does not hold that id.
+    case 'unknown_intelligence_decision':
       return 404;
     case 'invalid_mission_transition':
     case 'mission_status_changed':
@@ -1572,6 +1671,18 @@ function controlErrorStatus(code: string): number {
     case 'run_state_conflict':
     case 'run_attempt_refused':
     case 'stale_run_claim':
+    // Phase 14: the recorded policy conflicts with what was asked for. A
+    // ceiling that blocks, a tier the policy does not permit, a tier below the
+    // computed floor, a required reviewer tier a cheaper one cannot satisfy,
+    // and an escalation the tier order or the permitted set does not admit.
+    // None of these is a bad request: the request is well formed and the
+    // POLICY says no.
+    case 'budget_ceiling_blocks':
+    case 'tier_not_permitted':
+    case 'tier_below_policy_floor':
+    case 'review_tier_required':
+    case 'intelligence_routing_refused':
+    case 'escalation_refused':
       return 409;
     case 'unknown_capability':
     case 'capability_disabled':
@@ -3838,6 +3949,264 @@ function reconcileRunRoute(
     json(200, {
       ok: true,
       run: runView(result.data.run),
+      externalActionTaken: false,
+    }),
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Phase 14 — cost + intelligence optimization                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Everything the browser is told about one routing decision.
+ *
+ * The derived record is already free of the durable dedupe identity
+ * (`decision_key` never leaves the store). What this projection adds is
+ * `externalActionTaken: false` and `grantsAuthority: false` on every entry, so
+ * a console cannot render a decision as a thing that happened outside HQ or as
+ * a thing that permits one.
+ */
+function decisionView(decision: DecisionRecord): Record<string, unknown> {
+  return {
+    id: decision.id,
+    taskId: decision.taskId,
+    missionId: decision.missionId,
+    projectId: decision.projectId,
+    tier: decision.tier,
+    floorTier: decision.floorTier,
+    requiredReviewTier: decision.requiredReviewTier,
+    satisfiesReviewRequirement: decision.satisfiesReviewRequirement,
+    escalatedFrom: decision.escalatedFrom,
+    escalatedAwayTo: decision.escalatedAwayTo,
+    escalationTrigger: decision.escalationTrigger,
+    // The binding HQ OBSERVED on the canonical task. A decision never proposes
+    // a provider and never changes one.
+    boundProvider: decision.boundProvider,
+    characteristics: decision.characteristics,
+    permittedTiers: decision.permittedTiers,
+    budgetDecision: decision.budgetDecision,
+    label: decision.label,
+    issuedAt: decision.issuedAt,
+    issuedBy: decision.issuedBy,
+    state: decision.state,
+    result: decision.result,
+    reviewedByTier: decision.reviewedByTier,
+    grantsAuthority: false,
+    externalActionTaken: false,
+  };
+}
+
+/**
+ * The intelligence picture. A pure READ: it records nothing, activates
+ * nothing, contacts nothing and spends nothing, so refreshing the page can
+ * never change what HQ permits.
+ *
+ * It carries amounts and ceilings, which the unauthenticated snapshot
+ * deliberately does not — this route sits behind the resolved Founder, and a
+ * Founder who cannot see what was spent cannot govern it.
+ */
+function intelligenceRoute(
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const posture = deps.ops.hqIntelligencePosture();
+  const observations = deps.ops.listModelObservationsBounded();
+  const decisions = deps.ops.listIntelligenceDecisionsBounded();
+  const costs = deps.ops.listIntelligenceCostEntriesBounded();
+  const budgets = deps.ops.listIntelligenceBudgetsBounded();
+  audit('allowed', 'intelligence_posture', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      posture,
+      observations: observations.observations,
+      observationTotal: observations.total,
+      observationsTruncated: observations.truncated,
+      decisions: decisions.decisions.map(decisionView),
+      decisionTotal: decisions.total,
+      decisionsTruncated: decisions.truncated,
+      costEntries: costs.entries,
+      costEntryTotal: costs.total,
+      costEntriesTruncated: costs.truncated,
+      budgets: budgets.budgets,
+      budgetTotal: budgets.total,
+      budgetsTruncated: budgets.truncated,
+      analytics: deps.ops.intelligenceAnalytics(),
+      vocabulary: {
+        tiers: [...INTELLIGENCE_TIERS],
+        complexities: [...TASK_COMPLEXITIES],
+        contextSizes: [...CONTEXT_SIZES],
+        workKinds: [...WORK_KINDS],
+        latencyRequirements: [...LATENCY_REQUIREMENTS],
+        privacyRequirements: [...PRIVACY_REQUIREMENTS],
+        costProvenances: [...COST_PROVENANCES],
+        costUnitKinds: [...COST_UNIT_KINDS],
+        observationSources: [...OBSERVATION_SOURCES],
+        modelLocalities: [...MODEL_LOCALITIES],
+        modelAvailability: [...MODEL_AVAILABILITY_STATES],
+        modelCapabilityFacts: [...MODEL_CAPABILITY_FACTS],
+        budgetScopes: [...BUDGET_SCOPES],
+        budgetWindows: [...BUDGET_WINDOWS],
+        budgetDecisions: [...BUDGET_DECISIONS],
+        decisionStates: [...DECISION_STATES],
+        decisionResults: [...DECISION_RESULTS],
+        escalationTriggers: [...ESCALATION_TRIGGERS],
+      },
+      // Stated on the wire, not merely in a doc: there is no route and no
+      // facade method behind either of these.
+      canActivatePaidProvider: false,
+      canAuthorizeSpend: false,
+    }),
+  );
+}
+
+/**
+ * Record one OBSERVATION about a provider/model.
+ *
+ * Registering an observation activates nothing and connects nothing. The
+ * amount/provenance lock lives at the facade (`normalizeCostFact`), so this
+ * route forwards rather than re-implementing it — a second copy of "HQ never
+ * invents a price" is exactly the drift the rule exists to prevent.
+ */
+function recordModelObservationRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const providerId = stringField(request.body, 'providerId') ?? '';
+  const modelId = stringField(request.body, 'modelId') ?? '';
+  const locality = stringField(request.body, 'locality') ?? '';
+  const availability = stringField(request.body, 'availability') ?? '';
+  const source = stringField(request.body, 'source') ?? '';
+  const provenance = stringField(request.body, 'unitCostProvenance') ?? '';
+  const unitKind = stringField(request.body, 'unitCostUnitKind') ?? '';
+  const currency = stringField(request.body, 'unitCostCurrency') ?? '';
+  const basis = stringField(request.body, 'unitCostBasis') ?? '';
+  const note = stringField(request.body, 'note') ?? '';
+  const facts = stringArrayField(request.body, 'capabilityFacts');
+  if (facts === 'invalid') {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'capabilityFacts must be a list of strings.');
+  }
+  const rawAmount = (request.body as Record<string, unknown> | undefined)?.['unitCostMinorUnits'];
+  if (rawAmount !== undefined && rawAmount !== null && !Number.isInteger(rawAmount)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'unitCostMinorUnits must be a whole number of minor units, or omitted.');
+  }
+  const rawContext = (request.body as Record<string, unknown> | undefined)?.['contextWindowTokens'];
+  if (rawContext !== undefined && rawContext !== null && !Number.isInteger(rawContext)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'contextWindowTokens must be a whole number, or omitted.');
+  }
+  try {
+    assertBrowserSafe({ providerId, modelId, basis, note }, 'intelligence');
+  } catch {
+    audit('refused', 'unsafe_intelligence_content', founder);
+    return refusal(
+      400,
+      'unsafe_intelligence_content',
+      'The provider id, model id, basis or note looks like it contains credential material, so it was ' +
+        'refused rather than stored.',
+    );
+  }
+  const result = deps.ops.recordModelObservation({
+    providerId,
+    modelId: modelId || null,
+    locality: locality as ModelLocality,
+    availability: availability as ModelAvailability,
+    capabilityFacts: (facts ?? []) as ModelCapabilityFact[],
+    contextWindowTokens: rawContext === undefined ? null : (rawContext as number | null),
+    unitCostProvenance: provenance as CostProvenance,
+    unitCostMinorUnits: rawAmount === undefined ? null : (rawAmount as number | null),
+    unitCostCurrency: currency || null,
+    unitCostUnitKind: unitKind as CostUnitKind,
+    unitCostBasis: basis || undefined,
+    source: source as ObservationSource,
+    observedBy: founder.principal.id,
+    note: note || undefined,
+    idempotencyKey: stringField(request.body, 'idempotencyKey'),
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', 'intelligence_observation_recorded', founder);
+  return safe(
+    json(result.data.deduplicated ? 200 : 201, {
+      ok: true,
+      deduplicated: result.data.deduplicated,
+      observation: result.data.observation as unknown as Record<string, unknown>,
+      activatesProvider: false,
+      externalActionTaken: false,
+    }),
+  );
+}
+
+/**
+ * Set a budget policy — a ceiling, a currency and the permitted tiers.
+ *
+ * A ceiling BLOCKS or DEMANDS A DECISION. This route cannot grant spend, and
+ * there is no field on it that could: raising a ceiling makes no provider
+ * available, enables no paid service and buys nothing. The response says so on
+ * the wire so a console cannot draw it as a purchase.
+ */
+function setIntelligenceBudgetRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const scopeKind = stringField(request.body, 'scopeKind') ?? '';
+  const scopeId = stringField(request.body, 'scopeId') ?? '';
+  const window = stringField(request.body, 'window') ?? '';
+  const currency = stringField(request.body, 'currency') ?? '';
+  const note = stringField(request.body, 'note') ?? '';
+  const tiers = stringArrayField(request.body, 'permittedTiers');
+  if (tiers === 'invalid') {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'permittedTiers must be a list of strings.');
+  }
+  const ceiling = (request.body as Record<string, unknown> | undefined)?.['ceilingMinorUnits'];
+  if (!Number.isInteger(ceiling)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'ceilingMinorUnits must be a whole number of minor units.');
+  }
+  try {
+    assertBrowserSafe({ scopeId, note }, 'intelligence');
+  } catch {
+    audit('refused', 'unsafe_intelligence_content', founder);
+    return refusal(
+      400,
+      'unsafe_intelligence_content',
+      'The scope id or note looks like it contains credential material, so it was refused rather than stored.',
+    );
+  }
+  const result = deps.ops.setIntelligenceBudget({
+    scopeKind: scopeKind as BudgetScope,
+    scopeId,
+    window: window as BudgetWindow,
+    ceilingMinorUnits: ceiling as number,
+    currency,
+    permittedTiers: (tiers ?? []) as IntelligenceTier[],
+    setBy: founder.principal.id,
+    note: note || undefined,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', `intelligence_budget_v${result.data.budget.version}`, founder);
+  return safe(
+    json(201, {
+      ok: true,
+      budget: result.data.budget as unknown as Record<string, unknown>,
+      grantsSpend: false,
+      activatesPaidProvider: false,
       externalActionTaken: false,
     }),
   );
