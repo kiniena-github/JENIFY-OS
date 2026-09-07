@@ -385,9 +385,40 @@ describe('the snapshot fold is closed by construction', () => {
   });
 
   it('states an ABSENT store as absent rather than as an empty one', () => {
-    const empty = emptyReliabilitySnapshot(false);
+    const empty = emptyReliabilitySnapshot(false, {
+      safeMode: false,
+      assessmentDepth: 'structural',
+      findings: [],
+      durabilityMeetsRequirement: true,
+    });
     expect(empty.storePresent).toBe(false);
     expect(empty.runs).toBe(0);
     expect(empty.note).toMatch(/Counts over closed vocabularies only/);
+  });
+
+  /**
+   * Wave 5 High 5. The store-absent view used to hard-code `safeMode: false`,
+   * `findings: {}` and `durabilityMeetsRequirement: true`, so it could not
+   * carry a latched safe-mode verdict even when there was one. The integrity
+   * half is now an argument, and it is reported as given.
+   */
+  it('carries the LATCHED integrity verdict rather than hard-coded optimism', () => {
+    const latched = emptyReliabilitySnapshot(false, {
+      safeMode: true,
+      assessmentDepth: 'full',
+      findings: ['append_only_guard_missing', 'durability_below_requirement'],
+      durabilityMeetsRequirement: false,
+    });
+    expect(latched.safeMode).toBe(true);
+    expect(latched.assessmentDepth).toBe('full');
+    expect(latched.durabilityMeetsRequirement).toBe(false);
+    expect(latched.findings).toEqual({
+      append_only_guard_missing: 1,
+      durability_below_requirement: 1,
+    });
+    // The privacy shape is untouched: still counts over the closed vocabulary,
+    // still no run rows, still no detail text.
+    expect(latched.runs).toBe(0);
+    expect(latched.storePresent).toBe(false);
   });
 });

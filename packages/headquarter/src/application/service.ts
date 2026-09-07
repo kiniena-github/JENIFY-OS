@@ -7961,7 +7961,20 @@ export class HeadquarterOperations {
    * `summarizeReliability`, and anything else is counted as `unrecognized`.
    */
   reliabilitySummary(): ReliabilitySnapshotView {
-    if (!this.#reliabilityStorePresent) return emptyReliabilitySnapshot(false);
+    // A handle with no run ledger still has a LATCHED integrity verdict:
+    // `#integrityReport` is assessed at construction independently of the
+    // reliability store, and the snapshot CLI opens read-only, which is
+    // precisely this branch. Publishing hard-coded optimism here told an
+    // unauthenticated reader everything was fine while HQ had latched safe
+    // mode — the exact lie this section's own note forbids.
+    if (!this.#reliabilityStorePresent) {
+      return emptyReliabilitySnapshot(false, {
+        safeMode: this.#integrityReport.safeMode,
+        assessmentDepth: this.#integrityReport.depth,
+        findings: this.#integrityReport.observations.map((observation) => observation.finding),
+        durabilityMeetsRequirement: this.#integrityReport.durability.meetsRequirement,
+      });
+    }
     return summarizeReliability({
       storePresent: true,
       runs: this.#listRunsFromStore(),

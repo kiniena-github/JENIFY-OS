@@ -14,7 +14,7 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { expectOk } from './application.fixture.js';
 import { fileFixture } from './reliability.fixture.js';
-import { openHqDatabase, openMemoryHqDatabase } from '../src/store/db.js';
+import { openHqDatabase, openHqDatabaseReadOnly, openMemoryHqDatabase } from '../src/store/db.js';
 import {
   ENGINE_IMMUTABLE_TABLES,
   HQ_DURABILITY_REQUIREMENT,
@@ -340,6 +340,57 @@ describe('the durability posture is reported, never pretended', () => {
       expect(finding!.blocking).toBe(false);
       expect(report.safeMode).toBe(false);
       db.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * Wave 5 High 5. `reliabilitySummary()` is the one read on the path that
+ * produces the WORLD-READABLE `hq-snapshot.json`. Its store-absent branch
+ * returned a hard-coded `{safeMode:false, findings:{},
+ * durabilityMeetsRequirement:true}` — but `#integrityReport` is latched at
+ * construction independently of the reliability store, and the snapshot CLI
+ * opens read-only, which is exactly that branch. So the artifact published
+ * "everything is fine" while HQ had latched safe mode with blocking findings.
+ */
+describe('the unauthenticated snapshot never publishes optimism HQ does not hold', () => {
+  it('carries the latched safe-mode verdict on a handle with no run ledger', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-snapshot-failopen-'));
+    try {
+      const dbPath = path.join(dir, 'hq.sqlite');
+      const built = openHqDatabase(dbPath);
+      void new HeadquarterOperations(built);
+      built.close();
+
+      // A file that carries no Phase 13 ledger AND has lost an append-only
+      // guard — the two facts the read-only snapshot path must not conflate.
+      const raw = openHqDatabase(dbPath);
+      raw.exec('DROP TABLE hq_reliability_runs');
+      raw.exec('DROP TRIGGER trg_hq_action_events_no_erase');
+      raw.close();
+
+      const readOnly = openHqDatabaseReadOnly(dbPath);
+      const ops = new HeadquarterOperations(readOnly);
+      expect(ops.reliabilityStorePresent()).toBe(false);
+      const latched = ops.hqReliabilityPosture().integrity;
+      expect(latched.safeMode).toBe(true);
+
+      const published = ops.reliabilitySummary();
+      expect(published.storePresent).toBe(false);
+      expect(published.safeMode).toBe(true);
+      expect(published.findings.append_only_guard_missing).toBe(1);
+      expect(published.assessmentDepth).toBe(latched.depth);
+      // Reported as HQ actually found it, in either direction — never asserted.
+      expect(published.durabilityMeetsRequirement).toBe(latched.durability.meetsRequirement);
+      // The absence of the ledger is itself a stated finding, not silence.
+      expect(published.findings.reliability_schema_absent).toBe(1);
+      // Privacy shape unchanged: counts over the closed vocabulary only.
+      for (const key of Object.keys(published.findings)) {
+        expect(HQ_INTEGRITY_FINDINGS as readonly string[]).toContain(key);
+      }
+      readOnly.close();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

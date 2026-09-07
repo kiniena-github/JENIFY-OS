@@ -1030,21 +1030,42 @@ function zeroed<T extends string>(members: readonly T[]): Record<string, number>
   return counts;
 }
 
-export function emptyReliabilitySnapshot(storePresent: boolean): ReliabilitySnapshotView {
-  return {
+/**
+ * The snapshot for a handle that carries NO run ledger.
+ *
+ * The run counts are genuinely zero — there is no ledger to count — but the
+ * INTEGRITY half is not: `#integrityReport` is latched at construction
+ * independently of the reliability store, and the snapshot CLI opens read-only,
+ * which is exactly the store-absent branch. This used to hard-code
+ * `safeMode: false`, `findings: {}` and `durabilityMeetsRequirement: true`, so
+ * a world-readable artifact published "everything is fine" while HQ had latched
+ * safe mode with blocking findings — and published
+ * `durabilityMeetsRequirement: true` on EVERY read-only pre-Phase-13 snapshot
+ * with no tampering at all (Wave 5 High 5, executed).
+ *
+ * The integrity facts are therefore a REQUIRED argument: there is no way to
+ * build this view without stating what HQ actually knows about itself. The
+ * privacy shape is unchanged — the finding map is keyed through the closed
+ * vocabulary by `summarizeReliability`, and no detail text crosses.
+ */
+export function emptyReliabilitySnapshot(
+  storePresent: boolean,
+  integrity: {
+    safeMode: boolean;
+    assessmentDepth: 'structural' | 'full';
+    findings: readonly string[];
+    durabilityMeetsRequirement: boolean;
+  },
+): ReliabilitySnapshotView {
+  return summarizeReliability({
     storePresent,
-    runs: 0,
-    byKind: zeroed(RUN_KINDS) as RunKindCounts,
-    byState: zeroed(RUN_STATES) as RunStateCounts,
-    byOutcome: zeroed(RUN_OUTCOMES) as RunOutcomeCounts,
-    needsReconciliation: 0,
+    runs: [],
     verifiedBackups: 0,
-    safeMode: false,
-    assessmentDepth: 'structural',
-    findings: {},
-    durabilityMeetsRequirement: true,
-    note: RELIABILITY_SNAPSHOT_NOTE,
-  };
+    safeMode: integrity.safeMode,
+    assessmentDepth: integrity.assessmentDepth,
+    findings: integrity.findings,
+    durabilityMeetsRequirement: integrity.durabilityMeetsRequirement,
+  });
 }
 
 export const RELIABILITY_SNAPSHOT_NOTE =
