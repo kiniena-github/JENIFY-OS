@@ -227,7 +227,38 @@ mission ceiling, which made three of the five `BUDGET_SCOPES` meaningless.
 Both are now DERIVED by `#canonicalWorkIdentity` and are no longer parameters:
 one canonical attribution decision serving this and the scope rule above.
 `decisionId` on a cost entry must name a decision that exists AND belongs to
-the same task.
+the same task — and, since the second correction round (LOW 8), must be a
+bounded lowercase slug that is shape-checked before any store read, with the
+refusal carrying the code rather than echoing the caller's text. It was the one
+id a caller still passes into this phase, and it was left unbounded and
+unscanned by the same round that removed `missionId` and `projectId` for
+precisely that reason.
+
+#### The one row this derivation stands on, and what now protects it
+
+Both halves of that derivation reach the task through ONE row:
+`hq_mission_plan_items.task_id`. That was a fail-OPEN dependency and nothing
+said so (second correction round, MEDIUM 3). The older users of that link check
+that a row EXISTS, so a DELETE fails them closed; this derivation reads the
+absence as "this task belongs to no mission" and drops the mission and project
+ceilings from the applicable set entirely. Executed: with an exhausted
+`mission/mission-1/total` ceiling the proposal was `blocked` and restricted to
+`deterministic_local`; after one `DELETE` of the single link row it was
+`within_ceiling` with the full tier set — and the integrity census reported
+nothing, because `hq_mission_plan_items` was deliberately outside
+`ENGINE_IMMUTABLE_TABLES`.
+
+Checked before acting, as the finding required: **no code path in this
+repository deletes from that table**, and the mission source scan already
+forbids the spelling. So the table now carries
+`trg_hq_mission_plan_items_no_erase` and the engine refuses the DELETE from any
+writer. `no_rewrite` was deliberately NOT added — linking a task, superseding
+an item and stating a work spec are legitimate UPDATEs of this table's own
+columns, and each of those columns is already write-once by its own trigger. The
+table is now IN the census with a reduced declared base
+(`requiredGuards: ['no_erase', 'no_replace']` plus `no_relink` and `no_respec`),
+so its guards can no longer go missing quietly; being outside the census
+entirely was the second half of the defect.
 
 ### The law: the window is measured on the instant HQ stamped
 
@@ -574,6 +605,27 @@ markers, untouched — nothing under `packages/server`, `packages/web`,
   STORED trigger (Wave 5 LOW 4). If a deployment ever needs two escalations of
   one decision under different triggers, the key is the thing to widen, and
   that would be a deliberate change to what "the same escalation" means.
+- **`readStoredCostFact`'s parity with the writer is now complete, and the
+  previous round's claim that it was complete was wrong.** The Wave 5 Medium 6
+  correction closed two of `normalizeCostFact`'s refusals on the read side and
+  then asserted, in a comment, that there had only ever been two. There were
+  four. Executed against the reader in the second correction round (LOW 7): a
+  raw-appended `billed` row WITH a basis read back `state: 'known'` and carried
+  the basis with it (`basis_on_non_estimate` on write), and an `estimated` row
+  with a 500,000-character basis read back `known` and unbounded on a
+  Founder-gated read (`basis_too_long` on write). Both now return the unknown
+  fact, and the comment states four. `hq_intel_cost_entries` is append-only and
+  an APPEND is the write its triggers deliberately permit, so rows of these
+  shapes remain representable in a file — which is the whole reason the reader
+  has to fail closed independently of the writer.
+- **The budget-scope derivation depends on `hq_mission_plan_items`, and that
+  dependency is now guarded rather than merely stated.** See ["The one row this
+  derivation stands on"](#the-one-row-this-derivation-stands-on-and-what-now-protects-it).
+  The residual risk that remains: the engine refuses a DELETE, but the row's
+  `task_id` is still write-once rather than append-only-by-history, so an item
+  that was never linked in the first place attributes nothing — a task that no
+  mission plan references genuinely belongs to no mission, and HQ cannot tell
+  that from an omission. Only `deployment/*` ceilings apply to such a task.
 - **`byCostProvenance.unrecognized` is unreachable through the stored reader.**
   `readStoredCostFact` already coerces an out-of-vocabulary provenance to
   `unknown`, so no ROW can land in that bucket; the membership re-check catches
@@ -796,6 +848,17 @@ labelled by the lane that raised them.
 | B LOW 7 — a dead `unrecognized` bucket described as a live defence | "Known limitations"; comments corrected, bucket kept | new test in `intelligence-core.test.ts` |
 | B Informational — `fdfa1e0`'s "no facade method spells activate…" | "Surfaces → What has no route, and why", scoped honestly | the existing route-segment scan, unchanged |
 | B Undisclosed debt — a raw appender can widen a budget by version | "The law: a ceiling blocks or asks, and never grants" | stated, not defended — it is inherent to append-only versioning |
+
+### Second correction round
+
+The corrected head was reviewed again, hostilely. Three of its findings touch
+Phase 14, and all three are corrected in place above:
+
+| Finding | Correction | Pinned by |
+|---|---|---|
+| MEDIUM 3 — the budget-scope derivation depended on `hq_mission_plan_items`, which had no `no_erase` guard and was outside the census, so one DELETE unbound a mission/project ceiling FAIL-OPEN with no finding | ["The one row this derivation stands on"](#the-one-row-this-derivation-stands-on-and-what-now-protects-it); `trg_hq_mission_plan_items_no_erase` plus a census entry with a reduced declared base | a new test in `intelligence-authority.test.ts` that reproduces `blocked` → `within_ceiling` and proves the engine now refuses the DELETE, plus the two live-schema pins in `reliability-durability.test.ts` |
+| LOW 7 — `readStoredCostFact`'s parity was still incomplete for two more of the writer's refusals, contrary to a comment claiming there had been two | "Known limitations"; a non-estimate that names a basis, and a basis beyond `MAX_COST_BASIS_LENGTH`, both read back as the unknown fact | two new tests in `intelligence-core.test.ts` |
+| LOW 8 — `decisionId` was unbounded, unscanned and echoed verbatim into a refusal message | "The law: a spend is attributed to canonical work"; `#resolveDecisionReference` bounds and shape-checks it on all three paths that accept one, and the refusals carry the code alone | a new test in `intelligence-authority.test.ts` |
 
 **One merge-level detail, recorded rather than left silent.** Lane A's Medium
 10 replaced `foldSpend`'s composite-key separator (a raw NUL) with U+001F; Lane
