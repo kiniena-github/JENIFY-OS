@@ -42,6 +42,8 @@ import {
   COLLABORATION_CONTRIBUTE_CAPABILITY,
   registerCollaborationCommandCapability,
   registerCollaborationContributeCapability,
+  FOUNDER_BRIEF_CAPABILITY,
+  registerFounderBriefCapability,
   type ExternalActionAdapter,
 } from '@factoryos/headquarter/application';
 import { CapabilityRegistry } from '@factoryos/headquarter/operator';
@@ -1054,6 +1056,137 @@ describe('Phase 9 — the collaboration routes through the Fastify host', () => 
       });
       expect(res.statusCode, url).toBe(401);
     }
+    await app.close();
+  });
+});
+
+describe('Phase 10 — the command-centre routes through the Fastify host', () => {
+  async function phase10App(options: { grantBrief?: boolean } = {}): Promise<{
+    app: FastifyInstance;
+    ops: HeadquarterOperations;
+    missionId: string;
+  }> {
+    const db = openMemoryHqDatabase();
+    registerMissionCommandCapability(db);
+    registerFounderBriefCapability(db);
+    const store = new HeadquarterStore(db);
+    const ops = new HeadquarterOperations(db, { store });
+    new HumanPrincipalRegistry(db).register({
+      id: 'founder',
+      displayName: 'Proof Founder',
+      originateCapabilities: [
+        MISSION_COMMAND_CAPABILITY.id,
+        ...(options.grantBrief === false ? [] : [FOUNDER_BRIEF_CAPABILITY.id]),
+      ],
+      approvalAuthority: true,
+      active: true,
+    });
+    const mission = ops.commandMission({
+      title: 'Host mission',
+      objective: 'Prove the wiring',
+      planItems: ['Do the thing'],
+      requestedBy: 'founder',
+    });
+    if (!mission.ok) throw new Error(mission.error.message);
+    const app = Fastify({ logger: false });
+    registerHeadquarterRoutes(
+      app,
+      {
+        ops,
+        founderMap: [{ realmId: 'realm', accountId: 'acc-1', principalId: 'founder' }],
+        allowedOrigins: [ORIGIN],
+        secretsEnv: {},
+        mutationsEnabled: true,
+      },
+      identityFor(FOUNDER),
+    );
+    await app.ready();
+    return { app, ops, missionId: mission.data.mission.id };
+  }
+
+  it('reads the briefing and the inbox, issues one receipt attributed to the mapped principal, and deduplicates the repeat', async () => {
+    const { app, ops, missionId } = await phase10App();
+    const briefing = await app.inject({ method: 'GET', url: CONTROL_ROUTES.commandCenter });
+    expect(briefing.statusCode).toBe(200);
+    expect(briefing.headers['cache-control']).toBe('no-store');
+    const body = briefing.json() as {
+      briefing: { needsMe: { items: { source: { table: string; id: string } }[] }; recommendations: { items: { executable: boolean }[] } };
+      briefStorePresent: boolean;
+    };
+    expect(body.briefStorePresent).toBe(true);
+    // The commanded mission has an unspecified plan item, so the derived
+    // inbox names that canonical row rather than an invented one.
+    expect(body.briefing.needsMe.items.map((item) => item.source.id)).toContain(missionId);
+    for (const recommendation of body.briefing.recommendations.items) expect(recommendation.executable).toBe(false);
+
+    const inbox = await app.inject({ method: 'GET', url: CONTROL_ROUTES.commandCenterInbox });
+    expect(inbox.statusCode).toBe(200);
+    expect((inbox.json() as { inbox: { items: unknown[] } }).inbox.items).toHaveLength(body.briefing.needsMe.items.length);
+
+    const issued = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.commandCenterBrief,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: {},
+    });
+    expect(issued.statusCode).toBe(201);
+    expect((issued.json() as { brief: { issuedBy: string } }).brief.issuedBy).toBe('founder');
+    const repeat = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.commandCenterBrief,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: {},
+    });
+    expect(repeat.statusCode).toBe(200);
+    expect((repeat.json() as { deduplicated: boolean }).deduplicated).toBe(true);
+    expect(ops.listBriefs().total).toBe(1);
+
+    // A body naming an actor is refused before the facade is reached.
+    const forged = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.commandCenterBrief,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: { requestedBy: 'mallory' },
+    });
+    expect(forged.statusCode).toBe(400);
+    expect(ops.listBriefs().total).toBe(1);
+    await app.close();
+  });
+
+  it('refuses the write to a Founder without the grant while the reads still answer', async () => {
+    const { app, ops } = await phase10App({ grantBrief: false });
+    const refused = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.commandCenterBrief,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: {},
+    });
+    expect(refused.statusCode).toBe(403);
+    expect(ops.listBriefs().total).toBe(0);
+    expect((await app.inject({ method: 'GET', url: CONTROL_ROUTES.commandCenter })).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('refuses the whole command-centre surface to nobody, exactly as it refuses the rest', async () => {
+    const db = openMemoryHqDatabase();
+    const ops = new HeadquarterOperations(db, { store: new HeadquarterStore(db) });
+    const app = Fastify({ logger: false });
+    registerHeadquarterRoutes(
+      app,
+      { ops, founderMap: [], allowedOrigins: [ORIGIN], secretsEnv: {}, mutationsEnabled: true },
+      NO_IDENTITY,
+    );
+    await app.ready();
+    for (const url of [CONTROL_ROUTES.commandCenter, CONTROL_ROUTES.commandCenterInbox]) {
+      expect((await app.inject({ method: 'GET', url })).statusCode, url).toBe(401);
+    }
+    const write = await app.inject({
+      method: 'POST',
+      url: CONTROL_ROUTES.commandCenterBrief,
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      payload: {},
+    });
+    expect(write.statusCode).toBe(401);
     await app.close();
   });
 });

@@ -182,6 +182,39 @@ function overviewSection(state: HqStateDocument): Section {
   };
 }
 
+/**
+ * Phase 10: the Chief of Staff's derived command layer, when the state
+ * document carries it. Every number is a COUNT over a set the server just
+ * enumerated from canonical rows — never a priority, score, percentage or
+ * ETA, none of which exist anywhere in this phase. An absent section
+ * contributes nothing (not a zero): a static build reads no canonical store
+ * and says so by omission.
+ */
+function commandCenterFacts(state: HqStateDocument): {
+  present: boolean;
+  attention: number;
+  rows: RoomRow[];
+} {
+  const centre = state.commandCenter?.data;
+  if (!centre) return { present: false, attention: 0, rows: [] };
+  return {
+    present: true,
+    attention: centre.attention.total,
+    rows: centre.attention.items.map((item) => ({
+      id: `attention-${item.id}`,
+      primary: `${item.kind.replace(/_/g, ' ')}: ${item.summary}`,
+      secondary:
+        `${item.source.table} ${item.source.id} · ${item.reason} · resolved by ${item.requiredAuthority}` +
+        (item.since ? ` · since ${item.since}` : ' · the source record carries no timestamp'),
+      chips: [
+        { label: item.kind, tone: 'warn' as RoomTone },
+        ...(item.staleness === 'stale' ? [{ label: 'stale', tone: 'danger' as RoomTone }] : []),
+        ...(item.staleness === 'not_evaluated' ? [{ label: 'staleness not evaluated', tone: 'neutral' as RoomTone }] : []),
+      ],
+    })),
+  };
+}
+
 function operationsSection(state: HqStateDocument): Section {
   const ops = state.operations.data;
   const rows = [
@@ -198,6 +231,12 @@ function operationsSection(state: HqStateDocument): Section {
   ).length;
   const attention =
     ops.blocked.length + ops.outcomeUnknown.length + ops.approvals.length + missionsNeedingDecision;
+  // Phase 10: the derived command layer rides this room. It restates nothing
+  // — every item REFERENCES the canonical row it came from, and the room
+  // shows the reference beside it — and it lights attention because an
+  // attention item is by definition something the Founder decides on
+  // elsewhere. Present-only; zero renders as an explicit zero.
+  const centre = commandCenterFacts(state);
   return {
     metrics: [
       metric('In flight', ops.inFlight.length, 'Assigned or running right now.', tone(ops.inFlight.length, 'info')),
@@ -209,8 +248,26 @@ function operationsSection(state: HqStateDocument): Section {
       // Command Room would sit quiet over four zeroes.
       metric('Awaiting review', ops.pendingReviews.length, 'Submitted and waiting for the independent review lane.', tone(ops.pendingReviews.length, 'info')),
       metric('Missions needing a decision', missionsNeedingDecision, 'Commanded missions recorded blocked or ready for review — the Mission Room holds them.', tone(missionsNeedingDecision, 'warn')),
+      // Exactly ONE metric, and it is the one whose subject is this room's:
+      // things the Founder must decide, each carried as a row below with the
+      // canonical record it references. The section's other totals — recorded
+      // unknowns, the blocked aggregate, the brief ledger — deliberately stay
+      // OFF this room. They span workforce and provenance facts that are not
+      // "what HQ is holding here", and a metric this room counts but cannot
+      // explain with a row is precisely the defect the empty-message notes
+      // above were written about.
+      ...(centre.present
+        ? [
+            metric(
+              'Needs the Founder',
+              centre.attention,
+              'Derived attention items, each referencing the canonical row that produced it and listed below. Not a priority list: no score, weight, percentage or ETA exists anywhere in this layer.',
+              tone(centre.attention, 'warn'),
+            ),
+          ]
+        : []),
     ],
-    rows: limited(rows),
+    rows: limited([...rows, ...centre.rows]),
     // The empty message has to agree with the metrics above it.
     //
     // The Command Room lists what is moving or stuck — in flight, queued,
@@ -269,10 +326,13 @@ function operationsSection(state: HqStateDocument): Section {
       );
     })(),
     liveness: livenessFrom({
-      attention,
+      // A derived attention item is by definition something the Founder
+      // decides elsewhere, so it lights attention — and it always brings a
+      // row with it, so this room can never be lit with nothing to show.
+      attention: attention + centre.attention,
       active: ops.inFlight.length,
       present:
-        rows.length + ops.approvals.length + ops.pendingReviews.length + missionsNeedingDecision,
+        rows.length + ops.approvals.length + ops.pendingReviews.length + missionsNeedingDecision + centre.rows.length,
     }),
   };
 }

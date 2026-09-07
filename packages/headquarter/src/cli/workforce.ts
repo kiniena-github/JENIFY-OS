@@ -111,6 +111,11 @@ import {
   registerCollaborationCommandCapability,
   registerCollaborationContributeCapability,
 } from '../application/collaboration-command.js';
+import {
+  FOUNDER_BRIEF_CAPABILITY,
+  founderBriefCapabilityState,
+  registerFounderBriefCapability,
+} from '../application/chief-of-staff.js';
 
 /**
  * The capabilities this command may register — fail closed: an id outside
@@ -148,6 +153,13 @@ const REGISTRABLE = {
   [COLLABORATION_CONTRIBUTE_CAPABILITY.id]: {
     register: registerCollaborationContributeCapability,
     state: collaborationContributeCapabilityState,
+  },
+  // Phase 10: the one Founder-gated act the Chief of Staff adds — issuing a
+  // brief RECEIPT. Reading the command layer takes no capability, so this is
+  // the only id the phase contributes to the fail-closed list.
+  [FOUNDER_BRIEF_CAPABILITY.id]: {
+    register: registerFounderBriefCapability,
+    state: founderBriefCapabilityState,
   },
 } as const;
 

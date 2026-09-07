@@ -270,12 +270,21 @@ describe('a real mutation changes what the next read answers', () => {
       h.deps,
     );
     const command = rooms(h.call({})).find((room) => room.roomId === 'command-room')!;
-    expect(command.rows).toHaveLength(0);
     expect(command.metrics.find((metric) => metric.label === 'Awaiting decision')!.value).toBe(1);
     expect(command.liveness).toBe('attention');
     expect(command.emptyMessage).not.toContain('HQ is holding nothing');
     expect(command.emptyMessage).toContain('held at the Founder gate');
     expect(command.emptyMessage).toContain('1 task(s)');
+    // PIN UPDATED, deliberately, by Phase 10 (not relaxed). This assertion
+    // used to read `toHaveLength(0)`, recording the gap the empty message
+    // above was written to paper over: the room counted the held task and
+    // showed nothing for it. The Chief of Staff's derived inbox now carries
+    // exactly one row for it, naming the canonical `op_tasks` row it exists
+    // because of — so the room can explain the number it is lit for.
+    expect(command.rows).toHaveLength(1);
+    expect(command.rows[0]!.id.startsWith('attention-approval:task_awaiting_approval:')).toBe(true);
+    expect(command.rows[0]!.secondary).toContain('op_tasks');
+    expect(command.metrics.find((metric) => metric.label === 'Needs the Founder')!.value).toBe(1);
   });
 
   it('still says HQ is holding nothing when it genuinely is', () => {

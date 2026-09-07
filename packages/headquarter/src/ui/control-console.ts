@@ -101,6 +101,13 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
   CONTROL_ROUTES.collaboration,
   CONTROL_ROUTES.collaborationRoom,
   CONTROL_ROUTES.collaborationAdmit,
+  // Phase 10: the Chief of Staff console on index.html — the whole derived
+  // briefing and the one Founder-gated write that records a receipt. The
+  // inbox-only read exists on the API for a light poll and is not fetched by
+  // a page (the briefing already carries it).
+  CONTROL_ROUTES.commandCenter,
+  CONTROL_ROUTES.commandCenterInbox,
+  CONTROL_ROUTES.commandCenterBrief,
 ];
 
 /**
@@ -115,7 +122,7 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
  * server's words rather than guessing.
  */
 export const CONTROL_GRANT_JS = `function grantedControls(session) {
-  var off = { directOrder: false, approve: false, deny: false, missionCommand: false, projectCommand: false, workforceAssign: false, memoryCommand: false, missionOrchestrate: false, truthRecord: false, truthVerify: false, truthAccept: false, collaborationCommand: false, reason: '' };
+  var off = { directOrder: false, approve: false, deny: false, missionCommand: false, projectCommand: false, workforceAssign: false, memoryCommand: false, missionOrchestrate: false, truthRecord: false, truthVerify: false, truthAccept: false, collaborationCommand: false, founderBrief: false, reason: '' };
   if (session == null || typeof session !== 'object') {
     off.reason = 'The control API gave no readable answer, so no control is drawn.';
     return off;
@@ -138,6 +145,7 @@ export const CONTROL_GRANT_JS = `function grantedControls(session) {
     truthVerify: session.controls.truthVerify === true,
     truthAccept: session.controls.truthAccept === true,
     collaborationCommand: session.controls.collaborationCommand === true,
+    founderBrief: session.controls.founderBrief === true,
     reason: stated !== '' ? stated : ungrantedReason(session.controls)
   };
 }
@@ -3207,6 +3215,352 @@ export function collaborationConsoleScript(roles: readonly string[]): string {
           ', from the canonical record just now. Every worker shown was admitted by the Founder; every contribution shown was recorded under a resolved worker identity.';
         box.textContent = '';
         renderRooms(body.sessions, grant);
+      })
+      .catch(function (error) {
+        stayOff('the HQ control API is not reachable from this page (' + error.message + ').');
+      });
+  }
+
+  jsonExchange(fetch(SESSION_PATH, { headers: { accept: 'application/json' } }))
+    .then(function (result) {
+      sessionAnswer = result.body;
+      if (result.body == null || typeof result.body !== 'object' || result.body.founder !== true) {
+        stayOff(grantedControls(result.body).reason);
+        return;
+      }
+      reload();
+    })
+    .catch(function (error) {
+      stayOff('the HQ control API is not reachable from this page (' + error.message + ').');
+    });
+})();
+</script>`;
+}
+
+
+/**
+ * Chief of Staff / Company Command Center console on index.html (Phase 10).
+ *
+ * The static markup is a mount and a note — no control, no data. This script
+ * asks `/session`; any resolved Founder gets the live READ of the whole
+ * derived briefing: the Founder Inbox with the canonical row each item
+ * references, what is blocked, what changed since the last issued brief, what
+ * is verified, what is recorded unknown, what HQ can safely do next, the
+ * recommendations that answer the inbox, and the department PROJECTIONS. The
+ * "Issue brief receipt" button is drawn only under a granted `founderBrief`.
+ *
+ * Three things this console deliberately never draws:
+ * - a priority, score, percentage, ETA or confidence — none exists in the
+ *   data, and the wire guards refuse the field names outright;
+ * - an act on a recommendation. A recommendation card states the acting path
+ *   and the authority it takes, as TEXT, because there is no route and no
+ *   facade method that accepts a recommendation id;
+ * - worker activity. Every number shown is a count the server made over rows
+ *   it had just enumerated, and zero renders as an explicit zero.
+ *
+ * Every server string lands through textContent, and nothing animates.
+ */
+export function commandCenterConsoleScript(): string {
+  return `<script>
+(function () {
+  var mount = document.querySelector('[data-command-center-console]');
+  if (!mount || typeof window.fetch !== 'function') return;
+
+  ${CONTROL_GRANT_JS}
+  ${DOM_HELPERS_JS}
+
+  var SESSION_PATH = ${jsonForScript(CONTROL_ROUTES.session)};
+  var COMMAND_CENTER_PATH = ${jsonForScript(CONTROL_ROUTES.commandCenter)};
+  var BRIEF_PATH = ${jsonForScript(CONTROL_ROUTES.commandCenterBrief)};
+  var ITEM_LIMIT = 12;
+
+  var note = el('p', 'readonly-note console-state', 'Checking with the control API whether this session can read the command centre\\u2026');
+  note.setAttribute('data-command-center-state', 'checking');
+  note.setAttribute('role', 'status');
+  mount.appendChild(note);
+
+  var box = el('div', 'missions-live command-center-live');
+  box.setAttribute('data-command-center', '');
+  mount.appendChild(box);
+
+  var sessionAnswer = null;
+
+  function stayOff(reason) {
+    box.textContent = '';
+    note.setAttribute('data-command-center-state', 'off');
+    note.className = 'readonly-note console-state console-state-off';
+    note.textContent = 'THE COMMAND CENTRE IS NOT READABLE FROM THIS PAGE \\u2014 ' + reason;
+  }
+
+  function textLine(parent, cls, text) {
+    parent.appendChild(el('p', cls, text));
+  }
+
+  function chip(parent, text, attr, value) {
+    var c = el('span', 'chip', text);
+    if (attr) c.setAttribute(attr, value);
+    parent.appendChild(c);
+  }
+
+  function listOf(parent, label, items, render, emptyText) {
+    textLine(parent, 'order-label', label);
+    if (!Array.isArray(items) || items.length === 0) {
+      textLine(parent, 'muted', emptyText);
+      return;
+    }
+    var ul = document.createElement('ul');
+    ul.className = 'timeline';
+    for (var i = 0; i < items.length && i < ITEM_LIMIT; i++) {
+      var li = document.createElement('li');
+      render(li, items[i]);
+      ul.appendChild(li);
+    }
+    parent.appendChild(ul);
+    if (items.length > ITEM_LIMIT) textLine(parent, 'faint', 'Showing the first ' + ITEM_LIMIT + ' of ' + items.length + '.');
+  }
+
+  function boundedNote(list) {
+    if (!list) return '0';
+    return list.truncated ? list.total + ' (newest ' + list.items.length + ' shown)' : String(list.total);
+  }
+
+  function renderInbox(card, inbox) {
+    var head = el('p', 'row');
+    head.appendChild(el('b', '', 'WHAT NEEDS ME \\u2014 ' + inbox.total + ' item(s)'));
+    var kinds = inbox.byKind || {};
+    for (var key in kinds) {
+      if (Object.prototype.hasOwnProperty.call(kinds, key) && kinds[key] > 0) chip(head, key + ' ' + kinds[key], 'data-attention-kind', key);
+    }
+    card.appendChild(head);
+    textLine(card, 'faint', inbox.ordering);
+    if (inbox.withheldFounderOnly > 0) {
+      textLine(card, 'muted', inbox.withheldFounderOnly + ' item(s) derived from founder_only records are withheld from this read.');
+    }
+    listOf(card, 'Attention items (each references the canonical row it exists because of)', inbox.items, function (li, item) {
+      li.textContent = item.kind + ' \\u00b7 ' + item.summary +
+        ' \\u2014 source ' + item.source.table + ' ' + item.source.id +
+        ' \\u00b7 predicate: ' + item.provenance +
+        ' \\u00b7 resolved under ' + item.requiredAuthority +
+        ' \\u00b7 ' + (item.since ? 'since ' + item.since : 'the source record carries no timestamp') +
+        ' \\u00b7 staleness: ' + item.staleness;
+      li.setAttribute('data-attention-item', item.id);
+      li.setAttribute('data-attention-kind', item.kind);
+    }, 'Nothing needs the Founder. 0 means 0 \\u2014 no item is invented to fill the queue.');
+  }
+
+  function renderBlocked(card, blocked) {
+    listOf(card, 'WHAT IS BLOCKED \\u2014 missions (' + boundedNote(blocked.missions) + ')', blocked.missions.items, function (li, m) {
+      li.textContent = m.title + ' (' + m.id + ') \\u2014 ' + m.status + (m.blockReason ? ': ' + m.blockReason : '') + ' \\u00b7 since ' + m.statusChangedAt;
+    }, 'No mission is blocked.');
+    listOf(card, 'Blocked or review-failed tasks (' + boundedNote(blocked.tasks) + ')', blocked.tasks.items, function (li, t) {
+      li.textContent = (t.title ? t.title + ' (' + t.taskId + ')' : t.taskId) + ' \\u2014 ' + t.status + (t.blockReason ? ': ' + t.blockReason : '');
+    }, 'No task is blocked.');
+    listOf(card, 'Held at the Founder gate (' + boundedNote(blocked.heldForApproval) + ')', blocked.heldForApproval.items, function (li, t) {
+      li.textContent = (t.title ? t.title + ' (' + t.taskId + ')' : t.taskId) + ' \\u2014 approval ' + (t.approvalId || 'not recorded') + (t.requestedAt ? ' requested ' + t.requestedAt : '');
+    }, 'No task is held at the Founder gate.');
+    listOf(card, 'Kill switches engaged (' + blocked.killSwitches.length + ')', blocked.killSwitches, function (li, k) {
+      li.textContent = k.scope + (k.reason ? ': ' + k.reason : '') + (k.engagedBy ? ' \\u00b7 engaged by ' + k.engagedBy : '');
+    }, 'No kill switch is engaged.');
+    listOf(card, 'Plans the orchestrator cannot act on (' + boundedNote(blocked.plansNeedingFounder) + ')', blocked.plansNeedingFounder.items, function (li, p) {
+      li.textContent = p.title + ' (' + p.missionId + ') \\u2014 ' + p.needsClarification + ' item(s) need clarification, ' + p.unspecifiedWork + ' work item(s) have no Founder spec';
+    }, 'Every live plan item is either linked or specified.');
+  }
+
+  function renderChanged(card, changed) {
+    textLine(card, 'order-label', 'WHAT CHANGED');
+    textLine(card, 'muted', changed.note);
+    listOf(card, 'Canonical events (' + boundedNote(changed.events) + ')', changed.events.items, function (li, e) {
+      li.textContent = '#' + e.seq + ' ' + e.at + ' \\u00b7 ' + e.actor + ' \\u00b7 ' + e.subjectKind + ' ' + e.subjectId + (e.status ? ' [' + e.status + ']' : '') + ' \\u2014 ' + e.summary;
+    }, 'No canonical event was appended.');
+    listOf(card, 'Evidence appended, by kind', changed.evidenceByKind, function (li, k) {
+      li.textContent = k.kind + ': ' + k.count;
+    }, 'No evidence entry was appended.');
+  }
+
+  function renderVerified(card, verified) {
+    textLine(card, 'order-label', 'WHAT IS VERIFIED \\u2014 ' + verified.verified + ' verified, ' + verified.accepted + ' Founder-accepted, ' + verified.supersededExcluded + ' superseded and therefore excluded');
+    if (verified.withheldFounderOnly > 0) textLine(card, 'muted', verified.withheldFounderOnly + ' founder_only record(s) are withheld from this read and from every number above.');
+    listOf(card, 'Current records (' + boundedNote(verified.truth) + ')', verified.truth.items, function (li, t) {
+      li.textContent = t.state.toUpperCase() + ' \\u00b7 ' + t.entityKind + ' ' + t.entityId + ': ' + t.statement +
+        ' \\u00b7 recorded by ' + t.recordedBy +
+        ' \\u00b7 ' + (t.provenanceMissing ? 'NO EVIDENCE CITED \\u2014 provenance is missing' : 'evidence cited') +
+        ' \\u00b7 subject drift: ' + t.subjectDrift + ' (' + t.staleness + ')' +
+        (t.verificationLimitations.length > 0 ? ' \\u00b7 stated limitations: ' + t.verificationLimitations.join(' | ') : '');
+      li.setAttribute('data-verified-truth', t.id);
+    }, 'No current record derives verified or accepted.');
+    listOf(card, 'Missions verified or complete (' + boundedNote(verified.missions) + ')', verified.missions.items, function (li, m) {
+      li.textContent = m.title + ' (' + m.id + ') \\u2014 ' + m.status;
+    }, 'No mission is verified or complete.');
+  }
+
+  function renderUnknown(card, unknown) {
+    textLine(card, 'order-label', 'WHAT IS UNKNOWN \\u2014 ' + unknown.total + ' explicit unknown(s)');
+    textLine(card, 'muted', unknown.note);
+    if (unknown.withheldFounderOnly > 0) textLine(card, 'muted', unknown.withheldFounderOnly + ' entry/entries naming founder_only records are withheld from this read and from the total above.');
+    listOf(card, 'Tasks with an unconfirmed outcome (' + boundedNote(unknown.tasksOutcomeUnknown) + ')', unknown.tasksOutcomeUnknown.items, function (li, t) {
+      li.textContent = (t.title ? t.title + ' (' + t.taskId + ')' : t.taskId) + ' \\u00b7 since ' + t.updatedAt;
+    }, 'No task outcome is unknown.');
+    listOf(card, 'External actions awaiting reconciliation (' + boundedNote(unknown.actionsOutcomeUnknown) + ')', unknown.actionsOutcomeUnknown.items, function (li, a) {
+      li.textContent = a.actionId + ' on task ' + a.taskId + ' \\u2014 ' + a.state + ' since ' + a.since;
+    }, 'No external action is awaiting reconciliation.');
+    listOf(card, 'Dispatch attempts with no terminal record (' + boundedNote(unknown.dispatchOutcomeUnknown) + ')', unknown.dispatchOutcomeUnknown.items, function (li, d) {
+      li.textContent = 'task ' + d.taskId + ' \\u00b7 attempted ' + d.at;
+    }, 'No dispatch attempt is unresolved.');
+    listOf(card, 'Missions with no stated acceptance criteria (' + boundedNote(unknown.missionsWithoutAcceptanceCriteria) + ')', unknown.missionsWithoutAcceptanceCriteria.items, function (li, m) {
+      li.textContent = m.title + ' (' + m.id + ') \\u2014 ' + m.status;
+    }, 'Every live mission states acceptance criteria.');
+    listOf(card, 'Claims citing no evidence \\u2014 missing provenance, shown as missing (' + boundedNote(unknown.truthWithoutEvidence) + ')', unknown.truthWithoutEvidence.items, function (li, t) {
+      li.textContent = t.id + ' \\u00b7 ' + t.entityKind + ' ' + t.entityId + ' \\u00b7 ' + t.state;
+    }, 'Every current record cites evidence.');
+    listOf(card, 'Verifications that concluded nothing (' + boundedNote(unknown.truthInconclusive) + ')', unknown.truthInconclusive.items, function (li, t) {
+      li.textContent = t.id + ' \\u00b7 ' + t.entityKind + ' ' + t.entityId;
+    }, 'No verification is inconclusive.');
+    listOf(card, 'Active workers with no declared provider (' + boundedNote(unknown.workersUndeclaredProvider) + ')', unknown.workersUndeclaredProvider.items, function (li, w) {
+      li.textContent = w.workerId + ' (' + w.displayName + ') \\u2014 no op_worker_providers row; nothing is inferred from its vendor string';
+    }, 'Every active worker has a declared provider.');
+    if (Array.isArray(unknown.storesAbsent) && unknown.storesAbsent.length > 0) {
+      textLine(card, 'muted', 'Stores absent on this database handle (their answers are absence, not zero): ' + unknown.storesAbsent.join(', ') + '.');
+    }
+  }
+
+  function renderSafeNext(card, safeNext) {
+    textLine(card, 'order-label', 'WHAT HQ CAN SAFELY DO NEXT');
+    textLine(card, 'muted', safeNext.note);
+    listOf(card, 'Acts', safeNext.acts, function (li, a) {
+      li.textContent = a.act + ' (' + a.nature + ') \\u2014 ' + (a.safe ? 'available now' : 'not available: ' + a.blockers.join('; ')) +
+        ' \\u00b7 authority: ' + a.requiredAuthority +
+        (a.applyWouldRefuse.length > 0 ? ' \\u00b7 applying afterwards would currently refuse: ' + a.applyWouldRefuse.join('; ') : '') +
+        ' \\u00b7 ' + a.note;
+      li.setAttribute('data-safe-act', a.act);
+    }, 'No read or record act is available on this handle.');
+    listOf(card, 'Queued tasks a registered worker could claim (' + boundedNote(safeNext.claimableTasks) + ')', safeNext.claimableTasks.items, function (li, t) {
+      li.textContent = (t.title ? t.title + ' (' + t.taskId + ')' : t.taskId) + ' \\u00b7 ' + t.capabilityId + ' \\u00b7 eligible: ' + t.eligibleWorkers.join(', ');
+    }, 'No queued task has an eligible registered worker and no engaged stop.');
+  }
+
+  function renderRecommendations(card, recommendations) {
+    textLine(card, 'order-label', 'RECOMMENDATIONS (' + boundedNote(recommendations) + ')');
+    textLine(card, 'muted', 'A recommendation is a record, never a button: HQ has no route and no method that takes one. Each names the existing act and the authority that act passes.');
+    listOf(card, 'Recommended acts', recommendations.items, function (li, r) {
+      li.textContent = r.kind + ' \\u2014 ' + r.summary +
+        ' \\u00b7 act: ' + r.actPath +
+        ' \\u00b7 authority: ' + r.requiredAuthority +
+        ' \\u00b7 rationale: ' + r.rationale +
+        ' \\u00b7 limitations: ' + r.limitations.join(' | ') +
+        ' \\u00b7 executable: ' + String(r.executable);
+      li.setAttribute('data-recommendation', r.id);
+    }, 'Nothing is recommended, because nothing needs the Founder.');
+  }
+
+  function renderDepartments(card, departments) {
+    textLine(card, 'order-label', 'DEPARTMENTS \\u2014 projections over canonical truth, never their own stores');
+    var list = el('div', 'memory-cards');
+    for (var i = 0; i < departments.length; i++) {
+      var d = departments[i];
+      var item = el('article', 'panel memory-card command-center-department');
+      item.setAttribute('data-department', d.department);
+      item.setAttribute('data-department-basis', d.basis);
+      var row = el('p', 'row');
+      row.appendChild(el('b', '', d.department.replace(/_/g, ' ').toUpperCase()));
+      chip(row, d.basis === 'canonical' ? 'canonical' : 'not recorded', 'data-department-basis', d.basis);
+      if (d.attention > 0) chip(row, d.attention + ' need(s) the Founder');
+      item.appendChild(row);
+      if (d.metrics.length === 0) {
+        textLine(item, 'muted', 'No metric is shown, because HQ records nothing that would make one true.');
+      } else {
+        for (var m = 0; m < d.metrics.length; m++) {
+          textLine(item, '', d.metrics[m].label + ': ' + d.metrics[m].value);
+        }
+      }
+      textLine(item, 'faint', (d.sources.length > 0 ? 'Sources: ' + d.sources.join(', ') + '. ' : '') + d.note);
+      list.appendChild(item);
+    }
+    card.appendChild(list);
+  }
+
+  function briefForm(briefs) {
+    var form = el('div', 'order-field');
+    form.setAttribute('data-brief-form', '');
+    textLine(form, 'order-label', 'Issue a brief receipt');
+    textLine(form, 'muted', 'Records ONE append-only row: who issued it, when, the canonical watermarks it observed, categorical counts and a content digest. It sends nothing, schedules nothing and decides nothing.');
+    var submit = document.createElement('button');
+    submit.type = 'button';
+    submit.className = 'order-live-submit';
+    submit.textContent = 'Issue brief receipt';
+    var outcome = el('p', 'muted', '');
+    outcome.setAttribute('role', 'status');
+    outcome.setAttribute('aria-live', 'polite');
+    submit.addEventListener('click', function () {
+      submit.disabled = true;
+      outcome.textContent = 'Submitting\\u2026';
+      postJson(BRIEF_PATH, {}).then(function (result) {
+        submit.disabled = false;
+        var body = result.body || {};
+        if (body.ok === true) {
+          outcome.textContent = body.deduplicated
+            ? 'Nothing was appended since the last receipt, so this deduplicated to brief ' + body.brief.id + '.'
+            : 'Receipt ' + body.brief.id + ' recorded at watermark ' + body.brief.watermark.eventSeq + '/' + body.brief.watermark.evidenceSeq + '.';
+          notifyStateChanged();
+          reload();
+          return;
+        }
+        var error = body.error || {};
+        outcome.textContent = 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given');
+      }).catch(function (error) {
+        submit.disabled = false;
+        outcome.textContent = 'Not submitted (' + error.message + ').';
+      });
+    });
+    form.appendChild(submit);
+    form.appendChild(outcome);
+    if (briefs.latest) {
+      textLine(form, 'faint', 'Latest receipt: ' + briefs.latest.id + ' by ' + briefs.latest.issuedBy + ' at ' + briefs.latest.issuedAt +
+        ' \\u00b7 digest ' + briefs.latest.contentDigest + ' \\u00b7 ' + briefs.total + ' receipt(s) on the ledger.');
+    } else {
+      textLine(form, 'faint', 'No brief has ever been issued. 0 means 0.');
+    }
+    return form;
+  }
+
+  function renderBriefing(briefing, grant, briefStorePresent) {
+    var card = el('article', 'panel mission-card command-center-briefing');
+    card.setAttribute('data-command-center-briefing', '');
+    textLine(card, 'faint', 'Assembled ' + briefing.assembledAt + ' \\u00b7 ' + briefing.provenance.source);
+    renderInbox(card, briefing.needsMe);
+    renderBlocked(card, briefing.blocked);
+    renderChanged(card, briefing.changed);
+    renderVerified(card, briefing.verified);
+    renderUnknown(card, briefing.unknown);
+    renderSafeNext(card, briefing.safeNext);
+    renderRecommendations(card, briefing.recommendations);
+    renderDepartments(card, briefing.departments);
+    if (!briefStorePresent) {
+      textLine(card, 'readonly-note', 'This database handle carries no brief ledger, so no receipt can be recorded from it.');
+    } else if (grant.founderBrief) {
+      card.appendChild(briefForm(briefing.briefs));
+    } else {
+      textLine(card, 'readonly-note', 'The issue-brief control is off for this session \\u2014 ' + grant.reason);
+    }
+    box.appendChild(card);
+  }
+
+  function reload() {
+    jsonExchange(fetch(COMMAND_CENTER_PATH, { headers: { accept: 'application/json' } }))
+      .then(function (result) {
+        var body = result.body || {};
+        if (body.ok !== true || !body.briefing) {
+          var error = body.error || {};
+          stayOff('the command-centre read was refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given'));
+          return;
+        }
+        var grant = grantedControls(sessionAnswer);
+        note.setAttribute('data-command-center-state', 'live');
+        note.className = 'readonly-note console-state console-state-live';
+        note.textContent = 'Live: ' + body.briefing.needsMe.total + ' item(s) need the Founder, ' +
+          body.briefing.unknown.total + ' explicit unknown(s), ' + body.briefing.recommendations.total + ' recommendation(s), ' +
+          'derived from the canonical record just now. Nothing here is stored, ranked or estimated.';
+        box.textContent = '';
+        renderBriefing(body.briefing, grant, body.briefStorePresent === true);
       })
       .catch(function (error) {
         stayOff('the HQ control API is not reachable from this page (' + error.message + ').');

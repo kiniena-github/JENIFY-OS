@@ -175,6 +175,10 @@ import {
   isCollaborationPrivacy,
   isCollaborationRole,
 } from '../application/collaboration-command.js';
+import {
+  FOUNDER_BRIEF_CAPABILITY,
+  founderBriefCapabilityState,
+} from '../application/chief-of-staff.js';
 import { MEMORY_KINDS, isMemoryKind, isMemoryPrivacy } from '../memory/schema.js';
 import { isArchiveStatus } from '../archive/schema.js';
 import { PROVIDERS, providerConnectivity } from '../routing/providers.js';
@@ -310,6 +314,22 @@ export const CONTROL_ROUTES = {
   collaborationRoom: `${CONTROL_API_PREFIX}/collaboration/room`,
   collaborationContext: `${CONTROL_API_PREFIX}/collaboration/context`,
   collaborationAdmit: `${CONTROL_API_PREFIX}/collaboration/admit`,
+  /**
+   * Phase 10: the Chief of Staff / Company Command Center. GET is the whole
+   * derived briefing (the six questions, the recommendations, the department
+   * projections and the brief ledger's state); `inbox` is the Founder Inbox
+   * alone, for a light poll. Both are pure reads over canonical rows and
+   * write nothing.
+   *
+   * POST `brief` issues ONE receipt row recording that a brief was issued,
+   * by whom, over which canonical watermarks, with categorical counts and a
+   * content digest. That is the phase's ONLY write. There is deliberately no
+   * route — and no facade method — that takes a recommendation id: a
+   * recommendation is a record about an act, never a handle on one.
+   */
+  commandCenter: `${CONTROL_API_PREFIX}/command-center`,
+  commandCenterInbox: `${CONTROL_API_PREFIX}/command-center/inbox`,
+  commandCenterBrief: `${CONTROL_API_PREFIX}/command-center/brief`,
 } as const;
 
 /**
@@ -340,6 +360,7 @@ export const CONTROL_WRITE_ROUTES: readonly string[] = [
   CONTROL_ROUTES.actionReconcile,
   CONTROL_ROUTES.collaboration,
   CONTROL_ROUTES.collaborationAdmit,
+  CONTROL_ROUTES.commandCenterBrief,
 ];
 
 export interface ControlResponse {
@@ -625,7 +646,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.actionDetail ||
         path === CONTROL_ROUTES.collaboration ||
         path === CONTROL_ROUTES.collaborationRoom ||
-        path === CONTROL_ROUTES.collaborationContext)) ||
+        path === CONTROL_ROUTES.collaborationContext ||
+        path === CONTROL_ROUTES.commandCenter ||
+        path === CONTROL_ROUTES.commandCenterInbox)) ||
     (method === 'POST' &&
       (path === CONTROL_ROUTES.orders ||
         path === CONTROL_ROUTES.approve ||
@@ -648,7 +671,8 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.actions ||
         path === CONTROL_ROUTES.actionReconcile ||
         path === CONTROL_ROUTES.collaboration ||
-        path === CONTROL_ROUTES.collaborationAdmit));
+        path === CONTROL_ROUTES.collaborationAdmit ||
+        path === CONTROL_ROUTES.commandCenterBrief));
   if (!known) {
     // Deny by default, and say nothing about what does exist.
     return refusal(404, 'not_found', 'No such HQ control route.');
@@ -966,6 +990,14 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     return collaborationContextRoute(request, deps, founder, audit, now);
   }
 
+  if (method === 'GET' && path === CONTROL_ROUTES.commandCenter) {
+    return commandCenterRoute(deps, founder, audit, now);
+  }
+
+  if (method === 'GET' && path === CONTROL_ROUTES.commandCenterInbox) {
+    return founderInboxRoute(deps, founder, audit, now);
+  }
+
   if (path === CONTROL_ROUTES.orders) return createOrder(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.approve) return approve(request, deps, founder, audit, now);
   if (path === CONTROL_ROUTES.missions) return commandMission(request, deps, founder, audit);
@@ -999,6 +1031,7 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
   if (path === CONTROL_ROUTES.actionReconcile) return reconcileActionRoute(request, deps, founder, audit, now);
   if (path === CONTROL_ROUTES.collaboration) return openCollaborationRoute(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.collaborationAdmit) return admitCollaboratorRoute(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.commandCenterBrief) return issueBriefRoute(request, deps, founder, audit);
   return deny(request, deps, founder, audit);
 }
 
@@ -1115,6 +1148,16 @@ function controlAvailability(
       principal?.originateCapabilities.includes(COLLABORATION_COMMAND_CAPABILITY.id) === true &&
       collaborationCommandCapabilityState(capabilityRowFor(deps.ops, COLLABORATION_COMMAND_CAPABILITY.id)) ===
         'enabled',
+    // Phase 10: issuing a brief receipt is one Founder act
+    // (`hq.founder_brief`), advertised from exactly the conditions that
+    // decide the write. READING the Command Center takes no capability — the
+    // routes sit behind the Founder gate exactly as the Mission Room does —
+    // so there is no read flag, and no flag exists for a recommendation
+    // because no act takes one.
+    founderBrief:
+      writable &&
+      principal?.originateCapabilities.includes(FOUNDER_BRIEF_CAPABILITY.id) === true &&
+      founderBriefCapabilityState(capabilityRowFor(deps.ops, FOUNDER_BRIEF_CAPABILITY.id)) === 'enabled',
     mutationsEnabled: deps.mutationsEnabled !== false,
     trustedOriginConfigured: originsUsable,
     // Stated separately from `trustedOriginConfigured`, because they answer
@@ -2146,6 +2189,82 @@ function admitCollaboratorRoute(
       deduplicated: result.data.deduplicated,
       participant: result.data.participant as unknown as Record<string, unknown>,
       session: result.data.session as unknown as Record<string, unknown>,
+    }),
+  );
+}
+
+/**
+ * Phase 10 reads. Both sit behind the Founder gate exactly as the Mission
+ * Room does, and both carry founder_only-derived material for that reason —
+ * the same rule `GET /truth` follows. Neither takes a capability: reading a
+ * derivation is not an act.
+ *
+ * Nothing on these responses is a handle. A recommendation is a record with
+ * `executable: false` naming an EXISTING gated act; there is no route, and no
+ * facade method, that accepts a recommendation id.
+ */
+function commandCenterRoute(
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const briefing = deps.ops.founderBriefing({ includeFounderOnly: true });
+  audit('allowed', 'command_center', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      briefing: briefing as unknown as Record<string, unknown>,
+      briefStorePresent: deps.ops.briefStorePresent(),
+    }),
+  );
+}
+
+/** The Founder Inbox alone — the same derivation, without the other five sections. */
+function founderInboxRoute(
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const inbox = deps.ops.founderInbox({ includeFounderOnly: true });
+  audit('allowed', 'founder_inbox', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      inbox: inbox as unknown as Record<string, unknown>,
+    }),
+  );
+}
+
+/**
+ * Issue one brief receipt. The phase's only write, and it records rather than
+ * acts: no notification is sent, nothing is scheduled, and the response is a
+ * receipt the Founder can check a later re-derivation against.
+ */
+function issueBriefRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const result = deps.ops.issueBrief({
+    // The server-resolved principal, never a body field.
+    requestedBy: founder.principal.id,
+    idempotencyKey: stringField(request.body, 'idempotencyKey'),
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', result.data.deduplicated ? 'founder_brief_deduplicated' : 'founder_brief_issued', founder);
+  return safe(
+    json(result.data.deduplicated ? 200 : 201, {
+      ok: true,
+      deduplicated: result.data.deduplicated,
+      brief: result.data.brief as unknown as Record<string, unknown>,
     }),
   );
 }

@@ -677,7 +677,44 @@ import {
   type HandoffRequestView,
   type ParticipantView,
 } from './collaboration-command.js';
-import { listOrchestrationRuns } from './orchestrator-command.js';
+import { listOrchestrationRuns, orchestratorSchemaPresent } from './orchestrator-command.js';
+import {
+  BRIEFING_SECTION_LIMIT,
+  BRIEF_READ_LIMIT,
+  CHANGED_EVENT_LIMIT,
+  COMMAND_CENTER_SNAPSHOT_LIMIT,
+  FOUNDER_BRIEF_CAPABILITY,
+  INBOX_READ_LIMIT,
+  REFUSAL_EVIDENCE_KINDS,
+  assembleBriefing,
+  assembleCommandCenterSnapshot,
+  assembleFounderInbox,
+  briefCountsOf,
+  briefIdempotencyKey,
+  briefSchemaPresent,
+  briefView,
+  contentDigest,
+  deriveChanged,
+  deriveFounderInbox,
+  ensureBriefSchema,
+  founderBriefCapabilityState,
+  founderBriefContractDrift,
+  loadBrief,
+  loadBriefs,
+  loadLatestBrief,
+  type BriefRow,
+  type BriefView,
+  type ChangedEventRef,
+  type ChangedView,
+  type CommandCenterSnapshotView,
+  type CommandFacts,
+  type CanonicalWatermark,
+  type FounderBriefingView,
+  type FounderInboxView,
+  type InboxAttentionItem,
+  type MissionFact,
+  type TruthFact,
+} from './chief-of-staff.js';
 import { CLIENT_IDENTITY_KEYS } from '../live/auth.js';
 import { ensureMemoryTables, memorySchemaPresent, MemoryStore, searchMemory } from '../memory/store.js';
 import {
@@ -755,6 +792,10 @@ export type OpsErrorCode =
   | 'session_closed'
   | 'not_a_participant'
   | 'unknown_contribution';
+// Phase 10 adds NO refusal code: its two reads cannot fail (a derivation over
+// whatever the canonical stores hold), `getBrief` answers null for an id that
+// is not in the ledger, and `issueBrief` refuses only through the codes the
+// Founder gate and the capability gate already own.
 
 export interface OpsError {
   code: OpsErrorCode;
@@ -975,6 +1016,39 @@ function ok<T>(data: T): OpsResult<T> {
  * alone is not a claim.
  */
 const LIVE_CLAIM_STATUSES: readonly ActivityStatus[] = ['assigned', 'running', 'outcome_unknown'];
+
+/**
+ * Phase 10: the canonical position a brief observes, and the delta it is
+ * measured against, deliberately EXCLUDE the brief ledger's own audit rows.
+ *
+ * Issuing a brief appends one `hq_events` row and one `op_evidence` entry, as
+ * every write in HQ does. If those counted, the watermark would move every
+ * time a brief was issued, so a second brief issued a second later would
+ * never deduplicate and "what changed since the last brief" would report the
+ * last brief. Neither is true of the COMPANY record: writing a brief is not
+ * something to brief about.
+ *
+ * The exclusion is exact rather than a name-shaped guess — the events are
+ * matched against the ledger's own ids, and the evidence against the one kind
+ * `issueBrief` appends — and it is stated wherever the watermark is shown.
+ */
+const BRIEF_EVIDENCE_KIND = 'founder_brief_issued';
+const NOT_A_BRIEF_EVENT_SQL = `NOT (subject_kind = 'system' AND subject_id IN (
+  SELECT 'brief:' || id FROM hq_briefs
+))`;
+const NOT_A_BRIEF_EVIDENCE_SQL = `kind <> '${BRIEF_EVIDENCE_KIND}'`;
+/**
+ * With no ledger on the handle there is nothing to exclude — and the
+ * sub-select would reference a table that does not exist — so the predicate
+ * degenerates to "every row", which is the truthful answer for a file that
+ * has never held a brief.
+ */
+function notABriefEvent(ledgerPresent: boolean): string {
+  return ledgerPresent ? NOT_A_BRIEF_EVENT_SQL : '1 = 1';
+}
+function notABriefEvidence(ledgerPresent: boolean): string {
+  return ledgerPresent ? NOT_A_BRIEF_EVIDENCE_SQL : '1 = 1';
+}
 
 /**
  * Why an advisory assignment intent may NOT be recorded for this task, or
@@ -1722,6 +1796,15 @@ export class HeadquarterOperations {
   /** The Phase 9 collaboration schema, same truth-recording as missions above. */
   readonly #collaborationStorePresent: boolean;
 
+  /**
+   * The Phase 10 brief ledger (`hq_briefs`), same truth-recording as missions
+   * above. Note what it does NOT gate: the Command Center's derivations read
+   * canonical stores that exist without it, so a handle with no ledger still
+   * answers every question truthfully — it simply cannot record a receipt,
+   * and says so (`safeNext`'s `issue_founder_brief` carries the blocker).
+   */
+  readonly #briefStorePresent: boolean;
+
 
   /**
    * The external-action adapters, keyed by id — `#private`, handed in by the
@@ -1856,6 +1939,7 @@ export class HeadquarterOperations {
     ensureTruthSchema(db);
     ensureActionGatewaySchema(db);
     ensureCollaborationSchema(db);
+    ensureBriefSchema(db);
     // A writable construction just ensured the mission/project/memory tables.
     // A READ-ONLY one (the hq:snapshot path) may be observing an older file
     // that has some or none of them — the ensures above deliberately write
@@ -1868,6 +1952,7 @@ export class HeadquarterOperations {
     this.#truthStorePresent = db.readonly ? truthSchemaPresent(db) : true;
     this.#actionStorePresent = db.readonly ? actionGatewaySchemaPresent(db) : true;
     this.#collaborationStorePresent = db.readonly ? collaborationSchemaPresent(db) : true;
+    this.#briefStorePresent = db.readonly ? briefSchemaPresent(db) : true;
     this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
     // Company memory (Phase 5, issue #265): the issue-#120 store, finally
@@ -9428,6 +9513,655 @@ export class HeadquarterOperations {
         };
       },
     };
+  }
+
+  // ---- Chief of Staff + Command Center (Phase 10) ----
+
+  /**
+   * Every canonical fact the derived command layer reads, gathered ONCE per
+   * read through `#db` and the private derivations — never through a public,
+   * patchable projection.
+   *
+   * That rule is the Phase 9 High finding applied ahead of time. The Founder
+   * Inbox, the briefing and the snapshot section all cross a boundary: they
+   * decide what a reader is told about `founder_only` truth, and the snapshot
+   * section is published to an UNAUTHENTICATED artifact. A same-realm patch of
+   * `listTruth()` that relabelled `privacy` on the real rows would therefore
+   * both leak a genuine founder_only record and zero the honesty field beside
+   * it — which is exactly what happened to the Phase 9 context bundle. So the
+   * truth section here reads `#deriveAllTruth(loadTruthGraph(#db))`, the
+   * contradiction list is judged from that same private derivation, the
+   * capability rows come from `#capabilityFromStore`, the kill switches from
+   * `#killSwitchEngagedFromStore`, the worker binding from
+   * `#workerBindingFromStore`, eligibility from `#workerEligibilityFor`, and
+   * every remaining row is read straight off `#db`.
+   *
+   * Nothing here is stored. `CommandFacts` is a value handed to the pure core
+   * and dropped; an attention item exists exactly while its source predicate
+   * holds on the canonical row and vanishes the moment the source is decided
+   * elsewhere.
+   */
+  #commandFacts(): CommandFacts {
+    const now = nowIso();
+    const missionIds = this.#missionStorePresent ? listMissionIds(this.#db) : [];
+    const taskRows = this.#db
+      .prepare(
+        `SELECT id, capability_id, status, review_state, claimed_by, created_by, created_at, updated_at,
+                block_reason, submitted_by
+         FROM op_tasks ORDER BY created_at, id`,
+      )
+      .all() as Record<string, unknown>[];
+    const titleOf = this.#db.prepare(`SELECT title FROM hq_op_task_meta WHERE task_id = ?`);
+    const tasks = taskRows.map((row) => ({
+      id: row.id as string,
+      capabilityId: row.capability_id as string,
+      status: row.status as ActivityStatus,
+      reviewPending: row.review_state === 'pending',
+      claimedBy: (row.claimed_by as string | null) ?? null,
+      createdBy: row.created_by as string,
+      createdAt: row.created_at as string,
+      updatedAt: row.updated_at as string,
+      blockReason: (row.block_reason as string | null) ?? null,
+      submittedBy: (row.submitted_by as string | null) ?? null,
+      title: ((titleOf.get(row.id as string) as { title: string | null } | undefined)?.title ?? null) as string | null,
+      // The SAME directory/policy predicates enforcement uses, so a task this
+      // section calls claimable is one a real worker could genuinely claim.
+      eligibleWorkers: this.#workerEligibilityFor(row.capability_id as string),
+    }));
+    const taskById = new Map(tasks.map((task) => [task.id, task]));
+
+    const missions: MissionFact[] = missionIds.map((missionId) => {
+      const record = this.#missionRecord(missionId)!;
+      const live = record.planItems.filter((item) => item.supersededInIntentSeq == null);
+      const specified = live.filter((item) => item.kind === 'work' && item.specCapabilityId != null);
+      return {
+        id: record.id,
+        title: record.title,
+        status: record.status,
+        blockReason: record.blockReason,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
+        statusChangedAt: record.statusChangedAt,
+        // null is the Founder's explicit "not supplied", never an empty list.
+        acceptanceCriteriaStated: record.acceptanceCriteria !== null && record.acceptanceCriteria.length > 0,
+        dependsOn: record.dependsOn.map((dependencyId) => ({
+          missionId: dependencyId,
+          // `#missionStatusFromStore`, not the public `getMission`: whether a
+          // dependency is terminal decides whether an inbox item exists.
+          status: this.#missionStatusFromStore(dependencyId)?.status ?? null,
+        })),
+        planItems: live.map((item) => ({
+          seq: item.seq,
+          kind: item.kind,
+          taskId: item.taskId,
+          specCapabilityId: item.specCapabilityId,
+        })),
+        linkedTasks: live
+          .filter((item) => item.taskId != null)
+          .map((item) => {
+            const task = taskById.get(item.taskId!);
+            return {
+              taskId: item.taskId!,
+              status: task?.status ?? 'outcome_unknown',
+              reviewPending: task?.reviewPending ?? false,
+              claimedBy: task?.claimedBy ?? null,
+            };
+          }),
+        engagedSpecScopes: [
+          ...new Set(
+            specified
+              .map((item) => item.specCapabilityId!)
+              .filter((capabilityId) => this.#killSwitchEngagedFromStore(capabilityId)),
+          ),
+        ].sort(),
+        specCapabilitiesUnavailable: [
+          ...new Set(
+            specified
+              .map((item) => item.specCapabilityId!)
+              .filter((capabilityId) => {
+                const row = this.#capabilityFromStore(capabilityId);
+                return row === null || !row.enabled;
+              }),
+          ),
+        ].sort(),
+      };
+    });
+
+    const approvals = (
+      this.#db
+        .prepare(
+          `SELECT id, task_id, risk_class, requested_by, requested_at, decision, decided_by, decided_at,
+                  expires_at, consumed_at
+           FROM hq_approvals ORDER BY requested_at, id`,
+        )
+        .all() as Record<string, unknown>[]
+    ).map((row) => ({
+      id: row.id as string,
+      taskId: (row.task_id as string | null) ?? null,
+      riskClass: row.risk_class as string,
+      requestedBy: row.requested_by as string,
+      requestedAt: row.requested_at as string,
+      decision: row.decision as string,
+      decidedBy: (row.decided_by as string | null) ?? null,
+      decidedAt: (row.decided_at as string | null) ?? null,
+      expiresAt: (row.expires_at as string | null) ?? null,
+      consumedAt: (row.consumed_at as string | null) ?? null,
+    }));
+
+    const killSwitches = (
+      this.#db
+        .prepare(`SELECT scope, reason, engaged_by, engaged_at FROM op_kill_switch WHERE engaged = 1 ORDER BY scope`)
+        .all() as Record<string, unknown>[]
+    ).map((row) => ({
+      scope: row.scope as string,
+      reason: (row.reason as string | null) ?? null,
+      engagedBy: (row.engaged_by as string | null) ?? null,
+      engagedAt: (row.engaged_at as string | null) ?? null,
+    }));
+
+    // Truth + contradictions, both from the PRIVATE derivation over the
+    // canonical graph. `listTruth()` / `listTruthContradictions()` are public
+    // prototype methods and this read decides disclosure — see the note above.
+    const graph = this.#truthStorePresent ? loadTruthGraph(this.#db) : emptyTruthGraph();
+    const derived = this.#truthStorePresent ? this.#deriveAllTruth(graph) : new Map<string, TruthRecordView>();
+    const truth: TruthFact[] = [...derived.values()]
+      .sort((a, b) => b.seq - a.seq)
+      .map((view) => ({
+        id: view.id,
+        seq: view.seq,
+        entityKind: view.entityKind,
+        entityId: view.entityId,
+        statement: view.statement,
+        state: view.state,
+        lifecycle: view.lifecycle,
+        verification: view.verification,
+        contested: view.contested,
+        recordedBy: view.recordedBy,
+        recordedAt: view.recordedAt,
+        evidenceRefs: [...view.evidenceRefs],
+        privacy: view.privacy,
+        subjectDrift: view.subjectDrift,
+        acceptanceDigest: view.acceptanceDigest,
+        // The verifier's own words, verbatim: HQ never rewrites a stated
+        // limitation and never resolves one.
+        verificationLimitations: view.verifications
+          .filter((verification) => verification.verdict === 'confirmed' && verification.limitations.trim() !== '')
+          .map((verification) => verification.limitations),
+      }));
+    const contradictions = this.#truthStorePresent
+      ? listContradictions(graph, (id) => derived.get(id) ?? null)
+      : [];
+
+    const actions = this.#actionStorePresent
+      ? loadActionIntents(this.#db).map((row) => {
+          const view = deriveActionView(row, loadActionEvents(this.#db, row.id));
+          return {
+            id: view.id,
+            taskId: view.taskId,
+            missionId: view.missionId,
+            adapterId: view.adapterId,
+            actionType: view.actionType,
+            riskLevel: view.riskLevel,
+            state: view.state,
+            requestedBy: view.requestedBy,
+            requestedAt: view.requestedAt,
+            attemptedAt: view.attempt?.at ?? null,
+          };
+        })
+      : [];
+
+    const collaboration = this.#collaborationFacts();
+
+    const specialists = this.#store.listSpecialists();
+    const workers = specialists.map((specialist) => {
+      const binding = this.#workerBindingFromStore(specialist.id);
+      return {
+        id: specialist.id,
+        displayName: specialist.displayName,
+        active: specialist.active,
+        providerDeclared: binding.providerId,
+        memberIdentityKey: binding.member?.identityKey ?? null,
+        liveClaims: tasks.filter(
+          (task) => task.claimedBy === specialist.id && LIVE_CLAIM_STATUSES.includes(task.status),
+        ).length,
+      };
+    });
+
+    const projects = this.#projectStorePresent
+      ? (
+          this.#db.prepare(`SELECT id, name, status FROM hq_projects ORDER BY name, id`).all() as Record<
+            string,
+            unknown
+          >[]
+        ).map((row) => ({
+          id: row.id as string,
+          name: row.name as string,
+          status: row.status as string,
+          missionIds: (
+            this.#db.prepare(`SELECT id FROM hq_missions WHERE project_id = ? ORDER BY id`).all(row.id) as {
+              id: string;
+            }[]
+          ).map((mission) => mission.id),
+        }))
+      : [];
+
+    const memoryRecords = this.#memory?.listAll() ?? [];
+    const memoryByKind: Record<string, number> = {};
+    for (const record of memoryRecords) memoryByKind[record.kind] = (memoryByKind[record.kind] ?? 0) + 1;
+
+    const capabilities = (
+      this.#db
+        .prepare(`SELECT id, risk_class, side_effect, enabled FROM op_capabilities ORDER BY id`)
+        .all() as Record<string, unknown>[]
+    ).map((row) => ({
+      id: row.id as string,
+      riskClass: row.risk_class as string,
+      sideEffect: !!row.side_effect,
+      enabled: !!row.enabled,
+    }));
+
+    const refusalEvidence: Record<string, number> = {};
+    for (const kind of REFUSAL_EVIDENCE_KINDS) {
+      refusalEvidence[kind] = (
+        this.#db.prepare(`SELECT COUNT(*) AS n FROM op_evidence WHERE kind = ?`).get(kind) as { n: number }
+      ).n;
+    }
+
+    return {
+      now,
+      missions,
+      tasks,
+      approvals,
+      killSwitches,
+      truth,
+      contradictions,
+      actions,
+      collaboration,
+      dispatchLane: this.#dispatchLaneFacts(),
+      workers,
+      projects,
+      memory: {
+        total: memoryRecords.length,
+        current: memoryRecords.filter((record) => record.status === 'CURRENT').length,
+        founderOnly: memoryRecords.filter((record) => record.privacy === 'founder_only').length,
+        byKind: memoryByKind,
+      },
+      capabilities,
+      // The run ledger is its own table and its own presence question — a
+      // read-only pre-Phase-6 file has missions and no runs, and 0 there is a
+      // statement about the ledger's absence, not an invented count.
+      orchestrationRuns: orchestratorSchemaPresent(this.#db)
+        ? (this.#db.prepare(`SELECT COUNT(*) AS n FROM hq_orchestration_runs`).get() as { n: number }).n
+        : 0,
+      refusalEvidence,
+      stores: {
+        missions: this.#missionStorePresent,
+        projects: this.#projectStorePresent,
+        memory: this.#memoryStorePresent,
+        truth: this.#truthStorePresent,
+        actions: this.#actionStorePresent,
+        collaboration: this.#collaborationStorePresent,
+        briefs: this.#briefStorePresent,
+      },
+    };
+  }
+
+  /**
+   * The Phase 9 record as facts: sessions with their DERIVED standing, the
+   * explicit disagreements, and the handoff requests beside the canonical
+   * task picture read at derivation time. Every row through `#db`.
+   */
+  #collaborationFacts(): CommandFacts['collaboration'] {
+    if (!this.#collaborationStorePresent) return { sessions: [], disagreements: [], handoffs: [] };
+    const ctx = this.#contributionContext(true);
+    const sessions: CommandFacts['collaboration']['sessions'] = [];
+    const disagreements: CommandFacts['collaboration']['disagreements'] = [];
+    const handoffs: CommandFacts['collaboration']['handoffs'] = [];
+    for (const row of loadCollaborationSessions(this.#db)) {
+      const missionStatus = this.#missionStatusFromStore(row.missionId)?.status ?? null;
+      sessions.push({
+        id: row.id,
+        missionId: row.missionId,
+        missionStatus,
+        standing: sessionStandingFor(missionStatus),
+        title: row.title,
+      });
+      const contributions = loadContributions(this.#db, row.id);
+      const relations = loadSessionRelations(this.#db, row.id);
+      for (const view of deriveDisagreements(contributions, relations)) {
+        disagreements.push({
+          sessionId: row.id,
+          missionId: row.missionId,
+          contributionId: view.contributionId,
+          workerId: view.workerId,
+          role: view.role,
+          disputesId: view.disputesId,
+          disputedWorkerId: view.disputedWorkerId,
+          at: view.at,
+        });
+      }
+      for (const view of deriveHandoffRequests(contributions, ctx.taskStateOf)) {
+        handoffs.push({
+          contributionId: view.contributionId,
+          sessionId: row.id,
+          missionId: row.missionId,
+          taskId: view.taskId,
+          fromWorkerId: view.fromWorkerId,
+          toWorkerId: view.toWorkerId,
+          at: view.at,
+          canonical: view.canonical
+            ? {
+                status: view.canonical.status,
+                claimedBy: view.canonical.claimedBy,
+                assignedWorkerId: view.canonical.assignedWorkerId,
+              }
+            : null,
+        });
+      }
+    }
+    return { sessions, disagreements, handoffs };
+  }
+
+  /**
+   * The Claude GitHub dispatch lane, per task, from the hash-chained evidence
+   * rows — the SAME rule `#claudeDispatchState` enforces for the gateway's
+   * duplicate check, so the two can never disagree about whether an issue was
+   * published. `unknown` means an attempt exists with no terminal after it:
+   * HQ does not know, and says so until a human reconciles it.
+   */
+  #dispatchLaneFacts(): CommandFacts['dispatchLane'] {
+    const rows = this.#db
+      .prepare(
+        `SELECT task_id, kind, at FROM op_evidence
+         WHERE task_id IS NOT NULL AND kind IN (?, ?, ?)
+         ORDER BY seq`,
+      )
+      .all(
+        'claude_github_dispatch_attempted',
+        'claude_github_dispatch_succeeded',
+        'claude_github_dispatch_failed',
+      ) as { task_id: string; kind: string; at: string }[];
+    // The fold is the SAME one `#claudeDispatchState` applies, per task,
+    // including its stickiness: a recorded success means dispatched whatever
+    // follows it, a recorded failure closes the attempt, and `pending` with
+    // no terminal after it is the only unknown.
+    const folded = new Map<string, { pending: string | null; dispatchedAt: string | null }>();
+    for (const row of rows) {
+      const entry = folded.get(row.task_id) ?? { pending: null, dispatchedAt: null };
+      if (row.kind === 'claude_github_dispatch_attempted') entry.pending = row.at;
+      else if (row.kind === 'claude_github_dispatch_succeeded') {
+        entry.pending = null;
+        entry.dispatchedAt = row.at;
+      } else entry.pending = null;
+      folded.set(row.task_id, entry);
+    }
+    const out: CommandFacts['dispatchLane'] = [];
+    for (const [taskId, entry] of folded) {
+      if (entry.dispatchedAt !== null) out.push({ taskId, state: 'dispatched', at: entry.dispatchedAt });
+      else if (entry.pending !== null) out.push({ taskId, state: 'unknown', at: entry.pending });
+    }
+    return out.sort((a, b) => a.taskId.localeCompare(b.taskId));
+  }
+
+  /** The newest canonical `hq_events` and `op_evidence` sequence numbers — the position a brief observed. */
+  #canonicalWatermark(): CanonicalWatermark {
+    const events = this.#db
+      .prepare(`SELECT MAX(seq) AS seq FROM hq_events WHERE ${notABriefEvent(this.#briefStorePresent)}`)
+      .get() as { seq: number | null };
+    const evidence = this.#db
+      .prepare(`SELECT MAX(seq) AS seq FROM op_evidence WHERE ${notABriefEvidence(this.#briefStorePresent)}`)
+      .get() as { seq: number | null };
+    return { eventSeq: events.seq ?? 0, evidenceSeq: evidence.seq ?? 0 };
+  }
+
+  /**
+   * WHAT CHANGED: the canonical events appended after the last issued brief's
+   * watermark, and the evidence kinds after its evidence watermark. With no
+   * brief ever issued there is no watermark, so the section carries the
+   * newest events overall and SAYS it is not a delta — an honest absence
+   * rather than a delta against an invented zero.
+   */
+  #changedSince(latest: BriefRow | null, limit: number): ChangedView {
+    const since = latest?.watermark.eventSeq ?? 0;
+    const evidenceSince = latest?.watermark.evidenceSeq ?? 0;
+    const rows = (
+      latest
+        ? this.#db
+            .prepare(
+              `SELECT seq, at, subject_kind, subject_id, status, actor, summary FROM hq_events
+               WHERE seq > ? AND ${notABriefEvent(this.#briefStorePresent)} ORDER BY seq DESC`,
+            )
+            .all(since)
+        : this.#db
+            .prepare(
+              `SELECT seq, at, subject_kind, subject_id, status, actor, summary FROM hq_events
+               WHERE ${notABriefEvent(this.#briefStorePresent)} ORDER BY seq DESC`,
+            )
+            .all()
+    ) as Record<string, unknown>[];
+    const events: ChangedEventRef[] = rows.map((row) => ({
+      seq: row.seq as number,
+      at: row.at as string,
+      subjectKind: row.subject_kind as string,
+      subjectId: row.subject_id as string,
+      status: (row.status as string | null) ?? null,
+      actor: row.actor as string,
+      summary: row.summary as string,
+    }));
+    const evidenceRows = (
+      latest
+        ? this.#db
+            .prepare(`SELECT kind, COUNT(*) AS n FROM op_evidence WHERE seq > ? AND ${notABriefEvidence(this.#briefStorePresent)} GROUP BY kind`)
+            .all(evidenceSince)
+        : this.#db.prepare(`SELECT kind, COUNT(*) AS n FROM op_evidence WHERE ${notABriefEvidence(this.#briefStorePresent)} GROUP BY kind`).all()
+    ) as { kind: string; n: number }[];
+    return deriveChanged({
+      since: latest,
+      eventsAfter: events,
+      eventsTotal: events.length,
+      evidenceByKind: evidenceRows.map((row) => ({ kind: row.kind, count: row.n })),
+      limit,
+    });
+  }
+
+  /** The brief ledger's own state, for the sections that state it. */
+  #briefLedgerState(): { total: number; latest: BriefView | null } {
+    if (!this.#briefStorePresent) return { total: 0, latest: null };
+    const rows = loadBriefs(this.#db);
+    return { total: rows.length, latest: rows.length > 0 ? briefView(rows[0]!) : null };
+  }
+
+  /**
+   * WHAT NEEDS ME: the Founder Inbox — a DERIVED attention queue over the
+   * canonical stores. Every item REFERENCES the row it exists because of
+   * (`source: { table, id }`) and duplicates no authority: nothing here
+   * approves, reviews, verifies, assigns, claims, reconciles or executes, and
+   * no gate anywhere reads an item.
+   *
+   * Nothing is persisted, so an item cannot outlive its cause: decide the
+   * approval, review the task, resolve the contradiction or release the stop
+   * through its own gated act and the item is simply not derived on the next
+   * read.
+   */
+  founderInbox(options: { includeFounderOnly?: boolean; limit?: number } = {}): FounderInboxView {
+    const facts = this.#commandFacts();
+    return assembleFounderInbox({
+      items: deriveFounderInbox(facts),
+      at: facts.now,
+      includeFounderOnly: options.includeFounderOnly === true,
+      limit: options.limit ?? INBOX_READ_LIMIT,
+    });
+  }
+
+  /**
+   * The whole Command Center briefing: WHAT NEEDS ME / WHAT IS BLOCKED /
+   * WHAT CHANGED / WHAT IS VERIFIED / WHAT IS UNKNOWN / WHAT CAN HQ SAFELY DO
+   * NEXT, the recommendations that answer the inbox, the department
+   * PROJECTIONS and the brief ledger's state.
+   *
+   * A read. It writes nothing, and every recommendation it carries is
+   * `executable: false` — there is deliberately no facade method anywhere
+   * that accepts a recommendation id.
+   */
+  founderBriefing(options: { includeFounderOnly?: boolean; limit?: number } = {}): FounderBriefingView {
+    const facts = this.#commandFacts();
+    const briefs = this.#briefLedgerState();
+    return assembleBriefing({
+      facts,
+      changed: this.#changedSince(this.#briefStorePresent ? loadLatestBrief(this.#db) : null, CHANGED_EVENT_LIMIT),
+      briefs,
+      includeFounderOnly: options.includeFounderOnly === true,
+      limit: options.limit ?? BRIEFING_SECTION_LIMIT,
+    });
+  }
+
+  /**
+   * The bounded snapshot section. The reading layer's privacy decision is the
+   * caller's and defaults to the less disclosing answer, exactly as
+   * `truthSummary` and `collaborationSummary` do it: without
+   * `includeFounderOnly`, no item derived from a founder_only truth record is
+   * carried and no number here aggregates over one.
+   */
+  commandCenterSummary(options: { includeFounderOnly?: boolean; limit?: number } = {}): CommandCenterSnapshotView {
+    return assembleCommandCenterSnapshot({
+      facts: this.#commandFacts(),
+      briefs: this.#briefLedgerState(),
+      includeFounderOnly: options.includeFounderOnly === true,
+      limit: options.limit ?? COMMAND_CENTER_SNAPSHOT_LIMIT,
+    });
+  }
+
+  /** Every issued brief receipt, newest first, bounded with the true total. */
+  listBriefs(limit = BRIEF_READ_LIMIT): { briefs: BriefView[]; total: number; truncated: boolean } {
+    if (!this.#briefStorePresent) return { briefs: [], total: 0, truncated: false };
+    const rows = loadBriefs(this.#db);
+    return { briefs: rows.slice(0, limit).map(briefView), total: rows.length, truncated: rows.length > limit };
+  }
+
+  /** One issued brief receipt, or null. */
+  getBrief(id: string): BriefView | null {
+    if (!id || !this.#briefStorePresent) return null;
+    const row = loadBrief(this.#db, id);
+    return row ? briefView(row) : null;
+  }
+
+  /** Whether this database handle carries the Phase 10 brief ledger. */
+  briefStorePresent(): boolean {
+    return this.#briefStorePresent;
+  }
+
+  /**
+   * Issue ONE brief receipt — the single write this phase adds.
+   *
+   * A receipt, not a report: who issued it, when, the canonical watermarks it
+   * observed (`hq_events` and `op_evidence` sequence numbers), the categorical
+   * counts of the sets the briefing enumerated, and a content digest so a
+   * later reader can check a re-derivation against what was issued. It stores
+   * NO attention item, NO recommendation and NO document body, precisely so a
+   * stale receipt can never be mistaken for current truth.
+   *
+   * Deliberately NOT a notification: nothing is sent anywhere, no timer issues
+   * one, and there is no channel, webhook, email or schedule in this phase.
+   *
+   * A Founder act (`hq.founder_brief`, the founder-gate trio) resolved through
+   * `#resolveFounderGateActor` — a human principal holding the grant; workers,
+   * `system` and unknown ids refused. Idempotent on a derived key over the
+   * actor and the watermarks: issuing twice with nothing appended in between
+   * deduplicates to the first receipt rather than growing the ledger.
+   */
+  issueBrief(input: {
+    /** Resolved actor id. Set by the boundary, never read from a body. */
+    requestedBy: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ brief: BriefView; deduplicated: boolean }> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    const refusedActor = this.#resolveFounderGateActor(
+      input.requestedBy,
+      'issue a Founder brief',
+      FOUNDER_BRIEF_CAPABILITY.id,
+      'issuing a Founder brief',
+    );
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#founderBriefCapabilityGate('issue a Founder brief');
+    if (refusedCapability) return refusedCapability;
+    if (!this.#briefStorePresent) {
+      return fail('invalid_input', 'brief ledger unavailable on this database handle');
+    }
+
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    let createdId: string | null = null;
+    privileged.reserve(() => {
+      // Everything a receipt states is read INSIDE the write lock, so the
+      // watermarks, the counts and the digest describe one instant of the
+      // canonical record rather than three.
+      const watermark = this.#canonicalWatermark();
+      const idempotencyKey = briefIdempotencyKey({
+        requestedBy: input.requestedBy,
+        watermark,
+        idempotencyKey: input.idempotencyKey ?? null,
+      });
+      const existing = this.#db.prepare(`SELECT id FROM hq_briefs WHERE idempotency_key = ?`).get(idempotencyKey) as
+        | { id: string }
+        | undefined;
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      // The Founder's own audience: a receipt the Founder signs states what
+      // the Founder can see, founder_only material included.
+      const briefing = assembleBriefing({
+        facts: this.#commandFacts(),
+        changed: this.#changedSince(loadLatestBrief(this.#db), CHANGED_EVENT_LIMIT),
+        briefs: this.#briefLedgerState(),
+        includeFounderOnly: true,
+      });
+      const counts = briefCountsOf(briefing);
+      const digest = contentDigest(briefing);
+      const id = `brief-${uuid()}`;
+      const at = nowIso();
+      this.#db
+        .prepare(
+          `INSERT INTO hq_briefs (id, issued_by, issued_at, event_seq, evidence_seq, content_digest, counts, idempotency_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.requestedBy,
+          at,
+          watermark.eventSeq,
+          watermark.evidenceSeq,
+          digest,
+          JSON.stringify(counts),
+          idempotencyKey,
+        );
+      createdId = id;
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `brief:${id}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `Founder brief issued over hq_events seq ${watermark.eventSeq} / op_evidence seq ${watermark.evidenceSeq}`,
+        detail: { briefId: id, ...watermark, attention: counts.attention.total },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: BRIEF_EVIDENCE_KIND,
+        payload: { briefId: id, ...watermark, contentDigest: digest, counts, executable: false },
+      });
+    });
+    const id = dedupedTo ?? createdId!;
+    return ok({ brief: briefView(loadBrief(this.#db, id)!), deduplicated: dedupedTo !== null });
+  }
+
+  #founderBriefCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      FOUNDER_BRIEF_CAPABILITY.id,
+      founderBriefCapabilityState,
+      founderBriefContractDrift,
+      'issuing a Founder brief',
+    );
   }
 
   // ---- task metadata (console labels + advisory assignment) ----

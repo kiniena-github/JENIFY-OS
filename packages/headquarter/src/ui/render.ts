@@ -62,6 +62,7 @@ import {
   directOrderConsoleScript,
   approvalsConsoleScript,
   connectionsLiveScript,
+  commandCenterConsoleScript,
   missionCommandConsoleScript,
   missionsConsoleScript,
   collaborationConsoleScript,
@@ -278,6 +279,21 @@ ${fields}
 <div data-order-console></div>
 <p class="muted">Every direct order is created as the Founder-gated capability <code>hq.direct_order</code>: it lands in <code>needs_approval</code> with an action digest and executes nothing until a Founder approves that exact action. An order for a provider that cannot dispatch today is still <b>RECORDED and BLOCKED</b>, never started and never lost — bound to the provider it names, so only a worker declared as that provider could ever claim it. No other provider is ever substituted.</p>
 <p class="muted">The resolved provider is binding at execution, not a label: the order records it as <code>executionProvider</code>, and the Operator refuses to let any worker but one declared as that provider claim or start it. Because it sits in the payload, it is inside the digest the Founder approves — the provider cannot be swapped between approval and execution. <code>hq.direct_order</code> must also already be registered and enabled here: placing an order never registers it, and never re-enables one that was disabled.</p>
+</div>`;
+}
+
+/**
+ * Static markup for the Company Command Centre (Phase 10).
+ *
+ * A mount and a note, by the site-wide rule: no form, no button, no input in
+ * emitted markup. This render holds no derived item and claims none \u2014 the
+ * whole briefing is drawn inside the mount only from a live,
+ * Founder-authenticated read of the same-origin control API.
+ */
+function commandCentrePanel(): string {
+  return `<div class="panel">
+<p class="readonly-note">The Chief of Staff\u2019s one derived command layer over canonical company state: what needs the Founder, what is blocked, what changed since the last issued brief, what is verified, what is recorded unknown, and what HQ can safely do next \u2014 with the department projections and the recommendations that answer the inbox. Every item REFERENCES the canonical row it came from and duplicates no authority; nothing here is stored, so an item exists exactly while its source predicate holds and is gone the moment the source is decided elsewhere. A recommendation is a record and never a button: HQ has no route and no method that accepts one. There is no priority, score, confidence, percentage or ETA anywhere in this layer.</p>
+<div data-command-center-console></div>
 </div>`;
 }
 
@@ -618,6 +634,8 @@ ${event.status ? ` ${statusChip(event.status)}` : ` ${chip('note', 'neutral')}`}
 <div class="split-main">
 <div>
 ${section('WHAT NEEDS THE FOUNDER', attentionPanel, 'founder-attention')}
+${section('COMPANY COMMAND CENTRE — CHIEF OF STAFF', commandCentrePanel(), 'command-centre')}
+${commandCenterConsoleScript()}
 ${section('DIRECT ORDER', directOrderComposer(orderRoutes), 'direct-order')}
 ${directOrderConsoleScript({
   ready: ROUTE_STATE_PRESENTATION.ready,

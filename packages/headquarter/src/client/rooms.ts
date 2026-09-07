@@ -152,7 +152,10 @@ export const HQ_ROOMS: readonly HqRoom[] = [
     binding: {
       kind: 'live',
       section: 'operations',
-      source: 'operations section — op_tasks via application/console.founderConsole',
+      source:
+        'operations section — op_tasks via application/console.founderConsole; plus the optional ' +
+        'command-centre section (Phase 10): the derived Founder Inbox with the canonical row each item ' +
+        'references, the recorded-unknown and blocked totals, and the count of issued brief receipts',
     },
     placement: { ring: 1, slot: 0 },
     page: 'index.html',
