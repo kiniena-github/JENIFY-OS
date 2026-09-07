@@ -610,6 +610,7 @@ import {
   MAX_COST_MINOR_UNITS,
   MAX_DECISION_LABEL_LENGTH,
   MAX_INTEL_NOTE_LENGTH,
+  MAX_DECISION_ID_LENGTH,
   MAX_MODEL_ID_LENGTH,
   MAX_PROVIDER_ID_LENGTH,
   MODEL_AVAILABILITY_STATES,
@@ -8406,6 +8407,36 @@ export class HeadquarterOperations {
     );
   }
 
+  /**
+   * Resolve a CALLER-SUPPLIED routing decision id.
+   *
+   * Bounded and shape-checked before it is used for anything, and the refusal
+   * carries the CODE alone rather than the caller's text (Wave 5 Low 8). The
+   * value used to be unbounded and unscanned and was interpolated verbatim
+   * into the refusal message — the same gap that justified removing the
+   * caller-supplied `missionId` / `projectId` in the previous round, left
+   * standing on the one id a caller still passes. HQ mints
+   * `inteldec-<uuid>`, so a strict slug within a bound rejects everything else
+   * before a store read, and the caller already knows which id it sent.
+   */
+  #resolveDecisionReference(raw: unknown): OpsResult<DecisionRecord> {
+    const id = typeof raw === 'string' ? raw.trim() : '';
+    if (!isIdentifierSlug(id, MAX_DECISION_ID_LENGTH)) {
+      return fail(
+        'invalid_input',
+        'decisionId must be an HQ-minted routing decision id (a bounded lowercase slug)',
+      );
+    }
+    const record = this.#decisionRecordFromStore(id);
+    if (!record) {
+      return fail(
+        'unknown_intelligence_decision',
+        'Unknown routing decision: the id given is not in the intelligence ledger, and nothing was recorded.',
+      );
+    }
+    return ok(record);
+  }
+
   #decisionRecordFromStore(id: string): DecisionRecord | null {
     if (!this.#intelligenceStorePresent) return null;
     const row = loadDecision(this.#db, id);
@@ -9173,8 +9204,9 @@ export class HeadquarterOperations {
     }
     const safeMode = this.#safeModeRefusal('escalate an intelligence routing decision');
     if (safeMode) return safeMode;
-    const prior = this.#decisionRecordFromStore(input.decisionId);
-    if (!prior) return fail('unknown_intelligence_decision', `Unknown routing decision: ${input.decisionId}`);
+    const resolvedPrior = this.#resolveDecisionReference(input.decisionId);
+    if (!resolvedPrior.ok) return resolvedPrior;
+    const prior = resolvedPrior.data;
     const claim = this.#runClaimRefusal(
       prior.taskId,
       input.workerId,
@@ -9279,8 +9311,9 @@ export class HeadquarterOperations {
     }
     const safeMode = this.#safeModeRefusal('record an intelligence outcome');
     if (safeMode) return safeMode;
-    const decision = this.#decisionRecordFromStore(input.decisionId);
-    if (!decision) return fail('unknown_intelligence_decision', `Unknown routing decision: ${input.decisionId}`);
+    const resolvedDecision = this.#resolveDecisionReference(input.decisionId);
+    if (!resolvedDecision.ok) return resolvedDecision;
+    const decision = resolvedDecision.data;
     const claim = this.#runClaimRefusal(
       decision.taskId,
       input.workerId,
@@ -9444,15 +9477,13 @@ export class HeadquarterOperations {
     const identity = this.#canonicalWorkIdentity(input.taskId);
     const decisionId = input.decisionId?.trim() || null;
     if (decisionId !== null) {
-      const referenced = this.#decisionRecordFromStore(decisionId);
-      if (!referenced) {
-        return fail('unknown_intelligence_decision', `Unknown routing decision: ${decisionId}`);
-      }
-      if (referenced.taskId !== input.taskId) {
+      const resolved = this.#resolveDecisionReference(decisionId);
+      if (!resolved.ok) return resolved;
+      if (resolved.data.taskId !== input.taskId) {
         return fail(
           'invalid_input',
-          `Routing decision ${decisionId} belongs to task ${referenced.taskId}; a cost entry may only cite a ` +
-            'decision recorded against the task it is recorded on.',
+          'The cited routing decision belongs to a different task; a cost entry may only cite a decision ' +
+            'recorded against the task it is recorded on.',
         );
       }
     }

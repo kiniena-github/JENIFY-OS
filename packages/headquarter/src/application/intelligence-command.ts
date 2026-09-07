@@ -448,6 +448,16 @@ export const MAX_MODEL_ID_LENGTH = 120;
 export const MAX_INTEL_NOTE_LENGTH = 500;
 export const MAX_COST_BASIS_LENGTH = 200;
 export const MAX_DECISION_LABEL_LENGTH = 120;
+/**
+ * A decision id, as HQ will accept one from a caller (Wave 5 Low 8).
+ *
+ * HQ mints `inteldec-<uuid>`, which is 45 characters of slug. The bound exists
+ * because the value used to be unbounded and unscanned and was interpolated
+ * verbatim into `Unknown routing decision: ${decisionId}` — the same gap that
+ * justified removing the caller-supplied `missionId` / `projectId` in the
+ * previous round, left standing on the one id a caller still passes.
+ */
+export const MAX_DECISION_ID_LENGTH = 120;
 /** Largest amount HQ will record, in minor units. A bound, never a ceiling. */
 export const MAX_COST_MINOR_UNITS = 1_000_000_000_000;
 /** Bounded reads: the true total is always stated beside a bounded list. */
@@ -891,10 +901,11 @@ export function normalizeCostFact(input: {
  * reads as a number HQ cannot vouch for, and it never reads as zero.
  *
  * "The same direction as the writer" was a claim before it was true (Wave 5
- * Medium 6). Two of `normalizeCostFact`'s refusals had no counterpart here, so
- * a row carrying either shape read back as a KNOWN amount and was folded into
- * `observedMinorUnits` — which is how a scope that should read
- * `requires_founder_decision` reads `within_ceiling` instead:
+ * Medium 6), and the first correction was itself incomplete (Wave 5 Low 7): it
+ * said there were two such refusals when there were FOUR. All four now have a
+ * counterpart here, and each one was a row that read back as a KNOWN amount
+ * and was folded into `observedMinorUnits` — which is how a scope that should
+ * read `requires_founder_decision` reads `within_ceiling` instead:
  *
  *  - an `estimated` amount with NO BASIS. On write that is
  *    `estimate_without_basis`, because an estimate whose origin nobody
@@ -902,10 +913,19 @@ export function normalizeCostFact(input: {
  *    number HQ vouched for on exactly the evidence it refuses to accept.
  *  - an amount beyond `MAX_COST_MINOR_UNITS`. On write that is
  *    `amount_out_of_bounds`; read back, it was a spend total.
+ *  - a NON-ESTIMATE carrying a basis. On write that is
+ *    `basis_on_non_estimate`: `observed`, `provider_reported` and `billed`
+ *    amounts are facts, and a "basis" beside one is a story about a number
+ *    that did not need one. Executed: a raw-appended `billed` row WITH a basis
+ *    read back `state: 'known'` and carried the basis with it.
+ *  - a basis longer than `MAX_COST_BASIS_LENGTH`. On write that is
+ *    `basis_too_long`; executed: an `estimated` row with a 500,000-character
+ *    basis read back `known`, unbounded, on a Founder-gated read.
  *
- * Both now return the unknown fact. `hq_intel_cost_entries` is append-only and
- * an APPEND is the write its triggers deliberately permit, so a row of either
- * shape is representable in the file even though no facade path writes one.
+ * All four now return the unknown fact. `hq_intel_cost_entries` is append-only
+ * and an APPEND is the write its triggers deliberately permit, so a row of any
+ * of these shapes is representable in the file even though no facade path
+ * writes one.
  */
 export function readStoredCostFact(row: {
   provenance: unknown;
@@ -932,6 +952,14 @@ export function readStoredCostFact(row: {
   const basis = typeof row.basis === 'string' && row.basis.trim() !== '' ? row.basis : null;
   // An estimate must NAME ITS BASIS, on the way back as well as on the way in.
   if (row.provenance === 'estimated' && basis === null) return unknownFact;
+  // And a NON-estimate must not name one: a basis beside an `observed`,
+  // `provider_reported` or `billed` amount is the writer's
+  // `basis_on_non_estimate` refusal, so reading such a row as a known fact
+  // vouched for a shape HQ will not accept.
+  if (row.provenance !== 'estimated' && basis !== null) return unknownFact;
+  // The writer's length bound, applied on the way back too. Without it a
+  // raw-appended row could put an unbounded string on a Founder-gated read.
+  if (basis !== null && basis.length > MAX_COST_BASIS_LENGTH) return unknownFact;
   return {
     provenance: row.provenance,
     amountMinorUnits: amount,

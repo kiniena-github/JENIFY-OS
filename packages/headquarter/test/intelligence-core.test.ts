@@ -360,6 +360,65 @@ describe('HQ never invents a price — the cost fact lock', () => {
     ).toMatchObject({ provenance: 'estimated', amountMinorUnits: 100_000, state: 'known' });
   });
 
+  /**
+   * Wave 5 LOW 7. The Medium 6 correction closed two of the writer's refusals
+   * and then asserted, in a comment, that there had only ever been two. There
+   * were four. These are the other two, both executed against the reader.
+   */
+  it('reads a STORED non-estimate that names a basis back as unknown', () => {
+    expect(
+      normalizeCostFact({
+        provenance: 'billed',
+        amountMinorUnits: 250,
+        currency: 'USD',
+        unitKind: 'requests',
+        basis: 'a story about a number that did not need one',
+      }),
+    ).toEqual({ ok: false, refusal: 'basis_on_non_estimate' });
+    const read = readStoredCostFact({
+      provenance: 'billed',
+      amountMinorUnits: 250,
+      currency: 'USD',
+      unitKind: 'requests',
+      basis: 'a story about a number that did not need one',
+    });
+    expect(read).toMatchObject({ provenance: 'unknown', amountMinorUnits: null, state: 'unknown' });
+    // And the basis itself does not travel out on the unknown fact.
+    expect(read.basis).toBeNull();
+  });
+
+  it('reads a STORED basis beyond the writer’s length bound back as unknown', () => {
+    const enormous = 'x'.repeat(500_000);
+    expect(
+      normalizeCostFact({
+        provenance: 'estimated',
+        amountMinorUnits: 100,
+        currency: 'USD',
+        unitKind: 'requests',
+        basis: enormous,
+      }),
+    ).toEqual({ ok: false, refusal: 'basis_too_long' });
+    const read = readStoredCostFact({
+      provenance: 'estimated',
+      amountMinorUnits: 100,
+      currency: 'USD',
+      unitKind: 'requests',
+      basis: enormous,
+    });
+    expect(read).toMatchObject({ provenance: 'unknown', amountMinorUnits: null, state: 'unknown' });
+    expect(read.basis).toBeNull();
+    // A basis exactly at the bound is still a fact HQ vouches for.
+    expect(
+      readStoredCostFact({
+        provenance: 'estimated',
+        amountMinorUnits: 100,
+        currency: 'USD',
+        unitKind: 'requests',
+        basis: 'y'.repeat(MAX_COST_BASIS_LENGTH),
+      }),
+    ).toMatchObject({ state: 'known' });
+  });
+
   it('reads a STORED amount beyond the writer’s bound back as unknown', () => {
     const beyond = MAX_COST_MINOR_UNITS + 1;
     expect(

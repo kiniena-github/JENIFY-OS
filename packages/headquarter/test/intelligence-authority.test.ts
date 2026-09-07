@@ -879,7 +879,68 @@ describe('the applicable budget scope and the spend attribution are derived, not
       decisionId: decision.id,
     });
     expect(foreign.ok).toBe(false);
-    expect(!foreign.ok && foreign.error.message).toMatch(/belongs to task/);
+    expect(!foreign.ok && foreign.error.code).toBe('invalid_input');
+    expect(!foreign.ok && foreign.error.message).toMatch(/belongs to a different task/);
+    // The refusal does NOT echo the caller's id back (Wave 5 Low 8).
+    expect(!foreign.ok && foreign.error.message).not.toContain(decision.id);
+  });
+
+  /**
+   * Wave 5 LOW 8. `decisionId` is the one id a caller still passes into this
+   * phase, and it was unbounded, unscanned and interpolated verbatim into
+   * `Unknown routing decision: ${decisionId}` — the same gap that justified
+   * removing the caller-supplied `missionId` / `projectId` in the previous
+   * round. It is now shape-checked against a bound before anything reads the
+   * store, and the refusal carries the code alone.
+   */
+  it('bounds decisionId and refuses with the code rather than echoing it', () => {
+    const fx = intelligenceFixture();
+    fx.budget([...INTELLIGENCE_TIERS]);
+    const enormous = 'a'.repeat(5000);
+    const scripted = '<script>alert(1)</script>';
+    for (const hostile of [enormous, scripted, 'UPPERCASE-IS-NOT-A-SLUG']) {
+      const refused = cost(fx, { decisionId: hostile });
+      expect(refused.ok).toBe(false);
+      if (refused.ok) throw new Error('an unbounded decision id was accepted');
+      expect(refused.error.code).toBe('invalid_input');
+      expect(refused.error.message).not.toContain(hostile);
+      expect(refused.error.message.length).toBeLessThan(200);
+    }
+    // Whitespace only is the ABSENCE of a citation, which stays legitimate.
+    expectOk(cost(fx, { decisionId: '  ' }));
+    // A well-shaped id that simply is not in the ledger refuses too, and still
+    // does not echo it back.
+    const unknown = fx.ops.recordIntelligenceCost({
+      taskId: fx.claim.taskId,
+      workerId: fx.claim.workerId,
+      fence: fx.claim.fence,
+      providerId: 'anthropic',
+      provenance: 'unknown',
+      unitKind: 'unknown',
+      decisionId: 'inteldec-00000000-0000-4000-8000-000000000000',
+    });
+    expect(unknown.ok).toBe(false);
+    if (unknown.ok) throw new Error('an unknown decision id was accepted');
+    expect(unknown.error.code).toBe('unknown_intelligence_decision');
+    expect(unknown.error.message).not.toContain('inteldec-00000000');
+    // The same bound applies on the other two paths that take a caller's id.
+    const escalated = fx.ops.escalateIntelligenceDecision({
+      decisionId: enormous,
+      workerId: fx.claim.workerId,
+      fence: fx.claim.fence,
+      toTier: 'high',
+      trigger: 'review_tier_required',
+    } as Parameters<HeadquarterOperations['escalateIntelligenceDecision']>[0]);
+    expect(escalated.ok).toBe(false);
+    expect(!escalated.ok && escalated.error.message).not.toContain(enormous);
+    const outcome = fx.ops.recordIntelligenceOutcome({
+      decisionId: enormous,
+      workerId: fx.claim.workerId,
+      fence: fx.claim.fence,
+      result: 'quality_met',
+    } as Parameters<HeadquarterOperations['recordIntelligenceOutcome']>[0]);
+    expect(outcome.ok).toBe(false);
+    expect(!outcome.ok && outcome.error.message).not.toContain(enormous);
   });
 
   /**
