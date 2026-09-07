@@ -83,7 +83,6 @@ import {
 } from '../operator/approvals.js';
 import {
   ensureEvidenceGuards,
-  evidenceChainTip,
   verifyEvidenceChain,
   type EvidenceEntry,
 } from '../operator/evidence.js';
@@ -594,7 +593,6 @@ import {
   isRunReconcileDecision,
   IMMUTABLE_LEDGER_ABSENT_EVIDENCE_KIND,
   INTEGRITY_ASSESSED_EVIDENCE_KIND,
-  evidenceChainCommitmentBreach,
   standingIntegrityVerdict,
   loadBackupRecords,
   loadRun,
@@ -736,9 +734,11 @@ import {
 import {
   INTEGRITY_DEPTH_STATEMENT,
   SAFE_MODE_STATEMENT,
+  ensureIntegrityCheckpoints,
   fullIntegrity,
   observeImmutabilityAsFound,
   recordHqSchemaEnsured,
+  recordIntegrityCheckpoint,
   restoredImmutableTables,
   structuralIntegrity,
   verifyHqBackupFile,
@@ -2362,6 +2362,23 @@ export class HeadquarterOperations {
   #integrityReport: HqIntegrityReport;
 
   /**
+   * The declared engine-immutable ledgers that were ABSENT when this process
+   * opened the file and that HQ's own ensure pass has since re-created EMPTY.
+   *
+   * Held for `assessHqIntegrity`, and that is the whole point (Wave 5
+   * correction round five, Medium 1). The boot census reported the drop and
+   * engaged safe mode; the Founder's full assessment then asked about "the file
+   * as it now stands", found the re-created ledgers healthy, and recorded a
+   * verdict of `safeMode: false` with an EMPTY findings list — HQ affirmatively
+   * certifying a store it had just told the Founder was destroyed, and handing
+   * `releaseKillSwitch` back out. Re-creating a ledger is not repairing it, so
+   * this observation is carried into the assessment and is not clearable by it.
+   *
+   * `#private` and frozen: it is an input to an enforcement verdict.
+   */
+  readonly #immutableLedgersRestoredAtBoot: readonly string[];
+
+  /**
    * The external-action adapters, keyed by id — `#private`, handed in by the
    * composition root once, and read by the gateway's execute path ONLY. There
    * is deliberately no register/unregister method: an adapter is an execution
@@ -2576,6 +2593,10 @@ export class HeadquarterOperations {
     // other ensure and after the observation above, so a dropped guard is
     // reported before it is repaired — see `ensureEvidenceGuards`.
     ensureEvidenceGuards(db);
+    // The DURABLE COMMITMENT ledger, ensured here for exactly the same reason
+    // and in exactly the same position: after the as-found observation, so a
+    // tamperer who dropped it is reported before HQ re-creates it empty.
+    ensureIntegrityCheckpoints(db);
     // The durable "HQ has ensured this file" mark, stamped into
     // `PRAGMA user_version` AFTER the ensures and read BEFORE them, next time
     // (Wave 5 correction round four, High 1). It is the half of the
@@ -2607,20 +2628,33 @@ export class HeadquarterOperations {
     // The cheap half, at every construction. See the field's own note for why
     // the expensive half is an explicit act instead.
     const recordedVerdict = standingIntegrityVerdict(db);
-    // The DURABLE commitment HQ recorded about its own audit log, checked
-    // against the log as it now stands (Wave 5 correction round four, High H1).
-    // One indexed lookup, so the cheap pass can afford it — which is the point:
-    // `DROP TABLE op_evidence` and a rebuild used to read clean at BOTH depths,
-    // and the boot is where a destroyed audit log has to stop being silence.
-    const evidenceCommitmentBreachAt = evidenceChainCommitmentBreach(db);
+    // Only the ones HQ's own schema has just re-created count as a finding:
+    // that is HQ saying "my schema declares this ledger and this file did not
+    // have it". A read-only handle re-creates nothing, so an honestly older
+    // file reports nothing — see `restoredImmutableTables`.
+    //
+    // HELD on the instance, because `assessHqIntegrity` needs it too (Wave 5
+    // correction round five, Medium 1). A full assessment asks about the file
+    // as it now stands, and by then HQ has already re-created the dropped
+    // ledgers EMPTY — so the assessment used to read 31 healthy ledgers and
+    // record a CLEAN verdict over a store the same process had just told the
+    // Founder was gutted, which handed `releaseKillSwitch` straight back. The
+    // destruction is not repaired by the re-creation, so it may not be cleared
+    // by an assessment that only sees the repair.
+    this.#immutableLedgersRestoredAtBoot = Object.freeze(
+      restoredImmutableTables(db, immutabilityAsFound.tablesAbsent),
+    );
+    // The DURABLE commitment HQ recorded about its own audit log is read INSIDE
+    // `structuralIntegrity`, not injected here (`contradictedChainCommitment`).
+    // The concurrent lane's answer to the same question passed the breach in as
+    // a value computed from the verdict ledger; that mechanism is gone and this
+    // one survives — see the boundary note on `recordIntegrityCheckpoint`. The
+    // property that mattered is unchanged: the cheap pass pays one indexed
+    // lookup, so a `DROP TABLE op_evidence` plus a rebuild is caught at BOOT and
+    // not only inside a Founder assessment.
     this.#integrityReport = structuralIntegrity(db, {
-      evidenceCommitmentBreachAt,
       guardsMissingAsFound: immutabilityAsFound.guardsMissing,
-      // Only the ones HQ's own schema has just re-created count as a finding:
-      // that is HQ saying "my schema declares this ledger and this file did not
-      // have it". A read-only handle re-creates nothing, so an honestly older
-      // file reports nothing — see `restoredImmutableTables`.
-      immutableTablesAbsentAsFound: restoredImmutableTables(db, immutabilityAsFound.tablesAbsent),
+      immutableTablesAbsentAsFound: this.#immutableLedgersRestoredAtBoot,
       reliabilitySchemaPresent: this.#reliabilityStorePresent,
       // The RECORDED verdict, re-read from HQ's own append-only verdict ledger
       // (Wave 5 review, High finding 1). A structural pass cannot see a broken
@@ -2632,6 +2666,26 @@ export class HeadquarterOperations {
       // `assessHqIntegrity` records a clean verdict, and only that clears it.
       recordedVerdict,
     });
+    // The boot-time COMMITMENT (Wave 5 correction round five, High 1). A
+    // commitment is only worth what its age allows: an assessment is an
+    // explicit Founder act and may be months apart, so HQ also commits at every
+    // construction that finds nothing blocking — which bounds the window a
+    // forger has to one process lifetime rather than to the gap between two
+    // Founder acts.
+    //
+    // Only when safe mode is CLEAR, because a commitment is HQ standing behind
+    // the record and safe mode is HQ saying it cannot. Nothing is written on a
+    // read-only handle, on a file with no checkpoint ledger, or when neither
+    // the chain nor any ledger mark has advanced — see
+    // `recordIntegrityCheckpoint`.
+    if (!this.#integrityReport.safeMode) {
+      recordIntegrityCheckpoint(db, {
+        id: `checkpoint-${uuid()}`,
+        recordedAt: nowIso(),
+        processId: this.#processIdentity,
+        recordedBy: 'hq_boot',
+      });
+    }
     this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
     // Company memory (Phase 5, issue #265): the issue-#120 store, finally
@@ -2836,9 +2890,11 @@ export class HeadquarterOperations {
     const verdictId = `verdict-${uuid()}`;
     try {
       privileged.reserve(() => {
-        // The evidence entry FIRST, so the verdict can commit to the tip that
-        // now includes it (Wave 5 correction round four, High H1). Both still
-        // land inside ONE reservation, so the pair can never half-exist.
+        // The evidence entry and the verdict land inside ONE reservation, so
+        // the pair can never half-exist. No checkpoint is written here by
+        // design: this path only runs when the boot verdict is BLOCKING, and a
+        // checkpoint is HQ standing behind the record — see
+        // `recordIntegrityCheckpoint`.
         privileged.appendEvidence({
           actor: this.#processIdentity,
           kind: INTEGRITY_ASSESSED_EVIDENCE_KIND,
@@ -2863,7 +2919,6 @@ export class HeadquarterOperations {
           findings,
           processId: this.#processIdentity,
           assessedBy: this.#processIdentity,
-          evidenceTip: evidenceChainTip(this.#db),
         });
       });
     } catch {
@@ -8252,15 +8307,33 @@ export class HeadquarterOperations {
    * a verified backup, outside HQ; HQ's job is to say so and to keep saying so
    * until it is true.
    *
-   * Permitted in safe mode by construction, and it writes exactly one thing:
-   * an evidence entry recording that the assessment happened and what it
-   * found (categorical finding names only).
+   * Permitted in safe mode by construction, and it writes an evidence entry
+   * recording that the assessment happened and what it found (categorical
+   * finding names only), the verdict row that entry corroborates, and — only
+   * when the assessment found nothing blocking — one durable checkpoint.
+   *
+   * REFUSED on a read-only handle (Wave 5 correction round five, Low 2). All
+   * three of those writes are part of the act: "record first, latch second"
+   * means a verdict HQ could not record is a verdict HQ does not act on, and a
+   * read-only handle cannot record one. It used to be attempted anyway —
+   * `#reliabilityStorePresent` is TRUE for a read-only handle over a modern
+   * file, so the append ran and the engine's `SqliteError: attempt to write a
+   * readonly database` escaped this facade as a thrown exception rather than an
+   * `OpsResult`, against this module's own "refusals, not exceptions" rule.
    */
   assessHqIntegrity(input: { requestedBy: string }): OpsResult<HqIntegrityView> {
     const refusedActor = this.#resolveReliabilityCommander(input.requestedBy, 'assess HQ store integrity');
     if (refusedActor) return refusedActor;
     const refusedCapability = this.#reliabilityCapabilityGate('assess HQ store integrity');
     if (refusedCapability) return refusedCapability;
+    if (this.#db.readonly) {
+      return fail(
+        'invalid_input',
+        'HQ integrity cannot be assessed through a read-only handle: the assessment records a verdict, the ' +
+          'evidence entry that corroborates it and the durable checkpoint, and a verdict HQ cannot record ' +
+          'is a verdict HQ does not act on. Open the database with a writable HQ command and assess there.',
+      );
+    }
 
     const before = this.#integrityReport.safeMode;
     // Deliberately WITHOUT `guardsMissingAsFound`: a fresh assessment asks
@@ -8275,11 +8348,24 @@ export class HeadquarterOperations {
       // convenience surface — the Wave 5 High. See the field's note.
       verifyEvidenceChain: this.#verifyEvidenceChainFromStore,
       reliabilitySchemaPresent: this.#reliabilityStorePresent,
-      // The durable commitment, checked HERE too. This is the only path that
+      // The durable commitment is checked HERE too, and needs no argument: the
+      // full pass runs `structuralIntegrity` beneath it, which reads
+      // `contradictedChainCommitment` directly. This is the only path that
       // clears a latch, so a log that cannot satisfy what HQ recorded about it
-      // must be visible to it or a Founder assessment would clear a verdict
-      // about a destroyed audit log (Wave 5 correction round four, High H1).
-      evidenceCommitmentBreachAt: evidenceChainCommitmentBreach(this.#db),
+      // has to be visible to it, or a Founder assessment would clear a verdict
+      // about a destroyed audit log (Wave 5 correction round four, High H1;
+      // round five, High 1).
+      //
+      // The one as-found observation an assessment may NOT clear (Wave 5
+      // correction round five, Medium 1). Guards are deliberately omitted above
+      // because HQ re-creating a trigger genuinely repairs the file's guard set
+      // — the file as it now stands really does carry it. A ledger HQ had to
+      // re-create EMPTY is not repaired by the re-creation: the rows are gone,
+      // and an assessment that looked only at the healthy empty table certified
+      // a destroyed store as clean. Carried for the ledgers THIS process found
+      // missing; the durable half that survives a restart is the checkpoint's
+      // high-water commitment, `regressedImmutableLedgers`.
+      immutableTablesAbsentAsFound: this.#immutableLedgersRestoredAtBoot,
     });
     const findings = report.observations.map((observation) => observation.finding);
     // RECORD first, latch second, and both inside ONE reservation (Wave 5
@@ -8292,10 +8378,25 @@ export class HeadquarterOperations {
     const privileged = this.#requirePrivilegedQueue();
     const verdictId = `verdict-${uuid()}`;
     privileged.reserve(() => {
-      // Evidence FIRST, verdict second: the verdict commits to the chain tip
-      // that now includes its own corroborating entry, so the commitment is as
-      // fresh as the assessment (Wave 5 correction round four, High H1). Still
-      // one reservation, so the pair still lands together or not at all.
+      // Verdict, then its corroborating evidence entry, then the COMMITMENT —
+      // one reservation, so all three land together or not at all. The
+      // concurrent lane put the evidence append first so that a chain tip
+      // stored ON the verdict row would already include that entry; that
+      // mechanism is gone (see the boundary note on `recordIntegrityCheckpoint`)
+      // and the freshness it wanted is delivered by the checkpoint, which is
+      // written LAST and therefore commits to a tip that already carries this
+      // assessment's own entry.
+      if (this.#reliabilityStorePresent) {
+        appendIntegrityVerdict(this.#db, {
+          id: verdictId,
+          assessedAt: nowIso(),
+          depth: report.depth,
+          safeMode: report.safeMode,
+          findings,
+          processId: this.#processIdentity,
+          assessedBy: input.requestedBy,
+        });
+      }
       privileged.appendEvidence({
         actor: input.requestedBy,
         kind: INTEGRITY_ASSESSED_EVIDENCE_KIND,
@@ -8309,23 +8410,31 @@ export class HeadquarterOperations {
           safeMode: report.safeMode,
           safeModeChanged: before !== report.safeMode,
           findings,
-          // False on a handle with no verdict ledger — a pre-correction file,
-          // or a read-only one. The verdict is then process-local and
-          // SAFE_MODE_STATEMENT says so; nothing pretends otherwise.
+          // False on a handle whose FILE carries no verdict ledger — a
+          // database written before the Wave 5 correction. The verdict is then
+          // process-local and SAFE_MODE_STATEMENT says so; nothing pretends
+          // otherwise. It no longer says "or a read-only one", which was
+          // false: `#reliabilityStorePresent` is TRUE for a read-only handle
+          // over a modern file, so that case reached the append and threw
+          // rather than reporting anything. A read-only handle is refused
+          // above, before any of this runs (Wave 5 correction round five,
+          // Low 2).
           verdictRecorded: this.#reliabilityStorePresent,
           executable: false,
         },
       });
-      if (this.#reliabilityStorePresent) {
-        appendIntegrityVerdict(this.#db, {
-          id: verdictId,
-          assessedAt: nowIso(),
-          depth: report.depth,
-          safeMode: report.safeMode,
-          findings,
+      // The COMMITMENT, inside the same reservation and last, so its tip
+      // includes the evidence entry just appended and so it lands with the
+      // verdict or not at all. Only a CLEAN assessment commits: a checkpoint is
+      // HQ standing behind the record, and a blocking finding is HQ saying it
+      // cannot. Nothing is written when the chain has not advanced past what is
+      // already committed — see `recordIntegrityCheckpoint`.
+      if (!report.safeMode) {
+        recordIntegrityCheckpoint(this.#db, {
+          id: `checkpoint-${uuid()}`,
+          recordedAt: nowIso(),
           processId: this.#processIdentity,
-          assessedBy: input.requestedBy,
-          evidenceTip: evidenceChainTip(this.#db),
+          recordedBy: input.requestedBy,
         });
       }
     });
@@ -10266,7 +10375,40 @@ export class HeadquarterOperations {
     // rather than from this column, so the two halves cannot drift.
 
     const at = nowIso();
-    const occurredAt = (input.occurredAt ?? '').trim() || at;
+    /*
+     * The entry's IDENTITY has to be something the caller DECLARED (Wave 5
+     * correction round five, Low 3).
+     *
+     * `occurredAt` used to default to `nowIso()` and then feed `costEntryKey`,
+     * so an entry recorded without one carried a millisecond wall clock as part
+     * of its own identity. Two identical calls therefore almost never collided:
+     * executed at a 0 ms gap, a 2 ms gap and a 30 ms gap, an unchanged replay
+     * of a 6000-unit entry was ACCEPTED as a second row every time and the
+     * Founder ceiling observed 12000 from 6000 actually spent. The documented
+     * protection — "a second entry with the same identity and a different
+     * figure is `cost_entry_conflict`" — was true of the key and vacuous in
+     * practice, because the default path essentially never produced the same
+     * identity. A fabricated figure in the FALSE-ALARM direction is as much a
+     * fabrication as one in the reassuring direction.
+     *
+     * So an entry must declare at least one of the two things that can
+     * distinguish it from a replay, and the key uses the DECLARED instant only:
+     *
+     *  - `idempotencyKey`, which is the caller saying "this is the same
+     *    observation I may already have reported" and is now stated as the
+     *    mitigation it is rather than left as an unmentioned option; or
+     *  - `occurredAt`, a real instant the caller observed, which is a fact
+     *    about the spend rather than about the moment the call was made.
+     *
+     * Fail closed on unknown, and never dedupe on a fabricated identity: HQ
+     * genuinely cannot tell a replay from a second real spend when the caller
+     * declares neither, and inventing a wall clock to tell them apart
+     * over-reports while inventing a match would under-report against a Founder
+     * ceiling. It refuses instead.
+     */
+    const declaredOccurredAt = (input.occurredAt ?? '').trim();
+    const idempotencyKey = input.idempotencyKey?.trim() || null;
+    const occurredAt = declaredOccurredAt || at;
     /*
      * A REAL instant, BOUNDED against the clock — the two correction lanes'
      * checks folded into one (Wave 5 review, High findings B-2 / High 3).
@@ -10326,13 +10468,33 @@ export class HeadquarterOperations {
         );
       }
     }
+    // LAST of the refusals, deliberately: every check above is about whether
+    // this entry may be recorded at all, and this one is about whether HQ can
+    // tell it apart from a replay. Putting it earlier would have changed which
+    // refusal an unbound provider or a foreign decision id gets back, which is
+    // a worse answer to a worse question.
+    if (declaredOccurredAt === '' && idempotencyKey === null) {
+      return fail(
+        'invalid_input',
+        'A cost entry must carry an idempotencyKey, or the occurredAt instant it was observed at, so a ' +
+          'replay of the same observation can be recognized rather than counted twice. HQ will not stamp ' +
+          'an identity of its own on a spend figure: a wall clock read at the moment of the call makes ' +
+          'every replay look like a new entry.',
+      );
+    }
     const key = costEntryKey({
       taskId: input.taskId,
       providerId,
       modelId,
-      occurredAt,
+      // The DECLARED instant, never the defaulted one. `occurredAt` above still
+      // falls back to `at` for the stored column — the row records when HQ was
+      // told, which is honest metadata — but a wall clock HQ read for itself is
+      // not part of anything's identity. With an `idempotencyKey` and no
+      // declared instant, the key is the caller's key: two replays a minute
+      // apart collide, which is exactly what an idempotency key is for.
+      occurredAt: declaredOccurredAt || null,
       unitKind: cost.fact.unitKind,
-      idempotencyKey: input.idempotencyKey?.trim() || null,
+      idempotencyKey,
     });
     const id = `intelcost-${uuid()}`;
     // CANONICAL attribution, exactly as for a decision. Mission and project

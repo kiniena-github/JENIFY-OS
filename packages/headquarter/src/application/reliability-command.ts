@@ -485,34 +485,25 @@ BEGIN SELECT RAISE(ABORT, 'hq_reliability_backups is append-only (unique record_
 export function ensureReliabilitySchema(db: HqDatabase): void {
   if (db.readonly) return;
   db.exec(RELIABILITY_DDL);
-  ensureVerdictChainCommitmentColumns(db);
 }
 
 /**
- * The two columns that make a verdict COMMIT to the evidence chain it was
- * reached over (Wave 5 correction round four, High H1 / Medium M2).
+ * **The verdict ledger carries NO chain-tip columns, and that is a decision
+ * rather than an omission** (Wave 5 round-four/round-five reconciliation).
  *
- * Added by ALTER rather than in the DDL above, because `CREATE TABLE IF NOT
- * EXISTS` does not extend a table that already exists and a database written by
- * an earlier build carries the verdict ledger without them. Idempotent, exactly
- * like `ensureColumns` in `store/db.ts`.
- *
- * Nullable, and a null is read as "this verdict made no commitment" rather than
- * as a commitment to nothing — a verdict from an older build cannot be made
- * retroactively to have promised something.
+ * The concurrent round-four lane made every verdict commit to the evidence
+ * chain's tip (`evidence_tip_seq` / `evidence_tip_hash`, added by ALTER) and
+ * read the strongest of them back with `MAX(evidence_tip_seq)`. That answered
+ * the same question the checkpoint ledger answers — "how far did the audit log
+ * reach, according to a record kept outside it" — and it is the one of the two
+ * that could be argued past: appending to this ledger is exactly the write its
+ * trio permits, so a writer that rewrote `op_evidence` into a LONGER coherent
+ * forgery could append one verdict row committing to the forged tip and the
+ * `MAX` would select it, retiring the genuine commitment behind it.
+ * `contradictedChainCommitment` checks EVERY commitment ever recorded, so the
+ * same appended row adds a satisfied row and removes nothing. One mechanism
+ * survives, the fail-closed one; see `store/integrity.ts`.
  */
-function ensureVerdictChainCommitmentColumns(db: HqDatabase): void {
-  const columns = db.prepare(`PRAGMA table_info(hq_reliability_verdicts)`).all() as {
-    name: string;
-  }[];
-  const present = new Set(columns.map((column) => column.name));
-  if (!present.has('evidence_tip_seq')) {
-    db.exec(`ALTER TABLE hq_reliability_verdicts ADD COLUMN evidence_tip_seq INTEGER`);
-  }
-  if (!present.has('evidence_tip_hash')) {
-    db.exec(`ALTER TABLE hq_reliability_verdicts ADD COLUMN evidence_tip_hash TEXT`);
-  }
-}
 
 /** True when this file carries the Phase 13 ledger — observation, never migration. */
 export function reliabilitySchemaPresent(db: HqDatabase): boolean {
@@ -844,82 +835,6 @@ function verdictIsCorroborated(db: HqDatabase, verdictId: string): boolean {
   }
 }
 
-/**
- * The strongest commitment HQ has recorded about how far its own evidence chain
- * reached, or null when it has recorded none.
- *
- * MAX by `evidence_tip_seq`, deliberately, and it is the same monotone rule
- * `standingIntegrityVerdict` uses: appending to the verdict ledger can only ever
- * RAISE the commitment, never lower it, so a forged row appended with a small
- * or null tip changes nothing. Lowering it requires a DELETE or an UPDATE on
- * `hq_reliability_verdicts` — which the append-only trio refuses, whose removal
- * is an `append_only_guard_missing` finding, and whose table's disappearance is
- * a census finding.
- */
-export function recordedEvidenceChainCommitment(
-  db: HqDatabase,
-): { seq: number; hash: string } | null {
-  if (!integrityVerdictLedgerPresent(db)) return null;
-  try {
-    const row = db
-      .prepare(
-        `SELECT evidence_tip_seq AS seq, evidence_tip_hash AS hash
-           FROM hq_reliability_verdicts
-          WHERE evidence_tip_seq IS NOT NULL AND evidence_tip_hash IS NOT NULL
-          ORDER BY evidence_tip_seq DESC
-          LIMIT 1`,
-      )
-      .get() as { seq: unknown; hash: unknown } | undefined;
-    if (!row) return null;
-    const seq = Number(row.seq);
-    if (!Number.isInteger(seq) || seq <= 0 || typeof row.hash !== 'string') return null;
-    return { seq, hash: row.hash };
-  } catch {
-    // A ledger without the columns (an older build) has made no commitment.
-    return null;
-  }
-}
-
-/**
- * The committed `seq` that the evidence log NO LONGER satisfies, or null when
- * every commitment still stands.
- *
- * This is the check that makes destruction of the audit log detectable (Wave 5
- * correction round four, High H1, and the half of Medium M2 that
- * `sqlite_sequence` could not hold).
- *
- * `verifyEvidenceChain` walks the links and compares the highest `seq` present
- * against `sqlite_sequence`. Both of those live INSIDE the thing being checked:
- * `DROP TABLE op_evidence` takes the rows and the `sqlite_sequence` row with it,
- * so a log destroyed and rebuilt — empty, or with a freshly computed chain of
- * the attacker's own — verified perfectly and published `chainVerified: true`.
- * And with the guard trio recreated afterwards, one
- * `UPDATE sqlite_sequence SET seq = 2` hid a tail truncation outright.
- *
- * A commitment recorded in a DIFFERENT append-only ledger is outside all of
- * that. To satisfy it, the log must still carry the exact entry HQ saw at that
- * `seq`, with the exact hash — which a rebuilt log cannot produce, because
- * producing it means replaying the prefix that was destroyed.
- *
- * O(1): one indexed lookup, so it is affordable in the CHEAP structural pass
- * and therefore fires at boot rather than only inside a Founder assessment.
- */
-export function evidenceChainCommitmentBreach(db: HqDatabase): number | null {
-  const commitment = recordedEvidenceChainCommitment(db);
-  if (!commitment) return null;
-  try {
-    const row = db.prepare(`SELECT hash FROM op_evidence WHERE seq = ?`).get(commitment.seq) as
-      | { hash: unknown }
-      | undefined;
-    if (!row || row.hash !== commitment.hash) return commitment.seq;
-    return null;
-  } catch {
-    // The log cannot be read at all, and HQ has a standing commitment about it.
-    // That is the breach, not an excuse from it.
-    return commitment.seq;
-  }
-}
-
 function rowToRecordedVerdict(row: Record<string, unknown>): RecordedIntegrityVerdict {
   const depth = String(row.depth);
   return {
@@ -1018,22 +933,12 @@ export function appendIntegrityVerdict(
     findings: readonly string[];
     processId: string;
     assessedBy: string;
-    /**
-     * The evidence chain's tip at the moment this verdict was reached — HQ's
-     * durable commitment to how far its own audit log had got.
-     *
-     * Read by `evidenceChainCommitmentBreach`, which is what makes a destroyed
-     * and rebuilt log a finding instead of silence. Null only where there is
-     * genuinely no chain to commit to.
-     */
-    evidenceTip: { seq: number; hash: string } | null;
   },
 ): void {
   db.prepare(
     `INSERT INTO hq_reliability_verdicts
-       (id, assessed_at, depth, safe_mode, findings, process_id, assessed_by,
-        evidence_tip_seq, evidence_tip_hash)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, assessed_at, depth, safe_mode, findings, process_id, assessed_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     input.id,
     input.assessedAt,
@@ -1043,8 +948,6 @@ export function appendIntegrityVerdict(
     JSON.stringify(input.findings.filter(isHqIntegrityFinding)),
     input.processId,
     input.assessedBy,
-    input.evidenceTip?.seq ?? null,
-    input.evidenceTip?.hash ?? null,
   );
 }
 

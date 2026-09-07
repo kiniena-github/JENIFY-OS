@@ -55,7 +55,6 @@ import {
   RUN_STATES,
   REPORTABLE_RUN_OUTCOMES,
   isReportableRunOutcome,
-  evidenceChainCommitmentBreach,
   standingIntegrityVerdict,
 } from '../src/application/reliability-command.js';
 import { verifyEvidenceChain } from '../src/operator/evidence.js';
@@ -465,10 +464,18 @@ describe('destroying the audit log is a finding, not silence', () => {
           OR (TYPEOF(NEW.seq) = 'integer' AND EXISTS (SELECT 1 FROM op_evidence WHERE seq = NEW.seq))
         BEGIN SELECT RAISE(ABORT, 'op_evidence is append-only'); END;
       `);
-      // Nothing is missing by the guard census, and the walk over what is left
-      // verifies perfectly: this is what read clean before the correction.
+      // Nothing is missing by the guard census, and every check that lives
+      // INSIDE the log — links, seq contiguity from 1, the `sqlite_sequence`
+      // high-water mark — is satisfied by the rebuild: this is exactly what read
+      // clean before the correction.
       expect(missingImmutabilityGuards(fx.raw())).toEqual([]);
-      expect(verifyEvidenceChain(fx.raw())).toBeNull();
+      // PORTED at the round-four/round-five reconciliation. This line asserted
+      // `toBeNull()`, which was the pre-correction baseline: the whole point of
+      // the surviving mechanism is that `verifyEvidenceChain` no longer reads
+      // only the log. It now ends on `contradictedChainCommitment`, so the
+      // rebuild is refused right here, by the same function, rather than only by
+      // a separate check the caller had to remember to make.
+      expect(verifyEvidenceChain(fx.raw())).not.toBeNull();
 
       const restarted = fx.reopen('process-two');
       const posture = restarted.ops.hqReliabilityPosture();
@@ -481,7 +488,12 @@ describe('destroying the audit log is a finding, not silence', () => {
           .filter((o) => o.finding === 'evidence_chain_broken')
           .map((o) => o.detail)
           .join(' '),
-      ).toContain('reached entry seq');
+        // PORTED at the round-four/round-five reconciliation. The assertion
+        // named the wording of the retired verdict-ledger commitment ("HQ
+        // recorded that its hash-chained evidence log reached entry seq N");
+        // the surviving checkpoint commitment says the same thing about the
+        // same seq, so the substance is asserted against the wording that ships.
+      ).toContain('commits the evidence log to an entry at seq');
 
       // A FULL assessment does not clear it either — the commitment is checked
       // at both depths, and this is the only latch-clearing path there is.
@@ -491,10 +503,17 @@ describe('destroying the audit log is a finding, not silence', () => {
       expect(assessed.observations.map((o) => o.finding)).toContain('evidence_chain_broken');
       // And the report behind it says the chain was NOT verified, rather than
       // reporting "nothing to check" as a pass (Low L7).
+      //
+      // PORTED at the round-four/round-five reconciliation. This assertion used
+      // to hand `fullIntegrity` an `evidenceCommitmentBreachAt` computed from
+      // the verdict ledger; that mechanism was retired in favour of
+      // `hq_integrity_checkpoints`, so the commitment now reaches `chainVerified`
+      // through `verifyEvidenceChain` itself — which is a STRONGER statement of
+      // the same property, because the enforcement path no longer depends on the
+      // caller remembering to pass an argument.
       expect(
         fullIntegrity(restarted.db, {
           verifyEvidenceChain: () => verifyEvidenceChain(restarted.db),
-          evidenceCommitmentBreachAt: evidenceChainCommitmentBreach(restarted.db),
         }).chainVerified,
       ).toBe(false);
     } finally {
@@ -527,9 +546,16 @@ describe('destroying the audit log is a finding, not silence', () => {
         BEGIN SELECT RAISE(ABORT, 'op_evidence is append-only'); END;
       `);
       raw.prepare(`UPDATE sqlite_sequence SET seq = 1 WHERE name = 'op_evidence'`).run();
-      // Every check that lives inside the log now agrees the log is fine.
+      // Every check that lives inside the log now agrees the log is fine: the
+      // one surviving entry links, the seqs are contiguous from 1, and the
+      // high-water mark was lowered to match.
       expect(missingImmutabilityGuards(fx.raw())).toEqual([]);
-      expect(verifyEvidenceChain(fx.raw())).toBeNull();
+      // PORTED at the round-four/round-five reconciliation, for the reason given
+      // on the test above: the truncation is now refused by
+      // `verifyEvidenceChain` itself, because its last step is the commitment
+      // that does not live in this table. The committed length is what is
+      // reported, and the log no longer carries an entry there at all.
+      expect(verifyEvidenceChain(fx.raw())).not.toBeNull();
 
       const restarted = fx.reopen('process-two');
       const posture = restarted.ops.hqReliabilityPosture();
@@ -598,14 +624,29 @@ describe('destroying the audit log is a finding, not silence', () => {
   });
 
   /**
-   * Wave 5 correction round four, Medium M3. `assessHqIntegrity` deliberately
-   * passes no `immutableTablesAbsentAsFound` — it asks about the file as it NOW
-   * stands, which is the only way a latch can ever be cleared. That is right,
-   * and it meant a dropped LEDGER observed at boot was cleared by the next
-   * assessment with nothing durably recording that rows had gone missing.
+   * Wave 5 correction round four, Medium M3, PORTED at the round-four/round-five
+   * reconciliation.
    *
-   * The clearing is still correct. What is added is that the LOSS is now a
-   * fact in the append-only log, which outlives the latch.
+   * M3 observed that `assessHqIntegrity` passed no `immutableTablesAbsentAsFound`
+   * — it asks about the file as it NOW stands, which is the only way a latch can
+   * ever be cleared — so a dropped LEDGER seen at boot was cleared by the next
+   * assessment with nothing durably recording that rows had gone missing. Its
+   * answer was the `hq_immutable_ledger_absent` evidence entry, and that half is
+   * unchanged and asserted below.
+   *
+   * Its other half — "the clearing is still correct" — is WRONG, and the
+   * concurrent lane executed the case that proves it (round five, Medium 1): a
+   * full assessment over a file whose 31 declared ledgers had been dropped found
+   * the ledgers HQ had itself re-created EMPTY, recorded `safeMode: false` with
+   * an empty findings list, and handed `releaseKillSwitch` back. So the ledgers
+   * THIS process found absent are now carried into the assessment and are not
+   * clearable by it, and this test asserts the stricter behaviour.
+   *
+   * The residual is asserted too, rather than left as prose: `hq_intel_budgets`
+   * carries no AUTOINCREMENT high-water mark to regress, so
+   * `regressedImmutableLedgers` has nothing to measure and a RESTART plus a
+   * SECOND Founder assessment does clear the latch. That is exactly the cost the
+   * phase document names, and the loss record still stands afterwards.
    */
   it('records WHICH ledger disappeared in the audit log, so clearing the latch does not erase it', () => {
     const fx = fileFixture();
@@ -616,17 +657,54 @@ describe('destroying the audit log is a finding, not silence', () => {
       const restarted = fx.reopen('process-two');
       expect(restarted.ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
 
-      // The Founder assesses the file as it now stands and the latch clears —
-      // correctly: HQ has re-created what it declares and the file is sound.
-      const cleared = expectOk(restarted.ops.assessHqIntegrity({ requestedBy: 'founder' }));
-      expect(cleared.safeMode).toBe(false);
+      // The Founder assesses the file as it now stands, and the latch does NOT
+      // clear: HQ re-created the ledger EMPTY, and re-creating a table does not
+      // bring back its rows. The finding names the ledger rather than three
+      // triggers.
+      const stillEngaged = expectOk(restarted.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(stillEngaged.safeMode).toBe(true);
+      expect(stillEngaged.observations.map((o) => o.finding)).toContain(
+        'append_only_guard_missing',
+      );
+      expect(
+        stillEngaged.observations
+          .filter((o) => o.finding === 'append_only_guard_missing')
+          .map((o) => o.detail)
+          .join(' '),
+      ).toContain('hq_intel_budgets');
+      // And it is refusing, not merely reporting.
+      expectOk(restarted.ops.engageKillSwitch('*', 'founder', 'investigating'));
+      const refused = restarted.ops.releaseKillSwitch('*', 'founder');
+      expect(refused.ok).toBe(false);
+      expect(!refused.ok && refused.error.code).toBe('safe_mode_engaged');
 
-      // And the loss is still on the record afterwards, naming the ledger.
+      // The loss is on the record, naming the ledger, and the entry is what
+      // outlives every latch.
       const entries = restarted.ops.queue.evidence
         .list()
         .filter((entry) => entry.kind === 'hq_immutable_ledger_absent');
       expect(entries.length).toBeGreaterThan(0);
       expect(entries.at(-1)!.payload.tables).toContain('hq_intel_budgets');
+
+      // The RESIDUAL, executed rather than asserted as prose. The as-found
+      // observation belongs to the process that made it, and `hq_intel_budgets`
+      // has no AUTOINCREMENT mark for the durable half to measure — so a third
+      // process, plus a second Founder assessment, clears it. This is the exact
+      // cost the phase document states for a dropped ledger of this shape.
+      const third = fx.reopen('process-three');
+      expect(third.ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+      const clearedAfterRestart = expectOk(
+        third.ops.assessHqIntegrity({ requestedBy: 'founder' }),
+      );
+      expect(clearedAfterRestart.safeMode).toBe(false);
+      // And even then the loss record is still there, which is the whole point
+      // of M3: the latch is a posture, the evidence entry is a fact.
+      expect(
+        third.ops.queue.evidence
+          .list()
+          .filter((entry) => entry.kind === 'hq_immutable_ledger_absent')
+          .at(-1)!.payload.tables,
+      ).toContain('hq_intel_budgets');
     } finally {
       fx.cleanup();
     }

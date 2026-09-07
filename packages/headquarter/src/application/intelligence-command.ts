@@ -853,11 +853,23 @@ export function decisionOutcomeKey(decisionId: string): string {
   return `intelout:${decisionId}`;
 }
 
+/**
+ * A cost entry's identity.
+ *
+ * `occurredAt` is `string | null` and the null is load-bearing (Wave 5
+ * correction round five, Low 3): only an instant the CALLER declared belongs in
+ * an identity. The facade used to pass a defaulted `nowIso()` here, which made
+ * every replay of an otherwise identical entry a distinct row and left
+ * `cost_entry_conflict` unreachable on the default path. A caller that declares
+ * no instant must declare an `idempotencyKey` instead — the facade refuses an
+ * entry that declares neither, because HQ cannot then tell a replay from a
+ * second real spend and will not invent an answer either way.
+ */
 export function costEntryKey(input: {
   taskId: string;
   providerId: string;
   modelId: string | null;
-  occurredAt: string;
+  occurredAt: string | null;
   unitKind: CostUnitKind;
   idempotencyKey: string | null;
 }): string {

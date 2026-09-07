@@ -409,6 +409,15 @@ export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = deepFree
     secondaryGuards: ['no_replace_unique'],
   },
   { table: 'hq_intel_cost_entries', triggerPrefix: 'hq_intel_costs', secondaryGuards: ['no_replace_unique'] },
+  // The durable INTEGRITY CHECKPOINT ledger (Wave 5 correction round five,
+  // High 1 and Medium 1). It is the one commitment that lives OUTSIDE the
+  // records it commits to, so it is exactly the table a tamperer would want to
+  // drop: the trio is the whole guarantee, and there is no secondary identity
+  // to guard because every checkpoint appends a new row. See
+  // `recordIntegrityCheckpoint` for what it holds and
+  // `contradictedChainCommitment` / `regressedImmutableLedgers` for what it
+  // buys.
+  { table: 'hq_integrity_checkpoints', triggerPrefix: 'hq_integrity_checkpoints', secondaryGuards: [] },
 ]);
 
 /**
@@ -585,7 +594,10 @@ export const SAFE_MODE_STATEMENT =
   'own. It is a barrier against a stray append and a restart, not against that writer. On a database that ' +
   'carries no ' +
   'Phase 13 ledger there is nowhere to record it and the verdict is process-local; the ' +
-  'reliability_schema_absent finding says when that is the case.';
+  'reliability_schema_absent finding says when that is the case. HQ also records what it has committed ' +
+  'to about its own append-only records — the evidence chain’s length and the hash at that seq, and each ' +
+  'declared ledger’s high-water mark — in a separate append-only ledger, and a record that contradicts a ' +
+  'commitment recorded outside it is blocking however consistent that record has been made to look.';
 
 export const INTEGRITY_DEPTH_STATEMENT =
   'A structural assessment reads the schema catalogue and the durability pragmas only — cheap enough to run ' +
@@ -763,12 +775,39 @@ export function establishedImmutableTables(db: HqDatabase): string[] {
  * The value HQ stamps into `PRAGMA user_version` once it has ensured a file's
  * schema — the durable "HQ has been here before" mark.
  *
- * A version rather than a flag so a later build can raise it, but nothing reads
- * it as a version yet: any non-zero value means the same thing, which is the
- * fail-closed reading (a stamp HQ does not recognize is still not a fresh
- * file).
+ * **A distinctive value, not "1", and read as an exact member of a closed set**
+ * (Wave 5 correction round five, Low 1). `user_version` is the conventional
+ * application-schema slot every SQLite application is invited to use, and the
+ * previous reading — "any non-zero value" — was fail-closed in one direction
+ * and a FALSE ALARM in the other: a file some other application had stamped
+ * `user_version = 7`, opened by HQ for the first time, read as a file HQ had
+ * ensured before, so the census ran over it with every declared ledger absent
+ * and the first boot engaged safe mode on a database nothing had tampered with.
+ * Executed both ways before this change: a fresh file with a foreign
+ * `user_version = 7` booted `safeMode: true ["append_only_guard_missing"]`
+ * while the control fresh file booted clean.
+ *
+ * `0x48510001` is HQ's own: `0x4851` is "HQ" in ASCII, the low half is the
+ * schema generation. Nothing infers a version from it yet — a later build that
+ * raises the generation adds the new value to `HQ_SCHEMA_ENSURED_MARKS` beside
+ * the old one, which is a deliberate reviewed act rather than an arithmetic
+ * comparison that would quietly accept a foreign stamp again.
  */
-const HQ_SCHEMA_ENSURED_MARK = 1;
+const HQ_SCHEMA_ENSURED_MARK = 0x48510001;
+
+/**
+ * Every `user_version` value that means "HQ ensured this file". A CLOSED set,
+ * for the same reason the finding vocabulary is closed: a value HQ does not
+ * recognize is somebody else's stamp, and reading somebody else's stamp as
+ * HQ's own is how the false alarm above happened.
+ *
+ * The cost, stated: a file stamped by an EARLIER build of this wave carries
+ * `user_version = 1`, which is not a member, so such a file reads as unmarked.
+ * The ledger half of the discriminator still answers for it — an established
+ * file carries ensure-created ledgers — and the first writable construction
+ * re-stamps it with the value above.
+ */
+const HQ_SCHEMA_ENSURED_MARKS: readonly number[] = Object.freeze([HQ_SCHEMA_ENSURED_MARK]);
 
 /**
  * Whether a previous HQ construction has ENSURED this file's schema.
@@ -809,12 +848,19 @@ const HQ_SCHEMA_ENSURED_MARK = 1;
  * holds no key over it, and a writer that already has it can lie about it. The
  * inversion this closes is the one that mattered: more damage no longer means
  * less detection.
+ *
+ * **Only HQ's own mark counts** (Wave 5 correction round five, Low 1). Reading
+ * "any non-zero value" as HQ's mark made a foreign application's
+ * `user_version` a false alarm on a file HQ had never touched; see
+ * `HQ_SCHEMA_ENSURED_MARKS`. The fail-closed direction is unchanged — a value
+ * HQ does not recognize contributes NO evidence that HQ has been here, and the
+ * ledger half of the discriminator still answers.
  */
 export function hqSchemaEnsuredMarkPresent(db: HqDatabase): boolean {
   try {
     const row = db.prepare(`PRAGMA user_version`).get() as Record<string, unknown> | undefined;
     const value = Number(Object.values(row ?? {})[0] ?? 0);
-    return Number.isInteger(value) && value !== 0;
+    return Number.isInteger(value) && HQ_SCHEMA_ENSURED_MARKS.includes(value);
   } catch {
     // A handle that cannot answer the pragma contributes no evidence either
     // way; the ledger reading still applies.
@@ -839,6 +885,342 @@ export function recordHqSchemaEnsured(db: HqDatabase): void {
   } catch {
     // See the header: never fail a construction over the mark.
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* The durable integrity checkpoint                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The ledger of what HQ has COMMITTED to about its own append-only records.
+ *
+ * **Why a second ledger exists at all** (Wave 5 correction round five, High 1
+ * and Medium 1). Every check in this module before it read the record and
+ * asked whether the record is self-consistent, and a writer that holds the file
+ * open can make a shortened record perfectly self-consistent:
+ *
+ *  - `DROP TABLE op_evidence`, re-create it from its own `sqlite_master` SQL,
+ *    INSERT a shortened log with explicit seqs rehashed forward from the
+ *    genesis value, re-create the three guards. The links verify, the seqs are
+ *    contiguous from 1, `sqlite_sequence` is rebuilt from the explicit rowids
+ *    so the high-water mark agrees, the guards are back before HQ next
+ *    constructs — and no `UPDATE` was executed anywhere. Two committed audit
+ *    entries simply stop having happened. Executed against the previous head:
+ *    boot clean, full assessment clean;
+ *  - the same shape one step cheaper: drop the guards, DELETE the tail, INSERT
+ *    replacement rows at the SAME seqs, re-create the guards. Length, high-water
+ *    and contiguity all agree because nothing about the length changed;
+ *  - `DROP TABLE` every declared ledger, let HQ's own ensure pass re-create
+ *    them EMPTY, restart once, and ask the Founder for a full assessment: the
+ *    boot-time as-found observation belongs to the process that made it, so a
+ *    later process assessing "the file as it now stands" found 31 healthy empty
+ *    ledgers and recorded a CLEAN verdict over a store it had told the Founder
+ *    was gutted.
+ *
+ * What all three have in common is that the only witness to what the record
+ * USED TO BE lived inside the record. A checkpoint is that witness, moved out:
+ * an append-only row saying "at this moment the evidence log reached seq N with
+ * tip hash H, and these append-only ledgers had reached these AUTOINCREMENT
+ * high-water marks". A forged record must then contradict a row the attacker
+ * has to forge SEPARATELY and COHERENTLY, in a ledger that carries the engine's
+ * own append-only trio and is in the census.
+ *
+ * **Monotone by construction.** Every recorded commitment is checked, and the
+ * per-ledger comparison takes the MAXIMUM mark ever committed. Appending a
+ * checkpoint can therefore only ever ADD a constraint: a row claiming a shorter
+ * chain or a lower mark changes nothing, which is what stops "append a fresh
+ * checkpoint over the forgery" from being the way out. The same monotonicity
+ * `standingIntegrityVerdict` uses, for the same reason.
+ *
+ * **What it fails open on, tried rather than assumed.** A writer that drops
+ * THIS table drops the commitments with it; the absence is a census finding at
+ * the boot that observes it (the table is declared in
+ * `ENGINE_IMMUTABLE_TABLES`) and, once HQ has re-created it empty, a later
+ * process has nothing left to contradict. That is the same residual class as
+ * zeroing `PRAGMA user_version`, and it is stated in the phase document's
+ * residual list rather than glossed here. It is a cost — three more deliberate
+ * acts than the attack needed before — not a boundary: HQ holds no key a
+ * foreign writer does not also have.
+ */
+export const HQ_INTEGRITY_CHECKPOINT_TABLE = 'hq_integrity_checkpoints';
+
+const INTEGRITY_CHECKPOINT_DDL = `
+CREATE TABLE IF NOT EXISTS hq_integrity_checkpoints (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  recorded_at TEXT NOT NULL,
+  chain_length INTEGER NOT NULL,
+  tip_hash TEXT NOT NULL,
+  ledger_marks TEXT NOT NULL,
+  process_id TEXT NOT NULL,
+  recorded_by TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hq_integrity_checkpoints_length
+  ON hq_integrity_checkpoints(chain_length);
+
+CREATE TRIGGER IF NOT EXISTS trg_hq_integrity_checkpoints_no_rewrite
+BEFORE UPDATE ON hq_integrity_checkpoints
+BEGIN SELECT RAISE(ABORT, 'hq_integrity_checkpoints is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_integrity_checkpoints_no_erase
+BEFORE DELETE ON hq_integrity_checkpoints
+BEGIN SELECT RAISE(ABORT, 'hq_integrity_checkpoints is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_integrity_checkpoints_no_replace
+BEFORE INSERT ON hq_integrity_checkpoints
+WHEN EXISTS (SELECT 1 FROM hq_integrity_checkpoints WHERE id = NEW.id)
+  OR (TYPEOF(NEW.seq) = 'integer' AND EXISTS (SELECT 1 FROM hq_integrity_checkpoints WHERE seq = NEW.seq))
+BEGIN SELECT RAISE(ABORT, 'hq_integrity_checkpoints is append-only'); END;
+`;
+
+/**
+ * Install the checkpoint ledger and its guards. Idempotent, and never on a
+ * read-only handle — a handle that observes a file does not build one.
+ *
+ * Called from the facade constructor AFTER the as-found census, exactly like
+ * `ensureEvidenceGuards` and for the same reason: a dropped ledger must be
+ * OBSERVED before it is repaired.
+ */
+export function ensureIntegrityCheckpoints(db: HqDatabase): void {
+  if (db.readonly) return;
+  db.exec(INTEGRITY_CHECKPOINT_DDL);
+}
+
+/** True when this file carries the checkpoint ledger. Observation, never migration. */
+export function integrityCheckpointLedgerPresent(db: HqDatabase): boolean {
+  try {
+    return (
+      db
+        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`)
+        .get(HQ_INTEGRITY_CHECKPOINT_TABLE) !== undefined
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The AUTOINCREMENT high-water mark SQLite maintains for each declared
+ * append-only ledger that has ever held a row.
+ *
+ * `sqlite_sequence` is the right column to commit to because of the property
+ * `verifyEvidenceChain` already rests on: a DELETE does not lower it, and the
+ * engine guards refuse DELETE anyway. It goes back to zero for exactly one
+ * reason — the table was DROPPED, which takes its `sqlite_sequence` row with
+ * it — which is precisely the act this commitment exists to catch.
+ *
+ * Only the DECLARED ledgers, and only those with a mark above zero: a table
+ * that is not `INTEGER PRIMARY KEY AUTOINCREMENT` never appears in
+ * `sqlite_sequence` at all and therefore contributes no commitment. That is
+ * fail-open for such a table and is stated as such, rather than being covered
+ * by a mark that would always read zero.
+ */
+export function immutableLedgerMarks(db: HqDatabase): Record<string, number> {
+  const declared = new Set(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table));
+  const marks: Record<string, number> = {};
+  try {
+    const rows = db.prepare(`SELECT name, seq FROM sqlite_sequence`).all() as {
+      name: unknown;
+      seq: unknown;
+    }[];
+    for (const row of rows) {
+      const name = String(row.name);
+      if (!declared.has(name)) continue;
+      const value = Number(row.seq);
+      if (Number.isInteger(value) && value > 0) marks[name] = value;
+    }
+  } catch {
+    // No `sqlite_sequence` in this file at all: nothing has ever been appended
+    // anywhere, so there is nothing to commit to.
+  }
+  return marks;
+}
+
+/** The evidence log's tip, read as stored columns. Null when there is no log or no entry. */
+function evidenceChainTip(db: HqDatabase): { seq: number; hash: string } | null {
+  try {
+    const row = db.prepare(`SELECT seq, hash FROM op_evidence ORDER BY seq DESC LIMIT 1`).get() as
+      | { seq: unknown; hash: unknown }
+      | undefined;
+    if (!row) return null;
+    const seq = Number(row.seq);
+    if (!Number.isInteger(seq) || seq < 1) return null;
+    return { seq, hash: String(row.hash) };
+  } catch {
+    return null;
+  }
+}
+
+/** The greatest chain length any checkpoint commits to. Zero when there is none. */
+function committedChainLength(db: HqDatabase): number {
+  try {
+    const row = db
+      .prepare(`SELECT MAX(chain_length) AS len FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`)
+      .get() as { len: unknown } | undefined;
+    const value = Number(row?.len ?? 0);
+    return Number.isInteger(value) && value > 0 ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * The greatest mark ever committed for each declared ledger.
+ *
+ * Aggregated in the engine over `json_each` rather than by parsing every row in
+ * JavaScript, so the cost of a long-lived checkpoint ledger stays a single
+ * indexed scan of a small table. `json_valid` guards the extract for the same
+ * reason `verdictIsCorroborated` guards its own: these are columns a raw writer
+ * can put anything in, and an unparseable row must be inert here rather than an
+ * exception. Keys outside the declared set are ignored, so a forged row cannot
+ * name a table that was never HQ's and make the census shout about it.
+ */
+function committedLedgerMarks(db: HqDatabase): Record<string, number> {
+  const declared = new Set(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table));
+  const marks: Record<string, number> = {};
+  try {
+    const rows = db
+      .prepare(
+        `SELECT j.key AS name, MAX(CAST(j.value AS INTEGER)) AS mark
+           FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE} c, json_each(c.ledger_marks) j
+          WHERE json_valid(c.ledger_marks)
+          GROUP BY j.key`,
+      )
+      .all() as { name: unknown; mark: unknown }[];
+    for (const row of rows) {
+      const name = String(row.name);
+      if (!declared.has(name)) continue;
+      const value = Number(row.mark);
+      if (Number.isInteger(value) && value > 0) marks[name] = value;
+    }
+  } catch {
+    // No checkpoint ledger, or an engine that cannot read it: no commitment.
+  }
+  return marks;
+}
+
+/**
+ * Append a checkpoint, if there is anything new to commit to.
+ *
+ * Returns whether a row was written. Nothing is written when the handle is
+ * read-only, when the file carries no checkpoint ledger, when the evidence log
+ * is empty, or when neither the chain nor any ledger mark has advanced past
+ * what is already committed — a checkpoint per boot of an idle HQ would be
+ * noise, and the standing commitment is unchanged by it.
+ *
+ * A checkpoint is an OBSERVATION of stored columns, never a re-computation:
+ * the tip hash is read out of the row the log already holds, so there is no
+ * second spelling of the chain's hash formula anywhere (the one spelling lives
+ * in `operator/evidence.ts` and stays there). That is also why this module can
+ * own the checkpoint without acquiring a dependency on `operator/`.
+ *
+ * The CALLER decides when a checkpoint is appropriate, and both callers refuse
+ * to commit while safe mode is engaged: HQ does not add to a record it has
+ * already said it cannot stand behind. The consequence is deliberate — during
+ * an engagement the standing commitment stops advancing and the last one HQ
+ * made while it still trusted the file is what a later assessment is measured
+ * against.
+ */
+export function recordIntegrityCheckpoint(
+  db: HqDatabase,
+  input: { id: string; recordedAt: string; processId: string; recordedBy: string },
+): boolean {
+  if (db.readonly) return false;
+  if (!integrityCheckpointLedgerPresent(db)) return false;
+  const tip = evidenceChainTip(db);
+  const marks = immutableLedgerMarks(db);
+  const committedLength = committedChainLength(db);
+  const committedMarks = committedLedgerMarks(db);
+  // An empty evidence log is not a reason to skip: the LEDGER MARKS are half of
+  // what a checkpoint commits, and a file whose other ledgers have grown is
+  // worth committing whether or not anything has been appended to the audit
+  // log. `chain_length = 0` commits nothing about the chain and the chain check
+  // ignores it.
+  const advanced =
+    (tip !== null && tip.seq > committedLength) ||
+    Object.entries(marks).some(([table, mark]) => mark > (committedMarks[table] ?? 0));
+  if (!advanced) return false;
+  try {
+    db.prepare(
+      `INSERT INTO ${HQ_INTEGRITY_CHECKPOINT_TABLE}
+         (id, recorded_at, chain_length, tip_hash, ledger_marks, process_id, recorded_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      input.id,
+      input.recordedAt,
+      tip?.seq ?? 0,
+      tip?.hash ?? '',
+      JSON.stringify(marks),
+      input.processId,
+      input.recordedBy,
+    );
+    return true;
+  } catch {
+    // A checkpoint HQ could not write is a commitment HQ does not hold. It is
+    // never a reason to fail the construction or the assessment that tried:
+    // the checks below simply have one fewer commitment to measure against,
+    // which is the pre-existing posture rather than a new failure.
+    return false;
+  }
+}
+
+/**
+ * The FIRST committed evidence-chain length whose committed tip the log no
+ * longer carries, or null when every commitment still stands.
+ *
+ * One indexed query, and the answer has the same shape as every other answer
+ * about this log — the seq at which it stops being true — so
+ * `verifyEvidenceChain` can return it unchanged.
+ *
+ * `e.hash IS NOT c.tip_hash` rather than `<>`, because the LEFT JOIN's missing
+ * row is exactly the case that matters: a log shortened past a committed length
+ * has no row at that seq at all, and `<>` against NULL is NULL, which is not
+ * true and would have quietly passed.
+ */
+export function contradictedChainCommitment(db: HqDatabase): number | null {
+  try {
+    const row = db
+      .prepare(
+        `SELECT c.chain_length AS len
+           FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE} c
+           LEFT JOIN op_evidence e ON e.seq = c.chain_length
+          WHERE c.chain_length > 0 AND e.hash IS NOT c.tip_hash
+          ORDER BY c.chain_length ASC
+          LIMIT 1`,
+      )
+      .get() as { len: unknown } | undefined;
+    if (!row) return null;
+    const value = Number(row.len);
+    return Number.isInteger(value) && value > 0 ? value : null;
+  } catch {
+    // Either ledger absent: there is no commitment to contradict, and the
+    // absence of a DECLARED ledger is the census's finding, not this one's.
+    return null;
+  }
+}
+
+/**
+ * The declared append-only ledgers that now hold FEWER entries than HQ has
+ * committed they held.
+ *
+ * This is the half that survives a restart, and that is the whole point
+ * (Wave 5 correction round five, Medium 1). "Which ledgers were absent when
+ * this process opened the file" is an observation belonging to one process; a
+ * dropped-and-re-created ledger looks perfectly healthy to the next one. A
+ * high-water mark that has gone BACKWARDS is not an observation about a moment,
+ * it is a fact about the file as it now stands — so a full assessment reports
+ * it however many restarts have happened, and no assessment can clear it while
+ * it is true.
+ *
+ * A DELETE cannot produce it (the mark does not fall, and the engine guards
+ * refuse DELETE anyway), `VACUUM` and `VACUUM INTO` carry `sqlite_sequence`
+ * across, and a byte copy or `.backup()` copies it. `DROP TABLE` is what
+ * produces it.
+ */
+export function regressedImmutableLedgers(db: HqDatabase): string[] {
+  const committed = committedLedgerMarks(db);
+  const names = Object.keys(committed);
+  if (names.length === 0) return [];
+  const current = immutableLedgerMarks(db);
+  return names.filter((table) => (current[table] ?? 0) < committed[table]).sort();
 }
 
 /** What the schema-immutability census saw BEFORE this process ensured anything. */
@@ -1019,21 +1401,23 @@ export function structuralIntegrity(
      */
     recordedVerdict?: RecordedIntegrityVerdict | null;
     /**
-     * The `seq` of a DURABLE commitment HQ recorded about its own evidence
-     * chain that the log no longer satisfies, or null when every commitment
-     * still stands.
+     * **There is deliberately no `evidenceCommitmentBreachAt` option**, and its
+     * absence is the round-four/round-five reconciliation recorded where a
+     * future caller will look for it.
      *
-     * Injected as a VALUE, computed by the caller, because this module is a
-     * leaf of `store/` and the verdict ledger the commitment lives in belongs
-     * to `application/`. See `evidenceChainCommitmentBreach` there for what it
-     * answers and why the answer cannot come from inside `op_evidence` itself.
-     *
-     * It is checked at the CHEAP depth deliberately: it is one indexed lookup,
-     * and the attack it closes — destroying the audit log and rebuilding it —
-     * is one a boot must not read as clean (Wave 5 correction round four, High
-     * H1).
+     * The concurrent round-four lane injected the durable chain commitment as a
+     * VALUE here, computed by the caller from `evidence_tip_seq` on the verdict
+     * ledger, because the verdict ledger belongs to `application/` and this
+     * module is a leaf of `store/`. The commitment that survived the
+     * reconciliation lives in `hq_integrity_checkpoints`, which is a `store/`
+     * table, so it is read DIRECTLY below (`contradictedChainCommitment`) —
+     * no injection, nothing patchable in the path, and one place a reader can
+     * find the answer. The property the injected version was defended for is
+     * unchanged: it is checked at the CHEAP depth, for one indexed lookup,
+     * because destroying the audit log and rebuilding it is an attack a BOOT
+     * must not read as clean (Wave 5 correction round four, High H1; round
+     * five, High 1).
      */
-    evidenceCommitmentBreachAt?: number | null;
   } = {},
 ): HqIntegrityReport {
   const observations: HqIntegrityObservation[] = [];
@@ -1049,6 +1433,25 @@ export function structuralIntegrity(
       ...guardsDeclaredOnTables(absentTables),
     ]),
   ].sort();
+  // The DURABLE half of the same question (Wave 5 correction round five,
+  // Medium 1). "Which ledgers were absent when this process opened the file" is
+  // an observation belonging to one process, and a dropped-and-re-created
+  // ledger looks perfectly healthy to the next one. A high-water mark that has
+  // gone BACKWARDS is a fact about the file as it now stands, so it is reported
+  // however many restarts have happened — see `regressedImmutableLedgers`.
+  const regressed = regressedImmutableLedgers(db);
+  const regressionDetail =
+    regressed.length > 0
+      ? ` ${regressed.length} declared ledger(s) now hold FEWER entries than HQ's own durable checkpoint ` +
+        `records they held: ${regressed.join(', ')}. An append-only ledger's high-water mark cannot fall ` +
+        `— a DELETE does not lower it and the guards refuse one — so those tables were DROPPED and are ` +
+        `back empty. Re-creating a ledger does not bring back what it held.`
+      : '';
+  // ONE observation per finding, because the counts in the unauthenticated
+  // artifact and the wording of the refusal are keyed by the finding name. The
+  // two ways a declared ledger's append-only guarantee can be gone — the guard
+  // or the table itself, observed at boot; and the rows, measured against a
+  // commitment — are one finding with one detail.
   if (missing.length > 0) {
     observations.push({
       finding: 'append_only_guard_missing',
@@ -1061,9 +1464,38 @@ export function structuralIntegrity(
             `re-created empty by HQ's own schema: ${absentTables.join(', ')}. A dropped table is not a ` +
             `migration — whatever those ledgers held is gone.`
           : '') +
+        regressionDetail +
         ` HQ re-creates the guards it declares on every boot, so they may stand again ` +
-        `now — but it cannot know what was written while they were gone, so the finding stands until a full ` +
-        `assessment says otherwise.`,
+        `now — but it cannot know what was written while they were gone. A missing GUARD is cleared by a ` +
+        `full assessment of the file as it then stands, because re-creating a trigger really does repair ` +
+        `the file's guard set; a ledger that was ABSENT or that is back EMPTY is not, because re-creating ` +
+        `a table does not bring back the rows.`,
+    });
+  } else if (regressed.length > 0) {
+    observations.push({
+      finding: 'append_only_guard_missing',
+      blocking: true,
+      detail:
+        `The file's append-only ledgers contradict HQ's own durable checkpoint.${regressionDetail} ` +
+        `This is a fact about the file as it now stands, not an observation about the boot that saw the ` +
+        `drop, so it does not go away with a restart and no assessment clears it while it is true.`,
+    });
+  }
+
+  // The evidence log's own DURABLE commitment, cheap enough for a
+  // construction-time pass (one indexed lookup) and a fact about the file as it
+  // now stands (Wave 5 correction round five, High 1). Every other chain check
+  // reads the log and asks whether it is self-consistent, which a coherent
+  // whole-log rewrite satisfies.
+  const contradictedCommitment = contradictedChainCommitment(db);
+  if (contradictedCommitment !== null) {
+    observations.push({
+      finding: 'evidence_chain_broken',
+      blocking: true,
+      detail:
+        `HQ's durable checkpoint commits the evidence log to an entry at seq ${contradictedCommitment}, ` +
+        `and the log no longer carries that entry with that hash. A shortened or re-written log can be ` +
+        `made internally consistent; it cannot be made to agree with a commitment recorded outside it.`,
     });
   }
 
@@ -1078,21 +1510,6 @@ export function structuralIntegrity(
     });
   }
 
-  // A commitment HQ itself recorded, about its own audit log, that the log no
-  // longer satisfies. Blocking, and blocking at BOTH depths: the entry HQ saw
-  // at that seq is gone or is now a different entry, and there is no reading of
-  // that in which the standing record can be stood behind.
-  const commitmentBreachAt = options.evidenceCommitmentBreachAt ?? null;
-  if (commitmentBreachAt != null) {
-    observations.push({
-      finding: 'evidence_chain_broken',
-      blocking: true,
-      detail:
-        `HQ recorded that its hash-chained evidence log reached entry seq ${commitmentBreachAt}, and the ` +
-        `log no longer carries that entry with that hash. A dropped and re-created log, or a truncated ` +
-        `one, cannot satisfy a commitment recorded outside it — whatever the log now says about itself.`,
-    });
-  }
 
   if (options.reliabilitySchemaPresent === false) {
     observations.push({
@@ -1201,12 +1618,15 @@ export function fullIntegrity(
     /** See `structuralIntegrity`. Omitted here for the same reason. */
     immutableTablesAbsentAsFound?: readonly string[];
     /**
-     * See `structuralIntegrity`. Carried into a FULL assessment too, and the
-     * reason is the one that matters: this is the only latch-clearing path, so
-     * a commitment the log cannot satisfy has to be visible HERE or a Founder
-     * assessment would clear a verdict about a destroyed audit log.
+     * **No commitment argument, deliberately** — see `structuralIntegrity`. The
+     * durable commitment reaches a FULL assessment by two paths that need no
+     * caller cooperation, and that is the property that matters here: this is
+     * the only latch-clearing path, so a commitment the log cannot satisfy must
+     * be visible HERE or a Founder assessment would clear a verdict about a
+     * destroyed audit log. It is visible through the structural pass beneath
+     * this one, and again through `verifyEvidenceChain`, which ends on the same
+     * check.
      */
-    evidenceCommitmentBreachAt?: number | null;
   },
 ): HqIntegrityReport {
   // Deliberately WITHOUT a recorded verdict: a full assessment of the file as
@@ -1218,7 +1638,6 @@ export function fullIntegrity(
     reliabilitySchemaPresent: options.reliabilitySchemaPresent,
     guardsMissingAsFound: options.guardsMissingAsFound,
     immutableTablesAbsentAsFound: options.immutableTablesAbsentAsFound,
-    evidenceCommitmentBreachAt: options.evidenceCommitmentBreachAt,
   });
   const observations = [...structural.observations];
 
@@ -1275,13 +1694,23 @@ export function fullIntegrity(
       brokenAt = 'error';
     }
   }
-  if (brokenAt === 'error') {
+  // The structural pass already checks the DURABLE commitment and reports the
+  // same finding when one is contradicted, and `verifyEvidenceChain` checks it
+  // too so that `chainVerified` and the public delegate stay honest. One
+  // observation per finding is what the counts in the unauthenticated artifact
+  // and the refusal message are keyed by, so the second is folded in here
+  // rather than duplicated. The blocking outcome is identical either way, and
+  // the detail already on the list is the more specific of the two.
+  const commitmentAlreadyReported = observations.some(
+    (observation) => observation.finding === 'evidence_chain_broken',
+  );
+  if (brokenAt === 'error' && !commitmentAlreadyReported) {
     observations.push({
       finding: 'evidence_chain_broken',
       blocking: true,
       detail: 'The hash-chained evidence log could not be verified at all; HQ treats an unverifiable chain as a broken one.',
     });
-  } else if (brokenAt !== null) {
+  } else if (brokenAt !== 'error' && brokenAt !== null && !commitmentAlreadyReported) {
     observations.push({
       finding: 'evidence_chain_broken',
       blocking: true,
@@ -1295,8 +1724,11 @@ export function fullIntegrity(
     safeMode: observations.some((observation) => observation.blocking),
     // A commitment the log cannot satisfy is a chain that did not verify, even
     // when every link present holds — which is exactly the state a dropped and
-    // rebuilt log is in.
-    chainVerified: brokenAt === null && (options.evidenceCommitmentBreachAt ?? null) === null,
+    // rebuilt log is in. `verifyEvidenceChain` ends on
+    // `contradictedChainCommitment`, so that state is already inside `brokenAt`
+    // and no second term is needed here; the concurrent lane's second term read
+    // an injected value that no longer exists.
+    chainVerified: brokenAt === null,
     durability: structural.durability,
   };
 }

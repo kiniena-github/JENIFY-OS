@@ -2,8 +2,8 @@
  * Append-only, hash-chained evidence log.
  *
  * Every operator decision and execution attempt lands here. Entries are never
- * updated or deleted, and that is held in THREE independent ways, because the
- * hash chain alone held only one of the three:
+ * updated or deleted, and that is held in FOUR independent ways, because the
+ * hash chain alone held only one of the four:
  *
  *  1. **The engine refuses the write.** `ensureEvidenceGuards` installs the
  *     same append-only trigger trio every other engine-immutable ledger
@@ -24,50 +24,71 @@
  *     the genesis value and had nothing to say about where the chain was
  *     supposed to END. Without the contiguity half, that same commitment was
  *     erased by the very next append — see the check itself.
- *  4. **HQ commits DURABLY, outside this table, to how far the chain reached.**
- *     Every recorded verdict carries the tip (`seq` + `hash`) the chain had
- *     when it was reached, in the append-only verdict ledger; the boot pass and
- *     every full assessment check that the log still carries that entry with
- *     that hash. See `evidenceChainCommitmentBreach` in
- *     `application/reliability-command.ts`.
+ *  4. **A commitment that does not live inside the log.** Points 1–3 all read
+ *     this table and ask whether it is self-consistent, and a writer that holds
+ *     the file open can make a shortened log perfectly self-consistent. HQ
+ *     therefore records the log's tip — its length and the hash at that seq —
+ *     into `hq_integrity_checkpoints`, a separate append-only ledger that is
+ *     itself engine-guarded and in the census, and `verifyEvidenceChain`
+ *     refuses a log that contradicts any commitment ever recorded there. See
+ *     `recordIntegrityCheckpoint` in `store/integrity.ts`.
  *
- * **Holds 3 and 4 are BOTH here, and neither subsumes the other.** The two
- * concurrent Wave 5 round-four lanes each closed one of the two ways the
- * length commitment failed, and the reconciliation keeps both because they
- * answer different questions about the same log:
+ * **Holds 3 and 4 answer different questions, and neither subsumes the other.**
+ * The concurrent Wave 5 round-four lanes each closed one of the two ways the
+ * length commitment failed, and both closures are kept:
  *
  *  - CONTIGUITY (hold 3) is a property of the record that no later write
- *    repairs, so it holds with no prior verdict on the file at all. It is
- *    silent on a log DROPPED and recreated whole, because the seqs then
+ *    repairs, so it holds with no prior commitment on the file at all. It is
+ *    silent on a log DROPPED and re-created whole, because the seqs then
  *    restart at 1 with no gap;
- *  - the DURABLE COMMITMENT (hold 4) survives the drop, because it lives in a
- *    different ledger — but it says nothing until an assessment has recorded
- *    one, so a file with no verdict yet has only holds 1–3.
+ *  - the DURABLE COMMITMENT (hold 4) survives that drop, because it lives in a
+ *    different ledger — but it says nothing until HQ has recorded one, so a
+ *    file nothing has happened on yet has only holds 1–3.
  *
  * Together they leave no window: a tail delete followed by any number of
  * appends fails contiguity, and a whole-log rebuild that restores contiguity
  * fails the commitment.
  *
- * **Hold 4 is not decoration, and two false claims are corrected with it**
- * (Wave 5 correction round four, High H1). Holds 1–3 all live INSIDE the
- * thing being checked: the triggers, the rows and the `sqlite_sequence` entry
- * all disappear with `DROP TABLE op_evidence`, which is DDL that no BEFORE
- * trigger refuses. And the census that hold 2 rests on runs AFTER
+ * **There was a second candidate for hold 4, and it is gone rather than kept
+ * beside this one.** The round-four lane recorded the same tip on every
+ * VERDICT row (`evidence_tip_seq` / `evidence_tip_hash` on
+ * `hq_reliability_verdicts`) and read the strongest back with a MAX. Both
+ * mechanisms answer one question — "how far did this log reach, according to a
+ * record kept outside it" — and two answers to one question is the thing this
+ * package does not keep. The MAX is the reason this one survived: appending to
+ * the verdict ledger is a write its trio deliberately permits, so a writer that
+ * rebuilt `op_evidence` as a LONGER coherent forgery could append a verdict
+ * committing to the forged tip and the MAX would select it, retiring the
+ * genuine commitment behind it. `contradictedChainCommitment` checks EVERY
+ * commitment ever recorded and takes the per-ledger maximum, so the same
+ * appended row adds a satisfied row and removes nothing. The checkpoint is also
+ * written at every construction that finds nothing blocking, not only when a
+ * Founder assessment records a verdict, which bounds the forger's window to one
+ * process lifetime rather than to the gap between two Founder acts. What was
+ * lost with the verdict-row version is stated rather than glossed: the two
+ * commitments lived in two different ledgers, so an attacker now has to drop
+ * ONE ledger rather than two — see the residual at the end of this header.
+ *
+ * **Hold 4 is not decoration, and it corrects four shipped claims** (Wave 5
+ * correction rounds four High H1 and five High 1). Holds 1–3 all live INSIDE
+ * the thing being checked: the triggers, the rows and the `sqlite_sequence`
+ * entry all disappear with `DROP TABLE op_evidence`, which is DDL that no
+ * BEFORE trigger refuses. And the census that hold 2 rests on runs AFTER
  * `migrateHqDatabase` has already re-created the table, empty.
  *
- *  - the previous header said "a dropped `op_evidence` is caught by the census
- *    … the check that can actually see it". It was NOT: executed, raw-view
- *    `absentImmutableTables` returned `["op_evidence"]` and, after
+ *  - the header before the fourth round said "a dropped `op_evidence` is caught
+ *    by the census … the check that can actually see it". It was NOT: executed,
+ *    raw-view `absentImmutableTables` returned `["op_evidence"]` and, after
  *    `openHqDatabase()`, `[]`. A drop plus a rebuild carrying its own three
  *    declared guards read `safeMode: false`, `observations: []`,
  *    `chainVerified: true` at both depths over a destroyed audit log — and
  *    CLEARED an already-latched safe mode. The ordering is fixed at the
  *    ordering (`tableNamesBeforeMigration`), and the commitment closes the
  *    rebuild case that no ordering can;
- *  - the previous header called the `sqlite_sequence` step a real barrier
- *    because "the first of them is itself a blocking finding". It is not: a
- *    dropped trigger that is RECREATED before the next boot observation is
- *    never observed missing, so drop-trigger / delete-tail / recreate-trigger /
+ *  - that header also called the `sqlite_sequence` step a real barrier because
+ *    "the first of them is itself a blocking finding". It is not: a dropped
+ *    trigger that is RECREATED before the next boot observation is never
+ *    observed missing, so drop-trigger / delete-tail / recreate-trigger /
  *    `UPDATE sqlite_sequence` read clean. `sqlite_sequence` carries no triggers
  *    and cannot be brought under the census — it is an internal SQLite table —
  *    so what closes that is the commitment, which lives in a ledger that DOES
@@ -85,33 +106,49 @@
  *    write — and the documented remedy, a Founder full assessment, certified
  *    the robbed log as intact (Wave 5 correction round four, High 2). The
  *    contiguity requirement is what makes point 3 hold against the next write
- *    rather than only at the instant before it. No `sqlite_sequence` rewrite
- *    was ever needed for that route, and a residual that said otherwise is
- *    corrected with it.
+ *    rather than only at the instant before it, and no `sqlite_sequence`
+ *    rewrite was ever needed for that route;
+ *  - the header after THAT claimed points 1–3 named a real cost, in three
+ *    sentences that were all false (Wave 5 correction round five, High 1). It
+ *    said a coherent rewrite required RENUMBERING the survivors, that the
+ *    renumbering needs the UPDATE the engine guard refuses, that dropping the
+ *    guard is itself a blocking finding, and that a log dropped and re-created
+ *    whole is answered by the dropped-ledger census. Executed, none of it held:
+ *    `DROP TABLE op_evidence`, re-create it from its own `sqlite_master` SQL,
+ *    INSERT a shortened log with explicit seqs rehashed from the genesis value,
+ *    re-create the three triggers — no UPDATE anywhere, so that barrier is
+ *    never crossed; no write to `sqlite_sequence`, because SQLite rebuilds the
+ *    high-water mark from the explicit rowids; no census finding, because the
+ *    guards are back before HQ next constructs and the as-found census reads
+ *    `sqlite_master` at construction time only; and nothing from the
+ *    dropped-ledger detector, because the attacker re-created the table. Two
+ *    committed audit entries were erased and both the boot and the Founder's
+ *    full assessment read CLEAN. Point 4 is the answer, and it is a commitment
+ *    recorded outside this table rather than a fourth reading of the table.
  *
- * The remaining residual is stated rather than glossed, as the union of what
- * both lanes left open. HQ holds no key a foreign writer does not also have, so
- * a writer that already holds the database file open can still APPEND a
- * correctly-hashed entry; and it can still rewrite the whole log coherently —
- * dropping the triggers, deleting entries, RENUMBERING the survivors so no seq
- * is missing, recomputing every hash forward from the genesis value and
- * lowering `sqlite_sequence` to match. That last route is now a whole-log
- * rewrite rather than a tail delete, the renumbering needs the UPDATE the
- * engine guard refuses, and dropping that guard is itself a blocking finding.
- * Hold 4 narrows even that on a file where an assessment has already recorded a
- * verdict: any rewrite that disturbs the entry AT the committed seq — which is
- * every rewrite that touches anything at or below it, because the hashes chain
- * forward — leaves the log unable to satisfy the commitment and is refused. The
- * rewrite that stays undetected is therefore one confined ABOVE the last
- * committed tip, on a file that carries a commitment at all; and destroying the
- * verdict ledger and the evidence log together, which is itself a census
- * finding on the verdict ledger. A real barrier, not a cryptographic boundary.
+ * The residual is stated rather than glossed, and every barrier named in it has
+ * been tried. HQ holds no key a foreign writer does not also have, so a writer
+ * that already holds the database file open can still APPEND a correctly-hashed
+ * entry of its own; nothing here is a signature. Beyond that: rewriting the log
+ * coherently AND dropping `hq_integrity_checkpoints` (or appending to it a
+ * commitment that matches the forgery — which does not work on its own, because
+ * every commitment ever recorded is checked and the per-ledger comparison takes
+ * the maximum) leaves the forgery undetected once HQ has re-created the
+ * checkpoint ledger empty and a later process has nothing to measure against.
+ * That is more deliberate acts than before, across two engine-guarded ledgers
+ * and a census that reports each drop at the boot that observes it — a real
+ * cost, and still not a cryptographic boundary. It is ONE ledger to drop rather
+ * than two, because the concurrent lane's second commitment on the verdict
+ * ledger was retired above rather than kept beside this one; that is the price
+ * of one mechanism instead of two, and it is recorded here rather than left for
+ * a reader to discover.
  */
 
 import { createHash } from 'node:crypto';
 import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
+import { contradictedChainCommitment } from '../store/integrity.js';
 
 export interface EvidenceEntry {
   seq: number;
@@ -256,6 +293,14 @@ export function assertNoSecretLikeContent(payload: Record<string, unknown>): voi
  * from 1, which is a property of the record rather than of the moment it is
  * read.
  *
+ * **And none of that survives a log that was re-created whole** (Wave 5
+ * correction round five, High 1). Links, contiguity and the high-water mark are
+ * all read out of the same table, so a writer that drops it and inserts a
+ * shortened, coherently rehashed replacement satisfies every one of them. The
+ * last check is therefore against `hq_integrity_checkpoints` — a commitment HQ
+ * recorded elsewhere, in an append-only ledger of its own — and it is the only
+ * one of the four that a rewrite of THIS table cannot satisfy.
+ *
  * A deletion in the MIDDLE with NO later append was always caught by the links
  * themselves: the following entry's `prev_hash` no longer matches its new
  * predecessor. With a later append it was not — the appended entries chain from
@@ -279,9 +324,10 @@ export function assertNoSecretLikeContent(payload: Record<string, unknown>): voi
  * Neither of them detects DESTRUCTION, and that is stated here rather than
  * left to be discovered: this walk sees only what the table now contains, so
  * over a log dropped and rebuilt it returns null — "the chain stands" — about a
- * chain that no longer exists. `evidenceChainCommitmentBreach` is the check for
- * that, and it is checked beside this one at both depths (Wave 5 correction
- * round four, High H1).
+ * chain that no longer exists. `contradictedChainCommitment` is the check for
+ * that; it is the LAST step of this function and the structural pass reads it
+ * directly as well, so it speaks at both depths (Wave 5 correction round four,
+ * High H1; round five, High 1).
  *
  * `EvidenceLog.verifyChain` stays as the public delegate and now
  * calls this; `HeadquarterOperations` calls this directly through a `#private`
@@ -360,36 +406,34 @@ export function verifyEvidenceChain(db: HqDatabase): number | null {
   // first entry that does not verify — "the log stops being true here".
   const highWater = evidenceHighWaterMark(db);
   if (highWater != null && highWater > lastSeq) return lastSeq + 1;
-  return null;
+  // The DURABLE COMMITMENT, last (Wave 5 correction round five, High 1). Every
+  // check above reads this log and asks whether it is self-consistent, and a
+  // writer holding the file open can make a shortened log perfectly
+  // self-consistent — drop the table, re-create it from its own schema, insert
+  // a rehashed shorter log with explicit seqs, re-create the guards. Links,
+  // contiguity and the high-water mark all agree afterwards, because
+  // `sqlite_sequence` is rebuilt from the explicit rowids and no UPDATE was
+  // ever executed. The checkpoint ledger is the witness that does not live
+  // inside the record: see `recordIntegrityCheckpoint`.
+  //
+  // Checked AFTER the walk, deliberately: a genuine break in the links or a
+  // hole in the seqs keeps its own precise answer, and the commitment only
+  // speaks when the log has been made to look whole.
+  return contradictedChainCommitment(db);
 }
 
 /**
- * The chain's current TIP — the highest `seq` present and the hash it carries.
+ * **The chain's TIP is deliberately not exported from this module.**
  *
- * This is what a verdict COMMITS to (Wave 5 correction round four, High H1).
- * `sqlite_sequence` is SQLite's own high-water mark and disappears with the
- * table, so it says nothing at all about a log that was DROPPED and rebuilt;
- * a tip recorded in HQ's own append-only verdict ledger survives that, because
- * dropping THAT ledger is a census finding in its own right.
- *
- * Null on an empty log. A commitment is never made to an empty chain, so
- * "nothing yet" and "a tip" stay distinguishable.
+ * The concurrent round-four lane exported an `evidenceChainTip` here so the
+ * verdict ledger could store the tip on every verdict row. That mechanism was
+ * retired in favour of `hq_integrity_checkpoints` (see hold 4 in the module
+ * header), and `store/integrity.ts` reads the tip through its own module-private
+ * helper as part of writing a checkpoint. Re-exporting the read here would leave
+ * exactly the dead surface the `GENESIS_HASH` note above warns about: a second
+ * place to read the same two columns, inviting a second spelling of what a
+ * commitment is.
  */
-export function evidenceChainTip(db: HqDatabase): { seq: number; hash: string } | null {
-  try {
-    const row = db.prepare(`SELECT seq, hash FROM op_evidence ORDER BY seq DESC LIMIT 1`).get() as
-      | { seq: unknown; hash: unknown }
-      | undefined;
-    if (!row) return null;
-    const seq = Number(row.seq);
-    if (!Number.isInteger(seq) || typeof row.hash !== 'string') return null;
-    return { seq, hash: row.hash };
-  } catch {
-    // No readable log is not a tip. The caller records no commitment rather
-    // than a false one.
-    return null;
-  }
-}
 
 /**
  * Does the entry at `seq` LINK soundly — its own hash correct over its stored
