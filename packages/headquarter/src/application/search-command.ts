@@ -466,11 +466,30 @@ export const SEMANTIC_RETRIEVAL_ADAPTERS: readonly RetrievalAdapter[] = [];
 /* The adapter GUARD — closing the pre-real-adapter hole               */
 /* ------------------------------------------------------------------ */
 
+/**
+ * What HQ publishes about the retrieval guard, on the wire.
+ *
+ * It said an in-process caller "cannot obtain an unguarded adapter", and that
+ * was not true (Wave 5 Medium 9): `LEXICAL_RETRIEVAL_ADAPTER` and
+ * `SEMANTIC_RETRIEVAL_ADAPTERS` are exported, and this package's own tests
+ * import and call them directly — which is legitimate, because the raw
+ * adapters are what the guard is TESTED against. The guard itself is sound:
+ * all three branches of `resolveRetrievalAdapter` wrap with
+ * `guardRetrievalAdapter`, and both facade entry points scan before
+ * `normalizeSearchQuery` echoes anything into `criteria`.
+ *
+ * So the statement is narrowed to what is actually enforced, rather than the
+ * export being removed to make an over-claim true. This text is interpolated
+ * into `statement.note` and reaches the browser as an HQ assertion; it may not
+ * say more than HQ does.
+ */
 export const RETRIEVAL_GUARD_STATEMENT =
-  'Every retrieval adapter is reached through a guard that scans the free text handed to it for credential ' +
-  'shapes first. The guard is applied by the resolver, not by the caller, so an in-process caller cannot ' +
-  'obtain an unguarded adapter and no adapter — installed now or installed later — can be handed text HQ ' +
-  'has not scanned.';
+  'Every retrieval adapter the resolver hands out is a guarded wrapper that scans the free text passed to it ' +
+  'for credential shapes first, and the wrapping is done by the resolver rather than by the caller — so no ' +
+  'adapter, installed now or installed later, can opt out of it. The effective scan for a caller is the ' +
+  'FACADE scan, which runs on the way in and returns a stated refusal; the wrapper is defence in depth for ' +
+  'the day a real semantic adapter is installed. The raw adapter objects are exported for testing and are ' +
+  'not wrapped in themselves.';
 
 /**
  * Raised when free text reaching a retrieval adapter fails the browser-safety
@@ -515,8 +534,16 @@ export class RetrievalSafetyError extends Error {
  *
  * The facade scans the same four fields on the way in as well, so an in-process
  * caller gets a stated refusal instead of an exception from deep inside a
- * retrieval. Both layers are kept: the outer one gives a good error, the inner
- * one is the guarantee.
+ * retrieval.
+ *
+ * Which of the two is load-bearing, stated correctly (Wave 5 Medium 9): the
+ * FACADE scan is the effective one. The inner wrapper sees `input.terms`,
+ * which `normalizeSearchQuery` has already TOKENIZED — and a tokenized term
+ * cannot match the credential patterns, which need a `key: value` shape with
+ * punctuation the tokenizer has removed. So the wrapper is defence in depth,
+ * and it becomes the load-bearing layer only for a future caller that reaches
+ * `resolveRetrievalAdapter` without going through the facade. Describing it as
+ * "the guarantee" overstated it.
  */
 export function assertRetrievalTextSafe(
   fields: Record<string, string | null | undefined>,

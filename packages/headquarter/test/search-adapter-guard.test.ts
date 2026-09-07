@@ -43,6 +43,7 @@ import {
   type RetrievalAdapter,
   type SearchDocument,
 } from '../src/application/search-command.js';
+import { tokenize } from '../src/archive/search.js';
 import { setupFixture } from './application.fixture.js';
 
 /** A credential-shaped string the browser guard recognises by SHAPE. */
@@ -111,7 +112,39 @@ describe('no adapter, present or future, can be handed unscanned free text', () 
     expect(resolveRetrievalAdapter('semantic_embedding').statement.fallbackReason).toBe(
       'no_adapter_installed',
     );
-    expect(RETRIEVAL_GUARD_STATEMENT).toContain('applied by the resolver');
+    // The published statement says what is enforced and no more (Wave 5
+    // Medium 9). It used to claim an in-process caller "cannot obtain an
+    // unguarded adapter" — while this very file imports the raw adapters and
+    // calls them. The wrapping is what the resolver guarantees; the raw
+    // objects being exported and unwrapped is stated rather than denied.
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('the resolver hands out');
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('done by the resolver rather than by the caller');
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('exported for testing and are not wrapped');
+    expect(RETRIEVAL_GUARD_STATEMENT).not.toContain('cannot obtain an unguarded adapter');
+    // And it names the FACADE scan as the effective one rather than the inner
+    // wrapper, which sees already-tokenized terms.
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('FACADE scan');
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('defence in depth');
+  });
+
+  /**
+   * Wave 5 Medium 9, the substantive half. The inner wrapper is defence in
+   * depth precisely because `normalizeSearchQuery` has already TOKENIZED the
+   * terms by the time an adapter sees them, and a tokenized term cannot carry
+   * the `key: value` punctuation the credential patterns need. Pinned so the
+   * doc's claim about which layer is load-bearing stays true.
+   */
+  it('shows why the inner wrapper is defence in depth: tokenized terms cannot match', () => {
+    const raw = resolveRetrievalAdapter('deterministic_lexical').adapter;
+    // The unsplit credential string DOES trip the wrapper...
+    expect(() => raw.retrieve({ readable: [], terms: [SECRET], match: 'any_term' })).toThrow(
+      RetrievalSafetyError,
+    );
+    // ...but the tokens the facade actually passes do not, which is why the
+    // facade's own scan on the way in is the effective layer.
+    const tokens = tokenize(SECRET);
+    expect(tokens.length).toBeGreaterThan(0);
+    expect(() => raw.retrieve({ readable: [], terms: tokens, match: 'any_term' })).not.toThrow();
   });
 
   it('scans a field set and ignores blanks, so an absent criterion is not an error', () => {
