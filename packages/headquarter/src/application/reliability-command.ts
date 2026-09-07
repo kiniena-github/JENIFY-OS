@@ -1411,7 +1411,10 @@ export const BACKUP_RECORD_STATEMENT =
   'contentDigest is computed BY HQ over the exact bytes it opened and checked, so it pins what was verified. ' +
   'Those are the same bytes throughout, by construction: the candidate is opened once, and its bytes are ' +
   'hashed and copied to a scratch file in one pass, and integrity_check and the schema census then run ' +
-  'against that copy — so the path is never resolved a second time. A candidate carrying a -wal, -shm or ' +
+  'against that copy — so nothing the path names after the open can change what was verified. The path IS ' +
+  'read again before that open (an lstat, a realpath and three sidecar lstats), because the refusals those ' +
+  'checks make are about the PATH; what the digest and the checks come from is one descriptor, opened once. ' +
+  'A candidate carrying a -wal, -shm or ' +
   '-journal sidecar is refused rather than verified, because SQLite would read the sidecar together with ' +
   'the main file and the digest covers only the file; so is one that is a hard link to another name, ' +
   'because a file some other name can still be written through is not a snapshot. verified means these ' +

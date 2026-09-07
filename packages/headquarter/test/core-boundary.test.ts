@@ -169,8 +169,27 @@ describe('the HQ core depends on nothing above it (Phase 2, Stage 0)', () => {
  * identical and the file stays text.
  */
 describe('the shipped source stays text', () => {
-  it('carries no raw NUL byte in any source file', () => {
-    const offenders = files
+  /**
+   * Wave 5 correction round four, Low L9. This census was scoped to `src/`
+   * while the commit that added it claimed "no source file is binary to the
+   * repository's own text tooling". `test/connectors.github.test.ts` carried a
+   * literal NUL - a deliberate fixture, proving control characters are stripped
+   * from a title - so the claim was false of the package, and the file that
+   * PROVED the sanitizer was itself invisible to a reviewer's honesty scan.
+   *
+   * Narrowing the claim was the other option and was rejected: the fixture is
+   * spelled with a unicode escape now, which is the identical runtime value in
+   * a file that stays text, so the check can cover everything the claim did.
+   */
+  it('carries no raw NUL byte in ANY TypeScript file in the package', () => {
+    const everywhere = [
+      ...sourceFiles(srcRoot),
+      ...sourceFiles(join(packageRoot, 'test')),
+      ...sourceFiles(join(packageRoot, 'tools')),
+    ];
+    // Guards the walk itself: a broken glob would make this pass vacuously.
+    expect(everywhere.length).toBeGreaterThan(files.length);
+    const offenders = everywhere
       .filter((file) => readFileSync(file).includes(0x00))
       .map((file) => relative(packageRoot, file).split(sep).join('/'));
     expect(

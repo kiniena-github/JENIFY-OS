@@ -1358,16 +1358,28 @@ function digestFile(
  *  - a HARD LINK to the live inode under a name with no sidecars beside it
  *    passed, because the sidecar check is keyed on the PATH. That is closed
  *    now, from the descriptor, by `file_has_multiple_links`;
- *  - a plain `cp` of a live WAL database still verifies, and it always will.
- *    It is a different inode with no sidecars, and its bytes are a valid,
- *    integrity-clean HQ database — just one that is missing whatever the WAL
- *    had not yet checkpointed. Nothing in the bytes distinguishes it from a
- *    properly consolidated backup, so HQ does not pretend to distinguish it.
- *    `verified` means "these bytes are a sound HQ database", and it has never
- *    meant "this is the whole of what was committed at the moment it was
- *    taken". Take a backup with SQLite's own backup API or after a checkpoint;
- *    a `cp` of a live database is not a backup, and this function is not the
- *    thing that can tell you so.
+ *  - a plain `cp` of a live WAL database may verify, and when it does, nothing
+ *    in the bytes says it is missing anything. It is a different inode with no
+ *    sidecars, and its content is whatever had been checkpointed into the main
+ *    file at the moment it was copied — which can be a valid, integrity-clean
+ *    HQ database missing the newest committed rows.
+ *
+ *    The claim that used to stand here — that such a copy "still verifies, and
+ *    it always will" — was too strong in the other direction as well, and the
+ *    review executed the counter-example (Wave 5 correction round four, Low
+ *    L8): a `cp` of a live but UNCHECKPOINTED store was REFUSED
+ *    `not_an_hq_database` with `schemaTables: 0`, because everything including
+ *    the schema was still in the `-wal`. Only after
+ *    `wal_checkpoint(TRUNCATE)` did the copy verify.
+ *
+ *    So the honest statement is neither "always verifies" nor "always refuses":
+ *    a `cp` of a live WAL database is a copy of an arbitrary prefix of the
+ *    truth, and it may read as sound, as empty, or as not a database at all,
+ *    depending on where the checkpoint boundary fell. `verified` means "these
+ *    bytes are a sound HQ database", and it has never meant "this is the whole
+ *    of what was committed at the moment it was taken". Take a backup with
+ *    SQLite's own backup API or after a checkpoint; a `cp` of a live database
+ *    is not a backup, and this function is not the thing that can tell you so.
  *
  * Path protections are refusals, not exceptions, so a caller gets a
  * categorical reason it can record — see `BACKUP_REFUSAL_REASONS` for the
