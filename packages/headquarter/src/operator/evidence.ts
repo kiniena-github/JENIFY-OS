@@ -1,10 +1,39 @@
 /**
  * Append-only, hash-chained evidence log.
  *
- * Every operator decision and execution attempt lands here. Entries are
- * never updated or deleted; each entry's hash covers its content plus the
- * previous entry's hash, so silent tampering or deletion breaks the chain
- * and is detectable by verifyChain().
+ * Every operator decision and execution attempt lands here. Entries are never
+ * updated or deleted, and that is held in THREE independent ways, because the
+ * hash chain alone held only one of the three:
+ *
+ *  1. **The engine refuses the write.** `ensureEvidenceGuards` installs the
+ *     same append-only trigger trio every other engine-immutable ledger
+ *     carries — no UPDATE of any column, no DELETE of any row, and a BEFORE
+ *     INSERT guard that closes REPLACE/UPSERT on `id`/`seq`. Until the Wave 5
+ *     correction this table carried NO triggers at all, on the argument that
+ *     "its guarantee is the chain rather than the engine"; a raw
+ *     `DELETE FROM op_evidence WHERE seq > 1` was therefore simply permitted.
+ *  2. **A dropped guard is a census finding.** `op_evidence` is now a member
+ *     of `ENGINE_IMMUTABLE_TABLES`, so removing the triggers is
+ *     `append_only_guard_missing` — blocking, and safe mode engages on it.
+ *  3. **The chain commits to its own LENGTH, not only to its links.**
+ *     `verifyEvidenceChain` walks the links AND compares the highest `seq`
+ *     present against the AUTOINCREMENT high-water mark SQLite maintains in
+ *     `sqlite_sequence`, which a DELETE does not lower. Without that, deleting
+ *     the NEWEST entries left a chain that verified perfectly: the walk starts
+ *     at the genesis value and had nothing to say about where the chain was
+ *     supposed to END.
+ *
+ * What is corrected rather than restated: the previous header claimed "silent
+ * tampering or deletion breaks the chain and is detectable by verifyChain()".
+ * The tampering half was true; the deletion half was not, and it was the half
+ * an audit record actually needs (Wave 5 correction round three, High A2).
+ *
+ * The residual is stated rather than glossed: against a writer that already
+ * holds the database file open, dropping the triggers, deleting the tail,
+ * recomputing the chain from the true tip and rewriting `sqlite_sequence` is
+ * still possible. Each of those is an additional deliberate step and the first
+ * of them is itself a blocking finding, so this is a real barrier, not a
+ * cryptographic boundary — HQ holds no key a foreign writer does not also have.
  */
 
 import { createHash } from 'node:crypto';
@@ -36,6 +65,80 @@ export interface EvidenceEntry {
 const GENESIS_HASH = 'genesis';
 
 /**
+ * The engine-held half of the append-only guarantee, in the exact shape every
+ * other engine-immutable ledger already carries.
+ *
+ * Declared in `ENGINE_IMMUTABLE_TABLES` under the `op_evidence` prefix, so the
+ * integrity census reports it if any of the three goes missing. Nothing in HQ
+ * updates or deletes an evidence row — `EvidenceLog.append` holds the only
+ * write statement against this table in the whole package — so these guards
+ * refuse nothing a legitimate writer does.
+ */
+const EVIDENCE_GUARD_DDL = `
+CREATE TRIGGER IF NOT EXISTS trg_op_evidence_no_rewrite
+BEFORE UPDATE ON op_evidence
+BEGIN SELECT RAISE(ABORT, 'op_evidence is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_op_evidence_no_erase
+BEFORE DELETE ON op_evidence
+BEGIN SELECT RAISE(ABORT, 'op_evidence is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_op_evidence_no_replace
+BEFORE INSERT ON op_evidence
+WHEN EXISTS (SELECT 1 FROM op_evidence WHERE id = NEW.id)
+  OR (TYPEOF(NEW.seq) = 'integer' AND EXISTS (SELECT 1 FROM op_evidence WHERE seq = NEW.seq))
+BEGIN SELECT RAISE(ABORT, 'op_evidence is append-only'); END;
+`;
+
+/**
+ * Install the append-only guards on `op_evidence`. Idempotent; safe on every
+ * construction.
+ *
+ * Called from the facade constructor AFTER the boot-time missing-guard
+ * observation, exactly like every other `ensure*Schema`. That ordering is
+ * load-bearing: these are `CREATE TRIGGER IF NOT EXISTS`, so a construction
+ * RESTORES a dropped guard, and a census run afterwards would find a healthy
+ * file and report one. Putting them in `migrateHqDatabase` instead would run
+ * them before the facade exists and make the census permanently blind to a
+ * drop.
+ *
+ * Never on a READ-ONLY handle: the snapshot path observes a file, it does not
+ * migrate one.
+ */
+export function ensureEvidenceGuards(db: HqDatabase): void {
+  if (db.readonly) return;
+  db.exec(EVIDENCE_GUARD_DDL);
+}
+
+/**
+ * The AUTOINCREMENT high-water mark SQLite itself maintains for `op_evidence`.
+ *
+ * `seq` is `INTEGER PRIMARY KEY AUTOINCREMENT`, so SQLite records the largest
+ * value ever assigned in `sqlite_sequence` and — this is the property the check
+ * rests on — a DELETE does not lower it. Executed both ways before it was
+ * relied on: after `DELETE ... WHERE seq > 2` the mark stayed at 5, and after
+ * `DELETE FROM` (all rows) it stayed at 5 as well.
+ *
+ * Null when there is nothing to compare against: `sqlite_sequence` is created
+ * lazily by the first AUTOINCREMENT insert in the whole database, and its row
+ * for a table disappears with the table. A dropped `op_evidence` is caught by
+ * the census instead (`ENGINE_IMMUTABLE_TABLES`), which is the check that can
+ * actually see it.
+ */
+function evidenceHighWaterMark(db: HqDatabase): number | null {
+  try {
+    const row = db.prepare(`SELECT seq FROM sqlite_sequence WHERE name = 'op_evidence'`).get() as
+      | { seq: unknown }
+      | undefined;
+    if (!row) return null;
+    const value = Number(row.seq);
+    return Number.isInteger(value) ? value : null;
+  } catch {
+    // No `sqlite_sequence` at all: nothing has ever been appended anywhere, so
+    // there is no commitment to contradict.
+    return null;
+  }
+}
+
+/**
  * Best-effort guard: refuse evidence payloads that look like they carry
  * secret material. This is a backstop, not the primary defense — the primary
  * rule is that credentials never enter the control plane at all.
@@ -52,14 +155,35 @@ export function assertNoSecretLikeContent(payload: Record<string, unknown>): voi
 
 /**
  * Recompute the whole chain over a handle; returns the `seq` of the first
- * entry that does not verify, or null when the chain is intact.
+ * entry that does not verify — or the first entry that is ABSENT — and null
+ * only when the whole log stands.
+ *
+ * **The length is part of what is verified** (Wave 5 correction round three,
+ * High A2). Walking from the genesis value forward proves that the entries
+ * PRESENT link to each other; it says nothing about where the chain was
+ * supposed to end, so deleting the newest entries left a log that verified
+ * perfectly and a `fullIntegrity` that read clean. The high-water mark closes
+ * exactly that: the entries present must reach the largest `seq` SQLite has
+ * ever assigned.
+ *
+ * A deletion in the MIDDLE was always caught, by the links themselves: the
+ * following entry's `prev_hash` no longer matches its new predecessor.
  *
  * A module-level function over a DATABASE HANDLE rather than a method, and
  * deliberately so (Wave 5 review, High finding 1). The Phase 13 safe-mode
- * verdict takes `evidence_chain_broken` — the only blocking finding that
- * detects tampering with HQ's own audit record — from this computation, and an
+ * verdict takes `evidence_chain_broken` from this computation, and an
  * enforcement decision may not be reached through anything a same-realm patch
- * can replace. `EvidenceLog.verifyChain` stays as the public delegate and now
+ * can replace.
+ *
+ * It is no longer described as "the only blocking finding that detects
+ * tampering with HQ's own audit record", because that was both a false claim
+ * and a fragile design (Wave 5 correction round three, High A2):
+ * `op_evidence` now carries the engine's own append-only guards, so
+ * `append_only_guard_missing` detects the removal of those guards, and this
+ * check detects a chain whose links or whose LENGTH no longer stand. Two
+ * findings, deliberately, because either one alone could be walked around.
+ *
+ * `EvidenceLog.verifyChain` stays as the public delegate and now
  * calls this; `HeadquarterOperations` calls this directly through a `#private`
  * closure over its own handle, so patching `queue.evidence.verifyChain`, or
  * `EvidenceLog.prototype.verifyChain`, or `EvidenceLog.prototype.list`,
@@ -71,6 +195,7 @@ export function assertNoSecretLikeContent(payload: Record<string, unknown>): voi
  */
 export function verifyEvidenceChain(db: HqDatabase): number | null {
   let prevHash = GENESIS_HASH;
+  let lastSeq = 0;
   const rows = db.prepare(`SELECT * FROM op_evidence ORDER BY seq`).all() as Record<string, unknown>[];
   for (const row of rows) {
     const seq = row.seq as number;
@@ -103,7 +228,15 @@ export function verifyEvidenceChain(db: HqDatabase): number | null {
       .digest('hex');
     if (row.prev_hash !== prevHash || row.hash !== expected) return seq;
     prevHash = row.hash as string;
+    lastSeq = seq;
   }
+  // The TAIL. Every link above holds and the log still does not stand if
+  // entries were removed from the end of it: the mark SQLite maintains is a
+  // commitment to how far the chain reached, and a DELETE cannot lower it. The
+  // first ABSENT seq is reported, which is the same shape of answer as the
+  // first entry that does not verify — "the log stops being true here".
+  const highWater = evidenceHighWaterMark(db);
+  if (highWater != null && highWater > lastSeq) return lastSeq + 1;
   return null;
 }
 

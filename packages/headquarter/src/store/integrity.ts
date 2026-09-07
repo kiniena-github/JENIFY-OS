@@ -244,6 +244,21 @@ function deepFreezeTables(entries: EngineImmutableTable[]): readonly EngineImmut
  * through a method. Under ESM (always strict) the assignment now THROWS.
  */
 export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = deepFreezeTables([
+  /**
+   * The hash-chained audit log itself (Wave 5 correction round three, High A2).
+   *
+   * It used to be absent from this list on the argument that "its guarantee is
+   * the chain rather than the engine" — which meant `op_evidence` carried no
+   * triggers at all, and a raw `DELETE FROM op_evidence WHERE seq > 1` was
+   * simply permitted. The chain then verified perfectly over what was left,
+   * because the walk had no commitment to where the chain was supposed to end.
+   * The guards are installed by `ensureEvidenceGuards`; being LISTED here is
+   * what makes their removal a reportable finding rather than a silent one.
+   *
+   * Trio only: `id` is the sole secondary unique index and the `no_replace`
+   * guard already covers it beside `seq`.
+   */
+  { table: 'op_evidence', triggerPrefix: 'op_evidence', secondaryGuards: [] },
   { table: 'hq_action_intents', triggerPrefix: 'hq_action_intents', secondaryGuards: ['no_replace_unique'] },
   { table: 'hq_action_events', triggerPrefix: 'hq_action_events', secondaryGuards: ['no_replace_unique'] },
   { table: 'hq_briefs', triggerPrefix: 'hq_briefs', secondaryGuards: [] },
@@ -509,10 +524,16 @@ function triggerNames(db: HqDatabase): Set<string> {
 /**
  * Every append-only guard that the schema DECLARES and the file does not have.
  *
- * Only tables that are actually PRESENT are checked. A pre-Phase-N file that
- * never had `hq_products` is not missing a guard on it — that is absence, not
- * tampering, and conflating the two would engage safe mode on every older
+ * Only tables that are actually PRESENT are checked HERE. A pre-Phase-N file
+ * that never had `hq_products` is not missing a guard on it — that is absence,
+ * not tampering, and conflating the two would engage safe mode on every older
  * database HQ has ever been pointed at.
+ *
+ * That is a statement about this function's scope and NOT the end of the
+ * matter: an absent table used to be skipped by the whole module, which made a
+ * `DROP TABLE` invisible at both depths. `absentImmutableTables` and
+ * `restoredImmutableTables` answer the part this one deliberately does not —
+ * see them, and `structuralIntegrity`'s `immutableTablesAbsentAsFound`.
  *
  * Since the Wave 5 review this covers the SECONDARY guards too — the
  * unique-index guards and `hq_memory`'s supersede rule — because a census that
@@ -534,6 +555,140 @@ export function missingImmutabilityGuards(db: HqDatabase): string[] {
     }
   }
   return missing.sort();
+}
+
+/**
+ * Every DECLARED engine-immutable table this file does not currently carry.
+ *
+ * The companion to `missingImmutabilityGuards`, and the half that was missing
+ * (Wave 5 correction round three, High A1). `DROP TABLE` is DDL: no BEFORE
+ * trigger refuses it, and the census above deliberately SKIPS a table that is
+ * absent — so dropping `hq_action_intents`, `hq_truth_records`, `hq_memory`,
+ * `hq_intel_budgets` or, worst of all, `hq_reliability_verdicts` produced no
+ * observation at either depth, and the facade's own `ensure*Schema` calls then
+ * recreated each one EMPTY. Dropping the verdict ledger erased a latched safe
+ * mode outright, and `releaseKillSwitch` was admitted while the evidence chain
+ * was still broken.
+ *
+ * Absence alone is not the finding, because absence alone is genuinely
+ * ambiguous — a pre-Phase-N file that never had `hq_products` is not a tampered
+ * one. What resolves it is that HQ RE-CREATES the tables its own schema
+ * declares: see `restoredImmutableTables`.
+ */
+export function absentImmutableTables(db: HqDatabase): string[] {
+  const tables = tableNames(db);
+  return ENGINE_IMMUTABLE_TABLES.filter((entry) => !tables.has(entry.table))
+    .map((entry) => entry.table)
+    .sort();
+}
+
+/**
+ * Of the tables that were ABSENT as the file was found, the ones HQ's own
+ * schema ensures have since created.
+ *
+ * This is what turns an ambiguous absence into a categorical finding. Both
+ * halves are needed and neither alone is enough:
+ *
+ *  - absent AS FOUND, observed before any `ensure*Schema` ran, because those
+ *    calls are `CREATE TABLE IF NOT EXISTS` and would otherwise launder the
+ *    drop — the same boot-order rule the missing-guard observation already
+ *    obeys;
+ *  - present NOW, because that is HQ saying "my own schema declares this
+ *    ledger". A read-only handle over an older file creates nothing, so the
+ *    intersection is empty there and an honestly old file reports nothing —
+ *    which is the correct answer, since a handle that may not write genuinely
+ *    cannot tell an old file from a robbed one.
+ *
+ * The consequence is deliberately the SAME consequence a newly declared table
+ * already has on its first boot: the guards it declares were absent from the
+ * file, that is `append_only_guard_missing`, safe mode engages, and a Founder
+ * full assessment of the file as it now stands clears it. HQ can re-create
+ * what it declares; it cannot know what was written while it was gone.
+ */
+export function restoredImmutableTables(db: HqDatabase, absentAsFound: readonly string[]): string[] {
+  if (absentAsFound.length === 0) return [];
+  const tables = tableNames(db);
+  return [...absentAsFound].filter((table) => tables.has(table)).sort();
+}
+
+/**
+ * The declared engine-immutable tables that `migrateHqDatabase` creates rather
+ * than a facade `ensure*Schema` call.
+ *
+ * Exactly one — `op_evidence` — and it is named here because it is the one
+ * table whose PRESENCE says nothing about whether HQ has ever ensured this
+ * file's schema. Every other declared ledger arrives with a phase's ensure,
+ * inside the facade constructor, which is what makes "at least one of them is
+ * already here" a sound reading of "this file has been through an HQ boot
+ * before".
+ */
+const MIGRATION_CREATED_IMMUTABLE_TABLES: readonly string[] = Object.freeze(['op_evidence']);
+
+/**
+ * The declared engine-immutable ledgers a file ALREADY carries, excluding the
+ * one `migrateHqDatabase` creates.
+ *
+ * This is the discriminator between "a database HQ has never ensured" and "a
+ * database that has lost something", and it is needed because absence is
+ * otherwise genuinely ambiguous. On a brand-new file every phase's ledger is
+ * absent and every guard those phases declare is missing — which is not a
+ * finding, it is a file that has not been built yet, and reporting it would put
+ * every first construction into safe mode. On a file that already carries even
+ * one of these ledgers, HQ has ensured this schema before, and a declared
+ * ledger or guard that is now absent is a fact worth reporting.
+ *
+ * The known and accepted cost, which is the same cost every newly declared
+ * guard has always carried: the FIRST boot of a build that declares a new
+ * ledger or a new guard observes it as absent on an established file and
+ * engages safe mode until a Founder full assessment of the file as it then
+ * stands clears it. That is documented behaviour, not a new one.
+ */
+export function establishedImmutableTables(db: HqDatabase): string[] {
+  const tables = tableNames(db);
+  return ENGINE_IMMUTABLE_TABLES.filter(
+    (entry) => tables.has(entry.table) && !MIGRATION_CREATED_IMMUTABLE_TABLES.includes(entry.table),
+  )
+    .map((entry) => entry.table)
+    .sort();
+}
+
+/** What the schema-immutability census saw BEFORE this process ensured anything. */
+export interface ImmutabilityAsFound {
+  /** Declared guards absent from a table that was present. Empty on an unestablished file. */
+  guardsMissing: string[];
+  /** Declared ledgers absent entirely. Empty on an unestablished file. */
+  tablesAbsent: string[];
+  /** Whether this file already carried at least one ensure-created immutable ledger. */
+  established: boolean;
+}
+
+/**
+ * The single boot-time observation, taken BEFORE any `ensure*Schema` runs.
+ *
+ * One function rather than three call sites, because the three facts have to be
+ * read at the same instant to mean anything: the ensures are `CREATE ... IF NOT
+ * EXISTS` throughout, so anything read after them describes the file HQ has
+ * just rebuilt rather than the file it was handed.
+ */
+export function observeImmutabilityAsFound(db: HqDatabase): ImmutabilityAsFound {
+  const established = establishedImmutableTables(db).length > 0;
+  if (!established) return { guardsMissing: [], tablesAbsent: [], established };
+  return {
+    guardsMissing: missingImmutabilityGuards(db),
+    tablesAbsent: absentImmutableTables(db),
+    established,
+  };
+}
+
+/** Every guard the schema declares on the named engine-immutable tables. */
+function guardsDeclaredOnTables(tables: readonly string[]): string[] {
+  const names: string[] = [];
+  for (const table of tables) {
+    const entry = ENGINE_IMMUTABLE_TABLES.find((candidate) => candidate.table === table);
+    if (!entry) continue;
+    names.push(...declaredGuardsFor(entry));
+  }
+  return names;
 }
 
 /**
@@ -563,6 +718,19 @@ export function structuralIntegrity(
      */
     guardsMissingAsFound?: readonly string[];
     /**
+     * Engine-immutable tables that were ABSENT as the file was found and that
+     * HQ's own schema has since re-created — `restoredImmutableTables`.
+     *
+     * A dropped ledger is not a dropped trigger and used to be invisible to
+     * this whole module (Wave 5 correction round three, High A1): the census
+     * skipped an absent table, so a full assessment over a file with seven
+     * declared immutable ledgers DROPPED reported a completely clean store.
+     * Every guard such a table declares was in fact absent from the file, so
+     * that is what is reported, and the tables are named in the detail so the
+     * reader is told the ledger went missing rather than three triggers.
+     */
+    immutableTablesAbsentAsFound?: readonly string[];
+    /**
      * The last verdict HQ RECORDED about this database, read back from the
      * append-only verdict ledger before this assessment ran.
      *
@@ -582,16 +750,29 @@ export function structuralIntegrity(
   const observations: HqIntegrityObservation[] = [];
   const durability = readDurabilityPosture(db);
 
-  const missing = options.guardsMissingAsFound
-    ? [...options.guardsMissingAsFound]
-    : missingImmutabilityGuards(db);
+  const absentTables = [...(options.immutableTablesAbsentAsFound ?? [])].sort();
+  const missing = [
+    ...new Set([
+      ...(options.guardsMissingAsFound ?? missingImmutabilityGuards(db)),
+      // A ledger that was not there declared guards that were not there. The
+      // two observations are one finding, because "the table was gone" is a
+      // strictly worse way for its guards to be absent.
+      ...guardsDeclaredOnTables(absentTables),
+    ]),
+  ].sort();
   if (missing.length > 0) {
     observations.push({
       finding: 'append_only_guard_missing',
       blocking: true,
       detail:
         `${missing.length} append-only guard(s) declared by the schema were absent from this file: ` +
-        `${missing.join(', ')}. HQ re-creates the guards it declares on every boot, so they may stand again ` +
+        `${missing.join(', ')}.` +
+        (absentTables.length > 0
+          ? ` ${absentTables.length} of the ledger(s) they guard were absent ENTIRELY and have been ` +
+            `re-created empty by HQ's own schema: ${absentTables.join(', ')}. A dropped table is not a ` +
+            `migration — whatever those ledgers held is gone.`
+          : '') +
+        ` HQ re-creates the guards it declares on every boot, so they may stand again ` +
         `now — but it cannot know what was written while they were gone, so the finding stands until a full ` +
         `assessment says otherwise.`,
     });
@@ -712,6 +893,8 @@ export function fullIntegrity(
     reliabilitySchemaPresent?: boolean;
     /** See `structuralIntegrity`. Omitted here means "check the file as it stands now". */
     guardsMissingAsFound?: readonly string[];
+    /** See `structuralIntegrity`. Omitted here for the same reason. */
+    immutableTablesAbsentAsFound?: readonly string[];
   },
 ): HqIntegrityReport {
   // Deliberately WITHOUT a recorded verdict: a full assessment of the file as
@@ -722,6 +905,7 @@ export function fullIntegrity(
   const structural = structuralIntegrity(db, {
     reliabilitySchemaPresent: options.reliabilitySchemaPresent,
     guardsMissingAsFound: options.guardsMissingAsFound,
+    immutableTablesAbsentAsFound: options.immutableTablesAbsentAsFound,
   });
   const observations = [...structural.observations];
 

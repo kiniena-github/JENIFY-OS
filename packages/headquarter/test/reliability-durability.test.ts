@@ -431,6 +431,87 @@ describe('the engine-immutable inventory is checked against the live schema, not
     bare.close();
   });
 
+  /**
+   * The other side of the same coin, and the one that was missing (Wave 5
+   * correction round three, High A1). Absence is not tampering on a file that
+   * never had the ledger — but on a file that HQ has already ensured, a
+   * declared ledger that is gone is exactly tampering, and the census skipped it
+   * silently: dropping seven of them left both the structural pass and the FULL
+   * assessment reporting a completely clean store with zero observations, while
+   * the facade's own ensures recreated each one EMPTY.
+   */
+  it('reports a DROPPED declared ledger, and does not mistake a first boot for one', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-dropped-ledger-'));
+    try {
+      const dbPath = path.join(dir, 'hq.sqlite');
+      const first = openHqDatabase(dbPath);
+      // A FIRST construction, where every phase's ledger is legitimately absent
+      // before the ensures create it. This must NOT be a finding, or every new
+      // database would boot into safe mode.
+      const born = new HeadquarterOperations(first);
+      expect(born.hqReliabilityPosture().integrity.safeMode).toBe(false);
+      expect(born.hqReliabilityPosture().integrity.observations.map((o) => o.finding)).toEqual([]);
+      first.close();
+
+      const raw = new Database(dbPath);
+      for (const table of [
+        'hq_action_intents',
+        'hq_action_events',
+        'hq_truth_records',
+        'hq_truth_verifications',
+        'hq_truth_acceptances',
+        'hq_memory',
+        'hq_intel_budgets',
+      ]) {
+        raw.exec(`DROP TABLE ${table}`);
+      }
+      raw.close();
+
+      const reopened = openHqDatabase(dbPath);
+      const ops = new HeadquarterOperations(reopened);
+      const integrity = ops.hqReliabilityPosture().integrity;
+      expect(integrity.safeMode).toBe(true);
+      expect(integrity.observations.map((o) => o.finding)).toContain('append_only_guard_missing');
+      const detail = integrity.observations.find((o) => o.finding === 'append_only_guard_missing')!.detail;
+      // The reader is told a LEDGER went missing, not that three triggers did.
+      expect(detail).toContain('hq_truth_records');
+      expect(detail).toContain('hq_intel_budgets');
+      reopened.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The sharpest form of the same drop: the ledger that HOLDS the safe-mode
+   * latch. Dropping it erased a latched verdict outright, and `releaseKillSwitch`
+   * was then admitted while the evidence chain was still broken.
+   */
+  it('re-engages, and re-latches, when the VERDICT ledger itself is dropped', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-dropped-verdicts-'));
+    try {
+      const dbPath = path.join(dir, 'hq.sqlite');
+      const first = openHqDatabase(dbPath);
+      void new HeadquarterOperations(first);
+      first.close();
+      const raw = new Database(dbPath);
+      raw.exec('DROP TABLE hq_reliability_verdicts');
+      raw.close();
+      const reopened = openHqDatabase(dbPath);
+      const ops = new HeadquarterOperations(reopened);
+      expect(ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+      // And it is DURABLE: the boot wrote the blocking verdict into the ledger
+      // it had just been handed back, so a further restart still refuses.
+      reopened.close();
+      const again = openHqDatabase(dbPath);
+      const restarted = new HeadquarterOperations(again);
+      expect(restarted.hqReliabilityPosture().integrity.safeMode).toBe(true);
+      again.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('requires exactly the trio by default, and the rest per table', () => {
     // The universal DEFAULT is unchanged: requiring `no_replace_unique` of a
     // table with no secondary unique index would be a false finding, and a
@@ -541,12 +622,27 @@ describe('the durability posture is reported, never pretended', () => {
     try {
       const dbPath = path.join(dir, 'weak.sqlite');
       const db = openHqDatabase(dbPath);
+      // A REAL HQ store, not a bare migrated file. `op_evidence` now carries
+      // the same append-only guard trio every other engine-immutable ledger
+      // does (Wave 5 correction round three, High A2), and — like every other
+      // declared guard — those triggers are installed by the facade's ensure
+      // pass rather than by `migrateHqDatabase`, so that a dropped one is
+      // OBSERVED before it is repaired. A handle that has never been through a
+      // construction therefore genuinely does not carry the guards HQ declares,
+      // and `structuralIntegrity` says so. Constructing the facade first is the
+      // stronger fixture as well as the honest one: the durability finding is
+      // now asserted against a store that is otherwise completely healthy.
+      void new HeadquarterOperations(db);
       db.pragma('synchronous = NORMAL');
       const report = structuralIntegrity(db);
       const finding = report.observations.find((o) => o.finding === 'durability_below_requirement');
       expect(finding).toBeTruthy();
       expect(finding!.blocking).toBe(false);
       expect(report.safeMode).toBe(false);
+      // And nothing else was found at all: the degraded pragma is the ONLY
+      // observation, so this pins "reported, not blocking" against a store with
+      // no competing finding to hide behind.
+      expect(report.observations.map((o) => o.finding)).toEqual(['durability_below_requirement']);
       db.close();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -624,13 +720,21 @@ describe('the finding vocabulary and what blocks', () => {
   it('engages safe mode on a BROKEN EVIDENCE CHAIN, which is the tamper a schema check cannot see', () => {
     const fx = fileFixture();
     try {
-      // Rewrite a payload in the hash-chained evidence log through a raw
-      // connection: `op_evidence` carries no triggers, because its guarantee is
-      // the chain rather than the engine.
       const raw = fx.raw();
       const entry = raw.prepare(`SELECT id FROM op_evidence ORDER BY seq LIMIT 1`).get() as {
         id: string;
       };
+      // STRONGER than what this test used to do, because the behaviour it
+      // pinned changed for the better (Wave 5 correction round three, High A2).
+      // `op_evidence` used to carry no triggers at all — "its guarantee is the
+      // chain rather than the engine" — so this raw UPDATE simply succeeded.
+      // The engine now refuses it outright, which is the first of the three
+      // things that hold the log, and the tamperer has to remove the guard
+      // before it can rewrite anything.
+      expect(() =>
+        raw.prepare(`UPDATE op_evidence SET payload = ? WHERE id = ?`).run('{"tampered":true}', entry.id),
+      ).toThrow(/append-only/);
+      raw.exec('DROP TRIGGER trg_op_evidence_no_rewrite');
       raw.prepare(`UPDATE op_evidence SET payload = ? WHERE id = ?`).run('{"tampered":true}', entry.id);
       const report = fullIntegrity(fx.db, {
         verifyEvidenceChain: () => fx.ops.queue.evidence.verifyChain(),
@@ -638,6 +742,73 @@ describe('the finding vocabulary and what blocks', () => {
       expect(report.depth).toBe('full');
       expect(report.safeMode).toBe(true);
       expect(report.observations.map((o) => o.finding)).toContain('evidence_chain_broken');
+      // And the removal of the guard is itself a finding now, because
+      // `op_evidence` is a declared engine-immutable ledger: the two checks are
+      // independent, so neither one alone is the whole defence.
+      expect(report.observations.map((o) => o.finding)).toContain('append_only_guard_missing');
+      expect(missingImmutabilityGuards(fx.db)).toContain('trg_op_evidence_no_rewrite');
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * The deletion half, which the chain could not see at all (Wave 5 correction
+   * round three, High A2). Walking the links from the genesis value forward
+   * proves the entries PRESENT link to one another and says nothing about where
+   * the chain was supposed to END, so `DELETE FROM op_evidence WHERE seq > 1`
+   * left a log that verified perfectly and a full assessment that read clean.
+   */
+  it('refuses a tail deletion by engine, and DETECTS one taken after the guard is dropped', () => {
+    const fx = fileFixture();
+    try {
+      const raw = fx.raw();
+      const before = (raw.prepare(`SELECT COUNT(*) AS n FROM op_evidence`).get() as { n: number }).n;
+      expect(before).toBeGreaterThan(1);
+      // First: the engine refuses it.
+      expect(() => raw.exec('DELETE FROM op_evidence WHERE seq > 1')).toThrow(/append-only/);
+      expect((raw.prepare(`SELECT COUNT(*) AS n FROM op_evidence`).get() as { n: number }).n).toBe(before);
+      // Then: with the guard removed, the deletion goes through — and the
+      // AUTOINCREMENT high-water mark SQLite maintains, which a DELETE does not
+      // lower, contradicts it. The links all still hold; the LENGTH does not.
+      raw.exec('DROP TRIGGER trg_op_evidence_no_erase');
+      raw.exec('DELETE FROM op_evidence WHERE seq > 1');
+      expect((raw.prepare(`SELECT COUNT(*) AS n FROM op_evidence`).get() as { n: number }).n).toBe(1);
+      expect(verifyEvidenceChain(fx.db)).toBe(2);
+      const report = fullIntegrity(fx.db, { verifyEvidenceChain: () => verifyEvidenceChain(fx.db) });
+      expect(report.safeMode).toBe(true);
+      expect(report.observations.map((o) => o.finding)).toContain('evidence_chain_broken');
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * The whole log, removed as DDL. `DROP TABLE` is refused by no BEFORE trigger,
+   * and the guard census used to SKIP a declared table that was absent — so
+   * `DROP TABLE op_evidence` produced a completely clean structural pass and a
+   * completely clean full assessment, while the next `openHqDatabase` recreated
+   * the table empty.
+   */
+  it('engages safe mode when the evidence log itself is DROPPED and silently recreated', () => {
+    const fx = fileFixture();
+    const dbPath = fx.dbPath;
+    try {
+      fx.db.close();
+      const raw = new Database(dbPath);
+      raw.exec('DROP TABLE op_evidence');
+      raw.close();
+      const reopened = openHqDatabase(dbPath);
+      // `migrateHqDatabase` recreates the TABLE — it is foundation DDL — but
+      // not the guards, which are a facade ensure, so the loss is visible at
+      // the boot observation rather than laundered by the rebuild.
+      const ops = new HeadquarterOperations(reopened);
+      const posture = ops.hqReliabilityPosture();
+      expect(posture.integrity.safeMode).toBe(true);
+      expect(posture.integrity.observations.map((o) => o.finding)).toContain(
+        'append_only_guard_missing',
+      );
+      reopened.close();
     } finally {
       fx.cleanup();
     }
@@ -762,16 +933,19 @@ describe('backup verification, against real bytes on disk', () => {
     try {
       const backupPath = path.join(fx.dir, 'hq-backup.sqlite');
       await fx.db.backup(backupPath);
-      // Scribble over the LAST page of the file: still opens (`sqlite_master`
-      // lives at the front), fails `integrity_check` (a page whose first byte
-      // is 0x41 is not a valid b-tree page type).
+      // Scribble over the ROOT PAGE of a named table: still opens
+      // (`sqlite_master` is page 1 and is untouched), fails `integrity_check`
+      // (a page whose first byte is 0x41 is not a valid b-tree page type).
       //
-      // Deliberately the last page rather than 2048 bytes at `size / 2`, which
-      // is what this used to do. That offset only hit a b-tree page by luck of
-      // the current schema size: adding one table to HQ moved it onto a page
-      // whose corruption `integrity_check` does not report, and the test then
-      // silently stopped testing what it says it tests. Page-aligned, at a page
-      // the front-loaded catalogue never occupies, is a choice that stays true.
+      // The page is now CHOSEN from the catalogue rather than positionally.
+      // This used to corrupt 2048 bytes at `size / 2`, which only hit a b-tree
+      // page by luck of the schema size; it was then moved to the LAST page for
+      // the same reason, and that in turn stopped being a b-tree page when this
+      // wave added three triggers to `op_evidence` — at which point the
+      // corruption made the catalogue itself unreadable and the refusal became
+      // `not_a_readable_sqlite_database`, i.e. the test silently stopped
+      // testing what it says it tests for the second time. Asking SQLite which
+      // page holds `hq_events` is a choice that cannot drift with the schema.
       const size = fs.statSync(backupPath).size;
       const headerBytes = Buffer.alloc(2);
       const headerFd = fs.openSync(backupPath, 'r');
@@ -781,8 +955,18 @@ describe('backup verification, against real bytes on disk', () => {
       // SQLite encodes a 65536-byte page as 1 in the header.
       const pageSize = declared === 1 ? 65536 : declared;
       expect(size % pageSize).toBe(0);
+      // Read from the LIVE database rather than by opening the backup: SQLite's
+      // online backup copies page for page, so the root pages are the same, and
+      // opening the candidate here would create the very `-wal`/`-shm` sidecar
+      // whose presence `verifyHqBackupFile` correctly refuses.
+      const rootPage = (
+        fx.db
+          .prepare(`SELECT rootpage FROM sqlite_master WHERE type = 'table' AND name = 'hq_events'`)
+          .get() as { rootpage: number }
+      ).rootpage;
+      expect(rootPage).toBeGreaterThan(1);
       const handle = fs.openSync(backupPath, 'r+');
-      fs.writeSync(handle, Buffer.alloc(pageSize, 0x41), 0, pageSize, size - pageSize);
+      fs.writeSync(handle, Buffer.alloc(pageSize, 0x41), 0, pageSize, (rootPage - 1) * pageSize);
       fs.closeSync(handle);
       const verification = verifyHqBackupFile(backupPath);
       expect(verification.verified).toBe(false);

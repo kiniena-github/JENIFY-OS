@@ -82,6 +82,7 @@ import {
 } from '../operator/approvals.js';
 import {
   assertNoSecretLikeContent,
+  ensureEvidenceGuards,
   verifyEvidenceChain,
   type EvidenceEntry,
 } from '../operator/evidence.js';
@@ -700,7 +701,8 @@ import {
   INTEGRITY_DEPTH_STATEMENT,
   SAFE_MODE_STATEMENT,
   fullIntegrity,
-  missingImmutabilityGuards,
+  observeImmutabilityAsFound,
+  restoredImmutableTables,
   structuralIntegrity,
   verifyHqBackupFile,
   type HqIntegrityReport,
@@ -2513,7 +2515,14 @@ export class HeadquarterOperations {
     // nothing about it. HQ can re-create the guards it declares; it cannot know
     // what was written to the file while they were absent, and safe mode is
     // exactly the posture for that.
-    const guardsMissingAsFound = missingImmutabilityGuards(db);
+    // Both halves of the same observation, at the same instant (Wave 5
+    // correction round three, High A1). Guards absent from a ledger that is
+    // there, AND ledgers that are not there at all: a `DROP TABLE` is DDL, no
+    // BEFORE trigger refuses it, and the guard census deliberately skips an
+    // absent table — so seven declared immutable ledgers could be dropped and
+    // the full assessment still reported a completely clean store while the
+    // ensures below recreated each one EMPTY.
+    const immutabilityAsFound = observeImmutabilityAsFound(db);
     ensureApplicationSchema(db);
     ensureMissionCommandSchema(db);
     ensureProjectCommandSchema(db);
@@ -2526,6 +2535,10 @@ export class HeadquarterOperations {
     ensureProductFactorySchema(db);
     ensureReliabilitySchema(db);
     ensureIntelligenceSchema(db);
+    // The hash-chained audit log's ENGINE guards. Installed here, beside every
+    // other ensure and after the observation above, so a dropped guard is
+    // reported before it is repaired — see `ensureEvidenceGuards`.
+    ensureEvidenceGuards(db);
     // A writable construction just ensured the mission/project/memory tables.
     // A READ-ONLY one (the hq:snapshot path) may be observing an older file
     // that has some or none of them — the ensures above deliberately write
@@ -2547,7 +2560,12 @@ export class HeadquarterOperations {
     // the expensive half is an explicit act instead.
     const recordedVerdict = latestIntegrityVerdict(db);
     this.#integrityReport = structuralIntegrity(db, {
-      guardsMissingAsFound,
+      guardsMissingAsFound: immutabilityAsFound.guardsMissing,
+      // Only the ones HQ's own schema has just re-created count as a finding:
+      // that is HQ saying "my schema declares this ledger and this file did not
+      // have it". A read-only handle re-creates nothing, so an honestly older
+      // file reports nothing — see `restoredImmutableTables`.
+      immutableTablesAbsentAsFound: restoredImmutableTables(db, immutabilityAsFound.tablesAbsent),
       reliabilitySchemaPresent: this.#reliabilityStorePresent,
       // The RECORDED verdict, re-read from HQ's own append-only verdict ledger
       // (Wave 5 review, High finding 1). A structural pass cannot see a broken

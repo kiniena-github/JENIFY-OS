@@ -859,6 +859,17 @@ describe('safe mode', () => {
       const first = raw.prepare(`SELECT seq FROM op_evidence ORDER BY seq LIMIT 1`).get() as {
         seq: number;
       };
+      // The engine refuses the rewrite outright now — `op_evidence` carries the
+      // append-only guard trio since the Wave 5 correction round three (High
+      // A2), where before it carried no triggers at all. A tamperer must remove
+      // the guard first, which is itself a reported finding; the point of THIS
+      // test is what a patched `verifyChain` can do about the result, so the
+      // stronger refusal is asserted here and the guard is then dropped so the
+      // chain can actually be broken.
+      expect(() =>
+        raw.prepare(`UPDATE op_evidence SET actor = 'forged-actor' WHERE seq = ?`).run(first.seq),
+      ).toThrow(/append-only/);
+      raw.exec('DROP TRIGGER trg_op_evidence_no_rewrite');
       raw.prepare(`UPDATE op_evidence SET actor = 'forged-actor' WHERE seq = ?`).run(first.seq);
 
       const restarted = fx.reopen('process-two');
