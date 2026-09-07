@@ -26,9 +26,14 @@ enforcement-safe read, exactly as it does for every phase before this.
 - **Not a second provider truth.** `operator/provider-binding.ts` remains the
   one thing that decides who may execute a task. A routing decision RECORDS
   the binding HQ observed on the canonical payload; it never proposes a
-  different one, and the routing surface has no provider or model parameter
-  and no provider or model FIELD. A proposal that disagreed with a binding
-  would simply be ignored by `OperatorQueue.claim`/`start`.
+  different one, and the routing surface has no provider or model PARAMETER.
+  Stated exactly, because the previous wording was wrong (Wave 5 Low): the
+  `RoutingProposal` interface carries no provider or model field, but the
+  facade returns `RoutingProposal & { taskId; boundProvider }`. That
+  `boundProvider` is OBSERVED off the canonical payload by `#taskBoundProvider`
+  — a report of what will execute, with no parameter anywhere that could make
+  it say anything else — and a proposal that disagreed with a binding would
+  simply be ignored by `OperatorQueue.claim`/`start`.
 - **Not a second task truth.** `op_tasks` plus `ActivityStatus` stay the answer
   to "what is the state of this work". A decision row REFERENCES a canonical
   task and holds what none of them holds: which POLICY TIER the work was routed
@@ -126,8 +131,38 @@ directions:
 | a legitimate unknown | `amountMinorUnits: null`, `state: 'unknown'` — **never zero** |
 
 `readStoredCostFact` fails closed the same way, so an APPEND carrying a forged
-provenance, a bad currency or a fractional amount reads back as `unknown` with
+provenance, a bad currency, a fractional amount, an `estimated` amount with no
+BASIS, or an amount beyond `MAX_COST_MINOR_UNITS` reads back as `unknown` with
 a null amount rather than as a figure HQ would then publish.
+
+**The last two are Wave 5 corrections (Medium 6).** The parity above was a
+claim before it was true: those two shapes had no counterpart on the read side,
+so a row carrying either read back as a KNOWN amount and was folded into
+`observedMinorUnits` — which is how a scope that should read
+`requires_founder_decision` reads `within_ceiling` instead.
+
+**`MAX_COST_BASIS_LENGTH` applies on every branch** (Wave 5 Medium 7). It used
+to be applied only to non-estimates — the branch that cannot carry a basis at
+all — under the misnamed `basis_on_non_estimate`, so `estimated`, the one
+provenance that REQUIRES a basis, had no length check and roughly a megabyte of
+caller text could land permanently in an append-only, un-erasable table and be
+echoed on every read of the intelligence control surface. The bound is now
+checked before the provenance switch under `basis_too_long`, and
+`basis_on_non_estimate` means what its name says: a non-estimate may not carry
+a basis at all. `capabilityFacts` and `permittedTiers` are deduped in the
+facade, because the route's `stringArrayField` caps neither length nor
+repetition.
+
+**The canonical risk class is read through the vocabulary, never asserted**
+(Wave 5 Medium 5). `op_capabilities` carries no immutability triggers —
+enabling and disabling a capability is a legitimate UPDATE — so one raw
+`UPDATE op_capabilities SET risk_class = 'totally_harmless'` used to become a
+typed `RiskClass` by cast: `RISK_FLOOR[...]` and `REVIEW_REQUIREMENT[...]` both
+read `undefined`, the floor fell from `high` to `deterministic_local`, and a
+null review requirement is treated as satisfied — so `deterministic_local` was
+ACCEPTED on an `external_side_effect` task. `readStoredRiskClass` fails closed
+to `founder_gate` at every store read, and `computeRoutingProposal` re-checks as
+defence in depth.
 
 ### The law: a ceiling blocks or asks, and never grants
 
@@ -144,6 +179,68 @@ branch, including the last one. With no budget ever recorded, the permitted set
 is `DEFAULT_PERMITTED_TIERS` — `['deterministic_local']` — so a deployment that
 has never had a Founder policy written routes to local intelligence or asks a
 human, and never silently to a paid one.
+
+### The law: WHICH ceiling applies is derived, never chosen
+
+This is a Wave 5 correction (High 2), and it was the largest hole in the phase.
+`budgetScope` was a CALLER parameter on `recordIntelligenceDecision` and
+`intelligenceRoutingProposal`, and its `scopeId` was never checked against the
+task's canonical mission or project. With a strict `deployment/total` policy
+(`permittedTiers: ['deterministic_local']`) beside a permissive
+`mission/some-other-mission/total`, a worker on an `external_side_effect` task
+moved from `refusal: no_permitted_tier` to `tier: high, budgetDecision:
+within_ceiling` by naming the other scope — or by naming a different `window`,
+since only `total` was ever consulted. No test passed the parameter at all.
+
+The parameter is gone. `#canonicalBudgetScopes` derives the set from the task:
+`deployment/total` always, plus every deployment / mission / project
+scope-and-window for which a ceiling has ACTUALLY been recorded. The mission is
+read off `hq_mission_plan_items.task_id` and the project off
+`hq_missions.project_id` — the same canonical link `proposeAction` already
+checks. `mostRestrictiveBudget` then takes the most severe decision and the
+INTERSECTION of the permitted sets, so a tier is permitted only where every
+applicable ceiling permits it. Escalation evaluates the same canonical set
+rather than the deployment scope alone, so it cannot climb past a ceiling the
+first decision honoured.
+
+Only scopes with a RECORDED ceiling join, because `evaluateBudget` answers
+`requires_founder_decision` for a scope with no policy — folding in six silent
+scopes would make every answer a Founder decision and every permitted set the
+local tier alone, which is noise rather than caution.
+
+**`provider` and `model` scopes are deliberately absent from that set, and
+that is a stated limitation.** A cost entry's `providerId` is a
+caller-declared fact about who was billed, in a different vocabulary from the
+canonical execution binding, so HQ cannot attribute it canonically. A provider
+or model ceiling is REPORTED by `intelligenceBudgetDecision` and does not gate
+a routing decision.
+
+### The law: a spend is attributed to canonical work, not to a declaration
+
+Also a Wave 5 correction (Medium 8). `missionId` and `projectId` on both
+ledgers were `.trim() || null` with no existence check, no length bound and no
+secret scan, unlike `label`/`note`/`basis`, which get bounds AND a secret scan.
+A 5000-character `missionId` and a `projectId` of `<script>x</script>` were
+both accepted — and, worse, OMITTING `missionId` hid a spend from an exhausted
+mission ceiling, which made three of the five `BUDGET_SCOPES` meaningless.
+
+Both are now DERIVED by `#canonicalWorkIdentity` and are no longer parameters:
+one canonical attribution decision serving this and the scope rule above.
+`decisionId` on a cost entry must name a decision that exists AND belongs to
+the same task.
+
+### The law: the window is measured on the instant HQ stamped
+
+Wave 5 High 3. `occurredAt` was caller-supplied and the only check was
+`/^\d{4}-\d{2}-\d{2}T/`, which is a shape and not a date, while the window
+filter was a string prefix over that same field. Under a `deployment/day`
+ceiling of 100 with 90 observed, an entry declaring
+`occurredAt: "0000-00-00T00:00:00Z"` with an amount of 1,000,000 was ACCEPTED
+and the ceiling still reported `within_ceiling`.
+
+Three changes together: the instant must `Date.parse`; it may not be in the
+future; and the window filter measures `recorded_at`, which HQ sets.
+`occurredAt` survives as reported-only metadata, which is what it always was.
 
 ### The law: an escalation preserves canonical identity and creates no authority
 
@@ -401,6 +498,41 @@ markers, untouched — nothing under `packages/server`, `packages/web`,
 - **`hq.intelligence_command` is not registered automatically.** A deployment
   that wants the two Founder acts calls
   `registerIntelligenceCommandCapability`; until then both fail closed.
+- **`provider` and `model` budget scopes are REPORTED, not enforced at the
+  routing gate.** A cost entry's `providerId` is a caller-declared fact about
+  who was billed, in a different vocabulary from the canonical execution
+  binding, so HQ cannot attribute it canonically and will not pretend to. See
+  "WHICH ceiling applies is derived" above.
+- **`requiresFounderDecision` is computed and published but read by nothing.**
+  It appears on the proposal and on the escalation; no HQ path branches on it.
+  Carried honestly rather than removed, and carried honestly rather than
+  described as a gate.
+- **Escalation reuses the PRIOR decision's stored `requiredReviewTier` and
+  `floorTier`** rather than re-deriving them from the task's capability as it
+  stands now. It fails upward only — an escalation moves strictly up the tier
+  order — so a capability that has since been made RISKIER is not re-checked
+  against the new floor.
+- **`intelligenceAnalytics()` is unbounded** while its four neighbours on the
+  same control response are page-bounded: `provablyAvoidable.decisionIds` is
+  uncapped and four fold arrays are unbounded. It is Founder-gated, so this is
+  a response-size question and not a privacy one.
+- **`startTask` is not safe-mode gated.** A claim taken before safe mode
+  engaged can still advance `assigned → running`. The external path is closed —
+  `claimNext` and `executeAction` are both refused — so this narrows what safe
+  mode claims rather than changing behaviour: safe mode refuses NEW work being
+  taken up and anything reaching outside HQ, not every movement of a claim that
+  already existed.
+- **A source file must contain no raw NUL byte, and now none does** (Wave 5
+  Medium 10). `intelligence-command.ts` introduced a literal 0x00 as a
+  composite-key separator, and the PR body disclosed only the two pre-existing
+  ones in `product-command.ts` as "carried forward" — which reads as "nothing
+  new was added". A NUL makes a file BINARY to grep, git grep and ripgrep:
+  they report "binary file matches" and skip the content, so the file is
+  invisible to the repository's own text tooling and to a reviewer's default
+  honesty scan. All three are now U+001F UNIT SEPARATOR (identical runtime
+  value, file stays text), as is a FOURTH nobody had disclosed —
+  `src/live/auth.ts` — which the new source scan in
+  `test/core-boundary.test.ts` found.
 
 ## The `assertBrowserSafe` pre-real-adapter Low — exactly what was resolved
 
@@ -426,11 +558,22 @@ such an adapter would call.
    `resolveRetrievalAdapter` now returns a guarded wrapper in **every** branch
    — the deterministic one, an installed semantic one, and the fallback. There
    is therefore no code path through the resolver that yields an unguarded
-   adapter, an in-process caller cannot obtain one, and an adapter added to
-   `SEMANTIC_RETRIEVAL_ADAPTERS` later cannot opt out by being added to the
-   list. The wrapper is transparent in every other respect (same id, mode,
-   availability, reason), so nothing downstream gains a reason to reach for the
-   unguarded object.
+   adapter, and an adapter added to `SEMANTIC_RETRIEVAL_ADAPTERS` later cannot
+   opt out by being added to the list. The wrapper is transparent in every
+   other respect (same id, mode, availability, reason), so nothing downstream
+   gains a reason to reach for the unguarded object.
+
+   **`RETRIEVAL_GUARD_STATEMENT` originally overstated this** (Wave 5
+   Medium 9). It said an in-process caller "cannot obtain an unguarded
+   adapter", while `LEXICAL_RETRIEVAL_ADAPTER` and
+   `SEMANTIC_RETRIEVAL_ADAPTERS` are exported and this package's own tests
+   import and call them — which is legitimate, because the raw adapters are
+   what the guard is tested against. That statement is interpolated into
+   `statement.note` and reaches the browser as an HQ assertion, so it was
+   narrowed to what is enforced: every adapter the RESOLVER hands out is
+   guarded, the wrapping is done by the resolver rather than by the caller, and
+   the raw objects are exported for testing and are not wrapped in themselves.
+   The substantive guard is unchanged and sound.
 2. **At the facade.** `searchCompany` and `askJenify` scan `text`, `project`,
    `tag` and `question` on the way in and return a stated `invalid_input`
    refusal, so an in-process caller gets a good error instead of an exception
@@ -438,11 +581,21 @@ such an adapter would call.
    which echoes `project` and `tag` verbatim into `criteria` — so the material
    never reaches a structure at all.
 
+**Which of the two is load-bearing, stated correctly.** The FACADE scan is the
+effective one. The inner wrapper sees `input.terms`, which
+`normalizeSearchQuery` has already TOKENIZED — and a tokenized term cannot
+match the credential patterns, which need a `key: value` shape with punctuation
+the tokenizer has removed. The wrapper is defence in depth and becomes
+load-bearing only for a future caller that reaches `resolveRetrievalAdapter`
+without going through the facade. The module comment previously called the
+inner layer "the guarantee"; that was wrong and is corrected, and a test
+demonstrates the tokenization point directly.
+
 The route's own scan is **unchanged**: it has a better refusal to give
 (`400 unsafe_query`, audited as refused rather than allowed), and it stays as
 the outer layer.
 
-**Pinned by** `test/search-adapter-guard.test.ts` (9 tests). The load-bearing
+**Pinned by** `test/search-adapter-guard.test.ts` (10 tests). The load-bearing
 assertion is not that the guard throws — it is that a recording stand-in
 adapter, the thing the seam exists for, is **never called at all** with
 credential-shaped terms. Every branch of the resolver is exercised, the facade
@@ -480,6 +633,17 @@ described above and in exactly the scope described.
 non-discriminating latency requirement, availability observations that do not
 yet influence a proposal, the UTC-prefix budget window, and the per-call
 analytics derivation — all five listed under limitations above.
+
+**Carried from the Wave 5 review, deliberately NOT fixed and recorded as
+open** — each was judged too small or too behaviour-changing to correct inside
+a correction pass, and each is listed under limitations above except the last:
+the un-safe-mode-gated `startTask`; escalation reusing the prior decision's
+stored review/floor tiers; the computed-but-unread `requiresFounderDecision`;
+the unbounded `intelligenceAnalytics()`; and two assertions in
+`intelligence-authority.test.ts` that compare hard-coded `false` literals
+(`grantsSpend`, `authorizesPaidActivation`) and are therefore tautological at
+runtime — the TYPE-level `false` literal is what actually enforces those, and
+the assertions are left as documentation of intent rather than deleted.
 
 ## Deliberate pin ledger
 

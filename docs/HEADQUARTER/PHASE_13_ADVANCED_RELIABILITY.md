@@ -67,7 +67,7 @@ every enforcement-safe read, exactly as it does for every phase before this.
 | `missionId`, `actionId` | Optional references to the canonical mission and the Phase 8 action intent. Never written by this phase. |
 | `capabilityId` | Copied from the task row at open, so the crash classification can ask "could this have reached outside HQ" without re-resolving a task that may have moved. |
 | `workerId`, `claimFence`, `claimNonce` | The claim the run was opened under. |
-| `processId` | **The fact the phase turns on.** Which process was carrying the work. A restart is a different one; that is how "interrupted" is told from "still running", without a timer and without a guess. |
+| `processId` | Which process OPENED the run. Stated precisely, because the imprecision was a defect (Wave 5 Medium 1): it proves "not the process running this recovery". It does not prove "dead", and HQ holds no liveness signal that would — there is no heartbeat and no boot nonce. So a recovery run while another process is genuinely mid-attempt WILL classify that live attempt as interrupted. What HQ does about that is not pretend otherwise: see [When a live process is classified](#when-a-live-process-is-classified). |
 | `state`, `outcome`, `failureCategory`, `attempts` | DERIVED from the append-only event ledger. Never stored mutable columns. |
 
 ### The state vocabulary, and why it is disjoint
@@ -132,6 +132,47 @@ inventing a crash.
 
 Recovery is idempotent: a second pass finds nothing left to classify and writes
 nothing.
+
+### When a live process is classified
+
+`process_id` is an identity, not a liveness signal, and Phase 13 originally
+described it as if it were one. A Founder-gated recovery run while another
+process is mid-attempt classifies that live attempt as interrupted /
+`outcome_unknown` — and, before Wave 5, the live worker's truthful
+`recordRunOutcome` was then refused `run_state_conflict`, so the ledger
+permanently asserted an interruption that never happened and only a human guess
+could close it.
+
+**The correction is a repair path, not a prevention.** A run whose most recent
+event is an `interrupted` one (`RunRecord.interruptedWithoutReport`) accepts an
+outcome from the worker that still holds the LIVE FENCED CLAIM — which a dead
+process cannot hold, and which is already the only authority this phase accepts
+for a run write. It is a REPORT and not a retry: no attempt generation opens,
+the interruption event stays in the append-only ledger as the classification it
+was, and the outcome event carries `afterInterruption: true` rather than
+smoothing it over. A run that has been RECONCILED still refuses, so a human
+decision is never overwritten.
+
+**What was considered and not done, and why.** Skipping runs whose canonical
+task still holds an unexpired lease is genuinely sound and is the stronger fix.
+It was not taken because it changes WHEN recovery works: after a real crash the
+lease is still live, so recovery would do nothing until it expired. That is a
+material change to the behaviour of a Founder-gated operation and is a decision
+to take deliberately rather than as part of a correction pass.
+
+**Also not done, and stated plainly.** `deriveRunRecord` trusts a RECOGNIZED
+event absolutely; its fail-closed handling covers only strings outside the
+vocabulary. `hq_reliability_run_events` carries no hash chain and is not
+cross-checked against the chained `op_evidence` entry each facade write also
+lands, so ONE raw `INSERT` of a well-formed `reconciled` event still flips a
+run's derived state and re-admits an attempt (Wave 5 Medium 4, structural half).
+The MINIMUM was done — the `interrupted` branch's `uncertain` flag now fails
+closed, so an absent, corrupt or non-boolean value reads as UNCERTAIN rather
+than as "nothing happened", and an unreadable `failureCategory` reads `unknown`
+rather than `none`. The structural half (hash-chaining that table, or deriving
+reconciliation only for events with a matching chained evidence entry) changes a
+pure function's signature, the store shape and every call site, and would leave
+every pre-existing row unverifiable on an existing file. It is open.
 
 ## The five reconciliation paths
 
@@ -219,17 +260,47 @@ verified.**
 `verifyHqBackupFile` is read-only in the strongest available sense — the file
 is opened `O_NOFOLLOW` to digest and through `openHqDatabaseReadOnly` (SQLite
 itself refuses writes, and a missing file is an error rather than a new empty
-database) to check. Nine categorical refusals, never an exception:
+database) to check. **Eleven** categorical refusals, never an exception:
 `path_not_absolute`, `path_missing`, `path_is_symlink`,
 `path_not_a_regular_file`, `file_empty`, `file_too_large`,
+`file_has_uncheckpointed_wal`, `file_changed_during_verification`,
 `not_a_readable_sqlite_database`, `integrity_check_failed`,
-`not_an_hq_database`. Eight of the nine are exercised against real files on
+`not_an_hq_database`. Nine of the eleven are exercised against real files on
 disk — a relative path, a missing one, a directory, an empty file, a symlink,
-a file of prose, a corrupted SQLite image and a perfectly valid SQLite
-database that is simply somebody else's. `file_too_large` is NOT exercised: it
-would mean writing a two-gigabyte file in a test, and a bound that is asserted
-by reading the constant rather than by crossing it is stated here as what it
-is.
+a file of prose, a corrupted SQLite image, a perfectly valid SQLite database
+that is simply somebody else's, and a database with an un-checkpointed WAL
+beside it. `file_too_large` is NOT exercised: it would mean writing a
+two-gigabyte file in a test, and a bound that is asserted by reading the
+constant rather than by crossing it is stated here as what it is.
+`file_changed_during_verification` is a genuine race and is NOT exercised
+either; it is stated rather than claimed.
+
+**The last two are Wave 5 corrections (Medium 3), and both close a real hole.**
+The recorded digest covered the MAIN FILE only, while the verifying open reads
+main PLUS any `-wal`/`-shm` sidecar, which was never hashed — executed: two
+candidates carried an identical `contentDigest` and an identical recorded size
+while their verified table counts differed (11 versus 12), because the
+difference lived entirely in an un-digested WAL. So a candidate with a non-empty
+`-wal`/`-journal` sidecar is now refused rather than recorded under a digest
+that means less than it looks like it means. Consequence, stated: pointing this
+at the LIVE WAL database is now a refusal instead of a pass. It was never
+unsafe — it still reads and writes nothing — but the digest it produced did not
+pin what SQLite checked. Separately, the digest `open` and the SQLite `open`
+were two independent `open()` calls on the same path; the digest descriptor is
+now HELD across the SQLite open and the file is re-digested through it
+afterwards, so digest and verdict provably describe one inode and one content.
+
+**A symlinked PARENT directory is recorded, not refused.** `lstat` and
+`O_NOFOLLOW` cover only the FINAL path component (verified true with a directory
+symlink), so a candidate reached through a symlinked ancestor used to be
+verified silently under the alias the caller named. A symlinked ancestor
+substitutes no file — the digest and the `integrity_check` still describe
+whatever inode the path resolves to — so what it breaks is bookkeeping.
+`BackupVerification.resolvedPath` carries the path HQ actually opened, and
+`recordVerifiedBackup` stores THAT, so the register and the dedupe key name the
+file rather than an alias for it. Refusing on any divergence was the other
+option and was rejected as disproportionate and non-portable: on macOS
+`os.tmpdir()` itself sits under a symlinked `/var`.
 
 `recordVerifiedBackup` performs the verification itself rather than trusting a
 caller, and records the sha256 **HQ computed over the bytes it checked** —
@@ -317,6 +388,20 @@ folded.
 everything is fine while HQ has said otherwise about itself has been lied to,
 and that is the one thing this phase exists to prevent. The finding CATEGORY
 crosses; the detail — which names schema objects — does not.
+
+**That is true of the store-ABSENT branch too, and it was not (Wave 5
+High 5).** `reliabilitySummary()` returned a hard-coded
+`{safeMode: false, findings: {}, durabilityMeetsRequirement: true}` whenever
+`#reliabilityStorePresent` was false — but `#integrityReport` is latched at
+construction INDEPENDENTLY of the reliability store, and `src/cli/snapshot.ts`
+opens read-only, which is exactly that branch. The world-readable artifact
+therefore published "everything is fine" while HQ had latched safe mode with
+blocking findings, and published `durabilityMeetsRequirement: true` on EVERY
+read-only pre-Phase-13 snapshot with no tampering at all. The store-absent view
+now takes the integrity facts as a REQUIRED argument and folds them through
+`summarizeReliability`, so the closed vocabulary and the counts-only shape are
+unchanged and there is no way to build the view without stating what HQ knows.
+The run counts stay genuinely zero: there is no ledger to count.
 
 The provenance note states four things a reader would otherwise supply
 themselves: that a concluded count is a count of RECORDS and not evidence that
@@ -466,6 +551,49 @@ timing-only concurrency tests. What was built:
   bounded.** HQ reports that a guard was absent when the file was found; it
   cannot say for how long, or what was written meanwhile. That is why the
   posture is "stop and investigate" rather than "here is the damage".
+- **The guard census covers the trio AND every declared SECONDARY guard**
+  (Wave 5 High 1). It used to cover only `no_rewrite`/`no_erase`/`no_replace`,
+  on the reasoning that listing every trigger name would drift. That reasoning
+  was wrong in the direction that matters: the secondary guards close REPLACE
+  on a SECONDARY unique index, where the primary-identity guard never fires, and
+  `recursive_triggers` is off by default and connection-scoped — so an
+  `INSERT OR REPLACE` colliding on such an index DELETES the standing row with
+  no BEFORE DELETE running. Dropping just
+  `trg_hq_reliability_run_events_no_replace_attempt` (the cross-process
+  duplicate-attempt guard) left `missingImmutabilityGuards` reporting `[]`,
+  safe mode false at both depths, and a committed append-only row erasable and
+  replaceable by a forged one, with no finding. `ENGINE_IMMUTABLE_TABLES`
+  entries now carry `extraGuards`, and the live-schema pin test compares the
+  FULL trigger-name set for every listed prefix, so a guard a future phase adds
+  and forgets to declare fails there rather than escaping the check.
+- **The safe-mode latch reads the evidence chain from private truth**
+  (Wave 5 Critical 1). `assessHqIntegrity` used to pass
+  `() => this.queue.evidence.verifyChain()` into `fullIntegrity`.
+  `queue.evidence` is a public own-property object the queue documents as safe
+  to patch "because enforcement never dispatches through it" — a premise that
+  call made false. `evidence_chain_broken` is one of only three blocking
+  findings and this assessment is the only path that CLEARS the latch, so
+  replacing that one read let a same-realm caller clear safe mode over a
+  genuinely broken chain and claim again. The chain is now recomputed by
+  `#evidenceChainFromStore`, an ECMAScript `#private` closure over the
+  database, following the `#capabilityFromStore` recipe — deliberately NOT a
+  delegation to `PrivilegedQueueApi`, because that would still dispatch through
+  the exported `EvidenceLog.prototype`, which is equally patchable. Pinned on
+  the instance AND on that prototype.
+- **`POST /reliability/reconcile` takes step-up, unconditionally** (Wave 5
+  High 4). It was the only reconciliation route in HQ without it, while Phase
+  8's `actionReconcile` — which shares this route's decision vocabulary BY
+  IDENTITY — takes it always. `controlAvailability` now emits
+  `reliabilityReconcile` beside `reliabilityRecover`, which its own comment
+  already described.
+- **A run's dedupe key is not keyed on the caller's label** (Wave 5 Medium 2).
+  Both enforcement layers bind to the run key, and the key digested `label` —
+  ≤120 characters of arbitrary free text — so changing `'publish the thing'` to
+  `'publish the thing.'` opened a SECOND run with a fresh admitted attempt
+  beside a run standing at `needs_reconciliation` for that very work. The label
+  is out of the digest, and `openRun` additionally refuses outright when the
+  task already carries a run at `needs_reconciliation`, so the deliberate
+  `idempotencyKey` escape hatch cannot reopen the same hole.
 - **The independence check in `reconcileRun` is currently unreachable through
   the worker path**, because `assertApprovalAuthority` refuses any registered
   worker first, and only registered workers hold claims. It is kept as defence
@@ -479,6 +607,22 @@ timing-only concurrency tests. What was built:
 - **Nothing here has been exercised by a real AI worker lane.** As with Phases
   9 through 12, every canonical act in these suites is performed by a test
   acting as the Founder or as a registered worker.
+
+## Wave 5 review corrections
+
+The Phase 13 defects a four-reviewer hostile pass found, and what was done
+about each, are recorded inline in the sections above: the safe-mode latch's
+patchable evidence-chain read (Critical 1), the trio-only guard census
+(High 1), the missing step-up on `POST /reliability/reconcile` (High 4), the
+fail-OPEN store-absent snapshot (High 5), `process_id` as a liveness signal it
+never was (Medium 1), the label-keyed run identity (Medium 2), the backup
+digest that did not cover what SQLite checked (Medium 3), and the
+`interrupted` branch's fail-OPEN `uncertain` flag (Medium 4, minimum only).
+
+Two are only PARTLY closed, and both say so where they are described: the
+structural half of Medium 4 (no hash chain on `hq_reliability_run_events`, no
+cross-check against the chained `op_evidence` entry) is open, and Medium 1's
+correction is a repair path rather than a prevention.
 
 ## Carry-forward Low debt
 
