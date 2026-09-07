@@ -224,13 +224,65 @@ export function connectHqDatabaseUnmigrated(path: string = DEFAULT_HQ_DB_PATH): 
 }
 
 /**
+ * The table names a handle carried BEFORE `migrateHqDatabase` ran on it.
+ *
+ * Keyed by the handle, so it cannot be reached, replayed or forged through any
+ * exported surface, and it disappears with the connection.
+ */
+const TABLES_BEFORE_MIGRATION = new WeakMap<HqDatabase, ReadonlySet<string>>();
+
+/**
+ * What this handle's file carried before HQ's own migration touched it, or null
+ * when this handle has not been migrated in this process.
+ *
+ * **This exists because of a boot-ORDER hole, and the hole was in the one
+ * ledger that matters most** (Wave 5 correction round four, High H1).
+ * `op_evidence` — the hash-chained audit log — is created by
+ * `migrateHqDatabase`, which runs BEFORE the facade constructor takes its
+ * boot-time immutability census. So the census, which correctly reports a
+ * DROPPED ledger for the other declared tables, could never see `op_evidence`
+ * absent: by the time it looked, the migration had already re-created it,
+ * empty. Executed: raw-view `absentImmutableTables` returned
+ * `["op_evidence"]`, and after `openHqDatabase()` it returned `[]`.
+ *
+ * The consequence was categorical. `DROP TABLE op_evidence` read clean at BOTH
+ * depths — `safeMode: false`, `observations: []`, `chainVerified: true` — over
+ * an audit log that had been destroyed and rebuilt empty, and the same act
+ * CLEARED an already-latched safe mode and re-admitted `releaseKillSwitch`.
+ *
+ * Observing here is the ordering fix: the fact is captured at the only instant
+ * it is still true. The census reads it through
+ * `observeImmutabilityAsFound`. A handle opened read-only, or connected without
+ * migrating, records nothing and the census falls back to reading the file as
+ * it stands — which is correct, because nothing has re-created anything on it.
+ */
+export function tableNamesBeforeMigration(db: HqDatabase): ReadonlySet<string> | null {
+  return TABLES_BEFORE_MIGRATION.get(db) ?? null;
+}
+
+/**
  * Apply the schema and column upgrades to an already-connected database.
  *
  * Idempotent: the DDL is `CREATE TABLE IF NOT EXISTS` throughout and
  * `ensureColumns` adds only genuinely missing columns, so a migrating open and
  * an explicit later migration produce the same schema.
+ *
+ * The pre-migration table census is taken FIRST and recorded against the
+ * handle — see `tableNamesBeforeMigration` for why that ordering is
+ * load-bearing. It is a read of `sqlite_master`, so it costs one statement and
+ * changes nothing.
  */
 export function migrateHqDatabase(db: HqDatabase): HqDatabase {
+  try {
+    const rows = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
+      .all() as { name: string }[];
+    TABLES_BEFORE_MIGRATION.set(db, new Set(rows.map((row) => row.name)));
+  } catch {
+    // A handle that cannot even read its own catalogue records nothing rather
+    // than an empty set: "I could not look" must not read as "nothing was
+    // there", which would make every declared ledger look dropped.
+  }
   db.exec(DDL);
   ensureColumns(db);
   return db;

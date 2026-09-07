@@ -83,6 +83,7 @@ import {
 } from '../operator/approvals.js';
 import {
   ensureEvidenceGuards,
+  evidenceChainTip,
   verifyEvidenceChain,
   type EvidenceEntry,
 } from '../operator/evidence.js';
@@ -591,7 +592,9 @@ import {
   isRunFailureCategory,
   isRunKind,
   isRunReconcileDecision,
+  IMMUTABLE_LEDGER_ABSENT_EVIDENCE_KIND,
   INTEGRITY_ASSESSED_EVIDENCE_KIND,
+  evidenceChainCommitmentBreach,
   standingIntegrityVerdict,
   loadBackupRecords,
   loadRun,
@@ -2592,7 +2595,14 @@ export class HeadquarterOperations {
     // The cheap half, at every construction. See the field's own note for why
     // the expensive half is an explicit act instead.
     const recordedVerdict = standingIntegrityVerdict(db);
+    // The DURABLE commitment HQ recorded about its own audit log, checked
+    // against the log as it now stands (Wave 5 correction round four, High H1).
+    // One indexed lookup, so the cheap pass can afford it — which is the point:
+    // `DROP TABLE op_evidence` and a rebuild used to read clean at BOTH depths,
+    // and the boot is where a destroyed audit log has to stop being silence.
+    const evidenceCommitmentBreachAt = evidenceChainCommitmentBreach(db);
     this.#integrityReport = structuralIntegrity(db, {
+      evidenceCommitmentBreachAt,
       guardsMissingAsFound: immutabilityAsFound.guardsMissing,
       // Only the ones HQ's own schema has just re-created count as a finding:
       // that is HQ saying "my schema declares this ledger and this file did not
@@ -2743,6 +2753,59 @@ export class HeadquarterOperations {
     // reservation, one immediate transaction" property is unchanged, and it
     // lands an evidence entry beside the row rather than a silent one.
     this.#recordBootIntegrityVerdictIfBlocking(recordedVerdict);
+    // The ledger LOSS itself, recorded durably in the audit log even when a
+    // blocking verdict already stands (Wave 5 correction round four, Medium
+    // M3). `assessHqIntegrity` deliberately assesses the file as it NOW stands
+    // and is the only latch-clearing path, so without this a dropped ledger
+    // observed at boot was cleared by the next assessment with nothing
+    // anywhere recording that rows had gone missing. The verdict says a
+    // guard was absent; only this says WHICH ledger disappeared.
+    this.#recordImmutableLedgerLoss(immutabilityAsFound.tablesAbsent, db);
+  }
+
+  /**
+   * Append an evidence entry naming the engine-immutable ledgers this file did
+   * NOT carry, whenever any were absent as it was found.
+   *
+   * Unconditional on the standing verdict, and that is the correction: the
+   * verdict path below records at most one row and only when nothing blocking
+   * already stands, so on a database already in safe mode a SECOND ledger
+   * could be dropped and re-created empty with nothing recording it at all. A
+   * Founder full assessment then cleared the latch — correctly, because the
+   * file as it then stands is sound — and the fact that an audit ledger had
+   * been destroyed survived nowhere.
+   *
+   * It is an EVIDENCE entry rather than a verdict, deliberately: a verdict is a
+   * judgement HQ is currently making, and this is a fact about what was found.
+   * Facts belong in the append-only log, and the log outlives the latch.
+   */
+  #recordImmutableLedgerLoss(tablesAbsent: readonly string[], db: HqDatabase): void {
+    if (tablesAbsent.length === 0) return;
+    if (db.readonly) return;
+    if (!this.#queuePrivileged) return;
+    const privileged = this.#queuePrivileged;
+    // Only the ones HQ's own schema has since re-created, exactly as the
+    // structural pass counts them: an honestly older file reports nothing.
+    const restored = restoredImmutableTables(db, tablesAbsent);
+    if (restored.length === 0) return;
+    try {
+      privileged.reserve(() => {
+        privileged.appendEvidence({
+          actor: this.#processIdentity,
+          kind: IMMUTABLE_LEDGER_ABSENT_EVIDENCE_KIND,
+          payload: {
+            // Declared TABLE NAMES only — this package's own closed list — so
+            // the entry can never become a channel for stored content.
+            tables: restored,
+            observedAtConstruction: true,
+            executable: false,
+          },
+        });
+      });
+    } catch {
+      // A construction that cannot write its observation must still construct.
+      // The finding still stands in `#integrityReport` and still refuses.
+    }
   }
 
   /**
@@ -2761,22 +2824,16 @@ export class HeadquarterOperations {
     const verdictId = `verdict-${uuid()}`;
     try {
       privileged.reserve(() => {
-        appendIntegrityVerdict(this.#db, {
-          id: verdictId,
-          assessedAt: nowIso(),
-          depth: this.#integrityReport.depth,
-          safeMode: true,
-          findings,
-          processId: this.#processIdentity,
-          assessedBy: this.#processIdentity,
-        });
+        // The evidence entry FIRST, so the verdict can commit to the tip that
+        // now includes it (Wave 5 correction round four, High H1). Both still
+        // land inside ONE reservation, so the pair can never half-exist.
         privileged.appendEvidence({
           actor: this.#processIdentity,
           kind: INTEGRITY_ASSESSED_EVIDENCE_KIND,
           payload: {
             // The row this entry corroborates. `standingIntegrityVerdict` will
-            // not let a CLEAR verdict clear without it, and the pair lands
-            // inside ONE reservation so it can never half-exist.
+            // not let a CLEAR verdict clear without it, and it must be a
+            // genuine LINK in the chain — not merely a row carrying the id.
             verdictId,
             depth: this.#integrityReport.depth,
             safeMode: true,
@@ -2785,6 +2842,16 @@ export class HeadquarterOperations {
             observedAtConstruction: true,
             executable: false,
           },
+        });
+        appendIntegrityVerdict(this.#db, {
+          id: verdictId,
+          assessedAt: nowIso(),
+          depth: this.#integrityReport.depth,
+          safeMode: true,
+          findings,
+          processId: this.#processIdentity,
+          assessedBy: this.#processIdentity,
+          evidenceTip: evidenceChainTip(this.#db),
         });
       });
     } catch {
@@ -8196,6 +8263,11 @@ export class HeadquarterOperations {
       // convenience surface — the Wave 5 High. See the field's note.
       verifyEvidenceChain: this.#verifyEvidenceChainFromStore,
       reliabilitySchemaPresent: this.#reliabilityStorePresent,
+      // The durable commitment, checked HERE too. This is the only path that
+      // clears a latch, so a log that cannot satisfy what HQ recorded about it
+      // must be visible to it or a Founder assessment would clear a verdict
+      // about a destroyed audit log (Wave 5 correction round four, High H1).
+      evidenceCommitmentBreachAt: evidenceChainCommitmentBreach(this.#db),
     });
     const findings = report.observations.map((observation) => observation.finding);
     // RECORD first, latch second, and both inside ONE reservation (Wave 5
@@ -8208,17 +8280,10 @@ export class HeadquarterOperations {
     const privileged = this.#requirePrivilegedQueue();
     const verdictId = `verdict-${uuid()}`;
     privileged.reserve(() => {
-      if (this.#reliabilityStorePresent) {
-        appendIntegrityVerdict(this.#db, {
-          id: verdictId,
-          assessedAt: nowIso(),
-          depth: report.depth,
-          safeMode: report.safeMode,
-          findings,
-          processId: this.#processIdentity,
-          assessedBy: input.requestedBy,
-        });
-      }
+      // Evidence FIRST, verdict second: the verdict commits to the chain tip
+      // that now includes its own corroborating entry, so the commitment is as
+      // fresh as the assessment (Wave 5 correction round four, High H1). Still
+      // one reservation, so the pair still lands together or not at all.
       privileged.appendEvidence({
         actor: input.requestedBy,
         kind: INTEGRITY_ASSESSED_EVIDENCE_KIND,
@@ -8239,6 +8304,18 @@ export class HeadquarterOperations {
           executable: false,
         },
       });
+      if (this.#reliabilityStorePresent) {
+        appendIntegrityVerdict(this.#db, {
+          id: verdictId,
+          assessedAt: nowIso(),
+          depth: report.depth,
+          safeMode: report.safeMode,
+          findings,
+          processId: this.#processIdentity,
+          assessedBy: input.requestedBy,
+          evidenceTip: evidenceChainTip(this.#db),
+        });
+      }
     });
     this.#integrityReport = report;
     return ok(this.#integrityView());

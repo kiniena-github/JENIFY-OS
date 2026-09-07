@@ -55,6 +55,7 @@ import {
   RUN_STATES,
   REPORTABLE_RUN_OUTCOMES,
   isReportableRunOutcome,
+  evidenceChainCommitmentBreach,
   standingIntegrityVerdict,
 } from '../src/application/reliability-command.js';
 import { verifyEvidenceChain } from '../src/operator/evidence.js';
@@ -315,6 +316,17 @@ describe('the safe-mode verdict survives a restart, because it is RECORDED', () 
     expect(SAFE_MODE_STATEMENT).toContain('a restart does not clear it');
     expect(SAFE_MODE_STATEMENT).toContain('only a fresh full assessment that finds nothing blocking');
     expect(SAFE_MODE_STATEMENT).toContain('no Phase 13 ledger');
+    // Wave 5 correction round four, Medium M1 / Low L6: two clauses that were
+    // broader than the code, made exactly true rather than left aspirational.
+    // The statement must NOT claim safe mode refuses everything that adds to
+    // the record — `createTask`, `appendSystemEvidence`, `recordVerifiedBackup`
+    // and `engageKillSwitch` all add rows under an engaged latch, deliberately.
+    expect(SAFE_MODE_STATEMENT).not.toContain('refuses the acts that would add to');
+    expect(SAFE_MODE_STATEMENT).toContain('APPROVE, RELEASE, EXECUTE against or grant AUTHORITY');
+    // And it must say what the corroboration rule actually delivers, including
+    // the residual it cannot close.
+    expect(SAFE_MODE_STATEMENT).toContain('a genuine link in the chain');
+    expect(SAFE_MODE_STATEMENT).toContain('not a cryptographic boundary');
 
     const fx = fileFixture();
     try {
@@ -357,6 +369,304 @@ describe('the safe-mode verdict survives a restart, because it is RECORDED', () 
     }
   });
 });
+
+/**
+ * Wave 5 correction round four — the audit log itself.
+ *
+ * The round's defences (the append-only trigger trio on `op_evidence`, the
+ * census membership, the `sqlite_sequence` high-water mark) do work against a
+ * tail truncation. They did NOT work against DESTRUCTION, and the reason was
+ * boot ORDER: `op_evidence` is created by `migrateHqDatabase`, which runs
+ * BEFORE the facade's census, so the absent-table check could never see it
+ * absent. `DROP TABLE op_evidence` — with or without the attacker recreating
+ * the table and its three guards — read clean at BOTH depths (`safeMode:
+ * false`, `observations: []`, `chainVerified: true`) over an audit log
+ * destroyed and rebuilt empty, and the same act CLEARED an already-latched
+ * safe mode and re-admitted `releaseKillSwitch`.
+ *
+ * Two independent holds close it, and each is tested on its own so neither can
+ * be credited for the other's work:
+ *
+ *  1. the pre-migration observation, which sees the table absent at the only
+ *     instant the question is still answerable;
+ *  2. a durable COMMITMENT to the chain's tip, recorded in the append-only
+ *     verdict ledger — outside `op_evidence` and outside `sqlite_sequence`, so
+ *     a rebuilt log cannot satisfy it whatever it says about itself.
+ */
+describe('destroying the audit log is a finding, not silence', () => {
+  it('sees a DROPPED op_evidence, even though the migration re-creates it first', () => {
+    const fx = fileFixture();
+    try {
+      // A healthy, established file, and a chain that genuinely verifies.
+      expectOk(fx.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(verifyEvidenceChain(fx.raw())).toBeNull();
+
+      // The attack: the audit log is destroyed outright. `DROP TABLE` is DDL —
+      // no BEFORE trigger refuses it.
+      fx.raw().exec('DROP TABLE op_evidence');
+
+      // A new process. `openHqDatabase` re-creates `op_evidence` EMPTY before
+      // the facade can look at it, which is exactly what used to launder this.
+      const restarted = fx.reopen('process-two');
+      const posture = restarted.ops.hqReliabilityPosture();
+      expect(posture.integrity.safeMode).toBe(true);
+      const findings = posture.integrity.observations.map((o) => o.finding);
+      expect(findings).toContain('append_only_guard_missing');
+      const detail = posture.integrity.observations
+        .filter((o) => o.finding === 'append_only_guard_missing')
+        .map((o) => o.detail)
+        .join(' ');
+      expect(detail).toContain('op_evidence');
+      // The LEDGER is named as having gone entirely, not merely three triggers.
+      // That half is what the pre-migration observation adds: before it, the
+      // drop was reported as missing guards on a table HQ had silently rebuilt
+      // empty, and the reader was never told the log itself had been destroyed.
+      expect(detail).toContain('absent ENTIRELY');
+      expect(detail).toContain('whatever those ledgers held is gone');
+
+      // And the acts safe mode exists to refuse still refuse.
+      expectOk(restarted.ops.engageKillSwitch('*', 'founder', 'investigating'));
+      const release = restarted.ops.releaseKillSwitch('*', 'founder');
+      expect(release.ok).toBe(false);
+      expect(!release.ok && release.error.code).toBe('safe_mode_engaged');
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('refuses a log that was dropped and REBUILT with its own three guards', () => {
+    const fx = fileFixture();
+    try {
+      expectOk(fx.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+
+      // The stronger form of the attack: the table comes back, with the same
+      // declared schema AND its own three append-only guards, so nothing the
+      // census looks at is missing. Only the CONTENT is gone.
+      const raw = fx.raw();
+      raw.exec('DROP TABLE op_evidence');
+      raw.exec(`
+        CREATE TABLE op_evidence (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          id TEXT NOT NULL UNIQUE,
+          at TEXT NOT NULL,
+          task_id TEXT,
+          actor TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          payload TEXT NOT NULL,
+          prev_hash TEXT NOT NULL,
+          hash TEXT NOT NULL
+        );
+        CREATE TRIGGER trg_op_evidence_no_rewrite BEFORE UPDATE ON op_evidence
+        BEGIN SELECT RAISE(ABORT, 'op_evidence is append-only'); END;
+        CREATE TRIGGER trg_op_evidence_no_erase BEFORE DELETE ON op_evidence
+        BEGIN SELECT RAISE(ABORT, 'op_evidence is append-only'); END;
+        CREATE TRIGGER trg_op_evidence_no_replace BEFORE INSERT ON op_evidence
+        WHEN EXISTS (SELECT 1 FROM op_evidence WHERE id = NEW.id)
+          OR (TYPEOF(NEW.seq) = 'integer' AND EXISTS (SELECT 1 FROM op_evidence WHERE seq = NEW.seq))
+        BEGIN SELECT RAISE(ABORT, 'op_evidence is append-only'); END;
+      `);
+      // Nothing is missing by the guard census, and the walk over what is left
+      // verifies perfectly: this is what read clean before the correction.
+      expect(missingImmutabilityGuards(fx.raw())).toEqual([]);
+      expect(verifyEvidenceChain(fx.raw())).toBeNull();
+
+      const restarted = fx.reopen('process-two');
+      const posture = restarted.ops.hqReliabilityPosture();
+      expect(posture.integrity.safeMode).toBe(true);
+      expect(posture.integrity.observations.map((o) => o.finding)).toContain(
+        'evidence_chain_broken',
+      );
+      expect(
+        posture.integrity.observations
+          .filter((o) => o.finding === 'evidence_chain_broken')
+          .map((o) => o.detail)
+          .join(' '),
+      ).toContain('reached entry seq');
+
+      // A FULL assessment does not clear it either — the commitment is checked
+      // at both depths, and this is the only latch-clearing path there is.
+      const assessed = expectOk(restarted.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(assessed.safeMode).toBe(true);
+      expect(assessed.depth).toBe('full');
+      expect(assessed.observations.map((o) => o.finding)).toContain('evidence_chain_broken');
+      // And the report behind it says the chain was NOT verified, rather than
+      // reporting "nothing to check" as a pass (Low L7).
+      expect(
+        fullIntegrity(restarted.db, {
+          verifyEvidenceChain: () => verifyEvidenceChain(restarted.db),
+          evidenceCommitmentBreachAt: evidenceChainCommitmentBreach(restarted.db),
+        }).chainVerified,
+      ).toBe(false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * Wave 5 correction round four, Medium M2. The chain-LENGTH commitment the
+   * previous round added lives in `sqlite_sequence`, which carries no triggers
+   * and cannot be brought under the census (it is an internal SQLite table).
+   * Executed then: drop `trg_op_evidence_no_erase`, delete the tail, RECREATE
+   * the trigger, `UPDATE sqlite_sequence SET seq = 2` — and the boot read
+   * `safeMode: false, []`. The doc's mitigating clause ("the first is itself a
+   * blocking finding") was false, because the guard is recreated before the
+   * next boot observation ever runs.
+   */
+  it('catches a tail truncation that rewrites sqlite_sequence to hide itself', () => {
+    const fx = fileFixture();
+    try {
+      expectOk(fx.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      const raw = fx.raw();
+      const tip = raw.prepare(`SELECT MAX(seq) AS seq FROM op_evidence`).get() as { seq: number };
+      expect(tip.seq).toBeGreaterThan(1);
+
+      raw.exec('DROP TRIGGER trg_op_evidence_no_erase');
+      raw.prepare('DELETE FROM op_evidence WHERE seq > 1').run();
+      raw.exec(`
+        CREATE TRIGGER trg_op_evidence_no_erase BEFORE DELETE ON op_evidence
+        BEGIN SELECT RAISE(ABORT, 'op_evidence is append-only'); END;
+      `);
+      raw.prepare(`UPDATE sqlite_sequence SET seq = 1 WHERE name = 'op_evidence'`).run();
+      // Every check that lives inside the log now agrees the log is fine.
+      expect(missingImmutabilityGuards(fx.raw())).toEqual([]);
+      expect(verifyEvidenceChain(fx.raw())).toBeNull();
+
+      const restarted = fx.reopen('process-two');
+      const posture = restarted.ops.hqReliabilityPosture();
+      expect(posture.integrity.safeMode).toBe(true);
+      expect(posture.integrity.observations.map((o) => o.finding)).toContain(
+        'evidence_chain_broken',
+      );
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * Wave 5 correction round four, Medium M1. `verdictIsCorroborated` matched
+   * `kind` plus a `json_extract` of the payload and nothing else, so a
+   * corroborating evidence row needed NO valid hash. Two raw INSERTs — one
+   * clean verdict, one forged corroboration — cleared a latched safe mode and
+   * re-admitted `releaseKillSwitch` while the chain was genuinely broken.
+   */
+  it('does not accept a corroborating evidence row that is not a real link', () => {
+    const fx = fileFixture();
+    try {
+      breakChainByLegalAppend(fx);
+      const engaged = expectOk(fx.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(engaged.safeMode).toBe(true);
+
+      // The two raw appends. Both are writes the append-only triggers
+      // deliberately PERMIT — appending is not tampering.
+      const raw = fx.raw();
+      raw
+        .prepare(
+          `INSERT INTO hq_reliability_verdicts
+             (id, assessed_at, depth, safe_mode, findings, process_id, assessed_by)
+           VALUES (?, ?, ?, 0, '[]', ?, ?)`,
+        )
+        .run('forged-verdict', new Date().toISOString(), 'full', 'not-hq', 'not-hq');
+      raw
+        .prepare(
+          `INSERT INTO op_evidence (id, at, task_id, actor, kind, payload, prev_hash, hash)
+           VALUES (?, ?, NULL, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'forged-corroboration',
+          new Date().toISOString(),
+          'not-hq',
+          'hq_integrity_assessed',
+          JSON.stringify({ verdictId: 'forged-verdict' }),
+          'genesis',
+          'not-a-hash-anybody-computed',
+        );
+
+      // The forged clear does NOT stand: the walk continues past it to the
+      // engaged verdict behind it.
+      const standing = standingIntegrityVerdict(fx.raw());
+      expect(standing?.safeMode).toBe(true);
+
+      const restarted = fx.reopen('process-two');
+      expect(restarted.ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+      expectOk(restarted.ops.engageKillSwitch('*', 'founder', 'investigating'));
+      const release = restarted.ops.releaseKillSwitch('*', 'founder');
+      expect(release.ok).toBe(false);
+      expect(!release.ok && release.error.code).toBe('safe_mode_engaged');
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * Wave 5 correction round four, Medium M3. `assessHqIntegrity` deliberately
+   * passes no `immutableTablesAbsentAsFound` — it asks about the file as it NOW
+   * stands, which is the only way a latch can ever be cleared. That is right,
+   * and it meant a dropped LEDGER observed at boot was cleared by the next
+   * assessment with nothing durably recording that rows had gone missing.
+   *
+   * The clearing is still correct. What is added is that the LOSS is now a
+   * fact in the append-only log, which outlives the latch.
+   */
+  it('records WHICH ledger disappeared in the audit log, so clearing the latch does not erase it', () => {
+    const fx = fileFixture();
+    try {
+      expectOk(fx.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      fx.raw().exec('DROP TABLE hq_intel_budgets');
+
+      const restarted = fx.reopen('process-two');
+      expect(restarted.ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+
+      // The Founder assesses the file as it now stands and the latch clears —
+      // correctly: HQ has re-created what it declares and the file is sound.
+      const cleared = expectOk(restarted.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(cleared.safeMode).toBe(false);
+
+      // And the loss is still on the record afterwards, naming the ledger.
+      const entries = restarted.ops.queue.evidence
+        .list()
+        .filter((entry) => entry.kind === 'hq_immutable_ledger_absent');
+      expect(entries.length).toBeGreaterThan(0);
+      expect(entries.at(-1)!.payload.tables).toContain('hq_intel_budgets');
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+  /**
+   * The acts the corrected sentence names, exercised under an engaged latch.
+   * A statement is only true if the code agrees with it, so both halves are
+   * asserted here rather than only the wording.
+   */
+  it('adds to the record and refuses to release, exactly as the corrected sentence says', () => {
+    const fx = fileFixture();
+    try {
+      breakChainByLegalAppend(fx);
+      expect(expectOk(fx.ops.assessHqIntegrity({ requestedBy: 'founder' })).safeMode).toBe(true);
+
+      // ADDING to the record is still permitted, and each of these is a fact a
+      // store you cannot vouch for still needs written down.
+      expectOk(
+        fx.ops.createTask({
+          capabilityId: CAPS.openPr,
+          payload: { branch: 'recorded-under-safe-mode' },
+          idempotencyKey: 'recorded-under-safe-mode',
+          requestedBy: 'claude',
+        }),
+      );
+      expectOk(fx.ops.engageKillSwitch('*', 'founder', 'investigating'));
+
+      // RELEASING, and buying execution authority, are refused.
+      const release = fx.ops.releaseKillSwitch('*', 'founder');
+      expect(release.ok).toBe(false);
+      expect(!release.ok && release.error.code).toBe('safe_mode_engaged');
+      const claim = fx.ops.claimNext('claude', CAPS.openPr);
+      expect(claim.ok).toBe(false);
+      expect(!claim.ok && claim.error.code).toBe('safe_mode_engaged');
+    } finally {
+      fx.cleanup();
+    }
+  });
 
 describe('the enforcement declarations are frozen, not merely typed readonly', () => {
   it('refuses assignment to the census array, its entries and their guard lists', () => {

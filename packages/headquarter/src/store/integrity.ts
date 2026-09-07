@@ -38,7 +38,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import type { HqDatabase } from './db.js';
-import { openHqDatabaseReadOnly } from './db.js';
+import { openHqDatabaseReadOnly, tableNamesBeforeMigration } from './db.js';
 
 /* ------------------------------------------------------------------ */
 /* Durability requirements                                             */
@@ -268,6 +268,14 @@ export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = deepFree
    * The guards are installed by `ensureEvidenceGuards`; being LISTED here is
    * what makes their removal a reportable finding rather than a silent one.
    *
+   * Membership does NOT, on its own, make a DROP of this table reportable, and
+   * the round that added it said it did (Wave 5 correction round four, High
+   * H1). `migrateHqDatabase` re-creates `op_evidence` before the facade census
+   * runs, so `absentImmutableTables` could never see it absent — see
+   * `MIGRATION_CREATED_IMMUTABLE_TABLES` and
+   * `migrationRestoredImmutableTables` for the ordering fix, and
+   * `evidenceChainCommitmentBreach` for the half no ordering can close.
+   *
    * Trio only: `id` is the sole secondary unique index and the `no_replace`
    * guard already covers it beside `seq`.
    */
@@ -482,6 +490,17 @@ export interface HqIntegrityReport {
    * review, Medium finding 5). It is false on every structural assessment,
    * because a structural assessment does not run the check — false means "not
    * verified here", never "verified and broken".
+   *
+   * **What TRUE still does not distinguish, stated rather than implied** (Wave
+   * 5 correction round four, Low L7). `verifyEvidenceChain` returns null both
+   * for a chain whose every link stands and for a log with no entries at all,
+   * so "checked and sound" and "there was nothing to check" reach the same
+   * verdict. That case is now BOUNDED rather than open-ended: a verdict commits
+   * to the chain tip it was reached over, so any database on which an
+   * assessment has ever run carries a commitment an empty log cannot satisfy,
+   * and the breach is reported. What stays indistinguishable is a database that
+   * has never recorded a verdict AND whose log is empty — a file nothing has
+   * happened on yet.
    */
   chainVerified: boolean;
   durability: HqDurabilityPosture;
@@ -500,16 +519,46 @@ export interface RecordedIntegrityVerdict {
   findings: readonly HqIntegrityFinding[];
 }
 
+/**
+ * The sentence HQ ships verbatim on every reliability view, in every safe-mode
+ * refusal and on the unauthenticated snapshot.
+ *
+ * Two clauses are CORRECTED here rather than softened elsewhere (Wave 5
+ * correction round four, Medium M1 / Low L6).
+ *
+ *  - it used to say HQ "refuses the acts that would ADD TO … a record it cannot
+ *    stand behind". Broader than the code: under an engaged latch `createTask`,
+ *    `proposeMission`, `appendSystemEvidence`, `recordVerifiedBackup` and
+ *    `engageKillSwitch` all add rows, and each is individually argued and
+ *    correct — recording that work was requested, that a recovery point was
+ *    verified, or that everything is now stopped is exactly what a store you
+ *    cannot vouch for still needs. The sentence now names what is actually
+ *    refused: acts that would APPROVE, RELEASE, EXECUTE or grant AUTHORITY;
+ *  - it used to say "only a fresh full assessment that finds nothing blocking"
+ *    clears it, with no qualification. A corroborating evidence entry now has
+ *    to be a genuine LINK in the chain, which closes the forged-row route the
+ *    review executed — but a writer holding the file open can still append a
+ *    correctly-hashed entry, because HQ holds no key such a writer does not
+ *    also have. The sentence says that, in words, instead of asserting a
+ *    boundary the code cannot hold.
+ */
 export const SAFE_MODE_STATEMENT =
   'Safe mode is a statement about HQ’s OWN stored record, not about the outside world. It engages only when ' +
   'the engine reports the file corrupt, an append-only guard the schema declares is missing, or the evidence ' +
-  'hash chain does not verify. While engaged HQ still READS and still reconciles, and it refuses the acts ' +
-  'that would add to, approve, release or execute against a record it cannot stand behind — including ' +
+  'hash chain does not verify — which includes a chain that no longer reaches the tip HQ recorded for it. ' +
+  'While engaged HQ still READS, still reconciles, and still records what happened — a task requested, a ' +
+  'backup verified, a kill switch engaged — because a store you cannot vouch for still needs those facts on ' +
+  'the record. What it refuses are the acts that would APPROVE, RELEASE, EXECUTE against or grant AUTHORITY ' +
+  'over a record it cannot stand behind — including ' +
   'registering a worker or declaring its provider, which would ADD authority. A blocking ' +
   'verdict is APPENDED to HQ’s own verdict ledger and re-read at every construction, so a restart does not ' +
   'clear it — only a fresh full assessment that finds nothing blocking does. A verdict row appended by ' +
   'anything else does not clear it either: a clearing verdict counts only when the hash-chained evidence ' +
-  'log carries the entry naming it that an assessment writes beside it. On a database that carries no ' +
+  'log carries the entry naming it that an assessment writes beside it, AND that entry is a genuine link in ' +
+  'the chain. That is a barrier, not a cryptographic boundary: HQ holds no key a foreign writer does not also ' +
+  'have, so a writer that already holds the database file open can append a correctly-hashed entry of its ' +
+  'own. It is a barrier against a stray append and a restart, not against that writer. On a database that ' +
+  'carries no ' +
   'Phase 13 ledger there is nowhere to record it and the verdict is process-local; the ' +
   'reliability_schema_absent finding says when that is the case.';
 
@@ -637,6 +686,14 @@ export function restoredImmutableTables(db: HqDatabase, absentAsFound: readonly 
  * inside the facade constructor, which is what makes "at least one of them is
  * already here" a sound reading of "this file has been through an HQ boot
  * before".
+ *
+ * Until the Wave 5 correction round four (High H1) this constant recorded that
+ * fact and did nothing else with it: the census ran AFTER the migration, so a
+ * dropped `op_evidence` had already been re-created empty by the time anything
+ * looked, and it was excluded from `established` on top of that. The ordering
+ * is now answered where the ordering is — `migrateHqDatabase` records what the
+ * file carried before it touched it, and `observeImmutabilityAsFound` reads
+ * that instead of the post-migration catalogue for exactly these tables.
  */
 const MIGRATION_CREATED_IMMUTABLE_TABLES: readonly string[] = Object.freeze(['op_evidence']);
 
@@ -691,9 +748,53 @@ export function observeImmutabilityAsFound(db: HqDatabase): ImmutabilityAsFound 
   if (!established) return { guardsMissing: [], tablesAbsent: [], established };
   return {
     guardsMissing: missingImmutabilityGuards(db),
-    tablesAbsent: absentImmutableTables(db),
+    tablesAbsent: [
+      ...new Set([...absentImmutableTables(db), ...migrationRestoredImmutableTables(db)]),
+    ].sort(),
     established,
   };
+}
+
+/**
+ * The migration-created ledgers this file did NOT carry before
+ * `migrateHqDatabase` re-created them.
+ *
+ * `absentImmutableTables` reads the catalogue as it stands, and by the time the
+ * facade constructor runs, `openHqDatabase` has already executed the DDL — so
+ * for `op_evidence`, and only for it, "absent" is a question that can no longer
+ * be asked of the live catalogue. It is asked of the record
+ * `migrateHqDatabase` took a moment earlier instead (Wave 5 correction round
+ * four, High H1).
+ *
+ * Null-safe by design: a handle with no recorded pre-migration census — a
+ * read-only snapshot handle, or one connected without migrating — contributes
+ * nothing here rather than reporting every migration-created ledger as lost.
+ * Nothing re-created anything on such a handle, so there is nothing to launder.
+ */
+export function migrationRestoredImmutableTables(db: HqDatabase): string[] {
+  const before = tableNamesBeforeMigration(db);
+  if (!before) return [];
+  // ESTABLISHED as the file was found, judged on the PRE-migration catalogue —
+  // not on the live one. The distinction is the whole correctness of this
+  // function. A brand-new database legitimately has no `op_evidence` before
+  // `migrateHqDatabase` creates it, and the live catalogue a moment later
+  // carries every ledger this process has just ensured; reading `established`
+  // from THAT would report the first boot of every fresh store as a lost
+  // ledger, and a second facade over the same handle as one too.
+  //
+  // A file that already carried an ensure-created immutable ledger has been
+  // through an HQ boot before, so `op_evidence` missing from it is a fact worth
+  // reporting — the same discriminator `establishedImmutableTables` applies,
+  // asked of the moment it is still answerable.
+  const establishedBefore = ENGINE_IMMUTABLE_TABLES.some(
+    (entry) =>
+      before.has(entry.table) && !MIGRATION_CREATED_IMMUTABLE_TABLES.includes(entry.table),
+  );
+  if (!establishedBefore) return [];
+  const now = tableNames(db);
+  return MIGRATION_CREATED_IMMUTABLE_TABLES.filter(
+    (table) => !before.has(table) && now.has(table),
+  ).sort();
 }
 
 /** Every guard the schema declares on the named engine-immutable tables. */
@@ -761,6 +862,22 @@ export function structuralIntegrity(
      * clean verdict and therefore clears it.
      */
     recordedVerdict?: RecordedIntegrityVerdict | null;
+    /**
+     * The `seq` of a DURABLE commitment HQ recorded about its own evidence
+     * chain that the log no longer satisfies, or null when every commitment
+     * still stands.
+     *
+     * Injected as a VALUE, computed by the caller, because this module is a
+     * leaf of `store/` and the verdict ledger the commitment lives in belongs
+     * to `application/`. See `evidenceChainCommitmentBreach` there for what it
+     * answers and why the answer cannot come from inside `op_evidence` itself.
+     *
+     * It is checked at the CHEAP depth deliberately: it is one indexed lookup,
+     * and the attack it closes — destroying the audit log and rebuilding it —
+     * is one a boot must not read as clean (Wave 5 correction round four, High
+     * H1).
+     */
+    evidenceCommitmentBreachAt?: number | null;
   } = {},
 ): HqIntegrityReport {
   const observations: HqIntegrityObservation[] = [];
@@ -802,6 +919,22 @@ export function structuralIntegrity(
         `journal_mode=${durability.journalMode}, synchronous=${durability.synchronous}; ` +
         `a file-backed HQ database is required to run WAL + FULL. Reported, not blocking: a degraded ` +
         `durability posture risks the NEXT crash, it does not make the standing record false.`,
+    });
+  }
+
+  // A commitment HQ itself recorded, about its own audit log, that the log no
+  // longer satisfies. Blocking, and blocking at BOTH depths: the entry HQ saw
+  // at that seq is gone or is now a different entry, and there is no reading of
+  // that in which the standing record can be stood behind.
+  const commitmentBreachAt = options.evidenceCommitmentBreachAt ?? null;
+  if (commitmentBreachAt != null) {
+    observations.push({
+      finding: 'evidence_chain_broken',
+      blocking: true,
+      detail:
+        `HQ recorded that its hash-chained evidence log reached entry seq ${commitmentBreachAt}, and the ` +
+        `log no longer carries that entry with that hash. A dropped and re-created log, or a truncated ` +
+        `one, cannot satisfy a commitment recorded outside it — whatever the log now says about itself.`,
     });
   }
 
@@ -911,6 +1044,13 @@ export function fullIntegrity(
     guardsMissingAsFound?: readonly string[];
     /** See `structuralIntegrity`. Omitted here for the same reason. */
     immutableTablesAbsentAsFound?: readonly string[];
+    /**
+     * See `structuralIntegrity`. Carried into a FULL assessment too, and the
+     * reason is the one that matters: this is the only latch-clearing path, so
+     * a commitment the log cannot satisfy has to be visible HERE or a Founder
+     * assessment would clear a verdict about a destroyed audit log.
+     */
+    evidenceCommitmentBreachAt?: number | null;
   },
 ): HqIntegrityReport {
   // Deliberately WITHOUT a recorded verdict: a full assessment of the file as
@@ -922,6 +1062,7 @@ export function fullIntegrity(
     reliabilitySchemaPresent: options.reliabilitySchemaPresent,
     guardsMissingAsFound: options.guardsMissingAsFound,
     immutableTablesAbsentAsFound: options.immutableTablesAbsentAsFound,
+    evidenceCommitmentBreachAt: options.evidenceCommitmentBreachAt,
   });
   const observations = [...structural.observations];
 
@@ -996,7 +1137,10 @@ export function fullIntegrity(
     depth: 'full',
     observations,
     safeMode: observations.some((observation) => observation.blocking),
-    chainVerified: brokenAt === null,
+    // A commitment the log cannot satisfy is a chain that did not verify, even
+    // when every link present holds — which is exactly the state a dropped and
+    // rebuilt log is in.
+    chainVerified: brokenAt === null && (options.evidenceCommitmentBreachAt ?? null) === null,
     durability: structural.durability,
   };
 }

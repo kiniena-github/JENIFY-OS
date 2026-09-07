@@ -12,8 +12,8 @@
  *     correction this table carried NO triggers at all, on the argument that
  *     "its guarantee is the chain rather than the engine"; a raw
  *     `DELETE FROM op_evidence WHERE seq > 1` was therefore simply permitted.
- *  2. **A dropped guard is a census finding.** `op_evidence` is now a member
- *     of `ENGINE_IMMUTABLE_TABLES`, so removing the triggers is
+ *  2. **A dropped guard is a census finding.** `op_evidence` is a member of
+ *     `ENGINE_IMMUTABLE_TABLES`, so removing the triggers is
  *     `append_only_guard_missing` — blocking, and safe mode engages on it.
  *  3. **The chain commits to its own LENGTH, not only to its links.**
  *     `verifyEvidenceChain` walks the links AND compares the highest `seq`
@@ -22,18 +22,43 @@
  *     the NEWEST entries left a chain that verified perfectly: the walk starts
  *     at the genesis value and had nothing to say about where the chain was
  *     supposed to END.
+ *  4. **HQ commits DURABLY, outside this table, to how far the chain reached.**
+ *     Every recorded verdict carries the tip (`seq` + `hash`) the chain had
+ *     when it was reached, in the append-only verdict ledger; the boot pass and
+ *     every full assessment check that the log still carries that entry with
+ *     that hash. See `evidenceChainCommitmentBreach` in
+ *     `application/reliability-command.ts`.
  *
- * What is corrected rather than restated: the previous header claimed "silent
- * tampering or deletion breaks the chain and is detectable by verifyChain()".
- * The tampering half was true; the deletion half was not, and it was the half
- * an audit record actually needs (Wave 5 correction round three, High A2).
+ * **The fourth hold is not decoration, and two false claims are corrected with
+ * it** (Wave 5 correction round four, High H1). Holds 1–3 all live INSIDE the
+ * thing being checked: the triggers, the rows and the `sqlite_sequence` entry
+ * all disappear with `DROP TABLE op_evidence`, which is DDL that no BEFORE
+ * trigger refuses. And the census that hold 2 rests on runs AFTER
+ * `migrateHqDatabase` has already re-created the table, empty.
  *
- * The residual is stated rather than glossed: against a writer that already
- * holds the database file open, dropping the triggers, deleting the tail,
- * recomputing the chain from the true tip and rewriting `sqlite_sequence` is
- * still possible. Each of those is an additional deliberate step and the first
- * of them is itself a blocking finding, so this is a real barrier, not a
- * cryptographic boundary — HQ holds no key a foreign writer does not also have.
+ *  - the previous header said "a dropped `op_evidence` is caught by the census
+ *    … the check that can actually see it". It was NOT: executed, raw-view
+ *    `absentImmutableTables` returned `["op_evidence"]` and, after
+ *    `openHqDatabase()`, `[]`. A drop plus a rebuild carrying its own three
+ *    declared guards read `safeMode: false`, `observations: []`,
+ *    `chainVerified: true` at both depths over a destroyed audit log — and
+ *    CLEARED an already-latched safe mode. The ordering is fixed at the
+ *    ordering (`tableNamesBeforeMigration`), and the commitment closes the
+ *    rebuild case that no ordering can;
+ *  - the previous header called the `sqlite_sequence` step a real barrier
+ *    because "the first of them is itself a blocking finding". It is not: a
+ *    dropped trigger that is RECREATED before the next boot observation is
+ *    never observed missing, so drop-trigger / delete-tail / recreate-trigger /
+ *    `UPDATE sqlite_sequence` read clean. `sqlite_sequence` carries no triggers
+ *    and cannot be brought under the census — it is an internal SQLite table —
+ *    so what closes that is the commitment, which lives in a ledger that DOES
+ *    carry the guards and IS censused.
+ *
+ * The remaining residual is stated rather than glossed: HQ holds no key a
+ * foreign writer does not also have, so a writer holding the file open can
+ * still APPEND a correctly-hashed entry, and can still destroy the verdict
+ * ledger and the evidence log together — which is itself a census finding on
+ * the verdict ledger. This is a real barrier, not a cryptographic boundary.
  */
 
 import { createHash } from 'node:crypto';
@@ -119,9 +144,20 @@ export function ensureEvidenceGuards(db: HqDatabase): void {
  *
  * Null when there is nothing to compare against: `sqlite_sequence` is created
  * lazily by the first AUTOINCREMENT insert in the whole database, and its row
- * for a table disappears with the table. A dropped `op_evidence` is caught by
- * the census instead (`ENGINE_IMMUTABLE_TABLES`), which is the check that can
- * actually see it.
+ * for a table disappears with the table.
+ *
+ * A dropped `op_evidence` is therefore INVISIBLE here, and the claim that used
+ * to stand in this comment — that the census catches it, being "the check that
+ * can actually see it" — was false (Wave 5 correction round four, High H1). The
+ * census ran after `migrateHqDatabase` had already re-created the table. What
+ * sees it now is the pre-migration observation and the durable chain-tip
+ * commitment; see the module header.
+ *
+ * `sqlite_sequence` is also UNGUARDED and uncensused — it is an internal SQLite
+ * table, so no trigger can be put on it and `tableNames` excludes it by
+ * construction. One `UPDATE sqlite_sequence` therefore defeats this check on
+ * its own. It is kept because it is free and catches a careless truncation; the
+ * commitment is what catches a deliberate one.
  */
 function evidenceHighWaterMark(db: HqDatabase): number | null {
   try {
@@ -183,6 +219,13 @@ export function assertNoSecretLikeContent(payload: Record<string, unknown>): voi
  * check detects a chain whose links or whose LENGTH no longer stand. Two
  * findings, deliberately, because either one alone could be walked around.
  *
+ * Neither of them detects DESTRUCTION, and that is stated here rather than
+ * left to be discovered: this walk sees only what the table now contains, so
+ * over a log dropped and rebuilt it returns null — "the chain stands" — about a
+ * chain that no longer exists. `evidenceChainCommitmentBreach` is the check for
+ * that, and it is checked beside this one at both depths (Wave 5 correction
+ * round four, High H1).
+ *
  * `EvidenceLog.verifyChain` stays as the public delegate and now
  * calls this; `HeadquarterOperations` calls this directly through a `#private`
  * closure over its own handle, so patching `queue.evidence.verifyChain`, or
@@ -238,6 +281,88 @@ export function verifyEvidenceChain(db: HqDatabase): number | null {
   const highWater = evidenceHighWaterMark(db);
   if (highWater != null && highWater > lastSeq) return lastSeq + 1;
   return null;
+}
+
+/**
+ * The chain's current TIP — the highest `seq` present and the hash it carries.
+ *
+ * This is what a verdict COMMITS to (Wave 5 correction round four, High H1).
+ * `sqlite_sequence` is SQLite's own high-water mark and disappears with the
+ * table, so it says nothing at all about a log that was DROPPED and rebuilt;
+ * a tip recorded in HQ's own append-only verdict ledger survives that, because
+ * dropping THAT ledger is a census finding in its own right.
+ *
+ * Null on an empty log. A commitment is never made to an empty chain, so
+ * "nothing yet" and "a tip" stay distinguishable.
+ */
+export function evidenceChainTip(db: HqDatabase): { seq: number; hash: string } | null {
+  try {
+    const row = db.prepare(`SELECT seq, hash FROM op_evidence ORDER BY seq DESC LIMIT 1`).get() as
+      | { seq: unknown; hash: unknown }
+      | undefined;
+    if (!row) return null;
+    const seq = Number(row.seq);
+    if (!Number.isInteger(seq) || typeof row.hash !== 'string') return null;
+    return { seq, hash: row.hash };
+  } catch {
+    // No readable log is not a tip. The caller records no commitment rather
+    // than a false one.
+    return null;
+  }
+}
+
+/**
+ * Does the entry at `seq` LINK soundly — its own hash correct over its stored
+ * fields, and its `prev_hash` equal to the hash of the entry before it?
+ *
+ * O(1), which is what lets a boot-time structural pass use it. It is not a
+ * whole-chain verification and does not claim to be: what it answers is "is
+ * this one row a genuine link", which is exactly the question a corroboration
+ * check needs (Wave 5 correction round four, Medium M1). Before it, a
+ * corroborating evidence row needed NO valid hash at all — the check matched
+ * `kind` and a `json_extract` of the payload — so two raw INSERTs cleared a
+ * latched safe mode while the chain was genuinely broken.
+ *
+ * The residual is unchanged and is stated wherever this is used: HQ holds no
+ * key a foreign writer does not also have, so a writer holding the file open
+ * can APPEND a correctly-hashed row. This raises the bar from "any row" to "a
+ * row that is really part of the chain"; it is not a cryptographic boundary.
+ */
+export function evidenceEntryLinkStands(db: HqDatabase, seq: number): boolean {
+  try {
+    const row = db.prepare(`SELECT * FROM op_evidence WHERE seq = ?`).get(seq) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) return false;
+    const previous = db
+      .prepare(`SELECT hash FROM op_evidence WHERE seq < ? ORDER BY seq DESC LIMIT 1`)
+      .get(seq) as { hash: unknown } | undefined;
+    const prevHash = previous ? previous.hash : GENESIS_HASH;
+    if (typeof prevHash !== 'string') return false;
+    if (row.prev_hash !== prevHash) return false;
+    let payloadJson: string;
+    try {
+      payloadJson = JSON.stringify(JSON.parse(row.payload as string));
+    } catch {
+      return false;
+    }
+    const expected = createHash('sha256')
+      .update(
+        [
+          prevHash,
+          row.id as string,
+          row.at as string,
+          (row.task_id as string | null) ?? '',
+          row.actor as string,
+          row.kind as string,
+          payloadJson,
+        ].join('|'),
+      )
+      .digest('hex');
+    return row.hash === expected;
+  } catch {
+    return false;
+  }
 }
 
 export class EvidenceLog {
