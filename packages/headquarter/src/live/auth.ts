@@ -535,7 +535,10 @@ export function loadFounderBindings(raw: unknown): FounderMapResult {
           'A guessed username or email is never accepted in their place.',
       };
     }
-    const accountKey = `${realmId} ${accountId}`;
+    // U+001F UNIT SEPARATOR, not a raw NUL: a literal 0x00 makes this file
+    // binary to grep/git grep/ripgrep, which then skip its content entirely.
+    // Same runtime value; the file stays text (Wave 5 Medium 10).
+    const accountKey = `${realmId}${accountId}`;
     if (seenAccounts.has(accountKey)) {
       return {
         ok: false,

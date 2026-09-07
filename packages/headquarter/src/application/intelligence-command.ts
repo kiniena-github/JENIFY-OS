@@ -1939,7 +1939,13 @@ function foldSpend(
     // Currency is part of the grouping key, because HQ never converts between
     // currencies and a sum across two of them would be a fabricated number.
     const currency = row.fact.currency ?? 'unknown';
-    const composite = `${id} ${currency}`;
+    // U+001F UNIT SEPARATOR, not a raw NUL. A literal 0x00 in a source file
+    // makes it BINARY to grep, git grep and ripgrep — they report "binary file
+    // matches" and skip the content — so the file becomes invisible to the
+    // repository's own text tooling and to a reviewer's honesty scan. The
+    // runtime value is identical: both are characters no identifier or
+    // currency code can contain (Wave 5 Medium 10).
+    const composite = `${id}${currency}`;
     const entry = byKey.get(composite) ?? {
       id,
       currency,

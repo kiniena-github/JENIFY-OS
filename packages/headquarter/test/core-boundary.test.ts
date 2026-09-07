@@ -159,3 +159,23 @@ describe('the HQ core depends on nothing above it (Phase 2, Stage 0)', () => {
     expect(importers).toEqual(['src/store/db.ts']);
   });
 });
+
+/**
+ * Wave 5 Medium 10. A literal 0x00 was used as a composite-key separator in
+ * three source files. `grep`, `git grep` and ripgrep all treat a NUL as the
+ * marker of a binary file: they report "binary file matches" and skip the
+ * content, so the file becomes invisible to the repository's own text tooling
+ * and to any reviewer's honesty scan over it. The runtime value of U+001F is
+ * identical and the file stays text.
+ */
+describe('the shipped source stays text', () => {
+  it('carries no raw NUL byte in any source file', () => {
+    const offenders = files
+      .filter((file) => readFileSync(file).includes(0x00))
+      .map((file) => relative(packageRoot, file).split(sep).join('/'));
+    expect(
+      offenders,
+      'a NUL byte makes a file binary to grep/git grep/ripgrep, which then skip its content entirely',
+    ).toEqual([]);
+  });
+});
