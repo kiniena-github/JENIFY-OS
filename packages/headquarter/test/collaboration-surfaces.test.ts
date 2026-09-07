@@ -142,7 +142,7 @@ describe('the Mission Room', () => {
  * vocabulary has no level classifying free text for an unauthenticated reader.
  */
 describe('the snapshot section classifies war-room material', () => {
-  it('the unauthenticated artifact carries no founder_only session and no purpose verbatim, states both omissions, and aggregates over nothing withheld; the Founder-gated build carries both', () => {
+  it('NO section of the unauthenticated artifact — not the collaboration section, not the Phase 10 command centre, not anywhere in the serialized document — names a founder_only session, its activity or its purpose; both omissions are stated, nothing aggregates over them, and the Founder-gated build carries all of it', () => {
     const fx = collaborationFixture();
     const open = expectOk(
       fx.ops.openCollaborationSession({
@@ -164,10 +164,30 @@ describe('the snapshot section classifies war-room material', () => {
     ).session;
     expect(secret.privacy).toBe('founder_only');
     admit(fx, secret.id, 'claude', 'builder');
-    contribute(fx, secret.id, { sessionId: secret.id, content: 'A finding inside the private room.' });
+    admit(fx, secret.id, 'codex', 'reviewer');
+    const privateFinding = contribute(fx, secret.id, { sessionId: secret.id, content: 'A finding inside the private room.' });
+    // Real activity inside the private room — the two contribution kinds the
+    // Phase 10 command centre turns into inbox items. This is what the
+    // whole-document assertions below exist for: the collaboration section
+    // withheld the room correctly while the command-centre section narrated
+    // its disagreement and its handoff on the same file.
+    const privateCritique = contribute(fx, secret.id, {
+      sessionId: secret.id,
+      kind: 'critique',
+      content: 'Disagreeing inside the private room.',
+      requestedBy: 'codex',
+      disagreesWith: [privateFinding.id],
+    });
+    const privateHandoff = contribute(fx, secret.id, {
+      sessionId: secret.id,
+      kind: 'handoff_request',
+      content: 'Handing this over inside the private room.',
+      handoff: { taskId: fx.taskId, toWorkerId: 'jules', reason: 'private reason' },
+    });
     admit(fx, open.id, 'codex', 'reviewer');
 
-    const artifact = liveSnapshotFromOperations(fx.ops, { now: AT }).collaboration!;
+    const document = liveSnapshotFromOperations(fx.ops, { now: AT });
+    const artifact = document.collaboration!;
     expect(artifact.data.sessions).toBe(2);
     expect(artifact.data.withheldFounderOnly).toBe(1);
     expect(artifact.data.recent.map((session) => session.id)).toEqual([open.id]);
@@ -182,23 +202,52 @@ describe('the snapshot section classifies war-room material', () => {
     expect(artifact.data.recent[0]!.title).toBe('Public-facing room');
     expect(artifact.provenance.note).toContain('1 founder_only session(s)');
     expect(artifact.provenance.note).toContain('1 carried session(s) state a purpose');
-    const wire = JSON.stringify(artifact);
-    expect(wire).not.toContain('INTERNAL-PURPOSE-TEXT');
-    expect(wire).not.toContain('FOUNDER-ONLY-PURPOSE-TEXT');
-    expect(wire).not.toContain('Acquisition war room');
-    expect(wire).not.toContain('A finding inside the private room');
-    expect(() => assertBrowserSafe(liveSnapshotFromOperations(fx.ops, { now: AT }))).not.toThrow();
-    expect(() => assertNoFabricatedFields(liveSnapshotFromOperations(fx.ops, { now: AT }))).not.toThrow();
+    // The WHOLE serialized artifact, not just this section. The earlier
+    // version of this test asserted only over `artifact.collaboration`, so it
+    // passed while the Phase 10 command-centre section published the same
+    // room's id, participants, roles and activity two keys later.
+    const wholeDocument = JSON.stringify(document);
+    for (const forbidden of [
+      'INTERNAL-PURPOSE-TEXT',
+      'FOUNDER-ONLY-PURPOSE-TEXT',
+      'Acquisition war room',
+      'A finding inside the private room',
+      'Disagreeing inside the private room',
+      'Handing this over inside the private room',
+      secret.id,
+      privateFinding.id,
+      privateCritique.id,
+      privateHandoff.id,
+    ]) {
+      expect(wholeDocument, forbidden).not.toContain(forbidden);
+    }
+    // And the command-centre section specifically raised NO item from that
+    // room: no id, no summary, and no count aggregating over one.
+    const centre = document.commandCenter!.data;
+    expect(centre.attention.items.map((item) => item.reason)).not.toContain('disagreement_open');
+    expect(centre.attention.items.map((item) => item.reason)).not.toContain('handoff_requested');
+    expect(centre.attention.withheldFounderOnly).toBe(2);
+    expect(centre.recommendations.total).toBe(centre.attention.total);
+    expect(() => assertBrowserSafe(document)).not.toThrow();
+    expect(() => assertNoFabricatedFields(document)).not.toThrow();
 
     // The Founder-gated build — the same flag that carries founder_only memory
-    // and truth — carries the session and its purpose.
-    const gated = liveSnapshotFromOperations(fx.ops, { now: AT, includeFounderOnlyMemory: true }).collaboration!;
+    // and truth — carries the session, its purpose and its activity.
+    const gatedDocument = liveSnapshotFromOperations(fx.ops, { now: AT, includeFounderOnlyMemory: true });
+    const gated = gatedDocument.collaboration!;
     expect(gated.data.withheldFounderOnly).toBe(0);
     expect(gated.data.withheldPurposes).toBe(0);
     expect(gated.data.recent.map((session) => session.id).sort()).toEqual([open.id, secret.id].sort());
     expect(JSON.stringify(gated)).toContain('FOUNDER-ONLY-PURPOSE-TEXT');
+    // Distinct workers across both rooms: claude (private only) and codex (both).
     expect(gated.data.workersAdmitted).toBe(2);
-    expect(gated.data.contributions).toBe(1);
+    expect(gated.data.contributions).toBe(3);
+    const gatedCentre = gatedDocument.commandCenter!.data;
+    expect(gatedCentre.attention.withheldFounderOnly).toBe(0);
+    expect(gatedCentre.attention.items.map((item) => item.reason)).toEqual(
+      expect.arrayContaining(['disagreement_open', 'handoff_requested']),
+    );
+    expect(JSON.stringify(gatedDocument)).toContain(secret.id);
   });
 
   it('a classification is validated, defaults to internal, does not dedupe two differently-classified opens onto each other, and cannot be rewritten afterwards', () => {

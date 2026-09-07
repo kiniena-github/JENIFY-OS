@@ -4,9 +4,10 @@
  *
  * The section is the one place this phase crosses to an UNAUTHENTICATED
  * reader, so the disclosure discipline is what most of this suite is about:
- * an item derived from a `founder_only` truth record is not carried, no
- * number aggregates over one, and both omissions are counted and stated in
- * the provenance. Beside that: every number is a count the server made,
+ * an item derived from Founder-private material — a `founder_only` truth
+ * record OR a `founder_only` collaboration session (the M1 correction) — is
+ * not carried, no number aggregates over one, and both omissions are counted
+ * and stated in the provenance. Beside that: every number is a count the server made,
  * nothing on the artifact is a fabricated metric, and a document without the
  * section changes no room.
  */
@@ -20,6 +21,7 @@ import type { Provenance } from '../src/live/provenance.js';
 import { COMMAND_CENTER_SNAPSHOT_LIMIT } from '../src/application/chief-of-staff.js';
 import { CAPS, expectOk } from './application.fixture.js';
 import { commandCenterFixture, taskAwaitingApproval } from './command-center.fixture.js';
+import { admit, contribute, openSession } from './collaboration.fixture.js';
 import { HQ_ROOMS } from '../src/client/rooms.js';
 
 const AT = '2026-09-07T12:00:00.000Z';
@@ -147,13 +149,91 @@ describe('the snapshot section', () => {
     expect(centre.attention.total).toBe(before.total);
     expect(centre.recommendations.total).toBe(centre.attention.total);
     expect(JSON.stringify(artifact.commandCenter)).not.toContain('internal supplier');
-    expect(artifact.commandCenter!.provenance.note).toContain('1 attention item(s) derive from founder_only truth records');
+    expect(artifact.commandCenter!.provenance.note).toContain(
+      '1 attention item(s) derive from founder_only material (a truth record or a collaboration session)',
+    );
 
     // The Founder-gated /state build carries both, and states nothing withheld.
     const gated = liveSnapshotFromOperations(fx.ops, { now: AT, includeFounderOnlyMemory: true });
     expect(gated.commandCenter!.data.attention.items.some((item) => item.source.id === record.id)).toBe(true);
     expect(gated.commandCenter!.data.attention.withheldFounderOnly).toBe(0);
-    expect(gated.commandCenter!.provenance.note).not.toContain('derive from founder_only truth records');
+    expect(gated.commandCenter!.provenance.note).not.toContain('derive from founder_only material');
+  });
+
+  /**
+   * Phase 10 correction, M1. `founder_only` is a classification on the SESSION
+   * (Phase 9 L5), and until this correction the command layer had no
+   * representation of it: the collaboration section correctly withheld a
+   * private room while these two item kinds narrated its id, both worker ids,
+   * the disputing worker's role, the mission and the canonical task on the
+   * same unauthenticated file.
+   */
+  it('withholds the disagreement and the handoff raised inside a founder_only session, moves no count by them, and carries both past the Founder gate', () => {
+    const fx = commandCenterFixture();
+    const before = liveSnapshotFromOperations(fx.ops, { now: AT }).commandCenter!.data;
+    const secret = openSession(fx, { title: 'PRIVATE-ROOM-TITLE', purpose: 'PRIVATE-ROOM-PURPOSE', privacy: 'founder_only' });
+    expect(secret.privacy).toBe('founder_only');
+    admit(fx, secret.id, 'claude', 'builder');
+    admit(fx, secret.id, 'codex', 'reviewer');
+    const finding = contribute(fx, secret.id, { sessionId: secret.id });
+    const critique = contribute(fx, secret.id, {
+      sessionId: secret.id,
+      kind: 'critique',
+      content: 'PRIVATE-CRITIQUE-TEXT',
+      requestedBy: 'codex',
+      disagreesWith: [finding.id],
+    });
+    const handoff = contribute(fx, secret.id, {
+      sessionId: secret.id,
+      kind: 'handoff_request',
+      content: 'PRIVATE-HANDOFF-TEXT',
+      handoff: { taskId: fx.taskId, toWorkerId: 'jules', reason: 'private' },
+    });
+
+    const artifact = liveSnapshotFromOperations(fx.ops, { now: AT });
+    const centre = artifact.commandCenter!.data;
+    // Two real items exist and two are withheld: nothing was dropped silently.
+    expect(centre.attention.withheldFounderOnly).toBe(2);
+    expect(centre.attention.total).toBe(before.attention.total);
+    expect(centre.attention.byKind).toEqual(before.attention.byKind);
+    expect(centre.recommendations.total).toBe(centre.attention.total);
+    const wire = JSON.stringify(artifact);
+    for (const forbidden of [secret.id, critique.id, handoff.id, 'PRIVATE-ROOM-TITLE', 'PRIVATE-ROOM-PURPOSE', 'PRIVATE-CRITIQUE-TEXT', 'PRIVATE-HANDOFF-TEXT']) {
+      expect(wire, forbidden).not.toContain(forbidden);
+    }
+
+    // Past the Founder gate: both items, flagged founderOnly, nothing withheld.
+    const gated = liveSnapshotFromOperations(fx.ops, { now: AT, includeFounderOnlyMemory: true }).commandCenter!.data;
+    expect(gated.attention.withheldFounderOnly).toBe(0);
+    expect(gated.attention.total).toBe(before.attention.total + 2);
+    const raised = gated.attention.items.filter((item) => item.reason === 'disagreement_open' || item.reason === 'handoff_requested');
+    expect(raised).toHaveLength(2);
+    for (const item of raised) expect(item.founderOnly, item.id).toBe(true);
+    expect(JSON.stringify(gated)).toContain(secret.id);
+  });
+
+  it('still carries the disagreement and the handoff of an INTERNAL session on the unauthenticated artifact — the correction withholds a classification, not the whole item kind', () => {
+    const fx = commandCenterFixture();
+    const before = liveSnapshotFromOperations(fx.ops, { now: AT }).commandCenter!.data.attention.total;
+    const open = openSession(fx, { title: 'Public-facing room' });
+    expect(open.privacy).toBe('internal');
+    admit(fx, open.id, 'claude', 'builder');
+    admit(fx, open.id, 'codex', 'reviewer');
+    const finding = contribute(fx, open.id, { sessionId: open.id });
+    contribute(fx, open.id, { sessionId: open.id, kind: 'critique', content: 'No.', requestedBy: 'codex', disagreesWith: [finding.id] });
+    contribute(fx, open.id, {
+      sessionId: open.id,
+      kind: 'handoff_request',
+      content: 'To jules.',
+      handoff: { taskId: fx.taskId, toWorkerId: 'jules', reason: 'r' },
+    });
+    const centre = liveSnapshotFromOperations(fx.ops, { now: AT }).commandCenter!.data;
+    expect(centre.attention.withheldFounderOnly).toBe(0);
+    expect(centre.attention.total).toBe(before + 2);
+    const raised = centre.attention.items.filter((item) => item.reason === 'disagreement_open' || item.reason === 'handoff_requested');
+    expect(raised).toHaveLength(2);
+    for (const item of raised) expect(item.founderOnly, item.id).toBe(false);
+    expect(JSON.stringify(centre)).toContain(open.id);
   });
 
   it('withholds an unknown entry that names a founder_only record and keeps it out of the unknown total', () => {
@@ -182,6 +262,36 @@ describe('the snapshot section', () => {
     const gated = liveSnapshotFromOperations(fx.ops, { now: AT, includeFounderOnlyMemory: true }).commandCenter!.data;
     expect(gated.unknown.total).toBe(open + 1);
     expect(gated.unknown.withheldFounderOnly).toBe(0);
+  });
+
+  /**
+   * A stated limitation, pinned so it cannot drift into a bigger one. The
+   * brief RECEIPT is a Founder-audience document (`issueBrief` assembles it
+   * with `includeFounderOnly: true`, because a receipt the Founder signs
+   * states what the Founder can see), and `briefs.latest` rides the
+   * unauthenticated artifact. Its `counts` therefore DO span the private
+   * material the live section beside it withholds. What that permits and
+   * what it does not is asserted here rather than left for a reader to find.
+   */
+  it('publishes the brief receipt’s Founder-audience counts, which do span withheld material — but no session id, contribution id, room title, purpose or contribution text of it', () => {
+    const fx = commandCenterFixture();
+    const secret = openSession(fx, { title: 'RECEIPT-PRIVATE-TITLE', purpose: 'RECEIPT-PRIVATE-PURPOSE', privacy: 'founder_only' });
+    admit(fx, secret.id, 'claude', 'builder');
+    admit(fx, secret.id, 'codex', 'reviewer');
+    const finding = contribute(fx, secret.id, { sessionId: secret.id });
+    contribute(fx, secret.id, { sessionId: secret.id, kind: 'critique', content: 'RECEIPT-PRIVATE-CRITIQUE', requestedBy: 'codex', disagreesWith: [finding.id] });
+    expectOk(fx.ops.issueBrief({ requestedBy: 'founder' }));
+
+    const artifact = liveSnapshotFromOperations(fx.ops, { now: AT });
+    const centre = artifact.commandCenter!.data;
+    // The live section withholds it; the receipt counted it.
+    expect(centre.attention.withheldFounderOnly).toBe(1);
+    expect(centre.briefs.latest!.counts.attention.total).toBe(centre.attention.total + 1);
+    // The disclosure stops at the count. Nothing identifying crosses.
+    const wire = JSON.stringify(artifact.commandCenter);
+    for (const forbidden of [secret.id, finding.id, 'RECEIPT-PRIVATE-TITLE', 'RECEIPT-PRIVATE-PURPOSE', 'RECEIPT-PRIVATE-CRITIQUE']) {
+      expect(wire, forbidden).not.toContain(forbidden);
+    }
   });
 
   it('carries no department projection and no recommendation body — those stay behind the Founder gate', () => {

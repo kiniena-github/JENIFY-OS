@@ -321,7 +321,18 @@ less-disclosing answer:
   `founder_only`-classified session, counts the omission in `withheldFounderOnly`, and
   aggregates nothing else over the withheld sessions — their admitted workers and
   contributions are not in `workersAdmitted` / `contributions` / `activeSessions`, so
-  arithmetic on the artifact discloses no categorical fact about a private room;
+  arithmetic on the artifact discloses no categorical fact about a private room.
+  **Corrected in Phase 10 (M1):** as originally written this described the collaboration
+  SECTION only, and Phase 10 then added a second reading layer on the same file (the
+  command-centre section) that had no representation of session privacy at all and
+  narrated a private room's id, participants, roles and activity through its
+  `disagreement_open` / `handoff_requested` items. The claim is now true of the WHOLE
+  artifact, and is pinned that way — `collaboration-surfaces.test.ts` asserts over the
+  serialized document, not over one section;
+- the row is read for that decision through `loadCollaborationSessions(#db)` and the
+  private `#sessionView`, never through the public `listCollaborationSessions()`
+  projection (Phase 10 correction, L1 — the Phase 9 High applied to this read as well).
+  Pinned by a hostile same-realm patch on the instance and the prototype;
 - no carried session publishes its free-text `purpose` verbatim on that artifact at all.
   The vocabulary has NO `public` level, so nothing is ever classified FOR publication to an
   unauthenticated reader; where the policy was ambiguous the less-disclosing answer was
@@ -398,11 +409,18 @@ context selection: the policy is a stated table.
   and carries founder_only truth by design, exactly as `GET /truth` does.
 - **A session's privacy classification is metadata, not an enforcement mechanism by
   itself** — exactly what `memory/schema.ts` says of its own field. It is stored on the
-  row; the reading layer enforces. Today one reading layer acts on it: the snapshot
-  artifact. The Founder-gated room/list/context reads carry every session regardless of
-  classification, which is correct (they are behind the Founder gate) but means a
-  `founder_only` classification is currently an artifact-disclosure control and nothing
-  wider. Stated, not implied.
+  row; the reading layer enforces — and EVERY reading layer that crosses to an
+  unauthenticated reader must be made to. This bullet originally said "today one reading
+  layer acts on it: the snapshot artifact", which stopped being true one commit later:
+  Phase 10 published a second section on the same file that did not act on it (M1).
+  Today two act on it: the Phase 9 collaboration section, and the Phase 10 command-centre
+  section (through `CollaborationFact.privacy` → `InboxAttentionItem.founderOnly`, plus
+  the collaboration bundle-read acts in `deriveSafeNext`). The Founder-gated
+  room/list/context reads carry every session regardless of classification, which is
+  correct (they are behind the Founder gate) but means a `founder_only` classification is
+  still an artifact-disclosure control and nothing wider. **A new reader of the record
+  must decide this explicitly** — the failure mode here was a new surface defaulting to
+  "not private" rather than refusing to answer. Stated, not implied.
 - **The classification cannot be changed after a session is opened.** The table is
   append-only by engine, so a session opened `internal` stays `internal`; reclassifying
   would need a new session (or a deliberate future correction act). Chosen over inventing

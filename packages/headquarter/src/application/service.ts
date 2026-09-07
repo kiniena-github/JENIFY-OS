@@ -6876,10 +6876,22 @@ export class HeadquarterOperations {
    * them (review round 2): `byState`, `unresolvedContradictions` and
    * `awaitingAcceptance` span the set the reader may see, so arithmetic on
    * the artifact discloses no categorical fact about a private record.
+   *
+   * The records and the contradictions are read through the PRIVATE
+   * derivation over the canonical graph, not through the public
+   * `listTruth()` / `listTruthContradictions()` projections (Phase 10
+   * correction — carry-forward base debt, the same shape as the Phase 9
+   * High). This read decides an UNAUTHENTICATED disclosure: a same-realm
+   * patch that wrapped the public method and relabelled `privacy` on the
+   * real rows would otherwise publish a genuine founder_only statement AND
+   * zero the `withheldFounderOnly` field beside it. `listTruth()` is
+   * unchanged; it stays the Founder-gated route's projection.
    */
   truthSummary(options: { includeFounderOnly: boolean; limit?: number }): TruthSnapshotView {
     const limit = options.limit ?? TRUTH_SNAPSHOT_LIMIT;
-    const all = this.listTruth();
+    const graph = this.#truthStorePresent ? loadTruthGraph(this.#db) : emptyTruthGraph();
+    const derived = this.#truthStorePresent ? this.#deriveAllTruth(graph) : new Map<string, TruthRecordView>();
+    const all = [...derived.values()].sort((a, b) => b.seq - a.seq);
     const founderOnlyIds = new Set(all.filter((v) => v.privacy === 'founder_only').map((v) => v.id));
     const isFounderOnly = (id: string) => founderOnlyIds.has(id);
     const visible = options.includeFounderOnly ? all : all.filter((v) => !isFounderOnly(v.id));
@@ -6905,7 +6917,7 @@ export class HeadquarterOperations {
       // issued an acceptance digest for. A degraded acceptance never gets one.
       if (view.acceptanceDigest !== null) awaitingAcceptance += 1;
     }
-    const unresolved = this.listTruthContradictions().filter((pair) => {
+    const unresolved = listContradictions(graph, (id) => derived.get(id) ?? null).filter((pair) => {
       if (pair.resolution !== 'unresolved') return false;
       if (options.includeFounderOnly) return true;
       return !isFounderOnly(pair.a) && !isFounderOnly(pair.b);
@@ -9302,11 +9314,21 @@ export class HeadquarterOperations {
    * level that classifies text for an unauthenticated reader, so the
    * unauthenticated artifact never publishes one verbatim. The number
    * withheld is stated in `withheldPurposes` rather than silently nulled.
+   *
+   * The rows are read through `loadCollaborationSessions(#db)` + the private
+   * `#sessionView`, NOT through the public `listCollaborationSessions()`
+   * projection (Phase 10 correction, L1 — the Phase 9 High applied here).
+   * This read decides an UNAUTHENTICATED disclosure, so a same-realm patch
+   * that wrapped the public method and relabelled `privacy` on the real rows
+   * would otherwise both publish a genuine founder_only room and zero the
+   * `withheldFounderOnly` honesty field beside it.
    */
   collaborationSummary(options: { includeFounderOnly?: boolean; limit?: number } = {}): CollaborationSnapshotView {
     const limit = options.limit ?? COLLABORATION_SNAPSHOT_LIMIT;
     const includeFounderOnly = options.includeFounderOnly === true;
-    const all = this.listCollaborationSessions();
+    const all = this.#collaborationStorePresent
+      ? loadCollaborationSessions(this.#db).map((row) => this.#sessionView(row))
+      : [];
     const sessions = includeFounderOnly ? all : all.filter((session) => session.privacy !== 'founder_only');
     const workers = new Set<string>();
     let contributions = 0;
@@ -9519,8 +9541,19 @@ export class HeadquarterOperations {
 
   /**
    * Every canonical fact the derived command layer reads, gathered ONCE per
-   * read through `#db` and the private derivations — never through a public,
-   * patchable projection.
+   * read through `#db` and the private derivations.
+   *
+   * ONE exception, and it is named rather than glossed: the handoff item's
+   * canonical picture reads `this.readMeta(taskId)` inside
+   * `#contributionContext.taskStateOf` — the pre-existing Phase 9 display
+   * read, still a public prototype method. A same-realm patch of `readMeta`
+   * reporting the handoff as already assigned REMOVES a real
+   * `handoff_requested` item from the artifact (it cannot add a false one,
+   * and it changes no claim, fence or assignment, all of which
+   * `assignTaskAsFounder` reads off the canonical rows). Left deliberately —
+   * fixing it belongs in the Phase 9 module it lives in — and recorded here
+   * and in the Phase 10 doc's patchable-read audit. Every OTHER fact below
+   * is read privately.
    *
    * That rule is the Phase 9 High finding applied ahead of time. The Founder
    * Inbox, the briefing and the snapshot section all cross a boundary: they
@@ -9807,9 +9840,17 @@ export class HeadquarterOperations {
   }
 
   /**
-   * The Phase 9 record as facts: sessions with their DERIVED standing, the
-   * explicit disagreements, and the handoff requests beside the canonical
-   * task picture read at derivation time. Every row through `#db`.
+   * The Phase 9 record as facts: sessions with their DERIVED standing and
+   * their own privacy classification, the explicit disagreements, and the
+   * handoff requests beside the canonical task picture read at derivation
+   * time. Every row through `#db`.
+   *
+   * `row.privacy` is copied onto the session AND onto every disagreement and
+   * handoff derived from it (Phase 10 correction, M1). Before that, the
+   * command layer had no representation of session privacy at all, so a
+   * `founder_only` room's existence, participants and activity were narrated
+   * on the unauthenticated artifact by the two inbox items below while the
+   * Phase 9 collaboration section beside them correctly withheld the room.
    */
   #collaborationFacts(): CommandFacts['collaboration'] {
     if (!this.#collaborationStorePresent) return { sessions: [], disagreements: [], handoffs: [] };
@@ -9825,6 +9866,7 @@ export class HeadquarterOperations {
         missionStatus,
         standing: sessionStandingFor(missionStatus),
         title: row.title,
+        privacy: row.privacy,
       });
       const contributions = loadContributions(this.#db, row.id);
       const relations = loadSessionRelations(this.#db, row.id);
@@ -9838,6 +9880,7 @@ export class HeadquarterOperations {
           disputesId: view.disputesId,
           disputedWorkerId: view.disputedWorkerId,
           at: view.at,
+          privacy: row.privacy,
         });
       }
       for (const view of deriveHandoffRequests(contributions, ctx.taskStateOf)) {
@@ -9856,6 +9899,7 @@ export class HeadquarterOperations {
                 assignedWorkerId: view.canonical.assignedWorkerId,
               }
             : null,
+          privacy: row.privacy,
         });
       }
     }

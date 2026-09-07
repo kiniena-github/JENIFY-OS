@@ -237,7 +237,7 @@ derived question from the stores it does have, and is never migrated (all pinned
 | worker registration, assignability, grant, policy | `#commandFacts` (`eligibleWorkers`) | which queued tasks are listed as claimable and by whom | `#workerEligibilityFor` → `#grantOf`, `#workers.assignability`, `evaluatePolicy`, `#capabilityFromStore` | canonical (the same predicates `claimNext` enforces) |
 | provider / model binding | `#commandFacts` (workers) | which workers are listed as having no declared provider | `#workerBindingFromStore` → `op_worker_providers` + `hq_ai_members` rows via `#db` | canonical. Pinned: forged `listAiMembers` / `workerProviderDeclarations` change no unknown and no department metric |
 | task rows, titles, approvals, evidence kinds, projects, memory, runs | `#commandFacts` | every remaining count and summary | direct `#db` reads (`op_tasks`, `hq_op_task_meta`, `hq_approvals`, `op_evidence`, `hq_projects`, `hq_missions`, `hq_orchestration_runs`); memory through the `#private` `MemoryStore` | canonical. Pinned: a forged `readMeta` cannot rewrite what an item says; a forged `queue.evidence.list` cannot change the refusal count |
-| collaboration sessions / stances / handoffs | `#collaborationFacts` | the `disagreement_open` and `handoff_requested` items | the Phase 9 module loaders over `#db`, plus `#missionStatusFromStore` for standing | canonical |
+| collaboration sessions / stances / handoffs, and each session's `privacy` | `#collaborationFacts` | the `disagreement_open` and `handoff_requested` items, the collaboration bundle-read acts, and WHETHER any of them reach an unauthenticated reader | the Phase 9 module loaders over `#db`, plus `#missionStatusFromStore` for standing; `row.privacy` copied onto the session AND onto every disagreement and handoff derived from it | canonical. **Corrected (M1):** the first cut read no `privacy` at all and hard-coded `founderOnly: false` on both items, so a `founder_only` room's id, both worker ids, the disputing worker's role, the mission and the canonical task were narrated on `hq-snapshot.json` while the Phase 9 section two keys earlier correctly withheld the room. Pinned by a whole-document assertion plus direct Phase 10 regressions on both sides of the gate |
 | dispatch lane | `#dispatchLaneFacts` | whether a dispatch outcome is unknown | `op_evidence` rows via `#db`, the SAME rule `#claudeDispatchState` enforces | canonical |
 | `this.readMeta(taskId)` inside `#contributionContext.taskStateOf` | the handoff item's canonical picture | whether a handoff was already honoured canonically | public prototype method (the pre-existing Phase 9 display read) | **deliberately left, and recorded as a known limitation** — see below |
 
@@ -247,11 +247,34 @@ The snapshot section is published on `hq-snapshot.json`, so the reading layer's 
 decision is made exactly as `truthSummary` and `collaborationSummary` make it, and defaults
 to the LESS disclosing answer:
 
-- an attention item derived from a `founder_only` truth record is not carried, and **no
+- an attention item derived from FOUNDER-PRIVATE MATERIAL is not carried, and **no
   other number aggregates over it** — `attention.total`, `attention.byKind` and
   `recommendations.total` all span only the readable set, so arithmetic on the artifact
   discloses no categorical fact about a private record. The omission is counted in
   `attention.withheldFounderOnly` and stated in the section's provenance note;
+- **"Founder-private material" is TWO canonical classifications, not one** (M1
+  correction). `InboxAttentionItem.founderOnly` is set from `hq_truth_records.privacy`
+  for a truth item AND from `hq_collab_sessions.privacy` for a `handoff_requested` or
+  `disagreement_open` item — the Phase 9 L5 classification. The first cut honoured only
+  the first, so a `founder_only` war room's existence, participants, roles and activity
+  were published on `hq-snapshot.json` by this section while the Phase 9 section beside
+  it correctly withheld the room. One flag was widened rather than a parallel
+  `privateSource` added, deliberately: every reading layer already honours `founderOnly`,
+  and a second flag would need each layer to remember to honour it — the exact failure
+  this correction exists to close. `deriveSafeNext`'s collaboration bundle-read acts
+  honour the same rule, even though that section is not on the artifact today;
+- **the Founder's free-text kill-switch `reason` is NOT composed into the
+  `kill_switch_engaged` item summary** (deliberate decision, this correction). An inbox
+  item rides the unauthenticated artifact, and the pre-existing artifact kill-switch
+  surface (`operations.killSwitch`) publishes engaged scopes only and never the reason —
+  Phase 10 must not be the thing that puts Founder-written incident text there. The item
+  states categorically whether a reason was recorded ("A reason is recorded" / "No reason
+  was recorded"); the verbatim text and `engaged_by` are carried on the Founder-gated
+  briefing's `blocked.killSwitches`, unchanged. Pinned on both sides. Note the honest
+  limit of this decision: mission titles, mission `block_reason` and task `block_reason`
+  DO ride the artifact through other item summaries, and did before this phase (task
+  block reasons are on the pre-existing `console` section). The kill-switch reason is the
+  one place where the artifact had an established "scopes only" rule to keep;
 - the same rule applies to `unknown`: an unknown entry naming a founder_only record is
   withheld, kept out of `unknown.total`, counted in `unknown.withheldFounderOnly` and
   stated;
@@ -264,6 +287,28 @@ to the LESS disclosing answer:
 
 The Founder-gated `GET /api/hq/control/command-center` carries founder_only-derived
 material by design, exactly as `GET /truth` does. Pinned on both sides.
+
+### The other two sections on the same file (corrected here)
+
+`hq-snapshot.json` carries three sections that each decide an unauthenticated disclosure,
+and all three must derive from the private canonical read, not from a public prototype
+method a same-realm patch can wrap:
+
+- `collaborationSummary` (Phase 9) read `this.listCollaborationSessions()` — L1. A
+  wrapping patch that relabelled `privacy` on the real rows published a genuine
+  `founder_only` room's title and participants AND zeroed `withheldFounderOnly` beside
+  it. Now `loadCollaborationSessions(#db)` + the private `#sessionView`.
+- `truthSummary` (Phase 7, accepted base code, unchanged by this wave's feature diff)
+  read `this.listTruth()` and `this.listTruthContradictions()` — the same shape, and the
+  same leak was reproduced at this head. Now the private
+  `#deriveAllTruth(loadTruthGraph(#db))` and `listContradictions` over that same graph.
+  Fixed here as directly-adjacent carry-forward debt, deliberately kept to the derivation
+  lines: `listTruth()` / `listTruthContradictions()` themselves are unchanged and remain
+  the Founder-gated routes' projections.
+
+Both are pinned by hostile same-realm patches on the INSTANCE and the PROTOTYPE, each
+proving the lie took on the public surface first and that the published section did not
+move.
 
 ## Surfaces
 
@@ -330,10 +375,25 @@ receipt (the ledger is append-only by engine). No cost, spend or token figure an
   event-level delta would need a canonical change log that HQ does not have.
 - **The handoff item's canonical picture still reads `this.readMeta`.** That is the Phase 9
   display read, recorded there as deliberately left; it decides only whether an already-
-  honoured handoff is dropped from the inbox. A forged `readMeta` could therefore hide a
-  handoff item from the patcher's own display — it changes no claim, fence or assignment,
-  and `assignTaskAsFounder` reads the rows. Recorded rather than fixed, because fixing it
-  belongs in the Phase 9 module it lives in.
+  honoured handoff is dropped from the inbox. Stated precisely (the earlier wording
+  "the patcher's own display" was wrong for the published path, and `#commandFacts`'s own
+  code comment claimed no public read at all — both corrected, L2): a same-realm patch of
+  `readMeta` reporting the handoff as already assigned REMOVES a real `handoff_requested`
+  item from the derived inbox **and from the unauthenticated `hq-snapshot.json` built by
+  that process** (1 → 0). It can only remove, never invent; it changes no claim, fence or
+  assignment, and `assignTaskAsFounder` reads the canonical rows. Recorded rather than
+  fixed, because fixing it belongs in the Phase 9 module it lives in. This is the ONE
+  public, patchable read left in `#commandFacts`; every other fact is read privately.
+- **The brief receipt's counts on the artifact ARE Founder-audience counts.** `issueBrief`
+  assembles the briefing with `includeFounderOnly: true` — a receipt the Founder signs
+  states what the Founder can see — and `briefs.latest` rides the unauthenticated
+  artifact. So `briefs.latest.counts.attention.total` / `.byKind` DO span material the
+  live section beside them withholds. The disclosure stops at the count: no id, statement,
+  session id, room title, worker id or summary of a withheld item crosses, and the live
+  section already publishes `attention.withheldFounderOnly` by design. Left rather than
+  redacted, because projecting the receipt would make its `contentDigest` uncheckable
+  against a re-derivation, which is the receipt's whole purpose. Stated here and pinned by
+  a test that asserts exactly this and no more.
 - **The department projections are a judgement, stated as code.** Which canonical tables
   each department counts, and which departments are `not_recorded`, is a reviewed edit
   rather than configuration. The Founder may want a different split; every metric is a

@@ -620,7 +620,9 @@ export function liveSnapshotFromOperations(
     : null;
 
   // Phase 10 command centre: the SAME reading-layer privacy decision again.
-  // An attention item derived from a founder_only truth record rides only the
+  // An attention item derived from founder_only material — a truth record OR
+  // a founder_only collaboration session, the Phase 9 L5 classification the
+  // section above enforces (Phase 10 correction, M1) — rides only the
   // Founder-gated /state route; the unauthenticated artifact carries neither
   // the item nor any number aggregating over it, and states how many were
   // withheld. Unlike the three sections above there is no store to be absent:
@@ -844,9 +846,9 @@ export function liveSnapshotFromOperations(
               'while its source predicate holds on the canonical row and is gone the moment the source is ' +
               'decided elsewhere. No priority, score, confidence, percentage or ETA exists here.',
             commandCenter.attention.withheldFounderOnly > 0
-              ? `${commandCenter.attention.withheldFounderOnly} attention item(s) derive from founder_only truth ` +
-                'records; they are not carried by this artifact and no number here aggregates over them. They ' +
-                'are readable only through the Founder-authenticated /state route.'
+              ? `${commandCenter.attention.withheldFounderOnly} attention item(s) derive from founder_only material ` +
+                '(a truth record or a collaboration session); they are not carried by this artifact and no number ' +
+                'here aggregates over them. They are readable only through the Founder-authenticated /state route.'
               : null,
             commandCenter.unknown.withheldFounderOnly > 0
               ? `${commandCenter.unknown.withheldFounderOnly} unknown entry/entries name founder_only truth ` +

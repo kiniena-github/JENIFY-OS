@@ -106,14 +106,32 @@ describe('the Founder Inbox is derived, never a second authority store', () => {
     expect(itemFor(fx, 'mission_blocked')).toBeNull();
   });
 
-  it('raises an engaged kill switch as an incident and drops it when the switch is released', () => {
+  it('raises an engaged kill switch as an incident, states categorically that a reason exists without quoting it, and drops the item when the switch is released', () => {
     const fx = commandCenterFixture();
-    expectOk(fx.ops.engageKillSwitch('*', 'founder', 'incident 42'));
+    expectOk(fx.ops.engageKillSwitch('*', 'founder', 'INCIDENT-42-FREE-TEXT'));
     const item = itemFor(fx, 'kill_switch_engaged')!;
     expect(item.source).toEqual({ table: 'op_kill_switch', id: '*' });
-    expect(item.summary).toContain('incident 42');
+    expect(item.summary).toContain('Kill switch engaged for scope *');
+    expect(item.summary).toContain('by founder');
+    // The Founder's free text is a categorical statement here, never a quote:
+    // an inbox item rides the UNAUTHENTICATED artifact and the pre-existing
+    // artifact kill-switch surface publishes scopes only.
+    expect(item.summary).toContain('A reason is recorded');
+    expect(item.summary).not.toContain('INCIDENT-42-FREE-TEXT');
+    // The verbatim reason is on the Founder-gated briefing, unchanged.
+    const stop = fx.ops.founderBriefing({ includeFounderOnly: true }).blocked.killSwitches.find((k) => k.scope === '*')!;
+    expect(stop.reason).toBe('INCIDENT-42-FREE-TEXT');
+    expect(stop.engagedBy).toBe('founder');
     expectOk(fx.ops.releaseKillSwitch('*', 'founder'));
     expect(itemFor(fx, 'kill_switch_engaged')).toBeNull();
+  });
+
+  it('says "No reason was recorded" — never an invented one — when a stop carries no reason', () => {
+    const fx = commandCenterFixture();
+    expectOk(fx.ops.engageKillSwitch('repo.read_status', 'founder', ''));
+    const item = itemFor(fx, 'kill_switch_engaged')!;
+    expect(item.summary).toContain('No reason was recorded');
+    expect(item.summary).not.toContain('A reason is recorded');
   });
 
   it('raises an unresolved contradiction and traces both real truth records, then drops it on supersession', () => {
@@ -573,6 +591,109 @@ describe('every enforcement-relevant read is the canonical row, pinned against h
     } finally {
       proto.listTruth = originalList;
       delete (fx.ops as unknown as { listTruth?: unknown }).listTruth;
+    }
+  });
+
+  /**
+   * Phase 10 correction, L1. `collaborationSummary` is the read the
+   * UNAUTHENTICATED `hq-snapshot.json` publishes, and it used to derive from
+   * the public `listCollaborationSessions()` projection — the exact shape of
+   * the Phase 9 High. A wrapping patch that relabelled `privacy` on the real
+   * rows published a genuine founder_only room AND zeroed the honesty field
+   * beside it.
+   */
+  it('derives the published collaboration section from `#db`, so a relabelled `listCollaborationSessions` publishes no founder_only room and does not zero `withheldFounderOnly`', () => {
+    const fx = commandCenterFixture();
+    const secret = openSession(fx, { title: 'PRIVATE-TITLE-ABC', purpose: 'PRIVATE-PURPOSE-ABC', privacy: 'founder_only' });
+    admit(fx, secret.id, 'claude', 'builder');
+    const before = fx.ops.collaborationSummary();
+    expect(before.withheldFounderOnly).toBe(1);
+    expect(before.recent.map((session) => session.id)).not.toContain(secret.id);
+
+    const proto = Object.getPrototypeOf(fx.ops) as { listCollaborationSessions: (f?: unknown) => unknown[] };
+    const original = proto.listCollaborationSessions;
+    const relabel = function (this: HeadquarterOperations, filter?: unknown) {
+      return (original.call(this, filter) as { privacy: string }[]).map((view) => ({ ...view, privacy: 'internal' }));
+    };
+    proto.listCollaborationSessions = relabel;
+    (fx.ops as unknown as { listCollaborationSessions: unknown }).listCollaborationSessions = relabel;
+    try {
+      // The lie took on the public surface, on the instance and on a facade
+      // constructed after the patch.
+      expect(fx.ops.listCollaborationSessions().find((s) => s.id === secret.id)!.privacy).toBe('internal');
+      expect(freshOps(fx).listCollaborationSessions().find((s) => s.id === secret.id)!.privacy).toBe('internal');
+      // And the published section did not move.
+      const after = fx.ops.collaborationSummary();
+      expect(after.withheldFounderOnly).toBe(1);
+      expect(after.recent.map((session) => session.id)).not.toContain(secret.id);
+      expect(after.workersAdmitted).toBe(0);
+      expect(JSON.stringify(after)).not.toContain('PRIVATE-TITLE-ABC');
+      expect(JSON.stringify(after)).not.toContain('PRIVATE-PURPOSE-ABC');
+      // The Founder-gated read still carries the real row.
+      expect(fx.ops.collaborationSummary({ includeFounderOnly: true }).recent.map((s) => s.id)).toContain(secret.id);
+    } finally {
+      proto.listCollaborationSessions = original;
+      delete (fx.ops as unknown as { listCollaborationSessions?: unknown }).listCollaborationSessions;
+    }
+  });
+
+  /**
+   * Carry-forward base debt (accepted Phase 7 code, unchanged by this wave's
+   * feature diff): `truthSummary` fed the same unauthenticated artifact
+   * through `this.listTruth()` / `this.listTruthContradictions()`. Same
+   * shape, same fix, pinned the same way.
+   */
+  it('derives the published truth section from the private graph, so a relabelled `listTruth` publishes no founder_only statement, a forged `listTruthContradictions` invents none there, and `withheldFounderOnly` is not zeroed', () => {
+    const fx = commandCenterFixture();
+    const record = expectOk(
+      fx.ops.recordTruth({
+        entityKind: 'mission',
+        entityId: fx.missionId,
+        statement: 'PRIVATE-STATEMENT-ABC',
+        bornState: 'observed',
+        evidenceRefs: [fx.evidenceId],
+        privacy: 'founder_only',
+        requestedBy: 'founder',
+      }),
+    ).record;
+    const before = fx.ops.truthSummary({ includeFounderOnly: false });
+    expect(before.withheldFounderOnly).toBe(1);
+    expect(before.records.map((view) => view.id)).not.toContain(record.id);
+
+    const proto = Object.getPrototypeOf(fx.ops) as {
+      listTruth: (f?: unknown) => unknown[];
+      listTruthContradictions: () => unknown[];
+    };
+    const originalList = proto.listTruth;
+    const originalContradictions = proto.listTruthContradictions;
+    const relabel = function (this: HeadquarterOperations, filter?: unknown) {
+      return (originalList.call(this, filter) as { privacy: string }[]).map((view) => ({ ...view, privacy: 'internal' }));
+    };
+    const ghost = () => [
+      { a: 'ghost-a', b: 'ghost-b', entityKind: 'mission', entityId: 'ghost-mission', resolution: 'unresolved', statedBy: 'nobody', statedAt: '2026-01-01T00:00:00.000Z' },
+    ];
+    proto.listTruth = relabel;
+    proto.listTruthContradictions = ghost as typeof originalContradictions;
+    (fx.ops as unknown as { listTruth: unknown }).listTruth = relabel;
+    (fx.ops as unknown as { listTruthContradictions: unknown }).listTruthContradictions = ghost;
+    try {
+      expect(fx.ops.listTruth().find((view) => view.id === record.id)!.privacy).toBe('internal');
+      expect(freshOps(fx).listTruth().find((view) => view.id === record.id)!.privacy).toBe('internal');
+      expect(fx.ops.listTruthContradictions()[0]!.a).toBe('ghost-a');
+      const after = fx.ops.truthSummary({ includeFounderOnly: false });
+      expect(after.withheldFounderOnly).toBe(1);
+      expect(after.records.map((view) => view.id)).not.toContain(record.id);
+      expect(JSON.stringify(after)).not.toContain('PRIVATE-STATEMENT-ABC');
+      // The forged contradiction invented nothing on the published section either.
+      expect(after.unresolvedContradictions).toBe(0);
+      expect(JSON.stringify(after)).not.toContain('ghost-a');
+      // The Founder-gated read still carries the real row.
+      expect(fx.ops.truthSummary({ includeFounderOnly: true }).records.map((view) => view.id)).toContain(record.id);
+    } finally {
+      proto.listTruth = originalList;
+      proto.listTruthContradictions = originalContradictions;
+      delete (fx.ops as unknown as { listTruth?: unknown }).listTruth;
+      delete (fx.ops as unknown as { listTruthContradictions?: unknown }).listTruthContradictions;
     }
   });
 

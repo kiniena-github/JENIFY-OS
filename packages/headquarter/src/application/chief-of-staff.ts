@@ -55,7 +55,7 @@ import type { ActivityStatus } from '../contracts/events.js';
 import type { MissionStatus } from '../contracts/mission.js';
 import type { ActionRiskLevel, ActionState } from './action-gateway.js';
 import type { SubjectDrift, TruthEntityKind, TruthState, TruthVerificationSummary } from './truth-command.js';
-import type { CollaborationRole, SessionStanding } from './collaboration-command.js';
+import type { CollaborationPrivacy, CollaborationRole, SessionStanding } from './collaboration-command.js';
 
 // ---- vocabulary (categorical only) ----
 
@@ -578,8 +578,26 @@ export interface ActionFact {
   attemptedAt: string | null;
 }
 
+/**
+ * The Phase 9 collaboration record as facts.
+ *
+ * `privacy` is carried on EVERY entry, not looked up from the session list:
+ * a disagreement and a handoff each name the room they were recorded in, and
+ * what a reading layer may disclose about them is decided by that room's own
+ * classification. Carrying it per entry means no derivation can accidentally
+ * default a private room's activity to `internal` by failing a lookup
+ * (Phase 10 correction, M1).
+ */
 export interface CollaborationFact {
-  sessions: { id: string; missionId: string; missionStatus: MissionStatus | null; standing: SessionStanding; title: string }[];
+  sessions: {
+    id: string;
+    missionId: string;
+    missionStatus: MissionStatus | null;
+    standing: SessionStanding;
+    title: string;
+    /** The session's own classification, verbatim from `hq_collab_sessions.privacy`. */
+    privacy: CollaborationPrivacy;
+  }[];
   disagreements: {
     sessionId: string;
     missionId: string;
@@ -589,6 +607,8 @@ export interface CollaborationFact {
     disputesId: string;
     disputedWorkerId: string;
     at: string;
+    /** The privacy of the session this stance was recorded in. */
+    privacy: CollaborationPrivacy;
   }[];
   handoffs: {
     contributionId: string;
@@ -599,6 +619,8 @@ export interface CollaborationFact {
     toWorkerId: string;
     at: string;
     canonical: { status: ActivityStatus; claimedBy: string | null; assignedWorkerId: string | null } | null;
+    /** The privacy of the session this request was recorded in. */
+    privacy: CollaborationPrivacy;
   }[];
 }
 
@@ -680,7 +702,23 @@ export interface InboxAttentionItem {
   requiredAuthority: RequiredAuthority;
   /** Provenance: which derivation and which canonical store answered. */
   provenance: string;
-  /** True when the item derives from a founder_only truth record — withheld from the unauthenticated artifact. */
+  /**
+   * True when the item derives from FOUNDER-PRIVATE MATERIAL — withheld from
+   * the unauthenticated artifact and from every count beside it.
+   *
+   * Two canonical classifications feed this, both using the same
+   * `internal | founder_only` vocabulary:
+   * - `hq_truth_records.privacy` — the record the item is about;
+   * - `hq_collab_sessions.privacy` — the room the contribution or stance the
+   *   item is about was recorded in (Phase 10 correction, M1: a private
+   *   room's existence, participants and activity are Founder-private, so an
+   *   item narrating them is too).
+   *
+   * Deliberately ONE flag rather than a parallel `privateSource`: every
+   * reading layer already honours this one, and a second flag would need
+   * every layer to remember to honour it — the failure mode this correction
+   * exists to close.
+   */
   founderOnly: boolean;
 }
 
@@ -959,7 +997,16 @@ export function deriveFounderInbox(facts: CommandFacts): InboxAttentionItem[] {
       reason: 'kill_switch_engaged',
       source: { table: 'op_kill_switch', id: stop.scope },
       entities: [{ kind: 'kill_switch', id: stop.scope }],
-      summary: `Kill switch engaged for scope ${stop.scope}${stop.reason ? `: ${stop.reason}` : ''}${stop.engagedBy ? ` (by ${stop.engagedBy})` : ''}.`,
+      // The Founder's free-text `reason` is deliberately NOT composed into
+      // this summary. An inbox item rides the UNAUTHENTICATED artifact, and
+      // the pre-existing artifact kill-switch surface (`operations.killSwitch`)
+      // publishes scopes only and never the reason — Phase 10 must not be the
+      // thing that puts it there. Whether a reason was recorded is a
+      // categorical fact and IS stated; the text itself is carried verbatim
+      // on the Founder-gated briefing's `blocked.killSwitches`.
+      summary:
+        `Kill switch engaged for scope ${stop.scope}${stop.engagedBy ? ` (by ${stop.engagedBy})` : ''}. ` +
+        `${stop.reason ? 'A reason is recorded' : 'No reason was recorded'}; the reason text is read behind the Founder gate, not here.`,
       since: stop.engagedAt,
       staleness: 'not_evaluated',
       requiredAuthority: 'approval_authority',
@@ -1111,7 +1158,10 @@ export function deriveFounderInbox(facts: CommandFacts): InboxAttentionItem[] {
       staleness: 'current',
       requiredAuthority: 'workforce_assign',
       provenance: 'hq_collab_contributions kind = handoff_request in a session whose mission is non-terminal, not already assigned as requested',
-      founderOnly: false,
+      // The room's own classification. The summary names the session, both
+      // workers and the canonical task, so a founder_only room's handoff is
+      // Founder-private material.
+      founderOnly: handoff.privacy === 'founder_only',
     });
   }
   for (const disagreement of facts.collaboration.disagreements) {
@@ -1133,7 +1183,9 @@ export function deriveFounderInbox(facts: CommandFacts): InboxAttentionItem[] {
       staleness: 'current',
       requiredAuthority: 'founder_decision',
       provenance: 'hq_collab_relations kind = disagrees_with in a session whose mission is non-terminal',
-      founderOnly: false,
+      // Same rule as the handoff above: the summary names the session, the
+      // disputing worker and its role, and the mission.
+      founderOnly: disagreement.privacy === 'founder_only',
     });
   }
 
@@ -1597,6 +1649,12 @@ export function deriveSafeNext(facts: CommandFacts, options: SectionOptions = {}
   });
   for (const session of facts.collaboration.sessions) {
     if (session.standing !== 'active') continue;
+    // A founder_only room's ID and mission are Founder-private material: an
+    // act entry naming them would disclose the room's existence to a reader
+    // who may not see it (Phase 10 correction, M1). This section is not on
+    // the unauthenticated artifact today; it honours the same rule anyway so
+    // that publishing it later cannot reopen the leak.
+    if (session.privacy === 'founder_only' && options.includeFounderOnly !== true) continue;
     acts.push({
       act: 'assemble_collaboration_context',
       nature: 'read',
@@ -1858,7 +1916,7 @@ export interface FounderInboxView {
   total: number;
   truncated: boolean;
   byKind: Record<AttentionKind, number>;
-  /** Items derived from founder_only truth and withheld from this reader. 0 past the Founder gate. */
+  /** Items derived from Founder-private material (a founder_only truth record or collaboration session) and withheld from this reader. 0 past the Founder gate. */
   withheldFounderOnly: number;
   ordering: string;
   provenance: { mode: 'live'; source: string; asOf: string };
@@ -1914,8 +1972,10 @@ export function briefCountsOf(briefing: {
 /**
  * The snapshot section: counts over the set the reader may see, the newest
  * attention items, the unknown and blocked counts, and the latest receipt.
- * Founder-only-derived items are withheld from the unauthenticated artifact
- * and counted, and NO other number here aggregates over them.
+ * Items derived from Founder-private material — a `founder_only` truth
+ * record OR a `founder_only` collaboration session — are withheld from the
+ * unauthenticated artifact and counted, and NO other number here aggregates
+ * over them.
  *
  * Deliberately absent: the department projections and the recommendation
  * bodies. Both are Founder-gated reads; the artifact carries only the counts
@@ -1948,8 +2008,9 @@ export const COMMAND_CENTER_PROVENANCE =
 /**
  * Split the derived inbox into what this reader may see and what is withheld.
  * The only privacy input an attention item carries is `founderOnly`, set by
- * the derivation from the canonical `hq_truth_records.privacy` of the record
- * the item is about.
+ * the derivation from the canonical classification of the material the item
+ * is about — `hq_truth_records.privacy` for a truth item, and
+ * `hq_collab_sessions.privacy` for a handoff or disagreement item.
  */
 function readableItems(
   items: readonly InboxAttentionItem[],
@@ -2017,7 +2078,7 @@ export function assembleBriefing(input: {
     changed: input.changed,
     verified: deriveVerified(input.facts, { limit, includeFounderOnly }),
     unknown: deriveUnknown(input.facts, { limit, includeFounderOnly }),
-    safeNext: deriveSafeNext(input.facts, { limit }),
+    safeNext: deriveSafeNext(input.facts, { limit, includeFounderOnly }),
     recommendations: bounded(recommendations, limit),
     // Over the whole visible SET, not the bounded page: a department's
     // attention count is the size of a set, and a page size is not one.

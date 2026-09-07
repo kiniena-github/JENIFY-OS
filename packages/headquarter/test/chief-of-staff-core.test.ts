@@ -371,9 +371,9 @@ describe('the Founder Inbox is a set of predicates over canonical rows', () => {
     const live = facts({
       missions: [mission()],
       collaboration: {
-        sessions: [{ id: 'collab-1', missionId: 'mission-1', missionStatus: 'working', standing: 'active', title: 'War room' }],
+        sessions: [{ id: 'collab-1', missionId: 'mission-1', missionStatus: 'working', standing: 'active', title: 'War room', privacy: 'internal' }],
         disagreements: [
-          { sessionId: 'collab-1', missionId: 'mission-1', contributionId: 'c-2', workerId: 'codex', role: 'reviewer', disputesId: 'c-1', disputedWorkerId: 'claude', at: EARLIER },
+          { sessionId: 'collab-1', missionId: 'mission-1', contributionId: 'c-2', workerId: 'codex', role: 'reviewer', disputesId: 'c-1', disputedWorkerId: 'claude', at: EARLIER, privacy: 'internal' },
         ],
         handoffs: [
           {
@@ -385,6 +385,7 @@ describe('the Founder Inbox is a set of predicates over canonical rows', () => {
             toWorkerId: 'jules',
             at: EARLIER,
             canonical: { status: 'running', claimedBy: 'claude', assignedWorkerId: null },
+            privacy: 'internal',
           },
         ],
       },
@@ -402,6 +403,34 @@ describe('the Founder Inbox is a set of predicates over canonical rows', () => {
       },
     });
     expect(reasons(deriveFounderInbox(assigned))).not.toContain('handoff_requested');
+  });
+
+  it('flags the handoff and the disagreement of a founder_only session as founderOnly, and an internal session’s as not — the flag follows the room’s own classification', () => {
+    const roomsWith = (privacy: 'internal' | 'founder_only') =>
+      facts({
+        missions: [mission()],
+        collaboration: {
+          sessions: [{ id: 'collab-1', missionId: 'mission-1', missionStatus: 'working', standing: 'active', title: 'Room', privacy }],
+          disagreements: [
+            { sessionId: 'collab-1', missionId: 'mission-1', contributionId: 'c-2', workerId: 'codex', role: 'reviewer', disputesId: 'c-1', disputedWorkerId: 'claude', at: EARLIER, privacy },
+          ],
+          handoffs: [
+            { contributionId: 'c-3', sessionId: 'collab-1', missionId: 'mission-1', taskId: 'task-1', fromWorkerId: 'claude', toWorkerId: 'jules', at: EARLIER, canonical: null, privacy },
+          ],
+        },
+      });
+    const collaborationItems = (privacy: 'internal' | 'founder_only') =>
+      deriveFounderInbox(roomsWith(privacy)).filter(
+        (item) => item.reason === 'handoff_requested' || item.reason === 'disagreement_open',
+      );
+    const open = collaborationItems('internal');
+    expect(open).toHaveLength(2);
+    for (const item of open) expect(item.founderOnly, item.reason).toBe(false);
+    const secret = collaborationItems('founder_only');
+    // The items still EXIST (the Founder reads them past the gate); they are
+    // flagged, and every reading layer that honours the flag withholds them.
+    expect(secret).toHaveLength(2);
+    for (const item of secret) expect(item.founderOnly, item.reason).toBe(true);
   });
 
   it('asks for acceptance exactly while the Phase 7 derivation issued an acceptance digest', () => {
@@ -678,8 +707,8 @@ describe('what HQ can safely do next says what stops each act, and never confuse
         stores: { missions: true, projects: true, memory: true, truth: true, actions: true, collaboration: true, briefs: false },
         collaboration: {
           sessions: [
-            { id: 'collab-1', missionId: 'mission-1', missionStatus: 'working', standing: 'active', title: 'War room' },
-            { id: 'collab-2', missionId: 'mission-2', missionStatus: 'cancelled', standing: 'closed', title: 'Closed room' },
+            { id: 'collab-1', missionId: 'mission-1', missionStatus: 'working', standing: 'active', title: 'War room', privacy: 'internal' },
+            { id: 'collab-2', missionId: 'mission-2', missionStatus: 'cancelled', standing: 'closed', title: 'Closed room', privacy: 'internal' },
           ],
           disagreements: [],
           handoffs: [],
@@ -692,6 +721,24 @@ describe('what HQ can safely do next says what stops each act, and never confuse
     expect(brief.blockers).toEqual(['the brief ledger is absent on this database handle']);
     // Only the ACTIVE session offers a bundle read.
     expect(view.acts.filter((act) => act.act === 'assemble_collaboration_context')).toHaveLength(1);
+  });
+
+  it('names an ACTIVE founder_only session in a bundle-read act only past the Founder gate — its id and mission are Founder-private material', () => {
+    const input = facts({
+      collaboration: {
+        sessions: [
+          { id: 'collab-open', missionId: 'mission-1', missionStatus: 'working', standing: 'active', title: 'Open room', privacy: 'internal' },
+          { id: 'collab-secret', missionId: 'mission-1', missionStatus: 'working', standing: 'active', title: 'Private room', privacy: 'founder_only' },
+        ],
+        disagreements: [],
+        handoffs: [],
+      },
+    });
+    const guarded = deriveSafeNext(input).acts.filter((act) => act.act === 'assemble_collaboration_context');
+    expect(guarded.flatMap((act) => act.targets.map((target) => target.id))).toContain('collab-open');
+    expect(guarded.flatMap((act) => act.targets.map((target) => target.id))).not.toContain('collab-secret');
+    const gated = deriveSafeNext(input, { includeFounderOnly: true }).acts.filter((act) => act.act === 'assemble_collaboration_context');
+    expect(gated.flatMap((act) => act.targets.map((target) => target.id)).sort()).toEqual(['collab-open', 'collab-secret', 'mission-1', 'mission-1']);
   });
 
   it('lists a queued task as claimable only when a registered worker is eligible and no stop covers it', () => {
@@ -941,12 +988,12 @@ describe('the vocabulary claims no rule the derivations do not have', () => {
     ],
     dispatchLane: [{ taskId: 'task-unknown', state: 'unknown', at: EARLIER }],
     collaboration: {
-      sessions: [{ id: 'collab-1', missionId: 'm-live', missionStatus: 'working', standing: 'active', title: 'Room' }],
+      sessions: [{ id: 'collab-1', missionId: 'm-live', missionStatus: 'working', standing: 'active', title: 'Room', privacy: 'internal' }],
       disagreements: [
-        { sessionId: 'collab-1', missionId: 'm-live', contributionId: 'c-2', workerId: 'codex', role: 'reviewer', disputesId: 'c-1', disputedWorkerId: 'claude', at: EARLIER },
+        { sessionId: 'collab-1', missionId: 'm-live', contributionId: 'c-2', workerId: 'codex', role: 'reviewer', disputesId: 'c-1', disputedWorkerId: 'claude', at: EARLIER, privacy: 'internal' },
       ],
       handoffs: [
-        { contributionId: 'c-3', sessionId: 'collab-1', missionId: 'm-live', taskId: 'task-1', fromWorkerId: 'claude', toWorkerId: 'jules', at: EARLIER, canonical: null },
+        { contributionId: 'c-3', sessionId: 'collab-1', missionId: 'm-live', taskId: 'task-1', fromWorkerId: 'claude', toWorkerId: 'jules', at: EARLIER, canonical: null, privacy: 'internal' },
       ],
     },
     capabilities: [{ id: 'hq.mission_orchestrate', riskClass: 'founder_gate', sideEffect: false, enabled: true }],
