@@ -21,6 +21,7 @@ import {
   registerReliabilityCommandCapability,
 } from '../src/application/reliability-command.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
+import { EvidenceLog, verifyEvidenceChain } from '../src/operator/evidence.js';
 import { founderConsole } from '../src/application/console.js';
 
 function expectError(result: { ok: boolean; error?: { code: string; message: string } }): {
@@ -649,6 +650,154 @@ describe('safe mode', () => {
     } finally {
       fx.cleanup();
     }
+  });
+});
+
+/**
+ * Wave 5 review, HIGH finding 1.
+ *
+ * `assessHqIntegrity` used to compute `evidence_chain_broken` — one of the
+ * three `SAFE_MODE_BLOCKING_FINDINGS`, and the only one that detects tampering
+ * with HQ's OWN audit record — through `() => this.queue.evidence.verifyChain()`.
+ * `queue` is a public `readonly` field and `queue.evidence` is a mutable
+ * own-property object literal that issue #200 deliberately keeps as a
+ * PATCHABLE read surface, safe exactly while nothing is enforced on it.
+ *
+ * The exploit the reviewer demonstrated against a real file: break the chain by
+ * a LEGAL APPEND from a raw connection, let the Founder assess (safe mode
+ * engages, correctly), then set `ops.queue.evidence.verifyChain = () => null`.
+ * The next legitimate Founder assessment found nothing, CLEARED the latch, and
+ * handed `releaseKillSwitch` and `claimNext` back out against a chain that was
+ * still broken.
+ *
+ * The fix is the pattern `#capabilityFromStore` and `#runClaimFact` already
+ * use: a `#private` closure over the facade's own handle and the module-level
+ * `verifyEvidenceChain`. Nothing on the public object graph — and no prototype
+ * method — participates.
+ */
+describe('the safe-mode evidence verdict is computed from enforcement-safe truth', () => {
+  /**
+   * Break the hash chain by APPENDING a row from a raw connection, which is
+   * the write `op_evidence` legitimately permits: its guarantee is the chain,
+   * not a trigger. Nothing is updated and nothing is deleted.
+   */
+  function breakChainByLegalAppend(fx: ReturnType<typeof fileFixture>): void {
+    fx.raw()
+      .prepare(
+        `INSERT INTO op_evidence (id, at, task_id, actor, kind, payload, prev_hash, hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'forged-evidence-entry',
+        new Date().toISOString(),
+        null,
+        'not-hq',
+        'forged',
+        '{"executable":false}',
+        'genesis',
+        'a-hash-that-was-never-computed-over-anything',
+      );
+  }
+
+  it('engages on a genuinely broken chain, and no patch of the public surface clears it', () => {
+    const fx = fileFixture();
+    const evidencePrototype = EvidenceLog.prototype as unknown as Record<string, unknown>;
+    const realVerify = evidencePrototype.verifyChain;
+    const realList = evidencePrototype.list;
+    try {
+      breakChainByLegalAppend(fx);
+      const ops = fx.ops;
+
+      // (a) UNPATCHED: the finding engages and safe mode latches.
+      const engaged = expectOk(ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(engaged.depth).toBe('full');
+      expect(engaged.safeMode).toBe(true);
+      expect(engaged.observations.map((o) => o.finding)).toContain('evidence_chain_broken');
+
+      // Now the patch, on the INSTANCE own-property closure AND on the
+      // prototype of the class behind it — proven to have TAKEN on every
+      // public read a caller could reach.
+      ops.queue.evidence.verifyChain = () => null;
+      evidencePrototype.verifyChain = () => null;
+      evidencePrototype.list = () => [];
+      expect(ops.queue.evidence.verifyChain()).toBeNull();
+      expect(new EvidenceLog(fx.db).verifyChain()).toBeNull();
+
+      // (b) The already-latched verdict is NOT cleared by the next legitimate
+      // Founder assessment. This is the half the exploit turned on.
+      const stillEngaged = expectOk(ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(stillEngaged.safeMode).toBe(true);
+      expect(stillEngaged.observations.map((o) => o.finding)).toContain('evidence_chain_broken');
+      expect(ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+
+      // (c) And the acts safe mode exists to refuse still refuse.
+      expectOk(ops.engageKillSwitch('*', 'founder', 'investigating the chain'));
+      const release = ops.releaseKillSwitch('*', 'founder');
+      expect(release.ok).toBe(false);
+      expect(!release.ok && release.error.code).toBe('safe_mode_engaged');
+      expectOk(
+        ops.createTask({
+          capabilityId: CAPS.openPr,
+          payload: { branch: 'after-the-patch' },
+          idempotencyKey: 'after-the-patch',
+          requestedBy: 'claude',
+        }),
+      );
+      const claim = ops.claimNext('claude', CAPS.openPr);
+      expect(claim.ok).toBe(false);
+      expect(!claim.ok && claim.error.code).toBe('safe_mode_engaged');
+
+      // (d) A facade constructed AFTER the patch reaches the same verdict.
+      const after = fx.reopen('process-two');
+      const afterReport = expectOk(after.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(afterReport.safeMode).toBe(true);
+      expect(afterReport.observations.map((o) => o.finding)).toContain('evidence_chain_broken');
+      expect(!after.ops.claimNext('claude', CAPS.openPr).ok).toBe(true);
+
+      // (e) An independent recomputation, on a raw handle that never met the
+      // patched objects, agrees the chain is genuinely broken — so none of the
+      // above is safe mode standing on a stale latch.
+      expect(verifyEvidenceChain(fx.raw())).not.toBeNull();
+    } finally {
+      evidencePrototype.verifyChain = realVerify;
+      evidencePrototype.list = realList;
+      fx.cleanup();
+    }
+  });
+
+  it('still clears on a HEALTHY chain, so the finding is a verdict rather than a formality', () => {
+    const fx = fileFixture();
+    try {
+      // Engaged by an unrelated blocking finding, then cleared by an
+      // assessment of a file whose chain genuinely verifies. If the new
+      // computation were merely pessimistic, this would never clear.
+      fx.raw().exec('DROP TRIGGER trg_hq_action_events_no_erase');
+      const restarted = fx.reopen('process-two');
+      expect(restarted.ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+      const cleared = expectOk(restarted.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(cleared.safeMode).toBe(false);
+      expect(cleared.observations.map((o) => o.finding)).not.toContain('evidence_chain_broken');
+      expect(verifyEvidenceChain(fx.db)).toBeNull();
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('reads the chain through no public delegate at all', () => {
+    // Behaviour cannot prove a negative about every future call site, so the
+    // source is pinned too: the one call that decides safe mode goes through
+    // the `#private` closure, and `queue.evidence.verifyChain` appears in this
+    // file only inside comments explaining why it must not.
+    const source = fs.readFileSync(
+      new URL('../src/application/service.ts', import.meta.url).pathname,
+      'utf8',
+    );
+    const code = source
+      .split('\n')
+      .filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
+      .join('\n');
+    expect(code).not.toMatch(/queue\.evidence\.verifyChain/);
+    expect(code).toContain('verifyEvidenceChain: this.#verifyEvidenceChainFromStore');
   });
 });
 

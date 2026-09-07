@@ -107,63 +107,147 @@ export function readDurabilityPosture(db: HqDatabase): HqDurabilityPosture {
 /* The engine-immutable tables                                         */
 /* ------------------------------------------------------------------ */
 
+/** One engine-immutable ledger, and every guard the schema declares on it. */
+export interface EngineImmutableTable {
+  table: string;
+  triggerPrefix: string;
+  /**
+   * Guards BEYOND the universal trio, by suffix — the secondary-unique-index
+   * guards and `hq_memory`'s supersede rule. Empty for a table that carries
+   * only the trio.
+   */
+  secondaryGuards: readonly string[];
+}
+
 /**
  * Every append-only ledger whose immutability is held by the ENGINE, with the
- * prefix its triggers are named under.
+ * prefix its triggers are named under and every guard declared on it.
  *
  * The trio required of each is the one that carries the guarantee: no UPDATE
  * of any column, no DELETE of any row, and a BEFORE INSERT guard that closes
- * REPLACE / UPSERT on the primary identity. A table may carry further guards
- * (the secondary-unique-index guards, `hq_memory`'s supersede rule); those are
- * that module's business and are not re-stated here, because a list that
- * duplicates every trigger name would drift the moment a phase adds one.
+ * REPLACE / UPSERT on the primary identity.
+ *
+ * **`secondaryGuards` was added by the Wave 5 review (Medium finding 2), and
+ * the argument it replaces was wrong.** Until then this list carried the trio
+ * only, on the reasoning that a table's further guards "are that module's
+ * business" and that re-stating them here would drift. The consequence was
+ * that the census could not SEE them: dropping
+ * `trg_hq_intel_budgets_no_replace_unique` produced no
+ * `append_only_guard_missing` finding, engaged no safe mode, and left an
+ * `INSERT OR REPLACE` on `hq_intel_budgets.budget_key` free to swap a
+ * Founder's spend ceiling — which the reviewer demonstrated, 1000 to
+ * 999999999. A guard nothing checks is a guard that can go missing quietly,
+ * and "it belongs to another module" is not a reason for the integrity check
+ * to be blind to it. The drift concern is real and is answered where it
+ * belongs: a test pins this whole declaration against the LIVE schema, so a
+ * phase that adds a guard and forgets to declare it fails there rather than
+ * escaping the check forever.
  *
  * `hq_mission_plan_items` is deliberately ABSENT: it is legitimately updated
  * when an item is linked to a task, so it carries `no_relink` / `no_respec`
  * guards instead of the trio, and demanding the trio of it would be a false
- * finding. A test pins this list against the live schema, so a future
- * append-only table that is not listed here fails there rather than silently
- * escaping the check.
+ * finding.
  */
-export const ENGINE_IMMUTABLE_TABLES: readonly { table: string; triggerPrefix: string }[] = [
-  { table: 'hq_action_intents', triggerPrefix: 'hq_action_intents' },
-  { table: 'hq_action_events', triggerPrefix: 'hq_action_events' },
-  { table: 'hq_briefs', triggerPrefix: 'hq_briefs' },
-  { table: 'hq_collab_sessions', triggerPrefix: 'hq_collab_sessions' },
-  { table: 'hq_collab_participants', triggerPrefix: 'hq_collab_participants' },
-  { table: 'hq_collab_contributions', triggerPrefix: 'hq_collab_contributions' },
-  { table: 'hq_collab_relations', triggerPrefix: 'hq_collab_relations' },
-  { table: 'hq_memory', triggerPrefix: 'hq_memory' },
-  { table: 'hq_mission_intents', triggerPrefix: 'hq_mission_intents' },
-  { table: 'hq_mission_events', triggerPrefix: 'hq_mission_events' },
-  { table: 'hq_orchestration_runs', triggerPrefix: 'hq_orch_runs' },
-  { table: 'hq_orchestration_run_items', triggerPrefix: 'hq_orch_run_items' },
-  { table: 'hq_project_events', triggerPrefix: 'hq_project_events' },
-  { table: 'hq_truth_records', triggerPrefix: 'hq_truth_records' },
-  { table: 'hq_truth_verifications', triggerPrefix: 'hq_truth_verifications' },
-  { table: 'hq_truth_acceptances', triggerPrefix: 'hq_truth_acceptances' },
-  { table: 'hq_truth_relations', triggerPrefix: 'hq_truth_relations' },
-  { table: 'hq_products', triggerPrefix: 'hq_products' },
-  { table: 'hq_product_events', triggerPrefix: 'hq_product_events' },
-  { table: 'hq_product_artifacts', triggerPrefix: 'hq_product_artifacts' },
-  { table: 'hq_reliability_runs', triggerPrefix: 'hq_reliability_runs' },
-  { table: 'hq_reliability_run_events', triggerPrefix: 'hq_reliability_run_events' },
-  { table: 'hq_reliability_backups', triggerPrefix: 'hq_reliability_backups' },
+export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = [
+  { table: 'hq_action_intents', triggerPrefix: 'hq_action_intents', secondaryGuards: ['no_replace_unique'] },
+  { table: 'hq_action_events', triggerPrefix: 'hq_action_events', secondaryGuards: ['no_replace_unique'] },
+  { table: 'hq_briefs', triggerPrefix: 'hq_briefs', secondaryGuards: [] },
+  { table: 'hq_collab_sessions', triggerPrefix: 'hq_collab_sessions', secondaryGuards: [] },
+  { table: 'hq_collab_participants', triggerPrefix: 'hq_collab_participants', secondaryGuards: [] },
+  { table: 'hq_collab_contributions', triggerPrefix: 'hq_collab_contributions', secondaryGuards: [] },
+  { table: 'hq_collab_relations', triggerPrefix: 'hq_collab_relations', secondaryGuards: [] },
+  {
+    table: 'hq_memory',
+    triggerPrefix: 'hq_memory',
+    // `supersede_only` is a guard, not a convenience: it is what holds the one
+    // legal status move (CURRENT -> SUPERSEDED) for EVERY writer, and its
+    // absence would let a raw connection move a superseded memory back.
+    secondaryGuards: ['no_replace_idem', 'no_replace_rowid', 'supersede_only'],
+  },
+  { table: 'hq_mission_intents', triggerPrefix: 'hq_mission_intents', secondaryGuards: [] },
+  { table: 'hq_mission_events', triggerPrefix: 'hq_mission_events', secondaryGuards: [] },
+  { table: 'hq_orchestration_runs', triggerPrefix: 'hq_orch_runs', secondaryGuards: [] },
+  { table: 'hq_orchestration_run_items', triggerPrefix: 'hq_orch_run_items', secondaryGuards: [] },
+  { table: 'hq_project_events', triggerPrefix: 'hq_project_events', secondaryGuards: [] },
+  { table: 'hq_truth_records', triggerPrefix: 'hq_truth_records', secondaryGuards: ['no_replace_unique'] },
+  {
+    table: 'hq_truth_verifications',
+    triggerPrefix: 'hq_truth_verifications',
+    secondaryGuards: ['no_replace_unique'],
+  },
+  {
+    table: 'hq_truth_acceptances',
+    triggerPrefix: 'hq_truth_acceptances',
+    secondaryGuards: ['no_replace_unique'],
+  },
+  { table: 'hq_truth_relations', triggerPrefix: 'hq_truth_relations', secondaryGuards: [] },
+  { table: 'hq_products', triggerPrefix: 'hq_products', secondaryGuards: ['no_replace_unique'] },
+  { table: 'hq_product_events', triggerPrefix: 'hq_product_events', secondaryGuards: [] },
+  {
+    table: 'hq_product_artifacts',
+    triggerPrefix: 'hq_product_artifacts',
+    secondaryGuards: ['no_replace_unique', 'no_replace_version'],
+  },
+  {
+    table: 'hq_reliability_runs',
+    triggerPrefix: 'hq_reliability_runs',
+    secondaryGuards: ['no_replace_unique'],
+  },
+  {
+    table: 'hq_reliability_run_events',
+    triggerPrefix: 'hq_reliability_run_events',
+    // The attempt reservation. Without it two processes can both open the same
+    // generation of the same run — the duplicate-irreversible-act path Phase 13
+    // exists to close.
+    secondaryGuards: ['no_replace_attempt'],
+  },
+  {
+    table: 'hq_reliability_backups',
+    triggerPrefix: 'hq_reliability_backups',
+    secondaryGuards: ['no_replace_unique'],
+  },
   // Phase 14. All five carry the trio plus a secondary-unique guard, and the
   // secondary guard is load-bearing on two of them: a REPLACE colliding on
   // `hq_intel_budgets.budget_key` would silently swap a Founder's spending
   // ceiling for a looser one, and one on `hq_intel_cost_entries.entry_key`
   // would erase a recorded amount and free the same one to be recorded again —
   // which is how a spend total quietly shrinks.
-  { table: 'hq_intel_model_observations', triggerPrefix: 'hq_intel_obs' },
-  { table: 'hq_intel_budgets', triggerPrefix: 'hq_intel_budgets' },
-  { table: 'hq_intel_decisions', triggerPrefix: 'hq_intel_decisions' },
-  { table: 'hq_intel_decision_outcomes', triggerPrefix: 'hq_intel_outcomes' },
-  { table: 'hq_intel_cost_entries', triggerPrefix: 'hq_intel_costs' },
+  {
+    table: 'hq_intel_model_observations',
+    triggerPrefix: 'hq_intel_obs',
+    secondaryGuards: ['no_replace_unique'],
+  },
+  { table: 'hq_intel_budgets', triggerPrefix: 'hq_intel_budgets', secondaryGuards: ['no_replace_unique'] },
+  {
+    table: 'hq_intel_decisions',
+    triggerPrefix: 'hq_intel_decisions',
+    secondaryGuards: ['no_replace_unique'],
+  },
+  {
+    table: 'hq_intel_decision_outcomes',
+    triggerPrefix: 'hq_intel_outcomes',
+    secondaryGuards: ['no_replace_unique'],
+  },
+  { table: 'hq_intel_cost_entries', triggerPrefix: 'hq_intel_costs', secondaryGuards: ['no_replace_unique'] },
 ];
 
-/** The three guards every engine-immutable table must carry, by suffix. */
+/**
+ * The three guards EVERY engine-immutable table must carry, by suffix.
+ *
+ * Universal, and therefore still the trio. A table's further guards are
+ * declared per table in `ENGINE_IMMUTABLE_TABLES.secondaryGuards`, because
+ * requiring `no_replace_unique` of a table that has no secondary unique index
+ * would be a false finding — the same reason `hq_mission_plan_items` is not
+ * held to the trio.
+ */
 export const REQUIRED_IMMUTABILITY_GUARDS = ['no_rewrite', 'no_erase', 'no_replace'] as const;
+
+/** Every guard name the schema declares on one listed table. Trio plus its own. */
+export function declaredGuardsFor(entry: EngineImmutableTable): string[] {
+  return [...REQUIRED_IMMUTABILITY_GUARDS, ...entry.secondaryGuards].map(
+    (guard) => `trg_${entry.triggerPrefix}_${guard}`,
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /* Findings                                                            */
@@ -264,6 +348,12 @@ function triggerNames(db: HqDatabase): Set<string> {
  * never had `hq_products` is not missing a guard on it — that is absence, not
  * tampering, and conflating the two would engage safe mode on every older
  * database HQ has ever been pointed at.
+ *
+ * Since the Wave 5 review this covers the SECONDARY guards too — the
+ * unique-index guards and `hq_memory`'s supersede rule — because a census that
+ * matched `_no_rewrite`-style suffixes only could not report a dropped
+ * `trg_hq_intel_budgets_no_replace_unique`, and that guard is the whole reason
+ * an `INSERT OR REPLACE` cannot swap a Founder's spend ceiling.
  */
 export function missingImmutabilityGuards(db: HqDatabase): string[] {
   const tables = tableNames(db);
@@ -271,8 +361,7 @@ export function missingImmutabilityGuards(db: HqDatabase): string[] {
   const missing: string[] = [];
   for (const entry of ENGINE_IMMUTABLE_TABLES) {
     if (!tables.has(entry.table)) continue;
-    for (const guard of REQUIRED_IMMUTABILITY_GUARDS) {
-      const name = `trg_${entry.triggerPrefix}_${guard}`;
+    for (const name of declaredGuardsFor(entry)) {
       if (!triggers.has(name)) missing.push(name);
     }
   }

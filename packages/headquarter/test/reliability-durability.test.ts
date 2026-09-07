@@ -21,6 +21,7 @@ import {
   HQ_INTEGRITY_FINDINGS,
   REQUIRED_IMMUTABILITY_GUARDS,
   SAFE_MODE_BLOCKING_FINDINGS,
+  declaredGuardsFor,
   findingIsBlocking,
   fullIntegrity,
   missingImmutabilityGuards,
@@ -217,6 +218,75 @@ describe('the engine-immutable inventory is checked against the live schema, not
     db.close();
   });
 
+  /**
+   * Wave 5 review, MEDIUM finding 2. The census used to match the trio only,
+   * so every SECONDARY guard — the unique-index guards and `hq_memory`'s
+   * supersede rule — was invisible to it: dropping one produced no
+   * `append_only_guard_missing` finding and engaged no safe mode.
+   *
+   * The drift argument that justified leaving them out is answered here rather
+   * than by leaving them unchecked: a phase that adds a guard and does not
+   * DECLARE it fails this test, which is exactly where a maintenance mistake
+   * should surface.
+   */
+  it('declares every guard the live schema actually carries on a listed table', () => {
+    const db = openMemoryHqDatabase();
+    void new HeadquarterOperations(db);
+    const triggers = db
+      .prepare(`SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger'`)
+      .all() as { name: string; tbl_name: string }[];
+    for (const entry of ENGINE_IMMUTABLE_TABLES) {
+      const live = triggers
+        .filter((row) => row.tbl_name === entry.table)
+        .map((row) => row.name)
+        .sort();
+      expect(live, entry.table).toEqual([...declaredGuardsFor(entry)].sort());
+    }
+    db.close();
+  });
+
+  it('reports a dropped SECONDARY guard as a missing guard, on Phase 13 and Phase 14 alike', () => {
+    const fx = fileFixture();
+    try {
+      const raw = fx.raw();
+      raw.exec('DROP TRIGGER trg_hq_intel_budgets_no_replace_unique');
+      raw.exec('DROP TRIGGER trg_hq_reliability_run_events_no_replace_attempt');
+      raw.exec('DROP TRIGGER trg_hq_memory_supersede_only');
+      expect(missingImmutabilityGuards(raw)).toEqual([
+        'trg_hq_intel_budgets_no_replace_unique',
+        'trg_hq_memory_supersede_only',
+        'trg_hq_reliability_run_events_no_replace_attempt',
+      ]);
+      // And the finding is BLOCKING, so a file found in that state engages
+      // safe mode at the next construction — which is the half that makes the
+      // census worth widening.
+      const report = structuralIntegrity(raw, {
+        guardsMissingAsFound: missingImmutabilityGuards(raw),
+      });
+      expect(report.safeMode).toBe(true);
+      expect(report.observations.map((o) => o.finding)).toContain('append_only_guard_missing');
+      expect(report.observations[0]!.detail).toContain('trg_hq_intel_budgets_no_replace_unique');
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('engages safe mode at the next construction when a Phase 14 secondary guard is gone', () => {
+    const fx = fileFixture();
+    try {
+      fx.raw().exec('DROP TRIGGER trg_hq_intel_costs_no_replace_unique');
+      const restarted = fx.reopen('process-two');
+      const posture = restarted.ops.hqReliabilityPosture();
+      expect(posture.integrity.safeMode).toBe(true);
+      expect(posture.integrity.observations.map((o) => o.finding)).toContain('append_only_guard_missing');
+      expect(posture.integrity.observations[0]!.detail).toContain(
+        'trg_hq_intel_costs_no_replace_unique',
+      );
+    } finally {
+      fx.cleanup();
+    }
+  });
+
   it('finds nothing missing on a healthy database, and finds a dropped guard on a tampered one', () => {
     const fx = fileFixture();
     try {
@@ -242,8 +312,27 @@ describe('the engine-immutable inventory is checked against the live schema, not
     bare.close();
   });
 
-  it('requires exactly the trio that carries the guarantee', () => {
+  it('requires exactly the trio of EVERY table, and the rest per table', () => {
+    // The universal requirement is unchanged: requiring `no_replace_unique` of
+    // a table with no secondary unique index would be a false finding, the
+    // same reason `hq_mission_plan_items` is not held to the trio at all.
     expect([...REQUIRED_IMMUTABILITY_GUARDS]).toEqual(['no_rewrite', 'no_erase', 'no_replace']);
+    // The rest are declared where they exist, and the census reads both.
+    expect(declaredGuardsFor({
+      table: 'hq_intel_budgets',
+      triggerPrefix: 'hq_intel_budgets',
+      secondaryGuards: ['no_replace_unique'],
+    })).toEqual([
+      'trg_hq_intel_budgets_no_rewrite',
+      'trg_hq_intel_budgets_no_erase',
+      'trg_hq_intel_budgets_no_replace',
+      'trg_hq_intel_budgets_no_replace_unique',
+    ]);
+    expect(
+      ENGINE_IMMUTABLE_TABLES.filter((entry) => entry.secondaryGuards.length > 0).map(
+        (entry) => entry.table,
+      ),
+    ).toContain('hq_intel_budgets');
   });
 });
 
@@ -456,9 +545,20 @@ describe('backup verification, against real bytes on disk', () => {
       fs.closeSync(handle);
       const verification = verifyHqBackupFile(backupPath);
       expect(verification.verified).toBe(false);
+      // WHICH refusal, by name (Wave 5 review, Low finding 8). This test used
+      // to assert `verified: false` and the facade's error CODE only, which
+      // left `integrity_check_failed` the one refusal of the eight exercised
+      // here whose reason nothing pinned — so a corrupted backup and a
+      // perfectly good one refused for an unrelated reason read the same.
+      expect(verification.refusals).toContain('integrity_check_failed');
+      expect(verification.integrityVerdict).not.toBe('ok');
       const refusal = fx.ops.recordVerifiedBackup({ backupPath, requestedBy: 'founder' });
       expect(refusal.ok).toBe(false);
       expect(!refusal.ok && refusal.error.code).toBe('backup_verification_failed');
+      expect(
+        !refusal.ok && (refusal.error.details?.refusals as string[]),
+      ).toContain('integrity_check_failed');
+      expect(!refusal.ok && refusal.error.message).toContain('integrity_check_failed');
       expect(fx.ops.listVerifiedBackupsBounded().total).toBe(0);
     } finally {
       fx.cleanup();

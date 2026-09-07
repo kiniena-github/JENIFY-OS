@@ -207,6 +207,42 @@ exists. The verdict is a `#private` latched field; a hostile patch of
 instance, on the prototype, and on a facade constructed AFTER the patch — and
 to buy no claim on either facade.
 
+> **Correction (Wave 5 review, HIGH finding 1).** That paragraph was true of
+> the FIELD and false of the LATCH, and the gap was real rather than
+> theoretical. `assessHqIntegrity` computed `evidence_chain_broken` — one of the
+> three blocking findings, and the only one that detects tampering with HQ's own
+> audit record — through `() => this.queue.evidence.verifyChain()`. `queue` is a
+> public `readonly` field and `queue.evidence` is a mutable own-property object
+> literal that issue #200 deliberately keeps PATCHABLE, safe exactly while
+> nothing is enforced on it. So the finding could be switched off by assignment,
+> and worse: the next legitimate Founder assessment then found nothing and
+> CLEARED an already-latched safe mode, handing `releaseKillSwitch` and
+> `claimNext` back out against a chain that was still broken. This violated
+> permanent architectural law 3 and repeated a defect class the repository had
+> already hardened against three times (`queue.evidence` under #200,
+> `#getTask`/`#capabilityOf` rebuilt as private closures).
+>
+> **Fixed** by the pattern `#capabilityFromStore` and `#runClaimFact` already
+> use: `#verifyEvidenceChainFromStore` is a `#private` closure over the facade's
+> own handle and a new module-level `verifyEvidenceChain(db)` in
+> `operator/evidence.ts`. `EvidenceLog.verifyChain` is now a thin delegate over
+> the same function, so the read surface and the enforcement path share ONE
+> computation and cannot drift, and no prototype method participates — patching
+> `EvidenceLog.prototype.verifyChain` or `.list` moves what the patcher sees and
+> nothing that safe mode decides. Pinned by
+> `reliability-authority.test.ts` → "the safe-mode evidence verdict is computed
+> from enforcement-safe truth": the chain is broken by a LEGAL APPEND from a raw
+> connection, safe mode engages, the delegate is patched on the instance AND on
+> `EvidenceLog.prototype` (both proven to have taken), and the finding still
+> engages, the latch is still not cleared, `releaseKillSwitch` and `claimNext`
+> still refuse, a facade constructed AFTER the patch reaches the same verdict,
+> and an independent recomputation confirms the chain really is broken. A source
+> scan additionally pins that no non-comment line of `service.ts` reaches
+> `queue.evidence.verifyChain`.
+>
+> With that in place the paragraph above is now true of both: nothing clears
+> safe mode by assertion, and nothing clears it by patching a read either.
+
 ## Backup and restore
 
 HQ does not take a backup and cannot restore one. Taking one safely — inode
@@ -230,6 +266,14 @@ database that is simply somebody else's. `file_too_large` is NOT exercised: it
 would mean writing a two-gigabyte file in a test, and a bound that is asserted
 by reading the constant rather than by crossing it is stated here as what it
 is.
+
+> **Correction (Wave 5 review, LOW finding 8).** Seven of those eight refusals
+> were asserted BY NAME; the corrupted-database one asserted only `verified:
+> false` plus the facade's error code, which left `integrity_check_failed` the
+> one exercised refusal whose reason nothing pinned — a corrupted backup and a
+> good one refused for an unrelated reason read the same. The test now asserts
+> the refusal name, the non-`ok` integrity verdict, and that the name reaches
+> the caller in both the message and the `details.refusals` array.
 
 `recordVerifiedBackup` performs the verification itself rather than trusting a
 caller, and records the sha256 **HQ computed over the bytes it checked** —
@@ -285,6 +329,8 @@ The strongest claim in the phase, established three ways — the Phase 12 recipe
 | the capability's idempotency | `#capabilityFromStore` | whether `confirmed_not_executed` may reopen an attempt | canonical. |
 | the reliability-command capability row | `#capabilityFromStore` | whether an assessment or a backup record may proceed | canonical, unchanged from the Phase 4/5/7/12 pattern. |
 | the SAFE-MODE verdict | the `#private` `#integrityReport` field | whether a Founder-gated write, an approval, a kill-switch release, a claim or an external execution proceeds | canonical. Pinned against a patch of `hqReliabilityPosture` and `reliabilitySummary` on instance, prototype, and a later-constructed facade. |
+| the EVIDENCE-CHAIN verification that PRODUCES that verdict | `#verifyEvidenceChainFromStore` — a `#private` closure over `#db` and the module-level `verifyEvidenceChain`, deliberately NOT `queue.evidence.verifyChain()` | whether `evidence_chain_broken` engages safe mode, and whether an already-latched safe mode survives the next assessment | canonical **since the Wave 5 correction**; it previously read the patchable delegate. Pinned against a patch on the instance and on `EvidenceLog.prototype`, and against a facade constructed after it. |
+| the APPEND-ONLY GUARD census that produces the other schema finding | `missingImmutabilityGuards(db)` over `ENGINE_IMMUTABLE_TABLES`, observed as the file was FOUND | whether `append_only_guard_missing` engages safe mode | canonical, and **widened by the Wave 5 correction** to the secondary-unique guards and `hq_memory`'s supersede rule, which it previously could not see. |
 | store presence | the constructor's `#reliabilityStorePresent` flag | whether a 0 means "absent" or "empty" | canonical, observed, never migrated. |
 | the ledger, for the unauthenticated snapshot | `#listRunsFromStore` and the `#private` report — deliberately NOT `listRuns()` or `hqReliabilityPosture()` | what `hq-snapshot.json`'s `reliability` section publishes | canonical. |
 
@@ -466,6 +512,16 @@ timing-only concurrency tests. What was built:
   bounded.** HQ reports that a guard was absent when the file was found; it
   cannot say for how long, or what was written meanwhile. That is why the
   posture is "stop and investigate" rather than "here is the damage".
+- **Which guards the census can see** — corrected by the Wave 5 review (Medium
+  finding 2). It originally checked the trio only, on the reasoning that a
+  table's further guards were "that module's business" and that re-stating them
+  would drift. The consequence was that it could not report a dropped
+  `trg_hq_intel_budgets_no_replace_unique` at all. `ENGINE_IMMUTABLE_TABLES`
+  now declares each table's `secondaryGuards` and the census reads both, so a
+  dropped secondary guard produces a real `append_only_guard_missing` finding
+  and engages safe mode. The drift concern is answered where it belongs: a test
+  pins the whole declaration against the LIVE schema, so a phase that adds a
+  guard and forgets to declare it fails there.
 - **The independence check in `reconcileRun` is currently unreachable through
   the worker path**, because `assertApprovalAuthority` refuses any registered
   worker first, and only registered workers hold claims. It is kept as defence
@@ -519,3 +575,30 @@ rather than hidden:
 
 `Phase 10`'s assertion that no facade method name matches `/recommend/i` is
 untouched and still holds; nothing in this phase recommends anything.
+
+---
+
+## Wave 5 correction pass (this branch, on top of `c9ddecc`)
+
+A separate fresh read-only hostile reviewer returned CHANGES REQUIRED —
+0 Critical / 1 High / 1 Medium / 6 Low — against the frozen wave head. The two
+findings that touch Phase 13 are corrected in place above, in the sections they
+belong to rather than in a footnote:
+
+| Finding | Where it is now recorded |
+|---|---|
+| HIGH 1 — the safe-mode evidence verdict came through a patchable delegate | "Safe mode → Nothing clears it by assertion", plus two new rows in the enforcement-safe read audit |
+| MEDIUM 2 — the secondary append-only guards were unpinned and invisible to the census | "Known limitations → Which guards the census can see", plus the census row in the audit |
+| LOW 8 — the corrupted-backup refusal was not pinned by name | "Backup and restore" |
+
+**Verification after the correction pass** (the whole suite, not a subset):
+
+| Command | Result |
+|---|---|
+| `npm run test:hq` | 162 files, 3045 tests passed |
+| `npm run typecheck --workspace @factoryos/headquarter` | clean |
+
+Baseline at `c9ddecc` was 161 files / 3026 tests. Nothing was deleted, skipped,
+weakened or narrowed; the three pre-existing `it.skip` GAP markers under
+`packages/server` are untouched, and nothing under `packages/server`,
+`packages/web`, `packages/shared` or `packages/config-mesob` was changed.
