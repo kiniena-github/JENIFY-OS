@@ -164,6 +164,78 @@ describe('duplicate runs and duplicate attempts', () => {
     expect(fx.ops.getRun(run.id)!.needsReconciliation).toBe(true);
   });
 
+  /**
+   * Wave 5 Medium 2, as the exploit that found it. Both enforcement layers —
+   * the derivation and the UNIQUE index on the attempt key — bind to the run
+   * key, and the run key used to include the caller's `label`: ≤120 characters
+   * of arbitrary free text. Same task, same worker, same live fence, one added
+   * full stop, and a SECOND run opened with a fresh admitted attempt beside a
+   * run standing at `needs_reconciliation` / `outcome_unknown` for that very
+   * work.
+   */
+  it('is not walked around by re-labelling the same work', () => {
+    const fx = reliabilityFixture();
+    const run = expectOk(openRun(fx, { label: 'publish the thing' })).run;
+    expectOk(fx.ops.startRunAttempt({ runId: run.id, workerId: 'claude', fence: fx.claim.fence }));
+    expectOk(
+      fx.ops.recordRunOutcome({
+        runId: run.id,
+        workerId: 'claude',
+        fence: fx.claim.fence,
+        outcome: 'outcome_unknown',
+        note: 'the provider timed out after the request was sent',
+      }),
+    );
+    expect(fx.ops.getRun(run.id)!.needsReconciliation).toBe(true);
+
+    // The one-character rename deduplicates onto the standing run rather than
+    // opening a second one.
+    const relabelled = expectOk(openRun(fx, { label: 'publish the thing.' }));
+    expect(relabelled.deduplicated).toBe(true);
+    expect(relabelled.run.id).toBe(run.id);
+    expect(fx.ops.listRuns()).toHaveLength(1);
+    // And no fresh generation is admitted on it.
+    expect(
+      expectError(fx.ops.startRunAttempt({ runId: run.id, workerId: 'claude', fence: fx.claim.fence }))
+        .code,
+    ).toBe('run_attempt_refused');
+  });
+
+  /**
+   * The other half of Medium 2: the deliberate `idempotencyKey` escape hatch
+   * must not become a way to put a fresh admitted attempt beside unresolved
+   * work on the same task either.
+   */
+  it('refuses a NEW run on a task that already stands at needs_reconciliation', () => {
+    const fx = reliabilityFixture();
+    const run = expectOk(openRun(fx)).run;
+    expectOk(fx.ops.startRunAttempt({ runId: run.id, workerId: 'claude', fence: fx.claim.fence }));
+    expectOk(
+      fx.ops.recordRunOutcome({
+        runId: run.id,
+        workerId: 'claude',
+        fence: fx.claim.fence,
+        outcome: 'outcome_unknown',
+        note: 'the provider timed out after the request was sent',
+      }),
+    );
+    const refusal = expectError(openRun(fx, { idempotencyKey: 'a-deliberately-fresh-one' }));
+    expect(refusal.code).toBe('run_attempt_refused');
+    expect(refusal.message).toMatch(/never retried automatically/i);
+    expect(fx.ops.listRuns()).toHaveLength(1);
+
+    // Once a human has reconciled it, a fresh run is available again.
+    expectOk(
+      fx.ops.reconcileRun({
+        runId: run.id,
+        decision: 'confirmed_not_executed',
+        note: 'checked the provider; nothing landed',
+        requestedBy: 'coo',
+      }),
+    );
+    expect(expectOk(openRun(fx, { idempotencyKey: 'a-deliberately-fresh-one' })).run.id).not.toBe(run.id);
+  });
+
   it('refuses an outcome against a run with no open attempt', () => {
     const fx = reliabilityFixture();
     const run = expectOk(openRun(fx)).run;

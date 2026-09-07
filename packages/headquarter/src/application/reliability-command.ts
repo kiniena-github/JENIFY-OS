@@ -458,16 +458,35 @@ export function reliabilitySchemaPresent(db: HqDatabase): boolean {
  * rather than silently starting a clean one beside it. That is the whole
  * cross-restart duplicate guard, and putting the fence in the key would defeat
  * it.
+ *
+ * The LABEL is not an input either, and that is a correction rather than a
+ * design (Wave 5 Medium 2). It used to be, so the key — which both enforcement
+ * layers bind to, the pure derivation and the UNIQUE index on the attempt
+ * key — varied with arbitrary caller free text. Changing `'publish the thing'`
+ * to `'publish the thing.'` opened a SECOND run on the same task, same worker
+ * and same live fence, with a fresh admitted attempt, beside a run standing at
+ * `needs_reconciliation` / `outcome_unknown` for that very work. A law that
+ * says "never retried" cannot be keyed on a description. The label remains a
+ * stored, bounded, secret-scanned human note on the run; it identifies nothing.
  */
 export function runIdempotencyKey(input: {
   taskId: string;
   runKind: RunKind;
   actionId: string | null;
   missionId: string | null;
-  label: string;
   idempotencyKey: string | null;
 }): string {
-  const digest = createHash('sha256').update(canonicalJson(input)).digest('hex');
+  const digest = createHash('sha256')
+    .update(
+      canonicalJson({
+        taskId: input.taskId,
+        runKind: input.runKind,
+        actionId: input.actionId,
+        missionId: input.missionId,
+        idempotencyKey: input.idempotencyKey,
+      }),
+    )
+    .digest('hex');
   return `run:${digest.slice(0, 32)}`;
 }
 
@@ -738,14 +757,27 @@ export function deriveRunRecord(row: RunRow, events: readonly RunEventRow[]): Ru
         const value: RunOutcome = isReportableRunOutcome(reported) ? reported : 'outcome_unknown';
         outcome = value;
         const category = str(event.detail, 'failureCategory');
-        failureCategory = isRunFailureCategory(category) ? category : 'none';
+        // Fail closed like every sibling default. `'none'` asserts "there was
+        // no failure category", which is a positive claim HQ cannot make about
+        // a detail blob it could not read; `'unknown'` is already a member of
+        // the closed vocabulary and says exactly what is true (Wave 5 Low).
+        failureCategory = isRunFailureCategory(category) ? category : 'unknown';
         state = value === 'outcome_unknown' ? 'needs_reconciliation' : 'concluded';
         reopened = false;
         break;
       }
       case 'interrupted': {
         const reason = str(event.detail, 'reason');
-        const uncertain = event.detail.uncertain === true;
+        // FAIL CLOSED on the flag that decides whether a human is needed.
+        // This read used to be `=== true`, so an absent, corrupt or
+        // non-boolean `uncertain` produced `false` — and `false` here means
+        // `not_executed` / `concluded`, i.e. "nothing happened", which is the
+        // exact opposite of what an unreadable detail blob supports and the
+        // opposite of the documented rule (Wave 5 Medium 4). Only an EXPLICIT
+        // `false`, which the recovery pass writes when it can prove no attempt
+        // was ever reserved or that the capability cannot reach outside HQ,
+        // closes a run without a human.
+        const uncertain = event.detail.uncertain !== false;
         interruption = {
           reason: isRunInterruptionReason(reason) ? reason : 'process_interrupted',
           at: event.at,

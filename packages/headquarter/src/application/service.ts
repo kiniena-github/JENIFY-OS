@@ -7234,17 +7234,39 @@ export class HeadquarterOperations {
       runKind: input.runKind,
       actionId: input.actionId?.trim() || null,
       missionId: input.missionId?.trim() || null,
-      label: label.value!,
       idempotencyKey: input.idempotencyKey?.trim() || null,
     });
     const id = `run-${uuid()}`;
     const at = nowIso();
     const privileged = this.#requirePrivilegedQueue();
     let dedupedTo: string | null = null;
+    let refusal: OpsError | null = null;
     privileged.reserve(() => {
       const existing = loadRunByKey(this.#db, runKey);
       if (existing) {
         dedupedTo = existing.id;
+        return;
+      }
+      // The second half of the "never retried" law, at the OPEN rather than at
+      // the attempt (Wave 5 Medium 2). `runAdmitsAttempt` refuses a further
+      // attempt on a run standing at `needs_reconciliation` — but a fresh RUN
+      // on the same task carries a fresh, admitted generation, so the refusal
+      // could be walked around simply by opening again under a deliberately
+      // different idempotency key. A task whose last word is "HQ does not know
+      // what happened" needs a human, not another run.
+      const unresolved = this.#listRunsFromStore({ taskId: input.taskId }).find(
+        (run) => run.needsReconciliation,
+      );
+      if (unresolved) {
+        refusal = {
+          code: 'run_attempt_refused',
+          message:
+            `Task ${input.taskId} already carries run ${unresolved.id} standing at ` +
+            `${unresolved.state} with outcome ${unresolved.outcome}; a new run on the same work is ` +
+            'refused. An uncertain outcome is never retried automatically — reconcile it explicitly ' +
+            'after checking the external system.',
+          details: { runId: unresolved.id, state: unresolved.state, outcome: unresolved.outcome },
+        };
         return;
       }
       this.#db
@@ -7291,6 +7313,7 @@ export class HeadquarterOperations {
         payload: { runId: id, runKind: input.runKind, processId: this.#processIdentity, executable: false },
       });
     });
+    if (refusal) return { ok: false, error: refusal };
     if (dedupedTo) return ok({ run: this.#runRecordFromStore(dedupedTo)!, deduplicated: true });
     return ok({ run: this.#runRecordFromStore(id)!, deduplicated: false });
   }
