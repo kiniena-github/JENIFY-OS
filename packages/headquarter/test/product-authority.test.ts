@@ -549,8 +549,9 @@ describe('reaching release_candidate and released performs NO external action', 
       ...Object.getOwnPropertyNames(fx.ops),
     ];
     const products = surface.filter((name) => /^product|Product/.test(name));
-    // Exactly the seven product methods, and not one of them names an act
-    // that reaches outside HQ.
+    // Exactly the ten product methods, and not one of them names an act that
+    // reaches outside HQ. (The list below is the assertion; this comment
+    // previously said "seven" and simply miscounted it.)
     expect(products.sort()).toEqual([
       'createProduct',
       'getProduct',

@@ -536,6 +536,23 @@ function rowToProduct(r: Record<string, unknown>): ProductRow {
   };
 }
 
+/**
+ * A stored state column becomes a lifecycle state only if it IS one.
+ *
+ * `hq_product_events` is append-only, and an append is the one write the
+ * triggers deliberately permit — so a row can exist whose `to_state` is free
+ * text that no facade path would ever have written. Casting that column to
+ * `ProductLifecycleState` made the type a runtime lie, and the lie travelled:
+ * into `deriveProductRecord`'s `lifecycle`, into the search corpus as a
+ * product document's `status`, and — as an OBJECT KEY — into the
+ * unauthenticated snapshot. Anything that is not a vocabulary member is
+ * therefore read as `null`: not a move, because HQ will not invent a member
+ * for a value it does not recognise, and cannot honestly report one either.
+ */
+function stateColumn(value: unknown): ProductLifecycleState | null {
+  return isProductLifecycleState(value) ? value : null;
+}
+
 function rowToProductEvent(r: Record<string, unknown>): ProductEventRow {
   let detail: Record<string, unknown> | null = null;
   if (typeof r.detail === 'string') {
@@ -553,8 +570,8 @@ function rowToProductEvent(r: Record<string, unknown>): ProductEventRow {
     at: r.at as string,
     actor: r.actor as string,
     kind: r.kind as ProductEventKind,
-    fromState: (r.from_state as ProductLifecycleState | null) ?? null,
-    toState: (r.to_state as ProductLifecycleState | null) ?? null,
+    fromState: stateColumn(r.from_state),
+    toState: stateColumn(r.to_state),
     note: (r.note as string | null) ?? null,
     detail,
   };
@@ -764,6 +781,15 @@ export function productBrowserView(product: ProductRecord): ProductBrowserView {
  * The lifecycle is the `toState` of the LAST event that carries one, which is
  * the registration event (`idea`) until a move happens. There is deliberately
  * no lifecycle column to disagree with the ledger.
+ *
+ * `lifecycle: ProductLifecycleState` is a claim about a value derived from
+ * stored rows, so it is CHECKED here rather than asserted. `rowToProductEvent`
+ * already reads a non-vocabulary state column as `null`; this second guard
+ * covers a caller that builds `events` itself, and keeps the promise true for
+ * every construction of the record. An event carrying an unrecognised state is
+ * not a move: the record falls back to the last state HQ genuinely recognises,
+ * which leaves `canMoveProductLifecycle` a real member to reason from rather
+ * than a string it must refuse forever.
  */
 export function deriveProductRecord(input: {
   row: ProductRow;
@@ -772,9 +798,10 @@ export function deriveProductRecord(input: {
   capability: Capability | null;
   artifactLimit?: number;
 }): ProductRecord {
-  const moves = input.events.filter((event) => event.toState !== null);
+  const moves = input.events.filter((event) => isProductLifecycleState(event.toState));
   const last = moves[moves.length - 1] ?? null;
-  const lifecycle = last?.toState ?? PRODUCT_INITIAL_LIFECYCLE;
+  const lifecycle =
+    last !== null && isProductLifecycleState(last.toState) ? last.toState : PRODUCT_INITIAL_LIFECYCLE;
   const lifecycleMoves = input.events.filter((event) => event.kind === 'lifecycle_moved');
   const lastMove = lifecycleMoves[lifecycleMoves.length - 1] ?? null;
 
@@ -1093,11 +1120,19 @@ export const PRODUCT_PLAN_TEMPLATES: readonly ProductPlanTemplate[] = [
   },
 ];
 
-export function productPlanTemplateFor(productType: ProductType): ProductPlanTemplate {
-  const found = PRODUCT_PLAN_TEMPLATES.find((template) => template.productType === productType);
-  // Total by construction: PRODUCT_TYPES and the template list are pinned equal.
-  if (!found) throw new Error(`No product plan template for ${productType}`);
-  return found;
+/**
+ * The template for a product type, or `null` when there is none.
+ *
+ * Takes `string` and answers `null` rather than taking `ProductType` and
+ * throwing. PRODUCT_TYPES and the template list are pinned equal, so every
+ * genuine member resolves — but `hq_products.product_type` is a stored column,
+ * and a row carrying free text made the declared `ProductType` a runtime lie
+ * that surfaced as an uncaught throw and a 500. A value outside the closed
+ * vocabulary has no template, which is a fact this function can state; its
+ * caller turns that into a typed refusal.
+ */
+export function productPlanTemplateFor(productType: string): ProductPlanTemplate | null {
+  return PRODUCT_PLAN_TEMPLATES.find((template) => template.productType === productType) ?? null;
 }
 
 /**
@@ -1127,14 +1162,22 @@ export const TEMPLATE_CANONICAL_PATH =
   'HeadquarterOperations.commandMission (capability hq.mission_command, Founder-gated) — then the ' +
   'ordinary orchestrate/claim/approve path for any task under it.';
 
+/**
+ * `null` when the product's stored type is not a vocabulary member: there is
+ * no template to recommend, and inventing one would be inventing a plan. Note
+ * that `productType` on the view is taken from the TEMPLATE, not from the
+ * caller's string, so the field's declared `ProductType` is true by
+ * construction rather than by assertion.
+ */
 export function productPlanRecommendation(product: {
   id: string;
-  productType: ProductType;
-}): ProductPlanRecommendationView {
+  productType: string;
+}): ProductPlanRecommendationView | null {
   const template = productPlanTemplateFor(product.productType);
+  if (!template) return null;
   return {
     productId: product.id,
-    productType: product.productType,
+    productType: template.productType,
     templateId: template.id,
     templateStatement: template.statement,
     missions: template.missions.map((mission) => ({
@@ -1245,56 +1288,92 @@ export function productReleaseReadiness(product: ProductRecord): ProductReleaseR
  * the Phase 9/11 rule applies unchanged — an unauthenticated artifact has no
  * vocabulary that classifies free text for an unauthenticated reader, so it
  * publishes none.
+ *
+ * The three maps are keyed by their CLOSED VOCABULARY plus the one extra
+ * member `unrecognized`, and by nothing else. That last key is what makes the
+ * shape closed rather than merely intended: the values being counted come from
+ * stored columns, and `hq_products` / `hq_product_events` /
+ * `hq_product_artifacts` are append-only ledgers on which an APPEND is the
+ * write the triggers deliberately permit. Before this bucket existed, a row
+ * carrying free text in `product_type`, `to_state` or `kind` became an object
+ * KEY here — publishing that text to an unauthenticated reader and corrupting
+ * the count beside it, because `+= 1` on an absent key is `NaN` and `NaN`
+ * serialises as `null`. A value outside the vocabulary is now counted as
+ * exactly what HQ knows about it — that it is not one of these — and its text
+ * is never carried.
  */
 export interface ProductFactorySnapshotView {
   /** False when this database carries no Phase 12 schema; counts are then 0 by absence. */
   storePresent: boolean;
   products: number;
-  byType: Record<ProductType, number>;
-  byLifecycle: Record<ProductLifecycleState, number>;
+  byType: Record<ProductSnapshotBucket<ProductType>, number>;
+  byLifecycle: Record<ProductSnapshotBucket<ProductLifecycleState>, number>;
   artifacts: number;
-  artifactsByKind: Record<ProductArtifactKind, number>;
+  artifactsByKind: Record<ProductSnapshotBucket<ProductArtifactKind>, number>;
   note: string;
 }
+
+/**
+ * The one bucket that is not a vocabulary member. Named `unrecognized` rather
+ * than `other` or `unknown`: it is a statement that HQ did not recognise the
+ * stored value, not a category of product.
+ */
+export const PRODUCT_SNAPSHOT_UNRECOGNIZED = 'unrecognized';
+export type ProductSnapshotBucket<T extends string> = T | typeof PRODUCT_SNAPSHOT_UNRECOGNIZED;
 
 export const PRODUCT_SNAPSHOT_NOTE =
   'Counts over closed vocabularies only. This artifact carries no product name, problem statement, target ' +
   'user, artifact name, locator, digest or id — the Product Factory record is a Founder-gated read, and ' +
   'nothing free-text from it is published here. A lifecycle count is a count of records; it is not a ' +
-  'statement that anything was released, deployed or published, because nothing in this phase can do that.';
+  'statement that anything was released, deployed or published, because nothing in this phase can do that. ' +
+  'Each map carries its vocabulary plus one `unrecognized` bucket: a stored value outside the vocabulary is ' +
+  'counted there and its text is never carried, so no row can add a key to this artifact.';
+
+function zeroBuckets<T extends string>(vocabulary: readonly T[]): Record<ProductSnapshotBucket<T>, number> {
+  return Object.fromEntries([
+    ...vocabulary.map((member) => [member, 0]),
+    [PRODUCT_SNAPSHOT_UNRECOGNIZED, 0],
+  ]) as Record<ProductSnapshotBucket<T>, number>;
+}
 
 export function emptyProductFactorySnapshot(storePresent: boolean): ProductFactorySnapshotView {
   return {
     storePresent,
     products: 0,
-    byType: Object.fromEntries(PRODUCT_TYPES.map((type) => [type, 0])) as Record<ProductType, number>,
-    byLifecycle: Object.fromEntries(PRODUCT_LIFECYCLE_STATES.map((state) => [state, 0])) as Record<
-      ProductLifecycleState,
-      number
-    >,
+    byType: zeroBuckets(PRODUCT_TYPES),
+    byLifecycle: zeroBuckets(PRODUCT_LIFECYCLE_STATES),
     artifacts: 0,
-    artifactsByKind: Object.fromEntries(PRODUCT_ARTIFACT_KINDS.map((kind) => [kind, 0])) as Record<
-      ProductArtifactKind,
-      number
-    >,
+    artifactsByKind: zeroBuckets(PRODUCT_ARTIFACT_KINDS),
     note: PRODUCT_SNAPSHOT_NOTE,
   };
 }
 
-/** PURE. Fold derived records into the snapshot's counts. */
+/**
+ * PURE. Fold derived records into the snapshot's counts.
+ *
+ * Every increment goes through a membership check, and the checked value —
+ * never the caller's string — is the key. So this function can only ever write
+ * keys the empty snapshot already created: the section's key set is a function
+ * of the vocabularies, not of the data.
+ */
 export function summarizeProductFactory(input: {
   storePresent: boolean;
   products: readonly ProductRecord[];
   artifactTotal: number;
-  artifactKinds: readonly ProductArtifactKind[];
+  artifactKinds: readonly string[];
 }): ProductFactorySnapshotView {
   const view = emptyProductFactorySnapshot(input.storePresent);
   view.products = input.products.length;
   for (const product of input.products) {
-    view.byType[product.productType] += 1;
-    view.byLifecycle[product.lifecycle] += 1;
+    if (isProductType(product.productType)) view.byType[product.productType] += 1;
+    else view.byType[PRODUCT_SNAPSHOT_UNRECOGNIZED] += 1;
+    if (isProductLifecycleState(product.lifecycle)) view.byLifecycle[product.lifecycle] += 1;
+    else view.byLifecycle[PRODUCT_SNAPSHOT_UNRECOGNIZED] += 1;
   }
   view.artifacts = input.artifactTotal;
-  for (const kind of input.artifactKinds) view.artifactsByKind[kind] += 1;
+  for (const kind of input.artifactKinds) {
+    if (isProductArtifactKind(kind)) view.artifactsByKind[kind] += 1;
+    else view.artifactsByKind[PRODUCT_SNAPSHOT_UNRECOGNIZED] += 1;
+  }
   return view;
 }

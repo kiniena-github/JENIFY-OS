@@ -866,10 +866,14 @@ export type OpsErrorCode =
   | 'session_closed'
   | 'not_a_participant'
   | 'unknown_contribution'
-  // Phase 12 — the Product Factory. Three codes, and deliberately none that
+  // Phase 12 — the Product Factory. Four codes, and deliberately none that
   // names a release, a publish or a deploy: no product path can attempt one,
-  // so no product path can refuse one either.
+  // so no product path can refuse one either. `unrecognized_product_type` is
+  // the typed answer for a stored `product_type` outside the closed
+  // vocabulary — a state a facade write cannot create but a direct append to
+  // the ledger can, and one HQ states rather than throws over.
   | 'unknown_product'
+  | 'unrecognized_product_type'
   | 'product_lifecycle_conflict'
   | 'invalid_product_lifecycle_move';
 // Phase 10 adds NO refusal code: its two reads cannot fail (a derivation over
@@ -6435,7 +6439,20 @@ export class HeadquarterOperations {
     return this.#productRecordFromStore(id);
   }
 
-  listProducts(filter?: { projectId?: string; lifecycle?: ProductLifecycleState }): ProductRecord[] {
+  /**
+   * The register, read through `#db` and the private derivation only.
+   *
+   * The PRIVATE half of `listProducts`. Everything inside the facade that
+   * needs the register calls this one, so no internal caller depends on a
+   * public, prototype-patchable method: `listProducts` is the public name over
+   * it, and `listProductsBounded` and `productFactorySummary` go straight to
+   * it. `#searchCorpus` already read products this way; this makes it the
+   * whole class's habit rather than one call site's.
+   */
+  #listProductsFromStore(filter?: {
+    projectId?: string;
+    lifecycle?: ProductLifecycleState;
+  }): ProductRecord[] {
     if (!this.#productStorePresent) return [];
     // Fail closed: a supplied-but-unrecognized lifecycle filter matches
     // NOTHING (the listMissionIds/listProjectIds lesson).
@@ -6446,13 +6463,17 @@ export class HeadquarterOperations {
       .filter((record) => (filter?.lifecycle ? record.lifecycle === filter.lifecycle : true));
   }
 
+  listProducts(filter?: { projectId?: string; lifecycle?: ProductLifecycleState }): ProductRecord[] {
+    return this.#listProductsFromStore(filter);
+  }
+
   /** The bounded wire read: newest first, with the true total stated beside it. */
   listProductsBounded(filter?: { projectId?: string; lifecycle?: ProductLifecycleState }): {
     products: ProductRecord[];
     total: number;
     truncated: boolean;
   } {
-    const all = this.listProducts(filter).reverse();
+    const all = this.#listProductsFromStore(filter).reverse();
     const page = all.slice(0, PRODUCT_READ_LIMIT);
     return { products: page, total: all.length, truncated: all.length > page.length };
   }
@@ -6472,7 +6493,19 @@ export class HeadquarterOperations {
   productPlanTemplate(productId: string): OpsResult<ProductPlanRecommendationView> {
     const product = this.#productRecordFromStore(productId);
     if (!product) return fail('unknown_product', `Unknown product: ${productId}`);
-    return ok(productPlanRecommendation({ id: product.id, productType: product.productType }));
+    const plan = productPlanRecommendation({ id: product.id, productType: product.productType });
+    // A stored `product_type` outside the closed vocabulary has no template.
+    // A typed refusal, not a throw: the old code asserted the column was a
+    // `ProductType` and threw when it was not, which escaped uncaught and
+    // reached the route as an opaque 500 instead of a stated reason.
+    if (!plan) {
+      return fail(
+        'unrecognized_product_type',
+        `Product ${product.id} carries a product type that is not a member of the closed vocabulary, so no ` +
+          `plan template applies to it. HQ will not invent one. Recognized types: ${PRODUCT_TYPES.join(', ')}.`,
+      );
+    }
+    return ok(plan);
   }
 
   /**
@@ -6493,10 +6526,17 @@ export class HeadquarterOperations {
    * No name, problem, target user, artifact name, locator, digest or id
    * crosses — the Phase 9/11 rule about free text on an unauthenticated
    * artifact, applied to a register whose every text field is a company plan.
+   *
+   * ENFORCEMENT-SAFE, and it has to be: this is the one read on the path that
+   * produces the UNAUTHENTICATED artifact, so a same-realm patch of a public
+   * method here would be a patch of what the world is told. It reads
+   * `#listProductsFromStore` — `loadProducts`/`loadProductEvents` off `#db`
+   * and the pure derivation — deliberately NOT `listProducts()`, exactly as
+   * `#searchCorpus` already does.
    */
   productFactorySummary(): ProductFactorySnapshotView {
     if (!this.#productStorePresent) return emptyProductFactorySnapshot(false);
-    const products = this.listProducts();
+    const products = this.#listProductsFromStore();
     const artifacts = loadAllProductArtifacts(this.#db);
     return summarizeProductFactory({
       storePresent: true,
