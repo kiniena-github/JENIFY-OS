@@ -701,13 +701,26 @@ export const BACKUP_REFUSAL_REASONS = [
    */
   'file_has_uncheckpointed_wal',
   /**
-   * The bytes moved between the digest and the check (Wave 5 Medium 3).
+   * The bytes, or the path, moved between the digest and the check (Wave 5
+   * Medium 3, corrected by Wave 5 Medium 5).
    *
-   * The digest read and the SQLite open are two reads of the same path. The
-   * digest fd is now held across the open and the file is re-digested through
-   * that same fd afterwards, so digest and verdict provably describe one
-   * inode and one content — and a file that changed underneath is refused
-   * instead of being recorded under a digest it no longer has.
+   * Two checks, and they cover two different substitutions:
+   *
+   *  - the digest fd is HELD across the SQLite open and the file is
+   *    re-digested through that same fd afterwards, so the CONTENT behind that
+   *    one descriptor cannot have changed;
+   *  - `fstat` on that descriptor and `stat` on the path are compared after
+   *    the open, so a `rename()` that pointed the path at a different inode is
+   *    refused. Without it the digest described inode A while
+   *    `integrity_check`, the table count and `verified` described inode B —
+   *    the open is BY PATH, and the earlier comment's claim that the two
+   *    "provably describe one inode" was simply not true.
+   *
+   * What this does NOT claim: a rename that is REVERTED inside the window
+   * between SQLite's own open and the `stat` below would still pass. Closing
+   * that would take opening the database through the held descriptor
+   * (`/proc/self/fd/<n>`), which is not portable. The guarantee is stated
+   * exactly, not rounded up.
    */
   'file_changed_during_verification',
   'not_a_readable_sqlite_database',
@@ -780,16 +793,23 @@ function digestFile(fd: number): { digest: string; size: number } {
  *
  *  - `lstat` + `O_NOFOLLOW` cover the FINAL path component only, so a
  *    symlinked PARENT directory was followed silently. The path is resolved
- *    with `realpathSync` and a divergence is refused as `path_is_symlink`,
- *    which is what it is.
+ *    with `realpathSync` and the RESOLVED path is what is digested, opened and
+ *    carried back on `resolvedPath` — so the register names the file HQ
+ *    actually checked rather than an alias for it. It is RECORDED, not refused
+ *    (`path_is_symlink` covers the final component only); the inline note at
+ *    the `realpathSync` call argues why, and this header used to contradict
+ *    it (Wave 5 Low 6, a merge artifact).
  *  - a `-wal`/`-journal` sidecar is refused, because the digest covers the
  *    main file and the verifying open reads main PLUS sidecar — see
  *    `file_has_uncheckpointed_wal`. Pointing this at a LIVE WAL database is
  *    therefore now refused rather than "safe as well as useless": it was never
  *    unsafe, but the digest it produced did not pin what SQLite checked.
  *  - the digest fd is HELD across the SQLite open and the file is re-digested
- *    through it afterwards, so the digest and the verdict provably describe
- *    one inode and one content.
+ *    through it afterwards, AND the descriptor's `dev`/`ino` are compared with
+ *    the path's after the open — so neither the content behind the descriptor
+ *    nor the inode the path names can have been swapped for another. See
+ *    `file_changed_during_verification` for the exact boundary of that
+ *    guarantee, which is narrower than "one inode, provably".
  */
 export function verifyHqBackupFile(candidate: string): BackupVerification {
   const empty: BackupVerification = {
@@ -905,10 +925,48 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
 
       // Re-digest through the SAME descriptor the first digest used, after
       // SQLite has had its look. Equal digests mean the digest recorded beside
-      // the verdict describes the exact bytes the verdict was reached on.
+      // the verdict describes the exact bytes behind that descriptor.
       const after = digestFile(fd);
       if (after.digest !== digest || after.size !== sizeBytes) {
         return { ...empty, refusals: ['file_changed_during_verification'], digest, sizeBytes, resolvedPath: resolved };
+      }
+
+      // And the PATH still names that descriptor's inode (Wave 5 Medium 5).
+      // The re-digest above proves the content behind `fd` did not change; it
+      // proves nothing about what `openHqDatabaseReadOnly(resolved)` opened,
+      // because that open is BY PATH and re-resolves it. A `rename()` between
+      // the first digest and that open left the digest describing inode A
+      // while `integrity_check`, `schemaTables` and `verified` described inode
+      // B — and the re-digest, reading A, agreed with itself. Comparing the
+      // descriptor's `dev`/`ino` with the path's closes that: a divergence is
+      // the file changing during verification, which is exactly this refusal.
+      //
+      // Conservative by construction. On a platform that does not report a
+      // meaningful inode the two reads are equal anyway, so this never invents
+      // a refusal; and a rename that happens AFTER SQLite's own open is
+      // refused too, which is the fail-closed direction.
+      try {
+        const held = fs.fstatSync(fd);
+        const named = fs.statSync(resolved);
+        if (held.dev !== named.dev || held.ino !== named.ino) {
+          return {
+            ...empty,
+            refusals: ['file_changed_during_verification'],
+            digest,
+            sizeBytes,
+            resolvedPath: resolved,
+          };
+        }
+      } catch {
+        // The path no longer stats at all: it was moved or removed under the
+        // verification. That is the same finding, not a reason to record one.
+        return {
+          ...empty,
+          refusals: ['file_changed_during_verification'],
+          digest,
+          sizeBytes,
+          resolvedPath: resolved,
+        };
       }
 
       return {

@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { expectOk } from './application.fixture.js';
 import { fileFixture } from './reliability.fixture.js';
@@ -747,6 +747,74 @@ describe('backup verification, against real bytes on disk', () => {
       ).toContain('integrity_check_failed');
       expect(!refusal.ok && refusal.error.message).toContain('integrity_check_failed');
       expect(fx.ops.listVerifiedBackupsBounded().total).toBe(0);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * Wave 5 MEDIUM 5, as a real substitution rather than as an argument.
+   *
+   * The digest is taken through a held descriptor and the file is re-digested
+   * through that same descriptor afterwards — but the SQLite open is BY PATH
+   * and re-resolves it. A `rename()` between the two therefore left the digest
+   * describing inode A while `integrity_check`, `schemaTables` and `verified`
+   * described inode B, and the re-digest (reading A) agreed with itself. The
+   * comment claiming digest and verdict "provably describe one inode" was not
+   * true, and `recordVerifiedBackup` would have stored that digest as a
+   * recovery point.
+   *
+   * The swap is placed exactly where the race would put it: the moment the
+   * digest descriptor has been obtained and before anything opens the path.
+   */
+  it('refuses a candidate whose PATH was renamed onto a different inode mid-verification', () => {
+    const fx = fileFixture();
+    try {
+      const decoy = path.join(fx.dir, 'decoy.sqlite');
+      const substitute = path.join(fx.dir, 'substitute.sqlite');
+      for (const [file, extra] of [
+        [decoy, 0],
+        [substitute, 5],
+      ] as const) {
+        const db = openHqDatabase(file);
+        db.exec('CREATE TABLE IF NOT EXISTS hq_events (x TEXT)');
+        for (let i = 0; i < extra; i += 1) db.exec(`CREATE TABLE extra_${i} (x TEXT)`);
+        db.pragma('wal_checkpoint(TRUNCATE)');
+        db.close();
+        fs.rmSync(`${file}-wal`, { force: true });
+        fs.rmSync(`${file}-shm`, { force: true });
+      }
+      const decoyDigest = createHash('sha256').update(fs.readFileSync(decoy)).digest('hex');
+
+      const realOpenSync = fs.openSync;
+      let swapped = false;
+      const spy = vi
+        .spyOn(fs, 'openSync')
+        .mockImplementation(((...args: Parameters<typeof fs.openSync>) => {
+          const fd = (realOpenSync as (...a: unknown[]) => number)(...args);
+          if (!swapped && args[0] === decoy) {
+            swapped = true;
+            // The descriptor above still reads the decoy's inode; the PATH now
+            // names a different database entirely.
+            fs.renameSync(substitute, decoy);
+          }
+          return fd;
+        }) as typeof fs.openSync);
+      let verification;
+      try {
+        verification = verifyHqBackupFile(decoy);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(swapped).toBe(true);
+      // Refused, rather than recorded under a digest that does not describe
+      // what was checked.
+      expect(verification.verified).toBe(false);
+      expect(verification.refusals).toEqual(['file_changed_during_verification']);
+      // The digest that WOULD have been published is the decoy's, while the
+      // verdict was reached on the substitute — which is exactly the problem.
+      expect(verification.digest).toBe(decoyDigest);
+      expect(verification.schemaTables).toBeNull();
     } finally {
       fx.cleanup();
     }
