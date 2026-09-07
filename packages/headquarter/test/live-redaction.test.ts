@@ -315,6 +315,128 @@ describe('the value rule is not defeated by case or by invisible characters', ()
     expect(() => assertBrowserSafe(node)).toThrow();
   });
 
+  /**
+   * PORTED from the other Wave 5 round-four lane, whose Low 2 found U+2800.
+   *
+   * BRAILLE PATTERN BLANK is `So` — not `Cf`, not `Cc`, not
+   * `Default_Ignorable` — so it walked through every property this file's C0/C1
+   * sweep and the invisible sweep above name, and it broke every credential
+   * shape while leaving every character of the credential present and usable.
+   * It carries an advance width, which is why it is arguably not "invisible";
+   * what the class is actually for is ZERO INK, whatever the width. The merged
+   * `ERASED_CODE_POINTS` names it explicitly, so this test asserts against the
+   * surviving implementation rather than against the lane that wrote it.
+   */
+  it('refuses a credential broken by a zero-ink character that is not default-ignorable', () => {
+    const shapes = [
+      (hidden: string) => `sk-${hidden}AAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) => `ghp_${hidden}AAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) => `github_pat_${hidden}AAAAAAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) => `AIza${hidden}AAAAAAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) => `Bearer ${hidden}AAAAAAAAAAAAAAAAAAAA`,
+    ];
+    for (const shape of shapes) {
+      expect(() => assertBrowserSafe({ note: shape('⠀') }), shape('')).toThrow(
+        BrowserSafetyError,
+      );
+    }
+    // And braille as braille is still ordinary text, not a refusal.
+    expect(() =>
+      assertBrowserSafe({ note: '⠠⠓⠑⠍⠑ transcribed for accessibility' }),
+    ).not.toThrow();
+  });
+
+  /**
+   * PORTED from the other Wave 5 round-four lane (its Low 3), and it holds
+   * unchanged against the merged fold, which is the union of the two lanes'
+   * maps: one Cyrillic or Greek letter that reads as the ASCII one defeats the
+   * shape while the credential's entropy is entirely intact. Executed against
+   * that lane's head, Cyrillic `s` in `sk-…` and Cyrillic `a` in `AIza…` both
+   * PASSED.
+   */
+  it('refuses a credential whose prefix is spelled with Cyrillic or Greek lookalikes', () => {
+    const disguised: [string, string][] = [
+      ['Cyrillic s in sk-', 'ѕk-ABCDEFGHIJKLMNOP0123'],
+      ['Cyrillic a in AIza', 'AIzаABCDEFGHIJKLMNOPQRSTUV'],
+      ['Cyrillic o in xoxb-', 'xоxb-ABCDEFGHIJKL'],
+      ['Cyrillic e in eyJ', 'еyJABCDEFGH.ABCDEFGH.ABCDEFGH'],
+      ['Greek B in Bearer', 'Βearer ABCDEFGHIJKLMNOP'],
+      ['Greek O in BEGIN', '-----BEGIN RSA PRIVATE KEY-----'.replace('O', 'Ο')],
+      ['Cyrillic s plus a zero-ink blank', 'ѕk⠀-ABCDEFGHIJKLMNOP0123'],
+    ];
+    for (const [label, value] of disguised) {
+      expect(() => assertBrowserSafe({ note: value }), label).toThrow(BrowserSafetyError);
+    }
+  });
+
+  /**
+   * PORTED from the other Wave 5 round-four lane, and this is the one whose
+   * REASON changed in the merge, so the reason is restated rather than carried.
+   *
+   * That lane's map was curated by OMISSION — it deliberately left Cyrillic
+   * `к`, `м`, `т`, `в`, `н` and `г` unmapped so that no Cyrillic string could
+   * fold into an English keyword at all. The surviving map is this lane's,
+   * which IS shape-faithful for those letters, so that impossibility argument
+   * does not carry across and is not restated here. What carries across, and is
+   * what the test was really pinning, is that ordinary PROSE in these scripts
+   * is not turned into a refusal — which holds because the fold is faithful to
+   * the glyph: `С` folds to `C` and not `S`, `н` to `h` and not `n`, `р` to `p`
+   * and not `r`, so `СЕКРЕТ` folds to `CEKPET` and `токен` to `tokeh`.
+   *
+   * The two English keywords that ARE reachable from these alphabets are pinned
+   * in the test below this one, so the boundary is asserted from both sides
+   * instead of being claimed.
+   */
+  it('keeps accepting ordinary Cyrillic, Greek and other-script prose', () => {
+    const legitimate: [string, string][] = [
+      ['Russian prose', '\u041e\u0442\u0447\u0451\u0442 \u043e \u043f\u0440\u043e\u0438\u0437\u0432\u043e\u0434\u0441\u0442\u0432\u0435 \u0441\u043e\u043b\u0438 \u0437\u0430 \u043a\u0432\u0430\u0440\u0442\u0430\u043b'],
+      ['Russian, the word secret', '\u0421\u0435\u043a\u0440\u0435\u0442 \u043d\u0430\u0448\u0435\u0433\u043e \u0443\u0441\u043f\u0435\u0445\u0430 \u2014 \u043f\u043e\u0441\u0442\u043e\u044f\u043d\u0441\u0442\u0432\u043e'],
+      ['Russian, the word token', '\u0422\u043e\u043a\u0435\u043d \u0434\u043e\u0441\u0442\u0443\u043f\u0430 \u0438\u0441\u0442\u0451\u043a \u0432\u0447\u0435\u0440\u0430'],
+      ['Ukrainian', '\u0412\u0438\u0440\u043e\u0431\u043d\u0438\u0446\u0442\u0432\u043e \u0441\u043e\u043b\u0456 \u0437\u0440\u043e\u0441\u043b\u043e'],
+      ['Greek prose', '\u0397 \u03ad\u03ba\u03b8\u03b5\u03c3\u03b7 \u03c0\u03b1\u03c1\u03b1\u03b3\u03c9\u03b3\u03ae\u03c2 \u03b5\u03af\u03bd\u03b1\u03b9 \u03ad\u03c4\u03bf\u03b9\u03bc\u03b7'],
+      ['Greek capitals heading', '\u0395\u039a\u0398\u0395\u03a3\u0397 \u03a0\u0391\u03a1\u0391\u0393\u03a9\u0393\u0397\u03a3'],
+      ['Cherokee', '\u13e3\u13b3\u13a9 report heading'],
+      ['Armenian', '\u0531\u0580\u057f\u0561\u0564\u0580\u0578\u0582\u0569\u0575\u0561\u0576'],
+      ['mixed Latin and Cyrillic', 'Mesob Salt Factory \u2014 \u041c\u0435\u0437\u043e\u0431 \u2014 Q3'],
+    ];
+    for (const [label, value] of legitimate) {
+      expect(() => assertBrowserSafe({ note: value }), label).not.toThrow();
+    }
+  });
+
+  /**
+   * NEW at the round-four reconciliation, and the other half of the boundary the
+   * test above pins.
+   *
+   * Computed over the whole modern Russian, Ukrainian and Serbian alphabets, the
+   * ASCII letters the merged fold can produce from them are exactly
+   * `abcehijkmoptxy`. `apikey` and `cookie` are the only two keywords whose
+   * every letter is in that image, so those two — and only those two — have an
+   * all-Cyrillic homoglyph spelling. Refusing them is the CORRECT answer, not
+   * the cost: they are homoglyph spellings of an English credential keyword,
+   * which is the exact thing the fold exists to catch.
+   *
+   * This is asserted rather than argued so that widening the map later cannot
+   * silently widen the false-refusal surface without a test saying so.
+   */
+  it('folds only the two credential keywords a modern Cyrillic alphabet can spell', () => {
+    // а р і к е у — renders as `apikey`, is a word in no language.
+    expect(() => assertBrowserSafe({ 'арікеу': 'a-live-value' })).toThrow(BrowserSafetyError);
+    // с о о к і е — renders as `cookie`.
+    expect(() => assertBrowserSafe({ 'соокіе': 'a-live-value' })).toThrow(BrowserSafetyError);
+    // The keywords that need an `s`, `r`, `n`, `d`, `l`, `v`, `w`, `f`, `u` or
+    // `z` cannot be reached from those alphabets at all, so their nearest
+    // all-Cyrillic spelling stays ordinary text.
+    for (const [label, name] of [
+      ['Russian for secret, folds to cekpet', 'секрет'],
+      ['Russian for token, folds to tokeh', 'токен'],
+      ['Russian for password, folds to пapoль', 'пароль'],
+      ['Russian for access, folds to дocтyп', 'доступ'],
+    ] as [string, string][]) {
+      expect(() => assertBrowserSafe({ [name]: 'a-live-value' }), label).not.toThrow();
+    }
+  });
+
   it('still allows the hashes and ids HQ renders, after normalization', () => {
     // The normalization must not turn a legitimate value into a false refusal.
     expect(() =>

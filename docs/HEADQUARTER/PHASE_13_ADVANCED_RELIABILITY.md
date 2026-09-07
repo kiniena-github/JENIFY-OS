@@ -646,7 +646,7 @@ The strongest claim in the phase, established three ways — the Phase 12 recipe
 | the SAFE-MODE verdict | the `#private` `#integrityReport` field, latched from the structural assessment AND from the last row of `hq_reliability_verdicts` | whether a Founder-gated write, an approval, an external-action authorization, a kill-switch release, a claim or an external execution proceeds | canonical. Pinned against a patch of `hqReliabilityPosture` and `reliabilitySummary` on instance, prototype, and a later-constructed facade — and, **since the Wave 5 correction of HIGH 1**, against a plain RESTART, which used to clear it. |
 | the RECORDED verdict a construction re-reads | `latestIntegrityVerdict(db)` — a direct read of the append-only `hq_reliability_verdicts` ledger | whether a blocking verdict survives a restart | canonical. The ledger carries the full append-only trio; a raw connection can APPEND a `safe_mode = 1` row (the fail-closed direction) and can neither rewrite nor erase one. |
 | the APPEND-ONLY GUARDS ON THE AUDIT LOG ITSELF | the same `missingImmutabilityGuards` census, now that `op_evidence` is a declared `ENGINE_IMMUTABLE_TABLES` member | whether removing the guards on the hash-chained log is a blocking finding | canonical **since the third correction round (High A2)**. The table used to carry NO triggers at all, on the argument that "its guarantee is the chain rather than the engine" — so a raw `DELETE FROM op_evidence WHERE seq > 1` was simply permitted, and the chain then verified perfectly over what was left. |
-| the EVIDENCE-CHAIN verification that PRODUCES that verdict | `#verifyEvidenceChainFromStore` — a `#private` closure over `#db` and the module-level `verifyEvidenceChain`, deliberately NOT `queue.evidence.verifyChain()` | whether `evidence_chain_broken` engages safe mode, and whether an already-latched safe mode survives the next assessment | canonical **since the Wave 5 correction**; it previously read the patchable delegate. Pinned against a patch on the instance and on `EvidenceLog.prototype`, and against a facade constructed after it. Since the third correction round it verifies the chain's LENGTH as well as its links, against the AUTOINCREMENT high-water mark SQLite maintains — because walking forward from the genesis value proved that the entries PRESENT link to one another and said nothing about where the chain was supposed to END, so deleting the NEWEST entries left a log that verified perfectly. |
+| the EVIDENCE-CHAIN verification that PRODUCES that verdict | `#verifyEvidenceChainFromStore` — a `#private` closure over `#db` and the module-level `verifyEvidenceChain`, deliberately NOT `queue.evidence.verifyChain()` | whether `evidence_chain_broken` engages safe mode, and whether an already-latched safe mode survives the next assessment | canonical **since the Wave 5 correction**; it previously read the patchable delegate. Pinned against a patch on the instance and on `EvidenceLog.prototype`, and against a facade constructed after it. Since the third correction round it verifies the chain's LENGTH as well as its links, against the AUTOINCREMENT high-water mark SQLite maintains — because walking forward from the genesis value proved that the entries PRESENT link to one another and said nothing about where the chain was supposed to END, so deleting the NEWEST entries left a log that verified perfectly. Since the FOURTH it also requires the seqs present to be CONTIGUOUS from 1, because the high-water comparison alone was erased by the next ordinary append: one entry later the largest seq present reached the mark again, the deleted seqs became a hole in the middle, and the appended entries chained from the surviving tip so the links did not object either. |
 | the APPEND-ONLY GUARD census that produces the other schema finding | `missingImmutabilityGuards(db)` over `ENGINE_IMMUTABLE_TABLES`, observed as the file was FOUND | whether `append_only_guard_missing` engages safe mode | canonical, and **widened twice by the Wave 5 review** — to the secondary-unique guards and `hq_memory`'s supersede rule (Medium 2), and to `hq_mission_plan_items`' three own guards (Medium 6). The declaration is **deep-frozen at module scope** (HIGH 2): it is public package API, `readonly` erases at runtime, and one `ENGINE_IMMUTABLE_TABLES.length = 0` used to empty the census and make a tampered file read clean. |
 | store presence | the constructor's `#reliabilityStorePresent` flag | whether a 0 means "absent" or "empty" | canonical, observed, never migrated. |
 | the ledger, for the unauthenticated snapshot | `#listRunsFromStore` and the `#private` report — deliberately NOT `listRuns()` or `hqReliabilityPosture()` | what `hq-snapshot.json`'s `reliability` section publishes | canonical. |
@@ -1371,8 +1371,8 @@ names what was actually wrong, not what was thought to be wrong.
 
 | Finding | What was reproduced | What changed |
 |---|---|---|
-| **HIGH A1** — a DROPPED ledger read as a clean store | `DROP TABLE` is DDL: no BEFORE trigger refuses it, and the guard census SKIPPED a declared table that was absent. Dropping `hq_action_intents`, `hq_action_events`, `hq_truth_records`, `hq_truth_verifications`, `hq_truth_acceptances`, `hq_memory` and `hq_intel_budgets` produced a structural pass AND a full assessment with ZERO observations, while the facade's ensures recreated each one EMPTY. Dropping `hq_reliability_verdicts` erased a latched safe mode outright and `releaseKillSwitch` was admitted with the evidence chain still broken. | The absence is OBSERVED as found, before any ensure runs, and is a finding when HQ's own schema then re-creates the ledger. `establishedImmutableTables` discriminates a first construction — where every phase's ledger is legitimately absent — from a file that has lost one. |
-| **HIGH A2** — the hash chain did not detect DELETION | `op_evidence` carried no append-only triggers at all, so a raw `DELETE` was permitted; and the verifier walked forward from the genesis value with no commitment to where the chain should END, so deleting the NEWEST entries left a chain that verified perfectly. `DROP TABLE op_evidence` and `DELETE FROM op_evidence WHERE seq > 1` both read CLEAN at full depth. | Three holds were added — the engine refuses UPDATE/DELETE/REPLACE; `op_evidence` is a declared engine-immutable ledger; and the verification compares the entries present against the AUTOINCREMENT high-water mark. **They were NOT independent, and the round that added them said they were.** All three live inside the thing being checked: `DROP TABLE op_evidence` takes the triggers, the rows and the `sqlite_sequence` entry with it, and the census that hold two rests on runs AFTER `migrateHqDatabase` has re-created the table empty. The FOURTH correction round closes that — see its section below — with a pre-migration observation and a durable chain-tip commitment recorded outside `op_evidence`. |
+| **HIGH A1** — a DROPPED ledger read as a clean store | `DROP TABLE` is DDL: no BEFORE trigger refuses it, and the guard census SKIPPED a declared table that was absent. Dropping `hq_action_intents`, `hq_action_events`, `hq_truth_records`, `hq_truth_verifications`, `hq_truth_acceptances`, `hq_memory` and `hq_intel_budgets` produced a structural pass AND a full assessment with ZERO observations, while the facade's ensures recreated each one EMPTY. Dropping `hq_reliability_verdicts` erased a latched safe mode outright and `releaseKillSwitch` was admitted with the evidence chain still broken. | The absence is OBSERVED as found, before any ensure runs, and is a finding when HQ's own schema then re-creates the ledger. `establishedImmutableTables` discriminates a first construction — where every phase's ledger is legitimately absent — from a file that has lost one. **Corrected TWICE in the fourth round, once per lane, and both corrections are kept.** (a) That discriminator on its own was bypassed by doing MORE damage — dropping ALL of the declared ledgers emptied the set, read as a first boot and silenced the census entirely while the operational half of the database survived; it now also reads a mark HQ stamps into `PRAGMA user_version` after its ensure pass, which lives in the database header where no `DROP TABLE` reaches it and which `VACUUM` preserves. A content check over the tables was tried and rejected: HQ's own components legitimately write rows to a fresh file BEFORE the facade is constructed over it, so "this file has rows" cannot tell a first boot from an operated file. (b) `op_evidence` was invisible to the census in the other direction — `migrateHqDatabase` re-creates it before the facade census runs — so the absence is now taken from the PRE-migration catalogue (`tableNamesBeforeMigration`) for exactly the migration-created ledgers. |
+| **HIGH A2** — the hash chain did not detect DELETION | `op_evidence` carried no append-only triggers at all, so a raw `DELETE` was permitted; and the verifier walked forward from the genesis value with no commitment to where the chain should END, so deleting the NEWEST entries left a chain that verified perfectly. `DROP TABLE op_evidence` and `DELETE FROM op_evidence WHERE seq > 1` both read CLEAN at full depth. | Three holds were added — the engine refuses UPDATE/DELETE/REPLACE; `op_evidence` is a declared engine-immutable ledger; and the verification compares the entries present against the AUTOINCREMENT high-water mark. **They were NOT independent, and the round that added them said they were.** All three live inside the thing being checked: `DROP TABLE op_evidence` takes the triggers, the rows and the `sqlite_sequence` entry with it, and the census that hold two rests on runs AFTER `migrateHqDatabase` has re-created the table empty. The FOURTH correction round closes both halves, one per lane, and both are kept — see its section below: seq CONTIGUITY from 1, because the high-water half alone was erased by the very next append (HQ's own boot appends did it), and a durable chain-tip commitment recorded outside `op_evidence` in the verdict ledger, because contiguity is silent on a log dropped and recreated whole. |
 | **HIGH A3** — a second run lineage opened while the first attempt was still in flight | Both halves of the duplicate-run guard keyed on `needsReconciliation`, and a crashed attempt sits at `attempting` until the Founder-gated recovery classifies it. A second `openRun` under a distinct `idempotencyKey` derived a distinct `run_key`, passed both guards, and `startRunAttempt` ADMITTED generation 1 on a `sideEffect: true` capability while the first worker held the live fence. | One guard over both unsettled states, applied at the ATTEMPT as well as at the OPEN — two runs can both stand at `open` and then attempt one after the other. `open` stays admissible, so two genuinely separate pieces of work on one task remain expressible. |
 | **MEDIUM A4** — a hard link to the live database verified as a backup | The sidecar refusal is keyed on the resolved PATH; a hard link is a second name for the same inode with no sidecars beside it. Recorded permanently in the append-only register as a verified recovery point, missing WAL-resident committed data. | `nlink` from the opened descriptor; `file_has_multiple_links`. The shipped "the live database is therefore refused" is scoped to what is true, and the `cp` case is disclosed rather than implied away. |
 | **MEDIUM A5** — a fabricated durability defect on every snapshot | `synchronous` is a connection pragma SQLite records nothing about in the file, and `openHqDatabaseReadOnly` — the `hq:snapshot` open — never set it. Every world-readable snapshot of a healthy WAL + FULL store published `durabilityMeetsRequirement: false` and a `durability_below_requirement` finding, permanently masking a genuine degradation. | Both HQ opens establish the declared posture, spelled the same way. The posture documents what it is a statement about: the journal mode is the FILE's, `synchronous` is this CONNECTION's, and a read-only handle does not speak for the writer's. |
@@ -1395,25 +1395,66 @@ as well as here:
   against the chained `op_evidence` entry. A raw, well-formed, recognized append
   still moves a run's derived state; the engine guards refuse UPDATE, DELETE and
   REPLACE, not a forged new row.
-- ~~The evidence chain's LENGTH commitment is SQLite's own AUTOINCREMENT
-  high-water mark in `sqlite_sequence` … each of those is a further deliberate
-  step and the first is itself a blocking finding.~~ — **the mitigating clause
-  was FALSE and the hole is CLOSED in the fourth correction round (Medium M2).**
-  The dropped guard is RECREATED by the next construction before the boot
-  observation ever runs, so it is never observed missing: drop the trigger,
-  delete the tail, recreate the trigger, `UPDATE sqlite_sequence SET seq = 1`,
-  and the boot read `safeMode: false, []`. `sqlite_sequence` carries no triggers
-  and cannot be brought under the census — it is internal to SQLite and
-  `tableNames` excludes it by construction — so what closes this is a commitment
-  in a ledger that DOES carry the guards: every recorded verdict now stores the
-  chain tip (`seq` + `hash`) it was reached over, and both depths check that the
-  log still carries that entry with that hash. The high-water-mark check is kept
-  because it is free and catches a careless truncation.
+- The evidence chain's LENGTH commitment is now THREE checks, not one, because
+  the fourth correction round's two lanes each found a different way the single
+  check failed and both fixes are kept:
+  1. the seqs present must be CONTIGUOUS from 1;
+  2. the largest one present must reach SQLite's own AUTOINCREMENT high-water
+     mark in `sqlite_sequence`, which a DELETE does not lower;
+  3. the log must still carry the chain TIP (`seq` + `hash`) that every recorded
+     verdict commits to, which lives in the verdict ledger rather than in
+     `op_evidence`.
+  **Two earlier wordings of this item were wrong, in opposite directions, and
+  both are corrected here.** One said a `sqlite_sequence` rewrite was needed to
+  get past the check; in fact NO rewrite was needed at all, because the
+  high-water check alone was erased by the next ordinary append — HQ's own boot
+  appends did it — so a tail deletion that verified as BROKEN at the instant it
+  happened verified as CLEAN one entry later, with the documented remedy (one
+  Founder full assessment) then certifying the robbed log. The other said the
+  mitigating clause "the first of those steps is itself a blocking finding" held;
+  it did not, because a dropped guard that is RECREATED before the next boot
+  observation is never observed missing, so drop-trigger / delete-tail /
+  recreate-trigger / `UPDATE sqlite_sequence` read `safeMode: false, []`.
+  Contiguity is a property of the record that no later write repairs; the
+  commitment lives in a ledger that DOES carry the guards and IS censused. The
+  high-water check is kept because it is free and catches a careless truncation.
+  What is still NOT detected, stated exactly: a writer that drops the guard and
+  rewrites the WHOLE log coherently — deleting entries, RENUMBERING the survivors
+  so no seq is missing, recomputing every hash forward from the genesis value and
+  lowering `sqlite_sequence` to match — CONFINED to the region above the last
+  committed tip, on a file that carries a commitment at all. The renumbering
+  needs the UPDATE the engine guard refuses, dropping that guard is itself a
+  blocking finding, and HQ holds no key a foreign writer does not also have. A
+  real barrier, not a cryptographic boundary. Contiguity on its own is also
+  silent on a log that was DROPPED and recreated whole, because the seqs then
+  restart at 1 with no gap — that is the dropped-ledger question, answered by
+  check 3 and by the item below rather than by check 1.
 - A DROPPED declared ledger is a finding only on a handle that can WRITE, because
   the discriminator between "this file lost a ledger" and "this file predates
   it" is that HQ's own ensure pass re-creates what its schema declares. A
   read-only handle re-creates nothing and therefore cannot tell the two apart;
-  it reports neither rather than inventing one.
+  it reports neither rather than inventing one. **The earlier wording of this
+  item said only that, and it was incomplete in the direction that mattered.**
+  Until the fourth correction round the "has HQ been here before" half of the
+  discriminator was "does this file still carry an ensure-created declared
+  ledger", which meant dropping a SUBSET of the ledgers was reported and dropping
+  ALL of them emptied the set, read as a first boot, and returned a completely
+  SILENT census at both depths — while the workers, capabilities, principals,
+  tasks, approvals and kill switch all survived and `releaseKillSwitch` was
+  handed back. More damage bought less detection. That half is now answered a
+  second way as well, by a mark HQ stamps into `PRAGMA user_version` after its
+  ensure pass: it lives in the database header, no `DROP TABLE` reaches it, and
+  `VACUUM` preserves it. What remains, and is genuinely a residual: a writer that
+  ZEROES `PRAGMA user_version` puts the file back to unmarked and a census over a
+  file with every ledger dropped goes silent again. That is a deliberate forgery
+  of HQ's own mark rather than a further drop — the same residual class as
+  rewriting `sqlite_sequence` — and it is a different act from the one that used
+  to succeed, which needed nothing but more `DROP TABLE`. A file no writer of
+  this build has ever opened carries no mark either, and is read as a first boot;
+  that is the same read-only/older-file limit as the sentence above, and it also
+  covers the case where the stamp itself could not be written — the facade never
+  fails a construction over the mark, so a file HQ could not stamp is a file HQ
+  reads as new next time.
 - The verdict ledger is durable only where it EXISTS: a database written before
   this wave, or a read-only handle over one, carries no `hq_reliability_verdicts`
   table and the verdict is process-local there. `SAFE_MODE_STATEMENT` says so.
@@ -1458,6 +1499,49 @@ as well as here:
   asserted by construction rather than by being crossed.
 - `verifyHqBackupFile` now writes a full copy of the candidate into the OS temp
   directory, so verification needs free space equal to the file and is slower.
+- `file_has_multiple_links` refuses on `nlink > 1` from the opened descriptor,
+  and that is DELIBERATELY broader than "is this the live database". The
+  refusal was added because a hard link to the live inode under a name with no
+  sidecars beside it passed, and the check that catches it cannot know which
+  other name is on the other end of the link. Two costs are accepted rather than
+  narrowed, and they are real: anyone who can create a hard link in the backup
+  directory can make an already-recorded backup unverifiable — a
+  denial-of-verification, never a false pass — and a hardlink-based rotation
+  scheme (`rsync --link-dest`, borg and the like) is refused wholesale, so HQ
+  backups must be verified from a file that carries exactly one name. Narrowing
+  it to "the same inode as the live database" was considered and rejected: it
+  would weaken the standing assertion that a verified backup is a file no other
+  name can be written through, and it would make the answer depend on which
+  database HQ happens to have open rather than on the candidate's own bytes.
+- The credential-shape scan folds away invisible/zero-ink characters, NFKC
+  compatibility forms, and Cyrillic and Greek Latin-lookalike letters. It is NOT
+  a Unicode confusables implementation: a lookalike drawn from Cherokee,
+  Armenian, Coptic, Lisu or any other script still defeats the shape while
+  leaving the credential intact. The two folded scripts are the ones homoglyph
+  substitution is actually written in; the rest is disclosed rather than
+  claimed. Ordinary whitespace is deliberately not folded either — a space
+  inside a credential is a break a reader can see, and folding it would start
+  matching prose. The fold's one visible cost, stated rather than left to be
+  discovered: Greek `ΤΟΚΕΝ` folds to `TOKEN`, so Greek text of the form
+  `ΤΟΚΕΝ: ********` is refused by the free-text `key: value` heuristic exactly as
+  the English `TOKEN: ********` already is.
+  **The reason ordinary Cyrillic prose is safe from the same cost changed at the
+  reconciliation, so the reason is restated rather than carried.** One lane
+  bounded it by OMISSION — it deliberately left Cyrillic `к`, `м`, `т`, `в`, `н`
+  and `г` unmapped, so no Cyrillic string could fold into an English keyword at
+  all. The surviving map is the other lane's, which IS shape-faithful for those
+  letters, so that impossibility no longer holds and is not claimed. What holds
+  instead is the faithfulness itself: `с` folds to `c` and not `s`, `н` to `h`
+  and not `n`, `р` to `p` and not `r`, so `СЕКРЕТ` folds to `CEKPET` and `токен`
+  to `tokeh`. Computed over the whole modern Russian, Ukrainian and Serbian
+  alphabets, the ASCII letters the merged map can produce from them are exactly
+  `abcehijkmoptxy` — and `apikey` (with `api_key`/`api-key`) and `cookie` are
+  the ONLY two keywords whose every letter is in that set, so `арікеу` and
+  `соокіе` do fold onto them. Neither is a word in any of those languages; both
+  are homoglyph spellings of an English credential keyword, which is precisely
+  what the fold exists to catch, and both are field-NAME keywords where a
+  refusal is the right answer. `live-redaction.test.ts` pins the boundary from
+  both sides rather than leaving it argued.
 - A credential split across two search fields still passes both scans.
 - A `cp` of a live WAL-mode database is a copy of an arbitrary prefix of the
   truth, and HQ cannot tell you so from the bytes. **The claim that it "still
@@ -1487,9 +1571,18 @@ and returned 1 Critical, 3 High, 9 Medium and 8 Low across Phases 13 and 14.
 The Phase 13 half is below; the Phase 14 half is in that phase's document. All
 six findings from the previous round were re-verified CLOSED by mutation.
 
+**A SECOND, concurrent lane reviewed the same head `22680ba` and corrected it on
+this same branch**, without either lane knowing about the other — the fourth
+time that has happened on this branch. It returned 0 Critical, 2 High and 3 Low,
+and it reached two of the same defects by a different and in places better
+route. Both lanes are reconciled here; the table below carries the merged
+answer, and the section "The fourth round's two lanes, reconciled" at the end of
+this document records what survived from each, what was dropped and why, and
+which regression tests were ported.
+
 | Finding | What was reproduced | What changed |
 |---|---|---|
-| **CRITICAL C1** — a credential hidden by a control character, a hyphen homoglyph or a word-character prefix reached the UNAUTHENTICATED `hq-snapshot.json` | `\p{Cc}` is neither `\p{Cf}` nor `\p{Default_Ignorable_Code_Point}`, so the strip whose comment claimed to "hold for code points nobody enumerated" was blind to an entire block. One fresh fixture per row through `liveSnapshotFromOperations`: a plain `sk-…` correctly REFUSED the artifact, while U+0001, U+001F, U+007F, U+0090, U+2010 and `OPENAI_KEY_sk-…` each CARRIED the credential onto it. `\b` is a boundary between a word character and a non-word character, and `_` is a word character. At unit level, a credential in a `Map`, a `Set` or behind a `toJSON`, and a key-name homoglyph (`арiKey`), were all invisible to the walk. | `\p{Cc}`, `\p{Zl}` and `\p{Zp}` join the erased set (`\p{Zs}` deliberately does not — a space is visible, and erasing it fabricates refusals out of ordinary prose); the hyphen family folds to ASCII `-` before the erase; every `\b` becomes `(?<![A-Za-z0-9])`, which treats `_` as a boundary while still refusing to fire inside a letter run; the walk follows `toJSON`, `Map` (keys as key names) and `Set`, with a cycle set and a depth bound; the key rule reads the normalized name. The constant's false comment is corrected in place. |
+| **CRITICAL C1** — a credential hidden by a control character, a hyphen homoglyph or a word-character prefix reached the UNAUTHENTICATED `hq-snapshot.json` | `\p{Cc}` is neither `\p{Cf}` nor `\p{Default_Ignorable_Code_Point}`, so the strip whose comment claimed to "hold for code points nobody enumerated" was blind to an entire block. One fresh fixture per row through `liveSnapshotFromOperations`: a plain `sk-…` correctly REFUSED the artifact, while U+0001, U+001F, U+007F, U+0090, U+2010 and `OPENAI_KEY_sk-…` each CARRIED the credential onto it. `\b` is a boundary between a word character and a non-word character, and `_` is a word character. At unit level, a credential in a `Map`, a `Set` or behind a `toJSON`, and a key-name homoglyph (`арiKey`), were all invisible to the walk. | `\p{Cc}`, `\p{Zl}` and `\p{Zp}` join the erased set (`\p{Zs}` deliberately does not — a space is visible, and erasing it fabricates refusals out of ordinary prose); the hyphen family folds to ASCII `-` before the erase; every `\b` becomes `(?<![A-Za-z0-9])`, which treats `_` as a boundary while still refusing to fire inside a letter run; the walk follows `toJSON`, `Map` (keys as key names) and `Set`, with a cycle set and a depth bound; the key rule reads the normalized name; and U+2800 BRAILLE PATTERN BLANK joins the erased set from the OTHER lane's Low 2 — it is `So`, so it was in none of the properties named above and it split `sk-…` in two while leaving every character of the key present, which is why the class is stated as zero INK rather than zero width. The constant's false comment is corrected in place. |
 | **HIGH H1** — the evidence hash chain still did not detect DESTRUCTION | `DROP TABLE op_evidence` read CLEAN at both depths — `safeMode: false`, `observations: []`, `chainVerified: true` — over an audit log destroyed and rebuilt empty, and CLEARED an already-latched safe mode and re-admitted `releaseKillSwitch`. Root cause was ORDERING: `op_evidence` is created by `migrateHqDatabase`, which runs BEFORE the facade census, so the absent-table check could never see it absent (raw-view `absentImmutableTables` = `["op_evidence"]`; after `openHqDatabase()`, `[]`). | Two independent holds, because every existing hold lived inside the thing being checked. (1) `migrateHqDatabase` records the table names the file carried before it touched it, and the census asks that record for the migration-created ledgers; "established" is judged on the PRE-migration catalogue too, so a fresh store's first boot is not a false finding. (2) Every recorded verdict COMMITS to the chain tip (`seq` + `hash`) it was reached over, in the append-only verdict ledger, and both depths check the log still carries that entry with that hash. A rebuilt log cannot satisfy it — satisfying it means replaying the prefix that was destroyed. |
 | **MEDIUM M1** — a latched safe mode cleared by two raw inserts | `verdictIsCorroborated` matched `kind` plus `json_extract(payload,'$.verdictId')` and nothing else, so the corroborating evidence row needed NO valid hash: one clean verdict row plus one forged corroboration gave `safeMode false []` and `releaseKillSwitch {"ok":true}` with the chain genuinely broken. | Corroboration now requires the entry to be a genuine LINK: its own hash correct over its stored fields, and its `prev_hash` equal to its predecessor's. That closes the forged-row route. It does NOT close an append by a writer holding the file — HQ holds no key such a writer does not also have — so `SAFE_MODE_STATEMENT` says that in words instead of asserting a boundary the code cannot hold. |
 | **MEDIUM M2** — `sqlite_sequence` unguarded and uncensused | See the corrected entry in the NOT-fixed list above. | The durable chain-tip commitment, in a ledger that IS guarded and IS censused. |
@@ -1513,10 +1606,12 @@ six findings from the previous round were re-verified CLOSED by mutation.
 | `npm run build:site --workspace @factoryos/headquarter` | 10 pages + `hq-snapshot.json` |
 | `npm run build` | all workspaces built; web initial JS 215.66 kB / 69.22 kB gzip (unchanged) |
 
-The six Phase 13 test files hold 179 tests at this head:
+The six Phase 13 test files hold 179 tests at Lane A's head:
 `reliability-core` 32, `reliability-authority` 51, `reliability-surfaces` 19,
 `reliability-durability` 41, `reliability-crash-recovery` 12,
-`reliability-verdict-durability` 24. The three skipped tests under
+`reliability-verdict-durability` 24. At the MERGED head they hold 184, the five
+extra all in `reliability-durability` (46): four ported from the other lane and
+one new at the merge. The three skipped tests under
 `packages/server` are pre-existing `it.skip` GAP markers, untouched.
 
 **Every fix in this round is pinned by a test that was VERIFIED to fail against
@@ -1561,3 +1656,166 @@ survived it.
   build observes them missing once, engages safe mode once, and is cleared by
   one Founder full assessment. This is the same documented cost every newly
   declared guard carries. A fresh file is unaffected.
+
+## The fourth round's two lanes, reconciled
+
+Two correction lanes worked on the frozen head `22680ba` concurrently, neither
+knowing about the other, and both corrected it on this same canonical branch.
+This is the reconciliation, and it follows exactly the principle the three
+earlier reconciliations on this branch set: **nothing from either side is
+discarded; where both sides fixed the same defect differently, ONE
+implementation survives, chosen on the merits in the fail-closed direction, and
+BOTH sides' regression tests are kept, ported onto the survivor with the reason
+stated inline.**
+
+- **LANE A** — seven commits (`22680ba..3d6a307`), from a three-reviewer sweep
+  returning 1 Critical / 3 High / 9 Medium / 8 Low. It contributed the
+  credential-scan class fix (C1), the write-scan/read-scan parity across all 29
+  label and text write sites (H3), the freeze of 82 exported vocabularies with a
+  pinning test that enumerates every `package.json#exports` entry point (M7/M8),
+  the evidence-log DESTRUCTION detection (H1) — the pre-migration catalogue plus
+  the durable chain-tip commitment in the verdict ledger with its new
+  `evidence_tip_seq`/`evidence_tip_hash` columns — the budget derivation (H2)
+  with `provider_bound`, `trg_hq_mission_plan_items_no_remission` and
+  `hq_missions` under the census, the corroboration link check (M1), the
+  laundered-ledger-loss evidence entry (M3), `RETRIEVAL_GUARD_STATEMENT` (M9),
+  and the Low/doc corrections.
+- **LANE B** — two commits (`af0232b`, `83e563e`), already on `origin`, from a
+  separate fresh reviewer returning 0 Critical / 2 High / 3 Low. Narrower, and
+  deeper on two Phase 13 items: the total-erasure census bypass (its High 1) and
+  the evidence chain's laundered LENGTH (its High 2), plus U+2800 (Low 2), a
+  curated Cyrillic/Greek lookalike fold (Low 3), and the `file_has_multiple_links`
+  cost disclosed rather than narrowed (Low 1).
+
+### The two shared defects, and what survives
+
+**1. The evidence log's length and destruction (Lane A's H1 + M2 vs Lane B's
+High 1 and High 2). BOTH SURVIVE, because neither subsumes the other**, and
+that was checked rather than assumed:
+
+- Lane B found that the high-water commitment was erased by the very next
+  append — HQ's OWN boot appends were the laundering write, and the one Founder
+  full assessment the residual list tells them to run then certified a robbed
+  log as intact. Its fix requires the seqs present to be CONTIGUOUS from 1, a
+  property of the record that no later write repairs. It also corrects a
+  residual that claimed a `sqlite_sequence` rewrite was needed: none was.
+  Contiguity holds with **no prior verdict on the file at all**, which Lane A's
+  commitment cannot do, and it is silent on a log DROPPED and recreated whole,
+  because the seqs then restart at 1 with no gap.
+- Lane A found that `DROP TABLE op_evidence` plus a rebuild read
+  `safeMode: false`, `observations: []`, `chainVerified: true` at BOTH depths
+  and CLEARED an already-latched safe mode. Its fix is the pre-migration
+  catalogue plus a chain-tip commitment recorded OUTSIDE `op_evidence`, in the
+  verdict ledger. That survives a drop, which contiguity cannot, and it says
+  nothing until an assessment has recorded a commitment.
+
+  Together they leave no window: a tail delete followed by any number of appends
+  fails contiguity, and a whole-log rebuild that restores contiguity fails the
+  commitment. Both are stated as holds 3 and 4 in `operator/evidence.ts`, with
+  the boundary between them written down rather than implied.
+
+**2. The first-boot discriminator (Lane B's High 1 vs Lane A's H1, first half).
+BOTH SURVIVE, and the merge had to close the seam between them itself.**
+
+- Lane B found the inversion that mattered most: **more damage bought less
+  detection.** The discriminator read "does this file still carry an
+  ensure-created declared ledger", so dropping a SUBSET was reported and
+  dropping ALL of them emptied the set, read as a fresh file, and returned zero
+  observations at BOTH depths — while workers, capabilities, principals, tasks,
+  approvals and the kill switch all survived and `releaseKillSwitch` was handed
+  back. Its fix is a mark stamped into `PRAGMA user_version` after the ensure
+  pass: it lives in the database header, no `DROP TABLE` reaches it, and
+  `VACUUM` preserves it. A content check over the tables was tried and REJECTED,
+  with a test pinning that direction, because HQ's own components legitimately
+  write rows to a fresh file before the facade is constructed over it.
+- Lane A found the ordering hole in the other direction: `op_evidence` is
+  created by `migrateHqDatabase`, which runs before the facade census, so that
+  one ledger could never be seen absent. Its fix asks the PRE-migration
+  catalogue.
+- **The seam.** Composed naively, the widest attack — drop every declared ledger — reports the
+  other thirty ledgers and stays SILENT about the audit log itself, the one
+  thing it destroyed, because Lane A's function judged establishment on the
+  pre-migration ledger catalogue and that attack empties it. Reading Lane B's
+  mark as it STANDS does not fix it either: `recordHqSchemaEnsured` stamps at the
+  END of a facade construction, so a SECOND facade over the same handle sees a
+  mark this very process just wrote and reports `op_evidence` as a lost ledger on
+  a brand-new store. Executed during this merge, exactly that put nine suites
+  into safe mode. The mark is therefore recorded AT MIGRATION TIME, beside the
+  table catalogue and in the same `try`, by `schemaEnsuredMarkBeforeMigration`,
+  and the census asks the state of the file as HQ found it for both facts. One
+  definition of "established", two readings of it, taken at one instant.
+
+**3. The lookalike fold (Lane A's C1, key-name half, vs Lane B's Low 3). LANE
+A'S IMPLEMENTATION SURVIVES; Lane B's entries are folded into it.** Both lanes
+shipped a Cyrillic/Greek fold; one map survives, because two confusable tables
+are two spellings of the same truth. Lane A's is broader — it also folds the
+hyphen family, the C0/C1 control block, `\p{Zl}`/`\p{Zp}` and U+034F, and it
+carries the `toJSON`/`Map`/`Set` walk and the `(?<![A-Za-z0-9])` anchor that
+Lane B's lane did not touch — and a wider fold is the fail-closed direction for
+a credential scan. Lane B reached four code points Lane A did not (`Ү`, `Ԛ`,
+`Ԝ`, `ϲ`) and one erased character Lane A did not (U+2800, which is `So` and so
+in none of Lane A's named properties); all five are carried onto the survivor.
+**Lane B's BOUND does not carry across, and it is replaced rather than
+restated**: that lane bounded false positives by OMISSION — deliberately leaving
+`к`, `м`, `т`, `в`, `н`, `г` unmapped so no Cyrillic string could fold into an
+English keyword at all — and the surviving map is shape-faithful for those
+letters. The bound that actually holds for the merged map is computed and
+disclosed in the residual list above, and pinned from both sides by
+`live-redaction.test.ts`.
+
+**4. The key rule reading the normalized name.** Both lanes made the identical
+change. Lane A's `namesACredentialHolder` helper survives as the single spelling,
+because the rule is asked in more than one place; Lane B's inline reason is
+carried onto it.
+
+### Tests ported
+
+Nothing was deleted, skipped, weakened or narrowed to make this merge green. No
+`.skip`/`.only`/`.todo`/`xit`/`xdescribe` was added anywhere, and no `as any`,
+`@ts-expect-error` or `eslint-disable` appears in any added line.
+
+- Lane B's `refuses a credential broken by a zero-ink character that is not
+  default-ignorable` (U+2800) — kept whole, ported onto the merged
+  `ERASED_CODE_POINTS`, with the reason it is not `Cc` either stated inline.
+- Lane B's `refuses a credential whose prefix is spelled with Cyrillic or Greek
+  lookalikes` — kept whole; it holds unchanged against the merged fold.
+- Lane B's `keeps accepting ordinary Cyrillic, Greek and other-script prose` —
+  kept whole, with its REASON rewritten inline: the omission argument it was
+  written against is not the surviving map's property, and what it actually pins
+  is that prose is not turned into a refusal.
+- Lane B's `reports EVERY declared ledger dropped, so widening the attack does
+  not buy silence` — kept whole, and STRENGTHENED with one assertion neither
+  lane could make alone: the finding now names `op_evidence` too.
+- Lane B's `still reads a fresh file HQ has already written rows to as a first
+  boot`, `keeps detecting a deleted entry after a later, perfectly well-formed
+  append`, and `refuses to certify a robbed evidence log through the full
+  assessment that clears a boot finding` — all kept whole and unchanged.
+- Lane A's whole `reliability-verdict-durability.test.ts`, its C0/C1 sweep, its
+  hyphen-family, word-character-prefix, ordinary-prose, `Map`/`Set`/`toJSON`,
+  homoglyph-field-name and cycle tests, and everything else it changed alone —
+  kept verbatim.
+- NEW at the merge, because they pin properties neither lane had: `folds only
+  the two credential keywords a modern Cyrillic alphabet can spell`, and `does
+  not read its own schema mark as evidence that a fresh store lost a ledger`,
+  which pins the seam described above.
+
+### Verification actually run at the merged head
+
+| Command | Result |
+|---|---|
+| `npm run test:hq` | 164 files, 3177 passed, 0 failed |
+| `npm run typecheck --workspace @factoryos/headquarter` | clean |
+| `npm run test --workspace @factoryos/hq-host` | 23 files, 222 passed |
+| `npm run typecheck --workspace @factoryos/hq-host` | clean |
+| `npm run test --workspace @factoryos/hq-server` | 2 files, 20 passed |
+| `npm run typecheck --workspace @factoryos/hq-server` | clean |
+| `npm test` (root, `@factoryos/server`) | 37 files, 569 passed, 3 skipped |
+| `npm run build:site --workspace @factoryos/headquarter` | 10 pages + `hq-snapshot.json` |
+| `npm run build` | all workspaces built; web initial JS 215.66 kB / 69.22 kB gzip (unchanged) |
+
+Lane A alone was 164 files / 3168 tests; Lane B alone 164 / 3150; the merged
+head 164 / 3177, which exceeds both. Counted statically, Lane A carried 2984
+`it(` declarations and Lane B 2966; the merged head carries 2993, and no test
+file from either side was lost — both parents and the merge hold 164. `package.json` and `package-lock.json` are
+byte-identical to the wave base `f1ce71c`, no dependency was added, and the
+whole wave diff stays inside `packages/headquarter/` and `docs/HEADQUARTER/`.

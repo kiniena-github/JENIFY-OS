@@ -136,9 +136,13 @@ export class BrowserSafetyError extends Error {
 }
 
 /**
- * Every code point that does not render as an ordinary visible character, and
- * is therefore usable to break a credential pattern without changing what a
- * reader meaningfully sees.
+ * Every code point that carries NO INK — that does not render as an ordinary
+ * visible character — and is therefore usable to break a credential pattern
+ * while leaving every character of the credential present, and without changing
+ * what a reader meaningfully sees.
+ *
+ * The rule is zero INK, not zero WIDTH, and the difference is load-bearing: one
+ * member of this set (U+2800) has an advance width and is here anyway.
  *
  * Defined by PROPERTY, not by a hand-listed range (Wave 5 correction round
  * three, Medium B7). The version before that stripped five ranges somebody
@@ -175,7 +179,15 @@ export class BrowserSafetyError extends Error {
  *    they are in none of the above: the combining grapheme joiner is a
  *    combining mark and the line and paragraph separators are their own
  *    categories, and all three split a pattern in exactly the same invisible
- *    way.
+ *    way;
+ *  - U+2800 BRAILLE PATTERN BLANK is named for the same reason, and is the one
+ *    member of this set with an advance WIDTH. It is `So` — not `Cf`, not
+ *    `Cc`, not `Default_Ignorable` — so it walked straight through every
+ *    property named above while splitting `sk-…` in two (Wave 5 correction
+ *    round four, the other lane's Low 2, executed on that lane's head). It is
+ *    the reason this class is stated as zero INK rather than zero width.
+ *    Ordinary whitespace is still deliberately not folded — see the `\p{Zs}`
+ *    paragraph below.
  *
  * `\p{Zs}` -- the ordinary SPACE separators -- is deliberately NOT here, and
  * that is an argued boundary rather than an omission. A space is VISIBLE: it
@@ -185,7 +197,7 @@ export class BrowserSafetyError extends Error {
  * matched on the raw string anyway.
  */
 const ERASED_CODE_POINTS =
-  /[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Cc}\p{Zl}\p{Zp}͏]/gu;
+  /[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Cc}\p{Zl}\p{Zp}͏⠀]/gu;
 
 /**
  * The hyphen family, folded to ASCII `-`.
@@ -209,12 +221,54 @@ const HYPHEN_CONFUSABLES =
  * Latin look-alikes from other scripts, folded to the ASCII letter they are
  * drawn as.
  *
+ * **Why this exists, from both round-four lanes, which found it independently.**
  * The KEY rule reads a field NAME, and a name is chosen by whoever built the
  * object: `<Cyrillic a><Cyrillic r>iKey` renders identically to `apiKey` and
- * matched neither rule (Wave 5 correction round four, Critical C1). This is a
- * targeted fold of the confusables that actually spell the words the two rules
- * look for -- not a general confusables table, which HQ has no business
- * shipping its own copy of.
+ * matched neither rule (Critical C1). The VALUE rule matches SHAPES, and a
+ * shape is defeated by one character that reads the same and encodes
+ * differently: Cyrillic `ѕ` in `ѕk-ABCDEFGHIJKLMNOP0123` and Cyrillic
+ * `а` in `AIzаABCDEFGHIJKLMNOPQRSTUV` both PASSED with the whole key
+ * material intact, while the ASCII spellings of both were refused (Low 3).
+ *
+ * **What it deliberately is not.** This is not a Unicode confusables
+ * implementation — HQ carries no confusables table, and inventing a partial one
+ * while calling it complete would be the overclaim. It is a curated map over
+ * Cyrillic and Greek, the two scripts that carry a full set of ASCII-identical
+ * letters, sit on common keyboard layouts, and are what homoglyph substitution
+ * is written in. Cherokee, Armenian, Coptic, Lisu and the rest are NOT folded
+ * and a substitution drawn from them still defeats the shape; that limit is
+ * stated in the phase document's residual list rather than papered over.
+ *
+ * **What bounds the false-positive risk, by construction rather than by hope.**
+ * Every entry is faithful to the GLYPH, and the faithfulness is what does the
+ * bounding: Cyrillic `с` folds to `c` and not `s`, `н` to `h` and not `n`, `р`
+ * to `p` and not `r`, `В` to `B` and not `V`. Computed over the whole modern
+ * Russian, Ukrainian and Serbian alphabets, the ASCII letters this map can
+ * produce from them are exactly `abcehijkmoptxy` — so `СЕКРЕТ` folds to
+ * `CEKPET` and never to `SECRET`, and `токен` folds to `tokeh` and never to
+ * `token`, because `s`, `r` and `n` are not in that image at all.
+ *
+ * That is a bound, not an impossibility, and the exceptions are named rather
+ * than implied: `apikey` (with its `api_key` and `api-key` spellings) and
+ * `cookie` are the two keywords whose every letter IS in that image, so
+ * `арікеу` and `соокіе` do fold onto them. Neither is a word in any of those
+ * languages — they are homoglyph spellings of the English keyword, which is
+ * precisely what the fold exists to catch — and both are field-NAME keywords,
+ * where a refusal is the correct answer. `live-redaction.test.ts` pins the
+ * boundary from both sides: ordinary prose in these scripts is accepted, and
+ * those two spellings are refused.
+ *
+ * **The one visible cost, disclosed rather than discovered.** Greek capitals for
+ * `TOKEN` — `ΤΟΚΕΝ` — do fold to `TOKEN`, so Greek
+ * text of that shape is refused by the free-text key/value heuristic exactly as
+ * the English spelling already is. That is the pre-existing behaviour of that
+ * heuristic applied consistently, not a new class of refusal, and it is in the
+ * phase document's residual list.
+ *
+ * ONE map, not two (Wave 5 round-four reconciliation). Both lanes shipped a
+ * fold; this is the union of their entries on the broader lane's
+ * implementation, because a wider fold is the fail-closed direction for a
+ * credential scan and the bound above survives the widening.
  */
 const CONFUSABLE_LATIN: ReadonlyMap<string, string> = new Map([
   ['а', 'a'], ['в', 'b'], ['с', 'c'], ['ԁ', 'd'], ['е', 'e'],
@@ -224,6 +278,10 @@ const CONFUSABLE_LATIN: ReadonlyMap<string, string> = new Map([
   ['А', 'A'], ['В', 'B'], ['С', 'C'], ['Е', 'E'], ['Ѕ', 'S'],
   ['І', 'I'], ['Ј', 'J'], ['К', 'K'], ['М', 'M'], ['Н', 'H'],
   ['О', 'O'], ['Р', 'P'], ['Т', 'T'], ['У', 'Y'], ['Х', 'X'],
+  // Carried from the other round-four lane's curated map, which reached four
+  // code points this one did not: the Cyrillic Straight U and the Komi Qa/Wa
+  // capitals, and the Greek lunate sigma.
+  ['Ү', 'Y'], ['Ԛ', 'Q'], ['Ԝ', 'W'], ['ϲ', 'c'],
   ['α', 'a'], ['ο', 'o'], ['ν', 'v'], ['ρ', 'p'], ['τ', 't'],
   ['υ', 'u'], ['κ', 'k'], ['ε', 'e'], ['ι', 'i'],
   ['Α', 'A'], ['Β', 'B'], ['Ε', 'E'], ['Ζ', 'Z'], ['Η', 'H'],
@@ -256,6 +314,18 @@ function foldConfusableLetters(value: string): string {
  * Scanning the normalized form only -- the ORIGINAL string is what gets refused
  * or published, so this widens what is caught and never rewrites what is
  * carried.
+ *
+ * **U+2800 BRAILLE PATTERN BLANK is erased by step 4 even though it has an
+ * advance width** (Wave 5 correction round four, the other lane's Low 2). It is
+ * `So` — not `Cf`, not `Cc`, not `Default_Ignorable` — so it walked through
+ * every property `ERASED_CODE_POINTS` names, and on that lane's head it broke
+ * `sk-ABCDEFGHIJKLMNOP0123` into two unmatched halves while leaving every
+ * character of the key present and usable. What that class is for is ZERO-INK
+ * characters, whatever their width, because those are the ones that defeat a
+ * shape without removing the credential. Ordinary whitespace is still
+ * deliberately NOT folded: a space inside a credential is a break a reader can
+ * see, folding it away would start matching prose, and `Bearer\s+…` is matched
+ * on the raw string anyway.
  */
 function normalizeForScan(value: string): string {
   return foldConfusableLetters(
@@ -388,6 +458,11 @@ function namesACredentialHolder(key: string): boolean {
  */
 export function assertBrowserSafe(payload: unknown, rootPath = 'snapshot'): void {
   walk(payload, rootPath, (value, path, key) => {
+    // Both round-four lanes made the key rule read the NORMALIZED name too, for
+    // the same reason the value rule does: a field named with one Cyrillic
+    // lookalike is still a field that names a credential holder. One spelling
+    // of it survives — `namesACredentialHolder` — because the rule is asked in
+    // more than one place.
     if (key != null && namesACredentialHolder(key) && !isTrivial(value)) {
       if (typeof value === 'string' || typeof value === 'number') {
         throw new BrowserSafetyError(

@@ -16,12 +16,14 @@
  *     `ENGINE_IMMUTABLE_TABLES`, so removing the triggers is
  *     `append_only_guard_missing` — blocking, and safe mode engages on it.
  *  3. **The chain commits to its own LENGTH, not only to its links.**
- *     `verifyEvidenceChain` walks the links AND compares the highest `seq`
- *     present against the AUTOINCREMENT high-water mark SQLite maintains in
- *     `sqlite_sequence`, which a DELETE does not lower. Without that, deleting
- *     the NEWEST entries left a chain that verified perfectly: the walk starts
- *     at the genesis value and had nothing to say about where the chain was
- *     supposed to END.
+ *     `verifyEvidenceChain` walks the links, requires the seqs present to be
+ *     CONTIGUOUS from 1, and compares the highest `seq` present against the
+ *     AUTOINCREMENT high-water mark SQLite maintains in `sqlite_sequence`,
+ *     which a DELETE does not lower. Without the high-water half, deleting the
+ *     NEWEST entries left a chain that verified perfectly: the walk starts at
+ *     the genesis value and had nothing to say about where the chain was
+ *     supposed to END. Without the contiguity half, that same commitment was
+ *     erased by the very next append — see the check itself.
  *  4. **HQ commits DURABLY, outside this table, to how far the chain reached.**
  *     Every recorded verdict carries the tip (`seq` + `hash`) the chain had
  *     when it was reached, in the append-only verdict ledger; the boot pass and
@@ -29,8 +31,25 @@
  *     that hash. See `evidenceChainCommitmentBreach` in
  *     `application/reliability-command.ts`.
  *
- * **The fourth hold is not decoration, and two false claims are corrected with
- * it** (Wave 5 correction round four, High H1). Holds 1–3 all live INSIDE the
+ * **Holds 3 and 4 are BOTH here, and neither subsumes the other.** The two
+ * concurrent Wave 5 round-four lanes each closed one of the two ways the
+ * length commitment failed, and the reconciliation keeps both because they
+ * answer different questions about the same log:
+ *
+ *  - CONTIGUITY (hold 3) is a property of the record that no later write
+ *    repairs, so it holds with no prior verdict on the file at all. It is
+ *    silent on a log DROPPED and recreated whole, because the seqs then
+ *    restart at 1 with no gap;
+ *  - the DURABLE COMMITMENT (hold 4) survives the drop, because it lives in a
+ *    different ledger — but it says nothing until an assessment has recorded
+ *    one, so a file with no verdict yet has only holds 1–3.
+ *
+ * Together they leave no window: a tail delete followed by any number of
+ * appends fails contiguity, and a whole-log rebuild that restores contiguity
+ * fails the commitment.
+ *
+ * **Hold 4 is not decoration, and two false claims are corrected with it**
+ * (Wave 5 correction round four, High H1). Holds 1–3 all live INSIDE the
  * thing being checked: the triggers, the rows and the `sqlite_sequence` entry
  * all disappear with `DROP TABLE op_evidence`, which is DDL that no BEFORE
  * trigger refuses. And the census that hold 2 rests on runs AFTER
@@ -54,11 +73,39 @@
  *    so what closes that is the commitment, which lives in a ledger that DOES
  *    carry the guards and IS censused.
  *
- * The remaining residual is stated rather than glossed: HQ holds no key a
- * foreign writer does not also have, so a writer holding the file open can
- * still APPEND a correctly-hashed entry, and can still destroy the verdict
- * ledger and the evidence log together — which is itself a census finding on
- * the verdict ledger. This is a real barrier, not a cryptographic boundary.
+ * **And two further claims are corrected, from the other round-four lane:**
+ *
+ *  - the header before the third correction round claimed "silent tampering or
+ *    deletion breaks the chain and is detectable by verifyChain()". The
+ *    tampering half was true; the deletion half was not, and it was the half an
+ *    audit record actually needs (Wave 5 correction round three, High A2);
+ *  - the header after it claimed point 3 unqualified while the length
+ *    commitment lived only in `sqlite_sequence`, so ONE later append made a
+ *    deletion invisible again — HQ's OWN boot appends being the laundering
+ *    write — and the documented remedy, a Founder full assessment, certified
+ *    the robbed log as intact (Wave 5 correction round four, High 2). The
+ *    contiguity requirement is what makes point 3 hold against the next write
+ *    rather than only at the instant before it. No `sqlite_sequence` rewrite
+ *    was ever needed for that route, and a residual that said otherwise is
+ *    corrected with it.
+ *
+ * The remaining residual is stated rather than glossed, as the union of what
+ * both lanes left open. HQ holds no key a foreign writer does not also have, so
+ * a writer that already holds the database file open can still APPEND a
+ * correctly-hashed entry; and it can still rewrite the whole log coherently —
+ * dropping the triggers, deleting entries, RENUMBERING the survivors so no seq
+ * is missing, recomputing every hash forward from the genesis value and
+ * lowering `sqlite_sequence` to match. That last route is now a whole-log
+ * rewrite rather than a tail delete, the renumbering needs the UPDATE the
+ * engine guard refuses, and dropping that guard is itself a blocking finding.
+ * Hold 4 narrows even that on a file where an assessment has already recorded a
+ * verdict: any rewrite that disturbs the entry AT the committed seq — which is
+ * every rewrite that touches anything at or below it, because the hashes chain
+ * forward — leaves the log unable to satisfy the commitment and is refused. The
+ * rewrite that stays undetected is therefore one confined ABOVE the last
+ * committed tip, on a file that carries a commitment at all; and destroying the
+ * verdict ledger and the evidence log together, which is itself a census
+ * finding on the verdict ledger. A real barrier, not a cryptographic boundary.
  */
 
 import { createHash } from 'node:crypto';
@@ -202,8 +249,18 @@ export function assertNoSecretLikeContent(payload: Record<string, unknown>): voi
  * exactly that: the entries present must reach the largest `seq` SQLite has
  * ever assigned.
  *
- * A deletion in the MIDDLE was always caught, by the links themselves: the
- * following entry's `prev_hash` no longer matches its new predecessor.
+ * **And the length commitment has to survive the next write** (Wave 5
+ * correction round four, High 2). The high-water comparison alone did not: one
+ * further append raised `lastSeq` back to the mark and the missing seqs simply
+ * became a hole in the middle. So the seqs present must also be CONTIGUOUS
+ * from 1, which is a property of the record rather than of the moment it is
+ * read.
+ *
+ * A deletion in the MIDDLE with NO later append was always caught by the links
+ * themselves: the following entry's `prev_hash` no longer matches its new
+ * predecessor. With a later append it was not — the appended entries chain from
+ * the surviving tip, so every present row links to its present neighbour — and
+ * the contiguity requirement is what catches it now.
  *
  * A module-level function over a DATABASE HANDLE rather than a method, and
  * deliberately so (Wave 5 review, High finding 1). The Phase 13 safe-mode
@@ -239,9 +296,32 @@ export function assertNoSecretLikeContent(payload: Record<string, unknown>): voi
 export function verifyEvidenceChain(db: HqDatabase): number | null {
   let prevHash = GENESIS_HASH;
   let lastSeq = 0;
+  // The seq the next row must carry. `seq` is `INTEGER PRIMARY KEY
+  // AUTOINCREMENT` and the only writer is `append()`, so a log that has never
+  // lost an entry is 1, 2, 3, … with no gap — see the CONTIGUITY check below.
+  let expectedSeq = 1;
   const rows = db.prepare(`SELECT * FROM op_evidence ORDER BY seq`).all() as Record<string, unknown>[];
   for (const row of rows) {
     const seq = row.seq as number;
+    // CONTIGUITY, checked before the links (Wave 5 correction round four,
+    // High 2). The high-water comparison at the end of this function is a
+    // commitment to how far the chain REACHED, and it is erased by the next
+    // append: delete the tail, append one more entry, and `lastSeq` catches
+    // up with `sqlite_sequence` again while the deleted seqs stay missing in
+    // the middle. The links do not object either — the later entries chained
+    // from the SURVIVING tip, so every present row links to its present
+    // neighbour. Executed against the previous head: a log of [1..6] robbed
+    // of 5 and 6 read [1,2,3,4] and was DETECTED, and after HQ's own next two
+    // boot appends it read [1,2,3,4,7,8] and verified CLEAN — so the very
+    // remedy the residual list tells the Founder to run (one full assessment)
+    // certified the robbed log.
+    //
+    // A missing seq is a fact about the record that no later append can
+    // repair, which is what makes the header's "commits to its own LENGTH"
+    // true rather than true-until-the-next-write. The first ABSENT seq is
+    // reported, the same shape of answer the tail check gives.
+    if (seq !== expectedSeq) return expectedSeq;
+    expectedSeq = seq + 1;
     // Parsed and re-stringified, exactly as `list()` does it, because that is
     // the encoding `append()` hashed. A raw `row.payload` would differ from it
     // for any payload SQLite stored with different whitespace.

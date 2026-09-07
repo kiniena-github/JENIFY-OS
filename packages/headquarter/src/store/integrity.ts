@@ -38,7 +38,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import type { HqDatabase } from './db.js';
-import { openHqDatabaseReadOnly, tableNamesBeforeMigration } from './db.js';
+import {
+  openHqDatabaseReadOnly,
+  schemaEnsuredMarkBeforeMigration,
+  tableNamesBeforeMigration,
+} from './db.js';
 
 /* ------------------------------------------------------------------ */
 /* Durability requirements                                             */
@@ -722,14 +726,23 @@ const MIGRATION_CREATED_IMMUTABLE_TABLES: readonly string[] = Object.freeze(['op
  * The declared engine-immutable ledgers a file ALREADY carries, excluding the
  * one `migrateHqDatabase` creates.
  *
- * This is the discriminator between "a database HQ has never ensured" and "a
- * database that has lost something", and it is needed because absence is
+ * One HALF of the discriminator between "a database HQ has never ensured" and
+ * "a database that has lost something", and it is needed because absence is
  * otherwise genuinely ambiguous. On a brand-new file every phase's ledger is
  * absent and every guard those phases declare is missing — which is not a
  * finding, it is a file that has not been built yet, and reporting it would put
  * every first construction into safe mode. On a file that already carries even
  * one of these ledgers, HQ has ensured this schema before, and a declared
  * ledger or guard that is now absent is a fact worth reporting.
+ *
+ * **It is only half, and on its own it failed open on the widest attack**
+ * (Wave 5 correction round four, High 1): dropping ALL of the declared ledgers
+ * empties this set, which read as a first boot and silenced the whole census
+ * while the operational half of the database survived. The other half —
+ * `hqSchemaEnsuredMarkPresent` — is what closes that, and
+ * `observeImmutabilityAsFound` takes both. This function stays as it is because
+ * "which declared ledgers does this file still carry" is a fact worth having on
+ * its own; it is just not the whole question.
  *
  * The known and accepted cost, which is the same cost every newly declared
  * guard has always carried: the FIRST boot of a build that declares a new
@@ -746,13 +759,100 @@ export function establishedImmutableTables(db: HqDatabase): string[] {
     .sort();
 }
 
+/**
+ * The value HQ stamps into `PRAGMA user_version` once it has ensured a file's
+ * schema — the durable "HQ has been here before" mark.
+ *
+ * A version rather than a flag so a later build can raise it, but nothing reads
+ * it as a version yet: any non-zero value means the same thing, which is the
+ * fail-closed reading (a stamp HQ does not recognize is still not a fresh
+ * file).
+ */
+const HQ_SCHEMA_ENSURED_MARK = 1;
+
+/**
+ * Whether a previous HQ construction has ENSURED this file's schema.
+ *
+ * **This exists because the schema-only discriminator was bypassed by doing
+ * MORE damage** (Wave 5 correction round four, High 1).
+ * `establishedImmutableTables` asks which declared ledgers a file still
+ * carries, so dropping a SUBSET of them was reported and dropping ALL of them —
+ * `op_evidence` included — emptied the set, read as a first boot, and reported
+ * NOTHING at either assessment depth. Executed against the previous head: the
+ * verdict ledger, the evidence log, every Founder budget ceiling, every truth
+ * record and every action intent were gone; `hq_specialists`,
+ * `op_capabilities`, `op_kill_switch`, `op_tasks`, `hq_approvals` and
+ * `hq_human_principals` survived intact; HQ reported `safeMode: false` with an
+ * empty observation list and handed back `releaseKillSwitch` — the exact act
+ * safe mode exists to refuse. A detector that is silenced by WIDENING the
+ * attack is not a detector.
+ *
+ * `PRAGMA user_version` is the one place in the file that answers the question
+ * without depending on any table surviving: it lives in the 100-byte database
+ * header, `DROP TABLE` cannot reach it, `VACUUM` preserves it, and SQLite
+ * itself never writes it. So "drop everything" no longer buys silence — the
+ * mark is still there, the census runs over a file with 30 declared ledgers
+ * absent, and safe mode engages.
+ *
+ * Deliberately NOT a content check over the tables. That was tried and is
+ * wrong: HQ's own components legitimately write rows to a fresh file BEFORE the
+ * facade is constructed over it (the specialist directory, the capability
+ * registry and the member registry all do, and several suites compose exactly
+ * that way), so "this file has rows" cannot tell a first boot from an operated
+ * file. The mark is written by the facade's own writable construction and by
+ * nothing else, which is precisely the fact the discriminator needs.
+ *
+ * What it does not answer is stated with it: a writer that zeroes
+ * `PRAGMA user_version` puts the file back to unmarked. That is a deliberate
+ * forgery of HQ's own schema mark rather than a further drop, and it is the
+ * same residual class as rewriting `sqlite_sequence` — the file is HQ's, HQ
+ * holds no key over it, and a writer that already has it can lie about it. The
+ * inversion this closes is the one that mattered: more damage no longer means
+ * less detection.
+ */
+export function hqSchemaEnsuredMarkPresent(db: HqDatabase): boolean {
+  try {
+    const row = db.prepare(`PRAGMA user_version`).get() as Record<string, unknown> | undefined;
+    const value = Number(Object.values(row ?? {})[0] ?? 0);
+    return Number.isInteger(value) && value !== 0;
+  } catch {
+    // A handle that cannot answer the pragma contributes no evidence either
+    // way; the ledger reading still applies.
+    return false;
+  }
+}
+
+/**
+ * Stamp the mark `hqSchemaEnsuredMarkPresent` reads. Called by the facade AFTER
+ * its ensure pass, so the observation taken BEFORE that pass still describes the
+ * file as it was found.
+ *
+ * Silent on a read-only handle and on any engine refusal: this is a mark, not a
+ * guarantee, and a construction may not fail because it could not leave one.
+ * The cost of not leaving it is stated where it is read — an unmarked file is
+ * read as a first boot, which is the pre-existing read-only residual.
+ */
+export function recordHqSchemaEnsured(db: HqDatabase): void {
+  if (db.readonly) return;
+  try {
+    db.exec(`PRAGMA user_version = ${HQ_SCHEMA_ENSURED_MARK}`);
+  } catch {
+    // See the header: never fail a construction over the mark.
+  }
+}
+
 /** What the schema-immutability census saw BEFORE this process ensured anything. */
 export interface ImmutabilityAsFound {
   /** Declared guards absent from a table that was present. Empty on an unestablished file. */
   guardsMissing: string[];
   /** Declared ledgers absent entirely. Empty on an unestablished file. */
   tablesAbsent: string[];
-  /** Whether this file already carried at least one ensure-created immutable ledger. */
+  /**
+   * Whether this file has been through an HQ boot before — read as "it still
+   * carries an ensure-created immutable ledger" OR "it carries HQ's own
+   * schema-ensured mark". Either alone is enough; see
+   * `observeImmutabilityAsFound`.
+   */
   established: boolean;
 }
 
@@ -763,9 +863,25 @@ export interface ImmutabilityAsFound {
  * read at the same instant to mean anything: the ensures are `CREATE ... IF NOT
  * EXISTS` throughout, so anything read after them describes the file HQ has
  * just rebuilt rather than the file it was handed.
+ *
+ * **The discriminator takes TWO independent readings and needs only one of
+ * them** (Wave 5 correction round four, High 1). The ledger reading —
+ * `establishedImmutableTables` — is the one a first boot must not trip, and it
+ * failed open on the widest possible attack: drop EVERY declared ledger and the
+ * set is empty, which read as "this file has not been built yet" and returned a
+ * silent census over a database whose entire operational half was still there.
+ * The MARK reading — `hqSchemaEnsuredMarkPresent` — does not live in a table at
+ * all, so no amount of dropping reaches it, and the inversion is closed: more
+ * damage no longer means less detection.
+ *
+ * What a genuine first boot still looks like, and why it is still not a
+ * finding: no ensure-created ledger, and no mark. Both readings are false and
+ * the census is silent, exactly as before. That includes a fresh file HQ's own
+ * components have already written rows to before the facade is constructed over
+ * it, which is a supported composition and must not read as tampering.
  */
 export function observeImmutabilityAsFound(db: HqDatabase): ImmutabilityAsFound {
-  const established = establishedImmutableTables(db).length > 0;
+  const established = establishedImmutableTables(db).length > 0 || hqSchemaEnsuredMarkPresent(db);
   if (!established) return { guardsMissing: [], tablesAbsent: [], established };
   return {
     guardsMissing: missingImmutabilityGuards(db),
@@ -807,10 +923,29 @@ export function migrationRestoredImmutableTables(db: HqDatabase): string[] {
   // through an HQ boot before, so `op_evidence` missing from it is a fact worth
   // reporting — the same discriminator `establishedImmutableTables` applies,
   // asked of the moment it is still answerable.
-  const establishedBefore = ENGINE_IMMUTABLE_TABLES.some(
-    (entry) =>
-      before.has(entry.table) && !MIGRATION_CREATED_IMMUTABLE_TABLES.includes(entry.table),
-  );
+  //
+  // BOTH readings of that discriminator, not one (Wave 5 round-four
+  // reconciliation). This function was written against the ledger reading
+  // alone, and the other lane's finding applies to it word for word: dropping
+  // EVERY declared ledger empties the ledger reading, so `op_evidence` — the
+  // audit log itself, and the widest form of the attack — would have been the
+  // one table left out of the census exactly when everything else was gone.
+  // The mark reading answers it, and using it here is also what keeps ONE
+  // definition of "established" in the module: `observeImmutabilityAsFound`
+  // takes both readings, and so must the function whose result it unions in.
+  //
+  // The mark is read AS OF THE MIGRATION, not as it stands. That distinction is
+  // the same one this whole function exists for, and getting it wrong is not
+  // theoretical: `recordHqSchemaEnsured` runs at the END of a facade
+  // construction, so a SECOND facade over the same handle would see a mark this
+  // very process had just written, judge a genuine first boot "established",
+  // and report `op_evidence` as a lost ledger on a brand-new store. Executed
+  // during this merge, that put nine suites into safe mode.
+  const establishedBefore =
+    ENGINE_IMMUTABLE_TABLES.some(
+      (entry) =>
+        before.has(entry.table) && !MIGRATION_CREATED_IMMUTABLE_TABLES.includes(entry.table),
+    ) || schemaEnsuredMarkBeforeMigration(db) === true;
   if (!establishedBefore) return [];
   const now = tableNames(db);
   return MIGRATION_CREATED_IMMUTABLE_TABLES.filter(

@@ -1327,3 +1327,43 @@ cross-cutting findings and the full verification table are in
 - **A raw appender can still widen a budget by appending a higher-version row**,
   and can still understate complexity, context size and work kind on a forged
   decision row. Both unchanged from the third round.
+
+### The fourth round had TWO concurrent lanes, and this document describes the merged head
+
+A second correction lane reviewed the same frozen head `22680ba` at the same
+time, without either lane knowing about the other, and corrected it on this same
+branch. Its two commits are entirely Phase 13 — the total-erasure census bypass,
+the evidence chain's laundered length, U+2800, a Cyrillic/Greek lookalike fold
+and the `file_has_multiple_links` disclosure — so **no Phase 14 finding above was
+touched by it, and every sentence in this document's fourth-round section stands
+unchanged at the merged head.** The full reconciliation record — what survived
+from each lane, what was dropped and why, which regression tests were ported and
+what each now asserts — is the section "The fourth round's two lanes,
+reconciled" in `PHASE_13_ADVANCED_RELIABILITY.md`.
+
+Three residuals that lane disclosed reach Phase 14 surfaces even though the code
+is Phase 13's, so they are named here as well as there rather than left to a
+cross-reference:
+
+- **The `PRAGMA user_version` schema mark is not written when the facade cannot
+  write it**, and the facade never fails a construction over the mark. A file HQ
+  could not stamp is a file HQ reads as new next time — including on the
+  read-only `hq:snapshot` path that renders this phase's intelligence section.
+- **Seq contiguity is silent on an evidence log DROPPED and recreated whole**,
+  because the seqs then restart at 1 with no gap. That is the dropped-ledger
+  question and it is answered by the first-boot discriminator and the durable
+  chain-tip commitment instead, not by the chain check.
+- **The confusable fold has one visible cost, and it is shared by every write
+  this phase accepts**, because `recordIntelligenceDecision`'s labels go through
+  the same `assertNoCredentialShape`: Greek capitals for `TOKEN` fold to `TOKEN`,
+  so Greek text of the form `ΤΟΚΕΝ: ********` is refused exactly as the English
+  spelling already is. The bound that holds for the MERGED fold — and the two
+  keywords (`apikey` and `cookie`) a modern Cyrillic alphabet can spell — is
+  computed and disclosed in the Phase 13 residual list.
+
+**Verification at the merged head** (the whole matrix, all green, exit 0):
+`npm run test:hq` 164 files / 3177 tests; `npm test` (root) 37 files / 569
+passed + 3 pre-existing skips; hq-host 23 / 222; hq-server 2 / 20; all four
+typechecks clean; `npm run build:site` 10 pages + `hq-snapshot.json`;
+`npm run build` all workspaces, web initial JS 215.66 kB / 69.22 kB gzip,
+unchanged. Lane A alone was 164 / 3168 and this lane alone 164 / 3150.

@@ -232,6 +232,13 @@ export function connectHqDatabaseUnmigrated(path: string = DEFAULT_HQ_DB_PATH): 
 const TABLES_BEFORE_MIGRATION = new WeakMap<HqDatabase, ReadonlySet<string>>();
 
 /**
+ * The same, for HQ's own schema-ensured mark in `PRAGMA user_version`. Same
+ * WeakMap discipline, same reason, same instant — see
+ * `schemaEnsuredMarkBeforeMigration`.
+ */
+const MARK_BEFORE_MIGRATION = new WeakMap<HqDatabase, boolean>();
+
+/**
  * What this handle's file carried before HQ's own migration touched it, or null
  * when this handle has not been migrated in this process.
  *
@@ -261,6 +268,34 @@ export function tableNamesBeforeMigration(db: HqDatabase): ReadonlySet<string> |
 }
 
 /**
+ * The same WeakMap discipline for HQ's own schema-ensured MARK: what
+ * `PRAGMA user_version` said before this handle's migration ran.
+ *
+ * Added by the Wave 5 round-four RECONCILIATION, because the two lanes' fixes
+ * only compose with it. One lane made the first-boot discriminator read the
+ * mark as well as the ledger catalogue, so that dropping EVERY declared ledger
+ * no longer reads as a fresh file. The other made `op_evidence`'s absence a
+ * question asked of the PRE-migration catalogue, because the migration
+ * re-creates that one table before the census looks. Put together without this,
+ * the widest attack — drop every declared ledger — reports all the others and stays
+ * silent about the audit log itself, which is the one it destroyed.
+ *
+ * The mark has to be read at the same instant as the catalogue, and for exactly
+ * the same reason: the facade STAMPS it at the end of its construction, so a
+ * second facade over the same handle would otherwise see a mark this process
+ * had just written and read a genuine first boot as an established file with
+ * `op_evidence` lost. Recorded here, that cannot happen — this is what the file
+ * said before HQ touched it.
+ *
+ * Null when this handle has not been migrated in this process, on the same
+ * fail-safe reading as `tableNamesBeforeMigration`: "I could not look" is not
+ * "nothing was there".
+ */
+export function schemaEnsuredMarkBeforeMigration(db: HqDatabase): boolean | null {
+  return MARK_BEFORE_MIGRATION.get(db) ?? null;
+}
+
+/**
  * Apply the schema and column upgrades to an already-connected database.
  *
  * Idempotent: the DDL is `CREATE TABLE IF NOT EXISTS` throughout and
@@ -278,10 +313,19 @@ export function migrateHqDatabase(db: HqDatabase): HqDatabase {
       .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
       .all() as { name: string }[];
     TABLES_BEFORE_MIGRATION.set(db, new Set(rows.map((row) => row.name)));
+    // HQ's own schema-ensured mark, read at the SAME instant and for the same
+    // reason — see `schemaEnsuredMarkBeforeMigration`. Any non-zero value
+    // counts, which is the fail-closed reading: a stamp HQ does not recognize
+    // is still not a fresh file.
+    const version = db.prepare(`PRAGMA user_version`).get() as Record<string, unknown> | undefined;
+    const value = Number(Object.values(version ?? {})[0] ?? 0);
+    MARK_BEFORE_MIGRATION.set(db, Number.isInteger(value) && value !== 0);
   } catch {
     // A handle that cannot even read its own catalogue records nothing rather
     // than an empty set: "I could not look" must not read as "nothing was
-    // there", which would make every declared ledger look dropped.
+    // there", which would make every declared ledger look dropped. The mark is
+    // recorded in the same try for the same reason — either both facts are
+    // observed at that instant or neither is.
   }
   db.exec(DDL);
   ensureColumns(db);
