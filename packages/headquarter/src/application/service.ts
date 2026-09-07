@@ -480,6 +480,56 @@ import {
   type ProjectRecord,
 } from './project-command.js';
 import {
+  CONTENT_DIGEST_PATTERN,
+  MAX_ARTIFACT_LOCATOR_LENGTH,
+  MAX_ARTIFACT_NAME_LENGTH,
+  MAX_PRODUCT_NAME_LENGTH,
+  MAX_PRODUCT_NOTE_LENGTH,
+  MAX_PRODUCT_PROBLEM_LENGTH,
+  MAX_PRODUCT_SUMMARY_LENGTH,
+  MAX_PRODUCT_TARGET_USERS_LENGTH,
+  PRODUCT_ARTIFACT_KINDS,
+  PRODUCT_ARTIFACT_READ_LIMIT,
+  PRODUCT_COMMAND_CAPABILITY,
+  PRODUCT_INITIAL_LIFECYCLE,
+  PRODUCT_READ_LIMIT,
+  PRODUCT_TYPES,
+  allowedProductLifecycleMoves,
+  appendProductEvent,
+  artifactIdempotencyKey,
+  artifactRecordDigest,
+  canMoveProductLifecycle,
+  deriveProductRecord,
+  emptyProductFactorySnapshot,
+  ensureProductFactorySchema,
+  findArtifactIdByIdempotencyKey,
+  findProductIdByIdempotencyKey,
+  isProductArtifactKind,
+  isProductLifecycleState,
+  isProductType,
+  loadAllProductArtifacts,
+  loadProduct,
+  loadProductArtifacts,
+  loadProductEvents,
+  loadProducts,
+  nextArtifactVersion,
+  productCommandCapabilityState,
+  productCommandContractDrift,
+  productFactorySchemaPresent,
+  productIdempotencyKey,
+  productPlanRecommendation,
+  productReleaseReadiness,
+  summarizeProductFactory,
+  type ArtifactDigestProvenance,
+  type ProductArtifactKind,
+  type ProductFactorySnapshotView,
+  type ProductLifecycleState,
+  type ProductPlanRecommendationView,
+  type ProductRecord,
+  type ProductReleaseReadinessView,
+  type ProductType,
+} from './product-command.js';
+import {
   PROJECT_ALLOWED_TRANSITIONS,
   canTransitionProject,
   isProjectStatus,
@@ -815,7 +865,13 @@ export type OpsErrorCode =
   | 'unknown_session'
   | 'session_closed'
   | 'not_a_participant'
-  | 'unknown_contribution';
+  | 'unknown_contribution'
+  // Phase 12 — the Product Factory. Three codes, and deliberately none that
+  // names a release, a publish or a deploy: no product path can attempt one,
+  // so no product path can refuse one either.
+  | 'unknown_product'
+  | 'product_lifecycle_conflict'
+  | 'invalid_product_lifecycle_move';
 // Phase 10 adds NO refusal code: its two reads cannot fail (a derivation over
 // whatever the canonical stores hold), `getBrief` answers null for an id that
 // is not in the ledger, and `issueBrief` refuses only through the codes the
@@ -1878,6 +1934,14 @@ export class HeadquarterOperations {
    */
   readonly #briefStorePresent: boolean;
 
+  /**
+   * The Phase 12 Product Factory schema (`hq_products` and friends), same
+   * truth-recording as missions above. Note what it does NOT gate: nothing in
+   * the operator queue, the policy engine, the approval path or the action
+   * gateway reads a product table, so a handle without this schema executes
+   * exactly as much as a handle with it — which is the phase's whole point.
+   */
+  readonly #productStorePresent: boolean;
 
   /**
    * The external-action adapters, keyed by id — `#private`, handed in by the
@@ -2013,6 +2077,7 @@ export class HeadquarterOperations {
     ensureActionGatewaySchema(db);
     ensureCollaborationSchema(db);
     ensureBriefSchema(db);
+    ensureProductFactorySchema(db);
     // A writable construction just ensured the mission/project/memory tables.
     // A READ-ONLY one (the hq:snapshot path) may be observing an older file
     // that has some or none of them — the ensures above deliberately write
@@ -2026,6 +2091,7 @@ export class HeadquarterOperations {
     this.#actionStorePresent = db.readonly ? actionGatewaySchemaPresent(db) : true;
     this.#collaborationStorePresent = db.readonly ? collaborationSchemaPresent(db) : true;
     this.#briefStorePresent = db.readonly ? briefSchemaPresent(db) : true;
+    this.#productStorePresent = db.readonly ? productFactorySchemaPresent(db) : true;
     this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
     // Company memory (Phase 5, issue #265): the issue-#120 store, finally
@@ -5846,6 +5912,607 @@ export class HeadquarterOperations {
   #projectRecord(id: string): ProjectRecord | null {
     if (!this.#projectStorePresent) return null;
     return readProjectRecord(this.#db, id, this.#capabilityFromStore(PROJECT_COMMAND_CAPABILITY.id));
+  }
+
+  // ---- the Product Factory (Phase 12) ----
+
+  #resolveProductCommander(actor: string, action: string): OpsResult<never> | null {
+    return this.#resolveFounderGateActor(
+      actor,
+      action,
+      PRODUCT_COMMAND_CAPABILITY.id,
+      'commanding the product register',
+    );
+  }
+
+  #productCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      PRODUCT_COMMAND_CAPABILITY.id,
+      productCommandCapabilityState,
+      productCommandContractDrift,
+      'commanding the product register',
+    );
+  }
+
+  /**
+   * Does this project exist on the canonical register, and is it open?
+   *
+   * ENFORCEMENT-SAFE. This fact decides whether a product row is written at
+   * all, so it is read straight off `#db` — deliberately NOT through
+   * `getProject()`, `listProjects()` or `#projectRecord()`, all of which are
+   * reachable and patchable from outside. A same-realm patch that invents a
+   * project must not be able to hang a product off it: a product's whole
+   * claim to legitimacy is that it references a REAL register entry, and a
+   * forged reference would make the Product Factory a second project store
+   * with extra steps.
+   *
+   * The status is read as a raw string and compared, rather than typed
+   * through the project vocabulary, because the question here is only "is
+   * this row open" and an untypable legacy status must answer no.
+   */
+  #productProjectFact(projectId: string): { exists: boolean; open: boolean } {
+    if (!this.#projectStorePresent) return { exists: false, open: false };
+    const row = this.#db.prepare(`SELECT status FROM hq_projects WHERE id = ?`).get(projectId) as
+      | { status: string }
+      | undefined;
+    if (!row) return { exists: false, open: false };
+    return { exists: true, open: row.status === 'active' };
+  }
+
+  /**
+   * One product's whole derived record, read privately.
+   *
+   * ENFORCEMENT-SAFE for the same reason: the CURRENT lifecycle decides
+   * whether a requested move is legal, and it is derived here from the
+   * append-only event rows off `#db` rather than taken from `getProduct()`.
+   * A patched public read can therefore lie about a product's state to
+   * whoever reads it and still not buy an illegal move — pinned by a hostile
+   * test.
+   */
+  #productRecordFromStore(id: string, artifactLimit?: number): ProductRecord | null {
+    if (!this.#productStorePresent) return null;
+    const row = loadProduct(this.#db, id);
+    if (!row) return null;
+    return deriveProductRecord({
+      row,
+      events: loadProductEvents(this.#db, id),
+      artifacts: loadProductArtifacts(this.#db, id),
+      capability: this.#capabilityFromStore(PRODUCT_COMMAND_CAPABILITY.id),
+      artifactLimit,
+    });
+  }
+
+  /**
+   * Register one product against a canonical project.
+   *
+   * A product record is product-domain METADATA hanging off `hq_projects`: it
+   * organizes nothing, claims nothing, dispatches nothing and executes
+   * nothing. Founder-only through the `hq.product_command` originate grant and
+   * the fail-closed capability trio, exactly like a project or a mission.
+   *
+   * Order (the createProject/recordMemory shape): bounds and vocabulary →
+   * actor gate → capability gate → the project-existence probe (AFTER
+   * authority, so a stranger cannot use it as an existence oracle) → secret
+   * scan → derived idempotency key → ONE immediate transaction holding the
+   * dedupe read, the row, the `registered` history event, the `hq_events`
+   * audit entry and the `op_evidence` entry. A refusal writes nothing.
+   *
+   * The row is INSERT-only by engine, and the lifecycle lives in the event
+   * ledger rather than in a column, so this method is the only thing that
+   * ever creates a product and nothing — including this class — can edit one.
+   */
+  createProduct(input: {
+    projectId: string;
+    productType: string;
+    name: string;
+    problem: string;
+    targetUsers: string;
+    summary?: string;
+    /** Resolved principal id. Set by the boundary, never read from a body. */
+    requestedBy: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ product: ProductRecord; deduplicated: boolean }> {
+    if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
+    if (!input.projectId) return fail('invalid_input', 'projectId is required');
+    if (!isProductType(input.productType)) {
+      return fail('invalid_input', `productType must be one of: ${PRODUCT_TYPES.join(', ')}`);
+    }
+    const name = missionText('name', input.name, MAX_PRODUCT_NAME_LENGTH, true);
+    if (!name.ok) return fail('invalid_input', name.message);
+    const problem = missionText('problem', input.problem, MAX_PRODUCT_PROBLEM_LENGTH, true);
+    if (!problem.ok) return fail('invalid_input', problem.message);
+    const targetUsers = missionText('targetUsers', input.targetUsers, MAX_PRODUCT_TARGET_USERS_LENGTH, true);
+    if (!targetUsers.ok) return fail('invalid_input', targetUsers.message);
+    const summary = missionText('summary', input.summary, MAX_PRODUCT_SUMMARY_LENGTH, false);
+    if (!summary.ok) return fail('invalid_input', summary.message);
+
+    const refusedCommander = this.#resolveProductCommander(input.requestedBy, 'register a product');
+    if (refusedCommander) return refusedCommander;
+    const refusedCapability = this.#productCapabilityGate('register a product');
+    if (refusedCapability) return refusedCapability;
+
+    // The canonical project must EXIST. Read privately; a forged or absent
+    // project refuses the whole act and writes nothing.
+    const project = this.#productProjectFact(input.projectId);
+    if (!project.exists) {
+      return fail(
+        'unknown_project',
+        `Unknown project: ${input.projectId}. A product references a canonical project register entry; ` +
+          'it never creates or stands in for one.',
+      );
+    }
+    if (!project.open) {
+      return fail(
+        'project_closed',
+        `Project ${input.projectId} is closed; reopen it before registering a product against it`,
+      );
+    }
+    try {
+      assertNoSecretLikeContent({
+        name: name.value,
+        problem: problem.value,
+        targetUsers: targetUsers.value,
+        summary: summary.value,
+      });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+
+    const productType = input.productType;
+    const idempotencyKey = productIdempotencyKey({
+      requestedBy: input.requestedBy,
+      projectId: input.projectId,
+      productType,
+      name: name.value!,
+      idempotencyKey: input.idempotencyKey ?? null,
+    });
+    const id = `product-${uuid()}`;
+    const at = nowIso();
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    privileged.reserve(() => {
+      const existing = findProductIdByIdempotencyKey(this.#db, idempotencyKey);
+      if (existing) {
+        dedupedTo = existing;
+        return;
+      }
+      this.#db
+        .prepare(
+          `INSERT INTO hq_products
+             (id, project_id, product_type, name, problem, target_users, summary,
+              created_by, created_at, idempotency_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.projectId,
+          productType,
+          name.value,
+          problem.value,
+          targetUsers.value,
+          summary.value,
+          input.requestedBy,
+          at,
+          idempotencyKey,
+        );
+      // The registration event carries the initial lifecycle, so the derived
+      // state has a row behind it from the first instant rather than a default
+      // the code supplies.
+      appendProductEvent(this.#db, {
+        productId: id,
+        actor: input.requestedBy,
+        kind: 'registered',
+        toState: PRODUCT_INITIAL_LIFECYCLE,
+        detail: { projectId: input.projectId, productType },
+      });
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `product:${id}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `Product registered: ${productType} on project ${input.projectId}`,
+        detail: { productId: id, projectId: input.projectId, productType, lifecycle: PRODUCT_INITIAL_LIFECYCLE },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'product_registered',
+        payload: {
+          productId: id,
+          projectId: input.projectId,
+          productType,
+          lifecycle: PRODUCT_INITIAL_LIFECYCLE,
+          executable: false,
+        },
+      });
+    });
+    if (dedupedTo) {
+      return ok({ product: this.#productRecordFromStore(dedupedTo)!, deduplicated: true });
+    }
+    return ok({ product: this.#productRecordFromStore(id)!, deduplicated: false });
+  }
+
+  /**
+   * Move a product along its own lifecycle.
+   *
+   * This writes ONE event row and nothing else. It creates no task, claims
+   * nothing, approves nothing, touches no `hq_action_*` row and calls no
+   * adapter — including for `release_candidate` and `released`, which are
+   * records about the product and not a publish. There is deliberately no
+   * parameter on this method through which an external effect could be
+   * requested: a release is proposed through the Phase 8 gateway or it does
+   * not happen.
+   *
+   * Every move demands a note, because a lifecycle move — forward or back —
+   * is a decision with a reason. `expectedState` is the optimistic guard for
+   * a caller that read the product first.
+   */
+  moveProductLifecycle(input: {
+    productId: string;
+    to: string;
+    note?: string;
+    expectedState?: string;
+    requestedBy: string;
+  }): OpsResult<ProductRecord> {
+    if (!input.productId || !input.requestedBy) {
+      return fail('invalid_input', 'productId and requestedBy are required');
+    }
+    if (!isProductLifecycleState(input.to)) {
+      return fail('invalid_input', `Unknown product lifecycle state: ${input.to}`);
+    }
+    if (input.expectedState != null && !isProductLifecycleState(input.expectedState)) {
+      return fail('invalid_input', `Unknown product lifecycle state: ${input.expectedState}`);
+    }
+    const noteField = missionText('note', input.note, MAX_PRODUCT_NOTE_LENGTH, false);
+    if (!noteField.ok) return fail('invalid_input', noteField.message);
+    const note = noteField.value;
+    if (!note) {
+      return fail('invalid_input', `Moving a product to ${input.to} requires a note`);
+    }
+
+    const refusedCommander = this.#resolveProductCommander(
+      input.requestedBy,
+      `move product ${input.productId} to ${input.to}`,
+    );
+    if (refusedCommander) return refusedCommander;
+    const refusedCapability = this.#productCapabilityGate('move a product lifecycle');
+    if (refusedCapability) return refusedCapability;
+
+    // The CURRENT state comes from the private derivation over the append-only
+    // ledger — never from a public read a patch could relabel.
+    const current = this.#productRecordFromStore(input.productId);
+    if (!current) return fail('unknown_product', `Unknown product: ${input.productId}`);
+    if (input.expectedState && current.lifecycle !== input.expectedState) {
+      return fail(
+        'product_lifecycle_conflict',
+        `Product ${input.productId} is ${current.lifecycle}, not ${input.expectedState}`,
+        { lifecycle: current.lifecycle },
+      );
+    }
+    if (current.lifecycle === input.to) {
+      return fail('product_lifecycle_conflict', `Product ${input.productId} is already ${input.to}`, {
+        lifecycle: current.lifecycle,
+      });
+    }
+    if (!canMoveProductLifecycle(current.lifecycle, input.to)) {
+      return fail(
+        'invalid_product_lifecycle_move',
+        `Illegal product lifecycle move: ${current.lifecycle} -> ${input.to}. A product advances one state ` +
+          'at a time and may return to any earlier state; it never skips forward.',
+        { from: current.lifecycle, to: input.to, allowed: allowedProductLifecycleMoves(current.lifecycle) },
+      );
+    }
+    try {
+      assertNoSecretLikeContent({ note });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+
+    const to = input.to;
+    const from = current.lifecycle;
+    let raced = false;
+    const privileged = this.#requirePrivilegedQueue();
+    privileged.reserve(() => {
+      // Re-derive INSIDE the transaction: the ledger is the state, so a
+      // concurrent move must lose rather than double-apply. There is no row to
+      // guard with a conditional UPDATE here — that is the cost of deriving
+      // state, and this is where it is paid.
+      const live = this.#productRecordFromStore(input.productId);
+      if (!live || live.lifecycle !== from) {
+        raced = true;
+        return;
+      }
+      appendProductEvent(this.#db, {
+        productId: input.productId,
+        actor: input.requestedBy,
+        kind: 'lifecycle_moved',
+        fromState: from,
+        toState: to,
+        note,
+      });
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `product:${input.productId}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `Product lifecycle ${from} -> ${to}`,
+        detail: { productId: input.productId, from, to },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'product_lifecycle_moved',
+        payload: {
+          productId: input.productId,
+          from,
+          to,
+          // Stated in the evidence entry itself, because this is the record a
+          // future reader will ask "did that release anything" of.
+          externalActionTaken: false,
+          executable: false,
+        },
+      });
+    });
+    if (raced) {
+      return fail(
+        'product_lifecycle_conflict',
+        `Product ${input.productId} moved while the transition was being decided`,
+      );
+    }
+    return ok(this.#productRecordFromStore(input.productId)!);
+  }
+
+  /**
+   * Register the NEXT version of one artifact line.
+   *
+   * There is no update path and there never will be: a version is a row, the
+   * table is INSERT-only by engine, and the version number is derived inside
+   * the transaction as `max + 1` for this (product, kind, name). Recording a
+   * "correction" means recording a new version, which is what the unique
+   * `(product, kind, name, version)` index makes unavoidable.
+   *
+   * `contentDigest` is optional and is recorded as DECLARED: HQ never fetches
+   * the artifact, so it never claims to have verified one. `recordDigest` is
+   * computed here over the row's own canonical fields.
+   */
+  registerProductArtifact(input: {
+    productId: string;
+    kind: string;
+    name: string;
+    locator: string;
+    contentDigest?: string;
+    note?: string;
+    requestedBy: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ product: ProductRecord; artifactId: string; version: number; deduplicated: boolean }> {
+    if (!input.productId || !input.requestedBy) {
+      return fail('invalid_input', 'productId and requestedBy are required');
+    }
+    if (!isProductArtifactKind(input.kind)) {
+      return fail('invalid_input', `kind must be one of: ${PRODUCT_ARTIFACT_KINDS.join(', ')}`);
+    }
+    const name = missionText('name', input.name, MAX_ARTIFACT_NAME_LENGTH, true);
+    if (!name.ok) return fail('invalid_input', name.message);
+    const locator = missionText('locator', input.locator, MAX_ARTIFACT_LOCATOR_LENGTH, true);
+    if (!locator.ok) return fail('invalid_input', locator.message);
+    const note = missionText('note', input.note, MAX_PRODUCT_NOTE_LENGTH, false);
+    if (!note.ok) return fail('invalid_input', note.message);
+    const rawDigest = (input.contentDigest ?? '').trim().toLowerCase();
+    if (rawDigest !== '' && !CONTENT_DIGEST_PATTERN.test(rawDigest)) {
+      return fail(
+        'invalid_input',
+        'contentDigest must be a sha256 hex digest (64 hex characters), or be omitted. HQ records it as ' +
+          'declared by the recorder and never verifies it.',
+      );
+    }
+    const contentDigest = rawDigest === '' ? null : rawDigest;
+    const digestProvenance: ArtifactDigestProvenance =
+      contentDigest === null ? 'not_provided' : 'declared_by_recorder';
+
+    const refusedCommander = this.#resolveProductCommander(
+      input.requestedBy,
+      `register an artifact version for product ${input.productId}`,
+    );
+    if (refusedCommander) return refusedCommander;
+    const refusedCapability = this.#productCapabilityGate('register an artifact version');
+    if (refusedCapability) return refusedCapability;
+
+    const product = this.#productRecordFromStore(input.productId);
+    if (!product) return fail('unknown_product', `Unknown product: ${input.productId}`);
+    try {
+      assertNoSecretLikeContent({ name: name.value, locator: locator.value, note: note.value });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+
+    const kind = input.kind;
+    const idempotencyKey = artifactIdempotencyKey({
+      requestedBy: input.requestedBy,
+      productId: input.productId,
+      kind,
+      name: name.value!,
+      locator: locator.value!,
+      contentDigest,
+      idempotencyKey: input.idempotencyKey ?? null,
+    });
+    const id = `artifact-${uuid()}`;
+    const at = nowIso();
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    let version = 0;
+    privileged.reserve(() => {
+      const existing = findArtifactIdByIdempotencyKey(this.#db, idempotencyKey);
+      if (existing) {
+        dedupedTo = existing;
+        return;
+      }
+      // Derived INSIDE the transaction, and backed by the unique index: two
+      // concurrent writers cannot both land version N.
+      version = nextArtifactVersion(this.#db, { productId: input.productId, kind, name: name.value! });
+      const recordDigest = artifactRecordDigest({
+        productId: input.productId,
+        kind,
+        name: name.value!,
+        version,
+        locator: locator.value!,
+        contentDigest,
+        digestProvenance,
+        note: note.value,
+        recordedBy: input.requestedBy,
+        recordedAt: at,
+      });
+      this.#db
+        .prepare(
+          `INSERT INTO hq_product_artifacts
+             (id, product_id, kind, name, version, locator, content_digest, digest_provenance,
+              record_digest, note, recorded_by, recorded_at, idempotency_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.productId,
+          kind,
+          name.value,
+          version,
+          locator.value,
+          contentDigest,
+          digestProvenance,
+          recordDigest,
+          note.value,
+          input.requestedBy,
+          at,
+          idempotencyKey,
+        );
+      appendProductEvent(this.#db, {
+        productId: input.productId,
+        actor: input.requestedBy,
+        kind: 'artifact_versioned',
+        note: note.value,
+        detail: { artifactId: id, artifactKind: kind, name: name.value, version, recordDigest },
+      });
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `product:${input.productId}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `Artifact version ${version} recorded: ${kind}`,
+        detail: { productId: input.productId, artifactId: id, kind, version },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'product_artifact_registered',
+        payload: {
+          productId: input.productId,
+          artifactId: id,
+          artifactKind: kind,
+          version,
+          recordDigest,
+          contentDigestProvenance: digestProvenance,
+          executable: false,
+        },
+      });
+    });
+    if (dedupedTo) {
+      const row = this.#db
+        .prepare(`SELECT version FROM hq_product_artifacts WHERE id = ?`)
+        .get(dedupedTo) as { version: number } | undefined;
+      return ok({
+        product: this.#productRecordFromStore(input.productId)!,
+        artifactId: dedupedTo,
+        version: row?.version ?? 0,
+        deduplicated: true,
+      });
+    }
+    return ok({
+      product: this.#productRecordFromStore(input.productId)!,
+      artifactId: id,
+      version,
+      deduplicated: false,
+    });
+  }
+
+  getProduct(id: string): ProductRecord | null {
+    if (!id) return null;
+    return this.#productRecordFromStore(id);
+  }
+
+  listProducts(filter?: { projectId?: string; lifecycle?: ProductLifecycleState }): ProductRecord[] {
+    if (!this.#productStorePresent) return [];
+    // Fail closed: a supplied-but-unrecognized lifecycle filter matches
+    // NOTHING (the listMissionIds/listProjectIds lesson).
+    if (filter?.lifecycle != null && !isProductLifecycleState(filter.lifecycle)) return [];
+    return loadProducts(this.#db)
+      .filter((row) => (filter?.projectId ? row.projectId === filter.projectId : true))
+      .map((row) => this.#productRecordFromStore(row.id)!)
+      .filter((record) => (filter?.lifecycle ? record.lifecycle === filter.lifecycle : true));
+  }
+
+  /** The bounded wire read: newest first, with the true total stated beside it. */
+  listProductsBounded(filter?: { projectId?: string; lifecycle?: ProductLifecycleState }): {
+    products: ProductRecord[];
+    total: number;
+    truncated: boolean;
+  } {
+    const all = this.listProducts(filter).reverse();
+    const page = all.slice(0, PRODUCT_READ_LIMIT);
+    return { products: page, total: all.length, truncated: all.length > page.length };
+  }
+
+  /**
+   * The plan this product's type template proposes. A pure read: it writes
+   * nothing, creates no mission, holds no id a route could act on, and states
+   * on its face that turning any line into work goes through the canonical
+   * Founder-gated mission path.
+   *
+   * Named `productPlanTemplate` and not `...Recommendation` deliberately:
+   * Phase 10 pinned that NO facade method name matches `/recommend/i`, because
+   * a recommendation must never look like a handle on an act. That assertion
+   * is untouched here and now guards this phase too — the template is exactly
+   * the same kind of inert record, and it gets the same treatment.
+   */
+  productPlanTemplate(productId: string): OpsResult<ProductPlanRecommendationView> {
+    const product = this.#productRecordFromStore(productId);
+    if (!product) return fail('unknown_product', `Unknown product: ${productId}`);
+    return ok(productPlanRecommendation({ id: product.id, productType: product.productType }));
+  }
+
+  /**
+   * What is recorded, and what is missing, before a release could be
+   * PROPOSED through the Phase 8 gateway. An observation, never an
+   * authorization: `authorizesRelease` is a literal false, and an empty
+   * blocker list still leaves the gateway as the only path.
+   */
+  productReleaseReadiness(productId: string): OpsResult<ProductReleaseReadinessView> {
+    const product = this.#productRecordFromStore(productId);
+    if (!product) return fail('unknown_product', `Unknown product: ${productId}`);
+    return ok(productReleaseReadiness(product));
+  }
+
+  /**
+   * Counts over closed vocabularies for the UNAUTHENTICATED artifact.
+   *
+   * No name, problem, target user, artifact name, locator, digest or id
+   * crosses — the Phase 9/11 rule about free text on an unauthenticated
+   * artifact, applied to a register whose every text field is a company plan.
+   */
+  productFactorySummary(): ProductFactorySnapshotView {
+    if (!this.#productStorePresent) return emptyProductFactorySnapshot(false);
+    const products = this.listProducts();
+    const artifacts = loadAllProductArtifacts(this.#db);
+    return summarizeProductFactory({
+      storePresent: true,
+      products,
+      artifactTotal: artifacts.length,
+      artifactKinds: artifacts.map((artifact) => artifact.kind),
+    });
+  }
+
+  /**
+   * Whether this database carries the Phase 12 schema. False only for a
+   * read-only handle over a pre-Phase-12 file; product reads then answer
+   * empty/null and the snapshot states the absence rather than an empty store.
+   */
+  productStorePresent(): boolean {
+    return this.#productStorePresent;
   }
 
   // ---- company memory (Phase 5 — Context + Mission Memory, #265) ----
@@ -10464,6 +11131,61 @@ export class HeadquarterOperations {
       });
     }
 
+    // Products — hq_products off #db, with the lifecycle DERIVED from the
+    // append-only event ledger by the same private path every product read
+    // uses. A product document names the canonical project it references, so
+    // a hit leads back to the register rather than standing in for it.
+    if (this.#productStorePresent) {
+      const artifactsByProduct = new Map<string, ProductArtifactKind[]>();
+      for (const artifact of loadAllProductArtifacts(this.#db)) {
+        const kinds = artifactsByProduct.get(artifact.productId) ?? [];
+        kinds.push(artifact.kind);
+        artifactsByProduct.set(artifact.productId, kinds);
+        push('artifact', artifact.id, {
+          title: `${artifact.name} v${artifact.version}`,
+          body: bodyOf(artifact.kind, artifact.locator, artifact.note, `version ${artifact.version}`),
+          status: artifact.kind,
+          // An artifact version is never superseded: a later version is a
+          // DIFFERENT document with its own number, and both stay findable.
+          lifecycle: 'not_applicable',
+          truthState: null,
+          privacy: 'internal',
+          at: artifact.recordedAt,
+          project: '',
+          tags: [artifact.kind, `v${artifact.version}`],
+          evidenceRefs: [],
+          refs: [
+            { kind: 'artifact', id: artifact.id },
+            { kind: 'product', id: artifact.productId },
+          ],
+        });
+      }
+      for (const row of loadProducts(this.#db)) {
+        const record = deriveProductRecord({
+          row,
+          events: loadProductEvents(this.#db, row.id),
+          artifacts: [],
+          capability: null,
+        });
+        push('product', row.id, {
+          title: row.name,
+          body: bodyOf(row.problem, row.targetUsers, row.summary, row.productType),
+          status: record.lifecycle,
+          lifecycle: 'not_applicable',
+          truthState: null,
+          privacy: 'internal',
+          at: record.lifecycleChangedAt ?? row.createdAt,
+          project: '',
+          tags: [row.productType, ...new Set(artifactsByProduct.get(row.id) ?? [])],
+          evidenceRefs: [],
+          refs: [
+            { kind: 'product', id: row.id },
+            { kind: 'project', id: row.projectId },
+          ],
+        });
+      }
+    }
+
     // Company memory — hq_memory read as ROWS through #db, deliberately not
     // through MemoryStore.listAll(): a public method on another class is a
     // patchable read, and this one decides which records are founder_only.
@@ -10628,6 +11350,8 @@ export class HeadquarterOperations {
         // op_tasks and hq_specialists are core schema — present on every handle
         // this facade can be constructed over.
         { id: 'task', storePresent: true },
+        { id: 'product', storePresent: this.#productStorePresent },
+        { id: 'artifact', storePresent: this.#productStorePresent },
         { id: 'memory', storePresent: this.#memoryStorePresent },
         { id: 'truth', storePresent: this.#truthStorePresent },
         { id: 'collaboration', storePresent: this.#collaborationStorePresent },

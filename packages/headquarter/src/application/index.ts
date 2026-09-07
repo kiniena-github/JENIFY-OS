@@ -15,6 +15,7 @@ export * from './action-gateway.js';
 export * from './collaboration-command.js';
 export * from './chief-of-staff.js';
 export * from './search-command.js';
+export * from './product-command.js';
 export * from './member-nomination.js';
 export * from './service.js';
 export * from './console.js';

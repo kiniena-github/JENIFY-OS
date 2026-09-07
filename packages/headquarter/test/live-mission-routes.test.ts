@@ -172,7 +172,17 @@ describe('the write surface is stated, not inferred', () => {
     // write surface by nothing.
     expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.search);
     expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.ask);
-    expect(CONTROL_WRITE_ROUTES).toHaveLength(23);
+    // Phase 12: three Product Factory writes — register a product, move its
+    // lifecycle, version an artifact. Each appends to an append-only HQ
+    // ledger and reaches nothing outside HQ. The two product READS are GETs
+    // and stay off the write surface, and there is deliberately no fourth
+    // write: no route registers a release, a publish or a deploy, because
+    // that is an external action and the Phase 8 gateway is its only path.
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.products);
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.productLifecycle);
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.productArtifacts);
+    expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.productDetail);
+    expect(CONTROL_WRITE_ROUTES).toHaveLength(26);
   });
 });
 

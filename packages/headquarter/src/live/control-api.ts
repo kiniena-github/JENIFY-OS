@@ -180,6 +180,19 @@ import {
   founderBriefCapabilityState,
 } from '../application/chief-of-staff.js';
 import { SEARCH_SOURCES, isSearchSource, type SearchSourceId } from '../application/search-command.js';
+import {
+  PRODUCT_ARTIFACT_KINDS,
+  PRODUCT_COMMAND_CAPABILITY,
+  productCommandCapabilityState,
+  PRODUCT_LIFECYCLE_STATES,
+  PRODUCT_RELEASE_GATE_STATEMENT,
+  PRODUCT_TYPES,
+  isProductArtifactKind,
+  isProductLifecycleState,
+  isProductType,
+  type ProductLifecycleState,
+  type ProductRecord,
+} from '../application/product-command.js';
 import { MEMORY_KINDS, isMemoryKind, isMemoryPrivacy } from '../memory/schema.js';
 import { isArchiveStatus } from '../archive/schema.js';
 import { PROVIDERS, providerConnectivity } from '../routing/providers.js';
@@ -346,6 +359,34 @@ export const CONTROL_ROUTES = {
    */
   search: `${CONTROL_API_PREFIX}/search`,
   ask: `${CONTROL_API_PREFIX}/ask`,
+  /**
+   * Phase 12: the Product Factory. GET lists every registered product with
+   * its DERIVED lifecycle and artifact versions (bounded, newest first;
+   * `?projectId=`/`?lifecycle=` narrow), plus the closed vocabularies a
+   * console needs to draw a form without inventing one. `detail` is the
+   * parameterized read (`?productId=`) that adds the type's plan template and
+   * the release-readiness observation.
+   *
+   * Three POSTs, and there is deliberately no fourth: `products` registers a
+   * product against a canonical project, `lifecycle` moves the product's own
+   * state, and `artifacts` records the NEXT immutable version of an artifact
+   * line. There is NO release, publish or deploy route here and there is no
+   * facade method behind one — a real release is an external action and has
+   * exactly one path, the Phase 8 gateway, with its risk assessment, its
+   * bound approval, its Intent Guard and its kill switches.
+   *
+   * None of the three takes step-up, and that is a decision rather than an
+   * omission: step-up guards acts whose consequence cannot be walked back
+   * (a truth acceptance, a reconciliation of an irreversible external
+   * effect). Every write here appends a row to an append-only ledger that
+   * reaches nothing outside HQ, and a lifecycle move is undone by moving
+   * back. Demanding a fresh credential for it would imply the act does
+   * something it cannot do.
+   */
+  products: `${CONTROL_API_PREFIX}/products`,
+  productDetail: `${CONTROL_API_PREFIX}/products/detail`,
+  productLifecycle: `${CONTROL_API_PREFIX}/products/lifecycle`,
+  productArtifacts: `${CONTROL_API_PREFIX}/products/artifacts`,
 } as const;
 
 /**
@@ -377,6 +418,12 @@ export const CONTROL_WRITE_ROUTES: readonly string[] = [
   CONTROL_ROUTES.collaboration,
   CONTROL_ROUTES.collaborationAdmit,
   CONTROL_ROUTES.commandCenterBrief,
+  // Phase 12: register a product, move its lifecycle, version an artifact.
+  // Three writes, all of them appends to append-only HQ ledgers; no fourth
+  // exists, because a release is not a Product Factory act.
+  CONTROL_ROUTES.products,
+  CONTROL_ROUTES.productLifecycle,
+  CONTROL_ROUTES.productArtifacts,
 ];
 
 export interface ControlResponse {
@@ -666,7 +713,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.commandCenter ||
         path === CONTROL_ROUTES.commandCenterInbox ||
         path === CONTROL_ROUTES.search ||
-        path === CONTROL_ROUTES.ask)) ||
+        path === CONTROL_ROUTES.ask ||
+        path === CONTROL_ROUTES.products ||
+        path === CONTROL_ROUTES.productDetail)) ||
     (method === 'POST' &&
       (path === CONTROL_ROUTES.orders ||
         path === CONTROL_ROUTES.approve ||
@@ -690,7 +739,10 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.actionReconcile ||
         path === CONTROL_ROUTES.collaboration ||
         path === CONTROL_ROUTES.collaborationAdmit ||
-        path === CONTROL_ROUTES.commandCenterBrief));
+        path === CONTROL_ROUTES.commandCenterBrief ||
+        path === CONTROL_ROUTES.products ||
+        path === CONTROL_ROUTES.productLifecycle ||
+        path === CONTROL_ROUTES.productArtifacts));
   if (!known) {
     // Deny by default, and say nothing about what does exist.
     return refusal(404, 'not_found', 'No such HQ control route.');
@@ -1024,6 +1076,14 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     return askJenifyRoute(request, deps, founder, audit, now);
   }
 
+  if (method === 'GET' && path === CONTROL_ROUTES.products) {
+    return listProductsRoute(request, deps, founder, audit, now);
+  }
+
+  if (method === 'GET' && path === CONTROL_ROUTES.productDetail) {
+    return productDetailRoute(request, deps, founder, audit, now);
+  }
+
   if (path === CONTROL_ROUTES.orders) return createOrder(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.approve) return approve(request, deps, founder, audit, now);
   if (path === CONTROL_ROUTES.missions) return commandMission(request, deps, founder, audit);
@@ -1058,6 +1118,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
   if (path === CONTROL_ROUTES.collaboration) return openCollaborationRoute(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.collaborationAdmit) return admitCollaboratorRoute(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.commandCenterBrief) return issueBriefRoute(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.products) return createProductRoute(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.productLifecycle) return moveProductLifecycleRoute(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.productArtifacts) return registerArtifactRoute(request, deps, founder, audit);
   return deny(request, deps, founder, audit);
 }
 
@@ -1184,6 +1247,17 @@ function controlAvailability(
       writable &&
       principal?.originateCapabilities.includes(FOUNDER_BRIEF_CAPABILITY.id) === true &&
       founderBriefCapabilityState(capabilityRowFor(deps.ops, FOUNDER_BRIEF_CAPABILITY.id)) === 'enabled',
+    // Phase 12: registering a product, moving its lifecycle and versioning an
+    // artifact are ONE Founder act (`hq.product_command`), advertised from
+    // exactly the conditions that decide the write — the originate grant AND
+    // the intact registry row, read enforcement-safe. Reading the register
+    // takes no capability beyond the Founder gate, so there is no read flag;
+    // and there is deliberately no release flag, because there is no release
+    // act here to grant.
+    productCommand:
+      writable &&
+      principal?.originateCapabilities.includes(PRODUCT_COMMAND_CAPABILITY.id) === true &&
+      productCommandCapabilityState(capabilityRowFor(deps.ops, PRODUCT_COMMAND_CAPABILITY.id)) === 'enabled',
     mutationsEnabled: deps.mutationsEnabled !== false,
     trustedOriginConfigured: originsUsable,
     // Stated separately from `trustedOriginConfigured`, because they answer
@@ -1374,6 +1448,7 @@ function controlErrorStatus(code: string): number {
     case 'unknown_action':
     case 'unknown_session':
     case 'unknown_contribution':
+    case 'unknown_product':
       return 404;
     case 'invalid_mission_transition':
     case 'mission_status_changed':
@@ -1405,6 +1480,10 @@ function controlErrorStatus(code: string): number {
     // Phase 9: the session's mission finished, or the act conflicts with
     // what the record holds.
     case 'session_closed':
+    // Phase 12: the product moved, or the requested move is not one the
+    // lifecycle admits.
+    case 'product_lifecycle_conflict':
+    case 'invalid_product_lifecycle_move':
       return 409;
     case 'unknown_capability':
     case 'capability_disabled':
@@ -2419,6 +2498,276 @@ function askJenifyRoute(
       ok: true,
       generatedAt: now().toISOString(),
       answer: result.data as unknown as Record<string, unknown>,
+    }),
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Phase 12 — the Product Factory                                      */
+/* ------------------------------------------------------------------ */
+
+function productView(product: ProductRecord): Record<string, unknown> {
+  return product as unknown as Record<string, unknown>;
+}
+
+/**
+ * Phase 12 — the product register.
+ *
+ * Bounded on the wire (`PRODUCT_READ_LIMIT`, newest first) with the true total
+ * stated; `?projectId=` and `?lifecycle=` narrow it. The closed vocabularies
+ * ride along so a console can draw a form from the SERVER's list rather than
+ * from a hardcoded copy that could drift — the same reason the mission console
+ * is handed its transition table.
+ */
+function listProductsRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const query = request.query ?? {};
+  const lifecycle = (query.lifecycle ?? '').trim();
+  if (lifecycle !== '' && !isProductLifecycleState(lifecycle)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(
+      400,
+      'invalid_input',
+      `lifecycle must be one of: ${PRODUCT_LIFECYCLE_STATES.join(', ')}.`,
+    );
+  }
+  const page = deps.ops.listProductsBounded({
+    projectId: (query.projectId ?? '').trim() || undefined,
+    lifecycle: lifecycle === '' ? undefined : (lifecycle as ProductLifecycleState),
+  });
+  audit('allowed', 'list_products', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      products: page.products.map(productView),
+      total: page.total,
+      truncated: page.truncated,
+      storePresent: deps.ops.productStorePresent(),
+      vocabulary: {
+        productTypes: [...PRODUCT_TYPES],
+        lifecycleStates: [...PRODUCT_LIFECYCLE_STATES],
+        artifactKinds: [...PRODUCT_ARTIFACT_KINDS],
+      },
+      releaseGate: PRODUCT_RELEASE_GATE_STATEMENT,
+    }),
+  );
+}
+
+/**
+ * One product, its immutable artifact versions, its history, the plan its
+ * type template proposes, and the release-readiness observation.
+ *
+ * All three are READS. The plan carries no id and nothing accepts one; the
+ * readiness answer carries `authorizesRelease: false` whatever its blocker
+ * list says, because this route cannot authorize anything and neither can the
+ * facade method behind it.
+ */
+function productDetailRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const productId = (request.query?.productId ?? '').trim();
+  if (!productId) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'Supply a productId (?productId=...).');
+  }
+  const product = deps.ops.getProduct(productId);
+  if (!product) {
+    audit('refused', 'unknown_product', founder);
+    return refusal(404, 'unknown_product', `Unknown product: ${productId}`);
+  }
+  const plan = deps.ops.productPlanTemplate(productId);
+  const readiness = deps.ops.productReleaseReadiness(productId);
+  if (!plan.ok || !readiness.ok) {
+    const error = plan.ok ? readiness : plan;
+    if (error.ok) return refusal(500, 'internal', 'The product detail could not be produced.');
+    audit('refused', error.error.code, founder);
+    return refusal(controlErrorStatus(error.error.code), error.error.code, error.error.message);
+  }
+  audit('allowed', 'product_detail', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      product: productView(product),
+      plan: plan.data as unknown as Record<string, unknown>,
+      readiness: readiness.data as unknown as Record<string, unknown>,
+    }),
+  );
+}
+
+function createProductRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const productType = stringField(request.body, 'productType') ?? '';
+  if (!isProductType(productType)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', `productType must be one of: ${PRODUCT_TYPES.join(', ')}.`);
+  }
+  const projectId = stringField(request.body, 'projectId') ?? '';
+  const name = stringField(request.body, 'name') ?? '';
+  const problem = stringField(request.body, 'problem') ?? '';
+  const targetUsers = stringField(request.body, 'targetUsers') ?? '';
+  const summary = stringField(request.body, 'summary');
+  // The browser boundary's stricter scan BEFORE anything persists — the
+  // mission/project precedent.
+  try {
+    assertBrowserSafe({ name, problem, targetUsers, summary }, 'product');
+  } catch {
+    audit('refused', 'unsafe_product_content', founder);
+    return refusal(
+      400,
+      'unsafe_product_content',
+      'The product text looks like it contains credential material, so it was refused rather than stored.',
+    );
+  }
+  const result = deps.ops.createProduct({
+    projectId,
+    productType,
+    name,
+    problem,
+    targetUsers,
+    summary,
+    // The ONLY place the acting principal comes from — never the body.
+    requestedBy: founder.principal.id,
+    idempotencyKey: stringField(request.body, 'idempotencyKey'),
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', result.data.deduplicated ? 'product_deduplicated' : 'product_registered', founder);
+  return safe(
+    json(result.data.deduplicated ? 200 : 201, {
+      ok: true,
+      deduplicated: result.data.deduplicated,
+      product: productView(result.data.product),
+    }),
+  );
+}
+
+/**
+ * Move a product's own lifecycle. Records a state; publishes nothing.
+ *
+ * The response says so explicitly (`externalActionTaken: false`) rather than
+ * leaving a reader of `released` to assume otherwise — the same honesty the
+ * evidence entry behind it carries.
+ */
+function moveProductLifecycleRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const productId = stringField(request.body, 'productId') ?? '';
+  const to = stringField(request.body, 'to') ?? '';
+  if (!productId || !to) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'productId and to are required.');
+  }
+  const note = stringField(request.body, 'note');
+  if (note) {
+    try {
+      assertBrowserSafe({ note }, 'product');
+    } catch {
+      audit('refused', 'unsafe_product_content', founder);
+      return refusal(
+        400,
+        'unsafe_product_content',
+        'The note looks like it contains credential material, so it was refused rather than stored.',
+      );
+    }
+  }
+  const result = deps.ops.moveProductLifecycle({
+    productId,
+    to,
+    note,
+    expectedState: stringField(request.body, 'expectedState'),
+    requestedBy: founder.principal.id,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', `product_lifecycle_${result.data.lifecycle}`, founder);
+  return safe(
+    json(200, {
+      ok: true,
+      product: productView(result.data),
+      externalActionTaken: false,
+      releaseGate: PRODUCT_RELEASE_GATE_STATEMENT,
+    }),
+  );
+}
+
+/**
+ * Record the NEXT version of one artifact line. There is no update route,
+ * because there is no update: the table is INSERT-only by engine and the
+ * version number is derived server-side, so a client cannot state one.
+ */
+function registerArtifactRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const kind = stringField(request.body, 'kind') ?? '';
+  if (!isProductArtifactKind(kind)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', `kind must be one of: ${PRODUCT_ARTIFACT_KINDS.join(', ')}.`);
+  }
+  const productId = stringField(request.body, 'productId') ?? '';
+  const name = stringField(request.body, 'name') ?? '';
+  const locator = stringField(request.body, 'locator') ?? '';
+  const note = stringField(request.body, 'note');
+  try {
+    assertBrowserSafe({ name, locator, note }, 'product');
+  } catch {
+    audit('refused', 'unsafe_product_content', founder);
+    return refusal(
+      400,
+      'unsafe_product_content',
+      'The artifact text looks like it contains credential material, so it was refused rather than stored.',
+    );
+  }
+  const result = deps.ops.registerProductArtifact({
+    productId,
+    kind,
+    name,
+    locator,
+    contentDigest: stringField(request.body, 'contentDigest'),
+    note,
+    requestedBy: founder.principal.id,
+    idempotencyKey: stringField(request.body, 'idempotencyKey'),
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit(
+    'allowed',
+    result.data.deduplicated ? 'product_artifact_deduplicated' : 'product_artifact_registered',
+    founder,
+  );
+  return safe(
+    json(result.data.deduplicated ? 200 : 201, {
+      ok: true,
+      deduplicated: result.data.deduplicated,
+      artifactId: result.data.artifactId,
+      version: result.data.version,
+      product: productView(result.data.product),
     }),
   );
 }

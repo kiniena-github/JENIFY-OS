@@ -415,7 +415,7 @@ describe('every hostile caller is refused, and nothing is written', () => {
     }
   });
 
-  it('exposes no generic mutation surface — the whole route table is thirty-seven entries', () => {
+  it('exposes no generic mutation surface — the whole route table is forty-one entries', () => {
     // Nine since Phase 3 (issue #254); seventeen since Phase 4 (issue #262);
     // twenty-one since Phase 5+6 (issue #265): the memory GET+POST, the two
     // parameterized memory reads (search, context), and the one orchestrate
@@ -438,6 +438,14 @@ describe('every hostile caller is refused, and nothing is written', () => {
     // write surface at all, and that is the phase's shape rather than an
     // omission: search and Ask Jenify read canonical truth and can never
     // become a writer.
+    // Forty-one since Phase 12: the product register GET+POST, the
+    // parameterized detail read, the lifecycle POST and the artifact-version
+    // POST — write surface twenty-three to twenty-six. What is NOT here is
+    // the point of the phase: no release, publish, deploy or distribute
+    // route exists, and no facade method sits behind one, because a real
+    // release is an external action and the Phase 8 gateway is its only
+    // path. No product route takes an adapter, a provider, a target or a
+    // payload.
     // Each widening of the write surface beyond the 2026-08-28 three is
     // itself Founder-approved and recorded in docs/JENIFY_DECISIONS.md. What
     // this assertion protects is unchanged — no route takes a table, a
@@ -468,6 +476,10 @@ describe('every hostile caller is refused, and nothing is written', () => {
       '/api/hq/control/missions/orchestrate',
       '/api/hq/control/missions/transition',
       '/api/hq/control/orders',
+      '/api/hq/control/products',
+      '/api/hq/control/products/artifacts',
+      '/api/hq/control/products/detail',
+      '/api/hq/control/products/lifecycle',
       '/api/hq/control/projects',
       '/api/hq/control/projects/transition',
       '/api/hq/control/projects/update',

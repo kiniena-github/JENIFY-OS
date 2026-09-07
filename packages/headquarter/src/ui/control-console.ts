@@ -113,6 +113,14 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
   // write at all.
   CONTROL_ROUTES.search,
   CONTROL_ROUTES.ask,
+  // Phase 12: the Product Factory console on projects.html — the bounded
+  // register read, the parameterized detail read, and the three writes
+  // (register, lifecycle, artifact version). There is no fetch target for a
+  // release, because there is no release route.
+  CONTROL_ROUTES.products,
+  CONTROL_ROUTES.productDetail,
+  CONTROL_ROUTES.productLifecycle,
+  CONTROL_ROUTES.productArtifacts,
 ];
 
 /**
@@ -127,7 +135,7 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
  * server's words rather than guessing.
  */
 export const CONTROL_GRANT_JS = `function grantedControls(session) {
-  var off = { directOrder: false, approve: false, deny: false, missionCommand: false, projectCommand: false, workforceAssign: false, memoryCommand: false, missionOrchestrate: false, truthRecord: false, truthVerify: false, truthAccept: false, collaborationCommand: false, founderBrief: false, reason: '' };
+  var off = { directOrder: false, approve: false, deny: false, missionCommand: false, projectCommand: false, workforceAssign: false, memoryCommand: false, missionOrchestrate: false, truthRecord: false, truthVerify: false, truthAccept: false, collaborationCommand: false, founderBrief: false, productCommand: false, reason: '' };
   if (session == null || typeof session !== 'object') {
     off.reason = 'The control API gave no readable answer, so no control is drawn.';
     return off;
@@ -151,6 +159,7 @@ export const CONTROL_GRANT_JS = `function grantedControls(session) {
     truthAccept: session.controls.truthAccept === true,
     collaborationCommand: session.controls.collaborationCommand === true,
     founderBrief: session.controls.founderBrief === true,
+    productCommand: session.controls.productCommand === true,
     reason: stated !== '' ? stated : ungrantedReason(session.controls)
   };
 }
@@ -3841,6 +3850,408 @@ export function searchConsoleScript(): string {
         return;
       }
       buildConsole();
+    })
+    .catch(function (error) {
+      stayOff('the HQ control API is not reachable from this page (' + error.message + ').');
+    });
+})();
+</script>`;
+}
+
+/**
+ * Projects page: the Product Factory console (Phase 12).
+ *
+ * Static markup is a mount and a note, by the site-wide inert-markup rule.
+ * This script asks `/session`; any resolved Founder gets the live register
+ * read, and a session the server granted `productCommand` additionally gets
+ * the three writes — register a product against a canonical project, move a
+ * lifecycle, record the next artifact version.
+ *
+ * What this console deliberately never draws:
+ * - a release, publish, deploy or distribute button. No such route exists and
+ *   no facade method sits behind one. What it draws instead is the readiness
+ *   OBSERVATION and, verbatim from the server, the statement that a real
+ *   release runs through the Phase 8 gateway;
+ * - a progress bar, percentage, completion share or ETA for a product. The
+ *   lifecycle is a categorical state and nothing here turns nine ordered
+ *   names into a number;
+ * - an "apply this plan" control. The plan is a template's proposal; it
+ *   carries no id, and turning a line of it into work means commanding a
+ *   canonical mission on the mission console like any other mission;
+ * - a vocabulary of its own. The product types, lifecycle states and artifact
+ *   kinds are read from the server's response, so a console option that HQ
+ *   would refuse cannot exist.
+ */
+export function productFactoryConsoleScript(): string {
+  return `<script>
+(function () {
+  var mount = document.querySelector('[data-product-factory-console]');
+  if (!mount || typeof window.fetch !== 'function') return;
+
+  ${CONTROL_GRANT_JS}
+  ${DOM_HELPERS_JS}
+
+  var SESSION_PATH = ${jsonForScript(CONTROL_ROUTES.session)};
+  var PRODUCTS_PATH = ${jsonForScript(CONTROL_ROUTES.products)};
+  var PRODUCT_DETAIL_PATH = ${jsonForScript(CONTROL_ROUTES.productDetail)};
+  var PRODUCT_LIFECYCLE_PATH = ${jsonForScript(CONTROL_ROUTES.productLifecycle)};
+  var PRODUCT_ARTIFACTS_PATH = ${jsonForScript(CONTROL_ROUTES.productArtifacts)};
+
+  var note = el('p', 'readonly-note console-state', 'Checking with the control API whether this session can read the product register\\u2026');
+  note.setAttribute('data-product-factory-state', 'checking');
+  note.setAttribute('role', 'status');
+  mount.appendChild(note);
+
+  var listBox = el('div', 'projects-live product-live');
+  listBox.setAttribute('data-product-list', '');
+  mount.appendChild(listBox);
+
+  var sessionAnswer = null;
+
+  function stayOff(reason) {
+    listBox.textContent = '';
+    note.setAttribute('data-product-factory-state', 'off');
+    note.className = 'readonly-note console-state console-state-off';
+    note.textContent = 'THE PRODUCT REGISTER IS NOT READABLE FROM THIS PAGE \\u2014 ' + reason;
+  }
+
+  function textLine(parent, cls, text) {
+    parent.appendChild(el('p', cls, text));
+  }
+
+  function refusalText(result) {
+    var body = result.body || {};
+    var error = body.error || {};
+    return 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given');
+  }
+
+  function recheckAfterWriteRefusal(status, error) {
+    jsonExchange(fetch(SESSION_PATH, { headers: { accept: 'application/json' } }))
+      .then(function (result) {
+        sessionAnswer = result.body;
+        if (result.body == null || typeof result.body !== 'object' || result.body.founder !== true) {
+          stayOff('the session no longer resolves to the Founder (a write was refused: ' +
+            (error.code || ('HTTP ' + status)) + ')');
+          return;
+        }
+        reload();
+      })
+      .catch(function (err) {
+        stayOff('the HQ control API is not reachable from this page (' + err.message + ').');
+      });
+  }
+
+  function handleWrite(path, payload, button, outcome, successText) {
+    button.disabled = true;
+    outcome.textContent = 'Submitting\\u2026';
+    postJson(path, payload).then(function (result) {
+      button.disabled = false;
+      var body = result.body || {};
+      if (body.ok === true) { outcome.textContent = successText; notifyStateChanged(); reload(); return; }
+      outcome.textContent = refusalText(result);
+      if (result.status === 401 || result.status === 403) {
+        recheckAfterWriteRefusal(result.status, body.error || {});
+      }
+    }).catch(function (error) {
+      button.disabled = false;
+      outcome.textContent = 'Not submitted (' + error.message + ').';
+    });
+  }
+
+  function select(parent, labelText, options) {
+    var wrap = el('div', 'order-field');
+    var label = el('label', 'order-label', labelText);
+    var input = document.createElement('select');
+    input.className = 'order-input';
+    for (var i = 0; i < options.length; i++) {
+      var option = document.createElement('option');
+      option.value = String(options[i]);
+      option.textContent = String(options[i]);
+      input.appendChild(option);
+    }
+    label.appendChild(input);
+    wrap.appendChild(label);
+    parent.appendChild(wrap);
+    return input;
+  }
+
+  function textField(parent, labelText, placeholder) {
+    var wrap = el('div', 'order-field');
+    var label = el('label', 'order-label', labelText);
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'order-input';
+    input.placeholder = placeholder;
+    label.appendChild(input);
+    wrap.appendChild(label);
+    parent.appendChild(wrap);
+    return input;
+  }
+
+  function outcomeLine(parent) {
+    var p = el('p', 'muted', '');
+    p.setAttribute('role', 'status');
+    p.setAttribute('aria-live', 'polite');
+    parent.appendChild(p);
+    return p;
+  }
+
+  function renderArtifacts(card, product) {
+    var artifacts = Array.isArray(product.artifacts) ? product.artifacts : [];
+    if (artifacts.length === 0) {
+      textLine(card, 'muted', 'Artifacts: none recorded. 0 means 0 \\u2014 no version is invented for this product.');
+      return;
+    }
+    textLine(card, 'order-label', 'Artifact versions \\u2014 immutable; a new version is a new row, never an edit');
+    var list = document.createElement('ul');
+    list.className = 'timeline';
+    for (var i = 0; i < artifacts.length; i++) {
+      var a = artifacts[i];
+      var li = document.createElement('li');
+      li.appendChild(el('b', '', a.kind + ' \\u00b7 ' + a.name + ' \\u00b7 v' + a.version + (a.latest ? ' (latest)' : '')));
+      li.appendChild(el('p', 'faint', a.locator + ' \\u00b7 recorded by ' + a.recordedBy + ' \\u00b7 ' + a.recordedAt));
+      li.appendChild(el('p', 'faint', a.contentDigest
+        ? 'content digest ' + a.contentDigest + ' \\u2014 ' + a.digestProvenance + ', never verified by HQ'
+        : 'no content digest was declared for this version'));
+      li.appendChild(el('p', 'faint', 'record digest ' + a.recordDigest));
+      list.appendChild(li);
+    }
+    card.appendChild(list);
+    if (product.artifactTotal > artifacts.length) {
+      textLine(card, 'faint', 'Showing ' + artifacts.length + ' of ' + product.artifactTotal + ' recorded versions.');
+    }
+  }
+
+  function renderReadiness(card, readiness) {
+    if (readiness == null) return;
+    textLine(card, 'order-label', 'Release readiness \\u2014 an observation, never an authorization');
+    var blockers = Array.isArray(readiness.blockers) ? readiness.blockers : [];
+    if (blockers.length === 0) {
+      textLine(card, 'muted', 'Nothing is missing from the record. That is not an approval and not a release.');
+    } else {
+      var list = document.createElement('ul');
+      list.className = 'timeline';
+      for (var i = 0; i < blockers.length; i++) {
+        var li = document.createElement('li');
+        li.appendChild(el('b', '', blockers[i].code));
+        li.appendChild(el('p', '', blockers[i].statement));
+        list.appendChild(li);
+      }
+      card.appendChild(list);
+    }
+    textLine(card, 'readonly-note', readiness.statement);
+  }
+
+  function renderPlan(card, plan) {
+    if (plan == null || !Array.isArray(plan.missions)) return;
+    textLine(card, 'order-label', 'Plan proposed by the ' + plan.templateId + ' template');
+    textLine(card, 'faint', plan.templateStatement);
+    var list = document.createElement('ul');
+    list.className = 'timeline';
+    for (var i = 0; i < plan.missions.length; i++) {
+      var mission = plan.missions[i];
+      var li = document.createElement('li');
+      li.appendChild(el('b', '', mission.title));
+      li.appendChild(el('p', '', mission.objective));
+      li.appendChild(el('p', 'faint', 'plan items: ' + (mission.planItems || []).join(' \\u00b7 ')));
+      list.appendChild(li);
+    }
+    card.appendChild(list);
+    textLine(card, 'readonly-note', plan.statement);
+    textLine(card, 'faint', 'Canonical path: ' + plan.canonicalPath);
+  }
+
+  function openDetail(card, productId) {
+    jsonExchange(fetch(PRODUCT_DETAIL_PATH + '?productId=' + encodeURIComponent(productId), { headers: { accept: 'application/json' } }))
+      .then(function (result) {
+        var body = result.body || {};
+        var box = el('div', 'order-field');
+        box.setAttribute('data-product-detail', productId);
+        if (body.ok !== true) {
+          textLine(box, 'muted', refusalText(result));
+          card.appendChild(box);
+          return;
+        }
+        renderPlan(box, body.plan);
+        renderReadiness(box, body.readiness);
+        card.appendChild(box);
+      })
+      .catch(function (error) {
+        textLine(card, 'muted', 'The detail read failed (' + error.message + ').');
+      });
+  }
+
+  function renderProduct(product, vocabulary, canCommand) {
+    var card = el('article', 'panel product-card');
+    card.setAttribute('data-product-card', product.id);
+
+    var head = el('p', 'row');
+    head.appendChild(el('b', '', product.name));
+    var lifecycleChip = el('span', 'chip', String(product.lifecycle));
+    lifecycleChip.setAttribute('data-product-lifecycle', String(product.lifecycle));
+    head.appendChild(lifecycleChip);
+    head.appendChild(el('span', 'chip', String(product.productType)));
+    card.appendChild(head);
+
+    textLine(card, 'faint', product.id + ' \\u00b7 registered by ' + product.createdBy + ' \\u00b7 ' + product.createdAt);
+    textLine(card, 'faint', 'Canonical project: ' + product.projectId + ' \\u2014 this product references that register entry and does not replace it.');
+    textLine(card, '', 'Problem: ' + product.problem);
+    textLine(card, '', 'For: ' + product.targetUsers);
+    if (product.summary) textLine(card, 'muted', product.summary);
+    textLine(card, 'faint', product.lifecycleStatement);
+
+    renderArtifacts(card, product);
+
+    var detailButton = document.createElement('button');
+    detailButton.type = 'button';
+    detailButton.className = 'order-live-submit';
+    detailButton.textContent = 'Show the plan template and release readiness';
+    detailButton.addEventListener('click', function () {
+      detailButton.disabled = true;
+      openDetail(card, product.id);
+    });
+    card.appendChild(detailButton);
+
+    if (canCommand) {
+      var moveBox = el('div', 'order-field');
+      textLine(moveBox, 'order-label', 'Move the product lifecycle \\u2014 records a state; publishes nothing');
+      var toInput = select(moveBox, 'To', vocabulary.lifecycleStates || []);
+      var noteInput = textField(moveBox, 'Note', 'why \\u2014 required for every move');
+      var moveOutcome = outcomeLine(moveBox);
+      var moveButton = document.createElement('button');
+      moveButton.type = 'button';
+      moveButton.className = 'order-live-submit';
+      moveButton.textContent = 'Record the move';
+      moveButton.addEventListener('click', function () {
+        var noteText = noteInput.value.trim();
+        if (noteText === '') {
+          moveOutcome.textContent = 'Every lifecycle move needs a recorded note. Nothing was sent.';
+          return;
+        }
+        handleWrite(PRODUCT_LIFECYCLE_PATH, {
+          productId: product.id,
+          to: toInput.value,
+          note: noteText,
+          expectedState: product.lifecycle
+        }, moveButton, moveOutcome, 'Recorded. Nothing external happened.');
+      });
+      moveBox.appendChild(moveButton);
+      card.appendChild(moveBox);
+
+      var artifactBox = el('div', 'order-field');
+      textLine(artifactBox, 'order-label', 'Record the next artifact version \\u2014 append-only; the version number is derived by HQ');
+      var kindInput = select(artifactBox, 'Kind', vocabulary.artifactKinds || []);
+      var nameInput = textField(artifactBox, 'Name', 'artifact name (required)');
+      var locatorInput = textField(artifactBox, 'Locator', 'where it is (required)');
+      var digestInput = textField(artifactBox, 'Content digest', 'sha256 hex (optional) \\u2014 recorded as declared, never verified');
+      var artifactOutcome = outcomeLine(artifactBox);
+      var artifactButton = document.createElement('button');
+      artifactButton.type = 'button';
+      artifactButton.className = 'order-live-submit';
+      artifactButton.textContent = 'Record the version';
+      artifactButton.addEventListener('click', function () {
+        var payload = {
+          productId: product.id,
+          kind: kindInput.value,
+          name: nameInput.value.trim(),
+          locator: locatorInput.value.trim()
+        };
+        if (payload.name === '' || payload.locator === '') {
+          artifactOutcome.textContent = 'An artifact version needs a name and a locator. Nothing was sent.';
+          return;
+        }
+        if (digestInput.value.trim() !== '') payload.contentDigest = digestInput.value.trim();
+        handleWrite(PRODUCT_ARTIFACTS_PATH, payload, artifactButton, artifactOutcome, 'Recorded as a new version.');
+      });
+      artifactBox.appendChild(artifactButton);
+      card.appendChild(artifactBox);
+    }
+
+    listBox.appendChild(card);
+  }
+
+  function renderRegister(body, canCommand, reason) {
+    listBox.textContent = '';
+    var vocabulary = body.vocabulary || {};
+    var products = Array.isArray(body.products) ? body.products : [];
+    if (canCommand) {
+      var createBox = el('div', 'order-field');
+      createBox.setAttribute('data-product-create', '');
+      textLine(createBox, 'order-label', 'Register a product against a canonical project');
+      var projectInput = textField(createBox, 'Project id', 'the canonical hq_projects id (required)');
+      var typeInput = select(createBox, 'Product type', vocabulary.productTypes || []);
+      var nameInput = textField(createBox, 'Name', 'name (required)');
+      var problemInput = textField(createBox, 'Problem', 'the problem it solves (required)');
+      var usersInput = textField(createBox, 'Target users', 'who it is for (required)');
+      var summaryInput = textField(createBox, 'Summary', 'summary (optional)');
+      var createOutcome = outcomeLine(createBox);
+      var createButton = document.createElement('button');
+      createButton.type = 'button';
+      createButton.className = 'order-live-submit';
+      createButton.textContent = 'Register the product';
+      createButton.addEventListener('click', function () {
+        var payload = {
+          projectId: projectInput.value.trim(),
+          productType: typeInput.value,
+          name: nameInput.value.trim(),
+          problem: problemInput.value.trim(),
+          targetUsers: usersInput.value.trim()
+        };
+        if (payload.projectId === '' || payload.name === '' || payload.problem === '' || payload.targetUsers === '') {
+          createOutcome.textContent = 'A product needs a canonical project id, a name, a problem and its target users. Nothing was sent.';
+          return;
+        }
+        if (summaryInput.value.trim() !== '') payload.summary = summaryInput.value.trim();
+        handleWrite(PRODUCTS_PATH, payload, createButton, createOutcome, 'Registered.');
+      });
+      createBox.appendChild(createButton);
+      listBox.appendChild(createBox);
+    } else {
+      textLine(listBox, 'readonly-note', 'Product Factory controls are off for this session \\u2014 ' + reason);
+    }
+    if (typeof body.releaseGate === 'string') {
+      textLine(listBox, 'readonly-note', body.releaseGate);
+    }
+    if (products.length === 0) {
+      textLine(listBox, 'muted', 'HQ holds no registered product. 0 means 0 \\u2014 nothing is invented to fill this register.');
+      return;
+    }
+    for (var i = 0; i < products.length; i++) {
+      renderProduct(products[i], vocabulary, canCommand);
+    }
+    if (body.truncated === true) {
+      textLine(listBox, 'faint', 'Showing ' + products.length + ' of ' + body.total + ' registered products.');
+    }
+  }
+
+  function reload() {
+    jsonExchange(fetch(PRODUCTS_PATH, { headers: { accept: 'application/json' } }))
+      .then(function (result) {
+        var body = result.body || {};
+        if (body.ok !== true || !Array.isArray(body.products)) {
+          stayOff('the register read was refused \\u2014 ' + refusalText(result));
+          return;
+        }
+        var grant = grantedControls(sessionAnswer);
+        note.setAttribute('data-product-factory-state', 'live');
+        note.className = 'readonly-note console-state console-state-live';
+        note.textContent = 'Live: ' + body.total + ' registered product(s), read from the canonical register just now. ' +
+          'Nothing on this page can release, publish or deploy anything.';
+        renderRegister(body, grant.productCommand, grant.reason);
+      })
+      .catch(function (error) {
+        stayOff('the HQ control API is not reachable from this page (' + error.message + ').');
+      });
+  }
+
+  jsonExchange(fetch(SESSION_PATH, { headers: { accept: 'application/json' } }))
+    .then(function (result) {
+      sessionAnswer = result.body;
+      if (result.body == null || typeof result.body !== 'object' || result.body.founder !== true) {
+        stayOff(grantedControls(result.body).reason);
+        return;
+      }
+      reload();
     })
     .catch(function (error) {
       stayOff('the HQ control API is not reachable from this page (' + error.message + ').');

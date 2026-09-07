@@ -64,6 +64,7 @@ import {
   connectionsLiveScript,
   commandCenterConsoleScript,
   searchConsoleScript,
+  productFactoryConsoleScript,
   missionCommandConsoleScript,
   missionsConsoleScript,
   collaborationConsoleScript,
@@ -760,6 +761,11 @@ ${
 <div data-collaboration-console></div>
 </div>`;
 
+  const productFactory = `<div class="panel">
+<p class="readonly-note">The Product Factory (Phase 12): the products the Founder has registered, each REFERENCING a canonical project register entry rather than replacing one \u2014 with its product type, the problem it solves, who it is for, its immutable artifact versions and its own lifecycle. The lifecycle describes the PRODUCT and is never task or worker state: nothing in HQ derives eligibility, claiming, dispatch, approval or a kill-switch decision from it. Artifact history is append-only by the database engine itself \u2014 a new version is a new row and an in-place edit is refused, not merely discouraged. A plan template RECOMMENDS missions and grants nothing; each line becomes real work only by commanding a canonical mission on the Mission Room console above. There is no release, publish or deploy control here and no route behind one: reaching release_candidate or released records a state and contacts nothing, and an actual release is an external action through the Phase 8 gateway with its own risk assessment, Founder approval and kill switches. Read live from the same-origin control API; this static render holds no product data and claims none.</p>
+<div data-product-factory-console></div>
+</div>`;
+
   const projectRegister = `<div class="panel">
 <p class="readonly-note">The canonical project register (Phase 4): the projects the Founder has declared, each with its assigned missions and linked-task counts. Read live from the same-origin control API — this static render holds no register data and claims none. Distinct from the archive-derived label board below: a label on an event is not a register entry.</p>
 <div data-projects-console></div>
@@ -771,7 +777,7 @@ ${
     eyebrow: 'Company portfolio board',
     lede: 'The canonical project register, the missions each project carries, and the archive-derived activity board.',
     asOf: nowIso,
-    body: `${section('PROJECT REGISTER — CANONICAL', projectRegister, 'project-register')}${projectsConsoleScript()}${section('MISSION ROOM — FOUNDER COMMAND RECORD', missionRoom, 'mission-room')}${missionsConsoleScript()}${collaborationConsoleScript(COLLABORATION_ROLES)}${section('ACTIVITY BY PROJECT LABEL — ARCHIVE-DERIVED', board)}${timelineHtml}`,
+    body: `${section('PROJECT REGISTER — CANONICAL', projectRegister, 'project-register')}${projectsConsoleScript()}${section('MISSION ROOM — FOUNDER COMMAND RECORD', missionRoom, 'mission-room')}${missionsConsoleScript()}${collaborationConsoleScript(COLLABORATION_ROLES)}${section('PRODUCT FACTORY — WHAT THE COMPANY IS BUILDING', productFactory, 'product-factory')}${productFactoryConsoleScript()}${section('ACTIVITY BY PROJECT LABEL — ARCHIVE-DERIVED', board)}${timelineHtml}`,
     provenanceNote,
     sourceMode,
   });

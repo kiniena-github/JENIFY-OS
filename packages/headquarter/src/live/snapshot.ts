@@ -45,6 +45,7 @@ import type { MemoryBrowserView } from '../application/memory-command.js';
 import { TRUTH_SNAPSHOT_LIMIT, type TruthSnapshotView } from '../application/truth-command.js';
 import { COLLABORATION_SNAPSHOT_LIMIT, type CollaborationSnapshotView } from '../application/collaboration-command.js';
 import { SEARCH_SNAPSHOT_NOTE, type SearchIndexSnapshotView } from '../application/search-command.js';
+import { PRODUCT_SNAPSHOT_NOTE, type ProductFactorySnapshotView } from '../application/product-command.js';
 import {
   COMMAND_CENTER_PROVENANCE,
   COMMAND_CENTER_SNAPSHOT_LIMIT,
@@ -264,6 +265,22 @@ export interface HqSnapshot {
    * private record with, one term at a time.
    */
   search?: SnapshotSection<SearchIndexSnapshotView>;
+  /**
+   * The Phase 12 Product Factory — COUNTS OVER CLOSED VOCABULARIES, and
+   * nothing else.
+   *
+   * Deliberately carries no product name, problem statement, target user,
+   * artifact name, locator, digest or id: every text field on that register
+   * is a company plan, and an unauthenticated artifact has no vocabulary
+   * that classifies free text for an unauthenticated reader (the Phase 9
+   * rule about a session's purpose, and the Phase 11 rule about a search
+   * snippet, applied to a register of things the company is building).
+   *
+   * A lifecycle count is a count of RECORDS. It is not a statement that
+   * anything was released, deployed or published — nothing in Phase 12 can
+   * do any of those, and the note says so on the artifact itself.
+   */
+  productFactory?: SnapshotSection<ProductFactorySnapshotView>;
 }
 
 /**
@@ -337,6 +354,8 @@ export interface SnapshotSources {
   commandCenter?: { data: CommandCenterSnapshotView; provenance: Provenance };
   /** The search source registry (Phase 11). Optional — omitted means no canonical handle was read. */
   search?: { data: SearchIndexSnapshotView; provenance: Provenance };
+  /** The Product Factory counts (Phase 12). Optional — omitted means no canonical handle was read. */
+  productFactory?: { data: ProductFactorySnapshotView; provenance: Provenance };
   /**
    * Per-worker provider declarations (Phase 4). Optional: an omitted map
    * means the building context holds no declaration truth — every worker's
@@ -386,6 +405,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       ...(sources.collaboration ? [sources.collaboration.provenance.mode] : []),
       ...(sources.commandCenter ? [sources.commandCenter.provenance.mode] : []),
       ...(sources.search ? [sources.search.provenance.mode] : []),
+      ...(sources.productFactory ? [sources.productFactory.provenance.mode] : []),
     ]),
     note: sources.note ?? null,
     counts: {
@@ -469,6 +489,9 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       ? { commandCenter: section(sources.commandCenter.provenance, sources.commandCenter.data) }
       : {}),
     ...(sources.search ? { search: section(sources.search.provenance, sources.search.data) } : {}),
+    ...(sources.productFactory
+      ? { productFactory: section(sources.productFactory.provenance, sources.productFactory.data) }
+      : {}),
   };
 
   // Fail closed: prove it before anyone can publish it.
@@ -668,6 +691,15 @@ export function liveSnapshotFromOperations(
   const search = ops.searchIndexSummary({
     includeFounderOnly: options.includeFounderOnlyMemory === true,
   });
+
+  // Phase 12 Product Factory: counts only, and — unlike every section above
+  // — with no privacy parameter at all, because the register carries no
+  // classification. That is stated rather than assumed: a product record has
+  // no `founder_only` level in this phase, so a product the Founder does not
+  // want counted must not be registered here yet. What keeps the artifact
+  // safe is therefore not a filter but the SHAPE of the section: it is
+  // incapable of carrying a name, a locator, a digest or an id.
+  const productFactory = ops.productFactorySummary();
 
   return buildHqSnapshot({
     workerProviders,
@@ -897,6 +929,30 @@ export function liveSnapshotFromOperations(
               ? null
               : 'The hq_briefs ledger does not exist on this database handle, so no brief was ever issued ' +
                 'through it and none can be; briefs.total states that as 0 rather than implying an empty ledger.',
+          ]
+            .filter(Boolean)
+            .join(' ') || undefined,
+      },
+    },
+    productFactory: {
+      data: productFactory,
+      provenance: {
+        mode,
+        source: 'hq_products / hq_product_events / hq_product_artifacts via HeadquarterOperations.productFactorySummary',
+        asOf: at,
+        note:
+          [
+            PRODUCT_SNAPSHOT_NOTE,
+            productFactory.storePresent
+              ? null
+              : 'This database predates the Phase 12 Product Factory schema and was opened read-only, so no ' +
+                'product store exists to read. 0 states that absence; nothing was migrated.',
+            productFactory.byLifecycle.released > 0
+              ? `${productFactory.byLifecycle.released} product record(s) stand at the released lifecycle state. ` +
+                'That is a recorded state of a product, not evidence that anything was published: no Product ' +
+                'Factory path can perform an external action, and a real release runs through the Phase 8 ' +
+                'gateway with its own approval and audit.'
+              : null,
           ]
             .filter(Boolean)
             .join(' ') || undefined,

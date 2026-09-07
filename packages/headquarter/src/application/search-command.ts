@@ -64,15 +64,19 @@ import { TRUTH_STATES, type TruthState } from './truth-command.js';
  * two documents share a timestamp.
  *
  * This list IS the source registry: adding a source is adding an entry here
- * plus a projection in the facade's corpus builder. Phase 12's product /
- * artifact register joins by doing exactly that — no ranking change, no index
- * change, no new store for search itself. Nothing is listed speculatively: a
- * source appears here only when a canonical store genuinely backs it today.
+ * plus a projection in the facade's corpus builder. Phase 12's product and
+ * artifact registers joined by doing exactly that — one entry each here, one
+ * projection each in `#searchCorpus`, and nothing else: no ranking change, no
+ * index change, no new store for search itself. Nothing is listed
+ * speculatively: a source appears here only when a canonical store genuinely
+ * backs it today.
  */
 export const SEARCH_SOURCES = [
   'mission',
   'project',
   'task',
+  'product',
+  'artifact',
   'memory',
   'truth',
   'collaboration',
@@ -134,6 +138,26 @@ export const SEARCH_SOURCE_REGISTRY: readonly SearchSourceDescriptor[] = [
     statement:
       'A canonical task: its recorded title, capability and block reason. The task PAYLOAD and RESULT ' +
       'are never indexed and never quoted — the snapshot’s no-task-payload rule applies to search too.',
+    classified: false,
+    supersedable: false,
+  },
+  {
+    id: 'product',
+    table: 'hq_products',
+    statement:
+      'A product on the Phase 12 register: its name, type, the problem it solves, who it is for, and its ' +
+      'DERIVED lifecycle state. The lifecycle is a statement about the product and is never task or ' +
+      'worker state.',
+    classified: false,
+    supersedable: false,
+  },
+  {
+    id: 'artifact',
+    table: 'hq_product_artifacts',
+    statement:
+      'One immutable artifact VERSION: its kind, name, version number, locator and recorded digests. A ' +
+      'later version is a different document, so an artifact document is never superseded — the version ' +
+      'number is the history, and every version stays searchable.',
     classified: false,
     supersedable: false,
   },
