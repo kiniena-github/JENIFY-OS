@@ -20,9 +20,10 @@
  */
 
 import type { HqDatabase } from '../store/db.js';
+import { deepFreeze } from '../contracts/freeze.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 
-export const WORKFORCE_ASSIGN_CAPABILITY = {
+export const WORKFORCE_ASSIGN_CAPABILITY = deepFreeze({
   id: 'hq.workforce_assign',
   description:
     'Founder workforce assignment — records advisory task-to-worker assignment intent and ' +
@@ -30,18 +31,18 @@ export const WORKFORCE_ASSIGN_CAPABILITY = {
   riskClass: 'founder_gate',
   sideEffect: false,
   idempotent: true,
-} as const;
+} as const);
 
 /** Register the workforce-assign capability — a CONFIGURATION action. */
 export function registerWorkforceAssignCapability(db: HqDatabase): void {
   new CapabilityRegistry(db).register({ ...WORKFORCE_ASSIGN_CAPABILITY });
 }
 
-export const WORKFORCE_ASSIGN_RESERVED_CONTRACT = {
+export const WORKFORCE_ASSIGN_RESERVED_CONTRACT = deepFreeze({
   riskClass: WORKFORCE_ASSIGN_CAPABILITY.riskClass,
   sideEffect: WORKFORCE_ASSIGN_CAPABILITY.sideEffect,
   idempotent: WORKFORCE_ASSIGN_CAPABILITY.idempotent,
-} as const;
+} as const);
 
 /** Which contract fields the registry's CURRENT row disagrees with, if any. */
 export function workforceAssignContractDrift(capability: Capability): string[] {

@@ -26,6 +26,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { deepFreeze } from '../contracts/freeze.js';
 import type { HqDatabase } from '../store/db.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import { canonicalJson } from '../operator/approvals.js';
@@ -34,11 +35,11 @@ import type { MemoryPrivacy } from '../memory/schema.js';
 // ---- vocabulary (categorical only) ----
 
 /** The four truth states. Categorical; there is no number behind any of them. */
-export const TRUTH_STATES = ['claimed', 'observed', 'verified', 'accepted'] as const;
+export const TRUTH_STATES = deepFreeze(['claimed', 'observed', 'verified', 'accepted'] as const);
 export type TruthState = (typeof TRUTH_STATES)[number];
 
 /** A record is BORN in one of these two; `verified`/`accepted` are only ever derived. */
-export const TRUTH_BORN_STATES = ['claimed', 'observed'] as const;
+export const TRUTH_BORN_STATES = deepFreeze(['claimed', 'observed'] as const);
 export type TruthBornState = (typeof TRUTH_BORN_STATES)[number];
 
 export function isTruthBornState(value: unknown): value is TruthBornState {
@@ -46,7 +47,7 @@ export function isTruthBornState(value: unknown): value is TruthBornState {
 }
 
 /** Canonical entities a truth record may be ABOUT. Each names a real row; existence is the facade's job. */
-export const TRUTH_ENTITY_KINDS = ['mission', 'project', 'task', 'memory', 'worker', 'capability'] as const;
+export const TRUTH_ENTITY_KINDS = deepFreeze(['mission', 'project', 'task', 'memory', 'worker', 'capability'] as const);
 export type TruthEntityKind = (typeof TRUTH_ENTITY_KINDS)[number];
 
 export function isTruthEntityKind(value: unknown): value is TruthEntityKind {
@@ -58,30 +59,30 @@ export function isTruthEntityKind(value: unknown): value is TruthEntityKind {
  * birth (immutable facts of the record); `verified_by` and `accepted_by` are
  * written only by the verify/accept acts, atomically with their records.
  */
-export const TRUTH_RELATION_KINDS = [
+export const TRUTH_RELATION_KINDS = deepFreeze([
   'supports',
   'contradicts',
   'supersedes',
   'derived_from',
   'verified_by',
   'accepted_by',
-] as const;
+] as const);
 export type TruthRelationKind = (typeof TRUTH_RELATION_KINDS)[number];
 
-export const VERIFICATION_METHODS = [
+export const VERIFICATION_METHODS = deepFreeze([
   'reproduced',
   'inspected_evidence',
   'cross_checked_sources',
   'tested',
   'reviewed',
-] as const;
+] as const);
 export type VerificationMethod = (typeof VERIFICATION_METHODS)[number];
 
 export function isVerificationMethod(value: unknown): value is VerificationMethod {
   return typeof value === 'string' && (VERIFICATION_METHODS as readonly string[]).includes(value);
 }
 
-export const VERIFICATION_VERDICTS = ['confirmed', 'refuted', 'inconclusive'] as const;
+export const VERIFICATION_VERDICTS = deepFreeze(['confirmed', 'refuted', 'inconclusive'] as const);
 export type VerificationVerdict = (typeof VERIFICATION_VERDICTS)[number];
 
 export function isVerificationVerdict(value: unknown): value is VerificationVerdict {
@@ -120,7 +121,7 @@ export type TruthLifecycle = 'current' | 'superseded';
  * favour restores `standing` by derivation alone — the basis never moved and
  * nothing is written to restore it.
  */
-export const TRUTH_ACCEPTANCE_STANDINGS = ['none', 'standing', 'verification_refuted', 'superseded', 'contested'] as const;
+export const TRUTH_ACCEPTANCE_STANDINGS = deepFreeze(['none', 'standing', 'verification_refuted', 'superseded', 'contested'] as const);
 export type TruthAcceptanceStanding = (typeof TRUTH_ACCEPTANCE_STANDINGS)[number];
 
 /**
@@ -159,7 +160,7 @@ export type SubjectDrift =
 
 // ---- capabilities: the two trios ----
 
-export const TRUTH_RECORD_CAPABILITY = {
+export const TRUTH_RECORD_CAPABILITY = deepFreeze({
   id: 'hq.truth_record',
   description:
     'Truth record — records a claimed or observed statement about a canonical entity, ' +
@@ -168,9 +169,9 @@ export const TRUTH_RECORD_CAPABILITY = {
   riskClass: 'reversible',
   sideEffect: false,
   idempotent: true,
-} as const;
+} as const);
 
-export const TRUTH_VERIFY_CAPABILITY = {
+export const TRUTH_VERIFY_CAPABILITY = deepFreeze({
   id: 'hq.truth_verify',
   description:
     'Truth verification — records an independent verification verdict over an existing truth ' +
@@ -178,7 +179,7 @@ export const TRUTH_VERIFY_CAPABILITY = {
   riskClass: 'reversible',
   sideEffect: false,
   idempotent: true,
-} as const;
+} as const);
 
 /** Register the truth-record capability — a CONFIGURATION action. */
 export function registerTruthRecordCapability(db: HqDatabase): void {

@@ -41,6 +41,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { deepFreeze } from '../contracts/freeze.js';
 import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
@@ -71,7 +72,7 @@ import type { ActivityStatus } from '../contracts/events.js';
  * direction to a durable record — is a Founder-only act, and the policy
  * engine refuses standing pre-approvals for this class.
  */
-export const MISSION_COMMAND_CAPABILITY = {
+export const MISSION_COMMAND_CAPABILITY = deepFreeze({
   id: 'hq.mission_command',
   description:
     'Founder mission command — turns a Founder order into a canonical durable mission record. ' +
@@ -79,7 +80,7 @@ export const MISSION_COMMAND_CAPABILITY = {
   riskClass: 'founder_gate',
   sideEffect: false,
   idempotent: true,
-} as const;
+} as const);
 
 /** Register the mission-command capability — a CONFIGURATION action. */
 export function registerMissionCommandCapability(db: HqDatabase): void {
@@ -87,11 +88,11 @@ export function registerMissionCommandCapability(db: HqDatabase): void {
 }
 
 /** The definition fields that carry the Founder gate. */
-export const MISSION_COMMAND_RESERVED_CONTRACT = {
+export const MISSION_COMMAND_RESERVED_CONTRACT = deepFreeze({
   riskClass: MISSION_COMMAND_CAPABILITY.riskClass,
   sideEffect: MISSION_COMMAND_CAPABILITY.sideEffect,
   idempotent: MISSION_COMMAND_CAPABILITY.idempotent,
-} as const;
+} as const);
 
 /** Which contract fields the registry's CURRENT row disagrees with, if any. */
 export function missionCommandContractDrift(capability: Capability): string[] {

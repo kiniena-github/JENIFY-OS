@@ -35,6 +35,7 @@ import { CAPS, expectOk } from './application.fixture.js';
 import { fileFixture } from './reliability.fixture.js';
 import {
   ENGINE_IMMUTABLE_TABLES,
+  HQ_DURABILITY_REQUIREMENT,
   HQ_INTEGRITY_FINDINGS,
   REQUIRED_IMMUTABILITY_GUARDS,
   SAFE_MODE_BLOCKING_FINDINGS,
@@ -43,7 +44,19 @@ import {
   missingImmutabilityGuards,
   structuralIntegrity,
 } from '../src/store/integrity.js';
-import { latestIntegrityVerdict } from '../src/application/reliability-command.js';
+import {
+  RELIABILITY_COMMAND_CAPABILITY,
+  RELIABILITY_COMMAND_RESERVED_CONTRACT,
+  RUN_EVENT_KINDS,
+  RUN_FAILURE_CATEGORIES,
+  RUN_INTERRUPTION_REASONS,
+  RUN_KINDS,
+  RUN_OUTCOMES,
+  RUN_STATES,
+  REPORTABLE_RUN_OUTCOMES,
+  isReportableRunOutcome,
+  latestIntegrityVerdict,
+} from '../src/application/reliability-command.js';
 import { verifyEvidenceChain } from '../src/operator/evidence.js';
 import { openHqDatabaseReadOnly } from '../src/store/db.js';
 import { HeadquarterOperations } from '../src/application/service.js';
@@ -333,6 +346,105 @@ describe('the enforcement declarations are frozen, not merely typed readonly', (
     // make nothing blocking at all.
     expect([...SAFE_MODE_BLOCKING_FINDINGS]).toHaveLength(3);
     expect([...HQ_INTEGRITY_FINDINGS]).toHaveLength(6);
+  });
+
+  /**
+   * Wave 5 correction round three, Medium A6. The freeze above was applied to
+   * the census array and four integrity siblings and stopped there, so the
+   * OTHER half of the same gate stayed mutable:
+   * `RELIABILITY_COMMAND_RESERVED_CONTRACT` is what the capability drift check
+   * compares a registry row AGAINST, and rewriting it made the gate agree with
+   * a tampered row. Every `*_RESERVED_CONTRACT` in the package had the same
+   * shape, so the fix is one shared helper applied consistently rather than a
+   * second one-off — and this test enumerates the package rather than a list
+   * somebody has to remember to extend.
+   */
+  it('freezes every reserved contract and capability declaration in the package', async () => {
+    const application = (await import('../src/application/index.js')) as Record<string, unknown>;
+    const routing = (await import('../src/routing/providers.js')) as Record<string, unknown>;
+    const live = (await import('../src/live/orders.js')) as Record<string, unknown>;
+    const names: string[] = [];
+    for (const namespace of [application, routing, live]) {
+      for (const [name, value] of Object.entries(namespace)) {
+        if (!/_RESERVED_CONTRACT$|_CAPABILITY$/.test(name)) continue;
+        if (value == null || typeof value !== 'object') continue;
+        names.push(name);
+        expect(Object.isFrozen(value), name).toBe(true);
+        expect(() => {
+          (value as Record<string, unknown>).riskClass = 'external_side_effect';
+        }, name).toThrow(TypeError);
+      }
+    }
+    // A count, so an accidental narrowing of the scan is visible rather than
+    // quietly passing over an empty set.
+    expect(names.length).toBeGreaterThanOrEqual(15);
+    expect(names).toContain('RELIABILITY_COMMAND_RESERVED_CONTRACT');
+    expect(names).toContain('INTELLIGENCE_COMMAND_RESERVED_CONTRACT');
+    expect(names).toContain('MISSION_COMMAND_RESERVED_CONTRACT');
+    expect(names).toContain('PRODUCT_COMMAND_RESERVED_CONTRACT');
+    expect(names).toContain('MEMORY_COMMAND_RESERVED_CONTRACT');
+    expect(names).toContain('PROJECT_COMMAND_RESERVED_CONTRACT');
+  });
+
+  it('freezes the run vocabularies the snapshot counts and the derivation read', () => {
+    for (const list of [
+      RUN_KINDS,
+      RUN_STATES,
+      RUN_OUTCOMES,
+      REPORTABLE_RUN_OUTCOMES,
+      RUN_EVENT_KINDS,
+      RUN_FAILURE_CATEGORIES,
+      RUN_INTERRUPTION_REASONS,
+    ] as readonly (readonly string[])[]) {
+      expect(Object.isFrozen(list)).toBe(true);
+      expect(() => {
+        (list as unknown as { length: number }).length = 0;
+      }).toThrow(TypeError);
+    }
+    // `REPORTABLE_RUN_OUTCOMES.length = 0` used to make `isReportableRunOutcome`
+    // false for every outcome a worker can report, and `RUN_STATES.length = 0`
+    // used to make the unauthenticated snapshot count every run's state as
+    // `unrecognized` — a wrong count, published.
+    expect(isReportableRunOutcome('succeeded')).toBe(true);
+    expect(RUN_STATES).toContain('attempting');
+    expect(Object.isFrozen(HQ_DURABILITY_REQUIREMENT)).toBe(true);
+  });
+
+  /**
+   * The bypass itself, end to end, through supported calls only: a registry row
+   * that no longer matches the reserved contract is correctly REFUSED, and
+   * rewriting the reserved contract to agree with it no longer buys the
+   * Founder-gated act at full depth.
+   */
+  it('does not admit a Founder reliability act when the RESERVED CONTRACT is patched to match a tampered row', () => {
+    const fx = fileFixture();
+    try {
+      const raw = fx.raw();
+      raw
+        .prepare(`UPDATE op_capabilities SET risk_class = ?, side_effect = 1, idempotent = 0 WHERE id = ?`)
+        .run('external_side_effect', RELIABILITY_COMMAND_CAPABILITY.id);
+      raw.close();
+      const refused = fx.ops.assessHqIntegrity({ requestedBy: 'founder' });
+      expect(refused.ok).toBe(false);
+      expect(!refused.ok && refused.error.code).toBe('not_permitted');
+
+      // The patch the review used, on the exact object the gate reads.
+      const contract = RELIABILITY_COMMAND_RESERVED_CONTRACT as unknown as Record<string, unknown>;
+      expect(() => {
+        contract.riskClass = 'external_side_effect';
+      }).toThrow(TypeError);
+      expect(() => {
+        contract.sideEffect = true;
+      }).toThrow(TypeError);
+      expect(RELIABILITY_COMMAND_RESERVED_CONTRACT.riskClass).toBe('founder_gate');
+
+      const stillRefused = fx.ops.assessHqIntegrity({ requestedBy: 'founder' });
+      expect(stillRefused.ok).toBe(false);
+      expect(!stillRefused.ok && stillRefused.error.code).toBe('not_permitted');
+      expect(!stillRefused.ok && stillRefused.error.message).toMatch(/reserved contract/);
+    } finally {
+      fx.cleanup();
+    }
   });
 
   it('still finds a tampered file tampered after every attempt at the census', () => {

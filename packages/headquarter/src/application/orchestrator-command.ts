@@ -24,6 +24,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { deepFreeze } from '../contracts/freeze.js';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
 import { v4 as uuid } from 'uuid';
@@ -31,7 +32,7 @@ import { CapabilityRegistry, type Capability } from '../operator/capabilities.js
 import { canonicalJson } from '../operator/approvals.js';
 import type { ActivityStatus } from '../contracts/events.js';
 
-export const MISSION_ORCHESTRATE_CAPABILITY = {
+export const MISSION_ORCHESTRATE_CAPABILITY = deepFreeze({
   id: 'hq.mission_orchestrate',
   description:
     'Founder mission orchestration — derives real gated tasks from a mission’s ' +
@@ -40,18 +41,18 @@ export const MISSION_ORCHESTRATE_CAPABILITY = {
   riskClass: 'founder_gate',
   sideEffect: false,
   idempotent: true,
-} as const;
+} as const);
 
 /** Register the mission-orchestrate capability — a CONFIGURATION action. */
 export function registerMissionOrchestrateCapability(db: HqDatabase): void {
   new CapabilityRegistry(db).register({ ...MISSION_ORCHESTRATE_CAPABILITY });
 }
 
-export const MISSION_ORCHESTRATE_RESERVED_CONTRACT = {
+export const MISSION_ORCHESTRATE_RESERVED_CONTRACT = deepFreeze({
   riskClass: MISSION_ORCHESTRATE_CAPABILITY.riskClass,
   sideEffect: MISSION_ORCHESTRATE_CAPABILITY.sideEffect,
   idempotent: MISSION_ORCHESTRATE_CAPABILITY.idempotent,
-} as const;
+} as const);
 
 /** Which contract fields the registry's CURRENT row disagrees with, if any. */
 export function missionOrchestrateContractDrift(capability: Capability): string[] {
@@ -169,7 +170,7 @@ export function orchestratorSchemaPresent(db: HqDatabase): boolean {
  * WOULD do; apply decisions describe what one DID. Nothing outside this list
  * can be recorded, so a new behavior is a reviewed vocabulary change here.
  */
-export const ORCHESTRATION_DECISION_KINDS = [
+export const ORCHESTRATION_DECISION_KINDS = deepFreeze([
   // observations (both modes)
   'observed_linked',
   'skipped_superseded',
@@ -188,7 +189,7 @@ export const ORCHESTRATION_DECISION_KINDS = [
   'link_refused',
   'enqueue_refused',
   'eligibility_evaluated',
-] as const;
+] as const);
 
 export type OrchestrationDecisionKind = (typeof ORCHESTRATION_DECISION_KINDS)[number];
 

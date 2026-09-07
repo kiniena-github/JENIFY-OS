@@ -30,6 +30,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { deepFreeze } from '../contracts/freeze.js';
 import type { HqDatabase } from '../store/db.js';
 import { canonicalJson } from '../operator/approvals.js';
 import type { RiskClass } from '../operator/capabilities.js';
@@ -37,7 +38,7 @@ import type { RiskClass } from '../operator/capabilities.js';
 // ---- vocabulary (categorical only) ----
 
 /** The seven ledger states. Categorical; audit/execution truth, never a task lifecycle. */
-export const ACTION_STATES = [
+export const ACTION_STATES = deepFreeze([
   'proposed',
   'authorized',
   'attempted',
@@ -45,7 +46,7 @@ export const ACTION_STATES = [
   'failed',
   'outcome_unknown',
   'reconciled',
-] as const;
+] as const);
 export type ActionState = (typeof ACTION_STATES)[number];
 
 export function isActionState(value: unknown): value is ActionState {
@@ -53,20 +54,20 @@ export function isActionState(value: unknown): value is ActionState {
 }
 
 /** The four risk levels. There is no number behind any of them. */
-export const ACTION_RISK_LEVELS = ['low', 'medium', 'high', 'critical'] as const;
+export const ACTION_RISK_LEVELS = deepFreeze(['low', 'medium', 'high', 'critical'] as const);
 export type ActionRiskLevel = (typeof ACTION_RISK_LEVELS)[number];
 
 export function isActionRiskLevel(value: unknown): value is ActionRiskLevel {
   return typeof value === 'string' && (ACTION_RISK_LEVELS as readonly string[]).includes(value);
 }
 
-export const ACTION_VISIBILITIES = ['internal', 'external', 'public'] as const;
+export const ACTION_VISIBILITIES = deepFreeze(['internal', 'external', 'public'] as const);
 export type ActionVisibility = (typeof ACTION_VISIBILITIES)[number];
 
-export const ACTION_REVERSIBILITIES = ['reversible', 'compensable', 'irreversible'] as const;
+export const ACTION_REVERSIBILITIES = deepFreeze(['reversible', 'compensable', 'irreversible'] as const);
 export type ActionReversibility = (typeof ACTION_REVERSIBILITIES)[number];
 
-export const ACTION_BLAST_RADII = ['single', 'many', 'system'] as const;
+export const ACTION_BLAST_RADII = deepFreeze(['single', 'many', 'system'] as const);
 export type ActionBlastRadius = (typeof ACTION_BLAST_RADII)[number];
 
 export function isActionBlastRadius(value: unknown): value is ActionBlastRadius {
@@ -78,11 +79,11 @@ export function isActionBlastRadius(value: unknown): value is ActionBlastRadius 
  * checked the real world. Mirrors the queue's `ReconcileDecision` vocabulary
  * on purpose — same shape of judgement, same authority (approval authority).
  */
-export const ACTION_RECONCILE_DECISIONS = [
+export const ACTION_RECONCILE_DECISIONS = deepFreeze([
   'confirmed_succeeded',
   'confirmed_failed',
   'confirmed_not_executed',
-] as const;
+] as const);
 export type ActionReconcileDecision = (typeof ACTION_RECONCILE_DECISIONS)[number];
 
 export function isActionReconcileDecision(value: unknown): value is ActionReconcileDecision {

@@ -37,6 +37,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { deepFreeze } from '../contracts/freeze.js';
 import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
@@ -60,7 +61,7 @@ import type { MissionStatus } from '../contracts/mission.js';
  * class is still `founder_gate` because the ACT — declaring and closing
  * bodies of company work — is a Founder-only act.
  */
-export const PROJECT_COMMAND_CAPABILITY = {
+export const PROJECT_COMMAND_CAPABILITY = deepFreeze({
   id: 'hq.project_command',
   description:
     'Founder project command — creates and controls canonical project register entries. ' +
@@ -68,7 +69,7 @@ export const PROJECT_COMMAND_CAPABILITY = {
   riskClass: 'founder_gate',
   sideEffect: false,
   idempotent: true,
-} as const;
+} as const);
 
 /** Register the project-command capability — a CONFIGURATION action. */
 export function registerProjectCommandCapability(db: HqDatabase): void {
@@ -76,11 +77,11 @@ export function registerProjectCommandCapability(db: HqDatabase): void {
 }
 
 /** The definition fields that carry the Founder gate. */
-export const PROJECT_COMMAND_RESERVED_CONTRACT = {
+export const PROJECT_COMMAND_RESERVED_CONTRACT = deepFreeze({
   riskClass: PROJECT_COMMAND_CAPABILITY.riskClass,
   sideEffect: PROJECT_COMMAND_CAPABILITY.sideEffect,
   idempotent: PROJECT_COMMAND_CAPABILITY.idempotent,
-} as const;
+} as const);
 
 /** Which contract fields the registry's CURRENT row disagrees with, if any. */
 export function projectCommandContractDrift(capability: Capability): string[] {

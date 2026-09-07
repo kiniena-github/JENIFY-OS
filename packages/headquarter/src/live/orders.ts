@@ -88,6 +88,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { deepFreeze } from '../contracts/freeze.js';
 import { assertBrowserSafe } from './redaction.js';
 import {
   DEFAULT_ACTOR_AUTHENTICATION,
@@ -118,7 +119,7 @@ import {
  * action; until then `submitDirectOrder` fails closed, because deny-by-default
  * applies to this path exactly as it does to every other.
  */
-export const DIRECT_ORDER_CAPABILITY = {
+export const DIRECT_ORDER_CAPABILITY = deepFreeze({
   id: 'hq.direct_order',
   description:
     'Founder direct order — a written instruction for an AI worker to carry out under Operator control. ' +
@@ -126,7 +127,7 @@ export const DIRECT_ORDER_CAPABILITY = {
   riskClass: 'founder_gate',
   sideEffect: true,
   idempotent: true,
-} as const;
+} as const);
 
 /**
  * Register the direct-order capability — a CONFIGURATION action, deliberately
@@ -167,11 +168,11 @@ export function registerDirectOrderCapability(db: HqDatabase): void {
  * configuration act; invocation refuses to ride on a definition that no longer
  * promises what the order is relying on.
  */
-export const DIRECT_ORDER_RESERVED_CONTRACT = {
+export const DIRECT_ORDER_RESERVED_CONTRACT = deepFreeze({
   riskClass: DIRECT_ORDER_CAPABILITY.riskClass,
   sideEffect: DIRECT_ORDER_CAPABILITY.sideEffect,
   idempotent: DIRECT_ORDER_CAPABILITY.idempotent,
-} as const;
+} as const);
 
 /**
  * Which contract fields the registry's CURRENT row disagrees with, if any.
@@ -232,7 +233,7 @@ export function directOrderCapabilityState(ops: HeadquarterOperations): DirectOr
 }
 
 /** Routes the composer offers. Kept small on purpose. */
-export const DIRECT_ORDER_ROUTES = ['AUTO', 'CLAUDE', 'CODEX'] as const;
+export const DIRECT_ORDER_ROUTES = deepFreeze(['AUTO', 'CLAUDE', 'CODEX'] as const);
 export type DirectOrderRoute = (typeof DIRECT_ORDER_ROUTES)[number];
 
 /**
@@ -240,7 +241,7 @@ export type DirectOrderRoute = (typeof DIRECT_ORDER_ROUTES)[number];
  * capability claim — a preferred provider that is not connected is skipped,
  * never substituted for one that is.
  */
-export const AUTO_ROUTE_PREFERENCE: readonly ProviderId[] = ['CLAUDE', 'CODEX'];
+export const AUTO_ROUTE_PREFERENCE: readonly ProviderId[] = deepFreeze(['CLAUDE', 'CODEX']);
 
 export const MAX_INSTRUCTION_LENGTH = 4000;
 

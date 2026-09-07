@@ -51,6 +51,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { deepFreeze } from '../contracts/freeze.js';
 import type { HqDatabase } from '../store/db.js';
 import { canonicalJson } from '../operator/approvals.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
@@ -75,7 +76,7 @@ import {
  * lanes HQ actually has that can be interrupted mid-flight. Metadata: the kind
  * selects nothing and authorizes nothing.
  */
-export const RUN_KINDS = ['orchestration', 'external_action', 'dispatch'] as const;
+export const RUN_KINDS = deepFreeze(['orchestration', 'external_action', 'dispatch'] as const);
 export type RunKind = (typeof RUN_KINDS)[number];
 
 export function isRunKind(value: unknown): value is RunKind {
@@ -102,7 +103,7 @@ export type StoredRunKind = RunKind | typeof STORED_RUN_KIND_UNRECOGNIZED;
  * reader and no code path can mistake one for another, and a test pins the
  * disjointness directly.
  */
-export const RUN_STATES = ['open', 'attempting', 'needs_reconciliation', 'concluded'] as const;
+export const RUN_STATES = deepFreeze(['open', 'attempting', 'needs_reconciliation', 'concluded'] as const);
 export type RunState = (typeof RUN_STATES)[number];
 
 export function isRunState(value: unknown): value is RunState {
@@ -116,7 +117,7 @@ export function isRunState(value: unknown): value is RunState {
  * `not_executed` means somebody established that nothing happened — it is
  * never assumed from silence.
  */
-export const RUN_OUTCOMES = ['none', 'succeeded', 'failed', 'not_executed', 'outcome_unknown'] as const;
+export const RUN_OUTCOMES = deepFreeze(['none', 'succeeded', 'failed', 'not_executed', 'outcome_unknown'] as const);
 export type RunOutcome = (typeof RUN_OUTCOMES)[number];
 
 export function isRunOutcome(value: unknown): value is RunOutcome {
@@ -124,12 +125,12 @@ export function isRunOutcome(value: unknown): value is RunOutcome {
 }
 
 /** The outcomes a worker may REPORT. `none` is the absence of a report, so it is not reportable. */
-export const REPORTABLE_RUN_OUTCOMES: readonly RunOutcome[] = [
+export const REPORTABLE_RUN_OUTCOMES: readonly RunOutcome[] = deepFreeze([
   'succeeded',
   'failed',
   'not_executed',
   'outcome_unknown',
-];
+]);
 
 export function isReportableRunOutcome(value: unknown): value is RunOutcome {
   return isRunOutcome(value) && REPORTABLE_RUN_OUTCOMES.includes(value);
@@ -139,7 +140,7 @@ export function isReportableRunOutcome(value: unknown): value is RunOutcome {
  * WHY a run ended the way it did. Categorical, and there is deliberately no
  * numeric confidence, probability or severity anywhere beside it.
  */
-export const RUN_FAILURE_CATEGORIES = [
+export const RUN_FAILURE_CATEGORIES = deepFreeze([
   'none',
   'provider_unavailable',
   'provider_rejected',
@@ -150,7 +151,7 @@ export const RUN_FAILURE_CATEGORIES = [
   'integrity_safe_mode',
   'cancelled',
   'unknown',
-] as const;
+] as const);
 export type RunFailureCategory = (typeof RUN_FAILURE_CATEGORIES)[number];
 
 export function isRunFailureCategory(value: unknown): value is RunFailureCategory {
@@ -162,13 +163,13 @@ export function isRunFailureCategory(value: unknown): value is RunFailureCategor
  * for. Each names a real way HQ loses sight of work, and each maps to a
  * classification rather than to a retry.
  */
-export const RUN_INTERRUPTION_REASONS = [
+export const RUN_INTERRUPTION_REASONS = deepFreeze([
   'process_interrupted',
   'stale_lease',
   'provider_outage',
   'partial_attempt',
   'stale_fence',
-] as const;
+] as const);
 export type RunInterruptionReason = (typeof RUN_INTERRUPTION_REASONS)[number];
 
 export function isRunInterruptionReason(value: unknown): value is RunInterruptionReason {
@@ -189,14 +190,14 @@ export function isRunInterruptionReason(value: unknown): value is RunInterruptio
  * no state; `outcome_recorded` stays what it always was, the close of an OPEN
  * attempt.
  */
-export const RUN_EVENT_KINDS = [
+export const RUN_EVENT_KINDS = deepFreeze([
   'opened',
   'attempt_started',
   'outcome_recorded',
   'worker_report',
   'interrupted',
   'reconciled',
-] as const;
+] as const);
 export type RunEventKind = (typeof RUN_EVENT_KINDS)[number];
 
 /**
@@ -267,7 +268,7 @@ export const RECOVERY_SCOPE_STATEMENT =
  * `reconcileAction`, because they are judgements about what happened rather
  * than grants to do something.
  */
-export const RELIABILITY_COMMAND_CAPABILITY = {
+export const RELIABILITY_COMMAND_CAPABILITY = deepFreeze({
   id: 'hq.reliability_command',
   description:
     'Founder reliability command — assesses HQ store integrity and durability, and records a verified ' +
@@ -275,18 +276,18 @@ export const RELIABILITY_COMMAND_CAPABILITY = {
   riskClass: 'founder_gate',
   sideEffect: false,
   idempotent: true,
-} as const;
+} as const);
 
 /** Register the reliability-command capability — a CONFIGURATION action. */
 export function registerReliabilityCommandCapability(db: HqDatabase): void {
   new CapabilityRegistry(db).register({ ...RELIABILITY_COMMAND_CAPABILITY });
 }
 
-export const RELIABILITY_COMMAND_RESERVED_CONTRACT = {
+export const RELIABILITY_COMMAND_RESERVED_CONTRACT = deepFreeze({
   riskClass: RELIABILITY_COMMAND_CAPABILITY.riskClass,
   sideEffect: RELIABILITY_COMMAND_CAPABILITY.sideEffect,
   idempotent: RELIABILITY_COMMAND_CAPABILITY.idempotent,
-} as const;
+} as const);
 
 /** Which contract fields the registry's CURRENT row disagrees with, if any. */
 export function reliabilityCommandContractDrift(capability: Capability): string[] {

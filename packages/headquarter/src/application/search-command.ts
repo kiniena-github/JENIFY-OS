@@ -51,6 +51,7 @@ import {
   tokenize,
   type SearchIndex as ArchiveSearchIndex,
 } from '../archive/search.js';
+import { deepFreeze } from '../contracts/freeze.js';
 import type { ArchiveRecord, ArchiveStatus } from '../archive/schema.js';
 import type { MemoryPrivacy } from '../memory/schema.js';
 import { assertBrowserSafe } from '../live/redaction.js';
@@ -72,7 +73,7 @@ import { TRUTH_STATES, type TruthState } from './truth-command.js';
  * speculatively: a source appears here only when a canonical store genuinely
  * backs it today.
  */
-export const SEARCH_SOURCES = [
+export const SEARCH_SOURCES = deepFreeze([
   'mission',
   'project',
   'task',
@@ -84,7 +85,7 @@ export const SEARCH_SOURCES = [
   'external_action',
   'orchestration_run',
   'worker',
-] as const;
+] as const);
 
 export type SearchSourceId = (typeof SEARCH_SOURCES)[number];
 
@@ -118,7 +119,7 @@ export interface SearchSourceDescriptor {
   supersedable: boolean;
 }
 
-export const SEARCH_SOURCE_REGISTRY: readonly SearchSourceDescriptor[] = [
+export const SEARCH_SOURCE_REGISTRY: readonly SearchSourceDescriptor[] = deepFreeze([
   {
     id: 'mission',
     table: 'hq_missions',
@@ -208,7 +209,7 @@ export const SEARCH_SOURCE_REGISTRY: readonly SearchSourceDescriptor[] = [
     classified: false,
     supersedable: false,
   },
-];
+]);
 
 export function searchSourceDescriptor(id: SearchSourceId): SearchSourceDescriptor {
   const found = SEARCH_SOURCE_REGISTRY.find((entry) => entry.id === id);
@@ -316,7 +317,7 @@ export interface SearchCorpus {
  * honest unknown. Both are stated on every response, so a reader always knows
  * which rule produced the set in front of them.
  */
-export const TERM_MATCHES = ['all_terms', 'any_term'] as const;
+export const TERM_MATCHES = deepFreeze(['all_terms', 'any_term'] as const);
 export type TermMatch = (typeof TERM_MATCHES)[number];
 
 /**
@@ -340,21 +341,21 @@ export const QUERY_STOPWORDS: ReadonlySet<string> = new Set([
   'whom', 'why', 'will', 'with', 'would', 'you', 'your',
 ]);
 
-export const RETRIEVAL_MODES = ['deterministic_lexical', 'semantic_embedding'] as const;
+export const RETRIEVAL_MODES = deepFreeze(['deterministic_lexical', 'semantic_embedding'] as const);
 export type RetrievalMode = (typeof RETRIEVAL_MODES)[number];
 
 /**
  * Why a requested retrieval mode did not answer. Categorical, so a fallback
  * is always explained by a stated reason rather than by silence.
  */
-export const RETRIEVAL_UNAVAILABLE_REASONS = [
+export const RETRIEVAL_UNAVAILABLE_REASONS = deepFreeze([
   /** No adapter of that mode is installed in this build. */
   'no_adapter_installed',
   /** An adapter exists but would require a paid or hosted service. */
   'requires_external_service',
   /** An adapter is installed and deliberately not activated. */
   'not_activated',
-] as const;
+] as const);
 export type RetrievalUnavailableReason = (typeof RETRIEVAL_UNAVAILABLE_REASONS)[number];
 
 /**
@@ -1056,24 +1057,24 @@ export function sourceStatuses(
 /* Ask Jenify                                                          */
 /* ------------------------------------------------------------------ */
 
-export const ANSWER_STATES = ['grounded', 'insufficient_evidence', 'unknown'] as const;
+export const ANSWER_STATES = deepFreeze(['grounded', 'insufficient_evidence', 'unknown'] as const);
 export type AnswerState = (typeof ANSWER_STATES)[number];
 
-export const ANSWER_UNKNOWN_REASONS = [
+export const ANSWER_UNKNOWN_REASONS = deepFreeze([
   /** The question carried no term the index could match. */
   'no_searchable_terms',
   /** Retrieval ran and matched no canonical row the reader may see. */
   'no_matching_canonical_record',
   /** This database handle carries none of the stores the question would need. */
   'no_source_store_present',
-] as const;
+] as const);
 export type AnswerUnknownReason = (typeof ANSWER_UNKNOWN_REASONS)[number];
 
 /**
  * Every limitation an answer can carry. Categorical so a reader can act on
  * them, and exhaustive so an answer never quietly omits one.
  */
-export const ANSWER_LIMITATIONS = [
+export const ANSWER_LIMITATIONS = deepFreeze([
   'lexical_retrieval_only',
   'bounded_retrieval',
   'terms_ignored',
@@ -1084,7 +1085,7 @@ export const ANSWER_LIMITATIONS = [
   'founder_only_not_searched',
   'stores_absent',
   'composed_from_fields_only',
-] as const;
+] as const);
 export type AnswerLimitationCode = (typeof ANSWER_LIMITATIONS)[number];
 
 export interface AnswerLimitation {

@@ -72,6 +72,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { deepFreeze } from '../contracts/freeze.js';
 import type { HqDatabase } from '../store/db.js';
 import { canonicalJson } from '../operator/approvals.js';
 import { UNRECOGNIZED_BUCKET } from './reliability-command.js';
@@ -97,13 +98,13 @@ import { PROVIDER_HEALTH_STATES, type ProviderHealth } from '../providers/contra
  * `critical_review` is last because it is the tier reserved for work whose
  * failure is expensive to discover late — not because it is "the best".
  */
-export const INTELLIGENCE_TIERS = [
+export const INTELLIGENCE_TIERS = deepFreeze([
   'deterministic_local',
   'low_cost',
   'standard',
   'high',
   'critical_review',
-] as const;
+] as const);
 export type IntelligenceTier = (typeof INTELLIGENCE_TIERS)[number];
 
 export function isIntelligenceTier(value: unknown): value is IntelligenceTier {
@@ -122,7 +123,7 @@ export function tierRank(tier: IntelligenceTier): number {
  * has never had a Founder policy written routes to local intelligence or asks
  * a human, and never silently to a paid one.
  */
-export const DEFAULT_PERMITTED_TIERS: readonly IntelligenceTier[] = ['deterministic_local'];
+export const DEFAULT_PERMITTED_TIERS: readonly IntelligenceTier[] = deepFreeze(['deterministic_local']);
 
 /**
  * What a stored tier can be once read back. `hq_intel_*` are append-only
@@ -135,22 +136,22 @@ export const STORED_TIER_UNRECOGNIZED = 'unrecognized' as const;
 export type StoredIntelligenceTier = IntelligenceTier | typeof STORED_TIER_UNRECOGNIZED;
 
 /** How hard the work is. A property of the WORK, never of a model. */
-export const TASK_COMPLEXITIES = ['trivial', 'routine', 'substantial', 'novel'] as const;
+export const TASK_COMPLEXITIES = deepFreeze(['trivial', 'routine', 'substantial', 'novel'] as const);
 export type TaskComplexity = (typeof TASK_COMPLEXITIES)[number];
 
 /** How much material the work has to hold at once. */
-export const CONTEXT_SIZES = ['small', 'medium', 'large', 'very_large'] as const;
+export const CONTEXT_SIZES = deepFreeze(['small', 'medium', 'large', 'very_large'] as const);
 export type ContextSize = (typeof CONTEXT_SIZES)[number];
 
 /** What KIND of work it is. Coding and review are separated deliberately. */
-export const WORK_KINDS = [
+export const WORK_KINDS = deepFreeze([
   'classification',
   'summarization',
   'research',
   'coding',
   'planning',
   'review',
-] as const;
+] as const);
 export type WorkKind = (typeof WORK_KINDS)[number];
 
 /**
@@ -162,11 +163,11 @@ export type WorkKind = (typeof WORK_KINDS)[number];
  * so a real observation can make it discriminating later, and the statement on
  * every proposal says so.
  */
-export const LATENCY_REQUIREMENTS = ['unspecified', 'batch', 'interactive'] as const;
+export const LATENCY_REQUIREMENTS = deepFreeze(['unspecified', 'batch', 'interactive'] as const);
 export type LatencyRequirement = (typeof LATENCY_REQUIREMENTS)[number];
 
 /** Where the work's material may go. `local_only` is a hard constraint. */
-export const PRIVACY_REQUIREMENTS = ['unrestricted', 'local_only'] as const;
+export const PRIVACY_REQUIREMENTS = deepFreeze(['unrestricted', 'local_only'] as const);
 export type PrivacyRequirement = (typeof PRIVACY_REQUIREMENTS)[number];
 
 /**
@@ -176,7 +177,7 @@ export type PrivacyRequirement = (typeof PRIVACY_REQUIREMENTS)[number];
  * member rather than an error case, and it is the ONLY provenance an entry
  * with no amount may carry.
  */
-export const COST_PROVENANCES = ['estimated', 'provider_reported', 'billed', 'unknown'] as const;
+export const COST_PROVENANCES = deepFreeze(['estimated', 'provider_reported', 'billed', 'unknown'] as const);
 export type CostProvenance = (typeof COST_PROVENANCES)[number];
 
 export function isCostProvenance(value: unknown): value is CostProvenance {
@@ -184,14 +185,14 @@ export function isCostProvenance(value: unknown): value is CostProvenance {
 }
 
 /** Whether HQ holds an amount at all. Derived from the amount; never declared. */
-export const COST_STATES = ['known', 'unknown'] as const;
+export const COST_STATES = deepFreeze(['known', 'unknown'] as const);
 export type CostState = (typeof COST_STATES)[number];
 
 /**
  * What an amount was charged FOR. `unknown` is a real member: a billed line
  * item whose unit nobody recorded is still a real amount.
  */
-export const COST_UNIT_KINDS = [
+export const COST_UNIT_KINDS = deepFreeze([
   'tokens_prompt',
   'tokens_completion',
   'tokens_total',
@@ -199,7 +200,7 @@ export const COST_UNIT_KINDS = [
   'compute_seconds',
   'subscription_period',
   'unknown',
-] as const;
+] as const);
 export type CostUnitKind = (typeof COST_UNIT_KINDS)[number];
 
 export function isCostUnitKind(value: unknown): value is CostUnitKind {
@@ -210,7 +211,7 @@ export function isCostUnitKind(value: unknown): value is CostUnitKind {
  * Where a model/provider OBSERVATION came from. The registry holds
  * observations, not a catalogue HQ made up.
  */
-export const OBSERVATION_SOURCES = ['founder_declared', 'provider_reported', 'runtime_observed'] as const;
+export const OBSERVATION_SOURCES = deepFreeze(['founder_declared', 'provider_reported', 'runtime_observed'] as const);
 export type ObservationSource = (typeof OBSERVATION_SOURCES)[number];
 
 export function isObservationSource(value: unknown): value is ObservationSource {
@@ -234,14 +235,14 @@ export function isModelAvailability(value: unknown): value is ModelAvailability 
  * Capability facts a model observation may carry. Categorical presence only —
  * never a score, never a benchmark number, never a ranking.
  */
-export const MODEL_CAPABILITY_FACTS = [
+export const MODEL_CAPABILITY_FACTS = deepFreeze([
   'tool_use',
   'structured_output',
   'long_context',
   'code_generation',
   'independent_review',
   'offline_capable',
-] as const;
+] as const);
 export type ModelCapabilityFact = (typeof MODEL_CAPABILITY_FACTS)[number];
 
 export function isModelCapabilityFact(value: unknown): value is ModelCapabilityFact {
@@ -249,7 +250,7 @@ export function isModelCapabilityFact(value: unknown): value is ModelCapabilityF
 }
 
 /** Where a model runs relative to this machine. */
-export const MODEL_LOCALITIES = ['local', 'cloud'] as const;
+export const MODEL_LOCALITIES = deepFreeze(['local', 'cloud'] as const);
 export type ModelLocality = (typeof MODEL_LOCALITIES)[number];
 
 export function isModelLocality(value: unknown): value is ModelLocality {
@@ -265,7 +266,7 @@ export function isModelLocality(value: unknown): value is ModelLocality {
  * named `completed`, `concluded` or `released` would create exactly the
  * ambiguity a reader then has to resolve by guessing.
  */
-export const DECISION_STATES = ['issued', 'escalated_away', 'settled'] as const;
+export const DECISION_STATES = deepFreeze(['issued', 'escalated_away', 'settled'] as const);
 export type DecisionState = (typeof DECISION_STATES)[number];
 
 export function isDecisionState(value: unknown): value is DecisionState {
@@ -277,7 +278,7 @@ export function isDecisionState(value: unknown): value is DecisionState {
  * `result_unknown` is a first-class member and the default: a decision nobody
  * reported on has an unknown result, never a successful one.
  */
-export const DECISION_RESULTS = ['quality_met', 'quality_not_met', 'result_unknown'] as const;
+export const DECISION_RESULTS = deepFreeze(['quality_met', 'quality_not_met', 'result_unknown'] as const);
 export type DecisionResult = (typeof DECISION_RESULTS)[number];
 
 export function isDecisionResult(value: unknown): value is DecisionResult {
@@ -285,13 +286,13 @@ export function isDecisionResult(value: unknown): value is DecisionResult {
 }
 
 /** Why a stronger tier was asked for. Categorical, with no number beside it. */
-export const ESCALATION_TRIGGERS = [
+export const ESCALATION_TRIGGERS = deepFreeze([
   'tier_did_not_meet_requirement',
   'insufficient_evidence',
   'review_tier_required',
   'context_exceeded_tier',
   'policy_requires_stronger',
-] as const;
+] as const);
 export type EscalationTrigger = (typeof ESCALATION_TRIGGERS)[number];
 
 export function isEscalationTrigger(value: unknown): value is EscalationTrigger {
@@ -299,7 +300,7 @@ export function isEscalationTrigger(value: unknown): value is EscalationTrigger 
 }
 
 /** What a budget ceiling is scoped to. */
-export const BUDGET_SCOPES = ['mission', 'project', 'provider', 'model', 'deployment'] as const;
+export const BUDGET_SCOPES = deepFreeze(['mission', 'project', 'provider', 'model', 'deployment'] as const);
 export type BudgetScope = (typeof BUDGET_SCOPES)[number];
 
 /**
@@ -324,7 +325,7 @@ export function isBudgetScope(value: unknown): value is BudgetScope {
 }
 
 /** The window a ceiling applies over. */
-export const BUDGET_WINDOWS = ['day', 'month', 'total'] as const;
+export const BUDGET_WINDOWS = deepFreeze(['day', 'month', 'total'] as const);
 export type BudgetWindow = (typeof BUDGET_WINDOWS)[number];
 
 export function isBudgetWindow(value: unknown): value is BudgetWindow {
@@ -336,7 +337,7 @@ export function isBudgetWindow(value: unknown): value is BudgetWindow {
  * emphatically no `approved`: a ceiling is a limit, and a limit that could
  * authorize would be a spending grant wearing a limit's name.
  */
-export const BUDGET_DECISIONS = ['within_ceiling', 'requires_founder_decision', 'blocked'] as const;
+export const BUDGET_DECISIONS = deepFreeze(['within_ceiling', 'requires_founder_decision', 'blocked'] as const);
 export type BudgetDecision = (typeof BUDGET_DECISIONS)[number];
 
 export function isBudgetDecision(value: unknown): value is BudgetDecision {
@@ -344,11 +345,11 @@ export function isBudgetDecision(value: unknown): value is BudgetDecision {
 }
 
 /** Why a routing proposal could not name a tier. Categorical; never a guess. */
-export const ROUTING_REFUSALS = [
+export const ROUTING_REFUSALS = deepFreeze([
   'no_permitted_tier',
   'privacy_requires_local_but_work_needs_more',
   'budget_ceiling_blocks',
-] as const;
+] as const);
 export type RoutingRefusal = (typeof ROUTING_REFUSALS)[number];
 
 /* ------------------------------------------------------------------ */
@@ -414,7 +415,7 @@ export const AVOIDABLE_SPEND_STATEMENT =
  * canonical task, exactly like a Phase 13 run event, because the worker
  * carrying the work is the one entity that can honestly say what it used.
  */
-export const INTELLIGENCE_COMMAND_CAPABILITY = {
+export const INTELLIGENCE_COMMAND_CAPABILITY = deepFreeze({
   id: 'hq.intelligence_command',
   description:
     'Founder intelligence command — records observed model/provider capability and cost metadata, and ' +
@@ -423,18 +424,18 @@ export const INTELLIGENCE_COMMAND_CAPABILITY = {
   riskClass: 'founder_gate',
   sideEffect: false,
   idempotent: true,
-} as const;
+} as const);
 
 /** Register the intelligence-command capability — a CONFIGURATION action. */
 export function registerIntelligenceCommandCapability(db: HqDatabase): void {
   new CapabilityRegistry(db).register({ ...INTELLIGENCE_COMMAND_CAPABILITY });
 }
 
-export const INTELLIGENCE_COMMAND_RESERVED_CONTRACT = {
+export const INTELLIGENCE_COMMAND_RESERVED_CONTRACT = deepFreeze({
   riskClass: INTELLIGENCE_COMMAND_CAPABILITY.riskClass,
   sideEffect: INTELLIGENCE_COMMAND_CAPABILITY.sideEffect,
   idempotent: INTELLIGENCE_COMMAND_CAPABILITY.idempotent,
-} as const;
+} as const);
 
 /** Which contract fields the registry's CURRENT row disagrees with, if any. */
 export function intelligenceCommandContractDrift(capability: Capability): string[] {
@@ -1024,36 +1025,36 @@ export function isTaskCharacteristics(value: unknown): value is TaskCharacterist
  * Every mapping below is a POLICY choice, written once, and changeable by
  * editing one line. None of them names a provider or a model.
  */
-export const COMPLEXITY_FLOOR: Readonly<Record<TaskComplexity, IntelligenceTier>> = {
+export const COMPLEXITY_FLOOR: Readonly<Record<TaskComplexity, IntelligenceTier>> = deepFreeze({
   trivial: 'deterministic_local',
   routine: 'low_cost',
   substantial: 'standard',
   novel: 'high',
-};
+});
 
-export const CONTEXT_FLOOR: Readonly<Record<ContextSize, IntelligenceTier>> = {
+export const CONTEXT_FLOOR: Readonly<Record<ContextSize, IntelligenceTier>> = deepFreeze({
   small: 'deterministic_local',
   medium: 'low_cost',
   large: 'standard',
   very_large: 'high',
-};
+});
 
-export const WORK_KIND_FLOOR: Readonly<Record<WorkKind, IntelligenceTier>> = {
+export const WORK_KIND_FLOOR: Readonly<Record<WorkKind, IntelligenceTier>> = deepFreeze({
   classification: 'deterministic_local',
   summarization: 'deterministic_local',
   research: 'low_cost',
   coding: 'low_cost',
   planning: 'low_cost',
   review: 'standard',
-};
+});
 
-export const RISK_FLOOR: Readonly<Record<RiskClass, IntelligenceTier>> = {
+export const RISK_FLOOR: Readonly<Record<RiskClass, IntelligenceTier>> = deepFreeze({
   read_only: 'deterministic_local',
   reversible: 'low_cost',
   external_side_effect: 'high',
   destructive: 'critical_review',
   founder_gate: 'critical_review',
-};
+});
 
 /**
  * The RISK CLASS a routing decision is computed against.
@@ -1085,13 +1086,13 @@ export function riskClassForRouting(capability: { riskClass: RiskClass } | null 
  * touch the outside world. A recommendation never bypasses canonical approval
  * authority — this raises a floor, it never lowers the Phase 8 gate.
  */
-export const REVIEW_REQUIREMENT: Readonly<Record<RiskClass, IntelligenceTier | null>> = {
+export const REVIEW_REQUIREMENT: Readonly<Record<RiskClass, IntelligenceTier | null>> = deepFreeze({
   read_only: null,
   reversible: null,
   external_side_effect: 'high',
   destructive: 'critical_review',
   founder_gate: 'critical_review',
-};
+});
 
 function maxTier(...tiers: IntelligenceTier[]): IntelligenceTier {
   return tiers.reduce((a, b) => (tierRank(b) > tierRank(a) ? b : a));

@@ -51,6 +51,8 @@
  * decides and explains; it never dispatches, and it never widens authority.
  */
 
+import { deepFreeze } from '../contracts/freeze.js';
+
 /**
  * Every runtime caller of the decision functions below, outside tests and the
  * `application/index.ts` barrel re-export.
@@ -62,7 +64,7 @@
  * genuinely wires the watchdog must list its consumers here and rewrite the
  * status notice above; a change that wires it and leaves this alone fails.
  */
-export const MISSION_WATCHDOG_RUNTIME_CONSUMERS: readonly string[] = [];
+export const MISSION_WATCHDOG_RUNTIME_CONSUMERS: readonly string[] = deepFreeze([]);
 
 /**
  * What this module actually delivers, in one machine-checkable word.
@@ -73,16 +75,16 @@ export const MISSION_WATCHDOG_RUNTIME_CONSUMERS: readonly string[] = [];
  */
 export const MISSION_WATCHDOG_STATUS = 'decision_rules_only' as const;
 
-export const MISSION_CONTROL_STATES = [
+export const MISSION_CONTROL_STATES = deepFreeze([
   'running',
   'stalled',
   'founder_blocked',
   'external_blocked',
   'complete',
-] as const;
+] as const);
 export type MissionControlState = (typeof MISSION_CONTROL_STATES)[number];
 
-export const MISSION_CONTROL_ACTIONS = [
+export const MISSION_CONTROL_ACTIONS = deepFreeze([
   /** A worker is genuinely active on this lane — do not duplicate it. */
   'none',
   /** No active worker and the contract is unmet — re-trigger THIS lane. */
@@ -93,7 +95,7 @@ export const MISSION_CONTROL_ACTIONS = [
   'report_external',
   /** All completion evidence exists — stop. */
   'stop',
-] as const;
+] as const);
 export type MissionControlAction = (typeof MISSION_CONTROL_ACTIONS)[number];
 
 /** One required piece of completion evidence. `satisfied` must be proved, not assumed. */

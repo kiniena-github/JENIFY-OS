@@ -33,6 +33,7 @@
  */
 
 import fs from 'node:fs';
+import { deepFreeze } from '../contracts/freeze.js';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -53,11 +54,11 @@ import { openHqDatabaseReadOnly } from './db.js';
  * process holding a handle — including a local workstation run and the
  * read-only snapshot CLI, neither of which goes through the hosted owner.
  */
-export const HQ_DURABILITY_REQUIREMENT = {
+export const HQ_DURABILITY_REQUIREMENT = deepFreeze({
   journalMode: 'wal',
   /** SQLite's numeric `synchronous`: 2 is FULL. */
   synchronous: 2,
-} as const;
+} as const);
 
 /**
  * The pragma facts, read verbatim. `:memory:` databases legitimately report

@@ -14,14 +14,15 @@
  */
 
 import type { HqDatabase } from '../store/db.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
-export const RISK_CLASSES = [
+export const RISK_CLASSES = deepFreeze([
   'read_only',
   'reversible',
   'external_side_effect',
   'destructive',
   'founder_gate',
-] as const;
+] as const);
 
 export type RiskClass = (typeof RISK_CLASSES)[number];
 

@@ -51,6 +51,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { deepFreeze } from '../contracts/freeze.js';
 import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
@@ -67,7 +68,7 @@ import { CapabilityRegistry, type Capability, type RiskClass } from '../operator
  * per-type build pipeline and no per-type authority exists in this phase, and
  * a type never changes what a Founder gate decides.
  */
-export const PRODUCT_TYPES = [
+export const PRODUCT_TYPES = deepFreeze([
   'web',
   'mobile',
   'desktop',
@@ -76,7 +77,7 @@ export const PRODUCT_TYPES = [
   'media_technology',
   'hardware_iot_concept',
   'firmware',
-] as const;
+] as const);
 export type ProductType = (typeof PRODUCT_TYPES)[number];
 
 export function isProductType(value: unknown): value is ProductType {
@@ -92,7 +93,7 @@ export function isProductType(value: unknown): value is ProductType {
  * reads a value from this list to decide eligibility, claiming, dispatch,
  * approval, execution or a kill switch.
  */
-export const PRODUCT_LIFECYCLE_STATES = [
+export const PRODUCT_LIFECYCLE_STATES = deepFreeze([
   'idea',
   'research',
   'specification',
@@ -102,7 +103,7 @@ export const PRODUCT_LIFECYCLE_STATES = [
   'review',
   'release_candidate',
   'released',
-] as const;
+] as const);
 export type ProductLifecycleState = (typeof PRODUCT_LIFECYCLE_STATES)[number];
 
 export function isProductLifecycleState(value: unknown): value is ProductLifecycleState {
@@ -147,7 +148,7 @@ export function allowedProductLifecycleMoves(from: ProductLifecycleState): Produ
  * What an artifact IS. Versioned, immutable, referenced by locator — HQ
  * records that an artifact exists and what it is called, never its bytes.
  */
-export const PRODUCT_ARTIFACT_KINDS = [
+export const PRODUCT_ARTIFACT_KINDS = deepFreeze([
   'source_package',
   'specification',
   'architecture_doc',
@@ -157,7 +158,7 @@ export const PRODUCT_ARTIFACT_KINDS = [
   'firmware_artifact',
   'schema',
   'release_candidate',
-] as const;
+] as const);
 export type ProductArtifactKind = (typeof PRODUCT_ARTIFACT_KINDS)[number];
 
 export function isProductArtifactKind(value: unknown): value is ProductArtifactKind {
@@ -169,7 +170,7 @@ export function isProductArtifactKind(value: unknown): value is ProductArtifactK
  * member: HQ does not fetch the artifact, so it can never claim to have
  * checked one. A recorder's hash is recorded AS a recorder's hash.
  */
-export const ARTIFACT_DIGEST_PROVENANCES = ['declared_by_recorder', 'not_provided'] as const;
+export const ARTIFACT_DIGEST_PROVENANCES = deepFreeze(['declared_by_recorder', 'not_provided'] as const);
 export type ArtifactDigestProvenance = (typeof ARTIFACT_DIGEST_PROVENANCES)[number];
 
 export const ARTIFACT_DIGEST_STATEMENT =
@@ -179,7 +180,7 @@ export const ARTIFACT_DIGEST_STATEMENT =
   'is impossible rather than merely detectable.';
 
 /** Product event kinds — the append-only history of one product. */
-export const PRODUCT_EVENT_KINDS = ['registered', 'lifecycle_moved', 'artifact_versioned'] as const;
+export const PRODUCT_EVENT_KINDS = deepFreeze(['registered', 'lifecycle_moved', 'artifact_versioned'] as const);
 export type ProductEventKind = (typeof PRODUCT_EVENT_KINDS)[number];
 
 /* ------------------------------------------------------------------ */
@@ -198,7 +199,7 @@ export type ProductEventKind = (typeof PRODUCT_EVENT_KINDS)[number];
  * nothing outside HQ. The risk class is `founder_gate` because declaring what
  * the company is building is a Founder act.
  */
-export const PRODUCT_COMMAND_CAPABILITY = {
+export const PRODUCT_COMMAND_CAPABILITY = deepFreeze({
   id: 'hq.product_command',
   description:
     'Founder product command — registers products against canonical projects, moves the product ' +
@@ -206,7 +207,7 @@ export const PRODUCT_COMMAND_CAPABILITY = {
   riskClass: 'founder_gate',
   sideEffect: false,
   idempotent: true,
-} as const;
+} as const);
 
 /** Register the product-command capability — a CONFIGURATION action. */
 export function registerProductCommandCapability(db: HqDatabase): void {
@@ -214,11 +215,11 @@ export function registerProductCommandCapability(db: HqDatabase): void {
 }
 
 /** The definition fields that carry the Founder gate. */
-export const PRODUCT_COMMAND_RESERVED_CONTRACT = {
+export const PRODUCT_COMMAND_RESERVED_CONTRACT = deepFreeze({
   riskClass: PRODUCT_COMMAND_CAPABILITY.riskClass,
   sideEffect: PRODUCT_COMMAND_CAPABILITY.sideEffect,
   idempotent: PRODUCT_COMMAND_CAPABILITY.idempotent,
-} as const;
+} as const);
 
 /** Which contract fields the registry's CURRENT row disagrees with, if any. */
 export function productCommandContractDrift(capability: Capability): string[] {
@@ -910,7 +911,7 @@ export interface ProductPlanTemplate {
  * compliance gate would be exactly the fabricated business rule the
  * repository rules forbid).
  */
-export const PRODUCT_PLAN_TEMPLATES: readonly ProductPlanTemplate[] = [
+export const PRODUCT_PLAN_TEMPLATES: readonly ProductPlanTemplate[] = deepFreeze([
   {
     id: 'template.web.v1',
     productType: 'web',
@@ -1121,7 +1122,7 @@ export const PRODUCT_PLAN_TEMPLATES: readonly ProductPlanTemplate[] = [
       },
     ],
   },
-];
+]);
 
 /**
  * The template for a product type, or `null` when there is none.
@@ -1204,12 +1205,12 @@ export function productPlanRecommendation(product: {
  * blocker is a fact about recorded rows and never a judgement, a score or a
  * percentage.
  */
-export const PRODUCT_RELEASE_BLOCKERS = [
+export const PRODUCT_RELEASE_BLOCKERS = deepFreeze([
   'lifecycle_before_release_candidate',
   'no_release_candidate_artifact',
   'no_specification_artifact',
   'no_test_report_artifact',
-] as const;
+] as const);
 export type ProductReleaseBlockerCode = (typeof PRODUCT_RELEASE_BLOCKERS)[number];
 
 const RELEASE_BLOCKER_TEXT: Record<ProductReleaseBlockerCode, string> = {

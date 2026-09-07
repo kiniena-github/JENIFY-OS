@@ -67,6 +67,7 @@
  */
 
 import { v4 as uuid } from 'uuid';
+import { deepFreeze } from '../contracts/freeze.js';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
 import { HeadquarterStore } from '../store/headquarter.js';
@@ -116,7 +117,7 @@ import { PROVIDERS, type ProviderId } from '../routing/providers.js';
  * none is, or may become, a human principal or a registered worker — that is
  * enforced at the call, not merely intended. See `appendSystemEvidence`.
  */
-export const SYSTEM_EVIDENCE_ACTORS = ['system', 'hq-claude-dispatch'] as const;
+export const SYSTEM_EVIDENCE_ACTORS = deepFreeze(['system', 'hq-claude-dispatch'] as const);
 export type SystemEvidenceActor = (typeof SYSTEM_EVIDENCE_ACTORS)[number];
 
 /**
@@ -128,10 +129,10 @@ export type SystemEvidenceActor = (typeof SYSTEM_EVIDENCE_ACTORS)[number];
  * `DISPATCH_OUTCOME_EVIDENCE_KINDS` and are unreachable from here — see the
  * dispatch-evidence grant below.
  */
-export const SYSTEM_EVIDENCE_KINDS = [
+export const SYSTEM_EVIDENCE_KINDS = deepFreeze([
   'claude_github_dispatch_refused',
   'direct_order_dispatch_blocked',
-] as const;
+] as const);
 export type SystemEvidenceKind = (typeof SYSTEM_EVIDENCE_KINDS)[number];
 
 /**
@@ -168,12 +169,12 @@ export type SystemEvidenceKind = (typeof SYSTEM_EVIDENCE_KINDS)[number];
  * else, exactly as `PrivilegedQueueApi` is handed to whoever constructs the
  * queue, so it is not reachable from an `ops` object a worker holds.
  */
-export const DISPATCH_OUTCOME_EVIDENCE_KINDS = [
+export const DISPATCH_OUTCOME_EVIDENCE_KINDS = deepFreeze([
   'claude_github_dispatch_attempted',
   'claude_github_dispatch_succeeded',
   'claude_github_dispatch_failed',
   'claude_github_result_correlated',
-] as const;
+] as const);
 export type DispatchOutcomeEvidenceKind = (typeof DISPATCH_OUTCOME_EVIDENCE_KINDS)[number];
 
 /**
@@ -400,10 +401,10 @@ export function writeDispatchOutcome(
  * record describes actually happen". A holder of the grant that has not claimed
  * still may not report a publication.
  */
-export const CLAIM_BOUND_EVIDENCE_KINDS = [
+export const CLAIM_BOUND_EVIDENCE_KINDS = deepFreeze([
   'claude_github_dispatch_attempted',
   'claude_github_dispatch_succeeded',
-] as const;
+] as const);
 import { ensureApplicationSchema } from './db.js';
 import {
   SpecialistDirectoryAdapter,
