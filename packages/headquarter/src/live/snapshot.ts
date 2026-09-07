@@ -963,9 +963,9 @@ export function liveSnapshotFromOperations(
       provenance: {
         mode,
         source:
-          'hq_missions / hq_projects / op_tasks / hq_memory / hq_truth_records / hq_collab_sessions / ' +
-          'hq_action_intents / hq_orchestration_runs / hq_specialists via ' +
-          'HeadquarterOperations.searchIndexSummary (source registry only)',
+          'hq_missions / hq_projects / op_tasks / hq_products / hq_product_artifacts / hq_memory / ' +
+          'hq_truth_records / hq_collab_sessions / hq_action_intents / hq_orchestration_runs / ' +
+          'hq_specialists via HeadquarterOperations.searchIndexSummary (source registry only)',
         asOf: at,
         note:
           [

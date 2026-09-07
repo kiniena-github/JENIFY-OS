@@ -48,13 +48,20 @@ three reads (`searchCompany`, `askJenify`, `searchIndexSummary`, plus the regist
 
 ## The model
 
-### The source registry — nine canonical sources
+### The source registry — eleven canonical sources
+
+Phase 11 shipped this table with NINE rows. Phase 12 then added `product` and `artifact`
+by the mechanism described below, which is exactly what was intended — but this table was
+not updated with them, so it under-reported the registry at the Phase 12 head. The two
+Phase 12 rows are marked, and both counts below now match `SEARCH_SOURCES`.
 
 | Source | Table | What a hit is | Classified | Supersedable |
 |---|---|---|---|---|
 | `mission` | `hq_missions` | title, objective, scope, block reason | no | no |
 | `project` | `hq_projects` | name, stream, summary | no | no |
 | `task` | `op_tasks` | recorded title, capability, block reason | no | no |
+| `product` (Phase 12) | `hq_products` | name, type, problem, target users, DERIVED lifecycle as `status` | no | no |
+| `artifact` (Phase 12) | `hq_product_artifacts` | kind, name, version, locator, note | no | no |
 | `memory` | `hq_memory` | a company memory record | **yes** | **yes** |
 | `truth` | `hq_truth_records` | a truth record with its DERIVED Phase 7 state | **yes** | **yes** |
 | `collaboration` | `hq_collab_sessions` | a Mission Room session's title and purpose | **yes** | no |
@@ -64,7 +71,7 @@ three reads (`searchCompany`, `askJenify`, `searchIndexSummary`, plus the regist
 
 `SEARCH_SOURCES` IS the registry. Adding a source is one entry here plus one projection in
 `#searchCorpus` — no ranking change, no index change, no store. **Phase 12's product /
-artifact register joins by doing exactly that, and nothing is stubbed for it here**: a
+artifact register joined by doing exactly that, and nothing was stubbed for it here**: a
 source appears in this list only when a canonical store genuinely backs it today, so the
 registry never claims to search something that does not exist.
 
@@ -85,7 +92,7 @@ Two decisions in that table are load-bearing and are pinned:
 A `SearchDocument` carries `id`, `source`, `entityId`, `table`, `title`, `body`, `status`,
 `lifecycle`, `truthState`, `privacy`, `at`, `project`, `tags`, `evidenceRefs` and `refs`.
 `privacy` is copied from the canonical row for the three classified sources and is
-`internal` for the six whose rows have no privacy column — stated in the registry rather
+`internal` for the eight whose rows have no privacy column — stated in the registry rather
 than assumed at each call site.
 
 The browser projection (`SearchDocumentView`) carries no `body`: a document's text reaches
@@ -222,6 +229,7 @@ Phase 11 reads no public prototype method at all.**
 | missions, projects, tasks, orchestration runs | direct `#db` SELECTs | which rows exist as documents at all | canonical |
 | workers | direct `#db` SELECT of `hq_specialists` — deliberately NOT `directory.listSpecialists()` | which workers exist as documents | canonical. Pinned: a forged specialist directory invents no ghost worker and hides no real one |
 | external action intents | `loadActionIntents(#db)` — the Phase 8 loader | which intents exist as documents | canonical |
+| products and their artifact versions (Phase 12) | `loadProducts(#db)` / `loadAllProductArtifacts(#db)`, with the lifecycle DERIVED by the same pure path every product read uses — deliberately NOT `listProducts()` | which product and artifact rows exist as documents, and the `status` a product hit shows | canonical. A row whose stored state is outside the closed vocabulary is not read as a lifecycle at all, so free text cannot reach a document's `status` |
 | store presence per source | the constructor's `#*StorePresent` flags and `orchestratorSchemaPresent(#db)` | whether a 0 means "absent" or "empty" | canonical, observed, never migrated |
 | the memory text search of Phase 5 | not read at all | — | pinned: a forged `searchMemoryRecords` returning a ghost hit injects nothing into the corpus |
 
@@ -281,11 +289,25 @@ has nothing to put there. Pinned: neither path is in `CONTROL_WRITE_ROUTES`; POS
 PATCH / DELETE on either 404s; and a fourteen-table census is unchanged across four route
 calls.
 
-Both routes scan their free text with `assertBrowserSafe` BEFORE it is matched or echoed —
-credential-shaped query text is refused `unsafe_query` and a credential-shaped question
-`unsafe_question`, rather than being echoed back inside `criteria`, `terms` or `question`
-(the memory-intake precedent). An unknown `source` is refused rather than ignored, so a
-client never believes it filtered when it did not.
+Both routes scan **every** free-text parameter they read with `assertBrowserSafe` BEFORE it
+is matched or echoed — on `/search` that is `text`, `project` and `tag`; on `/ask` it is
+`question`, the only parameter that route reads at all. Credential-shaped query material is
+refused `unsafe_query`, and a credential-shaped question `unsafe_question`, rather than
+being echoed back inside `criteria`, `terms` or `question` (the memory-intake precedent).
+The other two criteria need no scan and are refused by their own shape: `year` is pinned to
+four digits and `source` to the closed registry — an unknown `source` is refused rather
+than ignored, so a client never believes it filtered when it did not.
+
+Stated because it was wrong here at the Phase 12 head: this claim originally covered only
+`text` and `question`. `project` and `tag` — two of the five criteria, and the two
+`normalizeSearchQuery` echoes VERBATIM into `criteria`, where `text` survives only as
+tokenized terms — were unscanned. The credential was never disclosed: the last-resort
+`safe()` guard over every control response caught it. But it caught it by turning the
+designed `400 unsafe_query` into an opaque `500 internal`, AFTER
+`audit('allowed', 'company_search')` had already recorded the read as allowed. All three
+are now scanned at the same place, before the facade call and before the allowed-audit
+fires, and route tests pin the status, the code, the absent echo and the audit line for
+each.
 
 UI: index.html gains the Company Search / Ask Jenify console (`searchConsoleScript`) below
 the Chief of Staff section. Static markup is a mount and a note — no input, button or form,
@@ -355,6 +377,17 @@ none of those is a reserved key. Proven at both boundaries end to end: `?Princip
 the Phase 11 search route is refused `client_identity_supplied`, and a mission spec payload
 nesting `RequestedBy` three levels deep is refused at the facade with no mission written.
 
+**The scan's depth limit, stated rather than implied.** `scanForClientIdentity` recurses
+while `depth < 3`, so it inspects keys at four levels and no deeper: a reserved key buried
+at `{a:{b:{c:{d:{RequestedBy}}}}}` is NOT refused. That bound is deliberate and predates
+Wave 4, which changed only the case-folding above. It is not a disclosure or authority hole
+today, because no facade path takes an identity from a request body at all — every control
+route passes `requestedBy: founder.principal.id` from the RESOLVED session, so a body key
+that survives the scan is read by nothing. The scan is a "say plainly what you are trying to
+do" guard on top of that, not the thing that decides who you are. Widening it is a change to
+a boundary guard and belongs in a phase that can test it end to end, not in a correction
+wave; it is recorded here so nobody reads the guard as unbounded.
+
 ## What is NOT here (deliberately)
 
 No semantic/embedding retrieval, no vector store, no embedding model, no paid or hosted
@@ -362,9 +395,10 @@ service, and no new npm dependency. No persisted index, query log, saved search,
 history or result cache. No write of any kind. No capability. No ranking, scoring,
 boosting, tuning or feedback signal. No natural-language GENERATION — no summarization, no
 paraphrase, no synthesis across rows beyond counting them. No cross-source join or inferred
-relationship: an answer cites rows, it does not connect them. No spatial room. No CLI. No
-Phase 12 product/artifact source — the registry is shaped to take one and no fake source is
-stubbed for it.
+relationship: an answer cites rows, it does not connect them. No spatial room. No CLI. At
+the time Phase 11 shipped, no product/artifact source — the registry was shaped to take one
+and no fake source was stubbed for it. Phase 12 then added `product` and `artifact` for
+real, by that mechanism; the registry table above is the current list.
 
 ## Known limitations (honest)
 

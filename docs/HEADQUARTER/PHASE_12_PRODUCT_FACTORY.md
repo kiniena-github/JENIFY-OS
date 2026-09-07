@@ -205,8 +205,24 @@ The strongest claim in the phase, established three ways.
 
 ## The enforcement-safe read audit
 
-Two facts in this phase decide whether a write lands. Both are read through
-`#db` or a private derivation; neither comes from a public, patchable method.
+Two facts in this phase decide whether a write lands, and one decides what the
+UNAUTHENTICATED artifact says. All three are read through `#db` or a private
+derivation; none comes from a public, patchable method.
+
+The snapshot row was missing from this table at first, and the omission was the
+defect rather than the documentation of it: `productFactorySummary` called the
+public `listProducts()` on the one path that produces `hq-snapshot.json`. It now
+reads `#listProductsFromStore` — the private half of `listProducts`, which
+`listProductsBounded` also uses — exactly as `#searchCorpus` already read
+products. **Inside the facade, no product read goes through a public method.**
+The one remaining public-method read is `productDetailRoute`'s `getProduct()`,
+and it is a different thing: a ROUTE calling the facade across the module
+boundary, which is what every route does. Nothing disclosure-deciding rides on
+it either — products carry no privacy level, and `getProduct` itself resolves
+through `#productRecordFromStore`. Phase 11's "no exception: Phase 11 reads no
+public prototype method at all" is a statement about Phase 11's corpus builder
+and does not extend across this phase; stated here so the framing does not
+bleed.
 
 | Read | Reads through | Decides | Status |
 |---|---|---|---|
@@ -215,6 +231,7 @@ Two facts in this phase decide whether a write lands. Both are read through
 | the next artifact version | `nextArtifactVersion` off `#db`, INSIDE the write transaction, backed by the unique index | which version number a row takes | canonical. The engine refuses a duplicate even under two processes |
 | the product-command capability row | `#capabilityFromStore` (the existing `#private` closure), never `queue.capabilities` | whether any product write may proceed | canonical, unchanged from the Phase 4/5/7 trio |
 | store presence | the constructor's `#productStorePresent` flag | whether a 0 means "absent" or "empty" | canonical, observed, never migrated |
+| the register, for the unauthenticated snapshot | `#listProductsFromStore` — `loadProducts`/`loadProductEvents` off `#db`, then the pure derivation — deliberately NOT `listProducts()` | what `hq-snapshot.json`'s `productFactory` section counts | canonical. Pinned: a patch of `listProducts` proven to have taken on the public surface (instance, prototype, and on a facade constructed after the patch) moves not one byte of the published section |
 
 The re-derivation inside `moveProductLifecycle`'s transaction is deliberate and
 its cost is stated: because the state is DERIVED, there is no row to guard with
@@ -231,10 +248,44 @@ No product name, problem statement, target user, artifact name, locator, digest
 or id. Every text field on this register is a company plan, and the Phase 9 rule
 about a session's `purpose` — and the Phase 11 rule about a search snippet —
 applies unchanged: an unauthenticated artifact has no vocabulary that classifies
-free text for an unauthenticated reader, so it publishes none. What keeps the
-section safe is therefore not a filter but the SHAPE of the section: it is
-incapable of carrying any of those fields. Pinned by exact key set and by a scan
-for every one of them.
+free text for an unauthenticated reader, so it publishes none.
+
+**What keeps the section safe, stated precisely.** The section's SHAPE is what
+does the work — it has no field for a name, a problem statement, a locator or an
+id, so none can be assigned to it. But shape alone was not enough, and saying it
+was, was wrong: three of the section's seven fields are MAPS whose keys came from
+stored columns, and `hq_products` / `hq_product_events` / `hq_product_artifacts`
+are append-only ledgers on which an APPEND is the write the triggers deliberately
+permit. One legal append carrying free text in `to_state`, `product_type` or an
+artifact `kind` therefore became an object KEY here — publishing that text to an
+unauthenticated reader, and corrupting the count beside it, because `+= 1` on a
+key the empty snapshot never created is `NaN` and `NaN` serialises as `null`.
+
+So the maps are now closed by construction as well as by intent. Each is keyed by
+its vocabulary plus exactly one extra member, `unrecognized`; every increment
+passes a membership check (`isProductType` / `isProductLifecycleState` /
+`isProductArtifactKind`) and the CHECKED value — never the caller's string — is
+the key. A stored value outside the vocabulary is counted as what HQ actually
+knows about it: that it is not one of these. Its text is never carried, and its
+count is never a key. `unrecognized` is a truthful bucket, not a category of
+product, and a test pins it disjoint from all three vocabularies.
+
+Two smaller consequences of the same root cause are fixed with it, upstream of
+the fold. `rowToProductEvent` reads a `from_state`/`to_state` outside the
+vocabulary as `null` — not a move — so `deriveProductRecord`'s
+`lifecycle: ProductLifecycleState` is a checked fact rather than a cast. That
+also unfreezes a product a forged append used to strand forever
+(`canMoveProductLifecycle` correctly fails closed on an unrecognised `from`, and
+the register has no edit or supersession path), and keeps the forged string out
+of the Founder-gated search corpus, where it had been reaching a product
+document's `status`. And a stored `product_type` outside the vocabulary now
+produces a typed `unrecognized_product_type` refusal instead of an uncaught throw
+out of `productPlanTemplateFor` that surfaced as `500 internal`.
+
+Pinned by the exact TOP-LEVEL key set, by the exact NESTED key set of all three
+maps on a POPULATED snapshot built from hostile rows, by a whole-artifact scan
+for every forged string, and by asserting every count is an integer and each
+map's total equals what was folded.
 
 The provenance note states one thing explicitly, because a reader would
 otherwise supply the inference themselves: a `released` COUNT is a count of
