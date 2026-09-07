@@ -3906,10 +3906,20 @@ export function productFactoryConsoleScript(): string {
   listBox.setAttribute('data-product-list', '');
   mount.appendChild(listBox);
 
+  // The outcome of the last write lives OUTSIDE the list, deliberately: a
+  // successful write reloads the register, which rebuilds every card and
+  // would otherwise wipe the line that said what happened.
+  var banner = el('p', 'muted', '');
+  banner.setAttribute('data-product-outcome', '');
+  banner.setAttribute('role', 'status');
+  banner.setAttribute('aria-live', 'polite');
+  mount.appendChild(banner);
+
   var sessionAnswer = null;
 
   function stayOff(reason) {
     listBox.textContent = '';
+    banner.textContent = '';
     note.setAttribute('data-product-factory-state', 'off');
     note.className = 'readonly-note console-state console-state-off';
     note.textContent = 'THE PRODUCT REGISTER IS NOT READABLE FROM THIS PAGE \\u2014 ' + reason;
@@ -3947,14 +3957,22 @@ export function productFactoryConsoleScript(): string {
     postJson(path, payload).then(function (result) {
       button.disabled = false;
       var body = result.body || {};
-      if (body.ok === true) { outcome.textContent = successText; notifyStateChanged(); reload(); return; }
+      if (body.ok === true) {
+        outcome.textContent = successText;
+        banner.textContent = successText;
+        notifyStateChanged();
+        reload();
+        return;
+      }
       outcome.textContent = refusalText(result);
+      banner.textContent = refusalText(result);
       if (result.status === 401 || result.status === 403) {
         recheckAfterWriteRefusal(result.status, body.error || {});
       }
     }).catch(function (error) {
       button.disabled = false;
       outcome.textContent = 'Not submitted (' + error.message + ').';
+      banner.textContent = 'Not submitted (' + error.message + ').';
     });
   }
 
