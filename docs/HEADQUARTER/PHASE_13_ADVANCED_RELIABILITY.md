@@ -37,10 +37,11 @@ every enforcement-safe read, exactly as it does for every phase before this.
   authority — rather than spelling a near-identical set. `RUN_RECONCILE_DECISIONS`
   is a re-export, and a test asserts identity (`toBe`), not equality.
 - **Not a retry engine.** There is no facade method, no route, no parameter and
-  no code path that reopens an uncertain outcome. The word `retry` appears in
-  this phase only in refusals and in the statements that explain them, and a
-  test pins that no control path SEGMENT anywhere spells `retry`, `restore`,
-  `repair`, `force` or `override`.
+  no code path that reopens an uncertain outcome. The only place the word
+  appears on a surface is `retryStatement` — a sentence that says HQ does NOT
+  do it — and `retriedAnything: false` on the recovery response. A test pins
+  that no control path SEGMENT anywhere spells `retry`, `restore`, `repair`,
+  `force` or `override`.
 - **Not a second writer into any other ledger.** Restart recovery classifies
   THIS ledger's runs. Interrupted canonical work owned elsewhere — Phase 8
   actions standing at `attempted`/`outcome_unknown`, tasks the queue moved to
