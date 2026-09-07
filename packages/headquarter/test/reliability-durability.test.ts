@@ -182,6 +182,58 @@ describe('the run ledger is immutable BY ENGINE, not by this module’s discipli
     }
   });
 
+  /**
+   * Wave 5 Critical 1, at the DERIVATION rather than at the facade.
+   *
+   * The facade now appends `worker_report` for a late statement, so no path in
+   * this repository writes an `outcome_recorded` on top of an interruption.
+   * But `hq_reliability_run_events` is append-only and an APPEND is exactly
+   * the write its triggers permit, so a raw connection can still put one
+   * there — and if the derivation concluded on it, `needsReconciliation` would
+   * go false, the `openRun` guard would lift, and a second attempt generation
+   * on the same task would become reachable without any human. The rule is
+   * therefore in `deriveRunRecord` and not only in the writer.
+   */
+  it('does not let a RAW outcome_recorded conclude a run standing at needs_reconciliation', () => {
+    const fx = fileFixture({ processIdentity: 'process-one' });
+    try {
+      const run = openedRun(fx, 'the interrupted run');
+      expectOk(fx.ops.startRunAttempt({ runId: run.id, workerId: 'claude', fence: fx.claim.fence }));
+      const other = fx.reopen('the-recovering-process');
+      expectOk(other.ops.recoverInterruptedRuns({ requestedBy: 'founder' }));
+      expect(fx.ops.getRun(run.id)!.needsReconciliation).toBe(true);
+
+      const raw = fx.raw();
+      raw
+        .prepare(
+          `INSERT INTO hq_reliability_run_events (id, run_id, kind, actor, at, process_id, detail, attempt_key)
+           VALUES (?, ?, 'outcome_recorded', 'a-forged-actor', '2026-01-01T00:00:00.000Z', 'p9', ?, NULL)`,
+        )
+        .run('forged-outcome', run.id, JSON.stringify({ outcome: 'succeeded', failureCategory: 'none' }));
+
+      const after = fx.ops.getRun(run.id)!;
+      expect(after.state).toBe('needs_reconciliation');
+      expect(after.outcome).toBe('outcome_unknown');
+      expect(after.needsReconciliation).toBe(true);
+      expect(after.admitsAttempt).toBe(false);
+      // Carried as what it is: a statement somebody appended, not a verdict.
+      expect(after.workerReport).toMatchObject({ by: 'a-forged-actor', outcome: 'succeeded' });
+      // And the guard the whole exploit runs through is still standing.
+      const second = fx.ops.openRun({
+        taskId: fx.claim.taskId,
+        workerId: 'claude',
+        fence: fx.claim.fence,
+        runKind: 'external_action',
+        label: 'the interrupted run',
+        idempotencyKey: 'a-deliberately-fresh-one',
+      });
+      expect(second.ok).toBe(false);
+      expect(!second.ok && second.error.code).toBe('run_attempt_refused');
+    } finally {
+      fx.cleanup();
+    }
+  });
+
   it('sees one process’s committed run from a SECOND facade over the same file', () => {
     const fx = fileFixture();
     try {

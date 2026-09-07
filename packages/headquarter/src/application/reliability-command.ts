@@ -170,11 +170,25 @@ export function isRunInterruptionReason(value: unknown): value is RunInterruptio
   return typeof value === 'string' && (RUN_INTERRUPTION_REASONS as readonly string[]).includes(value);
 }
 
-/** The append-only history of one run. */
+/**
+ * The append-only history of one run.
+ *
+ * `worker_report` is the LATE statement — the correction to the Wave 5
+ * correction. A worker whose live attempt was classified `interrupted` by a
+ * concurrent recovery still holds the live fenced claim and is still the only
+ * entity that saw what happened, so it must be able to say so. What it must
+ * NOT be able to do is CLOSE the run: closing a `needs_reconciliation` run is
+ * `reconcileRun`'s job, and that path demands an independent principal, a
+ * step-up, and an idempotent capability before it will reopen anything. A
+ * `worker_report` is therefore folded into the record as testimony and moves
+ * no state; `outcome_recorded` stays what it always was, the close of an OPEN
+ * attempt.
+ */
 export const RUN_EVENT_KINDS = [
   'opened',
   'attempt_started',
   'outcome_recorded',
+  'worker_report',
   'interrupted',
   'reconciled',
 ] as const;
@@ -215,7 +229,9 @@ export const RUN_RETRY_STATEMENT =
   'An interrupted attempt that could have reached the outside world is recorded as outcome_unknown and is ' +
   'NEVER retried automatically. Only a human reconciliation of confirmed_not_executed — a statement that the ' +
   'real world was checked and nothing happened — opens a further attempt generation, and only for an ' +
-  'idempotent capability.';
+  'idempotent capability. A worker that still holds the live fenced claim may REPORT what it observed against ' +
+  'such a run; that report is recorded as testimony beside the interruption and closes nothing, because the ' +
+  'entity whose own attempt is in doubt is not the one that gets to end the doubt.';
 
 export const RECOVERY_SCOPE_STATEMENT =
   'Restart recovery classifies runs in THIS ledger and writes nothing into any other. Interrupted canonical ' +
@@ -717,12 +733,42 @@ export interface RunRecord {
    * unable to say what actually happened: its truthful `recordRunOutcome` was
    * refused `run_state_conflict`, and only a human guess could close the run.
    * A worker still holding the LIVE FENCED CLAIM — which a genuinely dead
-   * process cannot — may record the outcome it observed against a run in this
-   * position. That is a report, never a retry: it opens no attempt generation,
-   * and the interruption event stays in the ledger as the history it is.
+   * process cannot — may make ONE late statement about a run in this position.
+   *
+   * That statement is `worker_report`, and the distinction is the whole
+   * correction: the first attempt at this let the worker append
+   * `outcome_recorded`, which concluded the run, cleared
+   * `needsReconciliation`, and thereby lifted the `openRun` guard that refuses
+   * a second run on a task whose last word is "HQ does not know" — so the
+   * worker whose own attempt was in doubt could re-admit a duplicate
+   * irreversible act with no human anywhere in the loop. A `worker_report`
+   * records what the worker saw and moves nothing.
    */
   interruptedWithoutReport: boolean;
+  /**
+   * The late statement a worker made about a run standing at
+   * `needs_reconciliation` — testimony, never a verdict.
+   *
+   * Present only when a `worker_report` event was appended (or when a stored
+   * `outcome_recorded` landed on a run already standing at
+   * `needs_reconciliation`, which no facade path produces but a raw append
+   * can). It is carried BESIDE `state` and `outcome`, which stay
+   * `needs_reconciliation` / `outcome_unknown`: HQ still does not know what
+   * happened, it knows what the worker says happened. `reconcileRun` — an
+   * independent principal, a step-up, and the idempotency rule — remains the
+   * only thing that closes the run.
+   */
+  workerReport: RunWorkerReport | null;
   events: RunEventView[];
+}
+
+/** One late worker statement about an interrupted run. Categorical plus a bounded note. */
+export interface RunWorkerReport {
+  by: string;
+  at: string;
+  outcome: RunOutcome;
+  failureCategory: RunFailureCategory;
+  note: string;
 }
 
 function str(detail: Record<string, unknown>, key: string): string | null {
@@ -751,7 +797,27 @@ export function deriveRunRecord(row: RunRow, events: readonly RunEventRow[]): Ru
   let lastCorrelationId: string | null = null;
   let interruption: RunRecord['interruption'] = null;
   let reconciliation: RunRecord['reconciliation'] = null;
+  let workerReport: RunWorkerReport | null = null;
   let reopened = false;
+
+  /**
+   * Fold a worker's statement in WITHOUT moving the run. Shared by the
+   * `worker_report` kind and by an `outcome_recorded` that landed on a run
+   * already standing at `needs_reconciliation` — the raw-append shape of the
+   * same thing.
+   */
+  const foldWorkerReport = (event: RunEventRow): void => {
+    const reported = str(event.detail, 'outcome');
+    const category = str(event.detail, 'failureCategory');
+    workerReport = {
+      by: event.actor,
+      at: event.at,
+      // Fail closed on both, exactly as the concluding branch does.
+      outcome: isReportableRunOutcome(reported) ? reported : 'outcome_unknown',
+      failureCategory: isRunFailureCategory(category) ? category : 'unknown',
+      note: str(event.detail, 'note') ?? '',
+    };
+  };
 
   for (const event of events) {
     switch (event.kind) {
@@ -765,7 +831,27 @@ export function deriveRunRecord(row: RunRow, events: readonly RunEventRow[]): Ru
         lastCorrelationId = str(event.detail, 'correlationId') ?? lastCorrelationId;
         break;
       }
+      case 'worker_report': {
+        // TESTIMONY. It records what the carrier says it saw and moves no
+        // state, no outcome and no attempt generation — see the kind's own
+        // note and `RunRecord.workerReport`.
+        foldWorkerReport(event);
+        break;
+      }
       case 'outcome_recorded': {
+        // A run standing at `needs_reconciliation` is NOT concluded by an
+        // outcome report, whoever appended it. No facade path produces this
+        // shape any more — the late path appends `worker_report` — but
+        // `hq_reliability_run_events` is append-only and an APPEND is exactly
+        // the write its triggers permit, so a raw writer can still put an
+        // `outcome_recorded` row on top of an interruption. Concluding on it
+        // would clear `needsReconciliation`, lift the `openRun` guard, and let
+        // a second run (and a second attempt) start on work whose last honest
+        // word was "HQ does not know". Folded in as testimony instead.
+        if (state === 'needs_reconciliation') {
+          foldWorkerReport(event);
+          break;
+        }
         const reported = str(event.detail, 'outcome');
         // Fail closed: an outcome outside the closed vocabulary is read as
         // unknown, which demands a human rather than concluding the run.
@@ -868,6 +954,7 @@ export function deriveRunRecord(row: RunRow, events: readonly RunEventRow[]): Ru
     admitsAttempt: state === 'open' || reopened,
     needsReconciliation: state === 'needs_reconciliation',
     interruptedWithoutReport: events[events.length - 1]?.kind === 'interrupted',
+    workerReport,
     events: events.map((event) => ({
       kind: event.kind,
       actor: event.actor,

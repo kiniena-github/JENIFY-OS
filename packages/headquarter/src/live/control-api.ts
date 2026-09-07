@@ -3810,6 +3810,11 @@ function runView(run: RunRecord): Record<string, unknown> {
     lastCorrelationId: run.lastCorrelationId,
     interruption: run.interruption,
     reconciliation: run.reconciliation,
+    // The late worker statement, carried as what it is. It closes nothing —
+    // `state` and `outcome` beside it still say `needs_reconciliation` /
+    // `outcome_unknown` — so a Founder reading this page sees the testimony
+    // and the standing doubt at the same time.
+    workerReport: run.workerReport,
     admitsAttempt: run.admitsAttempt,
     needsReconciliation: run.needsReconciliation,
     events,

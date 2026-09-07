@@ -580,6 +580,7 @@ import {
   type HqReliabilityPosture,
   type ReliabilitySnapshotView,
   type RunFailureCategory,
+  type RunEventKind,
   type RunKind,
   type RunOutcome,
   type RunReconcileDecision,
@@ -7172,7 +7173,11 @@ export class HeadquarterOperations {
 
   #appendRunEvent(input: {
     runId: string;
-    kind: 'opened' | 'attempt_started' | 'outcome_recorded' | 'interrupted' | 'reconciled';
+    // The vocabulary itself, not a second hand-maintained spelling of it: a
+    // kind added to `RUN_EVENT_KINDS` must be writable here without a silent
+    // divergence between what the derivation understands and what the writer
+    // can produce.
+    kind: RunEventKind;
     actor: string;
     at: string;
     detail: Record<string, unknown>;
@@ -7416,6 +7421,24 @@ export class HeadquarterOperations {
    * the honest one whenever the worker cannot tell — it moves the run to
    * `needs_reconciliation`, where no further attempt is admitted until a human
    * checks the real world.
+   *
+   * Two shapes, and the difference between them is the whole authority
+   * boundary of this phase:
+   *
+   *  - against an OPEN attempt, this CLOSES the run (`outcome_recorded`);
+   *  - against a run a concurrent recovery already classified, it records a
+   *    late `worker_report` and closes nothing.
+   *
+   * The second used to close the run too, and that was a hole rather than a
+   * kindness. `deriveRunRecord`'s `outcome_recorded` branch concludes, so
+   * `needsReconciliation` went false — and the `openRun` guard that refuses a
+   * new run on a task standing at "HQ does not know what happened" lifted with
+   * it. The worker whose own attempt was in doubt could then open a second run
+   * on the same task and start a second attempt, on a NON-IDEMPOTENT
+   * external-side-effect capability, with no independent principal anywhere in
+   * the loop — precisely the duplicate irreversible act `reconcileRun` demands
+   * independence, a step-up and an idempotency check to prevent. A live worker
+   * can still tell the truth; it just cannot also be the judge of it.
    */
   recordRunOutcome(input: {
     runId: string;
@@ -7461,17 +7484,22 @@ export class HeadquarterOperations {
         return;
       }
       const record = deriveRunRecord(row, loadRunEvents(this.#db, input.runId));
-      // A LATE but truthful report is accepted (Wave 5 Medium 1). Recovery
+      // A LATE but truthful report is accepted (Wave 5 Medium 1) — as
+      // TESTIMONY, not as a conclusion (Wave 5 Critical 1). Recovery
       // classifies every run whose `process_id` is not the recovering
       // process — which proves "not me", never "dead" — so a live worker
       // mid-attempt can find its run classified interrupted by a concurrent
-      // Founder-gated recovery. Refusing its outcome then left the ledger
-      // permanently asserting an interruption that never happened, closable
-      // only by a human guess. The worker still holds the LIVE FENCED CLAIM,
-      // already checked above and unobtainable by a dead process, so it is
-      // exactly the entity this phase trusts to report an outcome. This is a
-      // report and not a retry: it opens no attempt generation, and the
-      // interruption event stays in the append-only ledger as history.
+      // Founder-gated recovery. Refusing its statement outright left the
+      // ledger permanently asserting an interruption that never happened. The
+      // worker still holds the LIVE FENCED CLAIM, already checked above and
+      // unobtainable by a dead process, so it is exactly the entity this phase
+      // trusts to SAY what it saw. It is not the entity this phase lets DECIDE
+      // what happened: that is `reconcileRun`, which requires an independent
+      // principal, a step-up and an idempotent capability. So the late path
+      // appends `worker_report`, which the derivation folds in beside the
+      // interruption while `state` stays `needs_reconciliation` — the
+      // `openRun` guard, the attempt guard and the idempotency rule all stay
+      // exactly where they were.
       const lateAfterInterruption = record.interruptedWithoutReport;
       if (record.state !== 'attempting' && !lateAfterInterruption) {
         refusal = {
@@ -7483,7 +7511,7 @@ export class HeadquarterOperations {
       }
       this.#appendRunEvent({
         runId: input.runId,
-        kind: 'outcome_recorded',
+        kind: lateAfterInterruption ? 'worker_report' : 'outcome_recorded',
         actor: input.workerId,
         at: nowIso(),
         detail: {
@@ -7499,12 +7527,15 @@ export class HeadquarterOperations {
       privileged.appendEvidence({
         taskId: row.taskId,
         actor: input.workerId,
-        kind: 'run_outcome_recorded',
+        kind: lateAfterInterruption ? 'run_worker_report' : 'run_outcome_recorded',
         payload: {
           runId: input.runId,
           outcome: input.outcome,
           failureCategory,
           correlationId: record.lastCorrelationId,
+          // A late statement CLOSES NOTHING: the run stays at
+          // needs_reconciliation until an independent principal reconciles it.
+          closesRun: !lateAfterInterruption,
           executable: false,
         },
       });

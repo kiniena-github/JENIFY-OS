@@ -18,6 +18,8 @@ import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { CAPS, expectOk } from './application.fixture.js';
 import { fileFixture } from './reliability.fixture.js';
+import { CapabilityRegistry } from '../src/operator/capabilities.js';
+import { founderConsole } from '../src/application/console.js';
 
 /**
  * The child runs as `node --import tsx <script>` rather than through the `tsx`
@@ -253,6 +255,12 @@ describe('recovery is scoped, repeatable and honest about what it did not touch'
    * The correction does not pretend the classification did not happen: the
    * interruption event stays, and the worker that still holds the LIVE FENCED
    * CLAIM (which a dead process cannot) records what it observed on top.
+   *
+   * Wave 5 Critical 1 corrected the correction. The late statement is
+   * TESTIMONY, not a verdict: it is recorded as `worker_report`, the run stays
+   * at `needs_reconciliation`, and only `reconcileRun` — independent, stepped
+   * up, idempotency-checked — closes it. The exploit this pins the door on is
+   * chased to its end in the test below.
    */
   it('accepts a live worker’s truthful outcome on a run a concurrent recovery classified', () => {
     const fx = fileFixture({ processIdentity: 'the-worker-that-is-still-alive' });
@@ -288,24 +296,188 @@ describe('recovery is scoped, repeatable and honest about what it did not touch'
         }),
       );
       const settled = fx.ops.getRun(mine.id)!;
-      expect(settled.state).toBe('concluded');
-      expect(settled.outcome).toBe('succeeded');
-      // No human guess was needed, and no attempt generation was opened.
+      // The statement is ON the record...
+      expect(settled.workerReport).toEqual({
+        by: 'claude',
+        at: expect.any(String),
+        outcome: 'succeeded',
+        failureCategory: 'none',
+        note: 'the publish completed; the recovery pass had already classified it',
+      });
+      // ...and it decided nothing. HQ still does not KNOW, so it still says so.
+      expect(settled.state).toBe('needs_reconciliation');
+      expect(settled.outcome).toBe('outcome_unknown');
+      expect(settled.needsReconciliation).toBe(true);
       expect(settled.reconciliation).toBeNull();
       expect(settled.attempts).toBe(1);
       expect(settled.nextGeneration).toBe(1);
       expect(settled.admitsAttempt).toBe(false);
       // The classification is still in the append-only ledger, and the report
-      // says it arrived after one.
+      // is recorded beside it as the testimony it is.
       expect(settled.events.map((e) => e.kind)).toEqual([
         'opened',
         'attempt_started',
         'interrupted',
-        'outcome_recorded',
+        'worker_report',
       ]);
-      expect(
-        settled.events.find((e) => e.kind === 'outcome_recorded')!.detail.afterInterruption,
-      ).toBe(true);
+      expect(settled.events.find((e) => e.kind === 'worker_report')!.detail.afterInterruption).toBe(
+        true,
+      );
+
+      // An INDEPENDENT principal, reading that testimony, is what closes it.
+      expectOk(
+        other.ops.reconcileRun({
+          runId: mine.id,
+          decision: 'confirmed_succeeded',
+          note: 'checked the provider; the worker’s report matches what landed',
+          requestedBy: 'coo',
+        }),
+      );
+      const closed = fx.ops.getRun(mine.id)!;
+      expect(closed.state).toBe('concluded');
+      expect(closed.outcome).toBe('succeeded');
+      expect(closed.reconciliation!.by).toBe('coo');
+      // Still no further attempt: `confirmed_succeeded` reopens nothing.
+      expect(closed.admitsAttempt).toBe(false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * Wave 5 CRITICAL 1, chased all the way to the second irreversible act.
+   *
+   * The previous round's test stopped at `admitsAttempt: false` on the FIRST
+   * run, which is why the hole was missed: the second attempt does not come
+   * from the first run, it comes from a SECOND run on the same task. The
+   * `openRun` guard is what refuses that, and it is keyed on
+   * `needsReconciliation` — so any path that clears `needsReconciliation`
+   * without a human clears the guard too.
+   *
+   * The exploit, executed end to end: a worker holding a live fenced claim on
+   * a NON-IDEMPOTENT external-side-effect capability opens a run and starts an
+   * attempt; a Founder recovery from a second process classifies it
+   * `interrupted` / `outcome_unknown` / `needs_reconciliation`; the worker then
+   * reports a late outcome. Before the fix the report concluded the run, the
+   * guard lifted, a second `openRun` on the same task succeeded and a second
+   * attempt started — the same irreversible act, twice, with no independent
+   * principal anywhere in the chain.
+   */
+  it('a late worker report can never re-admit a second run or a second attempt on the same task', () => {
+    const fx = fileFixture({ processIdentity: 'the-worker-that-is-still-alive' });
+    try {
+      // A NON-IDEMPOTENT external side effect: the capability `reconcileRun`
+      // refuses to reopen even for a human, so nothing here may reopen it.
+      new CapabilityRegistry(fx.db).register({
+        id: 'irreversible.wire_transfer',
+        description: 'Send money. Once.',
+        riskClass: 'external_side_effect',
+        sideEffect: true,
+        idempotent: false,
+      });
+      fx.store.upsertSpecialist({
+        id: 'claude',
+        displayName: 'Claude',
+        vendor: 'anthropic',
+        role: 'build_lead',
+        allowedCapabilities: [CAPS.readStatus, CAPS.openPr, 'irreversible.wire_transfer'],
+        active: true,
+      });
+      const created = expectOk(
+        fx.ops.createTask({
+          capabilityId: 'irreversible.wire_transfer',
+          payload: { amount: 1 },
+          idempotencyKey: 'the-one-transfer',
+          requestedBy: 'claude',
+        }),
+      );
+      const card = founderConsole(fx.ops).approvals.find((a) => a.taskId === created.task.id)!;
+      expectOk(
+        fx.ops.approveTask({
+          taskId: created.task.id,
+          founderId: 'founder',
+          expectedActionDigest: card.actionDigest,
+        }),
+      );
+      const claimed = expectOk(
+        fx.ops.claimNext('claude', 'irreversible.wire_transfer', 60 * 60_000, created.task.id),
+      );
+
+      const first = expectOk(
+        fx.ops.openRun({
+          taskId: claimed.id,
+          workerId: 'claude',
+          fence: claimed.fence,
+          runKind: 'external_action',
+          label: 'send the transfer',
+        }),
+      ).run;
+      expectOk(fx.ops.startRunAttempt({ runId: first.id, workerId: 'claude', fence: claimed.fence }));
+
+      const other = fx.reopen('a-second-process-running-recovery');
+      expectOk(other.ops.recoverInterruptedRuns({ requestedBy: 'founder' }));
+      expect(fx.ops.getRun(first.id)!.needsReconciliation).toBe(true);
+
+      // The worker reports a late success. Accepted — and load-bearing that it
+      // is: this is the Medium-1 guarantee that a live worker can tell the
+      // truth. It must not also be the thing that unlocks the task.
+      expectOk(
+        fx.ops.recordRunOutcome({
+          runId: first.id,
+          workerId: 'claude',
+          fence: claimed.fence,
+          outcome: 'succeeded',
+          note: 'the transfer went out',
+        }),
+      );
+      expect(fx.ops.getRun(first.id)!.needsReconciliation).toBe(true);
+
+      // THE EXPLOIT STEP. A second run on the same task, which is where a
+      // second admitted attempt generation would come from.
+      const second = fx.ops.openRun({
+        taskId: claimed.id,
+        workerId: 'claude',
+        fence: claimed.fence,
+        runKind: 'external_action',
+        label: 'send the transfer',
+        idempotencyKey: 'deliberately-fresh',
+      });
+      expect(second.ok).toBe(false);
+      if (second.ok) throw new Error('the openRun guard lifted');
+      expect(second.error.code).toBe('run_attempt_refused');
+      expect(second.error.details!.runId).toBe(first.id);
+
+      // And no second attempt is reachable through the first run either.
+      const again = fx.ops.startRunAttempt({
+        runId: first.id,
+        workerId: 'claude',
+        fence: claimed.fence,
+      });
+      expect(again.ok).toBe(false);
+
+      // Nor can the worker unlock it by reconciling: independence is required,
+      // and for a NON-IDEMPOTENT capability `confirmed_not_executed` is
+      // refused even to an independent, approval-bearing principal.
+      const selfReconcile = fx.ops.reconcileRun({
+        runId: first.id,
+        decision: 'confirmed_not_executed',
+        note: 'I checked my own work and nothing happened',
+        requestedBy: 'claude',
+      });
+      expect(selfReconcile.ok).toBe(false);
+      const reopenNonIdempotent = other.ops.reconcileRun({
+        runId: first.id,
+        decision: 'confirmed_not_executed',
+        note: 'checked the bank; nothing left the account',
+        requestedBy: 'coo',
+      });
+      expect(reopenNonIdempotent.ok).toBe(false);
+      if (reopenNonIdempotent.ok) throw new Error('a non-idempotent capability was reopened');
+      expect(reopenNonIdempotent.error.code).toBe('not_permitted');
+
+      // Exactly one attempt was ever reserved against this work.
+      expect(fx.ops.getRun(first.id)!.attempts).toBe(1);
+      expect(fx.ops.listRuns({ taskId: claimed.id })).toHaveLength(1);
     } finally {
       fx.cleanup();
     }
