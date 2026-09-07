@@ -280,6 +280,41 @@ export interface SearchCorpus {
 /* The retrieval adapter boundary                                      */
 /* ------------------------------------------------------------------ */
 
+/**
+ * How a set of query terms is matched against a document.
+ *
+ * `all_terms` is the archive engine's own AND semantics and is what an
+ * EXPLICIT search means: the Founder typed those words on purpose. `any_term`
+ * is what a QUESTION means — a natural-language sentence carries words no
+ * canonical row will ever contain, and requiring all of them would answer
+ * every question with "no record", which is a lie of omission rather than an
+ * honest unknown. Both are stated on every response, so a reader always knows
+ * which rule produced the set in front of them.
+ */
+export const TERM_MATCHES = ['all_terms', 'any_term'] as const;
+export type TermMatch = (typeof TERM_MATCHES)[number];
+
+/**
+ * Words removed from a query before matching — a CLOSED, stated list of
+ * English function words and query verbs.
+ *
+ * It exists because `any_term` matching without it would retrieve every
+ * document containing "the". It is deliberately small and contains no domain
+ * word: nothing here is a fact about the company, so removing one cannot
+ * change which canonical rows are reachable, only which noise is not. Every
+ * removed word is reported back on the response as an ignored term, so the
+ * reader can see exactly what HQ did to their question.
+ */
+export const QUERY_STOPWORDS: ReadonlySet<string> = new Set([
+  'about', 'all', 'an', 'and', 'any', 'anything', 'are', 'as', 'at', 'be', 'because', 'been', 'being',
+  'but', 'by', 'can', 'could', 'did', 'do', 'does', 'doing', 'done', 'find', 'for', 'from', 'get',
+  'give', 'had', 'has', 'have', 'how', 'if', 'in', 'into', 'is', 'it', 'its', 'just', 'know', 'list',
+  'me', 'my', 'no', 'not', 'now', 'of', 'on', 'or', 'our', 'out', 'over', 'please', 'search', 'show',
+  'so', 'some', 'tell', 'than', 'that', 'the', 'their', 'them', 'then', 'there', 'these', 'they',
+  'this', 'those', 'to', 'us', 'was', 'we', 'were', 'what', 'whats', 'when', 'where', 'which', 'who',
+  'whom', 'why', 'will', 'with', 'would', 'you', 'your',
+]);
+
 export const RETRIEVAL_MODES = ['deterministic_lexical', 'semantic_embedding'] as const;
 export type RetrievalMode = (typeof RETRIEVAL_MODES)[number];
 
@@ -315,7 +350,11 @@ export interface RetrievalAdapter {
   readonly available: boolean;
   /** Stated when `available` is false; null when it is true. */
   readonly unavailableReason: RetrievalUnavailableReason | null;
-  retrieve(input: { readable: readonly SearchDocument[]; terms: readonly string[] }): SearchDocument[];
+  retrieve(input: {
+    readable: readonly SearchDocument[];
+    terms: readonly string[];
+    match: TermMatch;
+  }): SearchDocument[];
 }
 
 /**
@@ -324,14 +363,30 @@ export interface RetrievalAdapter {
  * "relevance" here is an ORDER, never a score.
  */
 export const SEARCH_ORDERING_STATEMENT =
-  'Newest canonical timestamp first; ties broken by the source registry order, then by document id. ' +
-  'There is no relevance score, ranking weight or confidence anywhere in this surface — the only match ' +
-  'fact published is which query terms matched.';
+  'Documents matching MORE of your applied terms come first; then newest canonical timestamp; then the ' +
+  'source registry order; then document id. The leading key is a COUNT over your own query — the same ' +
+  'number published as `matchedTerms` on every hit, which you can check against the snippet beside it. ' +
+  'It is not a relevance score, ranking weight, confidence or percentage: this surface has none of those, ' +
+  'and under all-terms matching every hit shares the same count, so the order degenerates to newest-first.';
 
 const SOURCE_ORDER = new Map<SearchSourceId, number>(SEARCH_SOURCES.map((id, index) => [id, index]));
 
-export function orderDocuments(documents: readonly SearchDocument[]): SearchDocument[] {
+/**
+ * The one deterministic order, used by search and by Ask Jenify alike.
+ *
+ * Total: every tie is broken by document id, so the same corpus and the same
+ * query produce a byte-identical sequence on every call and after a restart.
+ */
+export function orderDocuments(
+  documents: readonly SearchDocument[],
+  terms: readonly string[] = [],
+): SearchDocument[] {
+  const matchCount = new Map<string, number>(
+    documents.map((doc) => [doc.id, terms.length === 0 ? 0 : matchedTermsOf(doc, terms).length]),
+  );
   return [...documents].sort((a, b) => {
+    const byMatches = (matchCount.get(b.id) ?? 0) - (matchCount.get(a.id) ?? 0);
+    if (byMatches !== 0) return byMatches;
     const byTime = b.at.localeCompare(a.at);
     if (byTime !== 0) return byTime;
     const bySource = (SOURCE_ORDER.get(a.source) ?? 0) - (SOURCE_ORDER.get(b.source) ?? 0);
@@ -351,17 +406,22 @@ export const LEXICAL_RETRIEVAL_ADAPTER: RetrievalAdapter = {
   mode: 'deterministic_lexical',
   available: true,
   unavailableReason: null,
-  retrieve({ readable, terms }) {
-    if (terms.length === 0) return orderDocuments(readable);
+  retrieve({ readable, terms, match }) {
+    if (terms.length === 0) return orderDocuments(readable, terms);
     const byProjectedId = new Map(readable.map((doc) => [doc.id, doc]));
     const index: ArchiveSearchIndex = buildIndex(readable.map(asArchiveProjection));
-    const hits = searchArchiveIndex(index, { text: terms.join(' ') });
-    const matched: SearchDocument[] = [];
-    for (const hit of hits) {
-      const doc = byProjectedId.get(hit.record.id);
-      if (doc) matched.push(doc);
+    // `all_terms` is one AND query. `any_term` is the union of one AND query
+    // per term — the SAME engine call, run once per term, so there is still
+    // exactly one index implementation in this repository.
+    const queries = match === 'all_terms' ? [terms.join(' ')] : terms.map((term) => term);
+    const matched = new Map<string, SearchDocument>();
+    for (const text of queries) {
+      for (const hit of searchArchiveIndex(index, { text })) {
+        const doc = byProjectedId.get(hit.record.id);
+        if (doc) matched.set(doc.id, doc);
+      }
     }
-    return orderDocuments(matched);
+    return orderDocuments([...matched.values()], terms);
   },
 };
 
@@ -493,7 +553,7 @@ export interface CompanySearchQuery {
 }
 
 export type QueryNormalization =
-  | { ok: true; terms: string[]; droppedTerms: number; criteria: string[] }
+  | { ok: true; terms: string[]; ignoredTerms: string[]; criteria: string[] }
   | { ok: false; message: string };
 
 /**
@@ -525,8 +585,13 @@ export function normalizeSearchQuery(query: CompanySearchQuery): QueryNormalizat
   if (year !== '' && !/^\d{4}$/.test(year)) {
     return { ok: false, message: 'year must be a four-digit year' };
   }
-  const allTerms = tokenize(text);
-  const terms = allTerms.slice(0, MAX_QUERY_TERMS);
+  // Stopwords first, then the cap — so the cap spends its budget on words that
+  // can actually match a canonical row. Everything removed is reported back.
+  const tokens = tokenize(text);
+  const meaningful = tokens.filter((token) => !QUERY_STOPWORDS.has(token));
+  const terms = meaningful.slice(0, MAX_QUERY_TERMS);
+  const applied = new Set(terms);
+  const ignoredTerms = tokens.filter((token) => !applied.has(token));
   const criteria: string[] = [];
   if (terms.length > 0) criteria.push(`terms: ${terms.join(' ')}`);
   if (sources.length > 0) criteria.push(`sources: ${[...sources].sort().join(', ')}`);
@@ -541,7 +606,7 @@ export function normalizeSearchQuery(query: CompanySearchQuery): QueryNormalizat
         'query with no criterion: that is a dump of the company record, not a search.',
     };
   }
-  return { ok: true, terms, droppedTerms: allTerms.length - terms.length, criteria };
+  return { ok: true, terms, ignoredTerms, criteria };
 }
 
 /* ------------------------------------------------------------------ */
@@ -600,8 +665,14 @@ export interface CompanySearchView {
   /** The criteria that were actually applied, echoed back. */
   criteria: string[];
   terms: string[];
-  /** Terms beyond MAX_QUERY_TERMS that were not applied. 0 normally. */
-  droppedTerms: number;
+  /**
+   * Tokens from the query that were NOT applied — stopwords, and anything
+   * beyond MAX_QUERY_TERMS. Reported so the reader can see exactly what HQ
+   * did to their words.
+   */
+  ignoredTerms: string[];
+  /** How the applied terms were matched against a document. */
+  match: TermMatch;
   hits: SearchHitView[];
   /** Matching documents in the READABLE set. `hits.length` is the bounded page. */
   total: number;
@@ -668,7 +739,7 @@ export function runCompanySearch(input: {
   corpus: SearchCorpus;
   query: CompanySearchQuery;
   terms: readonly string[];
-  droppedTerms: number;
+  ignoredTerms: readonly string[];
   criteria: readonly string[];
   includeFounderOnly: boolean;
   now: string;
@@ -696,7 +767,9 @@ export function runCompanySearch(input: {
   });
 
   const { adapter, statement } = resolveRetrievalAdapter(query.retrieval ?? 'deterministic_lexical');
-  const matched = adapter.retrieve({ readable: filtered, terms });
+  // An EXPLICIT search means every word the Founder typed: `all_terms`.
+  const match: TermMatch = 'all_terms';
+  const matched = adapter.retrieve({ readable: filtered, terms, match });
 
   // (4): bound, and state the true readable total.
   const limit = Math.min(Math.max(query.limit ?? SEARCH_DEFAULT_LIMIT, 1), SEARCH_READ_LIMIT);
@@ -706,7 +779,8 @@ export function runCompanySearch(input: {
     searchedAt: input.now,
     criteria: [...input.criteria],
     terms: [...terms],
-    droppedTerms: input.droppedTerms,
+    ignoredTerms: [...input.ignoredTerms],
+    match,
     hits: page.map((document) => ({
       document: searchDocumentView(document),
       matchedTerms: matchedTermsOf(document, terms),
@@ -764,7 +838,7 @@ export type AnswerUnknownReason = (typeof ANSWER_UNKNOWN_REASONS)[number];
 export const ANSWER_LIMITATIONS = [
   'lexical_retrieval_only',
   'bounded_retrieval',
-  'terms_dropped',
+  'terms_ignored',
   'superseded_records_cited',
   'unverified_truth_cited',
   'no_truth_record_cited',
@@ -804,6 +878,10 @@ export interface AskAnswerView {
   /** Matching readable documents in total; `citations.length` is what was read. */
   considered: number;
   terms: string[];
+  /** Query words that were not applied — stopwords and anything over the cap. */
+  ignoredTerms: string[];
+  /** How the applied terms were matched. A question uses `any_term`. */
+  match: TermMatch;
   /** Phase 7 standing across the CITED truth records only. */
   truth: {
     cited: number;
@@ -837,7 +915,9 @@ const LIMITATION_TEXT: Record<AnswerLimitationCode, string> = {
     'words was not retrieved, and its absence here is not evidence that it does not exist.',
   bounded_retrieval:
     'More records matched than were read. The answer describes only the records cited below.',
-  terms_dropped: 'The question carried more terms than this surface applies; the extra terms were not used.',
+  terms_ignored:
+    'Some words in the question were not used as search terms: common English words from a stated, closed ' +
+    'stopword list, and anything beyond the term cap. They are listed on the answer as ignoredTerms.',
   superseded_records_cited:
     'At least one cited record has been superseded. It is labelled stale and is shown because it matched, ' +
     'not because it is current.',
@@ -909,7 +989,7 @@ export function composeAnswerText(input: {
   sentences.push(
     evidence === 0
       ? 'No cited record names an op_evidence entry.'
-      : `${evidence} cited record${evidence === 1 ? '' : 's'} name op_evidence entries.`,
+      : `${evidence} cited record${evidence === 1 ? ' names' : 's name'} op_evidence entries.`,
   );
   sentences.push('Each cited record is listed below with the canonical table and id it came from.');
   return sentences.join(' ');
@@ -936,7 +1016,8 @@ export function assembleAnswer(input: {
   question: string;
   askedAt: string;
   terms: readonly string[];
-  droppedTerms: number;
+  ignoredTerms: readonly string[];
+  match: TermMatch;
   /** Already privacy-filtered, already ordered, already bounded by the facade. */
   retrieved: readonly SearchDocument[];
   /** Total readable matches before bounding. */
@@ -979,7 +1060,7 @@ export function assembleAnswer(input: {
 
   const limitations: AnswerLimitation[] = [limitation('composed_from_fields_only')];
   if (input.retrieval.mode === 'deterministic_lexical') limitations.push(limitation('lexical_retrieval_only'));
-  if (input.droppedTerms > 0) limitations.push(limitation('terms_dropped'));
+  if (input.ignoredTerms.length > 0) limitations.push(limitation('terms_ignored'));
   if (input.considered > citations.length) limitations.push(limitation('bounded_retrieval'));
   if (citations.some((citation) => citation.stale)) limitations.push(limitation('superseded_records_cited'));
   if (byState.claimed > 0 || byState.observed > 0) limitations.push(limitation('unverified_truth_cited'));
@@ -1002,6 +1083,8 @@ export function assembleAnswer(input: {
     citations,
     considered: input.considered,
     terms: [...input.terms],
+    ignoredTerms: [...input.ignoredTerms],
+    match: input.match,
     truth: { cited: truthCited, byState, strongest },
     sources: input.sources,
     withheldFounderOnly: input.withheldFounderOnly,

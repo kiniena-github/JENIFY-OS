@@ -732,6 +732,7 @@ import {
   type CompanySearchView,
   type RetrievalMode,
   type SearchCorpus,
+  type TermMatch,
   type SearchDocument,
   type SearchEntityRef,
   type SearchIndexSnapshotView,
@@ -748,7 +749,7 @@ import {
   type MemoryPrivacy,
   type MemoryRecord as CompanyMemoryRecord,
 } from '../memory/schema.js';
-import type { SearchQuery } from '../archive/search.js';
+import { tokenize, type SearchQuery } from '../archive/search.js';
 import { isArchiveStatus, type ArchiveStatus, type DatedValue, type RelatedRefs } from '../archive/schema.js';
 
 // ---- result contract ----
@@ -10630,7 +10631,7 @@ export class HeadquarterOperations {
         corpus: this.#searchCorpus(),
         query,
         terms: normalized.terms,
-        droppedTerms: normalized.droppedTerms,
+        ignoredTerms: normalized.ignoredTerms,
         criteria: normalized.criteria,
         includeFounderOnly: options.includeFounderOnly === true,
         now: nowIso(),
@@ -10679,16 +10680,28 @@ export class HeadquarterOperations {
       : corpus.documents.filter((document) => document.privacy !== 'founder_only');
     const withheldFounderOnly = corpus.documents.length - readable.length;
 
+    // A question is normalized by exactly the same rule an explicit search is —
+    // one tokenizer, one stopword list — so the two surfaces can never disagree
+    // about what a word is. `ok: false` here means the question reduced to no
+    // usable term at all, which is an `unknown` answer rather than a refusal:
+    // the Founder asked something, and "I could not search on this" is the
+    // honest reply.
     const normalized = normalizeSearchQuery({ text: question });
     const terms = normalized.ok ? normalized.terms : [];
-    const droppedTerms = normalized.ok ? normalized.droppedTerms : 0;
+    const ignoredTerms = normalized.ok ? normalized.ignoredTerms : tokenize(question);
 
     const { adapter, statement } = resolveRetrievalAdapter(input.retrieval ?? 'deterministic_lexical');
+    // A QUESTION matches on `any_term`: a natural-language sentence carries
+    // words no canonical row will ever contain, and demanding all of them
+    // would answer every question with "no record" — a lie of omission dressed
+    // as an honest unknown. Which terms each cited row actually matched is
+    // published per citation, so the looser rule stays checkable.
+    const match: TermMatch = 'any_term';
     // A question with no searchable term retrieves NOTHING. It deliberately
     // does not fall through to "return everything ordered by date", which is
     // what the adapter does for an empty term list when search supplies a
     // structured filter instead.
-    const matched = terms.length === 0 ? [] : adapter.retrieve({ readable, terms });
+    const matched = terms.length === 0 ? [] : adapter.retrieve({ readable, terms, match });
     const limit = Math.min(Math.max(input.limit ?? ASK_CITATION_LIMIT, 1), ASK_CITATION_LIMIT);
 
     return ok(
@@ -10696,7 +10709,8 @@ export class HeadquarterOperations {
         question,
         askedAt,
         terms,
-        droppedTerms,
+        ignoredTerms,
+        match,
         retrieved: matched.slice(0, limit),
         considered: matched.length,
         sources: sourceStatuses(corpus, readable),
