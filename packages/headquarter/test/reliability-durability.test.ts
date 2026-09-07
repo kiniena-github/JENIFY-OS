@@ -576,8 +576,99 @@ describe('backup verification, against real bytes on disk', () => {
     try {
       const before = fs.readFileSync(fx.dbPath);
       const verification = verifyHqBackupFile(fx.dbPath);
-      expect(verification.verified).toBe(true);
+      // Still a pure read — not one byte moves. But the verdict is now a
+      // REFUSAL rather than `verified: true` (Wave 5 Medium 3): a live WAL
+      // database's committed content is not all in the file that would be
+      // digested, so vouching for it would record a digest that did not pin
+      // what SQLite checked.
+      expect(verification.verified).toBe(false);
+      expect(verification.refusals).toEqual(['file_has_uncheckpointed_wal']);
       expect(fs.readFileSync(fx.dbPath).equals(before)).toBe(true);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * Wave 5 Medium 3, as the exploit that found it: two candidates carried an
+   * identical `contentDigest` and an identical recorded size while their
+   * verified table counts differed, because the difference lived entirely in
+   * an un-digested `-wal` sidecar.
+   */
+  it('refuses a candidate whose committed content is not all in the file it would digest', () => {
+    const fx = fileFixture();
+    try {
+      const candidate = path.join(fx.dir, 'with-a-wal.sqlite');
+      const db = openHqDatabase(candidate);
+      db.exec('CREATE TABLE IF NOT EXISTS hq_events (x TEXT)');
+      db.exec('CREATE TABLE later_addition (x TEXT)');
+      // WAL mode with no checkpoint: the newest table is in the sidecar.
+      expect(fs.existsSync(`${candidate}-wal`)).toBe(true);
+      expect(fs.statSync(`${candidate}-wal`).size).toBeGreaterThan(0);
+
+      const refused = verifyHqBackupFile(candidate);
+      expect(refused.verified).toBe(false);
+      expect(refused.refusals).toEqual(['file_has_uncheckpointed_wal']);
+      // No digest is published for a file HQ will not stand behind.
+      expect(refused.digest).toBeNull();
+
+      // Checkpointed, the same path verifies and the digest pins what was
+      // checked.
+      db.pragma('wal_checkpoint(TRUNCATE)');
+      db.close();
+      const accepted = verifyHqBackupFile(candidate);
+      expect(accepted.verified).toBe(true);
+      expect(accepted.digest).toBe(
+        createHash('sha256').update(fs.readFileSync(candidate)).digest('hex'),
+      );
+      expect(accepted.schemaTables).toBeGreaterThanOrEqual(2);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * Wave 5 Low. `lstat` and `O_NOFOLLOW` cover the FINAL path component only,
+   * so a symlinked PARENT directory was followed silently and the register
+   * named an alias as if it were the file that had been checked. Recorded
+   * rather than refused — see `verifyHqBackupFile` for why refusing was
+   * rejected — so the divergence is visible and the REGISTER names the file HQ
+   * actually opened.
+   */
+  it('records the file it actually opened when an ancestor directory is a symlink', async () => {
+    const fx = fileFixture();
+    try {
+      const real = fs.realpathSync(path.join(fx.dir));
+      const vault = path.join(real, 'vault');
+      fs.mkdirSync(vault);
+      const backupPath = path.join(vault, 'hq-backup.sqlite');
+      await fx.db.backup(backupPath);
+      const direct = verifyHqBackupFile(backupPath);
+      expect(direct.verified).toBe(true);
+      expect(direct.resolvedPath).toBe(backupPath);
+
+      const link = path.join(real, 'vault-link');
+      fs.symlinkSync(vault, link);
+      const aliasPath = path.join(link, 'hq-backup.sqlite');
+      const throughLink = verifyHqBackupFile(aliasPath);
+      expect(throughLink.verified).toBe(true);
+      // The divergence is stated, not swallowed.
+      expect(throughLink.resolvedPath).not.toBe(aliasPath);
+      expect(throughLink.resolvedPath).toBe(backupPath);
+      expect(throughLink.digest).toBe(direct.digest);
+
+      // And the register names the real file, so the alias cannot become the
+      // recorded identity of a recovery point.
+      const recorded = expectOk(
+        fx.ops.recordVerifiedBackup({ backupPath: aliasPath, requestedBy: 'founder' }),
+      );
+      expect(recorded.backup.backupPath).toBe(backupPath);
+      // Recording it again under the real path is the SAME recovery point.
+      const again = expectOk(
+        fx.ops.recordVerifiedBackup({ backupPath, requestedBy: 'founder' }),
+      );
+      expect(again.deduplicated).toBe(true);
+      expect(again.backup.id).toBe(recorded.backup.id);
     } finally {
       fx.cleanup();
     }

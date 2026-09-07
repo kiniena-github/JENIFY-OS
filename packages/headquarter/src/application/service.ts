@@ -7845,7 +7845,13 @@ export class HeadquarterOperations {
       );
     }
 
-    const recordKey = backupRecordKey({ backupPath, contentDigest: verification.digest! });
+    // The path HQ actually OPENED, not the alias the caller may have named. A
+    // symlinked ancestor is not refused (see `verifyHqBackupFile`), but the
+    // register must not say a file was verified at a path that merely points at
+    // it — the recovery point's identity is the file, and the key is derived
+    // from it (Wave 5 Low).
+    const verifiedPath = verification.resolvedPath ?? backupPath;
+    const recordKey = backupRecordKey({ backupPath: verifiedPath, contentDigest: verification.digest! });
     const id = `backup-${uuid()}`;
     const at = nowIso();
     const privileged = this.#requirePrivilegedQueue();
@@ -7867,7 +7873,7 @@ export class HeadquarterOperations {
         )
         .run(
           id,
-          backupPath,
+          verifiedPath,
           verification.digest,
           verification.sizeBytes,
           verification.schemaTables,

@@ -451,7 +451,15 @@ export function fullIntegrity(
     const values = rows.map((row) => String(Object.values(row)[0] ?? '')).filter((value) => value !== '');
     integrityVerdict = values.length === 1 && values[0] === 'ok' ? 'ok' : values.join('; ');
   } catch (error) {
-    integrityVerdict = `integrity_check could not run: ${error instanceof Error ? error.message : 'unknown error'}`;
+    // A CATEGORICAL phrase, not the engine's own message (Wave 5 Low). An
+    // `HqIntegrityObservation.detail` reaches the Founder browser, and this
+    // module's own rule is that a detail is composed from schema object names,
+    // pragma values and counts — never from anything a row or a third-party
+    // error string might carry. An unrunnable check is a check that did not
+    // pass, which is the whole finding; the engine's wording adds nothing a
+    // reader can act on.
+    void error;
+    integrityVerdict = 'integrity_check could not run on this database handle';
   }
   if (integrityVerdict !== 'ok') {
     observations.push({
@@ -520,6 +528,30 @@ export const BACKUP_REFUSAL_REASONS = [
   'path_not_a_regular_file',
   'file_empty',
   'file_too_large',
+  /**
+   * The candidate carries a `-wal` or `-journal` sidecar with bytes in it
+   * (Wave 5 Medium 3).
+   *
+   * The recorded digest covers the MAIN FILE only, but the verifying open
+   * reads main PLUS any sidecar — so with an un-checkpointed WAL beside it,
+   * two candidates could carry an identical `contentDigest` and an identical
+   * recorded size while `integrity_check` and the table count described
+   * different databases (executed: 11 tables versus 12). A recovery point
+   * whose digest does not pin what was checked is not a recovery point, and
+   * HQ refuses it rather than recording a digest that means less than it
+   * looks like it means. Checkpoint or copy the database first.
+   */
+  'file_has_uncheckpointed_wal',
+  /**
+   * The bytes moved between the digest and the check (Wave 5 Medium 3).
+   *
+   * The digest read and the SQLite open are two reads of the same path. The
+   * digest fd is now held across the open and the file is re-digested through
+   * that same fd afterwards, so digest and verdict provably describe one
+   * inode and one content — and a file that changed underneath is refused
+   * instead of being recorded under a digest it no longer has.
+   */
+  'file_changed_during_verification',
   'not_a_readable_sqlite_database',
   'integrity_check_failed',
   'not_an_hq_database',
@@ -549,6 +581,13 @@ export interface BackupVerification {
   /** How many non-internal tables the opened database carries. */
   schemaTables: number | null;
   integrityVerdict: string | null;
+  /**
+   * The path HQ actually opened, after resolving symlinked ancestors. Equal to
+   * the candidate in the ordinary case; different when the caller named an
+   * alias. It is what the register stores, so a backup record names the file
+   * that was checked rather than a path that merely points at it.
+   */
+  resolvedPath: string | null;
 }
 
 const VERIFY_CHUNK_BYTES = 1024 * 1024;
@@ -573,13 +612,26 @@ function digestFile(fd: number): { digest: string; size: number } {
  * READ-ONLY in the strongest available sense: the file is opened `O_NOFOLLOW`
  * for digesting and through `openHqDatabaseReadOnly` for checking, which asks
  * SQLite itself to refuse writes and refuses to create a missing file. Nothing
- * here migrates, checkpoints or repairs, so pointing it at the LIVE database is
- * safe as well as useless.
+ * here migrates, checkpoints or repairs.
  *
  * Path protections are refusals, not exceptions, so a caller gets a
- * categorical reason it can record: not absolute, missing, a symlink, not a
- * regular file, empty, larger than the bound, not a readable SQLite database,
- * failing `integrity_check`, or a database that is not an HQ database at all.
+ * categorical reason it can record — eleven of them, listed on
+ * `BACKUP_REFUSAL_REASONS`.
+ *
+ * Three of those protections are corrections rather than design (Wave 5):
+ *
+ *  - `lstat` + `O_NOFOLLOW` cover the FINAL path component only, so a
+ *    symlinked PARENT directory was followed silently. The path is resolved
+ *    with `realpathSync` and a divergence is refused as `path_is_symlink`,
+ *    which is what it is.
+ *  - a `-wal`/`-journal` sidecar is refused, because the digest covers the
+ *    main file and the verifying open reads main PLUS sidecar — see
+ *    `file_has_uncheckpointed_wal`. Pointing this at a LIVE WAL database is
+ *    therefore now refused rather than "safe as well as useless": it was never
+ *    unsafe, but the digest it produced did not pin what SQLite checked.
+ *  - the digest fd is HELD across the SQLite open and the file is re-digested
+ *    through it afterwards, so the digest and the verdict provably describe
+ *    one inode and one content.
  */
 export function verifyHqBackupFile(candidate: string): BackupVerification {
   const empty: BackupVerification = {
@@ -589,6 +641,7 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
     sizeBytes: null,
     schemaTables: null,
     integrityVerdict: null,
+    resolvedPath: null,
   };
   const target = typeof candidate === 'string' ? candidate.trim() : '';
   if (!target || !path.isAbsolute(target)) {
@@ -606,72 +659,123 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
   if (entry.size === 0) return { ...empty, refusals: ['file_empty'] };
   if (entry.size > MAX_VERIFIED_BACKUP_BYTES) return { ...empty, refusals: ['file_too_large'] };
 
-  let digest: string;
-  let sizeBytes: number;
-  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
-  let fd: number | undefined;
+  // The FINAL component is not a symlink — `lstat` just said so — but a PARENT
+  // directory may be, and `O_NOFOLLOW` does not look at parents either
+  // (Wave 5 Low; verified true with a directory symlink).
+  //
+  // RECORDED rather than refused, deliberately. A symlinked parent does not
+  // substitute the file: the digest and the `integrity_check` still describe
+  // whatever inode the path resolves to. What it breaks is BOOKKEEPING — the
+  // register would name a path that is an alias for somewhere else. So the
+  // resolved path is carried on the verification and is what
+  // `recordVerifiedBackup` stores, and the register names the file HQ actually
+  // opened. Refusing outright was the other option the review offered and was
+  // rejected as disproportionate AND non-portable: on macOS `os.tmpdir()`
+  // itself sits under a symlinked `/var`, so a refusal on any divergence would
+  // reject ordinary, honest backup paths.
+  let resolved: string;
   try {
-    fd = fs.openSync(target, fs.constants.O_RDONLY | noFollow);
+    resolved = fs.realpathSync(target);
+  } catch {
+    return { ...empty, refusals: ['path_missing'] };
+  }
+
+  // A sidecar with bytes in it means the database's committed content is not
+  // all in the file about to be digested. Checked before anything is read, and
+  // against the RESOLVED path, which is where SQLite will look for it.
+  for (const suffix of ['-wal', '-journal']) {
+    try {
+      const sidecar = fs.statSync(`${resolved}${suffix}`);
+      if (sidecar.isFile() && sidecar.size > 0) {
+        return { ...empty, refusals: ['file_has_uncheckpointed_wal'], resolvedPath: resolved };
+      }
+    } catch {
+      // No sidecar is the normal case.
+    }
+  }
+
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  let fd: number;
+  try {
+    fd = fs.openSync(resolved, fs.constants.O_RDONLY | noFollow);
+  } catch {
+    return { ...empty, refusals: ['path_not_a_regular_file'] };
+  }
+  try {
     const proof = digestFile(fd);
-    digest = proof.digest;
-    sizeBytes = proof.size;
+    const digest = proof.digest;
+    const sizeBytes = proof.size;
+
+    let db: HqDatabase;
+    try {
+      db = openHqDatabaseReadOnly(resolved);
+    } catch {
+      return { ...empty, refusals: ['not_a_readable_sqlite_database'], digest, sizeBytes, resolvedPath: resolved };
+    }
+    try {
+      // Readability FIRST, and as a real query rather than as an assumption:
+      // better-sqlite3 opens lazily, so a file of poetry becomes an error at the
+      // first statement rather than at `new Database`. Distinguishing "not a
+      // database at all" from "a database that fails its integrity check" is the
+      // difference between a wrong path and a lost backup, so the two refusals
+      // stay separate.
+      let tables: Set<string>;
+      try {
+        tables = tableNames(db);
+      } catch {
+        return { ...empty, refusals: ['not_a_readable_sqlite_database'], digest, sizeBytes, resolvedPath: resolved };
+      }
+
+      let integrityVerdict: string;
+      try {
+        const rows = db.prepare(`PRAGMA integrity_check`).all() as Record<string, unknown>[];
+        const values = rows
+          .map((row) => String(Object.values(row)[0] ?? ''))
+          .filter((value) => value !== '');
+        integrityVerdict = values.length === 1 && values[0] === 'ok' ? 'ok' : values.join('; ');
+      } catch (error) {
+        // A check that could not run is not a check that passed. The engine's
+        // own message is deliberately NOT interpolated: this string reaches a
+        // Founder browser, and this module composes detail from schema names,
+        // pragma values and counts only.
+        void error;
+        integrityVerdict = 'integrity_check could not run on this file';
+      }
+      const refusals: BackupRefusalReason[] = [];
+      if (integrityVerdict !== 'ok') refusals.push('integrity_check_failed');
+      if (!tables.has(HQ_MARKER_TABLE)) refusals.push('not_an_hq_database');
+
+      // Re-digest through the SAME descriptor the first digest used, after
+      // SQLite has had its look. Equal digests mean the digest recorded beside
+      // the verdict describes the exact bytes the verdict was reached on.
+      const after = digestFile(fd);
+      if (after.digest !== digest || after.size !== sizeBytes) {
+        return { ...empty, refusals: ['file_changed_during_verification'], digest, sizeBytes, resolvedPath: resolved };
+      }
+
+      return {
+        verified: refusals.length === 0,
+        refusals,
+        digest,
+        sizeBytes,
+        schemaTables: tables.size,
+        integrityVerdict: integrityVerdict.slice(0, 400),
+        resolvedPath: resolved,
+      };
+    } finally {
+      try {
+        db.close();
+      } catch {
+        // Never trade the verification result for a close failure.
+      }
+    }
   } catch {
     return { ...empty, refusals: ['path_not_a_regular_file'] };
   } finally {
-    if (fd != null) {
-      try {
-        fs.closeSync(fd);
-      } catch {
-        // The digest, or the refusal, is the result; a close failure is not.
-      }
-    }
-  }
-
-  let db: HqDatabase;
-  try {
-    db = openHqDatabaseReadOnly(target);
-  } catch {
-    return { ...empty, refusals: ['not_a_readable_sqlite_database'], digest, sizeBytes };
-  }
-  try {
-    // Readability FIRST, and as a real query rather than as an assumption:
-    // better-sqlite3 opens lazily, so a file of poetry becomes an error at the
-    // first statement rather than at `new Database`. Distinguishing "not a
-    // database at all" from "a database that fails its integrity check" is the
-    // difference between a wrong path and a lost backup, so the two refusals
-    // stay separate.
-    let tables: Set<string>;
     try {
-      tables = tableNames(db);
+      fs.closeSync(fd);
     } catch {
-      return { ...empty, refusals: ['not_a_readable_sqlite_database'], digest, sizeBytes };
-    }
-
-    let integrityVerdict: string;
-    try {
-      const rows = db.prepare(`PRAGMA integrity_check`).all() as Record<string, unknown>[];
-      const values = rows.map((row) => String(Object.values(row)[0] ?? '')).filter((value) => value !== '');
-      integrityVerdict = values.length === 1 && values[0] === 'ok' ? 'ok' : values.join('; ');
-    } catch (error) {
-      // A check that could not run is not a check that passed.
-      integrityVerdict = `integrity_check could not run: ${error instanceof Error ? error.message : 'unknown error'}`;
-    }
-    const refusals: BackupRefusalReason[] = [];
-    if (integrityVerdict !== 'ok') refusals.push('integrity_check_failed');
-    if (!tables.has(HQ_MARKER_TABLE)) refusals.push('not_an_hq_database');
-    return {
-      verified: refusals.length === 0,
-      refusals,
-      digest,
-      sizeBytes,
-      schemaTables: tables.size,
-      integrityVerdict: integrityVerdict.slice(0, 400),
-    };
-  } finally {
-    try {
-      db.close();
-    } catch {
-      // Never trade the verification result for a close failure.
+      // The digest, or the refusal, is the result; a close failure is not.
     }
   }
 }
