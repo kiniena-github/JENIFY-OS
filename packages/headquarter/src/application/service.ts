@@ -503,6 +503,7 @@ import {
   MAX_MEMORY_BODY_LENGTH,
   MAX_MEMORY_LIST_ITEMS,
   MAX_MEMORY_PROJECT_LABEL_LENGTH,
+  MAX_MEMORY_RECORDED_SOURCE_LENGTH,
   MAX_MEMORY_SOURCE_REF_LENGTH,
   MAX_MEMORY_TAG_LENGTH,
   MAX_MEMORY_TITLE_LENGTH,
@@ -738,7 +739,7 @@ import {
   type SearchIndexSnapshotView,
   type SearchSourceId,
 } from './search-command.js';
-import { CLIENT_IDENTITY_KEYS } from '../live/auth.js';
+import { isClientIdentityKey } from '../live/auth.js';
 import { ensureMemoryTables, memorySchemaPresent, MemoryStore, searchMemory } from '../memory/store.js';
 import {
   MEMORY_KINDS,
@@ -1334,7 +1335,10 @@ function normalizeWorkSpec(
       return null;
     }
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      if (CLIENT_IDENTITY_KEYS.includes(key)) {
+      // Case-INSENSITIVE since Phase 11 (the same carry-forward Low the
+      // boundary's own scan carried): an exact match let `RequestedBy` through
+      // a guard written to refuse `requestedBy`.
+      if (isClientIdentityKey(key)) {
         return `${field}: a spec payload may not carry the reserved key '${key}'`;
       }
       const problem = walk(entry, depth + 1);
@@ -5925,6 +5929,27 @@ export class HeadquarterOperations {
     const taskId = input.taskId?.trim() || null;
     const supersedes = input.supersedes?.trim() || null;
 
+    // Phase 11 hardening of a carry-forward Low. `recorded.source` is
+    // caller-supplied free text that is PERSISTED (hq_memory.recorded_source),
+    // PUBLISHED (memoryBrowserView.recorded.source, which rides the
+    // unauthenticated artifact for an internal record) and, since Phase 11,
+    // INDEXED by search. Until now nothing bounded it and nothing scanned it:
+    // `recorded.date` and `recorded.confidence` were checked by the store's
+    // validator, and `source` fell through both. Bounded here and scanned with
+    // the rest of the persisted text below.
+    const recordedSource = input.recorded?.source;
+    if (recordedSource !== undefined && recordedSource !== null) {
+      if (typeof recordedSource !== 'string') {
+        return fail('invalid_input', 'recorded.source must be text when stated');
+      }
+      if (recordedSource.length > MAX_MEMORY_RECORDED_SOURCE_LENGTH) {
+        return fail(
+          'invalid_input',
+          `recorded.source exceeds ${MAX_MEMORY_RECORDED_SOURCE_LENGTH} characters`,
+        );
+      }
+    }
+
     const refusedRecorder = this.#resolveMemoryRecorder(input.requestedBy, 'record memory');
     if (refusedRecorder) return refusedRecorder;
     const refusedCapability = this.#memoryCapabilityGate('record memory');
@@ -5952,6 +5977,10 @@ export class HeadquarterOperations {
         tags: tags.value,
         sourceRefs: sourceRefs.value,
         related: related.value,
+        // Phase 11 hardening: the date's provenance note is persisted and
+        // published like everything above it, so it is scanned like everything
+        // above it.
+        recordedSource: recordedSource ?? null,
       });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));

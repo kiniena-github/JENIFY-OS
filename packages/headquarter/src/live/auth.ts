@@ -175,6 +175,25 @@ export const CLIENT_IDENTITY_KEYS: readonly string[] = [
 
 export type ClientIdentityScan = { ok: true } | { ok: false; key: string };
 
+/**
+ * The reserved keys, folded once, so the match below is CASE-INSENSITIVE.
+ *
+ * Phase 11 hardening of a carry-forward Low. The match used to be
+ * `CLIENT_IDENTITY_KEYS.includes(key)` — exact, so `RequestedBy`,
+ * `PrincipalId` and `TOKEN` all sailed past a guard whose whole purpose is to
+ * refuse a client that names who is acting. JSON keys are case-sensitive and
+ * every legitimate HQ body spells these in camelCase, so folding narrows
+ * nothing a real caller uses; it closes a bypass that took one keystroke.
+ */
+const RESERVED_IDENTITY_KEYS_FOLDED: ReadonlySet<string> = new Set(
+  CLIENT_IDENTITY_KEYS.map((key) => key.toLowerCase()),
+);
+
+/** True when this key names identity or trust, whatever its casing. */
+export function isClientIdentityKey(key: string): boolean {
+  return RESERVED_IDENTITY_KEYS_FOLDED.has(key.toLowerCase());
+}
+
 /** Refuse a body that tries to name who is acting. Top level and one nesting deep. */
 export function scanForClientIdentity(body: unknown, depth = 0): ClientIdentityScan {
   if (body == null || typeof body !== 'object') return { ok: true };
@@ -186,7 +205,7 @@ export function scanForClientIdentity(body: unknown, depth = 0): ClientIdentityS
     return { ok: true };
   }
   for (const key of Object.keys(body as Record<string, unknown>)) {
-    if (CLIENT_IDENTITY_KEYS.includes(key)) return { ok: false, key };
+    if (isClientIdentityKey(key)) return { ok: false, key };
     if (depth < 3) {
       const nested = scanForClientIdentity((body as Record<string, unknown>)[key], depth + 1);
       if (!nested.ok) return nested;

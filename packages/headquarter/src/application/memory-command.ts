@@ -79,6 +79,14 @@ export const MAX_MEMORY_LIST_ITEMS = 20;
 export const MAX_MEMORY_TAG_LENGTH = 60;
 /** Source refs are locators (paths, URLs, `hq://` ids) — longer than tags, still bounded. */
 export const MAX_MEMORY_SOURCE_REF_LENGTH = 500;
+/**
+ * `recorded.source` — the caller's free-text note about where the DATE came
+ * from ("git author date", "chat log"). Bounded since Phase 11, because it is
+ * persisted, published on `memoryBrowserView`, and indexed by search: an
+ * unbounded, unscanned field on a published projection is exactly the shape a
+ * secret gets smuggled through.
+ */
+export const MAX_MEMORY_RECORDED_SOURCE_LENGTH = 200;
 
 // ---- idempotency ----
 

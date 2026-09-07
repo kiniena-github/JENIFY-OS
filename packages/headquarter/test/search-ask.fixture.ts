@@ -68,12 +68,18 @@ export function searchFixture(): SearchFixture {
     }),
   ).record;
 
+  // Explicit recorded dates on this chain, deliberately: everything else in
+  // the fixture takes `nowIso()`, and two records written in the same
+  // millisecond tie on time and fall through to the id tiebreak — which is
+  // deterministic for a given corpus but arbitrary across fixture runs. The
+  // ordering assertions that use this chain want a real time difference.
   const superseded = expectOk(
     fx.ops.recordMemory({
       kind: 'task_state',
       title: 'krypton budget, first cut',
       body: 'The krypton budget was set at four seconds.',
       project: 'qos',
+      recorded: { date: '2026-08-01T00:00:00.000Z', confidence: 'exact', source: 'founder note' },
       requestedBy: 'founder',
     }),
   ).record;
@@ -83,6 +89,7 @@ export function searchFixture(): SearchFixture {
       title: 'krypton budget, revised',
       body: 'The krypton budget is now two and a half seconds.',
       project: 'qos',
+      recorded: { date: '2026-09-01T00:00:00.000Z', confidence: 'exact', source: 'founder note' },
       supersedes: superseded.id,
       requestedBy: 'founder',
     }),
