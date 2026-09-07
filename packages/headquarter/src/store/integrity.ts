@@ -1303,8 +1303,10 @@ export function structuralIntegrity(
           : '') +
         regressionDetail +
         ` HQ re-creates the guards it declares on every boot, so they may stand again ` +
-        `now — but it cannot know what was written while they were gone, so the finding stands until a full ` +
-        `assessment says otherwise.`,
+        `now — but it cannot know what was written while they were gone. A missing GUARD is cleared by a ` +
+        `full assessment of the file as it then stands, because re-creating a trigger really does repair ` +
+        `the file's guard set; a ledger that was ABSENT or that is back EMPTY is not, because re-creating ` +
+        `a table does not bring back the rows.`,
     });
   } else if (regressed.length > 0) {
     observations.push({
