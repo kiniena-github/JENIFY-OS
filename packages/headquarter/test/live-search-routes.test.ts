@@ -211,6 +211,55 @@ describe('GET /search', () => {
     expect(h.audit.at(-1)!.detail).toBe('unsafe_query');
   });
 
+  it('scans EVERY free-text criterion, not only ?text=', () => {
+    // The Wave 4 Medium. `project` and `tag` are two of the five criteria and
+    // are echoed VERBATIM into `criteria` — `text` survives only as tokenized
+    // terms — so they were the two most able to carry a credential back out.
+    // The last-resort `safe()` guard did stop the disclosure, but it turned
+    // the designed 400 `unsafe_query` into an opaque 500 `internal` AFTER the
+    // read had already been audited `allowed`. All three now refuse the same
+    // way, at the same place, before the facade is called.
+    const credential = 'api_key: sk-live-4f2a9c7e1b8d3f6a0c5e2b9d7f4a1c8e';
+    const queries: Record<string, string>[] = [
+      { project: credential },
+      { tag: credential },
+      { text: 'zircon', project: credential },
+      { text: 'zircon', tag: credential },
+      { text: credential },
+    ];
+    for (const query of queries) {
+      const h = harness();
+      const response = search(h, query);
+      const label = JSON.stringify(Object.keys(query));
+      expect(response.status, label).toBe(400);
+      expect((response.body.error as { code: string }).code, label).toBe('unsafe_query');
+      // The credential is not echoed, and — the second half of the finding —
+      // the refused read is never recorded as an allowed one.
+      expect(JSON.stringify(response.body), label).not.toContain('sk-live-');
+      expect(h.audit.map((entry) => `${entry.outcome}:${entry.detail}`), label).toEqual([
+        'refused:unsafe_query',
+      ]);
+      expect(h.audit.some((entry) => entry.outcome === 'allowed'), label).toBe(false);
+    }
+  });
+
+  it('still answers an honest project or tag criterion', () => {
+    // The guard refuses credential SHAPES, not the criteria themselves: a
+    // scan that broke ordinary filtering would be a worse bug than the one it
+    // fixed.
+    const h = harness();
+    const queries: Record<string, string>[] = [
+      { project: 'zircon' },
+      { tag: 'zircon' },
+      { text: 'zircon', tag: 'zircon' },
+    ];
+    for (const query of queries) {
+      const response = search(h, query);
+      expect(response.status, JSON.stringify(query)).toBe(200);
+    }
+    expect(h.audit.every((entry) => entry.detail === 'company_search')).toBe(true);
+  });
+
   it('carries no fabricated number anywhere on the response', () => {
     const h = harness();
     const wire = JSON.stringify(search(h, { text: 'zircon' }).body);
@@ -253,6 +302,31 @@ describe('GET /ask', () => {
     const unsafe = ask(h, 'is the key sk-abcdefghijklmnopqrstuv still valid?');
     expect(unsafe.status).toBe(400);
     expect((unsafe.body.error as { code: string }).code).toBe('unsafe_question');
+  });
+
+  it('reads `question` and no other query key, so it has no unscanned free text', () => {
+    // The same class of gap the search route had, checked here rather than
+    // assumed: if Ask Jenify ever read a second free-text parameter, this
+    // credential would reach the facade unscanned. Today it is ignored
+    // entirely — the answer is unchanged and nothing echoes it.
+    const credential = 'api_key: sk-live-4f2a9c7e1b8d3f6a0c5e2b9d7f4a1c8e';
+    const h = harness();
+    const plain = ask(h, 'What is verified about the tantalum measurement run?');
+    const spiked = h.call({
+      path: CONTROL_ROUTES.ask,
+      query: {
+        question: 'What is verified about the tantalum measurement run?',
+        text: credential,
+        project: credential,
+        tag: credential,
+        source: credential,
+      },
+    });
+    expect(spiked.status).toBe(200);
+    expect(JSON.stringify(spiked.body)).not.toContain('sk-live-');
+    expect((spiked.body.answer as { response: string }).response).toBe(
+      (plain.body.answer as { response: string }).response,
+    );
   });
 
   it('gives a signed-in non-Founder nothing', () => {

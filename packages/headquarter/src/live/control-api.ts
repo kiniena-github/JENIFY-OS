@@ -2414,26 +2414,38 @@ function searchCompanyRoute(
     return refusal(400, 'invalid_input', 'limit must be a small positive whole number.');
   }
   const text = (query.text ?? '').trim();
-  // The browser boundary's stricter scan of the query TEXT, before anything is
-  // matched: a query carrying credential-shaped material is refused here
-  // rather than echoed back inside `criteria` and `terms` (the memory-intake
-  // precedent).
+  const project = (query.project ?? '').trim();
+  const tag = (query.tag ?? '').trim();
+  // The browser boundary's stricter scan of EVERY free-text criterion, before
+  // anything is matched: a query carrying credential-shaped material is
+  // refused here rather than echoed back inside `criteria` and `terms` (the
+  // memory-intake precedent).
+  //
+  // `project` and `tag` are scanned for the same reason `text` is, and the
+  // omission was not cosmetic: `normalizeSearchQuery` echoes both VERBATIM
+  // into `criteria` (`text` survives only as tokenized terms), so they were
+  // the two criteria most able to carry a credential back out. The last-resort
+  // `safe()` guard did stop the disclosure, but it turned the designed
+  // `400 unsafe_query` into an opaque `500 internal` AFTER the read had
+  // already been audited `allowed`. `year` needs no scan: it is pinned to four
+  // digits, and `source` to the closed registry, both above.
   try {
-    assertBrowserSafe({ text }, 'search');
+    assertBrowserSafe({ text, project, tag }, 'search');
   } catch {
     audit('refused', 'unsafe_query', founder);
     return refusal(
       400,
       'unsafe_query',
-      'The search text looks like it contains credential material, so it was refused rather than matched.',
+      'The search text, project or tag looks like it contains credential material, so the query was ' +
+        'refused rather than matched.',
     );
   }
   const result = deps.ops.searchCompany(
     {
       text: text || undefined,
       sources: rawSources.length > 0 ? (rawSources as SearchSourceId[]) : undefined,
-      project: (query.project ?? '').trim() || undefined,
-      tag: (query.tag ?? '').trim() || undefined,
+      project: project || undefined,
+      tag: tag || undefined,
       year: (query.year ?? '').trim() || undefined,
       limit: limitText === '' ? undefined : Number(limitText),
     },
