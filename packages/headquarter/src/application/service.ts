@@ -8725,12 +8725,24 @@ export class HeadquarterOperations {
    * missions was governed by one of their ceilings and not the other; and it
    * excluded the `provider` scope on the argument that a cost entry's
    * `providerId` is caller-declared and in a different vocabulary from the
-   * execution binding. That argument was true of the head it was written
-   * against and is not true here — `recordIntelligenceCost` refuses a
-   * `providerId` that contradicts `#taskBoundProvider`
-   * (`provider_binding_mismatch`), so the two vocabularies are one by
-   * enforcement, and a Founder's provider ceiling therefore binds a decision
-   * write instead of merely being reported.
+   * execution binding.
+   *
+   * **Both of those arguments were more right than the answer that replaced
+   * them, and the third correction round had to finish the job** (High B1,
+   * High B2). Deriving EVERY mission here was necessary and was not
+   * sufficient: the cost entry's own `mission_id` column holds one value, and
+   * `#entriesForScope` matched THAT — so a task linked to two missions had the
+   * non-first mission's ceiling evaluated against zero entries, and which of
+   * the two bound was decided by uuid sort order. And the "different
+   * vocabulary" objection was literally true rather than obsolete: the
+   * refusal it was answered with (`provider_binding_mismatch`) made a cost
+   * entry against a provider-bound task IMPOSSIBLE, so the provider scope was
+   * dead and its ceiling stayed at `observed: 0` forever.
+   *
+   * Both are closed now, and neither by an argument: `#entriesForScope`
+   * derives mission, project and provider membership from canonical truth per
+   * entry, and `normalizeProviderId` folds the canonical uppercase binding into
+   * this lane's slug vocabulary so the two really are one.
    */
   #governingBudgetScopes(taskId: string): GoverningBudgetScope[] {
     const scopes: GoverningBudgetScope[] = [
