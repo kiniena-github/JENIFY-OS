@@ -63,17 +63,29 @@
  *    full assessment read CLEAN. Point 4 is the answer, and it is a commitment
  *    recorded outside this table rather than a fourth reading of the table.
  *
- * The residual is stated rather than glossed, and every barrier named in it has
- * been tried: against a writer that already holds the database file open,
- * rewriting the log coherently AND dropping `hq_integrity_checkpoints` (or
- * appending to it a commitment that matches the forgery — which does not work
- * on its own, because every commitment ever recorded is checked and the
- * per-ledger comparison takes the maximum) leaves the forgery undetected once
- * HQ has re-created the checkpoint ledger empty and a later process has nothing
- * to measure against. That is more deliberate acts than before, across two
- * engine-guarded ledgers and a census that reports each drop at the boot that
- * observes it — a real cost, and still not a cryptographic boundary. HQ holds
- * no key a foreign writer does not also have; nothing here pretends otherwise.
+ * The residual is stated rather than glossed, at the CHEAPEST price found and
+ * with the version WITHOUT each named barrier executed first. The previous
+ * round's sentence here named DROPPING `hq_integrity_checkpoints` as what the
+ * surviving attack costs, and that was false in the reassuring direction (Wave
+ * 5 correction round six, Medium 1): the drop costs a restart and a second
+ * Founder act, while wiping the commitments' ROWS in place — drop the ledger's
+ * three triggers, `DELETE`, INSERT one row agreeing with the forged log,
+ * re-create the triggers — left the table present, the census silent and the
+ * forgery accepted from the very next boot at zero restarts and zero Founder
+ * acts. That free version is now blocking: the commitment ledger's row count,
+ * greatest rowid and AUTOINCREMENT high-water mark are one number or rows were
+ * elided from it (`elidedCommitmentLedgerRows`). Appending a commitment that
+ * matches the forgery has never worked on its own, because every commitment
+ * ever recorded is checked and the per-ledger comparison takes the maximum.
+ *
+ * What SURVIVES, executed: the same in-place wipe with that invariant repaired
+ * — the replacement inserted at an explicit `seq = 1`, then one `UPDATE
+ * sqlite_sequence` for that ledger, which no trigger can guard. Measured
+ * `boot=false assess=false release=ADMITTED`. So the cost is one explicit rowid
+ * and one extra `UPDATE`, across two engine-guarded ledgers and a census that
+ * reports a drop at the boot that observes it — a real cost, and still not a
+ * cryptographic boundary. HQ holds no key a foreign writer does not also have;
+ * nothing here pretends otherwise.
  */
 
 import { createHash } from 'node:crypto';
