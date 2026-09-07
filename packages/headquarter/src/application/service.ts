@@ -82,7 +82,6 @@ import {
   type ApprovalRejection,
 } from '../operator/approvals.js';
 import {
-  assertNoSecretLikeContent,
   ensureEvidenceGuards,
   verifyEvidenceChain,
   type EvidenceEntry,
@@ -109,6 +108,36 @@ import {
 } from '../operator/provider-binding.js';
 import { assertBrowserSafe } from '../live/redaction.js';
 import { PROVIDERS, type ProviderId } from '../routing/providers.js';
+
+/**
+ * The credential scan EVERY facade write applies to caller-supplied text.
+ *
+ * One function, and it is the SAME function the read boundary uses. That
+ * identity is the whole point (Wave 5 correction round four, High H3): the two
+ * boundaries used to be different checks, and the write side was the weaker
+ * one. `assertNoSecretLikeContent` is an `api_key: value` heuristic, so
+ * `sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345`, `ghp_...`, `-----BEGIN RSA PRIVATE
+ * KEY-----` and `Bearer ...` were all STORED as a run label or a decision
+ * label — and `control-api.ts`'s `safe()` then applied the strict, shape-based
+ * `assertBrowserSafe` to every response. The rows are append-only, so
+ * `GET /api/control/reliability` and `GET /api/control/intelligence` returned
+ * `500 internal` on every subsequent read, FOREVER, and no `DELETE`/`UPDATE`
+ * could take the row back out. One accepted write permanently bricked two
+ * Founder read routes.
+ *
+ * An asymmetric pair like that is the defect, not the individual check: any
+ * text a write accepts and a read refuses is a permanent outage waiting to be
+ * typed. So the strict scan is applied HERE, at every write, and a value that
+ * could never be served is refused before it is stored rather than after.
+ *
+ * The scan is strictly stronger than the one it replaces —
+ * `assertBrowserSafe` applies the shape rules AND then the same
+ * `assertNoSecretLikeContent` heuristic — so nothing that used to be refused is
+ * now accepted.
+ */
+function assertNoCredentialShape(fields: Record<string, unknown>): void {
+  assertBrowserSafe(fields, 'stored_text');
+}
 
 /**
  * The only actors an in-process system lane may append evidence under.
@@ -3070,7 +3099,7 @@ export class HeadquarterOperations {
     // anywhere.
     if (input.note !== undefined) {
       try {
-        assertNoSecretLikeContent({ note: input.note });
+        assertNoCredentialShape({ note: input.note });
       } catch {
         return fail(
           'invalid_input',
@@ -3125,7 +3154,7 @@ export class HeadquarterOperations {
     // one: a different guard would reopen the gap from the other side, where
     // this check passes and the append still throws.
     try {
-      assertNoSecretLikeContent({ reason: input.reason });
+      assertNoCredentialShape({ reason: input.reason });
     } catch {
       return fail(
         'invalid_input',
@@ -4004,7 +4033,7 @@ export class HeadquarterOperations {
     const reason = missionText('reason', input.reason, MAX_ASSIGNMENT_RATIONALE_LENGTH, true);
     if (!reason.ok) return fail('invalid_input', reason.message);
     try {
-      assertNoSecretLikeContent({ reason: reason.value });
+      assertNoCredentialShape({ reason: reason.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -4064,7 +4093,7 @@ export class HeadquarterOperations {
     if (!rationale.ok) return fail('invalid_input', rationale.message);
     if (rationale.value) {
       try {
-        assertNoSecretLikeContent({ rationale: rationale.value });
+        assertNoCredentialShape({ rationale: rationale.value });
       } catch (error) {
         return fail('invalid_input', errorMessage(error));
       }
@@ -4353,7 +4382,7 @@ export class HeadquarterOperations {
     const actor = this.#resolveActor(input.proposedBy, 'raise a mission proposal');
     if (!actor.ok) return actor;
     try {
-      assertNoSecretLikeContent(input.payload);
+      assertNoCredentialShape(input.payload);
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -4691,7 +4720,7 @@ export class HeadquarterOperations {
     // payloads are Founder input headed for storage, so they are scanned on
     // exactly the same terms.
     try {
-      assertNoSecretLikeContent({
+      assertNoCredentialShape({
         title: title.value,
         objective: objective.value,
         scope: scope.value,
@@ -4972,7 +5001,7 @@ export class HeadquarterOperations {
     }
     if (note) {
       try {
-        assertNoSecretLikeContent({ note });
+        assertNoCredentialShape({ note });
       } catch (error) {
         return fail('invalid_input', errorMessage(error));
       }
@@ -5148,7 +5177,7 @@ export class HeadquarterOperations {
     }
 
     try {
-      assertNoSecretLikeContent({
+      assertNoCredentialShape({
         amendment: amendment.value,
         objective: objective.value,
         constraints: constraints.value,
@@ -6303,7 +6332,7 @@ export class HeadquarterOperations {
     if (refusedCapability) return refusedCapability;
     // Everything that will be PERSISTED is scanned before anything is written.
     try {
-      assertNoSecretLikeContent({ name: name.value, purpose: purpose.value, stream: stream.value });
+      assertNoCredentialShape({ name: name.value, purpose: purpose.value, stream: stream.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -6425,7 +6454,7 @@ export class HeadquarterOperations {
     if (nextStream !== current.stream) changed.push('stream');
     if (changed.length === 0) return ok(current);
     try {
-      assertNoSecretLikeContent({ name: nextName, purpose: nextPurpose, stream: nextStream });
+      assertNoCredentialShape({ name: nextName, purpose: nextPurpose, stream: nextStream });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -6528,7 +6557,7 @@ export class HeadquarterOperations {
       );
     }
     try {
-      assertNoSecretLikeContent({ note });
+      assertNoCredentialShape({ note });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -6735,7 +6764,7 @@ export class HeadquarterOperations {
       );
     }
     try {
-      assertNoSecretLikeContent({
+      assertNoCredentialShape({
         name: name.value,
         problem: problem.value,
         targetUsers: targetUsers.value,
@@ -6889,7 +6918,7 @@ export class HeadquarterOperations {
       );
     }
     try {
-      assertNoSecretLikeContent({ note });
+      assertNoCredentialShape({ note });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -7005,7 +7034,7 @@ export class HeadquarterOperations {
     const product = this.#productRecordFromStore(input.productId);
     if (!product) return fail('unknown_product', `Unknown product: ${input.productId}`);
     try {
-      assertNoSecretLikeContent({ name: name.value, locator: locator.value, note: note.value });
+      assertNoCredentialShape({ name: name.value, locator: locator.value, note: note.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -7509,9 +7538,18 @@ export class HeadquarterOperations {
     const label = missionText('label', input.label, MAX_RUN_LABEL_LENGTH, true);
     if (!label.ok) return fail('invalid_input', label.message);
     try {
-      assertNoSecretLikeContent({ label: label.value });
+      assertNoCredentialShape({ label: label.value });
     } catch {
-      return fail('invalid_input', 'The run label looks like it contains a credential; nothing was recorded.');
+      // The message names what was actually checked (Wave 5 correction round
+      // four, Low L2). It used to say "looks like it contains a credential"
+      // over a check that only recognised an `api_key: value` assignment, so a
+      // caller told a bare `sk-...` had been shape-detected when it had been
+      // stored. It is shape-detected NOW, and the wording can say so.
+      return fail(
+        'invalid_input',
+        'The run label matches a known credential shape, or names a credential holder; a label is stored ' +
+          'permanently and served on the Founder reliability route, so nothing was recorded.',
+      );
     }
     if (!this.#reliabilityStorePresent) {
       return fail('invalid_input', 'run ledger unavailable on this database handle');
@@ -7790,7 +7828,7 @@ export class HeadquarterOperations {
     const note = missionText('note', input.note, MAX_RUN_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
     try {
-      assertNoSecretLikeContent({ note: note.value ?? '' });
+      assertNoCredentialShape({ note: note.value ?? '' });
     } catch {
       return fail('invalid_input', 'The run note looks like it contains a credential; nothing was recorded.');
     }
@@ -8041,7 +8079,7 @@ export class HeadquarterOperations {
     const note = missionText('note', input.note, MAX_RUN_NOTE_LENGTH, true);
     if (!note.ok) return fail('invalid_input', note.message);
     try {
-      assertNoSecretLikeContent({ note: note.value });
+      assertNoCredentialShape({ note: note.value });
     } catch {
       return fail('invalid_input', 'The reconciliation note looks like it contains a credential; nothing was recorded.');
     }
@@ -9012,7 +9050,7 @@ export class HeadquarterOperations {
     const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
     try {
-      assertNoSecretLikeContent({ note: note.value ?? '', basis: cost.fact.basis ?? '' });
+      assertNoCredentialShape({ note: note.value ?? '', basis: cost.fact.basis ?? '' });
     } catch {
       return fail('invalid_input', 'The note or basis looks like it contains a credential; nothing was recorded.');
     }
@@ -9165,7 +9203,7 @@ export class HeadquarterOperations {
     const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
     try {
-      assertNoSecretLikeContent({ note: note.value ?? '' });
+      assertNoCredentialShape({ note: note.value ?? '' });
     } catch {
       return fail('invalid_input', 'The note looks like it contains a credential; nothing was recorded.');
     }
@@ -9414,9 +9452,15 @@ export class HeadquarterOperations {
     const label = missionText('label', input.label, MAX_DECISION_LABEL_LENGTH, true);
     if (!label.ok) return fail('invalid_input', label.message);
     try {
-      assertNoSecretLikeContent({ label: label.value });
+      assertNoCredentialShape({ label: label.value });
     } catch {
-      return fail('invalid_input', 'The decision label looks like it contains a credential; nothing was recorded.');
+      // See `openRun`'s label refusal: the same asymmetry, the same fix, and
+      // the same corrected wording (Wave 5 correction round four, H3 / L2).
+      return fail(
+        'invalid_input',
+        'The decision label matches a known credential shape, or names a credential holder; a label is ' +
+          'stored permanently and served on the Founder intelligence route, so nothing was recorded.',
+      );
     }
     if (!input.workerId) return fail('invalid_input', 'workerId is required');
     if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
@@ -9972,7 +10016,7 @@ export class HeadquarterOperations {
     const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
     try {
-      assertNoSecretLikeContent({ note: note.value ?? '', basis: cost.fact.basis ?? '' });
+      assertNoCredentialShape({ note: note.value ?? '', basis: cost.fact.basis ?? '' });
     } catch {
       return fail('invalid_input', 'The note or basis looks like it contains a credential; nothing was recorded.');
     }
@@ -10426,7 +10470,7 @@ export class HeadquarterOperations {
     // Everything that will be PERSISTED is scanned before anything is written
     // (the store scans again — deliberate defense in depth, not redundancy).
     try {
-      assertNoSecretLikeContent({
+      assertNoCredentialShape({
         title: title.value,
         body: body.value,
         project: project.value,
@@ -10808,7 +10852,7 @@ export class HeadquarterOperations {
       );
     }
     try {
-      assertNoSecretLikeContent({ statement: statement.value });
+      assertNoCredentialShape({ statement: statement.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -11019,7 +11063,7 @@ export class HeadquarterOperations {
     if (refusedCapability) return refusedCapability;
     if (!this.#truthStorePresent) return fail('invalid_input', 'truth store unavailable on this database handle');
     try {
-      assertNoSecretLikeContent({ limitations: limitations.value });
+      assertNoCredentialShape({ limitations: limitations.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -11180,7 +11224,7 @@ export class HeadquarterOperations {
     if (!note.ok) return fail('invalid_input', note.message);
     if (note.value) {
       try {
-        assertNoSecretLikeContent({ note: note.value });
+        assertNoCredentialShape({ note: note.value });
       } catch {
         return fail(
           'invalid_input',
@@ -11676,7 +11720,7 @@ export class HeadquarterOperations {
     // as a field — which the JSON encoding hides from the first pattern. The
     // payload is stored permanently and handed verbatim to an adapter.
     try {
-      assertNoSecretLikeContent(input.payload);
+      assertNoCredentialShape(input.payload);
       assertBrowserSafe(input.payload, 'payload');
       assertBrowserSafe({ target: target.value }, 'target');
     } catch {
@@ -12264,7 +12308,7 @@ export class HeadquarterOperations {
     const note = missionText('note', input.note, MAX_ACTION_NOTE_LENGTH, true);
     if (!note.ok) return fail('invalid_input', note.message);
     try {
-      assertNoSecretLikeContent({ note: note.value });
+      assertNoCredentialShape({ note: note.value });
     } catch {
       return fail('invalid_input', 'The reconciliation note looks like it contains a credential; nothing was recorded.');
     }
@@ -12845,7 +12889,7 @@ export class HeadquarterOperations {
       return fail('invalid_input', 'collaboration store unavailable on this database handle');
     }
     try {
-      assertNoSecretLikeContent({ title: title.value, purpose: purpose.value });
+      assertNoCredentialShape({ title: title.value, purpose: purpose.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -13141,7 +13185,7 @@ export class HeadquarterOperations {
       return fail('invalid_input', 'collaboration store unavailable on this database handle');
     }
     try {
-      assertNoSecretLikeContent({
+      assertNoCredentialShape({
         content: content.value,
         artifactRefs: artifactRefs.value,
         reason: handoff?.reason ?? null,

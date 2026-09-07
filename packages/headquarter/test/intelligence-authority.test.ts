@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { assertBrowserSafe } from '../src/live/redaction.js';
 import { CAPS, expectOk, setupFixture } from './application.fixture.js';
 import { intelligenceFixture, type IntelligenceFixture } from './intelligence.fixture.js';
 import { claimSideEffectTask } from './reliability.fixture.js';
@@ -116,6 +117,55 @@ function cost(fx: IntelligenceFixture, over: Record<string, unknown> = {}) {
 }
 
 /* ------------------------------------------------------------------ */
+
+/**
+ * Wave 5 correction round four, High H3 — the intelligence half of the same
+ * asymmetry.
+ *
+ * `recordIntelligenceDecision` scanned its label with the weak `api_key:
+ * value` heuristic; `control-api.ts` applies the strict `assertBrowserSafe` to
+ * every response. `hq_intel_decisions` is append-only, so one stored
+ * credential-shaped label made `GET /api/control/intelligence` answer
+ * `500 {"code":"internal"}` forever, with no DELETE or UPDATE able to undo it.
+ */
+describe('a decision label that the read boundary would refuse is refused at the WRITE', () => {
+  const poisoning = [
+    'sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345',
+    'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123',
+    '-----BEGIN RSA PRIVATE KEY-----',
+    'Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+    'OPENAI_KEY_sk-ABCDEFGHIJKLMNOPQRST',
+  ];
+
+  it('refuses every credential shape as a decision label, and keeps the route readable', () => {
+    for (const label of poisoning) {
+      const fx = intelligenceFixture();
+      const refusal = expectError(decide(fx, { label }));
+      expect(refusal.code, label).toBe('invalid_input');
+      expect(refusal.message, label).toContain('credential shape');
+      expect(fx.ops.listIntelligenceDecisionsBounded().total, label).toBe(0);
+      expect(() =>
+        assertBrowserSafe(
+          {
+            posture: fx.ops.hqIntelligencePosture(),
+            decisions: fx.ops.listIntelligenceDecisionsBounded(),
+            analytics: fx.ops.intelligenceAnalytics(),
+          },
+          'control',
+        ),
+        label,
+      ).not.toThrow();
+    }
+  });
+
+  it('still accepts an ordinary decision label', () => {
+    const fx = intelligenceFixture();
+    fx.budget([...INTELLIGENCE_TIERS]);
+    expect(expectOk(decide(fx, { label: 'open the release PR' })).decision.label).toBe(
+      'open the release PR',
+    );
+  });
+});
 
 describe('the two FOUNDER acts are gated by the capability trio and the originate grant', () => {
   it('accepts the Founder holding the grant against a registered, intact capability', () => {
