@@ -115,24 +115,39 @@ describe('the seam guard: defence in depth against a caller that supplies its ow
     expect(guarded.unavailableReason).toBe(adapter.unavailableReason);
   });
 
-  it('guards EVERY branch of the resolver, including the fallback', () => {
-    // A guarded adapter is a different object from the raw one, and each
-    // branch of the resolver hands one out.
+  it('exports only GUARDED adapters, so there is no unwrapped binding to obtain', () => {
+    // This used to assert `expect(lexical).not.toBe(LEXICAL_RETRIEVAL_ADAPTER)`
+    // — that the resolver wraps a raw exported constant. That was true and it
+    // was the weaker half of the claim being made: the RAW adapters were
+    // exported, `application/index.ts` re-exported them, and
+    // `search-core.test.ts` already called `LEXICAL_RETRIEVAL_ADAPTER.retrieve`
+    // unwrapped, so "an in-process caller cannot obtain an unwrapped adapter"
+    // was false of the module (Wave 5 review, Medium finding C-2).
+    //
+    // The raw adapters are module-private now and the exported bindings are
+    // the wrappers, so the assertion inverts: the resolver hands back the SAME
+    // object, because there is no unguarded one left to hand back.
     const lexical = resolveRetrievalAdapter('deterministic_lexical').adapter;
     const fallback = resolveRetrievalAdapter('semantic_embedding').adapter;
-    expect(lexical).not.toBe(LEXICAL_RETRIEVAL_ADAPTER);
-    expect(fallback).not.toBe(LEXICAL_RETRIEVAL_ADAPTER);
-    for (const adapter of [lexical, fallback]) {
+    expect(lexical).toBe(LEXICAL_RETRIEVAL_ADAPTER);
+    expect(fallback).toBe(LEXICAL_RETRIEVAL_ADAPTER);
+    // And every one of them refuses credential-shaped terms — including the
+    // EXPORTED constant reached directly, which is the path that was open.
+    for (const adapter of [lexical, fallback, LEXICAL_RETRIEVAL_ADAPTER]) {
       expect(() => adapter.retrieve({ readable: [], terms: [SECRET], match: 'any_term' })).toThrow(
         RetrievalSafetyError,
       );
     }
-    // The installed set is still empty, and the fallback still says so.
+    // The installed set is still empty, and the fallback still says so. Every
+    // member of it is guarded at DECLARATION, so an adapter added later cannot
+    // be reached unwrapped either.
     expect(SEMANTIC_RETRIEVAL_ADAPTERS).toHaveLength(0);
+    expect(Object.isFrozen(SEMANTIC_RETRIEVAL_ADAPTERS)).toBe(true);
     expect(resolveRetrievalAdapter('semantic_embedding').statement.fallbackReason).toBe(
       'no_adapter_installed',
     );
-    expect(RETRIEVAL_GUARD_STATEMENT).toContain('applied by the resolver');
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('applied AT DECLARATION');
+    expect(RETRIEVAL_GUARD_STATEMENT).not.toContain('applied by the resolver');
   });
 
   it('scans a field set and ignores blanks, so an absent criterion is not an error', () => {
@@ -150,11 +165,10 @@ describe('the seam guard: defence in depth against a caller that supplies its ow
    * asserted rather than assumed, so nobody has to take the comment's word for
    * why the FACADE scan is the layer that matters.
    */
-  it('is INERT on tokenized terms, which is why the facade scan is the guarantee', () => {
+  it('is INERT on tokenized SEPARATOR-BEARING shapes, which is why the facade scan is the guarantee', () => {
     for (const credential of [
       SECRET,
       'ghp_ABCDEFGHIJKLMNOPQRST1234',
-      'AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ012345',
       'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpM',
       'Bearer abcdefghijklmnop1234',
       'api_key: abcd1234efgh5678',
@@ -174,6 +188,38 @@ describe('the seam guard: defence in depth against a caller that supplies its ow
       guarded.retrieve({ readable: [], terms, match: 'any_term' });
       expect(adapter.seen).toEqual([terms]);
     }
+  });
+
+  /**
+   * The half of the same fact that changed with the Wave 5 correction of LOW
+   * finding C-2 — and it changed in the safe direction, so it is pinned rather
+   * than left to be discovered.
+   *
+   * A Google API key carries NO separator at all. Tokenization therefore leaves
+   * it intact apart from case, and once `SECRET_VALUE_PATTERNS` became
+   * case-insensitive the seam guard does catch it. So "the seam is inert on
+   * anything the pipeline can produce" — the wording the previous correction
+   * used — is no longer exactly true, and the doc and comments say the
+   * narrower, true thing instead: it is inert on the shapes whose match
+   * DEPENDS on a separator, which is most of them.
+   */
+  it('is NOT inert on a separator-free shape, now that the patterns are case-insensitive', () => {
+    const googleKey = 'AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ012345';
+    expect(() => assertRetrievalTextSafe({ text: googleKey }, 'search')).toThrow(RetrievalSafetyError);
+    const terms = tokenize(googleKey);
+    expect(terms).toEqual([googleKey.toLowerCase()]);
+    const adapter = recordingAdapter();
+    const guarded = guardRetrievalAdapter(adapter);
+    expect(() => guarded.retrieve({ readable: [], terms, match: 'any_term' })).toThrow(
+      RetrievalSafetyError,
+    );
+    // Refused BEFORE the adapter saw anything.
+    expect(adapter.seen).toEqual([]);
+    // And the case-only variant the guard used to let through is refused too,
+    // which is the whole point of the change.
+    expect(() => assertRetrievalTextSafe({ text: googleKey.toUpperCase() }, 'search')).toThrow(
+      RetrievalSafetyError,
+    );
   });
 
   it('does not overstate itself: the statement names the facade as the guarantee', () => {

@@ -545,16 +545,17 @@ import {
   RUN_READ_LIMIT,
   RUN_RECONCILE_DECISIONS,
   RUN_RETRY_STATEMENT,
+  appendIntegrityVerdict,
   backupRecordKey,
   backupRowToView,
   classifyInterruptedRun,
   deriveRunRecord,
-  emptyReliabilitySnapshot,
   ensureReliabilitySchema,
   isReportableRunOutcome,
   isRunFailureCategory,
   isRunKind,
   isRunReconcileDecision,
+  latestIntegrityVerdict,
   loadBackupRecords,
   loadRun,
   loadRunByKey,
@@ -597,12 +598,15 @@ import {
   INTELLIGENCE_ROUTING_STATEMENT,
   INTELLIGENCE_TIERS,
   LATENCY_REQUIREMENTS,
+  combineBudgetEvaluations,
+  MAX_COST_BASIS_LENGTH,
   MAX_COST_MINOR_UNITS,
   MAX_DECISION_LABEL_LENGTH,
   MAX_INTEL_NOTE_LENGTH,
   MAX_MODEL_ID_LENGTH,
   MAX_PROVIDER_ID_LENGTH,
   MODEL_AVAILABILITY_STATES,
+  readStoredCostFact,
   MODEL_CAPABILITY_FACTS,
   MODEL_LOCALITIES,
   OBSERVATION_READ_LIMIT,
@@ -657,6 +661,7 @@ import {
   type BudgetRecord,
   type BudgetRow,
   type BudgetScope,
+  type GoverningBudgetScope,
   type BudgetWindow,
   type ContextSize,
   type CostEntryRecord,
@@ -692,6 +697,7 @@ import {
   structuralIntegrity,
   verifyHqBackupFile,
   type HqIntegrityReport,
+  type RecordedIntegrityVerdict,
 } from '../store/integrity.js';
 import {
   PROJECT_ALLOWED_TRANSITIONS,
@@ -1066,7 +1072,12 @@ export type OpsErrorCode =
   | 'tier_below_policy_floor'
   | 'review_tier_required'
   | 'intelligence_routing_refused'
-  | 'escalation_refused';
+  | 'escalation_refused'
+  // Added by the Wave 5 correction (Medium finding B-5): a second cost entry
+  // whose IDENTITY matches one already recorded but whose FIGURE does not.
+  // Deduping two entries that say different things is how a fabricated zero
+  // permanently suppressed a real amount, so the disagreement is stated.
+  | 'cost_entry_conflict';
 // Phase 10 adds NO refusal code: its two reads cannot fail (a derivation over
 // whatever the canonical stores hold), `getBrief` answers null for an id that
 // is not in the ledger, and `issueBrief` refuses only through the codes the
@@ -1395,6 +1406,20 @@ const DEPLOYMENT_BUDGET_SCOPE = {
 };
 
 /**
+ * How far a recorded `occurredAt` may sit from the clock.
+ *
+ * `occurredAt` decides which `day` or `month` window a ceiling measures an
+ * entry in, so an unbounded one is a way to move real spend out of the window
+ * it belongs to. One hour ahead absorbs ordinary clock skew between a worker
+ * and HQ; thirty days behind absorbs a lane that records a batch of real
+ * observations late. Anything outside that is refused rather than quietly
+ * filed somewhere it did not happen — `recorded_at` is on the row too, so
+ * nothing is lost by insisting the two stay close.
+ */
+const MAX_COST_OCCURRED_AT_FUTURE_MS = 60 * 60_000;
+const MAX_COST_OCCURRED_AT_PAST_MS = 30 * 24 * 60 * 60_000;
+
+/**
  * Turn a cost-fact refusal into a sentence a Founder can act on. One place, so
  * the wording of "HQ will not invent a price" cannot drift between the
  * observation registry and the cost ledger.
@@ -1426,8 +1451,11 @@ function costRefusalMessage(refusal: CostFactRefusal): string {
       return 'An estimated amount must name its BASIS. An estimate whose origin nobody recorded is a ' +
         'fabricated price with a label on it, and HQ will not store one.';
     case 'basis_on_non_estimate':
-      return 'A basis belongs to an estimate; it may not accompany an unknown cost and may not exceed its ' +
-        'length bound on a reported or billed one.';
+      return 'A basis belongs to a recorded cost figure; it may not accompany an unknown cost, which has no ' +
+        'figure to explain.';
+    case 'basis_too_long':
+      return `A cost basis may not exceed ${MAX_COST_BASIS_LENGTH} characters. That bound applies to every ` +
+        'provenance, including an estimate.';
     default:
       return 'The cost figure was refused.';
   }
@@ -2457,9 +2485,19 @@ export class HeadquarterOperations {
     this.#processIdentity = options.processIdentity?.trim() || HQ_PROCESS_IDENTITY;
     // The cheap half, at every construction. See the field's own note for why
     // the expensive half is an explicit act instead.
+    const recordedVerdict = latestIntegrityVerdict(db);
     this.#integrityReport = structuralIntegrity(db, {
       guardsMissingAsFound,
       reliabilitySchemaPresent: this.#reliabilityStorePresent,
+      // The RECORDED verdict, re-read from HQ's own append-only verdict ledger
+      // (Wave 5 review, High finding 1). A structural pass cannot see a broken
+      // evidence chain, and the ensures above have already re-created any guard
+      // a tamperer dropped, so without this a plain restart cleared a blocking
+      // verdict — and in a local-first CLI model every command is a new
+      // process. Every blocking finding it holds is re-raised, so the latch
+      // belongs to the record and not to one process's memory. Only
+      // `assessHqIntegrity` records a clean verdict, and only that clears it.
+      recordedVerdict,
     });
     this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
@@ -2575,6 +2613,69 @@ export class HeadquarterOperations {
     options.grantDispatchEvidence?.(
       issueDispatchEvidenceGrant(this, (entry) => this.#appendDispatchOutcome(entry)),
     );
+
+    // The boot-time observation is RECORDED when it is blocking, and only then
+    // (Wave 5 review, High finding 1).
+    //
+    // Without this the structural finding survived exactly one boot: every
+    // `ensure*Schema` above is `CREATE TRIGGER IF NOT EXISTS`, so THIS
+    // construction has already re-created whatever guard was dropped, and the
+    // next one finds a healthy file and says so. The tamper would then be
+    // forgotten by a restart — with no Founder ever seeing it, because seeing it
+    // is what would have prompted the assessment.
+    //
+    // Deliberately narrow: only a BLOCKING verdict, only when the standing
+    // record does not already hold one, only on a writable handle that carries
+    // the verdict ledger, and only when this facade actually constructed its
+    // own queue and therefore holds the privileged API. It goes through
+    // `privileged.reserve` like every other reliability write, so the "one
+    // reservation, one immediate transaction" property is unchanged, and it
+    // lands an evidence entry beside the row rather than a silent one.
+    this.#recordBootIntegrityVerdictIfBlocking(recordedVerdict);
+  }
+
+  /**
+   * Append the construction-time verdict when it is blocking and nothing
+   * standing already says so. Never throws out of the constructor: a facade
+   * that cannot record its observation still HOLDS it in `#integrityReport`
+   * and still refuses, which is the fail-closed half.
+   */
+  #recordBootIntegrityVerdictIfBlocking(recordedVerdict: RecordedIntegrityVerdict | null): void {
+    if (!this.#integrityReport.safeMode) return;
+    if (recordedVerdict?.safeMode) return;
+    if (this.#db.readonly || !this.#reliabilityStorePresent) return;
+    if (!this.#queuePrivileged) return;
+    const privileged = this.#queuePrivileged;
+    const findings = this.#integrityReport.observations.map((observation) => observation.finding);
+    try {
+      privileged.reserve(() => {
+        appendIntegrityVerdict(this.#db, {
+          id: `verdict-${uuid()}`,
+          assessedAt: nowIso(),
+          depth: this.#integrityReport.depth,
+          safeMode: true,
+          findings,
+          processId: this.#processIdentity,
+          assessedBy: this.#processIdentity,
+        });
+        privileged.appendEvidence({
+          actor: this.#processIdentity,
+          kind: 'hq_integrity_assessed',
+          payload: {
+            depth: this.#integrityReport.depth,
+            safeMode: true,
+            safeModeChanged: true,
+            findings,
+            observedAtConstruction: true,
+            executable: false,
+          },
+        });
+      });
+    } catch {
+      // A construction that cannot write its observation must still construct.
+      // The verdict stands in memory for this process either way; what is lost
+      // is only its durability, and a Founder assessment records it properly.
+    }
   }
 
   /** Standing pre-approval set the policy engine is evaluated against. */
@@ -7206,12 +7307,34 @@ export class HeadquarterOperations {
     if (claim) return claim;
     const fact = this.#runClaimFact(input.taskId);
 
+    // The SECOND half of the cross-restart duplicate guard (Wave 5 review,
+    // Medium finding 4). The derived key answers "is this the same run"; this
+    // answers "does this task already have a run nobody has resolved". They are
+    // different questions, and only the first was asked: an uncertain attempt
+    // stood at `needs_reconciliation` while a fresh open — reachable by nothing
+    // more than a different label, since the label used to be in the key —
+    // produced a clean run beside it and admitted a new attempt on the same
+    // work. `needs_reconciliation` means a human has to establish what happened
+    // in the world before anything else is attempted, so opening a run against
+    // that task is refused until they have.
+    const unreconciled = this.#listRunsFromStore({ taskId: input.taskId }).find(
+      (run) => run.needsReconciliation,
+    );
+    if (unreconciled) {
+      return fail(
+        'run_state_conflict',
+        `Task ${input.taskId} already carries run ${unreconciled.id}, whose outcome is unresolved ` +
+          `(${unreconciled.outcome}). A new run is not opened against work whose last attempt nobody has ` +
+          'reconciled — establish what actually happened and reconcile that run first.',
+        { runId: unreconciled.id, outcome: unreconciled.outcome },
+      );
+    }
+
     const runKey = runIdempotencyKey({
       taskId: input.taskId,
       runKind: input.runKind,
       actionId: input.actionId?.trim() || null,
       missionId: input.missionId?.trim() || null,
-      label: label.value!,
       idempotencyKey: input.idempotencyKey?.trim() || null,
     });
     const id = `run-${uuid()}`;
@@ -7713,18 +7836,44 @@ export class HeadquarterOperations {
       verifyEvidenceChain: this.#verifyEvidenceChainFromStore,
       reliabilitySchemaPresent: this.#reliabilityStorePresent,
     });
-    this.#integrityReport = report;
-    this.#requirePrivilegedQueue().appendEvidence({
-      actor: input.requestedBy,
-      kind: 'hq_integrity_assessed',
-      payload: {
-        depth: report.depth,
-        safeMode: report.safeMode,
-        safeModeChanged: before !== report.safeMode,
-        findings: report.observations.map((observation) => observation.finding),
-        executable: false,
-      },
+    const findings = report.observations.map((observation) => observation.finding);
+    // RECORD first, latch second, and both inside ONE reservation (Wave 5
+    // review, Low finding 8 and High finding 1). Previously the field was
+    // assigned before the evidence append, so a throw in the append left safe
+    // mode engaged-or-cleared with no audit entry at all. Now the verdict row
+    // and the evidence entry land together or not at all, and the in-memory
+    // latch is only updated once they have: a verdict HQ could not record is a
+    // verdict HQ does not act on.
+    const privileged = this.#requirePrivilegedQueue();
+    privileged.reserve(() => {
+      if (this.#reliabilityStorePresent) {
+        appendIntegrityVerdict(this.#db, {
+          id: `verdict-${uuid()}`,
+          assessedAt: nowIso(),
+          depth: report.depth,
+          safeMode: report.safeMode,
+          findings,
+          processId: this.#processIdentity,
+          assessedBy: input.requestedBy,
+        });
+      }
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'hq_integrity_assessed',
+        payload: {
+          depth: report.depth,
+          safeMode: report.safeMode,
+          safeModeChanged: before !== report.safeMode,
+          findings,
+          // False on a handle with no verdict ledger — a pre-correction file,
+          // or a read-only one. The verdict is then process-local and
+          // SAFE_MODE_STATEMENT says so; nothing pretends otherwise.
+          verdictRecorded: this.#reliabilityStorePresent,
+          executable: false,
+        },
+      });
     });
+    this.#integrityReport = report;
     return ok(this.#integrityView());
   }
 
@@ -7939,11 +8088,26 @@ export class HeadquarterOperations {
    * `summarizeReliability`, and anything else is counted as `unrecognized`.
    */
   reliabilitySummary(): ReliabilitySnapshotView {
-    if (!this.#reliabilityStorePresent) return emptyReliabilitySnapshot(false);
+    // The RUN LEDGER may be absent while the integrity verdict is not.
+    // `#reliabilityStorePresent` answers only "does this file carry the Phase
+    // 13 run tables"; `#integrityReport` is computed over the WHOLE file, and
+    // the two disagree on exactly the case that matters — a genuine
+    // pre-Phase-13 database with a dropped append-only guard. This branch used
+    // to return `emptyReliabilitySnapshot(false)`, which HARD-CODES
+    // `safeMode: false`, `findings: {}` and `durabilityMeetsRequirement: true`
+    // without consulting the verdict at all, so the unauthenticated artifact
+    // published "everything is fine" while HQ had latched safe mode — and
+    // because the snapshot's provenance note is gated on that same flag, the
+    // "HQ is in SAFE MODE" sentence was suppressed too (Wave 5 review, Medium
+    // finding C-1; law 8, and the one thing this phase exists to prevent).
+    //
+    // The run half is stated as absent — no runs, no backups, storePresent
+    // false — and the integrity half is the real verdict, on both branches.
+    const storePresent = this.#reliabilityStorePresent;
     return summarizeReliability({
-      storePresent: true,
-      runs: this.#listRunsFromStore(),
-      verifiedBackups: loadBackupRecords(this.#db).length,
+      storePresent,
+      runs: storePresent ? this.#listRunsFromStore() : [],
+      verifiedBackups: storePresent ? loadBackupRecords(this.#db).length : 0,
       safeMode: this.#integrityReport.safeMode,
       assessmentDepth: this.#integrityReport.depth,
       findings: this.#integrityReport.observations.map((observation) => observation.finding),
@@ -8083,6 +8247,155 @@ export class HeadquarterOperations {
     });
   }
 
+  /**
+   * The mission(s) and project(s) a canonical task belongs to — read straight
+   * off `hq_mission_plan_items` / `hq_missions` through `#db`.
+   *
+   * This is the canonical answer to "whose budget is this work spending", and
+   * it is deliberately a query rather than a parameter. A plan item is the one
+   * place HQ records that a task belongs to a mission, and a mission's
+   * `project_id` the one place a mission belongs to a project; nothing else in
+   * HQ links a task to either. A task linked to no plan item belongs to no
+   * mission, which is answered as the empty list rather than as "unconstrained".
+   */
+  #canonicalTaskScopes(taskId: string): { missionIds: string[]; projectIds: string[] } {
+    if (!this.#missionStorePresent) return { missionIds: [], projectIds: [] };
+    const rows = this.#db
+      .prepare(
+        `SELECT DISTINCT m.id AS mission_id, m.project_id AS project_id
+           FROM hq_mission_plan_items p
+           JOIN hq_missions m ON m.id = p.mission_id
+          WHERE p.task_id = ?`,
+      )
+      .all(taskId) as { mission_id: string | null; project_id: string | null }[];
+    const missionIds = new Set<string>();
+    const projectIds = new Set<string>();
+    for (const row of rows) {
+      if (typeof row.mission_id === 'string' && row.mission_id !== '') missionIds.add(row.mission_id);
+      if (typeof row.project_id === 'string' && row.project_id !== '') projectIds.add(row.project_id);
+    }
+    return { missionIds: [...missionIds].sort(), projectIds: [...projectIds].sort() };
+  }
+
+  /**
+   * Every budget policy that GOVERNS one canonical task — derived, never named
+   * by a caller.
+   *
+   * `budgetScope` used to be an optional argument on `intelligenceRoutingProposal`
+   * and `recordIntelligenceDecision`, taken verbatim, and nothing checked that
+   * the named scope had anything to do with the task, its mission, its project
+   * or its bound provider. Since `evaluation.permittedTiers` and
+   * `evaluation.decision` are the WHOLE of what `#resolveRecordedTier` enforces
+   * against, that made the caller the chooser of the policy governing its own
+   * write: the same task, the same worker and the same live fence produced
+   * `tier_not_permitted` under the default scope and a recorded
+   * `critical_review` under a scope the caller named instead (Wave 5 review,
+   * High finding B-1). The parameter is gone; there is no way to name a scope
+   * here at all.
+   *
+   * What governs is:
+   *  - `deployment`/`total` — the baseline, always, exactly as before;
+   *  - every mission the task is canonically linked to, and every project
+   *    those missions belong to;
+   *  - the provider the canonical payload BINDS the task to, when it binds one.
+   *
+   * For each of those, every window a Founder has actually recorded a ceiling
+   * for. A scope with no recorded row is not evaluated: absence of a mission
+   * ceiling is absence of a mission policy, and the deployment baseline already
+   * answers "no policy anywhere". Model scopes are absent by construction —
+   * nothing in canonical truth binds a task to a MODEL, so HQ has no honest
+   * derivation for one and does not invent it. Recorded as a real limitation:
+   * a model-scoped ceiling can be read through `intelligenceBudgetDecision`
+   * but does not by itself constrain a decision write.
+   */
+  #governingBudgetScopes(taskId: string): GoverningBudgetScope[] {
+    const scopes: GoverningBudgetScope[] = [
+      { ...DEPLOYMENT_BUDGET_SCOPE, derivedFrom: 'deployment' },
+    ];
+    if (!this.#intelligenceStorePresent) return scopes;
+    const budgets = loadBudgets(this.#db);
+    const has = (scopeKind: BudgetScope, scopeId: string, window: BudgetWindow): boolean =>
+      latestBudgetFor(budgets, { scopeKind, scopeId, window }) != null;
+    const canonical = this.#canonicalTaskScopes(taskId);
+    const boundProvider = this.#taskBoundProvider(taskId);
+    const candidates: { kind: BudgetScope; id: string; from: GoverningBudgetScope['derivedFrom'] }[] = [
+      ...canonical.missionIds.map((id) => ({ kind: 'mission' as const, id, from: 'task_mission' as const })),
+      ...canonical.projectIds.map((id) => ({ kind: 'project' as const, id, from: 'task_project' as const })),
+      ...(boundProvider
+        ? [{ kind: 'provider' as const, id: boundProvider, from: 'task_bound_provider' as const }]
+        : []),
+    ];
+    for (const candidate of candidates) {
+      for (const window of BUDGET_WINDOWS) {
+        if (!has(candidate.kind, candidate.id, window)) continue;
+        scopes.push({
+          scopeKind: candidate.kind,
+          scopeId: candidate.id,
+          window,
+          derivedFrom: candidate.from,
+        });
+      }
+    }
+    // The deployment baseline's other windows too, when a Founder recorded them.
+    for (const window of BUDGET_WINDOWS) {
+      if (window === DEPLOYMENT_BUDGET_SCOPE.window) continue;
+      if (!has('deployment', DEPLOYMENT_BUDGET_SCOPE.scopeId, window)) continue;
+      scopes.push({
+        scopeKind: 'deployment',
+        scopeId: DEPLOYMENT_BUDGET_SCOPE.scopeId,
+        window,
+        derivedFrom: 'deployment',
+      });
+    }
+    return scopes;
+  }
+
+  /**
+   * The ONE budget answer a decision write is enforced against: the most
+   * restrictive of every governing policy, with the INTERSECTION of their
+   * permitted tiers. See `#governingBudgetScopes` and `combineBudgetEvaluations`.
+   */
+  #governingBudgetEvaluation(taskId: string): {
+    decision: BudgetDecision;
+    permittedTiers: IntelligenceTier[];
+    reason: string;
+    governedBy: GoverningBudgetScope[];
+  } {
+    return combineBudgetEvaluations(
+      this.#governingBudgetScopes(taskId).map((scope) => ({
+        scope,
+        evaluation: this.#budgetEvaluation(scope),
+      })),
+    );
+  }
+
+  /**
+   * CANONICAL truth about a decision's task, handed to every derivation.
+   *
+   * `bound_provider` and the risk class inside `characteristics` are stored
+   * columns on an append-only table, so a raw appender could choose both — and
+   * the Founder route publishes the first as "the provider the canonical
+   * payload binds" while `decisionIsProvablyAvoidable` computes the floor from
+   * the second (Wave 5 review, Medium finding B-3). Both are re-derived here,
+   * from `op_tasks` and `op_capabilities`, through the `#private` closures the
+   * rest of the phase already enforces on.
+   */
+  #canonicalDecisionFacts(): {
+    boundProvider: (taskId: string) => string | null;
+    riskClass: (taskId: string) => RiskClass;
+  } {
+    return {
+      boundProvider: (taskId: string) => this.#taskBoundProvider(taskId),
+      riskClass: (taskId: string) => {
+        const fact = this.#runClaimFact(taskId);
+        // Fail closed twice over: a task that cannot be read, and a capability
+        // that cannot be read, are both `founder_gate` — the strictest class.
+        if (!fact.exists) return 'founder_gate';
+        return riskClassForRouting(this.#capabilityFromStore(fact.capabilityId));
+      },
+    };
+  }
+
   #decisionRecordFromStore(id: string): DecisionRecord | null {
     if (!this.#intelligenceStorePresent) return null;
     const row = loadDecision(this.#db, id);
@@ -8090,6 +8403,7 @@ export class HeadquarterOperations {
     return deriveDecisionRecord(row, {
       outcomes: loadDecisionOutcomes(this.#db),
       escalations: loadDecisions(this.#db),
+      canonical: this.#canonicalDecisionFacts(),
     });
   }
 
@@ -8097,9 +8411,10 @@ export class HeadquarterOperations {
     if (!this.#intelligenceStorePresent) return [];
     const rows = loadDecisions(this.#db);
     const outcomes = loadDecisionOutcomes(this.#db);
+    const canonical = this.#canonicalDecisionFacts();
     return rows
       .filter((row) => (filter?.taskId ? row.taskId === filter.taskId : true))
-      .map((row) => deriveDecisionRecord(row, { outcomes, escalations: rows }));
+      .map((row) => deriveDecisionRecord(row, { outcomes, escalations: rows, canonical }));
   }
 
   #observationsFromStore(): ModelObservationRow[] {
@@ -8470,6 +8785,11 @@ export class HeadquarterOperations {
    * shape has no field that could name one. Provider truth is the canonical
    * binding's; a proposal that disagreed with it would simply be ignored by
    * `OperatorQueue.claim`/`start`.
+   *
+   * There is no BUDGET SCOPE parameter either, and there used to be. See
+   * `#governingBudgetScopes`: the scopes are derived from the task's canonical
+   * mission, project and provider binding, plus the deployment baseline, and
+   * the most restrictive of them governs.
    */
   intelligenceRoutingProposal(input: {
     taskId: string;
@@ -8478,15 +8798,16 @@ export class HeadquarterOperations {
     workKind: WorkKind;
     latency?: LatencyRequirement;
     privacy?: PrivacyRequirement;
-    budgetScope?: { scopeKind: BudgetScope; scopeId: string; window: BudgetWindow };
-  }): OpsResult<RoutingProposal & { taskId: string; boundProvider: string | null }> {
+  }): OpsResult<
+    RoutingProposal & {
+      taskId: string;
+      boundProvider: string | null;
+      governedBy: GoverningBudgetScope[];
+    }
+  > {
     const characteristics = this.#characteristicsFor(input);
     if (!characteristics.ok) return characteristics;
-    const scope = input.budgetScope ?? DEPLOYMENT_BUDGET_SCOPE;
-    if (!isBudgetScope(scope.scopeKind) || !isBudgetWindow(scope.window) || !scope.scopeId) {
-      return fail('invalid_input', 'budgetScope must name a recognized scope kind, id and window');
-    }
-    const evaluation = this.#budgetEvaluation(scope);
+    const evaluation = this.#governingBudgetEvaluation(input.taskId);
     const proposal = computeRoutingProposal({
       characteristics: characteristics.data,
       permittedTiers: evaluation.permittedTiers,
@@ -8497,6 +8818,9 @@ export class HeadquarterOperations {
       taskId: input.taskId,
       // OBSERVED from the canonical payload, never chosen here.
       boundProvider: this.#taskBoundProvider(input.taskId),
+      // Which recorded policies actually governed this answer, so a reader can
+      // see that the set was derived rather than supplied.
+      governedBy: evaluation.governedBy,
     });
   }
 
@@ -8583,9 +8907,6 @@ export class HeadquarterOperations {
     privacy?: PrivacyRequirement;
     /** Optional, and bounded BELOW by the policy floor. Never below it. */
     tier?: IntelligenceTier;
-    missionId?: string;
-    projectId?: string;
-    budgetScope?: { scopeKind: BudgetScope; scopeId: string; window: BudgetWindow };
     idempotencyKey?: string;
   }): OpsResult<{ decision: DecisionRecord; deduplicated: boolean }> {
     const label = missionText('label', input.label, MAX_DECISION_LABEL_LENGTH, true);
@@ -8614,11 +8935,7 @@ export class HeadquarterOperations {
     );
     if (claim) return claim;
 
-    const scope = input.budgetScope ?? DEPLOYMENT_BUDGET_SCOPE;
-    if (!isBudgetScope(scope.scopeKind) || !isBudgetWindow(scope.window) || !scope.scopeId) {
-      return fail('invalid_input', 'budgetScope must name a recognized scope kind, id and window');
-    }
-    const evaluation = this.#budgetEvaluation(scope);
+    const evaluation = this.#governingBudgetEvaluation(input.taskId);
     const proposal = computeRoutingProposal({
       characteristics: characteristics.data,
       permittedTiers: evaluation.permittedTiers,
@@ -8627,10 +8944,18 @@ export class HeadquarterOperations {
     const chosen = this.#resolveRecordedTier(proposal, input.tier);
     if (!chosen.ok) return chosen;
 
+    // Mission and project come from CANONICAL truth, never from the caller.
+    // They were free-text parameters written verbatim, so a claim-holding
+    // worker could attribute its own spend to a mission and project that do
+    // not exist — evading its real mission ceiling — or to a third party's, to
+    // push that scope towards `blocked` (Wave 5 review, High finding B-2). A
+    // task linked to no plan item is attributed to no mission, which is the
+    // honest answer and not a gap: HQ records what the plan says.
+    const canonical = this.#canonicalTaskScopes(input.taskId);
     return this.#insertDecision({
       taskId: input.taskId,
-      missionId: input.missionId?.trim() || null,
-      projectId: input.projectId?.trim() || null,
+      missionId: canonical.missionIds[0] ?? null,
+      projectId: canonical.projectIds[0] ?? null,
       tier: chosen.data,
       floorTier: proposal.floorTier,
       requiredReviewTier: proposal.requiredReviewTier,
@@ -8851,8 +9176,10 @@ export class HeadquarterOperations {
     );
     if (claim) return claim;
 
-    const scope = DEPLOYMENT_BUDGET_SCOPE;
-    const evaluation = this.#budgetEvaluation(scope);
+    // The same derived, most-restrictive answer the original record was
+    // enforced against — not the deployment baseline alone, which would have
+    // let an escalation reach a tier the task's own mission ceiling forbids.
+    const evaluation = this.#governingBudgetEvaluation(prior.taskId);
     const escalation = deriveEscalation({
       from: {
         id: prior.id,
@@ -8901,11 +9228,23 @@ export class HeadquarterOperations {
     // that says `reviewer_requested`. So the stored one is authoritative here,
     // exactly as `#decisionRecordFromStore` is authoritative for the decision
     // itself.
+    //
+    // `requiresFounderDecision` is the SIBLING of the same defect (Wave 5
+    // review, Low finding B-6): it was computed from the request-time
+    // evaluation, so when a second escalation deduped to a standing row it
+    // could disagree with the budget decision that row actually holds. It is
+    // projected from the STORED row too, by the same rule — a view may not
+    // contradict the record it claims to describe.
     const storedTrigger = inserted.data.decision.escalationTrigger;
-    const escalationView: EscalationProposal =
-      storedTrigger != null && storedTrigger !== escalation.escalation.trigger
-        ? { ...escalation.escalation, trigger: storedTrigger }
-        : escalation.escalation;
+    const storedBudgetDecision = inserted.data.decision.budgetDecision;
+    const storedRequiresFounderDecision =
+      storedBudgetDecision === 'requires_founder_decision' &&
+      escalation.escalation.toTier !== 'deterministic_local';
+    const escalationView: EscalationProposal = {
+      ...escalation.escalation,
+      trigger: storedTrigger ?? escalation.escalation.trigger,
+      requiresFounderDecision: storedRequiresFounderDecision,
+    };
     return ok({ ...inserted.data, escalation: escalationView });
   }
 
@@ -9012,8 +9351,6 @@ export class HeadquarterOperations {
     providerId: string;
     modelId?: string | null;
     decisionId?: string;
-    missionId?: string;
-    projectId?: string;
     provenance: CostProvenance;
     amountMinorUnits?: number | null;
     currency?: string | null;
@@ -9035,6 +9372,22 @@ export class HeadquarterOperations {
       return fail('invalid_input', 'modelId must be a lowercase slug, or omitted when it was not observed');
     }
     const modelId = modelIdRaw === '' ? null : modelIdRaw;
+    // Scanned at the FACADE, not only at the route (Wave 5 review, Low finding
+    // B-8). `recordIntelligenceCost` has no route at all, so its only callers
+    // are in-process and were unscanned — and the slug rule accepts
+    // `sk-proj-…`, which is a credential shape that reads as a perfectly legal
+    // provider id.
+    try {
+      // `assertBrowserSafe` rather than `assertNoSecretLikeContent`: the latter
+      // is the `key: value` heuristic, and a bare `sk-proj-…` is not that
+      // shape. The shape patterns are what a provider id can accidentally be.
+      assertBrowserSafe({ providerId, modelId }, 'cost_entry');
+    } catch {
+      return fail(
+        'invalid_input',
+        'The providerId or modelId looks like it contains a credential; nothing was recorded.',
+      );
+    }
     const cost = normalizeCostFact({
       provenance: input.provenance,
       amountMinorUnits: input.amountMinorUnits ?? null,
@@ -9069,10 +9422,47 @@ export class HeadquarterOperations {
     );
     if (claim) return claim;
 
+    // The provider must be the one the CANONICAL payload binds, when it binds
+    // one (Wave 5 review, High finding B-2). `providerId` was written verbatim,
+    // so a claim-holding worker could record its spend against
+    // `a.provider.never.bound` — evading its own provider ceiling, and pushing
+    // spend into a scope somebody else is answerable for. Same rule, same
+    // refusal code, as the queue's own claim/start enforcement.
+    const boundProvider = this.#taskBoundProvider(input.taskId);
+    if (boundProvider != null && boundProvider !== providerId) {
+      return fail(
+        'provider_binding_mismatch',
+        `Task ${input.taskId} is canonically bound to provider ${boundProvider}; a cost entry may not be ` +
+          `attributed to ${providerId}. No substitution is made, and the binding is not something a cost ` +
+          'record can change.',
+        { boundProvider, providerId },
+      );
+    }
+
     const at = nowIso();
     const occurredAt = (input.occurredAt ?? '').trim() || at;
     if (!/^\d{4}-\d{2}-\d{2}T/.test(occurredAt)) {
       return fail('invalid_input', 'occurredAt must be an ISO-8601 instant, or omitted');
+    }
+    // BOUNDED against the clock. `occurredAt` selects which window a `day` or
+    // `month` ceiling measures this entry in, and it was validated only by
+    // shape: a 999,999-minor-unit entry dated 2099-01-01 sat outside every
+    // window and left the scope reading `within_ceiling` with `observed: 0`
+    // (Wave 5 review, High finding B-2). A real observation is recorded close
+    // to when it happened; a lane recording much later has `recorded_at` for
+    // that, and both are on the row.
+    const occurredMs = Date.parse(occurredAt);
+    if (!Number.isFinite(occurredMs)) {
+      return fail('invalid_input', 'occurredAt must be an ISO-8601 instant, or omitted');
+    }
+    const skewMs = occurredMs - Date.parse(at);
+    if (skewMs > MAX_COST_OCCURRED_AT_FUTURE_MS || -skewMs > MAX_COST_OCCURRED_AT_PAST_MS) {
+      return fail(
+        'invalid_input',
+        'occurredAt must be within a bounded interval around now — at most one hour ahead and thirty days ' +
+          'behind. An instant outside that window would place recorded spend in a budget window it did not ' +
+          'happen in.',
+      );
     }
     const key = costEntryKey({
       taskId: input.taskId,
@@ -9083,14 +9473,51 @@ export class HeadquarterOperations {
       idempotencyKey: input.idempotencyKey?.trim() || null,
     });
     const id = `intelcost-${uuid()}`;
+    // CANONICAL attribution, exactly as for a decision. Mission and project
+    // were free-text parameters written verbatim and never checked for
+    // existence, so an entry could be filed against a mission that does not
+    // exist — or against a real one belonging to somebody else.
+    const canonicalScopes = this.#canonicalTaskScopes(input.taskId);
     const privileged = this.#requirePrivilegedQueue();
     let dedupedTo: string | null = null;
+    let conflict: OpsError | null = null;
     privileged.reserve(() => {
-      const existing = this.#db.prepare(`SELECT id FROM hq_intel_cost_entries WHERE entry_key = ?`).get(key) as
-        | { id: string }
+      const existing = this.#db.prepare(`SELECT * FROM hq_intel_cost_entries WHERE entry_key = ?`).get(key) as
+        | Record<string, unknown>
         | undefined;
       if (existing) {
-        dedupedTo = existing.id;
+        // Deduping is only honest when the two entries say the SAME thing.
+        // `costEntryKey` covers the entry's IDENTITY (task, provider, model,
+        // instant, unit kind, idempotency key) and deliberately not its
+        // figures, so first-write-wins used to let a `billed 0` recorded first
+        // permanently suppress the true amount — silently, and without setting
+        // `unknownAmountEntries`, so `evaluateBudget` answered `within_ceiling`
+        // over a fabricated zero (Wave 5 review, Medium finding B-5). A second
+        // entry that disagrees is now a REFUSAL a caller can see and a Founder
+        // can act on, rather than a silent `deduplicated: true`.
+        const stored = readStoredCostFact({
+          provenance: existing.provenance,
+          amountMinorUnits: existing.amount_minor_units,
+          currency: existing.currency,
+          unitKind: existing.unit_kind,
+          basis: existing.basis,
+        });
+        if (
+          stored.provenance !== cost.fact.provenance ||
+          stored.amountMinorUnits !== cost.fact.amountMinorUnits ||
+          stored.currency !== cost.fact.currency
+        ) {
+          conflict = {
+            code: 'cost_entry_conflict',
+            message:
+              'A cost entry is already recorded for this task, provider, model, instant and unit kind, and it ' +
+              'says something different. HQ does not overwrite a recorded figure and does not silently keep ' +
+              'the first: record the correction under its own idempotency key so both stand in the ledger.',
+            details: { entryId: String(existing.id) },
+          };
+          return;
+        }
+        dedupedTo = String(existing.id);
         return;
       }
       this.#db
@@ -9104,8 +9531,8 @@ export class HeadquarterOperations {
         .run(
           id,
           input.taskId,
-          input.missionId?.trim() || null,
-          input.projectId?.trim() || null,
+          canonicalScopes.missionIds[0] ?? null,
+          canonicalScopes.projectIds[0] ?? null,
           input.decisionId?.trim() || null,
           providerId,
           modelId,
@@ -9134,6 +9561,7 @@ export class HeadquarterOperations {
         },
       });
     });
+    if (conflict) return { ok: false, error: conflict };
     const resolvedId = dedupedTo ?? id;
     const row = this.#costEntriesFromStore().find((entry) => entry.id === resolvedId);
     if (!row) return fail('invalid_input', 'the cost entry could not be read back');
@@ -10846,6 +11274,15 @@ export class HeadquarterOperations {
    *
    * Only the worker holding the task's LIVE fenced claim may authorize (it is
    * the identity that will execute); humans never execute and are refused.
+   *
+   * REFUSED IN SAFE MODE (Wave 5 review, Medium finding 7). It is the
+   * external-action analogue of `approveTask`, which safe mode already refuses
+   * for precisely this reason: the snapshot written here is captured from
+   * canonical truth HQ has just declared it cannot stand behind, it survives
+   * the clearing of safe mode, and `executeAction` then compares against it. An
+   * authorization bound now would sit primed to run the moment safe mode
+   * cleared, which is the sentence the doc's Refused column already used —
+   * about the approval, while its external-action twin was ungated.
    */
   authorizeAction(input: { actionId: string; workerId: string; fence: number; now?: Date }): OpsResult<{ action: ActionView }> {
     const actionId = input.actionId?.trim() ?? '';
@@ -10853,6 +11290,8 @@ export class HeadquarterOperations {
     if (!input.workerId) return fail('invalid_input', 'workerId is required');
     if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
     if (!this.#actionStorePresent) return fail('invalid_input', 'action ledger unavailable on this database handle');
+    const safeMode = this.#safeModeRefusal('authorize an external action');
+    if (safeMode) return safeMode;
     const now = input.now ?? new Date();
     const privileged = this.#requirePrivilegedQueue();
     let refusal: OpsError | null = null;

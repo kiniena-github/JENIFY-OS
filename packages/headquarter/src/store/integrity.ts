@@ -33,6 +33,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import type { HqDatabase } from './db.js';
@@ -60,8 +61,17 @@ export const HQ_DURABILITY_REQUIREMENT = {
 
 /**
  * The pragma facts, read verbatim. `:memory:` databases legitimately report
- * `journal_mode = memory` and are flagged as such rather than pretended over —
- * an in-memory database is not durable and HQ says so instead of claiming WAL.
+ * `journal_mode = memory`, and `inMemory` carries that fact rather than
+ * pretending WAL.
+ *
+ * `meetsRequirement` is TRUE for an in-memory handle, and that is a scoped
+ * statement rather than a durability claim: `HQ_DURABILITY_REQUIREMENT` is a
+ * requirement on a FILE-backed database, and there is nothing durable to
+ * require of a database that has no file. The honest reading of the pair is
+ * "`inMemory` true means durability is not applicable here", which is why
+ * `inMemory` travels beside it on every authenticated view — and why the
+ * unauthenticated snapshot's note says so in words, since that artifact
+ * carries `durabilityMeetsRequirement` alone (Wave 5 review, Low finding 10).
  */
 export interface HqDurabilityPosture {
   journalMode: string;
@@ -107,7 +117,7 @@ export function readDurabilityPosture(db: HqDatabase): HqDurabilityPosture {
 /* The engine-immutable tables                                         */
 /* ------------------------------------------------------------------ */
 
-/** One engine-immutable ledger, and every guard the schema declares on it. */
+/** One engine-guarded ledger, and every guard the schema declares on it. */
 export interface EngineImmutableTable {
   table: string;
   triggerPrefix: string;
@@ -117,11 +127,40 @@ export interface EngineImmutableTable {
    * only the trio.
    */
   secondaryGuards: readonly string[];
+  /**
+   * False for a table that is NOT append-only as a whole and therefore does
+   * not carry `no_rewrite` / `no_erase` / `no_replace`, but whose own guards
+   * the census must still see. `hq_mission_plan_items` is the one such table:
+   * supersede and link legitimately UPDATE its columns, so demanding the trio
+   * of it would be a false finding — but `trg_hq_mission_plan_items_no_replace`
+   * is what stops an `INSERT OR REPLACE` re-pointing a plan item's task
+   * binding, and a census blind to it is a census that cannot report the
+   * tamper (Wave 5 review, Medium finding 6).
+   *
+   * Omitted means true.
+   */
+  holdsUniversalTrio?: boolean;
 }
 
 /**
- * Every append-only ledger whose immutability is held by the ENGINE, with the
- * prefix its triggers are named under and every guard declared on it.
+ * Freeze a declaration ALL THE WAY DOWN — the array, every entry, and every
+ * entry's guard list.
+ *
+ * A shallow `Object.freeze` would leave `entry.secondaryGuards.length = 0`
+ * working, which is the same exploit one level in. Nothing here is a
+ * convenience: these are the inputs an enforcement census reads.
+ */
+function deepFreezeTables(entries: EngineImmutableTable[]): readonly EngineImmutableTable[] {
+  for (const entry of entries) {
+    Object.freeze(entry.secondaryGuards);
+    Object.freeze(entry);
+  }
+  return Object.freeze(entries);
+}
+
+/**
+ * Every ledger whose guards are held by the ENGINE, with the prefix its
+ * triggers are named under and every guard declared on it.
  *
  * The trio required of each is the one that carries the guarantee: no UPDATE
  * of any column, no DELETE of any row, and a BEFORE INSERT guard that closes
@@ -143,12 +182,28 @@ export interface EngineImmutableTable {
  * phase that adds a guard and forgets to declare it fails there rather than
  * escaping the check forever.
  *
- * `hq_mission_plan_items` is deliberately ABSENT: it is legitimately updated
- * when an item is linked to a task, so it carries `no_relink` / `no_respec`
- * guards instead of the trio, and demanding the trio of it would be a false
- * finding.
+ * `hq_mission_plan_items` was deliberately ABSENT until the Wave 5 review's
+ * Medium finding 6, on the reasoning that it is legitimately updated when an
+ * item is linked to a task and therefore cannot be held to the trio. The first
+ * half of that is true and the conclusion was wrong: it carries three real
+ * guards of its own, and while the table was unlisted the census could not see
+ * them at all — dropping `trg_hq_mission_plan_items_no_replace` let an
+ * `INSERT OR REPLACE` rewrite a plan item's task binding with no
+ * `append_only_guard_missing` finding and no safe mode. It is listed now with
+ * `holdsUniversalTrio: false`, so its own guards are checked and the trio is
+ * not demanded of it.
+ *
+ * **Frozen at module scope**, entries and guard arrays included (Wave 5
+ * review, High finding 2). This array is on the enforcement path of
+ * `append_only_guard_missing`, and `store/index.ts` re-exports it as public
+ * package API: `readonly` erases at runtime, so before the freeze a single
+ * `ENGINE_IMMUTABLE_TABLES.length = 0` emptied the census and made a genuinely
+ * tampered file report `safeMode: false` on a freshly constructed facade. That
+ * is permanent architectural law 3 — a patchable convenience surface is never
+ * execution authority — reached through an exported constant rather than
+ * through a method. Under ESM (always strict) the assignment now THROWS.
  */
-export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = [
+export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = deepFreezeTables([
   { table: 'hq_action_intents', triggerPrefix: 'hq_action_intents', secondaryGuards: ['no_replace_unique'] },
   { table: 'hq_action_events', triggerPrefix: 'hq_action_events', secondaryGuards: ['no_replace_unique'] },
   { table: 'hq_briefs', triggerPrefix: 'hq_briefs', secondaryGuards: [] },
@@ -206,6 +261,12 @@ export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = [
     triggerPrefix: 'hq_reliability_backups',
     secondaryGuards: ['no_replace_unique'],
   },
+  // The verdict ledger (Wave 5 correction of High finding 1). It is what makes
+  // the safe-mode latch survive a restart, so it is exactly the table a
+  // tamperer would want to rewrite: the trio is the whole guarantee, and there
+  // is no secondary identity to guard because every assessment appends a new
+  // row.
+  { table: 'hq_reliability_verdicts', triggerPrefix: 'hq_reliability_verdicts', secondaryGuards: [] },
   // Phase 14. All five carry the trio plus a secondary-unique guard, and the
   // secondary guard is load-bearing on two of them: a REPLACE colliding on
   // `hq_intel_budgets.budget_key` would silently swap a Founder's spending
@@ -229,7 +290,16 @@ export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = [
     secondaryGuards: ['no_replace_unique'],
   },
   { table: 'hq_intel_cost_entries', triggerPrefix: 'hq_intel_costs', secondaryGuards: ['no_replace_unique'] },
-];
+  // NOT append-only as a table, and therefore not held to the trio — but its
+  // three own guards are real, and the census was blind to them. See the note
+  // above and `holdsUniversalTrio`.
+  {
+    table: 'hq_mission_plan_items',
+    triggerPrefix: 'hq_mission_plan_items',
+    holdsUniversalTrio: false,
+    secondaryGuards: ['no_replace', 'no_relink', 'no_respec'],
+  },
+]);
 
 /**
  * The three guards EVERY engine-immutable table must carry, by suffix.
@@ -240,13 +310,22 @@ export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = [
  * would be a false finding — the same reason `hq_mission_plan_items` is not
  * held to the trio.
  */
-export const REQUIRED_IMMUTABILITY_GUARDS = ['no_rewrite', 'no_erase', 'no_replace'] as const;
+export const REQUIRED_IMMUTABILITY_GUARDS = Object.freeze([
+  'no_rewrite',
+  'no_erase',
+  'no_replace',
+] as const);
 
-/** Every guard name the schema declares on one listed table. Trio plus its own. */
+/**
+ * Every guard name the schema declares on one listed table. Trio plus its own,
+ * or — for an entry with `holdsUniversalTrio: false` — its own alone.
+ */
 export function declaredGuardsFor(entry: EngineImmutableTable): string[] {
-  return [...REQUIRED_IMMUTABILITY_GUARDS, ...entry.secondaryGuards].map(
-    (guard) => `trg_${entry.triggerPrefix}_${guard}`,
-  );
+  const suffixes =
+    entry.holdsUniversalTrio === false
+      ? [...entry.secondaryGuards]
+      : [...REQUIRED_IMMUTABILITY_GUARDS, ...entry.secondaryGuards];
+  return suffixes.map((guard) => `trg_${entry.triggerPrefix}_${guard}`);
 }
 
 /* ------------------------------------------------------------------ */
@@ -258,14 +337,14 @@ export function declaredGuardsFor(entry: EngineImmutableTable): string[] {
  * a finding is what a safe-mode decision is taken on and what a count in the
  * unauthenticated artifact is keyed by, so it can never be a stored string.
  */
-export const HQ_INTEGRITY_FINDINGS = [
+export const HQ_INTEGRITY_FINDINGS = Object.freeze([
   'database_integrity_check_failed',
   'append_only_guard_missing',
   'evidence_chain_broken',
   'foreign_key_violations',
   'durability_below_requirement',
   'reliability_schema_absent',
-] as const;
+] as const);
 export type HqIntegrityFinding = (typeof HQ_INTEGRITY_FINDINGS)[number];
 
 export function isHqIntegrityFinding(value: unknown): value is HqIntegrityFinding {
@@ -277,11 +356,11 @@ export function isHqIntegrityFinding(value: unknown): value is HqIntegrityFindin
  * therefore the ONLY ones that engage safe mode. Argued in the module header;
  * pinned by a test so widening or narrowing it is a deliberate, reviewed act.
  */
-export const SAFE_MODE_BLOCKING_FINDINGS: readonly HqIntegrityFinding[] = [
+export const SAFE_MODE_BLOCKING_FINDINGS: readonly HqIntegrityFinding[] = Object.freeze([
   'database_integrity_check_failed',
   'append_only_guard_missing',
   'evidence_chain_broken',
-];
+] as const);
 
 export function findingIsBlocking(finding: HqIntegrityFinding): boolean {
   return SAFE_MODE_BLOCKING_FINDINGS.includes(finding);
@@ -291,15 +370,22 @@ export interface HqIntegrityObservation {
   finding: HqIntegrityFinding;
   blocking: boolean;
   /**
-   * A human-readable detail. Deliberately composed from schema object names,
-   * pragma values and counts — never from a row's stored content — so an
-   * observation cannot become a channel for record text.
+   * A human-readable detail. Composed from schema object names, pragma values,
+   * counts and — for the two engine checks — a BOUNDED slice of the engine's
+   * own verdict text (`PRAGMA integrity_check`'s message, or the message of the
+   * error that stopped it running). Never from a row's stored content, which is
+   * the property that matters: an observation cannot become a channel for
+   * record text. The engine's own text is not record content and is truncated
+   * to 400 characters; only `observation.finding` — a closed-vocabulary name —
+   * reaches the unauthenticated artifact, and the Founder route passes the
+   * detail through the browser-safety scan (Wave 5 review, Low finding C-3,
+   * which corrected this comment's earlier "never from engine output" claim).
    */
   detail: string;
 }
 
 /** How thorough the assessment behind a verdict was. Carried, never inferred. */
-export const INTEGRITY_ASSESSMENT_DEPTHS = ['structural', 'full'] as const;
+export const INTEGRITY_ASSESSMENT_DEPTHS = Object.freeze(['structural', 'full'] as const);
 export type IntegrityAssessmentDepth = (typeof INTEGRITY_ASSESSMENT_DEPTHS)[number];
 
 export interface HqIntegrityReport {
@@ -307,15 +393,44 @@ export interface HqIntegrityReport {
   observations: HqIntegrityObservation[];
   /** True when at least one blocking observation stands. */
   safeMode: boolean;
+  /**
+   * Did a whole-log evidence-chain verification actually RUN and pass in this
+   * assessment?
+   *
+   * Carried rather than inferred from `depth`, because the absence of the
+   * verification used to be indistinguishable from a pass: `fullIntegrity`
+   * took the verifier as an optional argument, and a call that omitted it
+   * returned `depth: 'full'` with no `evidence_chain_broken` finding (Wave 5
+   * review, Medium finding 5). It is false on every structural assessment,
+   * because a structural assessment does not run the check — false means "not
+   * verified here", never "verified and broken".
+   */
+  chainVerified: boolean;
   durability: HqDurabilityPosture;
+}
+
+/**
+ * A verdict HQ previously RECORDED about itself, read back at construction.
+ *
+ * This is what makes the safe-mode latch survive a restart. See
+ * `SAFE_MODE_STATEMENT` and `structuralIntegrity`'s `recordedVerdict` option.
+ */
+export interface RecordedIntegrityVerdict {
+  assessedAt: string;
+  depth: IntegrityAssessmentDepth;
+  safeMode: boolean;
+  findings: readonly HqIntegrityFinding[];
 }
 
 export const SAFE_MODE_STATEMENT =
   'Safe mode is a statement about HQ’s OWN stored record, not about the outside world. It engages only when ' +
   'the engine reports the file corrupt, an append-only guard the schema declares is missing, or the evidence ' +
   'hash chain does not verify. While engaged HQ still READS and still reconciles, and it refuses the acts ' +
-  'that would add to, approve, release or execute against a record it cannot stand behind. It is never ' +
-  'cleared by a boot: only a fresh assessment that finds nothing blocking clears it.';
+  'that would add to, approve, release or execute against a record it cannot stand behind. A blocking ' +
+  'verdict is APPENDED to HQ’s own verdict ledger and re-read at every construction, so a restart does not ' +
+  'clear it — only a fresh full assessment that finds nothing blocking does. On a database that carries no ' +
+  'Phase 13 ledger there is nowhere to record it and the verdict is process-local; the ' +
+  'reliability_schema_absent finding says when that is the case.';
 
 export const INTEGRITY_DEPTH_STATEMENT =
   'A structural assessment reads the schema catalogue and the durability pragmas only — cheap enough to run ' +
@@ -394,6 +509,21 @@ export function structuralIntegrity(
      * the file while they were absent.
      */
     guardsMissingAsFound?: readonly string[];
+    /**
+     * The last verdict HQ RECORDED about this database, read back from the
+     * append-only verdict ledger before this assessment ran.
+     *
+     * A structural pass cannot detect a broken evidence chain and cannot see a
+     * guard a previous boot has since re-created, so without this a plain
+     * restart cleared a blocking verdict — every finding in it, including
+     * `evidence_chain_broken`, simply went away, and the acts safe mode exists
+     * to refuse were handed back out (Wave 5 review, High finding 1). Each
+     * blocking finding it carries is re-raised as an observation here, so the
+     * latch is a property of the RECORD rather than of one process's memory.
+     * Only a fresh full assessment that finds nothing blocking records a
+     * clean verdict and therefore clears it.
+     */
+    recordedVerdict?: RecordedIntegrityVerdict | null;
   } = {},
 ): HqIntegrityReport {
   const observations: HqIntegrityObservation[] = [];
@@ -435,12 +565,49 @@ export function structuralIntegrity(
     });
   }
 
+  carryRecordedVerdict(observations, options.recordedVerdict ?? null);
+
   return {
     depth: 'structural',
     observations,
     safeMode: observations.some((observation) => observation.blocking),
+    // A structural pass never runs the whole-log verification. False here means
+    // "not verified in this assessment", never "verified and broken".
+    chainVerified: false,
     durability,
   };
+}
+
+/**
+ * Re-raise every BLOCKING finding a previously recorded verdict still holds.
+ *
+ * Non-blocking findings are deliberately NOT carried: they are observations
+ * about the file as it stood then, and re-reporting a stale
+ * `durability_below_requirement` or `foreign_key_violations` would be HQ
+ * asserting something it has not just checked. A blocking finding is different
+ * in kind — it is the standing statement that HQ cannot vouch for its own
+ * record, and it stands until an assessment says otherwise.
+ */
+function carryRecordedVerdict(
+  observations: HqIntegrityObservation[],
+  recorded: RecordedIntegrityVerdict | null,
+): void {
+  if (!recorded || !recorded.safeMode) return;
+  const alreadyObserved = new Set(observations.map((observation) => observation.finding));
+  for (const finding of recorded.findings) {
+    if (!isHqIntegrityFinding(finding)) continue;
+    if (!findingIsBlocking(finding)) continue;
+    if (alreadyObserved.has(finding)) continue;
+    alreadyObserved.add(finding);
+    observations.push({
+      finding,
+      blocking: true,
+      detail:
+        `Carried from the verdict HQ recorded at ${recorded.assessedAt} (depth ${recorded.depth}). ` +
+        `Safe mode is not cleared by a boot: this finding stands until a full assessment of the file as ` +
+        `it now stands finds nothing blocking.`,
+    });
+  }
 }
 
 /**
@@ -449,20 +616,43 @@ export function structuralIntegrity(
  * integrity, and a whole-log verification of the hash-chained evidence.
  *
  * `verifyEvidenceChain` is injected rather than imported so this module stays a
- * leaf of `store/` and cannot acquire a dependency on `operator/`. The caller
- * passes `EvidenceLog.verifyChain`, which returns the `seq` of the first entry
- * that does not verify, or null when the whole chain does.
+ * leaf of `store/` and cannot acquire a dependency on `operator/`. It is
+ * REQUIRED, and a call that omits it anyway does not read clean: the chain is
+ * treated as unverifiable, which is a blocking `evidence_chain_broken`.
+ *
+ * It was optional until the Wave 5 review's Medium finding 5, and the absence
+ * of the verifier was then indistinguishable from a pass — `fullIntegrity(db,
+ * {})` returned `depth: 'full'` with no findings over a genuinely broken chain.
+ * That is the same defect class as the High this wave already corrected: a
+ * missing enforcement input silently reading clean. This module is public
+ * package API (`store/index.ts`), so the type alone was not enough.
+ *
+ * The caller must NOT pass `EvidenceLog.verifyChain` or any other delegate
+ * reachable from a public surface. `HeadquarterOperations` passes
+ * `#verifyEvidenceChainFromStore`, a `#private` closure over its own handle;
+ * `evidence_chain_broken` engages safe mode, so the read behind it is
+ * enforcement and may not travel through a patchable convenience object. The
+ * function returns the `seq` of the first entry that does not verify, or null
+ * when the whole chain does.
  */
 export function fullIntegrity(
   db: HqDatabase,
   options: {
-    verifyEvidenceChain?: () => number | null;
+    verifyEvidenceChain: () => number | null;
     reliabilitySchemaPresent?: boolean;
     /** See `structuralIntegrity`. Omitted here means "check the file as it stands now". */
     guardsMissingAsFound?: readonly string[];
-  } = {},
+  },
 ): HqIntegrityReport {
-  const structural = structuralIntegrity(db, options);
+  // Deliberately WITHOUT a recorded verdict: a full assessment of the file as
+  // it now stands is the one thing that SUPERSEDES the record, which is how a
+  // latched safe mode is ever cleared. Carrying the old verdict in here would
+  // make it unclearable; carrying it in `structuralIntegrity` is what makes a
+  // restart unable to clear it.
+  const structural = structuralIntegrity(db, {
+    reliabilitySchemaPresent: options.reliabilitySchemaPresent,
+    guardsMissingAsFound: options.guardsMissingAsFound,
+  });
   const observations = [...structural.observations];
 
   let integrityVerdict: string;
@@ -498,32 +688,37 @@ export function fullIntegrity(
     // not a failure either. The depth on the verdict already says what ran.
   }
 
-  if (options.verifyEvidenceChain) {
-    let brokenAt: number | null | 'error' = null;
+  // A missing verifier is treated exactly like one that threw. An absent
+  // BLOCKING check is not a passed one, and this is public API a JS caller can
+  // reach with no arguments at all.
+  let brokenAt: number | null | 'error' =
+    typeof options.verifyEvidenceChain === 'function' ? null : 'error';
+  if (brokenAt !== 'error') {
     try {
       brokenAt = options.verifyEvidenceChain();
     } catch {
       brokenAt = 'error';
     }
-    if (brokenAt === 'error') {
-      observations.push({
-        finding: 'evidence_chain_broken',
-        blocking: true,
-        detail: 'The hash-chained evidence log could not be verified at all; HQ treats an unverifiable chain as a broken one.',
-      });
-    } else if (brokenAt !== null) {
-      observations.push({
-        finding: 'evidence_chain_broken',
-        blocking: true,
-        detail: `The hash-chained evidence log does not verify from entry seq ${brokenAt} onward.`,
-      });
-    }
+  }
+  if (brokenAt === 'error') {
+    observations.push({
+      finding: 'evidence_chain_broken',
+      blocking: true,
+      detail: 'The hash-chained evidence log could not be verified at all; HQ treats an unverifiable chain as a broken one.',
+    });
+  } else if (brokenAt !== null) {
+    observations.push({
+      finding: 'evidence_chain_broken',
+      blocking: true,
+      detail: `The hash-chained evidence log does not verify from entry seq ${brokenAt} onward.`,
+    });
   }
 
   return {
     depth: 'full',
     observations,
     safeMode: observations.some((observation) => observation.blocking),
+    chainVerified: brokenAt === null,
     durability: structural.durability,
   };
 }
@@ -532,26 +727,58 @@ export function fullIntegrity(
 /* Backup file verification                                            */
 /* ------------------------------------------------------------------ */
 
-/** Why a candidate backup file was refused. Closed, categorical. */
-export const BACKUP_REFUSAL_REASONS = [
+/**
+ * Why a candidate backup file was refused. Closed, categorical.
+ *
+ * Four members were added by the Wave 5 review (High finding 3, Low finding
+ * 12), and each names a distinct real refusal rather than being folded into
+ * `path_not_a_regular_file`, which every `openSync` failure used to collapse
+ * into regardless of cause:
+ *
+ *  - `path_not_normalized` — the absolute path still contains `.` or `..`
+ *    segments, so what it names depends on resolution rather than on the text;
+ *  - `path_not_readable` — the file exists and is a regular file, but this
+ *    process may not open it (EACCES/EPERM/EMFILE). "Not permitted to read"
+ *    is a different fact from "not a file";
+ *  - `sidecar_journal_present` — a `-wal`, `-shm` or `-journal` sidecar sits
+ *    beside the candidate. SQLite resolves those together with the main file,
+ *    so the main file alone may not be the whole database, and an operator who
+ *    restored the directory would get content this verification never saw. The
+ *    live HQ database is WAL-mode and is therefore refused here, which is the
+ *    honest answer for it;
+ *  - `verification_copy_failed` — HQ could not take the scratch copy it checks
+ *    (see `verifyHqBackupFile`). A verification that could not be performed is
+ *    reported as such, never as a pass.
+ */
+export const BACKUP_REFUSAL_REASONS = Object.freeze([
   'path_not_absolute',
+  'path_not_normalized',
   'path_missing',
   'path_is_symlink',
   'path_not_a_regular_file',
+  'path_not_readable',
   'file_empty',
   'file_too_large',
+  'sidecar_journal_present',
+  'verification_copy_failed',
   'not_a_readable_sqlite_database',
   'integrity_check_failed',
   'not_an_hq_database',
-] as const;
+] as const);
 export type BackupRefusalReason = (typeof BACKUP_REFUSAL_REASONS)[number];
 
 /**
- * The largest file this verification will hash and open. A bound, not a
- * policy: verification reads the whole file twice (once to digest, once as a
- * database), and an unbounded path argument must not become an unbounded read.
+ * The largest file this verification will hash and open. A REAL bound on the
+ * read, not only on the `lstat`: `digestFile` stops and reports
+ * `file_too_large` when the bytes it has read exceed it, so a file that grows
+ * between the stat and the read cannot become an unbounded read (Wave 5
+ * review, Low finding 12). The sidecar refusal bounds the other half — SQLite's
+ * own read of a `-wal` was previously unbounded by anything at all.
  */
 export const MAX_VERIFIED_BACKUP_BYTES = 2 * 1024 * 1024 * 1024;
+
+/** The journal sidecars SQLite resolves together with a database path. */
+const SQLITE_SIDECAR_SUFFIXES = Object.freeze(['-wal', '-shm', '-journal'] as const);
 
 /**
  * The table every HQ database has carried since the foundation wave. Its
@@ -573,15 +800,30 @@ export interface BackupVerification {
 
 const VERIFY_CHUNK_BYTES = 1024 * 1024;
 
-function digestFile(fd: number): { digest: string; size: number } {
+/**
+ * Hash the descriptor's bytes and write the SAME bytes to `sinkFd` as it goes.
+ *
+ * One pass, so the digest and the copy cannot disagree: what the database
+ * checks then open is, byte for byte, what this digest is of.
+ */
+function digestFile(
+  fd: number,
+  limitBytes: number,
+  sinkFd: number,
+): { digest: string; size: number } | 'too_large' {
   const hash = createHash('sha256');
   const buffer = Buffer.allocUnsafe(VERIFY_CHUNK_BYTES);
   let position = 0;
   for (;;) {
     const read = fs.readSync(fd, buffer, 0, buffer.length, position);
     if (read === 0) break;
-    hash.update(buffer.subarray(0, read));
+    const chunk = buffer.subarray(0, read);
+    hash.update(chunk);
+    fs.writeSync(sinkFd, chunk, 0, read, position);
     position += read;
+    // The bound applies to what is actually READ, not only to what the
+    // pre-open `lstat` reported.
+    if (position > limitBytes) return 'too_large';
   }
   return { digest: hash.digest('hex'), size: position };
 }
@@ -590,16 +832,52 @@ function digestFile(fd: number): { digest: string; size: number } {
  * Verify that a path holds a readable, uncorrupted HQ database — the check a
  * restore is worth nothing without.
  *
- * READ-ONLY in the strongest available sense: the file is opened `O_NOFOLLOW`
- * for digesting and through `openHqDatabaseReadOnly` for checking, which asks
- * SQLite itself to refuse writes and refuses to create a missing file. Nothing
- * here migrates, checkpoints or repairs, so pointing it at the LIVE database is
- * safe as well as useless.
+ * **The digest and the checks are pinned to the SAME bytes.** They were not,
+ * and the gap was exploitable (Wave 5 review, High finding 3): `digestFile`
+ * hashed the main file through a descriptor while `integrity_check`, the schema
+ * census and the `hq_events` marker were evaluated by a SECOND open of the
+ * PATH — and SQLite resolves a path together with its `-wal`/`-shm` sidecars.
+ * A plain `cp` of a live WAL-mode HQ database therefore verified as `true`,
+ * with 45 tables read out of a `-wal` the digest never covered, a `sizeBytes`
+ * counting the main file only, and the pristine file's digest recorded
+ * permanently in an append-only register. The same block was TOCTOU besides:
+ * `lstat` -> `openSync(O_NOFOLLOW)` -> open-by-path, where the third step
+ * re-resolved the path WITHOUT `O_NOFOLLOW`, making `path_is_symlink` advisory
+ * for exactly the half that decided `verified`.
+ *
+ * Both are closed the same way: after the `O_NOFOLLOW` open, this function
+ * never touches the candidate path again. The descriptor's bytes are hashed and
+ * copied to a SCRATCH file in one pass, and the database checks run against the
+ * scratch copy. So what `integrity_check` read, what `schemaTables` counted and
+ * what `digest` is of are the same bytes by construction rather than by
+ * argument; no sidecar of the candidate is read; and nothing that happens to
+ * the path between the steps can change the answer.
+ *
+ * READ-ONLY with respect to the CANDIDATE, in the strongest available sense:
+ * it is opened `O_RDONLY | O_NOFOLLOW` and never written, and no `-wal`/`-shm`
+ * is created beside it — which the previous version did create, by opening it
+ * with SQLite. The scratch copy is HQ's own space under the OS temp directory
+ * and is removed before this function returns. Nothing migrates, checkpoints
+ * or repairs anything.
+ *
+ * A sidecar beside the candidate is still a categorical REFUSAL rather than
+ * something to check around, because the main file alone may then not be the
+ * whole database and an operator restoring the directory would get content this
+ * verification never saw. Pointing this at the LIVE HQ database is therefore
+ * refused — a live HQ database is WAL-mode — which is a more honest answer than
+ * the "safe as well as useless" pass it used to give.
  *
  * Path protections are refusals, not exceptions, so a caller gets a
- * categorical reason it can record: not absolute, missing, a symlink, not a
- * regular file, empty, larger than the bound, not a readable SQLite database,
- * failing `integrity_check`, or a database that is not an HQ database at all.
+ * categorical reason it can record — see `BACKUP_REFUSAL_REASONS` for the
+ * closed list and what each member means.
+ *
+ * NOT covered, and recorded rather than implied: a path whose PARENT
+ * directories are symlinks is accepted. `O_NOFOLLOW` constrains the final
+ * component only, and resolving the whole path with `realpath` would refuse
+ * legitimate layouts (a symlinked backup volume, `/var` on macOS). WHICH file
+ * an operator is entitled to point at is a question this function does not
+ * answer; what it answers is what the bytes at the descriptor it opened
+ * actually are.
  */
 export function verifyHqBackupFile(candidate: string): BackupVerification {
   const empty: BackupVerification = {
@@ -614,6 +892,12 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
   if (!target || !path.isAbsolute(target)) {
     return { ...empty, refusals: ['path_not_absolute'] };
   }
+  // An absolute path carrying `.` or `..` names a file only after resolution.
+  // Refused as its own category rather than normalized on the caller's behalf:
+  // the recorded path must be the path that was checked.
+  if (path.normalize(target) !== target) {
+    return { ...empty, refusals: ['path_not_normalized'] };
+  }
 
   let entry: fs.Stats;
   try {
@@ -626,72 +910,131 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
   if (entry.size === 0) return { ...empty, refusals: ['file_empty'] };
   if (entry.size > MAX_VERIFIED_BACKUP_BYTES) return { ...empty, refusals: ['file_too_large'] };
 
-  let digest: string;
-  let sizeBytes: number;
-  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
-  let fd: number | undefined;
-  try {
-    fd = fs.openSync(target, fs.constants.O_RDONLY | noFollow);
-    const proof = digestFile(fd);
-    digest = proof.digest;
-    sizeBytes = proof.size;
-  } catch {
-    return { ...empty, refusals: ['path_not_a_regular_file'] };
-  } finally {
-    if (fd != null) {
-      try {
-        fs.closeSync(fd);
-      } catch {
-        // The digest, or the refusal, is the result; a close failure is not.
-      }
+  // BEFORE anything else. SQLite would resolve these together with the main
+  // file, so their presence means the main file alone may not be the database
+  // an operator would restore.
+  for (const suffix of SQLITE_SIDECAR_SUFFIXES) {
+    try {
+      fs.lstatSync(`${target}${suffix}`);
+      return { ...empty, refusals: ['sidecar_journal_present'] };
+    } catch {
+      // Absent is the expected case for a consolidated backup file.
     }
   }
 
-  let db: HqDatabase;
+  let scratchDir: string;
   try {
-    db = openHqDatabaseReadOnly(target);
+    scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-backup-verify-'));
   } catch {
-    return { ...empty, refusals: ['not_a_readable_sqlite_database'], digest, sizeBytes };
+    return { ...empty, refusals: ['verification_copy_failed'] };
   }
+  const scratchPath = path.join(scratchDir, 'candidate.sqlite');
+
   try {
-    // Readability FIRST, and as a real query rather than as an assumption:
-    // better-sqlite3 opens lazily, so a file of poetry becomes an error at the
-    // first statement rather than at `new Database`. Distinguishing "not a
-    // database at all" from "a database that fails its integrity check" is the
-    // difference between a wrong path and a lost backup, so the two refusals
-    // stay separate.
-    let tables: Set<string>;
+    let digest: string;
+    let sizeBytes: number;
+    const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+    let fd: number | undefined;
+    let sinkFd: number | undefined;
     try {
-      tables = tableNames(db);
+      try {
+        fd = fs.openSync(target, fs.constants.O_RDONLY | noFollow);
+      } catch (error) {
+        // One `openSync` failure is not one refusal. ELOOP is the final
+        // component turning out to be a symlink after all (the O_NOFOLLOW
+        // race), and EACCES/EPERM/EMFILE are "this process may not read it",
+        // which is a different fact from "it is not a file" (Wave 5 review,
+        // Low finding 12).
+        const code = (error as NodeJS.ErrnoException | null)?.code;
+        if (code === 'ELOOP') return { ...empty, refusals: ['path_is_symlink'] };
+        if (code === 'ENOENT') return { ...empty, refusals: ['path_missing'] };
+        if (code === 'EACCES' || code === 'EPERM' || code === 'EMFILE' || code === 'ENFILE') {
+          return { ...empty, refusals: ['path_not_readable'] };
+        }
+        return { ...empty, refusals: ['path_not_a_regular_file'] };
+      }
+      // Taken from the DESCRIPTOR: from here on the path is never consulted.
+      if (!fs.fstatSync(fd).isFile()) return { ...empty, refusals: ['path_not_a_regular_file'] };
+      try {
+        sinkFd = fs.openSync(scratchPath, 'wx', 0o600);
+      } catch {
+        return { ...empty, refusals: ['verification_copy_failed'] };
+      }
+      let proof: { digest: string; size: number } | 'too_large';
+      try {
+        proof = digestFile(fd, MAX_VERIFIED_BACKUP_BYTES, sinkFd);
+      } catch {
+        // A read or write that could not complete is a verification that did
+        // not happen. Never a pass.
+        return { ...empty, refusals: ['verification_copy_failed'] };
+      }
+      if (proof === 'too_large') return { ...empty, refusals: ['file_too_large'] };
+      digest = proof.digest;
+      sizeBytes = proof.size;
+    } finally {
+      for (const handle of [fd, sinkFd]) {
+        if (handle == null) continue;
+        try {
+          fs.closeSync(handle);
+        } catch {
+          // The digest, or the refusal, is the result; a close failure is not.
+        }
+      }
+    }
+
+    let db: HqDatabase;
+    try {
+      db = openHqDatabaseReadOnly(scratchPath);
     } catch {
       return { ...empty, refusals: ['not_a_readable_sqlite_database'], digest, sizeBytes };
     }
+    try {
+      // Readability FIRST, and as a real query rather than as an assumption:
+      // better-sqlite3 opens lazily, so a file of poetry becomes an error at the
+      // first statement rather than at `new Database`. Distinguishing "not a
+      // database at all" from "a database that fails its integrity check" is the
+      // difference between a wrong path and a lost backup, so the two refusals
+      // stay separate.
+      let tables: Set<string>;
+      try {
+        tables = tableNames(db);
+      } catch {
+        return { ...empty, refusals: ['not_a_readable_sqlite_database'], digest, sizeBytes };
+      }
 
-    let integrityVerdict: string;
-    try {
-      const rows = db.prepare(`PRAGMA integrity_check`).all() as Record<string, unknown>[];
-      const values = rows.map((row) => String(Object.values(row)[0] ?? '')).filter((value) => value !== '');
-      integrityVerdict = values.length === 1 && values[0] === 'ok' ? 'ok' : values.join('; ');
-    } catch (error) {
-      // A check that could not run is not a check that passed.
-      integrityVerdict = `integrity_check could not run: ${error instanceof Error ? error.message : 'unknown error'}`;
+      let integrityVerdict: string;
+      try {
+        const rows = db.prepare(`PRAGMA integrity_check`).all() as Record<string, unknown>[];
+        const values = rows.map((row) => String(Object.values(row)[0] ?? '')).filter((value) => value !== '');
+        integrityVerdict = values.length === 1 && values[0] === 'ok' ? 'ok' : values.join('; ');
+      } catch (error) {
+        // A check that could not run is not a check that passed.
+        integrityVerdict = `integrity_check could not run: ${error instanceof Error ? error.message : 'unknown error'}`;
+      }
+      const refusals: BackupRefusalReason[] = [];
+      if (integrityVerdict !== 'ok') refusals.push('integrity_check_failed');
+      if (!tables.has(HQ_MARKER_TABLE)) refusals.push('not_an_hq_database');
+      return {
+        verified: refusals.length === 0,
+        refusals,
+        digest,
+        sizeBytes,
+        schemaTables: tables.size,
+        integrityVerdict: integrityVerdict.slice(0, 400),
+      };
+    } finally {
+      try {
+        db.close();
+      } catch {
+        // Never trade the verification result for a close failure.
+      }
     }
-    const refusals: BackupRefusalReason[] = [];
-    if (integrityVerdict !== 'ok') refusals.push('integrity_check_failed');
-    if (!tables.has(HQ_MARKER_TABLE)) refusals.push('not_an_hq_database');
-    return {
-      verified: refusals.length === 0,
-      refusals,
-      digest,
-      sizeBytes,
-      schemaTables: tables.size,
-      integrityVerdict: integrityVerdict.slice(0, 400),
-    };
   } finally {
+    // The scratch copy is HQ's own; it never outlives the verification.
     try {
-      db.close();
+      fs.rmSync(scratchDir, { recursive: true, force: true });
     } catch {
-      // Never trade the verification result for a close failure.
+      // A temp-directory cleanup failure is not a verification result.
     }
   }
 }

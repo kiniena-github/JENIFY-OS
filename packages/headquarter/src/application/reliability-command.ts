@@ -54,7 +54,12 @@ import { createHash } from 'node:crypto';
 import type { HqDatabase } from '../store/db.js';
 import { canonicalJson } from '../operator/approvals.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
-import { isHqIntegrityFinding } from '../store/integrity.js';
+import {
+  INTEGRITY_ASSESSMENT_DEPTHS,
+  isHqIntegrityFinding,
+  type IntegrityAssessmentDepth,
+  type RecordedIntegrityVerdict,
+} from '../store/integrity.js';
 import {
   ACTION_RECONCILE_DECISIONS,
   isActionReconcileDecision,
@@ -354,6 +359,25 @@ CREATE INDEX IF NOT EXISTS idx_hq_reliability_run_events_run ON hq_reliability_r
 CREATE UNIQUE INDEX IF NOT EXISTS idx_hq_reliability_run_events_attempt
   ON hq_reliability_run_events(attempt_key) WHERE attempt_key IS NOT NULL;
 
+-- The VERDICT ledger: what HQ has said about its own integrity, appended once
+-- per full assessment and re-read at every construction. Without it the
+-- safe-mode latch lived only in one process's memory, and a plain restart
+-- cleared an evidence_chain_broken verdict (Wave 5 review, High finding 1).
+-- Trio only: every assessment is a NEW row, so there is no secondary identity
+-- a REPLACE could collide on, and requiring a no_replace_unique guard of a
+-- table with no secondary unique index would be a false finding.
+CREATE TABLE IF NOT EXISTS hq_reliability_verdicts (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  assessed_at TEXT NOT NULL,
+  depth TEXT NOT NULL,
+  safe_mode INTEGER NOT NULL,
+  findings TEXT NOT NULL,
+  process_id TEXT NOT NULL,
+  assessed_by TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hq_reliability_verdicts_seq ON hq_reliability_verdicts(seq);
+
 CREATE TABLE IF NOT EXISTS hq_reliability_backups (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   id TEXT NOT NULL UNIQUE,
@@ -401,6 +425,18 @@ BEFORE INSERT ON hq_reliability_run_events
 WHEN NEW.attempt_key IS NOT NULL
   AND EXISTS (SELECT 1 FROM hq_reliability_run_events WHERE attempt_key = NEW.attempt_key)
 BEGIN SELECT RAISE(ABORT, 'hq_reliability_run_events is append-only (UNIQUE attempt_key already reserved)'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_verdicts_no_rewrite
+BEFORE UPDATE ON hq_reliability_verdicts
+BEGIN SELECT RAISE(ABORT, 'hq_reliability_verdicts is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_verdicts_no_erase
+BEFORE DELETE ON hq_reliability_verdicts
+BEGIN SELECT RAISE(ABORT, 'hq_reliability_verdicts is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_verdicts_no_replace
+BEFORE INSERT ON hq_reliability_verdicts
+WHEN EXISTS (SELECT 1 FROM hq_reliability_verdicts WHERE id = NEW.id)
+  OR (TYPEOF(NEW.seq) = 'integer' AND EXISTS (SELECT 1 FROM hq_reliability_verdicts WHERE seq = NEW.seq))
+BEGIN SELECT RAISE(ABORT, 'hq_reliability_verdicts is append-only'); END;
 
 CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_backups_no_rewrite
 BEFORE UPDATE ON hq_reliability_backups
@@ -458,13 +494,23 @@ export function reliabilitySchemaPresent(db: HqDatabase): boolean {
  * rather than silently starting a clean one beside it. That is the whole
  * cross-restart duplicate guard, and putting the fence in the key would defeat
  * it.
+ *
+ * **The free-text `label` is not an input either, and used to be** (Wave 5
+ * review, Medium finding 4). A label is display text, not identity, so
+ * including it meant re-opening the same work under a different wording
+ * produced a DIFFERENT key, a second run beside the first, and an attempt
+ * admitted on it — while the first run stood at `needs_reconciliation` with an
+ * unknown outcome. That is precisely the duplicate irreversible act the phase
+ * exists to prevent, reachable by renaming. Identity is now the canonical
+ * facts alone; the facade refuses the second open outright when the task
+ * already carries an unreconciled run, so the two halves close it in both
+ * directions.
  */
 export function runIdempotencyKey(input: {
   taskId: string;
   runKind: RunKind;
   actionId: string | null;
   missionId: string | null;
-  label: string;
   idempotencyKey: string | null;
 }): string {
   const digest = createHash('sha256').update(canonicalJson(input)).digest('hex');
@@ -634,6 +680,102 @@ export function loadBackupRecords(db: HqDatabase): BackupRow[] {
   return (
     db.prepare(`SELECT * FROM hq_reliability_backups ORDER BY seq`).all() as Record<string, unknown>[]
   ).map(rowToBackup);
+}
+
+/* ------------------------------------------------------------------ */
+/* The verdict ledger — the safe-mode latch, made durable               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * True when this file carries the verdict ledger.
+ *
+ * Checked separately from `reliabilitySchemaPresent`, because a database
+ * written by a build BEFORE the Wave 5 correction carries the Phase 13 run
+ * ledger and not this table. Observation, never migration: a read-only handle
+ * over such a file reports the absence and the verdict is process-local there,
+ * which `SAFE_MODE_STATEMENT` says in words rather than glossing over.
+ */
+export function integrityVerdictLedgerPresent(db: HqDatabase): boolean {
+  return (
+    db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'hq_reliability_verdicts'`)
+      .get() !== undefined
+  );
+}
+
+/**
+ * The LAST verdict HQ recorded about this database, or null.
+ *
+ * Every finding is read through `isHqIntegrityFinding`, so a row appended by a
+ * raw writer can never introduce a finding name outside the closed vocabulary
+ * — a forged string is dropped rather than carried, exactly as the snapshot
+ * folds it to `unrecognized` rather than publishing it.
+ *
+ * Note what a raw appender CAN do here and what it cannot. It can append a
+ * `safe_mode = 1` row, which engages safe mode — the fail-closed direction,
+ * and a denial of service at worst. It cannot make a blocking verdict go away
+ * by appending a clean one: safe mode is cleared by a full ASSESSMENT of the
+ * file, and an assessment that finds a broken chain or a missing guard records
+ * a blocking verdict again immediately. The append-only trio holds the rest.
+ */
+export function latestIntegrityVerdict(db: HqDatabase): RecordedIntegrityVerdict | null {
+  if (!integrityVerdictLedgerPresent(db)) return null;
+  const row = db
+    .prepare(`SELECT * FROM hq_reliability_verdicts ORDER BY seq DESC LIMIT 1`)
+    .get() as Record<string, unknown> | undefined;
+  if (!row) return null;
+  const depth = String(row.depth);
+  const findings = jsonStringArray(row.findings).filter(isHqIntegrityFinding);
+  return {
+    assessedAt: String(row.assessed_at),
+    // Read through the vocabulary, never asserted into it. An unreadable depth
+    // is reported as the CHEAP one, so a forged row can never make a structural
+    // pass look like a full assessment.
+    depth: (INTEGRITY_ASSESSMENT_DEPTHS as readonly string[]).includes(depth)
+      ? (depth as IntegrityAssessmentDepth)
+      : 'structural',
+    safeMode: Number(row.safe_mode) === 1,
+    findings,
+  };
+}
+
+function jsonStringArray(value: unknown): string[] {
+  if (typeof value !== 'string') return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Append one verdict. Called from inside the assessment's own reservation. */
+export function appendIntegrityVerdict(
+  db: HqDatabase,
+  input: {
+    id: string;
+    assessedAt: string;
+    depth: IntegrityAssessmentDepth;
+    safeMode: boolean;
+    findings: readonly string[];
+    processId: string;
+    assessedBy: string;
+  },
+): void {
+  db.prepare(
+    `INSERT INTO hq_reliability_verdicts
+       (id, assessed_at, depth, safe_mode, findings, process_id, assessed_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    input.id,
+    input.assessedAt,
+    input.depth,
+    input.safeMode ? 1 : 0,
+    // Categorical names only. The same closed vocabulary the snapshot uses.
+    JSON.stringify(input.findings.filter(isHqIntegrityFinding)),
+    input.processId,
+    input.assessedBy,
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -857,9 +999,13 @@ export function classifyInterruptedRun(
   if (record.state !== 'open' && record.state !== 'attempting') return null;
   const reason = input.reason ?? 'process_interrupted';
   if (record.state === 'open') {
-    // No attempt was ever started, so nothing external can have happened. That
-    // is provable from the ledger rather than assumed, which is why it is the
-    // only case allowed to conclude without a human.
+    // No attempt was ever RESERVED in this ledger, so as far as HQ's own
+    // record goes nothing external happened — which is why this is the only
+    // case allowed to conclude without a human. It is a statement about the
+    // record and not about the world: `openRun`/`startRunAttempt` are opt-in,
+    // so a lane that never opened a run leaves nothing here to classify. The
+    // ledger proves what HQ was told, never what the world did (Wave 5 review,
+    // Low finding 11).
     return { interrupted: true, uncertain: false, reason, outcome: 'not_executed' };
   }
   if (!input.capabilitySideEffect) {
@@ -893,9 +1039,12 @@ export interface BackupRecordView {
 
 export const BACKUP_RECORD_STATEMENT =
   'contentDigest is computed BY HQ over the exact bytes it opened and checked, so it pins what was verified. ' +
-  'HQ did not take this backup and cannot restore it: taking one safely belongs to the durable persistence ' +
-  'owner, and restoring is a deliberate operator act against a stopped process. This row says a file was ' +
-  'checked, by whom, and what it hashed to — nothing more.';
+  'Those are the same bytes throughout: a candidate carrying a -wal, -shm or -journal sidecar is refused ' +
+  'rather than verified, because SQLite would read the sidecar together with the main file and the digest ' +
+  'covers only the file, and a path that does not resolve to the same inode for the digest and for the ' +
+  'database open is refused too. HQ did not take this backup and cannot restore it: taking one safely ' +
+  'belongs to the durable persistence owner, and restoring is a deliberate operator act against a stopped ' +
+  'process. This row says a file was checked, by whom, and what it hashed to — nothing more.';
 
 export function backupRowToView(row: BackupRow): BackupRecordView {
   return {
@@ -1051,7 +1200,9 @@ export const RELIABILITY_SNAPSHOT_NOTE =
   'Counts over closed vocabularies only. No run label, task/mission/action id, worker id, correlation id, ' +
   'backup path, digest or finding detail crosses to an unauthenticated reader. A concluded count is a count ' +
   'of RECORDS, not evidence that anything reached the outside world — no reliability path can perform an ' +
-  'external action. safeMode true means HQ has said so about itself; it is never inferred here.';
+  'external action. safeMode true means HQ has said so about itself; it is never inferred here. ' +
+  'durabilityMeetsRequirement is a statement about a FILE-backed database: an in-memory handle reports it ' +
+  'true because there is nothing durable to require of a database with no file, not because it is durable.';
 
 /**
  * Fold the register into counts. Every increment passes a membership check and

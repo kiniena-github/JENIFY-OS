@@ -159,8 +159,20 @@ describe('duplicate runs and duplicate attempts', () => {
     );
     expect(refusal.code).toBe('run_attempt_refused');
     expect(refusal.message).toMatch(/never retried automatically/i);
-    // And re-opening the same work does not produce a clean run either.
-    expect(expectOk(openRun(fx)).run.id).toBe(run.id);
+    // And re-opening the same work does not produce a clean run either. This
+    // used to assert that an identical open DEDUPED to the standing run, which
+    // was true and not enough: the derived key included the free-text label, so
+    // the same work re-opened under a different wording produced a SECOND run
+    // and an attempt was admitted on it (Wave 5 review, Medium finding 4). Both
+    // halves are pinned now, and both are stronger than the old assertion:
+    // an open against a task carrying an unreconciled run is REFUSED outright,
+    // whatever the label says, and the ledger still holds exactly one run.
+    const reopened = expectError(openRun(fx));
+    expect(reopened.code).toBe('run_state_conflict');
+    expect(reopened.message).toMatch(/nobody has reconciled|unresolved/i);
+    const renamed = expectError(openRun(fx, { label: 'a completely different wording' }));
+    expect(renamed.code).toBe('run_state_conflict');
+    expect(fx.ops.listRuns({ taskId: fx.claim.taskId }).map((entry) => entry.id)).toEqual([run.id]);
     expect(fx.ops.getRun(run.id)!.needsReconciliation).toBe(true);
   });
 

@@ -42,17 +42,29 @@ const SECRET_KEY_PATTERN =
  * Known credential shapes. Deliberately shape-based rather than
  * entropy-based: a generic "looks random" rule would reject the hash-chained
  * evidence digests, claim nonces and UUIDs that HQ legitimately renders.
+ *
+ * **Case-insensitive since the Wave 5 review (Low finding C-2).** Ten of the
+ * eleven patterns were case-sensitive while only `Bearer` carried `/i`, so
+ * `SK-AAAA…` passed where `sk-AAAA…` was refused — a one-keystroke bypass of a
+ * guard whose whole job is to fail closed. The JWT pattern is the deliberate
+ * exception: `eyJ` is base64url of `{"`, so its case is the ENCODING and not a
+ * spelling choice, and loosening it would only widen what it matches by
+ * accident.
+ *
+ * Values are also NORMALIZED before matching (see `normalizeForScan`), because
+ * the same finding showed a zero-width space or a fullwidth hyphen inside a key
+ * defeating every pattern at once.
  */
 const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
-  /\bsk-[A-Za-z0-9_-]{16,}/, // OpenAI-style secret key
-  /\bgh[pousr]_[A-Za-z0-9]{16,}/, // GitHub token
-  /\bgithub_pat_[A-Za-z0-9_]{20,}/, // GitHub fine-grained PAT
-  /\bAIza[0-9A-Za-z_-]{20,}/, // Google API key
-  /\bya29\.[0-9A-Za-z_-]{20,}/, // Google OAuth access token
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}/, // Slack token
-  /\bsbp_[a-f0-9]{32,}/, // Supabase personal access token
-  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/, // JWT
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/, // PEM private key
+  /\bsk-[A-Za-z0-9_-]{16,}/i, // OpenAI-style secret key
+  /\bgh[pousr]_[A-Za-z0-9]{16,}/i, // GitHub token
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/i, // GitHub fine-grained PAT
+  /\bAIza[0-9A-Za-z_-]{20,}/i, // Google API key
+  /\bya29\.[0-9A-Za-z_-]{20,}/i, // Google OAuth access token
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}/i, // Slack token
+  /\bsbp_[a-f0-9]{32,}/i, // Supabase personal access token
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/, // JWT (base64url; case IS the payload)
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/i, // PEM private key
   /\bBearer\s+[A-Za-z0-9._-]{16,}/i, // Authorization header value
   // `api_key: "…"` style assignments inside free text. This mirrors the
   // evidence log's own heuristic, but is applied to each RAW string rather
@@ -100,6 +112,23 @@ export class BrowserSafetyError extends Error {
   }
 }
 
+/**
+ * Fold away the two cheap ways to hide a credential shape from a regex:
+ * invisible characters inside it, and compatibility variants of its
+ * separators.
+ *
+ * `NFKC` maps the fullwidth forms (`－`, `＿`, `．`) onto the ASCII the patterns
+ * look for; the explicit strip removes the zero-width and bidi controls NFKC
+ * leaves alone. Scanning the normalized form only — the ORIGINAL string is
+ * what gets refused or published, so this widens what is caught and never
+ * rewrites what is carried.
+ */
+function normalizeForScan(value: string): string {
+  return value
+    .normalize('NFKC')
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g, '');
+}
+
 /** Trivial values are exempt from the key rule so `{ token: null }` is fine. */
 function isTrivial(value: unknown): boolean {
   return value == null || (typeof value === 'string' && value.trim().length === 0);
@@ -136,8 +165,9 @@ export function assertBrowserSafe(payload: unknown, rootPath = 'snapshot'): void
       }
     }
     if (typeof value === 'string') {
+      const scanned = normalizeForScan(value);
       for (const pattern of SECRET_VALUE_PATTERNS) {
-        if (pattern.test(value)) {
+        if (pattern.test(value) || pattern.test(scanned)) {
           throw new BrowserSafetyError('String matches a known credential shape', path);
         }
       }

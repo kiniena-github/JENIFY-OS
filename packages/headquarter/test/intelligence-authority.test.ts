@@ -593,9 +593,16 @@ describe('escalation preserves canonical task identity through the facade', () =
   it('creates a second decision on the SAME task, mission and project, one tier up', () => {
     const fx = intelligenceFixture();
     fx.budget([...INTELLIGENCE_TIERS]);
-    const first = expectOk(
-      decide(fx, { tier: 'high', missionId: 'mission-alpha', projectId: 'project-alpha' }),
-    ).decision;
+    // The mission and project are CANONICAL, not parameters. They used to be
+    // free-text arguments written verbatim, which is what let a worker
+    // attribute its spend to a mission that does not exist or to somebody
+    // else's (Wave 5 review, High finding B-2). The identity this test is
+    // about is therefore established the way HQ actually records it — a
+    // commanded mission, a work plan item linked to the task, the mission
+    // assigned to a project — and the assertions below are strictly stronger
+    // for it: they now prove the ids came from the plan.
+    const canonical = fx.linkToCanonicalMission(fx.claim.taskId, 'alpha');
+    const first = expectOk(decide(fx, { tier: 'high' })).decision;
     const escalated = expectOk(
       fx.ops.escalateIntelligenceDecision({
         decisionId: first.id,
@@ -605,8 +612,10 @@ describe('escalation preserves canonical task identity through the facade', () =
       }),
     );
     expect(escalated.decision.taskId).toBe(first.taskId);
-    expect(escalated.decision.missionId).toBe('mission-alpha');
-    expect(escalated.decision.projectId).toBe('project-alpha');
+    expect(first.missionId).toBe(canonical.missionId);
+    expect(first.projectId).toBe(canonical.projectId);
+    expect(escalated.decision.missionId).toBe(canonical.missionId);
+    expect(escalated.decision.projectId).toBe(canonical.projectId);
     expect(escalated.decision.tier).toBe('critical_review');
     expect(escalated.decision.escalatedFrom).toBe(first.id);
     expect(escalated.escalation.grantsAuthority).toBe(false);
