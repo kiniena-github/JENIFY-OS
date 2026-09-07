@@ -24,8 +24,17 @@ export type ProviderLocality = 'local' | 'cloud';
 /** Coarse, provider-claimed cost tier for a model. Informational only. */
 export type ProviderCostClass = 'free' | 'low' | 'medium' | 'high' | 'premium';
 
-/** Health as last observed by a probe. Never trust a stale value silently. */
-export type ProviderHealth = 'unknown' | 'healthy' | 'degraded' | 'unavailable';
+/**
+ * Health as last observed by a probe. Never trust a stale value silently.
+ *
+ * The members are also exported as a runtime array so a later layer can COUNT
+ * them without spelling a second, drifting copy of the same four answers —
+ * Phase 14's model-availability vocabulary is this array, by identity rather
+ * than by equality. `unknown` is deliberately first: it is the default and the
+ * fail-closed reading, never an error case.
+ */
+export const PROVIDER_HEALTH_STATES = ['unknown', 'healthy', 'degraded', 'unavailable'] as const;
+export type ProviderHealth = (typeof PROVIDER_HEALTH_STATES)[number];
 
 /**
  * One model a provider claims to offer. This is advertised metadata, not a

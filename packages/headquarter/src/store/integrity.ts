@@ -149,6 +149,17 @@ export const ENGINE_IMMUTABLE_TABLES: readonly { table: string; triggerPrefix: s
   { table: 'hq_reliability_runs', triggerPrefix: 'hq_reliability_runs' },
   { table: 'hq_reliability_run_events', triggerPrefix: 'hq_reliability_run_events' },
   { table: 'hq_reliability_backups', triggerPrefix: 'hq_reliability_backups' },
+  // Phase 14. All five carry the trio plus a secondary-unique guard, and the
+  // secondary guard is load-bearing on two of them: a REPLACE colliding on
+  // `hq_intel_budgets.budget_key` would silently swap a Founder's spending
+  // ceiling for a looser one, and one on `hq_intel_cost_entries.entry_key`
+  // would erase a recorded amount and free the same one to be recorded again —
+  // which is how a spend total quietly shrinks.
+  { table: 'hq_intel_model_observations', triggerPrefix: 'hq_intel_obs' },
+  { table: 'hq_intel_budgets', triggerPrefix: 'hq_intel_budgets' },
+  { table: 'hq_intel_decisions', triggerPrefix: 'hq_intel_decisions' },
+  { table: 'hq_intel_decision_outcomes', triggerPrefix: 'hq_intel_outcomes' },
+  { table: 'hq_intel_cost_entries', triggerPrefix: 'hq_intel_costs' },
 ];
 
 /** The three guards every engine-immutable table must carry, by suffix. */
