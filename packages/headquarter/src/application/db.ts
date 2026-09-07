@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS hq_mission_proposals (
 );
 CREATE INDEX IF NOT EXISTS idx_hq_mission_proposals_status
   ON hq_mission_proposals(status, proposed_at);
+
 `;
 
 /**

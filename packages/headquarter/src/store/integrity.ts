@@ -304,7 +304,28 @@ export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = deepFree
     // UPDATE their own columns, and each of those columns is write-once by its
     // own guard below. `no_erase` IS required — see the header.
     requiredGuards: ['no_erase', 'no_replace'],
-    secondaryGuards: ['no_relink', 'no_respec'],
+    // `no_remission` closes the OTHER end of the task-to-mission link (Wave 5
+    // correction round four, High H2): `no_relink` is declared `BEFORE UPDATE
+    // OF task_id`, so re-pointing `mission_id` broke the same link and was
+    // simply accepted.
+    secondaryGuards: ['no_relink', 'no_remission', 'no_respec'],
+  },
+  {
+    // The mission ROW a plan item joins to. Added by the Wave 5 correction
+    // round four (High H2): Phase 14's budget derivation reads a task's mission
+    // and, through `hq_missions.project_id`, its project — and this table was
+    // absent from this list entirely, so `DELETE FROM hq_missions` unbound
+    // every task from every mission and project ceiling with no finding
+    // anywhere.
+    //
+    // A REDUCED base, for the same reason `hq_mission_plan_items` has one: a
+    // mission's status, project link and `updated_at` legitimately move through
+    // the facade, so a blanket `no_rewrite` would break every real writer. What
+    // is write-once is the row's EXISTENCE and its identity.
+    table: 'hq_missions',
+    triggerPrefix: 'hq_missions',
+    requiredGuards: ['no_erase', 'no_replace'],
+    secondaryGuards: [],
   },
   { table: 'hq_orchestration_runs', triggerPrefix: 'hq_orch_runs', secondaryGuards: [] },
   { table: 'hq_orchestration_run_items', triggerPrefix: 'hq_orch_run_items', secondaryGuards: [] },

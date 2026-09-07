@@ -762,6 +762,37 @@ BEGIN SELECT RAISE(ABORT, 'hq_intel_cost_entries is append-only (unique entry_ke
 export function ensureIntelligenceSchema(db: HqDatabase): void {
   if (db.readonly) return;
   db.exec(INTELLIGENCE_DDL);
+  ensureCostEntryBindingColumn(db);
+}
+
+/**
+ * Was the entry's task CANONICALLY BOUND to the provider it names, at the
+ * moment HQ recorded it?
+ *
+ * Added by ALTER because `CREATE TABLE IF NOT EXISTS` does not extend an
+ * existing table; idempotent, exactly like `ensureColumns` in `store/db.ts`.
+ *
+ * It exists so a provider ceiling stops depending on a MUTABLE table for work
+ * that already happened (Wave 5 correction round four, High H2 route (c), and
+ * Medium M6). `provider_id` on this row is caller-declared and is only
+ * enforced equal to the binding when a binding EXISTS
+ * (`provider_binding_mismatch`); the measurement therefore had to re-read
+ * `op_tasks.payload` for every entry, and that column is neither append-only
+ * nor censused — one raw `UPDATE op_tasks SET payload = ...` moved recorded
+ * spend out of the ceiling that governed it. HQ writes this flag itself, from
+ * the binding it read at record time, and the row is append-only, so what was
+ * true then stays true.
+ *
+ * A NULL means "an entry recorded before this column existed", and is read as
+ * NOT bound — the fail-closed direction: such an entry measures no provider
+ * ceiling and is reported as unattributed rather than credited to a provider
+ * HQ cannot vouch for.
+ */
+function ensureCostEntryBindingColumn(db: HqDatabase): void {
+  const columns = db.prepare(`PRAGMA table_info(hq_intel_cost_entries)`).all() as { name: string }[];
+  if (!columns.some((column) => column.name === 'provider_bound')) {
+    db.exec(`ALTER TABLE hq_intel_cost_entries ADD COLUMN provider_bound INTEGER`);
+  }
 }
 
 /** True when this file carries the Phase 14 ledgers — observation, never migration. */
@@ -1802,6 +1833,17 @@ export interface CostEntryRow {
   projectId: string | null;
   decisionId: string | null;
   providerId: string;
+  /**
+   * Did HQ's own canonical record BIND this entry's task to the provider it
+   * names, at the moment the entry was recorded?
+   *
+   * `providerId` is caller-declared and is only enforced equal to the binding
+   * when a binding exists, so it is an attribution CLAIM. This is HQ's
+   * statement about that claim, written by HQ and never by the caller, on an
+   * append-only row. False on an entry recorded before the column existed —
+   * the fail-closed reading.
+   */
+  providerBound: boolean;
   modelId: string | null;
   fact: CostFact;
   unitsObserved: number | null;
@@ -1963,6 +2005,10 @@ function rowToCostEntry(r: Record<string, unknown>): CostEntryRow {
     projectId: (r.project_id as string | null) ?? null,
     decisionId: (r.decision_id as string | null) ?? null,
     providerId: r.provider_id as string,
+    // Read as NOT bound unless HQ recorded that it was. See
+    // `ensureCostEntryBindingColumn`: null (an older row) is the fail-closed
+    // reading, never the convenient one.
+    providerBound: Number(r.provider_bound) === 1,
     modelId: (r.model_id as string | null) ?? null,
     fact: readStoredCostFact({
       provenance: r.provenance,
@@ -2345,6 +2391,47 @@ export function decisionIsProvablyAvoidable(decision: DecisionRecord): boolean {
   return tierRank(decision.tier) > tierRank(recomputed.floorTier);
 }
 
+/**
+ * The bucket a recorded amount lands in when HQ has no canonical statement
+ * about who it belongs to.
+ *
+ * Distinct from `UNRECOGNIZED_BUCKET`, which means "a value outside a closed
+ * vocabulary". This one means "a real value HQ cannot attribute", and it exists
+ * because the alternative was to publish the CALLER's claim as a measurement
+ * (Wave 5 correction round four, Medium M6): a claim-holding worker on an
+ * unbound task recorded `providerId: 'openai'` and
+ * `byProvider = [{"id":"openai","knownAmountMinorUnits":999999}]` went out on
+ * the Founder route for work HQ has no statement ever ran there — while the
+ * ceiling path, which had already stopped trusting that column, correctly read
+ * `observed 0`. Two surfaces over one ledger disagreeing is exactly the defect;
+ * this is the fold that makes them agree.
+ */
+export const UNATTRIBUTED_BUCKET = 'unattributed';
+
+function foldSpendMany(
+  rows: readonly CostEntryRow[],
+  keysOf: (row: CostEntryRow) => readonly string[],
+): SpendByIdentity[] {
+  // An entry linked to two missions counts IN FULL under each, and that is
+  // deliberate (Wave 5 correction round four, Medium M5). HQ has no basis on
+  // which to split a recorded amount between them, so it does not invent one —
+  // and it is the same reading the ceilings take, where each mission's ceiling
+  // measures the whole spend of the work it is linked to.
+  const expanded: CostEntryRow[] = [];
+  const keys: (string | null)[] = [];
+  for (const row of rows) {
+    for (const key of new Set(keysOf(row))) {
+      expanded.push(row);
+      keys.push(key);
+    }
+  }
+  let index = -1;
+  return foldSpend(expanded, () => {
+    index += 1;
+    return keys[index] ?? null;
+  });
+}
+
 function foldSpend(
   rows: readonly CostEntryRow[],
   keyOf: (row: CostEntryRow) => string | null,
@@ -2394,6 +2481,25 @@ export function summarizeIntelligenceAnalytics(input: {
   decisions: readonly DecisionRecord[];
   costs: readonly CostEntryRow[];
   observations: readonly ModelObservationRow[];
+  /**
+   * CANONICAL membership for a cost entry's task — every mission it is linked
+   * to and every project those missions belong to.
+   *
+   * REQUIRED, not optional, and that is the point (Wave 5 correction round
+   * four, Medium M5). `byMission` and `byProject` used to fold the entry's own
+   * stored column, which holds ONE of the N missions a task may be linked to
+   * (`canonicalScopes.missionIds[0] ?? null`) — so which mission a spend was
+   * attributed to flipped on uuid sort order. Executed over six runs with one
+   * task linked to two missions and one 5000 spend: four runs attributed 100%
+   * to mission A and 0 to B; two runs the reverse. The phase document claimed
+   * the stored columns "measure nothing"; they measured THIS, and this is
+   * served on `/api/hq/control/intelligence`.
+   *
+   * An absent derivation would silently produce empty attribution, which is the
+   * same class of defect this wave has closed twice already (a missing
+   * enforcement input reading clean), so there is no default.
+   */
+  canonicalScopesOf: (taskId: string) => { missionIds: readonly string[]; projectIds: readonly string[] };
 }): IntelligenceAnalyticsView {
   const byTier = zeroed(INTELLIGENCE_TIERS);
   const byState = zeroed(DECISION_STATES);
@@ -2490,10 +2596,30 @@ export function summarizeIntelligenceAnalytics(input: {
       byProvenance,
       unknownAmountEntries,
       byCurrency: [...currencyTotals.values()].sort((a, b) => a.currency.localeCompare(b.currency)),
-      byProvider: foldSpend(input.costs, (row) => row.providerId),
+      // The provider HQ can VOUCH for, never the one the caller declared. An
+      // entry whose task was not canonically bound is a real amount HQ cannot
+      // attribute, and it is reported as exactly that rather than credited to
+      // whoever the worker named (Medium M6).
+      byProvider: foldSpend(input.costs, (row) =>
+        row.providerBound ? row.providerId : UNATTRIBUTED_BUCKET,
+      ),
+      // `model` stays on the entry's own column, and that is the same stated
+      // limitation `#entriesForScope` carries: nothing in canonical truth binds
+      // a task to a MODEL, so HQ has no derivation to prefer.
       byModel: foldSpend(input.costs, (row) => row.modelId),
-      byMission: foldSpend(input.costs, (row) => row.missionId),
-      byProject: foldSpend(input.costs, (row) => row.projectId),
+      // CANONICAL membership UNION the attribution HQ recorded on the row, for
+      // the same reason the ceilings take that union: the derivation answers
+      // "every mission this task belongs to NOW", and the recorded column
+      // answers "the mission this spend was filed under", which no later
+      // relinking can take away (Medium M5, and High H2's observation half).
+      byMission: foldSpendMany(input.costs, (row) => [
+        ...input.canonicalScopesOf(row.taskId).missionIds,
+        ...(row.missionId ? [row.missionId] : []),
+      ]),
+      byProject: foldSpendMany(input.costs, (row) => [
+        ...input.canonicalScopesOf(row.taskId).projectIds,
+        ...(row.projectId ? [row.projectId] : []),
+      ]),
     },
     provablyAvoidable: {
       decisionIds: avoidable,

@@ -264,8 +264,14 @@ describe('HQ never invents a price, at the facade', () => {
     // and `knownAmountMinorUnits: 0` — a `0` that meant "unknown", beside a
     // currency code HQ invented. The assertion is corrected here rather than
     // relaxed: it now pins the stronger property.
+    // Wave 5 correction round four, Medium M6: this used to assert
+    // `id: 'anthropic'`. The fixture's task carries NO provider binding, so
+    // `anthropic` was the claim-holding worker's own declaration, published on
+    // the Founder route as a measurement of a provider HQ has no canonical
+    // statement ever ran the work. The ceiling path had already stopped
+    // trusting that column (`observed 0`); this is the report agreeing with it.
     expect(analytics.cost.byProvider[0]).toMatchObject({
-      id: 'anthropic',
+      id: 'unattributed',
       currency: null,
       knownAmountMinorUnits: null,
       unknownAmountEntries: 1,

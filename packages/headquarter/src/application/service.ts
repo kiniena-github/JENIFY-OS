@@ -8710,10 +8710,40 @@ export class HeadquarterOperations {
           // canonical-truth answer rather than a second store that can drift
           // from it. The stored columns stay as recorded attribution and
           // measure nothing.
+          // CANONICAL membership UNION the attribution HQ itself recorded on
+          // the entry (Wave 5 correction round four, High H2).
+          //
+          // The canonical half alone was fail-OPEN in the one direction that
+          // matters. `#canonicalTaskScopes` answers "every mission this task
+          // belongs to NOW", so breaking the link erased the SPEND from the
+          // ceiling it had exhausted: `blocked, observed 5000` became
+          // `within_ceiling, observed 0`, and the previously refused write was
+          // then RECORDED. Three routes reached it — a supported facade call
+          // (`assignMissionToProject({projectId: null})` by a principal holding
+          // only `hq.mission_command`), a raw `UPDATE hq_mission_plan_items SET
+          // mission_id`, and `DELETE FROM hq_missions` — and none of them was a
+          // finding anywhere.
+          //
+          // `mission_id` and `project_id` on this row are HQ-DERIVED, never
+          // caller-supplied (`recordIntelligenceCost` writes them from
+          // `#canonicalTaskScopes`), and the row is append-only. So the union
+          // is monotone and unforgeable: once HQ has filed a spend under a
+          // mission, no later relinking can take it out of that mission's
+          // measurement, and no caller can put it into another's.
+          //
+          // The column still holds ONE of N missions, which is why the
+          // canonical half stays: it is what lets a task linked to a second
+          // mission accumulate against that mission's ceiling too.
           case 'mission':
-            return canonicalOf(entry.taskId).missionIds.includes(scope.scopeId);
+            return (
+              canonicalOf(entry.taskId).missionIds.includes(scope.scopeId) ||
+              entry.missionId === scope.scopeId
+            );
           case 'project':
-            return canonicalOf(entry.taskId).projectIds.includes(scope.scopeId);
+            return (
+              canonicalOf(entry.taskId).projectIds.includes(scope.scopeId) ||
+              entry.projectId === scope.scopeId
+            );
           // The provider scope is measured against the task's canonical
           // BINDING, never against the caller-supplied column. On a bound task
           // the two are equal by enforcement (`provider_binding_mismatch`); on
@@ -8723,6 +8753,15 @@ export class HeadquarterOperations {
           // Spend HQ cannot attribute to a provider is spend that measures no
           // provider ceiling.
           case 'provider': {
+            // The binding HQ RECORDED on the entry, union the one the payload
+            // carries now. `provider_bound` is HQ's own statement, written at
+            // record time and append-only, so a later `UPDATE op_tasks SET
+            // payload` cannot move already-recorded spend out of the ceiling
+            // that governed it — which it could while this read went to the
+            // mutable payload alone (Wave 5 correction round four, High H2
+            // route (c)). An entry HQ could not attribute measures no provider
+            // ceiling, exactly as before.
+            if (entry.providerBound && entry.providerId === scope.scopeId) return true;
             const bound = boundProviderOf(entry.taskId);
             return bound != null && bound === scope.scopeId;
           }
@@ -8782,6 +8821,44 @@ export class HeadquarterOperations {
    * HQ links a task to either. A task linked to no plan item belongs to no
    * mission, which is answered as the empty list rather than as "unconstrained".
    */
+  /**
+   * The mission, project and provider scopes HQ has already ATTRIBUTED spend
+   * from this task to — read off its own append-only cost entries.
+   *
+   * Not a second authority store and not a second truth: every one of these
+   * columns was written by HQ from the canonical record at the moment the entry
+   * was recorded (`recordIntelligenceCost` derives them; no caller supplies
+   * one), and the rows can never be updated or deleted. So this answers a
+   * different question from `#canonicalTaskScopes` — "whose ceiling has this
+   * work already been charged against", rather than "whose ceiling applies to
+   * it now" — and a ceiling that has been charged does not stop applying
+   * because a link was later broken.
+   */
+  #recordedScopesForTask(taskId: string): {
+    missionIds: string[];
+    projectIds: string[];
+    providerIds: string[];
+  } {
+    if (!this.#intelligenceStorePresent) return { missionIds: [], projectIds: [], providerIds: [] };
+    const missionIds = new Set<string>();
+    const projectIds = new Set<string>();
+    const providerIds = new Set<string>();
+    for (const entry of this.#costEntriesFromStore()) {
+      if (entry.taskId !== taskId) continue;
+      if (entry.missionId) missionIds.add(entry.missionId);
+      if (entry.projectId) projectIds.add(entry.projectId);
+      // Only a binding HQ VOUCHED for. A caller-declared provider on an
+      // unbound task is an attribution claim, not a scope — the same rule
+      // `#entriesForScope` applies to the measurement.
+      if (entry.providerBound) providerIds.add(normalizeProviderId(entry.providerId));
+    }
+    return {
+      missionIds: [...missionIds].sort(),
+      projectIds: [...projectIds].sort(),
+      providerIds: [...providerIds].sort(),
+    };
+  }
+
   #canonicalTaskScopes(taskId: string): { missionIds: string[]; projectIds: string[] } {
     if (!this.#missionStorePresent) return { missionIds: [], projectIds: [] };
     const rows = this.#db
@@ -8869,9 +8946,42 @@ export class HeadquarterOperations {
       latestBudgetFor(budgets, { scopeKind, scopeId, window }) != null;
     const canonical = this.#canonicalTaskScopes(taskId);
     const boundProvider = this.#taskBoundProvider(taskId);
+    // Every scope this task has ALREADY SPENT UNDER, taken from HQ's own
+    // append-only attribution on its cost entries (Wave 5 correction round
+    // four, High H2).
+    //
+    // `#canonicalTaskScopes` answers "which ceilings apply to this task NOW",
+    // and that alone was fail-open: breaking the mission link dropped the
+    // exhausted ceiling out of the governing set entirely, so a refused write
+    // became a recorded one. Route (a) needed no raw SQL at all — a principal
+    // holding `hq.mission_command`, without approval authority and without
+    // `hq.intelligence_command`, called
+    // `assignMissionToProject({ projectId: null })` and the project ceiling
+    // stopped governing. That same principal raising the ceiling directly is
+    // correctly REFUSED, which is what made the route a bypass rather than an
+    // authority.
+    //
+    // A scope a task has spent under continues to govern it. The attribution
+    // is HQ-derived and the rows are append-only, so this can only ever ADD
+    // constraints — it is monotone in the fail-closed direction, and no caller
+    // can name a scope here any more than before.
+    const spentUnder = this.#recordedScopesForTask(taskId);
     const candidates: { kind: BudgetScope; id: string; from: GoverningBudgetScope['derivedFrom'] }[] = [
-      ...canonical.missionIds.map((id) => ({ kind: 'mission' as const, id, from: 'task_mission' as const })),
-      ...canonical.projectIds.map((id) => ({ kind: 'project' as const, id, from: 'task_project' as const })),
+      ...[...new Set([...canonical.missionIds, ...spentUnder.missionIds])].map((id) => ({
+        kind: 'mission' as const,
+        id,
+        from: 'task_mission' as const,
+      })),
+      ...[...new Set([...canonical.projectIds, ...spentUnder.projectIds])].map((id) => ({
+        kind: 'project' as const,
+        id,
+        from: 'task_project' as const,
+      })),
+      ...spentUnder.providerIds.map((id) => ({
+        kind: 'provider' as const,
+        id,
+        from: 'task_bound_provider' as const,
+      })),
       // Folded into THIS lane's vocabulary, which is what makes the two
       // vocabularies actually one (Wave 5 correction round three, High B2). The
       // canonical binding is `CLAUDE`; every budget scope id, cost entry column
@@ -8887,7 +8997,13 @@ export class HeadquarterOperations {
           ]
         : []),
     ];
+    const seenCandidates = new Set<string>();
     for (const candidate of candidates) {
+      // The live binding and a recorded one can name the same provider; a scope
+      // may be derived once and only once.
+      const key = `${candidate.kind}\u001f${candidate.id}`;
+      if (seenCandidates.has(key)) continue;
+      seenCandidates.add(key);
       for (const window of BUDGET_WINDOWS) {
         if (!has(candidate.kind, candidate.id, window)) continue;
         scopes.push({
@@ -10275,10 +10391,11 @@ export class HeadquarterOperations {
       this.#db
         .prepare(
           `INSERT INTO hq_intel_cost_entries
-             (id, task_id, mission_id, project_id, decision_id, provider_id, model_id, provenance,
+             (id, task_id, mission_id, project_id, decision_id, provider_id, provider_bound, model_id,
+              provenance,
               amount_minor_units, currency, unit_kind, units_observed, basis, occurred_at, recorded_at,
               recorded_by, note, entry_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -10287,6 +10404,12 @@ export class HeadquarterOperations {
           canonicalScopes.projectIds[0] ?? null,
           decisionId,
           providerId,
+          // HQ's OWN statement about the caller's attribution claim, taken from
+          // the canonical binding read a few lines above and enforced equal to
+          // `providerId` when it exists. Written once, on an append-only row,
+          // so a later payload rewrite cannot change what was true (Wave 5
+          // correction round four, High H2 route (c) / Medium M6).
+          boundProvider != null ? 1 : 0,
           modelId,
           cost.fact.provenance,
           cost.fact.amountMinorUnits,
@@ -10368,10 +10491,22 @@ export class HeadquarterOperations {
    * projection, converts no currency and invents no confidence.
    */
   intelligenceAnalytics(): IntelligenceAnalyticsView {
+    // The SAME canonical derivation the ceilings are measured against, so the
+    // Founder's report and the ceiling that blocked a write can never disagree
+    // about whose spend it was (Wave 5 correction round four, Medium M5 / M6).
+    const memo = new Map<string, { missionIds: string[]; projectIds: string[] }>();
     return summarizeIntelligenceAnalytics({
       decisions: this.#listDecisionRecordsFromStore(),
       costs: this.#costEntriesFromStore(),
       observations: this.#observationsFromStore(),
+      canonicalScopesOf: (taskId: string) => {
+        let value = memo.get(taskId);
+        if (!value) {
+          value = this.#canonicalTaskScopes(taskId);
+          memo.set(taskId, value);
+        }
+        return value;
+      },
     });
   }
 

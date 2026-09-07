@@ -286,14 +286,27 @@ describe('the engine-immutable inventory is checked against the live schema, not
     // silently escaping the integrity check forever.
     expect(declared).toEqual(listed);
     // A REDUCED base is a deliberate, named exception, never a quiet omission
-    // (Wave 5 Medium 3). Exactly one table has one, and adding a second is a
-    // change this assertion forces a reviewer to see.
+    // (Wave 5 Medium 3), and this assertion exists to force a reviewer to see a
+    // new one. It saw this one: `hq_missions` joined the list in Wave 5
+    // correction round four (High H2), because Phase 14 derives a task's
+    // project ceiling through `hq_missions.project_id` while the table was
+    // absent from the census entirely — `DELETE FROM hq_missions` unbound every
+    // task from every mission and project ceiling with no finding anywhere. Its
+    // base is reduced for the same reason `hq_mission_plan_items`' is: status,
+    // project link and `updated_at` legitimately move through the facade, so a
+    // blanket `no_rewrite` would break every real writer. What is write-once is
+    // the row's EXISTENCE and its identity.
     expect(
       ENGINE_IMMUTABLE_TABLES.filter((entry) => entry.requiredGuards).map((entry) => ({
         table: entry.table,
         requiredGuards: [...entry.requiredGuards!],
       })),
-    ).toEqual([{ table: 'hq_mission_plan_items', requiredGuards: ['no_erase', 'no_replace'] }]);
+    ).toEqual([
+      { table: 'hq_mission_plan_items', requiredGuards: ['no_erase', 'no_replace'] },
+      { table: 'hq_missions', requiredGuards: ['no_erase', 'no_replace'] },
+    ]);
+    expect(declared).not.toContain('hq_missions');
+    expect(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table)).toContain('hq_missions');
     // And the one reduced-base entry is there for the stated reason, not by
     // accident: it carries no `no_rewrite` guard at all, and it IS listed
     // (the other lane's assertion, kept — being unlisted was the defect).
