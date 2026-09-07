@@ -86,7 +86,12 @@ import {
   assertNoSecretLikeContent,
   type EvidenceEntry,
 } from '../operator/evidence.js';
-import { CapabilityRegistry, type Capability, type RiskClass } from '../operator/capabilities.js';
+import {
+  CapabilityRegistry,
+  readStoredRiskClass,
+  type Capability,
+  type RiskClass,
+} from '../operator/capabilities.js';
 import {
   GLOBAL_SCOPE,
   OperatorQueue,
@@ -598,6 +603,7 @@ import {
   INTELLIGENCE_ROUTING_STATEMENT,
   INTELLIGENCE_TIERS,
   LATENCY_REQUIREMENTS,
+  MAX_COST_BASIS_LENGTH,
   MAX_COST_MINOR_UNITS,
   MAX_DECISION_LABEL_LENGTH,
   MAX_INTEL_NOTE_LENGTH,
@@ -1426,8 +1432,11 @@ function costRefusalMessage(refusal: CostFactRefusal): string {
       return 'An estimated amount must name its BASIS. An estimate whose origin nobody recorded is a ' +
         'fabricated price with a label on it, and HQ will not store one.';
     case 'basis_on_non_estimate':
-      return 'A basis belongs to an estimate; it may not accompany an unknown cost and may not exceed its ' +
-        'length bound on a reported or billed one.';
+      return 'A basis belongs to an ESTIMATE and to nothing else. An observed, reported or billed amount ' +
+        'is a fact; a story about where it came from beside one is not a basis.';
+    case 'basis_too_long':
+      return `The basis exceeds ${MAX_COST_BASIS_LENGTH} characters. It is a short statement of where a ` +
+        'number came from, and it lands permanently in an append-only ledger.';
     default:
       return 'The cost figure was refused.';
   }
@@ -2404,7 +2413,16 @@ export class HeadquarterOperations {
       return {
         id: row.id as string,
         description: row.description as string,
-        riskClass: row.risk_class as Capability['riskClass'],
+        // Read through the vocabulary, never ASSERTED into it (Wave 5
+        // Medium 5). `op_capabilities` carries no immutability triggers, so a
+        // raw `UPDATE ... SET risk_class = 'totally_harmless'` is a writable
+        // row — and the cast made that string a typed `RiskClass`, which then
+        // dropped the routing floor from `high` to `deterministic_local` and
+        // the review requirement from `high` to `undefined` (read as "no
+        // reviewer required"). An unreadable risk class is the STRICTEST one,
+        // never the convenient one: the same fail-closed rule
+        // `#characteristicsFor` already applies to a MISSING capability row.
+        riskClass: readStoredRiskClass(row.risk_class),
         sideEffect: !!row.side_effect,
         idempotent: !!row.idempotent,
         enabled: !!row.enabled,
@@ -8277,7 +8295,12 @@ export class HeadquarterOperations {
     if (!isObservationSource(input.source)) {
       return fail('invalid_input', `source must be one of: ${OBSERVATION_SOURCES.join(', ')}`);
     }
-    const facts = [...(input.capabilityFacts ?? [])];
+    // DEDUPED, and bounded by the closed vocabulary itself (Wave 5 Medium 7):
+    // the route's `stringArrayField` caps neither length nor repetition, so an
+    // array of ten thousand copies of one legal member would otherwise land
+    // permanently in an append-only, un-erasable table and be echoed on every
+    // read. A set of a five-member vocabulary can hold at most five.
+    const facts = [...new Set(input.capabilityFacts ?? [])];
     if (facts.some((fact) => !isModelCapabilityFact(fact))) {
       return fail('invalid_input', `capabilityFacts must be drawn from: ${MODEL_CAPABILITY_FACTS.join(', ')}`);
     }
@@ -8439,7 +8462,9 @@ export class HeadquarterOperations {
     if (!isCurrencyCode(currency)) {
       return fail('invalid_input', 'currency must be a three-letter uppercase code; HQ never converts between them');
     }
-    const permitted = [...(input.permittedTiers ?? [])];
+    // Deduped for the same reason, and with the same effect: the permitted set
+    // is a SET, so a repeated member is neither meaningful nor storable twice.
+    const permitted = [...new Set(input.permittedTiers ?? [])];
     if (permitted.some((tier) => !isIntelligenceTier(tier))) {
       return fail('invalid_input', `permittedTiers must be drawn from: ${INTELLIGENCE_TIERS.join(', ')}`);
     }

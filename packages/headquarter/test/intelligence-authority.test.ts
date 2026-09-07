@@ -429,6 +429,54 @@ describe('a cheaper tier cannot bypass a required reviewer tier, at the facade',
     expect(readOnly.requiredReviewTier).toBeNull();
     expect(readOnly.tier).toBe('deterministic_local');
   });
+
+  /**
+   * Wave 5 Medium 5, as the exploit that found it. `op_capabilities` carries no
+   * immutability triggers — enabling and disabling a capability is a legitimate
+   * UPDATE — so one raw `UPDATE ... SET risk_class = 'totally_harmless'` used to
+   * become a typed `RiskClass` by assertion. `RISK_FLOOR[...]` and
+   * `REVIEW_REQUIREMENT[...]` then read `undefined`, the floor fell from `high`
+   * to `deterministic_local`, and `proposalSatisfiesReviewRequirement` treats a
+   * null requirement as satisfied — so `deterministic_local` was ACCEPTED on an
+   * `external_side_effect` task.
+   */
+  it('fails CLOSED on a risk class outside the vocabulary, rather than dropping the floor', () => {
+    const fx = intelligenceFixture();
+    fx.budget([...INTELLIGENCE_TIERS]);
+    fx.db.prepare(`UPDATE op_capabilities SET risk_class = ? WHERE id = ?`).run(
+      'totally_harmless',
+      CAPS.openPr,
+    );
+
+    const proposal = expectOk(
+      fx.ops.intelligenceRoutingProposal({
+        taskId: fx.claim.taskId,
+        complexity: 'trivial',
+        contextSize: 'small',
+        workKind: 'classification',
+      }),
+    );
+    // The strictest class, not the convenient one.
+    expect(proposal.characteristics.riskClass).toBe('founder_gate');
+    expect(proposal.requiredReviewTier).toBe('critical_review');
+    expect(proposal.floorTier).toBe('critical_review');
+    // And the forged string never becomes a published value.
+    expect(JSON.stringify(proposal)).not.toContain('totally_harmless');
+
+    const refusal = expectError(
+      fx.ops.recordIntelligenceDecision({
+        taskId: fx.claim.taskId,
+        workerId: fx.claim.workerId,
+        fence: fx.claim.fence,
+        label: 'cheap work on forged-risk work',
+        complexity: 'trivial',
+        contextSize: 'small',
+        workKind: 'classification',
+        tier: 'deterministic_local',
+      }),
+    );
+    expect(refusal.code).toBe('review_tier_required');
+  });
 });
 
 describe('a local model is accepted when policy permits, and paid tiers are never assumed', () => {

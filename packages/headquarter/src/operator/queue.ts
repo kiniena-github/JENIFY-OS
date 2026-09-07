@@ -20,7 +20,7 @@ import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
 import { assertTransition, type ActivityStatus } from '../contracts/events.js';
-import { CapabilityRegistry, type Capability } from './capabilities.js';
+import { CapabilityRegistry, readStoredRiskClass, type Capability } from './capabilities.js';
 
 /**
  * Every AUTHORITY-BEARING mutation on the queue, handed only to the
@@ -471,7 +471,7 @@ export class OperatorQueue {
       return {
         id: row.id as string,
         description: row.description as string,
-        riskClass: row.risk_class as Capability['riskClass'],
+        riskClass: readStoredRiskClass(row.risk_class),
         sideEffect: !!row.side_effect,
         idempotent: !!row.idempotent,
         enabled: !!row.enabled,

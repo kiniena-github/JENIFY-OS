@@ -34,6 +34,8 @@ import {
   evaluateBudget,
   isIntelligenceTier,
   latestBudgetFor,
+  MAX_COST_BASIS_LENGTH,
+  MAX_COST_MINOR_UNITS,
   normalizeCostFact,
   proposalSatisfiesReviewRequirement,
   readStoredCostFact,
@@ -293,6 +295,122 @@ describe('HQ never invents a price — the cost fact lock', () => {
         basis: null,
       }),
     ).toMatchObject({ amountMinorUnits: null, state: 'unknown' });
+  });
+
+  /**
+   * Wave 5 Medium 6. `readStoredCostFact` claimed parity with the writer and
+   * did not have it: two of `normalizeCostFact`'s refusals had no counterpart,
+   * so a row of either shape read back as a KNOWN amount and was folded into
+   * `observedMinorUnits` — turning a scope that should read
+   * `requires_founder_decision` into `within_ceiling`.
+   */
+  it('reads a STORED estimate with no basis back as unknown, exactly as the writer refuses one', () => {
+    expect(
+      normalizeCostFact({
+        provenance: 'estimated',
+        amountMinorUnits: 100_000,
+        currency: 'USD',
+        unitKind: 'requests',
+      }),
+    ).toEqual({ ok: false, refusal: 'estimate_without_basis' });
+    expect(
+      readStoredCostFact({
+        provenance: 'estimated',
+        amountMinorUnits: 100_000,
+        currency: 'USD',
+        unitKind: 'requests',
+        basis: null,
+      }),
+    ).toMatchObject({ provenance: 'unknown', amountMinorUnits: null, state: 'unknown' });
+    // A stored estimate that DOES name its basis still reads as known.
+    expect(
+      readStoredCostFact({
+        provenance: 'estimated',
+        amountMinorUnits: 100_000,
+        currency: 'USD',
+        unitKind: 'requests',
+        basis: 'published rate card read on 2026-01-01',
+      }),
+    ).toMatchObject({ provenance: 'estimated', amountMinorUnits: 100_000, state: 'known' });
+  });
+
+  it('reads a STORED amount beyond the writer’s bound back as unknown', () => {
+    const beyond = MAX_COST_MINOR_UNITS + 1;
+    expect(
+      normalizeCostFact({
+        provenance: 'billed',
+        amountMinorUnits: beyond,
+        currency: 'USD',
+        unitKind: 'requests',
+      }),
+    ).toEqual({ ok: false, refusal: 'amount_out_of_bounds' });
+    expect(
+      readStoredCostFact({
+        provenance: 'billed',
+        amountMinorUnits: beyond,
+        currency: 'USD',
+        unitKind: 'requests',
+        basis: null,
+      }),
+    ).toMatchObject({ provenance: 'unknown', amountMinorUnits: null, state: 'unknown' });
+  });
+
+  /**
+   * Wave 5 Medium 7. `MAX_COST_BASIS_LENGTH` was applied only to the branch
+   * that cannot carry a basis at all, under the misnamed
+   * `basis_on_non_estimate` — so `estimated`, the one provenance that REQUIRES
+   * a basis, had no length check, and roughly a megabyte of caller text could
+   * land permanently in an append-only, un-erasable table.
+   */
+  it('bounds the basis on EVERY branch, and names the refusal for what it is', () => {
+    const long = 'x'.repeat(MAX_COST_BASIS_LENGTH + 1);
+    expect(
+      normalizeCostFact({
+        provenance: 'estimated',
+        amountMinorUnits: 10,
+        currency: 'USD',
+        unitKind: 'requests',
+        basis: long,
+      }),
+    ).toEqual({ ok: false, refusal: 'basis_too_long' });
+    expect(
+      normalizeCostFact({
+        provenance: 'billed',
+        amountMinorUnits: 10,
+        currency: 'USD',
+        unitKind: 'requests',
+        basis: long,
+      }),
+    ).toEqual({ ok: false, refusal: 'basis_too_long' });
+    expect(
+      normalizeCostFact({
+        provenance: 'unknown',
+        amountMinorUnits: null,
+        currency: null,
+        unitKind: 'unknown',
+        basis: long,
+      }),
+    ).toEqual({ ok: false, refusal: 'basis_too_long' });
+    // At the bound exactly, an estimate is accepted.
+    const atBound = normalizeCostFact({
+      provenance: 'estimated',
+      amountMinorUnits: 10,
+      currency: 'USD',
+      unitKind: 'requests',
+      basis: 'y'.repeat(MAX_COST_BASIS_LENGTH),
+    });
+    expect(atBound.ok).toBe(true);
+    // And a SHORT basis on a non-estimate is refused for what it is, rather
+    // than silently accepted because it happened to be under 200 characters.
+    expect(
+      normalizeCostFact({
+        provenance: 'billed',
+        amountMinorUnits: 10,
+        currency: 'USD',
+        unitKind: 'requests',
+        basis: 'a story about a number that did not need one',
+      }),
+    ).toEqual({ ok: false, refusal: 'basis_on_non_estimate' });
   });
 });
 
