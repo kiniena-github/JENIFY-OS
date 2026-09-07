@@ -251,6 +251,7 @@ operators route around instead of a thing they act on.
 | `approveTask` — an approval bound now would sit primed to run the moment safe mode clears | `denyTask` — the fail-safe direction |
 | `authorizeAction` — the external-action analogue of the same argument: the `authorized` snapshot is captured from canonical truth HQ has just declared untrustworthy, it outlives the clearing of safe mode, and `executeAction` compares against it | `proposeAction` — a proposal is a request, not an authorization, and it reaches nothing |
 | `releaseKillSwitch` | `engageKillSwitch` — the fail-safe direction |
+| `registerExecutionWorker`, `declareWorkerProvider` — the two that ADD authority | `revokeWorkerProvider`, `deactivateExecutionWorker` — the two that remove it |
 | `claimNext` — refused as `safe_mode_engaged`, distinctly from `nothing_claimable` | `recoverInterruptedRuns` and `reconcileRun` — the acts that resolve the state |
 | `executeAction` — refused BEFORE the reservation, so no side-effect key is burned | `assessHqIntegrity` and `recordVerifiedBackup` — the acts that investigate and clear it |
 | `openRun` / `startRunAttempt` / `recordRunOutcome` | |
@@ -262,7 +263,18 @@ never removes a way to find out what is wrong.
 **The mutators deliberately left AVAILABLE, each with its reason** (Wave 5
 review, Medium finding 7 — `authorizeAction` was in neither column, and neither
 was anything else in this list, so "what safe mode refuses" was a partial
-statement presented as a complete one):
+statement presented as a complete one).
+
+That table was still incomplete, and one of the entries missing from it granted
+AUTHORITY (Wave 5 correction round three, Medium A8). `registerExecutionWorker`
+created a worker identity WITH its `allowedCapabilities` straight into
+`hq_specialists` — the table `#grantOf` reads at every enforcement point — while
+HQ had declared its own record untrustworthy, and registration is create-only
+with no revoke path. `declareWorkerProvider` is the same act one field across:
+it is what lets a worker claim provider-bound work at all. Both are REFUSED now,
+and `SAFE_MODE_STATEMENT` names them. The five that remain available were each
+decided deliberately rather than by omission, and the reason is recorded on the
+method as well as here.
 
 | Left available | Why |
 |---|---|
@@ -270,7 +282,10 @@ statement presented as a complete one):
 | `assignTask` | assignment narrows who MAY claim; the claim itself is refused. It removes an option, it never adds one. |
 | `startTask`, `submitResult` | both belong to work already claimed and already running. Refusing them would strand a live execution with nowhere to report, which loses truth rather than protecting it. |
 | `reviewTask` | a `pass` verdict completes a task and is the closest of these to an approval, but the task it completes was claimed and executed BEFORE safe mode engaged. Refusing the verdict does not un-execute it; it only leaves HQ unable to record what happened. **Stated as the argued judgement it is, not as an obvious one.** |
-| `proposeAction` | a proposal reaches nothing and authorizes nothing; `authorizeAction` and `executeAction` are both refused, so it cannot become an act. |
+| `proposeAction`, `proposeMission`, `promoteProposal` | a proposal reaches nothing and authorizes nothing; `authorizeAction` and `executeAction` are both refused, and the task a promotion creates cannot be claimed, so none of the three can become an act. |
+| `routeTask` | advisory routing. `eligible` is computed from the capability registry and the directory allow-list, it changes no canonical state, and the claim it might inform is refused anyway. The only thing it can write is an evidence note saying a nomination source misbehaved. |
+| `appendSystemEvidence` | the entry that had to be ARGUED, because it appends into the very hash chain a latched `evidence_chain_broken` finding is a statement about. Every kind it can still write records a system lane REFUSING to act (`claude_github_dispatch_refused`, `direct_order_dispatch_blocked`); the kinds that DECIDE a dispatch outcome are structurally excluded and reachable only through the constructor grant; and the actor is a reserved system name that can never resolve to a principal or a worker. It grants nothing and concludes nothing, and refusing it would leave a lane unable to record that it declined — losing truth in the posture built for not losing truth. The same argument as `startTask`/`submitResult`. |
+| `revokeWorkerProvider`, `deactivateExecutionWorker` | strictly NARROWING: each can only take authority away, and there is no reactivate method. `declareWorkerProvider` and `registerExecutionWorker` are refused for the mirror-image reason. |
 | `reconcileAction`, `reconcileRun`, `recoverInterruptedRuns` | the acts that RESOLVE an uncertain state. Refusing them would make safe mode self-sustaining. |
 | `engageKillSwitch`, `denyTask` | the fail-safe directions. |
 
@@ -515,9 +530,26 @@ developer's machine cannot arrange honestly.
 > restore. The surviving rule refuses on PRESENCE rather than on non-zero size
 > (the other lane's `file_has_uncheckpointed_wal` bound), because presence is
 > what makes the main file possibly not the whole database. Pointing this at the
-> LIVE HQ database is consequently refused — a live HQ database is WAL-mode —
-> which is a more honest answer than the "safe as well as useless" pass it used
-> to give. `MAX_VERIFIED_BACKUP_BYTES` now bounds the READ rather than only the
+> LIVE HQ database AT ITS OWN PATH is consequently refused — a live HQ database
+> is WAL-mode — which is a more honest answer than the "safe as well as useless"
+> pass it used to give.
+>
+> **That was written as "the live database is refused" and the scope was wrong
+> in two ways the third correction round executed (Medium A4).** A HARD LINK to
+> the live inode, under a name with no sidecars beside it, PASSED — because the
+> sidecar check is keyed on the resolved PATH — and the live database was then
+> recorded permanently in the append-only register as a verified recovery point
+> while its committed content was demonstrably not all in the bytes that had
+> been digested. `nlink` is taken from the descriptor that was actually opened
+> now, and a candidate with more than one name is refused as
+> `file_has_multiple_links`: a snapshot another name can still be written
+> through is not a snapshot. A plain `cp` of a live WAL database, however, still
+> verifies and always will — it is a different inode with no sidecars and its
+> bytes are a sound HQ database, just one that may be missing whatever the WAL
+> had not checkpointed, and nothing in the bytes distinguishes it from a
+> properly consolidated backup. `verified` means "these bytes are a sound HQ
+> database" and has never meant "this is the whole of what was committed when
+> they were copied". `MAX_VERIFIED_BACKUP_BYTES` now bounds the READ rather than only the
 > pre-open `lstat`, and the `openSync` failure that used to collapse every cause
 > into `path_not_a_regular_file` is distinguished (LOW 12).
 >
@@ -600,7 +632,8 @@ The strongest claim in the phase, established three ways — the Phase 12 recipe
 | the reliability-command capability row | `#capabilityFromStore` | whether an assessment or a backup record may proceed | canonical, unchanged from the Phase 4/5/7/12 pattern. |
 | the SAFE-MODE verdict | the `#private` `#integrityReport` field, latched from the structural assessment AND from the last row of `hq_reliability_verdicts` | whether a Founder-gated write, an approval, an external-action authorization, a kill-switch release, a claim or an external execution proceeds | canonical. Pinned against a patch of `hqReliabilityPosture` and `reliabilitySummary` on instance, prototype, and a later-constructed facade — and, **since the Wave 5 correction of HIGH 1**, against a plain RESTART, which used to clear it. |
 | the RECORDED verdict a construction re-reads | `latestIntegrityVerdict(db)` — a direct read of the append-only `hq_reliability_verdicts` ledger | whether a blocking verdict survives a restart | canonical. The ledger carries the full append-only trio; a raw connection can APPEND a `safe_mode = 1` row (the fail-closed direction) and can neither rewrite nor erase one. |
-| the EVIDENCE-CHAIN verification that PRODUCES that verdict | `#verifyEvidenceChainFromStore` — a `#private` closure over `#db` and the module-level `verifyEvidenceChain`, deliberately NOT `queue.evidence.verifyChain()` | whether `evidence_chain_broken` engages safe mode, and whether an already-latched safe mode survives the next assessment | canonical **since the Wave 5 correction**; it previously read the patchable delegate. Pinned against a patch on the instance and on `EvidenceLog.prototype`, and against a facade constructed after it. |
+| the APPEND-ONLY GUARDS ON THE AUDIT LOG ITSELF | the same `missingImmutabilityGuards` census, now that `op_evidence` is a declared `ENGINE_IMMUTABLE_TABLES` member | whether removing the guards on the hash-chained log is a blocking finding | canonical **since the third correction round (High A2)**. The table used to carry NO triggers at all, on the argument that "its guarantee is the chain rather than the engine" — so a raw `DELETE FROM op_evidence WHERE seq > 1` was simply permitted, and the chain then verified perfectly over what was left. |
+| the EVIDENCE-CHAIN verification that PRODUCES that verdict | `#verifyEvidenceChainFromStore` — a `#private` closure over `#db` and the module-level `verifyEvidenceChain`, deliberately NOT `queue.evidence.verifyChain()` | whether `evidence_chain_broken` engages safe mode, and whether an already-latched safe mode survives the next assessment | canonical **since the Wave 5 correction**; it previously read the patchable delegate. Pinned against a patch on the instance and on `EvidenceLog.prototype`, and against a facade constructed after it. Since the third correction round it verifies the chain's LENGTH as well as its links, against the AUTOINCREMENT high-water mark SQLite maintains — because walking forward from the genesis value proved that the entries PRESENT link to one another and said nothing about where the chain was supposed to END, so deleting the NEWEST entries left a log that verified perfectly. |
 | the APPEND-ONLY GUARD census that produces the other schema finding | `missingImmutabilityGuards(db)` over `ENGINE_IMMUTABLE_TABLES`, observed as the file was FOUND | whether `append_only_guard_missing` engages safe mode | canonical, and **widened twice by the Wave 5 review** — to the secondary-unique guards and `hq_memory`'s supersede rule (Medium 2), and to `hq_mission_plan_items`' three own guards (Medium 6). The declaration is **deep-frozen at module scope** (HIGH 2): it is public package API, `readonly` erases at runtime, and one `ENGINE_IMMUTABLE_TABLES.length = 0` used to empty the census and make a tampered file read clean. |
 | store presence | the constructor's `#reliabilityStorePresent` flag | whether a 0 means "absent" or "empty" | canonical, observed, never migrated. |
 | the ledger, for the unauthenticated snapshot | `#listRunsFromStore` and the `#private` report — deliberately NOT `listRuns()` or `hqReliabilityPosture()` | what `hq-snapshot.json`'s `reliability` section publishes | canonical. |
@@ -1312,6 +1345,30 @@ the census blind to the guard the other lane had just added. Frozen, and pinned
 by an added assertion in `refuses assignment to the census array, its entries
 and their guard lists`.
 
+## The THIRD correction round: what two independent hostile reviews reproduced
+
+Two read-only reviewers re-read the reconciled head by EXECUTION and reproduced
+five High, ten Medium and four Low findings across Phases 13 and 14. The Phase
+13 half is below; the Phase 14 half is in that phase's document. Every entry
+names what was actually wrong, not what was thought to be wrong.
+
+| Finding | What was reproduced | What changed |
+|---|---|---|
+| **HIGH A1** — a DROPPED ledger read as a clean store | `DROP TABLE` is DDL: no BEFORE trigger refuses it, and the guard census SKIPPED a declared table that was absent. Dropping `hq_action_intents`, `hq_action_events`, `hq_truth_records`, `hq_truth_verifications`, `hq_truth_acceptances`, `hq_memory` and `hq_intel_budgets` produced a structural pass AND a full assessment with ZERO observations, while the facade's ensures recreated each one EMPTY. Dropping `hq_reliability_verdicts` erased a latched safe mode outright and `releaseKillSwitch` was admitted with the evidence chain still broken. | The absence is OBSERVED as found, before any ensure runs, and is a finding when HQ's own schema then re-creates the ledger. `establishedImmutableTables` discriminates a first construction — where every phase's ledger is legitimately absent — from a file that has lost one. |
+| **HIGH A2** — the hash chain did not detect DELETION | `op_evidence` carried no append-only triggers at all, so a raw `DELETE` was permitted; and the verifier walked forward from the genesis value with no commitment to where the chain should END, so deleting the NEWEST entries left a chain that verified perfectly. `DROP TABLE op_evidence` and `DELETE FROM op_evidence WHERE seq > 1` both read CLEAN at full depth. | Three independent holds: the engine refuses UPDATE/DELETE/REPLACE; `op_evidence` is a declared engine-immutable ledger, so removing those guards is a blocking finding; and the verification compares the entries present against the AUTOINCREMENT high-water mark, which a DELETE does not lower. The module header's "deletion breaks the chain" and "the only blocking finding that detects tampering with HQ's own audit record" are corrected rather than restated. |
+| **HIGH A3** — a second run lineage opened while the first attempt was still in flight | Both halves of the duplicate-run guard keyed on `needsReconciliation`, and a crashed attempt sits at `attempting` until the Founder-gated recovery classifies it. A second `openRun` under a distinct `idempotencyKey` derived a distinct `run_key`, passed both guards, and `startRunAttempt` ADMITTED generation 1 on a `sideEffect: true` capability while the first worker held the live fence. | One guard over both unsettled states, applied at the ATTEMPT as well as at the OPEN — two runs can both stand at `open` and then attempt one after the other. `open` stays admissible, so two genuinely separate pieces of work on one task remain expressible. |
+| **MEDIUM A4** — a hard link to the live database verified as a backup | The sidecar refusal is keyed on the resolved PATH; a hard link is a second name for the same inode with no sidecars beside it. Recorded permanently in the append-only register as a verified recovery point, missing WAL-resident committed data. | `nlink` from the opened descriptor; `file_has_multiple_links`. The shipped "the live database is therefore refused" is scoped to what is true, and the `cp` case is disclosed rather than implied away. |
+| **MEDIUM A5** — a fabricated durability defect on every snapshot | `synchronous` is a connection pragma SQLite records nothing about in the file, and `openHqDatabaseReadOnly` — the `hq:snapshot` open — never set it. Every world-readable snapshot of a healthy WAL + FULL store published `durabilityMeetsRequirement: false` and a `durability_below_requirement` finding, permanently masking a genuine degradation. | Both HQ opens establish the declared posture, spelled the same way. The posture documents what it is a statement about: the journal mode is the FILE's, `synchronous` is this CONNECTION's, and a read-only handle does not speak for the writer's. |
+| **MEDIUM A6** — the capability drift gate was defeated by patching what it compares against | `RELIABILITY_COMMAND_RESERVED_CONTRACT` was unfrozen. With a tampered registry row the gate correctly refused `assessHqIntegrity`; patching the reserved contract made it ADMIT at full depth. `REPORTABLE_RUN_OUTCOMES.length = 0` and `RUN_STATES.length = 0` corrupted the unauthenticated snapshot's counts. | One shared `deepFreeze`, applied to every `*_RESERVED_CONTRACT` in the package, the capability declarations they derive from, and every closed vocabulary a decision or a published count is keyed by. The pinning test enumerates the package rather than a hand-kept list. |
+| **MEDIUM A7** — one raw `INSERT` cleared a latched safe mode | An APPEND is exactly the write an append-only ledger permits, and the boot's own pass is structural. `releaseKillSwitch` and `claimNext` came straight back out, while `SAFE_MODE_STATEMENT` asserted on every view that only a fresh full assessment clears it. | A verdict that says ENGAGED stands whoever appended it; a verdict that says CLEAR counts only when the evidence chain carries the entry naming it, which the two writers of a verdict append in the same reservation. `latestIntegrityVerdict` is renamed `standingIntegrityVerdict`, because it is no longer the latest anything. |
+| **MEDIUM A8** — safe mode left an authority-GRANTING mutator open | `registerExecutionWorker` created a worker identity WITH its `allowedCapabilities` while HQ had declared its own record untrustworthy. `declareWorkerProvider` is the same act one field across and was not in the reviewers' list. | Both refused, first and categorically; `SAFE_MODE_STATEMENT` names them. The five that stay available are decided deliberately, with the reason on the method and in the table above. |
+| **LOW A9 / LOW A10** — three test titles advertising proofs their bodies did not execute | The two latch tests tried UPDATE and DELETE, which the triggers refuse, and never the plain INSERT that actually cleared safe mode. The statement test greped three substrings and executed no behaviour while pinning a sentence whose second half was false. | Each body now runs what its title claims. |
+
+**Two claims the review checked and found TRUE**, recorded so a later reader does
+not re-litigate them: the `#private`-closure enforcement design held under
+hostile patching of every read surface tried, and the trigger/table census was
+exactly complete in both directions before `op_evidence` was added to it.
+
 ### What is NOT fixed — all four lanes' disclosures, in one list
 
 Nothing below is closed by this wave, and each item is stated where it belongs
@@ -1321,14 +1378,31 @@ as well as here:
   against the chained `op_evidence` entry. A raw, well-formed, recognized append
   still moves a run's derived state; the engine guards refuse UPDATE, DELETE and
   REPLACE, not a forged new row.
+- The evidence chain's LENGTH commitment is SQLite's own AUTOINCREMENT
+  high-water mark in `sqlite_sequence`, which a DELETE does not lower. That is a
+  durable commitment the engine maintains and it is not a signed one: a writer
+  that drops the guard, deletes the tail and then rewrites `sqlite_sequence` is
+  not detected by it. Each of those is a further deliberate step and the first is
+  itself a blocking finding.
+- A DROPPED declared ledger is a finding only on a handle that can WRITE, because
+  the discriminator between "this file lost a ledger" and "this file predates
+  it" is that HQ's own ensure pass re-creates what its schema declares. A
+  read-only handle re-creates nothing and therefore cannot tell the two apart;
+  it reports neither rather than inventing one.
 - The verdict ledger is durable only where it EXISTS: a database written before
   this wave, or a read-only handle over one, carries no `hq_reliability_verdicts`
   table and the verdict is process-local there. `SAFE_MODE_STATEMENT` says so.
-- A writer that already holds a writable handle can APPEND a `safe_mode = 0`
-  verdict, and the next construction's own pass is STRUCTURAL — which by design
-  cannot see a broken evidence chain — so an `evidence_chain_broken` engagement
-  would not be re-derived. The same residual class as the run-event ledger above.
-  What the ledger DOES close is a plain restart silently lowering a verdict.
+- ~~A writer that already holds a writable handle can APPEND a `safe_mode = 0`
+  verdict~~ — **CLOSED in the third correction round (Medium A7)**, because the
+  sentence `SAFE_MODE_STATEMENT` ships on every view said it could not. A
+  verdict that says ENGAGED stands whoever appended it; a verdict that says
+  CLEAR counts only when the hash-chained evidence log carries the entry naming
+  it, which the two writers of a verdict append inside the same reservation.
+  What remains is stated on `standingIntegrityVerdict`: HQ holds no key a
+  foreign writer does not also have, so a writer holding the file open can forge
+  the evidence entry too — at the cost of appending to a chain that is now
+  engine-guarded and length-committed. A real barrier, not a cryptographic
+  boundary, and the same residual class as the run-event ledger above.
 - **An HQ database file created before this wave engages safe mode once, on its
   first boot afterwards**, because `trg_hq_mission_plan_items_no_erase` did not
   exist in it and the as-found census observes it missing. The finding is true
@@ -1336,6 +1410,20 @@ as well as here:
   ledger survived this merge, that first boot also RECORDS the engagement, so it
   now persists across restarts until that assessment — stronger, and stated here
   rather than discovered in operation. A fresh file is unaffected.
+- **The third correction round adds two more first-boot cases of exactly that
+  kind, for exactly that reason.** `op_evidence` now carries the append-only
+  guard trio, and those triggers are installed by the facade's ensure pass
+  rather than by `migrateHqDatabase` — deliberately, so that a DROPPED guard is
+  OBSERVED before it is repaired. A file that has never been opened by a writer
+  of this build therefore does not carry them, and the as-found census says so
+  once. The same holds for a CLEAR verdict recorded by an older build, which
+  carries no paired evidence entry and so no longer clears a blocking verdict
+  standing behind it. Both are the fail-closed direction and both are cleared by
+  one Founder full assessment.
+- **A READ-ONLY handle over such a file cannot clear either**, because it
+  creates nothing and assesses nothing. `hq:snapshot` over a database that no
+  writer of this build has opened will report `append_only_guard_missing` until
+  one has. Open it once with a writable HQ command first.
 - Recovery's liveness correction is a REPAIR path, not a prevention.
 - A MODEL-scoped ceiling does not govern a decision write, because nothing in
   canonical truth binds a task to a model.
@@ -1346,6 +1434,14 @@ as well as here:
 - `verifyHqBackupFile` now writes a full copy of the candidate into the OS temp
   directory, so verification needs free space equal to the file and is slower.
 - A credential split across two search fields still passes both scans.
+- A `cp` of a live WAL-mode database still verifies as a backup, and always
+  will: it is a different inode with no sidecars beside it and its bytes are a
+  sound, integrity-clean HQ database — just one that may be missing whatever the
+  WAL had not checkpointed. Nothing in the bytes distinguishes it from a properly
+  consolidated backup. `verified` means "these bytes are a sound HQ database" and
+  has never meant "this is the whole of what was committed when it was taken".
+  A hard LINK to the live database is refused now (`file_has_multiple_links`);
+  a copy of it is not, and cannot be.
 - A forged decision row can still understate complexity, context size and work
   kind.
 - A raw appender can still widen a budget by appending a higher-version row.

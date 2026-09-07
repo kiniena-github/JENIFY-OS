@@ -112,6 +112,30 @@ refuses `tier_below_policy_floor`, because the floor already contains the
 review requirement and a caller who only ever saw "below the floor" would never
 learn the actual reason.
 
+**On EVERY path that records a tier, which was not true until the third
+correction round (Medium B3).** `escalateIntelligenceDecision` never ran
+`#resolveRecordedTier` at all: `deriveEscalation` picked the cheapest higher
+PERMITTED tier and consulted neither the required reviewer tier nor the floor.
+Reproduced through supported calls only — a Founder re-registering a capability
+at a higher risk class through the documented registry upsert — the enforced
+path refused `low_cost` with `review_tier_required` while escalation recorded
+`low_cost` anyway against a `critical_review` requirement. There are two checks
+now: the pure derivation SKIPS a tier that cannot satisfy the requirement
+(skips rather than refuses, because the next one up may well satisfy it), and
+the facade re-derives the current proposal and runs the shared resolver, which
+also covers the floor and the permitted set as they stand at escalation time.
+A prior decision whose stored characteristics cannot be read through the closed
+vocabularies fails closed: the escalation is refused rather than recorded
+against a policy HQ could not compute.
+
+The requirement also survives a FORGED row in both columns (Medium B4). The
+canonical re-derivation used to be skipped whenever `characteristics` failed to
+parse, and `rowToDecision` reads an unparseable column as null — so forging
+`required_review_tier` alone was caught by the max and forging BOTH escaped
+completely, with `requiredReviewTier: null`, `satisfies: true`, and the row
+dropping out of `reviewRequired` in analytics. The canonical risk class is now
+read first and unconditionally.
+
 A recommendation still never bypasses canonical approval authority. This raises
 a floor; it does not lower the Phase 8 gate, and the refusal text says so.
 
@@ -198,6 +222,31 @@ scope-and-window for which a ceiling has ACTUALLY been recorded. The missions
 are read off `hq_mission_plan_items.task_id` (ALL of them, not the first) and
 the projects off `hq_missions.project_id` — the same canonical link
 `proposeAction` already checks — and the provider off `#taskBoundProvider`.
+
+**Deriving every mission was only half of it, and the other half was missing
+until the third correction round (High B1).** A cost entry carries ONE
+`mission_id` column, the attribution wrote `canonical.missionIds[0]`, and
+`#entriesForScope` matched that column — so a task linked to a SECOND mission
+had that mission's ceiling evaluated against ZERO entries. Identical spend under
+an identical ceiling read `blocked, observed 5000000` with one link and
+`within_ceiling, observed 0` with two, and WHICH of the two bound was decided by
+uuid sort order: twelve runs of the two-link configuration enforced eight times
+and bypassed four. Reached through `linkMissionPlanItem`, a supported facade
+call, with no raw SQL — the same fail-open the wave's own
+`trg_hq_mission_plan_items_no_erase` trigger was added to close, one link over.
+
+`#entriesForScope` now derives mission and project membership from
+`hq_mission_plan_items` per entry, which is the canonical-truth answer rather
+than a denormalized column that can only hold one of N. The stored `mission_id`
+and `project_id` remain recorded attribution and measure nothing. The `provider`
+scope is derived the same way, from the task's canonical BINDING rather than
+from the caller-supplied column — which is what closes the mirror-image defect
+(Medium B5): spend from an UNBOUND task could be filed against any provider id
+and pushed a third party's Founder ceiling from `observed 0` to `blocked,
+observed 999999`. Such an entry is still recorded and still counts toward the
+deployment total, because the provider a worker reports is a real fact; it
+simply measures no PROVIDER ceiling, because HQ has no canonical statement that
+the work ran there.
 `combineBudgetEvaluations` then takes the most severe decision and the
 INTERSECTION of the permitted sets, so a tier is permitted only where every
 applicable ceiling permits it, and carries `governedBy`, so a reader can see
@@ -216,10 +265,24 @@ tier alone.
 limitation.** Nothing in canonical truth binds a task to a MODEL, so HQ has no
 honest derivation for one and does not invent it: a model ceiling is REPORTED by
 `intelligenceBudgetDecision` and does not gate a routing decision. The
-`provider` scope is NOT in that position — a cost entry whose `providerId`
-contradicts `#taskBoundProvider` is refused as `provider_binding_mismatch`, so
-the cost ledger's provider vocabulary and the canonical execution binding are
-the same vocabulary by enforcement, and a Founder's provider ceiling binds.
+`provider` scope is NOT in that position, and the reason it is not had to be
+built rather than asserted (Wave 5 correction round three, High B2). The claim
+made here was that "a cost entry whose `providerId` contradicts
+`#taskBoundProvider` is refused, so the two vocabularies are one by enforcement"
+— and the refusal was real while the vocabularies were not one at all. Canonical
+routing says `CLAUDE`; every id this lane stores is a lowercase slug. So on a
+provider-bound task `CLAUDE` failed the slug rule, `claude` failed the binding
+rule, and `Claude` failed the slug rule again: no cost entry against bound work
+was expressible, the `provider` scope was dead, and every Founder ceiling on it
+stayed at `observed: 0` forever. The escape hatch was closed too, since a task
+bound to lowercase `claude` cannot be claimed by anyone.
+
+`normalizeProviderId` is where the two now meet. It is a CASE FOLD, not a
+substitution: the canonical set is uppercase-distinct so the fold is injective
+over it, the decision record still stores the canonical binding verbatim, and
+the fold is applied at the cost write, the observation write, the budget write
+and the budget read — so a Founder may write `CLAUDE` or `claude` and get one
+ceiling, which then genuinely binds a decision write on bound work.
 
 ### The law: a spend is attributed to canonical work, not to a declaration
 
@@ -802,14 +865,19 @@ box above rather than by narrowing the sentence:
   that caller is real: `resolveRetrievalAdapter` is exported, so an in-process
   caller can obtain an adapter and hand it terms it built itself. That is worth
   guarding; it is not the layer the pipeline relies on.
-- **"An in-process caller cannot obtain an unguarded adapter" was not true**,
-  and the published statement no longer says it. `LEXICAL_RETRIEVAL_ADAPTER`
-  and `SEMANTIC_RETRIEVAL_ADAPTERS` are exported, and this package's own tests
-  import and call them RAW — which is legitimate, because the raw adapters are
-  what the guard is tested against. What is true is narrower and is what is
-  published now: every adapter the RESOLVER hands out is wrapped, the wrapping
-  is done by the resolver rather than by the caller, and the raw adapter objects
-  are exported for testing and are not wrapped in themselves.
+- **"An in-process caller cannot obtain an unguarded adapter" is TRUE, and it
+  was made true structurally rather than narrowed away.** The paragraph that
+  stood here said the opposite — that the raw adapters were exported for testing
+  and were not wrapped in themselves — and it was dropped-lane prose that
+  survived into the merged document while contradicting the row about the same
+  finding further down this page (Wave 5 correction round three, Low B9). At
+  this head `RAW_LEXICAL_RETRIEVAL_ADAPTER` and `RAW_SEMANTIC_RETRIEVAL_ADAPTERS`
+  are module-private, `LEXICAL_RETRIEVAL_ADAPTER` and
+  `SEMANTIC_RETRIEVAL_ADAPTERS` are `guardRetrievalAdapter(...)` applied AT
+  DECLARATION, and there is no exported binding through which an unguarded
+  `retrieve` can be reached — including a semantic adapter a future build adds
+  to the list, which is guarded where it is declared rather than at the one call
+  site that happens to resolve it.
 
 `RETRIEVAL_GUARD_STATEMENT`, the module comments and the test names all say this
 now, and a new test PINS the tokenization fact itself against six real
@@ -1149,6 +1217,20 @@ declarations, so a guarded table nobody listed is a test failure) is kept and
 binds it. Nothing else in this phase was fixed twice: the budget-scope
 derivation exists once, in the surviving `#governingBudgetScopes`.
 
+## The THIRD correction round: what two independent hostile reviews reproduced
+
+| Finding | What was reproduced | What changed |
+|---|---|---|
+| **HIGH B1** — a mission ceiling stopped accumulating at the second link | The attribution wrote `canonical.missionIds[0]` while `#governingBudgetScopes` derived every mission, and `#entriesForScope` matched that one column — so the non-first mission's ceiling was evaluated against ZERO entries. Identical spend under an identical ceiling: `blocked, observed 5000000` with one link, `within_ceiling, observed 0` with two. Twelve runs of the two-link configuration enforced eight times and bypassed four, on uuid sort order. Through `linkMissionPlanItem`, no raw SQL. | Scope membership is derived from `hq_mission_plan_items` per entry — canonical truth rather than a column that can only hold one of N. Projects the same. |
+| **HIGH B2** — the `provider` scope was DEAD | `recordIntelligenceCost` demanded a lowercase slug and then equality with the uppercase canonical binding, so `CLAUDE`, `claude` and `Claude` all failed. No cost entry against a provider-bound task was expressible, every provider ceiling stayed at `observed: 0` forever, and a task bound to lowercase `claude` is unclaimable. The doc and the code comment both claimed the two vocabularies were one by enforcement. | `normalizeProviderId` — a case fold, injective over the canonical set, applied at the cost write, the observation write, the budget write and the budget read. The decision record still stores the canonical binding verbatim. |
+| **MEDIUM B3** — escalation recorded a tier the enforced path refuses | `escalateIntelligenceDecision` never ran `#resolveRecordedTier`; `deriveEscalation` picked the cheapest higher permitted tier and consulted neither the review requirement nor the floor. Through supported calls only: the enforced path refused `low_cost` with `review_tier_required` while escalation recorded `low_cost` against a `critical_review` requirement. | Two checks: the derivation skips a tier that cannot satisfy the requirement, and the facade runs the shared resolver against a freshly derived proposal. |
+| **MEDIUM B4** — a double-column forgery escaped the canonical re-derivation | The re-derivation was skipped when `characteristics` failed to parse, and an unparseable column reads as null. Forging both columns gave `requiredReviewTier: null`, `satisfies: true`, and the row dropped out of `reviewRequired` in analytics. | The canonical risk class is read first and unconditionally. It was in scope and simply unused on that branch. |
+| **MEDIUM B5** — spend from an UNBOUND task poisoned another provider's ceiling | The binding check only ran when a binding existed, so a claim-holding worker pushed an unrelated Founder ceiling from `observed 0` to `blocked, observed 999999`. | The provider scope is measured against the task's canonical binding. The entry is still recorded and still counts toward the deployment total. |
+| **MEDIUM B6** — the `provider_binding_mismatch` proof was vacuous | The test guarded on `boundProvider == null` and always took its early return, because the fixture's claim task binds no provider — while its comment claimed the opposite. That vacuous test is why B2 shipped. | The fixture gains a genuinely provider-bound claim; the unbound case is its own test. |
+| **MEDIUM B7** — invisible characters defeated the STATED facade guarantee | `normalizeForScan` stripped five hand-listed ranges. U+00AD, U+180E, U+034F, U+2028, U+2029, U+115F and U+FFA0 all passed the scan inside every credential shape the guard knows. End to end: a plain `sk-…` note refused 400, the same note with one soft hyphen stored 201 and returned on the wire; and `searchCompany`/`askJenify` refused the plain form and ACCEPTED the hidden one. The added test picked exactly the three characters the implementation handled. | A Unicode PROPERTY — default-ignorable plus format, with the three invisible splitters that are in neither category named — and a pinning test using code points the implementation does not enumerate. |
+| **LOW B8** — the cost-entry conflict check covered three columns | A second entry with the same amount but `unitsObserved` 9,999,999, an invented `basis`, or a citation of a real `decisionId` deduped SILENTLY and the stored values stayed the first row's. `units_observed` is published on the Founder route and `basis` is what law 2 says an estimate must name. | All six figures are compared. |
+| **LOW B9** — dropped-lane prose surviving into the merged document | The paragraph claiming the raw retrieval adapters "are exported for testing and are not wrapped in themselves" was false at this head and contradicted the merge row further down the same page. | Corrected to what the code does: the raw adapters are module-private and every exported binding is guarded at declaration. |
+
 **What is NOT fixed in this phase**, all sides' disclosures in one list: a
 credential split across two search fields still passes both scans; a forged
 decision row can still understate complexity, context size and work kind, since
@@ -1163,3 +1245,17 @@ unreachable rather than as a live defence; and `recordIntelligenceCost` /
 arguments at all, so an in-process caller that passed them silently gets
 canonical attribution instead — a deliberate behaviour change, not a compatible
 one.
+
+**Added by the third correction round**, and each stated where it belongs as
+well as here: a cost entry's stored `mission_id` and `project_id` still hold one
+value each and are recorded ATTRIBUTION only — every ceiling is measured from
+`hq_mission_plan_items` instead, so the columns can be read as a summary but
+never as the measurement; spend recorded against a provider the task is not
+canonically bound to is kept in the deployment total and measures no PROVIDER
+ceiling, which means an unbound lane's provider ceiling cannot be filled at all
+rather than being fillable by anyone; the provider fold is a CASE fold and
+nothing else, so two providers whose ids differ only by case would collide, which
+the canonical uppercase-distinct set makes impossible today and a future set
+would have to preserve; and the credential scan remains SHAPE-based — folding
+away invisible characters widens what it catches and does not make it a
+data-loss-prevention filter.
