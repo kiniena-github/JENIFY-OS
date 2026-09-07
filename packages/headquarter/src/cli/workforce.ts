@@ -103,6 +103,19 @@ import {
   resolveLocalAdminInvocation,
 } from '../live/local-trust.js';
 import { readFlag, missingFlagValueMessage } from './flags.js';
+import {
+  COLLABORATION_COMMAND_CAPABILITY,
+  COLLABORATION_CONTRIBUTE_CAPABILITY,
+  collaborationCommandCapabilityState,
+  collaborationContributeCapabilityState,
+  registerCollaborationCommandCapability,
+  registerCollaborationContributeCapability,
+} from '../application/collaboration-command.js';
+import {
+  FOUNDER_BRIEF_CAPABILITY,
+  founderBriefCapabilityState,
+  registerFounderBriefCapability,
+} from '../application/chief-of-staff.js';
 
 /**
  * The capabilities this command may register — fail closed: an id outside
@@ -130,6 +143,23 @@ const REGISTRABLE = {
   [MISSION_ORCHESTRATE_CAPABILITY.id]: {
     register: registerMissionOrchestrateCapability,
     state: missionOrchestrateCapabilityState,
+  },
+  // Phase 9: the two collaboration trios — the Founder's command trio and
+  // the worker-holdable contribute trio — join the fail-closed list.
+  [COLLABORATION_COMMAND_CAPABILITY.id]: {
+    register: registerCollaborationCommandCapability,
+    state: collaborationCommandCapabilityState,
+  },
+  [COLLABORATION_CONTRIBUTE_CAPABILITY.id]: {
+    register: registerCollaborationContributeCapability,
+    state: collaborationContributeCapabilityState,
+  },
+  // Phase 10: the one Founder-gated act the Chief of Staff adds — issuing a
+  // brief RECEIPT. Reading the command layer takes no capability, so this is
+  // the only id the phase contributes to the fail-closed list.
+  [FOUNDER_BRIEF_CAPABILITY.id]: {
+    register: registerFounderBriefCapability,
+    state: founderBriefCapabilityState,
   },
 } as const;
 

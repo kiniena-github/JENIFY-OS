@@ -104,6 +104,9 @@ describe('every page script speaks only to the control API and the snapshot', ()
       'fetch(MEMORY_PATH', // Phase 5: the Founder-gated memory read (issue #265)
       'fetch(TRUTH_PATH', // Phase 7: the Founder-gated truth read
       'fetch(TRUTH_ENTITY_PATH', // Phase 7: the parameterized entity truth read
+      'fetch(COLLAB_PATH', // Phase 9: the Founder-gated collaboration session read
+      'fetch(COLLAB_ROOM_PATH', // Phase 9: the parameterized Mission Room read
+      'fetch(COMMAND_CENTER_PATH', // Phase 10: the Founder-gated command-centre briefing read
       'fetch(path,', // postJson's parameter; its call sites are audited below
     ];
     for (const page of HQ_PAGES) {
@@ -134,7 +137,7 @@ describe('every page script speaks only to the control API and the snapshot', ()
     }
   });
 
-  it('allow-lists every postJson call site against the twenty write routes', () => {
+  it('allow-lists every postJson call site against the twenty-three write routes', () => {
     // Three until Phase 3; the mission command/transition/amend writes joined
     // with issue #254; the project register, mission-linkage and workforce
     // writes joined with issue #262; the memory record write and the
@@ -142,7 +145,14 @@ describe('every page script speaks only to the control API and the snapshot', ()
     // writes joined with Phase 7 — each the same Founder-approved widening
     // the route-table test records. Phase 8 widened the surface to twenty
     // (action propose/reconcile) with NO console call site yet, so the
-    // allow-list below deliberately gains nothing. (TRANSITION_PATH
+    // allow-list below deliberately gained nothing there. Phase 9 widened it
+    // to twenty-two (collaboration open/admit) WITH console call sites on
+    // projects.html's Mission Room console, so COLLAB_PATH and
+    // COLLAB_ADMIT_PATH join. Phase 10 widened it to twenty-three (the brief
+    // receipt) WITH a console call site on index.html's Chief of Staff
+    // console, so BRIEF_PATH joins — and nothing else does, because the two
+    // command-centre reads are GETs and no route accepts a recommendation.
+    // (TRANSITION_PATH
     // and UPDATE_PATH name the mission transition on projects.html's mission
     // console and the project transition/update on its register console
     // respectively — the variable-binding test below pins each to its
@@ -169,6 +179,9 @@ describe('every page script speaks only to the control API and the snapshot', ()
             'TRUTH_PATH',
             'TRUTH_VERIFY_PATH',
             'TRUTH_ACCEPT_PATH',
+            'COLLAB_PATH',
+            'COLLAB_ADMIT_PATH',
+            'BRIEF_PATH',
             'path',
           ].includes(match[1]!),
           `${page.file}: unexpected postJson target: ${match[1]}`,
@@ -187,6 +200,9 @@ describe('every page script speaks only to the control API and the snapshot', ()
     expect(approvals).toContain(`var APPROVALS_PATH = ${JSON.stringify(CONTROL_ROUTES.approvals)};`);
     expect(approvals).toContain(`var APPROVE_PATH = ${JSON.stringify(CONTROL_ROUTES.approve)};`);
     expect(approvals).toContain(`var DENY_PATH = ${JSON.stringify(CONTROL_ROUTES.deny)};`);
+    // Phase 10: the Chief of Staff console on index.html.
+    expect(index).toContain(`var COMMAND_CENTER_PATH = ${JSON.stringify(CONTROL_ROUTES.commandCenter)};`);
+    expect(index).toContain(`var BRIEF_PATH = ${JSON.stringify(CONTROL_ROUTES.commandCenterBrief)};`);
     const projects = scriptsOf(site.get('projects.html')!);
     expect(projects).toContain(`var MISSIONS_PATH = ${JSON.stringify(CONTROL_ROUTES.missions)};`);
     expect(projects).toContain(
@@ -208,6 +224,10 @@ describe('every page script speaks only to the control API and the snapshot', ()
     expect(projects).toContain(
       `var LINK_ITEM_PATH = ${JSON.stringify(CONTROL_ROUTES.missionLinkPlanItem)};`,
     );
+    // Phase 9: the Mission Room collaboration console on projects.html.
+    expect(projects).toContain(`var COLLAB_PATH = ${JSON.stringify(CONTROL_ROUTES.collaboration)};`);
+    expect(projects).toContain(`var COLLAB_ROOM_PATH = ${JSON.stringify(CONTROL_ROUTES.collaborationRoom)};`);
+    expect(projects).toContain(`var COLLAB_ADMIT_PATH = ${JSON.stringify(CONTROL_ROUTES.collaborationAdmit)};`);
     const specialists = scriptsOf(site.get('specialists.html')!);
     expect(specialists).toContain(
       `var WORKFORCE_PATH = ${JSON.stringify(CONTROL_ROUTES.workforce)};`,

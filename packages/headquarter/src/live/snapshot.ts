@@ -43,6 +43,12 @@ import { missionBrowserView, type MissionBrowserView } from '../application/miss
 import { projectBrowserView, type ProjectBrowserView } from '../application/project-command.js';
 import type { MemoryBrowserView } from '../application/memory-command.js';
 import { TRUTH_SNAPSHOT_LIMIT, type TruthSnapshotView } from '../application/truth-command.js';
+import { COLLABORATION_SNAPSHOT_LIMIT, type CollaborationSnapshotView } from '../application/collaboration-command.js';
+import {
+  COMMAND_CENTER_PROVENANCE,
+  COMMAND_CENTER_SNAPSHOT_LIMIT,
+  type CommandCenterSnapshotView,
+} from '../application/chief-of-staff.js';
 import type { ProviderId, SecretsEnv } from '../routing/providers.js';
 import { assessConnections, type ConnectionProbe, type ConnectionStatus } from './connections.js';
 import { assertBrowserSafe, assertNoFabricatedFields } from './redaction.js';
@@ -219,6 +225,28 @@ export interface HqSnapshot {
    * unauthenticated artifact withholds them and counts the exclusion.
    */
   truth?: SnapshotSection<TruthSnapshotView>;
+  /**
+   * The Mission Room collaboration record (Phase 9) — counts HQ made over
+   * every session plus the newest `COLLABORATION_SNAPSHOT_LIMIT` session
+   * views, each with its DERIVED standing and admitted workers. OPTIONAL by
+   * shape for the truth section's reason: a static build opens no store and
+   * states nothing rather than an invented zero section. No participant
+   * activity is invented; a session with no contribution counts zero.
+   */
+  collaboration?: SnapshotSection<CollaborationSnapshotView>;
+  /**
+   * The Chief of Staff's derived command layer (Phase 10) — the Founder
+   * Inbox's counts and newest items, the unknown/blocked/recommendation
+   * totals, and the brief ledger's state. OPTIONAL by shape for the truth
+   * section's reason: a static build opens no store and states nothing rather
+   * than an invented zero section.
+   *
+   * Every entry is DERIVED at read time from canonical rows and nothing here
+   * is a second authority store. Deliberately absent: the department
+   * projections and the recommendation bodies, which stay on the
+   * Founder-gated read.
+   */
+  commandCenter?: SnapshotSection<CommandCenterSnapshotView>;
 }
 
 /**
@@ -286,6 +314,10 @@ export interface SnapshotSources {
   memory: { data: MemoryBrowserView[]; provenance: Provenance };
   /** The truth/evidence projection (Phase 7). Optional — omitted means no truth store was read. */
   truth?: { data: TruthSnapshotView; provenance: Provenance };
+  /** The collaboration record (Phase 9). Optional — omitted means no collaboration store was read. */
+  collaboration?: { data: CollaborationSnapshotView; provenance: Provenance };
+  /** The derived command layer (Phase 10). Optional — omitted means no canonical handle was read. */
+  commandCenter?: { data: CommandCenterSnapshotView; provenance: Provenance };
   /**
    * Per-worker provider declarations (Phase 4). Optional: an omitted map
    * means the building context holds no declaration truth — every worker's
@@ -332,6 +364,8 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       sources.projects.provenance.mode,
       sources.memory.provenance.mode,
       ...(sources.truth ? [sources.truth.provenance.mode] : []),
+      ...(sources.collaboration ? [sources.collaboration.provenance.mode] : []),
+      ...(sources.commandCenter ? [sources.commandCenter.provenance.mode] : []),
     ]),
     note: sources.note ?? null,
     counts: {
@@ -408,6 +442,12 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
           )
         : section(sources.memory.provenance, sources.memory.data),
     ...(sources.truth ? { truth: section(sources.truth.provenance, sources.truth.data) } : {}),
+    ...(sources.collaboration
+      ? { collaboration: section(sources.collaboration.provenance, sources.collaboration.data) }
+      : {}),
+    ...(sources.commandCenter
+      ? { commandCenter: section(sources.commandCenter.provenance, sources.commandCenter.data) }
+      : {}),
   };
 
   // Fail closed: prove it before anyone can publish it.
@@ -565,6 +605,35 @@ export function liveSnapshotFromOperations(
       })
     : null;
 
+  // Phase 9 collaboration section: the SAME reading-layer privacy decision as
+  // memory and truth (Phase 9 correction, Low L5). A session's own material is
+  // classified (`internal | founder_only`, the memory/truth vocabulary): a
+  // `founder_only` session rides only the Founder-gated /state route, and no
+  // session's free-text purpose is published verbatim on the unauthenticated
+  // artifact — the vocabulary has no level that classifies text for an
+  // unauthenticated reader. Both omissions are counted inside the view.
+  const collaboration = ops.collaborationStorePresent()
+    ? ops.collaborationSummary({
+        includeFounderOnly: options.includeFounderOnlyMemory === true,
+        limit: COLLABORATION_SNAPSHOT_LIMIT,
+      })
+    : null;
+
+  // Phase 10 command centre: the SAME reading-layer privacy decision again.
+  // An attention item derived from founder_only material — a truth record OR
+  // a founder_only collaboration session, the Phase 9 L5 classification the
+  // section above enforces (Phase 10 correction, M1) — rides only the
+  // Founder-gated /state route; the unauthenticated artifact carries neither
+  // the item nor any number aggregating over it, and states how many were
+  // withheld. Unlike the three sections above there is no store to be absent:
+  // the layer derives from hq_missions / op_tasks / hq_approvals and friends,
+  // so it is built from any handle and the brief LEDGER's absence is stated
+  // inside the view (`storePresent`) rather than by omitting the section.
+  const commandCenter = ops.commandCenterSummary({
+    includeFounderOnly: options.includeFounderOnlyMemory === true,
+    limit: COMMAND_CENTER_SNAPSHOT_LIMIT,
+  });
+
   return buildHqSnapshot({
     workerProviders,
     workerMembers,
@@ -716,6 +785,88 @@ export function liveSnapshotFromOperations(
               'store exists to read. 0 rows states that absence; nothing was migrated.',
           },
         },
+    collaboration: collaboration
+      ? {
+          data: collaboration,
+          provenance: {
+            mode,
+            source:
+              'hq_collab_sessions / hq_collab_participants / hq_collab_contributions / hq_collab_relations via ' +
+              'HeadquarterOperations.collaborationSummary (derived projection; a session references one hq_missions row)',
+            asOf: at,
+            note:
+              [
+                collaboration.sessions > collaboration.recent.length
+                  ? `Carries the newest ${collaboration.recent.length} of ${collaboration.sessions} sessions; sessions states the count.`
+                  : null,
+                collaboration.withheldFounderOnly > 0
+                  ? `${collaboration.withheldFounderOnly} founder_only session(s) are counted in sessions but not carried by ` +
+                    'this artifact, and no other number here aggregates over them; they are readable only through the ' +
+                    'Founder-authenticated /state route.'
+                  : null,
+                collaboration.withheldPurposes > 0
+                  ? `${collaboration.withheldPurposes} carried session(s) state a purpose that this artifact withholds: ` +
+                    'session purpose is free operator text and no privacy level classifies it for an unauthenticated reader.'
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(' ') || undefined,
+          },
+        }
+      : {
+          data: {
+            sessions: 0,
+            withheldFounderOnly: 0,
+            withheldPurposes: 0,
+            activeSessions: 0,
+            workersAdmitted: 0,
+            contributions: 0,
+            disagreements: 0,
+            handoffRequests: 0,
+            recent: [],
+          },
+          provenance: {
+            mode,
+            source: 'hq_collab_sessions via HeadquarterOperations.collaborationSummary',
+            asOf: at,
+            note:
+              'This database predates the Phase 9 collaboration schema and was opened read-only, so no ' +
+              'collaboration store exists to read. 0 rows states that absence; nothing was migrated.',
+          },
+        },
+    commandCenter: {
+      data: commandCenter,
+      provenance: {
+        mode,
+        source: `${COMMAND_CENTER_PROVENANCE} (HeadquarterOperations.commandCenterSummary)`,
+        asOf: at,
+        note:
+          [
+            'Every entry is derived at read time and nothing is stored: an attention item exists exactly ' +
+              'while its source predicate holds on the canonical row and is gone the moment the source is ' +
+              'decided elsewhere. No priority, score, confidence, percentage or ETA exists here.',
+            commandCenter.attention.withheldFounderOnly > 0
+              ? `${commandCenter.attention.withheldFounderOnly} attention item(s) derive from founder_only material ` +
+                '(a truth record or a collaboration session); they are not carried by this artifact and no number ' +
+                'here aggregates over them. They are readable only through the Founder-authenticated /state route.'
+              : null,
+            commandCenter.unknown.withheldFounderOnly > 0
+              ? `${commandCenter.unknown.withheldFounderOnly} unknown entry/entries name founder_only truth ` +
+                'records and are withheld on the same terms.'
+              : null,
+            commandCenter.attention.total > commandCenter.attention.items.length
+              ? `Carries the newest ${commandCenter.attention.items.length} of ${commandCenter.attention.total} ` +
+                'readable attention items; attention.total states the count.'
+              : null,
+            commandCenter.storePresent
+              ? null
+              : 'The hq_briefs ledger does not exist on this database handle, so no brief was ever issued ' +
+                'through it and none can be; briefs.total states that as 0 rather than implying an empty ledger.',
+          ]
+            .filter(Boolean)
+            .join(' ') || undefined,
+      },
+    },
   });
 }
 

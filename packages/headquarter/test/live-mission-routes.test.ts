@@ -154,7 +154,19 @@ describe('the write surface is stated, not inferred', () => {
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.actions);
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.actionReconcile);
     expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.actionDetail);
-    expect(CONTROL_WRITE_ROUTES).toHaveLength(20);
+    // Phase 9: the collaboration open and admit POSTs. The room and context
+    // reads are GETs and stay off the write surface; contribute has no route.
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.collaboration);
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.collaborationAdmit);
+    expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.collaborationRoom);
+    expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.collaborationContext);
+    // Phase 10: the brief-receipt POST is the phase's ONLY write. Both
+    // command-centre reads are GETs and stay off the write surface, and no
+    // route anywhere accepts a recommendation.
+    expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.commandCenterBrief);
+    expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.commandCenter);
+    expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.commandCenterInbox);
+    expect(CONTROL_WRITE_ROUTES).toHaveLength(23);
   });
 });
 

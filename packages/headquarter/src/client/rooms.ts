@@ -152,7 +152,10 @@ export const HQ_ROOMS: readonly HqRoom[] = [
     binding: {
       kind: 'live',
       section: 'operations',
-      source: 'operations section — op_tasks via application/console.founderConsole',
+      source:
+        'operations section — op_tasks via application/console.founderConsole; plus the optional ' +
+        'command-centre section (Phase 10): the derived Founder Inbox with the canonical row each item ' +
+        'references, the recorded-unknown and blocked totals, and the count of issued brief receipts',
     },
     placement: { ring: 1, slot: 0 },
     page: 'index.html',
@@ -170,7 +173,10 @@ export const HQ_ROOMS: readonly HqRoom[] = [
       // Phase 3 (issue #254) deliberately rebound this room: mission stopped
       // meaning "an open op_tasks row" and became the canonical Mission
       // aggregate. Recorded in docs/JENIFY_DECISIONS.md, not slipped in.
-      source: 'hq_missions via HeadquarterOperations.listMissions — the canonical command-level missions',
+      source:
+        'hq_missions via HeadquarterOperations.listMissions — the canonical command-level missions; ' +
+        'the optional collaboration section (Phase 9) rides beside them: sessions, admitted workers, ' +
+        'contributions, disagreements and handoff requests, each referencing one mission',
     },
     placement: { ring: 1, slot: 1 },
     page: 'projects.html',

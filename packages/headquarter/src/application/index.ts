@@ -12,6 +12,8 @@ export * from './context-assembly.js';
 export * from './orchestrator-command.js';
 export * from './truth-command.js';
 export * from './action-gateway.js';
+export * from './collaboration-command.js';
+export * from './chief-of-staff.js';
 export * from './member-nomination.js';
 export * from './service.js';
 export * from './console.js';
