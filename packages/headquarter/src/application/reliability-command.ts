@@ -726,9 +726,19 @@ export function safeModeLatchSchemaPresent(db: HqDatabase): boolean {
  * evidence that HQ is healthy; a depth outside the vocabulary reads as
  * `structural`, the weaker claim; a finding outside the vocabulary is dropped
  * from the list rather than carried, because the list is published as counts
- * keyed by that vocabulary. The table is append-only, so a raw writer can
- * append a row here — it can add an engagement it cannot take one away, which
- * is the direction this whole mechanism is supposed to fail in.
+ * keyed by that vocabulary.
+ *
+ * **What this does NOT protect against, stated rather than glossed.** The
+ * standing verdict is the LAST row, and the table is append-only — which is
+ * the write its triggers deliberately permit. So a writer that already holds a
+ * writable handle on the file can append `engaged = 0` and clear safe mode at
+ * the next construction, exactly as it could append a forged event into any
+ * other ledger here. The guards close the OTHER doors (no UPDATE of a standing
+ * row, no DELETE of the history, no REPLACE onto an existing id) and the
+ * census reports them if they go missing. Against a writer with the file open,
+ * this mechanism is bookkeeping, not a boundary; what it does close is the
+ * thing it was built for — a RESTART silently lowering a verdict HQ had
+ * already reached.
  */
 export function readSafeModeLatch(db: HqDatabase): HqSafeModeLatch | null {
   if (!safeModeLatchSchemaPresent(db)) return null;

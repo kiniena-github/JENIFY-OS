@@ -5979,9 +5979,16 @@ export class HeadquarterOperations {
     const blocking = this.#integrityReport.observations
       .filter((observation) => observation.blocking)
       .map((observation) => observation.finding);
+    // A categorical phrase rather than an empty pair of brackets. Safe mode can
+    // stand on a durable latch whose stored finding list could not be read
+    // through the closed vocabulary (a raw append), and "HQ is in SAFE MODE ()"
+    // would read like a bug in the refusal rather than like the honest answer,
+    // which is that HQ knows it stopped trusting itself and cannot say which
+    // finding did it. No vocabulary member is invented for it.
+    const named = blocking.length > 0 ? blocking.join(', ') : 'a latched finding HQ could not read back';
     return fail(
       'safe_mode_engaged',
-      `Cannot ${action}: HQ is in SAFE MODE (${blocking.join(', ')}). ${SAFE_MODE_STATEMENT}`,
+      `Cannot ${action}: HQ is in SAFE MODE (${named}). ${SAFE_MODE_STATEMENT}`,
       { findings: blocking, assessmentDepth: this.#integrityReport.depth },
     );
   }

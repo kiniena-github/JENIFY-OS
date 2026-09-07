@@ -1058,6 +1058,40 @@ describe('the safe-mode evidence verdict is computed from enforcement-safe truth
     }
   });
 
+  /**
+   * A latch row whose stored finding list cannot be read through the closed
+   * vocabulary still ENGAGES — a row that says "engaged" is itself the
+   * statement, and dropping the engagement because its reasons were unreadable
+   * would be the fail-open answer. The refusal names that honestly rather than
+   * printing an empty pair of brackets.
+   */
+  it('engages on a latch row whose findings cannot be read, and says so', () => {
+    const fx = fileFixture({ processIdentity: 'process-one' });
+    try {
+      fx.raw()
+        .prepare(
+          `INSERT INTO hq_safe_mode_latch (id, engaged, findings, depth, at, process_id)
+           VALUES ('forged-latch', 1, 'not even json', 'full', '2026-01-01T00:00:00.000Z', 'somebody')`,
+        )
+        .run();
+      const restarted = fx.reopen('process-two');
+      expect(restarted.ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+      const claim = restarted.ops.claimNext('claude', CAPS.openPr);
+      expect(claim.ok).toBe(false);
+      if (claim.ok) throw new Error('safe mode did not engage');
+      expect(claim.error.code).toBe('safe_mode_engaged');
+      expect(claim.error.message).toContain('a latched finding HQ could not read back');
+      expect(claim.error.message).not.toContain('SAFE MODE ()');
+      // Nothing invents a finding name for the snapshot either.
+      expect(restarted.ops.reliabilitySummary().safeMode).toBe(true);
+      expect(
+        Object.values(restarted.ops.reliabilitySummary().findings).reduce((a, b) => a + b, 0),
+      ).toBe(0);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
   it('still clears on a HEALTHY chain, so the finding is a verdict rather than a formality', () => {
     const fx = fileFixture();
     try {

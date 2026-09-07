@@ -351,6 +351,18 @@ to buy no claim on either facade.
 > and only because a FULL assessment found nothing blocking; there is still no
 > override, force flag or acknowledgement.
 >
+> **What the latch does NOT protect against, stated rather than glossed.** The
+> standing verdict is the LAST row, and an APPEND is the write the table's
+> triggers deliberately permit. A writer that already holds a writable handle on
+> the file can therefore append `engaged = 0` and clear safe mode at the next
+> construction — exactly as it could append a forged event into any other ledger
+> here, and exactly the class of residual this document already records for
+> `hq_reliability_run_events`. The guards close the other doors (no UPDATE of a
+> standing row, no DELETE of the history, no REPLACE onto an existing id) and
+> the census reports them if they go missing. Against a writer with the file
+> open this is bookkeeping, not a boundary; what it closes is the thing it was
+> built for — a RESTART silently lowering a verdict HQ had already reached.
+>
 > Two details that are deliberately narrow. The reported `depth` remains the
 > depth of the CURRENT assessment — a structural boot must not present itself as
 > a full pass — and the latched depth is stated in the carried observation's
