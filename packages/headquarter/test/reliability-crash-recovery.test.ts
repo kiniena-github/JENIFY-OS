@@ -241,6 +241,104 @@ describe('recovery is scoped, repeatable and honest about what it did not touch'
     }
   });
 
+  /**
+   * Wave 5 Medium 1. `process_id` proves "not the process running this
+   * recovery"; it does not prove "dead", and HQ holds no liveness signal that
+   * would. So a Founder-gated recovery run while another process is genuinely
+   * mid-attempt classifies that live attempt as interrupted. The truthful
+   * outcome the live worker then reported was refused `run_state_conflict`,
+   * and the ledger permanently asserted an interruption that never happened —
+   * closable only by a human guessing.
+   *
+   * The correction does not pretend the classification did not happen: the
+   * interruption event stays, and the worker that still holds the LIVE FENCED
+   * CLAIM (which a dead process cannot) records what it observed on top.
+   */
+  it('accepts a live worker’s truthful outcome on a run a concurrent recovery classified', () => {
+    const fx = fileFixture({ processIdentity: 'the-worker-that-is-still-alive' });
+    try {
+      // This process is live and mid-attempt.
+      const mine = expectOk(
+        fx.ops.openRun({
+          taskId: fx.claim.taskId,
+          workerId: 'claude',
+          fence: fx.claim.fence,
+          runKind: 'external_action',
+          label: 'publishing something, right now',
+        }),
+      ).run;
+      expectOk(fx.ops.startRunAttempt({ runId: mine.id, workerId: 'claude', fence: fx.claim.fence }));
+
+      // A SECOND process runs the Founder-gated recovery. It sees a different
+      // process id and classifies the live attempt.
+      const other = fx.reopen('a-second-process-running-recovery');
+      const report = expectOk(other.ops.recoverInterruptedRuns({ requestedBy: 'founder' }));
+      expect(report.interruptedTotal).toBe(1);
+      expect(fx.ops.getRun(mine.id)!.state).toBe('needs_reconciliation');
+      expect(fx.ops.getRun(mine.id)!.outcome).toBe('outcome_unknown');
+
+      // The live worker finishes and says what actually happened.
+      expectOk(
+        fx.ops.recordRunOutcome({
+          runId: mine.id,
+          workerId: 'claude',
+          fence: fx.claim.fence,
+          outcome: 'succeeded',
+          note: 'the publish completed; the recovery pass had already classified it',
+        }),
+      );
+      const settled = fx.ops.getRun(mine.id)!;
+      expect(settled.state).toBe('concluded');
+      expect(settled.outcome).toBe('succeeded');
+      // No human guess was needed, and no attempt generation was opened.
+      expect(settled.reconciliation).toBeNull();
+      expect(settled.attempts).toBe(1);
+      expect(settled.nextGeneration).toBe(1);
+      expect(settled.admitsAttempt).toBe(false);
+      // The classification is still in the append-only ledger, and the report
+      // says it arrived after one.
+      expect(settled.events.map((e) => e.kind)).toEqual([
+        'opened',
+        'attempt_started',
+        'interrupted',
+        'outcome_recorded',
+      ]);
+      expect(
+        settled.events.find((e) => e.kind === 'outcome_recorded')!.detail.afterInterruption,
+      ).toBe(true);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('still refuses an outcome on a run that has been RECONCILED', () => {
+    const fx = fileFixture({ processIdentity: 'the-worker' });
+    try {
+      const runId = interruptedRunFrom(fx);
+      const survivor = fx.reopen('the-survivor');
+      expectOk(survivor.ops.recoverInterruptedRuns({ requestedBy: 'founder' }));
+      expectOk(
+        survivor.ops.reconcileRun({
+          runId,
+          decision: 'confirmed_failed',
+          note: 'checked the provider; the request never landed',
+          requestedBy: 'coo',
+        }),
+      );
+      const refused = fx.ops.recordRunOutcome({
+        runId,
+        workerId: 'claude',
+        fence: fx.claim.fence,
+        outcome: 'succeeded',
+      });
+      expect(refused.ok).toBe(false);
+      expect(!refused.ok && refused.error.code).toBe('run_state_conflict');
+      expect(fx.ops.getRun(runId)!.outcome).toBe('failed');
+    } finally {
+      fx.cleanup();
+    }
+  });
+
   it('takes approval authority, and refuses a worker or a stranger', () => {
     const fx = fileFixture();
     try {
@@ -311,43 +409,54 @@ describe('recovery is scoped, repeatable and honest about what it did not touch'
 
 describe('a restart with nothing wrong changes nothing', () => {
   it('recovers zero runs, engages no safe mode, and leaves every record identical', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-clean-restart-'));
+    const fx = fileFixture({ processIdentity: 'boot-one' });
     try {
-      const fx = fileFixture({ processIdentity: 'boot-one' });
-      try {
-        const run = expectOk(
-          fx.ops.openRun({
-            taskId: fx.claim.taskId,
-            workerId: 'claude',
-            fence: fx.claim.fence,
-            runKind: 'dispatch',
-            label: 'finished cleanly',
-          }),
-        ).run;
-        expectOk(fx.ops.startRunAttempt({ runId: run.id, workerId: 'claude', fence: fx.claim.fence }));
-        expectOk(
-          fx.ops.recordRunOutcome({
-            runId: run.id,
-            workerId: 'claude',
-            fence: fx.claim.fence,
-            outcome: 'succeeded',
-          }),
-        );
-        const before = fs.readFileSync(fx.dbPath);
+      const run = expectOk(
+        fx.ops.openRun({
+          taskId: fx.claim.taskId,
+          workerId: 'claude',
+          fence: fx.claim.fence,
+          runKind: 'dispatch',
+          label: 'finished cleanly',
+        }),
+      ).run;
+      expectOk(fx.ops.startRunAttempt({ runId: run.id, workerId: 'claude', fence: fx.claim.fence }));
+      expectOk(
+        fx.ops.recordRunOutcome({
+          runId: run.id,
+          workerId: 'claude',
+          fence: fx.claim.fence,
+          outcome: 'succeeded',
+        }),
+      );
 
-        const rebooted = fx.reopen('boot-two');
-        expect(rebooted.ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
-        const report = expectOk(rebooted.ops.recoverInterruptedRuns({ requestedBy: 'founder' }));
-        expect(report.interruptedTotal).toBe(0);
-        expect(report.nowNeedingReconciliation).toBe(0);
-        expect(rebooted.ops.getRun(run.id)!.outcome).toBe('succeeded');
-        // The recovery pass wrote nothing at all, so the file is unchanged.
-        expect(fs.readFileSync(fx.dbPath).equals(before)).toBe(true);
-      } finally {
-        fx.cleanup();
-      }
+      /*
+       * "Nothing was written" is asserted against the LEDGERS, not against the
+       * main database file (Wave 5 Low). Under WAL a committed write lands in
+       * `-wal` and leaves `hq.sqlite` byte-identical until a checkpoint, so
+       * comparing main-file bytes here passed whether or not the recovery pass
+       * wrote — proved vacuous by executing it against a pass that does write.
+       * Row counts and the evidence watermark are what actually move.
+       */
+      const raw = fx.raw();
+      const counts = () => ({
+        runs: raw.prepare(`SELECT COUNT(*) AS n FROM hq_reliability_runs`).get(),
+        runEvents: raw.prepare(`SELECT COUNT(*) AS n FROM hq_reliability_run_events`).get(),
+        tasks: raw.prepare(`SELECT * FROM op_tasks ORDER BY id`).all(),
+        evidenceWatermark: raw.prepare(`SELECT MAX(seq) AS seq, COUNT(*) AS n FROM op_evidence`).get(),
+        hqEvents: raw.prepare(`SELECT COUNT(*) AS n FROM hq_events`).get(),
+      });
+      const before = counts();
+
+      const rebooted = fx.reopen('boot-two');
+      expect(rebooted.ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
+      const report = expectOk(rebooted.ops.recoverInterruptedRuns({ requestedBy: 'founder' }));
+      expect(report.interruptedTotal).toBe(0);
+      expect(report.nowNeedingReconciliation).toBe(0);
+      expect(rebooted.ops.getRun(run.id)!.outcome).toBe('succeeded');
+      expect(counts()).toEqual(before);
     } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
+      fx.cleanup();
     }
   });
 });

@@ -707,6 +707,21 @@ export interface RunRecord {
    */
   admitsAttempt: boolean;
   needsReconciliation: boolean;
+  /**
+   * True when the run's MOST RECENT event is an `interrupted` one — a recovery
+   * pass classified it and nothing has been reported or reconciled since.
+   *
+   * It exists because `process_id` proves "not the process running the
+   * recovery", never "dead" (Wave 5 Medium 1). A live worker mid-attempt whose
+   * run is classified by a concurrent recovery would otherwise be permanently
+   * unable to say what actually happened: its truthful `recordRunOutcome` was
+   * refused `run_state_conflict`, and only a human guess could close the run.
+   * A worker still holding the LIVE FENCED CLAIM — which a genuinely dead
+   * process cannot — may record the outcome it observed against a run in this
+   * position. That is a report, never a retry: it opens no attempt generation,
+   * and the interruption event stays in the ledger as the history it is.
+   */
+  interruptedWithoutReport: boolean;
   events: RunEventView[];
 }
 
@@ -852,6 +867,7 @@ export function deriveRunRecord(row: RunRow, events: readonly RunEventRow[]): Ru
     reconciliation,
     admitsAttempt: state === 'open' || reopened,
     needsReconciliation: state === 'needs_reconciliation',
+    interruptedWithoutReport: events[events.length - 1]?.kind === 'interrupted',
     events: events.map((event) => ({
       kind: event.kind,
       actor: event.actor,

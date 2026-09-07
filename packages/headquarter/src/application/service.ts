@@ -7447,7 +7447,19 @@ export class HeadquarterOperations {
         return;
       }
       const record = deriveRunRecord(row, loadRunEvents(this.#db, input.runId));
-      if (record.state !== 'attempting') {
+      // A LATE but truthful report is accepted (Wave 5 Medium 1). Recovery
+      // classifies every run whose `process_id` is not the recovering
+      // process — which proves "not me", never "dead" — so a live worker
+      // mid-attempt can find its run classified interrupted by a concurrent
+      // Founder-gated recovery. Refusing its outcome then left the ledger
+      // permanently asserting an interruption that never happened, closable
+      // only by a human guess. The worker still holds the LIVE FENCED CLAIM,
+      // already checked above and unobtainable by a dead process, so it is
+      // exactly the entity this phase trusts to report an outcome. This is a
+      // report and not a retry: it opens no attempt generation, and the
+      // interruption event stays in the append-only ledger as history.
+      const lateAfterInterruption = record.interruptedWithoutReport;
+      if (record.state !== 'attempting' && !lateAfterInterruption) {
         refusal = {
           code: 'run_state_conflict',
           message: `Run ${input.runId} is ${record.state}; an outcome is recorded against an open attempt`,
@@ -7465,6 +7477,9 @@ export class HeadquarterOperations {
           failureCategory,
           note: note.value ?? '',
           correlationId: record.lastCorrelationId,
+          // Stated on the record rather than smoothed over: this outcome was
+          // reported after a recovery pass had already classified the run.
+          afterInterruption: lateAfterInterruption,
         },
       });
       privileged.appendEvidence({
@@ -7488,8 +7503,18 @@ export class HeadquarterOperations {
    * CRASH / RESTART RECOVERY — the classification pass.
    *
    * Every run this ledger holds that is still `open` or `attempting` and was
-   * opened by a DIFFERENT process is, by definition, work whose carrier is
-   * gone. Each is classified truthfully and closed or flagged:
+   * opened by a DIFFERENT process is classified. Stated precisely, because the
+   * precision is the point (Wave 5 Medium 1): `process_id` proves the run was
+   * opened by a process that is NOT the one running this recovery. It does not
+   * prove that process is dead, and HQ holds no liveness signal that would —
+   * there is no heartbeat and no boot nonce here. A recovery run while another
+   * process is genuinely mid-attempt will therefore classify that attempt as
+   * interrupted. What HQ does about that is not pretend otherwise: the run's
+   * carrier, if it is alive and still holds the live fenced claim, may record
+   * the outcome it actually observed afterwards (`recordRunOutcome`), and the
+   * interruption stays in the ledger as the classification it was.
+   *
+   * Each classified run is closed or flagged:
    *
    *  - never attempted → concluded `not_executed`. Provable from the ledger:
    *    no attempt was ever reserved, so nothing external can have happened.
