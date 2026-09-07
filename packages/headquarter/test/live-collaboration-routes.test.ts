@@ -155,7 +155,7 @@ describe('the collaboration write surface', () => {
 });
 
 describe('the Founder-gated reads', () => {
-  it('GET /collaboration/room composes the mission, canonical tasks, participants, contributions with binding truth, disagreements, handoffs beside the canonical claim, truth, approvals, runs and actions — with no raw intent body and no task payload on the wire', () => {
+  it('GET /collaboration/room composes the mission, canonical tasks, participants, contributions with binding truth, disagreements, handoffs beside the canonical claim, truth, what the Founder gate holds, runs and actions — with no raw intent body and no task payload on the wire', () => {
     const h = harness();
     const fx = h.fixture;
     const sessionId = roomWithThree(fx);
@@ -180,7 +180,7 @@ describe('the Founder-gated reads', () => {
     expect((room.handoffRequests as { canonical: { claimedBy: string } }[])[0]!.canonical.claimedBy).toBe('claude');
     // Founder-gated: founder_only truth about the mission IS carried here, exactly as GET /truth carries it.
     expect((room.truth as { records: { statement: string }[] }).records.map((r) => r.statement).sort()).toEqual(['Load time is 4.2 s.', 'PRIVATE-ROOM-TRUTH']);
-    expect(Array.isArray(room.approvals)).toBe(true);
+    expect(Array.isArray(room.heldForApproval)).toBe(true);
     expect(Array.isArray(room.recentRuns)).toBe(true);
     expect((room.externalActions as { total: number }).total).toBe(0);
     const wire = JSON.stringify(response.body);

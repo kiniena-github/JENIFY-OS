@@ -44,6 +44,7 @@ import {
   deriveUnknown,
   deriveVerified,
   orderAttentionItems,
+  tasksHeldAtFounderGate,
   truthSubjectRef,
   type CommandFacts,
   type InboxAttentionItem,
@@ -359,11 +360,30 @@ describe('the Founder Inbox is a set of predicates over canonical rows', () => {
   });
 
   it('raises an unknown dispatch outcome and drops it once the lane records a terminal', () => {
-    const unknown = facts({ dispatchLane: [{ taskId: 'task-1', state: 'unknown', at: EARLIER }], tasks: [task()] });
+    const unknown = facts({
+      dispatchLane: [{ taskId: 'task-1', state: 'unknown', at: EARLIER, evidenceId: 'evidence-attempt-1', evidenceSeq: 41 }],
+      tasks: [task()],
+    });
     const item = deriveFounderInbox(unknown).find((entry) => entry.reason === 'dispatch_outcome_unknown')!;
     expect(item.requiredAuthority).toBe('reconciliation_authority');
     expect(item.summary).toContain('whether an issue was published is unknown');
-    const dispatched = facts({ ...unknown, dispatchLane: [{ taskId: 'task-1', state: 'dispatched', at: NOW }] });
+    // The source names the `op_evidence` row that left the lane unknown, by
+    // that row's own id — never the task id under an `op_evidence` label
+    // (Phase 10 correction, M2). The task stays an affected entity.
+    expect(item.source).toEqual({ table: 'op_evidence', id: 'evidence-attempt-1' });
+    expect(item.source.id).not.toBe('task-1');
+    expect(item.entities).toEqual([{ kind: 'task', id: 'task-1' }]);
+    expect(item.id).toBe('external_action:dispatch_outcome_unknown:evidence-attempt-1');
+    // And the derived recommendation carries the same true pair, because it
+    // copies the item's source rather than re-deriving one.
+    const recommendation = deriveRecommendations([item])[0]!;
+    expect(recommendation.sourceFacts).toEqual([
+      { table: 'op_evidence', id: 'evidence-attempt-1', fact: item.provenance },
+    ]);
+    const dispatched = facts({
+      ...unknown,
+      dispatchLane: [{ taskId: 'task-1', state: 'dispatched', at: NOW, evidenceId: 'evidence-success-1', evidenceSeq: 42 }],
+    });
     expect(reasons(deriveFounderInbox(dispatched))).not.toContain('dispatch_outcome_unknown');
   });
 
@@ -536,7 +556,7 @@ describe('stale facts are excluded or marked, and unknown stays unknown', () => 
         actions: [
           { id: 'a1', taskId: 'task-1', missionId: null, adapterId: 'github', actionType: 'open_issue', riskLevel: 'low', state: 'outcome_unknown', requestedBy: 'claude', requestedAt: EARLIER, attemptedAt: EARLIER },
         ],
-        dispatchLane: [{ taskId: 'task-2', state: 'unknown', at: EARLIER }],
+        dispatchLane: [{ taskId: 'task-2', state: 'unknown', at: EARLIER, evidenceId: 'evidence-attempt-2', evidenceSeq: 7 }],
         missions: [mission({ acceptanceCriteriaStated: false })],
         truth: [truth({ id: 'truth-inconclusive', verification: 'inconclusive' })],
         workers: [{ id: 'jules', displayName: 'Jules', active: true, providerDeclared: null, memberIdentityKey: null, liveClaims: 0 }],
@@ -796,6 +816,48 @@ describe('departments are projections, and say so when nothing canonical backs t
     expect(projections.find((entry) => entry.department === 'finance')!.note).toContain('would be fabricated');
   });
 
+  it('counts "Approvals pending" from the canonical Founder gate, with no approval row in existence, and agrees with the inbox', () => {
+    // The exact state HQ actually produces: a task held at the gate and NO
+    // `hq_approvals` row at all, because HQ writes that row when the decision
+    // is MADE. The metric used to read `hq_approvals.decision = 'pending'`
+    // and so reported 0 over a queue of genuinely held work (M1).
+    const held = facts({ tasks: [task({ status: 'needs_approval' }), task({ id: 'task-2', status: 'running' })], approvals: [] });
+    expect(held.approvals).toEqual([]);
+    const inbox = deriveFounderInbox(held);
+    const ops = deriveDepartments(held, inbox).find((entry) => entry.department === 'ops')!;
+    const pending = ops.metrics.find((metric) => metric.label === 'Approvals pending')!;
+    expect(pending.value).toBe(1);
+    // One canonical predicate, so the executive number, the Founder Inbox and
+    // WHAT IS BLOCKED cannot disagree about what is at the gate.
+    expect(pending.value).toBe(reasons(inbox).filter((reason) => reason === 'task_awaiting_approval').length);
+    expect(pending.value).toBe(deriveBlocked(held).heldForApproval.total);
+    expect(pending.value).toBe(tasksHeldAtFounderGate(held).length);
+    expect(ops.note).toContain('op_tasks.status = needs_approval');
+
+    // Decide it on the canonical row and the metric falls with the inbox —
+    // including the case that produced the defect, where deciding the task is
+    // exactly what WRITES the (now non-pending) approval row.
+    const decided = facts({
+      tasks: [task({ status: 'completed' }), task({ id: 'task-2', status: 'running' })],
+      approvals: [
+        {
+          id: 'approval-1',
+          taskId: 'task-1',
+          riskClass: 'external_side_effect',
+          requestedBy: 'claude',
+          requestedAt: EARLIER,
+          decision: 'approved',
+          decidedBy: 'founder',
+          decidedAt: NOW,
+          expiresAt: null,
+          consumedAt: NOW,
+        },
+      ],
+    });
+    const after = deriveDepartments(decided, deriveFounderInbox(decided)).find((entry) => entry.department === 'ops')!;
+    expect(after.metrics.find((metric) => metric.label === 'Approvals pending')!.value).toBe(0);
+  });
+
   it('counts only over the canonical stores it names, and reads an absent store as absent', () => {
     const withoutProjects = deriveDepartments(
       facts({ stores: { missions: true, projects: false, memory: true, truth: true, actions: true, collaboration: true, briefs: true } }),
@@ -986,7 +1048,7 @@ describe('the vocabulary claims no rule the derivations do not have', () => {
       { id: 'action-risk', taskId: 'task-held', missionId: 'm-live', adapterId: 'github', actionType: 'open_issue', riskLevel: 'high', state: 'proposed', requestedBy: 'claude', requestedAt: EARLIER, attemptedAt: null },
       { id: 'action-open', taskId: 'task-held', missionId: null, adapterId: 'github', actionType: 'open_issue', riskLevel: 'low', state: 'attempted', requestedBy: 'claude', requestedAt: EARLIER, attemptedAt: EARLIER },
     ],
-    dispatchLane: [{ taskId: 'task-unknown', state: 'unknown', at: EARLIER }],
+    dispatchLane: [{ taskId: 'task-unknown', state: 'unknown', at: EARLIER, evidenceId: 'evidence-attempt-9', evidenceSeq: 9 }],
     collaboration: {
       sessions: [{ id: 'collab-1', missionId: 'm-live', missionStatus: 'working', standing: 'active', title: 'Room', privacy: 'internal' }],
       disagreements: [

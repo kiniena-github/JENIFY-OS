@@ -174,6 +174,11 @@ Cybersecurity's refusal count is over an ENUMERATED list of fourteen `op_evidenc
 (`REFUSAL_EVIDENCE_KINDS`), not a substring search, and `op_evidence` is append-only so
 "all time" is exact.
 
+Ops' "Approvals pending" counts tasks at the Founder gate through the SAME canonical
+predicate the Founder Inbox and WHAT IS BLOCKED read (`tasksHeldAtFounderGate`, i.e.
+`op_tasks.status = 'needs_approval'`), so the executive number and the queue it summarises
+cannot disagree — see the M1 correction below.
+
 ## Authority rules (the enforcement-safe path)
 
 - **One capability trio**, CONFIGURATION-vs-INVOCATION exactly as mission / truth / memory
@@ -461,6 +466,97 @@ list has never contained them, so those two remain registrable only through the 
 functions from a trusted composition root. Phase 10 did not fix it — the two ids belong to
 the Phase 7 module and the fix is that phase's to own.)
 
+## Corrections after the independent gate (GPT-5.6 Sol, Wave 3)
+
+Two Medium defects were raised against `0b63c5c` by the independent gate and are fixed
+here. Both were the same species of error — a published fact that named a canonical row
+the code was not actually reading — and both are now pinned.
+
+### M1 — the Ops "Approvals pending" metric counted a state HQ never writes
+
+**What was wrong.** `deriveFounderInbox` documents the rule correctly: HQ writes an
+`hq_approvals` row when the Founder decision is MADE (`approveTask` and `denyTask` each
+insert one, `approved` or `denied`), so a task waiting on the Founder has no approval row
+at all and `op_tasks.status = 'needs_approval'` is the one canonical "this needs the
+Founder" fact. The `ops` department projection then contradicted that same module by
+publishing `facts.approvals.filter(a => a.decision === 'pending').length`. Since nothing on
+the canonical facade ever writes a `pending` row, that executive metric reported **0 while
+the queue genuinely held work at the gate** — the Founder Inbox and the department card
+disagreed about the same rows.
+
+**What it is now.** One exported canonical predicate, `tasksHeldAtFounderGate(facts)`, and
+three readers go through it: the `task_awaiting_approval` inbox item, WHAT IS BLOCKED's
+`heldForApproval`, and the Ops metric. They cannot disagree, because there is only one
+predicate. `hq_approvals` stays in the department's `sources` for an honest reason and the
+note now says which: it reaches Ops only through the attention count (an approved approval
+that expired unconsumed), never through this metric.
+
+**The adjacent surface with the same shape, checked and fixed.** The Phase 9 Mission Room
+card "Approvals pending at the Founder gate" selected `hq_approvals` rows with
+`decision = 'pending'` on the mission's linked tasks, so it said "No approval is pending on
+this mission's tasks" over a mission holding real work. `MissionRoomView.approvals` is now
+`MissionRoomView.heldForApproval`, derived from the SAME canonical fact
+(`op_tasks.status = 'needs_approval'` among `execution.linkedTasks`) and carrying
+`{ taskId, capabilityId, requestedBy, since }` — no approval id, because a task still at
+the gate has none. The control-console card is relabelled to what it reads.
+
+**What was checked and deliberately NOT changed.** The other `decision === 'pending'`
+readers are `ui/render.ts` (the Command Center KPI hint, the Executive Room decision panel
+and the build-time Founder Approvals cards) and `ui/spatial/state.ts`'s
+`approvalFixtures`. All four read `HeadquarterData.approvals: ApprovalRequest[]` — the
+presentation bundle handed to `buildSite`, not the HQ facade — where `pending` is a real
+value the legacy `HeadquarterStore.requestApproval` writes and the pages render read-only
+build-time cards that say so. `founderConsole` (the live approvals surface) was already
+correct: it reads `queue.listByStatus('needs_approval')`.
+
+### M2 — a dispatch attention item claimed an `op_evidence` row and carried a task id
+
+**What was wrong.** `DispatchLaneFact` carried only `{ taskId, state, at }`, and the
+`dispatch_outcome_unknown` item published `source: { table: 'op_evidence', id: lane.taskId }`
+— an `op_tasks` id under an `op_evidence` label. Nothing could resolve that reference
+against the log it named, and `deriveRecommendations` copies `item.source` verbatim, so the
+false pair propagated into the recommendation's `sourceFacts` as well.
+
+**What it is now.** The lane state is a fold, but exactly ONE canonical row establishes the
+state a reader is shown, and that row's identity now travels with the fact:
+`DispatchLaneFact` gained `evidenceId` (`op_evidence.id`) and `evidenceSeq`
+(`op_evidence.seq`, its position in the hash chain). `#dispatchLaneFacts` selects `id` and
+`seq` alongside `at` and publishes the establishing row — the unterminated attempt row for
+`unknown`, the success row for `dispatched`. The item's `source.id` is that
+`op_evidence.id`, the item id is `external_action:dispatch_outcome_unknown:<evidence id>`,
+the summary names the entry and seq, and the task id stays where it belongs, in `entities`.
+The fold rule itself is untouched: it is still the sticky rule `#claudeDispatchState`
+enforces for the gateway's duplicate check.
+
+`UnknownView.dispatchOutcomeUnknown` still carries `{ taskId, at }` and is left alone
+deliberately: it claims no `op_evidence` row id, so it published nothing false.
+
+### Regressions added (three new tests, one existing test strengthened; none relaxed, none deleted)
+
+- `chief-of-staff-core` — "counts \"Approvals pending\" from the canonical Founder gate,
+  with no approval row in existence, and agrees with the inbox": a held task with
+  `approvals: []` proves the metric reports 1 and equals the inbox count,
+  `heldForApproval.total` and `tasksHeldAtFounderGate`; deciding the task (which is what
+  writes the approval row) drops it to 0.
+- `command-center-authority` — "reports the held task as one pending Founder decision in
+  the ops department, with no approval row in existence": the same proof against the real
+  canonical machinery, asserting `hq_approvals` is empty while the metric reads 1, then
+  that `approveTask` writes an `approved` row and the metric falls to 0. Plus "shows the
+  same held task in the Mission Room…", which links the held task to the mission plan and
+  proves the room's `heldForApproval` names it with no approval row anywhere.
+- `command-center-authority` — the dispatch-lane test now RESOLVES the published source id
+  against `op_evidence` (`SELECT … WHERE id = ?`), proves the row is the
+  `claude_github_dispatch_attempted` entry for that task, that it is the newest attempt by
+  the chain's own order, that it is not the task id, and that the derived recommendation's
+  `sourceFacts` carries the same true pair. `chief-of-staff-core` pins the same at the pure
+  derivation level.
+
+**Two existing assertions were UPDATED to the now-correct behaviour, none removed.**
+`command-center-authority`'s `expect(item.source).toEqual({ table: 'op_evidence', id: fx.taskId })`
+encoded the M2 defect and is replaced by the resolvability block above;
+`live-collaboration-routes` asserts `room.heldForApproval` where it asserted
+`room.approvals`.
+
 ## Salvage ledger
 
 What came from `cloud/phase-10-wip-fable-interrupted` (`26616f6`), and what did not:
@@ -512,7 +608,7 @@ console, the CLI registration, this document and every test.
 
 ## Evidence
 
-New suites (all in `packages/headquarter/test/`): `chief-of-staff-core` (46: every
+New suites (all in `packages/headquarter/test/`): `chief-of-staff-core` (49: every
 attention predicate and its disappearance when the fact changes; ordering as a grouping;
 superseded-excluded; staleness marks; missing provenance; the unknown list and absent
 stores; the founder_only partition across inbox / verified / unknown / recommendations /
@@ -520,7 +616,7 @@ snapshot; the recommendation's exact key set and inertness; `safe === blockers.l
 for every act; the apply/blocker split; the changed-delta note in both branches; the
 department projections including `not_recorded`; no fabricated key anywhere; every total
 the size of its set; bounds; the brief key and digest; and the four
-vocabulary-reachability pins), `command-center-authority` (30: the inbox derived and never
+vocabulary-reachability pins), `command-center-authority` (35: the inbox derived and never
 stored against real canonical machinery, with six sources decided through their own gates
 and the item disappearing each time; the recommendation with no path to an act and no
 method that takes one; the brief gate failing closed on worker / `system` / unknown /
@@ -543,7 +639,7 @@ body refused; no idempotency key on the wire; non-Founder / staff / nobody refus
 three routes; mutations-off; one status per capability cause; the session control
 advertised from the deciding conditions and withdrawn when either fails; the kill-switch
 behaviour on both sides; the query scan; and the inbox losing an item after the approval
-route decides it), `command-center-surfaces` (11: the optional section absent from a
+route decides it), `command-center-surfaces` (14: the optional section absent from a
 store-less build; the counts, bounds and both wire guards; no fabricated-metric key;
 founder_only withheld from the artifact with nothing aggregating over it and both omissions
 stated; the unknown half of the same rule; the section carrying no department and no
@@ -559,5 +655,7 @@ repaired) and hq-host `host-contract` (+3: the Fastify-wired briefing/inbox/rece
 with dedupe and a forged body refused; the ungranted Founder refused on the write while the
 reads answer; the NO_IDENTITY sweep of all three routes).
 
-Full-matrix results are recorded in the builder's report and the wave PR; merge stays gated
-on independent review and the Founder.
+Per-suite counts above are the numbers vitest reports at the corrected head (the earlier
+figures predated this wave's two correction passes). Full-matrix results are recorded in
+the builder's report and the wave PR; merge stays gated on independent review and the
+Founder.

@@ -624,11 +624,33 @@ export interface CollaborationFact {
   }[];
 }
 
+/**
+ * One task's Claude GitHub dispatch lane, as the hash-chained evidence rows
+ * left it.
+ *
+ * The lane state is not a fact of its own: it is a fold over `op_evidence`,
+ * and exactly ONE row establishes the state a reader is shown — the attempt
+ * row with no terminal after it (`unknown`), or the success row (`dispatched`).
+ * That row's canonical identity is carried here, because an attention item
+ * derived from this lane must reference the row it exists because of.
+ *
+ * Recorded deliberately (Phase 10 correction, M2): the draft carried the task
+ * id only, and the `dispatch_outcome_unknown` item published
+ * `{ table: 'op_evidence', id: <task id> }` — a source reference that named
+ * the evidence log while carrying an `op_tasks` id, so nothing could resolve
+ * it against `op_evidence` and the false pair propagated into the derived
+ * recommendation's `sourceFacts`. The evidence identity now travels with the
+ * lane and the task id stays where it belongs, in `entities`.
+ */
 export interface DispatchLaneFact {
   taskId: string;
   state: 'unknown' | 'dispatched';
-  /** The `at` of the newest lane evidence row, so the item carries a canonical timestamp. */
+  /** The `at` of the evidence row that established this state. */
   at: string;
+  /** `op_evidence.id` of that row — the canonical row identity an item references. */
+  evidenceId: string;
+  /** `op_evidence.seq` of that row — its position in the append-only hash chain. */
+  evidenceSeq: number;
 }
 
 export interface WorkerFact {
@@ -753,6 +775,27 @@ function itemId(kind: AttentionKind, reason: InboxAttentionReason, sourceId: str
   return `${kind}:${reason}:${sourceId}`;
 }
 
+/**
+ * The ONE canonical predicate for "this is waiting on a Founder decision".
+ *
+ * Recorded deliberately, because the obvious predicate is wrong in this
+ * codebase: HQ writes an `hq_approvals` row when a decision is MADE
+ * (`approveTask` and `denyTask` each insert one, `approved` or `denied`), not
+ * when one is requested. A task waiting on the Founder therefore has no
+ * approval row at all, and `hq_approvals.decision = 'pending'` is a state the
+ * canonical facade never writes. `op_tasks.status = 'needs_approval'` is the
+ * one canonical "this needs the Founder" fact.
+ *
+ * Every reader of that fact — the Founder Inbox item, WHAT IS BLOCKED's
+ * `heldForApproval`, and the ops department's executive metric (Phase 10
+ * correction, M1: it counted `hq_approvals.decision = 'pending'` and so
+ * reported 0 while the queue held real work) — goes through this function, so
+ * the three can never disagree about what is at the gate.
+ */
+export function tasksHeldAtFounderGate(facts: CommandFacts): TaskFact[] {
+  return facts.tasks.filter((task) => task.status === 'needs_approval');
+}
+
 function truthStaleness(drift: SubjectDrift): Staleness {
   if (drift === 'not_evaluated') return 'not_evaluated';
   return drift === 'none' ? 'current' : 'stale';
@@ -774,17 +817,10 @@ export function deriveFounderInbox(facts: CommandFacts): InboxAttentionItem[] {
     return task?.title ? `${task.title} (${id})` : id;
   };
 
-  // approval: the canonical task status IS the Founder gate holding the task.
-  //
-  // Recorded deliberately, because the obvious predicate is wrong here: HQ
-  // writes an `hq_approvals` row when a decision is MADE (`approveTask` /
-  // `denyTask` both insert one), not when one is requested. A task waiting on
-  // the Founder therefore has no approval row at all, and a derivation over
-  // `hq_approvals.decision = 'pending'` would have shown an empty inbox on a
-  // queue full of held work. `op_tasks.status = 'needs_approval'` is the one
-  // canonical "this needs the Founder" fact, and it is what this reads.
-  for (const task of facts.tasks) {
-    if (task.status !== 'needs_approval') continue;
+  // approval: the canonical task status IS the Founder gate holding the task,
+  // read through the shared predicate (`tasksHeldAtFounderGate`) so this item
+  // and every other reader of the gate count the same rows.
+  for (const task of tasksHeldAtFounderGate(facts)) {
     items.push({
       id: itemId('approval', 'task_awaiting_approval', task.id),
       kind: 'approval',
@@ -974,13 +1010,16 @@ export function deriveFounderInbox(facts: CommandFacts): InboxAttentionItem[] {
   }
   for (const lane of facts.dispatchLane) {
     if (lane.state !== 'unknown') continue;
+    // The source is the `op_evidence` ATTEMPT ROW that left this lane
+    // unknown, by its own canonical id — resolvable against the evidence log
+    // it names. The task is an affected entity, not the source row.
     items.push({
-      id: itemId('external_action', 'dispatch_outcome_unknown', lane.taskId),
+      id: itemId('external_action', 'dispatch_outcome_unknown', lane.evidenceId),
       kind: 'external_action',
       reason: 'dispatch_outcome_unknown',
-      source: { table: 'op_evidence', id: lane.taskId },
+      source: { table: 'op_evidence', id: lane.evidenceId },
       entities: [{ kind: 'task', id: lane.taskId }],
-      summary: `The Claude GitHub dispatch for task ${taskLabel(lane.taskId)} was attempted and has no terminal record; whether an issue was published is unknown.`,
+      summary: `The Claude GitHub dispatch for task ${taskLabel(lane.taskId)} was attempted (op_evidence entry ${lane.evidenceId}, seq ${lane.evidenceSeq}) and has no terminal record; whether an issue was published is unknown.`,
       since: lane.at,
       staleness: 'current',
       requiredAuthority: 'reconciliation_authority',
@@ -1408,9 +1447,12 @@ export function deriveBlocked(facts: CommandFacts, options: SectionOptions = {})
   const blockedTasks = facts.tasks
     .filter((task) => task.status === 'blocked' || task.status === 'review_failed')
     .map((task) => ({ taskId: task.id, title: task.title, status: task.status, blockReason: task.blockReason, updatedAt: task.updatedAt }));
-  const held = facts.tasks
-    .filter((task) => task.status === 'needs_approval')
-    .map((task) => ({ taskId: task.id, title: task.title, capabilityId: task.capabilityId, since: task.updatedAt }));
+  const held = tasksHeldAtFounderGate(facts).map((task) => ({
+    taskId: task.id,
+    title: task.title,
+    capabilityId: task.capabilityId,
+    since: task.updatedAt,
+  }));
   const plans = facts.missions
     .filter((mission) => !TERMINAL_MISSION.includes(mission.status))
     .map((mission) => ({
@@ -1800,16 +1842,27 @@ export function deriveDepartments(facts: CommandFacts, inbox: readonly InboxAtte
     {
       department: 'ops',
       basis: 'canonical',
-      sources: ['hq_approvals', 'op_tasks', 'op_kill_switch', 'hq_orchestration_runs'],
+      sources: ['op_tasks', 'op_kill_switch', 'hq_orchestration_runs', 'hq_approvals'],
       metrics: [
-        { label: 'Approvals pending', value: facts.approvals.filter((a) => a.decision === 'pending').length },
+        // The SAME predicate the Founder Inbox and WHAT IS BLOCKED read
+        // (`tasksHeldAtFounderGate`), so this executive number and the queue
+        // it summarises can never disagree. It counted
+        // `hq_approvals.decision = 'pending'` before — a state HQ never
+        // writes, because an approval row is inserted when the decision is
+        // MADE — and so reported 0 over a queue of genuinely held work
+        // (Phase 10 correction, M1).
+        { label: 'Approvals pending', value: tasksHeldAtFounderGate(facts).length },
         { label: 'Reviews pending', value: facts.tasks.filter((t) => t.reviewPending).length },
         { label: 'Outcome unknown', value: byStatus(['outcome_unknown']) },
         { label: 'Kill switches engaged', value: facts.killSwitches.length },
         { label: 'Orchestration runs recorded', value: facts.orchestrationRuns },
       ],
       attention: kinds('approval', 'incident', 'external_action'),
-      note: 'What is held, what is stopped and what was orchestrated — recorded acts only.',
+      note:
+        'What is held, what is stopped and what was orchestrated — recorded acts only. "Approvals pending" ' +
+        'counts tasks at the Founder gate (op_tasks.status = needs_approval), which is the canonical fact ' +
+        'that work is waiting; hq_approvals records decisions already made, and reaches this department ' +
+        'only through the attention count (an approved approval that expired unconsumed).',
     },
     {
       department: 'cybersecurity',

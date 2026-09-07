@@ -49,6 +49,60 @@ describe('the Founder Inbox is derived, never a second authority store', () => {
     expect(fx.ops.founderBriefing({ includeFounderOnly: true }).blocked.heldForApproval.total).toBe(0);
   });
 
+  it('reports the held task as one pending Founder decision in the ops department, with no approval row in existence', () => {
+    // The canonical state HQ actually produces, and the one the ops metric
+    // used to miss: a task at the gate and NOT ONE `hq_approvals` row, because
+    // HQ writes that row when the decision is MADE. Counting
+    // `hq_approvals.decision = 'pending'` reported 0 here (Phase 10
+    // correction, M1).
+    const fx = commandCenterFixture();
+    const { taskId } = taskAwaitingApproval(fx, 'cc-ops-metric');
+    expect(count(fx, 'hq_approvals')).toBe(0);
+    expect(
+      (fx.db.prepare(`SELECT COUNT(*) AS n FROM hq_approvals WHERE decision = 'pending'`).get() as { n: number }).n,
+    ).toBe(0);
+    expect(fx.ops.queue.get(taskId)!.status).toBe('needs_approval');
+
+    const opsMetric = () =>
+      fx.ops
+        .founderBriefing({ includeFounderOnly: true })
+        .departments.find((entry) => entry.department === 'ops')!
+        .metrics.find((metric) => metric.label === 'Approvals pending')!.value;
+    expect(opsMetric()).toBe(1);
+    // The executive number and the Founder Inbox read ONE predicate, so they
+    // cannot disagree about what is waiting on the Founder.
+    const inbox = fx.ops.founderInbox({ includeFounderOnly: true });
+    expect(opsMetric()).toBe(inbox.items.filter((item) => item.reason === 'task_awaiting_approval').length);
+    expect(opsMetric()).toBe(fx.ops.founderBriefing({ includeFounderOnly: true }).blocked.heldForApproval.total);
+
+    // Deciding it is exactly what WRITES the approval row: the row appears,
+    // it is not `pending`, and the metric falls to 0 with the inbox item.
+    const digest = founderConsole(fx.ops).approvals.find((card) => card.taskId === taskId)!.actionDigest;
+    expectOk(fx.ops.approveTask({ taskId, founderId: 'founder', expectedActionDigest: digest }));
+    expect(count(fx, 'hq_approvals')).toBe(1);
+    expect((fx.db.prepare(`SELECT decision FROM hq_approvals`).get() as { decision: string }).decision).toBe('approved');
+    expect(opsMetric()).toBe(0);
+    expect(itemFor(fx, 'task_awaiting_approval')).toBeNull();
+  });
+
+  it('shows the same held task in the Mission Room, from the task status rather than an approval row that is never pending', () => {
+    // The adjacent surface with M1's shape: the room's "Approvals pending at
+    // the Founder gate" card selected `hq_approvals.decision = 'pending'` and
+    // so said nothing was waiting while the mission held real work.
+    const fx = commandCenterFixture();
+    const { taskId } = taskAwaitingApproval(fx, 'cc-room-gate');
+    expectOk(fx.ops.linkMissionPlanItem({ missionId: fx.missionId, planItemSeq: 2, taskId, requestedBy: 'founder' }));
+    const room = expectOk(fx.ops.getMissionRoom(fx.missionId));
+    expect(room.heldForApproval).toEqual([
+      { taskId, capabilityId: CAPS.indexDoc, requestedBy: 'claude', since: fx.ops.queue.get(taskId)!.updatedAt },
+    ]);
+    expect(count(fx, 'hq_approvals')).toBe(0);
+
+    const digest = founderConsole(fx.ops).approvals.find((card) => card.taskId === taskId)!.actionDigest;
+    expectOk(fx.ops.approveTask({ taskId, founderId: 'founder', expectedActionDigest: digest }));
+    expect(expectOk(fx.ops.getMissionRoom(fx.missionId)).heldForApproval).toEqual([]);
+  });
+
   it('persists no item anywhere: assembling the whole briefing writes not one row', () => {
     const fx = commandCenterFixture();
     taskAwaitingApproval(fx, 'cc-nothing-written');
@@ -251,8 +305,33 @@ describe('the dispatch lane is folded by the same rule the gateway enforces', ()
     });
     expect(lane().map((entry) => entry.taskId)).toEqual([fx.taskId]);
     const item = itemFor(fx, 'dispatch_outcome_unknown')!;
-    expect(item.source).toEqual({ table: 'op_evidence', id: fx.taskId });
+    expect(item.source.table).toBe('op_evidence');
     expect(item.requiredAuthority).toBe('reconciliation_authority');
+
+    // The published source id is a REAL `op_evidence` row id, resolvable
+    // against the log the item names, and it is the attempt row that left
+    // this lane unknown — not the task id the draft published under an
+    // `op_evidence` label (Phase 10 correction, M2).
+    const row = fx.db
+      .prepare(`SELECT id, seq, task_id, kind FROM op_evidence WHERE id = ?`)
+      .get(item.source.id) as { id: string; seq: number; task_id: string | null; kind: string } | undefined;
+    expect(row, 'the item source must resolve against op_evidence').toBeDefined();
+    expect(row!.kind).toBe('claude_github_dispatch_attempted');
+    expect(row!.task_id).toBe(fx.taskId);
+    expect(item.source.id).not.toBe(fx.taskId);
+    // It is the NEWEST unterminated attempt for the task, by the chain's own order.
+    const newestAttempt = fx.db
+      .prepare(
+        `SELECT id FROM op_evidence WHERE task_id = ? AND kind = 'claude_github_dispatch_attempted' ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(fx.taskId) as { id: string };
+    expect(item.source.id).toBe(newestAttempt.id);
+    expect(item.summary).toContain(row!.id);
+    // The recommendation copies that true pair rather than re-deriving one.
+    const derived = fx.ops
+      .founderBriefing({ includeFounderOnly: true })
+      .recommendations.items.find((r) => r.attentionIds.includes(item.id))!;
+    expect(derived.sourceFacts).toEqual([{ table: 'op_evidence', id: row!.id, fact: item.provenance }]);
 
     // A recorded success settles it — and stays settled, exactly as
     // `#claudeDispatchState` treats it, so a later attempt row cannot

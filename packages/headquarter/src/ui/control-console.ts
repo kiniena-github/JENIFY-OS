@@ -3021,9 +3021,9 @@ export function collaborationConsoleScript(roles: readonly string[]): string {
       li.setAttribute('data-collaboration-truth', t.id);
     }, 'No truth record is about this mission or its tasks.');
 
-    listOf(card, 'Approvals pending at the Founder gate', room.approvals, function (li, a) {
-      li.textContent = 'task ' + a.taskId + ' \\u2014 approval ' + a.approvalId + ' (' + a.riskClass + ') requested by ' + a.requestedBy + ' at ' + a.requestedAt;
-    }, 'No approval is pending on this mission\\u2019s tasks.');
+    listOf(card, 'Held at the Founder gate (op_tasks.status = needs_approval)', room.heldForApproval, function (li, a) {
+      li.textContent = 'task ' + a.taskId + ' \\u2014 ' + a.capabilityId + ', requested by ' + a.requestedBy + ', waiting since ' + a.since;
+    }, 'No task of this mission is waiting on a Founder decision.');
 
     listOf(card, 'Recent orchestration runs', room.recentRuns, function (li, r) {
       li.textContent = r.runId + ' by ' + r.requestedBy + ' at ' + r.at;

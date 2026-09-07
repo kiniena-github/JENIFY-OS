@@ -877,8 +877,13 @@ export interface MissionRoomView {
   handoffRequests: HandoffRequestView[];
   /** Truth records ABOUT the mission or its linked tasks, newest first, bounded. Founder-gated reader: founder_only included. */
   truth: { records: TruthRecordView[]; total: number; truncated: boolean; unresolvedContradictions: number };
-  /** Pending Founder approvals on the mission's linked tasks — the canonical `hq_approvals` rows, referenced. */
-  approvals: { approvalId: string; taskId: string; riskClass: string; requestedBy: string; requestedAt: string }[];
+  /**
+   * The mission's linked tasks the Founder gate is HOLDING — canonical
+   * `op_tasks` rows with `status = 'needs_approval'`, referenced. No approval
+   * id is named because a task still at the gate has no `hq_approvals` row:
+   * HQ writes that row when the decision is made (Phase 10 correction, M1).
+   */
+  heldForApproval: { taskId: string; capabilityId: string; requestedBy: string; since: string }[];
   /** Orchestration run records for this mission, newest first, bounded. */
   recentRuns: { runId: string; requestedBy: string; at: string; summary: Record<string, unknown> }[];
   /** External-action ledger entries bound to the mission or its linked tasks, newest first, bounded. */
@@ -8880,7 +8885,7 @@ export class HeadquarterOperations {
    * session with its admitted workers, the actual contributions, the
    * explicit disagreements, handoff requests beside the canonical claim /
    * assignment they did not change, the truth records about the mission and
-   * its tasks, pending approvals, recent orchestration runs and the external
+   * its tasks, the tasks held at the Founder gate, recent orchestration runs and the external
    * actions on the ledger. Composition only — writes nothing, transitions
    * nothing, and invents no activity.
    */
@@ -8944,21 +8949,31 @@ export class HeadquarterOperations {
       (pair) => pair.resolution === 'unresolved' && (truthIds.has(pair.a) || truthIds.has(pair.b)),
     ).length;
 
-    const approvals =
-      linkedTaskIds.length === 0
+    // What the Founder gate is HOLDING on this mission, read from the same
+    // canonical fact the Founder Inbox and WHAT IS BLOCKED read
+    // (`op_tasks.status = 'needs_approval'`).
+    //
+    // Corrected with Phase 10's M1, whose defect this shared: the list used to
+    // select `hq_approvals` rows with `decision = 'pending'`, a state the
+    // canonical facade never writes — `approveTask` and `denyTask` each insert
+    // the row when the decision is MADE — so this card said "No approval is
+    // pending on this mission's tasks" over a mission with real work held at
+    // the gate. There is no approval id to name here, by design.
+    const heldTaskIds = execution.linkedTasks.filter((task) => task.status === 'needs_approval').map((task) => task.taskId);
+    const heldForApproval =
+      heldTaskIds.length === 0
         ? []
         : (this.#db
             .prepare(
-              `SELECT id, task_id, risk_class, requested_by, requested_at FROM hq_approvals
-               WHERE decision = 'pending' AND task_id IN (${linkedTaskIds.map(() => '?').join(',')})
-               ORDER BY requested_at`,
+              `SELECT id, capability_id, created_by, updated_at FROM op_tasks
+               WHERE id IN (${heldTaskIds.map(() => '?').join(',')})
+               ORDER BY updated_at`,
             )
-            .all(...linkedTaskIds) as Record<string, unknown>[]).map((r) => ({
-            approvalId: r.id as string,
-            taskId: r.task_id as string,
-            riskClass: r.risk_class as string,
-            requestedBy: r.requested_by as string,
-            requestedAt: r.requested_at as string,
+            .all(...heldTaskIds) as Record<string, unknown>[]).map((r) => ({
+            taskId: r.id as string,
+            capabilityId: r.capability_id as string,
+            requestedBy: r.created_by as string,
+            since: r.updated_at as string,
           }));
 
     const runs = listOrchestrationRuns(this.#db, id)
@@ -9002,7 +9017,7 @@ export class HeadquarterOperations {
         truncated: truthAll.length > TRUTH_SNAPSHOT_LIMIT,
         unresolvedContradictions: unresolved,
       },
-      approvals,
+      heldForApproval,
       recentRuns: runs,
       externalActions: {
         items: actions.slice(0, MISSION_ROOM_RUN_LIMIT),
@@ -9914,9 +9929,13 @@ export class HeadquarterOperations {
    * HQ does not know, and says so until a human reconciles it.
    */
   #dispatchLaneFacts(): CommandFacts['dispatchLane'] {
+    // `id` and `seq` travel with the fold, not just `at`: the lane state is a
+    // derivation, but ONE canonical `op_evidence` row establishes it, and a
+    // reader that publishes an `op_evidence` source reference must carry that
+    // row's own identity rather than the task's (Phase 10 correction, M2).
     const rows = this.#db
       .prepare(
-        `SELECT task_id, kind, at FROM op_evidence
+        `SELECT id, seq, task_id, kind, at FROM op_evidence
          WHERE task_id IS NOT NULL AND kind IN (?, ?, ?)
          ORDER BY seq`,
       )
@@ -9924,25 +9943,37 @@ export class HeadquarterOperations {
         'claude_github_dispatch_attempted',
         'claude_github_dispatch_succeeded',
         'claude_github_dispatch_failed',
-      ) as { task_id: string; kind: string; at: string }[];
+      ) as { id: string; seq: number; task_id: string; kind: string; at: string }[];
     // The fold is the SAME one `#claudeDispatchState` applies, per task,
     // including its stickiness: a recorded success means dispatched whatever
     // follows it, a recorded failure closes the attempt, and `pending` with
     // no terminal after it is the only unknown.
-    const folded = new Map<string, { pending: string | null; dispatchedAt: string | null }>();
+    type LaneRow = { id: string; seq: number; at: string };
+    const folded = new Map<string, { pending: LaneRow | null; dispatched: LaneRow | null }>();
     for (const row of rows) {
-      const entry = folded.get(row.task_id) ?? { pending: null, dispatchedAt: null };
-      if (row.kind === 'claude_github_dispatch_attempted') entry.pending = row.at;
+      const entry = folded.get(row.task_id) ?? { pending: null, dispatched: null };
+      const here: LaneRow = { id: row.id, seq: Number(row.seq), at: row.at };
+      if (row.kind === 'claude_github_dispatch_attempted') entry.pending = here;
       else if (row.kind === 'claude_github_dispatch_succeeded') {
         entry.pending = null;
-        entry.dispatchedAt = row.at;
+        entry.dispatched = here;
       } else entry.pending = null;
       folded.set(row.task_id, entry);
     }
     const out: CommandFacts['dispatchLane'] = [];
     for (const [taskId, entry] of folded) {
-      if (entry.dispatchedAt !== null) out.push({ taskId, state: 'dispatched', at: entry.dispatchedAt });
-      else if (entry.pending !== null) out.push({ taskId, state: 'unknown', at: entry.pending });
+      // The row published is the one that ESTABLISHED the state: the success
+      // row when the lane is dispatched, the unterminated attempt row when it
+      // is unknown. Either way it is resolvable against `op_evidence`.
+      const establishing = entry.dispatched ?? entry.pending;
+      if (establishing === null) continue;
+      out.push({
+        taskId,
+        state: entry.dispatched !== null ? 'dispatched' : 'unknown',
+        at: establishing.at,
+        evidenceId: establishing.id,
+        evidenceSeq: establishing.seq,
+      });
     }
     return out.sort((a, b) => a.taskId.localeCompare(b.taskId));
   }

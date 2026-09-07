@@ -290,8 +290,11 @@ route. The Mission Room read composes `missionBrowserView` (no intent bodies), t
 execution state, the sessions with participants, the bounded contributions with binding
 and stances, the disagreements, the handoff requests beside the canonical claim, the truth
 records about the mission and its linked tasks (founder_only INCLUDED — this route sits
-behind the Founder gate, exactly as `GET /truth` does), pending `hq_approvals` rows on the
-linked tasks, the newest orchestration runs and the newest external actions on the ledger
+behind the Founder gate, exactly as `GET /truth` does), the linked tasks the Founder gate
+is HOLDING (`heldForApproval`, i.e. `op_tasks.status = 'needs_approval'` — corrected with
+Phase 10's M1, which found this list selecting `hq_approvals.decision = 'pending'`, a state
+the canonical facade never writes, so the card said nothing was pending over a mission
+holding real work), the newest orchestration runs and the newest external actions on the ledger
 — every list bounded with its total. One status per cause: 404 `unknown_session |
 unknown_contribution | unknown_mission`; 409 `session_closed | mission_terminal`; 403
 `not_a_participant` and the existing authority codes (`not_permitted`,
@@ -362,7 +365,7 @@ room read — canonical tasks with live claim / Founder assignment / eligible wo
 blockers and kill switches, admitted workers with the binding HQ recorded, disagreements,
 handoff requests beside the canonical picture, the contributions with kind / worker / role
 / standing / binding / stances / truth-ref states / evidence refs, the truth records,
-pending approvals, recent runs, external actions and the sessions. The open-session form
+what the Founder gate is holding, recent runs, external actions and the sessions. The open-session form
 (mission select over the live non-terminal missions, title, purpose) and the per-session
 admit form (registered worker id, role select) are drawn only under a granted
 `collaborationCommand`. Fetch heads / postJson targets / path literals are allow-listed in
