@@ -24,9 +24,13 @@ import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { EvidenceLog, verifyEvidenceChain } from '../src/operator/evidence.js';
 import { founderConsole } from '../src/application/console.js';
 
-function expectError(result: { ok: boolean; error?: { code: string; message: string } }): {
+function expectError(result: {
+  ok: boolean;
+  error?: { code: string; message: string; details?: Record<string, unknown> };
+}): {
   code: string;
   message: string;
+  details?: Record<string, unknown>;
 } {
   expect(result.ok).toBe(false);
   return result.error!;
