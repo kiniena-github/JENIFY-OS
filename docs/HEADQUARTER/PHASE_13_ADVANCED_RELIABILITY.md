@@ -1395,7 +1395,10 @@ as well as here:
   from the genesis value and lowering `sqlite_sequence` to match. The renumbering
   needs the UPDATE the engine guard refuses, dropping that guard is itself a
   blocking finding, and HQ holds no key a foreign writer does not also have. A
-  real barrier, not a cryptographic boundary.
+  real barrier, not a cryptographic boundary. Contiguity is also silent on a log
+  that was DROPPED and recreated whole, because the seqs then restart at 1 with
+  no gap — that is the dropped-ledger question, answered by the item below rather
+  than by this one.
 - A DROPPED declared ledger is a finding only on a handle that can WRITE, because
   the discriminator between "this file lost a ledger" and "this file predates
   it" is that HQ's own ensure pass re-creates what its schema declares. A
@@ -1418,7 +1421,10 @@ as well as here:
   rewriting `sqlite_sequence` — and it is a different act from the one that used
   to succeed, which needed nothing but more `DROP TABLE`. A file no writer of
   this build has ever opened carries no mark either, and is read as a first boot;
-  that is the same read-only/older-file limit as the sentence above.
+  that is the same read-only/older-file limit as the sentence above, and it also
+  covers the case where the stamp itself could not be written — the facade never
+  fails a construction over the mark, so a file HQ could not stamp is a file HQ
+  reads as new next time.
 - The verdict ledger is durable only where it EXISTS: a database written before
   this wave, or a read-only handle over one, carries no `hq_reliability_verdicts`
   table and the verdict is process-local there. `SAFE_MODE_STATEMENT` says so.
@@ -1485,7 +1491,12 @@ as well as here:
   substitution is actually written in; the rest is disclosed rather than
   claimed. Ordinary whitespace is deliberately not folded either — a space
   inside a credential is a break a reader can see, and folding it would start
-  matching prose.
+  matching prose. The fold's one visible cost, stated rather than left to be
+  discovered: Greek `ΤΟΚΕΝ` folds to `TOKEN`, so Greek text of the form
+  `ΤΟΚΕΝ: ********` is refused by the free-text `key: value` heuristic exactly as
+  the English `TOKEN: ********` already is. No Cyrillic word can reach any of
+  those keywords by folding, which is a property of which letters the map
+  deliberately omits.
 - A credential split across two search fields still passes both scans.
 - A `cp` of a live WAL-mode database still verifies as a backup, and always
   will: it is a different inode with no sidecars beside it and its bytes are a
