@@ -453,6 +453,124 @@ describe('the enforcement declarations are frozen, not merely typed readonly', (
     expect(names).toContain('PROJECT_COMMAND_RESERVED_CONTRACT');
   });
 
+  /**
+   * Wave 5 correction round four, Medium M7 / M8.
+   *
+   * The test above claimed to enumerate "the package" and scanned THREE modules
+   * for TWO name suffixes. That narrowness is the hole two live exploits fell
+   * through, and neither had a `_RESERVED_CONTRACT` or `_CAPABILITY` name:
+   *
+   *  - `FABRICATED_FIELD_NAMES` is read by `assertNoFabricatedFields`, the
+   *    fail-closed publication gate on the unauthenticated snapshot. Executed:
+   *    `FABRICATED_FIELD_NAMES.length = 0` and a fabricated `costUsd`
+   *    published;
+   *  - `STATE_CHANGING_METHODS` is what `checkMutationOrigin` decides on, and
+   *    it returns `{ ok: true }` for any method NOT in the list. Executed:
+   *    `.length = 0` turned a refused cross-origin non-JSON POST
+   *    (`403 content_type_not_json`, no write) into an accepted `201` that
+   *    WROTE a budget row.
+   *
+   * So this one really does enumerate the package: every public entry point in
+   * `package.json#exports`, every exported ALL-CAPS binding that is an object
+   * or an array, no name filter at all. A future constant is covered the day it
+   * is exported, which is the property the previous version only claimed.
+   */
+  it('freezes EVERY exported closed vocabulary in the package, by enumeration', async () => {
+    const entryPoints = [
+      '../src/index.js',
+      '../src/contracts/index.js',
+      '../src/operator/index.js',
+      '../src/store/index.js',
+      '../src/archive/index.js',
+      '../src/connectors/index.js',
+      '../src/ui/index.js',
+      '../src/organization/index.js',
+      '../src/memory/index.js',
+      '../src/handover/index.js',
+      '../src/registry/index.js',
+      '../src/providers/index.js',
+      '../src/application/index.js',
+      '../src/routing/index.js',
+      '../src/live/index.js',
+      '../src/client/index.js',
+    ];
+    const seen = new Map<string, unknown>();
+    for (const entry of entryPoints) {
+      const namespace = (await import(entry)) as Record<string, unknown>;
+      for (const [name, value] of Object.entries(namespace)) {
+        // ALL-CAPS is how this package spells a declared constant, and an
+        // object or an array is what a `length = 0` or a property rewrite can
+        // actually reach.
+        if (!/^[A-Z][A-Z0-9_]*$/.test(name)) continue;
+        if (value == null || typeof value !== 'object') continue;
+        if (!seen.has(name)) seen.set(name, value);
+      }
+    }
+    const unfrozen = [...seen.entries()]
+      .filter(([, value]) => !Object.isFrozen(value))
+      .map(([name]) => name)
+      .sort();
+    expect(unfrozen).toEqual([]);
+    // A count, so a future narrowing of the enumeration is visible rather than
+    // silently passing over an empty set. 202 bindings at this head.
+    expect(seen.size).toBeGreaterThanOrEqual(200);
+    // The two the previous scan could not see, named so a regression on either
+    // is reported by name rather than as an anonymous count.
+    for (const name of [
+      'FABRICATED_FIELD_NAMES',
+      'STATE_CHANGING_METHODS',
+      'CLIENT_IDENTITY_KEYS',
+      'STEP_UP_RISK_CLASSES',
+      'CONTROL_ROUTES',
+      'CONTROL_WRITE_ROUTES',
+      'MEMORY_PRIVACY_LEVELS',
+      'ACTIVITY_STATUSES',
+      'ALLOWED_TRANSITIONS',
+      'MISSION_ALLOWED_TRANSITIONS',
+      'MEMBER_RISK_CLASSES',
+      'ALL_RESULT_MARKERS',
+      'PROVIDER_HEALTH_STATES',
+      'MODEL_AVAILABILITY_STATES',
+      'LEXICAL_RETRIEVAL_ADAPTER',
+    ]) {
+      expect([...seen.keys()], name).toContain(name);
+      expect(Object.isFrozen(seen.get(name)), name).toBe(true);
+    }
+  });
+
+  /**
+   * The two exploits themselves, not only the `Object.isFrozen` property —
+   * because "frozen" is the mechanism and "the gate still holds" is the
+   * guarantee. Under ESM (always strict) the write THROWS.
+   */
+  it('refuses the two writes that emptied a publication gate and a CSRF gate', async () => {
+    const { FABRICATED_FIELD_NAMES, assertNoFabricatedFields, BrowserSafetyError } = await import(
+      '../src/live/redaction.js'
+    );
+    expect(() => {
+      (FABRICATED_FIELD_NAMES as unknown as { length: number }).length = 0;
+    }).toThrow(TypeError);
+    expect(() => assertNoFabricatedFields({ card: { costUsd: 42 } })).toThrow(BrowserSafetyError);
+
+    const { STATE_CHANGING_METHODS } = await import('../src/live/auth.js');
+    expect(() => {
+      (STATE_CHANGING_METHODS as unknown as { length: number }).length = 0;
+    }).toThrow(TypeError);
+    expect([...STATE_CHANGING_METHODS]).toEqual(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+    // `RETRIEVAL_GUARD_STATEMENT` says every exported adapter binding is
+    // already wrapped; a bare object literal let the wrapper be replaced IN
+    // PLACE, which made the shipped sentence false by one line (Medium M9).
+    const { LEXICAL_RETRIEVAL_ADAPTER } = await import('../src/application/search-command.js');
+    expect(Object.isFrozen(LEXICAL_RETRIEVAL_ADAPTER)).toBe(true);
+    expect(() => {
+      (LEXICAL_RETRIEVAL_ADAPTER as unknown as { retrieve: unknown }).retrieve = () => [];
+    }).toThrow(TypeError);
+    expect(() => {
+      (LEXICAL_RETRIEVAL_ADAPTER as unknown as { available: unknown }).available = false;
+    }).toThrow(TypeError);
+  });
+
   it('freezes the run vocabularies the snapshot counts and the derivation read', () => {
     for (const list of [
       RUN_KINDS,

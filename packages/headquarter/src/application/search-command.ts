@@ -331,7 +331,7 @@ export type TermMatch = (typeof TERM_MATCHES)[number];
  * removed word is reported back on the response as an ignored term, so the
  * reader can see exactly what HQ did to their question.
  */
-export const QUERY_STOPWORDS: ReadonlySet<string> = new Set([
+export const QUERY_STOPWORDS: ReadonlySet<string> = deepFreeze(new Set([
   'about', 'all', 'an', 'and', 'any', 'anything', 'are', 'as', 'at', 'be', 'because', 'been', 'being',
   'but', 'by', 'can', 'could', 'did', 'do', 'does', 'doing', 'done', 'find', 'for', 'from', 'get',
   'give', 'had', 'has', 'have', 'how', 'if', 'in', 'into', 'is', 'it', 'its', 'just', 'know', 'list',
@@ -339,7 +339,7 @@ export const QUERY_STOPWORDS: ReadonlySet<string> = new Set([
   'so', 'some', 'tell', 'than', 'that', 'the', 'their', 'them', 'then', 'there', 'these', 'they',
   'this', 'those', 'to', 'us', 'was', 'we', 'were', 'what', 'whats', 'when', 'where', 'which', 'who',
   'whom', 'why', 'will', 'with', 'would', 'you', 'your',
-]);
+]));
 
 export const RETRIEVAL_MODES = deepFreeze(['deterministic_lexical', 'semantic_embedding'] as const);
 export type RetrievalMode = (typeof RETRIEVAL_MODES)[number];
@@ -498,8 +498,8 @@ export const RETRIEVAL_GUARD_STATEMENT =
   'own scan outside it. Every retrieval adapter the resolver hands out is additionally reached through a ' +
   'seam guard that scans the terms it is about to be handed, and the guard is applied AT DECLARATION ' +
   'rather than by the caller: the raw adapters are module-private and every exported binding is already ' +
-  'wrapped, so no in-process caller can obtain an unwrapped adapter and one installed later cannot opt ' +
-  'out. Because the pipeline tokenizes first, those terms no longer carry the separators a credential ' +
+  'wrapped AND frozen, so no in-process caller can obtain an unwrapped adapter or replace the wrapper in ' +
+  'place, and one installed later cannot opt out. Because the pipeline tokenizes first, those terms no longer carry the separators a credential ' +
   'shape needs: the seam guard is defence in depth against a caller that supplies its own untokenized ' +
   'terms, not the layer the pipeline relies on.';
 
@@ -656,9 +656,9 @@ export function guardRetrievalAdapter(adapter: RetrievalAdapter): RetrievalAdapt
  * semantic list, which is guarded at declaration here rather than at the one
  * call site that happens to resolve it.
  */
-export const LEXICAL_RETRIEVAL_ADAPTER: RetrievalAdapter = guardRetrievalAdapter(
+export const LEXICAL_RETRIEVAL_ADAPTER: RetrievalAdapter = deepFreeze(guardRetrievalAdapter(
   RAW_LEXICAL_RETRIEVAL_ADAPTER,
-);
+));
 
 /** The semantic list, guarded member by member at declaration. Empty today. */
 export const SEMANTIC_RETRIEVAL_ADAPTERS: readonly RetrievalAdapter[] = Object.freeze(

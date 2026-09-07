@@ -224,7 +224,7 @@ export function isObservationSource(value: unknown): value is ObservationSource 
  * `unknown` default — a second spelling would drift, and a test asserts the
  * two arrays are the same object.
  */
-export const MODEL_AVAILABILITY_STATES = PROVIDER_HEALTH_STATES;
+export const MODEL_AVAILABILITY_STATES = deepFreeze(PROVIDER_HEALTH_STATES);
 export type ModelAvailability = ProviderHealth;
 
 export function isModelAvailability(value: unknown): value is ModelAvailability {

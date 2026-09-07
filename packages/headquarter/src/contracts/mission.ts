@@ -20,8 +20,9 @@
  */
 
 import { type ActivityStatus } from './events.js';
+import { deepFreeze } from './freeze.js';
 
-export const MISSION_STATUSES = [
+export const MISSION_STATUSES = deepFreeze([
   'planned',
   'working',
   'blocked',
@@ -30,7 +31,7 @@ export const MISSION_STATUSES = [
   'complete',
   'failed',
   'cancelled',
-] as const;
+] as const);
 
 export type MissionStatus = (typeof MISSION_STATUSES)[number];
 
@@ -60,7 +61,7 @@ export type MissionStatus = (typeof MISSION_STATUSES)[number];
  *   Founder-only. Widening the caller set is a deliberate later-phase
  *   change, not something this table can grant.
  */
-export const MISSION_ALLOWED_TRANSITIONS: Record<MissionStatus, readonly MissionStatus[]> = {
+export const MISSION_ALLOWED_TRANSITIONS: Record<MissionStatus, readonly MissionStatus[]> = deepFreeze({
   planned: ['working', 'blocked', 'cancelled'],
   working: ['blocked', 'ready_review', 'failed', 'cancelled'],
   blocked: ['working', 'failed', 'cancelled'],
@@ -69,7 +70,7 @@ export const MISSION_ALLOWED_TRANSITIONS: Record<MissionStatus, readonly Mission
   complete: [],
   failed: [],
   cancelled: [],
-};
+});
 
 export function isMissionStatus(value: string): value is MissionStatus {
   return (MISSION_STATUSES as readonly string[]).includes(value);
@@ -94,12 +95,12 @@ export function isMissionTerminal(status: MissionStatus): boolean {
  * or verifying a mission is a decision with a reason; the reason is part of
  * the record (the `denyTask` mandatory-reason precedent).
  */
-export const MISSION_NOTE_REQUIRED_TARGETS: readonly MissionStatus[] = [
+export const MISSION_NOTE_REQUIRED_TARGETS: readonly MissionStatus[] = deepFreeze([
   'blocked',
   'verified',
   'failed',
   'cancelled',
-];
+]);
 
 /**
  * How a mission can become `verified`. Deliberately a single member: Phase 3
@@ -109,7 +110,7 @@ export const MISSION_NOTE_REQUIRED_TARGETS: readonly MissionStatus[] = [
  * live/local-trust.ts): a later phase must first add the ability to even
  * SAY "machine-verified" before any code path can claim it.
  */
-export const MISSION_VERIFICATION_METHODS = ['founder_decision'] as const;
+export const MISSION_VERIFICATION_METHODS = deepFreeze(['founder_decision'] as const);
 
 export type MissionVerificationMethod = (typeof MISSION_VERIFICATION_METHODS)[number];
 
@@ -119,7 +120,7 @@ export type MissionVerificationMethod = (typeof MISSION_VERIFICATION_METHODS)[nu
  * FIFO. `null` (absent) means the Founder did not state one — unstated is
  * recorded as unstated, never defaulted to `normal`.
  */
-export const MISSION_PRIORITIES = ['critical', 'high', 'normal', 'low'] as const;
+export const MISSION_PRIORITIES = deepFreeze(['critical', 'high', 'normal', 'low'] as const);
 
 export type MissionPriority = (typeof MISSION_PRIORITIES)[number];
 

@@ -52,6 +52,7 @@ import {
   type ProviderId,
   type SecretsEnv,
 } from '../routing/providers.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 /**
  * Connection state.
@@ -94,7 +95,7 @@ export type ConnectionState =
   | 'error'
   | 'setup_required';
 
-export const CONNECTION_STATE_LABELS: Record<ConnectionState, string> = {
+export const CONNECTION_STATE_LABELS: Record<ConnectionState, string> = deepFreeze({
   connected: 'Connected',
   local_only: 'Local-only',
   dispatchable: 'Dispatchable — unverified',
@@ -103,7 +104,7 @@ export const CONNECTION_STATE_LABELS: Record<ConnectionState, string> = {
   expired: 'Expired',
   error: 'Error',
   setup_required: 'Setup required',
-};
+});
 
 /**
  * How a state was established. Carried on every status so a reader can see
@@ -150,9 +151,9 @@ export const CONNECTION_STATE_LABELS: Record<ConnectionState, string> = {
  * restatement shape that produced the tone-mapping defect one round earlier.
  * Moved rather than re-copied, so there is one list and both views read it.
  */
-export const LIT_CONNECTION_STATES: readonly ConnectionState[] = ['connected', 'local_only'];
+export const LIT_CONNECTION_STATES: readonly ConnectionState[] = deepFreeze(['connected', 'local_only']);
 
-export const CONNECTION_STATE_TONE: Record<ConnectionState, 'accent' | 'info' | 'warn' | 'danger' | 'neutral'> = {
+export const CONNECTION_STATE_TONE: Record<ConnectionState, 'accent' | 'info' | 'warn' | 'danger' | 'neutral'> = deepFreeze({
   connected: 'accent',
   local_only: 'info',
   dispatchable: 'info',
@@ -161,7 +162,7 @@ export const CONNECTION_STATE_TONE: Record<ConnectionState, 'accent' | 'info' | 
   expired: 'warn',
   error: 'danger',
   setup_required: 'warn',
-};
+});
 
 export type VerificationMethod = 'none' | 'configuration' | 'routing_contract' | 'live_check';
 
@@ -394,7 +395,7 @@ export type AuthMechanism =
   | 'service_account'
   | 'none';
 
-export const AUTH_MECHANISM_LABELS: Record<AuthMechanism, string> = {
+export const AUTH_MECHANISM_LABELS: Record<AuthMechanism, string> = deepFreeze({
   oauth: 'OAuth',
   api_key: 'API key',
   mcp: 'MCP',
@@ -402,7 +403,7 @@ export const AUTH_MECHANISM_LABELS: Record<AuthMechanism, string> = {
   github_workflow: 'GitHub workflow secret',
   service_account: 'Service account',
   none: 'None',
-};
+});
 
 /** Where the integration physically runs. */
 export type ConnectionLocality = 'cloud' | 'local';
@@ -505,7 +506,7 @@ export interface ConnectionStatus extends ConnectionDescriptor {
  * The seeded connection catalogue. Names present here mean only "HQ knows
  * what this integration would be"; they are not a claim that it exists.
  */
-export const CONNECTION_CATALOG: readonly ConnectionDescriptor[] = [
+export const CONNECTION_CATALOG: readonly ConnectionDescriptor[] = deepFreeze([
   {
     id: 'anthropic-claude',
     displayName: 'Anthropic — Claude',
@@ -604,7 +605,7 @@ export const CONNECTION_CATALOG: readonly ConnectionDescriptor[] = [
     recheckable: false,
     revocable: false,
   },
-] as const;
+] as const);
 
 /* ------------------------------------------------------------------ */
 /* Probes                                                              */
@@ -862,7 +863,7 @@ const ROUTING_BACKED: Readonly<Record<string, ProviderId>> = {
  * integration therefore tops out at `configured`, which is the truth about
  * what HQ has actually established.
  */
-export const DEFAULT_CONNECTION_VERIFIERS: readonly ConnectionVerifier[] = [];
+export const DEFAULT_CONNECTION_VERIFIERS: readonly ConnectionVerifier[] = deepFreeze([]);
 
 /** Default probe set for the seeded catalogue. */
 export function defaultConnectionProbes(

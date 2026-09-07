@@ -16,6 +16,8 @@
  * Do not re-inline a second copy of the matching logic.
  */
 
+import { deepFreeze } from '../contracts/freeze.js';
+
 /** The searchable projection of one archive record, embedded as JSON. */
 export interface ArchiveSearchRow {
   id: string;
@@ -37,7 +39,7 @@ export interface ArchiveFilters {
   year: string;
 }
 
-export const EMPTY_FILTERS: ArchiveFilters = { project: '', category: '', status: '', year: '' };
+export const EMPTY_FILTERS: ArchiveFilters = deepFreeze({ project: '', category: '', status: '', year: '' });
 
 /**
  * Split free text into searchable tokens: lower-cased, alphanumeric,

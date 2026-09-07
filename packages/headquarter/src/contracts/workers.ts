@@ -7,6 +7,7 @@
  */
 
 import type { ActivityStatus } from './events.js';
+import { deepFreeze } from './freeze.js';
 
 /**
  * Broad role a worker plays in the org. Informational, not a permission.
@@ -14,13 +15,13 @@ import type { ActivityStatus } from './events.js';
  * Listed as a runtime array so a CLI can validate what an operator typed
  * against the same source the type comes from — one list, not two that drift.
  */
-export const WORKER_ROLES = [
+export const WORKER_ROLES = deepFreeze([
   'build_lead',
   'parallel_implementer',
   'reviewer_gatekeeper',
   'specialist_tool',
   'mission_director',
-] as const;
+] as const);
 
 export type WorkerRole = (typeof WORKER_ROLES)[number];
 

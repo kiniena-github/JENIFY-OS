@@ -107,8 +107,8 @@ export function adapterKillSwitchScope(adapterId: string): string {
 
 // ---- adapter contract ----
 
-export const ADAPTER_ID_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,63}$/;
-export const ACTION_TYPE_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,63}$/;
+export const ADAPTER_ID_PATTERN = deepFreeze(/^[a-z0-9][a-z0-9_.-]{0,63}$/);
+export const ACTION_TYPE_PATTERN = deepFreeze(/^[a-z0-9][a-z0-9_.-]{0,63}$/);
 
 /**
  * Declarative compensation. Present ONLY where the provider genuinely supports

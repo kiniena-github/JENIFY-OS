@@ -41,6 +41,8 @@
  * projects these coordinates; nothing else knows them.
  */
 
+import { deepFreeze } from '../contracts/freeze.js';
+
 /** Where a room's content is allowed to come from. */
 export type RoomBinding =
   | {
@@ -64,7 +66,7 @@ export type RoomBinding =
  * `analytics`, `security`). A derived section is still a projection: it counts
  * and groups rows the state document already carries, and adds no row.
  */
-export const ROOM_SECTIONS = [
+export const ROOM_SECTIONS = deepFreeze([
   'overview',
   'operations',
   'missions',
@@ -78,7 +80,7 @@ export const ROOM_SECTIONS = [
   'security',
   'founder',
   'memory',
-] as const;
+] as const);
 
 /**
  * A runtime tuple, with the type DERIVED from it — not the other way round.
@@ -130,7 +132,7 @@ export interface HqRoom {
  * ought to show. Three rooms came out `not_recorded` and two `later_phase`;
  * inventing a source for any of them was the one thing this stage may not do.
  */
-export const HQ_ROOMS: readonly HqRoom[] = [
+export const HQ_ROOMS: readonly HqRoom[] = deepFreeze([
   {
     id: 'home',
     ordinal: 1,
@@ -406,7 +408,7 @@ export const HQ_ROOMS: readonly HqRoom[] = [
     placement: { ring: 2, slot: 7 },
     page: 'connections.html',
   },
-];
+]);
 
 /** Route fragment for a room. One scheme, used by the shell and the tests. */
 export function roomRoute(roomId: string): string {
@@ -441,7 +443,7 @@ export function liveRooms(): HqRoom[] {
 /* ------------------------------------------------------------------ */
 
 /** Ring radii in world units. The atrium sits at the origin. */
-export const RING_RADIUS: Record<0 | 1 | 2, number> = { 0: 0, 1: 30, 2: 54 };
+export const RING_RADIUS: Record<0 | 1 | 2, number> = deepFreeze({ 0: 0, 1: 30, 2: 54 });
 
 /** Half-extent of a room volume, in world units. */
 export const ROOM_HALF_SPAN = 7.5;

@@ -48,6 +48,7 @@
 
 import { jsonForScript } from '../ui/components.js';
 import { HQ_ROOMS, ROOM_HALF_SPAN, roomAnchor } from './rooms.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 /**
  * Feature detection, as browser-executable source.
@@ -94,12 +95,12 @@ export const MOTION_MODE_JS = `function motionMode(explicit, mediaMatches) {
 }`;
 
 /** Colour per liveness, as linear RGB. Kept beside the CSS tones on purpose. */
-export const LIVENESS_COLOR: Record<string, [number, number, number]> = {
+export const LIVENESS_COLOR: Record<string, [number, number, number]> = deepFreeze({
   active: [0.16, 0.74, 0.96],
   attention: [0.98, 0.66, 0.19],
   quiet: [0.32, 0.42, 0.55],
   dark: [0.13, 0.16, 0.21],
-};
+});
 
 /**
  * The scene's static geometry, generated at build time.

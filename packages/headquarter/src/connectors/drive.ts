@@ -29,12 +29,13 @@ import type {
   SourceConfidence,
   SyncOutcome,
 } from './types.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 export const DRIVE_CONNECTOR_ID = 'drive';
 export const DRIVE_SOURCE_SYSTEM = 'drive.google.com';
 export const DRIVE_HOST = 'drive.google.com';
 
-export const DRIVE_NATIVE_KINDS = ['drive_file', 'drive_folder'] as const;
+export const DRIVE_NATIVE_KINDS = deepFreeze(['drive_file', 'drive_folder'] as const);
 
 export type DriveNativeKind = (typeof DRIVE_NATIVE_KINDS)[number];
 

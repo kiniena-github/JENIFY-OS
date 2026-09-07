@@ -92,8 +92,9 @@ import { SOURCE_MODE_LABELS, type SourceMode } from '../live/provenance.js';
 import type { FloorState } from './spatial/state.js';
 import { spatialFloorBody } from './spatial/page.js';
 import { immersiveBody } from '../client/page.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
-export const HQ_PAGES = [
+export const HQ_PAGES = deepFreeze([
   { file: 'index.html', title: 'Command Center', glyph: '◈' },
   { file: 'immersive.html', title: 'Immersive HQ', glyph: '◉' },
   { file: 'headquarters.html', title: 'Headquarters Floor', glyph: '⬡' },
@@ -104,7 +105,7 @@ export const HQ_PAGES = [
   { file: 'approvals.html', title: 'Founder Approvals', glyph: '⚖' },
   { file: 'connections.html', title: 'Connections', glyph: '⇄' },
   { file: 'archive.html', title: 'Archive', glyph: '▦' },
-] as const;
+] as const);
 
 const ROLE_LABELS: Record<WorkerRole, string> = {
   build_lead: 'Build lead',
@@ -232,11 +233,11 @@ export const DIRECT_ORDER_BLOCKER =
   'TRUSTED-LOCAL-ADMIN interface: it does not authenticate the Founder, it asserts a principal ' +
   'id that deny-by-default authorization and the no-self-approval rule then contain.';
 
-export const ROUTE_STATE_PRESENTATION: Record<'ready' | 'blocked' | 'unknown', { label: string; tone: Tone }> = {
+export const ROUTE_STATE_PRESENTATION: Record<'ready' | 'blocked' | 'unknown', { label: string; tone: Tone }> = deepFreeze({
   ready: { label: 'Available', tone: 'accent' },
   blocked: { label: 'Blocked — not connected', tone: 'danger' },
   unknown: { label: 'Not evaluated', tone: 'neutral' },
-};
+});
 
 /**
  * The composer. Rendered entirely from inert elements — no `<form>`, no

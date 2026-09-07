@@ -15,6 +15,8 @@
  *   advertised-vs-granted security boundary.
  */
 
+import { deepFreeze } from '../contracts/freeze.js';
+
 /** How a provider's models run relative to this machine. */
 export type ProviderKind = 'cloud' | 'local' | 'hybrid';
 
@@ -33,7 +35,7 @@ export type ProviderCostClass = 'free' | 'low' | 'medium' | 'high' | 'premium';
  * than by equality. `unknown` is deliberately first: it is the default and the
  * fail-closed reading, never an error case.
  */
-export const PROVIDER_HEALTH_STATES = ['unknown', 'healthy', 'degraded', 'unavailable'] as const;
+export const PROVIDER_HEALTH_STATES = deepFreeze(['unknown', 'healthy', 'degraded', 'unavailable'] as const);
 export type ProviderHealth = (typeof PROVIDER_HEALTH_STATES)[number];
 
 /**

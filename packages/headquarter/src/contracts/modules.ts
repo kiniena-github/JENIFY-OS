@@ -6,7 +6,9 @@
  * backend store; Jules owns the UI presentation built on top of them.
  */
 
-export const HQ_MODULES = [
+import { deepFreeze } from './freeze.js';
+
+export const HQ_MODULES = deepFreeze([
   'command_center',
   'projects',
   'executive_room',
@@ -14,18 +16,18 @@ export const HQ_MODULES = [
   'specialist_directory',
   'founder_approvals',
   'archive_knowledge',
-] as const;
+] as const);
 
 export type HqModule = (typeof HQ_MODULES)[number];
 
 /** Command Center lanes — the Founder's five-question dashboard (issue #43). */
-export const COMMAND_CENTER_LANES = [
+export const COMMAND_CENTER_LANES = deepFreeze([
   'now',
   'done_today',
   'blocked',
   'waiting_for_founder',
   'next',
-] as const;
+] as const);
 
 export type CommandCenterLane = (typeof COMMAND_CENTER_LANES)[number];
 

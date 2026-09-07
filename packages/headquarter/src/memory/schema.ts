@@ -25,6 +25,7 @@ import {
   type DatedValue,
   type RelatedRefs,
 } from '../archive/schema.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 /**
  * What a piece of company memory captures.
@@ -38,7 +39,7 @@ import {
  * Observed system facts continue to use `evidence_note` — an observation is a
  * note about evidence, not a new epistemic tier.
  */
-export const MEMORY_KINDS = [
+export const MEMORY_KINDS = deepFreeze([
   'decision',
   'rationale',
   'task_state',
@@ -50,7 +51,7 @@ export const MEMORY_KINDS = [
   'founder_note',
   'source_material',
   'summary',
-] as const;
+] as const);
 
 export type MemoryKind = (typeof MEMORY_KINDS)[number];
 
@@ -66,7 +67,7 @@ export function isMemoryKind(value: unknown): value is MemoryKind {
  * by a UI hiding a field). This module stores the flag; it does not gate
  * reads by it.
  */
-export const MEMORY_PRIVACY_LEVELS = ['internal', 'founder_only'] as const;
+export const MEMORY_PRIVACY_LEVELS = deepFreeze(['internal', 'founder_only'] as const);
 export type MemoryPrivacy = (typeof MEMORY_PRIVACY_LEVELS)[number];
 
 export function isMemoryPrivacy(value: unknown): value is MemoryPrivacy {

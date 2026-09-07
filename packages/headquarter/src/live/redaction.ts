@@ -33,6 +33,7 @@
  */
 
 import { assertNoSecretLikeContent } from '../operator/evidence.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 /** Field names that may never carry a non-trivial string value. */
 const SECRET_KEY_PATTERN =
@@ -103,7 +104,7 @@ const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
  * equality, so `contextWindowTokens` (a vendor-advertised model property,
  * not a usage measurement) is unaffected.
  */
-export const FABRICATED_FIELD_NAMES: readonly string[] = [
+export const FABRICATED_FIELD_NAMES: readonly string[] = deepFreeze([
   'cost',
   'costUsd',
   'costEstimate',
@@ -122,7 +123,7 @@ export const FABRICATED_FIELD_NAMES: readonly string[] = [
   'mood',
   'confidenceScore',
   'progressPercent',
-];
+]);
 
 export class BrowserSafetyError extends Error {
   constructor(

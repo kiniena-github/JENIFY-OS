@@ -44,8 +44,9 @@ import { nowIso } from '../store/db.js';
 import { HeadquarterStore } from '../store/headquarter.js';
 import type { MemoryStore } from '../memory/store.js';
 import { generateHandoverPackage, type HandoverPackage } from './package.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
-export const HANDOVER_STATES = [
+export const HANDOVER_STATES = deepFreeze([
   'frozen',
   'inventoried',
   'package_ready',
@@ -53,7 +54,7 @@ export const HANDOVER_STATES = [
   'verified',
   'completed',
   'aborted',
-] as const;
+] as const);
 
 export type HandoverState = (typeof HANDOVER_STATES)[number];
 
@@ -63,7 +64,7 @@ export type HandoverState = (typeof HANDOVER_STATES)[number];
  * structurally impossible: 'verified' is reachable only from 'acknowledged',
  * and 'completed' only from 'verified'.
  */
-export const HANDOVER_TRANSITIONS: Record<HandoverState, readonly HandoverState[]> = {
+export const HANDOVER_TRANSITIONS: Record<HandoverState, readonly HandoverState[]> = deepFreeze({
   frozen: ['inventoried', 'aborted'],
   inventoried: ['package_ready', 'aborted'],
   package_ready: ['acknowledged', 'aborted'],
@@ -71,7 +72,7 @@ export const HANDOVER_TRANSITIONS: Record<HandoverState, readonly HandoverState[
   verified: ['completed', 'aborted'],
   completed: [],
   aborted: [],
-};
+});
 
 export function isHandoverState(value: unknown): value is HandoverState {
   return typeof value === 'string' && (HANDOVER_STATES as readonly string[]).includes(value);
