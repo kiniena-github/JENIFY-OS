@@ -150,7 +150,17 @@ describe('the collaboration record across a full close and reopen', () => {
     expect(ops.listCollaborationSessions()).toEqual([]);
     expect(ops.getCollaborationSession('anything')).toBeNull();
     expect(ops.listContributions('anything')).toEqual({ contributions: [], total: 0 });
-    expect(ops.collaborationSummary()).toEqual({ sessions: 0, activeSessions: 0, workersAdmitted: 0, contributions: 0, disagreements: 0, handoffRequests: 0, recent: [] });
+    expect(ops.collaborationSummary()).toEqual({
+      sessions: 0,
+      withheldFounderOnly: 0,
+      withheldPurposes: 0,
+      activeSessions: 0,
+      workersAdmitted: 0,
+      contributions: 0,
+      disagreements: 0,
+      handoffRequests: 0,
+      recent: [],
+    });
     const snapshot = liveSnapshotFromOperations(ops, { now: '2026-09-06T12:00:00.000Z' });
     expect(snapshot.collaboration!.data.sessions).toBe(0);
     expect(snapshot.collaboration!.provenance.note).toContain('predates the Phase 9 collaboration schema');

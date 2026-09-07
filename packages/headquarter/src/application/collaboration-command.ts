@@ -50,6 +50,7 @@ import { CapabilityRegistry, type Capability } from '../operator/capabilities.js
 import { canonicalJson } from '../operator/approvals.js';
 import type { ActivityStatus } from '../contracts/events.js';
 import type { MissionStatus } from '../contracts/mission.js';
+import { MEMORY_PRIVACY_LEVELS, isMemoryPrivacy, type MemoryPrivacy } from '../memory/schema.js';
 import type { TruthState } from './truth-command.js';
 
 // ---- vocabulary (categorical only) ----
@@ -94,6 +95,32 @@ export type ContributionRelationKind = (typeof CONTRIBUTION_RELATION_KINDS)[numb
 
 /** A session's standing is DERIVED from its mission's canonical status; nothing stores it. */
 export type SessionStanding = 'active' | 'closed';
+
+/**
+ * The privacy classification of a war-room session's own material (its title
+ * and purpose text). It is the EXISTING privacy vocabulary — literally
+ * `MEMORY_PRIVACY_LEVELS`, the same two levels truth and memory use — not a
+ * second privacy system and not a second authority store: the classification
+ * is metadata on the session row, and each reading layer enforces its own
+ * disclosure exactly as `hq_memory` / `hq_truth_records` do.
+ *
+ * Why it exists (Phase 9 correction, Low L5): `collaborationSummary` feeds the
+ * UNAUTHENTICATED `hq-snapshot.json` artifact, and a session's free-text
+ * purpose rode it verbatim. There is no `public` level in this vocabulary, so
+ * nothing is ever classified FOR verbatim publication on that artifact: the
+ * snapshot withholds every purpose text, and a `founder_only` session's
+ * material is not carried at all. `internal` is the conservative default —
+ * a session opened without naming a classification is internal, never public.
+ */
+export const COLLABORATION_PRIVACIES = MEMORY_PRIVACY_LEVELS;
+export type CollaborationPrivacy = MemoryPrivacy;
+
+export function isCollaborationPrivacy(value: unknown): value is CollaborationPrivacy {
+  return isMemoryPrivacy(value);
+}
+
+/** What a session opened without an explicit classification is: internal, never public. */
+export const DEFAULT_COLLABORATION_PRIVACY: CollaborationPrivacy = 'internal';
 
 /**
  * The categorical agreement picture of one contribution, derived from the
@@ -209,15 +236,32 @@ export const COLLABORATION_SNAPSHOT_LIMIT = 20;
 
 // ---- idempotency ----
 
-/** Derived dedupe key for a session. The caller's `idempotencyKey` is an INPUT to the digest (the mission rule). */
+/**
+ * Derived dedupe key for a session. The caller's `idempotencyKey` is an INPUT
+ * to the digest (the mission rule).
+ *
+ * `privacy` participates ONLY when it is not the default, deliberately: two
+ * opens that differ only in classification must not dedupe onto each other
+ * (the second one's classification would be silently discarded), while an
+ * `internal` open still digests byte-identically to the pre-classification
+ * derivation — so a session recorded before this correction still deduplicates
+ * a repeat afterwards instead of silently opening a second room.
+ */
 export function collaborationSessionIdempotencyKey(input: {
   requestedBy: string;
   missionId: string;
   title: string;
   purpose: string | null;
+  privacy?: CollaborationPrivacy;
   idempotencyKey: string | null;
 }): string {
-  const digest = createHash('sha256').update(canonicalJson(input)).digest('hex');
+  // `canonicalJson` drops `undefined` entries, so the default classification
+  // contributes nothing to the digest.
+  const digested = {
+    ...input,
+    privacy: input.privacy === DEFAULT_COLLABORATION_PRIVACY ? undefined : input.privacy,
+  };
+  const digest = createHash('sha256').update(canonicalJson(digested)).digest('hex');
   return `collab-session:${digest.slice(0, 32)}`;
 }
 
@@ -264,6 +308,9 @@ CREATE TABLE IF NOT EXISTS hq_collab_sessions (
   mission_id TEXT NOT NULL,
   title TEXT NOT NULL,
   purpose TEXT,
+  -- The session's own privacy classification (the memory/truth vocabulary).
+  -- Conservative default so a pre-classification row reads as internal.
+  privacy TEXT NOT NULL DEFAULT 'internal',
   opened_by TEXT NOT NULL,
   opened_at TEXT NOT NULL,
   idempotency_key TEXT NOT NULL UNIQUE
@@ -375,10 +422,23 @@ WHEN EXISTS (SELECT 1 FROM hq_collab_relations WHERE id = NEW.id)
 BEGIN SELECT RAISE(ABORT, 'hq_collab_relations is append-only'); END;
 `;
 
-/** Idempotent; readonly-safe (the post-Phase-3 ensure*Schema pattern). */
+/**
+ * Idempotent; readonly-safe (the post-Phase-3 ensure*Schema pattern).
+ *
+ * The `privacy` column is additive for a file whose `hq_collab_sessions` was
+ * created before the classification existed (`CREATE TABLE IF NOT EXISTS`
+ * never revisits an existing table). `ADD COLUMN ... DEFAULT 'internal'`
+ * writes no row and fires no trigger, so the append-only guarantee is
+ * untouched and every pre-existing session reads as `internal` — the
+ * conservative classification, never `public`.
+ */
 export function ensureCollaborationSchema(db: HqDatabase): void {
   if (db.readonly) return;
   db.exec(COLLABORATION_DDL);
+  const columns = db.prepare(`PRAGMA table_info(hq_collab_sessions)`).all() as { name: string }[];
+  if (!columns.some((column) => column.name === 'privacy')) {
+    db.exec(`ALTER TABLE hq_collab_sessions ADD COLUMN privacy TEXT NOT NULL DEFAULT 'internal'`);
+  }
 }
 
 /** True when the collaboration tables exist in this file — observation, never migration. */
@@ -398,6 +458,8 @@ export interface CollaborationSessionRow {
   missionId: string;
   title: string;
   purpose: string | null;
+  /** Stored classification of this session's own material. Metadata; each reader enforces its own disclosure. */
+  privacy: CollaborationPrivacy;
   openedBy: string;
   openedAt: string;
 }
@@ -451,6 +513,16 @@ function rowToSession(r: Record<string, unknown>): CollaborationSessionRow {
     missionId: r.mission_id as string,
     title: r.title as string,
     purpose: (r.purpose as string | null) ?? null,
+    // Absent column = a read-only file created before the classification
+    // existed; it reads as exactly what `ADD COLUMN ... DEFAULT` would have
+    // written. A PRESENT but unrecognised value is corruption and reads as the
+    // MORE private level — a broken classification never opens a session up.
+    privacy:
+      r.privacy === undefined || r.privacy === null
+        ? DEFAULT_COLLABORATION_PRIVACY
+        : isCollaborationPrivacy(r.privacy)
+          ? r.privacy
+          : 'founder_only',
     openedBy: r.opened_by as string,
     openedAt: r.opened_at as string,
   };
@@ -791,7 +863,14 @@ export interface CollaborationSessionView {
   /** DERIVED from `missionStatus`. */
   standing: SessionStanding;
   title: string;
+  /**
+   * The session's free-text purpose — or `null` where the reading layer
+   * withheld it (the unauthenticated snapshot artifact always does; see
+   * `snapshotSessionView`). Never a rewritten or invented string.
+   */
   purpose: string | null;
+  /** This session's own privacy classification. Metadata; the reader enforces. */
+  privacy: CollaborationPrivacy;
   openedBy: string;
   openedAt: string;
   participants: ParticipantView[];
@@ -828,6 +907,7 @@ export function deriveSessionView(
     standing: sessionStandingFor(missionStatus),
     title: row.title,
     purpose: row.purpose,
+    privacy: row.privacy,
     openedBy: row.openedBy,
     openedAt: row.openedAt,
     participants: participants.map(participantView),
@@ -868,13 +948,42 @@ export const CONTEXT_SECTIONS_BY_ROLE: Readonly<Record<CollaborationRole, readon
  * activity is invented: a session with no contribution counts zero.
  */
 export interface CollaborationSnapshotView {
+  /** Every session, `founder_only`-classified ones INCLUDED — the true count, never a shortened one. */
   sessions: number;
+  /**
+   * `founder_only`-classified sessions counted in `sessions` but not carried
+   * and not aggregated over. Every other number below spans the set this
+   * reader may see, so arithmetic on the artifact discloses no categorical
+   * fact about a withheld session (the `truthSummary` rule).
+   */
+  withheldFounderOnly: number;
+  /**
+   * Carried sessions whose free-text `purpose` was withheld. The privacy
+   * vocabulary has no `public` level, so nothing is classified FOR verbatim
+   * publication on an unauthenticated artifact and this equals the number of
+   * carried sessions that HAVE a purpose. Stated rather than silently nulled.
+   */
+  withheldPurposes: number;
   activeSessions: number;
-  /** Distinct admitted worker ids across every session. */
+  /** Distinct admitted worker ids across the sessions this reader may see. */
   workersAdmitted: number;
   contributions: number;
   /** Explicit `disagrees_with` stances — every one is open until the reader resolves it by an act elsewhere. */
   disagreements: number;
   handoffRequests: number;
   recent: CollaborationSessionView[];
+}
+
+/**
+ * One session as an UNAUTHENTICATED artifact may carry it: the free-text
+ * purpose is dropped, because the privacy vocabulary has no level that
+ * classifies text for publication to an unauthenticated reader. Counts,
+ * categorical fields, worker ids and bindings are unchanged — the session is
+ * still visibly there, it just does not narrate itself.
+ *
+ * Callers hand this only sessions they have already decided the reader may
+ * see; it withholds text, it does not decide who reads.
+ */
+export function snapshotSessionView(view: CollaborationSessionView): CollaborationSessionView {
+  return view.purpose === null ? view : { ...view, purpose: null };
 }

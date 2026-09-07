@@ -172,6 +172,7 @@ import {
   COLLABORATION_COMMAND_CAPABILITY,
   COLLABORATION_ROLES,
   collaborationCommandCapabilityState,
+  isCollaborationPrivacy,
   isCollaborationRole,
 } from '../application/collaboration-command.js';
 import { MEMORY_KINDS, isMemoryKind, isMemoryPrivacy } from '../memory/schema.js';
@@ -2080,6 +2081,13 @@ function openCollaborationRoute(
 ): ControlResponse {
   const title = stringField(request.body, 'title') ?? '';
   const purpose = stringField(request.body, 'purpose');
+  // The session's own classification — the SAME body key and vocabulary the
+  // memory and truth routes already use, not a second privacy system.
+  const privacy = stringField(request.body, 'privacy');
+  if (privacy !== undefined && !isCollaborationPrivacy(privacy)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'privacy must be internal or founder_only.');
+  }
   try {
     assertBrowserSafe({ title, purpose: purpose ?? null }, 'collaboration');
   } catch {
@@ -2090,6 +2098,7 @@ function openCollaborationRoute(
     missionId: stringField(request.body, 'missionId') ?? '',
     title,
     purpose,
+    privacy,
     // The server-resolved principal, never a body field.
     requestedBy: founder.principal.id,
     idempotencyKey: stringField(request.body, 'idempotencyKey'),

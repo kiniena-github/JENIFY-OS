@@ -624,11 +624,13 @@ import {
   COLLABORATION_COMMAND_CAPABILITY,
   COLLABORATION_CONTEXT_LIMIT,
   COLLABORATION_CONTRIBUTE_CAPABILITY,
+  COLLABORATION_PRIVACIES,
   COLLABORATION_READ_LIMIT,
   COLLABORATION_ROLES,
   COLLABORATION_SNAPSHOT_LIMIT,
   CONTEXT_SECTIONS_BY_ROLE,
   CONTRIBUTION_KINDS,
+  DEFAULT_COLLABORATION_PRIVACY,
   MAX_COLLABORATION_PURPOSE_LENGTH,
   MAX_COLLABORATION_REF_LENGTH,
   MAX_COLLABORATION_TITLE_LENGTH,
@@ -648,6 +650,7 @@ import {
   deriveHandoffRequests,
   deriveSessionView,
   ensureCollaborationSchema,
+  isCollaborationPrivacy,
   isCollaborationRole,
   isContributionKind,
   loadCollaborationSession,
@@ -658,7 +661,9 @@ import {
   loadSessionRelations,
   participantView,
   sessionStandingFor,
+  snapshotSessionView,
   type BindingSource,
+  type CollaborationPrivacy,
   type CollaborationRole,
   type CollaborationSessionRow,
   type CollaborationSessionView,
@@ -907,9 +912,41 @@ export interface CollaborationContextBundle {
     total: number;
   } | null;
   memory: { groups: MemoryContextGroup[] } | null;
-  withheld: { founderOnlyMemory: number; founderOnlyTruth: number; otherSessionContributions: number };
+  withheld: ContextWithheld;
   provenance: Provenance;
 }
+
+/**
+ * What the bundle did NOT carry — reported at the audience's resolution.
+ *
+ * A `founder_only` CARDINALITY is itself a disclosure about private material:
+ * "3 private truth records exist about your mission" is a fact a worker was
+ * never meant to learn, and repeated probes across task scopes would localise
+ * them. So a worker is told categorically THAT something was withheld and
+ * nothing more (Founder decision, Phase 9 correction Low L3); the
+ * Founder-gated audit path keeps the exact counts, because auditing what a
+ * role would receive is exactly the case for knowing the numbers.
+ *
+ * `otherSessionContributions` stays a count for both audiences deliberately:
+ * it is not founder_only material, it is same-mission collaboration the
+ * worker's own room simply does not include, and the phase advertises it as a
+ * stated bound rather than a silent drop.
+ */
+export type ContextWithheld =
+  | {
+      audience: 'worker';
+      /** Whether ANY founder_only memory was withheld. Never how much. */
+      founderOnlyMemory: boolean;
+      /** Whether ANY founder_only truth was withheld. Never how much. */
+      founderOnlyTruth: boolean;
+      otherSessionContributions: number;
+    }
+  | {
+      audience: 'founder_audit';
+      founderOnlyMemory: number;
+      founderOnlyTruth: number;
+      otherSessionContributions: number;
+    };
 
 export interface OrchestrationReport {
   missionId: string;
@@ -8107,6 +8144,13 @@ export class HeadquarterOperations {
     missionId: string;
     title: string;
     purpose?: string;
+    /**
+     * How this session's own material is classified — the memory/truth
+     * vocabulary, not a second privacy system. Defaults to `internal`; a
+     * `founder_only` session is not carried by the unauthenticated snapshot
+     * artifact at all.
+     */
+    privacy?: CollaborationPrivacy;
     /** Resolved actor id. Set by the boundary, never read from a body. */
     requestedBy: string;
     idempotencyKey?: string;
@@ -8118,6 +8162,10 @@ export class HeadquarterOperations {
     if (!title.ok) return fail('invalid_input', title.message);
     const purpose = missionText('purpose', input.purpose, MAX_COLLABORATION_PURPOSE_LENGTH, false);
     if (!purpose.ok) return fail('invalid_input', purpose.message);
+    if (input.privacy !== undefined && !isCollaborationPrivacy(input.privacy)) {
+      return fail('invalid_input', `privacy must be one of: ${COLLABORATION_PRIVACIES.join(', ')}`);
+    }
+    const privacy: CollaborationPrivacy = input.privacy ?? DEFAULT_COLLABORATION_PRIVACY;
 
     const refusedActor = this.#resolveCollaborationCommander(input.requestedBy, 'open a collaboration session');
     if (refusedActor) return refusedActor;
@@ -8136,6 +8184,7 @@ export class HeadquarterOperations {
       missionId,
       title: title.value!,
       purpose: purpose.value,
+      privacy,
       idempotencyKey: input.idempotencyKey ?? null,
     });
 
@@ -8171,10 +8220,10 @@ export class HeadquarterOperations {
       const at = nowIso();
       this.#db
         .prepare(
-          `INSERT INTO hq_collab_sessions (id, mission_id, title, purpose, opened_by, opened_at, idempotency_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO hq_collab_sessions (id, mission_id, title, purpose, privacy, opened_by, opened_at, idempotency_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(id, missionId, title.value, purpose.value, input.requestedBy, at, idempotencyKey);
+        .run(id, missionId, title.value, purpose.value, privacy, input.requestedBy, at, idempotencyKey);
       createdId = id;
       this.#store.appendEvent({
         subjectKind: 'system',
@@ -8182,12 +8231,12 @@ export class HeadquarterOperations {
         status: null,
         actor: input.requestedBy,
         summary: `Collaboration session opened on mission ${missionId}: ${title.value}`,
-        detail: { sessionId: id, missionId },
+        detail: { sessionId: id, missionId, privacy },
       });
       privileged.appendEvidence({
         actor: input.requestedBy,
         kind: 'collaboration_session_opened',
-        payload: { sessionId: id, missionId, missionIntentSeq: mission.intentSeq, executable: false },
+        payload: { sessionId: id, missionId, missionIntentSeq: mission.intentSeq, privacy, executable: false },
       });
     });
     if (refusal) return { ok: false, error: refusal };
@@ -8254,6 +8303,17 @@ export class HeadquarterOperations {
         .get(sessionId, workerId, input.role) as { id: string } | undefined;
       if (existing) {
         dedupedTo = existing.id;
+        return;
+      }
+      // Re-derived INSIDE the write lock, against the Wave-2 correction
+      // `0b6c108` precedent ("revalidate all authority gates inside the write
+      // lock"). The pre-lock check above stays where it is so the refusal
+      // ORDER is unchanged (an unknown worker is still nobody before any
+      // session is probed); this is the second reading, the one the INSERT
+      // actually depends on.
+      const refusedInLock = this.#rejectNotACollaboratingWorker(workerId, 'be admitted to a collaboration session');
+      if (refusedInLock && !refusedInLock.ok) {
+        refusal = refusedInLock.error;
         return;
       }
       const binding = this.#workerBindingFromStore(workerId);
@@ -8529,6 +8589,17 @@ export class HeadquarterOperations {
         };
         return;
       }
+      if (handoff) {
+        // Re-derived INSIDE the write lock (Wave-2 correction `0b6c108`: every
+        // authority gate is revalidated where the write happens). The pre-lock
+        // check above is kept so the refusal order is unchanged; this is the
+        // reading the INSERT depends on.
+        const refusedTargetInLock = this.#rejectNotACollaboratingWorker(handoff.toWorkerId, 'receive a handoff');
+        if (refusedTargetInLock && !refusedTargetInLock.ok) {
+          refusal = refusedTargetInLock.error;
+          return;
+        }
+      }
       const missingEvidence = this.#missingEvidenceIds(evidenceRefs.value);
       if (missingEvidence.length > 0) {
         refusal = {
@@ -8755,6 +8826,17 @@ export class HeadquarterOperations {
     disagreements.sort((a, b) => b.at.localeCompare(a.at));
     handoffs.sort((a, b) => b.at.localeCompare(a.at));
 
+    // DECIDED, not overlooked (Phase 9 correction, H1's adjacent audit): this
+    // read stays on the public `listTruth` / `listTruthContradictions`
+    // projections. `getMissionRoom` has exactly ONE caller and it is
+    // Founder-gated (`missionRoomRoute`, behind `ResolvedFounder`), it carries
+    // founder_only truth by design exactly as `GET /truth` does, and nothing
+    // it returns crosses to another principal. A same-realm patch of those
+    // methods therefore misinforms the patcher's own display and changes no
+    // disclosure decision — the standard this module already records for
+    // `readMeta` and the kill-switch reads. The context bundle is the
+    // opposite case (it is assembled FOR another worker) and reads the
+    // private derivation; see `assembleCollaborationContext`.
     const truthAll = this.listTruth().filter(
       (view) =>
         (view.entityKind === 'mission' && view.entityId === id) ||
@@ -8856,6 +8938,32 @@ export class HeadquarterOperations {
    * each section only where `CONTEXT_SECTIONS_BY_ROLE` grants it, each list
    * bounded to `COLLABORATION_CONTEXT_LIMIT` with the true total stated, and
    * everything withheld counted rather than silently dropped.
+   *
+   * The gates a WORKER passes are the SAME ones `recordContribution` applies,
+   * re-derived here rather than assumed (Phase 9 correction, Medium M2 — the
+   * bundle previously survived every stop lever the write paths honour):
+   *
+   * - identity and grant through `#resolveContributor` (registered, assignable,
+   *   `hq.collaboration_contribute` in the directory grant read by `#grantOf`);
+   * - the capability trio through `#collaborationContributeCapabilityGate`,
+   *   which reads the DATABASE row — a disabled or drifted capability closes
+   *   the read exactly as it closes the write;
+   * - membership in THIS session, from the canonical participant rows;
+   * - the session's DERIVED standing, from `hq_missions.status` through `#db`:
+   *   a cancelled/complete/failed mission closes the room, and a worker gets
+   *   `session_closed` from the read just as it does from the write.
+   *
+   * The Founder-gated audit path is deliberately different on the last point:
+   * a human holding `hq.collaboration_command` may still read a CLOSED
+   * session's bundle, because auditing what a role received is precisely what
+   * is needed after a mission is cancelled. It is a read that grants nothing
+   * and hands nothing to a worker. Pinned by test.
+   *
+   * No-oracle rule (Low L4): for a WORKER, "this session does not exist" and
+   * "you are not in this session" are the SAME refusal, byte for byte — the
+   * discipline this module already applies to founder_only truth refs. A
+   * worker already inside a session may be told it holds a different role
+   * there; that discloses nothing it did not know.
    */
   assembleCollaborationContext(input: {
     sessionId: string;
@@ -8876,26 +8984,53 @@ export class HeadquarterOperations {
     }
     const isWorker = this.#isRegisteredWorker(input.requestedBy);
     if (isWorker) {
-      const assignability = this.#workers.assignability(input.requestedBy);
-      if (!assignability.assignable) return this.#rejectNotAssignable(input.requestedBy, assignability, 'assemble a context bundle');
+      // Identity + assignability + the directory grant, then the capability
+      // trio from the DATABASE row — the same two gates, in the same order,
+      // that `recordContribution` applies before it takes the write lock.
+      const refusedActor = this.#resolveContributor(input.requestedBy, 'assemble a context bundle');
+      if (refusedActor) return refusedActor;
+      const refusedCapability = this.#collaborationContributeCapabilityGate('assemble a context bundle');
+      if (refusedCapability) return refusedCapability;
     } else {
       const refused = this.#resolveCollaborationCommander(input.requestedBy, 'assemble a context bundle');
       if (refused) return refused;
+      const refusedCapability = this.#collaborationCommandCapabilityGate('assemble a context bundle');
+      if (refusedCapability) return refusedCapability;
     }
     if (!this.#collaborationStorePresent) {
       return fail('invalid_input', 'collaboration store unavailable on this database handle');
     }
+    // ONE refusal for "no such session" and, for a worker, for "a session you
+    // are not in" — identical code, message and details, so a worker cannot
+    // use this read to enumerate which sessions exist (Low L4).
+    const unknownSession = (): OpsResult<never> =>
+      fail('unknown_session', `Unknown collaboration session: ${sessionId}`);
     const session = loadCollaborationSession(this.#db, sessionId);
-    if (!session) return fail('unknown_session', `Unknown collaboration session: ${sessionId}`);
+    if (!session) return unknownSession();
     if (isWorker) {
-      const held = this.#db
-        .prepare(`SELECT 1 FROM hq_collab_participants WHERE session_id = ? AND worker_id = ? AND role = ?`)
-        .get(sessionId, input.requestedBy, input.role);
-      if (!held) {
+      // The roles this worker actually holds HERE, from the canonical rows.
+      const held = (
+        this.#db
+          .prepare(`SELECT role FROM hq_collab_participants WHERE session_id = ? AND worker_id = ? ORDER BY seq`)
+          .all(sessionId, input.requestedBy) as { role: CollaborationRole }[]
+      ).map((r) => r.role);
+      if (held.length === 0) return unknownSession();
+      if (!held.includes(input.role)) {
         return fail(
           'not_permitted',
-          `${input.requestedBy} was not admitted to session ${sessionId} as ${input.role}; a worker receives only the bundle of a role it holds`,
-          { workerId: input.requestedBy, role: input.role },
+          `${input.requestedBy} holds role(s) ${held.join(', ')} in session ${sessionId}, not ${input.role}; a worker receives only the bundle of a role it holds`,
+          { workerId: input.requestedBy, held, requested: input.role },
+        );
+      }
+      // The session's standing, DERIVED from the mission's canonical status
+      // read through `#db` — never `getMission`, never a public projection.
+      // A stop lever that closes the room for the write closes it for the read.
+      const missionStatus = this.#missionStatusFromStore(session.missionId);
+      if (sessionStandingFor(missionStatus?.status ?? null) === 'closed') {
+        return fail(
+          'session_closed',
+          `Collaboration session ${sessionId} is closed: mission ${session.missionId} is ${missionStatus?.status ?? 'gone'}; a worker receives no bundle from a closed room`,
+          { missionStatus: missionStatus?.status ?? null },
         );
       }
     }
@@ -8940,7 +9075,20 @@ export class HeadquarterOperations {
     let founderOnlyTruth = 0;
     if (has('truth')) {
       const scopeTasks = taskId ? [taskId] : linkedTaskIds;
-      const about = this.listTruth().filter(
+      // The PRIVATE derivation over the canonical graph — never `listTruth()`.
+      //
+      // `listTruth` is a public, patchable prototype method, and this bundle
+      // crosses principals: it is assembled for ANOTHER worker. A same-realm
+      // patch that wrapped the original and relabelled `privacy` on the real
+      // rows both pushed a genuine founder_only record into a worker's bundle
+      // and drove `withheld.founderOnlyTruth` to 0, so the bundle's own
+      // honesty field concealed the disclosure (Phase 9 correction, High H1).
+      // The same private derivation `#contributionContext` already uses is the
+      // enforcement-safe read; the privacy filter runs on the derived row.
+      const derived = this.#truthStorePresent
+        ? [...this.#deriveAllTruth(loadTruthGraph(this.#db)).values()].sort((a, b) => b.seq - a.seq)
+        : [];
+      const about = derived.filter(
         (view) =>
           (view.entityKind === 'mission' && view.entityId === mission.id) ||
           (view.entityKind === 'task' && scopeTasks.includes(view.entityId)),
@@ -9033,22 +9181,48 @@ export class HeadquarterOperations {
       contributions,
       truth,
       memory,
-      withheld: { founderOnlyMemory, founderOnlyTruth, otherSessionContributions },
+      withheld: isWorker
+        ? {
+            audience: 'worker',
+            founderOnlyMemory: founderOnlyMemory > 0,
+            founderOnlyTruth: founderOnlyTruth > 0,
+            otherSessionContributions,
+          }
+        : { audience: 'founder_audit', founderOnlyMemory, founderOnlyTruth, otherSessionContributions },
       provenance: {
         mode: 'live',
         source:
           `bounded role-scoped assembly for ${input.role} over hq_missions, hq_collab_* (this session only), ` +
-          'hq_truth_records (internal only), hq_memory (entity-linked, internal only) via HeadquarterOperations.assembleCollaborationContext; ' +
-          'raw intent bodies, task payloads and founder_only records never travel',
+          'hq_truth_records (internal only, through the private truth derivation over the canonical graph — never the ' +
+          'public listTruth projection), hq_memory (entity-linked, internal only) via ' +
+          'HeadquarterOperations.assembleCollaborationContext; raw intent bodies, task payloads and founder_only records never travel',
         asOf: at,
       },
     });
   }
 
-  /** The bounded snapshot view: counts HQ made over every session, plus the newest sessions. */
-  collaborationSummary(options: { limit?: number } = {}): CollaborationSnapshotView {
+  /**
+   * The bounded snapshot view: counts HQ made over the sessions this reader
+   * may see, plus the newest of them.
+   *
+   * The reading layer's privacy decision is the caller's
+   * (`includeFounderOnly`, exactly as `truthSummary`) and it DEFAULTS to the
+   * less-disclosing answer: a caller that says nothing gets no `founder_only`
+   * session material. Withheld sessions stay in `sessions` and are counted in
+   * `withheldFounderOnly`; nothing else aggregates over them, so arithmetic on
+   * the artifact discloses no categorical fact about a private session.
+   *
+   * A carried session's free-text `purpose` is withheld unless the caller is
+   * past a gate (`includeFounderOnly: true`): the privacy vocabulary has no
+   * level that classifies text for an unauthenticated reader, so the
+   * unauthenticated artifact never publishes one verbatim. The number
+   * withheld is stated in `withheldPurposes` rather than silently nulled.
+   */
+  collaborationSummary(options: { includeFounderOnly?: boolean; limit?: number } = {}): CollaborationSnapshotView {
     const limit = options.limit ?? COLLABORATION_SNAPSHOT_LIMIT;
-    const sessions = this.listCollaborationSessions();
+    const includeFounderOnly = options.includeFounderOnly === true;
+    const all = this.listCollaborationSessions();
+    const sessions = includeFounderOnly ? all : all.filter((session) => session.privacy !== 'founder_only');
     const workers = new Set<string>();
     let contributions = 0;
     let disagreements = 0;
@@ -9059,14 +9233,17 @@ export class HeadquarterOperations {
       disagreements += session.disagreementCount;
       handoffRequests += session.handoffRequestCount;
     }
+    const page = sessions.slice(0, limit);
     return {
-      sessions: sessions.length,
+      sessions: all.length,
+      withheldFounderOnly: all.length - sessions.length,
+      withheldPurposes: includeFounderOnly ? 0 : page.filter((session) => session.purpose !== null).length,
       activeSessions: sessions.filter((session) => session.standing === 'active').length,
       workersAdmitted: workers.size,
       contributions,
       disagreements,
       handoffRequests,
-      recent: sessions.slice(0, limit),
+      recent: includeFounderOnly ? page : page.map(snapshotSessionView),
     };
   }
 

@@ -5,6 +5,19 @@ Phase 9 + 10 wave on branch `cloud/phase-9-10-collaboration-chief-of-staff`. One
 for the phase, in the Phase 5+6 / Phase 7 / Phase 8 style. Phase 10 is a separate build on
 the same branch and is NOT described here.
 
+**Corrected after the hostile review of `1b73316`.** A second Opus review disproved two
+claims this document made, and the Founder decided two adjacent Lows. The corrections are
+described where they belong below and summarised here so nothing is buried:
+
+| Finding | What was wrong | What the correction does |
+|---|---|---|
+| **H1 (High)** | The context bundle's truth section filtered privacy over the PUBLIC `listTruth()` projection. A same-realm patch that wrapped the original and relabelled `privacy` on the REAL rows pushed a genuine `founder_only` record into another worker's bundle AND drove `withheld.founderOnlyTruth` to 0, so the bundle's own honesty field concealed the disclosure. This document's claim that a forged read "cannot reveal a real founder_only one" was FALSE. | The bundle derives truth from the private `#deriveAllTruth(loadTruthGraph(#db))` — the enforcement-safe derivation `#contributionContext` already used — and filters privacy on the derived row. Pinned by a hostile-patch regression on the instance AND the prototype. |
+| **M2 (Medium)** | `assembleCollaborationContext` had no capability gate and no standing check. A cancelled mission, both capability rows disabled, and a revoked `hq.collaboration_contribute` grant each closed the WRITE paths and left the bundle read fully open. | The worker read now carries the same gates as `recordContribution` (identity + assignability + directory grant + the capability trio read from the DATABASE row) plus the session's derived standing from `hq_missions.status` through `#db`. Fails closed. The Founder-gated audit path may still read a CLOSED session — stated below and pinned. |
+| **L3 (Founder-decided)** | A worker's bundle disclosed `founder_only` CARDINALITIES. | A worker gets a categorical `withheld` (`audience: 'worker'`, booleans); the Founder audit keeps exact counts (`audience: 'founder_audit'`). |
+| **L4** | Session-existence oracle: a real session a worker was not admitted to returned `not_permitted`, a fake id `unknown_session`. | For a worker both are ONE byte-identical `unknown_session`. The Founder-gated path keeps the distinguishing answers. |
+| **L5 (Founder-decided)** | A session's free-text `purpose` rode the UNAUTHENTICATED snapshot artifact verbatim, and no classification existed. | Sessions carry the existing `internal | founder_only` privacy vocabulary (no second system, no second store). The unauthenticated artifact carries no `founder_only` session and no purpose text at all; both omissions are counted and stated. |
+| **L6** | Two authority reads sat outside the reserve lock, against Wave-2 correction `0b6c108`. | Both are now REVALIDATED inside the lock; the pre-lock checks stay so refusal order is unchanged. No exploit existed (`reserve()` is synchronous) — this is consistency, not a fix. |
+
 ## What Phase 9 is
 
 Several real AI workers can now collaborate on ONE canonical mission — as a durable,
@@ -21,8 +34,8 @@ authority decision and every write (`openCollaborationSession`, `admitCollaborat
 ### The model
 
 - **A session references ONE canonical mission and has no lifecycle of its own.**
-  `hq_collab_sessions` carries `mission_id`, a title, an optional purpose, who opened it
-  and when — and NO status column (pinned). Its `standing` (`active | closed`) is DERIVED
+  `hq_collab_sessions` carries `mission_id`, a title, an optional purpose, a privacy
+  classification (below), who opened it and when — and NO status column (pinned). Its `standing` (`active | closed`) is DERIVED
   on every read from the mission's canonical `hq_missions.status`: a terminal mission
   (`complete | failed | cancelled`) closes every session on it, admits nobody and records
   nothing further; a finished mission opens no new session (`mission_terminal`).
@@ -88,17 +101,43 @@ authority decision and every write (`openCollaborationSession`, `admitCollaborat
   amendment rationale, never `intentHistory`), the ONE task's minimal ref when named (never
   the payload), THIS session's participants and contributions (never another session's —
   counted in `withheld.otherSessionContributions`), internal truth about the mission and
-  its tasks (founder_only counted in `withheld.founderOnlyTruth`, never carried), and
-  entity-linked internal memory through the Phase 5 assembler (founder_only counted in
-  `withheld.founderOnlyMemory`, never carried; unrelated company memory never enters). Each
+  its tasks (**derived through the PRIVATE truth derivation over the canonical graph, never
+  the public `listTruth` projection** — H1), and entity-linked internal memory through the
+  Phase 5 assembler (unrelated company memory never enters). Each
   section is assembled only where `CONTEXT_SECTIONS_BY_ROLE` grants it — a stated,
   categorical policy table (builders: task + memory, no truth graph; reviewers/verifiers/
   critics: truth, no memory; planners/researchers: both) — and a section outside the policy
   is `null`, never an empty list pretending to be a read. Every list is bounded to
-  `COLLABORATION_CONTEXT_LIMIT` (20) with the true total stated. A worker receives only the
-  bundle of a role it holds in that session; a human needs the collaboration command grant
-  (the Founder audits any role); `system` and unknown ids are refused before any session is
-  probed.
+  `COLLABORATION_CONTEXT_LIMIT` (20) with the true total stated.
+- **The bundle read is gated exactly like the sibling WRITE paths** (M2). A WORKER passes:
+  identity + assignability + the `hq.collaboration_contribute` directory grant
+  (`#resolveContributor`, the enforcement closures); the capability trio through
+  `#collaborationContributeCapabilityGate`, which reads the DATABASE row, so a disabled or
+  drifted capability closes the read exactly as it closes the write; membership in THIS
+  session from the canonical participant rows; and the session's DERIVED standing from
+  `hq_missions.status` read through `#db` — a cancelled, complete or failed mission answers
+  `session_closed` to the read just as it does to the write. A human passes
+  `hq.collaboration_command` (grant AND intact capability row). `system` and unknown ids
+  are refused before any session is probed.
+  **Decided, and pinned:** a Founder-gated audit MAY still read a CLOSED session's bundle —
+  auditing what a role received is precisely what is wanted after a mission is cancelled,
+  and the audit read grants nothing and hands nothing to a worker. An admitted WORKER may
+  not.
+- **What was withheld is reported at the audience's resolution** (L3, Founder decision). A
+  `founder_only` cardinality is itself a disclosure about private material, so a worker's
+  bundle carries `withheld: { audience: 'worker', founderOnlyMemory: boolean,
+  founderOnlyTruth: boolean, otherSessionContributions: number }` — categorically THAT
+  something was withheld, never how much. The Founder-gated audit path carries
+  `{ audience: 'founder_audit', founderOnlyMemory: number, founderOnlyTruth: number, … }`
+  with the exact counts. `otherSessionContributions` stays a count for both audiences
+  deliberately: it is not founder_only material, and the phase advertises the session bound
+  as a stated bound rather than a silent drop.
+- **The bundle is not a session-existence oracle** (L4). For a WORKER, "no such session"
+  and "a session you were not admitted to" are ONE refusal — same code, same message, same
+  (absent) details — the discipline this module already applies to `founder_only` truth
+  refs. A worker already inside a room may still be told it holds a different role there;
+  that discloses nothing it did not know. The Founder-gated commander path keeps the
+  distinguishing answers.
 
 ### The state machine, as enforced
 
@@ -124,7 +163,9 @@ authority decision and every write (`openCollaborationSession`, `admitCollaborat
                                                                                          │
    mission reaches complete | failed | cancelled ────────────────────────────────────────┘
    ⇒ every session closed: admit → session_closed, contribute → session_closed,
-     open → mission_terminal. Nothing is ever updated or deleted.
+     assembleCollaborationContext FOR A WORKER → session_closed (M2), open →
+     mission_terminal. The Founder-gated audit read of a closed session stays open,
+     deliberately. Nothing is ever updated or deleted.
 ```
 
 ## Authority rules (the enforcement-safe path)
@@ -155,10 +196,19 @@ authority decision and every write (`openCollaborationSession`, `admitCollaborat
   (session still closed, ghost still nobody), `listAiMembers` /
   `workerProviderDeclarations` / `workers.allowedCapabilities` (binding still canonical,
   the ungranted still refused).
+- The bundle READ resolves through the same two gates as the write it mirrors —
+  `#resolveContributor` + `#collaborationContributeCapabilityGate` for a worker,
+  `#resolveCollaborationCommander` + `#collaborationCommandCapabilityGate` for the Founder
+  audit — and then re-derives the session's standing from `hq_missions.status` through
+  `#db` (M2). Before the correction it did none of these, and survived every stop lever.
 - Every write is ONE IMMEDIATE reserve transaction: dedupe read → existence and standing
   checks → membership → binding → references → insert(s) + stated stances + `hq_events`
   audit + `op_evidence` entry, atomically. Refusals write nothing (row counts pinned
-  throughout).
+  throughout). The two worker-validity gates that sat only OUTSIDE the lock
+  (`admitCollaborator`'s admitted worker, `recordContribution`'s handoff target) are now
+  REVALIDATED inside it, matching Wave-2 correction `0b6c108` (L6). The pre-lock checks are
+  kept, so refusal ORDER is unchanged; no exploit existed, because `reserve()` is
+  synchronous — this is consistency, and it is recorded as such rather than sold as a fix.
 - Derived idempotency keys (`collab-session:`, `collab-contribution:`) over canonical JSON of
   the normalized input + actor; the client key is an input, never the key. Admission
   dedupes on the engine-unique (session, worker, role) triple.
@@ -186,7 +236,15 @@ authority decision and every write (`openCollaborationSession`, `admitCollaborat
 
 Migration safety: all four tables are `CREATE TABLE IF NOT EXISTS`, ensured by
 `ensureCollaborationSchema` from the constructor (readonly-safe, the post-Phase-3 pattern).
-No existing table or column changes; no `HQ_SNAPSHOT_VERSION` bump (the snapshot section is
+The one column this correction adds — `hq_collab_sessions.privacy` — follows the additive
+`ALTER TABLE … ADD COLUMN … DEFAULT` pattern already used by `hq_memory`, `hq_missions` and
+`hq_projects`: no row is written, no trigger fires, the append-only guarantee is untouched,
+and a file created before the correction reads `internal`. The session idempotency
+derivation digests `privacy` only when it is NOT the default, so a session recorded before
+the correction still deduplicates a repeat afterwards instead of silently opening a second
+room — while two opens that differ only in classification stay distinct, because deduping
+them would discard the second one's classification. No other existing table or column
+changes; no `HQ_SNAPSHOT_VERSION` bump (the snapshot section is
 optional and additive); a read-only pre-Phase-9 file reports
 `collaborationStorePresent() === false`, empty lists, zero summary, an absence-stating
 snapshot section, and is never migrated (pinned).
@@ -202,7 +260,9 @@ snapshot section, and is never migrated (pinned).
 | provider / model binding | admit, contribute | what is recorded; whether a declared binding is refused | `#workerBindingFromStore` → `op_worker_providers` + `hq_ai_members` rows via `#db`; the registry table is probed in `sqlite_master` at read time | canonical — never `listAiMembers` / `workerProviderDeclarations` / the registry object |
 | evidence / truth / plan-item existence | contribute, context | reference validity; founder_only withholding | `#missingEvidenceIds`, `hq_truth_records` row, `hq_mission_plan_items` row | canonical |
 | `this.readMeta(taskId)` | `#contributionContext.taskStateOf` (handoff canonical picture) and `#missionExecutionState` (pre-existing) | NOTHING — a display projection beside the request | public prototype method | deliberately left: a lie there misinforms the patcher's own display and changes no decision (`claimNext`/`assignTaskAsFounder` read the rows). Recorded here as a display read, not an enforcement read |
-| `this.listTruth()` / `this.listTruthContradictions()` | `getMissionRoom`, `assembleCollaborationContext` (truth section) | NOTHING — projections; the bundle's founder_only withholding filters on `view.privacy` from the derived rows | public prototype methods over `#deriveAllTruth` | deliberately left: display composition; a forged `listTruth` misinforms the patcher's own room. **Recorded Low debt:** the bundle's privacy filter runs over the public `listTruth` output; a same-realm patch of `listTruth` could ADD forged public-looking records to a worker bundle (never reveal a real founder_only one, since forged output cannot read the private row). Migrating the bundle's truth read to a private `#db` derivation is a one-line change and is recorded rather than done, because the bundle is a read that grants nothing |
+| `this.listTruth()` / `this.listTruthContradictions()` | `getMissionRoom` ONLY | NOTHING — display composition for the Founder | public prototype methods over `#deriveAllTruth` | deliberately left, and re-examined under H1: `getMissionRoom` has exactly ONE caller (`missionRoomRoute`, behind `ResolvedFounder`), it carries founder_only truth by design exactly as `GET /truth` does, and nothing it returns crosses to another principal. A forged read therefore misinforms the patcher's OWN display and moves no disclosure decision — the same standard recorded for `readMeta` and the kill-switch reads |
+| the truth records in a context bundle | `assembleCollaborationContext` (truth section) | WHICH truth records reach ANOTHER worker, and the `withheld` accounting beside them | `#deriveAllTruth(loadTruthGraph(#db))` — the private derivation, privacy filtered on the DERIVED row | **canonical (corrected under H1).** The previous entry read this through the public `listTruth` and claimed a forged read "cannot reveal a real founder_only one". That was wrong: wrapping the original and relabelling `privacy` on the rows it really returned both leaked a genuine founder_only record and zeroed `withheld.founderOnlyTruth`. The bundle crosses principals, so it is an enforcement read, not a display read |
+| worker standing / capability trio / session standing for the bundle READ | `assembleCollaborationContext` | whether a bundle is assembled at all | `#resolveContributor` (`#isRegisteredWorker`, `#workers.assignability`, `#grantOf`), `#collaborationContributeCapabilityGate` → `#capabilityFromStore` (the DATABASE row), `#missionStatusFromStore` → `#db` | **canonical (added under M2).** Pinned by a hostile-patch test: forged `workers.allowedCapabilities` and forged `queue.capabilities.get`/`.list` on the instance and the prototype open nothing |
 | `#missionExecutionState`'s three `queue.killSwitchEngaged` reads | `getMissionRoom` (via the Phase 6 read) | NOTHING — the room's picture | patchable delegate | unchanged, deliberately left (the Phase 8 audit's recorded projection) |
 
 ## Surfaces
@@ -218,7 +278,8 @@ GET  /api/hq/control/collaboration/room     ?missionId= — the Founder's Missio
 GET  /api/hq/control/collaboration/context  ?sessionId=&collaborationRole=&taskId= — the bundle that role
                                             would receive (a Founder audit read; founder_only never travels)
 POST /api/hq/control/collaboration          OPEN a session (201 / 200 deduplicated); requestedBy is the
-                                            mapped principal; browser-guard scan of title + purpose first
+                                            mapped principal; browser-guard scan of title + purpose first;
+                                            optional privacy=internal|founder_only (default internal)
 POST /api/hq/control/collaboration/admit    ADMIT a registered worker under collaborationRole (201 / 200)
 ```
 
@@ -239,12 +300,41 @@ unknown_contribution | unknown_mission`; 409 `session_closed | mission_terminal`
 grant AND the intact row, enforcement-safe read).
 
 Snapshot: an OPTIONAL `collaboration` section (`CollaborationSnapshotView`: `sessions`,
-`activeSessions`, `workersAdmitted` (distinct), `contributions`, `disagreements`,
-`handoffRequests`, and the newest `COLLABORATION_SNAPSHOT_LIMIT`=20 session views). Optional
+`withheldFounderOnly`, `withheldPurposes`, `activeSessions`, `workersAdmitted` (distinct),
+`contributions`, `disagreements`, `handoffRequests`, and the newest
+`COLLABORATION_SNAPSHOT_LIMIT`=20 session views). Optional
 by shape for the truth section's reason; no `HQ_SNAPSHOT_VERSION` bump; a read-only
 pre-Phase-9 file projects absence with provenance saying why. The section carries no
 founder_only material, no raw intent body and no task payload (pinned) — a session view is
 worker ids, roles, bindings, a title and counts.
+
+**War-room material is classified** (L5, Founder decision). `hq_collab_sessions` carries a
+`privacy` column using the EXISTING privacy vocabulary — literally `MEMORY_PRIVACY_LEVELS`,
+the two levels truth and memory use — not a second privacy system and not a second
+authority store. `openCollaborationSession({ …, privacy })` defaults to `internal`; the
+control route accepts the same `privacy` body key the memory and truth routes already use
+and 400s anything outside the vocabulary. `collaborationSummary({ includeFounderOnly })`
+makes the reading layer's decision exactly as `truthSummary` does, and defaults to the
+less-disclosing answer:
+
+- the UNAUTHENTICATED artifact (`hq:snapshot`, the static build) carries no
+  `founder_only`-classified session, counts the omission in `withheldFounderOnly`, and
+  aggregates nothing else over the withheld sessions — their admitted workers and
+  contributions are not in `workersAdmitted` / `contributions` / `activeSessions`, so
+  arithmetic on the artifact discloses no categorical fact about a private room;
+- no carried session publishes its free-text `purpose` verbatim on that artifact at all.
+  The vocabulary has NO `public` level, so nothing is ever classified FOR publication to an
+  unauthenticated reader; where the policy was ambiguous the less-disclosing answer was
+  taken. The purpose is nulled, never rewritten, and the number nulled is stated in
+  `withheldPurposes` and in the section provenance note rather than silently dropped;
+- the Founder-gated `/state` route — the same `includeFounderOnlyMemory` flag that carries
+  founder_only memory and truth — carries both the sessions and their purposes.
+
+A pre-classification file is upgraded additively (`ALTER TABLE … ADD COLUMN privacy TEXT
+NOT NULL DEFAULT 'internal'`, no row written, no trigger fired); a READ-ONLY pre-correction
+file reports `internal` for its sessions (exactly what the ALTER would have written) and
+still publishes no purpose. A present-but-unrecognised stored value reads as the MORE
+private level.
 
 Rooms (server-side `hydrate.ts`, present-only): the **Mission Room** gains five metrics —
 `Collaboration sessions`, `Workers admitted`, `Contributions`, `Open disagreements`,
@@ -301,10 +391,22 @@ context selection: the policy is a stated table.
 - **The context-bundle policy table is a judgement, stated as code.** Which sections each
   role receives is a reviewed edit, not configuration; the Founder may want a different
   split. Every section is bounded and privacy-filtered regardless of the split.
-- **The bundle's truth section reads the public `listTruth` projection** (audit table
-  above) — Low debt, recorded: a forged public read could add forged records to a worker
-  bundle; it cannot reveal a real founder_only record. The room read is Founder-gated and
-  carries founder_only truth by design, exactly as `GET /truth` does.
+- **The bundle's truth section reads the PRIVATE derivation** (corrected; see H1 in the
+  table at the top and in the patchable-read audit). The claim this bullet previously made
+  — that a forged public read "cannot reveal a real founder_only record" — was disproven by
+  the hostile review and is not true of a wrapping patch. The room read is Founder-gated
+  and carries founder_only truth by design, exactly as `GET /truth` does.
+- **A session's privacy classification is metadata, not an enforcement mechanism by
+  itself** — exactly what `memory/schema.ts` says of its own field. It is stored on the
+  row; the reading layer enforces. Today one reading layer acts on it: the snapshot
+  artifact. The Founder-gated room/list/context reads carry every session regardless of
+  classification, which is correct (they are behind the Founder gate) but means a
+  `founder_only` classification is currently an artifact-disclosure control and nothing
+  wider. Stated, not implied.
+- **The classification cannot be changed after a session is opened.** The table is
+  append-only by engine, so a session opened `internal` stays `internal`; reclassifying
+  would need a new session (or a deliberate future correction act). Chosen over inventing
+  an UPDATE path into an append-only table.
 - **`getMissionRoom` scans the ledger and the truth graph in memory** per read (the Phase 7
   / Phase 8 note). Fine at HQ scale; a large ledger would want indexed derivation.
 - **A handoff's canonical picture is read at derivation time, not stored.** A request made
@@ -331,6 +433,16 @@ Mission Room's `binding.source` text was extended (no test pinned the exact stri
 test was deleted or relaxed; no `counts` pin, no `ROOM_SECTIONS` change, no
 `HQ_SNAPSHOT_VERSION` bump, no change to `CLAIM_BOUND_EVIDENCE_KINDS` or the dispatch
 evidence kinds, no change under `packages/server`.
+
+Correction round (this commit): three existing pins were UPDATED to the new, correct
+behaviour, none deleted or relaxed — `collaboration-context`'s worker `withheld` shape
+(three assertions, L3: counts→categorical, with a new assertion proving the Founder audit
+still gets exact counts) and `collaboration-durability`'s empty-summary `toEqual` (two
+additive fields). The route table stays 32 and the write surface stays 22: the `privacy`
+body key is an additive field on the EXISTING open route, not a new route. `CollaborationSessionView`
+gains `privacy`; `CollaborationSnapshotView` gains `withheldFounderOnly` and
+`withheldPurposes`; `CollaborationContextBundle.withheld` becomes the discriminated
+`ContextWithheld`.
 
 ## Deployment runbook (configuration acts, never automatic)
 
@@ -367,23 +479,39 @@ picture, and every bad handoff refused; roles granting nothing; reference validi
 founder_only-as-unknown and the secret scan; three-way dedupe; engine immutability on all
 four tables incl. every secondary unique index with `recursive_triggers` OFF; forged
 `getMission`/`getCollaborationSession`/`lookupPrincipal`/`workers.isRegistered` on instance
-and prototype), `collaboration-context` (5: the builder bundle's scope, bounds, no raw
+and prototype), `collaboration-context` (11: the builder bundle's scope, bounds, no raw
 rationale / no payload / no other session / no intentHistory; the planner bundle's withheld
 founder_only memory and no unrelated mission; the reviewer bundle's internal-only truth and
-no memory; who receives a bundle incl. the no-oracle rule; assembly writes nothing and
-repeats deterministically), `collaboration-durability` (2: real file close/reopen with the
+no memory; who receives a bundle; assembly writes nothing and
+repeats deterministically; **plus the six correction regressions** — H1's hostile
+`listTruth` relabel patched on the instance AND the prototype, with the lie proven to have
+taken on the public surface (a freshly constructed facade lies too), the real founder_only
+record still absent from another worker's bundle, and `withheld` unforgeable; M2's
+cancelled-mission close for a worker beside the Founder audit still reading it, the
+disabled/drifted capability rows for both trios, the revoked directory grant and the
+deactivated worker, and the hostile forge of `workers.allowedCapabilities` +
+`queue.capabilities.get`/`.list` opening nothing; L3's categorical-vs-exact `withheld`
+on both audiences; L4's byte-identical refusal for a real-but-not-mine session and a
+session id that never existed, with the Founder path still distinguishing them),
+`collaboration-durability` (2: real file close/reopen with the
 room, session, summary and contributions identical, refusals identical, dedupe still
 deduping; read-only pre-Phase-9 absence incl. the snapshot's absence note),
-`live-collaboration-routes` (11: write surface; open attributed/dedupe/no key on the wire;
+`live-collaboration-routes` (12: write surface; open attributed/dedupe/no key on the wire;
+the `privacy` body key — default internal, founder_only accepted, anything else 400 with no
+row written;
 admit with `collaborationRole` and `role` refused as identity; no contribute route; the
 room read's composition with no rationale/payload/idempotency on the wire and founder_only
 truth carried past the gate; bounded list with `?missionId=` and `?principalId=` refused;
 context audit with `role=` refused and founder_only never on the wire; one status per
 cause; nobody/staff sweep; identity in body, mutations off, secret-like title; control
-advertisement incl. withdrawal on a disabled row), `collaboration-surfaces` (4: optional
+advertisement incl. withdrawal on a disabled row), `collaboration-surfaces` (6: optional
 section absence; counts/bounds/both wire guards/no fabricated key/no private or raw text;
 Mission Room metrics and liveness ladder; zero collaboration counts on a session-less
-mission), `collaboration-console` (4, JSDOM against the real control API: inert static
+mission; **plus L5** — the unauthenticated artifact carrying no founder_only session, no
+purpose text, aggregating over nothing withheld, stating both omissions in its provenance,
+against a Founder-gated build that carries both; and the classification's validation,
+conservative default, dedupe behaviour and append-only immutability),
+`collaboration-console` (4, JSDOM against the real control API: inert static
 markup; live zero with the open form only under grant; open + admit from the page then a
 facade-recorded contribution and disagreement rendered with binding and standing;
 non-Founder off and a Founder without the grant reading with forms off), `workforce-cli` (+1: both trios registrable

@@ -581,12 +581,18 @@ export function liveSnapshotFromOperations(
       })
     : null;
 
-  // Phase 9 collaboration section: counts over every session plus the newest
-  // views. Founder-gated and unauthenticated readers see the same counts —
-  // a session view carries no founder_only material by construction (worker
-  // ids, roles, bindings, titles, counts).
+  // Phase 9 collaboration section: the SAME reading-layer privacy decision as
+  // memory and truth (Phase 9 correction, Low L5). A session's own material is
+  // classified (`internal | founder_only`, the memory/truth vocabulary): a
+  // `founder_only` session rides only the Founder-gated /state route, and no
+  // session's free-text purpose is published verbatim on the unauthenticated
+  // artifact — the vocabulary has no level that classifies text for an
+  // unauthenticated reader. Both omissions are counted inside the view.
   const collaboration = ops.collaborationStorePresent()
-    ? ops.collaborationSummary({ limit: COLLABORATION_SNAPSHOT_LIMIT })
+    ? ops.collaborationSummary({
+        includeFounderOnly: options.includeFounderOnlyMemory === true,
+        limit: COLLABORATION_SNAPSHOT_LIMIT,
+      })
     : null;
 
   return buildHqSnapshot({
@@ -750,14 +756,29 @@ export function liveSnapshotFromOperations(
               'HeadquarterOperations.collaborationSummary (derived projection; a session references one hq_missions row)',
             asOf: at,
             note:
-              collaboration.sessions > collaboration.recent.length
-                ? `Carries the newest ${collaboration.recent.length} of ${collaboration.sessions} sessions; sessions states the count.`
-                : undefined,
+              [
+                collaboration.sessions > collaboration.recent.length
+                  ? `Carries the newest ${collaboration.recent.length} of ${collaboration.sessions} sessions; sessions states the count.`
+                  : null,
+                collaboration.withheldFounderOnly > 0
+                  ? `${collaboration.withheldFounderOnly} founder_only session(s) are counted in sessions but not carried by ` +
+                    'this artifact, and no other number here aggregates over them; they are readable only through the ' +
+                    'Founder-authenticated /state route.'
+                  : null,
+                collaboration.withheldPurposes > 0
+                  ? `${collaboration.withheldPurposes} carried session(s) state a purpose that this artifact withholds: ` +
+                    'session purpose is free operator text and no privacy level classifies it for an unauthenticated reader.'
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(' ') || undefined,
           },
         }
       : {
           data: {
             sessions: 0,
+            withheldFounderOnly: 0,
+            withheldPurposes: 0,
             activeSessions: 0,
             workersAdmitted: 0,
             contributions: 0,

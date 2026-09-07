@@ -110,6 +110,21 @@ describe('the collaboration write surface', () => {
     expect(count(h.fixture, 'hq_collab_sessions')).toBe(1);
   });
 
+  it('opens with the session privacy classification the memory and truth routes already use: default internal, founder_only accepted, anything else 400 before a row is written', () => {
+    const h = harness();
+    const plain = h.call({ body: openBody(h) });
+    expect(plain.status).toBe(201);
+    expect((plain.body.session as Record<string, unknown>).privacy).toBe('internal');
+    const bad = h.call({ body: openBody(h, { title: 'War room', privacy: 'public' }) });
+    expect(bad.status).toBe(400);
+    expect((bad.body.error as { code: string }).code).toBe('invalid_input');
+    expect(count(h.fixture, 'hq_collab_sessions')).toBe(1);
+    const secret = h.call({ body: openBody(h, { title: 'War room', privacy: 'founder_only' }) });
+    expect(secret.status).toBe(201);
+    expect((secret.body.session as Record<string, unknown>).privacy).toBe('founder_only');
+    expect(count(h.fixture, 'hq_collab_sessions')).toBe(2);
+  });
+
   it('admits a registered worker under collaborationRole; a body naming `role` is refused as a client-identity key before anything is written', () => {
     const h = harness();
     const session = h.call({ body: openBody(h) }).body.session as { id: string };
