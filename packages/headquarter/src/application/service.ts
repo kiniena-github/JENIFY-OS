@@ -645,6 +645,7 @@ import {
   isModelLocality,
   isObservationSource,
   latestBudgetFor,
+  mostRestrictiveBudget,
   loadBudgets,
   loadCostEntries,
   loadDecision,
@@ -1386,13 +1387,17 @@ function assignmentBarrier(task: OperatorTask): OpsError | null {
 }
 
 /**
- * The scope a routing proposal is measured against when the caller names none.
+ * The scope every piece of work is measured against, always.
  *
- * `deployment`/`total` deliberately: the widest, longest-lived ceiling, so an
- * un-scoped question is answered against the policy that constrains
- * EVERYTHING rather than against one that happens to be silent. With no
- * ceiling recorded there at all, the answer is `requires_founder_decision` and
- * the permitted set is the free local tier alone — never permission.
+ * `deployment`/`total` deliberately: the widest, longest-lived ceiling, so the
+ * question is answered against the policy that constrains EVERYTHING rather
+ * than against one that happens to be silent. With no ceiling recorded there
+ * at all, the answer is `requires_founder_decision` and the permitted set is
+ * the free local tier alone — never permission.
+ *
+ * It is the FLOOR of the canonical scope set, not the whole of it: see
+ * `#canonicalBudgetScopes`, which adds the task's own mission and project
+ * scopes and every window on which a ceiling actually exists.
  */
 const DEPLOYMENT_BUDGET_SCOPE = {
   scopeKind: 'deployment' as const,
@@ -8136,10 +8141,17 @@ export class HeadquarterOperations {
   /**
    * The entries a scope's ceiling is measured against.
    *
-   * The window filter is a PREFIX comparison on the recorded `occurredAt`
-   * instant, so it needs no timezone rule and no arithmetic: a `day` ceiling
-   * counts entries whose instant starts with today's date, a `month` ceiling
-   * this month's. `total` counts everything ever recorded for the scope.
+   * The window filter is a PREFIX comparison on `recordedAt` — the instant HQ
+   * itself stamped — so it needs no timezone rule and no arithmetic: a `day`
+   * ceiling counts entries HQ recorded today, a `month` ceiling this month's.
+   * `total` counts everything ever recorded for the scope.
+   *
+   * It used to compare `occurredAt`, which the CALLER supplies (Wave 5
+   * High 3). Under a `deployment/day` ceiling of 100 with 90 observed, an
+   * entry declaring `occurredAt: "0000-00-00T00:00:00Z"` with an amount of
+   * 1,000,000 was accepted and the ceiling still reported `within_ceiling`:
+   * the entry simply fell outside the window it was being measured against.
+   * `occurredAt` stays as reported metadata; it measures nothing.
    */
   #entriesForScope(
     scope: { scopeKind: BudgetScope; scopeId: string; window: BudgetWindow },
@@ -8165,7 +8177,12 @@ export class HeadquarterOperations {
             return false;
         }
       })
-      .filter((entry) => prefix === '' || entry.occurredAt.startsWith(prefix));
+      // The window is measured on `recordedAt`, which HQ SETS, and never on
+      // `occurredAt`, which the caller supplies (Wave 5 High 3). Filtering on
+      // the caller's field meant one field moved an entry out of the window a
+      // ceiling was counting, so a day ceiling was evaded by declaring a
+      // different day.
+      .filter((entry) => prefix === '' || entry.recordedAt.startsWith(prefix));
   }
 
   /**
@@ -8188,6 +8205,85 @@ export class HeadquarterOperations {
         currency: entry.fact.currency,
       })),
     });
+  }
+
+  /**
+   * The mission and project a task CANONICALLY belongs to, read off `#db`.
+   *
+   * A task reaches a mission through `hq_mission_plan_items.task_id` — the
+   * same link `proposeAction` already checks — and a mission reaches a project
+   * through `hq_missions.project_id`. Neither is ever taken from a caller
+   * (Wave 5 High 2 / Medium 8): `missionId`, `projectId`, `scopeId` and the
+   * budget `window` used to be caller parameters with no existence check, no
+   * length bound and no secret scan, so a 5000-character `missionId` and a
+   * `projectId` of `<script>x</script>` were both accepted — and, worse,
+   * OMITTING `missionId` hid a spend from an exhausted mission ceiling, which
+   * made three of the five `BUDGET_SCOPES` meaningless.
+   */
+  #canonicalWorkIdentity(taskId: string): { missionId: string | null; projectId: string | null } {
+    if (!this.#missionStorePresent) return { missionId: null, projectId: null };
+    const link = this.#db
+      .prepare(`SELECT mission_id FROM hq_mission_plan_items WHERE task_id = ? ORDER BY seq LIMIT 1`)
+      .get(taskId) as { mission_id: string } | undefined;
+    const missionId = link?.mission_id ?? null;
+    if (!missionId) return { missionId: null, projectId: null };
+    const mission = this.#db.prepare(`SELECT project_id FROM hq_missions WHERE id = ?`).get(missionId) as
+      | { project_id: string | null }
+      | undefined;
+    return { missionId, projectId: mission?.project_id ?? null };
+  }
+
+  /**
+   * EVERY budget scope that applies to a task — derived, never chosen.
+   *
+   * `deployment/total` always participates, so "no policy anywhere" still
+   * answers `requires_founder_decision` with the free local tier alone. On top
+   * of that, any scope in the canonical set for which a ceiling has ACTUALLY
+   * been recorded joins in: the other deployment windows, and the task's own
+   * mission and project across every window.
+   *
+   * Only recorded ceilings join, because `evaluateBudget` answers
+   * `requires_founder_decision` for a scope with no policy — folding in six
+   * silent scopes would make every answer a Founder decision and every
+   * permitted set the local tier alone, which is not caution, it is noise.
+   *
+   * `provider` and `model` scopes are deliberately absent: a cost entry's
+   * `providerId` is a caller-declared fact about who was billed, in a
+   * different vocabulary from the canonical execution binding, so HQ cannot
+   * attribute it canonically. A provider or model ceiling is therefore
+   * REPORTED by `intelligenceBudgetDecision` and does not gate a routing
+   * decision. Stated rather than pretended.
+   */
+  #canonicalBudgetScopes(
+    taskId: string,
+  ): { scopeKind: BudgetScope; scopeId: string; window: BudgetWindow }[] {
+    const scopes = [DEPLOYMENT_BUDGET_SCOPE as { scopeKind: BudgetScope; scopeId: string; window: BudgetWindow }];
+    const identity = this.#canonicalWorkIdentity(taskId);
+    const candidates: { scopeKind: BudgetScope; scopeId: string }[] = [
+      { scopeKind: 'deployment', scopeId: DEPLOYMENT_BUDGET_SCOPE.scopeId },
+      ...(identity.missionId ? [{ scopeKind: 'mission' as const, scopeId: identity.missionId }] : []),
+      ...(identity.projectId ? [{ scopeKind: 'project' as const, scopeId: identity.projectId }] : []),
+    ];
+    for (const candidate of candidates) {
+      for (const window of BUDGET_WINDOWS) {
+        if (
+          candidate.scopeKind === DEPLOYMENT_BUDGET_SCOPE.scopeKind &&
+          window === DEPLOYMENT_BUDGET_SCOPE.window
+        ) {
+          continue;
+        }
+        const scope = { ...candidate, window };
+        if (this.#budgetFromStore(scope)) scopes.push(scope);
+      }
+    }
+    return scopes;
+  }
+
+  /** The most restrictive answer across every scope that applies to a task. */
+  #canonicalBudgetEvaluation(taskId: string): BudgetEvaluation {
+    return mostRestrictiveBudget(
+      this.#canonicalBudgetScopes(taskId).map((scope) => this.#budgetEvaluation(scope)),
+    );
   }
 
   #decisionRecordFromStore(id: string): DecisionRecord | null {
@@ -8580,10 +8676,18 @@ export class HeadquarterOperations {
    * supply is a description of the WORK, and none of it can lower the floor
    * below what the canonical risk class imposes.
    *
-   * There is deliberately no provider or model parameter, and the returned
-   * shape has no field that could name one. Provider truth is the canonical
-   * binding's; a proposal that disagreed with it would simply be ignored by
-   * `OperatorQueue.claim`/`start`.
+   * There is deliberately no provider or model parameter, and the routing
+   * INTERFACE has no field that could name one. Provider truth is the
+   * canonical binding's; a proposal that disagreed with it would simply be
+   * ignored by `OperatorQueue.claim`/`start`. What the facade returns is
+   * `RoutingProposal & { taskId; boundProvider }`, and `boundProvider` is
+   * OBSERVED off the task's canonical payload by `#taskBoundProvider` — a
+   * report of what will execute, not a choice, and there is no parameter that
+   * could make it say anything else.
+   *
+   * There is no `budgetScope` parameter either (Wave 5 High 2). Which ceiling
+   * applies is derived from the task by `#canonicalBudgetScopes` and every
+   * applicable scope binds at once.
    */
   intelligenceRoutingProposal(input: {
     taskId: string;
@@ -8592,15 +8696,10 @@ export class HeadquarterOperations {
     workKind: WorkKind;
     latency?: LatencyRequirement;
     privacy?: PrivacyRequirement;
-    budgetScope?: { scopeKind: BudgetScope; scopeId: string; window: BudgetWindow };
   }): OpsResult<RoutingProposal & { taskId: string; boundProvider: string | null }> {
     const characteristics = this.#characteristicsFor(input);
     if (!characteristics.ok) return characteristics;
-    const scope = input.budgetScope ?? DEPLOYMENT_BUDGET_SCOPE;
-    if (!isBudgetScope(scope.scopeKind) || !isBudgetWindow(scope.window) || !scope.scopeId) {
-      return fail('invalid_input', 'budgetScope must name a recognized scope kind, id and window');
-    }
-    const evaluation = this.#budgetEvaluation(scope);
+    const evaluation = this.#canonicalBudgetEvaluation(input.taskId.trim());
     const proposal = computeRoutingProposal({
       characteristics: characteristics.data,
       permittedTiers: evaluation.permittedTiers,
@@ -8694,9 +8793,6 @@ export class HeadquarterOperations {
     privacy?: PrivacyRequirement;
     /** Optional, and bounded BELOW by the policy floor. Never below it. */
     tier?: IntelligenceTier;
-    missionId?: string;
-    projectId?: string;
-    budgetScope?: { scopeKind: BudgetScope; scopeId: string; window: BudgetWindow };
     idempotencyKey?: string;
   }): OpsResult<{ decision: DecisionRecord; deduplicated: boolean }> {
     const label = missionText('label', input.label, MAX_DECISION_LABEL_LENGTH, true);
@@ -8725,11 +8821,9 @@ export class HeadquarterOperations {
     );
     if (claim) return claim;
 
-    const scope = input.budgetScope ?? DEPLOYMENT_BUDGET_SCOPE;
-    if (!isBudgetScope(scope.scopeKind) || !isBudgetWindow(scope.window) || !scope.scopeId) {
-      return fail('invalid_input', 'budgetScope must name a recognized scope kind, id and window');
-    }
-    const evaluation = this.#budgetEvaluation(scope);
+    // Every ceiling that applies to THIS task, most restrictive wins. Which
+    // one applies is not a caller parameter any more (Wave 5 High 2).
+    const evaluation = this.#canonicalBudgetEvaluation(input.taskId);
     const proposal = computeRoutingProposal({
       characteristics: characteristics.data,
       permittedTiers: evaluation.permittedTiers,
@@ -8738,10 +8832,14 @@ export class HeadquarterOperations {
     const chosen = this.#resolveRecordedTier(proposal, input.tier);
     if (!chosen.ok) return chosen;
 
+    // Attribution is DERIVED from the canonical link, never declared (Wave 5
+    // Medium 8). Omitting a mission id used to hide a spend from an exhausted
+    // mission ceiling.
+    const identity = this.#canonicalWorkIdentity(input.taskId);
     return this.#insertDecision({
       taskId: input.taskId,
-      missionId: input.missionId?.trim() || null,
-      projectId: input.projectId?.trim() || null,
+      missionId: identity.missionId,
+      projectId: identity.projectId,
       tier: chosen.data,
       floorTier: proposal.floorTier,
       requiredReviewTier: proposal.requiredReviewTier,
@@ -8962,8 +9060,12 @@ export class HeadquarterOperations {
     );
     if (claim) return claim;
 
-    const scope = DEPLOYMENT_BUDGET_SCOPE;
-    const evaluation = this.#budgetEvaluation(scope);
+    // Every ceiling that applies to the PRIOR decision's canonical task, not
+    // the deployment scope alone (Wave 5 High 2, carry-forward): an escalation
+    // moves UP the tier order, so evaluating a wider scope than the one the
+    // first decision was bound by would let it climb past a mission or project
+    // ceiling that the first decision honoured.
+    const evaluation = this.#canonicalBudgetEvaluation(prior.taskId);
     const escalation = deriveEscalation({
       from: {
         id: prior.id,
@@ -9105,9 +9207,17 @@ export class HeadquarterOperations {
     fence: number;
     providerId: string;
     modelId?: string | null;
+    /**
+     * The routing decision this cost belongs to, when there is one. Checked
+     * against the ledger and against THIS task (Wave 5 Medium 8): it used to
+     * be unvalidated caller free text.
+     *
+     * `missionId` and `projectId` are deliberately NOT parameters. They are
+     * derived from the task's canonical mission link, because omitting a
+     * mission id hid a spend from an exhausted mission ceiling and made three
+     * of the five `BUDGET_SCOPES` meaningless.
+     */
     decisionId?: string;
-    missionId?: string;
-    projectId?: string;
     provenance: CostProvenance;
     amountMinorUnits?: number | null;
     currency?: string | null;
@@ -9165,8 +9275,46 @@ export class HeadquarterOperations {
 
     const at = nowIso();
     const occurredAt = (input.occurredAt ?? '').trim() || at;
-    if (!/^\d{4}-\d{2}-\d{2}T/.test(occurredAt)) {
-      return fail('invalid_input', 'occurredAt must be an ISO-8601 instant, or omitted');
+    /*
+     * A REAL instant, not a shape (Wave 5 High 3). The only check used to be
+     * `/^\d{4}-\d{2}-\d{2}T/`, which is a pattern rather than a date: under a
+     * `deployment/day` ceiling of 100 with 90 observed, an entry with
+     * `occurredAt: "0000-00-00T00:00:00Z"` and an amount of 1,000,000 was
+     * ACCEPTED and the ceiling still reported `within_ceiling`, because the
+     * window filter was a string prefix over that same caller-supplied field.
+     *
+     * Three changes, together: the instant must PARSE; it may not be in the
+     * future (a cost cannot have been incurred after now, and a future date is
+     * the same evasion with a different string); and the window filter moved
+     * off `occurred_at` entirely onto `recorded_at`, which HQ sets. `occurredAt`
+     * survives as reported-only metadata, which is what it always was.
+     */
+    const parsed = Date.parse(occurredAt);
+    if (!Number.isFinite(parsed)) {
+      return fail('invalid_input', 'occurredAt must be a real ISO-8601 instant, or omitted');
+    }
+    if (parsed > Date.parse(at)) {
+      return fail(
+        'invalid_input',
+        'occurredAt is in the future; a cost cannot have been incurred after the moment it is recorded',
+      );
+    }
+    // Attribution is DERIVED, and a referenced decision must exist and belong
+    // to THIS task (Wave 5 Medium 8).
+    const identity = this.#canonicalWorkIdentity(input.taskId);
+    const decisionId = input.decisionId?.trim() || null;
+    if (decisionId !== null) {
+      const referenced = this.#decisionRecordFromStore(decisionId);
+      if (!referenced) {
+        return fail('unknown_intelligence_decision', `Unknown routing decision: ${decisionId}`);
+      }
+      if (referenced.taskId !== input.taskId) {
+        return fail(
+          'invalid_input',
+          `Routing decision ${decisionId} belongs to task ${referenced.taskId}; a cost entry may only cite a ` +
+            'decision recorded against the task it is recorded on.',
+        );
+      }
     }
     const key = costEntryKey({
       taskId: input.taskId,
@@ -9198,9 +9346,9 @@ export class HeadquarterOperations {
         .run(
           id,
           input.taskId,
-          input.missionId?.trim() || null,
-          input.projectId?.trim() || null,
-          input.decisionId?.trim() || null,
+          identity.missionId,
+          identity.projectId,
+          decisionId,
           providerId,
           modelId,
           cost.fact.provenance,

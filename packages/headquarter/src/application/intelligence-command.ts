@@ -1494,6 +1494,60 @@ export function evaluateBudget(input: {
   };
 }
 
+/** How restrictive an answer is. Higher wins when several scopes apply. */
+const BUDGET_DECISION_SEVERITY: Readonly<Record<BudgetDecision, number>> = {
+  within_ceiling: 0,
+  requires_founder_decision: 1,
+  blocked: 2,
+};
+
+/**
+ * Combine the answers of EVERY scope that applies to one piece of work into
+ * the single most restrictive one (Wave 5 High 2).
+ *
+ * A task is inside a deployment, and usually inside a mission and a project
+ * too, and each of those may carry a ceiling over each window. The phase used
+ * to evaluate exactly ONE scope, chosen by a CALLER parameter — so a worker
+ * facing a strict `deployment/total` policy could name a permissive
+ * `mission/<some other mission>/total` (or merely a different `window`) and
+ * move from `refusal: no_permitted_tier` to `tier: high, budgetDecision:
+ * within_ceiling`. The scope set is now derived canonically and every member
+ * of it binds:
+ *
+ *  - the DECISION is the most severe of the answers (blocked beats requires a
+ *    Founder decision beats within ceiling);
+ *  - the permitted tier set is the INTERSECTION, so a tier is permitted only
+ *    where every applicable ceiling permits it;
+ *  - the reported ceiling/observed figures come from the scope that produced
+ *    the governing decision, so the reason a reader sees names the ceiling
+ *    that actually bound.
+ *
+ * An empty list cannot occur at the call sites (the deployment scope always
+ * participates) and is treated as the fail-closed no-policy answer if it ever
+ * did.
+ */
+export function mostRestrictiveBudget(
+  evaluations: readonly BudgetEvaluation[],
+): BudgetEvaluation {
+  if (evaluations.length === 0) {
+    return evaluateBudget({ budget: null, entries: [] });
+  }
+  let governing = evaluations[0]!;
+  for (const evaluation of evaluations) {
+    if (
+      BUDGET_DECISION_SEVERITY[evaluation.decision] > BUDGET_DECISION_SEVERITY[governing.decision]
+    ) {
+      governing = evaluation;
+    }
+  }
+  let permitted: readonly IntelligenceTier[] = evaluations[0]!.permittedTiers;
+  for (const evaluation of evaluations.slice(1)) {
+    const allowed = new Set(evaluation.permittedTiers);
+    permitted = permitted.filter((tier) => allowed.has(tier));
+  }
+  return { ...governing, permittedTiers: [...permitted] };
+}
+
 /* ------------------------------------------------------------------ */
 /* Stored rows                                                         */
 /* ------------------------------------------------------------------ */

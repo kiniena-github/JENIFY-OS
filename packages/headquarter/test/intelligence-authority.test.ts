@@ -67,6 +67,42 @@ function decide(fx: IntelligenceFixture, over: Record<string, unknown> = {}) {
   } as Parameters<HeadquarterOperations['recordIntelligenceDecision']>[0]);
 }
 
+/**
+ * Link the fixture's claimed task to a mission (and that mission to a project)
+ * the way the canonical record does it: a `hq_mission_plan_items` row carrying
+ * the task id, and `hq_missions.project_id`.
+ *
+ * Written directly, because what is under test is what the facade DERIVES from
+ * that link — not the mission machinery that creates it. This is the exact
+ * link `proposeAction` already checks a task against.
+ */
+function linkTaskToMission(fx: IntelligenceFixture, missionId: string, projectId: string | null): void {
+  fx.db
+    .prepare(
+      `INSERT INTO hq_missions
+         (id, title, objective, constraints, idempotency_key, created_by, created_at, updated_at,
+          status_changed_at, status_changed_by, project_id)
+       VALUES (?, ?, ?, '[]', ?, 'founder', ?, ?, ?, 'founder', ?)`,
+    )
+    .run(
+      missionId,
+      `Mission ${missionId}`,
+      'ship the thing',
+      `idem-${missionId}`,
+      '2026-01-01T00:00:00.000Z',
+      '2026-01-01T00:00:00.000Z',
+      '2026-01-01T00:00:00.000Z',
+      projectId,
+    );
+  fx.db
+    .prepare(
+      `INSERT INTO hq_mission_plan_items
+         (id, mission_id, seq, summary, kind, task_id, created_in_intent_seq)
+       VALUES (?, ?, 1, 'the work', 'task', ?, 1)`,
+    )
+    .run(`item-${missionId}`, missionId, fx.claim.taskId);
+}
+
 function cost(fx: IntelligenceFixture, over: Record<string, unknown> = {}) {
   return fx.ops.recordIntelligenceCost({
     taskId: fx.claim.taskId,
@@ -632,13 +668,226 @@ describe('a budget ceiling blocks a paid act or requires a decision — and neve
   });
 });
 
+/**
+ * Wave 5 High 2, High 3 and Medium 8: WHICH ceiling applies, and WHAT a spend
+ * is attributed to, are canonical facts about the task — never caller
+ * parameters.
+ */
+describe('the applicable budget scope and the spend attribution are derived, not chosen', () => {
+  it('binds EVERY applicable scope at once, so a permissive one cannot be named instead', () => {
+    const fx = intelligenceFixture();
+    linkTaskToMission(fx, 'mission-alpha', 'project-alpha');
+    // The deployment policy is strict: local only.
+    fx.budget(['deterministic_local']);
+    // A permissive policy on a mission this task is NOT part of. Under the old
+    // caller-supplied `budgetScope`, naming it moved an external_side_effect
+    // task from `refusal: no_permitted_tier` to `tier: high`.
+    fx.budget([...INTELLIGENCE_TIERS], { scopeKind: 'mission', scopeId: 'some-other-mission' });
+
+    const proposal = expectOk(
+      fx.ops.intelligenceRoutingProposal({
+        taskId: fx.claim.taskId,
+        complexity: 'routine',
+        contextSize: 'medium',
+        workKind: 'coding',
+      }),
+    );
+    expect([...proposal.permittedTiers]).toEqual(['deterministic_local']);
+    expect(proposal.tier).toBeNull();
+    expect(proposal.refusal).toBe('no_permitted_tier');
+
+    // And there is no parameter that could have named the other scope: the
+    // signature has none, and smuggling one through changes nothing.
+    const smuggled = expectOk(
+      fx.ops.intelligenceRoutingProposal({
+        taskId: fx.claim.taskId,
+        complexity: 'routine',
+        contextSize: 'medium',
+        workKind: 'coding',
+        ...({
+          budgetScope: { scopeKind: 'mission', scopeId: 'some-other-mission', window: 'total' },
+        } as unknown as Record<string, never>),
+      }),
+    );
+    expect(smuggled.refusal).toBe('no_permitted_tier');
+
+    const refusal = expectError(decide(fx, { tier: 'high' }));
+    expect(refusal.code).toBe('tier_not_permitted');
+  });
+
+  it('takes the MOST RESTRICTIVE answer when the task’s own mission ceiling is tighter', () => {
+    const fx = intelligenceFixture();
+    linkTaskToMission(fx, 'mission-alpha', 'project-alpha');
+    fx.budget([...INTELLIGENCE_TIERS]);
+    // The task's OWN mission permits only the local tier.
+    fx.budget(['deterministic_local'], { scopeKind: 'mission', scopeId: 'mission-alpha' });
+    const proposal = expectOk(
+      fx.ops.intelligenceRoutingProposal({
+        taskId: fx.claim.taskId,
+        complexity: 'routine',
+        contextSize: 'medium',
+        workKind: 'coding',
+      }),
+    );
+    // The intersection of the two permitted sets.
+    expect([...proposal.permittedTiers]).toEqual(['deterministic_local']);
+    expect(expectError(decide(fx, { tier: 'high' })).code).toBe('tier_not_permitted');
+  });
+
+  it('is not evaded by naming a different WINDOW: a day ceiling that is reached still blocks', () => {
+    const fx = intelligenceFixture();
+    // Deployment/total is generous; deployment/DAY is exhausted.
+    fx.budget([...INTELLIGENCE_TIERS]);
+    fx.budget([...INTELLIGENCE_TIERS], { window: 'day', ceilingMinorUnits: 100 });
+    expectOk(
+      cost(fx, {
+        provenance: 'billed',
+        amountMinorUnits: 100,
+        currency: 'USD',
+        unitKind: 'requests',
+      }),
+    );
+    const proposal = expectOk(
+      fx.ops.intelligenceRoutingProposal({
+        taskId: fx.claim.taskId,
+        complexity: 'routine',
+        contextSize: 'medium',
+        workKind: 'coding',
+      }),
+    );
+    expect(proposal.budgetDecision).toBe('blocked');
+    expect(proposal.tier).toBeNull();
+    expect(expectError(decide(fx, { tier: 'low_cost' })).code).toBe('budget_ceiling_blocks');
+  });
+
+  it('measures a day ceiling on the instant HQ stamped, not on the one the caller declares', () => {
+    const fx = intelligenceFixture();
+    fx.budget([...INTELLIGENCE_TIERS]);
+    fx.budget([...INTELLIGENCE_TIERS], { window: 'day', ceilingMinorUnits: 100 });
+    // 90 of 100 observed.
+    expectOk(
+      cost(fx, {
+        provenance: 'billed',
+        amountMinorUnits: 90,
+        currency: 'USD',
+        unitKind: 'requests',
+        idempotencyKey: 'first',
+      }),
+    );
+    // A shape that PASSES the old `/^\d{4}-\d{2}-\d{2}T/` check and is not a
+    // date at all. It is refused outright now.
+    const nonsense = cost(fx, {
+      provenance: 'billed',
+      amountMinorUnits: 1_000_000,
+      currency: 'USD',
+      unitKind: 'requests',
+      occurredAt: '0000-00-00T00:00:00Z',
+      idempotencyKey: 'the-evasion',
+    });
+    expect(nonsense.ok).toBe(false);
+    expect(!nonsense.ok && nonsense.error.message).toMatch(/real ISO-8601 instant/);
+
+    // So is a future one.
+    const future = cost(fx, {
+      provenance: 'billed',
+      amountMinorUnits: 1_000_000,
+      currency: 'USD',
+      unitKind: 'requests',
+      occurredAt: '2999-01-01T00:00:00.000Z',
+      idempotencyKey: 'the-other-evasion',
+    });
+    expect(future.ok).toBe(false);
+    expect(!future.ok && future.error.message).toMatch(/future/);
+
+    // And a valid-but-OLD occurredAt no longer moves the entry out of today's
+    // window: the window is measured on recordedAt, which HQ sets.
+    expectOk(
+      cost(fx, {
+        provenance: 'billed',
+        amountMinorUnits: 1_000_000,
+        currency: 'USD',
+        unitKind: 'requests',
+        occurredAt: '2020-01-01T00:00:00.000Z',
+        idempotencyKey: 'the-backdated-one',
+      }),
+    );
+    const evaluation = expectOk(
+      fx.ops.intelligenceBudgetDecision({ scopeKind: 'deployment', scopeId: 'deployment', window: 'day' }),
+    );
+    expect(evaluation.observedMinorUnits).toBe(1_000_090);
+    expect(evaluation.decision).toBe('blocked');
+  });
+
+  it('derives mission and project attribution, and refuses a decision id from another task', () => {
+    const fx = intelligenceFixture();
+    linkTaskToMission(fx, 'mission-alpha', 'project-alpha');
+    fx.budget([...INTELLIGENCE_TIERS]);
+    const decision = expectOk(decide(fx, { tier: 'high' })).decision;
+    expect(decision.missionId).toBe('mission-alpha');
+    expect(decision.projectId).toBe('project-alpha');
+
+    // A cost entry inherits the same canonical attribution, with no parameter
+    // that could omit it or invent one.
+    const entry = expectOk(
+      cost(fx, {
+        provenance: 'billed',
+        amountMinorUnits: 250,
+        currency: 'USD',
+        unitKind: 'requests',
+        decisionId: decision.id,
+        ...({ missionId: 'x'.repeat(5000), projectId: '<script>x</script>' } as unknown as Record<
+          string,
+          never
+        >),
+      }),
+    ).entry;
+    expect(entry.missionId).toBe('mission-alpha');
+    expect(entry.projectId).toBe('project-alpha');
+    expect(JSON.stringify(entry)).not.toContain('<script>');
+
+    // The mission ceiling now SEES that spend, which is the whole point:
+    // omitting `missionId` used to hide it.
+    fx.budget([...INTELLIGENCE_TIERS], {
+      scopeKind: 'mission',
+      scopeId: 'mission-alpha',
+      ceilingMinorUnits: 200,
+    });
+    const missionCeiling = expectOk(
+      fx.ops.intelligenceBudgetDecision({
+        scopeKind: 'mission',
+        scopeId: 'mission-alpha',
+        window: 'total',
+      }),
+    );
+    expect(missionCeiling.observedMinorUnits).toBe(250);
+    expect(missionCeiling.decision).toBe('blocked');
+
+    // A decision id belonging to another task is refused rather than stored.
+    const other = claimSideEffectTask(fx, 'another-piece-of-work');
+    const foreign = fx.ops.recordIntelligenceCost({
+      taskId: other.taskId,
+      workerId: other.workerId,
+      fence: other.fence,
+      providerId: 'anthropic',
+      provenance: 'unknown',
+      unitKind: 'unknown',
+      decisionId: decision.id,
+    });
+    expect(foreign.ok).toBe(false);
+    expect(!foreign.ok && foreign.error.message).toMatch(/belongs to task/);
+  });
+});
+
 describe('escalation preserves canonical task identity through the facade', () => {
   it('creates a second decision on the SAME task, mission and project, one tier up', () => {
     const fx = intelligenceFixture();
     fx.budget([...INTELLIGENCE_TIERS]);
-    const first = expectOk(
-      decide(fx, { tier: 'high', missionId: 'mission-alpha', projectId: 'project-alpha' }),
-    ).decision;
+    // The mission and project are DERIVED from the canonical link, not declared
+    // (Wave 5 Medium 8), so the link has to exist for them to be carried.
+    linkTaskToMission(fx, 'mission-alpha', 'project-alpha');
+    const first = expectOk(decide(fx, { tier: 'high' })).decision;
+    expect(first.missionId).toBe('mission-alpha');
+    expect(first.projectId).toBe('project-alpha');
     const escalated = expectOk(
       fx.ops.escalateIntelligenceDecision({
         decisionId: first.id,
