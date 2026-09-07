@@ -255,6 +255,16 @@ export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = [
     // `record_key` is the duplicate-BACKUP-RECORD guard.
     secondaryGuards: ['no_replace_unique'],
   },
+  {
+    // The durable safe-mode latch. It has no secondary unique index — a latch
+    // row is one entry in a history, not a keyed fact — so the trio is the
+    // whole requirement. It matters that it is append-only: an UPDATE or a
+    // DELETE here would be a way to CLEAR safe mode without an assessment,
+    // which is the one thing the mechanism exists to prevent.
+    table: 'hq_safe_mode_latch',
+    triggerPrefix: 'hq_safe_mode_latch',
+    secondaryGuards: [],
+  },
   // Phase 14. All five carry the trio plus a secondary-unique guard, and the
   // secondary guard is load-bearing on two of them: a REPLACE colliding on
   // `hq_intel_budgets.budget_key` would silently swap a Founder's spending
@@ -366,7 +376,81 @@ export const SAFE_MODE_STATEMENT =
   'the engine reports the file corrupt, an append-only guard the schema declares is missing, or the evidence ' +
   'hash chain does not verify. While engaged HQ still READS and still reconciles, and it refuses the acts ' +
   'that would add to, approve, release or execute against a record it cannot stand behind. It is never ' +
-  'cleared by a boot: only a fresh assessment that finds nothing blocking clears it.';
+  'cleared by a boot: the engagement is written to an append-only latch in the database itself, read back at ' +
+  'every construction, and only a FULL assessment that finds nothing blocking clears it.';
+
+/* ------------------------------------------------------------------ */
+/* The durable safe-mode latch                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The latest durable safe-mode engagement, as read back from the store.
+ *
+ * The SQL lives with the Phase 13 ledger (`reliability-command.ts`); this
+ * module owns the TYPE and the pure overlay, because a verdict is what this
+ * module is for and because `store/` may not depend on `application/`.
+ */
+export interface HqSafeModeLatch {
+  /** True while the latch stands engaged. */
+  engaged: boolean;
+  /** The blocking findings that engaged it. Closed vocabulary members only. */
+  findings: readonly HqIntegrityFinding[];
+  /** The depth of the assessment that engaged (or cleared) it. */
+  depth: IntegrityAssessmentDepth;
+  at: string;
+  processId: string;
+}
+
+/**
+ * Overlay a durable latch onto a freshly computed report — the correction that
+ * makes `SAFE_MODE_STATEMENT` true (Wave 5 High 2).
+ *
+ * The statement has always said safe mode "is never cleared by a boot". It
+ * was, and the mechanism made it inevitable: the latched verdict lived only in
+ * a private field, recomputed at every construction from `structuralIntegrity`
+ * — which by design never runs the evidence-chain verification. So an
+ * `evidence_chain_broken` engagement evaporated at the next process start with
+ * the chain still broken (executed: `safeMode` false, depth `structural`,
+ * `claimNext` allowed, `verifyEvidenceChain` still reporting the break, and
+ * `hq-snapshot.json` publishing `safeMode: false` over it). An
+ * `append_only_guard_missing` engagement survived exactly one boot, because
+ * the next `ensure*Schema` re-created the trigger and the as-found census then
+ * found a healthy file.
+ *
+ * With the latch persisted, a boot ADDS an engagement to whatever it finds and
+ * never subtracts one. The observation it contributes is composed from finding
+ * names, a depth and a timestamp — no stored row content — so it obeys the
+ * same rule as every other observation.
+ *
+ * `depth` on the returned report stays the depth of THIS assessment, never the
+ * latched one: a structural boot must not be able to present itself as a full
+ * pass, and the latched depth is stated in the observation's detail instead.
+ */
+export function applySafeModeLatch(
+  report: HqIntegrityReport,
+  latch: HqSafeModeLatch | null,
+): HqIntegrityReport {
+  if (!latch?.engaged) return report;
+  const alreadyObserved = new Set(
+    report.observations.filter((observation) => observation.blocking).map((o) => o.finding),
+  );
+  const carried = latch.findings.filter((finding) => !alreadyObserved.has(finding));
+  const observations = [
+    ...report.observations,
+    ...carried.map((finding) => ({
+      finding,
+      blocking: true,
+      detail:
+        `Latched by a ${latch.depth} assessment at ${latch.at}: this finding engaged safe mode and has not ` +
+        `been cleared. Only a full assessment that finds nothing blocking clears it — a restart does not, ` +
+        `which is why the engagement is stored rather than held in memory.`,
+    })),
+  ];
+  // Engaged even when the latch carried NO readable finding: a latch row that
+  // says "engaged" is itself the statement, and dropping the engagement
+  // because its finding list could not be read would be the fail-open answer.
+  return { ...report, observations, safeMode: true };
+}
 
 export const INTEGRITY_DEPTH_STATEMENT =
   'A structural assessment reads the schema catalogue and the durability pragmas only — cheap enough to run ' +

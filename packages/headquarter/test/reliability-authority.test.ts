@@ -22,6 +22,7 @@ import {
 } from '../src/application/reliability-command.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { EvidenceLog, verifyEvidenceChain } from '../src/operator/evidence.js';
+import { missingImmutabilityGuards } from '../src/store/integrity.js';
 import { founderConsole } from '../src/application/console.js';
 
 function expectError(result: {
@@ -929,6 +930,130 @@ describe('the safe-mode evidence verdict is computed from enforcement-safe truth
     } finally {
       evidencePrototype.verifyChain = realVerify;
       evidencePrototype.list = realList;
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * Wave 5 HIGH 2, as the exploit that found it.
+   *
+   * `SAFE_MODE_STATEMENT` — which crosses to the Founder browser and to the
+   * unauthenticated `hq-snapshot.json` — says safe mode "is never cleared by a
+   * boot: only a fresh assessment that finds nothing blocking clears it". It
+   * was: the latch was a private field recomputed at every construction from
+   * `structuralIntegrity`, which by design never verifies the evidence chain.
+   * So an `evidence_chain_broken` engagement — the one finding only a FULL
+   * assessment can reach — evaporated at the next process start with the chain
+   * still broken: `safeMode` false, depth `structural`, `claimNext` ALLOWED,
+   * and the world-readable snapshot publishing `safeMode: false` over it.
+   *
+   * The latch is now a row in an append-only table, read at construction.
+   */
+  it('survives a RESTART with the chain still broken, and the snapshot says so', () => {
+    const fx = fileFixture({ processIdentity: 'process-one' });
+    try {
+      breakChainByLegalAppend(fx);
+      const engaged = expectOk(fx.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(engaged.depth).toBe('full');
+      expect(engaged.safeMode).toBe(true);
+
+      // THE RESTART. A brand-new facade over the same file, in a different
+      // process identity, which runs only the cheap structural pass.
+      const restarted = fx.reopen('process-two');
+      const posture = restarted.ops.hqReliabilityPosture();
+      expect(posture.integrity.safeMode).toBe(true);
+      expect(posture.integrity.observations.map((o) => o.finding)).toContain('evidence_chain_broken');
+      // The depth reported is this boot's, never the latched one: a structural
+      // pass may not present itself as a full assessment.
+      expect(posture.integrity.depth).toBe('structural');
+      expect(posture.integrity.observations.find((o) => o.finding === 'evidence_chain_broken')!.detail)
+        .toContain('Latched by a full assessment');
+
+      // The acts safe mode exists to refuse still refuse after the restart.
+      expectOk(
+        restarted.ops.createTask({
+          capabilityId: CAPS.openPr,
+          payload: { branch: 'after-the-restart' },
+          idempotencyKey: 'after-the-restart',
+          requestedBy: 'claude',
+        }),
+      );
+      const claim = restarted.ops.claimNext('claude', CAPS.openPr);
+      expect(claim.ok).toBe(false);
+      expect(!claim.ok && claim.error.code).toBe('safe_mode_engaged');
+
+      // And the unauthenticated artifact tells the truth about it.
+      const snapshot = restarted.ops.reliabilitySummary();
+      expect(snapshot.safeMode).toBe(true);
+      expect(snapshot.assessmentDepth).toBe('structural');
+      expect(snapshot.findings.evidence_chain_broken).toBe(1);
+
+      // The chain really is still broken, independently recomputed.
+      expect(verifyEvidenceChain(fx.raw())).not.toBeNull();
+
+      // A SECOND restart does not wear it down either — the engagement is one
+      // row, and a boot can only add.
+      const third = fx.reopen('process-three');
+      expect(third.ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * The other half of the same statement: a boot ADDS an engagement, and an
+   * `append_only_guard_missing` one used to survive exactly one boot because
+   * the next `ensure*Schema` re-created the trigger and the as-found census
+   * then found a healthy file.
+   */
+  it('survives the SECOND boot after a dropped guard, which re-creation used to erase', () => {
+    const fx = fileFixture({ processIdentity: 'process-one' });
+    try {
+      fx.raw().exec('DROP TRIGGER trg_hq_action_events_no_erase');
+      const first = fx.reopen('process-two');
+      expect(first.ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+      // The first boot re-created the trigger, so the file is now "healthy" —
+      // and the finding must still stand, because HQ cannot know what was
+      // written while the guard was gone.
+      const second = fx.reopen('process-three');
+      expect(second.ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+      expect(second.ops.hqReliabilityPosture().integrity.observations.map((o) => o.finding)).toContain(
+        'append_only_guard_missing',
+      );
+      expect(second.ops.reliabilitySummary().safeMode).toBe(true);
+      // Only the Founder's full assessment lowers it, and only because the
+      // file now genuinely passes.
+      const cleared = expectOk(second.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(cleared.safeMode).toBe(false);
+      // And the CLEAR is durable in the same way the engagement was.
+      const fourth = fx.reopen('process-four');
+      expect(fourth.ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /** The latch itself is engine-immutable: it cannot be cleared by a raw writer. */
+  it('holds the latch append-only, so no writer can clear safe mode without an assessment', () => {
+    const fx = fileFixture({ processIdentity: 'process-one' });
+    try {
+      breakChainByLegalAppend(fx);
+      expectOk(fx.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      const raw = fx.raw();
+      expect(raw.prepare(`SELECT COUNT(*) AS n FROM hq_safe_mode_latch`).get()).toEqual({ n: 1 });
+      for (const statement of [
+        `UPDATE hq_safe_mode_latch SET engaged = 0`,
+        `DELETE FROM hq_safe_mode_latch`,
+      ]) {
+        expect(() => raw.exec(statement), statement).toThrow(/append-only/);
+      }
+      expect(fx.reopen('process-two').ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+      // The census sees the latch table's guards, so dropping one is a finding
+      // rather than a silent way to make the latch erasable.
+      expect(missingImmutabilityGuards(raw)).toEqual([]);
+      raw.exec('DROP TRIGGER trg_hq_safe_mode_latch_no_erase');
+      expect(missingImmutabilityGuards(raw)).toEqual(['trg_hq_safe_mode_latch_no_erase']);
+    } finally {
       fx.cleanup();
     }
   });

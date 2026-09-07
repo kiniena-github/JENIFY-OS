@@ -54,7 +54,7 @@ import { createHash } from 'node:crypto';
 import type { HqDatabase } from '../store/db.js';
 import { canonicalJson } from '../operator/approvals.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
-import { isHqIntegrityFinding } from '../store/integrity.js';
+import { isHqIntegrityFinding, type HqIntegrityFinding, type HqSafeModeLatch } from '../store/integrity.js';
 import {
   ACTION_RECONCILE_DECISIONS,
   isActionReconcileDecision,
@@ -433,6 +433,35 @@ CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_backups_no_replace_unique
 BEFORE INSERT ON hq_reliability_backups
 WHEN EXISTS (SELECT 1 FROM hq_reliability_backups WHERE record_key = NEW.record_key)
 BEGIN SELECT RAISE(ABORT, 'hq_reliability_backups is append-only (unique record_key already held)'); END;
+
+-- The DURABLE SAFE-MODE LATCH (Wave 5 High 2). An append-only history of
+-- engagements and clearings; the LAST row is the standing verdict. It exists
+-- because the latch used to be a private field recomputed at every
+-- construction from the cheap structural pass, so an evidence_chain_broken
+-- engagement -- which only a FULL assessment can even find -- evaporated at
+-- the next process start with the chain still broken, while
+-- SAFE_MODE_STATEMENT told the Founder and the unauthenticated snapshot that
+-- safe mode "is never cleared by a boot".
+CREATE TABLE IF NOT EXISTS hq_safe_mode_latch (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  engaged INTEGER NOT NULL,
+  findings TEXT NOT NULL,
+  depth TEXT NOT NULL,
+  at TEXT NOT NULL,
+  process_id TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS trg_hq_safe_mode_latch_no_rewrite
+BEFORE UPDATE ON hq_safe_mode_latch
+BEGIN SELECT RAISE(ABORT, 'hq_safe_mode_latch is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_safe_mode_latch_no_erase
+BEFORE DELETE ON hq_safe_mode_latch
+BEGIN SELECT RAISE(ABORT, 'hq_safe_mode_latch is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_safe_mode_latch_no_replace
+BEFORE INSERT ON hq_safe_mode_latch
+WHEN EXISTS (SELECT 1 FROM hq_safe_mode_latch WHERE id = NEW.id)
+  OR (TYPEOF(NEW.seq) = 'integer' AND EXISTS (SELECT 1 FROM hq_safe_mode_latch WHERE seq = NEW.seq))
+BEGIN SELECT RAISE(ABORT, 'hq_safe_mode_latch is append-only'); END;
 `;
 
 /**
@@ -673,6 +702,81 @@ export function loadRunEvents(db: HqDatabase, runId: string): RunEventRow[] {
       .prepare(`SELECT * FROM hq_reliability_run_events WHERE run_id = ? ORDER BY seq`)
       .all(runId) as Record<string, unknown>[]
   ).map(rowToRunEvent);
+}
+
+/* ------------------------------------------------------------------ */
+/* The durable safe-mode latch                                         */
+/* ------------------------------------------------------------------ */
+
+/** True when this file carries the latch table — observation, never migration. */
+export function safeModeLatchSchemaPresent(db: HqDatabase): boolean {
+  return (
+    db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'hq_safe_mode_latch'`)
+      .get() !== undefined
+  );
+}
+
+/**
+ * The STANDING latch: the last row appended, read back through the closed
+ * finding vocabulary.
+ *
+ * Fail closed on every field it cannot read. An `engaged` column that is not
+ * exactly 0 reads as engaged, because a latch row nobody can interpret is not
+ * evidence that HQ is healthy; a depth outside the vocabulary reads as
+ * `structural`, the weaker claim; a finding outside the vocabulary is dropped
+ * from the list rather than carried, because the list is published as counts
+ * keyed by that vocabulary. The table is append-only, so a raw writer can
+ * append a row here — it can add an engagement it cannot take one away, which
+ * is the direction this whole mechanism is supposed to fail in.
+ */
+export function readSafeModeLatch(db: HqDatabase): HqSafeModeLatch | null {
+  if (!safeModeLatchSchemaPresent(db)) return null;
+  const row = db.prepare(`SELECT * FROM hq_safe_mode_latch ORDER BY seq DESC LIMIT 1`).get() as
+    | Record<string, unknown>
+    | undefined;
+  if (!row) return null;
+  let findings: HqIntegrityFinding[] = [];
+  try {
+    const parsed: unknown = JSON.parse(String(row.findings ?? '[]'));
+    if (Array.isArray(parsed)) findings = parsed.filter(isHqIntegrityFinding);
+  } catch {
+    findings = [];
+  }
+  const depth = row.depth === 'full' ? 'full' : 'structural';
+  return {
+    engaged: Number(row.engaged) !== 0,
+    findings,
+    depth,
+    at: typeof row.at === 'string' ? row.at : '',
+    processId: typeof row.process_id === 'string' ? row.process_id : '',
+  };
+}
+
+/**
+ * Append one latch row. INSERT-only, like every other Phase 13 write.
+ *
+ * Deliberately unconditional: the caller decides whether the transition is
+ * worth recording, and a repeated engagement is a legitimate thing to have in
+ * the history. A CLEAR is only ever appended by `assessHqIntegrity` after a
+ * FULL assessment found nothing blocking — there is no other caller, no force
+ * flag and no acknowledgement path.
+ */
+export function appendSafeModeLatch(
+  db: HqDatabase,
+  input: { id: string; engaged: boolean; findings: readonly string[]; depth: 'structural' | 'full'; at: string; processId: string },
+): void {
+  db.prepare(
+    `INSERT INTO hq_safe_mode_latch (id, engaged, findings, depth, at, process_id)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    input.id,
+    input.engaged ? 1 : 0,
+    JSON.stringify(input.findings.filter(isHqIntegrityFinding)),
+    input.depth,
+    input.at,
+    input.processId,
+  );
 }
 
 export function loadBackupRecords(db: HqDatabase): BackupRow[] {

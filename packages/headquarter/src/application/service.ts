@@ -550,9 +550,12 @@ import {
   RUN_READ_LIMIT,
   RUN_RECONCILE_DECISIONS,
   RUN_RETRY_STATEMENT,
+  readSafeModeLatch,
+  safeModeLatchSchemaPresent,
   backupRecordKey,
   backupRowToView,
   classifyInterruptedRun,
+  appendSafeModeLatch,
   deriveRunRecord,
   emptyReliabilitySnapshot,
   ensureReliabilitySchema,
@@ -695,6 +698,7 @@ import {
 import {
   INTEGRITY_DEPTH_STATEMENT,
   SAFE_MODE_STATEMENT,
+  applySafeModeLatch,
   fullIntegrity,
   missingImmutabilityGuards,
   structuralIntegrity,
@@ -2272,6 +2276,19 @@ export class HeadquarterOperations {
    * re-derives its own precondition on every write is a guard whose cost grows
    * with the write rate, and one an attacker can time. Clearing it takes a
    * fresh assessment that finds nothing blocking.
+   *
+   * The engagement is DURABLE (Wave 5 High 2). It used to live only here, in a
+   * private field rebuilt at every construction from the cheap structural
+   * pass — which never runs the evidence-chain verification — so an
+   * `evidence_chain_broken` engagement evaporated at the next process start
+   * with the chain still broken, and an `append_only_guard_missing` one
+   * survived exactly one boot before `ensure*Schema` re-created the trigger.
+   * Meanwhile `SAFE_MODE_STATEMENT`, which crosses to the Founder browser and
+   * to `hq-snapshot.json`, said safe mode is never cleared by a boot. It is
+   * now written to `hq_safe_mode_latch` (append-only, INSERT-only, trio-
+   * guarded and in the integrity census) and read back at construction, so the
+   * statement is true: a boot can only ADD an engagement, and only a full
+   * assessment that finds nothing blocking clears one.
    */
   #integrityReport: HqIntegrityReport;
 
@@ -2498,10 +2515,36 @@ export class HeadquarterOperations {
     this.#processIdentity = options.processIdentity?.trim() || HQ_PROCESS_IDENTITY;
     // The cheap half, at every construction. See the field's own note for why
     // the expensive half is an explicit act instead.
-    this.#integrityReport = structuralIntegrity(db, {
+    const structural = structuralIntegrity(db, {
       guardsMissingAsFound,
       reliabilitySchemaPresent: this.#reliabilityStorePresent,
     });
+    // ENGAGE first, then overlay (Wave 5 High 2). A boot that finds something
+    // blocking writes the engagement down before it acts on it, so the next
+    // process inherits the verdict instead of re-deriving a cheaper one. A
+    // read-only handle — the `hq:snapshot` path — writes nothing and simply
+    // reports the latch it finds, which is the honest answer for a handle that
+    // promised not to write.
+    const latchPresent = !db.readonly && safeModeLatchSchemaPresent(db);
+    const standing = latchPresent ? readSafeModeLatch(db) : null;
+    if (structural.safeMode && latchPresent && !standing?.engaged) {
+      appendSafeModeLatch(db, {
+        id: `safemode-${uuid()}`,
+        engaged: true,
+        findings: structural.observations
+          .filter((observation) => observation.blocking)
+          .map((observation) => observation.finding),
+        depth: structural.depth,
+        at: nowIso(),
+        processId: this.#processIdentity,
+      });
+    }
+    this.#integrityReport = applySafeModeLatch(
+      structural,
+      // Re-read, so the row just appended is the one that is overlaid and a
+      // read-only handle still sees whatever the file holds.
+      safeModeLatchSchemaPresent(db) ? readSafeModeLatch(db) : null,
+    );
     this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
     // Company memory (Phase 5, issue #265): the issue-#120 store, finally
@@ -7860,6 +7903,28 @@ export class HeadquarterOperations {
       verifyEvidenceChain: this.#verifyEvidenceChainFromStore,
       reliabilitySchemaPresent: this.#reliabilityStorePresent,
     });
+    // The DURABLE half (Wave 5 High 2). This is the only path that may append
+    // a CLEAR, and it may do so only because a FULL assessment — the one that
+    // actually verifies the evidence chain — found nothing blocking. There is
+    // still no override, no force flag and no acknowledgement: `report` is
+    // whatever the file says, and the latch simply follows it.
+    const latchPresent = !this.#db.readonly && safeModeLatchSchemaPresent(this.#db);
+    const standing = latchPresent ? readSafeModeLatch(this.#db) : null;
+    if (latchPresent && report.safeMode !== (standing?.engaged ?? false)) {
+      appendSafeModeLatch(this.#db, {
+        id: `safemode-${uuid()}`,
+        engaged: report.safeMode,
+        findings: report.observations
+          .filter((observation) => observation.blocking)
+          .map((observation) => observation.finding),
+        depth: report.depth,
+        at: nowIso(),
+        processId: this.#processIdentity,
+      });
+    }
+    // A fresh FULL assessment replaces the verdict outright — it is the one
+    // thing that can lower it — so no overlay is applied here. What makes that
+    // safe is that the latch was just written to agree with it.
     this.#integrityReport = report;
     this.#requirePrivilegedQueue().appendEvidence({
       actor: input.requestedBy,
@@ -7868,6 +7933,7 @@ export class HeadquarterOperations {
         depth: report.depth,
         safeMode: report.safeMode,
         safeModeChanged: before !== report.safeMode,
+        latchPersisted: latchPresent,
         findings: report.observations.map((observation) => observation.finding),
         executable: false,
       },
