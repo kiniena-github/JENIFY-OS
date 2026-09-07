@@ -237,8 +237,18 @@ call, with no raw SQL — the same fail-open the wave's own
 
 `#entriesForScope` now derives mission and project membership from
 `hq_mission_plan_items` per entry, which is the canonical-truth answer rather
-than a denormalized column that can only hold one of N. The stored `mission_id`
-and `project_id` remain recorded attribution and measure nothing. The `provider`
+than a denormalized column that can only hold one of N. **The claim that
+followed here — that the stored `mission_id` and `project_id` "remain recorded
+attribution and measure nothing" — was FALSE, and is corrected in the fourth
+round (Medium M5).** They measured `intelligenceAnalytics()`, which is served on
+`/api/hq/control/intelligence`: `analytics.cost.byMission` and `byProject`
+folded exactly those one-of-N columns, so which mission a spend was attributed
+to flipped on uuid sort order (six runs, one task linked to two missions, one
+5000 spend: four runs attributed 100% to A and 0 to B, two the reverse). Both
+the ceilings and the analytics now read canonical membership UNION the recorded
+attribution — the union, because the derivation answers "every mission this task
+belongs to NOW" and the column answers "the mission this spend was filed under",
+which no later relinking can take away. The `provider`
 scope is derived the same way, from the task's canonical BINDING rather than
 from the caller-supplied column — which is what closes the mirror-image defect
 (Medium B5): spend from an UNBOUND task could be filed against any provider id
@@ -588,10 +598,14 @@ entry in ONE reservation.
 | `npm run build` | all workspaces built; web initial JS 215.66 kB / 69.22 kB gzip (unchanged) |
 
 Baseline after Phase 13 was 157 files / 2917 tests; the accepted base was 152 /
-2810. The four Phase 14 test files plus `intelligence-durability.test.ts` and
-`intelligence-attribution.test.ts` now hold 126 tests. (`c9ddecc`'s claim of
-"109 tests across four new files" was 111 at that head and is corrected here
-rather than left standing — Wave 5, LOW B-9.)
+2810. (`c9ddecc`'s claim of "109 tests across four new files" was 111 at that
+head and is corrected here rather than left standing — Wave 5, LOW B-9.)
+
+**The count above said 126 and was stale by two rounds (Low L4).** Counted at
+the fourth-round head, the five Phase 14 test files hold **153**:
+`intelligence-core` 52, `intelligence-authority` 52, `intelligence-surfaces` 17,
+`intelligence-durability` 7, `intelligence-attribution` 25. Numbers on this page
+are now recorded from a run rather than carried forward.
 The three skipped tests under `packages/server` are pre-existing `it.skip` GAP
 markers, untouched — nothing under `packages/server`, `packages/web`,
 `packages/shared` or `packages/config-mesob` was changed.
@@ -684,11 +698,19 @@ markers, untouched — nothing under `packages/server`, `packages/web`,
   It appears on the proposal and on the escalation; no HQ path branches on it.
   Carried honestly rather than removed, and carried honestly rather than
   described as a gate.
-- **Escalation reuses the PRIOR decision's stored `requiredReviewTier` and
-  `floorTier`** rather than re-deriving them from the task's capability as it
-  stands now. It fails upward only — an escalation moves strictly up the tier
-  order — so a capability that has since been made RISKIER is not re-checked
-  against the new floor.
+- ~~**Escalation reuses the PRIOR decision's stored `requiredReviewTier` and
+  `floorTier`** rather than re-deriving them … a capability that has since been
+  made RISKIER is not re-checked against the new floor.~~ — **this states the
+  OPPOSITE of the code and is corrected in the fourth round (Low L1).** At this
+  head `escalateIntelligenceDecision` resolves the prior decision through
+  `deriveDecisionRecord`, which reads the canonical risk class from
+  `op_tasks`/`op_capabilities` unconditionally and takes
+  `maxRequiredReviewTier(row.requiredReviewTier, canonicalReview)` — the
+  STRONGER of the stored value and the freshly derived one. A capability made
+  riskier since IS re-checked. The escalation is also evaluated against
+  `#governingBudgetEvaluation(prior.taskId)`, the same derived most-restrictive
+  answer the original was bound by, rather than the deployment baseline. The
+  false statement was in the safe direction and understated the code.
 - **`intelligenceAnalytics()` is unbounded** while its four neighbours on the
   same control response are page-bounded: `provablyAvoidable.decisionIds` is
   uncapped and four fold arrays are unbounded. It is Founder-gated, so this is
@@ -787,10 +809,17 @@ such an adapter would call.
    import and call them — which is legitimate, because the raw adapters are
    what the guard is tested against. That statement is interpolated into
    `statement.note` and reaches the browser as an HQ assertion, so it was
-   narrowed to what is enforced: every adapter the RESOLVER hands out is
-   guarded, the wrapping is done by the resolver rather than by the caller, and
-   the raw objects are exported for testing and are not wrapped in themselves.
-   The substantive guard is unchanged and sound.
+   narrowed to what is enforced. **The sentence that stood here — "the raw
+   objects are exported for testing and are not wrapped in themselves" — was
+   left in the PRESENT tense after the code stopped making it true, and it
+   contradicted both `RETRIEVAL_GUARD_STATEMENT` and two later passages of this
+   page. It is corrected in the fourth round (Low L3).** At this head the raw
+   adapters are module-private (`RAW_LEXICAL_RETRIEVAL_ADAPTER`,
+   `RAW_SEMANTIC_RETRIEVAL_ADAPTERS`), every exported binding is wrapped AT
+   DECLARATION, and — since the fourth round closed Medium M9 —
+   `LEXICAL_RETRIEVAL_ADAPTER` is frozen too, so the wrapper cannot be replaced
+   in place. The substantive guard is unchanged and sound; the FACADE scan
+   remains the stated real guarantee.
 2. **At the facade.** `searchCompany` and `askJenify` scan `text`, `project`,
    `tag` and `question` on the way in and return a stated `invalid_input`
    refusal, so an in-process caller gets a good error instead of an exception
@@ -1259,3 +1288,42 @@ the canonical uppercase-distinct set makes impossible today and a future set
 would have to preserve; and the credential scan remains SHAPE-based — folding
 away invisible characters widens what it catches and does not make it a
 data-loss-prevention filter.
+
+
+## The FOURTH correction round: what three independent hostile reviews reproduced
+
+Three read-only reviewers re-read the third-round head (`22680ba`) by EXECUTION.
+The Phase 14 half of what they returned is below; the Phase 13 half, the
+cross-cutting findings and the full verification table are in
+`PHASE_13_ADVANCED_RELIABILITY.md`.
+
+| Finding | What was reproduced | What changed |
+|---|---|---|
+| **HIGH H2** — an exhausted budget ceiling could be nullified: `blocked, observed 5000` became `within_ceiling, observed 0`, and the refused write then succeeded | The previous round moved ceiling measurement off the append-only cost ledger's own columns onto three MUTABLE, UNCENSUSED tables: `hq_mission_plan_items.mission_id`, `hq_missions` (joined at `service.ts`) and `op_tasks.payload`. The hardening guarded `DELETE` and a `task_id` relink and nothing else. Three routes: **(a)** a principal with `originateCapabilities: ['hq.mission_command']`, no approval authority and no `hq.intelligence_command`, calling `assignMissionToProject({projectId: null})` — a supported facade call, no raw SQL; **(b)** `UPDATE hq_mission_plan_items SET mission_id` (the `no_relink` guard is declared `BEFORE UPDATE OF task_id`), `UPDATE hq_missions SET project_id = NULL`, `DELETE FROM hq_missions`; **(c)** `UPDATE op_tasks SET payload`. Nothing in the census or safe mode fired on any of it. The reviewer separated the halves by re-running against a reverted copy: the ENFORCEMENT drop-out was pre-existing; what this wave ADDED was that `observed` collapses to 0, removing the last place a Founder could see the spend the ceiling was exhausted by. | One rule closes all three: **canonical membership UNION the attribution HQ itself recorded**. `mission_id`, `project_id` and a new `provider_bound` flag are derived by HQ at record time from canonical truth — no caller supplies one — and the rows are append-only, so the union is monotone and unforgeable. It is applied identically to `#entriesForScope` (the observed figure) and `#governingBudgetScopes` (which policies bind), so the pre-existing enforcement half is closed with the new one rather than beside it. `provider_bound` takes the provider ceiling off `op_tasks.payload` entirely for work that already happened. Engine guards for the raw routes: `trg_hq_mission_plan_items_no_remission`, and `trg_hq_missions_no_erase` / `_no_replace` with `hq_missions` joining `ENGINE_IMMUTABLE_TABLES` under a reduced base. |
+| **HIGH H3** — one accepted write permanently bricked BOTH new Founder read routes | `openRun` and `recordIntelligenceDecision` scanned their labels with the weak `api_key: value` heuristic while `control-api.ts` applies the strict, shape-based `assertBrowserSafe` to every response. `sk-…`, `ghp_…`, a PEM header and `Bearer …` were all STORED; the rows are append-only; `GET /api/control/reliability` and `GET /api/control/intelligence` then answered `500 {"code":"internal"}` on every subsequent read, forever, with no DELETE or UPDATE able to undo it. | Every facade write that stores caller text goes through one function, `assertNoCredentialShape`, which is the SAME `assertBrowserSafe` the read boundary uses — 29 call sites. Any text a write accepts and a read refuses is a permanent outage waiting to be typed, so the asymmetry is closed rather than the two labels patched. The two refusal messages (Low L2) are corrected with it: they claimed shape detection the weak check did not perform. |
+| **MEDIUM M5** — `analytics.cost.byMission`/`byProject` rested on the one-of-N stored column | Six runs, one task linked to two missions, one 5000 spend: four runs attributed 100% to mission A and 0 to B; two the reverse. This page claimed the stored columns "measure nothing"; they measured `intelligenceAnalytics()`, served on `/api/hq/control/intelligence`. | Folded from the same union the ceilings use. A task linked to two missions counts IN FULL under each, because HQ has no basis for a split and does not invent one. `summarizeIntelligenceAnalytics` takes the canonical derivation as a REQUIRED input, so a missing one cannot read clean. |
+| **MEDIUM M6** — a claim-holding worker poisoned the Founder's spend-by-provider report | `byProvider` folded the caller-declared `row.providerId` that the ceiling path had already stopped trusting: `[{"id":"openai","knownAmountMinorUnits":999999}]` went out for work HQ has no canonical statement ever ran there, while the ceiling correctly read `observed 0`. Two surfaces over one ledger, disagreeing about the same spend. | Folded on the binding HQ vouched for (`provider_bound`). An amount HQ cannot attribute lands in a categorical `unattributed` bucket rather than being credited to whoever the worker named. |
+
+### What the fourth round adds to Phase 14's NOT-fixed list
+
+- **A cost entry that HQ could not attribute to a provider is reported as
+  `unattributed` rather than dropped.** The amount is real and still counts
+  toward the deployment total; what HQ refuses to do is name a provider for it.
+  A reader who wants per-provider spend for such work has to bind the task
+  first.
+- **An entry linked to two missions counts in full under BOTH.** The sum of
+  `byMission` can therefore exceed the sum of `byCurrency`. That is the honest
+  reading — each mission's ceiling really is measured against the whole spend of
+  the work linked to it — and it is stated on the fold rather than smoothed over
+  by an invented split.
+- **`op_tasks.payload` remains mutable and uncensused**, and the provider
+  ceiling no longer depends on it for work that already happened. What still
+  depends on the live payload is which provider scope governs a NEW decision on
+  a task that has not yet recorded any spend. A write-once guard on the column
+  was implemented and withdrawn — see the Phase 13 document for why.
+- **A MODEL-scoped ceiling still does not govern a decision write**, unchanged:
+  nothing in canonical truth binds a task to a model, so `byModel` stays on the
+  entry's own column and a model ceiling is readable but not binding.
+- **A raw appender can still widen a budget by appending a higher-version row**,
+  and can still understate complexity, context size and work kind on a forged
+  decision row. Both unchanged from the third round.
