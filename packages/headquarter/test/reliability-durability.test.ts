@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { expectOk } from './application.fixture.js';
 import { fileFixture } from './reliability.fixture.js';
@@ -29,6 +29,7 @@ import {
   structuralIntegrity,
   verifyHqBackupFile,
 } from '../src/store/integrity.js';
+import { verifyEvidenceChain } from '../src/operator/evidence.js';
 import { reliabilitySchemaPresent } from '../src/application/reliability-command.js';
 import { HeadquarterOperations } from '../src/application/service.js';
 
@@ -228,7 +229,14 @@ describe('the run ledger is immutable BY ENGINE, not by this module’s discipli
         idempotencyKey: 'a-deliberately-fresh-one',
       });
       expect(second.ok).toBe(false);
-      expect(!second.ok && second.error.code).toBe('run_attempt_refused');
+      // `run_state_conflict` since the three-lane merge, which added an EARLIER
+      // `openRun` guard against a task carrying an unreconciled run; before it,
+      // the in-reservation guard answered `run_attempt_refused`. Same
+      // categorical refusal, same standing run named, and the property this
+      // test pins — a raw `outcome_recorded` does not lift the guard — is
+      // unchanged.
+      expect(!second.ok && second.error.code).toBe('run_state_conflict');
+      expect(!second.ok && second.error.details!.runId).toBe(run.id);
     } finally {
       fx.cleanup();
     }
@@ -262,6 +270,12 @@ describe('the engine-immutable inventory is checked against the live schema, not
       .filter((name) => name.endsWith('_no_rewrite'))
       .map((name) => name.replace(/^trg_/, '').replace(/_no_rewrite$/, ''))
       .sort();
+    // Only the entries whose BASE actually includes `no_rewrite`, because the
+    // list gained one whose base is reduced: `hq_mission_plan_items` is
+    // legitimately updated and declares `requiredGuards` instead (both Wave 5
+    // correction lanes reached this, as Medium 3 and Medium 6). The
+    // whole-schema check moved to the next tests, which are strictly stronger
+    // than this one was.
     const listed = ENGINE_IMMUTABLE_TABLES.filter((entry) =>
       (entry.requiredGuards ?? REQUIRED_IMMUTABILITY_GUARDS).includes('no_rewrite'),
     )
@@ -280,6 +294,11 @@ describe('the engine-immutable inventory is checked against the live schema, not
         requiredGuards: [...entry.requiredGuards!],
       })),
     ).toEqual([{ table: 'hq_mission_plan_items', requiredGuards: ['no_erase', 'no_replace'] }]);
+    // And the one reduced-base entry is there for the stated reason, not by
+    // accident: it carries no `no_rewrite` guard at all, and it IS listed
+    // (the other lane's assertion, kept — being unlisted was the defect).
+    expect(declared).not.toContain('hq_mission_plan_items');
+    expect(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table)).toContain('hq_mission_plan_items');
     db.close();
   });
 
@@ -331,6 +350,17 @@ describe('the engine-immutable inventory is checked against the live schema, not
         .sort();
       expect(live, entry.table).toEqual([...declaredGuardsFor(entry)].sort());
     }
+    // INVERTED, and this is the half that was missing (Wave 5 review, Medium
+    // finding 6). The loop above iterates the DECLARATION, so it cannot see a
+    // guard on a table nobody listed — which is exactly how
+    // `hq_mission_plan_items`' three guards escaped the census entirely, and
+    // why the doc's "a phase that adds a guard and forgets to declare it fails
+    // there" was untrue whenever the phase also added a table. Asserting the
+    // LIVE trigger set equals the union of the declarations closes it in the
+    // direction that matters: a new guarded table is now a test failure.
+    const liveTriggers = triggers.map((row) => row.name).sort();
+    const declaredTriggers = ENGINE_IMMUTABLE_TABLES.flatMap((entry) => declaredGuardsFor(entry)).sort();
+    expect(liveTriggers).toEqual(declaredTriggers);
     db.close();
   });
 
@@ -456,9 +486,17 @@ describe('the engine-immutable inventory is checked against the live schema, not
       expect(missingImmutabilityGuards(raw)).toEqual([
         'trg_hq_reliability_run_events_no_replace_attempt',
       ]);
-      // Both depths, because the census feeds both.
+      // Both depths, because the census feeds both. The chain verifier is a
+      // REQUIRED argument on the merged `fullIntegrity` (the other correction
+      // lane's Medium 5: an absent verifier used to read as a passing chain
+      // while the report still said `depth: 'full'`), so this call supplies a
+      // real one rather than relying on the old optional parameter. The
+      // assertion is unchanged — safe mode is engaged by the census, not by
+      // the chain.
       expect(structuralIntegrity(raw).safeMode).toBe(true);
-      expect(fullIntegrity(raw).safeMode).toBe(true);
+      expect(
+        fullIntegrity(raw, { verifyEvidenceChain: () => verifyEvidenceChain(raw) }).safeMode,
+      ).toBe(true);
       expect(
         structuralIntegrity(raw).observations.map((observation) => observation.finding),
       ).toContain('append_only_guard_missing');
@@ -724,11 +762,27 @@ describe('backup verification, against real bytes on disk', () => {
     try {
       const backupPath = path.join(fx.dir, 'hq-backup.sqlite');
       await fx.db.backup(backupPath);
-      // Scribble over a page in the middle of the file: still opens, fails
-      // integrity_check.
-      const handle = fs.openSync(backupPath, 'r+');
+      // Scribble over the LAST page of the file: still opens (`sqlite_master`
+      // lives at the front), fails `integrity_check` (a page whose first byte
+      // is 0x41 is not a valid b-tree page type).
+      //
+      // Deliberately the last page rather than 2048 bytes at `size / 2`, which
+      // is what this used to do. That offset only hit a b-tree page by luck of
+      // the current schema size: adding one table to HQ moved it onto a page
+      // whose corruption `integrity_check` does not report, and the test then
+      // silently stopped testing what it says it tests. Page-aligned, at a page
+      // the front-loaded catalogue never occupies, is a choice that stays true.
       const size = fs.statSync(backupPath).size;
-      fs.writeSync(handle, Buffer.alloc(2048, 0x41), 0, 2048, Math.floor(size / 2));
+      const headerBytes = Buffer.alloc(2);
+      const headerFd = fs.openSync(backupPath, 'r');
+      fs.readSync(headerFd, headerBytes, 0, 2, 16);
+      fs.closeSync(headerFd);
+      const declared = headerBytes.readUInt16BE(0);
+      // SQLite encodes a 65536-byte page as 1 in the header.
+      const pageSize = declared === 1 ? 65536 : declared;
+      expect(size % pageSize).toBe(0);
+      const handle = fs.openSync(backupPath, 'r+');
+      fs.writeSync(handle, Buffer.alloc(pageSize, 0x41), 0, pageSize, size - pageSize);
       fs.closeSync(handle);
       const verification = verifyHqBackupFile(backupPath);
       expect(verification.verified).toBe(false);
@@ -752,97 +806,108 @@ describe('backup verification, against real bytes on disk', () => {
     }
   });
 
-  /**
-   * Wave 5 MEDIUM 5, as a real substitution rather than as an argument.
-   *
-   * The digest is taken through a held descriptor and the file is re-digested
-   * through that same descriptor afterwards — but the SQLite open is BY PATH
-   * and re-resolves it. A `rename()` between the two therefore left the digest
-   * describing inode A while `integrity_check`, `schemaTables` and `verified`
-   * described inode B, and the re-digest (reading A) agreed with itself. The
-   * comment claiming digest and verdict "provably describe one inode" was not
-   * true, and `recordVerifiedBackup` would have stored that digest as a
-   * recovery point.
-   *
-   * The swap is placed exactly where the race would put it: the moment the
-   * digest descriptor has been obtained and before anything opens the path.
-   */
-  it('refuses a candidate whose PATH was renamed onto a different inode mid-verification', () => {
-    const fx = fileFixture();
-    try {
-      const decoy = path.join(fx.dir, 'decoy.sqlite');
-      const substitute = path.join(fx.dir, 'substitute.sqlite');
-      for (const [file, extra] of [
-        [decoy, 0],
-        [substitute, 5],
-      ] as const) {
-        const db = openHqDatabase(file);
-        db.exec('CREATE TABLE IF NOT EXISTS hq_events (x TEXT)');
-        for (let i = 0; i < extra; i += 1) db.exec(`CREATE TABLE extra_${i} (x TEXT)`);
-        db.pragma('wal_checkpoint(TRUNCATE)');
-        db.close();
-        fs.rmSync(`${file}-wal`, { force: true });
-        fs.rmSync(`${file}-shm`, { force: true });
-      }
-      const decoyDigest = createHash('sha256').update(fs.readFileSync(decoy)).digest('hex');
-
-      const realOpenSync = fs.openSync;
-      let swapped = false;
-      const spy = vi
-        .spyOn(fs, 'openSync')
-        .mockImplementation(((...args: Parameters<typeof fs.openSync>) => {
-          const fd = (realOpenSync as (...a: unknown[]) => number)(...args);
-          if (!swapped && args[0] === decoy) {
-            swapped = true;
-            // The descriptor above still reads the decoy's inode; the PATH now
-            // names a different database entirely.
-            fs.renameSync(substitute, decoy);
-          }
-          return fd;
-        }) as typeof fs.openSync);
-      let verification;
-      try {
-        verification = verifyHqBackupFile(decoy);
-      } finally {
-        spy.mockRestore();
-      }
-      expect(swapped).toBe(true);
-      // Refused, rather than recorded under a digest that does not describe
-      // what was checked.
-      expect(verification.verified).toBe(false);
-      expect(verification.refusals).toEqual(['file_changed_during_verification']);
-      // The digest that WOULD have been published is the decoy's, while the
-      // verdict was reached on the substitute — which is exactly the problem.
-      expect(verification.digest).toBe(decoyDigest);
-      expect(verification.schemaTables).toBeNull();
-    } finally {
-      fx.cleanup();
-    }
-  });
-
-  it('is a pure read: verifying the LIVE database changes not one byte of it', () => {
+  it('is a pure read of the candidate, and REFUSES a database carrying a journal sidecar', () => {
     const fx = fileFixture();
     try {
       const before = fs.readFileSync(fx.dbPath);
       const verification = verifyHqBackupFile(fx.dbPath);
-      // Still a pure read — not one byte moves. But the verdict is now a
-      // REFUSAL rather than `verified: true` (Wave 5 Medium 3): a live WAL
-      // database's committed content is not all in the file that would be
-      // digested, so vouching for it would record a digest that did not pin
-      // what SQLite checked.
+      // The LIVE database is WAL-mode and carries a `-wal`, and SQLite resolves
+      // that together with the main file while the digest covers only the main
+      // file. Verifying it used to return `verified: true` — a record whose
+      // digest did not pin what was checked (Wave 5 review, High finding 3).
+      // The honest answer is a categorical refusal, and this test asserts it
+      // by name rather than asserting the old, weaker pass.
       expect(verification.verified).toBe(false);
-      expect(verification.refusals).toEqual(['file_has_uncheckpointed_wal']);
+      expect(verification.refusals).toEqual(['sidecar_journal_present']);
+      // Still a pure read: not one byte of the candidate changed, and HQ left
+      // no sidecar of its own beside it either — the previous version created
+      // `-wal`/`-shm` next to whatever it verified, by opening it with SQLite.
       expect(fs.readFileSync(fx.dbPath).equals(before)).toBe(true);
     } finally {
       fx.cleanup();
     }
   });
 
+  it('creates no sidecar beside the candidate, so verifying twice is stable', async () => {
+    const fx = fileFixture();
+    try {
+      const backupPath = path.join(fx.dir, 'hq-backup.sqlite');
+      await fx.db.backup(backupPath);
+      const first = verifyHqBackupFile(backupPath);
+      expect(first.verified).toBe(true);
+      // The whole reason the checks run against a scratch COPY: opening the
+      // candidate with SQLite creates `<path>-wal` and `<path>-shm` and leaves
+      // them there, so a verification that opened it directly would refuse its
+      // own leftovers on the next call — and would have been reading bytes its
+      // digest did not cover on this one.
+      for (const suffix of ['-wal', '-shm', '-journal']) {
+        expect(fs.existsSync(`${backupPath}${suffix}`), suffix).toBe(false);
+      }
+      const second = verifyHqBackupFile(backupPath);
+      expect(second.verified).toBe(true);
+      expect(second.digest).toBe(first.digest);
+      expect(second.schemaTables).toBe(first.schemaTables);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('does not read a -wal the digest never covered', async () => {
+    const fx = fileFixture();
+    try {
+      // The reviewer's exploit, verbatim: a genuine consolidated backup, with
+      // a `-wal` dropped beside it afterwards. It used to verify `true` with
+      // the pristine file's digest and a table count read out of the sidecar.
+      const backupPath = path.join(fx.dir, 'exploit.sqlite');
+      await fx.db.backup(backupPath);
+      const cleanDigest = verifyHqBackupFile(backupPath).digest;
+      expect(cleanDigest).toHaveLength(64);
+      fs.writeFileSync(`${backupPath}-wal`, Buffer.alloc(4096, 0x00));
+      const withSidecar = verifyHqBackupFile(backupPath);
+      expect(withSidecar.verified).toBe(false);
+      expect(withSidecar.refusals).toEqual(['sidecar_journal_present']);
+      // Nothing about the file was reported at all — not a digest that would
+      // have pinned the wrong thing, and not a table count.
+      expect(withSidecar.digest).toBeNull();
+      expect(withSidecar.schemaTables).toBeNull();
+      const refusal = fx.ops.recordVerifiedBackup({ backupPath, requestedBy: 'founder' });
+      expect(refusal.ok).toBe(false);
+      expect(!refusal.ok && refusal.error.code).toBe('backup_verification_failed');
+      expect(fx.ops.listVerifiedBackupsBounded().total).toBe(0);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('refuses a path that is absolute but not normalized, without resolving it', () => {
+    const fx = fileFixture();
+    try {
+      const sneaky = path.join(fx.dir, 'sub', '..', 'headquarter.sqlite');
+      // `path.join` normalizes, so build the unnormalized text directly.
+      const raw = `${fx.dir}/./headquarter.sqlite`;
+      expect(path.isAbsolute(raw)).toBe(true);
+      expect(verifyHqBackupFile(raw).refusals).toEqual(['path_not_normalized']);
+      expect(verifyHqBackupFile(`${fx.dir}/sub/../headquarter.sqlite`).refusals).toEqual([
+        'path_not_normalized',
+      ]);
+      // And the normalized form of the same text is a different question,
+      // answered on its own merits rather than by resolution.
+      expect(sneaky).toBe(fx.dbPath);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
   /**
-   * Wave 5 Medium 3, as the exploit that found it: two candidates carried an
-   * identical `contentDigest` and an identical recorded size while their
-   * verified table counts differed, because the difference lived entirely in
-   * an un-digested `-wal` sidecar.
+   * The other correction lane's exploit for the same finding, ported onto the
+   * surviving implementation: two candidates carried an identical
+   * `contentDigest` and an identical recorded size while their verified table
+   * counts differed, because the difference lived entirely in an un-digested
+   * `-wal` sidecar. The refusal is `sidecar_journal_present` rather than that
+   * lane's `file_has_uncheckpointed_wal` because the surviving rule is the
+   * broader one — presence, not size, is what makes the main file possibly not
+   * the whole database — and the CHECKPOINTED half of the exploit, which that
+   * lane pinned and this one did not, is kept exactly as it was written.
    */
   it('refuses a candidate whose committed content is not all in the file it would digest', () => {
     const fx = fileFixture();
@@ -857,12 +922,12 @@ describe('backup verification, against real bytes on disk', () => {
 
       const refused = verifyHqBackupFile(candidate);
       expect(refused.verified).toBe(false);
-      expect(refused.refusals).toEqual(['file_has_uncheckpointed_wal']);
+      expect(refused.refusals).toEqual(['sidecar_journal_present']);
       // No digest is published for a file HQ will not stand behind.
       expect(refused.digest).toBeNull();
 
-      // Checkpointed, the same path verifies and the digest pins what was
-      // checked.
+      // Checkpointed and closed, the same path verifies and the digest pins
+      // what was checked.
       db.pragma('wal_checkpoint(TRUNCATE)');
       db.close();
       const accepted = verifyHqBackupFile(candidate);
@@ -877,12 +942,11 @@ describe('backup verification, against real bytes on disk', () => {
   });
 
   /**
-   * Wave 5 Low. `lstat` and `O_NOFOLLOW` cover the FINAL path component only,
-   * so a symlinked PARENT directory was followed silently and the register
-   * named an alias as if it were the file that had been checked. Recorded
-   * rather than refused — see `verifyHqBackupFile` for why refusing was
-   * rejected — so the divergence is visible and the REGISTER names the file HQ
-   * actually opened.
+   * `lstat` and `O_NOFOLLOW` cover the FINAL path component only, so a
+   * symlinked PARENT directory was followed silently and the register named an
+   * alias as if it were the file that had been checked. Recorded rather than
+   * refused — see `verifyHqBackupFile` for why refusing was rejected — so the
+   * divergence is visible and the REGISTER names the file HQ actually opened.
    */
   it('records the file it actually opened when an ancestor directory is a symlink', async () => {
     const fx = fileFixture();
@@ -937,13 +1001,18 @@ describe('backup verification, against real bytes on disk', () => {
       const restoredPath = path.join(fx.dir, 'restored.sqlite');
       fs.copyFileSync(backupPath, restoredPath);
       expect(verifyHqBackupFile(restoredPath).verified).toBe(true);
+      // The restored copy is a byte-for-byte copy, and its own digest says so.
+      // Asserted BEFORE the file is opened live: opening a WAL-mode database
+      // for writing creates a `-wal` beside it, and a candidate carrying a
+      // journal sidecar is refused rather than verified (Wave 5 review, High
+      // finding 3) — an open database is not a recovery point.
+      expect(verifyHqBackupFile(restoredPath).digest).toBe(verifyHqBackupFile(backupPath).digest);
 
       const restored = openHqDatabase(restoredPath);
       const ops = new HeadquarterOperations(restored, { processIdentity: 'restored-process' });
       expect(ops.getRun(run.id)!.label).toBe('recorded before the backup');
       expect(ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
-      // The restored copy is a different file, and its own digest says so.
-      expect(verifyHqBackupFile(restoredPath).digest).toBe(verifyHqBackupFile(backupPath).digest);
+      expect(verifyHqBackupFile(restoredPath).refusals).toEqual(['sidecar_journal_present']);
       restored.close();
     } finally {
       fx.cleanup();

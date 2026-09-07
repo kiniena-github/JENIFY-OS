@@ -806,13 +806,22 @@ describe('the applicable budget scope and the spend attribution are derived, not
 
     // And a valid-but-OLD occurredAt no longer moves the entry out of today's
     // window: the window is measured on recordedAt, which HQ sets.
+    //
+    // Twenty days back rather than this lane's original `2020-01-01`: the
+    // merged implementation also carries the other lane's bound on how far
+    // `occurredAt` may sit from the clock (at most one hour ahead, thirty days
+    // behind), so a six-year-old instant is refused outright now and cannot be
+    // used to demonstrate this property. The property itself is unchanged and
+    // is what this assertion pins — a backdated entry still counts in TODAY's
+    // window, because the window reads `recorded_at`.
+    const backdated = new Date(Date.now() - 20 * 24 * 60 * 60_000).toISOString();
     expectOk(
       cost(fx, {
         provenance: 'billed',
         amountMinorUnits: 1_000_000,
         currency: 'USD',
         unitKind: 'requests',
-        occurredAt: '2020-01-01T00:00:00.000Z',
+        occurredAt: backdated,
         idempotencyKey: 'the-backdated-one',
       }),
     );
@@ -1011,12 +1020,20 @@ describe('escalation preserves canonical task identity through the facade', () =
   it('creates a second decision on the SAME task, mission and project, one tier up', () => {
     const fx = intelligenceFixture();
     fx.budget([...INTELLIGENCE_TIERS]);
-    // The mission and project are DERIVED from the canonical link, not declared
-    // (Wave 5 Medium 8), so the link has to exist for them to be carried.
-    linkTaskToMission(fx, 'mission-alpha', 'project-alpha');
+    // The mission and project are CANONICAL, not parameters. They used to be
+    // The other lane's version of this test wrote the same link with raw rows
+    // (`linkTaskToMission`, still used above) and asserted the ids on the
+    // FIRST decision as literals; those two assertions are kept below against
+    // the canonically created ids, so nothing it pinned is lost.
+    // free-text arguments written verbatim, which is what let a worker
+    // attribute its spend to a mission that does not exist or to somebody
+    // else's (Wave 5 review, High finding B-2). The identity this test is
+    // about is therefore established the way HQ actually records it — a
+    // commanded mission, a work plan item linked to the task, the mission
+    // assigned to a project — and the assertions below are strictly stronger
+    // for it: they now prove the ids came from the plan.
+    const canonical = fx.linkToCanonicalMission(fx.claim.taskId, 'alpha');
     const first = expectOk(decide(fx, { tier: 'high' })).decision;
-    expect(first.missionId).toBe('mission-alpha');
-    expect(first.projectId).toBe('project-alpha');
     const escalated = expectOk(
       fx.ops.escalateIntelligenceDecision({
         decisionId: first.id,
@@ -1026,8 +1043,10 @@ describe('escalation preserves canonical task identity through the facade', () =
       }),
     );
     expect(escalated.decision.taskId).toBe(first.taskId);
-    expect(escalated.decision.missionId).toBe('mission-alpha');
-    expect(escalated.decision.projectId).toBe('project-alpha');
+    expect(first.missionId).toBe(canonical.missionId);
+    expect(first.projectId).toBe(canonical.projectId);
+    expect(escalated.decision.missionId).toBe(canonical.missionId);
+    expect(escalated.decision.projectId).toBe(canonical.projectId);
     expect(escalated.decision.tier).toBe('critical_review');
     expect(escalated.decision.escalatedFrom).toBe(first.id);
     expect(escalated.escalation.grantsAuthority).toBe(false);

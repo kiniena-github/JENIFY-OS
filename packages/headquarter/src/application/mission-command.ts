@@ -258,7 +258,8 @@ BEGIN SELECT RAISE(ABORT, 'hq_mission_events is append-only'); END;
 --
 -- no_erase is not symmetry for its own sake. hq_mission_plan_items.task_id
 -- is the ONLY link from a task to its mission, and Phase 14 derives a task's
--- budget scope through it (HeadquarterOperations #canonicalWorkIdentity). The
+-- budget scope through it (HeadquarterOperations #canonicalTaskScopes, read by
+-- #governingBudgetScopes). The
 -- pre-existing readers check that a row EXISTS, so a delete fails those
 -- closed; the budget derivation reads the absence as "this task belongs to no
 -- mission" and fails OPEN -- one DELETE unbound a task from an exhausted

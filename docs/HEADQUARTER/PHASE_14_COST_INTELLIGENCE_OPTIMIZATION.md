@@ -192,28 +192,34 @@ moved from `refusal: no_permitted_tier` to `tier: high, budgetDecision:
 within_ceiling` by naming the other scope — or by naming a different `window`,
 since only `total` was ever consulted. No test passed the parameter at all.
 
-The parameter is gone. `#canonicalBudgetScopes` derives the set from the task:
-`deployment/total` always, plus every deployment / mission / project
-scope-and-window for which a ceiling has ACTUALLY been recorded. The mission is
-read off `hq_mission_plan_items.task_id` and the project off
-`hq_missions.project_id` — the same canonical link `proposeAction` already
-checks. `mostRestrictiveBudget` then takes the most severe decision and the
+The parameter is gone. `#governingBudgetScopes` derives the set from the task:
+`deployment/total` always, plus every deployment / mission / project / provider
+scope-and-window for which a ceiling has ACTUALLY been recorded. The missions
+are read off `hq_mission_plan_items.task_id` (ALL of them, not the first) and
+the projects off `hq_missions.project_id` — the same canonical link
+`proposeAction` already checks — and the provider off `#taskBoundProvider`.
+`combineBudgetEvaluations` then takes the most severe decision and the
 INTERSECTION of the permitted sets, so a tier is permitted only where every
-applicable ceiling permits it. Escalation evaluates the same canonical set
-rather than the deployment scope alone, so it cannot climb past a ceiling the
-first decision honoured.
+applicable ceiling permits it, and carries `governedBy`, so a reader can see
+which recorded policies actually bound the answer and where each was derived
+from. Escalation evaluates the same derived set rather than the deployment scope
+alone, so it cannot climb past a ceiling the first decision honoured.
 
 Only scopes with a RECORDED ceiling join, because `evaluateBudget` answers
-`requires_founder_decision` for a scope with no policy — folding in six silent
+`requires_founder_decision` for a scope with no policy — folding in silent
 scopes would make every answer a Founder decision and every permitted set the
-local tier alone, which is noise rather than caution.
+local tier alone, which is noise rather than caution. An EMPTY set is still not
+"no restrictions": it answers `requires_founder_decision` with the free local
+tier alone.
 
-**`provider` and `model` scopes are deliberately absent from that set, and
-that is a stated limitation.** A cost entry's `providerId` is a
-caller-declared fact about who was billed, in a different vocabulary from the
-canonical execution binding, so HQ cannot attribute it canonically. A provider
-or model ceiling is REPORTED by `intelligenceBudgetDecision` and does not gate
-a routing decision.
+**`model` scopes are deliberately absent from that set, and that is a stated
+limitation.** Nothing in canonical truth binds a task to a MODEL, so HQ has no
+honest derivation for one and does not invent it: a model ceiling is REPORTED by
+`intelligenceBudgetDecision` and does not gate a routing decision. The
+`provider` scope is NOT in that position — a cost entry whose `providerId`
+contradicts `#taskBoundProvider` is refused as `provider_binding_mismatch`, so
+the cost ledger's provider vocabulary and the canonical execution binding are
+the same vocabulary by enforcement, and a Founder's provider ceiling binds.
 
 ### The law: a spend is attributed to canonical work, not to a declaration
 
@@ -224,10 +230,13 @@ A 5000-character `missionId` and a `projectId` of `<script>x</script>` were
 both accepted — and, worse, OMITTING `missionId` hid a spend from an exhausted
 mission ceiling, which made three of the five `BUDGET_SCOPES` meaningless.
 
-Both are now DERIVED by `#canonicalWorkIdentity` and are no longer parameters:
+Both are now DERIVED by `#canonicalTaskScopes` and are no longer parameters:
 one canonical attribution decision serving this and the scope rule above.
 `decisionId` on a cost entry must name a decision that exists AND belongs to
-the same task — and, since the second correction round (LOW 8), must be a
+the same task, and a `providerId` contradicting the canonical binding is refused
+as `provider_binding_mismatch`.
+
+`decisionId` must additionally, since the second correction round (LOW 8), be a
 bounded lowercase slug that is shape-checked before any store read, with the
 refusal carrying the code rather than echoing the caller's text. It was the one
 id a caller still passes into this phase, and it was left unbounded and
@@ -260,6 +269,18 @@ table is now IN the census with a reduced declared base
 so its guards can no longer go missing quietly; being outside the census
 entirely was the second half of the defect.
 
+The other correction lane reached the same table from the other side, and its
+exploit is closed by the same entry: with the table unlisted, dropping
+`trg_hq_mission_plan_items_no_replace` let an `INSERT OR REPLACE` rewrite a plan
+item's task binding with no `append_only_guard_missing` finding at all. Its
+mechanism for putting the table into the census — a boolean
+`holdsUniversalTrio: false` — was dropped in the reconciliation in favour of
+`requiredGuards`, because a boolean cannot express a REQUIRED `no_erase` and the
+`no_erase` guard is the half that closes the fail-open above. Its inverted
+live-schema test (the live trigger set EQUALS the union of the declarations, so
+a guarded table nobody listed is a test failure) is kept and now binds this
+entry.
+
 ### The law: the window is measured on the instant HQ stamped
 
 Wave 5 High 3. `occurredAt` was caller-supplied and the only check was
@@ -269,9 +290,16 @@ ceiling of 100 with 90 observed, an entry declaring
 `occurredAt: "0000-00-00T00:00:00Z"` with an amount of 1,000,000 was ACCEPTED
 and the ceiling still reported `within_ceiling`.
 
-Three changes together: the instant must `Date.parse`; it may not be in the
-future; and the window filter measures `recorded_at`, which HQ sets.
-`occurredAt` survives as reported-only metadata, which is what it always was.
+Three changes together: the instant must `Date.parse`; it must sit inside a
+BOUNDED interval around `nowIso()` — at most one hour ahead, to absorb ordinary
+clock skew, and thirty days behind — and the window filter measures
+`recorded_at`, which HQ sets. `occurredAt` survives as reported-only metadata,
+which is what it always was. (Two correction lanes fixed this: one with "must
+parse, may not be in the future", one with the bounded interval. The interval
+survives because it closes both directions, and the future half keeps the other
+lane's refusal by name. The consequence is stated rather than hidden: a genuine
+observation older than thirty days can no longer be recorded at all, and a lane
+importing historical spend would need a Founder decision about that bound.)
 **What a RAW WRITER can still do to a budget, stated rather than left for a
 reader to find** (recorded by the Wave 5 review; not a defect, and not
 previously written down). `hq_intel_budgets` is append-only and versioned, and
@@ -321,7 +349,15 @@ recorded under is the same claim.
   computes for the characteristics recorded ON it, it was not an escalation, no
   reviewer tier was required, and its recorded result is `quality_met`. The
   floor is RECOMPUTED from the characteristics rather than trusted from the
-  stored column, so a forged append can neither hide nor manufacture a finding.
+  stored column. **Stated exactly** (Wave 5, MEDIUM B-3): recomputing from
+  `decision.characteristics` RELOCATES the forgery rather than closing it —
+  `characteristics` is a stored column on the same append-only table. What
+  closes it is upstream: `deriveDecisionRecord` re-derives the `riskClass` half
+  from `op_tasks`/`op_capabilities`, and the review requirement is the STRONGER
+  of the stored one and the one the canonical risk class imposes, so a forged
+  NULL cannot drop it. The remaining terms — complexity, context size, work kind
+  — are descriptions of the work HQ has no canonical source for, and a forged
+  row can still understate those. That is recorded debt, not a closed hole.
   It is a statement about HQ's own policy, not a claim about what a cheaper
   model would have produced — HQ never ran one, and the statement on the view
   says so.
@@ -344,7 +380,12 @@ authority: the `coo` principal holds the first and is refused the second.
 | Read | Reads through | Decides | Status |
 |---|---|---|---|
 | the claim on the referenced task | `#runClaimFact` — a direct `#db` SELECT of `op_tasks`, deliberately NOT `queue.get()` | whether any decision, outcome or cost row is written | canonical. Pinned against a patch on instance and prototype. |
-| the CURRENT budget ceiling and permitted tier set | `#budgetFromStore` → `loadBudgets` off `#db`, then `latestBudgetFor` | whether a tier may be recorded at all, and which ones | canonical. Pinned: a forged `intelligenceBudgetDecision`/`listIntelligenceBudgetsBounded` lies publicly and buys no write, on instance, prototype and a later-constructed facade. |
+| WHICH budget policies govern a piece of work | `#governingBudgetScopes` — the deployment baseline, plus the task's canonical missions and projects off `hq_mission_plan_items`/`hq_missions`, plus `#taskBoundProvider`, all through `#db` | which ceilings a decision write is enforced against at all | canonical **since the Wave 5 correction of HIGH B-1**; it was previously an optional `budgetScope` ARGUMENT taken verbatim, so the caller chose the policy governing its own write. |
+| the CURRENT budget ceiling and permitted tier set | `#budgetFromStore` → `loadBudgets` off `#db`, then `latestBudgetFor`, folded by `combineBudgetEvaluations` | whether a tier may be recorded at all, and which ones | canonical. The most restrictive DECISION and the INTERSECTION of permitted tiers stand. Pinned: a forged `intelligenceBudgetDecision`/`listIntelligenceBudgetsBounded` lies publicly and buys no write, on instance, prototype and a later-constructed facade. |
+| a STORED budget row's scope, window and ceiling | `rowToBudget`, fail-closed | whether a row governs anything at all | canonical **since HIGH B-4**; a scope or window outside the vocabulary reads as `unrecognized` and matches nothing, and a ceiling that is not a whole non-negative number reads as `null` and answers `requires_founder_decision`. It used to coerce them to `deployment`/`total` and `NaN`. |
+| the mission and project a decision or cost entry is ATTRIBUTED to | `#canonicalTaskScopes` — `hq_mission_plan_items` joined to `hq_missions`, through `#db` | whose ceiling the spend counts against | canonical **since HIGH B-2**; both were caller parameters written verbatim, and neither was checked for existence. |
+| the provider a COST ENTRY may name | `#taskBoundProvider`, compared against the supplied `providerId` | whether the entry is recorded at all | canonical. A contradiction is `provider_binding_mismatch`, the same refusal the queue's claim/start enforcement gives. |
+| a decision's `boundProvider` and risk class, at READ time | `deriveDecisionRecord`'s `canonical` resolver — `#taskBoundProvider` and `riskClassForRouting(#capabilityFromStore(...))` | what the Founder route publishes, and what the avoidable-spend derivation computes its floor from | canonical **since MEDIUM B-3**; both were stored columns on an append-only table read back verbatim. |
 | the recorded cost entries in the window | `#costEntriesFromStore` / `#entriesForScope` | whether the ceiling is reached, and whether HQ can prove it | canonical, and fail-closed on an unknown amount. |
 | the task's canonical RISK CLASS | `#capabilityFromStore` (the existing `#private` closure), never `queue.capabilities` | the floor and the review requirement | canonical. The fail-closed default for an UNREADABLE row is `riskClassForRouting`, and it is now asserted directly — it was listed here as verified while nothing reached it (Wave 5 LOW 5). |
 | the prior decision, for an escalation | `#decisionRecordFromStore` — `loadDecision`/`loadDecisionOutcomes` off `#db` | the canonical identity the escalation carries, and the tier it moves from | canonical. Pinned: a forged `getIntelligenceDecision` buys no escalation. |
@@ -484,7 +525,10 @@ entry in ONE reservation.
 | `npm run build` | all workspaces built; web initial JS 215.66 kB / 69.22 kB gzip (unchanged) |
 
 Baseline after Phase 13 was 157 files / 2917 tests; the accepted base was 152 /
-2810. Phase 14 adds 109 tests across four new files plus one shared fixture.
+2810. The four Phase 14 test files plus `intelligence-durability.test.ts` and
+`intelligence-attribution.test.ts` now hold 126 tests. (`c9ddecc`'s claim of
+"109 tests across four new files" was 111 at that head and is corrected here
+rather than left standing — Wave 5, LOW B-9.)
 The three skipped tests under `packages/server` are pre-existing `it.skip` GAP
 markers, untouched — nothing under `packages/server`, `packages/web`,
 `packages/shared` or `packages/config-mesob` was changed.
@@ -499,9 +543,12 @@ markers, untouched — nothing under `packages/server`, `packages/web`,
   through the Founder-gated route, through the snapshot, and across a real
   restart over a real file: `null`, never `0`.
 - **A budget ceiling blocks a paid act or requires a decision.** A ceiling
-  reached refuses the decision write with `budget_ceiling_blocks`; one unknown
-  entry anywhere in the window turns `within_ceiling` into
-  `requires_founder_decision`.
+  reached refuses the decision write with `budget_ceiling_blocks` **when a tier
+  is explicitly supplied**; with the tier omitted the proposal simply names no
+  admissible tier and the refusal is `intelligence_routing_refused`. Both are
+  refusals and neither records anything, but they are different codes and this
+  line used to name only the first (Wave 5, LOW B-9). One unknown entry anywhere
+  in the window turns `within_ceiling` into `requires_founder_decision`.
 - **Escalation preserves canonical task identity.** Same task, mission and
   project; the method has no parameter that could change any of them.
 - **A cheaper tier cannot bypass a required reviewer tier.** `low_cost` on an
@@ -562,11 +609,14 @@ markers, untouched — nothing under `packages/server`, `packages/web`,
 - **`hq.intelligence_command` is not registered automatically.** A deployment
   that wants the two Founder acts calls
   `registerIntelligenceCommandCapability`; until then both fail closed.
-- **`provider` and `model` budget scopes are REPORTED, not enforced at the
-  routing gate.** A cost entry's `providerId` is a caller-declared fact about
-  who was billed, in a different vocabulary from the canonical execution
-  binding, so HQ cannot attribute it canonically and will not pretend to. See
-  "WHICH ceiling applies is derived" above.
+- **`model` budget scopes are REPORTED, not enforced at the routing gate.**
+  Nothing in canonical truth binds a task to a model, so HQ has no honest
+  derivation for a model scope and does not invent one. The `provider` scope IS
+  enforced, because `provider_binding_mismatch` makes the cost ledger's provider
+  vocabulary the same one as the canonical execution binding. See "WHICH ceiling
+  applies is derived" above.
+- **A scope with no recorded ceiling is not evaluated at all**, so a Founder who
+  has recorded no mission policy is governed by the deployment baseline alone.
 - **`requiresFounderDecision` is computed and published but read by nothing.**
   It appears on the proposal and on the escalation; no HQ path branches on it.
   Carried honestly rather than removed, and carried honestly rather than
@@ -707,23 +757,44 @@ assertion is not that the guard throws — it is that a recording stand-in
 adapter, the thing the seam exists for, is **never called at all** with
 credential-shaped terms.
 
-**Which of the two layers is the guarantee — corrected.** Both Wave 5
-correction lanes reached this independently (one as Medium 9, one as Low 3).
-The sentence above used to end "Both layers are kept: the outer one gives a
-good error, the inner one is the guarantee", and commit `0c5edea`'s message
-said "a test proves the wrapped adapter is never CALLED with credential-shaped
-terms". The structural claims mostly hold — every resolver branch returns a
-wrapper, and a recording stand-in got zero calls — but the ATTRIBUTION was the
-wrong way round, and one claim was simply false. Both are now stated as they
-are:
+> **Correction (Wave 5 review, MEDIUM finding C-2).** The claim "an in-process
+> caller cannot obtain an unwrapped adapter" was made on the RESOLVER and was
+> false of the MODULE: `LEXICAL_RETRIEVAL_ADAPTER` and
+> `SEMANTIC_RETRIEVAL_ADAPTERS` were exported raw, `application/index.ts`
+> re-exported them, and `search-core.test.ts` already called
+> `LEXICAL_RETRIEVAL_ADAPTER.retrieve(...)` unwrapped. The day a real
+> transmitting retriever joined the semantic list,
+> `SEMANTIC_RETRIEVAL_ADAPTERS[0].retrieve({terms})` would have been a one-line
+> public bypass. Fixed structurally rather than by deleting the sentence: the
+> raw adapters are module-private, every exported binding is the GUARDED
+> wrapper, the semantic list is guarded member by member at declaration and
+> frozen, and `guardRetrievalAdapter` is idempotent so the resolver does not
+> double-wrap. There is now no exported binding through which an unguarded
+> `retrieve` can be reached.
+
+**Which of the two layers is the guarantee — corrected.** All three Wave 5
+correction lanes reached this independently (one as Medium 9, one as Low 3, one
+as Medium C-2). The sentence above used to end "Both layers are kept: the outer
+one gives a good error, the inner one is the guarantee", and commit `0c5edea`'s
+message said "a test proves the wrapped adapter is never CALLED with
+credential-shaped terms". The structural claims mostly held — every resolver
+branch returns a wrapper, and a recording stand-in got zero calls — but the
+ATTRIBUTION was the wrong way round, and one claim was simply false when it was
+made. Both are now stated as they are, and the false one was made TRUE by the
+box above rather than by narrowing the sentence:
 
 - `guardRetrievalAdapter` scans `input.terms`. On the pipeline path those terms
   are always `tokenize()` output, which lowercases and splits on `[^a-z0-9]+` —
   stripping every separator the eleven `SECRET_VALUE_PATTERNS` require (`sk-`,
-  `ghp_`, a JWT's dots, `Bearer `, `api_key: `) and defeating the
-  case-sensitive ones besides. **The seam scan therefore does not fire on
-  anything the pipeline can produce.** The test that fed it a whole unsplit key
-  was feeding it an input the pipeline cannot generate.
+  `ghp_`, a JWT's dots, `Bearer `, `api_key: `). **The seam scan therefore does
+  not fire on those shapes once the pipeline has tokenized them.** The test that
+  fed it a whole unsplit key was feeding it an input the pipeline cannot
+  generate. *(Narrowed by the Wave 5 correction of LOW C-2: the sentence used to
+  add "and defeating the case-sensitive ones besides" and to claim the seam is
+  inert on anything the pipeline can produce. The patterns are case-insensitive
+  now, so a shape with NO separator — a Google API key — survives tokenization
+  apart from case and IS caught at the seam. Two separate tests say which is
+  which.)*
 - **The FACADE scan is the guarantee** for the pipeline, and the route's scan
   is the outer layer beyond it. Both see the raw field before normalization and
   before tokenization, which is where a credential is actually met.
@@ -748,7 +819,12 @@ tokenized — so the claim cannot quietly become wrong again in either direction
 **What was NOT resolved.** The scan is credential-SHAPE based
 (`assertBrowserSafe`'s key rule and value patterns); it is not a general
 data-loss-prevention filter and will not recognise a secret that looks like
-ordinary prose. The corpus documents handed to an adapter are deliberately not
+ordinary prose. **A credential SPLIT ACROSS TWO FIELDS passes both scans** —
+`?text=sk-&project=AAAAAAAAAAAAAAAAAAAAAAAA` was verified to pass at the route
+and at the facade, and the pieces are then echoed into `criteria` (Wave 5, LOW
+C-1). Each field is scanned independently, and joining them for the scan would
+either miss the same split (if joined with a separator) or manufacture false
+refusals (if joined without one), so this is recorded rather than papered over. The corpus documents handed to an adapter are deliberately not
 scanned — they are canonical rows HQ has already decided this reader may see,
 and re-scanning them would be a second, drifting disclosure rule. And no real
 semantic adapter exists to test against: what is proven is that the seam cannot
@@ -835,11 +911,11 @@ labelled by the lane that raised them.
 
 | Finding | Correction | Pinned by |
 |---|---|---|
-| A HIGH 2 — `budgetScope` was a caller parameter and which ceiling applied was chosen, not derived | "The law: WHICH ceiling applies is derived, never chosen"; `#canonicalBudgetScopes` + `mostRestrictiveBudget` | new tests in `intelligence-authority.test.ts` |
-| A HIGH 3 — `occurredAt` was caller-supplied and the window measured it | "The law: the window is measured on the instant HQ stamped"; the window filter reads `recorded_at` | new tests in `intelligence-authority.test.ts` |
+| A HIGH 2 = C HIGH B-1 — `budgetScope` was a caller parameter and which ceiling applied was chosen, not derived | "The law: WHICH ceiling applies is derived, never chosen". This lane's `#canonicalBudgetScopes` + `mostRestrictiveBudget` was the DROPPED duplicate; the surviving implementation is `#governingBudgetScopes` + `combineBudgetEvaluations` (all missions, the bound provider, and `governedBy` provenance) | this lane's tests in `intelligence-authority.test.ts`, kept and ported, plus `intelligence-attribution.test.ts` |
+| A HIGH 3 = C HIGH B-2 (second half) — `occurredAt` was caller-supplied and the window measured it | "The law: the window is measured on the instant HQ stamped"; the window filter reads `recorded_at`, and the instant must parse AND sit inside the bounded interval around now | this lane's tests in `intelligence-authority.test.ts` (the backdated case ported to a date inside the new bound), plus `intelligence-attribution.test.ts` |
 | A MEDIUM 5/6/7 — three fail-open reads in the cost and routing policy | recorded at each site above | new tests in `intelligence-core.test.ts` and `intelligence-authority.test.ts` |
-| A MEDIUM 8 — a spend was attributed to a declaration, not to canonical work | "The law: a spend is attributed to canonical work"; `#canonicalWorkIdentity` | new tests in `intelligence-authority.test.ts` |
-| A MEDIUM 9 = B LOW 3 — the seam guard's scan is inert on tokenized terms | "The `assertBrowserSafe` pre-real-adapter Low" above, rewritten to name the FACADE scan as the guarantee, and to stop claiming an in-process caller cannot obtain an unguarded adapter | both lanes' tests in `search-adapter-guard.test.ts` (12 tests), one of which pins the tokenization fact against six real credential shapes |
+| A MEDIUM 8 = C HIGH B-2 — a spend was attributed to a declaration, not to canonical work | "The law: a spend is attributed to canonical work". This lane's `#canonicalWorkIdentity` was the DROPPED duplicate (it read the first plan item only); the survivor is `#canonicalTaskScopes`, and this lane's decision-id existence/ownership check is kept on top of it | this lane's tests in `intelligence-authority.test.ts`, kept and ported, plus `intelligence-attribution.test.ts` |
+| A MEDIUM 9 = B LOW 3 = C MEDIUM C-2 — the seam guard's scan is inert on tokenized terms, and the raw adapters were exported | "The `assertBrowserSafe` pre-real-adapter Low" above, which names the FACADE scan as the guarantee. The "cannot obtain an unguarded adapter" claim was made TRUE structurally (raw adapters module-private, every export guarded at declaration) rather than narrowed away, so this lane's prose fix is the dropped duplicate and its assertions are ported or inverted | both lanes' tests in `search-adapter-guard.test.ts` (12 tests), one of which pins the tokenization fact against six real credential shapes |
 | A MEDIUM 10 — a raw NUL byte made a source file binary to the repo's own tooling | "Known limitations"; all four are U+001F now | new source scan in `test/core-boundary.test.ts` |
 | A HIGH 1 = B MEDIUM 2 — the five secondary-unique guards were unpinned, and the census could not see them | `ENGINE_IMMUTABLE_TABLES` now declares each table's `secondaryGuards` and `missingImmutabilityGuards` reads them, so a dropped one produces a real `append_only_guard_missing` finding and engages safe mode | `test/intelligence-durability.test.ts` (7 tests, kept in full from Lane B) and five tests in `reliability-durability.test.ts`, including BOTH lanes' live-schema pins |
 | B LOW 4 — the returned escalation trigger could contradict the record | "Known limitations", and the facade now returns the STORED trigger | new test in `intelligence-authority.test.ts` |
@@ -885,7 +961,8 @@ half is a verification and regression-exposure fix, not an exploit fix. The
 Lane A findings above are a different matter — High 2, High 3 and Medium 8 were
 each demonstrated against a running facade.
 
-**Verification after the reconciliation** (the whole suite, not a subset):
+**Verification after the FIRST reconciliation** (Lane A + Lane B; the whole
+suite, not a subset):
 
 | Command | Result |
 |---|---|
@@ -908,3 +985,181 @@ per-table declaration beside the universal trio). The three pre-existing
 `it.skip` GAP markers under `packages/server` are untouched, and nothing under
 `packages/server`, `packages/web`, `packages/shared` or `packages/config-mesob`
 was changed.
+
+---
+
+## Wave 5 SECOND correction pass, and the THREE-lane reconciliation
+
+Three further fresh read-only hostile reviewers, none of whom authored the head
+they reviewed and none of whom knew about the two lanes above, returned
+0 Critical / 5 High / 7 Medium / 13 Low across both phases; every High was
+reproduced by execution. That correction is **Lane C**, and it was then merged
+with the Lane A + Lane B head on the same principle that merge used: nothing
+from either side is discarded, and where both sides fixed the same defect
+differently ONE implementation survives with BOTH sides' regression tests ported
+onto it. The findings that touch Phase 14 are corrected in place above, in the
+sections they belong to:
+
+| Finding | What changed | Pinned by |
+|---|---|---|
+| HIGH B-1 — a caller chose which Founder budget policy governed its own write | the `budgetScope` parameter is GONE from `intelligenceRoutingProposal` and `recordIntelligenceDecision`; `#governingBudgetScopes` derives the applicable scopes from canonical truth (deployment baseline + the task's missions and projects + its bound provider), and `combineBudgetEvaluations` takes the most restrictive decision and the INTERSECTION of permitted tiers | `test/intelligence-attribution.test.ts`, including the reviewer's own shopped-scope reproduction and the mission-ceiling case it was used to route around |
+| HIGH B-2 — every non-deployment ceiling and both time windows were keyed on caller strings | mission and project come from `hq_mission_plan_items`/`hq_missions`; a `providerId` contradicting the canonical binding is `provider_binding_mismatch`; `occurredAt` is clamped to a bounded interval around `nowIso()` (one hour ahead, thirty days behind) | the ghost-mission, misattributed-provider and 2099-dated-entry cases, same file |
+| MEDIUM B-3 — "recompute the floor" was described as closing a forgery it only relocates | the comment and the doc say what recomputation does; structurally, `bound_provider`, the risk class and the review requirement are re-derived at READ time from `op_tasks`/`op_capabilities` | a raw append forging all three, same file |
+| MEDIUM B-4 — `rowToBudget` failed OPEN on a malformed row | `unrecognized` scope/window (matching nothing) and a `null` ceiling answering `requires_founder_decision` | the reviewer's one-append reproduction, same file |
+| MEDIUM B-5 — first-write-wins dedupe let a `billed 0` suppress a real amount | a second entry with the same identity and a different figure is `cost_entry_conflict`; an identical one still dedupes | same file |
+| LOW B-6 — the escalation view's `requiresFounderDecision` came from the request, not the row | projected from the stored `budgetDecision`, like the trigger beside it | same file |
+| LOW B-7 — `MAX_COST_BASIS_LENGTH` never applied to an `estimated` basis, and the refusal was misnamed | the bound applies to every provenance; `basis_too_long` is its own refusal | same file |
+| LOW B-8 — `providerId`/`modelId` were scanned at the route and not at the facade | `assertBrowserSafe` at the facade, where `recordIntelligenceCost`'s only callers are | same file |
+| LOW B-9 — doc drift (test count, the `budget_ceiling_blocks` claim, the undisclosed caller-supplied scope) | all three corrected above | — |
+| MEDIUM C-2 — "an in-process caller cannot obtain an unwrapped adapter" was false | the raw adapters are module-private; `LEXICAL_RETRIEVAL_ADAPTER` and every member of `SEMANTIC_RETRIEVAL_ADAPTERS` are guarded AT DECLARATION, and `guardRetrievalAdapter` is idempotent | `search-adapter-guard.test.ts`, with the assertion inverted from "the resolver wraps" to "there is nothing unwrapped to obtain" |
+| LOW C-1 — a credential split across two search fields passes both scans | NOT fixed; recorded below | — |
+| LOW C-2 — ten of the eleven credential patterns were case-sensitive, and invisible characters defeated all of them | the patterns are case-insensitive (the JWT one deliberately excepted: `eyJ` is base64url, not a spelling) and values are NFKC-normalized with zero-width and bidi controls stripped before matching | `live-redaction.test.ts` |
+
+**Where Lane C and the Lane A + Lane B head fixed the SAME Phase 14 defect**,
+the surviving implementation and the reason are recorded in the lane table
+above; in summary:
+
+- **which ceiling governs, and what a spend is attributed to** — Lane C's
+  `#governingBudgetScopes` / `#canonicalTaskScopes` / `combineBudgetEvaluations`
+  survive over Lane A's `#canonicalBudgetScopes` / `#canonicalWorkIdentity` /
+  `mostRestrictiveBudget`, because they derive EVERY mission a task is linked to
+  rather than the first plan item, enforce the provider scope (which
+  `provider_binding_mismatch` makes canonically attributable), and carry
+  `governedBy`. Lane A's `Readonly` severity map, its `.trim()` on the proposal's
+  task id, and its decision-id existence/ownership check are carried onto the
+  survivor, and its tests are kept;
+- **`occurredAt`** — the bounded interval survives over "must parse, may not be
+  in the future", because it closes both directions; the future refusal keeps
+  the other lane's name and message fragment, and Lane A's structural half (the
+  window filter reads `recorded_at`) is unchanged and is what the backdated test
+  still pins;
+- **`MAX_COST_BASIS_LENGTH`** — Lane A's ordering survives (the bound is checked
+  BEFORE the provenance switch, so a long basis on an `unknown` cost is
+  `basis_too_long` and not the other refusal), together with its rule that a
+  non-estimate may not carry a basis at all. Lane C's late bound is dropped as
+  the weaker placement; both lanes' tests hold against the survivor;
+- **the retrieval guard statement** — Lane C's structural fix survives over Lane
+  A's prose narrowing, so the claim "no in-process caller can obtain an unwrapped
+  adapter" is TRUE rather than deleted. Lane A's assertions on the statement text
+  are ported, except `toContain('exported for testing and are not wrapped')`,
+  which is INVERTED because that sentence is now false.
+
+**A consequence of LOW C-2 that changes an earlier claim, stated rather than
+left to be found.** The previous correction pass established that the seam
+guard is INERT on the terms the pipeline produces, because `tokenize()` strips
+every separator the shape patterns need. That is still true of the shapes whose
+match DEPENDS on a separator — `sk-`, `ghp_`, a JWT's dots, `Bearer `,
+`api_key: ` — and it is no longer true of a Google API key, which carries no
+separator at all and now matches case-insensitively after tokenization. The
+test file says which is which, in two separate tests.
+
+**Known debt this pass records rather than closes:**
+
+- **A credential split across two search fields still passes** (`?text=sk-&project=AAAA…`).
+  Each field is scanned independently and the pieces are then echoed into
+  `criteria`. Joining the fields for the scan would either miss the same split
+  (with a separator) or produce false refusals (without one), so this is
+  recorded rather than papered over.
+- **A forged decision row can still understate complexity, context size and
+  work kind.** Only the risk class has a canonical source; HQ does not invent
+  one for the other three.
+- **No MODEL-scoped ceiling constrains a decision write.** Nothing in canonical
+  truth binds a task to a model, so HQ has no honest derivation for a model
+  scope and does not invent one. A model ceiling can be read through
+  `intelligenceBudgetDecision`; it does not by itself govern.
+- **A scope with no recorded ceiling is not evaluated.** Absence of a mission
+  policy is absence of a policy, and the deployment baseline already answers
+  "no policy anywhere" with the free local tier alone.
+- **A raw appender can still widen a budget by appending a higher-version row**
+  (`latestBudgetFor` takes the max version). Inherent to append-only versioning
+  under a raw-writer threat; unchanged from the previous pass, and still stated.
+
+**Verification at the THREE-lane merged head** (the whole suite, not a subset):
+
+| Command | Result |
+|---|---|
+| `npm run test:hq` | 164 files, 3109 tests passed |
+| `npm run typecheck --workspace @factoryos/headquarter` | clean |
+| `npm run test --workspace @factoryos/hq-host` | 23 files, 222 tests passed |
+| `npm run typecheck --workspace @factoryos/hq-host` | clean |
+| `npm run test --workspace @factoryos/hq-server` | 2 files, 20 tests passed |
+| `npm run typecheck --workspace @factoryos/hq-server` | clean |
+| `npm test` (root) | 37 files, 569 passed, 3 skipped |
+| `npm run build` | all workspaces; web `215.66 kB` / `69.22 kB` gzip (unchanged) |
+| `npm run build:site --workspace @factoryos/headquarter` | 10 pages + `hq-snapshot.json` |
+
+Lane C alone was 164 files / 3080 tests and the Lane A + Lane B head 162 /
+3073; the merged head exceeds both, which is what "nothing was dropped" looks
+like in the count. Nothing was deleted, skipped, weakened or narrowed to make
+the merge green: no `.skip` / `.only` / `.todo` / `xit` / `xdescribe` was added
+anywhere, no `as any`, no `@ts-expect-error` and no `eslint-disable` in an added
+line. Seven assertions written by the two earlier lanes were PORTED onto the
+surviving implementations rather than dropped — five of them because the
+survivor answers more strictly than the lane that wrote the assertion expected
+(the re-labelled open, the deliberately fresh `idempotencyKey` open, the
+un-checkpointed-WAL refusal name, the backdated `occurredAt`, and the retrieval
+statement's "exported for testing" disclosure, which is inverted because it is
+now false), and two because the survivor's signature changed (`fullIntegrity`'s
+chain verifier is required, and the guard statement names declaration rather
+than the resolver). Every guarantee either lane pinned is still pinned. The
+three pre-existing `it.skip` GAP markers under `packages/server` are untouched;
+`git diff` against the wave base `f1ce71c` over `packages/server`,
+`packages/web`, `packages/shared` and `packages/config-mesob` is empty; and
+`package.json` and `package-lock.json` are byte-identical to that base.
+
+---
+
+## The FOURTH reconciliation: the second correction round merged with the three-lane head
+
+The three-lane head above and the "second correction round" recorded earlier in
+this document were produced CONCURRENTLY, on the same branch, both descending
+from `4c83f54`, by efforts that did not know about each other. This section
+records their merge for Phase 14. The full account, including the CRITICAL that
+had to survive it, is in the matching section of `PHASE_13_ADVANCED_RELIABILITY.md`.
+
+**What each side contributed to this phase.**
+
+The three lanes contributed the canonical budget-scope derivation and spend
+attribution (`#canonicalTaskScopes`, `#governingBudgetScopes`,
+`combineBudgetEvaluations`, with `budgetScope` removed as a parameter rather
+than validated), `cost_entry_conflict`, `provider_binding_mismatch`,
+`deriveDecisionRecord`'s canonical re-derivation of `bound_provider` and the
+risk class, the fail-closed `rowToBudget`, the bounded `occurredAt` interval,
+`requiresFounderDecision` projected from the stored row, the facade-level
+`assertBrowserSafe` scan of `providerId`/`modelId`, and the NFKC-normalized
+case-insensitive credential patterns.
+
+The second correction round contributed `readStoredCostFact`'s two remaining
+parity gaps (a raw-appended `billed` row carrying a basis, and an `estimated`
+row whose basis exceeds `MAX_COST_BASIS_LENGTH`, both of which used to read back
+as `state: 'known'`), the bounded and shape-checked `decisionId` with refusals
+that carry the code rather than echoing the caller's text, and the
+`trg_hq_mission_plan_items_no_erase` guard that closes the one executed fail-open
+this phase's budget derivation stood on.
+
+**One duplicate implementation, one survivor.** Both sides put
+`hq_mission_plan_items` into the integrity census, from two different exploits.
+`EngineImmutableTable.requiredGuards` survives and `holdsUniversalTrio: false` is
+dropped, because a boolean can only say "the trio" or "nothing" and cannot
+express the REQUIRED `no_erase` that closes the DELETE fail-open described
+above. The other lane's exploit — dropping `_no_replace` so an `INSERT OR
+REPLACE` rewrites a plan item's task binding — is closed by the same entry, and
+its inverted live-schema test (the live trigger set EQUALS the union of the
+declarations, so a guarded table nobody listed is a test failure) is kept and
+binds it. Nothing else in this phase was fixed twice: the budget-scope
+derivation exists once, in the surviving `#governingBudgetScopes`.
+
+**What is NOT fixed in this phase**, all sides' disclosures in one list: a
+credential split across two search fields still passes both scans; a forged
+decision row can still understate complexity, context size and work kind, since
+only the risk class has a canonical source; no MODEL-scoped ceiling governs a
+decision write, because nothing in canonical truth binds a task to a model; a
+scope with no recorded ceiling is not evaluated; a raw appender can still widen a
+budget by appending a higher-version row; a genuine observation older than thirty
+days can no longer be recorded, which is the stated cost of the bounded
+`occurredAt` interval; the `unrecognized` provenance bucket is documented as
+unreachable rather than as a live defence; and `recordIntelligenceCost` /
+`recordIntelligenceDecision` no longer accept mission/project/provider/budget-scope
+arguments at all, so an in-process caller that passed them silently gets
+canonical attribution instead — a deliberate behaviour change, not a compatible
+one.

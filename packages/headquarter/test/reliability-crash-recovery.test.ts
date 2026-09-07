@@ -444,7 +444,16 @@ describe('recovery is scoped, repeatable and honest about what it did not touch'
       });
       expect(second.ok).toBe(false);
       if (second.ok) throw new Error('the openRun guard lifted');
-      expect(second.error.code).toBe('run_attempt_refused');
+      // The refusal's NAME changed in the three-lane merge and its meaning did
+      // not: the third lane added a second, EARLIER `openRun` guard that refuses
+      // any open against a task carrying an unreconciled run, so the answer is
+      // now `run_state_conflict` rather than the in-reservation
+      // `run_attempt_refused` that answered it before. Both are categorical
+      // refusals naming the standing run; what this test exists to pin — that
+      // the late worker report does NOT lift the guard — is unchanged, and the
+      // in-reservation guard survives beneath it as the re-check under the
+      // reservation.
+      expect(second.error.code).toBe('run_state_conflict');
       expect(second.error.details!.runId).toBe(first.id);
 
       // And no second attempt is reachable through the first run either.

@@ -84,6 +84,56 @@ describe('assertBrowserSafe — value rule', () => {
   });
 });
 
+describe('the value rule is not defeated by case or by invisible characters', () => {
+  /**
+   * Wave 5 review, LOW finding C-2. Ten of the eleven shape patterns were
+   * case-sensitive while only `Bearer` carried `/i`, so `SK-AAAA…` passed where
+   * `sk-AAAA…` was refused — a one-keystroke bypass of a guard whose whole job
+   * is to fail closed. Zero-width and fullwidth variants passed for the same
+   * kind of reason: the separator the pattern needs was there, but not as the
+   * ASCII byte.
+   */
+  it('refuses the same credential in any case', () => {
+    for (const value of [
+      'sk-AAAAAAAAAAAAAAAAAAAA',
+      'SK-AAAAAAAAAAAAAAAAAAAA',
+      'Sk-aaaaaaaaaaaaaaaaaaaa',
+      'GHP_AAAAAAAAAAAAAAAAAAAA',
+      'aizasyaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'XOXB-AAAAAAAAAAAA',
+      '-----begin rsa private key-----',
+    ]) {
+      expect(() => assertBrowserSafe({ note: value }), value).toThrow(BrowserSafetyError);
+    }
+  });
+
+  it('refuses a credential hidden behind a zero-width or fullwidth character', () => {
+    // NFKC folds the fullwidth hyphen onto ASCII; the zero-width strip removes
+    // what NFKC leaves alone. The ORIGINAL string is what would have been
+    // published, so this widens what is caught and rewrites nothing.
+    for (const value of [
+      'sk\u200b-AAAAAAAAAAAAAAAAAAAA',
+      'sk\uff0dAAAAAAAAAAAAAAAAAAAA',
+      'sk-AAAAAAAA\ufeffAAAAAAAAAAAA',
+    ]) {
+      expect(() => assertBrowserSafe({ note: value }), JSON.stringify(value)).toThrow(
+        BrowserSafetyError,
+      );
+    }
+  });
+
+  it('still allows the hashes and ids HQ renders, after normalization', () => {
+    // The normalization must not turn a legitimate value into a false refusal.
+    expect(() =>
+      assertBrowserSafe({
+        actionDigest: '3f9a1c2b4d5e6f7081920a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f',
+        taskId: '9f2c6c1e-6d64-4c0a-a5c7-6a0f1c2d3e4b',
+        label: 'Ask Jenify about the salt yield',
+      }),
+    ).not.toThrow();
+  });
+});
+
 describe('assertNoFabricatedFields', () => {
   it('refuses metrics the control plane does not record', () => {
     for (const field of ['cost', 'costUsd', 'tokens', 'eta', 'sentiment', 'progressPercent']) {

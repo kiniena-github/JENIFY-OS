@@ -27,6 +27,14 @@
 import { CAPS, expectOk, setupFixture, type Fixture } from './application.fixture.js';
 import { claimReadOnlyTask, claimSideEffectTask } from './reliability.fixture.js';
 import {
+  MISSION_COMMAND_CAPABILITY,
+  registerMissionCommandCapability,
+} from '../src/application/mission-command.js';
+import {
+  PROJECT_COMMAND_CAPABILITY,
+  registerProjectCommandCapability,
+} from '../src/application/project-command.js';
+import {
   INTELLIGENCE_COMMAND_CAPABILITY,
   registerIntelligenceCommandCapability,
   type BudgetScope,
@@ -39,6 +47,17 @@ export interface IntelligenceFixture extends Fixture {
   claim: { taskId: string; workerId: string; fence: number };
   /** A live fenced claim on `repo.read_status` — read_only, no review required. */
   readOnlyClaim: { taskId: string; workerId: string; fence: number };
+  /**
+   * Link a task to a CANONICAL mission and project, the way HQ actually
+   * records that relationship: a commanded mission with a work plan item, the
+   * item linked to the task, and the mission assigned to a real project.
+   *
+   * Needed since the Wave 5 correction of High finding B-2: a decision's and a
+   * cost entry's mission/project are read off `hq_mission_plan_items` /
+   * `hq_missions` instead of being taken from the caller, so a suite that
+   * wants to see a non-null mission on a record has to create the real link.
+   */
+  linkToCanonicalMission(taskId: string, label?: string): { missionId: string; projectId: string };
   /** Record a deployment-wide ceiling and permitted tier set. */
   budget(
     permittedTiers: readonly IntelligenceTier[],
@@ -63,6 +82,8 @@ export function intelligenceFixture(
 ): IntelligenceFixture {
   const fx = setupFixture();
   if (options.registerIntelligence !== false) registerIntelligenceCommandCapability(fx.db);
+  registerMissionCommandCapability(fx.db);
+  registerProjectCommandCapability(fx.db);
   fx.principals.register({
     id: 'founder',
     displayName: 'Founder',
@@ -70,6 +91,8 @@ export function intelligenceFixture(
       CAPS.readStatus,
       CAPS.openPr,
       CAPS.indexDoc,
+      MISSION_COMMAND_CAPABILITY.id,
+      PROJECT_COMMAND_CAPABILITY.id,
       ...(options.grantIntelligence === false ? [] : [INTELLIGENCE_COMMAND_CAPABILITY.id]),
     ],
     approvalAuthority: true,
@@ -89,6 +112,33 @@ export function intelligenceFixture(
     ...fx,
     claim: claimSideEffectTask(fx, 'intel-side-effect'),
     readOnlyClaim: claimReadOnlyTask(fx, 'intel-read-only'),
+    linkToCanonicalMission(taskId, label = 'canonical') {
+      const project = expectOk(
+        fx.ops.createProject({
+          name: `Project ${label}`,
+          purpose: 'Carry the canonical mission this suite links its task to',
+          requestedBy: 'founder',
+        }),
+      ).project;
+      const mission = expectOk(
+        fx.ops.commandMission({
+          title: `Mission ${label}`,
+          objective: 'Do the work the linked task carries',
+          planItems: ['Do the work the linked task carries'],
+          projectId: project.id,
+          requestedBy: 'founder',
+        }),
+      ).mission;
+      expectOk(
+        fx.ops.linkMissionPlanItem({
+          missionId: mission.id,
+          planItemSeq: 1,
+          taskId,
+          requestedBy: 'founder',
+        }),
+      );
+      return { missionId: mission.id, projectId: project.id };
+    },
     budget(permittedTiers, over = {}) {
       expectOk(
         fx.ops.setIntelligenceBudget({

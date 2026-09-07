@@ -1691,6 +1691,9 @@ function controlErrorStatus(code: string): number {
     case 'review_tier_required':
     case 'intelligence_routing_refused':
     case 'escalation_refused':
+    // A second cost entry whose identity matches a recorded one and whose
+    // figure does not. The request is well formed; the RECORD says otherwise.
+    case 'cost_entry_conflict':
       return 409;
     case 'unknown_capability':
     case 'capability_disabled':
@@ -3786,6 +3789,17 @@ function deny(
  * back. What this projection additionally does is BOUND the history, so one
  * long-lived run cannot make the response unbounded, and state the true total
  * beside the page (the standing bounded-read rule).
+ *
+ * **`externalActionTaken: false` is a statement about the RELIABILITY LEDGER,
+ * not about the run's work** (Wave 5 review, Low finding C-4). It means: no
+ * path in this phase performs an external action, so reading or recording this
+ * row reached nothing outside HQ. It does NOT mean the work the run audits had
+ * no side effect — a `succeeded` run of a side-effecting capability is exactly
+ * a record that something outside HQ DID happen, and the Phase 8
+ * `hq_action_intents` / `hq_action_events` ledger is the only answer to what.
+ * The field is stamped per run rather than on the envelope because a run is
+ * what a reader picks up and copies; the docstring was silent about it, which
+ * is how a false reading of the name became available.
  */
 const RUN_EVENT_WIRE_LIMIT = 50;
 

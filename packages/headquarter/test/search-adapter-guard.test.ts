@@ -115,44 +115,62 @@ describe('the seam guard: defence in depth against a caller that supplies its ow
     expect(guarded.unavailableReason).toBe(adapter.unavailableReason);
   });
 
-  it('guards EVERY branch of the resolver, including the fallback', () => {
-    // A guarded adapter is a different object from the raw one, and each
-    // branch of the resolver hands one out.
+  it('exports only GUARDED adapters, so there is no unwrapped binding to obtain', () => {
+    // This used to assert `expect(lexical).not.toBe(LEXICAL_RETRIEVAL_ADAPTER)`
+    // — that the resolver wraps a raw exported constant. That was true and it
+    // was the weaker half of the claim being made: the RAW adapters were
+    // exported, `application/index.ts` re-exported them, and
+    // `search-core.test.ts` already called `LEXICAL_RETRIEVAL_ADAPTER.retrieve`
+    // unwrapped, so "an in-process caller cannot obtain an unwrapped adapter"
+    // was false of the module (Wave 5 review, Medium finding C-2).
+    //
+    // The raw adapters are module-private now and the exported bindings are
+    // the wrappers, so the assertion inverts: the resolver hands back the SAME
+    // object, because there is no unguarded one left to hand back.
     const lexical = resolveRetrievalAdapter('deterministic_lexical').adapter;
     const fallback = resolveRetrievalAdapter('semantic_embedding').adapter;
-    expect(lexical).not.toBe(LEXICAL_RETRIEVAL_ADAPTER);
-    expect(fallback).not.toBe(LEXICAL_RETRIEVAL_ADAPTER);
-    for (const adapter of [lexical, fallback]) {
+    expect(lexical).toBe(LEXICAL_RETRIEVAL_ADAPTER);
+    expect(fallback).toBe(LEXICAL_RETRIEVAL_ADAPTER);
+    // And every one of them refuses credential-shaped terms — including the
+    // EXPORTED constant reached directly, which is the path that was open.
+    for (const adapter of [lexical, fallback, LEXICAL_RETRIEVAL_ADAPTER]) {
       expect(() => adapter.retrieve({ readable: [], terms: [SECRET], match: 'any_term' })).toThrow(
         RetrievalSafetyError,
       );
     }
-    // The installed set is still empty, and the fallback still says so.
+    // The installed set is still empty, and the fallback still says so. Every
+    // member of it is guarded at DECLARATION, so an adapter added later cannot
+    // be reached unwrapped either.
     expect(SEMANTIC_RETRIEVAL_ADAPTERS).toHaveLength(0);
+    expect(Object.isFrozen(SEMANTIC_RETRIEVAL_ADAPTERS)).toBe(true);
     expect(resolveRetrievalAdapter('semantic_embedding').statement.fallbackReason).toBe(
       'no_adapter_installed',
     );
-    // The published statement says what is enforced and no more (Wave 5
-    // Medium 9). It used to claim an in-process caller "cannot obtain an
-    // unguarded adapter" — while this very file imports the raw adapters and
-    // calls them. The wrapping is what the resolver guarantees; the raw
-    // objects being exported and unwrapped is stated rather than denied.
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('applied AT DECLARATION');
+    expect(RETRIEVAL_GUARD_STATEMENT).not.toContain('applied by the resolver');
+    // Carried from the other correction lane, which fixed the same finding in
+    // PROSE. Its `toContain('the resolver hands out')` and its two
+    // facade-is-the-guarantee assertions hold against the surviving wording and
+    // are kept. The one assertion NOT carried is
+    // `toContain('exported for testing and are not wrapped')`: that sentence
+    // was a disclosure that the raw adapters were reachable, and it is false of
+    // this implementation — so the assertion is INVERTED rather than dropped,
+    // because a statement that still said it would now be a lie in the safe
+    // direction's favour.
     expect(RETRIEVAL_GUARD_STATEMENT).toContain('the resolver hands out');
-    expect(RETRIEVAL_GUARD_STATEMENT).toContain('done by the resolver rather than by the caller');
-    expect(RETRIEVAL_GUARD_STATEMENT).toContain('exported for testing and are not wrapped');
-    expect(RETRIEVAL_GUARD_STATEMENT).not.toContain('cannot obtain an unguarded adapter');
-    // And it names the FACADE scan as the effective one rather than the inner
-    // wrapper, which sees already-tokenized terms.
     expect(RETRIEVAL_GUARD_STATEMENT).toContain('FACADE scan');
     expect(RETRIEVAL_GUARD_STATEMENT).toContain('defence in depth');
+    expect(RETRIEVAL_GUARD_STATEMENT).not.toContain('exported for testing');
+    expect(RETRIEVAL_GUARD_STATEMENT).not.toContain('cannot obtain an unguarded adapter');
   });
 
   /**
-   * Wave 5 Medium 9, the substantive half. The inner wrapper is defence in
-   * depth precisely because `normalizeSearchQuery` has already TOKENIZED the
-   * terms by the time an adapter sees them, and a tokenized term cannot carry
-   * the `key: value` punctuation the credential patterns need. Pinned so the
-   * doc's claim about which layer is load-bearing stays true.
+   * Wave 5 Medium 9, the substantive half, from the prose lane. The inner
+   * wrapper is defence in depth precisely because `normalizeSearchQuery` has
+   * already TOKENIZED the terms by the time an adapter sees them, and a
+   * tokenized term cannot carry the `key: value` punctuation these credential
+   * patterns need. Pinned so the doc's claim about which layer is load-bearing
+   * stays true.
    */
   it('shows why the inner wrapper is defence in depth: tokenized terms cannot match', () => {
     const raw = resolveRetrievalAdapter('deterministic_lexical').adapter;
@@ -182,11 +200,10 @@ describe('the seam guard: defence in depth against a caller that supplies its ow
    * asserted rather than assumed, so nobody has to take the comment's word for
    * why the FACADE scan is the layer that matters.
    */
-  it('is INERT on tokenized terms, which is why the facade scan is the guarantee', () => {
+  it('is INERT on tokenized SEPARATOR-BEARING shapes, which is why the facade scan is the guarantee', () => {
     for (const credential of [
       SECRET,
       'ghp_ABCDEFGHIJKLMNOPQRST1234',
-      'AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ012345',
       'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpM',
       'Bearer abcdefghijklmnop1234',
       'api_key: abcd1234efgh5678',
@@ -208,17 +225,53 @@ describe('the seam guard: defence in depth against a caller that supplies its ow
     }
   });
 
+  /**
+   * The half of the same fact that changed with the Wave 5 correction of LOW
+   * finding C-2 — and it changed in the safe direction, so it is pinned rather
+   * than left to be discovered.
+   *
+   * A Google API key carries NO separator at all. Tokenization therefore leaves
+   * it intact apart from case, and once `SECRET_VALUE_PATTERNS` became
+   * case-insensitive the seam guard does catch it. So "the seam is inert on
+   * anything the pipeline can produce" — the wording the previous correction
+   * used — is no longer exactly true, and the doc and comments say the
+   * narrower, true thing instead: it is inert on the shapes whose match
+   * DEPENDS on a separator, which is most of them.
+   */
+  it('is NOT inert on a separator-free shape, now that the patterns are case-insensitive', () => {
+    const googleKey = 'AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ012345';
+    expect(() => assertRetrievalTextSafe({ text: googleKey }, 'search')).toThrow(RetrievalSafetyError);
+    const terms = tokenize(googleKey);
+    expect(terms).toEqual([googleKey.toLowerCase()]);
+    const adapter = recordingAdapter();
+    const guarded = guardRetrievalAdapter(adapter);
+    expect(() => guarded.retrieve({ readable: [], terms, match: 'any_term' })).toThrow(
+      RetrievalSafetyError,
+    );
+    // Refused BEFORE the adapter saw anything.
+    expect(adapter.seen).toEqual([]);
+    // And the case-only variant the guard used to let through is refused too,
+    // which is the whole point of the change.
+    expect(() => assertRetrievalTextSafe({ text: googleKey.toUpperCase() }, 'search')).toThrow(
+      RetrievalSafetyError,
+    );
+  });
+
   it('does not overstate itself: the statement names the facade as the guarantee', () => {
     expect(RETRIEVAL_GUARD_STATEMENT).toContain('at the FACADE');
     expect(RETRIEVAL_GUARD_STATEMENT).toContain('defence in depth');
     // The old wording claimed the seam scan covered every adapter's free text.
     expect(RETRIEVAL_GUARD_STATEMENT).not.toContain('can be handed text HQ has not scanned');
-    // And it still says WHO applies the wrapper. One correction lane asserted
-    // this as `toContain('applied by the resolver')` and the other rewrote the
-    // sentence; the assertion is carried across to the surviving wording rather
-    // than dropped with it, because the claim it pins — the caller does not
-    // choose to be guarded — is the reason the seam holds for a future adapter.
-    expect(RETRIEVAL_GUARD_STATEMENT).toContain('done by the resolver rather than by the caller');
+    // And it still says WHO applies the wrapper. Two correction lanes asserted
+    // this differently — `toContain('applied by the resolver')` and
+    // `toContain('done by the resolver rather than by the caller')` — and both
+    // pin the same claim: the caller does not choose to be guarded. The claim
+    // is what is carried across to the surviving wording, which is STRONGER
+    // than either (the wrapping happens at declaration, so it holds even for a
+    // caller that never reaches the resolver), so the assertion is on the half
+    // both lanes shared rather than on either lane's spelling of the mechanism.
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('rather than by the caller');
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('cannot opt out');
   });
 });
 

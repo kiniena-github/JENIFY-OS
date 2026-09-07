@@ -164,8 +164,20 @@ describe('duplicate runs and duplicate attempts', () => {
     );
     expect(refusal.code).toBe('run_attempt_refused');
     expect(refusal.message).toMatch(/never retried automatically/i);
-    // And re-opening the same work does not produce a clean run either.
-    expect(expectOk(openRun(fx)).run.id).toBe(run.id);
+    // And re-opening the same work does not produce a clean run either. This
+    // used to assert that an identical open DEDUPED to the standing run, which
+    // was true and not enough: the derived key included the free-text label, so
+    // the same work re-opened under a different wording produced a SECOND run
+    // and an attempt was admitted on it (Wave 5 review, Medium finding 4). Both
+    // halves are pinned now, and both are stronger than the old assertion:
+    // an open against a task carrying an unreconciled run is REFUSED outright,
+    // whatever the label says, and the ledger still holds exactly one run.
+    const reopened = expectError(openRun(fx));
+    expect(reopened.code).toBe('run_state_conflict');
+    expect(reopened.message).toMatch(/nobody has reconciled|unresolved/i);
+    const renamed = expectError(openRun(fx, { label: 'a completely different wording' }));
+    expect(renamed.code).toBe('run_state_conflict');
+    expect(fx.ops.listRuns({ taskId: fx.claim.taskId }).map((entry) => entry.id)).toEqual([run.id]);
     expect(fx.ops.getRun(run.id)!.needsReconciliation).toBe(true);
   });
 
@@ -193,18 +205,37 @@ describe('duplicate runs and duplicate attempts', () => {
     );
     expect(fx.ops.getRun(run.id)!.needsReconciliation).toBe(true);
 
-    // The one-character rename opens NO second run. Since Wave 5 Medium 4 it
-    // is refused rather than silently folded onto the standing run: the key
-    // collided, but nothing established that this is the same work.
+    // The one-character rename does not open a second run. Three lanes have now
+    // written this assertion differently: the first expected `ok` with
+    // `deduplicated: true` (its fix was to take the label out of the digest);
+    // the second expected `run_key_conflict` (its fix refuses a collision
+    // between two DIFFERENT pieces of work); the third expected
+    // `run_state_conflict` (its fix refuses any new open against a task holding
+    // an unreconciled run). All three fixes are in the merged `openRun`, and the
+    // STATE guard is checked first, before the run key is even derived —
+    // deliberately, because "a human must establish what happened" is the
+    // stronger and earlier statement. So the answer here is
+    // `run_state_conflict`, and everything each lane pinned still holds: one run
+    // on the task, the standing run named in the refusal, no fresh generation
+    // admitted, and the key-collision refusal exercised on live work by its own
+    // test below.
     const relabelled = expectError(openRun(fx, { label: 'publish the thing.' }));
-    expect(relabelled.code).toBe('run_key_conflict');
+    expect(relabelled.code).toBe('run_state_conflict');
     expect(relabelled.details!.runId).toBe(run.id);
     expect(fx.ops.listRuns()).toHaveLength(1);
-    // Re-opening the SAME work still finds the standing run — the
-    // cross-restart inherit the key exists for, unchanged.
-    const reopened = expectOk(openRun(fx, { label: 'publish the thing' }));
-    expect(reopened.deduplicated).toBe(true);
-    expect(reopened.run.id).toBe(run.id);
+    // Re-opening the SAME work is refused too, for the same reason and by the
+    // same guard: this task's last word is "HQ does not know what happened",
+    // and no new open is admitted against it under ANY wording until a human
+    // has reconciled it. The earlier lane asserted `ok` with `deduplicated:
+    // true` here, because before the state guard existed the identical key fell
+    // onto the standing run; the property it was pinning — that re-opening the
+    // same work never produces a SECOND run — is pinned by the length assertion
+    // below and, on live work where the dedupe is still reachable, by
+    // 'treats a re-labelled open of live work as the SAME run'.
+    const reopened = expectError(openRun(fx, { label: 'publish the thing' }));
+    expect(reopened.code).toBe('run_state_conflict');
+    expect(reopened.details!.runId).toBe(run.id);
+    expect(fx.ops.listRuns()).toHaveLength(1);
     // And no fresh generation is admitted on it.
     expect(
       expectError(fx.ops.startRunAttempt({ runId: run.id, workerId: 'claude', fence: fx.claim.fence }))
@@ -243,6 +274,36 @@ describe('duplicate runs and duplicate attempts', () => {
   });
 
   /**
+   * The half of the same finding the refusal above cannot show: that the LABEL
+   * is not part of a run's IDENTITY — it is not in the derived key at all.
+   *
+   * The other correction lane wrote this as `expectOk(...)` with
+   * `deduplicated: true`, because under its implementation a re-labelled open of
+   * live work fell straight onto the standing run. The merged implementation
+   * carries this lane's `run_key_conflict` as well, so the answer is a REFUSAL
+   * that NAMES the standing run — and that refusal is itself the proof the other
+   * lane's assertion was after: the two opens can only have collided if the
+   * label was absent from the digest. What the survivor adds is that HQ will not
+   * silently hand back a run described as other work. Both halves are asserted
+   * here: the same key is derived (the collision), and the same work under the
+   * same wording still dedupes onto the standing run.
+   */
+  it('treats a re-labelled open of live work as the SAME run', () => {
+    const fx = reliabilityFixture();
+    const run = expectOk(openRun(fx, { label: 'publish the thing' })).run;
+    const relabelled = expectError(openRun(fx, { label: 'publish the thing.' }));
+    // One derived key: the label is not part of the run's identity.
+    expect(relabelled.code).toBe('run_key_conflict');
+    expect(relabelled.details!.runId).toBe(run.id);
+    expect(fx.ops.listRuns()).toHaveLength(1);
+    // And the identical work, re-opened, is still the same run.
+    const reopened = expectOk(openRun(fx, { label: 'publish the thing' }));
+    expect(reopened.deduplicated).toBe(true);
+    expect(reopened.run.id).toBe(run.id);
+    expect(fx.ops.listRuns()).toHaveLength(1);
+  });
+
+  /**
    * The other half of Medium 2: the deliberate `idempotencyKey` escape hatch
    * must not become a way to put a fresh admitted attempt beside unresolved
    * work on the same task either.
@@ -261,8 +322,15 @@ describe('duplicate runs and duplicate attempts', () => {
       }),
     );
     const refusal = expectError(openRun(fx, { idempotencyKey: 'a-deliberately-fresh-one' }));
-    expect(refusal.code).toBe('run_attempt_refused');
-    expect(refusal.message).toMatch(/never retried automatically/i);
+    // `run_state_conflict`, not `run_attempt_refused`: the merged
+    // implementation refuses at the OPEN rather than at the attempt, so the
+    // second run never exists to be attempted. This lane asserted the attempt
+    // refusal because its own fix left the fresh run openable; the assertion is
+    // ported to where the refusal now happens, and the message it matched
+    // ("never retried automatically") belongs to the attempt path, which the
+    // test below still reaches.
+    expect(refusal.code).toBe('run_state_conflict');
+    expect(refusal.message).toMatch(/nobody has reconciled|unresolved/i);
     expect(fx.ops.listRuns()).toHaveLength(1);
 
     // Once a human has reconciled it, a fresh run is available again.
@@ -947,7 +1015,12 @@ describe('the safe-mode evidence verdict is computed from enforcement-safe truth
    * still broken: `safeMode` false, depth `structural`, `claimNext` ALLOWED,
    * and the world-readable snapshot publishing `safeMode: false` over it.
    *
-   * The latch is now a row in an append-only table, read at construction.
+   * The latch is now a row in an append-only ledger, re-read at construction.
+   * The other Wave 5 correction lane built the same durability as its own
+   * `hq_safe_mode_latch` table; the merge kept ONE ledger
+   * (`hq_reliability_verdicts`) and ported this test onto it, because two tables
+   * holding one verdict is a second truth. Every guarantee it pinned is
+   * asserted here unchanged.
    */
   it('survives a RESTART with the chain still broken, and the snapshot says so', () => {
     const fx = fileFixture({ processIdentity: 'process-one' });
@@ -966,8 +1039,14 @@ describe('the safe-mode evidence verdict is computed from enforcement-safe truth
       // The depth reported is this boot's, never the latched one: a structural
       // pass may not present itself as a full assessment.
       expect(posture.integrity.depth).toBe('structural');
+      // Written by the lane that used a dedicated latch table, ported to the
+      // surviving ledger's wording. The property is identical: the observation
+      // names the assessment that reached it and its DEPTH, so a reader can see
+      // the standing finding came from a full pass and not from this boot.
       expect(posture.integrity.observations.find((o) => o.finding === 'evidence_chain_broken')!.detail)
-        .toContain('Latched by a full assessment');
+        .toContain('Carried from the verdict HQ recorded at');
+      expect(posture.integrity.observations.find((o) => o.finding === 'evidence_chain_broken')!.detail)
+        .toContain('(depth full)');
 
       // The acts safe mode exists to refuse still refuse after the restart.
       expectOk(
@@ -1033,45 +1112,66 @@ describe('the safe-mode evidence verdict is computed from enforcement-safe truth
     }
   });
 
-  /** The latch itself is engine-immutable: it cannot be cleared by a raw writer. */
+  /**
+   * The latch itself is engine-immutable: it cannot be cleared by a raw writer.
+   *
+   * Written against the other lane's `hq_safe_mode_latch`; ported verbatim in
+   * substance onto the surviving `hq_reliability_verdicts`, which is where the
+   * engagement is now recorded. The companion test in
+   * `reliability-verdict-durability.test.ts` pins the INSERT-side guard from the
+   * other direction; this one pins UPDATE, DELETE and the census.
+   */
   it('holds the latch append-only, so no writer can clear safe mode without an assessment', () => {
     const fx = fileFixture({ processIdentity: 'process-one' });
     try {
       breakChainByLegalAppend(fx);
       expectOk(fx.ops.assessHqIntegrity({ requestedBy: 'founder' }));
       const raw = fx.raw();
-      expect(raw.prepare(`SELECT COUNT(*) AS n FROM hq_safe_mode_latch`).get()).toEqual({ n: 1 });
+      expect(
+        (raw.prepare(`SELECT COUNT(*) AS n FROM hq_reliability_verdicts`).get() as { n: number }).n,
+      ).toBeGreaterThanOrEqual(1);
       for (const statement of [
-        `UPDATE hq_safe_mode_latch SET engaged = 0`,
-        `DELETE FROM hq_safe_mode_latch`,
+        `UPDATE hq_reliability_verdicts SET safe_mode = 0`,
+        `DELETE FROM hq_reliability_verdicts`,
       ]) {
         expect(() => raw.exec(statement), statement).toThrow(/append-only/);
       }
       expect(fx.reopen('process-two').ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
-      // The census sees the latch table's guards, so dropping one is a finding
-      // rather than a silent way to make the latch erasable.
+      // The census sees the verdict ledger's guards, so dropping one is a
+      // finding rather than a silent way to make the latch erasable.
       expect(missingImmutabilityGuards(raw)).toEqual([]);
-      raw.exec('DROP TRIGGER trg_hq_safe_mode_latch_no_erase');
-      expect(missingImmutabilityGuards(raw)).toEqual(['trg_hq_safe_mode_latch_no_erase']);
+      raw.exec('DROP TRIGGER trg_hq_reliability_verdicts_no_erase');
+      expect(missingImmutabilityGuards(raw)).toEqual(['trg_hq_reliability_verdicts_no_erase']);
     } finally {
       fx.cleanup();
     }
   });
 
   /**
-   * A latch row whose stored finding list cannot be read through the closed
-   * vocabulary still ENGAGES — a row that says "engaged" is itself the
+   * A recorded verdict whose stored finding list cannot be read through the
+   * closed vocabulary still ENGAGES — a row that says "safe mode" is itself the
    * statement, and dropping the engagement because its reasons were unreadable
    * would be the fail-open answer. The refusal names that honestly rather than
    * printing an empty pair of brackets.
+   *
+   * This is the one behaviour the merge CHANGED in the surviving ledger. The
+   * lane that wrote `hq_reliability_verdicts` dropped the unreadable finding
+   * NAME and the ENGAGEMENT with it; the lane that wrote `hq_safe_mode_latch`
+   * dropped the name and kept the engagement. Both halves hold here: no
+   * vocabulary member is invented (the snapshot's finding counts stay at zero,
+   * asserted below, and its sibling test in
+   * `reliability-verdict-durability.test.ts` pins the same for a forged name),
+   * and the engagement survives.
    */
   it('engages on a latch row whose findings cannot be read, and says so', () => {
     const fx = fileFixture({ processIdentity: 'process-one' });
     try {
       fx.raw()
         .prepare(
-          `INSERT INTO hq_safe_mode_latch (id, engaged, findings, depth, at, process_id)
-           VALUES ('forged-latch', 1, 'not even json', 'full', '2026-01-01T00:00:00.000Z', 'somebody')`,
+          `INSERT INTO hq_reliability_verdicts
+             (id, assessed_at, depth, safe_mode, findings, process_id, assessed_by)
+           VALUES ('forged-verdict', '2026-01-01T00:00:00.000Z', 'full', 1, 'not even json',
+                   'somebody', 'somebody')`,
         )
         .run();
       const restarted = fx.reopen('process-two');

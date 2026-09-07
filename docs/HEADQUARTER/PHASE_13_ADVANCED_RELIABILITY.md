@@ -249,13 +249,30 @@ operators route around instead of a thing they act on.
 |---|---|
 | every Founder-gated command write (mission, project, memory, truth, orchestrate, collaboration, brief, product) | every READ — a Founder who cannot see the store cannot fix it |
 | `approveTask` — an approval bound now would sit primed to run the moment safe mode clears | `denyTask` — the fail-safe direction |
+| `authorizeAction` — the external-action analogue of the same argument: the `authorized` snapshot is captured from canonical truth HQ has just declared untrustworthy, it outlives the clearing of safe mode, and `executeAction` compares against it | `proposeAction` — a proposal is a request, not an authorization, and it reaches nothing |
 | `releaseKillSwitch` | `engageKillSwitch` — the fail-safe direction |
 | `claimNext` — refused as `safe_mode_engaged`, distinctly from `nothing_claimable` | `recoverInterruptedRuns` and `reconcileRun` — the acts that resolve the state |
 | `executeAction` — refused BEFORE the reservation, so no side-effect key is burned | `assessHqIntegrity` and `recordVerifiedBackup` — the acts that investigate and clear it |
 | `openRun` / `startRunAttempt` / `recordRunOutcome` | |
+| `recordIntelligenceDecision`, `escalateIntelligenceDecision`, `recordIntelligenceOutcome`, `recordIntelligenceCost`, `recordModelObservation`, `setIntelligenceBudget` (Phase 14) | |
 
 The asymmetry is the point: safe mode never removes a way to STOP something and
 never removes a way to find out what is wrong.
+
+**The mutators deliberately left AVAILABLE, each with its reason** (Wave 5
+review, Medium finding 7 — `authorizeAction` was in neither column, and neither
+was anything else in this list, so "what safe mode refuses" was a partial
+statement presented as a complete one):
+
+| Left available | Why |
+|---|---|
+| `createTask` | a queued task is a request that cannot execute: claiming it is refused, so nothing it carries can happen while safe mode stands. Refusing creation would stop a Founder recording the very work that fixes the store. |
+| `assignTask` | assignment narrows who MAY claim; the claim itself is refused. It removes an option, it never adds one. |
+| `startTask`, `submitResult` | both belong to work already claimed and already running. Refusing them would strand a live execution with nowhere to report, which loses truth rather than protecting it. |
+| `reviewTask` | a `pass` verdict completes a task and is the closest of these to an approval, but the task it completes was claimed and executed BEFORE safe mode engaged. Refusing the verdict does not un-execute it; it only leaves HQ unable to record what happened. **Stated as the argued judgement it is, not as an obvious one.** |
+| `proposeAction` | a proposal reaches nothing and authorizes nothing; `authorizeAction` and `executeAction` are both refused, so it cannot become an act. |
+| `reconcileAction`, `reconcileRun`, `recoverInterruptedRuns` | the acts that RESOLVE an uncertain state. Refusing them would make safe mode self-sustaining. |
+| `engageKillSwitch`, `denyTask` | the fail-safe directions. |
 
 ### When it is assessed, and the cost of each
 
@@ -283,6 +300,47 @@ exists. The verdict is a `#private` latched field; a hostile patch of
 `hqReliabilityPosture` and `reliabilitySummary` is proven to have taken on the
 instance, on the prototype, and on a facade constructed AFTER the patch — and
 to buy no claim on either facade.
+
+**And a restart does not clear it either, because the verdict is RECORDED.**
+
+> **Correction (Wave 5 review, HIGH finding 1 — the second one).**
+> `SAFE_MODE_STATEMENT` shipped verbatim on every reliability view, in every
+> refusal message and in the unauthenticated snapshot, asserting: "It is never
+> cleared by a boot: only a fresh assessment that finds nothing blocking clears
+> it." The paragraph above repeated it. **Both were false.** The verdict lived
+> only in the in-memory `#integrityReport`; construction ran
+> `structuralIntegrity`, which by design cannot see a broken evidence chain;
+> nothing was persisted and nothing re-read. A plain restart over a file whose
+> chain was still broken at seq 2 reported `safeMode: false`, depth
+> `structural`, findings `[]` — and handed `releaseKillSwitch` and `claimNext`
+> back out. In a local-first CLI model every command is a new process, so this
+> was the ordinary path rather than an exotic one. `append_only_guard_missing`
+> had the same shape with one extra step: it survived exactly one boot, because
+> boot #1's `ensure*Schema` re-created the dropped trigger and boot #2 then
+> found a healthy file.
+>
+> **What changed.** `hq_reliability_verdicts` is a fourth append-only ledger
+> (the full trio of guards; declared in `ENGINE_IMMUTABLE_TABLES`), holding one
+> row per verdict: when, at what depth, safe mode or not, and the categorical
+> findings. `assessHqIntegrity` appends the verdict and its evidence entry in
+> ONE `privileged.reserve`, and only then updates the latch — which also closes
+> LOW 8's ordering complaint, where the field was assigned before the evidence
+> append and a throw could leave the posture changed with no audit entry. The
+> constructor reads the last verdict and re-raises every BLOCKING finding it
+> holds, so the latch belongs to the record rather than to one process's memory;
+> and when a construction's own structural pass is blocking and nothing standing
+> already says so, it APPENDS that observation (through the same reserve), so
+> the tamper a boot repairs is not forgotten by the next boot.
+>
+> Non-blocking findings are deliberately not carried: re-asserting a stale
+> `durability_below_requirement` would be HQ stating something it has not just
+> checked. Clearing is unchanged in principle and now true in fact — only
+> `fullIntegrity` over the file as it now stands supersedes the record.
+>
+> The prose says the mechanism and says where it does not apply: on a database
+> that carries no Phase 13 ledger there is nowhere to record a verdict, so it is
+> process-local there, and the `reliability_schema_absent` finding says when
+> that is the case.
 
 > **Correction (Wave 5 review, HIGH finding 1).** That paragraph was true of
 > the FIELD and false of the LATCH, and the gap was real rather than
@@ -322,54 +380,64 @@ to buy no claim on either facade.
 
 ### The latch is DURABLE, and it was not
 
-> **Correction (Wave 5 second correction round, HIGH 2).** `SAFE_MODE_STATEMENT`
-> — which crosses to the Founder browser and into the unauthenticated
-> `hq-snapshot.json` — says safe mode "is never cleared by a boot: only a fresh
-> assessment that finds nothing blocking clears it". Until this round it was,
-> and the mechanism made it inevitable: `#integrityReport` was an in-memory
-> field recomputed at every construction from `structuralIntegrity`, which by
-> design never runs the evidence-chain verification.
+> **Correction (Wave 5, reached INDEPENDENTLY by two correction lanes — one as
+> HIGH 1, one as HIGH 2).** Both found the same defect from the same executed
+> evidence and both built the same guarantee: after a full assessment engaged
+> `evidence_chain_broken`, a RESTART reported `safeMode: false` at depth
+> `structural` with `claimNext` ALLOWED, while `verifyEvidenceChain` still
+> reported the break and the world-readable snapshot published `safeMode: false`
+> over it; an `append_only_guard_missing` engagement survived exactly one boot,
+> because the next `ensure*Schema` re-created the trigger.
 >
-> Executed: after a full assessment engaged `evidence_chain_broken`,
-> `claimNext` was refused; after a RESTART, `safeMode` was false, the depth was
-> `structural`, `claimNext` was ALLOWED, `verifyEvidenceChain` still reported
-> the break at seq 1, and the world-readable snapshot published
-> `safeMode: false` over a genuinely broken chain. An
-> `append_only_guard_missing` engagement survived exactly one boot, because the
-> next `ensure*Schema` re-created the trigger and the as-found census then saw a
-> healthy file. The mechanism predates this wave; this wave made it load-bearing
-> (High 5 relies on "latched at construction") and re-published the claim.
+> **ONE implementation survives.** The engagement is a row in
+> `hq_reliability_verdicts`, described in full in the correction above. The
+> other lane built the same durability as its own INSERT-only
+> `hq_safe_mode_latch` table; that table, its DDL, its readers, its writer, its
+> type and its census entry were deleted in the reconciliation rather than kept
+> beside the verdict ledger, because two append-only tables answering "is safe
+> mode engaged" is a second truth. Its tests were ported onto the survivor
+> rather than dropped: UPDATE and DELETE from a raw connection are refused,
+> dropping `trg_hq_reliability_verdicts_no_erase` is a census finding, a restart
+> with the chain still broken keeps safe mode and publishes it, and a second
+> boot after a dropped guard keeps it even though the first boot re-created the
+> trigger.
 >
-> **Fixed** by writing the engagement down. `hq_safe_mode_latch` is an
-> INSERT-only table in the Phase 13 schema, carrying the full trio of engine
-> guards and declared in `ENGINE_IMMUTABLE_TABLES` so the census reports a
-> dropped guard on it — because an UPDATE or DELETE there would be a way to
-> clear safe mode without an assessment. The constructor appends an engagement
-> when a blocking finding stands and none is latched, then overlays the standing
-> latch onto the fresh report: **a boot can only ADD an engagement, never
-> subtract one.** `assessHqIntegrity` is the only path that may append a CLEAR,
-> and only because a FULL assessment found nothing blocking; there is still no
-> override, force flag or acknowledgement.
+> **Three properties carried across from the dropped implementation, because it
+> stated them and the survivor had not.**
 >
-> **What the latch does NOT protect against, stated rather than glossed.** The
+> 1. **A recorded verdict that says ENGAGED engages even when its stored finding
+>    list cannot be read.** A raw append can put a finding name outside the
+>    closed vocabulary into the ledger. That name is still dropped — it must
+>    never reach the unauthenticated artifact's key set or a refusal message, and
+>    no vocabulary member is invented for it — but dropping the ENGAGEMENT with
+>    it was the fail-open answer, and the surviving lane's own test asserted
+>    exactly that. `carryRecordedVerdict` now reports the standing engagement
+>    separately from the findings it could carry, `#safeModeRefusal` names the
+>    situation categorically instead of rendering "HQ is in SAFE MODE ()", and
+>    the snapshot's finding counts stay at zero rather than gaining a fabricated
+>    key. Both lanes' assertions are kept, on the merged behaviour.
+> 2. **The reported `depth` stays the depth of the CURRENT assessment**, never
+>    the recorded one — a structural boot must not present itself as a full pass
+>    — and the recorded depth is stated in the carried observation's detail
+>    instead.
+> 3. **A READ-ONLY handle (the `hq:snapshot` CLI) writes nothing.** It reports
+>    the verdict it finds, which is the honest answer for a handle that promised
+>    not to write, and it means a read-only process observing a blocking finding
+>    for the first time reports it without recording it.
+>
+> **What this does NOT protect against, stated rather than glossed.** The
 > standing verdict is the LAST row, and an APPEND is the write the table's
 > triggers deliberately permit. A writer that already holds a writable handle on
-> the file can therefore append `engaged = 0` and clear safe mode at the next
-> construction — exactly as it could append a forged event into any other ledger
-> here, and exactly the class of residual this document already records for
-> `hq_reliability_run_events`. The guards close the other doors (no UPDATE of a
-> standing row, no DELETE of the history, no REPLACE onto an existing id) and
+> the file can therefore append a `safe_mode = 0` row, and the next
+> construction's own pass is STRUCTURAL — which by design cannot see a broken
+> evidence chain — so an `evidence_chain_broken` engagement would not be
+> re-derived. That is exactly the class of residual this document already records
+> for `hq_reliability_run_events`. The guards close the other doors (no UPDATE of
+> a standing row, no DELETE of the history, no REPLACE onto an existing id) and
 > the census reports them if they go missing. Against a writer with the file
-> open this is bookkeeping, not a boundary; what it closes is the thing it was
-> built for — a RESTART silently lowering a verdict HQ had already reached.
->
-> Two details that are deliberately narrow. The reported `depth` remains the
-> depth of the CURRENT assessment — a structural boot must not present itself as
-> a full pass — and the latched depth is stated in the carried observation's
-> detail instead. And a READ-ONLY handle (the `hq:snapshot` CLI) writes nothing:
-> it reports the latch it finds, which is the honest answer for a handle that
-> promised not to write, and it means a read-only process observing a blocking
-> finding for the first time reports it without latching it.
+> already open this is bookkeeping, not a boundary; what it closes is the thing
+> it was built for — a plain RESTART silently lowering a verdict HQ had already
+> reached.
 
 ## Backup and restore
 
@@ -380,81 +448,91 @@ and restoring is a deliberate operator act against a stopped process. Phase 13
 adds the half that was missing: **verification, and a register of what was
 verified.**
 
-`verifyHqBackupFile` is read-only in the strongest available sense — the file
-is opened `O_NOFOLLOW` to digest and through `openHqDatabaseReadOnly` (SQLite
-itself refuses writes, and a missing file is an error rather than a new empty
-database) to check. **Eleven** categorical refusals, never an exception:
-`path_not_absolute`, `path_missing`, `path_is_symlink`,
-`path_not_a_regular_file`, `file_empty`, `file_too_large`,
-`file_has_uncheckpointed_wal`, `file_changed_during_verification`,
+`verifyHqBackupFile` is read-only with respect to the CANDIDATE in the
+strongest available sense — the file is opened `O_RDONLY | O_NOFOLLOW` and
+never written, and no `-wal`/`-shm` is created beside it. Thirteen categorical
+refusals, never an exception: `path_not_absolute`, `path_not_normalized`,
+`path_missing`, `path_is_symlink`, `path_not_a_regular_file`,
+`path_not_readable`, `file_empty`, `file_too_large`,
+`sidecar_journal_present`, `verification_copy_failed`,
 `not_a_readable_sqlite_database`, `integrity_check_failed`,
-`not_an_hq_database`. Nine of the eleven are exercised against real files on
-disk — a relative path, a missing one, a directory, an empty file, a symlink,
-a file of prose, a corrupted SQLite image, a perfectly valid SQLite database
-that is simply somebody else's, and a database with an un-checkpointed WAL
-beside it. `file_too_large` is NOT exercised: it would mean writing a
-two-gigabyte file in a test, and a bound that is asserted by reading the
-constant rather than by crossing it is stated here as what it is.
-`file_changed_during_verification` IS exercised since the second Wave 5
-correction round: the substitution is placed exactly where the race would put
-it (the moment the digest descriptor is obtained, before anything opens the
-path) by a spy on `fs.openSync`, and two real HQ databases with different table
-counts make the swap observable.
+`not_an_hq_database`. Ten of the thirteen are exercised against real files on
+disk — a relative path, an unnormalized absolute one, a missing one, a
+directory, an empty file, a symlink, a file of prose, a corrupted SQLite image,
+a valid SQLite database that is simply somebody else's, and a genuine backup
+with a `-wal` dropped beside it (twice over: as a dropped sidecar, and as a
+live un-checkpointed WAL database whose newest table exists only in the
+sidecar). `file_too_large` is NOT exercised: it would mean writing a
+two-gigabyte file in a test, and a bound asserted by reading the constant
+rather than by crossing it is stated here as what it is. `path_not_readable`
+and `verification_copy_failed` are likewise not exercised — both need a
+filesystem HQ cannot read or write, which a test that must pass on any
+developer's machine cannot arrange honestly.
 
-**The last two are Wave 5 corrections (Medium 3), and both close a real hole.**
-The recorded digest covered the MAIN FILE only, while the verifying open reads
-main PLUS any `-wal`/`-shm` sidecar, which was never hashed — executed: two
-candidates carried an identical `contentDigest` and an identical recorded size
-while their verified table counts differed (11 versus 12), because the
-difference lived entirely in an un-digested WAL. So a candidate with a non-empty
-`-wal`/`-journal` sidecar is now refused rather than recorded under a digest
-that means less than it looks like it means. Consequence, stated: pointing this
-at the LIVE WAL database is now a refusal instead of a pass. It was never
-unsafe — it still reads and writes nothing — but the digest it produced did not
-pin what SQLite checked. Separately, the digest `open` and the SQLite `open`
-were two independent `open()` calls on the same path; the digest descriptor is
-now HELD across the SQLite open and the file is re-digested through it
-afterwards.
-
-> **Correction (Wave 5 second correction round, MEDIUM 5).** That last sentence
-> used to end "so digest and verdict provably describe one inode and one
-> content", and it did not. The re-digest proves the CONTENT behind the held
-> descriptor did not change; it proves nothing about what
-> `openHqDatabaseReadOnly(resolved)` opened, because that open is BY PATH and
-> re-resolves it. A `rename()` between the first digest and that open left the
-> digest describing inode A while `integrity_check`, `schemaTables` and
-> `verified` described inode B — and the re-digest, reading A, agreed with
-> itself, so the candidate passed and `recordVerifiedBackup` would have stored
-> that digest as a recovery point.
+> **Correction (Wave 5 review, HIGH finding 3 / Medium 3 — both correction
+> lanes found it independently).** The digest and the checks were statements
+> about DIFFERENT byte sets, and the gap was exploitable. `digestFile` hashed
+> the main file through a descriptor while `integrity_check`, the schema census
+> and the `hq_events` marker were evaluated by a SECOND open of the PATH — and
+> SQLite resolves a path together with its `-wal`/`-shm`. A plain `cp` of a live
+> WAL-mode HQ database therefore verified `true`, with 45 tables read out of a
+> sidecar the digest never covered, a `sizeBytes` counting the main file only,
+> and the pristine file's digest recorded permanently in an append-only
+> register; the other lane executed the same defect from the other side, with
+> two candidates carrying an identical `contentDigest` and an identical recorded
+> size while their verified table counts differed (11 versus 12).
+> `backupRecordKey` is `hash(path, digest)`, so two materially different backups
+> collapsed onto one record. The same block was TOCTOU besides: `lstat` →
+> `openSync(O_NOFOLLOW)` → open-by-path, where only the first two constrained
+> the final component, which made `path_is_symlink` advisory for exactly the
+> half that decided `verified`.
 >
-> **Fixed** by comparing the descriptor's `dev`/`ino` with the path's after the
-> open and refusing a divergence as `file_changed_during_verification`. It
-> cannot invent a refusal (on a platform with no meaningful inode both reads
-> agree) and a rename that happens after SQLite's own open is refused too, which
-> is the fail-closed direction.
+> **Both are closed the same way.** After the `O_NOFOLLOW` open the function
+> never touches the path again: the descriptor's bytes are hashed and copied to
+> a scratch file under the OS temp directory in ONE pass, and the database
+> checks run against the copy, which is removed before the function returns. So
+> what `integrity_check` read, what `schemaTables` counted and what `digest` is
+> of are the same bytes by construction. That also removed a defect the fix
+> would otherwise have introduced: opening the candidate with SQLite CREATED
+> `-wal` and `-shm` beside it and left them, so a verification that refused
+> sidecars while opening the candidate directly would have refused its own
+> leftovers on the second call — pinned now by a test that verifies the same
+> file twice and asserts no sidecar was created.
 >
-> **What the guarantee actually is, stated exactly rather than rounded up:** the
-> content behind the digest descriptor cannot have changed, and the path cannot
-> be naming a different inode at the moment of verification. A rename that is
-> REVERTED inside the window between SQLite's own open and that `stat` would
-> still pass. Closing that would require opening the database through the held
-> descriptor (`/proc/self/fd/<n>`), which is not portable, and it was not done.
-
-**A symlinked PARENT directory is recorded, not refused.** `verifyHqBackupFile`'s
-own function header used to say the opposite — that a divergence is "refused as
-`path_is_symlink`" — while the code, the inline note forty lines below and the
-test all said it is recorded. A merge artifact, corrected in the second Wave 5
-round (LOW 6); the header now matches. `lstat` and
-`O_NOFOLLOW` cover only the FINAL path component (verified true with a directory
-symlink), so a candidate reached through a symlinked ancestor used to be
-verified silently under the alias the caller named. A symlinked ancestor
-substitutes no file — the digest and the `integrity_check` still describe
-whatever inode the path resolves to — so what it breaks is bookkeeping.
-`BackupVerification.resolvedPath` carries the path HQ actually opened, and
-`recordVerifiedBackup` stores THAT, so the register and the dedupe key name the
-file rather than an alias for it. Refusing on any divergence was the other
-option and was rejected as disproportionate and non-portable: on macOS
-`os.tmpdir()` itself sits under a symlinked `/var`.
+> The other lane closed the same TOCTOU differently, by HOLDING the digest
+> descriptor across the SQLite open and re-digesting through it afterwards,
+> refusing a divergence as `file_changed_during_verification`. That
+> implementation is dropped and its refusal reason with it, because the
+> scratch-copy version does not need the check: one pass over one descriptor
+> produces the digest, the copy and the checks together, so there is no window
+> in which they can disagree, and SQLite never re-resolves the candidate path at
+> all. A race closed by construction is preferred to a race detected afterwards,
+> and the reason nothing pinned it — it was recorded as an untested refusal — no
+> longer exists to be pinned.
+>
+> A sidecar beside the candidate is still refused rather than checked around,
+> because the main file alone may then not be the database an operator would
+> restore. The surviving rule refuses on PRESENCE rather than on non-zero size
+> (the other lane's `file_has_uncheckpointed_wal` bound), because presence is
+> what makes the main file possibly not the whole database. Pointing this at the
+> LIVE HQ database is consequently refused — a live HQ database is WAL-mode —
+> which is a more honest answer than the "safe as well as useless" pass it used
+> to give. `MAX_VERIFIED_BACKUP_BYTES` now bounds the READ rather than only the
+> pre-open `lstat`, and the `openSync` failure that used to collapse every cause
+> into `path_not_a_regular_file` is distinguished (LOW 12).
+>
+> **A symlinked PARENT directory is resolved and RECORDED, not refused.**
+> `lstat` and `O_NOFOLLOW` cover only the FINAL path component (verified true
+> with a directory symlink), so a candidate reached through a symlinked ancestor
+> used to be verified silently under the alias the caller named. An ancestor
+> link substitutes no file — the digest still describes whatever inode the path
+> resolves to — so what it breaks is bookkeeping.
+> `BackupVerification.resolvedPath` carries the path HQ actually opened and
+> `recordVerifiedBackup` stores THAT, so the register and the dedupe key name
+> the file rather than an alias for it. Refusing on any divergence was the other
+> option and was rejected as disproportionate and non-portable: on macOS
+> `os.tmpdir()` itself sits under a symlinked `/var`. WHICH file an operator may
+> point at remains a question this function does not answer.
 
 > **Correction (Wave 5 review, LOW finding 8).** Seven of those eight refusals
 > were asserted BY NAME; the corrupted-database one asserted only `verified:
@@ -470,7 +548,10 @@ never a declared digest. `BACKUP_RECORD_STATEMENT` says so on every view.
 
 Restart proof and restore verification are proven end to end: a real file is
 backed up, verified, copied, verified again, opened as a working HQ, and the
-run recorded before the backup is read back out of the restored copy.
+run recorded before the backup is read back out of the restored copy. The
+digest comparison is made BEFORE the restored file is opened live, because an
+open WAL-mode database carries a `-wal` and is therefore no longer a candidate
+this verification will vouch for.
 
 ## Authority
 
@@ -517,9 +598,10 @@ The strongest claim in the phase, established three ways — the Phase 12 recipe
 | does the capability have a side effect | `#capabilityFromStore` (the existing `#private` closure), never `queue.capabilities` | whether an interrupted attempt is uncertain | canonical, and fail-closed on an unreadable row. |
 | the capability's idempotency | `#capabilityFromStore` | whether `confirmed_not_executed` may reopen an attempt | canonical. |
 | the reliability-command capability row | `#capabilityFromStore` | whether an assessment or a backup record may proceed | canonical, unchanged from the Phase 4/5/7/12 pattern. |
-| the SAFE-MODE verdict | the `#private` `#integrityReport` field | whether a Founder-gated write, an approval, a kill-switch release, a claim or an external execution proceeds | canonical. Pinned against a patch of `hqReliabilityPosture` and `reliabilitySummary` on instance, prototype, and a later-constructed facade. |
+| the SAFE-MODE verdict | the `#private` `#integrityReport` field, latched from the structural assessment AND from the last row of `hq_reliability_verdicts` | whether a Founder-gated write, an approval, an external-action authorization, a kill-switch release, a claim or an external execution proceeds | canonical. Pinned against a patch of `hqReliabilityPosture` and `reliabilitySummary` on instance, prototype, and a later-constructed facade — and, **since the Wave 5 correction of HIGH 1**, against a plain RESTART, which used to clear it. |
+| the RECORDED verdict a construction re-reads | `latestIntegrityVerdict(db)` — a direct read of the append-only `hq_reliability_verdicts` ledger | whether a blocking verdict survives a restart | canonical. The ledger carries the full append-only trio; a raw connection can APPEND a `safe_mode = 1` row (the fail-closed direction) and can neither rewrite nor erase one. |
 | the EVIDENCE-CHAIN verification that PRODUCES that verdict | `#verifyEvidenceChainFromStore` — a `#private` closure over `#db` and the module-level `verifyEvidenceChain`, deliberately NOT `queue.evidence.verifyChain()` | whether `evidence_chain_broken` engages safe mode, and whether an already-latched safe mode survives the next assessment | canonical **since the Wave 5 correction**; it previously read the patchable delegate. Pinned against a patch on the instance and on `EvidenceLog.prototype`, and against a facade constructed after it. |
-| the APPEND-ONLY GUARD census that produces the other schema finding | `missingImmutabilityGuards(db)` over `ENGINE_IMMUTABLE_TABLES`, observed as the file was FOUND | whether `append_only_guard_missing` engages safe mode | canonical, and **widened by the Wave 5 correction** to the secondary-unique guards and `hq_memory`'s supersede rule, which it previously could not see. |
+| the APPEND-ONLY GUARD census that produces the other schema finding | `missingImmutabilityGuards(db)` over `ENGINE_IMMUTABLE_TABLES`, observed as the file was FOUND | whether `append_only_guard_missing` engages safe mode | canonical, and **widened twice by the Wave 5 review** — to the secondary-unique guards and `hq_memory`'s supersede rule (Medium 2), and to `hq_mission_plan_items`' three own guards (Medium 6). The declaration is **deep-frozen at module scope** (HIGH 2): it is public package API, `readonly` erases at runtime, and one `ENGINE_IMMUTABLE_TABLES.length = 0` used to empty the census and make a tampered file read clean. |
 | store presence | the constructor's `#reliabilityStorePresent` flag | whether a 0 means "absent" or "empty" | canonical, observed, never migrated. |
 | the ledger, for the unauthenticated snapshot | `#listRunsFromStore` and the `#private` report — deliberately NOT `listRuns()` or `hqReliabilityPosture()` | what `hq-snapshot.json`'s `reliability` section publishes | canonical. |
 
@@ -535,6 +617,29 @@ correlation id, process identity, backup path, digest, or finding detail
 string. Pinned by the exact top-level key set, by the exact nested key set of
 all three maps, and by a whole-artifact scan for every one of those values on a
 populated snapshot.
+
+> **Correction (Wave 5 review, MEDIUM finding C-1).** `reliabilitySummary()`
+> short-circuited on `#reliabilityStorePresent === false` and returned
+> `emptyReliabilitySnapshot(false)`, which HARD-CODES `safeMode: false`,
+> `assessmentDepth: 'structural'`, `findings: {}` and
+> `durabilityMeetsRequirement: true` without consulting `#integrityReport` at
+> all. But `#reliabilityStorePresent` answers only "does this file carry the
+> Phase 13 run TABLES", while the integrity verdict is computed over the whole
+> file — and on the case where they disagree (a genuine pre-Phase-13 database
+> with one dropped append-only trigger) the public artifact said everything was
+> fine while the Founder-gated view said `safeMode: true`. Because
+> `snapshot.ts` gates the "HQ is in SAFE MODE" provenance sentence on the same
+> flag, the note was suppressed with it, and the `durabilityMeetsRequirement:
+> true` in that branch was a separate law-8 breach. Both branches now report the
+> REAL verdict; the run half is still stated as absent, which it is. The key set
+> is unchanged — the same twelve.
+>
+> `durabilityMeetsRequirement` is a statement about a FILE-backed database, and
+> the snapshot note now says so in words (LOW 10): an in-memory handle reports
+> it true because there is nothing durable to require of a database with no
+> file, not because it is durable. The authenticated posture carries `inMemory`
+> beside it; the artifact deliberately does not grow a thirteenth key for a fact
+> the note can state.
 
 The four MAPS are closed **by construction**, not only by intent — the Phase 12
 lesson applied without having to relearn it. `hq_reliability_runs` and
@@ -625,7 +730,8 @@ than half-built.
 |---|---|
 | `hq_reliability_runs` — one INSERT-only row per run | `state`, `outcome`, `failureCategory`, `attempts`, `nextGeneration`, `lastCorrelationId`, `interruption`, `reconciliation`, `admitsAttempt` |
 | `hq_reliability_run_events` — INSERT-only history, with the UNIQUE attempt reservation | the recovery report and its classifications |
-| `hq_reliability_backups` — INSERT-only verified recovery points | the integrity verdict and the safe-mode posture |
+| `hq_reliability_backups` — INSERT-only verified recovery points | the integrity verdict's OBSERVATIONS and the safe-mode posture |
+| `hq_reliability_verdicts` — INSERT-only integrity verdicts (Wave 5 correction) | the snapshot's `safeMode` / `assessmentDepth` / `findings` |
 | | the snapshot counts |
 
 | Canonical (referenced, never written by this phase) |
@@ -673,9 +779,13 @@ timing-only concurrency tests. What was built:
   never ran this repository's code. There is no sleep, no timer and no
   interleaving assumption anywhere: the assertion is that the ENGINE refuses.
 - **A real file.** Engine immutability (UPDATE, DELETE, and both REPLACE-on-
-  unique-index paths on all three tables), the tamper that engages safe mode,
-  the evidence-chain break, and every backup path protection are all exercised
-  against a real database in a real temporary directory.
+  unique-index paths on all four tables — `hq_reliability_verdicts` included),
+  the tamper that engages safe mode, the evidence-chain break, the restart that
+  no longer clears a verdict, and ten of the thirteen backup path protections
+  are all exercised against a real database in a real temporary directory. The
+  three that are not (`file_too_large`, `path_not_readable`,
+  `verification_copy_failed`) are named in "Backup and restore" with the reason,
+  rather than counted as if they were.
 - **A real restore.** Backed up, verified, copied, verified again, opened as a
   working HQ, and the run read back out of the copy.
 
@@ -739,15 +849,31 @@ timing-only concurrency tests. What was built:
   whole declaration — one compares the full trigger-name set for every listed
   PREFIX, the other every trigger on the listed TABLE — so a guard a future
   phase adds and forgets to declare fails there rather than escaping the check.
-  The second correction round added `EngineImmutableTable.requiredGuards`, a
-  REDUCED base for the one table whose own columns are legitimately updated
-  (`hq_mission_plan_items` — see the Phase 14 doc for why it had to come into
-  the census at all), and a test pins that exactly one entry declares one, so a
-  second exception cannot be added quietly.
-- **An HQ database file created before this correction round engages safe mode
-  once, on its first boot afterwards.** `trg_hq_mission_plan_items_no_erase` and
-  the `hq_safe_mode_latch` guards did not exist in it. The census skips a table
-  that is ABSENT (so the latch table produces nothing), but
+  **Corrected again — by BOTH later correction lanes, from two different
+  exploits (Medium 3 and Medium A-6).** Those pin tests iterated the
+  DECLARATION, so they could not see a guard on a table nobody had listed — and
+  `hq_mission_plan_items`' guards were exactly that. The table is not
+  append-only as a whole (supersede and link legitimately UPDATE it), which was
+  taken as a reason to leave it out of the list altogether. One lane demonstrated
+  that dropping `_no_replace` let an `INSERT OR REPLACE` rewrite a plan item's
+  task binding with no finding at all; the other demonstrated that the table
+  carried no `_no_erase` guard whatever, and that ONE DELETE of the single link
+  row turned a `blocked` Phase 14 proposal into `within_ceiling` (see the Phase
+  14 doc). The merged fix is one entry: the table now CARRIES `no_erase`, and it
+  is listed with a REDUCED base declared through
+  `EngineImmutableTable.requiredGuards` (`no_erase`, `no_replace`, plus
+  `no_relink` and `no_respec`), so the census checks exactly what the schema
+  declares and demands no `no_rewrite` it should not. The boolean
+  `holdsUniversalTrio` the other lane used for the same purpose was dropped in
+  the reconciliation because it cannot express a required `no_erase`. A test
+  pins that exactly one entry declares a reduced base, so a second exception
+  cannot be added quietly, and a third test asserts the LIVE trigger set EQUALS
+  the union of the declarations, so a new guarded table is a test failure rather
+  than a silent gap.
+- **An HQ database file created before this wave engages safe mode once, on its
+  first boot afterwards.** `trg_hq_mission_plan_items_no_erase` and the
+  `hq_reliability_verdicts` guards did not exist in it. The census skips a table
+  that is ABSENT (so the verdict ledger produces nothing), but
   `hq_mission_plan_items` EXISTS on such a file without its new guard, and the
   as-found observation is taken before the schema ensures — by design, because
   HQ cannot know what was written while a guard was gone. The finding is
@@ -807,6 +933,17 @@ timing-only concurrency tests. What was built:
   mismatch is refused as the new `run_key_conflict`, which names the standing
   run id and deliberately does NOT echo its stored label. A caller with
   genuinely separate work on one task passes a distinct `idempotencyKey`.
+  **Ordering, since the three-lane reconciliation:** `openRun` now carries three
+  guards, and the earliest one wins. A task holding an unreconciled run is
+  refused `run_state_conflict` BEFORE the run key is derived at all, so on such a
+  task every open — same label or not — is answered by that refusal; the
+  `run_key_conflict` above is what answers a collision on LIVE work, where the
+  dedupe is still reachable. The in-reservation `run_attempt_refused` remains
+  beneath both as the re-check under the reservation, which is what closes the
+  window between the pre-reservation read and the write. Three lanes wrote three
+  different expected codes for the relabel-under-`needs_reconciliation` case;
+  the tests are ported to the answer the merged guard order actually gives, with
+  the reason stated inline, and no lane's guarantee was dropped to do it.
 - **The independence check in `reconcileRun` is currently unreachable through
   the worker path**, because `assertApprovalAuthority` refuses any registered
   worker first, and only registered workers hold claims. It is kept as defence
@@ -852,8 +989,8 @@ above rather than summarised away:
 | CRITICAL 1 — the late-outcome path concluded the run, lifting the `openRun` guard and re-admitting a duplicate irreversible act with no human | ["When a live process is classified"](#when-a-live-process-is-classified) |
 | HIGH 2 — the safe-mode latch did not survive a restart while `SAFE_MODE_STATEMENT` said it did | ["The latch is DURABLE, and it was not"](#the-latch-is-durable-and-it-was-not) |
 | MEDIUM 4 — a run-key collision silently merged two different pieces of work | "Known limitations" |
-| MEDIUM 5 — `file_changed_during_verification` did not hold, because the SQLite open is by path | "Backup and restore" |
-| LOW 6 — `verifyHqBackupFile`'s header contradicted its own code about a symlinked ancestor | "Backup and restore" |
+| MEDIUM 5 — `file_changed_during_verification` did not hold, because the SQLite open is by path | "Backup and restore" — **the finding stands; its implementation does not.** The third lane closed the same TOCTOU by construction (the scratch copy), that implementation survived the reconciliation, and this refusal was dropped with the code that needed it. |
+| LOW 6 — `verifyHqBackupFile`'s header contradicted its own code about a symlinked ancestor | "Backup and restore" — the header was rewritten around the scratch copy and states the resolve-and-record rule correctly. |
 
 The lesson recorded, because it is the one that produced the Critical: the two
 Wave 5 fixes that cancelled were each correct in isolation. Medium 1 gave a
@@ -951,7 +1088,8 @@ Both lanes' hostile-patch tests are kept, and both live-schema guard pins are
 kept: one compares the full trigger-name set per PREFIX, the other every
 trigger per TABLE.
 
-**Verification after the reconciliation** (the whole suite, not a subset):
+**Verification after the FIRST reconciliation** (Lane A + Lane B; the whole
+suite, not a subset):
 
 | Command | Result |
 |---|---|
@@ -967,7 +1105,251 @@ trigger per TABLE.
 
 Baseline at `c9ddecc` was 161 files / 3026 tests; Lane A alone was 161 / 3053
 and Lane B alone 162 / 3045. Nothing was deleted, skipped, weakened or
-narrowed by either lane or by the merge; the three pre-existing `it.skip` GAP
+narrowed by either lane or by that merge; the three pre-existing `it.skip` GAP
 markers under `packages/server` are untouched, and nothing under
 `packages/server`, `packages/web`, `packages/shared` or `packages/config-mesob`
 was changed.
+
+---
+
+## Wave 5 SECOND correction pass, and the THREE-lane reconciliation
+
+The head those two lanes produced was reviewed again, by three further fresh
+read-only hostile reviewers, none of whom authored the head they reviewed and
+none of whom knew about the lanes above. They returned 0 Critical / 5 High /
+7 Medium / 13 Low across both phases, every High reproduced by execution rather
+than inferred. That correction is **Lane C**, and this section is both its
+record and the record of merging it with the Lane A + Lane B head.
+
+The findings that touch Phase 13 are corrected in place above, in the sections
+they belong to:
+
+| Finding | Where it is now recorded |
+|---|---|
+| HIGH 1 — the safe-mode latch was process-local; a plain restart cleared an `evidence_chain_broken` verdict | "Safe mode → Nothing clears it by assertion", plus two rows in the enforcement-safe read audit and a fourth table in the ledger map |
+| HIGH 2 — `ENGINE_IMMUTABLE_TABLES` was a mutable exported array on an enforcement path | the census row of the enforcement-safe read audit |
+| HIGH 3 — `verifyHqBackupFile` digested one byte set and verified another | "Backup and restore" |
+| MEDIUM 4 — the run key included the caller's free-text label, so renaming defeated the duplicate guard | "Known limitations" |
+| MEDIUM 5 — `fullIntegrity`'s chain verifier was optional and its absence read as a pass | `fullIntegrity`'s own contract; the report now carries `chainVerified` |
+| MEDIUM 6 — the census was blind to `hq_mission_plan_items`, and the pinning test could not have caught it | "Known limitations → Which guards the census can see" |
+| MEDIUM 7 — `authorizeAction` was in neither column of the safe-mode table | "What it refuses, and what it deliberately does not", which now lists every mutator left available with its reason |
+| MEDIUM C-1 — the unauthenticated section published `safeMode: false` while HQ had latched safe mode | "Privacy: what crosses to the unauthenticated artifact" |
+| LOW 8 — the latch was mutated before the assessment was recorded | folded into the HIGH 1 correction: one `reserve`, record first |
+| LOW 9 — a stale comment pointed a maintainer back at the removed delegate | `fullIntegrity`'s contract |
+| LOW 10 — `:memory:` durability read as meeting the requirement at the artifact boundary | the durability posture's own note, and the snapshot note |
+| LOW 11 — "provable from the ledger" overstated what a voluntary ledger proves | `classifyInterruptedRun`'s comment |
+| LOW 12 — backup refusal categories over-collapsed and the size bound was not a bound on the read | "Backup and restore" |
+| LOW C-3 — the integrity `detail` comment claimed it was never composed from engine output | `HqIntegrityObservation.detail`'s own comment |
+| LOW C-4 — `runView.externalActionTaken: false` was stamped per run with nothing explaining it | `runView`'s docstring in `live/control-api.ts` |
+
+**Where Lane C and the Lane A + Lane B head fixed the SAME defect, one
+implementation survives and both sides' tests are kept, ported onto it.** In
+Phase 13 that is three places:
+
+- **Backup verification** (Lane A's Medium 3 vs Lane C's High 3). Lane C's
+  scratch-copy version survives: it digests, copies and checks one descriptor in
+  one pass, so the digest pins what was checked BY CONSTRUCTION and the
+  candidate's path is never resolved a second time. Lane A's held-descriptor
+  re-digest and its `file_changed_during_verification` refusal are dropped with
+  it — that race cannot occur in the survivor — while Lane A's `realpathSync`
+  resolution and `BackupVerification.resolvedPath` are carried ONTO the
+  survivor, so the register still names the file HQ opened rather than an alias.
+  Lane A's two backup tests are ported: the un-checkpointed-WAL exploit now
+  expects `sidecar_journal_present` (the broader rule) and keeps its
+  checkpointed-accept half, and the symlinked-ancestor test is kept unchanged.
+- **The absent-run-ledger snapshot** (Lane A's High 5 vs Lane C's C-1). Both
+  reached the same answer. `reliabilitySummary` composes the integrity half
+  exactly once now, with no separate branch for the absent store;
+  `emptyReliabilitySnapshot` keeps the required-integrity signature Lane A gave
+  it, and its own unit test still pins that it cannot be called without a
+  verdict.
+- **The run key and the duplicate-run guard** (Lane A's Medium 2 vs Lane C's
+  Medium 4). Identical fix to the digest, and Lane C's second half — `openRun`
+  refuses `run_state_conflict` against a task carrying an unreconciled run —
+  survives. Lane A's re-labelling test asserted the rename DEDUPES; it is ported
+  to assert the refusal, and the property it was really pinning (the label is
+  not part of a run's identity) is kept as its own new test over live work,
+  where nothing is unresolved and the rename does dedupe.
+
+**Known debt this pass records rather than closes:**
+
+- WHICH file an operator may point `verifyHqBackupFile` at is not a question it
+  answers. A symlinked ancestor is resolved and reported through `resolvedPath`
+  rather than refused, and the final component is `O_NOFOLLOW`, so the inode the
+  digest covers is the inode that is checked — but the choice of path is the
+  operator's;
+- `file_too_large`, `path_not_readable` and `verification_copy_failed` are
+  asserted by construction rather than by being crossed;
+- the verdict ledger is durable only where it exists: a database written before
+  this correction, or a read-only handle over one, carries no
+  `hq_reliability_verdicts` table, and the verdict is process-local there.
+  `SAFE_MODE_STATEMENT` says so rather than glossing it;
+- `hq_reliability_run_events` is not hash-chained (Lane A's open item, still
+  open): a raw recognized `reconciled` append still flips a run's derived state
+  and re-admits an attempt. The engine guards refuse UPDATE, DELETE and REPLACE;
+  they do not refuse a new, well-formed, forged row;
+- the recovery-liveness fix is a REPAIR path rather than a prevention (Lane A's
+  open item, still open). The lease-liveness alternative was considered and
+  deliberately not taken in this wave.
+
+**Verification at the THREE-lane merged head** (the whole suite, not a subset):
+
+| Command | Result |
+|---|---|
+| `npm run test:hq` | 164 files, 3109 tests passed |
+| `npm run typecheck --workspace @factoryos/headquarter` | clean |
+| `npm run test --workspace @factoryos/hq-host` | 23 files, 222 tests passed |
+| `npm run typecheck --workspace @factoryos/hq-host` | clean |
+| `npm run test --workspace @factoryos/hq-server` | 2 files, 20 tests passed |
+| `npm run typecheck --workspace @factoryos/hq-server` | clean |
+| `npm test` (root) | 37 files, 569 passed, 3 skipped |
+| `npm run build` | all workspaces; web `215.66 kB` / `69.22 kB` gzip (unchanged) |
+| `npm run build:site --workspace @factoryos/headquarter` | 10 pages + `hq-snapshot.json` |
+
+Lane C alone was 164 files / 3080 tests and the Lane A + Lane B head 162 /
+3073; the merged head exceeds both, which is what "nothing was dropped" looks
+like in the count. Nothing was deleted, skipped, weakened or narrowed to make
+the merge green: no `.skip` / `.only` / `.todo` / `xit` / `xdescribe` was added
+anywhere, no `as any`, no `@ts-expect-error` and no `eslint-disable` in an added
+line. Seven assertions written by the two earlier lanes were PORTED onto the
+surviving implementations rather than dropped — five of them because the
+survivor answers more strictly than the lane that wrote the assertion expected
+(the re-labelled open, the deliberately fresh `idempotencyKey` open, the
+un-checkpointed-WAL refusal name, the backdated `occurredAt`, and the retrieval
+statement's "exported for testing" disclosure, which is inverted because it is
+now false), and two because the survivor's signature changed (`fullIntegrity`'s
+chain verifier is required, and the guard statement names declaration rather
+than the resolver). Every guarantee either lane pinned is still pinned. The
+three pre-existing `it.skip` GAP markers under `packages/server` are untouched;
+`git diff` against the wave base `f1ce71c` over `packages/server`,
+`packages/web`, `packages/shared` and `packages/config-mesob` is empty; and
+`package.json` and `package-lock.json` are byte-identical to that base.
+
+---
+
+## The FOURTH reconciliation: the second correction round merged with the three-lane head
+
+The three-lane head above and the "second correction round" recorded earlier in
+this document were produced CONCURRENTLY by efforts that did not know about each
+other, both on the same branch and both descending from the Lane A + Lane B head
+`4c83f54`. This section records their merge. Nothing from either side was
+discarded; where both fixed the same defect, ONE implementation survives and both
+sides' regression tests are kept, ported onto it.
+
+### The CRITICAL, and why it had to survive intact
+
+The second correction round found that the FIRST round had introduced a
+Critical: the late-outcome accept path let a worker whose own attempt had been
+classified by a concurrent recovery conclude its own doubtful run, which lifted
+the `openRun` guard and re-admitted a SECOND run and a second attempt on a
+NON-IDEMPOTENT `external_side_effect` capability, with no independent principal,
+no step-up and no idempotency check. The three-lane head inherits the vulnerable
+accept path from `4c83f54` and does not close it.
+
+The fix survives this merge unchanged: a late statement is appended as
+`worker_report`, a member of the closed run-event vocabulary that
+`deriveRunRecord` folds into `RunRecord.workerReport` while `state` stays
+`needs_reconciliation` and `outcome` stays `outcome_unknown`; and an
+`outcome_recorded` that lands on a run ALREADY standing at
+`needs_reconciliation` is folded as testimony too, so a raw append into the
+append-only event table cannot reopen the hole from outside this code.
+`reconcileRun` — independent principal, step-up, idempotency rule — remains the
+only thing that closes such a run.
+
+The exploit is re-proven end to end in the merged tree by
+`a late worker report can never re-admit a second run or a second attempt on the
+same task` (`reliability-crash-recovery.test.ts`), which follows the whole chain:
+a non-idempotent `external_side_effect` capability, a live fenced claim, a run
+and an attempt, recovery from a second process, the late outcome from that same
+worker, then a SECOND `openRun` and a second `startRunAttempt` — both refused —
+plus a self-reconcile refused for want of independence and an independent
+`confirmed_not_executed` refused because the capability is not idempotent.
+`does not let a RAW outcome_recorded conclude a run standing at
+needs_reconciliation` (`reliability-durability.test.ts`) proves the same rule at
+the derivation, through a raw INSERT.
+
+**One refusal NAME changed and no guarantee did.** The third lane added a second,
+EARLIER `openRun` guard — a task carrying an unreconciled run is refused
+`run_state_conflict` before the run key is derived at all — so the second
+`openRun` in that exploit is now answered by that guard rather than by the
+in-reservation `run_attempt_refused` that answered it before. Both are
+categorical refusals naming the standing run; the assertions were ported to the
+answer the merged guard order actually gives, with the reason stated inline, and
+the in-reservation guard survives beneath it as the re-check under the
+reservation. Reverting the `worker_report` fix in the merged tree makes three
+tests fail, including both named above — checked, not assumed.
+
+### Duplicate implementations, and which one survived
+
+| Defect both sides fixed | Survivor | Dropped, and why |
+|---|---|---|
+| The safe-mode latch was not durable | `hq_reliability_verdicts` (third lane) | `hq_safe_mode_latch` (second round) — table, DDL, readers, writer, type, census entry and imports all removed. Two append-only ledgers answering "is safe mode engaged" is a second truth. The survivor also appends the verdict row and its evidence entry in ONE reservation, is consulted by `reliabilitySummary`, and records who assessed. Three properties were carried ONTO it from the dropped one: an engaged verdict whose stored finding list cannot be read still engages, the reported depth stays this assessment's, and a read-only handle writes nothing. All of the dropped implementation's tests were ported. |
+| Backup verification digested one byte set and checked another | the scratch-copy verification (third lane) | the held-descriptor re-digest plus `dev`/`ino` comparison, and its `file_changed_during_verification` refusal (second round). Its argument was evaluated against the code rather than taken on trust, and it holds: after the `O_NOFOLLOW` open the survivor never touches the candidate path again, so digest, copy and checks come from ONE pass over ONE descriptor and there is no window in which they can disagree — fail-closed by construction rather than by detection. The dropped version disclosed its own residual (a rename REVERTED inside the window between SQLite's open and the `stat` still passes) and the survivor has no such residual. The second argument is decisive in combination: the dropped version opens the candidate with SQLite, which CREATES `-wal`/`-shm` beside it and leaves them, and the surviving sidecar rule refuses on PRESENCE — so keeping both would have made HQ refuse its own leftovers on the second verification. Keeping the size-based rule instead would have been the weaker refusal. The refusal reason is dropped with the implementation because the race it detects cannot occur in the survivor. |
+| `hq_mission_plan_items` was outside the census | `EngineImmutableTable.requiredGuards` (second round) | `holdsUniversalTrio: false` (third lane). A boolean can only say "the trio" or "nothing"; it cannot express a REQUIRED `no_erase`, and `no_erase` is the guard that closes the executed Phase 14 fail-open (one DELETE of the single plan-item link turned a `blocked` proposal into `within_ceiling`). The third lane's exploit — dropping `_no_replace` to rewrite a plan item's task binding — is closed by the same entry, and its INVERTED live-schema test (the live trigger set EQUALS the union of the declarations) is kept and now binds it. |
+| The run key and the duplicate-run guard | all three guards, in one order | nothing dropped. `run_state_conflict` (third lane) is checked first, before the key is derived; `run_key_conflict` (second round) answers a collision on LIVE work, where the dedupe is still reachable; the in-reservation `run_attempt_refused` remains as the re-check under the reservation. Three lanes wrote three different expected codes for the relabel-under-`needs_reconciliation` case, and each assertion was ported to the merged answer with its reason inline. |
+
+Everything either side changed ALONE is kept verbatim. From the third lane: the
+deep-freeze of `ENGINE_IMMUTABLE_TABLES` and its four sibling constants, the
+required fail-closed chain verifier and `chainVerified`, the safe-mode gate on
+`authorizeAction`, the module-private raw retrieval adapters, the
+NFKC-normalized case-insensitive credential patterns, `cost_entry_conflict`,
+the canonical budget-scope derivation and spend attribution,
+`provider_binding_mismatch`, `deriveDecisionRecord`'s canonical re-derivation,
+and the `redaction.ts` corrections. From the second round: the CRITICAL above,
+`run_key_conflict`, the `no_erase` guard and its reduced census base,
+`readStoredCostFact`'s two further parity gaps, the bounded `decisionId`, and
+the honest residual disclosure now stated on `latestIntegrityVerdict`.
+
+### One seam the merge had to close itself
+
+The deep-freeze (third lane) and the reduced base (second round) met for the
+first time here, and `deepFreezeTables` froze `entry.secondaryGuards` and the
+entry but not `entry.requiredGuards` — which is exactly the finding the freeze
+exists to close, one field across:
+`ENGINE_IMMUTABLE_TABLES[i].requiredGuards.length = 0` would have dropped
+`no_erase` and `no_replace` off `hq_mission_plan_items`' declared set and made
+the census blind to the guard the other lane had just added. Frozen, and pinned
+by an added assertion in `refuses assignment to the census array, its entries
+and their guard lists`.
+
+### What is NOT fixed — all four lanes' disclosures, in one list
+
+Nothing below is closed by this wave, and each item is stated where it belongs
+as well as here:
+
+- `hq_reliability_run_events` is not hash-chained, and there is no cross-check
+  against the chained `op_evidence` entry. A raw, well-formed, recognized append
+  still moves a run's derived state; the engine guards refuse UPDATE, DELETE and
+  REPLACE, not a forged new row.
+- The verdict ledger is durable only where it EXISTS: a database written before
+  this wave, or a read-only handle over one, carries no `hq_reliability_verdicts`
+  table and the verdict is process-local there. `SAFE_MODE_STATEMENT` says so.
+- A writer that already holds a writable handle can APPEND a `safe_mode = 0`
+  verdict, and the next construction's own pass is STRUCTURAL — which by design
+  cannot see a broken evidence chain — so an `evidence_chain_broken` engagement
+  would not be re-derived. The same residual class as the run-event ledger above.
+  What the ledger DOES close is a plain restart silently lowering a verdict.
+- **An HQ database file created before this wave engages safe mode once, on its
+  first boot afterwards**, because `trg_hq_mission_plan_items_no_erase` did not
+  exist in it and the as-found census observes it missing. The finding is true
+  rather than spurious; one Founder full assessment clears it. Since the verdict
+  ledger survived this merge, that first boot also RECORDS the engagement, so it
+  now persists across restarts until that assessment — stronger, and stated here
+  rather than discovered in operation. A fresh file is unaffected.
+- Recovery's liveness correction is a REPAIR path, not a prevention.
+- A MODEL-scoped ceiling does not govern a decision write, because nothing in
+  canonical truth binds a task to a model.
+- WHICH file an operator may point `verifyHqBackupFile` at is not a question it
+  answers; a symlinked ancestor is resolved and RECORDED rather than refused.
+- `file_too_large`, `path_not_readable` and `verification_copy_failed` are
+  asserted by construction rather than by being crossed.
+- `verifyHqBackupFile` now writes a full copy of the candidate into the OS temp
+  directory, so verification needs free space equal to the file and is slower.
+- A credential split across two search fields still passes both scans.
+- A forged decision row can still understate complexity, context size and work
+  kind.
+- A raw appender can still widen a budget by appending a higher-version row.
+- The independence check in `reconcileRun` is unreachable through the worker
+  path (kept as defence in depth), `listRuns` derives every record per call, a
+  run cannot be corrected in place, and nothing here has been exercised by a real
+  AI worker lane.

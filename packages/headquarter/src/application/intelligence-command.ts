@@ -302,6 +302,23 @@ export function isEscalationTrigger(value: unknown): value is EscalationTrigger 
 export const BUDGET_SCOPES = ['mission', 'project', 'provider', 'model', 'deployment'] as const;
 export type BudgetScope = (typeof BUDGET_SCOPES)[number];
 
+/**
+ * What a STORED scope kind or window can be once it has been read back — the
+ * same shape, and the same reason, as `STORED_RUN_KIND_UNRECOGNIZED`.
+ *
+ * `hq_intel_budgets` is append-only, so an APPEND is the write the triggers
+ * deliberately permit and a row naming a scope outside the vocabulary is
+ * representable. It reads as `unrecognized` rather than being coerced into a
+ * real scope, which is what it used to be: a forged `scope_kind` became
+ * `deployment` and a forged `window_kind` became `total`, so the row was
+ * adopted as the DEPLOYMENT ceiling (Wave 5 review, Medium finding B-4).
+ * `latestBudgetFor` matches no real scope against this value, so such a row
+ * governs nothing.
+ */
+export const STORED_BUDGET_UNRECOGNIZED = 'unrecognized' as const;
+export type StoredBudgetScope = BudgetScope | typeof STORED_BUDGET_UNRECOGNIZED;
+export type StoredBudgetWindow = BudgetWindow | typeof STORED_BUDGET_UNRECOGNIZED;
+
 export function isBudgetScope(value: unknown): value is BudgetScope {
   return typeof value === 'string' && (BUDGET_SCOPES as readonly string[]).includes(value);
 }
@@ -1415,10 +1432,16 @@ export function deriveEscalation(input: {
 export interface BudgetRecord {
   id: string;
   seq: number;
-  scopeKind: BudgetScope;
+  /** `unrecognized` for a row appended outside the vocabulary. It governs nothing. */
+  scopeKind: StoredBudgetScope;
   scopeId: string;
-  window: BudgetWindow;
-  ceilingMinorUnits: number;
+  window: StoredBudgetWindow;
+  /**
+   * Null for a row whose stored ceiling is not a whole non-negative number.
+   * Read as null rather than as `NaN`, and answered as
+   * `requires_founder_decision` rather than as `within_ceiling`.
+   */
+  ceilingMinorUnits: number | null;
   currency: string;
   permittedTiers: readonly IntelligenceTier[];
   version: number;
@@ -1491,7 +1514,29 @@ export function evaluateBudget(input: {
         'alone.',
     };
   }
-  const budget = input.budget;
+  if (input.budget.ceilingMinorUnits == null) {
+    // A row exists and its ceiling is unreadable. That is NOT permission, and
+    // it is not `within_ceiling` either: an unguarded `Number()` used to make
+    // it `NaN`, `observed >= NaN` false, and `blocked` unreachable for the
+    // scope forever (Wave 5 review, Medium finding B-4). Answered as the
+    // Founder decision it is, with the free local tier alone.
+    const unknownAmountEntries = input.entries.filter((entry) => entry.amountMinorUnits == null).length;
+    return {
+      ...base,
+      decision: 'requires_founder_decision',
+      ceilingMinorUnits: null,
+      currency: input.budget.currency,
+      observedMinorUnits: 0,
+      unknownAmountEntries,
+      otherCurrencyEntries: 0,
+      permittedTiers: [...DEFAULT_PERMITTED_TIERS],
+      reason:
+        'A budget row is recorded for this scope but its ceiling is not a whole non-negative number, so HQ ' +
+        'cannot measure anything against it. An unreadable ceiling is a Founder decision, never a reassuring ' +
+        'answer, and the permitted tier set is the free local tier alone.',
+    };
+  }
+  const budget = { ...input.budget, ceilingMinorUnits: input.budget.ceilingMinorUnits };
   let observedMinorUnits = 0;
   let unknownAmountEntries = 0;
   let otherCurrencyEntries = 0;
@@ -1544,58 +1589,95 @@ export function evaluateBudget(input: {
   };
 }
 
-/** How restrictive an answer is. Higher wins when several scopes apply. */
-const BUDGET_DECISION_SEVERITY: Readonly<Record<BudgetDecision, number>> = {
+/** One scope a piece of work is answerable to, and where it came from. */
+export interface GoverningBudgetScope {
+  scopeKind: BudgetScope;
+  scopeId: string;
+  window: BudgetWindow;
+  /**
+   * The canonical row this scope was DERIVED from — never a caller's argument.
+   * `deployment` is the baseline every piece of work is answerable to.
+   */
+  derivedFrom: 'deployment' | 'task_mission' | 'task_project' | 'task_bound_provider';
+}
+
+/**
+ * The order refusals get worse in. Used to pick the most restrictive answer.
+ *
+ * `Readonly` and frozen: it is read on an enforcement path, and the other
+ * correction lane's version of this constant carried the `Readonly` type for
+ * exactly that reason.
+ */
+const BUDGET_DECISION_SEVERITY: Readonly<Record<BudgetDecision, number>> = Object.freeze({
   within_ceiling: 0,
   requires_founder_decision: 1,
   blocked: 2,
-};
+});
 
 /**
- * Combine the answers of EVERY scope that applies to one piece of work into
- * the single most restrictive one (Wave 5 High 2).
+ * Fold EVERY policy that governs one piece of work into one answer — law 4,
+ * enforced instead of asserted.
  *
- * A task is inside a deployment, and usually inside a mission and a project
- * too, and each of those may carry a ceiling over each window. The phase used
- * to evaluate exactly ONE scope, chosen by a CALLER parameter — so a worker
- * facing a strict `deployment/total` policy could name a permissive
- * `mission/<some other mission>/total` (or merely a different `window`) and
- * move from `refusal: no_permitted_tier` to `tier: high, budgetDecision:
- * within_ceiling`. The scope set is now derived canonically and every member
- * of it binds:
+ * The module docstring's fourth law says no policy path can widen the
+ * permitted tier set on its own. That was true of this module and false of the
+ * facade, because the facade took the governing scope as a caller argument:
+ * the same task, the same worker and the same live fence produced
+ * `tier_not_permitted` under the default scope and a recorded
+ * `critical_review` under a scope the caller named instead, with the whole
+ * permitted set behind it (Wave 5 review, High finding B-1). The scopes are
+ * derived from canonical truth now, and this is where they are combined.
  *
- *  - the DECISION is the most severe of the answers (blocked beats requires a
- *    Founder decision beats within ceiling);
- *  - the permitted tier set is the INTERSECTION, so a tier is permitted only
- *    where every applicable ceiling permits it;
- *  - the reported ceiling/observed figures come from the scope that produced
- *    the governing decision, so the reason a reader sees names the ceiling
- *    that actually bound.
+ * Two rules, both in the restrictive direction:
  *
- * An empty list cannot occur at the call sites (the deployment scope always
- * participates) and is treated as the fail-closed no-policy answer if it ever
- * did.
+ *  - the DECISION is the worst of them. One `blocked` ceiling blocks; one
+ *    scope HQ cannot measure makes the whole answer a Founder decision;
+ *  - the permitted tier set is the INTERSECTION, never the union. A ceiling
+ *    that permits more cannot widen one that permits less, which is the only
+ *    reading under which "the most restrictive applicable policy governs" is
+ *    true rather than aspirational.
+ *
+ * An EMPTY list is not "no restrictions": it answers `requires_founder_decision`
+ * with the free local tier alone, the same fail-closed answer as no ceiling at
+ * all. Nothing produces an empty list today (the deployment baseline is always
+ * present), and a future caller that did must not be handed permission.
  */
-export function mostRestrictiveBudget(
-  evaluations: readonly BudgetEvaluation[],
-): BudgetEvaluation {
-  if (evaluations.length === 0) {
-    return evaluateBudget({ budget: null, entries: [] });
+export function combineBudgetEvaluations(
+  parts: readonly { scope: GoverningBudgetScope; evaluation: BudgetEvaluation }[],
+): {
+  decision: BudgetDecision;
+  permittedTiers: IntelligenceTier[];
+  reason: string;
+  governedBy: GoverningBudgetScope[];
+} {
+  if (parts.length === 0) {
+    return {
+      decision: 'requires_founder_decision',
+      permittedTiers: [...DEFAULT_PERMITTED_TIERS],
+      reason:
+        'No budget policy was resolved for this work at all. Absence of a policy is not permission, so the ' +
+        'answer is a Founder decision and the permitted tier set is the free local tier alone.',
+      governedBy: [],
+    };
   }
-  let governing = evaluations[0]!;
-  for (const evaluation of evaluations) {
-    if (
-      BUDGET_DECISION_SEVERITY[evaluation.decision] > BUDGET_DECISION_SEVERITY[governing.decision]
-    ) {
-      governing = evaluation;
+  let decision: BudgetDecision = 'within_ceiling';
+  for (const part of parts) {
+    if (BUDGET_DECISION_SEVERITY[part.evaluation.decision] > BUDGET_DECISION_SEVERITY[decision]) {
+      decision = part.evaluation.decision;
     }
   }
-  let permitted: readonly IntelligenceTier[] = evaluations[0]!.permittedTiers;
-  for (const evaluation of evaluations.slice(1)) {
-    const allowed = new Set(evaluation.permittedTiers);
-    permitted = permitted.filter((tier) => allowed.has(tier));
-  }
-  return { ...governing, permittedTiers: [...permitted] };
+  const permittedTiers = INTELLIGENCE_TIERS.filter((tier) =>
+    parts.every((part) => part.evaluation.permittedTiers.includes(tier)),
+  );
+  const worst = parts.find((part) => part.evaluation.decision === decision)!;
+  const scopes = parts.map((part) => `${part.scope.scopeKind}:${part.scope.scopeId}/${part.scope.window}`);
+  return {
+    decision,
+    permittedTiers,
+    reason:
+      `${scopes.length} recorded polic(ies) govern this work (${scopes.join(', ')}); the most restrictive ` +
+      `answer stands and the permitted tier set is their intersection. ${worst.evaluation.reason}`,
+    governedBy: parts.map((part) => part.scope),
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1733,14 +1815,36 @@ function rowToObservation(r: Record<string, unknown>): ModelObservationRow {
   };
 }
 
+/**
+ * Read a STORED budget row. FAIL CLOSED, in the same direction as
+ * `readStoredCostFact` — which the budget reader did not do, and the gap was
+ * live (Wave 5 review, Medium finding B-4).
+ *
+ * Three coercions used to fail OPEN, and all three are gone:
+ *
+ *  - `scope_kind` outside the vocabulary was coerced to `'deployment'` and
+ *    `window_kind` to `'total'`, so a raw append naming a scope that does not
+ *    exist was ADOPTED into the deployment scope — the exact opposite of
+ *    `#entriesForScope`'s stated rule that an unrecognized scope matches
+ *    nothing. Both now read as `unrecognized`, which `latestBudgetFor` can
+ *    never match, so a forged row governs nothing;
+ *  - `Number(r.ceiling_minor_units)` was unguarded, so a non-numeric ceiling
+ *    became `NaN`, `observed >= NaN` was false, and `blocked` could never fire
+ *    again for that scope: one append turned a blocked scope into
+ *    `within_ceiling` and a `critical_review` tier was recorded against it.
+ *    A ceiling that is not a whole non-negative number now reads as `null`,
+ *    and `evaluateBudget` answers `requires_founder_decision` on it.
+ */
 function rowToBudget(r: Record<string, unknown>): BudgetRow {
+  const ceiling = r.ceiling_minor_units;
   return {
     seq: r.seq as number,
     id: r.id as string,
-    scopeKind: (isBudgetScope(r.scope_kind) ? r.scope_kind : 'deployment') as BudgetScope,
+    scopeKind: isBudgetScope(r.scope_kind) ? r.scope_kind : STORED_BUDGET_UNRECOGNIZED,
     scopeId: r.scope_id as string,
-    window: (isBudgetWindow(r.window_kind) ? r.window_kind : 'total') as BudgetWindow,
-    ceilingMinorUnits: Number(r.ceiling_minor_units),
+    window: isBudgetWindow(r.window_kind) ? r.window_kind : STORED_BUDGET_UNRECOGNIZED,
+    ceilingMinorUnits:
+      typeof ceiling === 'number' && Number.isInteger(ceiling) && ceiling >= 0 ? ceiling : null,
     currency: r.currency as string,
     permittedTiers: readPermittedTiers(r.permitted_tiers),
     version: Number(r.version),
@@ -1913,7 +2017,40 @@ export interface DecisionRecord extends DecisionRow {
  */
 export function deriveDecisionRecord(
   row: DecisionRow,
-  input: { outcomes: readonly DecisionOutcomeRow[]; escalations: readonly DecisionRow[] },
+  input: {
+    outcomes: readonly DecisionOutcomeRow[];
+    escalations: readonly DecisionRow[];
+    /**
+     * CANONICAL truth about the decision's task, re-read at derivation time.
+     *
+     * Three columns on an append-only table were previously read back verbatim
+     * and published as canonical facts, and a raw appender could therefore
+     * choose all three (Wave 5 review, Medium finding B-3):
+     *
+     *  - `bound_provider` is presented on the Founder route as "the provider
+     *    the canonical payload binds", which is a claim about `op_tasks` and
+     *    not about this row;
+     *  - the `riskClass` half of `characteristics` drives the recomputed floor
+     *    that `decisionIsProvablyAvoidable` calls a defence against forgery —
+     *    the recomputation relocated the forgery from `floor_tier` to
+     *    `characteristics`, it did not close it;
+     *  - `required_review_tier` NULL made `satisfiesReviewRequirement` true and
+     *    dropped the row out of the review-required count.
+     *
+     * When this resolver is supplied — the facade always supplies it — all
+     * three are taken from `op_tasks` / `op_capabilities` instead, and the
+     * review requirement is the STRONGER of the stored one and the one the
+     * canonical risk class imposes. On an honestly recorded row the two agree,
+     * so nothing changes; on a forged one the canonical answer wins. It is
+     * optional only so the pure derivation stays exercisable without a
+     * database.
+     */
+    canonical?: {
+      boundProvider: (taskId: string) => string | null;
+      /** Fail-closed: `founder_gate` for a task or capability that cannot be read. */
+      riskClass: (taskId: string) => RiskClass;
+    };
+  },
 ): DecisionRecord {
   const outcome =
     [...input.outcomes].filter((entry) => entry.decisionId === row.id).sort((a, b) => a.seq - b.seq).pop() ??
@@ -1922,19 +2059,41 @@ export function deriveDecisionRecord(
     [...input.escalations].filter((entry) => entry.escalatedFrom === row.id).sort((a, b) => a.seq - b.seq)[0] ??
     null;
   const state: DecisionState = escalatedAway ? 'escalated_away' : outcome ? 'settled' : 'issued';
+  const canonical = input.canonical ?? null;
+  const boundProvider = canonical ? canonical.boundProvider(row.taskId) : row.boundProvider;
+  const characteristics =
+    canonical && row.characteristics
+      ? { ...row.characteristics, riskClass: canonical.riskClass(row.taskId) }
+      : row.characteristics;
+  // The stronger of the two, so a forged NULL cannot drop the requirement.
+  const canonicalReview = characteristics ? REVIEW_REQUIREMENT[characteristics.riskClass] : null;
+  const requiredReviewTier = maxRequiredReviewTier(row.requiredReviewTier, canonical ? canonicalReview : null);
   return {
     ...row,
+    boundProvider,
+    characteristics,
+    requiredReviewTier,
     state,
     result: outcome?.result ?? 'result_unknown',
     reviewedByTier: outcome?.reviewedByTier ?? null,
     escalatedAwayTo: escalatedAway?.id ?? null,
     satisfiesReviewRequirement: proposalSatisfiesReviewRequirement({
       tier: isIntelligenceTier(row.tier) ? row.tier : null,
-      requiredReviewTier: row.requiredReviewTier,
+      requiredReviewTier,
     }),
     grantsAuthority: false,
     statement: INTELLIGENCE_ROUTING_STATEMENT,
   };
+}
+
+/** The stronger of two review requirements; null only when both are null. */
+function maxRequiredReviewTier(
+  stored: IntelligenceTier | null,
+  canonical: IntelligenceTier | null,
+): IntelligenceTier | null {
+  if (stored == null) return canonical;
+  if (canonical == null) return stored;
+  return tierRank(canonical) > tierRank(stored) ? canonical : stored;
 }
 
 /** One recorded cost entry, as a reader sees it. */
@@ -2093,9 +2252,20 @@ export function decisionIsProvablyAvoidable(decision: DecisionRecord): boolean {
   if (decision.result !== 'quality_met') return false;
   const characteristics = decision.characteristics;
   if (!characteristics) return false;
-  // Recompute the floor from the recorded characteristics rather than trusting
-  // the stored `floor_tier` column: the append-only table admits an APPEND, so
-  // a forged row could otherwise declare a low floor and manufacture a finding.
+  // Recompute the floor rather than trusting the stored `floor_tier` column.
+  //
+  // Stated exactly, because the old comment here overclaimed and the doc
+  // repeated it (Wave 5 review, Medium finding B-3): recomputing from
+  // `decision.characteristics` RELOCATES the forgery, it does not close it —
+  // `characteristics` is a stored column on the same append-only table, so a
+  // raw appender that could have lied in `floor_tier` can lie there instead.
+  // What actually closes it is upstream: `deriveDecisionRecord` re-derives the
+  // `riskClass` half of `characteristics` from `op_tasks`/`op_capabilities`, so
+  // the floor computed here rests on canonical truth for the term that carries
+  // the risk. The remaining terms (complexity, context size, work kind) are
+  // descriptions of the work that HQ has no canonical source for and does not
+  // pretend to — a forged row can still understate those, which is recorded
+  // debt rather than a closed hole.
   const recomputed = computeRoutingProposal({
     characteristics,
     permittedTiers: INTELLIGENCE_TIERS,

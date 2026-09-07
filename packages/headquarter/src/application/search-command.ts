@@ -426,7 +426,7 @@ export function orderDocuments(
  * AND semantics (every term must appear somewhere in the document) come from
  * `archive/search.ts` unchanged. This adapter neither loosens nor scores them.
  */
-export const LEXICAL_RETRIEVAL_ADAPTER: RetrievalAdapter = {
+const RAW_LEXICAL_RETRIEVAL_ADAPTER: RetrievalAdapter = {
   id: 'hq.retrieval.lexical',
   mode: 'deterministic_lexical',
   available: true,
@@ -460,7 +460,7 @@ export const LEXICAL_RETRIEVAL_ADAPTER: RetrievalAdapter = {
  * until it is taken, a semantic request is answered by the deterministic
  * adapter and told so.
  */
-export const SEMANTIC_RETRIEVAL_ADAPTERS: readonly RetrievalAdapter[] = [];
+const RAW_SEMANTIC_RETRIEVAL_ADAPTERS: readonly RetrievalAdapter[] = [];
 
 /* ------------------------------------------------------------------ */
 /* The adapter GUARD — closing the pre-real-adapter hole               */
@@ -469,29 +469,38 @@ export const SEMANTIC_RETRIEVAL_ADAPTERS: readonly RetrievalAdapter[] = [];
 /**
  * What HQ publishes about the retrieval guard, on the wire.
  *
- * It said an in-process caller "cannot obtain an unguarded adapter", and that
- * was not true (Wave 5 Medium 9): `LEXICAL_RETRIEVAL_ADAPTER` and
- * `SEMANTIC_RETRIEVAL_ADAPTERS` are exported, and this package's own tests
- * import and call them directly — which is legitimate, because the raw
- * adapters are what the guard is TESTED against. The guard itself is sound:
- * all three branches of `resolveRetrievalAdapter` wrap with
- * `guardRetrievalAdapter`, and both facade entry points scan before
- * `normalizeSearchQuery` echoes anything into `criteria`.
+ * It said an in-process caller "cannot obtain an unguarded adapter", and at the
+ * frozen wave head that was FALSE (Wave 5 Medium 9 / C-2):
+ * `LEXICAL_RETRIEVAL_ADAPTER` and `SEMANTIC_RETRIEVAL_ADAPTERS` were the raw,
+ * unwrapped objects, exported — and this package's own `search-core.test.ts`
+ * called one of them directly.
  *
- * So the statement is narrowed to what is actually enforced, rather than the
- * export being removed to make an over-claim true. This text is interpolated
- * into `statement.note` and reaches the browser as an HQ assertion; it may not
- * say more than HQ does.
+ * Two correction lanes answered it differently: one narrowed the SENTENCE to
+ * what was enforced and disclosed that the raw objects are exported unwrapped;
+ * the other made the CODE meet the sentence. The code fix is what survives,
+ * because a guarantee that holds structurally is worth more than a disclosure
+ * that the guarantee does not hold: the raw adapters are module-private
+ * (`RAW_LEXICAL_RETRIEVAL_ADAPTER`, `RAW_SEMANTIC_RETRIEVAL_ADAPTERS`), the
+ * exported bindings are already wrapped at DECLARATION, the semantic list is
+ * frozen, and `guardRetrievalAdapter` is idempotent so the resolver's own
+ * wrapping still costs nothing. The narrowed sentence's true half — that the
+ * FACADE scan, not the seam guard, is the layer the pipeline relies on, because
+ * tokenization has already removed the separators a credential shape needs — is
+ * carried into the wording below and pinned by its own test.
+ *
+ * This text is interpolated into `statement.note` and reaches the browser as an
+ * HQ assertion; it may not say more than HQ does.
  */
 export const RETRIEVAL_GUARD_STATEMENT =
   'Free text entering search or a question is scanned for credential shapes at the FACADE, before it is ' +
   'tokenized, normalized or matched — that FACADE scan is the guarantee, and the browser route keeps its ' +
-  'own scan outside it. Every retrieval adapter the resolver hands out is additionally a guarded wrapper ' +
-  'that scans the free text passed to it, and the wrapping is done by the resolver rather than by the ' +
-  'caller, so an adapter installed later cannot opt out of it. Because the pipeline tokenizes first, ' +
-  'those terms no longer carry the separators a credential shape needs: the seam guard is defence in ' +
-  'depth against a caller that supplies its own untokenized terms, not the layer the pipeline relies on. ' +
-  'The raw adapter objects are exported for testing and are not wrapped in themselves.';
+  'own scan outside it. Every retrieval adapter the resolver hands out is additionally reached through a ' +
+  'seam guard that scans the terms it is about to be handed, and the guard is applied AT DECLARATION ' +
+  'rather than by the caller: the raw adapters are module-private and every exported binding is already ' +
+  'wrapped, so no in-process caller can obtain an unwrapped adapter and one installed later cannot opt ' +
+  'out. Because the pipeline tokenizes first, those terms no longer carry the separators a credential ' +
+  'shape needs: the seam guard is defence in depth against a caller that supplies its own untokenized ' +
+  'terms, not the layer the pipeline relies on.';
 
 /**
  * Raised when free text reaching a retrieval adapter fails the browser-safety
@@ -544,10 +553,14 @@ export class RetrievalSafetyError extends Error {
  *    that meets a credential in the shape `assertBrowserSafe` recognises;
  *  - the SEAM guard sees `input.terms`, which on the pipeline path are always
  *    `tokenize()` output — lowercased and split on `[^a-z0-9]+`. That strips
- *    every separator the eleven `SECRET_VALUE_PATTERNS` require (`sk-`, `ghp_`,
- *    a JWT's dots, `Bearer `, `api_key: `), and lowercasing defeats the
- *    case-sensitive ones besides, so on realistic pipeline input the seam scan
- *    does not fire at all.
+ *    every separator the `SECRET_VALUE_PATTERNS` shapes depend on (`sk-`,
+ *    `ghp_`, a JWT's dots, `Bearer `, `api_key: `), so on realistic pipeline
+ *    input the seam scan does not fire on those shapes. It is NOT inert on
+ *    everything: a separator-free shape such as a Google `AIza…` key survives
+ *    tokenization intact apart from case, and since the patterns became
+ *    case-insensitive (Wave 5 Low C-2) the seam does catch it. Both halves are
+ *    pinned by their own tests in `search-adapter-guard.test.ts`, so neither
+ *    claim can quietly become the other one.
  *
  * The seam guard is kept, and is worth keeping, for the caller the FACADE does
  * not cover: `resolveRetrievalAdapter` is exported, so an in-process caller can
@@ -583,8 +596,20 @@ export function assertRetrievalTextSafe(
  * from the adapter it guards, and no code path gains a reason to reach for the
  * unguarded one.
  */
+/**
+ * Every adapter this module has already wrapped.
+ *
+ * A `WeakSet` rather than a flag on the object, so nothing about an adapter's
+ * public shape says whether it is guarded and nothing can claim to be guarded
+ * by declaring it. Wrapping twice would be harmless but wasteful; more to the
+ * point, it lets the EXPORTED constants be the guarded ones without the
+ * resolver double-wrapping them on every call.
+ */
+const GUARDED_ADAPTERS = new WeakSet<RetrievalAdapter>();
+
 export function guardRetrievalAdapter(adapter: RetrievalAdapter): RetrievalAdapter {
-  return {
+  if (GUARDED_ADAPTERS.has(adapter)) return adapter;
+  const guarded: RetrievalAdapter = {
     id: adapter.id,
     mode: adapter.mode,
     available: adapter.available,
@@ -607,7 +632,37 @@ export function guardRetrievalAdapter(adapter: RetrievalAdapter): RetrievalAdapt
       return adapter.retrieve(input);
     },
   };
+  GUARDED_ADAPTERS.add(guarded);
+  return guarded;
 }
+
+/**
+ * The ONE installed adapter, ALREADY GUARDED — and that is the whole point of
+ * the two names above it.
+ *
+ * The claim "an in-process caller cannot obtain an unwrapped adapter" was made
+ * on `resolveRetrievalAdapter`, and it was false of the module: the raw
+ * constants were exported, `application/index.ts` re-exported them, and
+ * `search-core.test.ts` already called `LEXICAL_RETRIEVAL_ADAPTER.retrieve(...)`
+ * unwrapped (Wave 5 review, Medium finding C-2). The day a real transmitting
+ * retriever joined the semantic list, `SEMANTIC_RETRIEVAL_ADAPTERS[0].retrieve`
+ * would have been a one-line public bypass of the seam guard.
+ *
+ * Fixed structurally rather than by deleting the claim: the RAW adapters are
+ * module-private, and what the package exports is the guarded wrapper. There is
+ * now no exported binding through which an unguarded retrieve can be reached,
+ * whatever a future caller does — including a future adapter added to the
+ * semantic list, which is guarded at declaration here rather than at the one
+ * call site that happens to resolve it.
+ */
+export const LEXICAL_RETRIEVAL_ADAPTER: RetrievalAdapter = guardRetrievalAdapter(
+  RAW_LEXICAL_RETRIEVAL_ADAPTER,
+);
+
+/** The semantic list, guarded member by member at declaration. Empty today. */
+export const SEMANTIC_RETRIEVAL_ADAPTERS: readonly RetrievalAdapter[] = Object.freeze(
+  RAW_SEMANTIC_RETRIEVAL_ADAPTERS.map(guardRetrievalAdapter),
+);
 
 /** What actually answered, what was asked for, and why they differ. */
 export interface RetrievalStatement {
