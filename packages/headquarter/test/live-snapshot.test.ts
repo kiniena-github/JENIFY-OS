@@ -282,6 +282,52 @@ describe('what the snapshot must never contain', () => {
     expect(snapshot.operations.data.approvals[0]!.title).toBe('Direct order → CLAUDE');
   });
 
+  /**
+   * Wave 5 correction round four, Critical C1 — end to end, through the one
+   * order field that genuinely reaches the browser.
+   *
+   * The reviewer ran exactly this and got the artifact BUILT with the
+   * credential on it: `assertBrowserSafe` is the only thing between a memory
+   * body and the world-readable `hq-snapshot.json`, and a C0/C1 control
+   * character, a hyphen homoglyph or an underscore-joined prefix each walked
+   * straight through it. A plain `sk-...` correctly refused the order.
+   *
+   * The assertion is that the ORDER is refused — the same answer the plain form
+   * already got — which is strictly better than a refused snapshot: nothing
+   * poisoned is stored in the first place.
+   */
+  it('refuses an order title carrying a credential hidden by a control character, a dash homoglyph or a prefix', () => {
+    const hidden = [
+      `sk-${String.fromCharCode(0x01)}AAAAAAAAAAAAAAAAAAAA`,
+      `sk-${String.fromCharCode(0x1f)}AAAAAAAAAAAAAAAAAAAA`,
+      `sk-${String.fromCharCode(0x7f)}AAAAAAAAAAAAAAAAAAAA`,
+      `sk-${String.fromCharCode(0x90)}AAAAAAAAAAAAAAAAAAAA`,
+      'sk‐AAAAAAAAAAAAAAAAAAAA',
+      'OPENAI_KEY_sk-AAAAAAAAAAAAAAAAAAAA',
+    ];
+    for (const title of hidden) {
+      const fixture = setupFixture();
+      registerDirectOrderCapability(fixture.db);
+      fixture.principals.register({
+        id: 'founder',
+        displayName: 'Founder',
+        originateCapabilities: [DIRECT_ORDER_CAPABILITY.id],
+        approvalAuthority: true,
+        active: true,
+      });
+      const order = submitDirectOrder(
+        fixture.ops,
+        { instruction: 'Routine work.', title, route: 'CLAUDE', requestedBy: 'founder' },
+        CLAUDE_ONLY,
+      );
+      // Refused at the write, exactly as the plain `sk-...` form already was.
+      expect(order.ok, JSON.stringify(title)).toBe(false);
+      // And nothing reached the unauthenticated artifact either.
+      const snapshot = liveSnapshotFromOperations(fixture.ops, { now: NOW, env: CLAUDE_ONLY });
+      expect(JSON.stringify(snapshot), JSON.stringify(title)).not.toContain('AAAAAAAAAAAAAAAAAAAA');
+    }
+  });
+
   it('publishes a title only when its author deliberately chose one', () => {
     const fixture = setupFixture();
     registerDirectOrderCapability(fixture.db);

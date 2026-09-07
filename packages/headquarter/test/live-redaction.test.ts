@@ -177,6 +177,144 @@ describe('the value rule is not defeated by case or by invisible characters', ()
     }
   });
 
+  /**
+   * Wave 5 correction round four, Critical C1.
+   *
+   * The previous sweep chose characters from two Unicode PROPERTIES and the
+   * comment beside it claimed that naming a property "makes this hold for code
+   * points nobody enumerated". It did not hold for an entire BLOCK: `\p{Cc}` is
+   * neither `Cf` nor `Default_Ignorable`, and U+0001, U+001F, U+007F and U+0090
+   * each carried a live credential onto the UNAUTHENTICATED artifact.
+   *
+   * So this does not pick four characters either. It sweeps the WHOLE C0/C1
+   * control block against every credential shape the guard knows, which is the
+   * only form of this test that could have failed before the fix and cannot be
+   * satisfied by adding four more entries to a list.
+   */
+  it('refuses a credential broken by any C0/C1 CONTROL character', () => {
+    const shapes = [
+      (hidden: string) => `sk-${hidden}AAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) => `ghp_${hidden}AAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) => `github_pat_${hidden}AAAAAAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) => `AIza${hidden}AAAAAAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) => `-----BEGIN ${hidden}RSA PRIVATE KEY-----`,
+      (hidden: string) => `Bearer ${hidden}AAAAAAAAAAAAAAAAAAAA`,
+    ];
+    const controls: number[] = [];
+    for (let code = 0x00; code <= 0x1f; code += 1) controls.push(code);
+    for (let code = 0x7f; code <= 0x9f; code += 1) controls.push(code);
+    expect(controls).toHaveLength(65);
+    for (const code of controls) {
+      const hidden = String.fromCharCode(code);
+      for (const shape of shapes) {
+        expect(
+          () => assertBrowserSafe({ note: shape(hidden) }),
+          `U+${code.toString(16).toUpperCase().padStart(4, '0')} in ${shape('')}`,
+        ).toThrow(BrowserSafetyError);
+      }
+    }
+  });
+
+  /**
+   * NFKC does not fold these. U+2010 HYPHEN and U+2011 NON-BREAKING HYPHEN are
+   * canonical in their own right, so `sk<U+2010>...` normalized to itself and
+   * matched nothing at all (Wave 5 correction round four, Critical C1).
+   */
+  it('refuses a credential whose hyphen is drawn as some other dash', () => {
+    const dashes = [
+      '‐', // HYPHEN
+      '‑', // NON-BREAKING HYPHEN
+      '‒', // FIGURE DASH
+      '–', // EN DASH
+      '—', // EM DASH
+      '―', // HORIZONTAL BAR
+      '⁃', // HYPHEN BULLET
+      '˗', // MODIFIER LETTER MINUS SIGN
+      '−', // MINUS SIGN
+      '﹣', // SMALL HYPHEN-MINUS
+      '－', // FULLWIDTH HYPHEN-MINUS
+    ];
+    for (const dash of dashes) {
+      expect(
+        () => assertBrowserSafe({ note: `sk${dash}AAAAAAAAAAAAAAAAAAAA` }),
+        `U+${dash.codePointAt(0)!.toString(16).toUpperCase()}`,
+      ).toThrow(BrowserSafetyError);
+    }
+  });
+
+  /**
+   * `\b` is a boundary between a word character and a non-word character, and
+   * `_` is a WORD character — so any underscore-joined prefix removed the
+   * boundary the whole pattern set was anchored on (Wave 5 correction round
+   * four, Critical C1).
+   */
+  it('refuses a credential hidden behind a word-character prefix', () => {
+    const prefixed = [
+      'OPENAI_KEY_sk-AAAAAAAAAAAAAAAAAAAA',
+      'openaiKEY_sk-AAAAAAAAAAAAAAAAAAAA',
+      'GITHUB_TOKEN_ghp_AAAAAAAAAAAAAAAAAAAA',
+      'GOOGLE_KEY_AIzaAAAAAAAAAAAAAAAAAAAAAAAA',
+      'HEADER_VALUE_Bearer AAAAAAAAAAAAAAAAAAAA',
+    ];
+    for (const value of prefixed) {
+      expect(() => assertBrowserSafe({ note: value }), value).toThrow(BrowserSafetyError);
+    }
+  });
+
+  /**
+   * The anchor may not be widened into ordinary prose. `task-oriented-approach`
+   * literally contains `sk-oriented-approach`, so an UNANCHORED pattern would
+   * refuse a Founder's own text — and with the write and read scans now being
+   * the same function, a false refusal is a refused write rather than a
+   * cosmetic annoyance.
+   */
+  it('does not fabricate a credential out of ordinary hyphenated prose', () => {
+    for (const value of [
+      'the next task-oriented-approach for the salt line',
+      'a task\n-oriented-workflow-item is ready for review',
+      'risk-management-workflow, quarter three',
+      'the bearer of the news arrives tomorrow',
+    ]) {
+      expect(() => assertBrowserSafe({ note: value }), value).not.toThrow();
+    }
+  });
+
+  /**
+   * `Object.entries` of a Map is empty, a Set has no own enumerable members,
+   * and a value whose only string form comes from `toJSON` has no string
+   * property at all — yet all three are serialized to the artifact (Wave 5
+   * correction round four, Critical C1).
+   */
+  it('sees a credential carried by a Map, a Set or a toJSON projection', () => {
+    const key = 'sk-AAAAAAAAAAAAAAAAAAAA';
+    expect(() => assertBrowserSafe({ held: new Map([['note', key]]) })).toThrow(BrowserSafetyError);
+    expect(() => assertBrowserSafe({ held: new Set([key]) })).toThrow(BrowserSafetyError);
+    expect(() => assertBrowserSafe({ held: { toJSON: () => key } })).toThrow(BrowserSafetyError);
+    // The KEY rule reaches a Map's keys too: a Map is an object whose field
+    // names happen to be data.
+    expect(() => assertBrowserSafe({ held: new Map([['apiKey', 'a-live-value']]) })).toThrow(
+      BrowserSafetyError,
+    );
+  });
+
+  /** A field NAME is chosen by whoever built the object, so it can be a homoglyph. */
+  it('refuses a credential-named field whose name is spelled in another script', () => {
+    // Cyrillic а (U+0430) and р (U+0440): renders as `apiKey`.
+    expect(() => assertBrowserSafe({ 'арiKey': 'a-live-value' })).toThrow(
+      BrowserSafetyError,
+    );
+  });
+
+  /** A cyclic graph must terminate rather than overflow the stack. */
+  it('terminates on a cyclic object instead of recursing forever', () => {
+    const node: Record<string, unknown> = { label: 'fine' };
+    node.self = node;
+    // The JSON heuristic still refuses to serialize a cycle, which is the
+    // fail-closed direction; what must not happen is a stack overflow in the
+    // walk itself.
+    expect(() => assertBrowserSafe(node)).toThrow();
+  });
+
   it('still allows the hashes and ids HQ renders, after normalization', () => {
     // The normalization must not turn a legitimate value into a false refusal.
     expect(() =>
