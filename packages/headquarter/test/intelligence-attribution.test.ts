@@ -282,35 +282,123 @@ describe('a cost entry is attributed to canonical truth, not to what the caller 
     expect(orphan.projectId).toBeNull();
   });
 
+  /**
+   * This test advertised the `provider_binding_mismatch` proof and never
+   * executed it (Wave 5 correction round three, Medium B6). The standing
+   * fixture's claim task carries `{ branch: 'intel-side-effect' }`, which binds
+   * no provider, so `boundProvider` was always null and the guard below always
+   * took the early return — while the comment on that branch asserted the
+   * fixture DID carry a binding. The vacuous test is why the whole `provider`
+   * budget scope shipped dead: nothing ever ran the path.
+   *
+   * It now uses a genuinely provider-bound claim, and the unbound case is a
+   * separate test that says what actually happens there rather than an early
+   * return dressed as a proof.
+   */
   it('refuses a provider the canonical payload does not bind', () => {
     const fx = intelligenceFixture();
     fx.budget([...INTELLIGENCE_TIERS]);
-    const bound = fx.ops.getIntelligenceDecision('none');
-    expect(bound).toBeNull();
-    // The fixture's task carries a provider binding, so a cost entry naming a
-    // different provider is a misattribution rather than a description.
+    const boundClaim = fx.providerBoundClaim('CLAUDE');
     const boundProvider = expectOk(
       fx.ops.intelligenceRoutingProposal({
-        taskId: fx.claim.taskId,
+        taskId: boundClaim.taskId,
         complexity: 'routine',
         contextSize: 'medium',
         workKind: 'coding',
       }),
     ).boundProvider;
-    if (boundProvider == null) {
-      // Nothing is bound on this fixture's task, so the rule cannot fire and
-      // saying it did would be a fabrication. The unbound case is stated
-      // instead: any provider is accepted, exactly as before.
-      expect(
-        expectOk(cost(fx, { providerId: 'a.provider.never.bound' })).entry.providerId,
-      ).toBe('a.provider.never.bound');
-      return;
-    }
-    const refusal = cost(fx, { providerId: 'a.provider.never.bound' });
+    // No guard, no early return: the binding is REAL and the canonical routing
+    // vocabulary is uppercase.
+    expect(boundProvider).toBe('CLAUDE');
+
+    const boundCost = (over: Record<string, unknown>) =>
+      fx.ops.recordIntelligenceCost({
+        taskId: boundClaim.taskId,
+        workerId: boundClaim.workerId,
+        fence: boundClaim.fence,
+        providerId: 'anthropic',
+        provenance: 'unknown',
+        unitKind: 'unknown',
+        ...over,
+      } as Parameters<HeadquarterOperations['recordIntelligenceCost']>[0]);
+
+    const refusal = boundCost({ providerId: 'a.provider.never.bound' });
     expect(refusal.ok).toBe(false);
     expect(!refusal.ok && refusal.error.code).toBe('provider_binding_mismatch');
     expect(!refusal.ok && refusal.error.message).toContain('No substitution is made');
-    expect(expectOk(cost(fx, { providerId: boundProvider })).entry.providerId).toBe(boundProvider);
+
+    // And the bound provider is ACCEPTED in either spelling, which is the half
+    // that was structurally impossible: `CLAUDE` failed the slug rule, `claude`
+    // failed the binding rule, and `Claude` failed the slug rule again, so no
+    // cost entry could ever be recorded against a provider-bound task at all.
+    expect(expectOk(boundCost({ providerId: 'CLAUDE' })).entry.providerId).toBe('claude');
+    expect(
+      expectOk(boundCost({ providerId: 'claude', idempotencyKey: 'lowercase-spelling' })).entry
+        .providerId,
+    ).toBe('claude');
+    expect(
+      expectOk(boundCost({ providerId: 'Claude', idempotencyKey: 'mixed-spelling' })).entry.providerId,
+    ).toBe('claude');
+  });
+
+  /**
+   * The UNBOUND case, stated as what it is. The entry is recorded — the
+   * provider a worker reports is a real fact and the spend belongs in the
+   * deployment total — but it measures no PROVIDER ceiling, because HQ has no
+   * canonical statement that this work ran there. Before the correction it did
+   * measure one, and a claim-holding worker used that to push an unrelated
+   * provider's Founder ceiling from `observed 0` to `blocked, observed 999999`.
+   */
+  it('records spend from an UNBOUND task without letting it move another provider’s ceiling', () => {
+    const fx = intelligenceFixture();
+    fx.budget([...INTELLIGENCE_TIERS]);
+    fx.budget([...INTELLIGENCE_TIERS], {
+      scopeKind: 'provider',
+      scopeId: 'someone.elses.provider',
+      ceilingMinorUnits: 10,
+    });
+    const before = expectOk(
+      fx.ops.intelligenceBudgetDecision({
+        scopeKind: 'provider',
+        scopeId: 'someone.elses.provider',
+        window: 'total',
+      }),
+    );
+    expect(before.decision).toBe('within_ceiling');
+    expect(before.observedMinorUnits).toBe(0);
+
+    // The fixture's standing claim binds no provider, so nothing refuses the
+    // attribution itself.
+    const recorded = expectOk(
+      cost(fx, {
+        providerId: 'someone.elses.provider',
+        provenance: 'billed',
+        amountMinorUnits: 999_999,
+        currency: 'USD',
+        unitKind: 'requests',
+      }),
+    ).entry;
+    expect(recorded.providerId).toBe('someone.elses.provider');
+
+    const after = expectOk(
+      fx.ops.intelligenceBudgetDecision({
+        scopeKind: 'provider',
+        scopeId: 'someone.elses.provider',
+        window: 'total',
+      }),
+    );
+    expect(after.observedMinorUnits).toBe(0);
+    expect(after.decision).toBe('within_ceiling');
+    // It IS counted where it honestly belongs: the deployment total.
+    expect(
+      expectOk(
+        fx.ops.intelligenceBudgetDecision({
+          scopeKind: 'deployment',
+          scopeId: 'deployment',
+          window: 'total',
+        }),
+      ).observedMinorUnits,
+    ).toBe(999_999);
   });
 
   it('refuses an occurredAt that would file the spend in a window it did not happen in', () => {
@@ -644,5 +732,213 @@ describe('the smaller truths that travel with them', () => {
       again.decision.budgetDecision === 'requires_founder_decision' &&
         again.escalation.toTier !== 'deterministic_local',
     );
+  });
+});
+
+/**
+ * Wave 5 correction round three — the four Phase 14 findings the previous
+ * rounds' own fixes left open, each reproduced by execution against this head.
+ */
+describe('every ceiling that governs the work binds, and every figure it rests on is checked', () => {
+  /**
+   * HIGH B1. `#governingBudgetScopes` derives EVERY mission a task is linked
+   * to, but the cost entry's attribution wrote `canonical.missionIds[0]` and
+   * `#entriesForScope` matched that one column — so the moment a task carried a
+   * second mission link, the non-first mission's ceiling was evaluated against
+   * ZERO entries. Identical spend under an identical ceiling read `blocked,
+   * observed 5000000` with one link and `within_ceiling, observed 0` with two,
+   * and WHICH of the two bound was decided by uuid sort order: twelve runs of
+   * the same configuration enforced eight times and bypassed four.
+   */
+  it('accumulates a mission ceiling through EVERY link, not the first by uuid order', () => {
+    const fx = intelligenceFixture();
+    const task = fx.claim.taskId;
+    const alpha = fx.linkToCanonicalMission(task, 'alpha');
+    const beta = fx.linkToCanonicalMission(task, 'beta');
+    expect(beta.missionId).not.toBe(alpha.missionId);
+    fx.budget([...INTELLIGENCE_TIERS], { ceilingMinorUnits: 1_000_000_000 });
+    for (const mission of [alpha, beta]) {
+      fx.budget([...INTELLIGENCE_TIERS], {
+        scopeKind: 'mission',
+        scopeId: mission.missionId,
+        ceilingMinorUnits: 10,
+      });
+    }
+    expectOk(
+      cost(fx, {
+        provenance: 'billed',
+        amountMinorUnits: 5_000_000,
+        currency: 'USD',
+        unitKind: 'tokens_total',
+      }),
+    );
+    // BOTH ceilings see the spend, whichever of the two uuids sorts first.
+    for (const mission of [alpha, beta]) {
+      const evaluation = expectOk(
+        fx.ops.intelligenceBudgetDecision({
+          scopeKind: 'mission',
+          scopeId: mission.missionId,
+          window: 'total',
+        }),
+      );
+      expect(evaluation.observedMinorUnits, mission.missionId).toBe(5_000_000);
+      expect(evaluation.decision, mission.missionId).toBe('blocked');
+    }
+    // And the enforced write is refused, which is the consequence that matters.
+    const refused = decide(fx, { tier: 'critical_review', label: 'more paid work' });
+    expect(refused.ok).toBe(false);
+    expect(!refused.ok && refused.error.code).toBe('budget_ceiling_blocks');
+  });
+
+  /**
+   * The same rule for PROJECT scopes, which had the identical
+   * `projectIds[0] ?? null` shape.
+   */
+  it('accumulates a project ceiling through every mission the task belongs to', () => {
+    const fx = intelligenceFixture();
+    const alpha = fx.linkToCanonicalMission(fx.claim.taskId, 'alpha');
+    const beta = fx.linkToCanonicalMission(fx.claim.taskId, 'beta');
+    fx.budget([...INTELLIGENCE_TIERS], { ceilingMinorUnits: 1_000_000_000 });
+    for (const project of [alpha.projectId, beta.projectId]) {
+      fx.budget([...INTELLIGENCE_TIERS], {
+        scopeKind: 'project',
+        scopeId: project,
+        ceilingMinorUnits: 10,
+      });
+    }
+    expectOk(
+      cost(fx, {
+        provenance: 'billed',
+        amountMinorUnits: 4_000,
+        currency: 'USD',
+        unitKind: 'requests',
+      }),
+    );
+    for (const project of [alpha.projectId, beta.projectId]) {
+      expect(
+        expectOk(
+          fx.ops.intelligenceBudgetDecision({ scopeKind: 'project', scopeId: project, window: 'total' }),
+        ).observedMinorUnits,
+        project,
+      ).toBe(4_000);
+    }
+  });
+
+  /**
+   * HIGH B2, from the other end: a Founder's PROVIDER ceiling on a bound task
+   * genuinely binds now. It could not before — no cost entry against a
+   * provider-bound task was expressible at all — so the scope stayed at
+   * `observed: 0` forever and the phase document's "a Founder's provider
+   * ceiling binds" was false.
+   */
+  it('binds a Founder provider ceiling to work the payload canonically binds', () => {
+    const fx = intelligenceFixture();
+    const bound = fx.providerBoundClaim('CLAUDE');
+    fx.budget([...INTELLIGENCE_TIERS], { ceilingMinorUnits: 1_000_000_000 });
+    // Written in the CANONICAL uppercase spelling, and matched anyway.
+    fx.budget([...INTELLIGENCE_TIERS], {
+      scopeKind: 'provider',
+      scopeId: 'CLAUDE',
+      ceilingMinorUnits: 10,
+    });
+    expectOk(
+      fx.ops.recordIntelligenceCost({
+        taskId: bound.taskId,
+        workerId: bound.workerId,
+        fence: bound.fence,
+        providerId: 'CLAUDE',
+        provenance: 'billed',
+        amountMinorUnits: 3_702,
+        currency: 'USD',
+        unitKind: 'tokens_total',
+      }),
+    );
+    // Readable under either spelling, because the read is folded exactly as the
+    // write is.
+    for (const spelling of ['CLAUDE', 'claude']) {
+      const evaluation = expectOk(
+        fx.ops.intelligenceBudgetDecision({
+          scopeKind: 'provider',
+          scopeId: spelling,
+          window: 'total',
+        }),
+      );
+      expect(evaluation.observedMinorUnits, spelling).toBe(3_702);
+      expect(evaluation.decision, spelling).toBe('blocked');
+    }
+    // And it BLOCKS a decision write on that task, which is the whole claim.
+    const refused = fx.ops.recordIntelligenceDecision({
+      taskId: bound.taskId,
+      workerId: bound.workerId,
+      fence: bound.fence,
+      label: 'more provider-bound work',
+      complexity: 'routine',
+      contextSize: 'medium',
+      workKind: 'coding',
+      tier: 'high',
+    });
+    expect(refused.ok).toBe(false);
+    expect(!refused.ok && refused.error.code).toBe('budget_ceiling_blocks');
+  });
+
+  /**
+   * LOW B8. The amount check closed the case where a `billed 0` recorded first
+   * suppressed the true amount; `unitsObserved`, `basis` and `decisionId` were
+   * left on the same silent first-write-wins path, and each is a claim
+   * published on the Founder route.
+   */
+  it('refuses a second entry that disagrees on units, basis or the decision it cites', () => {
+    const fx = intelligenceFixture();
+    fx.budget([...INTELLIGENCE_TIERS]);
+    // A fixed instant, because `costEntryKey` covers it: two calls a
+    // millisecond apart are two different entries and would never meet.
+    const occurredAt = new Date().toISOString();
+    const base = {
+      provenance: 'billed' as const,
+      amountMinorUnits: 1_000,
+      currency: 'USD',
+      unitKind: 'tokens_total' as const,
+      occurredAt,
+    };
+    expectOk(cost(fx, { ...base, unitsObserved: 10, idempotencyKey: 'units' }));
+    const units = cost(fx, { ...base, unitsObserved: 9_999_999, idempotencyKey: 'units' });
+    expect(units.ok).toBe(false);
+    expect(!units.ok && units.error.code).toBe('cost_entry_conflict');
+
+    expectOk(
+      cost(fx, {
+        provenance: 'estimated',
+        amountMinorUnits: 500,
+        currency: 'USD',
+        unitKind: 'requests',
+        basis: 'vendor list price 2026-01',
+        occurredAt,
+        idempotencyKey: 'basis',
+      }),
+    );
+    const basis = cost(fx, {
+      provenance: 'estimated',
+      amountMinorUnits: 500,
+      currency: 'USD',
+      unitKind: 'requests',
+      basis: 'a number nobody can trace',
+      occurredAt,
+      idempotencyKey: 'basis',
+    });
+    expect(basis.ok).toBe(false);
+    expect(!basis.ok && basis.error.code).toBe('cost_entry_conflict');
+
+    const decision = expectOk(decide(fx, { tier: 'high' })).decision;
+    expectOk(cost(fx, { ...base, idempotencyKey: 'citation' }));
+    const cited = cost(fx, { ...base, decisionId: decision.id, idempotencyKey: 'citation' });
+    expect(cited.ok).toBe(false);
+    expect(!cited.ok && cited.error.code).toBe('cost_entry_conflict');
+    // The stored row is untouched by every refusal: nothing was overwritten and
+    // nothing was silently kept under a claim it does not carry.
+    const stored = fx.ops
+      .listIntelligenceCostEntriesBounded()
+      .entries.filter((entry) => entry.unitsObserved === 10);
+    expect(stored).toHaveLength(1);
+    expect(stored[0].decisionId).toBeNull();
   });
 });

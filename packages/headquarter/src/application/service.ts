@@ -645,7 +645,9 @@ import {
   isCurrencyCode,
   isDecisionResult,
   isEscalationTrigger,
+  canonicalBudgetScopeId,
   isIdentifierSlug,
+  normalizeProviderId,
   isIntelligenceTier,
   isModelAvailability,
   isModelCapabilityFact,
@@ -8551,15 +8553,69 @@ export class HeadquarterOperations {
     at: string,
   ): CostEntryRow[] {
     const prefix = scope.window === 'day' ? at.slice(0, 10) : scope.window === 'month' ? at.slice(0, 7) : '';
+    // Memoised per evaluation: a scope is measured over every entry, and the
+    // canonical lookups below are one query each.
+    const canonicalMemo = new Map<string, { missionIds: string[]; projectIds: string[] }>();
+    const canonicalOf = (taskId: string): { missionIds: string[]; projectIds: string[] } => {
+      let value = canonicalMemo.get(taskId);
+      if (!value) {
+        value = this.#canonicalTaskScopes(taskId);
+        canonicalMemo.set(taskId, value);
+      }
+      return value;
+    };
+    const providerMemo = new Map<string, string | null>();
+    const boundProviderOf = (taskId: string): string | null => {
+      if (providerMemo.has(taskId)) return providerMemo.get(taskId) ?? null;
+      const bound = this.#taskBoundProvider(taskId);
+      const value = bound == null ? null : normalizeProviderId(bound);
+      providerMemo.set(taskId, value);
+      return value;
+    };
     return this.#costEntriesFromStore()
       .filter((entry) => {
         switch (scope.scopeKind) {
+          // CANONICAL membership, not the entry's own stored column (Wave 5
+          // correction round three, High B1 / Medium B5).
+          //
+          // `mission_id` and `project_id` on a cost entry hold ONE value, and
+          // `#canonicalTaskScopes` derives EVERY mission a task is linked to.
+          // Matching the column therefore stopped a mission ceiling
+          // accumulating the moment a task was linked to a second mission —
+          // the non-first mission's ceiling was evaluated against ZERO entries
+          // — and WHICH of the two ceilings bound was decided by uuid sort
+          // order, so twelve runs of one configuration enforced eight times and
+          // bypassed four. Identical spend under an identical ceiling read
+          // `blocked, observed 5000000` with one link and `within_ceiling,
+          // observed 0` with two, through `linkMissionPlanItem`, a supported
+          // facade call, with no raw SQL anywhere.
+          //
+          // `hq_mission_plan_items` is the one place HQ records that a task
+          // belongs to a mission, so deriving membership from it here is the
+          // canonical-truth answer rather than a second store that can drift
+          // from it. The stored columns stay as recorded attribution and
+          // measure nothing.
           case 'mission':
-            return entry.missionId === scope.scopeId;
+            return canonicalOf(entry.taskId).missionIds.includes(scope.scopeId);
           case 'project':
-            return entry.projectId === scope.scopeId;
-          case 'provider':
-            return entry.providerId === scope.scopeId;
+            return canonicalOf(entry.taskId).projectIds.includes(scope.scopeId);
+          // The provider scope is measured against the task's canonical
+          // BINDING, never against the caller-supplied column. On a bound task
+          // the two are equal by enforcement (`provider_binding_mismatch`); on
+          // an UNBOUND task the column was whatever the caller wrote, and a
+          // claim-holding worker used it to push an unrelated provider's
+          // Founder ceiling from `observed 0` to `blocked, observed 999999`.
+          // Spend HQ cannot attribute to a provider is spend that measures no
+          // provider ceiling.
+          case 'provider': {
+            const bound = boundProviderOf(entry.taskId);
+            return bound != null && bound === scope.scopeId;
+          }
+          // `model` stays on the entry's own column, and that is a stated
+          // limitation rather than an oversight: nothing in canonical truth
+          // binds a task to a MODEL, so HQ has no derivation to prefer. It is
+          // why a model-scoped ceiling is readable but does not by itself
+          // constrain a decision write — see `#governingBudgetScopes`.
           case 'model':
             return entry.modelId === scope.scopeId;
           case 'deployment':
@@ -8689,8 +8745,19 @@ export class HeadquarterOperations {
     const candidates: { kind: BudgetScope; id: string; from: GoverningBudgetScope['derivedFrom'] }[] = [
       ...canonical.missionIds.map((id) => ({ kind: 'mission' as const, id, from: 'task_mission' as const })),
       ...canonical.projectIds.map((id) => ({ kind: 'project' as const, id, from: 'task_project' as const })),
+      // Folded into THIS lane's vocabulary, which is what makes the two
+      // vocabularies actually one (Wave 5 correction round three, High B2). The
+      // canonical binding is `CLAUDE`; every budget scope id, cost entry column
+      // and derived key here is a lowercase slug. Without the fold a Founder's
+      // provider ceiling could never match a single recorded entry.
       ...(boundProvider
-        ? [{ kind: 'provider' as const, id: boundProvider, from: 'task_bound_provider' as const }]
+        ? [
+            {
+              kind: 'provider' as const,
+              id: normalizeProviderId(boundProvider),
+              from: 'task_bound_provider' as const,
+            },
+          ]
         : []),
     ];
     for (const candidate of candidates) {
@@ -8880,11 +8947,14 @@ export class HeadquarterOperations {
     note?: string;
     idempotencyKey?: string;
   }): OpsResult<{ observation: ModelObservationRow; deduplicated: boolean }> {
-    const providerId = (input.providerId ?? '').trim();
+    // The same fold as `recordIntelligenceCost`, so a registry observation and a
+    // cost entry name a provider the same way and a Founder can write either
+    // spelling.
+    const providerId = normalizeProviderId(input.providerId ?? '');
     if (!isIdentifierSlug(providerId, MAX_PROVIDER_ID_LENGTH)) {
       return fail(
         'invalid_input',
-        'providerId must be a lowercase slug of letters, digits, dot, colon, dash or underscore',
+        'providerId must be a slug of letters, digits, dot, colon, dash or underscore',
       );
     }
     const modelIdRaw = (input.modelId ?? '').trim();
@@ -9054,7 +9124,13 @@ export class HeadquarterOperations {
     if (!isBudgetWindow(input.window)) {
       return fail('invalid_input', `window must be one of: ${BUDGET_WINDOWS.join(', ')}`);
     }
-    const scopeId = (input.scopeId ?? '').trim();
+    // A PROVIDER scope id is folded into this lane's vocabulary, so a Founder
+    // may write `CLAUDE` or `claude` and get the one ceiling that the derived
+    // governing scope will actually match (Wave 5 correction round three, High
+    // B2). Every other scope kind is already single-vocabulary and is left
+    // exactly as written — case-folding a mission id would merge two Founder
+    // scopes that are genuinely different.
+    const scopeId = canonicalBudgetScopeId(input.scopeKind, input.scopeId ?? '');
     if (scopeId === '' || scopeId.length > MAX_MODEL_ID_LENGTH) {
       return fail('invalid_input', 'scopeId is required');
     }
@@ -9172,7 +9248,9 @@ export class HeadquarterOperations {
     if (!isBudgetWindow(input.window)) {
       return fail('invalid_input', `window must be one of: ${BUDGET_WINDOWS.join(', ')}`);
     }
-    const scopeId = (input.scopeId ?? '').trim();
+    // Folded exactly as `setIntelligenceBudget` folds it, so a read and a write
+    // of the same provider ceiling cannot land on two different scope ids.
+    const scopeId = canonicalBudgetScopeId(input.scopeKind, input.scopeId ?? '');
     if (scopeId === '') return fail('invalid_input', 'scopeId is required');
     return ok(this.#budgetEvaluation({ scopeKind: input.scopeKind, scopeId, window: input.window }));
   }
@@ -9616,14 +9694,55 @@ export class HeadquarterOperations {
         { refusal: escalation.refusal },
       );
     }
+    // THE SAME enforcement point the first record goes through (Wave 5
+    // correction round three, Medium B3). `#resolveRecordedTier` is documented
+    // as "the ONE place a recorded tier is checked against the policy — law 6",
+    // and this path never ran it: `deriveEscalation` picked the cheapest higher
+    // permitted tier and consulted neither the required reviewer tier nor the
+    // computed floor. Reproduced through supported calls only — a Founder
+    // re-registering a capability at a higher risk class through the documented
+    // registry upsert — the enforced path refused `low_cost` with
+    // `review_tier_required` while escalation recorded `low_cost` anyway
+    // against a `critical_review` requirement.
+    //
+    // `deriveEscalation` now skips a tier that cannot satisfy the review
+    // requirement, and this re-derivation is the half that also covers the
+    // FLOOR and the permitted set as they stand at escalation time. Two checks
+    // rather than one, deliberately, because the pure derivation is exported and
+    // callable without a database.
+    const priorCharacteristics = prior.characteristics;
+    if (!priorCharacteristics) {
+      // Fail closed. A stored `characteristics` column that cannot be read
+      // through the closed vocabularies means HQ cannot compute the policy this
+      // escalation would have to satisfy, and an escalation moves UP the tier
+      // order — recording one it cannot check is exactly the fabrication law 6
+      // exists to prevent.
+      return fail(
+        'escalation_refused',
+        'The prior decision’s recorded characteristics cannot be read through the closed vocabularies, so ' +
+          'the policy this escalation would have to satisfy cannot be computed. ' +
+          ESCALATION_STATEMENT,
+        { refusal: 'prior_decision_has_no_tier' },
+      );
+    }
+    const proposal = computeRoutingProposal({
+      characteristics: priorCharacteristics,
+      permittedTiers: evaluation.permittedTiers,
+      budgetDecision: evaluation.decision,
+    });
+    const chosen = this.#resolveRecordedTier(proposal, escalation.escalation.toTier);
+    if (!chosen.ok) return chosen;
     const inserted = this.#insertDecision({
       // Copied from the ESCALATION, which copied them from the prior decision.
       taskId: escalation.escalation.identity.taskId,
       missionId: escalation.escalation.identity.missionId,
       projectId: escalation.escalation.identity.projectId,
-      tier: escalation.escalation.toTier,
+      tier: chosen.data,
       floorTier: isIntelligenceTier(prior.floorTier) ? prior.floorTier : escalation.escalation.toTier,
-      requiredReviewTier: prior.requiredReviewTier,
+      // The CURRENT canonical requirement when it is stronger than the one the
+      // prior row carries, so a row escalated after a risk class was raised
+      // records the requirement it actually has to meet.
+      requiredReviewTier: proposal.requiredReviewTier ?? prior.requiredReviewTier,
       escalatedFrom: prior.id,
       escalationTrigger: input.trigger,
       characteristics: prior.characteristics,
@@ -9792,9 +9911,16 @@ export class HeadquarterOperations {
   }): OpsResult<{ entry: CostEntryRecord; deduplicated: boolean }> {
     if (!input.workerId) return fail('invalid_input', 'workerId is required');
     if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
-    const providerId = (input.providerId ?? '').trim();
+    // FOLDED into this lane's vocabulary before it is checked (Wave 5
+    // correction round three, High B2). The canonical routing binding is
+    // `CLAUDE` and every id stored here is a lowercase slug, so demanding the
+    // slug of the caller and then demanding equality with the uppercase binding
+    // made a bound task's cost entry structurally impossible: `CLAUDE` failed
+    // the slug rule, `claude` failed the binding rule, and `Claude` failed the
+    // slug rule again. The `provider` budget scope was dead as a result.
+    const providerId = normalizeProviderId(input.providerId ?? '');
     if (!isIdentifierSlug(providerId, MAX_PROVIDER_ID_LENGTH)) {
-      return fail('invalid_input', 'providerId must be a lowercase slug');
+      return fail('invalid_input', 'providerId must be a slug of letters, digits, dot, colon, dash or underscore');
     }
     const modelIdRaw = (input.modelId ?? '').trim();
     if (modelIdRaw !== '' && !isIdentifierSlug(modelIdRaw, MAX_MODEL_ID_LENGTH)) {
@@ -9858,7 +9984,7 @@ export class HeadquarterOperations {
     // spend into a scope somebody else is answerable for. Same rule, same
     // refusal code, as the queue's own claim/start enforcement.
     const boundProvider = this.#taskBoundProvider(input.taskId);
-    if (boundProvider != null && boundProvider !== providerId) {
+    if (boundProvider != null && normalizeProviderId(boundProvider) !== providerId) {
       return fail(
         'provider_binding_mismatch',
         `Task ${input.taskId} is canonically bound to provider ${boundProvider}; a cost entry may not be ` +
@@ -9867,6 +9993,16 @@ export class HeadquarterOperations {
         { boundProvider, providerId },
       );
     }
+    // An UNBOUND task is not a licence to file spend against anybody's ceiling
+    // (Wave 5 correction round three, Medium B5). The check above only ran when
+    // a binding existed, so a claim-holding worker on an unbound task filed its
+    // spend against an unrelated provider and pushed that Founder ceiling from
+    // `observed 0` to `blocked, observed 999999`. The entry is still RECORDED —
+    // the provider it names is a real fact the worker is reporting, and
+    // refusing it would lose the spend from the deployment total — but it
+    // measures no PROVIDER ceiling, because HQ has no canonical statement that
+    // this work ran there. `#entriesForScope` enforces that from the binding
+    // rather than from this column, so the two halves cannot drift.
 
     const at = nowIso();
     const occurredAt = (input.occurredAt ?? '').trim() || at;
@@ -9967,10 +10103,28 @@ export class HeadquarterOperations {
           unitKind: existing.unit_kind,
           basis: existing.basis,
         });
+        // EVERY figure the row carries, not three of them (Wave 5 correction
+        // round three, Low B8). The amount check closed the case where a
+        // `billed 0` recorded first permanently suppressed the true amount;
+        // `unitsObserved`, `basis` and `decisionId` were left on the same
+        // silent first-write-wins path, and each is a published claim: a second
+        // entry with the same amount but `unitsObserved` 9,999,999 deduped and
+        // kept the first row's 10, an invented `basis` deduped and kept
+        // nothing, and a citation of a real `decisionId` deduped onto a row
+        // whose `decision_id` stayed null. `units_observed` goes out on the
+        // Founder route and `basis` is what law 2 says an `estimated` amount
+        // must NAME, so silently discarding either is the same defect class the
+        // amount check was added to close.
+        const storedUnitsObserved =
+          existing.units_observed == null ? null : Number(existing.units_observed);
+        const storedDecisionId = (existing.decision_id as string | null) ?? null;
         if (
           stored.provenance !== cost.fact.provenance ||
           stored.amountMinorUnits !== cost.fact.amountMinorUnits ||
-          stored.currency !== cost.fact.currency
+          stored.currency !== cost.fact.currency ||
+          stored.basis !== cost.fact.basis ||
+          storedUnitsObserved !== unitsObserved ||
+          storedDecisionId !== decisionId
         ) {
           conflict = {
             code: 'cost_entry_conflict',

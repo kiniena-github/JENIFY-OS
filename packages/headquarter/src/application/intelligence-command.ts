@@ -498,6 +498,51 @@ export function isIdentifierSlug(value: string, maxLength: number): boolean {
   return value.length > 0 && value.length <= maxLength && SLUG.test(value);
 }
 
+/**
+ * The ONE spelling of a provider identity inside this lane.
+ *
+ * HQ has two vocabularies for the same thing and always has: canonical routing
+ * says `CLAUDE` (`routing/providers.ts`, and the value `readProviderBinding`
+ * returns from a task payload), while every id this module stores or echoes is
+ * a lowercase slug, because these strings are joined into derived keys and go
+ * out on a Founder-gated read. The two are the same identity in different case,
+ * and this function is where they meet.
+ *
+ * Until the Wave 5 correction round three they never met, and the `provider`
+ * budget scope was DEAD as a result (High B2). `recordIntelligenceCost` demanded
+ * a lowercase slug and then demanded equality with `#taskBoundProvider`, which
+ * is uppercase — so `CLAUDE` was `invalid_input`, `claude` was
+ * `provider_binding_mismatch`, and `Claude` was `invalid_input` again. Every
+ * ceiling a Founder set on a provider therefore stayed at `observed: 0` forever
+ * over work that was genuinely bound to it, and the escape hatch was closed too:
+ * a task bound to lowercase `claude` is unclaimable, because
+ * `declareWorkerProvider` is limited to the canonical uppercase set. Meanwhile
+ * the module comment and the phase document both claimed "the two vocabularies
+ * are one by enforcement and a Founder's provider ceiling binds".
+ *
+ * A case fold is not a SUBSTITUTION: `CLAUDE` and `claude` name the same
+ * provider, the canonical set is uppercase-distinct so the fold is injective
+ * over it, and the DECISION record still stores the canonical uppercase binding
+ * verbatim. What is folded is the id used as a budget scope key and as a cost
+ * entry's provider column — the intelligence lane's own vocabulary.
+ */
+export function normalizeProviderId(value: string): string {
+  return (value ?? '').trim().toLowerCase();
+}
+
+/**
+ * A budget scope id in the vocabulary its KIND is expressed in.
+ *
+ * Only `provider` is folded, and only because that is the one scope whose ids
+ * come from the canonical uppercase routing vocabulary. Mission, project and
+ * model ids are already single-vocabulary (uuids and lowercase slugs), and
+ * case-folding a mission id would silently merge two Founder scopes that are
+ * genuinely different.
+ */
+export function canonicalBudgetScopeId(scopeKind: BudgetScope, scopeId: string): string {
+  return scopeKind === 'provider' ? normalizeProviderId(scopeId) : (scopeId ?? '').trim();
+}
+
 /** ISO-4217-shaped currency code. Never converted; only compared. */
 const CURRENCY = /^[A-Z]{3}$/;
 
@@ -1399,6 +1444,17 @@ export function deriveEscalation(input: {
   }
   const higher = [...input.permittedTiers]
     .filter((tier) => isIntelligenceTier(tier) && tierRank(tier) > tierRank(fromTier))
+    // A tier that does not satisfy the REVIEW requirement is not a candidate
+    // (Wave 5 correction round three, Medium B3). This used to pick the cheapest
+    // higher permitted tier full stop, consulting neither `requiredReviewTier`
+    // nor the floor — so an escalation RECORDED `low_cost` against a
+    // `critical_review` requirement that the enforced path refuses outright with
+    // `review_tier_required`, while law 6 and the phase document both said the
+    // facade ENFORCES it. Skipping such a tier rather than refusing on it is
+    // what keeps escalation useful: the next one up may well satisfy it.
+    .filter((tier) =>
+      proposalSatisfiesReviewRequirement({ tier, requiredReviewTier: input.from.requiredReviewTier }),
+    )
     .sort((a, b) => tierRank(a) - tierRank(b));
   const toTier = higher[0];
   if (!toTier) return { ok: false, refusal: 'no_higher_permitted_tier' };
@@ -2062,13 +2118,27 @@ export function deriveDecisionRecord(
   const state: DecisionState = escalatedAway ? 'escalated_away' : outcome ? 'settled' : 'issued';
   const canonical = input.canonical ?? null;
   const boundProvider = canonical ? canonical.boundProvider(row.taskId) : row.boundProvider;
+  // The canonical risk class is read FIRST and UNCONDITIONALLY, so the review
+  // requirement below does not depend on whether the stored characteristics
+  // happened to parse (Wave 5 correction round three, Medium B4).
+  //
+  // It used to be read only inside the `row.characteristics` branch, and
+  // `rowToDecision` reads an unparseable `characteristics` column as null. So
+  // forging `required_review_tier` alone was correctly caught by the max below,
+  // and forging BOTH columns escaped completely: `requiredReviewTier` came back
+  // null, `satisfiesReviewRequirement` true, and the row dropped out of
+  // `reviewRequired` in analytics altogether. `canonical.riskClass(taskId)` was
+  // in scope and simply unused on that branch, and it fails closed to
+  // `founder_gate` for a task or capability it cannot read.
+  const canonicalRiskClass = canonical ? canonical.riskClass(row.taskId) : null;
   const characteristics =
     canonical && row.characteristics
-      ? { ...row.characteristics, riskClass: canonical.riskClass(row.taskId) }
+      ? { ...row.characteristics, riskClass: canonicalRiskClass! }
       : row.characteristics;
-  // The stronger of the two, so a forged NULL cannot drop the requirement.
-  const canonicalReview = characteristics ? REVIEW_REQUIREMENT[characteristics.riskClass] : null;
-  const requiredReviewTier = maxRequiredReviewTier(row.requiredReviewTier, canonical ? canonicalReview : null);
+  // The stronger of the two, so a forged NULL cannot drop the requirement — and
+  // neither can a forged pair.
+  const canonicalReview = canonicalRiskClass ? REVIEW_REQUIREMENT[canonicalRiskClass] : null;
+  const requiredReviewTier = maxRequiredReviewTier(row.requiredReviewTier, canonicalReview);
   return {
     ...row,
     boundProvider,

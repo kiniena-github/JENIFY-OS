@@ -113,20 +113,55 @@ export class BrowserSafetyError extends Error {
 }
 
 /**
- * Fold away the two cheap ways to hide a credential shape from a regex:
- * invisible characters inside it, and compatibility variants of its
- * separators.
+ * Every code point that renders as nothing and is therefore usable to break a
+ * credential pattern without changing what a reader sees.
  *
- * `NFKC` maps the fullwidth forms (`－`, `＿`, `．`) onto the ASCII the patterns
- * look for; the explicit strip removes the zero-width and bidi controls NFKC
+ * Defined by PROPERTY, not by a hand-listed range (Wave 5 correction round
+ * three, Medium B7). The previous version stripped five ranges somebody chose,
+ * and a whole class walked straight through it: U+00AD SOFT HYPHEN, U+034F
+ * COMBINING GRAPHEME JOINER, U+180E, U+2028 LINE SEPARATOR, U+2029, U+115F and
+ * U+FFA0 HALFWIDTH HANGUL FILLER all passed the scan when placed inside `sk-`,
+ * `ghp_`, `github_pat_`, `AIza`, a PEM header, `Bearer ` and a JWT.
+ *
+ * That was not a snapshot backstop failing quietly. End to end through the
+ * Founder route, a plain `sk-…` note was refused 400 while the same note
+ * carrying one U+00AD was stored 201 and came back on the wire on the next
+ * read; and through the RETRIEVAL facade — the layer
+ * `RETRIEVAL_GUARD_STATEMENT` names as the guarantee — `searchCompany` and
+ * `askJenify` refused the plain form and ACCEPTED the invisible-character form.
+ *
+ *  - `\p{Default_Ignorable_Code_Point}` is Unicode's own name for "renders as
+ *    nothing": the soft hyphen, the Hangul fillers, the Mongolian and variation
+ *    selectors, the zero-width and bidi controls, the tag characters;
+ *  - `\p{Cf}` is the format category, which overlaps it and covers the rest;
+ *  - U+034F and U+2028/U+2029 are named explicitly because they are in neither:
+ *    the combining grapheme joiner is a combining mark and the line and
+ *    paragraph separators are `Zl`/`Zp`, and all three split a pattern in
+ *    exactly the same invisible way.
+ *
+ * Naming a property rather than a range is what makes this hold for code points
+ * nobody enumerated, which is why the pinning test uses characters this comment
+ * does not list.
+ */
+const INVISIBLE_CODE_POINTS =
+  /[\p{Default_Ignorable_Code_Point}\p{Cf}\u034F\u2028\u2029]/gu;
+
+/**
+ * Fold away the two cheap ways to hide a credential shape from a regex:
+ * invisible characters inside it, and compatibility variants of its separators.
+ *
+ * `NFKC` maps the fullwidth forms (`－`, `＿`, `．`) onto the ASCII
+ * the patterns look for; the strip removes every invisible code point NFKC
  * leaves alone. Scanning the normalized form only — the ORIGINAL string is
  * what gets refused or published, so this widens what is caught and never
  * rewrites what is carried.
+ *
+ * NFKC runs FIRST and the strip SECOND, deliberately: a compatibility form can
+ * decompose around an invisible character, so stripping afterwards catches a
+ * shape that only becomes contiguous once the folding has happened.
  */
 function normalizeForScan(value: string): string {
-  return value
-    .normalize('NFKC')
-    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g, '');
+  return value.normalize('NFKC').replace(INVISIBLE_CODE_POINTS, '');
 }
 
 /** Trivial values are exempt from the key rule so `{ token: null }` is fine. */

@@ -58,6 +58,18 @@ export interface IntelligenceFixture extends Fixture {
    * wants to see a non-null mission on a record has to create the real link.
    */
   linkToCanonicalMission(taskId: string, label?: string): { missionId: string; projectId: string };
+  /**
+   * A live fenced claim on a task whose CANONICAL PAYLOAD binds it to a
+   * provider, with the claiming worker declared as that provider.
+   *
+   * Added because the suite's `provider_binding_mismatch` proof was VACUOUS
+   * without it (Wave 5 correction round three, Medium B6): the standing
+   * fixture's payload is `{ branch: … }`, which binds nothing, so the test
+   * guarded on `boundProvider == null` and always took its early return while
+   * its comment claimed the fixture carried a binding. That vacuous test is
+   * precisely why the provider scope shipped dead.
+   */
+  providerBoundClaim(provider?: string): { taskId: string; workerId: string; fence: number; provider: string };
   /** Record a deployment-wide ceiling and permitted tier set. */
   budget(
     permittedTiers: readonly IntelligenceTier[],
@@ -138,6 +150,21 @@ export function intelligenceFixture(
         }),
       );
       return { missionId: mission.id, projectId: project.id };
+    },
+    providerBoundClaim(provider = 'CLAUDE') {
+      // The worker must be DECLARED as the provider before it may claim
+      // provider-bound work — the canonical rule, not a fixture shortcut.
+      expectOk(fx.ops.declareWorkerProvider({ workerId: 'claude', providerId: provider, founderId: 'coo' }));
+      const created = expectOk(
+        fx.ops.createTask({
+          capabilityId: CAPS.openPr,
+          payload: { branch: `intel-bound-${provider.toLowerCase()}`, executionProvider: provider },
+          idempotencyKey: `intel-bound-${provider.toLowerCase()}`,
+          requestedBy: 'claude',
+        }),
+      );
+      const claimed = expectOk(fx.ops.claimNext('claude', CAPS.openPr, undefined, created.task.id));
+      return { taskId: claimed.id, workerId: 'claude', fence: claimed.fence, provider };
     },
     budget(permittedTiers, over = {}) {
       expectOk(

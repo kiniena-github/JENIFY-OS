@@ -108,9 +108,9 @@ describe('the value rule is not defeated by case or by invisible characters', ()
   });
 
   it('refuses a credential hidden behind a zero-width or fullwidth character', () => {
-    // NFKC folds the fullwidth hyphen onto ASCII; the zero-width strip removes
-    // what NFKC leaves alone. The ORIGINAL string is what would have been
-    // published, so this widens what is caught and rewrites nothing.
+    // NFKC folds the fullwidth hyphen onto ASCII; the invisible-code-point
+    // strip removes what NFKC leaves alone. The ORIGINAL string is what would
+    // have been published, so this widens what is caught and rewrites nothing.
     for (const value of [
       'sk\u200b-AAAAAAAAAAAAAAAAAAAA',
       'sk\uff0dAAAAAAAAAAAAAAAAAAAA',
@@ -119,6 +119,61 @@ describe('the value rule is not defeated by case or by invisible characters', ()
       expect(() => assertBrowserSafe({ note: value }), JSON.stringify(value)).toThrow(
         BrowserSafetyError,
       );
+    }
+  });
+
+  /**
+   * Wave 5 correction round three, Medium B7. The previous strip was five
+   * hand-listed ranges, and the test that came with it picked exactly the three
+   * characters those ranges handled \u2014 so a whole class walked through both: the
+   * soft hyphen, the combining grapheme joiner, the Mongolian vowel separator,
+   * the line and paragraph separators, and the Hangul fillers all passed the
+   * scan inside every pattern the guard has.
+   *
+   * The characters below are chosen for the opposite property: NONE of them is
+   * in the range the old implementation listed, and the ones the current
+   * implementation names in its own comment are deliberately not the only ones
+   * here \u2014 the rule is a Unicode PROPERTY, so it has to hold for code points
+   * nobody enumerated.
+   */
+  it('refuses a credential broken by any INVISIBLE code point, not a listed few', () => {
+    const invisible = [
+      '\u00ad', // SOFT HYPHEN
+      '\u034f', // COMBINING GRAPHEME JOINER
+      '\u061c', // ARABIC LETTER MARK
+      '\u115f', // HANGUL CHOSEONG FILLER
+      '\u1160', // HANGUL JUNGSEONG FILLER
+      '\u17b4', // KHMER VOWEL INHERENT AQ
+      '\u180e', // MONGOLIAN VOWEL SEPARATOR
+      '\u2028', // LINE SEPARATOR
+      '\u2029', // PARAGRAPH SEPARATOR
+      '\u2065', // unassigned default-ignorable
+      '\u3164', // HANGUL FILLER
+      '\ufe00', // VARIATION SELECTOR-1
+      '\uffa0', // HALFWIDTH HANGUL FILLER
+      '\u{e0001}', // LANGUAGE TAG
+      '\u{e0041}', // TAG LATIN CAPITAL LETTER A
+    ];
+    // Every credential shape the guard knows, not only the OpenAI one: the
+    // review proved the bypass inside all of these.
+    const shapes = [
+      (hidden: string) => `sk-${hidden}AAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) => `ghp_${hidden}AAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) => `github_pat_${hidden}AAAAAAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) => `AIza${hidden}AAAAAAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) => `-----BEGIN ${hidden}RSA PRIVATE KEY-----`,
+      (hidden: string) => `Bearer ${hidden}AAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) =>
+        `eyJhbGciOi${hidden}JIUzI1NiJ9.eyJzdWIiOiIxIn0.AAAAAAAAAAAAAAAA`,
+    ];
+    for (const hidden of invisible) {
+      for (const shape of shapes) {
+        const value = shape(hidden);
+        expect(
+          () => assertBrowserSafe({ note: value }),
+          `U+${hidden.codePointAt(0)!.toString(16).toUpperCase()} in ${shape('')}`,
+        ).toThrow(BrowserSafetyError);
+      }
     }
   });
 

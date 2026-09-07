@@ -1703,3 +1703,164 @@ describe('the intelligence ledgers are not task, mission or approval authority',
     expect(fx.ops.intelligenceAnalytics().decisions.total).toBe(0);
   });
 });
+
+/**
+ * Wave 5 correction round three — the two Phase 14 enforcement gaps whose
+ * shipped claims said the opposite.
+ */
+describe('the review requirement is enforced on EVERY path that records a tier', () => {
+  /**
+   * MEDIUM B3. `escalateIntelligenceDecision` never ran `#resolveRecordedTier`
+   * — the function documented as "the ONE place a recorded tier is checked
+   * against the policy — law 6". `deriveEscalation` picked the cheapest higher
+   * permitted tier and consulted neither `requiredReviewTier` nor the floor, so
+   * the enforced path refused `low_cost` with `review_tier_required` while
+   * escalation RECORDED `low_cost` anyway against a `critical_review`
+   * requirement. Reproduced here through supported calls only: a Founder
+   * re-registering a capability at a higher risk class through the documented
+   * registry upsert.
+   */
+  it('never escalates INTO a tier the enforced path would refuse', () => {
+    const fx = intelligenceFixture();
+    fx.budget([...INTELLIGENCE_TIERS]);
+    // A read-only task: no review is required yet, so the first decision can
+    // legitimately sit at the free local tier.
+    const claim = fx.readOnlyClaim;
+    const first = expectOk(
+      fx.ops.recordIntelligenceDecision({
+        taskId: claim.taskId,
+        workerId: claim.workerId,
+        fence: claim.fence,
+        label: 'read the repository status',
+        complexity: 'trivial',
+        contextSize: 'small',
+        workKind: 'research',
+        tier: 'low_cost',
+      }),
+    ).decision;
+    expect(first.tier).toBe('low_cost');
+    expect(first.requiredReviewTier).toBeNull();
+
+    // The Founder raises the capability's risk class through the documented
+    // registry upsert. `REVIEW_REQUIREMENT` for `destructive` is
+    // `critical_review`.
+    new CapabilityRegistry(fx.db).register({
+      id: CAPS.readStatus,
+      description: 'Read repo/CI status',
+      riskClass: 'destructive',
+      sideEffect: false,
+      idempotent: true,
+    });
+
+    // The ENFORCED path now refuses the cheap tier by name.
+    const refused = fx.ops.recordIntelligenceDecision({
+      taskId: claim.taskId,
+      workerId: claim.workerId,
+      fence: claim.fence,
+      label: 'read the repository status again',
+      complexity: 'trivial',
+      contextSize: 'small',
+      workKind: 'research',
+      tier: 'standard',
+    });
+    expect(refused.ok).toBe(false);
+    expect(!refused.ok && refused.error.code).toBe('review_tier_required');
+
+    // And the escalation path agrees with it, instead of recording a tier its
+    // sibling refuses.
+    const escalated = expectOk(
+      fx.ops.escalateIntelligenceDecision({
+        decisionId: first.id,
+        workerId: claim.workerId,
+        fence: claim.fence,
+        trigger: 'review_tier_required',
+      }),
+    );
+    expect(escalated.decision.requiredReviewTier).toBe('critical_review');
+    expect(escalated.decision.tier).toBe('critical_review');
+    expect(escalated.decision.satisfiesReviewRequirement).toBe(true);
+    // The recorded tier is exactly what the escalation view reports, so the row
+    // and the view cannot disagree either.
+    expect(escalated.escalation.toTier).toBe(escalated.decision.tier);
+  });
+
+  /**
+   * MEDIUM B4. The canonical review re-derivation was skipped whenever
+   * `characteristics` failed to parse, and `rowToDecision` reads an unparseable
+   * column as null — so forging `required_review_tier` ALONE was caught by the
+   * max, and forging BOTH columns escaped completely: `requiredReviewTier` came
+   * back null, `satisfiesReviewRequirement` true, and the row dropped out of
+   * `reviewRequired` in analytics entirely.
+   */
+  it('re-derives the review requirement from canonical truth even when characteristics will not parse', () => {
+    const fx = intelligenceFixture();
+    fx.budget([...INTELLIGENCE_TIERS]);
+    // A raw APPEND — the write the append-only triggers deliberately permit, so
+    // this needs no dropped guard and is the shape a forger actually has.
+    const forge = (id: string, characteristics: string, requiredReviewTier: string | null): void => {
+      fx.db
+        .prepare(
+          `INSERT INTO hq_intel_decisions
+             (id, task_id, mission_id, project_id, tier, floor_tier, required_review_tier,
+              escalated_from, escalation_trigger, bound_provider, characteristics, permitted_tiers,
+              budget_decision, label, issued_at, issued_by, process_id, decision_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          fx.claim.taskId,
+          null,
+          null,
+          'low_cost',
+          'deterministic_local',
+          requiredReviewTier,
+          null,
+          null,
+          null,
+          characteristics,
+          JSON.stringify(INTELLIGENCE_TIERS),
+          'within_ceiling',
+          'forged',
+          new Date().toISOString(),
+          'attacker',
+          'attacker-process',
+          `forged-key-${id}`,
+        );
+    };
+    // (a) `required_review_tier` alone. This was always caught, by the max
+    // against the canonical requirement.
+    forge(
+      'inteldec-forged-one-column',
+      JSON.stringify({
+        complexity: 'trivial',
+        contextSize: 'small',
+        workKind: 'classification',
+        latency: 'unspecified',
+        privacy: 'unrestricted',
+        riskClass: 'read_only',
+      }),
+      null,
+    );
+    // (b) BOTH columns. `rowToDecision` reads an unparseable `characteristics`
+    // as null, and the re-derivation used to be skipped on that branch — so
+    // this row came back `requiredReviewTier: null`, `satisfies: true`, and
+    // dropped out of `reviewRequired` in analytics entirely.
+    forge('inteldec-forged-two-columns', 'not json at all', null);
+
+    // `github.open_pr` is `external_side_effect`, whose review requirement is
+    // `high` — read from `op_tasks`/`op_capabilities`, never from the row.
+    for (const id of ['inteldec-forged-one-column', 'inteldec-forged-two-columns']) {
+      const read = fx.ops.getIntelligenceDecision(id)!;
+      expect(read.requiredReviewTier, id).toBe('high');
+      expect(read.satisfiesReviewRequirement, id).toBe(false);
+    }
+    expect(fx.ops.getIntelligenceDecision('inteldec-forged-two-columns')!.characteristics).toBeNull();
+
+    // And both are COUNTED as requiring a review they do not satisfy, rather
+    // than vanishing from the analytics.
+    const analytics = fx.ops.intelligenceAnalytics();
+    const byTier = analytics.decisions.byTierResult.find((entry) => entry.tier === 'low_cost');
+    expect(byTier?.reviewRequired).toBe(2);
+    expect(byTier?.reviewRequirementSatisfied).toBe(0);
+  });
+});
