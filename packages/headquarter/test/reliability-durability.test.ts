@@ -21,6 +21,7 @@ import {
   HQ_INTEGRITY_FINDINGS,
   REQUIRED_IMMUTABILITY_GUARDS,
   SAFE_MODE_BLOCKING_FINDINGS,
+  declaredGuardNames,
   findingIsBlocking,
   fullIntegrity,
   missingImmutabilityGuards,
@@ -217,6 +218,27 @@ describe('the engine-immutable inventory is checked against the live schema, not
     db.close();
   });
 
+  /**
+   * Wave 5 High 1. The census used to check the trio only, so the SECONDARY
+   * guards — including `trg_hq_reliability_run_events_no_replace_attempt`, the
+   * cross-process duplicate-attempt guard the module's own comment calls load-
+   * bearing — could be dropped with no finding at all. This pins the FULL
+   * trigger-name set for every listed prefix, so a guard a future phase adds
+   * and forgets to declare fails here rather than escaping the check.
+   */
+  it('lists every guard each of those tables actually declares, not just the trio', () => {
+    const db = openMemoryHqDatabase();
+    void new HeadquarterOperations(db);
+    const live = (
+      db.prepare(`SELECT name FROM sqlite_master WHERE type = 'trigger'`).all() as { name: string }[]
+    ).map((row) => row.name);
+    for (const entry of ENGINE_IMMUTABLE_TABLES) {
+      const onFile = live.filter((name) => name.startsWith(`trg_${entry.triggerPrefix}_`)).sort();
+      expect(declaredGuardNames(entry).sort(), entry.table).toEqual(onFile);
+    }
+    db.close();
+  });
+
   it('finds nothing missing on a healthy database, and finds a dropped guard on a tampered one', () => {
     const fx = fileFixture();
     try {
@@ -244,6 +266,39 @@ describe('the engine-immutable inventory is checked against the live schema, not
 
   it('requires exactly the trio that carries the guarantee', () => {
     expect([...REQUIRED_IMMUTABILITY_GUARDS]).toEqual(['no_rewrite', 'no_erase', 'no_replace']);
+  });
+
+  /**
+   * Wave 5 High 1, as the exploit that found it. Dropping ONE secondary guard
+   * used to be invisible: the census reported `[]`, safe mode stayed false at
+   * both depths, and a raw `INSERT OR REPLACE` then erased a committed
+   * append-only row (`recursive_triggers` is off and connection-scoped, so no
+   * BEFORE DELETE fires) and substituted a forged one, with no finding.
+   */
+  it('finds a dropped SECONDARY guard, and engages safe mode on it', () => {
+    const fx = fileFixture();
+    try {
+      openedRun(fx, 'the run whose attempt guard is about to vanish');
+      expect(missingImmutabilityGuards(fx.db)).toEqual([]);
+      const raw = fx.raw();
+      raw.exec('DROP TRIGGER trg_hq_reliability_run_events_no_replace_attempt');
+
+      expect(missingImmutabilityGuards(raw)).toEqual([
+        'trg_hq_reliability_run_events_no_replace_attempt',
+      ]);
+      // Both depths, because the census feeds both.
+      expect(structuralIntegrity(raw).safeMode).toBe(true);
+      expect(fullIntegrity(raw).safeMode).toBe(true);
+      expect(
+        structuralIntegrity(raw).observations.map((observation) => observation.finding),
+      ).toContain('append_only_guard_missing');
+
+      // And the next construction latches it.
+      const restarted = fx.reopen('process-two');
+      expect(restarted.ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+    } finally {
+      fx.cleanup();
+    }
   });
 });
 
