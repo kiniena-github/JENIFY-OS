@@ -166,6 +166,12 @@ describe('the write surface is stated, not inferred', () => {
     expect(CONTROL_WRITE_ROUTES).toContain(CONTROL_ROUTES.commandCenterBrief);
     expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.commandCenter);
     expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.commandCenterInbox);
+    // Phase 11 adds NO write. Search and Ask Jenify are GETs and stay off the
+    // write surface, so its length is unchanged — the first phase since the
+    // browser boundary existed that widens the route table by two and the
+    // write surface by nothing.
+    expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.search);
+    expect(CONTROL_WRITE_ROUTES).not.toContain(CONTROL_ROUTES.ask);
     expect(CONTROL_WRITE_ROUTES).toHaveLength(23);
   });
 });

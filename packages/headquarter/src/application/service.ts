@@ -715,6 +715,28 @@ import {
   type MissionFact,
   type TruthFact,
 } from './chief-of-staff.js';
+import {
+  ASK_CITATION_LIMIT,
+  MAX_DOCUMENT_BODY_LENGTH,
+  MAX_QUESTION_LENGTH,
+  SEARCH_SOURCES,
+  assembleAnswer,
+  normalizeSearchQuery,
+  resolveRetrievalAdapter,
+  runCompanySearch,
+  searchSourceDescriptor,
+  sourceStatuses,
+  SEARCH_SNAPSHOT_NOTE,
+  type AskAnswerView,
+  type CompanySearchQuery,
+  type CompanySearchView,
+  type RetrievalMode,
+  type SearchCorpus,
+  type SearchDocument,
+  type SearchEntityRef,
+  type SearchIndexSnapshotView,
+  type SearchSourceId,
+} from './search-command.js';
 import { CLIENT_IDENTITY_KEYS } from '../live/auth.js';
 import { ensureMemoryTables, memorySchemaPresent, MemoryStore, searchMemory } from '../memory/store.js';
 import {
@@ -1192,6 +1214,47 @@ function truthIdList(
 
 function emptyTruthGraph(): TruthGraph {
   return { records: [], relations: [], verifications: [], acceptances: [] };
+}
+
+/**
+ * A stored JSON string list, read defensively (Phase 11 corpus builder).
+ *
+ * The corpus reads `hq_memory.tags` as a raw column rather than through the
+ * store's row mapper, so a malformed value must degrade to "no tags" instead
+ * of throwing a search request. Nothing here repairs the row.
+ */
+function safeStringList(encoded: string | null): string[] {
+  if (!encoded) return [];
+  try {
+    const parsed: unknown = JSON.parse(encoded);
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Map a truth record's SUBJECT onto a search entity reference.
+ *
+ * Total over `TruthEntityKind`, deliberately: the Phase 10 salvage found a
+ * draft that relabelled a `memory` subject as `truth`, publishing a memory id
+ * under the wrong kind. A total mapping cannot drift that way.
+ */
+function truthEntityRef(entityKind: TruthEntityKind, entityId: string): SearchEntityRef {
+  switch (entityKind) {
+    case 'mission':
+      return { kind: 'mission', id: entityId };
+    case 'project':
+      return { kind: 'project', id: entityId };
+    case 'task':
+      return { kind: 'task', id: entityId };
+    case 'memory':
+      return { kind: 'memory', id: entityId };
+    case 'worker':
+      return { kind: 'worker', id: entityId };
+    case 'capability':
+      return { kind: 'capability', id: entityId };
+  }
 }
 
 /**
@@ -10237,6 +10300,442 @@ export class HeadquarterOperations {
       founderBriefContractDrift,
       'issuing a Founder brief',
     );
+  }
+
+  // ---- Search + Company Memory + Ask Jenify (Phase 11) ----
+
+  /**
+   * Every canonical row search is allowed to see, projected ONCE per read.
+   *
+   * ENFORCEMENT-SAFE BY CONSTRUCTION. This corpus decides two things a hostile
+   * same-realm patch would love to move: WHICH rows a reader is shown, and
+   * WHICH of them are `founder_only`. So every row here is read through
+   * `#db` or a private derivation, and NOT ONE fact comes from a public,
+   * patchable prototype method — not `listMemory()`, not `listTruth()`, not
+   * `listCollaborationSessions()`, not `listActions()`, not
+   * `directory.listSpecialists()`, not `MemoryStore.listAll()`. This is the
+   * Phase 9 High finding and the Phase 10 `#commandFacts` rule applied to a
+   * surface whose whole job is disclosure, and unlike `#commandFacts` there is
+   * no exception: Phase 11 reads no public method at all.
+   *
+   * `privacy` is copied from the canonical row for the three classified
+   * sources (`hq_memory.privacy`, the DERIVED truth view's `privacy`,
+   * `hq_collab_sessions.privacy`) and is `internal` for the six sources whose
+   * canonical rows carry no privacy column — stated in the source registry
+   * rather than assumed at each call site.
+   *
+   * Two payloads are deliberately NOT indexed and therefore can never be
+   * quoted back: `op_tasks.payload` / `op_tasks.result`, and
+   * `hq_action_intents.payload`. The snapshot's no-task-payload rule is a
+   * disclosure rule, not a snapshot rule, so it applies to a Founder-gated
+   * search result too. A task is searchable by its recorded title, capability
+   * and block reason; an action by its type, adapter and target.
+   *
+   * Nothing here is stored. The corpus is a value handed to the pure core and
+   * dropped: there is no index table, no query log and no result cache in this
+   * phase, which is why search cannot become a second answer to "what does the
+   * company hold".
+   */
+  #searchCorpus(): SearchCorpus {
+    const builtAt = nowIso();
+    const documents: SearchDocument[] = [];
+    const bodyOf = (...parts: (string | null | undefined)[]): string =>
+      parts
+        .filter((part): part is string => typeof part === 'string' && part.trim() !== '')
+        .join(' — ')
+        .slice(0, MAX_DOCUMENT_BODY_LENGTH);
+    const push = (
+      source: SearchSourceId,
+      entityId: string,
+      fields: Omit<SearchDocument, 'id' | 'source' | 'entityId' | 'table'>,
+    ): void => {
+      documents.push({
+        id: `${source}:${entityId}`,
+        source,
+        entityId,
+        table: searchSourceDescriptor(source).table,
+        ...fields,
+      });
+    };
+
+    // Missions — hq_missions straight off #db.
+    if (this.#missionStorePresent) {
+      const rows = this.#db
+        .prepare(
+          `SELECT id, title, objective, scope, status, block_reason, project, created_at, updated_at
+           FROM hq_missions ORDER BY id`,
+        )
+        .all() as Record<string, unknown>[];
+      for (const row of rows) {
+        push('mission', row.id as string, {
+          title: row.title as string,
+          body: bodyOf(row.objective as string, row.scope as string | null, row.block_reason as string | null),
+          status: row.status as string,
+          lifecycle: 'not_applicable',
+          truthState: null,
+          privacy: 'internal',
+          at: (row.updated_at as string) ?? (row.created_at as string),
+          project: ((row.project as string | null) ?? '').trim(),
+          tags: [],
+          evidenceRefs: [],
+          refs: [{ kind: 'mission', id: row.id as string }],
+        });
+      }
+    }
+
+    // Projects — hq_projects straight off #db.
+    if (this.#projectStorePresent) {
+      const rows = this.#db
+        .prepare(`SELECT id, name, stream, summary, status, created_at, updated_at FROM hq_projects ORDER BY id`)
+        .all() as Record<string, unknown>[];
+      for (const row of rows) {
+        push('project', row.id as string, {
+          title: row.name as string,
+          body: bodyOf(row.summary as string, row.stream as string),
+          status: row.status as string,
+          lifecycle: 'not_applicable',
+          truthState: null,
+          privacy: 'internal',
+          at: (row.updated_at as string) ?? (row.created_at as string),
+          project: row.name as string,
+          tags: [row.stream as string].filter((tag) => tag !== ''),
+          evidenceRefs: [],
+          refs: [{ kind: 'project', id: row.id as string }],
+        });
+      }
+    }
+
+    // Tasks — the recorded title, capability and block reason. Never the
+    // payload and never the result.
+    const taskRows = this.#db
+      .prepare(
+        `SELECT t.id AS id, t.capability_id AS capability_id, t.status AS status, t.created_at AS created_at,
+                t.updated_at AS updated_at, t.block_reason AS block_reason,
+                m.title AS title, m.project AS project
+         FROM op_tasks t LEFT JOIN hq_op_task_meta m ON m.task_id = t.id ORDER BY t.id`,
+      )
+      .all() as Record<string, unknown>[];
+    for (const row of taskRows) {
+      push('task', row.id as string, {
+        title: ((row.title as string | null) ?? (row.capability_id as string)).trim(),
+        body: bodyOf(row.capability_id as string, row.block_reason as string | null),
+        status: row.status as string,
+        lifecycle: 'not_applicable',
+        truthState: null,
+        privacy: 'internal',
+        at: (row.updated_at as string) ?? (row.created_at as string),
+        project: ((row.project as string | null) ?? '').trim(),
+        tags: [],
+        evidenceRefs: [],
+        refs: [
+          { kind: 'task', id: row.id as string },
+          { kind: 'capability', id: row.capability_id as string },
+        ],
+      });
+    }
+
+    // Company memory — hq_memory read as ROWS through #db, deliberately not
+    // through MemoryStore.listAll(): a public method on another class is a
+    // patchable read, and this one decides which records are founder_only.
+    if (this.#memoryStorePresent) {
+      const rows = this.#db
+        .prepare(
+          `SELECT id, kind, title, body, status, privacy, recorded_date, recorded_source, project, tags,
+                  mission_id, project_id, task_id
+           FROM hq_memory ORDER BY id`,
+        )
+        .all() as Record<string, unknown>[];
+      for (const row of rows) {
+        const refs: SearchEntityRef[] = [{ kind: 'memory', id: row.id as string }];
+        if (row.mission_id) refs.push({ kind: 'mission', id: row.mission_id as string });
+        if (row.project_id) refs.push({ kind: 'project', id: row.project_id as string });
+        if (row.task_id) refs.push({ kind: 'task', id: row.task_id as string });
+        push('memory', row.id as string, {
+          title: row.title as string,
+          body: bodyOf(row.body as string, row.kind as string, row.recorded_source as string | null),
+          status: row.status as string,
+          lifecycle: row.status === 'SUPERSEDED' ? 'superseded' : 'current',
+          truthState: null,
+          privacy: (row.privacy as MemoryPrivacy) ?? 'internal',
+          at: row.recorded_date as string,
+          project: ((row.project as string | null) ?? '').trim(),
+          tags: safeStringList(row.tags as string | null),
+          evidenceRefs: [],
+          refs,
+        });
+      }
+    }
+
+    // Truth — the PRIVATE derivation over the canonical graph, exactly as
+    // `#commandFacts` reads it. `state`, `lifecycle` and `privacy` are all
+    // derived facts here, never stored flags a patch could relabel.
+    if (this.#truthStorePresent) {
+      for (const view of this.#deriveAllTruth(loadTruthGraph(this.#db)).values()) {
+        push('truth', view.id, {
+          title: view.statement,
+          body: bodyOf(
+            view.statement,
+            view.entityKind,
+            view.entityId,
+            ...view.verifications
+              .filter((verification) => verification.limitations.trim() !== '')
+              .map((verification) => verification.limitations),
+          ),
+          status: view.state,
+          lifecycle: view.lifecycle === 'superseded' ? 'superseded' : 'current',
+          truthState: view.state,
+          privacy: view.privacy,
+          at: view.recordedAt,
+          project: '',
+          tags: [view.entityKind],
+          evidenceRefs: [...view.evidenceRefs],
+          refs: [truthEntityRef(view.entityKind, view.entityId)],
+        });
+      }
+    }
+
+    // Collaboration sessions — the Phase 9 loader over #db; `privacy` is the
+    // session's own classification and is the disclosure decision here.
+    if (this.#collaborationStorePresent) {
+      for (const row of loadCollaborationSessions(this.#db)) {
+        push('collaboration', row.id, {
+          title: row.title,
+          body: bodyOf(row.purpose),
+          status: 'open',
+          lifecycle: 'not_applicable',
+          truthState: null,
+          privacy: row.privacy === 'founder_only' ? 'founder_only' : 'internal',
+          at: row.openedAt,
+          project: '',
+          tags: [],
+          evidenceRefs: [],
+          refs: [
+            { kind: 'collaboration', id: row.id },
+            { kind: 'mission', id: row.missionId },
+          ],
+        });
+      }
+    }
+
+    // External action intents — the Phase 8 loader over #db. Type, adapter,
+    // target and the risk vocabulary; never the payload.
+    if (this.#actionStorePresent) {
+      for (const row of loadActionIntents(this.#db)) {
+        push('external_action', row.id, {
+          title: `${row.actionType} via ${row.adapterId}`,
+          body: bodyOf(row.target, row.riskLevel, row.visibility, row.reversibility, ...row.riskFactors),
+          status: row.riskLevel,
+          lifecycle: 'not_applicable',
+          truthState: null,
+          privacy: 'internal',
+          at: row.requestedAt,
+          project: '',
+          tags: [row.adapterId, row.actionType],
+          evidenceRefs: [...row.contextEvidenceRefs],
+          refs: [
+            { kind: 'external_action', id: row.id },
+            { kind: 'task', id: row.taskId },
+            ...(row.missionId ? [{ kind: 'mission' as const, id: row.missionId }] : []),
+          ],
+        });
+      }
+    }
+
+    // Orchestration runs — hq_orchestration_runs straight off #db, and only
+    // when the ledger genuinely exists on this handle.
+    if (orchestratorSchemaPresent(this.#db)) {
+      const rows = this.#db
+        .prepare(`SELECT id, mission_id, requested_by, at, summary FROM hq_orchestration_runs ORDER BY id`)
+        .all() as Record<string, unknown>[];
+      for (const row of rows) {
+        push('orchestration_run', row.id as string, {
+          title: row.summary as string,
+          body: bodyOf(row.summary as string, row.requested_by as string),
+          status: 'recorded',
+          lifecycle: 'not_applicable',
+          truthState: null,
+          privacy: 'internal',
+          at: row.at as string,
+          project: '',
+          tags: [],
+          evidenceRefs: [],
+          refs: [
+            { kind: 'orchestration_run', id: row.id as string },
+            { kind: 'mission', id: row.mission_id as string },
+          ],
+        });
+      }
+    }
+
+    // Workers — hq_specialists straight off #db, deliberately not through
+    // `directory.listSpecialists()` (a public read on this instance).
+    const workerRows = this.#db
+      .prepare(`SELECT id, display_name, vendor, role, active FROM hq_specialists ORDER BY id`)
+      .all() as Record<string, unknown>[];
+    for (const row of workerRows) {
+      push('worker', row.id as string, {
+        title: row.display_name as string,
+        body: bodyOf(row.role as string, row.vendor as string, row.id as string),
+        status: row.active ? 'active' : 'inactive',
+        lifecycle: 'not_applicable',
+        truthState: null,
+        privacy: 'internal',
+        // hq_specialists carries no timestamp; the corpus states the read
+        // instant rather than inventing a canonical one.
+        at: builtAt,
+        project: '',
+        tags: [row.vendor as string, row.role as string].filter((tag) => tag !== ''),
+        evidenceRefs: [],
+        refs: [{ kind: 'worker', id: row.id as string }],
+      });
+    }
+
+    return {
+      documents,
+      sources: [
+        { id: 'mission', storePresent: this.#missionStorePresent },
+        { id: 'project', storePresent: this.#projectStorePresent },
+        // op_tasks and hq_specialists are core schema — present on every handle
+        // this facade can be constructed over.
+        { id: 'task', storePresent: true },
+        { id: 'memory', storePresent: this.#memoryStorePresent },
+        { id: 'truth', storePresent: this.#truthStorePresent },
+        { id: 'collaboration', storePresent: this.#collaborationStorePresent },
+        { id: 'external_action', storePresent: this.#actionStorePresent },
+        { id: 'orchestration_run', storePresent: orchestratorSchemaPresent(this.#db) },
+        { id: 'worker', storePresent: true },
+      ],
+      builtAt,
+    };
+  }
+
+  /**
+   * Unified deterministic search across every canonical source in the Phase 11
+   * registry. A pure read: it appends no event, no evidence and no row, and
+   * there is no table it could append one to.
+   *
+   * `includeFounderOnly` is the READER's right, decided by the calling layer
+   * (the Founder-gated route passes true; the unauthenticated snapshot passes
+   * false) and never by anything in the query. A query with no criterion at
+   * all is refused rather than answered — see `normalizeSearchQuery`.
+   */
+  searchCompany(
+    query: CompanySearchQuery,
+    options: { includeFounderOnly?: boolean } = {},
+  ): OpsResult<CompanySearchView> {
+    const normalized = normalizeSearchQuery(query);
+    if (!normalized.ok) return fail('invalid_input', normalized.message);
+    return ok(
+      runCompanySearch({
+        corpus: this.#searchCorpus(),
+        query,
+        terms: normalized.terms,
+        droppedTerms: normalized.droppedTerms,
+        criteria: normalized.criteria,
+        includeFounderOnly: options.includeFounderOnly === true,
+        now: nowIso(),
+      }),
+    );
+  }
+
+  /**
+   * Ask Jenify — one natural-language question, answered from canonical rows.
+   *
+   * RETRIEVE FIRST, THEN COMPOSE, and structurally so: this method retrieves
+   * through the same corpus and the same adapter search uses, hands the
+   * already-privacy-filtered, already-bounded documents to a pure composer,
+   * and the composer has no database handle to reach past them with. When
+   * retrieval returns nothing the answer is `insufficient_evidence` (or
+   * `unknown` when there was nothing to retrieve on) — never a guess.
+   *
+   * This is not a model call. No prose is generated: the response is counts
+   * and categorical states over the cited rows, and each row's own text
+   * appears only as a quoted snippet beside the table and id it came from.
+   *
+   * A pure read, exactly like `searchCompany`: no write, no event, no
+   * evidence, no capability, no authority. A question is not an act.
+   */
+  askJenify(input: {
+    question: string;
+    /** The READER's disclosure right, set by the calling layer. */
+    includeFounderOnly?: boolean;
+    /** Citations to read, clamped to [1, ASK_CITATION_LIMIT]. */
+    limit?: number;
+    retrieval?: RetrievalMode;
+  }): OpsResult<AskAnswerView> {
+    const question = (input.question ?? '').trim();
+    if (question === '') return fail('invalid_input', 'question is required');
+    if (question.length > MAX_QUESTION_LENGTH) {
+      return fail('invalid_input', `question exceeds ${MAX_QUESTION_LENGTH} characters`);
+    }
+    const askedAt = nowIso();
+    const corpus = this.#searchCorpus();
+    const noStorePresent = corpus.sources.every((source) => !source.storePresent);
+
+    // The reader's set, and the corpus-wide (never per-query) withheld count.
+    const includeFounderOnly = input.includeFounderOnly === true;
+    const readable = includeFounderOnly
+      ? [...corpus.documents]
+      : corpus.documents.filter((document) => document.privacy !== 'founder_only');
+    const withheldFounderOnly = corpus.documents.length - readable.length;
+
+    const normalized = normalizeSearchQuery({ text: question });
+    const terms = normalized.ok ? normalized.terms : [];
+    const droppedTerms = normalized.ok ? normalized.droppedTerms : 0;
+
+    const { adapter, statement } = resolveRetrievalAdapter(input.retrieval ?? 'deterministic_lexical');
+    // A question with no searchable term retrieves NOTHING. It deliberately
+    // does not fall through to "return everything ordered by date", which is
+    // what the adapter does for an empty term list when search supplies a
+    // structured filter instead.
+    const matched = terms.length === 0 ? [] : adapter.retrieve({ readable, terms });
+    const limit = Math.min(Math.max(input.limit ?? ASK_CITATION_LIMIT, 1), ASK_CITATION_LIMIT);
+
+    return ok(
+      assembleAnswer({
+        question,
+        askedAt,
+        terms,
+        droppedTerms,
+        retrieved: matched.slice(0, limit),
+        considered: matched.length,
+        sources: sourceStatuses(corpus, readable),
+        withheldFounderOnly,
+        retrieval: statement,
+        noStorePresent,
+      }),
+    );
+  }
+
+  /**
+   * The search source registry for the UNAUTHENTICATED artifact: which stores
+   * exist, how many documents an unauthenticated reader could search, how many
+   * classified documents were not searched, and which retrieval mode answers.
+   *
+   * No document, title, snippet, id, term, question or result crosses. The
+   * counts span the reader's set only, and the withheld count is a property of
+   * the corpus rather than of any query — the Phase 10 rule that no number may
+   * aggregate over withheld material, plus the stronger Phase 11 rule that no
+   * number may be a function of an attacker-chosen query.
+   */
+  searchIndexSummary(options: { includeFounderOnly?: boolean } = {}): SearchIndexSnapshotView {
+    const corpus = this.#searchCorpus();
+    const readable =
+      options.includeFounderOnly === true
+        ? [...corpus.documents]
+        : corpus.documents.filter((document) => document.privacy !== 'founder_only');
+    return {
+      sources: sourceStatuses(corpus, readable),
+      readableTotal: readable.length,
+      withheldFounderOnly: corpus.documents.length - readable.length,
+      retrieval: resolveRetrievalAdapter('deterministic_lexical').statement,
+      note: SEARCH_SNAPSHOT_NOTE,
+    };
+  }
+
+  /** Which canonical sources this build searches. A registry read; no rows. */
+  searchSources(): readonly SearchSourceId[] {
+    return SEARCH_SOURCES;
   }
 
   // ---- task metadata (console labels + advisory assignment) ----

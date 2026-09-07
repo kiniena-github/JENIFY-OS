@@ -179,6 +179,7 @@ import {
   FOUNDER_BRIEF_CAPABILITY,
   founderBriefCapabilityState,
 } from '../application/chief-of-staff.js';
+import { SEARCH_SOURCES, isSearchSource, type SearchSourceId } from '../application/search-command.js';
 import { MEMORY_KINDS, isMemoryKind, isMemoryPrivacy } from '../memory/schema.js';
 import { isArchiveStatus } from '../archive/schema.js';
 import { PROVIDERS, providerConnectivity } from '../routing/providers.js';
@@ -330,6 +331,21 @@ export const CONTROL_ROUTES = {
   commandCenter: `${CONTROL_API_PREFIX}/command-center`,
   commandCenterInbox: `${CONTROL_API_PREFIX}/command-center/inbox`,
   commandCenterBrief: `${CONTROL_API_PREFIX}/command-center/brief`,
+  /**
+   * Phase 11: unified search and Ask Jenify. BOTH ARE GETs, and that is a
+   * design statement rather than a convenience — a read that can never appear
+   * on the write surface cannot quietly become a writer, and the phase adds no
+   * write at all. `search` takes the query criteria (`?text=&source=&project=
+   * &tag=&year=&limit=`); `ask` takes one natural-language `?question=` and
+   * answers from canonical rows retrieved first, or says it cannot.
+   *
+   * Neither route takes an identity, a privacy level or a source to trust:
+   * whether founder_only material is searched is decided from the RESOLVED
+   * Founder, exactly as the memory, truth, collaboration and command-centre
+   * reads decide it.
+   */
+  search: `${CONTROL_API_PREFIX}/search`,
+  ask: `${CONTROL_API_PREFIX}/ask`,
 } as const;
 
 /**
@@ -648,7 +664,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.collaborationRoom ||
         path === CONTROL_ROUTES.collaborationContext ||
         path === CONTROL_ROUTES.commandCenter ||
-        path === CONTROL_ROUTES.commandCenterInbox)) ||
+        path === CONTROL_ROUTES.commandCenterInbox ||
+        path === CONTROL_ROUTES.search ||
+        path === CONTROL_ROUTES.ask)) ||
     (method === 'POST' &&
       (path === CONTROL_ROUTES.orders ||
         path === CONTROL_ROUTES.approve ||
@@ -996,6 +1014,14 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
 
   if (method === 'GET' && path === CONTROL_ROUTES.commandCenterInbox) {
     return founderInboxRoute(deps, founder, audit, now);
+  }
+
+  if (method === 'GET' && path === CONTROL_ROUTES.search) {
+    return searchCompanyRoute(request, deps, founder, audit, now);
+  }
+
+  if (method === 'GET' && path === CONTROL_ROUTES.ask) {
+    return askJenifyRoute(request, deps, founder, audit, now);
   }
 
   if (path === CONTROL_ROUTES.orders) return createOrder(request, deps, founder, audit);
@@ -2265,6 +2291,134 @@ function issueBriefRoute(
       ok: true,
       deduplicated: result.data.deduplicated,
       brief: result.data.brief as unknown as Record<string, unknown>,
+    }),
+  );
+}
+
+/**
+ * Phase 11 — unified search across the canonical sources.
+ *
+ * A GET, and a pure read: the facade appends no row, no event and no evidence
+ * answering it, and there is no Phase 11 table it could append one to.
+ *
+ * `includeFounderOnly: true` is passed because this response exists ONLY past
+ * the Founder gate — the same reading-layer decision `GET /memory`,
+ * `GET /truth`, `GET /collaboration` and `GET /command-center` each make.
+ * Nothing in the query can change it: the flag is a function of the RESOLVED
+ * principal and of nothing the client sent.
+ *
+ * `?source=` may repeat as a comma-separated list; an unknown source is
+ * refused rather than silently ignored, so a client never believes it filtered
+ * when it did not.
+ */
+function searchCompanyRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const query = request.query ?? {};
+  const rawSources = (query.source ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '');
+  for (const source of rawSources) {
+    if (!isSearchSource(source)) {
+      audit('refused', 'invalid_input', founder);
+      return refusal(400, 'invalid_input', `source must be one of: ${SEARCH_SOURCES.join(', ')}.`);
+    }
+  }
+  const limitText = (query.limit ?? '').trim();
+  if (limitText !== '' && !/^\d{1,3}$/.test(limitText)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'limit must be a small positive whole number.');
+  }
+  const text = (query.text ?? '').trim();
+  // The browser boundary's stricter scan of the query TEXT, before anything is
+  // matched: a query carrying credential-shaped material is refused here
+  // rather than echoed back inside `criteria` and `terms` (the memory-intake
+  // precedent).
+  try {
+    assertBrowserSafe({ text }, 'search');
+  } catch {
+    audit('refused', 'unsafe_query', founder);
+    return refusal(
+      400,
+      'unsafe_query',
+      'The search text looks like it contains credential material, so it was refused rather than matched.',
+    );
+  }
+  const result = deps.ops.searchCompany(
+    {
+      text: text || undefined,
+      sources: rawSources.length > 0 ? (rawSources as SearchSourceId[]) : undefined,
+      project: (query.project ?? '').trim() || undefined,
+      tag: (query.tag ?? '').trim() || undefined,
+      year: (query.year ?? '').trim() || undefined,
+      limit: limitText === '' ? undefined : Number(limitText),
+    },
+    { includeFounderOnly: true },
+  );
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', 'company_search', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      search: result.data as unknown as Record<string, unknown>,
+    }),
+  );
+}
+
+/**
+ * Phase 11 — Ask Jenify.
+ *
+ * A GET, deliberately: a question is a read, and a read route can never drift
+ * onto the write surface. The facade retrieves canonical rows FIRST and
+ * composes the response from their fields only; when nothing was retrieved the
+ * answer states `insufficient_evidence` or `unknown` and says why. No model is
+ * called from here and nothing external is contacted.
+ *
+ * The question is scanned for credential shapes before it is echoed, and the
+ * response — like every control response — passes the browser-safety guard.
+ */
+function askJenifyRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const question = (request.query?.question ?? '').trim();
+  if (question === '') {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'Supply a question (?question=...).');
+  }
+  try {
+    assertBrowserSafe({ question }, 'ask');
+  } catch {
+    audit('refused', 'unsafe_question', founder);
+    return refusal(
+      400,
+      'unsafe_question',
+      'The question looks like it contains credential material, so it was refused rather than answered.',
+    );
+  }
+  const result = deps.ops.askJenify({ question, includeFounderOnly: true });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', `ask_jenify_${result.data.state}`, founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      answer: result.data as unknown as Record<string, unknown>,
     }),
   );
 }

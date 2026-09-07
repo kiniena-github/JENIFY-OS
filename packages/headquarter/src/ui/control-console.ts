@@ -108,6 +108,11 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
   CONTROL_ROUTES.commandCenter,
   CONTROL_ROUTES.commandCenterInbox,
   CONTROL_ROUTES.commandCenterBrief,
+  // Phase 11: the unified search and Ask Jenify reads on index.html. Both are
+  // GETs and neither joins the postJson allow-list, because the phase adds no
+  // write at all.
+  CONTROL_ROUTES.search,
+  CONTROL_ROUTES.ask,
 ];
 
 /**
@@ -3575,6 +3580,267 @@ export function commandCenterConsoleScript(): string {
         return;
       }
       reload();
+    })
+    .catch(function (error) {
+      stayOff('the HQ control API is not reachable from this page (' + error.message + ').');
+    });
+})();
+</script>`;
+}
+
+/**
+ * Company Search + Ask Jenify console on index.html (Phase 11).
+ *
+ * The static markup is a mount and a note — no input, no button, no form, per
+ * the site-wide inert-markup rule. This script asks `/session`; any resolved
+ * Founder gets two live READS built into the mount: a unified search across
+ * the canonical sources, and a natural-language question answered from rows
+ * retrieved first.
+ *
+ * What this console deliberately never draws:
+ * - a relevance score, rank, percentage or confidence. None exists in the
+ *   data. What a hit shows instead is WHICH query terms it matched, which the
+ *   reader can check against the snippet beside it;
+ * - an action. Every element here is a read; there is no write route in this
+ *   phase, and `postJson` is not called once in this script;
+ * - a generated sentence. The answer text is the server's composed line over
+ *   canonical fields, rendered verbatim through textContent, with each cited
+ *   row's table and id beside it.
+ *
+ * Both reads are GETs whose criteria travel in the query string, and both are
+ * refused by the server when the caller supplies no criterion at all — a
+ * search box that returns the company record for an empty query is a dump,
+ * not a search, and this console never issues one.
+ */
+export function searchConsoleScript(): string {
+  return `<script>
+(function () {
+  var mount = document.querySelector('[data-search-console]');
+  if (!mount || typeof window.fetch !== 'function') return;
+
+  ${CONTROL_GRANT_JS}
+  ${DOM_HELPERS_JS}
+
+  var SESSION_PATH = ${jsonForScript(CONTROL_ROUTES.session)};
+  var SEARCH_PATH = ${jsonForScript(CONTROL_ROUTES.search)};
+  var ASK_PATH = ${jsonForScript(CONTROL_ROUTES.ask)};
+  var HIT_LIMIT = 12;
+
+  var note = el('p', 'readonly-note console-state', 'Checking with the control API whether this session may search the company record\\u2026');
+  note.setAttribute('data-search-state', 'checking');
+  note.setAttribute('role', 'status');
+  mount.appendChild(note);
+
+  var box = el('div', 'missions-live search-live');
+  box.setAttribute('data-search-live', '');
+  mount.appendChild(box);
+
+  function stayOff(reason) {
+    box.textContent = '';
+    note.setAttribute('data-search-state', 'off');
+    note.className = 'readonly-note console-state console-state-off';
+    note.textContent = 'COMPANY SEARCH IS NOT READABLE FROM THIS PAGE \\u2014 ' + reason;
+  }
+
+  function textLine(parent, cls, text) {
+    parent.appendChild(el('p', cls, text));
+  }
+
+  function field(parent, labelText, placeholder) {
+    var wrap = el('div', 'order-field');
+    var label = el('label', 'order-label', labelText);
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'order-input';
+    input.placeholder = placeholder;
+    label.appendChild(input);
+    wrap.appendChild(label);
+    parent.appendChild(wrap);
+    return input;
+  }
+
+  function button(parent, text) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'order-live-submit';
+    b.textContent = text;
+    parent.appendChild(b);
+    return b;
+  }
+
+  function outcomeLine(parent) {
+    var p = el('p', 'muted', '');
+    p.setAttribute('role', 'status');
+    p.setAttribute('aria-live', 'polite');
+    parent.appendChild(p);
+    return p;
+  }
+
+  function refusalText(result) {
+    var body = result.body || {};
+    var error = body.error || {};
+    return 'Refused (' + (error.code || ('HTTP ' + result.status)) + '): ' + (error.message || 'no detail was given');
+  }
+
+  function renderDocumentLine(li, doc, matchedTerms, snippet, stale) {
+    li.appendChild(el('b', '', doc.title));
+    textLine(li, 'faint', doc.source + ' \\u00b7 ' + doc.table + ' \\u00b7 ' + doc.entityId + ' \\u00b7 ' + doc.at);
+    textLine(li, '', 'status ' + doc.status + (doc.truthState ? ' \\u00b7 truth state ' + doc.truthState : '') +
+      ' \\u00b7 lifecycle ' + doc.lifecycle + (stale ? ' \\u2014 SUPERSEDED, shown because it matched, not because it is current' : ''));
+    if (snippet) textLine(li, 'muted', snippet);
+    textLine(li, 'faint', 'matched terms: ' + (matchedTerms.length > 0 ? matchedTerms.join(', ') : 'none (structured filter only)') +
+      (doc.evidenceRefs.length > 0 ? ' \\u00b7 evidence: ' + doc.evidenceRefs.join(', ') : ' \\u00b7 no op_evidence cited'));
+  }
+
+  function renderSearch(card, data) {
+    var head = el('p', 'row');
+    head.appendChild(el('b', '', 'SEARCH \\u2014 ' + data.total + ' matching record(s)'));
+    card.appendChild(head);
+    textLine(card, 'faint', 'Criteria: ' + data.criteria.join(' | '));
+    textLine(card, 'faint', data.ordering);
+    textLine(card, 'faint', 'Retrieval: ' + data.retrieval.mode + ' (' + data.retrieval.adapterId + '). ' + data.retrieval.note);
+    if (data.withheldFounderOnly > 0) {
+      textLine(card, 'muted', data.withheldFounderOnly + ' founder-classified document(s) exist in the corpus. ' +
+        'That count describes the corpus, not this query.');
+    }
+    if (data.total === 0) {
+      textLine(card, 'muted', 'No canonical record matched. That states what the company record contains; it is not a statement that the thing searched for is false.');
+      return;
+    }
+    var ul = document.createElement('ul');
+    ul.className = 'timeline';
+    for (var i = 0; i < data.hits.length && i < HIT_LIMIT; i++) {
+      var li = document.createElement('li');
+      renderDocumentLine(li, data.hits[i].document, data.hits[i].matchedTerms, data.hits[i].snippet, data.hits[i].stale);
+      ul.appendChild(li);
+    }
+    card.appendChild(ul);
+    if (data.truncated) {
+      textLine(card, 'faint', 'Showing ' + data.hits.length + ' of ' + data.total + ' matches; the limit is stated, never silent.');
+    }
+  }
+
+  function renderAnswer(card, answer) {
+    var head = el('p', 'row');
+    head.appendChild(el('b', '', 'ASK JENIFY \\u2014 ' + answer.state));
+    var state = el('span', 'chip', answer.state);
+    state.setAttribute('data-answer-state', answer.state);
+    head.appendChild(state);
+    card.appendChild(head);
+    textLine(card, '', answer.response);
+    if (answer.unknownReason) textLine(card, 'faint', 'Reason: ' + answer.unknownReason);
+    if (answer.truth.cited > 0) {
+      textLine(card, 'faint', 'Cited truth records: ' + answer.truth.cited + ' \\u00b7 strongest state cited: ' + answer.truth.strongest);
+    }
+    if (answer.citations.length > 0) {
+      textLine(card, 'order-label', 'Sources this answer is grounded in');
+      var ul = document.createElement('ul');
+      ul.className = 'timeline';
+      for (var i = 0; i < answer.citations.length; i++) {
+        var li = document.createElement('li');
+        renderDocumentLine(li, answer.citations[i].document, answer.citations[i].matchedTerms, answer.citations[i].snippet, answer.citations[i].stale);
+        ul.appendChild(li);
+      }
+      card.appendChild(ul);
+    }
+    textLine(card, 'order-label', 'Limitations of this answer');
+    var limits = document.createElement('ul');
+    limits.className = 'timeline';
+    for (var j = 0; j < answer.limitations.length; j++) {
+      var item = document.createElement('li');
+      item.textContent = answer.limitations[j].code + ' \\u2014 ' + answer.limitations[j].statement;
+      limits.appendChild(item);
+    }
+    card.appendChild(limits);
+    textLine(card, 'faint', answer.provenance);
+  }
+
+  function buildConsole() {
+    box.textContent = '';
+    var card = el('article', 'panel mission-card search-card');
+    card.setAttribute('data-search-card', '');
+
+    textLine(card, 'order-label', 'Search the canonical company record');
+    var text = field(card, 'Text', 'e.g. load time hero image');
+    var source = field(card, 'Source (optional, comma-separated)', 'mission, memory, truth, task, project, worker\\u2026');
+    var searchOutcome = outcomeLine(card);
+    var searchResults = el('div', '');
+    searchResults.setAttribute('data-search-results', '');
+    var runSearch = button(card, 'Search');
+    card.appendChild(searchResults);
+
+    runSearch.addEventListener('click', function () {
+      var query = text.value.trim();
+      var sources = source.value.trim();
+      if (query === '' && sources === '') {
+        searchOutcome.textContent = 'Supply at least one criterion. HQ does not answer a query with no criterion \\u2014 that is a dump of the company record, not a search.';
+        return;
+      }
+      runSearch.disabled = true;
+      searchOutcome.textContent = 'Searching\\u2026';
+      jsonExchange(fetch(SEARCH_PATH + '?text=' + encodeURIComponent(query) + '&source=' + encodeURIComponent(sources), { headers: { accept: 'application/json' } })).then(function (result) {
+        runSearch.disabled = false;
+        searchResults.textContent = '';
+        var body = result.body || {};
+        if (body.ok !== true || !body.search) {
+          searchOutcome.textContent = refusalText(result);
+          return;
+        }
+        searchOutcome.textContent = 'Read at ' + body.search.searchedAt + '. Nothing was written to answer this.';
+        renderSearch(searchResults, body.search);
+      }).catch(function (error) {
+        runSearch.disabled = false;
+        searchOutcome.textContent = 'Not searched (' + error.message + ').';
+      });
+    });
+
+    textLine(card, 'order-label', 'Ask Jenify a question about the company');
+    textLine(card, 'muted', 'The question is answered from canonical rows retrieved first. When the record does not support an answer, HQ says so \\u2014 it never fills the gap with prose.');
+    var question = field(card, 'Question', 'e.g. what is verified about the QOS load time work?');
+    var askOutcome = outcomeLine(card);
+    var answerBox = el('div', '');
+    answerBox.setAttribute('data-answer', '');
+    var runAsk = button(card, 'Ask Jenify');
+    card.appendChild(answerBox);
+
+    runAsk.addEventListener('click', function () {
+      var asked = question.value.trim();
+      if (asked === '') {
+        askOutcome.textContent = 'Type a question first.';
+        return;
+      }
+      runAsk.disabled = true;
+      askOutcome.textContent = 'Retrieving canonical records\\u2026';
+      jsonExchange(fetch(ASK_PATH + '?question=' + encodeURIComponent(asked), { headers: { accept: 'application/json' } })).then(function (result) {
+        runAsk.disabled = false;
+        answerBox.textContent = '';
+        var body = result.body || {};
+        if (body.ok !== true || !body.answer) {
+          askOutcome.textContent = refusalText(result);
+          return;
+        }
+        askOutcome.textContent = 'Answered at ' + body.answer.askedAt + ' from ' + body.answer.citations.length +
+          ' cited record(s) of ' + body.answer.considered + ' that matched. Nothing was written to answer this.';
+        renderAnswer(answerBox, body.answer);
+      }).catch(function (error) {
+        runAsk.disabled = false;
+        askOutcome.textContent = 'Not asked (' + error.message + ').';
+      });
+    });
+
+    box.appendChild(card);
+    note.setAttribute('data-search-state', 'live');
+    note.className = 'readonly-note console-state console-state-live';
+    note.textContent = 'Live: search and Ask Jenify read the canonical record directly. Both are reads \\u2014 no result is stored, ranked, scored or estimated, and no answer states anything its cited rows do not carry.';
+  }
+
+  jsonExchange(fetch(SESSION_PATH, { headers: { accept: 'application/json' } }))
+    .then(function (result) {
+      if (result.body == null || typeof result.body !== 'object' || result.body.founder !== true) {
+        stayOff(grantedControls(result.body).reason);
+        return;
+      }
+      buildConsole();
     })
     .catch(function (error) {
       stayOff('the HQ control API is not reachable from this page (' + error.message + ').');

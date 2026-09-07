@@ -107,6 +107,8 @@ describe('every page script speaks only to the control API and the snapshot', ()
       'fetch(COLLAB_PATH', // Phase 9: the Founder-gated collaboration session read
       'fetch(COLLAB_ROOM_PATH', // Phase 9: the parameterized Mission Room read
       'fetch(COMMAND_CENTER_PATH', // Phase 10: the Founder-gated command-centre briefing read
+      'fetch(SEARCH_PATH', // Phase 11: the Founder-gated unified search read
+      'fetch(ASK_PATH', // Phase 11: the Founder-gated Ask Jenify read
       'fetch(path,', // postJson's parameter; its call sites are audited below
     ];
     for (const page of HQ_PAGES) {

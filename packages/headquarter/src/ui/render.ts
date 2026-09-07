@@ -63,6 +63,7 @@ import {
   approvalsConsoleScript,
   connectionsLiveScript,
   commandCenterConsoleScript,
+  searchConsoleScript,
   missionCommandConsoleScript,
   missionsConsoleScript,
   collaborationConsoleScript,
@@ -290,6 +291,19 @@ ${fields}
  * whole briefing is drawn inside the mount only from a live,
  * Founder-authenticated read of the same-origin control API.
  */
+/**
+ * The static Company Search + Ask Jenify panel (Phase 11). Inert by the
+ * site-wide rule: no input, no button, no form in emitted markup. The working
+ * search box and question box are drawn inside the mount by
+ * `searchConsoleScript` only when `/session` resolves a Founder.
+ */
+function companySearchPanel(): string {
+  return `<div class="panel">
+<p class="readonly-note">One place to search every canonical source HQ holds \u2014 missions, projects, tasks, company memory, truth records, collaboration sessions, external action intents, orchestration runs and the worker directory \u2014 and to ask a question in words and get an answer GROUNDED in the rows that were retrieved to answer it. Retrieval happens first; the answer is then composed from the fields of what came back, with every source named by its canonical table and id. When the record does not support an answer, HQ returns unknown or insufficient evidence rather than inventing one. There is no relevance score, rank, confidence or percentage anywhere in this surface: a hit states which of your terms it matched. Search and Ask Jenify are READS \u2014 they store nothing, rank nothing and grant nothing, and Founder-classified records are never searched for a reader who may not see them.</p>
+<div data-search-console></div>
+</div>`;
+}
+
 function commandCentrePanel(): string {
   return `<div class="panel">
 <p class="readonly-note">The Chief of Staff\u2019s one derived command layer over canonical company state: what needs the Founder, what is blocked, what changed since the last issued brief, what is verified, what is recorded unknown, and what HQ can safely do next \u2014 with the department projections and the recommendations that answer the inbox. Every item REFERENCES the canonical row it came from and duplicates no authority; nothing here is stored, so an item exists exactly while its source predicate holds and is gone the moment the source is decided elsewhere. A recommendation is a record and never a button: HQ has no route and no method that accepts one. There is no priority, score, confidence, percentage or ETA anywhere in this layer.</p>
@@ -636,6 +650,8 @@ ${event.status ? ` ${statusChip(event.status)}` : ` ${chip('note', 'neutral')}`}
 ${section('WHAT NEEDS THE FOUNDER', attentionPanel, 'founder-attention')}
 ${section('COMPANY COMMAND CENTRE — CHIEF OF STAFF', commandCentrePanel(), 'command-centre')}
 ${commandCenterConsoleScript()}
+${section('COMPANY SEARCH — ASK JENIFY', companySearchPanel(), 'company-search')}
+${searchConsoleScript()}
 ${section('DIRECT ORDER', directOrderComposer(orderRoutes), 'direct-order')}
 ${directOrderConsoleScript({
   ready: ROUTE_STATE_PRESENTATION.ready,

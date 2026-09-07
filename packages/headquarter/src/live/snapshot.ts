@@ -44,6 +44,7 @@ import { projectBrowserView, type ProjectBrowserView } from '../application/proj
 import type { MemoryBrowserView } from '../application/memory-command.js';
 import { TRUTH_SNAPSHOT_LIMIT, type TruthSnapshotView } from '../application/truth-command.js';
 import { COLLABORATION_SNAPSHOT_LIMIT, type CollaborationSnapshotView } from '../application/collaboration-command.js';
+import { SEARCH_SNAPSHOT_NOTE, type SearchIndexSnapshotView } from '../application/search-command.js';
 import {
   COMMAND_CENTER_PROVENANCE,
   COMMAND_CENTER_SNAPSHOT_LIMIT,
@@ -247,6 +248,22 @@ export interface HqSnapshot {
    * Founder-gated read.
    */
   commandCenter?: SnapshotSection<CommandCenterSnapshotView>;
+  /**
+   * The Phase 11 search SOURCE REGISTRY — and nothing else.
+   *
+   * Deliberately carries no document, title, snippet, id, term, question or
+   * result: search and Ask Jenify are Founder-gated reads, and an
+   * unauthenticated artifact has no vocabulary that classifies free text for
+   * an unauthenticated reader (the Phase 9 rule about a session's purpose,
+   * applied to every source at once). What crosses is which stores exist, how
+   * many documents an unauthenticated reader could search, how many
+   * classified documents were not searched, and which retrieval mode answers.
+   *
+   * The withheld count is a property of the CORPUS, never of a query — a
+   * per-query withheld count would be an oracle a reader could probe the
+   * private record with, one term at a time.
+   */
+  search?: SnapshotSection<SearchIndexSnapshotView>;
 }
 
 /**
@@ -318,6 +335,8 @@ export interface SnapshotSources {
   collaboration?: { data: CollaborationSnapshotView; provenance: Provenance };
   /** The derived command layer (Phase 10). Optional — omitted means no canonical handle was read. */
   commandCenter?: { data: CommandCenterSnapshotView; provenance: Provenance };
+  /** The search source registry (Phase 11). Optional — omitted means no canonical handle was read. */
+  search?: { data: SearchIndexSnapshotView; provenance: Provenance };
   /**
    * Per-worker provider declarations (Phase 4). Optional: an omitted map
    * means the building context holds no declaration truth — every worker's
@@ -366,6 +385,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       ...(sources.truth ? [sources.truth.provenance.mode] : []),
       ...(sources.collaboration ? [sources.collaboration.provenance.mode] : []),
       ...(sources.commandCenter ? [sources.commandCenter.provenance.mode] : []),
+      ...(sources.search ? [sources.search.provenance.mode] : []),
     ]),
     note: sources.note ?? null,
     counts: {
@@ -448,6 +468,7 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
     ...(sources.commandCenter
       ? { commandCenter: section(sources.commandCenter.provenance, sources.commandCenter.data) }
       : {}),
+    ...(sources.search ? { search: section(sources.search.provenance, sources.search.data) } : {}),
   };
 
   // Fail closed: prove it before anyone can publish it.
@@ -632,6 +653,20 @@ export function liveSnapshotFromOperations(
   const commandCenter = ops.commandCenterSummary({
     includeFounderOnly: options.includeFounderOnlyMemory === true,
     limit: COMMAND_CENTER_SNAPSHOT_LIMIT,
+  });
+
+  // Phase 11 search registry: the SAME reading-layer privacy decision once
+  // more, and the smallest disclosure of the five. This section carries no
+  // text of any kind — no document, title, snippet, id, term, question or
+  // result — because search is a Founder-gated read and an unauthenticated
+  // artifact has no classification for the free text a hit would quote. What
+  // it publishes is the registry: which stores exist on this handle, how many
+  // documents an unauthenticated reader could search, and how many classified
+  // documents were not searched. That withheld count is corpus-wide and
+  // query-independent by construction; there is no query here to make it an
+  // oracle, and the surface that does take a query never publishes one.
+  const search = ops.searchIndexSummary({
+    includeFounderOnly: options.includeFounderOnlyMemory === true,
   });
 
   return buildHqSnapshot({
@@ -862,6 +897,32 @@ export function liveSnapshotFromOperations(
               ? null
               : 'The hq_briefs ledger does not exist on this database handle, so no brief was ever issued ' +
                 'through it and none can be; briefs.total states that as 0 rather than implying an empty ledger.',
+          ]
+            .filter(Boolean)
+            .join(' ') || undefined,
+      },
+    },
+    search: {
+      data: search,
+      provenance: {
+        mode,
+        source:
+          'hq_missions / hq_projects / op_tasks / hq_memory / hq_truth_records / hq_collab_sessions / ' +
+          'hq_action_intents / hq_orchestration_runs / hq_specialists via ' +
+          'HeadquarterOperations.searchIndexSummary (source registry only)',
+        asOf: at,
+        note:
+          [
+            SEARCH_SNAPSHOT_NOTE,
+            search.withheldFounderOnly > 0
+              ? `${search.withheldFounderOnly} founder_only document(s) exist in the corpus and are not ` +
+                'searchable by an unauthenticated reader; the readable total excludes them. That number is a ' +
+                'property of the corpus and not of any query.'
+              : null,
+            search.sources.some((source) => !source.storePresent)
+              ? 'At least one canonical store is absent from this database handle; its readable count is 0 by ' +
+                'absence, not by emptiness.'
+              : null,
           ]
             .filter(Boolean)
             .join(' ') || undefined,

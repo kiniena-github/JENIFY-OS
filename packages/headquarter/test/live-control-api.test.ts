@@ -415,7 +415,7 @@ describe('every hostile caller is refused, and nothing is written', () => {
     }
   });
 
-  it('exposes no generic mutation surface — the whole route table is thirty-five entries', () => {
+  it('exposes no generic mutation surface — the whole route table is thirty-seven entries', () => {
     // Nine since Phase 3 (issue #254); seventeen since Phase 4 (issue #262);
     // twenty-one since Phase 5+6 (issue #265): the memory GET+POST, the two
     // parameterized memory reads (search, context), and the one orchestrate
@@ -432,6 +432,12 @@ describe('every hostile caller is refused, and nothing is written', () => {
     // and the brief-receipt POST. No route takes a recommendation id, and
     // there is deliberately no method behind one either — a recommendation is
     // a record about an existing gated act, never a handle on it.
+    // Thirty-seven since Phase 11: the unified search GET and the Ask Jenify
+    // GET. BOTH are reads, so the write surface below stays at twenty-three —
+    // this is the first phase to widen the route table without widening the
+    // write surface at all, and that is the phase's shape rather than an
+    // omission: search and Ask Jenify read canonical truth and can never
+    // become a writer.
     // Each widening of the write surface beyond the 2026-08-28 three is
     // itself Founder-approved and recorded in docs/JENIFY_DECISIONS.md. What
     // this assertion protects is unchanged — no route takes a table, a
@@ -444,6 +450,7 @@ describe('every hostile caller is refused, and nothing is written', () => {
       '/api/hq/control/approvals',
       '/api/hq/control/approvals/approve',
       '/api/hq/control/approvals/deny',
+      '/api/hq/control/ask',
       '/api/hq/control/collaboration',
       '/api/hq/control/collaboration/admit',
       '/api/hq/control/collaboration/context',
@@ -464,6 +471,7 @@ describe('every hostile caller is refused, and nothing is written', () => {
       '/api/hq/control/projects',
       '/api/hq/control/projects/transition',
       '/api/hq/control/projects/update',
+      '/api/hq/control/search',
       '/api/hq/control/session',
       '/api/hq/control/state',
       '/api/hq/control/truth',
