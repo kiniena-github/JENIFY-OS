@@ -466,16 +466,41 @@ const RAW_SEMANTIC_RETRIEVAL_ADAPTERS: readonly RetrievalAdapter[] = [];
 /* The adapter GUARD — closing the pre-real-adapter hole               */
 /* ------------------------------------------------------------------ */
 
+/**
+ * What HQ publishes about the retrieval guard, on the wire.
+ *
+ * It said an in-process caller "cannot obtain an unguarded adapter", and at the
+ * frozen wave head that was FALSE (Wave 5 Medium 9 / C-2):
+ * `LEXICAL_RETRIEVAL_ADAPTER` and `SEMANTIC_RETRIEVAL_ADAPTERS` were the raw,
+ * unwrapped objects, exported — and this package's own `search-core.test.ts`
+ * called one of them directly.
+ *
+ * Two correction lanes answered it differently: one narrowed the SENTENCE to
+ * what was enforced and disclosed that the raw objects are exported unwrapped;
+ * the other made the CODE meet the sentence. The code fix is what survives,
+ * because a guarantee that holds structurally is worth more than a disclosure
+ * that the guarantee does not hold: the raw adapters are module-private
+ * (`RAW_LEXICAL_RETRIEVAL_ADAPTER`, `RAW_SEMANTIC_RETRIEVAL_ADAPTERS`), the
+ * exported bindings are already wrapped at DECLARATION, the semantic list is
+ * frozen, and `guardRetrievalAdapter` is idempotent so the resolver's own
+ * wrapping still costs nothing. The narrowed sentence's true half — that the
+ * FACADE scan, not the seam guard, is the layer the pipeline relies on, because
+ * tokenization has already removed the separators a credential shape needs — is
+ * carried into the wording below and pinned by its own test.
+ *
+ * This text is interpolated into `statement.note` and reaches the browser as an
+ * HQ assertion; it may not say more than HQ does.
+ */
 export const RETRIEVAL_GUARD_STATEMENT =
   'Free text entering search or a question is scanned for credential shapes at the FACADE, before it is ' +
-  'tokenized, normalized or matched — that scan is the guarantee, and the browser route keeps its own scan ' +
-  'outside it. Every adapter is additionally reached through a seam guard that scans the terms it is about ' +
-  'to be handed, and the guard is applied AT DECLARATION rather than by the caller: the raw adapters are ' +
-  'module-private and every exported binding is already wrapped, so no in-process caller can obtain an ' +
-  'unwrapped adapter and one installed later cannot opt out. Because the pipeline ' +
-  'tokenizes first, those terms no longer carry the separators a credential shape needs: the seam guard is ' +
-  'defence in depth against a caller that supplies its own untokenized terms, not the layer the pipeline ' +
-  'relies on.';
+  'tokenized, normalized or matched — that FACADE scan is the guarantee, and the browser route keeps its ' +
+  'own scan outside it. Every retrieval adapter the resolver hands out is additionally reached through a ' +
+  'seam guard that scans the terms it is about to be handed, and the guard is applied AT DECLARATION ' +
+  'rather than by the caller: the raw adapters are module-private and every exported binding is already ' +
+  'wrapped, so no in-process caller can obtain an unwrapped adapter and one installed later cannot opt ' +
+  'out. Because the pipeline tokenizes first, those terms no longer carry the separators a credential ' +
+  'shape needs: the seam guard is defence in depth against a caller that supplies its own untokenized ' +
+  'terms, not the layer the pipeline relies on.';
 
 /**
  * Raised when free text reaching a retrieval adapter fails the browser-safety
@@ -520,17 +545,22 @@ export class RetrievalSafetyError extends Error {
  *
  * The facade scans the same four fields on the way in, and THAT is the layer
  * the pipeline relies on. Stated precisely, because the first version of this
- * comment had it backwards (Wave 5 review, LOW finding 3):
+ * comment had it backwards — both Wave 5 correction lanes reached this
+ * independently (one as Medium 9, one as Low 3):
  *
  *  - the FACADE scan sees the raw `text` / `project` / `tag` / `question`,
  *    before `normalizeSearchQuery` and before `tokenize`, so it is the scan
  *    that meets a credential in the shape `assertBrowserSafe` recognises;
  *  - the SEAM guard sees `input.terms`, which on the pipeline path are always
  *    `tokenize()` output — lowercased and split on `[^a-z0-9]+`. That strips
- *    every separator the eleven `SECRET_VALUE_PATTERNS` require (`sk-`, `ghp_`,
- *    a JWT's dots, `Bearer `, `api_key: `), and lowercasing defeats the
- *    case-sensitive ones besides, so on realistic pipeline input the seam scan
- *    does not fire at all.
+ *    every separator the `SECRET_VALUE_PATTERNS` shapes depend on (`sk-`,
+ *    `ghp_`, a JWT's dots, `Bearer `, `api_key: `), so on realistic pipeline
+ *    input the seam scan does not fire on those shapes. It is NOT inert on
+ *    everything: a separator-free shape such as a Google `AIza…` key survives
+ *    tokenization intact apart from case, and since the patterns became
+ *    case-insensitive (Wave 5 Low C-2) the seam does catch it. Both halves are
+ *    pinned by their own tests in `search-adapter-guard.test.ts`, so neither
+ *    claim can quietly become the other one.
  *
  * The seam guard is kept, and is worth keeping, for the caller the FACADE does
  * not cover: `resolveRetrievalAdapter` is exported, so an in-process caller can

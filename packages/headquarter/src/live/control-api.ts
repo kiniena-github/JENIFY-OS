@@ -1262,7 +1262,7 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     return recoverRunsRoute(request, deps, founder, audit, now);
   }
   if (path === CONTROL_ROUTES.reliabilityReconcile) {
-    return reconcileRunRoute(request, deps, founder, audit);
+    return reconcileRunRoute(request, deps, founder, audit, now);
   }
   if (path === CONTROL_ROUTES.intelligenceObserve) {
     return recordModelObservationRoute(request, deps, founder, audit);
@@ -1411,7 +1411,14 @@ function controlAvailability(
     // Founder gate itself (approval authority), so they ride `mayApprove`
     // exactly as `actionReconcile` does — neither takes a capability grant,
     // because neither is an origination of work.
+    //
+    // Both are advertised, because the comment above describes both and Phase 8
+    // already emits `actionReconcile` for the identical act. `reliabilityRecover`
+    // takes no step-up; `reliabilityReconcile` takes step-up unconditionally,
+    // exactly like `actionReconcile` — a flag here says a principal MAY reach
+    // the route, never that the route asks nothing further of them.
     reliabilityRecover: mayApprove,
+    reliabilityReconcile: mayApprove,
     // The reliability COMMAND capability (`hq.reliability_command`) gates the
     // two acts that have no route at all — the full integrity assessment and
     // the verified-backup record — so it is advertised as a fact about this
@@ -3915,13 +3922,14 @@ function recoverRunsRoute(
 /**
  * Close a run whose outcome HQ does not know, after a human checked the real
  * world. Independence and the idempotency rule are enforced by the facade, not
- * here — this route resolves the Founder and forwards.
+ * here — this route resolves the Founder, takes step-up, and forwards.
  */
 function reconcileRunRoute(
   request: ControlRequest,
   deps: ControlApiDeps,
   founder: ResolvedFounder,
   audit: Audit,
+  now: () => Date,
 ): ControlResponse {
   const runId = stringField(request.body, 'runId') ?? '';
   const decision = stringField(request.body, 'decision') ?? '';
@@ -3947,6 +3955,23 @@ function reconcileRunRoute(
       'unsafe_reliability_content',
       'The note looks like it contains credential material, so it was refused rather than stored.',
     );
+  }
+  // STEP-UP, unconditionally — the same block `reconcileActionRoute` takes,
+  // for the same reason and with the same status mapping. The two share their
+  // decision vocabulary BY IDENTITY (`RUN_RECONCILE_DECISIONS =
+  // ACTION_RECONCILE_DECISIONS`) because they are the same judgement:
+  // declaring whether an irreversible external side effect happened. And
+  // `confirmed_not_executed` here re-opens the run for another attempt
+  // generation, which is a grant to act again. This route was the only
+  // reconciliation route in HQ without step-up (Wave 5 High 4).
+  const stepUp = verifyStepUp(founder, stringField(request.body, 'stepUpPassword'), {
+    credentials: deps.credentials,
+    now: now(),
+  });
+  if (!stepUp.ok) {
+    audit('refused', stepUp.reason, founder);
+    const status = stepUp.reason === 'step_up_rate_limited' ? 429 : stepUp.reason === 'step_up_failed' ? 403 : 401;
+    return refusal(status, stepUp.reason, stepUp.message);
   }
   const result = deps.ops.reconcileRun({
     runId,

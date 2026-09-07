@@ -176,6 +176,107 @@ describe('duplicate runs and duplicate attempts', () => {
     expect(fx.ops.getRun(run.id)!.needsReconciliation).toBe(true);
   });
 
+  /**
+   * Wave 5 Medium 2, as the exploit that found it. Both enforcement layers —
+   * the derivation and the UNIQUE index on the attempt key — bind to the run
+   * key, and the run key used to include the caller's `label`: ≤120 characters
+   * of arbitrary free text. Same task, same worker, same live fence, one added
+   * full stop, and a SECOND run opened with a fresh admitted attempt beside a
+   * run standing at `needs_reconciliation` / `outcome_unknown` for that very
+   * work.
+   */
+  it('is not walked around by re-labelling the same work', () => {
+    const fx = reliabilityFixture();
+    const run = expectOk(openRun(fx, { label: 'publish the thing' })).run;
+    expectOk(fx.ops.startRunAttempt({ runId: run.id, workerId: 'claude', fence: fx.claim.fence }));
+    expectOk(
+      fx.ops.recordRunOutcome({
+        runId: run.id,
+        workerId: 'claude',
+        fence: fx.claim.fence,
+        outcome: 'outcome_unknown',
+        note: 'the provider timed out after the request was sent',
+      }),
+    );
+    expect(fx.ops.getRun(run.id)!.needsReconciliation).toBe(true);
+
+    // The one-character rename does not open a second run. This lane's own
+    // version of the assertion was `expectOk(...)` with `deduplicated: true`,
+    // because its fix was to take the label out of the digest and let the
+    // rename fall onto the standing run. The merged implementation carries the
+    // OTHER lane's second half as well — a task holding an unreconciled run
+    // refuses a new open outright — so the rename is answered by a REFUSAL
+    // rather than by a silent dedupe. The assertion is ported to the stronger
+    // answer rather than dropped, and everything it pinned still holds: one
+    // run on the task, and no fresh generation admitted.
+    const relabelled = expectError(openRun(fx, { label: 'publish the thing.' }));
+    expect(relabelled.code).toBe('run_state_conflict');
+    expect(fx.ops.listRuns()).toHaveLength(1);
+    // And no fresh generation is admitted on it.
+    expect(
+      expectError(fx.ops.startRunAttempt({ runId: run.id, workerId: 'claude', fence: fx.claim.fence }))
+        .code,
+    ).toBe('run_attempt_refused');
+  });
+
+  /**
+   * The half of the same finding the refusal above cannot show: that the LABEL
+   * is not part of a run's identity at all. With nothing unresolved on the
+   * task, a re-open under a different wording falls onto the standing run
+   * instead of creating a second one — which is what "display text, not
+   * identity" means, and what the digest change actually did.
+   */
+  it('treats a re-labelled open of live work as the SAME run', () => {
+    const fx = reliabilityFixture();
+    const run = expectOk(openRun(fx, { label: 'publish the thing' })).run;
+    const relabelled = expectOk(openRun(fx, { label: 'publish the thing.' }));
+    expect(relabelled.deduplicated).toBe(true);
+    expect(relabelled.run.id).toBe(run.id);
+    expect(fx.ops.listRuns()).toHaveLength(1);
+  });
+
+  /**
+   * The other half of Medium 2: the deliberate `idempotencyKey` escape hatch
+   * must not become a way to put a fresh admitted attempt beside unresolved
+   * work on the same task either.
+   */
+  it('refuses a NEW run on a task that already stands at needs_reconciliation', () => {
+    const fx = reliabilityFixture();
+    const run = expectOk(openRun(fx)).run;
+    expectOk(fx.ops.startRunAttempt({ runId: run.id, workerId: 'claude', fence: fx.claim.fence }));
+    expectOk(
+      fx.ops.recordRunOutcome({
+        runId: run.id,
+        workerId: 'claude',
+        fence: fx.claim.fence,
+        outcome: 'outcome_unknown',
+        note: 'the provider timed out after the request was sent',
+      }),
+    );
+    const refusal = expectError(openRun(fx, { idempotencyKey: 'a-deliberately-fresh-one' }));
+    // `run_state_conflict`, not `run_attempt_refused`: the merged
+    // implementation refuses at the OPEN rather than at the attempt, so the
+    // second run never exists to be attempted. This lane asserted the attempt
+    // refusal because its own fix left the fresh run openable; the assertion is
+    // ported to where the refusal now happens, and the message it matched
+    // ("never retried automatically") belongs to the attempt path, which the
+    // test below still reaches.
+    expect(refusal.code).toBe('run_state_conflict');
+    expect(refusal.message).toMatch(/nobody has reconciled|unresolved/i);
+    expect(fx.ops.listRuns()).toHaveLength(1);
+
+    // Once a human has reconciled it, a fresh run is available again.
+    expectOk(
+      fx.ops.reconcileRun({
+        runId: run.id,
+        decision: 'confirmed_not_executed',
+        note: 'checked the provider; nothing landed',
+        requestedBy: 'coo',
+      }),
+    );
+    expect(expectOk(openRun(fx, { idempotencyKey: 'a-deliberately-fresh-one' })).run.id).not.toBe(run.id);
+  });
+
   it('refuses an outcome against a run with no open attempt', () => {
     const fx = reliabilityFixture();
     const run = expectOk(openRun(fx)).run;
@@ -663,6 +764,62 @@ describe('safe mode', () => {
       fx.cleanup();
     }
   });
+
+  /**
+   * Wave 5 Critical 1: the assessment read the evidence chain through
+   * `queue.evidence.verifyChain` — a PUBLIC own-property closure the queue
+   * documents as safe to patch. `evidence_chain_broken` is one of only three
+   * blocking findings and the assessment is the only path that CLEARS the
+   * latch, so that read was the one lever a same-realm caller needed: break
+   * the chain, let a dropped guard latch safe mode at boot, replace
+   * `verifyChain` with `() => null`, and the ordinary Founder assessment
+   * cleared the latch over a record HQ could not stand behind.
+   *
+   * Patched on the instance AND on `EvidenceLog.prototype`, because a fix that
+   * merely moved the call to `PrivilegedQueueApi` would still dispatch through
+   * that exported class's prototype.
+   */
+  it('reads the evidence chain from private truth, so patching verifyChain cannot clear the latch', () => {
+    const fx = fileFixture();
+    const prototype = EvidenceLog.prototype as unknown as Record<string, unknown>;
+    const realVerify = prototype.verifyChain;
+    try {
+      // A guard is gone (safe mode latches at boot) AND the hash chain is
+      // genuinely broken by a raw writer that never ran HQ's code.
+      tamper(fx);
+      const raw = fx.raw();
+      const first = raw.prepare(`SELECT seq FROM op_evidence ORDER BY seq LIMIT 1`).get() as {
+        seq: number;
+      };
+      raw.prepare(`UPDATE op_evidence SET actor = 'forged-actor' WHERE seq = ?`).run(first.seq);
+
+      const restarted = fx.reopen('process-two');
+      const ops = restarted.ops;
+      expect(ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+
+      // The patch, taken on every surface a same-realm caller can reach.
+      ops.queue.evidence.verifyChain = () => null;
+      prototype.verifyChain = () => null;
+      expect(ops.queue.evidence.verifyChain()).toBeNull();
+      expect(new EvidenceLog(restarted.db).verifyChain()).toBeNull();
+
+      // The assessment is unmoved: the chain really is broken, so the latch
+      // stands and names the finding.
+      const assessed = expectOk(ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(assessed.depth).toBe('full');
+      expect(assessed.safeMode).toBe(true);
+      expect(assessed.observations.map((o) => o.finding)).toContain('evidence_chain_broken');
+      expect(ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+
+      // And nothing may claim against it.
+      const claim = ops.claimNext('claude', CAPS.openPr);
+      expect(claim.ok).toBe(false);
+      expect(!claim.ok && claim.error.code).toBe('safe_mode_engaged');
+    } finally {
+      prototype.verifyChain = realVerify;
+      fx.cleanup();
+    }
+  });
 });
 
 /**
@@ -790,6 +947,58 @@ describe('the safe-mode evidence verdict is computed from enforcement-safe truth
       expect(cleared.safeMode).toBe(false);
       expect(cleared.observations.map((o) => o.finding)).not.toContain('evidence_chain_broken');
       expect(verifyEvidenceChain(fx.db)).toBeNull();
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * The merge of the two Wave 5 correction lanes kept ONE chain computation
+   * (`verifyEvidenceChain`) and dropped the other lane's inlined copy, but
+   * carried that copy's one better behaviour into the survivor: a payload that
+   * is not JSON is a BREAK at that seq, not a `JSON.parse` exception thrown out
+   * of the verification.
+   *
+   * `fullIntegrity` does treat a THROWN verifier as a broken chain, so safe
+   * mode was never at risk either way. The difference this pins is the public
+   * read: `EvidenceLog.verifyChain` and `verifyEvidenceChain` now NAME the bad
+   * entry to any caller, instead of failing with an error that says nothing
+   * about which row is wrong.
+   */
+  it('treats an unparseable payload as a break at that seq rather than throwing', () => {
+    const fx = fileFixture();
+    try {
+      const raw = fx.raw();
+      const before = verifyEvidenceChain(raw);
+      expect(before).toBeNull();
+      raw
+        .prepare(
+          `INSERT INTO op_evidence (id, at, task_id, actor, kind, payload, prev_hash, hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'unparseable-payload-entry',
+          new Date().toISOString(),
+          null,
+          'not-hq',
+          'forged',
+          'this is not json',
+          'genesis',
+          'a-hash-that-was-never-computed-over-anything',
+        );
+      const seq = (
+        raw.prepare(`SELECT seq FROM op_evidence ORDER BY seq DESC LIMIT 1`).get() as {
+          seq: number;
+        }
+      ).seq;
+      expect(verifyEvidenceChain(raw)).toBe(seq);
+      expect(new EvidenceLog(raw).verifyChain()).toBe(seq);
+      // And the verdict that matters is unchanged: the chain is broken, so a
+      // fresh assessment engages safe mode rather than clearing it.
+      const restarted = fx.reopen('process-two');
+      const assessed = expectOk(restarted.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(assessed.safeMode).toBe(true);
+      expect(assessed.observations.map((o) => o.finding)).toContain('evidence_chain_broken');
     } finally {
       fx.cleanup();
     }

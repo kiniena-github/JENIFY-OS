@@ -211,6 +211,56 @@ describe('the derived run record', () => {
     expect(runAdmitsAttempt(record)).toBe(false);
   });
 
+  /**
+   * Wave 5 Medium 4 (minimum). `interrupted` read `event.detail.uncertain ===
+   * true`, so an absent, corrupt or non-boolean flag produced `false` — and
+   * `false` here concludes the run `not_executed`, i.e. "nothing happened". An
+   * unreadable detail blob supports no such claim, and the phase's own rule
+   * says the safe answer is the one that costs a human a phone call.
+   */
+  it('reads an interruption with an unreadable `uncertain` flag as UNCERTAIN', () => {
+    for (const detail of [
+      { reason: 'process_interrupted' },
+      { reason: 'process_interrupted', uncertain: 'no' },
+      { reason: 'process_interrupted', uncertain: 0 },
+      { reason: 'process_interrupted', uncertain: null },
+    ]) {
+      const record = deriveRunRecord(ROW, [
+        event('opened'),
+        event('attempt_started', {}),
+        event('interrupted', detail),
+      ]);
+      expect(record.state, JSON.stringify(detail)).toBe('needs_reconciliation');
+      expect(record.outcome).toBe('outcome_unknown');
+      expect(record.interruption!.uncertain).toBe(true);
+      expect(runAdmitsAttempt(record)).toBe(false);
+    }
+    // An EXPLICIT false still concludes: that is what the recovery pass writes
+    // when it can prove no attempt was reserved, or that the capability cannot
+    // reach outside HQ.
+    const certain = deriveRunRecord(ROW, [
+      event('opened'),
+      event('interrupted', { reason: 'process_interrupted', uncertain: false }),
+    ]);
+    expect(certain.state).toBe('concluded');
+    expect(certain.outcome).toBe('not_executed');
+  });
+
+  /**
+   * Wave 5 Low. Every sibling default fails closed; this one asserted
+   * `'none'` — "there was no failure category" — about a detail blob HQ could
+   * not read. `'unknown'` is already a member of the closed vocabulary.
+   */
+  it('reads an unreadable failure category as unknown rather than as “no failure”', () => {
+    const record = deriveRunRecord(ROW, [
+      event('opened'),
+      event('attempt_started', {}),
+      event('outcome_recorded', { outcome: 'failed', failureCategory: 'not_a_category' }),
+    ]);
+    expect(record.outcome).toBe('failed');
+    expect(record.failureCategory).toBe('unknown');
+  });
+
   it('reads a reconciliation decision outside the vocabulary as the strictest of the three', () => {
     const record = deriveRunRecord(ROW, [
       event('opened'),
@@ -322,7 +372,6 @@ describe('the derived keys', () => {
     runKind: 'external_action' as const,
     actionId: null,
     missionId: null,
-    label: 'publish',
     idempotencyKey: null,
   };
 
@@ -344,6 +393,26 @@ describe('the derived keys', () => {
     // re-claim after a crash must find the SAME run and inherit its unresolved
     // outcome, and a key that varied with the fence would defeat that.
     expect(Object.keys(base)).not.toContain('fence');
+  });
+
+  /**
+   * Wave 5 Medium 2. The label used to be a digest input, so the key both
+   * enforcement layers bind to varied with arbitrary caller free text and one
+   * added full stop opened a second run on the same work. It is no longer part
+   * of the input shape at all; the behavioural half is pinned at the facade in
+   * reliability-authority.test.ts.
+   */
+  it('is not keyed on the caller’s free-text label', () => {
+    expect(Object.keys(base)).not.toContain('label');
+    expect(runIdempotencyKey(base)).toBe(
+      runIdempotencyKey({
+        taskId: 'task-1',
+        runKind: 'external_action',
+        actionId: null,
+        missionId: null,
+        idempotencyKey: null,
+      }),
+    );
   });
 
   it('gives each generation its own reservation identity', () => {
@@ -385,9 +454,40 @@ describe('the snapshot fold is closed by construction', () => {
   });
 
   it('states an ABSENT store as absent rather than as an empty one', () => {
-    const empty = emptyReliabilitySnapshot(false);
+    const empty = emptyReliabilitySnapshot(false, {
+      safeMode: false,
+      assessmentDepth: 'structural',
+      findings: [],
+      durabilityMeetsRequirement: true,
+    });
     expect(empty.storePresent).toBe(false);
     expect(empty.runs).toBe(0);
     expect(empty.note).toMatch(/Counts over closed vocabularies only/);
+  });
+
+  /**
+   * Wave 5 High 5. The store-absent view used to hard-code `safeMode: false`,
+   * `findings: {}` and `durabilityMeetsRequirement: true`, so it could not
+   * carry a latched safe-mode verdict even when there was one. The integrity
+   * half is now an argument, and it is reported as given.
+   */
+  it('carries the LATCHED integrity verdict rather than hard-coded optimism', () => {
+    const latched = emptyReliabilitySnapshot(false, {
+      safeMode: true,
+      assessmentDepth: 'full',
+      findings: ['append_only_guard_missing', 'durability_below_requirement'],
+      durabilityMeetsRequirement: false,
+    });
+    expect(latched.safeMode).toBe(true);
+    expect(latched.assessmentDepth).toBe('full');
+    expect(latched.durabilityMeetsRequirement).toBe(false);
+    expect(latched.findings).toEqual({
+      append_only_guard_missing: 1,
+      durability_below_requirement: 1,
+    });
+    // The privacy shape is untouched: still counts over the closed vocabulary,
+    // still no run rows, still no detail text.
+    expect(latched.runs).toBe(0);
+    expect(latched.storePresent).toBe(false);
   });
 });

@@ -14,7 +14,7 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { expectOk } from './application.fixture.js';
 import { fileFixture } from './reliability.fixture.js';
-import { openHqDatabase, openMemoryHqDatabase } from '../src/store/db.js';
+import { openHqDatabase, openHqDatabaseReadOnly, openMemoryHqDatabase } from '../src/store/db.js';
 import {
   ENGINE_IMMUTABLE_TABLES,
   HQ_DURABILITY_REQUIREMENT,
@@ -29,6 +29,7 @@ import {
   structuralIntegrity,
   verifyHqBackupFile,
 } from '../src/store/integrity.js';
+import { verifyEvidenceChain } from '../src/operator/evidence.js';
 import { reliabilitySchemaPresent } from '../src/application/reliability-command.js';
 import { HeadquarterOperations } from '../src/application/service.js';
 
@@ -230,15 +231,39 @@ describe('the engine-immutable inventory is checked against the live schema, not
   });
 
   /**
-   * Wave 5 review, MEDIUM finding 2. The census used to match the trio only,
-   * so every SECONDARY guard — the unique-index guards and `hq_memory`'s
-   * supersede rule — was invisible to it: dropping one produced no
-   * `append_only_guard_missing` finding and engaged no safe mode.
+   * Both Wave 5 correction lanes reached this finding (one as High 1, one as
+   * Medium 2). The census used to check the trio only, so the SECONDARY guards
+   * — including `trg_hq_reliability_run_events_no_replace_attempt`, the
+   * cross-process duplicate-attempt guard the module's own comment calls load-
+   * bearing — could be dropped with no finding at all. This pins the FULL
+   * trigger-name set for every listed PREFIX, so a guard a future phase adds
+   * and forgets to declare fails here rather than escaping the check. The
+   * companion test below pins the same declaration by TABLE, which is the
+   * complementary direction: this one catches a guard named under a listed
+   * prefix, that one catches a guard on a listed table whatever it is named.
+   */
+  it('lists every guard each of those tables actually declares, not just the trio', () => {
+    const db = openMemoryHqDatabase();
+    void new HeadquarterOperations(db);
+    const live = (
+      db.prepare(`SELECT name FROM sqlite_master WHERE type = 'trigger'`).all() as { name: string }[]
+    ).map((row) => row.name);
+    for (const entry of ENGINE_IMMUTABLE_TABLES) {
+      const onFile = live.filter((name) => name.startsWith(`trg_${entry.triggerPrefix}_`)).sort();
+      expect([...declaredGuardsFor(entry)].sort(), entry.table).toEqual(onFile);
+    }
+    db.close();
+  });
+
+  /**
+   * The same declaration, pinned by TABLE rather than by trigger-name prefix,
+   * so a guard attached to a listed table under some other naming is caught
+   * too.
    *
-   * The drift argument that justified leaving them out is answered here rather
-   * than by leaving them unchecked: a phase that adds a guard and does not
-   * DECLARE it fails this test, which is exactly where a maintenance mistake
-   * should surface.
+   * The drift argument that justified leaving the secondary guards out is
+   * answered here rather than by leaving them unchecked: a phase that adds a
+   * guard and does not DECLARE it fails this test, which is exactly where a
+   * maintenance mistake should surface.
    */
   it('declares every guard the live schema actually carries on a listed table', () => {
     const db = openMemoryHqDatabase();
@@ -356,6 +381,47 @@ describe('the engine-immutable inventory is checked against the live schema, not
       ),
     ).toContain('hq_intel_budgets');
   });
+
+  /**
+   * Wave 5 High 1, as the exploit that found it. Dropping ONE secondary guard
+   * used to be invisible: the census reported `[]`, safe mode stayed false at
+   * both depths, and a raw `INSERT OR REPLACE` then erased a committed
+   * append-only row (`recursive_triggers` is off and connection-scoped, so no
+   * BEFORE DELETE fires) and substituted a forged one, with no finding.
+   */
+  it('finds a dropped SECONDARY guard, and engages safe mode on it', () => {
+    const fx = fileFixture();
+    try {
+      openedRun(fx, 'the run whose attempt guard is about to vanish');
+      expect(missingImmutabilityGuards(fx.db)).toEqual([]);
+      const raw = fx.raw();
+      raw.exec('DROP TRIGGER trg_hq_reliability_run_events_no_replace_attempt');
+
+      expect(missingImmutabilityGuards(raw)).toEqual([
+        'trg_hq_reliability_run_events_no_replace_attempt',
+      ]);
+      // Both depths, because the census feeds both. The chain verifier is a
+      // REQUIRED argument on the merged `fullIntegrity` (the other correction
+      // lane's Medium 5: an absent verifier used to read as a passing chain
+      // while the report still said `depth: 'full'`), so this call supplies a
+      // real one rather than relying on the old optional parameter. The
+      // assertion is unchanged — safe mode is engaged by the census, not by
+      // the chain.
+      expect(structuralIntegrity(raw).safeMode).toBe(true);
+      expect(
+        fullIntegrity(raw, { verifyEvidenceChain: () => verifyEvidenceChain(raw) }).safeMode,
+      ).toBe(true);
+      expect(
+        structuralIntegrity(raw).observations.map((observation) => observation.finding),
+      ).toContain('append_only_guard_missing');
+
+      // And the next construction latches it.
+      const restarted = fx.reopen('process-two');
+      expect(restarted.ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+    } finally {
+      fx.cleanup();
+    }
+  });
 });
 
 describe('the durability posture is reported, never pretended', () => {
@@ -396,6 +462,57 @@ describe('the durability posture is reported, never pretended', () => {
       expect(finding!.blocking).toBe(false);
       expect(report.safeMode).toBe(false);
       db.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * Wave 5 High 5. `reliabilitySummary()` is the one read on the path that
+ * produces the WORLD-READABLE `hq-snapshot.json`. Its store-absent branch
+ * returned a hard-coded `{safeMode:false, findings:{},
+ * durabilityMeetsRequirement:true}` — but `#integrityReport` is latched at
+ * construction independently of the reliability store, and the snapshot CLI
+ * opens read-only, which is exactly that branch. So the artifact published
+ * "everything is fine" while HQ had latched safe mode with blocking findings.
+ */
+describe('the unauthenticated snapshot never publishes optimism HQ does not hold', () => {
+  it('carries the latched safe-mode verdict on a handle with no run ledger', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-snapshot-failopen-'));
+    try {
+      const dbPath = path.join(dir, 'hq.sqlite');
+      const built = openHqDatabase(dbPath);
+      void new HeadquarterOperations(built);
+      built.close();
+
+      // A file that carries no Phase 13 ledger AND has lost an append-only
+      // guard — the two facts the read-only snapshot path must not conflate.
+      const raw = openHqDatabase(dbPath);
+      raw.exec('DROP TABLE hq_reliability_runs');
+      raw.exec('DROP TRIGGER trg_hq_action_events_no_erase');
+      raw.close();
+
+      const readOnly = openHqDatabaseReadOnly(dbPath);
+      const ops = new HeadquarterOperations(readOnly);
+      expect(ops.reliabilityStorePresent()).toBe(false);
+      const latched = ops.hqReliabilityPosture().integrity;
+      expect(latched.safeMode).toBe(true);
+
+      const published = ops.reliabilitySummary();
+      expect(published.storePresent).toBe(false);
+      expect(published.safeMode).toBe(true);
+      expect(published.findings.append_only_guard_missing).toBe(1);
+      expect(published.assessmentDepth).toBe(latched.depth);
+      // Reported as HQ actually found it, in either direction — never asserted.
+      expect(published.durabilityMeetsRequirement).toBe(latched.durability.meetsRequirement);
+      // The absence of the ledger is itself a stated finding, not silence.
+      expect(published.findings.reliability_schema_absent).toBe(1);
+      // Privacy shape unchanged: counts over the closed vocabulary only.
+      for (const key of Object.keys(published.findings)) {
+        expect(HQ_INTEGRITY_FINDINGS as readonly string[]).toContain(key);
+      }
+      readOnly.close();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -690,6 +807,95 @@ describe('backup verification, against real bytes on disk', () => {
       // And the normalized form of the same text is a different question,
       // answered on its own merits rather than by resolution.
       expect(sneaky).toBe(fx.dbPath);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * The other correction lane's exploit for the same finding, ported onto the
+   * surviving implementation: two candidates carried an identical
+   * `contentDigest` and an identical recorded size while their verified table
+   * counts differed, because the difference lived entirely in an un-digested
+   * `-wal` sidecar. The refusal is `sidecar_journal_present` rather than that
+   * lane's `file_has_uncheckpointed_wal` because the surviving rule is the
+   * broader one — presence, not size, is what makes the main file possibly not
+   * the whole database — and the CHECKPOINTED half of the exploit, which that
+   * lane pinned and this one did not, is kept exactly as it was written.
+   */
+  it('refuses a candidate whose committed content is not all in the file it would digest', () => {
+    const fx = fileFixture();
+    try {
+      const candidate = path.join(fx.dir, 'with-a-wal.sqlite');
+      const db = openHqDatabase(candidate);
+      db.exec('CREATE TABLE IF NOT EXISTS hq_events (x TEXT)');
+      db.exec('CREATE TABLE later_addition (x TEXT)');
+      // WAL mode with no checkpoint: the newest table is in the sidecar.
+      expect(fs.existsSync(`${candidate}-wal`)).toBe(true);
+      expect(fs.statSync(`${candidate}-wal`).size).toBeGreaterThan(0);
+
+      const refused = verifyHqBackupFile(candidate);
+      expect(refused.verified).toBe(false);
+      expect(refused.refusals).toEqual(['sidecar_journal_present']);
+      // No digest is published for a file HQ will not stand behind.
+      expect(refused.digest).toBeNull();
+
+      // Checkpointed and closed, the same path verifies and the digest pins
+      // what was checked.
+      db.pragma('wal_checkpoint(TRUNCATE)');
+      db.close();
+      const accepted = verifyHqBackupFile(candidate);
+      expect(accepted.verified).toBe(true);
+      expect(accepted.digest).toBe(
+        createHash('sha256').update(fs.readFileSync(candidate)).digest('hex'),
+      );
+      expect(accepted.schemaTables).toBeGreaterThanOrEqual(2);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * `lstat` and `O_NOFOLLOW` cover the FINAL path component only, so a
+   * symlinked PARENT directory was followed silently and the register named an
+   * alias as if it were the file that had been checked. Recorded rather than
+   * refused — see `verifyHqBackupFile` for why refusing was rejected — so the
+   * divergence is visible and the REGISTER names the file HQ actually opened.
+   */
+  it('records the file it actually opened when an ancestor directory is a symlink', async () => {
+    const fx = fileFixture();
+    try {
+      const real = fs.realpathSync(path.join(fx.dir));
+      const vault = path.join(real, 'vault');
+      fs.mkdirSync(vault);
+      const backupPath = path.join(vault, 'hq-backup.sqlite');
+      await fx.db.backup(backupPath);
+      const direct = verifyHqBackupFile(backupPath);
+      expect(direct.verified).toBe(true);
+      expect(direct.resolvedPath).toBe(backupPath);
+
+      const link = path.join(real, 'vault-link');
+      fs.symlinkSync(vault, link);
+      const aliasPath = path.join(link, 'hq-backup.sqlite');
+      const throughLink = verifyHqBackupFile(aliasPath);
+      expect(throughLink.verified).toBe(true);
+      // The divergence is stated, not swallowed.
+      expect(throughLink.resolvedPath).not.toBe(aliasPath);
+      expect(throughLink.resolvedPath).toBe(backupPath);
+      expect(throughLink.digest).toBe(direct.digest);
+
+      // And the register names the real file, so the alias cannot become the
+      // recorded identity of a recovery point.
+      const recorded = expectOk(
+        fx.ops.recordVerifiedBackup({ backupPath: aliasPath, requestedBy: 'founder' }),
+      );
+      expect(recorded.backup.backupPath).toBe(backupPath);
+      // Recording it again under the real path is the SAME recovery point.
+      const again = expectOk(
+        fx.ops.recordVerifiedBackup({ backupPath, requestedBy: 'founder' }),
+      );
+      expect(again.deduplicated).toBe(true);
+      expect(again.backup.id).toBe(recorded.backup.id);
     } finally {
       fx.cleanup();
     }

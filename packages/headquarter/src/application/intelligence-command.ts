@@ -806,6 +806,15 @@ export type CostFactRefusal =
   | 'unrecognized_unit_kind'
   | 'estimate_without_basis'
   | 'basis_on_non_estimate'
+  /**
+   * The basis exceeds `MAX_COST_BASIS_LENGTH` (Wave 5 Medium 7).
+   *
+   * The bound used to be applied only on the NON-estimate branch, under the
+   * misnamed `basis_on_non_estimate` — so `estimated`, the one provenance that
+   * REQUIRES a basis, had no length check at all, and roughly a megabyte of
+   * caller text could land permanently in an append-only, un-erasable table
+   * and be echoed on every read of the intelligence control surface.
+   */
   | 'basis_too_long';
 
 /**
@@ -833,6 +842,11 @@ export function normalizeCostFact(input: {
   const provenance = input.provenance;
   const unitKind = input.unitKind;
   const basisRaw = typeof input.basis === 'string' ? input.basis.trim() : '';
+  // The length bound applies to EVERY branch, before the provenance switch
+  // (Wave 5 Medium 7). It used to be applied only to non-estimates — the one
+  // branch that cannot carry a basis at all — so `estimated`, which REQUIRES
+  // one, was unbounded.
+  if (basisRaw.length > MAX_COST_BASIS_LENGTH) return { ok: false, refusal: 'basis_too_long' };
   const hasAmount = input.amountMinorUnits != null;
 
   if (provenance === 'unknown') {
@@ -866,15 +880,13 @@ export function normalizeCostFact(input: {
   if (provenance === 'estimated' && basisRaw === '') {
     return { ok: false, refusal: 'estimate_without_basis' };
   }
-  // The LENGTH bound applies to every basis, and the two refusals are separate.
-  // It used to be checked only on the `provenance !== 'estimated'` branch and
-  // raised `basis_on_non_estimate`, so a 5,000-character basis on an
-  // `estimated` entry — the one provenance that REQUIRES a basis, and therefore
-  // the one where a long one is actually likely — was stored in full, and the
-  // refusal a non-estimate got named the wrong problem (Wave 5 review, Low
-  // finding B-7).
-  if (basisRaw.length > MAX_COST_BASIS_LENGTH) {
-    return { ok: false, refusal: 'basis_too_long' };
+  // A non-estimate may not name a basis at all: `observed`, `provider_reported`
+  // and `billed` amounts are facts, and a "basis" beside one is a story about a
+  // number that did not need one. (This used to accept any basis of ≤200
+  // characters here, which is why the refusal was both misnamed and unreachable
+  // in practice — no test exercised it.)
+  if (provenance !== 'estimated' && basisRaw !== '') {
+    return { ok: false, refusal: 'basis_on_non_estimate' };
   }
   return {
     ok: true,
@@ -894,6 +906,23 @@ export function normalizeCostFact(input: {
  * writer: a row whose provenance is outside the vocabulary, or whose amount
  * and provenance disagree, reads as `unknown` with a null amount. It never
  * reads as a number HQ cannot vouch for, and it never reads as zero.
+ *
+ * "The same direction as the writer" was a claim before it was true (Wave 5
+ * Medium 6). Two of `normalizeCostFact`'s refusals had no counterpart here, so
+ * a row carrying either shape read back as a KNOWN amount and was folded into
+ * `observedMinorUnits` — which is how a scope that should read
+ * `requires_founder_decision` reads `within_ceiling` instead:
+ *
+ *  - an `estimated` amount with NO BASIS. On write that is
+ *    `estimate_without_basis`, because an estimate whose origin nobody
+ *    recorded is a fabricated price with a label on it. Read back, it was a
+ *    number HQ vouched for on exactly the evidence it refuses to accept.
+ *  - an amount beyond `MAX_COST_MINOR_UNITS`. On write that is
+ *    `amount_out_of_bounds`; read back, it was a spend total.
+ *
+ * Both now return the unknown fact. `hq_intel_cost_entries` is append-only and
+ * an APPEND is the write its triggers deliberately permit, so a row of either
+ * shape is representable in the file even though no facade path writes one.
  */
 export function readStoredCostFact(row: {
   provenance: unknown;
@@ -914,13 +943,18 @@ export function readStoredCostFact(row: {
   if (!isCostProvenance(row.provenance) || row.provenance === 'unknown') return unknownFact;
   const amount = row.amountMinorUnits;
   if (typeof amount !== 'number' || !Number.isInteger(amount) || amount < 0) return unknownFact;
+  // The writer's bound, applied on the way back in too.
+  if (amount > MAX_COST_MINOR_UNITS) return unknownFact;
   if (typeof row.currency !== 'string' || !isCurrencyCode(row.currency)) return unknownFact;
+  const basis = typeof row.basis === 'string' && row.basis.trim() !== '' ? row.basis : null;
+  // An estimate must NAME ITS BASIS, on the way back as well as on the way in.
+  if (row.provenance === 'estimated' && basis === null) return unknownFact;
   return {
     provenance: row.provenance,
     amountMinorUnits: amount,
     currency: row.currency,
     unitKind,
-    basis: typeof row.basis === 'string' && row.basis.trim() !== '' ? row.basis : null,
+    basis,
     state: 'known',
   };
 }
@@ -1109,8 +1143,20 @@ export function computeRoutingProposal(input: {
   const complexityFloor = COMPLEXITY_FLOOR[c.complexity];
   const contextFloor = CONTEXT_FLOOR[c.contextSize];
   const workFloor = WORK_KIND_FLOOR[c.workKind];
-  const riskFloor = RISK_FLOOR[c.riskClass];
-  const requiredReviewTier = REVIEW_REQUIREMENT[c.riskClass];
+  // FAIL CLOSED on a risk class outside the vocabulary (Wave 5 Medium 5,
+  // defence in depth). `op_capabilities` carries no immutability triggers, so
+  // a raw `UPDATE ... SET risk_class = 'totally_harmless'` is a writable row —
+  // and an unrecognized key here reads `RISK_FLOOR[...] === undefined` (no
+  // floor at all) and `REVIEW_REQUIREMENT[...] === undefined`, which
+  // `proposalSatisfiesReviewRequirement` treats as "no reviewer required". The
+  // store reads coerce the same way (`readStoredRiskClass`); this is the
+  // second layer, so a characteristics object built by any future path cannot
+  // escape it either.
+  const riskClass: RiskClass = (RISK_CLASSES as readonly unknown[]).includes(c.riskClass)
+    ? c.riskClass
+    : 'founder_gate';
+  const riskFloor = RISK_FLOOR[riskClass];
+  const requiredReviewTier = REVIEW_REQUIREMENT[riskClass];
   const floorTier = maxTier(
     complexityFloor,
     contextFloor,
@@ -1140,10 +1186,11 @@ export function computeRoutingProposal(input: {
     },
     {
       factor: 'risk_class',
-      observed: c.riskClass,
+      // The CHECKED value, never the stored string.
+      observed: riskClass,
       imposedFloor: riskFloor,
       statement:
-        `The canonical risk class ${c.riskClass} needs at least ${riskFloor}` +
+        `The canonical risk class ${riskClass} needs at least ${riskFloor}` +
         (requiredReviewTier
           ? `, and requires an independent review at ${requiredReviewTier}.`
           : ', and requires no independent review tier.'),
@@ -1526,12 +1573,18 @@ export interface GoverningBudgetScope {
   derivedFrom: 'deployment' | 'task_mission' | 'task_project' | 'task_bound_provider';
 }
 
-/** The order refusals get worse in. Used to pick the most restrictive answer. */
-const BUDGET_DECISION_SEVERITY: Record<BudgetDecision, number> = {
+/**
+ * The order refusals get worse in. Used to pick the most restrictive answer.
+ *
+ * `Readonly` and frozen: it is read on an enforcement path, and the other
+ * correction lane's version of this constant carried the `Readonly` type for
+ * exactly that reason.
+ */
+const BUDGET_DECISION_SEVERITY: Readonly<Record<BudgetDecision, number>> = Object.freeze({
   within_ceiling: 0,
   requires_founder_decision: 1,
   blocked: 2,
-};
+});
 
 /**
  * Fold EVERY policy that governs one piece of work into one answer — law 4,
@@ -2207,7 +2260,16 @@ function foldSpend(
     // has no amount for. It is not labelled `"unknown"`, because that would put
     // an invented code where a reader expects an observed one.
     const currency = row.fact.currency;
-    const composite = `${id} ${currency ?? ''}`;
+    // U+001F UNIT SEPARATOR, not a raw NUL and not a space. A literal 0x00 in a
+    // source file makes it BINARY to grep, git grep and ripgrep — they report
+    // "binary file matches" and skip the content — so the file becomes
+    // invisible to the repository's own text tooling and to a reviewer's
+    // honesty scan. A SPACE would be worse still: the identities folded here are
+    // provider and model strings that may legitimately contain one, so
+    // `"a b"` with no currency and `"a"` with currency `"b"` would collapse into
+    // one bogus group. U+001F is a character neither an identity nor a currency
+    // code can contain.
+    const composite = `${id}${currency ?? ''}`;
     const entry = byKey.get(composite) ?? {
       id,
       currency,

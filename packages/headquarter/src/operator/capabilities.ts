@@ -25,6 +25,29 @@ export const RISK_CLASSES = [
 
 export type RiskClass = (typeof RISK_CLASSES)[number];
 
+export function isRiskClass(value: unknown): value is RiskClass {
+  return typeof value === 'string' && (RISK_CLASSES as readonly string[]).includes(value);
+}
+
+/**
+ * Read a STORED `op_capabilities.risk_class` back through the vocabulary,
+ * never by assertion (Wave 5 Medium 5).
+ *
+ * `op_capabilities` carries no immutability triggers — enabling and disabling
+ * a capability is a legitimate UPDATE — so the column is writable by anything
+ * holding the file. Every read of it used to be a bare
+ * `row.risk_class as RiskClass`, which turned one raw
+ * `UPDATE op_capabilities SET risk_class = 'totally_harmless'` into a typed
+ * member: the Phase 14 routing floor fell from `high` to `deterministic_local`
+ * and the review requirement became `undefined`, which reads as "no reviewer
+ * required". An unreadable risk class is the STRICTEST one — the same
+ * fail-closed rule already applied to a capability row that is missing
+ * entirely.
+ */
+export function readStoredRiskClass(value: unknown): RiskClass {
+  return isRiskClass(value) ? value : 'founder_gate';
+}
+
 export interface Capability {
   /** Stable id, e.g. 'github.open_pr', 'archive.index_document'. */
   id: string;
@@ -107,7 +130,7 @@ export class CapabilityRegistry {
     return {
       id: row.id as string,
       description: row.description as string,
-      riskClass: row.risk_class as RiskClass,
+      riskClass: readStoredRiskClass(row.risk_class),
       sideEffect: !!row.side_effect,
       idempotent: !!row.idempotent,
       enabled: !!row.enabled,

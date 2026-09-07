@@ -148,6 +148,41 @@ describe('the seam guard: defence in depth against a caller that supplies its ow
     );
     expect(RETRIEVAL_GUARD_STATEMENT).toContain('applied AT DECLARATION');
     expect(RETRIEVAL_GUARD_STATEMENT).not.toContain('applied by the resolver');
+    // Carried from the other correction lane, which fixed the same finding in
+    // PROSE. Its `toContain('the resolver hands out')` and its two
+    // facade-is-the-guarantee assertions hold against the surviving wording and
+    // are kept. The one assertion NOT carried is
+    // `toContain('exported for testing and are not wrapped')`: that sentence
+    // was a disclosure that the raw adapters were reachable, and it is false of
+    // this implementation — so the assertion is INVERTED rather than dropped,
+    // because a statement that still said it would now be a lie in the safe
+    // direction's favour.
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('the resolver hands out');
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('FACADE scan');
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('defence in depth');
+    expect(RETRIEVAL_GUARD_STATEMENT).not.toContain('exported for testing');
+    expect(RETRIEVAL_GUARD_STATEMENT).not.toContain('cannot obtain an unguarded adapter');
+  });
+
+  /**
+   * Wave 5 Medium 9, the substantive half, from the prose lane. The inner
+   * wrapper is defence in depth precisely because `normalizeSearchQuery` has
+   * already TOKENIZED the terms by the time an adapter sees them, and a
+   * tokenized term cannot carry the `key: value` punctuation these credential
+   * patterns need. Pinned so the doc's claim about which layer is load-bearing
+   * stays true.
+   */
+  it('shows why the inner wrapper is defence in depth: tokenized terms cannot match', () => {
+    const raw = resolveRetrievalAdapter('deterministic_lexical').adapter;
+    // The unsplit credential string DOES trip the wrapper...
+    expect(() => raw.retrieve({ readable: [], terms: [SECRET], match: 'any_term' })).toThrow(
+      RetrievalSafetyError,
+    );
+    // ...but the tokens the facade actually passes do not, which is why the
+    // facade's own scan on the way in is the effective layer.
+    const tokens = tokenize(SECRET);
+    expect(tokens.length).toBeGreaterThan(0);
+    expect(() => raw.retrieve({ readable: [], terms: tokens, match: 'any_term' })).not.toThrow();
   });
 
   it('scans a field set and ignores blanks, so an absent criterion is not an error', () => {
@@ -227,6 +262,16 @@ describe('the seam guard: defence in depth against a caller that supplies its ow
     expect(RETRIEVAL_GUARD_STATEMENT).toContain('defence in depth');
     // The old wording claimed the seam scan covered every adapter's free text.
     expect(RETRIEVAL_GUARD_STATEMENT).not.toContain('can be handed text HQ has not scanned');
+    // And it still says WHO applies the wrapper. Two correction lanes asserted
+    // this differently — `toContain('applied by the resolver')` and
+    // `toContain('done by the resolver rather than by the caller')` — and both
+    // pin the same claim: the caller does not choose to be guarded. The claim
+    // is what is carried across to the surviving wording, which is STRONGER
+    // than either (the wrapping happens at declaration, so it holds even for a
+    // caller that never reaches the resolver), so the assertion is on the half
+    // both lanes shared rather than on either lane's spelling of the mechanism.
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('rather than by the caller');
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('cannot opt out');
   });
 });
 

@@ -85,7 +85,12 @@ import {
   verifyEvidenceChain,
   type EvidenceEntry,
 } from '../operator/evidence.js';
-import { CapabilityRegistry, type Capability, type RiskClass } from '../operator/capabilities.js';
+import {
+  CapabilityRegistry,
+  readStoredRiskClass,
+  type Capability,
+  type RiskClass,
+} from '../operator/capabilities.js';
 import {
   GLOBAL_SCOPE,
   OperatorQueue,
@@ -1391,13 +1396,17 @@ function assignmentBarrier(task: OperatorTask): OpsError | null {
 }
 
 /**
- * The scope a routing proposal is measured against when the caller names none.
+ * The scope every piece of work is measured against, always.
  *
- * `deployment`/`total` deliberately: the widest, longest-lived ceiling, so an
- * un-scoped question is answered against the policy that constrains
- * EVERYTHING rather than against one that happens to be silent. With no
- * ceiling recorded there at all, the answer is `requires_founder_decision` and
- * the permitted set is the free local tier alone — never permission.
+ * `deployment`/`total` deliberately: the widest, longest-lived ceiling, so the
+ * question is answered against the policy that constrains EVERYTHING rather
+ * than against one that happens to be silent. With no ceiling recorded there
+ * at all, the answer is `requires_founder_decision` and the permitted set is
+ * the free local tier alone — never permission.
+ *
+ * It is the FLOOR of the derived scope set, not the whole of it: see
+ * `#governingBudgetScopes`, which adds the task's own mission(s), project(s)
+ * and bound provider, and every window on which a ceiling actually exists.
  */
 const DEPLOYMENT_BUDGET_SCOPE = {
   scopeKind: 'deployment' as const,
@@ -1451,11 +1460,11 @@ function costRefusalMessage(refusal: CostFactRefusal): string {
       return 'An estimated amount must name its BASIS. An estimate whose origin nobody recorded is a ' +
         'fabricated price with a label on it, and HQ will not store one.';
     case 'basis_on_non_estimate':
-      return 'A basis belongs to a recorded cost figure; it may not accompany an unknown cost, which has no ' +
-        'figure to explain.';
+      return 'A basis belongs to an ESTIMATE and to nothing else. An observed, reported or billed amount ' +
+        'is a fact; a story about where it came from beside one is not a basis.';
     case 'basis_too_long':
-      return `A cost basis may not exceed ${MAX_COST_BASIS_LENGTH} characters. That bound applies to every ` +
-        'provenance, including an estimate.';
+      return `The basis exceeds ${MAX_COST_BASIS_LENGTH} characters. It is a short statement of where a ` +
+        'number came from, and it lands permanently in an append-only ledger.';
     default:
       return 'The cost figure was refused.';
   }
@@ -2324,7 +2333,8 @@ export class HeadquarterOperations {
 
   /**
    * The evidence-chain verification that the SAFE-MODE verdict is computed
-   * from (Wave 5 review, High finding 1 on `c9ddecc`).
+   * from (Wave 5 correction; both review lanes reached this finding
+   * independently on `c9ddecc`, one as Critical, one as High).
    *
    * `assessHqIntegrity` used to pass `() => this.queue.evidence.verifyChain()`
    * into `fullIntegrity`. `queue` is a public `readonly` field and
@@ -2332,8 +2342,9 @@ export class HeadquarterOperations {
    * deliberately documents as a patchable READ surface — safe exactly while no
    * enforcement decision is taken on it. `evidence_chain_broken` is one of the
    * three `SAFE_MODE_BLOCKING_FINDINGS` and the only one that detects tampering
-   * with HQ's own audit record, so that closure WAS an enforcement decision
-   * reached through a patchable convenience surface: with
+   * with HQ's own audit record, and the full assessment is the ONLY path that
+   * can clear the latch. So that closure WAS an enforcement decision reached
+   * through a patchable convenience surface: with
    * `ops.queue.evidence.verifyChain = () => null` the finding never engaged,
    * and — worse — a legitimate Founder assessment then CLEARED an already
    * latched safe mode, handing `releaseKillSwitch` and `claimNext` back out
@@ -2348,6 +2359,18 @@ export class HeadquarterOperations {
    * of the path entirely, so patching either — on an instance or on
    * `EvidenceLog.prototype` — moves what the patcher sees and nothing that
    * safe mode decides.
+   *
+   * The other correction lane fixed the same defect by INLINING a second copy
+   * of the hash formula in this class. That copy was dropped in the merge and
+   * this one kept, on the argument that decided it: two computations of one
+   * verdict can drift, and a drifted verifier reports a false break — which
+   * under safe mode is an outage, not a warning. The one thing that copy did
+   * better, treating an unparseable payload as a BREAK rather than letting
+   * `JSON.parse` throw out of the assessment, was carried into
+   * `verifyEvidenceChain` itself, so nothing was lost with it.
+   *
+   * Returns the `seq` of the first entry that does not verify, or null when the
+   * whole chain does.
    */
   readonly #verifyEvidenceChainFromStore: () => number | null;
 
@@ -2433,7 +2456,16 @@ export class HeadquarterOperations {
       return {
         id: row.id as string,
         description: row.description as string,
-        riskClass: row.risk_class as Capability['riskClass'],
+        // Read through the vocabulary, never ASSERTED into it (Wave 5
+        // Medium 5). `op_capabilities` carries no immutability triggers, so a
+        // raw `UPDATE ... SET risk_class = 'totally_harmless'` is a writable
+        // row — and the cast made that string a typed `RiskClass`, which then
+        // dropped the routing floor from `high` to `deterministic_local` and
+        // the review requirement from `high` to `undefined` (read as "no
+        // reviewer required"). An unreadable risk class is the STRICTEST one,
+        // never the convenient one: the same fail-closed rule
+        // `#characteristicsFor` already applies to a MISSING capability row.
+        riskClass: readStoredRiskClass(row.risk_class),
         sideEffect: !!row.side_effect,
         idempotent: !!row.idempotent,
         enabled: !!row.enabled,
@@ -7341,10 +7373,33 @@ export class HeadquarterOperations {
     const at = nowIso();
     const privileged = this.#requirePrivilegedQueue();
     let dedupedTo: string | null = null;
+    let refusal: OpsError | null = null;
     privileged.reserve(() => {
       const existing = loadRunByKey(this.#db, runKey);
       if (existing) {
         dedupedTo = existing.id;
+        return;
+      }
+      // The second half of the "never retried" law, at the OPEN rather than at
+      // the attempt (Wave 5 Medium 2). `runAdmitsAttempt` refuses a further
+      // attempt on a run standing at `needs_reconciliation` — but a fresh RUN
+      // on the same task carries a fresh, admitted generation, so the refusal
+      // could be walked around simply by opening again under a deliberately
+      // different idempotency key. A task whose last word is "HQ does not know
+      // what happened" needs a human, not another run.
+      const unresolved = this.#listRunsFromStore({ taskId: input.taskId }).find(
+        (run) => run.needsReconciliation,
+      );
+      if (unresolved) {
+        refusal = {
+          code: 'run_attempt_refused',
+          message:
+            `Task ${input.taskId} already carries run ${unresolved.id} standing at ` +
+            `${unresolved.state} with outcome ${unresolved.outcome}; a new run on the same work is ` +
+            'refused. An uncertain outcome is never retried automatically — reconcile it explicitly ' +
+            'after checking the external system.',
+          details: { runId: unresolved.id, state: unresolved.state, outcome: unresolved.outcome },
+        };
         return;
       }
       this.#db
@@ -7391,6 +7446,7 @@ export class HeadquarterOperations {
         payload: { runId: id, runKind: input.runKind, processId: this.#processIdentity, executable: false },
       });
     });
+    if (refusal) return { ok: false, error: refusal };
     if (dedupedTo) return ok({ run: this.#runRecordFromStore(dedupedTo)!, deduplicated: true });
     return ok({ run: this.#runRecordFromStore(id)!, deduplicated: false });
   }
@@ -7524,7 +7580,19 @@ export class HeadquarterOperations {
         return;
       }
       const record = deriveRunRecord(row, loadRunEvents(this.#db, input.runId));
-      if (record.state !== 'attempting') {
+      // A LATE but truthful report is accepted (Wave 5 Medium 1). Recovery
+      // classifies every run whose `process_id` is not the recovering
+      // process — which proves "not me", never "dead" — so a live worker
+      // mid-attempt can find its run classified interrupted by a concurrent
+      // Founder-gated recovery. Refusing its outcome then left the ledger
+      // permanently asserting an interruption that never happened, closable
+      // only by a human guess. The worker still holds the LIVE FENCED CLAIM,
+      // already checked above and unobtainable by a dead process, so it is
+      // exactly the entity this phase trusts to report an outcome. This is a
+      // report and not a retry: it opens no attempt generation, and the
+      // interruption event stays in the append-only ledger as history.
+      const lateAfterInterruption = record.interruptedWithoutReport;
+      if (record.state !== 'attempting' && !lateAfterInterruption) {
         refusal = {
           code: 'run_state_conflict',
           message: `Run ${input.runId} is ${record.state}; an outcome is recorded against an open attempt`,
@@ -7542,6 +7610,9 @@ export class HeadquarterOperations {
           failureCategory,
           note: note.value ?? '',
           correlationId: record.lastCorrelationId,
+          // Stated on the record rather than smoothed over: this outcome was
+          // reported after a recovery pass had already classified the run.
+          afterInterruption: lateAfterInterruption,
         },
       });
       privileged.appendEvidence({
@@ -7565,8 +7636,18 @@ export class HeadquarterOperations {
    * CRASH / RESTART RECOVERY — the classification pass.
    *
    * Every run this ledger holds that is still `open` or `attempting` and was
-   * opened by a DIFFERENT process is, by definition, work whose carrier is
-   * gone. Each is classified truthfully and closed or flagged:
+   * opened by a DIFFERENT process is classified. Stated precisely, because the
+   * precision is the point (Wave 5 Medium 1): `process_id` proves the run was
+   * opened by a process that is NOT the one running this recovery. It does not
+   * prove that process is dead, and HQ holds no liveness signal that would —
+   * there is no heartbeat and no boot nonce here. A recovery run while another
+   * process is genuinely mid-attempt will therefore classify that attempt as
+   * interrupted. What HQ does about that is not pretend otherwise: the run's
+   * carrier, if it is alive and still holds the live fenced claim, may record
+   * the outcome it actually observed afterwards (`recordRunOutcome`), and the
+   * interruption stays in the ledger as the classification it was.
+   *
+   * Each classified run is closed or flagged:
    *
    *  - never attempted → concluded `not_executed`. Provable from the ledger:
    *    no attempt was ever reserved, so nothing external can have happened.
@@ -7924,7 +8005,13 @@ export class HeadquarterOperations {
       );
     }
 
-    const recordKey = backupRecordKey({ backupPath, contentDigest: verification.digest! });
+    // The path HQ actually OPENED, not the alias the caller may have named. A
+    // symlinked ancestor is not refused (see `verifyHqBackupFile`), but the
+    // register must not say a file was verified at a path that merely points at
+    // it — the recovery point's identity is the file, and the key is derived
+    // from it (Wave 5 Low).
+    const verifiedPath = verification.resolvedPath ?? backupPath;
+    const recordKey = backupRecordKey({ backupPath: verifiedPath, contentDigest: verification.digest! });
     const id = `backup-${uuid()}`;
     const at = nowIso();
     const privileged = this.#requirePrivilegedQueue();
@@ -7946,7 +8033,7 @@ export class HeadquarterOperations {
         )
         .run(
           id,
-          backupPath,
+          verifiedPath,
           verification.digest,
           verification.sizeBytes,
           verification.schemaTables,
@@ -8103,6 +8190,14 @@ export class HeadquarterOperations {
     //
     // The run half is stated as absent — no runs, no backups, storePresent
     // false — and the integrity half is the real verdict, on both branches.
+    //
+    // The other correction lane fixed the same finding by passing the real
+    // verdict into `emptyReliabilitySnapshot(false, integrity)` on this
+    // branch. That helper keeps the required-integrity signature that lane
+    // gave it — it can no longer be called without a verdict, and its own
+    // test pins that — but the BRANCH is gone here: the integrity fields are
+    // composed exactly once, so the absent-store and present-store answers
+    // cannot drift apart in a later change.
     const storePresent = this.#reliabilityStorePresent;
     return summarizeReliability({
       storePresent,
@@ -8193,10 +8288,17 @@ export class HeadquarterOperations {
   /**
    * The entries a scope's ceiling is measured against.
    *
-   * The window filter is a PREFIX comparison on the recorded `occurredAt`
-   * instant, so it needs no timezone rule and no arithmetic: a `day` ceiling
-   * counts entries whose instant starts with today's date, a `month` ceiling
-   * this month's. `total` counts everything ever recorded for the scope.
+   * The window filter is a PREFIX comparison on `recordedAt` — the instant HQ
+   * itself stamped — so it needs no timezone rule and no arithmetic: a `day`
+   * ceiling counts entries HQ recorded today, a `month` ceiling this month's.
+   * `total` counts everything ever recorded for the scope.
+   *
+   * It used to compare `occurredAt`, which the CALLER supplies (Wave 5
+   * High 3). Under a `deployment/day` ceiling of 100 with 90 observed, an
+   * entry declaring `occurredAt: "0000-00-00T00:00:00Z"` with an amount of
+   * 1,000,000 was accepted and the ceiling still reported `within_ceiling`:
+   * the entry simply fell outside the window it was being measured against.
+   * `occurredAt` stays as reported metadata; it measures nothing.
    */
   #entriesForScope(
     scope: { scopeKind: BudgetScope; scopeId: string; window: BudgetWindow },
@@ -8222,7 +8324,12 @@ export class HeadquarterOperations {
             return false;
         }
       })
-      .filter((entry) => prefix === '' || entry.occurredAt.startsWith(prefix));
+      // The window is measured on `recordedAt`, which HQ SETS, and never on
+      // `occurredAt`, which the caller supplies (Wave 5 High 3). Filtering on
+      // the caller's field meant one field moved an entry out of the window a
+      // ceiling was counting, so a day ceiling was evaded by declaring a
+      // different day.
+      .filter((entry) => prefix === '' || entry.recordedAt.startsWith(prefix));
   }
 
   /**
@@ -8307,6 +8414,21 @@ export class HeadquarterOperations {
    * derivation for one and does not invent it. Recorded as a real limitation:
    * a model-scoped ceiling can be read through `intelligenceBudgetDecision`
    * but does not by itself constrain a decision write.
+   *
+   * The other correction lane derived the same thing as
+   * `#canonicalWorkIdentity` + `#canonicalBudgetScopes`, and that
+   * implementation is dropped rather than kept beside this one. Two
+   * differences decided it, both in the fail-closed direction: it took the
+   * FIRST plan item only (`ORDER BY seq LIMIT 1`), so a task linked to two
+   * missions was governed by one of their ceilings and not the other; and it
+   * excluded the `provider` scope on the argument that a cost entry's
+   * `providerId` is caller-declared and in a different vocabulary from the
+   * execution binding. That argument was true of the head it was written
+   * against and is not true here — `recordIntelligenceCost` refuses a
+   * `providerId` that contradicts `#taskBoundProvider`
+   * (`provider_binding_mismatch`), so the two vocabularies are one by
+   * enforcement, and a Founder's provider ceiling therefore binds a decision
+   * write instead of merely being reported.
    */
   #governingBudgetScopes(taskId: string): GoverningBudgetScope[] {
     const scopes: GoverningBudgetScope[] = [
@@ -8503,7 +8625,12 @@ export class HeadquarterOperations {
     if (!isObservationSource(input.source)) {
       return fail('invalid_input', `source must be one of: ${OBSERVATION_SOURCES.join(', ')}`);
     }
-    const facts = [...(input.capabilityFacts ?? [])];
+    // DEDUPED, and bounded by the closed vocabulary itself (Wave 5 Medium 7):
+    // the route's `stringArrayField` caps neither length nor repetition, so an
+    // array of ten thousand copies of one legal member would otherwise land
+    // permanently in an append-only, un-erasable table and be echoed on every
+    // read. A set of a five-member vocabulary can hold at most five.
+    const facts = [...new Set(input.capabilityFacts ?? [])];
     if (facts.some((fact) => !isModelCapabilityFact(fact))) {
       return fail('invalid_input', `capabilityFacts must be drawn from: ${MODEL_CAPABILITY_FACTS.join(', ')}`);
     }
@@ -8665,7 +8792,9 @@ export class HeadquarterOperations {
     if (!isCurrencyCode(currency)) {
       return fail('invalid_input', 'currency must be a three-letter uppercase code; HQ never converts between them');
     }
-    const permitted = [...(input.permittedTiers ?? [])];
+    // Deduped for the same reason, and with the same effect: the permitted set
+    // is a SET, so a repeated member is neither meaningful nor storable twice.
+    const permitted = [...new Set(input.permittedTiers ?? [])];
     if (permitted.some((tier) => !isIntelligenceTier(tier))) {
       return fail('invalid_input', `permittedTiers must be drawn from: ${INTELLIGENCE_TIERS.join(', ')}`);
     }
@@ -8781,15 +8910,22 @@ export class HeadquarterOperations {
    * supply is a description of the WORK, and none of it can lower the floor
    * below what the canonical risk class imposes.
    *
-   * There is deliberately no provider or model parameter, and the returned
-   * shape has no field that could name one. Provider truth is the canonical
-   * binding's; a proposal that disagreed with it would simply be ignored by
-   * `OperatorQueue.claim`/`start`.
+   * There is deliberately no provider or model parameter, and the routing
+   * INTERFACE has no field that could name one. Provider truth is the
+   * canonical binding's; a proposal that disagreed with it would simply be
+   * ignored by `OperatorQueue.claim`/`start`. What the facade returns is
+   * `RoutingProposal & { taskId; boundProvider; governedBy }`, and
+   * `boundProvider` is OBSERVED off the task's canonical payload by
+   * `#taskBoundProvider` — a report of what will execute, not a choice, and
+   * there is no parameter that could make it say anything else.
    *
-   * There is no BUDGET SCOPE parameter either, and there used to be. See
+   * There is no BUDGET SCOPE parameter either, and there used to be (Wave 5
+   * review, High finding B-1 / High 2 — both correction lanes found it). See
    * `#governingBudgetScopes`: the scopes are derived from the task's canonical
-   * mission, project and provider binding, plus the deployment baseline, and
-   * the most restrictive of them governs.
+   * mission(s), project(s) and provider binding, plus the deployment baseline,
+   * every applicable scope binds at once, and the most restrictive of them
+   * governs.
+
    */
   intelligenceRoutingProposal(input: {
     taskId: string;
@@ -8807,7 +8943,7 @@ export class HeadquarterOperations {
   > {
     const characteristics = this.#characteristicsFor(input);
     if (!characteristics.ok) return characteristics;
-    const evaluation = this.#governingBudgetEvaluation(input.taskId);
+    const evaluation = this.#governingBudgetEvaluation(input.taskId.trim());
     const proposal = computeRoutingProposal({
       characteristics: characteristics.data,
       permittedTiers: evaluation.permittedTiers,
@@ -8935,6 +9071,8 @@ export class HeadquarterOperations {
     );
     if (claim) return claim;
 
+    // Every ceiling that applies to THIS task, most restrictive wins. Which
+    // one applies is not a caller parameter any more (Wave 5 High 2 / B-1).
     const evaluation = this.#governingBudgetEvaluation(input.taskId);
     const proposal = computeRoutingProposal({
       characteristics: characteristics.data,
@@ -9176,6 +9314,9 @@ export class HeadquarterOperations {
     );
     if (claim) return claim;
 
+    // An escalation moves UP the tier order, so evaluating a wider scope than
+    // the one the first decision was bound by would let it climb past a
+    // mission or project ceiling that the first decision honoured.
     // The same derived, most-restrictive answer the original record was
     // enforced against — not the deployment baseline alone, which would have
     // let an escalation reach a tier the task's own mission ceiling forbids.
@@ -9350,6 +9491,16 @@ export class HeadquarterOperations {
     fence: number;
     providerId: string;
     modelId?: string | null;
+    /**
+     * The routing decision this cost belongs to, when there is one. Checked
+     * against the ledger and against THIS task (Wave 5 Medium 8): it used to
+     * be unvalidated caller free text.
+     *
+     * `missionId` and `projectId` are deliberately NOT parameters. They are
+     * derived from the task's canonical mission link, because omitting a
+     * mission id hid a spend from an exhausted mission ceiling and made three
+     * of the five `BUDGET_SCOPES` meaningless.
+     */
     decisionId?: string;
     provenance: CostProvenance;
     amountMinorUnits?: number | null;
@@ -9441,28 +9592,66 @@ export class HeadquarterOperations {
 
     const at = nowIso();
     const occurredAt = (input.occurredAt ?? '').trim() || at;
-    if (!/^\d{4}-\d{2}-\d{2}T/.test(occurredAt)) {
-      return fail('invalid_input', 'occurredAt must be an ISO-8601 instant, or omitted');
-    }
-    // BOUNDED against the clock. `occurredAt` selects which window a `day` or
-    // `month` ceiling measures this entry in, and it was validated only by
-    // shape: a 999,999-minor-unit entry dated 2099-01-01 sat outside every
-    // window and left the scope reading `within_ceiling` with `observed: 0`
-    // (Wave 5 review, High finding B-2). A real observation is recorded close
-    // to when it happened; a lane recording much later has `recorded_at` for
-    // that, and both are on the row.
+    /*
+     * A REAL instant, BOUNDED against the clock — the two correction lanes'
+     * checks folded into one (Wave 5 review, High findings B-2 / High 3).
+     *
+     * The only check used to be `/^\d{4}-\d{2}-\d{2}T/`, which is a pattern
+     * rather than a date: under a `deployment/day` ceiling of 100 with 90
+     * observed, an entry with `occurredAt: "0000-00-00T00:00:00Z"` and an
+     * amount of 1,000,000 was ACCEPTED and the ceiling still reported
+     * `within_ceiling`; so was a 999,999-unit entry dated 2099-01-01, which no
+     * `day` or `month` window could see, leaving the scope reading `observed:
+     * 0`. Both lanes reproduced it; one answered with "must parse, and may not
+     * be in the future", the other with "must sit inside a bounded interval
+     * around now". The bounded interval is the surviving rule because it closes
+     * BOTH directions, and the future half of it keeps the other lane's
+     * refusal by name.
+     *
+     * Structurally, the window filter also moved off `occurred_at` entirely
+     * onto `recorded_at`, which HQ sets (see `#entriesForScope`), so
+     * `occurredAt` is reported-only metadata and this bound is the defence in
+     * depth that keeps it close to the truth rather than the thing the ceiling
+     * rests on. A real observation is recorded close to when it happened; a
+     * lane recording later has `recorded_at` for that, and both are on the row.
+     */
     const occurredMs = Date.parse(occurredAt);
     if (!Number.isFinite(occurredMs)) {
-      return fail('invalid_input', 'occurredAt must be an ISO-8601 instant, or omitted');
+      return fail('invalid_input', 'occurredAt must be a real ISO-8601 instant, or omitted');
     }
     const skewMs = occurredMs - Date.parse(at);
-    if (skewMs > MAX_COST_OCCURRED_AT_FUTURE_MS || -skewMs > MAX_COST_OCCURRED_AT_PAST_MS) {
+    if (skewMs > MAX_COST_OCCURRED_AT_FUTURE_MS) {
       return fail(
         'invalid_input',
-        'occurredAt must be within a bounded interval around now — at most one hour ahead and thirty days ' +
-          'behind. An instant outside that window would place recorded spend in a budget window it did not ' +
-          'happen in.',
+        'occurredAt is in the future by more than the tolerated clock skew. A cost cannot have been ' +
+          'incurred after the moment it is recorded, and an instant outside the bounded interval around ' +
+          'now would place recorded spend in a budget window it did not happen in.',
       );
+    }
+    if (-skewMs > MAX_COST_OCCURRED_AT_PAST_MS) {
+      return fail(
+        'invalid_input',
+        'occurredAt is more than thirty days behind now. It must sit inside the bounded interval around ' +
+          'now — at most one hour ahead and thirty days behind — because an instant outside that window ' +
+          'would place recorded spend in a budget window it did not happen in.',
+      );
+    }
+    // A referenced decision must EXIST and belong to THIS task (Wave 5 Medium
+    // 8): a cost entry citing another task's decision is an attribution claim
+    // HQ can check, so it checks it.
+    const decisionId = input.decisionId?.trim() || null;
+    if (decisionId !== null) {
+      const referenced = this.#decisionRecordFromStore(decisionId);
+      if (!referenced) {
+        return fail('unknown_intelligence_decision', `Unknown routing decision: ${decisionId}`);
+      }
+      if (referenced.taskId !== input.taskId) {
+        return fail(
+          'invalid_input',
+          `Routing decision ${decisionId} belongs to task ${referenced.taskId}; a cost entry may only cite a ` +
+            'decision recorded against the task it is recorded on.',
+        );
+      }
     }
     const key = costEntryKey({
       taskId: input.taskId,
@@ -9533,7 +9722,7 @@ export class HeadquarterOperations {
           input.taskId,
           canonicalScopes.missionIds[0] ?? null,
           canonicalScopes.projectIds[0] ?? null,
-          input.decisionId?.trim() || null,
+          decisionId,
           providerId,
           modelId,
           cost.fact.provenance,

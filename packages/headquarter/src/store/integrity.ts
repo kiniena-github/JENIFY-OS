@@ -162,25 +162,36 @@ function deepFreezeTables(entries: EngineImmutableTable[]): readonly EngineImmut
  * Every ledger whose guards are held by the ENGINE, with the prefix its
  * triggers are named under and every guard declared on it.
  *
- * The trio required of each is the one that carries the guarantee: no UPDATE
- * of any column, no DELETE of any row, and a BEFORE INSERT guard that closes
- * REPLACE / UPSERT on the primary identity.
+ * The trio required of each is the one that carries the primary guarantee: no
+ * UPDATE of any column, no DELETE of any row, and a BEFORE INSERT guard that
+ * closes REPLACE / UPSERT on the primary identity.
  *
- * **`secondaryGuards` was added by the Wave 5 review (Medium finding 2), and
- * the argument it replaces was wrong.** Until then this list carried the trio
- * only, on the reasoning that a table's further guards "are that module's
- * business" and that re-stating them here would drift. The consequence was
- * that the census could not SEE them: dropping
+ * **`secondaryGuards` was added by the Wave 5 correction (both review lanes
+ * reached this finding independently), and the argument it replaces was
+ * wrong.** Until then this list carried the trio only, on the reasoning that a
+ * table's further guards "are that module's business" and that re-stating them
+ * here would drift. That reasoning was wrong in the one direction that matters:
+ * the secondary guards are the ones that close REPLACE on a SECONDARY unique
+ * index, where the primary-identity guard never fires. `recursive_triggers` is
+ * off by default and connection-scoped, so an `INSERT OR REPLACE` colliding on
+ * such an index DELETES the standing row without any BEFORE DELETE running.
+ *
+ * The consequence was that the census could not SEE those guards. Dropping
  * `trg_hq_intel_budgets_no_replace_unique` produced no
- * `append_only_guard_missing` finding, engaged no safe mode, and left an
- * `INSERT OR REPLACE` on `hq_intel_budgets.budget_key` free to swap a
- * Founder's spend ceiling — which the reviewer demonstrated, 1000 to
- * 999999999. A guard nothing checks is a guard that can go missing quietly,
- * and "it belongs to another module" is not a reason for the integrity check
- * to be blind to it. The drift concern is real and is answered where it
- * belongs: a test pins this whole declaration against the LIVE schema, so a
- * phase that adds a guard and forgets to declare it fails there rather than
- * escaping the check forever.
+ * `append_only_guard_missing` finding, engaged no safe mode at either depth,
+ * and left an `INSERT OR REPLACE` on `hq_intel_budgets.budget_key` free to swap
+ * a Founder's spend ceiling — demonstrated, 1000 to 999999999. The same held
+ * for `trg_hq_reliability_run_events_no_replace_attempt`, the cross-process
+ * duplicate-attempt guard this module itself calls load-bearing: a committed
+ * append-only row could be erased and a forged one substituted, with no
+ * finding. A guard nothing checks is a guard that can go missing quietly, and
+ * "it belongs to another module" is not a reason for the integrity check to be
+ * blind to it.
+ *
+ * The drift concern is real and is answered where it belongs: tests pin this
+ * whole declaration against the LIVE schema — the FULL trigger-name set for
+ * every listed prefix — so a phase that adds a guard and forgets to declare it
+ * fails there rather than escaping the check forever.
  *
  * `hq_mission_plan_items` was deliberately ABSENT until the Wave 5 review's
  * Medium finding 6, on the reasoning that it is legitimately updated when an
@@ -246,19 +257,22 @@ export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = deepFree
   {
     table: 'hq_reliability_runs',
     triggerPrefix: 'hq_reliability_runs',
+    // `run_key` is the duplicate-RUN guard.
     secondaryGuards: ['no_replace_unique'],
   },
   {
     table: 'hq_reliability_run_events',
     triggerPrefix: 'hq_reliability_run_events',
-    // The attempt reservation. Without it two processes can both open the same
-    // generation of the same run — the duplicate-irreversible-act path Phase 13
-    // exists to close.
+    // `attempt_key` is the cross-process duplicate-ATTEMPT guard — the single
+    // most load-bearing secondary guard in the schema. Without it two
+    // processes can both open the same generation of the same run — the
+    // duplicate-irreversible-act path Phase 13 exists to close.
     secondaryGuards: ['no_replace_attempt'],
   },
   {
     table: 'hq_reliability_backups',
     triggerPrefix: 'hq_reliability_backups',
+    // `record_key` is the duplicate-BACKUP-RECORD guard.
     secondaryGuards: ['no_replace_unique'],
   },
   // The verdict ledger (Wave 5 correction of High finding 1). It is what makes
@@ -476,6 +490,9 @@ export function missingImmutabilityGuards(db: HqDatabase): string[] {
   const missing: string[] = [];
   for (const entry of ENGINE_IMMUTABLE_TABLES) {
     if (!tables.has(entry.table)) continue;
+    // The trio AND the declared secondary guards. The secondaries close
+    // REPLACE on a secondary unique index, where the primary-identity guard
+    // never fires — see `ENGINE_IMMUTABLE_TABLES`.
     for (const name of declaredGuardsFor(entry)) {
       if (!triggers.has(name)) missing.push(name);
     }
@@ -661,7 +678,15 @@ export function fullIntegrity(
     const values = rows.map((row) => String(Object.values(row)[0] ?? '')).filter((value) => value !== '');
     integrityVerdict = values.length === 1 && values[0] === 'ok' ? 'ok' : values.join('; ');
   } catch (error) {
-    integrityVerdict = `integrity_check could not run: ${error instanceof Error ? error.message : 'unknown error'}`;
+    // A CATEGORICAL phrase, not the engine's own message (Wave 5 Low). An
+    // `HqIntegrityObservation.detail` reaches the Founder browser, and this
+    // module's own rule is that a detail is composed from schema object names,
+    // pragma values and counts — never from anything a row or a third-party
+    // error string might carry. An unrunnable check is a check that did not
+    // pass, which is the whole finding; the engine's wording adds nothing a
+    // reader can act on.
+    void error;
+    integrityVerdict = 'integrity_check could not run on this database handle';
   }
   if (integrityVerdict !== 'ok') {
     observations.push({
@@ -759,6 +784,21 @@ export const BACKUP_REFUSAL_REASONS = Object.freeze([
   'path_not_readable',
   'file_empty',
   'file_too_large',
+  /**
+   * A `-wal`, `-shm` or `-journal` sidecar sits beside the candidate.
+   *
+   * Both Wave 5 correction lanes reached this refusal from the same exploit
+   * (High finding 3 / Medium 3) and named it differently: one refused any
+   * sidecar as `sidecar_journal_present`, the other refused a `-wal`/`-journal`
+   * carrying BYTES as `file_has_uncheckpointed_wal`. The broader rule is the
+   * one kept, because presence — not size — is what makes the main file
+   * possibly-not-the-whole-database: SQLite resolves the sidecars together
+   * with the path, two candidates could then carry an identical
+   * `contentDigest` and an identical recorded size while `integrity_check` and
+   * the table count described different databases (executed: 11 tables versus
+   * 12), and an operator restoring the DIRECTORY would get content this
+   * verification never saw. Checkpoint or `.backup` the database first.
+   */
   'sidecar_journal_present',
   'verification_copy_failed',
   'not_a_readable_sqlite_database',
@@ -796,6 +836,13 @@ export interface BackupVerification {
   /** How many non-internal tables the opened database carries. */
   schemaTables: number | null;
   integrityVerdict: string | null;
+  /**
+   * The path HQ actually opened, after resolving symlinked ancestors. Equal to
+   * the candidate in the ordinary case; different when the caller named an
+   * alias. It is what the register stores, so a backup record names the file
+   * that was checked rather than a path that merely points at it.
+   */
+  resolvedPath: string | null;
 }
 
 const VERIFY_CHUNK_BYTES = 1024 * 1024;
@@ -871,13 +918,24 @@ function digestFile(
  * categorical reason it can record — see `BACKUP_REFUSAL_REASONS` for the
  * closed list and what each member means.
  *
- * NOT covered, and recorded rather than implied: a path whose PARENT
- * directories are symlinks is accepted. `O_NOFOLLOW` constrains the final
- * component only, and resolving the whole path with `realpath` would refuse
- * legitimate layouts (a symlinked backup volume, `/var` on macOS). WHICH file
- * an operator is entitled to point at is a question this function does not
- * answer; what it answers is what the bytes at the descriptor it opened
- * actually are.
+ * A symlinked PARENT directory is RESOLVED and RECORDED rather than refused.
+ * `lstat` and `O_NOFOLLOW` constrain the final component only, so an ancestor
+ * link used to be followed silently and the register then named an alias as if
+ * it were the file that had been checked. `realpathSync` now settles which file
+ * this is; the resolved path is what is opened, what the sidecar check looks
+ * beside, and what `resolvedPath` carries into the register. Refusing any
+ * divergence was the other option and was rejected as disproportionate AND
+ * non-portable — on macOS `os.tmpdir()` itself sits under a symlinked `/var`,
+ * so honest backup paths would be refused.
+ *
+ * NOT covered, and recorded rather than implied: WHICH file an operator is
+ * entitled to point at is a question this function does not answer; what it
+ * answers is what the bytes at the descriptor it opened actually are. There is
+ * deliberately no `file_changed_during_verification` refusal: a candidate
+ * mutated mid-verification cannot produce a digest that disagrees with what was
+ * checked, because the digest, the copy and the checks all come from one pass
+ * over one descriptor. The race is closed by construction rather than detected
+ * afterwards.
  */
 export function verifyHqBackupFile(candidate: string): BackupVerification {
   const empty: BackupVerification = {
@@ -887,6 +945,7 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
     sizeBytes: null,
     schemaTables: null,
     integrityVerdict: null,
+    resolvedPath: null,
   };
   const target = typeof candidate === 'string' ? candidate.trim() : '';
   if (!target || !path.isAbsolute(target)) {
@@ -910,13 +969,24 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
   if (entry.size === 0) return { ...empty, refusals: ['file_empty'] };
   if (entry.size > MAX_VERIFIED_BACKUP_BYTES) return { ...empty, refusals: ['file_too_large'] };
 
-  // BEFORE anything else. SQLite would resolve these together with the main
-  // file, so their presence means the main file alone may not be the database
-  // an operator would restore.
+  // WHICH file this is, settled once. An ancestor directory may be a symlink
+  // even though the final component is not, and the register must name the
+  // file HQ actually opened rather than an alias for it.
+  let resolved: string;
+  try {
+    resolved = fs.realpathSync(target);
+  } catch {
+    return { ...empty, refusals: ['path_missing'] };
+  }
+
+  // BEFORE anything else, and beside the RESOLVED path, which is where SQLite
+  // would look for them. SQLite resolves these together with the main file, so
+  // their presence means the main file alone may not be the database an
+  // operator would restore.
   for (const suffix of SQLITE_SIDECAR_SUFFIXES) {
     try {
-      fs.lstatSync(`${target}${suffix}`);
-      return { ...empty, refusals: ['sidecar_journal_present'] };
+      fs.lstatSync(`${resolved}${suffix}`);
+      return { ...empty, refusals: ['sidecar_journal_present'], resolvedPath: resolved };
     } catch {
       // Absent is the expected case for a consolidated backup file.
     }
@@ -926,7 +996,7 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
   try {
     scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-backup-verify-'));
   } catch {
-    return { ...empty, refusals: ['verification_copy_failed'] };
+    return { ...empty, refusals: ['verification_copy_failed'], resolvedPath: resolved };
   }
   const scratchPath = path.join(scratchDir, 'candidate.sqlite');
 
@@ -938,7 +1008,7 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
     let sinkFd: number | undefined;
     try {
       try {
-        fd = fs.openSync(target, fs.constants.O_RDONLY | noFollow);
+        fd = fs.openSync(resolved, fs.constants.O_RDONLY | noFollow);
       } catch (error) {
         // One `openSync` failure is not one refusal. ELOOP is the final
         // component turning out to be a symlink after all (the O_NOFOLLOW
@@ -949,16 +1019,18 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
         if (code === 'ELOOP') return { ...empty, refusals: ['path_is_symlink'] };
         if (code === 'ENOENT') return { ...empty, refusals: ['path_missing'] };
         if (code === 'EACCES' || code === 'EPERM' || code === 'EMFILE' || code === 'ENFILE') {
-          return { ...empty, refusals: ['path_not_readable'] };
+          return { ...empty, refusals: ['path_not_readable'], resolvedPath: resolved };
         }
-        return { ...empty, refusals: ['path_not_a_regular_file'] };
+        return { ...empty, refusals: ['path_not_a_regular_file'], resolvedPath: resolved };
       }
       // Taken from the DESCRIPTOR: from here on the path is never consulted.
-      if (!fs.fstatSync(fd).isFile()) return { ...empty, refusals: ['path_not_a_regular_file'] };
+      if (!fs.fstatSync(fd).isFile()) {
+        return { ...empty, refusals: ['path_not_a_regular_file'], resolvedPath: resolved };
+      }
       try {
         sinkFd = fs.openSync(scratchPath, 'wx', 0o600);
       } catch {
-        return { ...empty, refusals: ['verification_copy_failed'] };
+        return { ...empty, refusals: ['verification_copy_failed'], resolvedPath: resolved };
       }
       let proof: { digest: string; size: number } | 'too_large';
       try {
@@ -966,9 +1038,11 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
       } catch {
         // A read or write that could not complete is a verification that did
         // not happen. Never a pass.
-        return { ...empty, refusals: ['verification_copy_failed'] };
+        return { ...empty, refusals: ['verification_copy_failed'], resolvedPath: resolved };
       }
-      if (proof === 'too_large') return { ...empty, refusals: ['file_too_large'] };
+      if (proof === 'too_large') {
+        return { ...empty, refusals: ['file_too_large'], resolvedPath: resolved };
+      }
       digest = proof.digest;
       sizeBytes = proof.size;
     } finally {
@@ -986,7 +1060,13 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
     try {
       db = openHqDatabaseReadOnly(scratchPath);
     } catch {
-      return { ...empty, refusals: ['not_a_readable_sqlite_database'], digest, sizeBytes };
+      return {
+        ...empty,
+        refusals: ['not_a_readable_sqlite_database'],
+        digest,
+        sizeBytes,
+        resolvedPath: resolved,
+      };
     }
     try {
       // Readability FIRST, and as a real query rather than as an assumption:
@@ -999,17 +1079,29 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
       try {
         tables = tableNames(db);
       } catch {
-        return { ...empty, refusals: ['not_a_readable_sqlite_database'], digest, sizeBytes };
+        return {
+          ...empty,
+          refusals: ['not_a_readable_sqlite_database'],
+          digest,
+          sizeBytes,
+          resolvedPath: resolved,
+        };
       }
 
       let integrityVerdict: string;
       try {
         const rows = db.prepare(`PRAGMA integrity_check`).all() as Record<string, unknown>[];
-        const values = rows.map((row) => String(Object.values(row)[0] ?? '')).filter((value) => value !== '');
+        const values = rows
+          .map((row) => String(Object.values(row)[0] ?? ''))
+          .filter((value) => value !== '');
         integrityVerdict = values.length === 1 && values[0] === 'ok' ? 'ok' : values.join('; ');
       } catch (error) {
-        // A check that could not run is not a check that passed.
-        integrityVerdict = `integrity_check could not run: ${error instanceof Error ? error.message : 'unknown error'}`;
+        // A check that could not run is not a check that passed. The engine's
+        // own message is deliberately NOT interpolated: this string reaches a
+        // Founder browser, and this module composes detail from schema names,
+        // pragma values and counts only.
+        void error;
+        integrityVerdict = 'integrity_check could not run on this file';
       }
       const refusals: BackupRefusalReason[] = [];
       if (integrityVerdict !== 'ok') refusals.push('integrity_check_failed');
@@ -1021,6 +1113,7 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
         sizeBytes,
         schemaTables: tables.size,
         integrityVerdict: integrityVerdict.slice(0, 400),
+        resolvedPath: resolved,
       };
     } finally {
       try {

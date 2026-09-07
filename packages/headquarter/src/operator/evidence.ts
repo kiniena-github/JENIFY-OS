@@ -24,6 +24,15 @@ export interface EvidenceEntry {
   hash: string;
 }
 
+/**
+ * The chain's zero value. Module-private and stays that way: the one
+ * enforcement-safe verifier, `verifyEvidenceChain` below, lives in this module
+ * and closes over it, so there is exactly ONE spelling of the zero value and no
+ * second computation that could drift from it. (A previous correction pass
+ * exported this constant so a verifier written elsewhere could share it; the
+ * verifier was moved HERE instead, which is strictly better — the export would
+ * now be a dead surface inviting exactly that second copy.)
+ */
 const GENESIS_HASH = 'genesis';
 
 /**
@@ -68,7 +77,17 @@ export function verifyEvidenceChain(db: HqDatabase): number | null {
     // Parsed and re-stringified, exactly as `list()` does it, because that is
     // the encoding `append()` hashed. A raw `row.payload` would differ from it
     // for any payload SQLite stored with different whitespace.
-    const payloadJson = JSON.stringify(JSON.parse(row.payload as string));
+    //
+    // An UNPARSEABLE payload is a broken entry, not a passed one, and not an
+    // exception either: this function feeds a safe-mode verdict, so a raw
+    // writer that stored `payload = 'not json'` must produce a BREAK at that
+    // seq rather than a thrown error that the assessment never returns from.
+    let payloadJson: string;
+    try {
+      payloadJson = JSON.stringify(JSON.parse(row.payload as string));
+    } catch {
+      return seq;
+    }
     const expected = createHash('sha256')
       .update(
         [

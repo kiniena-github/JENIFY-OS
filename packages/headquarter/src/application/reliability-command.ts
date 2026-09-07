@@ -505,6 +505,14 @@ export function reliabilitySchemaPresent(db: HqDatabase): boolean {
  * facts alone; the facade refuses the second open outright when the task
  * already carries an unreconciled run, so the two halves close it in both
  * directions.
+ *
+ * The other correction lane found the same defect and reproduced it at the
+ * smallest possible scale: changing `'publish the thing'` to `'publish the
+ * thing.'` opened a SECOND run on the same task, same worker and same live
+ * fence, with a fresh admitted attempt, beside a run standing at
+ * `needs_reconciliation` / `outcome_unknown` for that very work. A law that
+ * says "never retried" cannot be keyed on a description. The label remains a
+ * stored, bounded, secret-scanned human note on the run; it identifies nothing.
  */
 export function runIdempotencyKey(input: {
   taskId: string;
@@ -513,7 +521,17 @@ export function runIdempotencyKey(input: {
   missionId: string | null;
   idempotencyKey: string | null;
 }): string {
-  const digest = createHash('sha256').update(canonicalJson(input)).digest('hex');
+  const digest = createHash('sha256')
+    .update(
+      canonicalJson({
+        taskId: input.taskId,
+        runKind: input.runKind,
+        actionId: input.actionId,
+        missionId: input.missionId,
+        idempotencyKey: input.idempotencyKey,
+      }),
+    )
+    .digest('hex');
   return `run:${digest.slice(0, 32)}`;
 }
 
@@ -830,6 +848,21 @@ export interface RunRecord {
    */
   admitsAttempt: boolean;
   needsReconciliation: boolean;
+  /**
+   * True when the run's MOST RECENT event is an `interrupted` one — a recovery
+   * pass classified it and nothing has been reported or reconciled since.
+   *
+   * It exists because `process_id` proves "not the process running the
+   * recovery", never "dead" (Wave 5 Medium 1). A live worker mid-attempt whose
+   * run is classified by a concurrent recovery would otherwise be permanently
+   * unable to say what actually happened: its truthful `recordRunOutcome` was
+   * refused `run_state_conflict`, and only a human guess could close the run.
+   * A worker still holding the LIVE FENCED CLAIM — which a genuinely dead
+   * process cannot — may record the outcome it observed against a run in this
+   * position. That is a report, never a retry: it opens no attempt generation,
+   * and the interruption event stays in the ledger as the history it is.
+   */
+  interruptedWithoutReport: boolean;
   events: RunEventView[];
 }
 
@@ -880,14 +913,27 @@ export function deriveRunRecord(row: RunRow, events: readonly RunEventRow[]): Ru
         const value: RunOutcome = isReportableRunOutcome(reported) ? reported : 'outcome_unknown';
         outcome = value;
         const category = str(event.detail, 'failureCategory');
-        failureCategory = isRunFailureCategory(category) ? category : 'none';
+        // Fail closed like every sibling default. `'none'` asserts "there was
+        // no failure category", which is a positive claim HQ cannot make about
+        // a detail blob it could not read; `'unknown'` is already a member of
+        // the closed vocabulary and says exactly what is true (Wave 5 Low).
+        failureCategory = isRunFailureCategory(category) ? category : 'unknown';
         state = value === 'outcome_unknown' ? 'needs_reconciliation' : 'concluded';
         reopened = false;
         break;
       }
       case 'interrupted': {
         const reason = str(event.detail, 'reason');
-        const uncertain = event.detail.uncertain === true;
+        // FAIL CLOSED on the flag that decides whether a human is needed.
+        // This read used to be `=== true`, so an absent, corrupt or
+        // non-boolean `uncertain` produced `false` — and `false` here means
+        // `not_executed` / `concluded`, i.e. "nothing happened", which is the
+        // exact opposite of what an unreadable detail blob supports and the
+        // opposite of the documented rule (Wave 5 Medium 4). Only an EXPLICIT
+        // `false`, which the recovery pass writes when it can prove no attempt
+        // was ever reserved or that the capability cannot reach outside HQ,
+        // closes a run without a human.
+        const uncertain = event.detail.uncertain !== false;
         interruption = {
           reason: isRunInterruptionReason(reason) ? reason : 'process_interrupted',
           at: event.at,
@@ -962,6 +1008,7 @@ export function deriveRunRecord(row: RunRow, events: readonly RunEventRow[]): Ru
     reconciliation,
     admitsAttempt: state === 'open' || reopened,
     needsReconciliation: state === 'needs_reconciliation',
+    interruptedWithoutReport: events[events.length - 1]?.kind === 'interrupted',
     events: events.map((event) => ({
       kind: event.kind,
       actor: event.actor,
@@ -1039,10 +1086,12 @@ export interface BackupRecordView {
 
 export const BACKUP_RECORD_STATEMENT =
   'contentDigest is computed BY HQ over the exact bytes it opened and checked, so it pins what was verified. ' +
-  'Those are the same bytes throughout: a candidate carrying a -wal, -shm or -journal sidecar is refused ' +
-  'rather than verified, because SQLite would read the sidecar together with the main file and the digest ' +
-  'covers only the file, and a path that does not resolve to the same inode for the digest and for the ' +
-  'database open is refused too. HQ did not take this backup and cannot restore it: taking one safely ' +
+  'Those are the same bytes throughout, by construction: the candidate is opened once, and its bytes are ' +
+  'hashed and copied to a scratch file in one pass, and integrity_check and the schema census then run ' +
+  'against that copy — so the path is never resolved a second time. A candidate carrying a -wal, -shm or ' +
+  '-journal sidecar is refused rather than verified, because SQLite would read the sidecar together with ' +
+  'the main file and the digest covers only the file. HQ did not take this backup and cannot restore it: ' +
+  'taking one safely ' +
   'belongs to the durable persistence owner, and restoring is a deliberate operator act against a stopped ' +
   'process. This row says a file was checked, by whom, and what it hashed to — nothing more.';
 
@@ -1179,21 +1228,42 @@ function zeroed<T extends string>(members: readonly T[]): Record<string, number>
   return counts;
 }
 
-export function emptyReliabilitySnapshot(storePresent: boolean): ReliabilitySnapshotView {
-  return {
+/**
+ * The snapshot for a handle that carries NO run ledger.
+ *
+ * The run counts are genuinely zero — there is no ledger to count — but the
+ * INTEGRITY half is not: `#integrityReport` is latched at construction
+ * independently of the reliability store, and the snapshot CLI opens read-only,
+ * which is exactly the store-absent branch. This used to hard-code
+ * `safeMode: false`, `findings: {}` and `durabilityMeetsRequirement: true`, so
+ * a world-readable artifact published "everything is fine" while HQ had latched
+ * safe mode with blocking findings — and published
+ * `durabilityMeetsRequirement: true` on EVERY read-only pre-Phase-13 snapshot
+ * with no tampering at all (Wave 5 High 5, executed).
+ *
+ * The integrity facts are therefore a REQUIRED argument: there is no way to
+ * build this view without stating what HQ actually knows about itself. The
+ * privacy shape is unchanged — the finding map is keyed through the closed
+ * vocabulary by `summarizeReliability`, and no detail text crosses.
+ */
+export function emptyReliabilitySnapshot(
+  storePresent: boolean,
+  integrity: {
+    safeMode: boolean;
+    assessmentDepth: 'structural' | 'full';
+    findings: readonly string[];
+    durabilityMeetsRequirement: boolean;
+  },
+): ReliabilitySnapshotView {
+  return summarizeReliability({
     storePresent,
-    runs: 0,
-    byKind: zeroed(RUN_KINDS) as RunKindCounts,
-    byState: zeroed(RUN_STATES) as RunStateCounts,
-    byOutcome: zeroed(RUN_OUTCOMES) as RunOutcomeCounts,
-    needsReconciliation: 0,
+    runs: [],
     verifiedBackups: 0,
-    safeMode: false,
-    assessmentDepth: 'structural',
-    findings: {},
-    durabilityMeetsRequirement: true,
-    note: RELIABILITY_SNAPSHOT_NOTE,
-  };
+    safeMode: integrity.safeMode,
+    assessmentDepth: integrity.assessmentDepth,
+    findings: integrity.findings,
+    durabilityMeetsRequirement: integrity.durabilityMeetsRequirement,
+  });
 }
 
 export const RELIABILITY_SNAPSHOT_NOTE =

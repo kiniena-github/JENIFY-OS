@@ -20,7 +20,7 @@ import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
 import { assertTransition, type ActivityStatus } from '../contracts/events.js';
-import { CapabilityRegistry, type Capability } from './capabilities.js';
+import { CapabilityRegistry, readStoredRiskClass, type Capability } from './capabilities.js';
 
 /**
  * Every AUTHORITY-BEARING mutation on the queue, handed only to the
@@ -299,6 +299,15 @@ export class OperatorQueue {
    * the chain attests order and integrity, never authority (issue #200, Codex
    * exact-head finding on `821c836` — the twelfth mechanism here, and the
    * first aimed at the audit record itself rather than at a decision).
+   *
+   * The READS here are patchable, and that stays safe only while nothing
+   * enforced dispatches through them. Phase 13 briefly broke that: the
+   * safe-mode assessment read `verifyChain` from this object, so replacing it
+   * cleared the `evidence_chain_broken` latch. The assessment now recomputes
+   * the chain through `HeadquarterOperations.#verifyEvidenceChainFromStore` —
+   * a `#private` closure over the database and the module-level
+   * `verifyEvidenceChain`, with no prototype to patch — and this handle is once
+   * again a convenience a caller can only lie to itself with.
    */
   readonly evidence: EvidenceReadOnly;
   /** The writer. Never reachable from anything a worker is handed. */
@@ -463,7 +472,7 @@ export class OperatorQueue {
       return {
         id: row.id as string,
         description: row.description as string,
-        riskClass: row.risk_class as Capability['riskClass'],
+        riskClass: readStoredRiskClass(row.risk_class),
         sideEffect: !!row.side_effect,
         idempotent: !!row.idempotent,
         enabled: !!row.enabled,
