@@ -248,6 +248,42 @@ exists. The verdict is a `#private` latched field; a hostile patch of
 instance, on the prototype, and on a facade constructed AFTER the patch — and
 to buy no claim on either facade.
 
+> **Correction (Wave 5 review, HIGH finding 1).** That paragraph was true of
+> the FIELD and false of the LATCH, and the gap was real rather than
+> theoretical. `assessHqIntegrity` computed `evidence_chain_broken` — one of the
+> three blocking findings, and the only one that detects tampering with HQ's own
+> audit record — through `() => this.queue.evidence.verifyChain()`. `queue` is a
+> public `readonly` field and `queue.evidence` is a mutable own-property object
+> literal that issue #200 deliberately keeps PATCHABLE, safe exactly while
+> nothing is enforced on it. So the finding could be switched off by assignment,
+> and worse: the next legitimate Founder assessment then found nothing and
+> CLEARED an already-latched safe mode, handing `releaseKillSwitch` and
+> `claimNext` back out against a chain that was still broken. This violated
+> permanent architectural law 3 and repeated a defect class the repository had
+> already hardened against three times (`queue.evidence` under #200,
+> `#getTask`/`#capabilityOf` rebuilt as private closures).
+>
+> **Fixed** by the pattern `#capabilityFromStore` and `#runClaimFact` already
+> use: `#verifyEvidenceChainFromStore` is a `#private` closure over the facade's
+> own handle and a new module-level `verifyEvidenceChain(db)` in
+> `operator/evidence.ts`. `EvidenceLog.verifyChain` is now a thin delegate over
+> the same function, so the read surface and the enforcement path share ONE
+> computation and cannot drift, and no prototype method participates — patching
+> `EvidenceLog.prototype.verifyChain` or `.list` moves what the patcher sees and
+> nothing that safe mode decides. Pinned by
+> `reliability-authority.test.ts` → "the safe-mode evidence verdict is computed
+> from enforcement-safe truth": the chain is broken by a LEGAL APPEND from a raw
+> connection, safe mode engages, the delegate is patched on the instance AND on
+> `EvidenceLog.prototype` (both proven to have taken), and the finding still
+> engages, the latch is still not cleared, `releaseKillSwitch` and `claimNext`
+> still refuse, a facade constructed AFTER the patch reaches the same verdict,
+> and an independent recomputation confirms the chain really is broken. A source
+> scan additionally pins that no non-comment line of `service.ts` reaches
+> `queue.evidence.verifyChain`.
+>
+> With that in place the paragraph above is now true of both: nothing clears
+> safe mode by assertion, and nothing clears it by patching a read either.
+
 ## Backup and restore
 
 HQ does not take a backup and cannot restore one. Taking one safely — inode
@@ -301,6 +337,14 @@ whatever inode the path resolves to — so what it breaks is bookkeeping.
 file rather than an alias for it. Refusing on any divergence was the other
 option and was rejected as disproportionate and non-portable: on macOS
 `os.tmpdir()` itself sits under a symlinked `/var`.
+
+> **Correction (Wave 5 review, LOW finding 8).** Seven of those eight refusals
+> were asserted BY NAME; the corrupted-database one asserted only `verified:
+> false` plus the facade's error code, which left `integrity_check_failed` the
+> one exercised refusal whose reason nothing pinned — a corrupted backup and a
+> good one refused for an unrelated reason read the same. The test now asserts
+> the refusal name, the non-`ok` integrity verdict, and that the name reaches
+> the caller in both the message and the `details.refusals` array.
 
 `recordVerifiedBackup` performs the verification itself rather than trusting a
 caller, and records the sha256 **HQ computed over the bytes it checked** —
@@ -356,6 +400,8 @@ The strongest claim in the phase, established three ways — the Phase 12 recipe
 | the capability's idempotency | `#capabilityFromStore` | whether `confirmed_not_executed` may reopen an attempt | canonical. |
 | the reliability-command capability row | `#capabilityFromStore` | whether an assessment or a backup record may proceed | canonical, unchanged from the Phase 4/5/7/12 pattern. |
 | the SAFE-MODE verdict | the `#private` `#integrityReport` field | whether a Founder-gated write, an approval, a kill-switch release, a claim or an external execution proceeds | canonical. Pinned against a patch of `hqReliabilityPosture` and `reliabilitySummary` on instance, prototype, and a later-constructed facade. |
+| the EVIDENCE-CHAIN verification that PRODUCES that verdict | `#verifyEvidenceChainFromStore` — a `#private` closure over `#db` and the module-level `verifyEvidenceChain`, deliberately NOT `queue.evidence.verifyChain()` | whether `evidence_chain_broken` engages safe mode, and whether an already-latched safe mode survives the next assessment | canonical **since the Wave 5 correction**; it previously read the patchable delegate. Pinned against a patch on the instance and on `EvidenceLog.prototype`, and against a facade constructed after it. |
+| the APPEND-ONLY GUARD census that produces the other schema finding | `missingImmutabilityGuards(db)` over `ENGINE_IMMUTABLE_TABLES`, observed as the file was FOUND | whether `append_only_guard_missing` engages safe mode | canonical, and **widened by the Wave 5 correction** to the secondary-unique guards and `hq_memory`'s supersede rule, which it previously could not see. |
 | store presence | the constructor's `#reliabilityStorePresent` flag | whether a 0 means "absent" or "empty" | canonical, observed, never migrated. |
 | the ledger, for the unauthenticated snapshot | `#listRunsFromStore` and the `#private` report — deliberately NOT `listRuns()` or `hqReliabilityPosture()` | what `hq-snapshot.json`'s `reliability` section publishes | canonical. |
 
@@ -551,35 +597,52 @@ timing-only concurrency tests. What was built:
   bounded.** HQ reports that a guard was absent when the file was found; it
   cannot say for how long, or what was written meanwhile. That is why the
   posture is "stop and investigate" rather than "here is the damage".
-- **The guard census covers the trio AND every declared SECONDARY guard**
-  (Wave 5 High 1). It used to cover only `no_rewrite`/`no_erase`/`no_replace`,
-  on the reasoning that listing every trigger name would drift. That reasoning
-  was wrong in the direction that matters: the secondary guards close REPLACE
-  on a SECONDARY unique index, where the primary-identity guard never fires, and
+- **The guard census covers the trio AND every declared SECONDARY guard.**
+  Both Wave 5 correction lanes reached this independently (one as High 1, one
+  as Medium 2). It used to cover only `no_rewrite`/`no_erase`/`no_replace`, on
+  the reasoning that listing every trigger name would drift, and that a table's
+  further guards were "that module's business". That reasoning was wrong in the
+  direction that matters: the secondary guards close REPLACE on a SECONDARY
+  unique index, where the primary-identity guard never fires, and
   `recursive_triggers` is off by default and connection-scoped — so an
   `INSERT OR REPLACE` colliding on such an index DELETES the standing row with
   no BEFORE DELETE running. Dropping just
   `trg_hq_reliability_run_events_no_replace_attempt` (the cross-process
   duplicate-attempt guard) left `missingImmutabilityGuards` reporting `[]`,
   safe mode false at both depths, and a committed append-only row erasable and
-  replaceable by a forged one, with no finding. `ENGINE_IMMUTABLE_TABLES`
-  entries now carry `extraGuards`, and the live-schema pin test compares the
-  FULL trigger-name set for every listed prefix, so a guard a future phase adds
-  and forgets to declare fails there rather than escaping the check.
-- **The safe-mode latch reads the evidence chain from private truth**
-  (Wave 5 Critical 1). `assessHqIntegrity` used to pass
-  `() => this.queue.evidence.verifyChain()` into `fullIntegrity`.
-  `queue.evidence` is a public own-property object the queue documents as safe
-  to patch "because enforcement never dispatches through it" — a premise that
-  call made false. `evidence_chain_broken` is one of only three blocking
-  findings and this assessment is the only path that CLEARS the latch, so
-  replacing that one read let a same-realm caller clear safe mode over a
-  genuinely broken chain and claim again. The chain is now recomputed by
-  `#evidenceChainFromStore`, an ECMAScript `#private` closure over the
-  database, following the `#capabilityFromStore` recipe — deliberately NOT a
-  delegation to `PrivilegedQueueApi`, because that would still dispatch through
-  the exported `EvidenceLog.prototype`, which is equally patchable. Pinned on
-  the instance AND on that prototype.
+  replaceable by a forged one, with no finding; dropping
+  `trg_hq_intel_budgets_no_replace_unique` was demonstrated the same way, and
+  the ceiling went 1000 to 999999999 with the census silent.
+  `ENGINE_IMMUTABLE_TABLES` entries now declare `secondaryGuards` and
+  `declaredGuardsFor` composes the full set the census demands, so a dropped
+  secondary guard produces a real `append_only_guard_missing` finding and
+  engages safe mode at both depths and at the next construction. The drift
+  concern is answered where it belongs: TWO live-schema pin tests hold the
+  whole declaration — one compares the full trigger-name set for every listed
+  PREFIX, the other every trigger on the listed TABLE — so a guard a future
+  phase adds and forgets to declare fails there rather than escaping the check.
+- **The safe-mode latch reads the evidence chain from private truth.** Both
+  correction lanes found this too (one as Critical 1, one as High 1).
+  `assessHqIntegrity` used to pass `() => this.queue.evidence.verifyChain()`
+  into `fullIntegrity`. `queue.evidence` is a public own-property object the
+  queue documents as safe to patch "because enforcement never dispatches
+  through it" — a premise that call made false. `evidence_chain_broken` is one
+  of only three blocking findings and this assessment is the only path that
+  CLEARS the latch, so replacing that one read let a same-realm caller clear
+  safe mode over a genuinely broken chain and claim again. The chain is now
+  computed by a module-level `verifyEvidenceChain(db)` in `operator/evidence.ts`
+  and reached from `#verifyEvidenceChainFromStore`, an ECMAScript `#private`
+  closure over the facade's own handle — deliberately NOT a delegation to
+  `PrivilegedQueueApi`, because that would still dispatch through the exported
+  `EvidenceLog.prototype`, which is equally patchable. `EvidenceLog.verifyChain`
+  is now a thin delegate over that same function, so the READ surface and the
+  ENFORCEMENT path share one computation and cannot drift — the reason this
+  shape was kept over the other lane's inlined second copy. Pinned on the
+  instance AND on that prototype, with `EvidenceLog.list` patched out too, plus
+  a source scan that no non-comment line of `service.ts` reaches
+  `queue.evidence.verifyChain`. An unparseable payload is a BREAK at that seq
+  rather than a thrown error, which is the one thing the dropped copy did
+  better and which was carried into the survivor.
 - **`POST /reliability/reconcile` takes step-up, unconditionally** (Wave 5
   High 4). It was the only reconciliation route in HQ without it, while Phase
   8's `actionReconcile` — which shares this route's decision vocabulary BY
@@ -609,6 +672,10 @@ timing-only concurrency tests. What was built:
   acting as the Founder or as a registered worker.
 
 ## Wave 5 review corrections
+
+The frozen wave head was reviewed by TWO independent hostile passes; this
+section records the four-reviewer one, and "Wave 5 correction pass" at the end
+of this document records both and how they were reconciled.
 
 The Phase 13 defects a four-reviewer hostile pass found, and what was done
 about each, are recorded inline in the sections above: the safe-mode latch's
@@ -663,3 +730,73 @@ rather than hidden:
 
 `Phase 10`'s assertion that no facade method name matches `/recommend/i` is
 untouched and still holds; nothing in this phase recommends anything.
+
+---
+
+## Wave 5 correction pass (this branch, on top of `c9ddecc`)
+
+**Two independent correction lanes, reconciled by a merge.** The frozen wave
+head `c9ddecc` was hostile-reviewed twice, concurrently and without either
+reviewer knowing about the other:
+
+| Lane | Verdict | Landed as |
+|---|---|---|
+| A four-reviewer sweep | 1 Critical / 5 High / 10 Medium / ~13 Low | twelve commits |
+| A separate fresh read-only reviewer | 0 Critical / 1 High / 1 Medium / 6 Low | one commit |
+
+Both reached the SAME two defects — the safe-mode evidence-chain read and the
+trio-only guard census — by different routes, and each found things the other
+did not. The merge keeps the union of the guarantees, one implementation of
+each shared fix, and every regression test from both lanes. Where the two
+disagreed on implementation the surviving choice and the reason are recorded at
+the code and in the bullets above; nothing was resolved by picking a side.
+
+The findings that touch Phase 13 are corrected in place above, in the sections
+they belong to rather than in a footnote:
+
+| Finding | Where it is now recorded |
+|---|---|
+| the safe-mode evidence verdict came through a patchable delegate (Lane A Critical 1 = Lane B High 1) | "Safe mode → Nothing clears it by assertion", plus two new rows in the enforcement-safe read audit, plus "Known limitations → The safe-mode latch reads the evidence chain from private truth" |
+| the secondary append-only guards were unpinned and invisible to the census (Lane A High 1 = Lane B Medium 2) | "Known limitations → The guard census covers the trio AND every declared SECONDARY guard", plus the census row in the audit |
+| `POST /reliability/reconcile` took no step-up (Lane A High 4) | "Surfaces", and "Known limitations" |
+| the store-absent snapshot failed OPEN (Lane A High 5) | "Privacy: what crosses to the unauthenticated artifact" |
+| `process_id` read as a liveness signal (Lane A Medium 1) | "When a live process is classified" |
+| the label-keyed run identity (Lane A Medium 2) | "Known limitations → A run's dedupe key" |
+| the backup digest did not cover what SQLite checked (Lane A Medium 3) | "Backup and restore" |
+| the `interrupted` branch's fail-OPEN `uncertain` flag (Lane A Medium 4, minimum only) | "The law: an uncertain outcome is never retried" |
+| the corrupted-backup refusal was not pinned by name (Lane B Low 8) | "Backup and restore" |
+
+**Which duplicate implementation was dropped, and why.** Both lanes moved the
+evidence-chain verification off `queue.evidence.verifyChain`. Lane A inlined a
+second copy of the hash formula as a `#private` closure in `service.ts`; Lane B
+moved the computation to a module-level `verifyEvidenceChain(db)` and made
+`EvidenceLog.verifyChain` a thin delegate over it. Lane B's survives and Lane
+A's copy was deleted, on the argument that decided it: two computations of one
+verdict can drift, and a drifted verifier reports a false break, which under
+safe mode is an outage rather than a warning. Lane A's one better behaviour —
+an unparseable payload is a BREAK at that seq rather than a thrown
+`JSON.parse` — was carried into the survivor and is pinned by its own test.
+Both lanes' hostile-patch tests are kept, and both live-schema guard pins are
+kept: one compares the full trigger-name set per PREFIX, the other every
+trigger per TABLE.
+
+**Verification after the reconciliation** (the whole suite, not a subset):
+
+| Command | Result |
+|---|---|
+| `npm run test:hq` | 162 files, 3073 tests passed |
+| `npm run typecheck --workspace @factoryos/headquarter` | clean |
+| `npm run test --workspace @factoryos/hq-host` | 23 files, 222 tests passed |
+| `npm run typecheck --workspace @factoryos/hq-host` | clean |
+| `npm run test --workspace @factoryos/hq-server` | 2 files, 20 tests passed |
+| `npm run typecheck --workspace @factoryos/hq-server` | clean |
+| `npm test` (root) | 37 files, 569 passed, 3 skipped |
+| `npm run build` | all workspaces; web `215.66 kB` / `69.22 kB` gzip (unchanged) |
+| `npm run build:site --workspace @factoryos/headquarter` | 10 pages + `hq-snapshot.json` |
+
+Baseline at `c9ddecc` was 161 files / 3026 tests; Lane A alone was 161 / 3053
+and Lane B alone 162 / 3045. Nothing was deleted, skipped, weakened or
+narrowed by either lane or by the merge; the three pre-existing `it.skip` GAP
+markers under `packages/server` are untouched, and nothing under
+`packages/server`, `packages/web`, `packages/shared` or `packages/config-mesob`
+was changed.

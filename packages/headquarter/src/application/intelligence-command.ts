@@ -1011,6 +1011,28 @@ export const RISK_FLOOR: Readonly<Record<RiskClass, IntelligenceTier>> = {
 };
 
 /**
+ * The RISK CLASS a routing decision is computed against.
+ *
+ * Canonical when the task's `op_capabilities` row can be read; the STRICTEST
+ * class — `founder_gate`, which forces the highest floor AND a
+ * `critical_review` requirement — when it cannot. An unreadable capability
+ * must never be the cheap path.
+ *
+ * Extracted from `HeadquarterOperations.#characteristicsFor` by the Wave 5
+ * review (LOW finding 5). The default was live and correct, and it was
+ * UNPINNED: the reviewer flipped it to `'read_only'` and all 3026 tests passed,
+ * because a foreign key on `op_tasks.capability_id` makes an unreadable row
+ * unreachable through the ordinary path. A defensive default whose whole job is
+ * to hold on the day the FK does not — a raw writer, a handle with
+ * `foreign_keys` off, a future schema change — is worth keeping and is worth
+ * one assertion. It is a total function over one nullable input, so the
+ * assertion is a unit test rather than a contrived integration.
+ */
+export function riskClassForRouting(capability: { riskClass: RiskClass } | null | undefined): RiskClass {
+  return capability ? capability.riskClass : 'founder_gate';
+}
+
+/**
  * When an INDEPENDENT REVIEW tier is required, and which one.
  *
  * Derived from the canonical risk class alone, because that is the one input
@@ -1926,8 +1948,25 @@ export function budgetRowToRecord(row: BudgetRow): BudgetRecord {
  */
 export interface SpendByIdentity {
   id: string;
-  currency: string;
-  knownAmountMinorUnits: number;
+  /**
+   * The observed currency, or NULL when this group's entries carry no currency
+   * at all — which is exactly when they carry no amount either
+   * (`normalizeCostFact` and `readStoredCostFact` lock the two together in both
+   * directions). Never a synthetic code: `"unknown"` is not a currency, and a
+   * reader scanning currency codes must not find one HQ invented.
+   */
+  currency: string | null;
+  /**
+   * The sum of the amounts HQ actually knows, or NULL when it knows none.
+   *
+   * Law 8 (Wave 5 review, LOW finding 6). This used to render `0` under a
+   * synthetic `currency: "unknown"`. Nothing was fabricated — the `0` was
+   * arithmetically true and `unknownAmountEntries` stood beside it — but a `0`
+   * sitting next to an identity HQ has no amount for is precisely the shape a
+   * reader misreads as "this cost nothing", and that is the reading this phase
+   * exists to prevent. An unknown amount is `null`, here as everywhere else.
+   */
+  knownAmountMinorUnits: number | null;
   entries: number;
   unknownAmountEntries: number;
 }
@@ -2046,28 +2085,39 @@ function foldSpend(
     const id = keyOf(row);
     if (id == null) continue;
     // Currency is part of the grouping key, because HQ never converts between
-    // currencies and a sum across two of them would be a fabricated number.
-    const currency = row.fact.currency ?? 'unknown';
-    // U+001F UNIT SEPARATOR, not a raw NUL. A literal 0x00 in a source file
-    // makes it BINARY to grep, git grep and ripgrep — they report "binary file
-    // matches" and skip the content — so the file becomes invisible to the
-    // repository's own text tooling and to a reviewer's honesty scan. The
-    // runtime value is identical: both are characters no identifier or
-    // currency code can contain (Wave 5 Medium 10).
-    const composite = `${id}${currency}`;
+    // currencies and a sum across two of them would be a fabricated number. A
+    // null currency is its OWN group and STAYS null — the group of entries HQ
+    // has no amount for. It is not labelled `"unknown"`, because that would put
+    // an invented code where a reader expects an observed one.
+    const currency = row.fact.currency;
+    // U+001F UNIT SEPARATOR, not a raw NUL and not a space. A literal 0x00 in a
+    // source file makes it BINARY to grep, git grep and ripgrep — they report
+    // "binary file matches" and skip the content — so the file becomes
+    // invisible to the repository's own text tooling and to a reviewer's
+    // honesty scan. A SPACE would be worse still: the identities folded here are
+    // provider and model strings that may legitimately contain one, so
+    // `"a b"` with no currency and `"a"` with currency `"b"` would collapse into
+    // one bogus group. U+001F is a character neither an identity nor a currency
+    // code can contain.
+    const composite = `${id}${currency ?? ''}`;
     const entry = byKey.get(composite) ?? {
       id,
       currency,
-      knownAmountMinorUnits: 0,
+      // Null until a KNOWN amount is folded in. See the field's own note: a `0`
+      // beside an identity HQ has no amount for is the reading this phase
+      // exists to prevent.
+      knownAmountMinorUnits: null,
       entries: 0,
       unknownAmountEntries: 0,
     };
     entry.entries += 1;
     if (row.fact.amountMinorUnits == null) entry.unknownAmountEntries += 1;
-    else entry.knownAmountMinorUnits += row.fact.amountMinorUnits;
+    else entry.knownAmountMinorUnits = (entry.knownAmountMinorUnits ?? 0) + row.fact.amountMinorUnits;
     byKey.set(composite, entry);
   }
-  return [...byKey.values()].sort((a, b) => a.id.localeCompare(b.id) || a.currency.localeCompare(b.currency));
+  return [...byKey.values()].sort(
+    (a, b) => a.id.localeCompare(b.id) || (a.currency ?? '').localeCompare(b.currency ?? ''),
+  );
 }
 
 /** Fold the ledgers into truthful analytics. Every number is observed. */
@@ -2115,6 +2165,11 @@ export function summarizeIntelligenceAnalytics(input: {
     perTier.set(bucketKey, bucket);
   }
 
+  // As in `summarizeIntelligence`: a stored provenance is already vocabulary by
+  // the time it reaches here (`readStoredCostFact` coerces), so this map's
+  // `unrecognized` bucket cannot be reached through the live path and is kept
+  // for the shape and for a caller passing a raw fact — not for a defence
+  // against anything the ledger can hold.
   const byProvenance = zeroed(COST_PROVENANCES);
   let unknownAmountEntries = 0;
   const currencyTotals = new Map<string, { currency: string; knownAmountMinorUnits: number; entries: number }>();
@@ -2243,8 +2298,27 @@ export function emptyIntelligenceSnapshot(storePresent: boolean): IntelligenceSn
  *
  * The four MAPS are closed BY CONSTRUCTION, not merely by intent — the Phase
  * 12 lesson, applied again. Every increment passes a membership check and the
- * CHECKED value is the key, so a stored tier, state, result or provenance that
- * is free text lands in `unrecognized` and its TEXT never becomes a key.
+ * CHECKED value is the key, so a stored tier, state or result that is free text
+ * lands in `unrecognized` and its TEXT never becomes a key.
+ *
+ * **Where `unrecognized` really catches something, stated exactly** (Wave 5
+ * review, LOW finding 7). For the tier, state and result it is reachable IN
+ * PRODUCTION: those are read off the stored column as-is, so a raw append
+ * carrying `SUPER SECRET TIER NAME` lands there. For the cost PROVENANCE it is
+ * reachable only at this function's own boundary — every fact HQ actually
+ * hands it came through `readStoredCostFact`, which has ALREADY coerced
+ * anything outside `COST_PROVENANCES` to `unknown`, so no stored row can reach
+ * `UNRECOGNIZED_BUCKET` through the live path. The check and the bucket are
+ * kept, and described as what they are rather than as a live defence: this
+ * fold has to stay closed by construction independently of what its caller
+ * happens to do today, and a `zeroed()` map publishes the same key set whether
+ * the bucket is ever incremented or not. Both readings fail closed, so nothing
+ * is at risk either way.
+ *
+ * The same class of finding was recorded in Wave 4 as
+ * `byLifecycle.unrecognized` and deliberately LEFT open; this pass corrects the
+ * wording here and does not touch that one, so the two now differ in wording
+ * while agreeing in behaviour.
  *
  * No amount crosses at all. That is not a redaction, it is the shape: this
  * view has no numeric money field, so there is nothing to leak and nothing a
@@ -2270,6 +2344,12 @@ export function summarizeIntelligence(input: {
   const byCostProvenance = zeroed(COST_PROVENANCES);
   let unknownAmountEntries = 0;
   for (const entry of input.costs) {
+    // Belt-and-braces at this boundary, not a live defence behind it: every
+    // `entry.fact` HQ hands in came through `readStoredCostFact`, which has
+    // already coerced an out-of-vocabulary provenance to `unknown`, so no
+    // STORED row reaches `UNRECOGNIZED_BUCKET` here. Kept so the fold stays
+    // closed by construction if that reader ever changes, and so a caller
+    // passing a raw fact is bucketed rather than trusted. See the note above.
     byCostProvenance[isCostProvenance(entry.fact.provenance) ? entry.fact.provenance : UNRECOGNIZED_BUCKET] += 1;
     if (entry.fact.amountMinorUnits == null) unknownAmountEntries += 1;
   }

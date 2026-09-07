@@ -25,15 +25,15 @@ export interface EvidenceEntry {
 }
 
 /**
- * The chain's zero value. Exported as `EVIDENCE_GENESIS_HASH` so an
- * enforcement-safe verifier can recompute the chain WITHOUT dispatching
- * through this class's prototype — `EvidenceLog` is exported, so a same-realm
- * caller can replace `EvidenceLog.prototype.verifyChain`, and a safe-mode
- * verdict must not be reachable that way. See
- * `HeadquarterOperations.#evidenceChainFromStore`.
+ * The chain's zero value. Module-private and stays that way: the one
+ * enforcement-safe verifier, `verifyEvidenceChain` below, lives in this module
+ * and closes over it, so there is exactly ONE spelling of the zero value and no
+ * second computation that could drift from it. (A previous correction pass
+ * exported this constant so a verifier written elsewhere could share it; the
+ * verifier was moved HERE instead, which is strictly better — the export would
+ * now be a dead surface inviting exactly that second copy.)
  */
-export const EVIDENCE_GENESIS_HASH = 'genesis';
-const GENESIS_HASH = EVIDENCE_GENESIS_HASH;
+const GENESIS_HASH = 'genesis';
 
 /**
  * Best-effort guard: refuse evidence payloads that look like they carry
@@ -48,6 +48,63 @@ export function assertNoSecretLikeContent(payload: Record<string, unknown>): voi
   if (SECRET_PATTERN.test(text)) {
     throw new Error('Evidence payload rejected: contains secret-like content');
   }
+}
+
+/**
+ * Recompute the whole chain over a handle; returns the `seq` of the first
+ * entry that does not verify, or null when the chain is intact.
+ *
+ * A module-level function over a DATABASE HANDLE rather than a method, and
+ * deliberately so (Wave 5 review, High finding 1). The Phase 13 safe-mode
+ * verdict takes `evidence_chain_broken` — the only blocking finding that
+ * detects tampering with HQ's own audit record — from this computation, and an
+ * enforcement decision may not be reached through anything a same-realm patch
+ * can replace. `EvidenceLog.verifyChain` stays as the public delegate and now
+ * calls this; `HeadquarterOperations` calls this directly through a `#private`
+ * closure over its own handle, so patching `queue.evidence.verifyChain`, or
+ * `EvidenceLog.prototype.verifyChain`, or `EvidenceLog.prototype.list`,
+ * changes what the patcher sees and nothing about what safe mode decides.
+ *
+ * One computation, not two: duplicating the hash formula at the enforcement
+ * site would let the two drift, and a drifted verifier reports a false break —
+ * which under safe mode is an outage, not a warning.
+ */
+export function verifyEvidenceChain(db: HqDatabase): number | null {
+  let prevHash = GENESIS_HASH;
+  const rows = db.prepare(`SELECT * FROM op_evidence ORDER BY seq`).all() as Record<string, unknown>[];
+  for (const row of rows) {
+    const seq = row.seq as number;
+    // Parsed and re-stringified, exactly as `list()` does it, because that is
+    // the encoding `append()` hashed. A raw `row.payload` would differ from it
+    // for any payload SQLite stored with different whitespace.
+    //
+    // An UNPARSEABLE payload is a broken entry, not a passed one, and not an
+    // exception either: this function feeds a safe-mode verdict, so a raw
+    // writer that stored `payload = 'not json'` must produce a BREAK at that
+    // seq rather than a thrown error that the assessment never returns from.
+    let payloadJson: string;
+    try {
+      payloadJson = JSON.stringify(JSON.parse(row.payload as string));
+    } catch {
+      return seq;
+    }
+    const expected = createHash('sha256')
+      .update(
+        [
+          prevHash,
+          row.id as string,
+          row.at as string,
+          (row.task_id as string | null) ?? '',
+          row.actor as string,
+          row.kind as string,
+          payloadJson,
+        ].join('|'),
+      )
+      .digest('hex');
+    if (row.prev_hash !== prevHash || row.hash !== expected) return seq;
+    prevHash = row.hash as string;
+  }
+  return null;
 }
 
 export class EvidenceLog {
@@ -143,18 +200,16 @@ export class EvidenceLog {
     }));
   }
 
-  /** Recompute the chain; returns the seq of the first bad entry, or null if intact. */
+  /**
+   * Recompute the chain; returns the seq of the first bad entry, or null if
+   * intact.
+   *
+   * A thin delegate over the module-level `verifyEvidenceChain`, so the READ
+   * surface and the enforcement path share one computation and cannot drift.
+   * This method is the patchable half of that pair by design — nothing decides
+   * anything on it.
+   */
   verifyChain(): number | null {
-    let prevHash = GENESIS_HASH;
-    for (const e of this.list()) {
-      const expected = createHash('sha256')
-        .update(
-          [prevHash, e.id, e.at, e.taskId ?? '', e.actor, e.kind, JSON.stringify(e.payload)].join('|'),
-        )
-        .digest('hex');
-      if (e.prevHash !== prevHash || e.hash !== expected) return e.seq;
-      prevHash = e.hash;
-    }
-    return null;
+    return verifyEvidenceChain(this.#db);
   }
 }

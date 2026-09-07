@@ -304,9 +304,10 @@ export class OperatorQueue {
    * enforced dispatches through them. Phase 13 briefly broke that: the
    * safe-mode assessment read `verifyChain` from this object, so replacing it
    * cleared the `evidence_chain_broken` latch. The assessment now recomputes
-   * the chain through `HeadquarterOperations.#evidenceChainFromStore` — a
-   * `#private` closure over the database with no prototype to patch — and this
-   * handle is once again a convenience a caller can only lie to itself with.
+   * the chain through `HeadquarterOperations.#verifyEvidenceChainFromStore` —
+   * a `#private` closure over the database and the module-level
+   * `verifyEvidenceChain`, with no prototype to patch — and this handle is once
+   * again a convenience a caller can only lie to itself with.
    */
   readonly evidence: EvidenceReadOnly;
   /** The writer. Never reachable from anything a worker is handed. */

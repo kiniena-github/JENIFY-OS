@@ -20,15 +20,35 @@
  *
  * `resolveRetrievalAdapter` is the only way to obtain an adapter, and it now
  * returns a GUARDED wrapper in every branch — the lexical one, an installed
- * semantic one, and the fallback. The wrapper scans the free text before it
- * delegates, so no adapter present or future can be handed text HQ has not
- * scanned, and an adapter added to `SEMANTIC_RETRIEVAL_ADAPTERS` cannot opt
- * out. The facade scans the same fields on the way IN as well, so an
- * in-process caller gets a stated refusal instead of an exception from deep
- * inside a retrieval.
+ * semantic one, and the fallback. There is therefore no code path through the
+ * resolver that yields an UNWRAPPED adapter, and an adapter added to
+ * `SEMANTIC_RETRIEVAL_ADAPTERS` cannot opt out. The facade scans the four raw
+ * fields on the way IN, which is where a credential is actually met.
  *
  * The route's own scan is unchanged: it has a better refusal to give
  * (`400 unsafe_query`), and it is kept as the outer layer.
+ *
+ * ## Which layer is the guarantee, stated exactly
+ *
+ * The Wave 5 review (LOW finding 3) established that the seam guard's scan is
+ * INERT on the terms the real pipeline produces: terms are always `tokenize()`
+ * output, which lowercases and splits on `[^a-z0-9]+`, stripping every
+ * separator the eleven `SECRET_VALUE_PATTERNS` require. The structural claims
+ * all held — every resolver branch returns a wrapper, and a recording stand-in
+ * is never called with credential-shaped terms — but "the inner one is the
+ * guarantee" was the wrong way round.
+ *
+ * So this file now says which is which, in the test names as well as here:
+ *
+ *  - the FACADE scan (and the route's, outside it) is the GUARANTEE for the
+ *    pipeline: it sees the raw field, before normalization and before
+ *    tokenization;
+ *  - the SEAM guard is DEFENCE IN DEPTH against a non-tokenized caller — one
+ *    that resolves an adapter itself and supplies terms it built. That caller
+ *    is real and reachable, since `resolveRetrievalAdapter` is exported.
+ *
+ * A test below pins the tokenization fact itself, so the claim cannot quietly
+ * become wrong again in either direction.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -68,7 +88,7 @@ function recordingAdapter(): RetrievalAdapter & { seen: string[][] } {
   };
 }
 
-describe('no adapter, present or future, can be handed unscanned free text', () => {
+describe('the seam guard: defence in depth against a caller that supplies its own terms', () => {
   it('refuses credential-shaped terms at the seam before the adapter sees them', () => {
     const adapter = recordingAdapter();
     const guarded = guardRetrievalAdapter(adapter);
@@ -152,9 +172,57 @@ describe('no adapter, present or future, can be handed unscanned free text', () 
     expect(() => assertRetrievalTextSafe({}, 'search')).not.toThrow();
     expect(() => assertRetrievalTextSafe({ project: SECRET }, 'search')).toThrow(RetrievalSafetyError);
   });
+
+  /**
+   * The fact the layer claims now rest on (Wave 5 review, LOW finding 3).
+   *
+   * `tokenize` lowercases and splits on `[^a-z0-9]+`, so a credential arriving
+   * as free text is in pieces by the time the seam sees it — every hyphen,
+   * underscore, dot, colon and space the shape patterns need is gone. This is
+   * asserted rather than assumed, so nobody has to take the comment's word for
+   * why the FACADE scan is the layer that matters.
+   */
+  it('is INERT on tokenized terms, which is why the facade scan is the guarantee', () => {
+    for (const credential of [
+      SECRET,
+      'ghp_ABCDEFGHIJKLMNOPQRST1234',
+      'AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ012345',
+      'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpM',
+      'Bearer abcdefghijklmnop1234',
+      'api_key: abcd1234efgh5678',
+    ]) {
+      // The facade scan sees this and refuses it.
+      expect(() => assertRetrievalTextSafe({ text: credential }, 'search')).toThrow(
+        RetrievalSafetyError,
+      );
+      // After tokenization the same material no longer matches any shape, so
+      // the seam scan lets it through. That is not a hole — the facade already
+      // refused it — but it IS the reason the seam is defence in depth rather
+      // than the guarantee.
+      const terms = tokenize(credential);
+      expect(terms.length).toBeGreaterThan(0);
+      const adapter = recordingAdapter();
+      const guarded = guardRetrievalAdapter(adapter);
+      guarded.retrieve({ readable: [], terms, match: 'any_term' });
+      expect(adapter.seen).toEqual([terms]);
+    }
+  });
+
+  it('does not overstate itself: the statement names the facade as the guarantee', () => {
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('at the FACADE');
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('defence in depth');
+    // The old wording claimed the seam scan covered every adapter's free text.
+    expect(RETRIEVAL_GUARD_STATEMENT).not.toContain('can be handed text HQ has not scanned');
+    // And it still says WHO applies the wrapper. One correction lane asserted
+    // this as `toContain('applied by the resolver')` and the other rewrote the
+    // sentence; the assertion is carried across to the surviving wording rather
+    // than dropped with it, because the claim it pins — the caller does not
+    // choose to be guarded — is the reason the seam holds for a future adapter.
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('done by the resolver rather than by the caller');
+  });
 });
 
-describe('the IN-PROCESS facade caller is covered, not only the browser route', () => {
+describe('the FACADE scan is the guarantee for the pipeline, not only the browser route', () => {
   it('refuses a credential-shaped search text, project and tag with a stated reason', () => {
     const fx = setupFixture();
     for (const query of [{ text: SECRET }, { project: SECRET }, { tag: SECRET }]) {

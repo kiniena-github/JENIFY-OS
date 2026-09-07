@@ -39,6 +39,7 @@ import {
   normalizeCostFact,
   proposalSatisfiesReviewRequirement,
   readStoredCostFact,
+  riskClassForRouting,
   summarizeIntelligence,
   summarizeIntelligenceAnalytics,
   tierRank,
@@ -202,6 +203,31 @@ describe('the vocabularies are closed, categorical and disjoint from every other
     for (const tier of Object.values(COMPLEXITY_FLOOR)) expect(isIntelligenceTier(tier)).toBe(true);
     for (const tier of Object.values(CONTEXT_FLOOR)) expect(isIntelligenceTier(tier)).toBe(true);
     for (const tier of Object.values(WORK_KIND_FLOOR)) expect(isIntelligenceTier(tier)).toBe(true);
+  });
+
+  /**
+   * Wave 5 review, LOW finding 5. The fail-closed default for an unreadable
+   * capability row was live, correct and UNPINNED — flipping it to
+   * `'read_only'` passed all 3026 tests, because a foreign key makes the null
+   * branch unreachable through the ordinary path. It is a total function over
+   * one nullable input, so it is asserted directly rather than through a
+   * contrived integration.
+   */
+  it('fails closed to the STRICTEST risk class when the capability cannot be read', () => {
+    expect(riskClassForRouting(null)).toBe('founder_gate');
+    expect(riskClassForRouting(undefined)).toBe('founder_gate');
+    // ...and that default is genuinely the strictest: the highest floor there
+    // is, plus a required reviewer tier. An unreadable capability is never the
+    // cheap path.
+    expect(RISK_FLOOR.founder_gate).toBe('critical_review');
+    expect(REVIEW_REQUIREMENT.founder_gate).toBe('critical_review');
+    for (const riskClass of RISK_CLASSES) {
+      expect(tierRank(RISK_FLOOR.founder_gate)).toBeGreaterThanOrEqual(tierRank(RISK_FLOOR[riskClass]));
+    }
+    // A readable row is carried through verbatim, never widened or narrowed.
+    for (const riskClass of RISK_CLASSES) {
+      expect(riskClassForRouting({ riskClass })).toBe(riskClass);
+    }
   });
 });
 
@@ -766,6 +792,72 @@ describe('analytics are derived only from observed data', () => {
     expect(analytics.cost.byProvider.map((entry) => entry.currency).sort()).toEqual(['EUR', 'USD']);
   });
 
+  /**
+   * Wave 5 review, LOW finding 6. `foldSpend` used to render an
+   * unknown-amount identity as `knownAmountMinorUnits: 0` under a synthetic
+   * `currency: "unknown"`. Nothing was fabricated — the `0` was arithmetically
+   * true and `unknownAmountEntries: 1` stood beside it — but a `0` next to an
+   * identity HQ has no amount for is exactly the reading this phase exists to
+   * prevent, and `"unknown"` is not a currency.
+   */
+  it('renders an identity HQ has NO amount for as null, never as zero', () => {
+    const analytics = summarizeIntelligenceAnalytics({
+      decisions: [],
+      costs: [
+        costRow({
+          id: 'c1',
+          providerId: 'anthropic',
+          fact: {
+            provenance: 'unknown',
+            amountMinorUnits: null,
+            currency: null,
+            unitKind: 'unknown',
+            basis: null,
+            state: 'unknown',
+          },
+        }),
+      ],
+      observations: [],
+    });
+    const provider = analytics.cost.byProvider[0]!;
+    expect(provider.id).toBe('anthropic');
+    expect(provider.knownAmountMinorUnits).toBeNull();
+    expect(provider.currency).toBeNull();
+    expect(provider.entries).toBe(1);
+    expect(provider.unknownAmountEntries).toBe(1);
+    // No zero anywhere in the fold, and no invented currency code.
+    expect(JSON.stringify(analytics.cost.byProvider)).not.toContain('"knownAmountMinorUnits":0');
+    // No invented currency code. (`unknown` remains a legitimate PROVENANCE
+    // vocabulary member elsewhere in the fold; it is never a currency.)
+    expect(JSON.stringify(analytics.cost.byProvider)).not.toContain('unknown"');
+    expect(JSON.stringify(analytics.cost.byCurrency)).not.toContain('unknown');
+    // The known and unknown halves of one identity stay separate groups, and
+    // only the known one carries a number.
+    const mixed = summarizeIntelligenceAnalytics({
+      decisions: [],
+      costs: [
+        costRow({
+          id: 'c1',
+          providerId: 'anthropic',
+          fact: {
+            provenance: 'unknown',
+            amountMinorUnits: null,
+            currency: null,
+            unitKind: 'unknown',
+            basis: null,
+            state: 'unknown',
+          },
+        }),
+        costRow({ id: 'c2', providerId: 'anthropic', fact: { ...costRow().fact, amountMinorUnits: 900, currency: 'USD' } }),
+      ],
+      observations: [],
+    });
+    expect(mixed.cost.byProvider).toEqual([
+      { id: 'anthropic', currency: null, knownAmountMinorUnits: null, entries: 1, unknownAmountEntries: 1 },
+      { id: 'anthropic', currency: 'USD', knownAmountMinorUnits: 900, entries: 1, unknownAmountEntries: 0 },
+    ]);
+  });
+
   it('counts a decision as provably avoidable ONLY on all four recorded facts', () => {
     // Above the floor, not an escalation, no reviewer required, quality met.
     const avoidable = record({ id: 'av', tier: 'high' });
@@ -933,6 +1025,47 @@ describe('the unauthenticated snapshot section is closed BY SHAPE', () => {
       for (const count of Object.values(map)) expect(Number.isInteger(count)).toBe(true);
       expect(Object.values(map).reduce((a, b) => a + b, 0)).toBe(1);
     }
+  });
+
+  /**
+   * Wave 5 review, LOW finding 7. The test above forges a fact DIRECTLY, which
+   * is the fold's own boundary. This one pins the sentence the comment now
+   * makes: through the reader HQ actually uses, a forged provenance is already
+   * `unknown` before the fold sees it, so `byCostProvenance.unrecognized` is
+   * unreachable on the live path — while the TIER bucket stays reachable there,
+   * which is the asymmetry the comment has to state honestly.
+   */
+  it('cannot reach the provenance `unrecognized` bucket through the STORED reader', () => {
+    const coerced = readStoredCostFact({
+      provenance: 'PROJECT NEPTUNE PROVENANCE',
+      amountMinorUnits: 4200,
+      currency: 'USD',
+      unitKind: 'requests',
+      basis: null,
+    });
+    expect(coerced.provenance).toBe('unknown');
+    expect(coerced.amountMinorUnits).toBeNull();
+    const view = summarizeIntelligence({
+      storePresent: true,
+      decisions: [],
+      costs: [costRow({ fact: coerced })],
+      observations: [],
+      budgets: [],
+    });
+    expect(view.byCostProvenance.unrecognized).toBe(0);
+    expect(view.byCostProvenance.unknown).toBe(1);
+    expect(view.unknownAmountEntries).toBe(1);
+    // The tier bucket, by contrast, IS reachable from a stored row: the tier is
+    // read off the column as-is, which is why that bucket is a live defence and
+    // this one is not.
+    const forgedTier = summarizeIntelligence({
+      storePresent: true,
+      decisions: [record({ id: 'x', tier: 'PROJECT NEPTUNE' as IntelligenceTier })],
+      costs: [],
+      observations: [],
+      budgets: [],
+    });
+    expect(forgedTier.byTier.unrecognized).toBe(1);
   });
 
   it('states an absent store as zeros without implying an empty one', () => {

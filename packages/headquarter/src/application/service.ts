@@ -66,7 +66,6 @@
  * case: it is what a human reads before deciding to promote a mission.
  */
 
-import { createHash } from 'node:crypto';
 import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
@@ -82,8 +81,8 @@ import {
   type ApprovalRejection,
 } from '../operator/approvals.js';
 import {
-  EVIDENCE_GENESIS_HASH,
   assertNoSecretLikeContent,
+  verifyEvidenceChain,
   type EvidenceEntry,
 } from '../operator/evidence.js';
 import {
@@ -656,6 +655,7 @@ import {
   normalizeCostFact,
   observationIdempotencyKey,
   proposalSatisfiesReviewRequirement,
+  riskClassForRouting,
   summarizeIntelligence,
   summarizeIntelligenceAnalytics,
   tierRank,
@@ -2309,32 +2309,47 @@ export class HeadquarterOperations {
   readonly #capabilityFromStore: (id: string) => Capability | null;
 
   /**
-   * The evidence HASH CHAIN, recomputed from the database (Wave 5 correction,
-   * Critical 1 on `c9ddecc`).
+   * The evidence-chain verification that the SAFE-MODE verdict is computed
+   * from (Wave 5 correction; both review lanes reached this finding
+   * independently on `c9ddecc`, one as Critical, one as High).
    *
-   * `evidence_chain_broken` is one of only three findings that engage safe
-   * mode, and the full assessment is the ONLY path that can clear the latch.
-   * That assessment used to read `this.queue.evidence.verifyChain()` —
-   * `queue.evidence` is a public own-property object literal that `queue.ts`
-   * documents as safe to patch "because enforcement never dispatches through
-   * it". Feeding a safe-mode verdict from it made that premise false: with the
-   * chain genuinely broken and safe mode latched at boot, replacing
-   * `ops.queue.evidence.verifyChain` with `() => null` let the ordinary
-   * Founder assessment clear the latch, and `claimNext` was granted again over
-   * a record HQ could not stand behind.
+   * `assessHqIntegrity` used to pass `() => this.queue.evidence.verifyChain()`
+   * into `fullIntegrity`. `queue` is a public `readonly` field and
+   * `queue.evidence` is a mutable own-property object literal that #200
+   * deliberately documents as a patchable READ surface — safe exactly while no
+   * enforcement decision is taken on it. `evidence_chain_broken` is one of the
+   * three `SAFE_MODE_BLOCKING_FINDINGS` and the only one that detects tampering
+   * with HQ's own audit record, and the full assessment is the ONLY path that
+   * can clear the latch. So that closure WAS an enforcement decision reached
+   * through a patchable convenience surface: with
+   * `ops.queue.evidence.verifyChain = () => null` the finding never engaged,
+   * and — worse — a legitimate Founder assessment then CLEARED an already
+   * latched safe mode, handing `releaseKillSwitch` and `claimNext` back out
+   * against a chain that was genuinely broken.
    *
-   * So the chain is verified HERE, over `#db`, by the `#capabilityFromStore`
-   * recipe: an own closure with no public surface and — unlike a delegation to
-   * `EvidenceLog.verifyChain` — no prototype an attacker can reach either.
-   * `EvidenceLog` is exported, so `EvidenceLog.prototype.verifyChain = () =>
-   * null` would defeat any route that dispatched through the class. The SQL and
-   * the digest are the same as `EvidenceLog.verifyChain`'s; that method stays
-   * as the public read for callers who legitimately want one.
+   * So the verification is a `#private` closure over this facade's own handle
+   * and the module-level `verifyEvidenceChain`, exactly like
+   * `#capabilityFromStore` and `#runClaimFact`. There is no property on any
+   * exposed object that reaches it and no prototype method in the path:
+   * `EvidenceLog.verifyChain` is now a thin delegate over the same module
+   * function rather than the computation itself, and `EvidenceLog.list` is out
+   * of the path entirely, so patching either — on an instance or on
+   * `EvidenceLog.prototype` — moves what the patcher sees and nothing that
+   * safe mode decides.
+   *
+   * The other correction lane fixed the same defect by INLINING a second copy
+   * of the hash formula in this class. That copy was dropped in the merge and
+   * this one kept, on the argument that decided it: two computations of one
+   * verdict can drift, and a drifted verifier reports a false break — which
+   * under safe mode is an outage, not a warning. The one thing that copy did
+   * better, treating an unparseable payload as a BREAK rather than letting
+   * `JSON.parse` throw out of the assessment, was carried into
+   * `verifyEvidenceChain` itself, so nothing was lost with it.
    *
    * Returns the `seq` of the first entry that does not verify, or null when the
    * whole chain does.
    */
-  readonly #evidenceChainFromStore: () => number | null;
+  readonly #verifyEvidenceChainFromStore: () => number | null;
 
   /**
    * The kill-switch ROW read, from the database (Sol M1, PR #266 review
@@ -2433,36 +2448,12 @@ export class HeadquarterOperations {
         enabled: !!row.enabled,
       };
     };
-    // See `#evidenceChainFromStore` for why the chain is recomputed here rather
-    // than delegated to `queue.evidence.verifyChain` or to `EvidenceLog`.
-    this.#evidenceChainFromStore = (): number | null => {
-      const rows = db.prepare(`SELECT * FROM op_evidence ORDER BY seq`).all() as Record<
-        string,
-        unknown
-      >[];
-      let prevHash = EVIDENCE_GENESIS_HASH;
-      for (const row of rows) {
-        const at = row.at as string;
-        const taskId = (row.task_id as string | null) ?? '';
-        const actor = row.actor as string;
-        const kind = row.kind as string;
-        // Re-serialized exactly the way `EvidenceLog.verifyChain` does, so the
-        // two answers cannot diverge on a healthy chain.
-        let payloadJson: string;
-        try {
-          payloadJson = JSON.stringify(JSON.parse(row.payload as string));
-        } catch {
-          // An unparseable payload is a broken entry, not a passed one.
-          return Number(row.seq);
-        }
-        const expected = createHash('sha256')
-          .update([prevHash, row.id as string, at, taskId, actor, kind, payloadJson].join('|'))
-          .digest('hex');
-        if (row.prev_hash !== prevHash || row.hash !== expected) return Number(row.seq);
-        prevHash = row.hash as string;
-      }
-      return null;
-    };
+    // The safe-mode evidence-chain verification: a closure over this handle
+    // and the module-level computation, exactly like `#capabilityFromStore`
+    // above. See the field's own note — the verdict this feeds is enforcement
+    // state, so it may not be reached through `queue.evidence` (a patchable
+    // read surface by #200's design) nor through any prototype method.
+    this.#verifyEvidenceChainFromStore = () => verifyEvidenceChain(db);
     // Phase 13: observe the append-only guards AS THE FILE WAS FOUND, before
     // any `ensure*Schema` call below re-creates a missing one. Those calls are
     // `CREATE TRIGGER IF NOT EXISTS` and therefore repair a dropped guard on
@@ -7800,10 +7791,11 @@ export class HeadquarterOperations {
     // assessment rather than a restart — a restart would re-create the guards
     // and then report the file it had just repaired.
     const report = fullIntegrity(this.#db, {
-      // The `#private` closure over `#db`, never `queue.evidence.verifyChain`
-      // and never `EvidenceLog`: this read decides whether the safe-mode latch
-      // clears, so it may not be reachable on any public surface or prototype.
-      verifyEvidenceChain: () => this.#evidenceChainFromStore(),
+      // The `#private` closure, NEVER `this.queue.evidence.verifyChain()`.
+      // `evidence_chain_broken` is a safe-mode blocking finding, so the read
+      // behind it is enforcement and may not travel through a patchable
+      // convenience surface — the Wave 5 High. See the field's note.
+      verifyEvidenceChain: this.#verifyEvidenceChainFromStore,
       reliabilitySchemaPresent: this.#reliabilityStorePresent,
     });
     this.#integrityReport = report;
@@ -8752,8 +8744,11 @@ export class HeadquarterOperations {
     if (!fact.exists) return fail('unknown_task', `Unknown task: ${taskId}`);
     const capability = this.#capabilityFromStore(fact.capabilityId);
     // Fail closed on an unreadable capability: the strictest class, never the
-    // convenient one.
-    const riskClass: RiskClass = capability ? capability.riskClass : 'founder_gate';
+    // convenient one. The rule itself lives in `riskClassForRouting` so it can
+    // be asserted directly — it was previously an inline conditional that no
+    // test reached, because an FK makes the null branch unreachable through
+    // the ordinary path (Wave 5 review, Low finding 5).
+    const riskClass: RiskClass = riskClassForRouting(capability);
     return ok({
       complexity: input.complexity,
       contextSize: input.contextSize,
@@ -9102,7 +9097,24 @@ export class HeadquarterOperations {
       idempotencyKey: input.idempotencyKey?.trim() || null,
     });
     if (!inserted.ok) return inserted;
-    return ok({ ...inserted.data, escalation: escalation.escalation });
+    // Law 8: a categorical reason in a returned view may never contradict the
+    // record (Wave 5 review, Low finding 4).
+    //
+    // `decisionIdempotencyKey` deliberately excludes the escalation TRIGGER —
+    // the same escalation re-recorded is one row, which is what an append-only
+    // ledger with an idempotency rule is for. The consequence is that a second
+    // escalation naming a DIFFERENT trigger dedupes to the row already held,
+    // and the row's trigger is the one HQ actually stores. Returning the
+    // caller's would hand back a view saying `quality_not_met` over a record
+    // that says `reviewer_requested`. So the stored one is authoritative here,
+    // exactly as `#decisionRecordFromStore` is authoritative for the decision
+    // itself.
+    const storedTrigger = inserted.data.decision.escalationTrigger;
+    const escalationView: EscalationProposal =
+      storedTrigger != null && storedTrigger !== escalation.escalation.trigger
+        ? { ...escalation.escalation, trigger: storedTrigger }
+        : escalation.escalation;
+    return ok({ ...inserted.data, escalation: escalationView });
   }
 
   /**

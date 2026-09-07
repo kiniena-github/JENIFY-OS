@@ -484,12 +484,14 @@ export const SEMANTIC_RETRIEVAL_ADAPTERS: readonly RetrievalAdapter[] = [];
  * say more than HQ does.
  */
 export const RETRIEVAL_GUARD_STATEMENT =
-  'Every retrieval adapter the resolver hands out is a guarded wrapper that scans the free text passed to it ' +
-  'for credential shapes first, and the wrapping is done by the resolver rather than by the caller — so no ' +
-  'adapter, installed now or installed later, can opt out of it. The effective scan for a caller is the ' +
-  'FACADE scan, which runs on the way in and returns a stated refusal; the wrapper is defence in depth for ' +
-  'the day a real semantic adapter is installed. The raw adapter objects are exported for testing and are ' +
-  'not wrapped in themselves.';
+  'Free text entering search or a question is scanned for credential shapes at the FACADE, before it is ' +
+  'tokenized, normalized or matched — that FACADE scan is the guarantee, and the browser route keeps its ' +
+  'own scan outside it. Every retrieval adapter the resolver hands out is additionally a guarded wrapper ' +
+  'that scans the free text passed to it, and the wrapping is done by the resolver rather than by the ' +
+  'caller, so an adapter installed later cannot opt out of it. Because the pipeline tokenizes first, ' +
+  'those terms no longer carry the separators a credential shape needs: the seam guard is defence in ' +
+  'depth against a caller that supplies its own untokenized terms, not the layer the pipeline relies on. ' +
+  'The raw adapter objects are exported for testing and are not wrapped in themselves.';
 
 /**
  * Raised when free text reaching a retrieval adapter fails the browser-safety
@@ -532,18 +534,27 @@ export class RetrievalSafetyError extends Error {
  * `SEMANTIC_RETRIEVAL_ADAPTERS` cannot opt out of it: the resolver wraps the
  * candidate it selects, whatever it is.
  *
- * The facade scans the same four fields on the way in as well, so an in-process
- * caller gets a stated refusal instead of an exception from deep inside a
- * retrieval.
+ * The facade scans the same four fields on the way in, and THAT is the layer
+ * the pipeline relies on. Stated precisely, because the first version of this
+ * comment had it backwards — both Wave 5 correction lanes reached this
+ * independently (one as Medium 9, one as Low 3):
  *
- * Which of the two is load-bearing, stated correctly (Wave 5 Medium 9): the
- * FACADE scan is the effective one. The inner wrapper sees `input.terms`,
- * which `normalizeSearchQuery` has already TOKENIZED — and a tokenized term
- * cannot match the credential patterns, which need a `key: value` shape with
- * punctuation the tokenizer has removed. So the wrapper is defence in depth,
- * and it becomes the load-bearing layer only for a future caller that reaches
- * `resolveRetrievalAdapter` without going through the facade. Describing it as
- * "the guarantee" overstated it.
+ *  - the FACADE scan sees the raw `text` / `project` / `tag` / `question`,
+ *    before `normalizeSearchQuery` and before `tokenize`, so it is the scan
+ *    that meets a credential in the shape `assertBrowserSafe` recognises;
+ *  - the SEAM guard sees `input.terms`, which on the pipeline path are always
+ *    `tokenize()` output — lowercased and split on `[^a-z0-9]+`. That strips
+ *    every separator the eleven `SECRET_VALUE_PATTERNS` require (`sk-`, `ghp_`,
+ *    a JWT's dots, `Bearer `, `api_key: `), and lowercasing defeats the
+ *    case-sensitive ones besides, so on realistic pipeline input the seam scan
+ *    does not fire at all.
+ *
+ * The seam guard is kept, and is worth keeping, for the caller the FACADE does
+ * not cover: `resolveRetrievalAdapter` is exported, so an in-process caller can
+ * obtain an adapter and hand it terms it built itself. That caller is real and
+ * reachable, and it is what "defence in depth against a non-tokenized caller"
+ * means here. What it is NOT is the guarantee, and this comment no longer says
+ * it is.
  */
 export function assertRetrievalTextSafe(
   fields: Record<string, string | null | undefined>,
@@ -579,11 +590,15 @@ export function guardRetrievalAdapter(adapter: RetrievalAdapter): RetrievalAdapt
     available: adapter.available,
     unavailableReason: adapter.unavailableReason,
     retrieve(input) {
-      // The terms ARE the free text by the time retrieval sees it: they are
-      // what `normalizeSearchQuery`/`tokenize` produced from `text` or from a
-      // question, and they are the only caller-supplied material that crosses
-      // this boundary. The corpus does not need scanning — it is canonical
-      // rows HQ already published to this reader.
+      // The terms are the only caller-supplied material that crosses this
+      // boundary. The corpus does not need scanning — it is canonical rows HQ
+      // already published to this reader.
+      //
+      // On the PIPELINE path these terms are `tokenize()` output, and no
+      // credential shape survives tokenization, so this scan is inert there —
+      // the facade scan is what catches that case, before tokenization. What
+      // this scan does catch is a caller that resolved an adapter and built its
+      // own terms. Stated rather than overclaimed; see the function note above.
       const offending: Record<string, string> = {};
       input.terms.forEach((term, index) => {
         offending[`term${index}`] = term;
@@ -614,9 +629,11 @@ export interface RetrievalStatement {
  * Every adapter it hands out is GUARDED (`guardRetrievalAdapter`), including
  * the deterministic one and including any semantic adapter installed later.
  * That is the structural half of the pre-real-adapter fix: there is no code
- * path through this resolver that yields an adapter which has not scanned its
- * free text, so an in-process caller cannot obtain one and a future adapter
- * cannot opt out by being added to the list.
+ * path through this resolver that yields an UNWRAPPED adapter, so an
+ * in-process caller cannot obtain one and a future adapter cannot opt out by
+ * being added to the list. What the wrapper then catches is stated exactly on
+ * `guardRetrievalAdapter` — on the pipeline path the terms are already
+ * tokenized and the FACADE scan is the layer that meets a credential.
  */
 export function resolveRetrievalAdapter(requested: RetrievalMode = 'deterministic_lexical'): {
   adapter: RetrievalAdapter;

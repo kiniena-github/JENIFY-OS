@@ -210,12 +210,17 @@ describe('HQ never invents a price, at the facade', () => {
     expect(analytics.cost.entries).toBe(1);
     expect(analytics.cost.unknownAmountEntries).toBe(1);
     expect(analytics.cost.byCurrency).toEqual([]);
+    // Wave 5 review, LOW finding 6: this used to assert `currency: 'unknown'`
+    // and `knownAmountMinorUnits: 0` — a `0` that meant "unknown", beside a
+    // currency code HQ invented. The assertion is corrected here rather than
+    // relaxed: it now pins the stronger property.
     expect(analytics.cost.byProvider[0]).toMatchObject({
       id: 'anthropic',
-      currency: 'unknown',
-      knownAmountMinorUnits: 0,
+      currency: null,
+      knownAmountMinorUnits: null,
       unknownAmountEntries: 1,
     });
+    expect(JSON.stringify(analytics.cost.byProvider)).not.toContain('"knownAmountMinorUnits":0');
   });
 });
 
@@ -988,6 +993,45 @@ describe('escalation preserves canonical task identity through the facade', () =
         }),
       ).code,
     ).toBe('unknown_intelligence_decision');
+  });
+
+  /**
+   * Wave 5 review, LOW finding 4. `decisionIdempotencyKey` deliberately
+   * excludes the escalation trigger, so a second escalation naming a DIFFERENT
+   * trigger dedupes to the row already held. The returned view used to carry
+   * the CALLER's trigger regardless — a categorical reason contradicting the
+   * record it claims to describe, which is precisely what law 8 forbids.
+   */
+  it('returns the STORED escalation trigger when a second call dedupes to the same row', () => {
+    const fx = intelligenceFixture();
+    fx.budget([...INTELLIGENCE_TIERS]);
+    const first = expectOk(decide(fx, { tier: 'high' })).decision;
+    const escalate = (trigger: string) =>
+      expectOk(
+        fx.ops.escalateIntelligenceDecision({
+          decisionId: first.id,
+          workerId: fx.claim.workerId,
+          fence: fx.claim.fence,
+          trigger: trigger as never,
+        }),
+      );
+
+    const original = escalate('insufficient_evidence');
+    expect(original.deduplicated).toBe(false);
+    expect(original.escalation.trigger).toBe('insufficient_evidence');
+    expect(original.decision.escalationTrigger).toBe('insufficient_evidence');
+
+    const again = escalate('tier_did_not_meet_requirement');
+    // One row, and the view agrees with it in BOTH places.
+    expect(again.deduplicated).toBe(true);
+    expect(again.decision.id).toBe(original.decision.id);
+    expect(again.decision.escalationTrigger).toBe('insufficient_evidence');
+    expect(again.escalation.trigger).toBe('insufficient_evidence');
+    expect(again.escalation.trigger).toBe(again.decision.escalationTrigger);
+    // And the ledger really does hold exactly one escalation.
+    expect(
+      fx.ops.listIntelligenceDecisionsBounded().decisions.filter((d) => d.escalatedFrom === first.id),
+    ).toHaveLength(1);
   });
 });
 

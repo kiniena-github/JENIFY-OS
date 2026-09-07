@@ -241,6 +241,20 @@ and the ceiling still reported `within_ceiling`.
 Three changes together: the instant must `Date.parse`; it may not be in the
 future; and the window filter measures `recorded_at`, which HQ sets.
 `occurredAt` survives as reported-only metadata, which is what it always was.
+**What a RAW WRITER can still do to a budget, stated rather than left for a
+reader to find** (recorded by the Wave 5 review; not a defect, and not
+previously written down). `hq_intel_budgets` is append-only and versioned, and
+`latestBudgetFor` takes the highest `version`. So a writer with direct file
+access — not HQ, not any route, not any facade method — can WIDEN policy by
+APPENDING a higher-version row with a looser ceiling and a broader permitted
+set. That is inherent to append-only versioning under a raw-writer threat: the
+guards make an existing row unchangeable, they do not and cannot make a new
+legitimate-looking append impossible, and the same is true of every versioned
+append-only register in this repository. What the guards DO close is the
+quieter attack — an `INSERT OR REPLACE` colliding on `budget_key`, which would
+swap a standing ceiling with no new row for anyone to notice — and that is now
+pinned (see the correction pass below). A widening append leaves a row, with
+its version, its `set_by` and its `set_at`, for a Founder to see.
 
 ### The law: an escalation preserves canonical identity and creates no authority
 
@@ -263,7 +277,14 @@ recorded under is the same claim.
   converts and a sum across two currencies would be a fabricated number. There
   is deliberately no single grand total.
 - **Unknown-amount entries** are their own count beside every sum, never folded
-  in and never rendered as zero.
+  in and never rendered as zero. `foldSpend` used to be the one exception:
+  an identity with no known amount rendered `knownAmountMinorUnits: 0` under a
+  synthetic `currency: "unknown"`. Nothing was fabricated — the zero was
+  arithmetically true and `unknownAmountEntries: 1` stood beside it — but a `0`
+  next to an identity HQ has no amount for is exactly the reading this phase
+  exists to prevent, and `"unknown"` is not a currency code. Both fields are now
+  `null` in that group (Wave 5 LOW 6), and the known and unknown halves of one
+  identity stay separate groups so only the known one ever carries a number.
 - **Provably avoidable** counts a decision only when all four hold from
   recorded data: it was issued strictly above the floor the policy itself
   computes for the characteristics recorded ON it, it was not an escalation, no
@@ -294,7 +315,7 @@ authority: the `coo` principal holds the first and is refused the second.
 | the claim on the referenced task | `#runClaimFact` — a direct `#db` SELECT of `op_tasks`, deliberately NOT `queue.get()` | whether any decision, outcome or cost row is written | canonical. Pinned against a patch on instance and prototype. |
 | the CURRENT budget ceiling and permitted tier set | `#budgetFromStore` → `loadBudgets` off `#db`, then `latestBudgetFor` | whether a tier may be recorded at all, and which ones | canonical. Pinned: a forged `intelligenceBudgetDecision`/`listIntelligenceBudgetsBounded` lies publicly and buys no write, on instance, prototype and a later-constructed facade. |
 | the recorded cost entries in the window | `#costEntriesFromStore` / `#entriesForScope` | whether the ceiling is reached, and whether HQ can prove it | canonical, and fail-closed on an unknown amount. |
-| the task's canonical RISK CLASS | `#capabilityFromStore` (the existing `#private` closure), never `queue.capabilities` | the floor and the review requirement | canonical, and fail-closed to `founder_gate` on an unreadable row. |
+| the task's canonical RISK CLASS | `#capabilityFromStore` (the existing `#private` closure), never `queue.capabilities` | the floor and the review requirement | canonical. The fail-closed default for an UNREADABLE row is `riskClassForRouting`, and it is now asserted directly — it was listed here as verified while nothing reached it (Wave 5 LOW 5). |
 | the prior decision, for an escalation | `#decisionRecordFromStore` — `loadDecision`/`loadDecisionOutcomes` off `#db` | the canonical identity the escalation carries, and the tier it moves from | canonical. Pinned: a forged `getIntelligenceDecision` buys no escalation. |
 | the provider BINDING on the task | a direct `#db` SELECT of `op_tasks.payload` through `readProviderBinding` | what a decision RECORDS as the bound provider | canonical, and the same function the queue's own enforcement uses. |
 | the intelligence-command capability row | `#capabilityFromStore` | whether an observation or a budget policy may proceed | canonical, unchanged from the Phase 4/5/7/12/13 pattern. |
@@ -366,10 +387,22 @@ move.
 **What has no route, and why.** Recording a routing decision, escalating one,
 recording its outcome and recording a cost entry are WORKER acts under a live
 fenced claim — exactly like authorize and execute in Phase 8 and the run writes
-in Phase 13 — and a browser holds no claim. And there is no route, no facade
-method and no path SEGMENT anywhere in the whole control table that spells
-`activate`, `spend`, `purchase`, `buy`, `credits`, `billing` or `upgrade`. Ten
-invented paths 404.
+in Phase 13 — and a browser holds no claim. There is no route and no path
+SEGMENT anywhere in the whole control table that spells `activate`, `spend`,
+`purchase`, `buy`, `credits`, `billing` or `upgrade`, and ten invented paths
+404.
+
+**Correction to the same claim about FACADE METHOD NAMES** (Wave 5 review,
+informational). Commit `fdfa1e0`'s message says "no route, no facade method …
+spells activate, spend, purchase, buy, credits, billing or upgrade". The route
+half is exact. The facade half is not: `deactivateExecutionWorker` — a Phase 4
+workforce lifecycle method that REMOVES a worker's ability to execute — contains
+the substring "activate". A pushed commit message cannot be amended, so the
+claim is corrected here, scoped to what is actually true: **no facade method
+activates a provider, enables a paid service, buys credits or authorizes spend,
+and no Phase 14 method name contains any of those seven words.** The one
+pre-existing method whose name contains the substring moves in the fail-safe
+direction.
 
 Neither write takes step-up, and that is a decision: both append to an
 append-only ledger, neither can execute anything, and a ceiling that has to be
@@ -533,6 +566,25 @@ markers, untouched — nothing under `packages/server`, `packages/web`,
   value, file stays text), as is a FOURTH nobody had disclosed —
   `src/live/auth.ts` — which the new source scan in
   `test/core-boundary.test.ts` found.
+- **A second escalation with a DIFFERENT trigger dedupes to the first.**
+  `decisionIdempotencyKey` deliberately excludes the trigger, so the same
+  escalation re-recorded is one row — which is the point of an idempotency rule
+  over an append-only ledger. What follows is that the second caller's trigger
+  is not what HQ holds, and the returned view now says so: it carries the
+  STORED trigger (Wave 5 LOW 4). If a deployment ever needs two escalations of
+  one decision under different triggers, the key is the thing to widen, and
+  that would be a deliberate change to what "the same escalation" means.
+- **`byCostProvenance.unrecognized` is unreachable through the stored reader.**
+  `readStoredCostFact` already coerces an out-of-vocabulary provenance to
+  `unknown`, so no ROW can land in that bucket; the membership re-check catches
+  only a caller passing a raw fact directly. The bucket is kept — the key set is
+  a published shape guarantee and the fold must stay closed by construction
+  independently of its reader — and the comments now describe it as that rather
+  than as a live defence (Wave 5 LOW 7). The tier, state and result buckets ARE
+  reachable from a stored row, and that asymmetry is now pinned by a test. The
+  same class of finding was recorded in Wave 4 as `byLifecycle.unrecognized`
+  and deliberately left open; this pass corrected the wording here and did NOT
+  touch that one, so the two now differ in wording while agreeing in behaviour.
 
 ## The `assertBrowserSafe` pre-real-adapter Low — exactly what was resolved
 
@@ -595,13 +647,51 @@ The route's own scan is **unchanged**: it has a better refusal to give
 (`400 unsafe_query`, audited as refused rather than allowed), and it stays as
 the outer layer.
 
-**Pinned by** `test/search-adapter-guard.test.ts` (10 tests). The load-bearing
+**Pinned by** `test/search-adapter-guard.test.ts` (12 tests). Every branch of
+the resolver is exercised, the facade refusals are proven for all four fields,
+and an ordinary search and an ordinary question are proven still to work, so the
+guard did not narrow the surface it protects. The seam's own load-bearing
 assertion is not that the guard throws — it is that a recording stand-in
 adapter, the thing the seam exists for, is **never called at all** with
-credential-shaped terms. Every branch of the resolver is exercised, the facade
-refusals are proven for all four fields, and an ordinary search and an ordinary
-question are proven still to work, so the guard did not narrow the surface it
-protects.
+credential-shaped terms.
+
+**Which of the two layers is the guarantee — corrected.** Both Wave 5
+correction lanes reached this independently (one as Medium 9, one as Low 3).
+The sentence above used to end "Both layers are kept: the outer one gives a
+good error, the inner one is the guarantee", and commit `0c5edea`'s message
+said "a test proves the wrapped adapter is never CALLED with credential-shaped
+terms". The structural claims mostly hold — every resolver branch returns a
+wrapper, and a recording stand-in got zero calls — but the ATTRIBUTION was the
+wrong way round, and one claim was simply false. Both are now stated as they
+are:
+
+- `guardRetrievalAdapter` scans `input.terms`. On the pipeline path those terms
+  are always `tokenize()` output, which lowercases and splits on `[^a-z0-9]+` —
+  stripping every separator the eleven `SECRET_VALUE_PATTERNS` require (`sk-`,
+  `ghp_`, a JWT's dots, `Bearer `, `api_key: `) and defeating the
+  case-sensitive ones besides. **The seam scan therefore does not fire on
+  anything the pipeline can produce.** The test that fed it a whole unsplit key
+  was feeding it an input the pipeline cannot generate.
+- **The FACADE scan is the guarantee** for the pipeline, and the route's scan
+  is the outer layer beyond it. Both see the raw field before normalization and
+  before tokenization, which is where a credential is actually met.
+- **The seam guard is defence in depth against a non-tokenized caller**, and
+  that caller is real: `resolveRetrievalAdapter` is exported, so an in-process
+  caller can obtain an adapter and hand it terms it built itself. That is worth
+  guarding; it is not the layer the pipeline relies on.
+- **"An in-process caller cannot obtain an unguarded adapter" was not true**,
+  and the published statement no longer says it. `LEXICAL_RETRIEVAL_ADAPTER`
+  and `SEMANTIC_RETRIEVAL_ADAPTERS` are exported, and this package's own tests
+  import and call them RAW — which is legitimate, because the raw adapters are
+  what the guard is tested against. What is true is narrower and is what is
+  published now: every adapter the RESOLVER hands out is wrapped, the wrapping
+  is done by the resolver rather than by the caller, and the raw adapter objects
+  are exported for testing and are not wrapped in themselves.
+
+`RETRIEVAL_GUARD_STATEMENT`, the module comments and the test names all say this
+now, and a new test PINS the tokenization fact itself against six real
+credential shapes — each refused at the facade, each inert at the seam once
+tokenized — so the claim cannot quietly become wrong again in either direction.
 
 **What was NOT resolved.** The scan is credential-SHAPE based
 (`assertBrowserSafe`'s key rule and value patterns); it is not a general
@@ -671,3 +761,87 @@ untouched and still holds: this phase's proposal-shaped reads are named
 `intelligenceRoutingProposal` and `escalateIntelligenceDecision`, for the same
 reason Phase 12 named its template `productPlanTemplate` — a recommendation
 must never look like a handle on an act.
+
+---
+
+## Wave 5 correction pass (this branch, on top of `c9ddecc`)
+
+**Two independent correction lanes, reconciled by a merge.** The frozen wave
+head `c9ddecc` was hostile-reviewed twice, concurrently and without either
+reviewer knowing about the other: a four-reviewer sweep (1 Critical / 5 High /
+10 Medium / ~13 Low, landed as twelve commits) and a separate fresh read-only
+reviewer (0 Critical / 1 High / 1 Medium / 6 Low, landed as one commit). Both
+reached the same guard-census defect; each found things the other did not. The
+merge keeps the union of the guarantees, one implementation of each shared fix,
+and every regression test from both lanes. Full reconciliation record, and the
+one duplicate implementation that was dropped and why, are in Phase 13's "Wave
+5 correction pass".
+
+Every finding that touches Phase 14 is corrected in place above, in the section
+it belongs to. This table says where, and what now pins each one. Findings are
+labelled by the lane that raised them.
+
+| Finding | Correction | Pinned by |
+|---|---|---|
+| A HIGH 2 — `budgetScope` was a caller parameter and which ceiling applied was chosen, not derived | "The law: WHICH ceiling applies is derived, never chosen"; `#canonicalBudgetScopes` + `mostRestrictiveBudget` | new tests in `intelligence-authority.test.ts` |
+| A HIGH 3 — `occurredAt` was caller-supplied and the window measured it | "The law: the window is measured on the instant HQ stamped"; the window filter reads `recorded_at` | new tests in `intelligence-authority.test.ts` |
+| A MEDIUM 5/6/7 — three fail-open reads in the cost and routing policy | recorded at each site above | new tests in `intelligence-core.test.ts` and `intelligence-authority.test.ts` |
+| A MEDIUM 8 — a spend was attributed to a declaration, not to canonical work | "The law: a spend is attributed to canonical work"; `#canonicalWorkIdentity` | new tests in `intelligence-authority.test.ts` |
+| A MEDIUM 9 = B LOW 3 — the seam guard's scan is inert on tokenized terms | "The `assertBrowserSafe` pre-real-adapter Low" above, rewritten to name the FACADE scan as the guarantee, and to stop claiming an in-process caller cannot obtain an unguarded adapter | both lanes' tests in `search-adapter-guard.test.ts` (12 tests), one of which pins the tokenization fact against six real credential shapes |
+| A MEDIUM 10 — a raw NUL byte made a source file binary to the repo's own tooling | "Known limitations"; all four are U+001F now | new source scan in `test/core-boundary.test.ts` |
+| A HIGH 1 = B MEDIUM 2 — the five secondary-unique guards were unpinned, and the census could not see them | `ENGINE_IMMUTABLE_TABLES` now declares each table's `secondaryGuards` and `missingImmutabilityGuards` reads them, so a dropped one produces a real `append_only_guard_missing` finding and engages safe mode | `test/intelligence-durability.test.ts` (7 tests, kept in full from Lane B) and five tests in `reliability-durability.test.ts`, including BOTH lanes' live-schema pins |
+| B LOW 4 — the returned escalation trigger could contradict the record | "Known limitations", and the facade now returns the STORED trigger | new test in `intelligence-authority.test.ts` |
+| B LOW 5 — the `founder_gate` fail-closed default was unpinned | extracted as `riskClassForRouting`; audit row corrected | new unit test in `intelligence-core.test.ts` |
+| B LOW 6 — `foldSpend` rendered `0` for an unknown amount | "Analytics: only what was observed"; the field is `null` now | new test in `intelligence-core.test.ts`, and the corrected assertion in `intelligence-authority.test.ts` |
+| B LOW 7 — a dead `unrecognized` bucket described as a live defence | "Known limitations"; comments corrected, bucket kept | new test in `intelligence-core.test.ts` |
+| B Informational — `fdfa1e0`'s "no facade method spells activate…" | "Surfaces → What has no route, and why", scoped honestly | the existing route-segment scan, unchanged |
+| B Undisclosed debt — a raw appender can widen a budget by version | "The law: a ceiling blocks or asks, and never grants" | stated, not defended — it is inherent to append-only versioning |
+
+**One merge-level detail, recorded rather than left silent.** Lane A's Medium
+10 replaced `foldSpend`'s composite-key separator (a raw NUL) with U+001F; Lane
+B's Low 6 rewrote the same line for the null-currency rule and left a SPACE
+there. The merged line takes Lane A's U+001F with Lane B's semantics, because a
+space is not a safe separator here: the identities folded are provider and
+model strings that may legitimately contain one, so `"a b"` with no currency
+and `"a"` with currency `"b"` would have collapsed into one bogus group.
+
+**What the five guards actually hold, verified rather than asserted.** With the
+five `_no_replace_unique` triggers deleted from a scratch copy outside the
+repository, `INSERT OR REPLACE` colliding on `hq_intel_budgets.budget_key`
+swapped the ceiling from 1000 to 999999999 and the permitted tier from
+`deterministic_local` to `critical_review`, and the same on
+`hq_intel_cost_entries.entry_key` erased a recorded amount. Three of the seven
+new tests fail against that scratch copy and pass here. The other four are
+SHAPE coverage — with `recursive_triggers` ON the implicit DELETE reaches
+`_no_erase`, and an upsert reaches `_no_rewrite` — and the test file says so
+rather than implying four pins where there are three.
+
+**No live defect existed at this head** for the guard finding. All five guards
+were present and every one of the eight new tables refused every attack; that
+half is a verification and regression-exposure fix, not an exploit fix. The
+Lane A findings above are a different matter — High 2, High 3 and Medium 8 were
+each demonstrated against a running facade.
+
+**Verification after the reconciliation** (the whole suite, not a subset):
+
+| Command | Result |
+|---|---|
+| `npm run test:hq` | 162 files, 3073 tests passed |
+| `npm run typecheck --workspace @factoryos/headquarter` | clean |
+| `npm run test --workspace @factoryos/hq-host` | 23 files, 222 tests passed |
+| `npm run typecheck --workspace @factoryos/hq-host` | clean |
+| `npm run test --workspace @factoryos/hq-server` | 2 files, 20 tests passed |
+| `npm run typecheck --workspace @factoryos/hq-server` | clean |
+| `npm test` (root) | 37 files, 569 passed, 3 skipped |
+| `npm run build` | all workspaces; web `215.66 kB` / `69.22 kB` gzip (unchanged) |
+| `npm run build:site --workspace @factoryos/headquarter` | 10 pages + `hq-snapshot.json` |
+
+Baseline at `c9ddecc` was 161 files / 3026 tests; Lane A alone was 161 / 3053
+and Lane B alone 162 / 3045. Nothing was deleted, skipped, weakened or narrowed
+by either lane or by the merge. Two existing assertions were CORRECTED rather
+than relaxed, and both are recorded above: the `foldSpend` zero (it pinned the
+defect) and `REQUIRED_IMMUTABILITY_GUARDS`' companion test (widened to cover the
+per-table declaration beside the universal trio). The three pre-existing
+`it.skip` GAP markers under `packages/server` are untouched, and nothing under
+`packages/server`, `packages/web`, `packages/shared` or `packages/config-mesob`
+was changed.
