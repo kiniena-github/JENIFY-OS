@@ -81,11 +81,15 @@
  * What SURVIVES, executed: the same in-place wipe with that invariant repaired
  * — the replacement inserted at an explicit `seq = 1`, then one `UPDATE
  * sqlite_sequence` for that ledger, which no trigger can guard. Measured
- * `boot=false assess=false release=ADMITTED`. So the cost is one explicit rowid
- * and one extra `UPDATE`, across two engine-guarded ledgers and a census that
- * reports a drop at the boot that observes it — a real cost, and still not a
- * cryptographic boundary. HQ holds no key a foreign writer does not also have;
- * nothing here pretends otherwise.
+ * `boot=false assess=false release=ADMITTED`. The cheaper one-statement repair,
+ * DELETING that `sqlite_sequence` row instead, was tried too and buys only the
+ * process that follows: the assessment it was aiming to pass is itself the next
+ * commitment, which re-creates the mark and breaks the identity again
+ * (`p3 boot=true assess=true release=refused`, permanently). So
+ * the cost is one explicit rowid and one extra `UPDATE`, across two
+ * engine-guarded ledgers and a census that reports a drop at the boot that
+ * observes it — a real cost, and still not a cryptographic boundary. HQ holds
+ * no key a foreign writer does not also have; nothing here pretends otherwise.
  */
 
 import { createHash } from 'node:crypto';

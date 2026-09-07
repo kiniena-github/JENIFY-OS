@@ -1279,14 +1279,21 @@ export function regressedImmutableLedgers(db: HqDatabase): string[] {
  * permanent alarm here would be worse than the hole, and it is the same
  * fabricated-finding failure the Low of this round corrects elsewhere.
  *
- * **What it costs an attacker, executed rather than asserted.** It is one more
- * step, not a boundary: `sqlite_sequence` is writable and no trigger can guard
- * it, so a writer who knows this invariant inserts the replacement at an
- * EXPLICIT `seq = 1` and then `UPDATE sqlite_sequence SET seq = 1` for this
- * table. That variant was executed and is still silent. The honest gain is that
- * the naive in-place wipe — the one that costs nothing — is now reported
- * durably at every boot and at every assessment, and no assessment clears it
- * while it is true.
+ * **What it costs an attacker, executed rather than asserted, at the cheapest
+ * path found rather than the one easiest to describe.** It is more steps, not a
+ * boundary: `sqlite_sequence` is writable and no trigger can guard it. Two
+ * repairs were tried and both are cheaper to describe than to price honestly.
+ * The DURABLE one is two statements — insert the replacement at an EXPLICIT
+ * `seq = 1`, then `UPDATE sqlite_sequence SET seq = 1` for this table — and it
+ * stays silent for ever (`rows/highwater={"c":1,"s":1} boot=false assess=false
+ * release=ADMITTED`). The ONE-statement version, `DELETE FROM sqlite_sequence
+ * WHERE name = ...`, buys the process that follows and no more — including the
+ * Founder assessment it was aiming to pass, which is itself the next COMMITMENT
+ * and re-creates the high-water mark from the surviving rowid. Measured:
+ * `p2 boot=false assess=false release=ADMITTED`, then `p3 boot=true assess=true
+ * release=refused`, `p4` the same, permanently. The honest gain is therefore
+ * that the version costing NOTHING is gone, and that the cheap repair costs the
+ * attacker every process after the one it bought.
  *
  * Scoped to this ONE ledger deliberately. The identity holds for it because HQ
  * is its only writer; extending a row COUNT to all 31 declared ledgers would

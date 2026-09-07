@@ -1489,8 +1489,17 @@ as well as here:
   `rows/highwater={"c":1,"s":1} boot=false assess=false release=ADMITTED`. So
   the honest price of the surviving attack is one explicit rowid and one extra
   `UPDATE` against a table no trigger can guard — still zero restarts and zero
-  Founder acts, and cheaper than the `DROP TABLE` the previous round named. What
-  the round bought is that the version costing NOTHING is gone. HQ holds no key
+  Founder acts, and cheaper than the `DROP TABLE` the previous round named. The
+  even cheaper ONE-statement repair was tried too and does not hold: `DELETE
+  FROM sqlite_sequence WHERE name = 'hq_integrity_checkpoints'` buys the
+  attacker the process that follows, the Founder assessment it was aiming to
+  pass included — and that assessment is itself the next COMMITMENT, which
+  re-creates the high-water mark from the surviving rowid and breaks the
+  identity again without any further help. Measured: `p2 boot=false
+  assess=false release=ADMITTED`, then `p3 boot=true assess=true
+  release=refused` and `p4` the same, permanently. What the round bought is that
+  the version costing NOTHING is gone, and that the one-statement repair costs
+  the attacker every process after the one it bought. HQ holds no key
   a foreign writer does not also have; every fact this ledger rests on lives in
   the same file the attacker is already writing, and nothing here pretends the
   commitment is a boundary.

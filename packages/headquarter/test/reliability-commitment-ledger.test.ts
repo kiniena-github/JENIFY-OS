@@ -127,7 +127,10 @@ function forgeShortenedLog(raw: HqDatabase, drop: number): { before: number; aft
  * match, which is the honest remaining price and is executed here rather than
  * asserted.
  */
-function wipeCommitmentsInPlace(raw: HqDatabase, options: { repairSequence: boolean }): void {
+function wipeCommitmentsInPlace(
+  raw: HqDatabase,
+  options: { repairSequence: boolean; omitOwnMark?: boolean },
+): void {
   const guardSql = (
     raw
       .prepare(`SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name = ?`)
@@ -142,6 +145,11 @@ function wipeCommitmentsInPlace(raw: HqDatabase, options: { repairSequence: bool
   }[]) {
     marks[row.name] = row.seq;
   }
+  // The attacker composes the replacement row's marks anyway, so leaving its
+  // own ledger out costs nothing extra — and it is what the DELETE-the-sequence
+  // variant has to do, since the mark it commits must not exceed what the file
+  // will show afterwards.
+  if (options.omitOwnMark) delete marks[HQ_INTEGRITY_CHECKPOINT_TABLE];
   // The gutted-store variant drops `op_evidence` too, and an attacker with no
   // log to agree with simply commits to none.
   let tip: { seq: number; hash: string } | undefined;
@@ -307,6 +315,48 @@ describe('HQ’s own commitment ledger is checked against itself', () => {
       const after = fx.reopen('sequence-repaired');
       expect(after.ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
       after.db.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('costs the cheaper one-statement repair every process after the first', () => {
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+
+      const raw = fx.raw();
+      forgeShortenedLog(raw, 2);
+      wipeCommitmentsInPlace(raw, { repairSequence: false, omitOwnMark: true });
+      // One statement instead of two: remove the high-water row rather than
+      // matching it. Nothing to compare against, so this boot reads clean.
+      raw.exec(`DELETE FROM sqlite_sequence WHERE name = '${HQ_INTEGRITY_CHECKPOINT_TABLE}'`);
+      expect(elidedCommitmentLedgerRows(raw)).toBe(false);
+      raw.close();
+
+      const bought = fx.reopen('the-one-clean-process');
+      expect(bought.ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
+      // The Founder assessment the forgery was aiming to pass does pass — and
+      // it is also the act that appends the next commitment.
+      const boughtAssessment = bought.ops.assessHqIntegrity({ requestedBy: 'founder' });
+      expect(boughtAssessment.ok).toBe(true);
+      if (!boughtAssessment.ok) throw new Error('unreachable');
+      expect(boughtAssessment.data.safeMode).toBe(false);
+      bought.db.close();
+
+      // And then HQ's own next commitment re-creates the mark from the rowid
+      // the forged row still carries, so the identity breaks again by itself.
+      for (const tag of ['and-then-one', 'and-then-two']) {
+        const process = fx.reopen(tag);
+        expect(process.ops.hqReliabilityPosture().integrity.safeMode, tag).toBe(true);
+        const assessed = process.ops.assessHqIntegrity({ requestedBy: 'founder' });
+        expect(assessed.ok).toBe(true);
+        if (!assessed.ok) throw new Error('unreachable');
+        expect(assessed.data.safeMode, tag).toBe(true);
+        expect(process.ops.releaseKillSwitch('global', 'founder').ok, tag).toBe(false);
+        process.db.close();
+      }
     } finally {
       fx.cleanup();
     }
