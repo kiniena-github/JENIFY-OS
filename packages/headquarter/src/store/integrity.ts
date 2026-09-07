@@ -504,9 +504,12 @@ export const SAFE_MODE_STATEMENT =
   'Safe mode is a statement about HQ’s OWN stored record, not about the outside world. It engages only when ' +
   'the engine reports the file corrupt, an append-only guard the schema declares is missing, or the evidence ' +
   'hash chain does not verify. While engaged HQ still READS and still reconciles, and it refuses the acts ' +
-  'that would add to, approve, release or execute against a record it cannot stand behind. A blocking ' +
+  'that would add to, approve, release or execute against a record it cannot stand behind — including ' +
+  'registering a worker or declaring its provider, which would ADD authority. A blocking ' +
   'verdict is APPENDED to HQ’s own verdict ledger and re-read at every construction, so a restart does not ' +
-  'clear it — only a fresh full assessment that finds nothing blocking does. On a database that carries no ' +
+  'clear it — only a fresh full assessment that finds nothing blocking does. A verdict row appended by ' +
+  'anything else does not clear it either: a clearing verdict counts only when the hash-chained evidence ' +
+  'log carries the entry naming it that an assessment writes beside it. On a database that carries no ' +
   'Phase 13 ledger there is nowhere to record it and the verdict is process-local; the ' +
   'reliability_schema_absent finding says when that is the case.';
 

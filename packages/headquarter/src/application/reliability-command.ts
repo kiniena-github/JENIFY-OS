@@ -750,38 +750,45 @@ export function integrityVerdictLedgerPresent(db: HqDatabase): boolean {
 }
 
 /**
- * The LAST verdict HQ recorded about this database, or null.
- *
- * Every finding is read through `isHqIntegrityFinding`, so a row appended by a
- * raw writer can never introduce a finding name outside the closed vocabulary
- * — a forged string is dropped rather than carried, exactly as the snapshot
- * folds it to `unrecognized` rather than publishing it.
- *
- * **What this does NOT protect against, stated rather than glossed** (the other
- * correction lane's self-review of the same mechanism, carried onto this one).
- * The standing verdict is the LAST row, and an APPEND is exactly the write this
- * table's triggers deliberately permit. So a writer that already holds a
- * writable handle can append a `safe_mode = 0` row and the next construction
- * reads a clean standing verdict — and the boot's own pass is STRUCTURAL, which
- * by design cannot see a broken evidence chain, so an `evidence_chain_broken`
- * engagement would not be re-derived. Appending a `safe_mode = 1` row is the
- * mirror image and is the fail-closed direction (a denial of service at worst).
- * The guards close the OTHER doors — no UPDATE of a standing row, no DELETE of
- * the history, no REPLACE onto an existing id — and the census reports them if
- * they go missing. Against a writer with the file already open this is
- * bookkeeping, not a boundary, and it is the same residual this document
- * already records for `hq_reliability_run_events`. What it DOES close is the
- * thing it was built for: a plain RESTART silently lowering a verdict HQ had
- * already reached.
+ * The kind of evidence entry an assessment appends beside the verdict it
+ * records. One spelling, read by the corroboration check below and written by
+ * the two places that record a verdict.
  */
-export function latestIntegrityVerdict(db: HqDatabase): RecordedIntegrityVerdict | null {
-  if (!integrityVerdictLedgerPresent(db)) return null;
-  const row = db
-    .prepare(`SELECT * FROM hq_reliability_verdicts ORDER BY seq DESC LIMIT 1`)
-    .get() as Record<string, unknown> | undefined;
-  if (!row) return null;
+export const INTEGRITY_ASSESSED_EVIDENCE_KIND = 'hq_integrity_assessed';
+
+/**
+ * Is this verdict row CORROBORATED by the hash-chained evidence log?
+ *
+ * `assessHqIntegrity` and the construction-time observation each write the
+ * verdict row and an `hq_integrity_assessed` evidence entry naming that row's
+ * id, inside ONE reservation, so the pair lands together or not at all. A
+ * verdict row that arrived any other way has no such entry.
+ *
+ * `json_valid` guards the extract, because `op_evidence.payload` is an
+ * append-only column a raw writer can put anything in and an unparseable row
+ * must be inert here rather than an exception.
+ */
+function verdictIsCorroborated(db: HqDatabase, verdictId: string): boolean {
+  try {
+    const row = db
+      .prepare(
+        `SELECT 1 AS ok FROM op_evidence
+          WHERE kind = ?
+            AND json_valid(payload)
+            AND json_extract(payload, '$.verdictId') = ?
+          LIMIT 1`,
+      )
+      .get(INTEGRITY_ASSESSED_EVIDENCE_KIND, verdictId) as { ok: number } | undefined;
+    return row !== undefined;
+  } catch {
+    // No evidence log to corroborate against is not corroboration. Fail closed:
+    // an uncorroborated CLEAR does not clear.
+    return false;
+  }
+}
+
+function rowToRecordedVerdict(row: Record<string, unknown>): RecordedIntegrityVerdict {
   const depth = String(row.depth);
-  const findings = jsonStringArray(row.findings).filter(isHqIntegrityFinding);
   return {
     assessedAt: String(row.assessed_at),
     // Read through the vocabulary, never asserted into it. An unreadable depth
@@ -791,8 +798,70 @@ export function latestIntegrityVerdict(db: HqDatabase): RecordedIntegrityVerdict
       ? (depth as IntegrityAssessmentDepth)
       : 'structural',
     safeMode: Number(row.safe_mode) === 1,
-    findings,
+    // Every finding is read through `isHqIntegrityFinding`, so a row appended by
+    // a raw writer can never introduce a finding name outside the closed
+    // vocabulary — a forged string is dropped rather than carried, exactly as
+    // the snapshot folds it to `unrecognized` rather than publishing it.
+    findings: jsonStringArray(row.findings).filter(isHqIntegrityFinding),
   };
+}
+
+/**
+ * The verdict that STANDS about this database, or null.
+ *
+ * Not simply the last row, and the difference is the whole point (Wave 5
+ * correction round three, Medium A7). An APPEND is exactly the write this
+ * table's triggers deliberately permit, so one raw
+ * `INSERT INTO hq_reliability_verdicts ... safe_mode = 0` used to clear a
+ * latched safe mode outright — and the boot's own pass is STRUCTURAL, which by
+ * design cannot see a broken evidence chain, so an `evidence_chain_broken`
+ * engagement was not re-derived either. `releaseKillSwitch` and `claimNext`
+ * were handed straight back out. Meanwhile `SAFE_MODE_STATEMENT`, shipped
+ * verbatim on every reliability view, in every refusal and in the
+ * unauthenticated snapshot, asserted that "only a fresh full assessment that
+ * finds nothing blocking" clears it. The sentence is now true rather than
+ * softened:
+ *
+ *  - a verdict that says ENGAGED stands, whoever appended it. Appending one is
+ *    the fail-safe direction (a denial of service at worst), so it needs no
+ *    corroboration;
+ *  - a verdict that says CLEAR clears only if the hash-chained evidence log
+ *    carries the entry that names it. Both writers of a verdict append that
+ *    entry inside the same reservation; nothing else can produce the pair
+ *    without also writing into the evidence chain.
+ *
+ * An uncorroborated clear is not an error and is not a finding — it is simply
+ * not a verdict, so the walk continues to the row behind it. That keeps the
+ * rule monotone: appending noise can never lower the standing verdict, and can
+ * only ever raise it.
+ *
+ * **The residual, stated rather than glossed.** HQ holds no key a foreign
+ * writer does not also have, so a writer that already holds the file open can
+ * forge the evidence entry too — at the cost of appending to the hash chain,
+ * which is itself now guarded by the engine and by a durable length commitment
+ * (see `verifyEvidenceChain`). Against that writer this is a real barrier and
+ * not a cryptographic boundary, which is the same residual recorded for
+ * `hq_reliability_run_events`. What it closes completely is the thing it was
+ * built for: one appended row, and a plain restart, silently lowering a verdict
+ * HQ had already reached.
+ *
+ * **The upgrade consequence, recorded honestly.** A verdict written by a build
+ * before this change carries no paired evidence entry, so a CLEAR from such a
+ * build no longer clears. If an older blocking verdict stands behind it, that
+ * database boots into safe mode once and a Founder full assessment clears it.
+ * That is the fail-closed direction and the documented cost of the mechanism.
+ */
+export function standingIntegrityVerdict(db: HqDatabase): RecordedIntegrityVerdict | null {
+  if (!integrityVerdictLedgerPresent(db)) return null;
+  const rows = db
+    .prepare(`SELECT * FROM hq_reliability_verdicts ORDER BY seq DESC`)
+    .all() as Record<string, unknown>[];
+  for (const row of rows) {
+    const verdict = rowToRecordedVerdict(row);
+    if (verdict.safeMode) return verdict;
+    if (verdictIsCorroborated(db, String(row.id))) return verdict;
+  }
+  return null;
 }
 
 function jsonStringArray(value: unknown): string[] {

@@ -22,7 +22,7 @@ import {
 } from '../src/application/reliability-command.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { EvidenceLog, verifyEvidenceChain } from '../src/operator/evidence.js';
-import { missingImmutabilityGuards } from '../src/store/integrity.js';
+import { SAFE_MODE_STATEMENT, missingImmutabilityGuards } from '../src/store/integrity.js';
 import { founderConsole } from '../src/application/console.js';
 
 function expectError(result: {
@@ -768,6 +768,113 @@ describe('safe mode', () => {
     }
   });
 
+  /**
+   * Wave 5 correction round three, Medium A8. Safe mode left an
+   * authority-GRANTING mutator open: `registerExecutionWorker` created a worker
+   * identity WITH its `allowedCapabilities` straight into `hq_specialists` — the
+   * table `#grantOf` reads at every enforcement point — while HQ had declared
+   * its own record untrustworthy. `declareWorkerProvider` is the same act one
+   * field across: it is what lets a worker claim provider-bound work at all.
+   * Both are exactly what `SAFE_MODE_STATEMENT` says it refuses.
+   */
+  it('refuses the two mutators that ADD authority, and writes no row while doing so', () => {
+    const fx = fileFixture();
+    try {
+      tamper(fx);
+      const restarted = fx.reopen('process-two');
+      const ops = restarted.ops;
+      expect(ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+      const raw = fx.raw();
+      const workersBefore = (
+        raw.prepare(`SELECT COUNT(*) AS n FROM hq_specialists`).get() as { n: number }
+      ).n;
+      const declarationsBefore = (
+        raw.prepare(`SELECT COUNT(*) AS n FROM op_worker_providers`).get() as { n: number }
+      ).n;
+
+      const registered = ops.registerExecutionWorker({
+        workerId: 'a-brand-new-worker',
+        displayName: 'Brand New',
+        vendor: 'anthropic',
+        role: 'build_lead',
+        allowedCapabilities: [CAPS.openPr],
+        founderId: 'founder',
+      });
+      expect(registered.ok).toBe(false);
+      expect(!registered.ok && registered.error.code).toBe('safe_mode_engaged');
+
+      const declared = ops.declareWorkerProvider({
+        workerId: 'claude',
+        providerId: 'CLAUDE',
+        founderId: 'founder',
+      });
+      expect(declared.ok).toBe(false);
+      expect(!declared.ok && declared.error.code).toBe('safe_mode_engaged');
+
+      // Refused means nothing was written, in either table.
+      expect((raw.prepare(`SELECT COUNT(*) AS n FROM hq_specialists`).get() as { n: number }).n).toBe(
+        workersBefore,
+      );
+      expect(
+        (raw.prepare(`SELECT COUNT(*) AS n FROM op_worker_providers`).get() as { n: number }).n,
+      ).toBe(declarationsBefore);
+      // And the shipped statement now says so, so the code and the sentence
+      // agree rather than the sentence being aspirational.
+      expect(SAFE_MODE_STATEMENT).toContain('registering a worker or declaring its provider');
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * The other column of the same table, and the half that has to be ARGUED
+   * rather than assumed. Each of these is deliberately left available, and the
+   * reason is on the method: revocation and deactivation only ever take
+   * authority away; routing is advisory and claiming is refused anyway; a
+   * mission proposal is inert and cannot be claimed into an act; and the system
+   * evidence surface can only record that a lane REFUSED to do something.
+   */
+  it('keeps the strictly-narrowing and inert mutators available, deliberately', () => {
+    const fx = fileFixture();
+    try {
+      // A declaration made while the store was healthy, so the revoke has
+      // something real to withdraw.
+      expectOk(
+        fx.ops.declareWorkerProvider({ workerId: 'claude', providerId: 'CLAUDE', founderId: 'founder' }),
+      );
+      tamper(fx);
+      const restarted = fx.reopen('process-two');
+      const ops = restarted.ops;
+      expect(ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+
+      // Advisory routing still answers; it authorizes nothing and the claim it
+      // might inform is refused.
+      expectOk(ops.routeTask(fx.claim.taskId));
+      // An INERT proposal: it is not a task and executes nothing.
+      expectOk(
+        ops.proposeMission({
+          threadId: 'thread-in-safe-mode',
+          capabilityId: CAPS.openPr,
+          payload: { branch: 'proposed-while-degraded' },
+          proposedBy: 'claude',
+        }),
+      );
+      // A system lane recording that it REFUSED something.
+      expect(
+        ops.appendSystemEvidence({
+          actor: 'system',
+          kind: 'direct_order_dispatch_blocked',
+          payload: { reason: 'recorded while safe mode stands', executable: false },
+        }).kind,
+      ).toBe('direct_order_dispatch_blocked');
+      // Strictly narrowing: authority removed, never added.
+      expect(expectOk(ops.revokeWorkerProvider({ workerId: 'claude', founderId: 'founder' }))).toBe(true);
+      expect(ops.workerProviderDeclarations()).toEqual([]);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
   it('keeps reading, recovering, reconciling and STOPPING available', () => {
     const fx = fileFixture();
     try {
@@ -1189,6 +1296,15 @@ describe('the safe-mode evidence verdict is computed from enforcement-safe truth
    * `reliability-verdict-durability.test.ts` pins the INSERT-side guard from the
    * other direction; this one pins UPDATE, DELETE and the census.
    */
+  /**
+   * The title used to promise more than the body executed (Wave 5 correction
+   * round three, Low A9). It tried UPDATE and DELETE — which the triggers
+   * refuse — and never tried the one write that actually cleared safe mode: a
+   * plain `INSERT` of a `safe_mode = 0` row, which is exactly the write an
+   * append-only table permits. That row DID clear the latch, and
+   * `SAFE_MODE_STATEMENT` denied it on every view. The body now runs the write
+   * the title claims nothing can do.
+   */
   it('holds the latch append-only, so no writer can clear safe mode without an assessment', () => {
     const fx = fileFixture({ processIdentity: 'process-one' });
     try {
@@ -1205,11 +1321,62 @@ describe('the safe-mode evidence verdict is computed from enforcement-safe truth
         expect(() => raw.exec(statement), statement).toThrow(/append-only/);
       }
       expect(fx.reopen('process-two').ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+
+      // THE WRITE THE TITLE IS ABOUT: an APPEND, which the triggers deliberately
+      // permit and which a raw writer therefore always could make. It succeeds
+      // as a write and settles nothing, because a clearing verdict now counts
+      // only when the hash-chained evidence log carries the entry naming it that
+      // an assessment writes beside it.
+      raw
+        .prepare(
+          `INSERT INTO hq_reliability_verdicts
+             (id, assessed_at, depth, safe_mode, findings, process_id, assessed_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run('verdict-forged-clean', new Date().toISOString(), 'full', 0, '[]', 'attacker', 'attacker');
+      expect(
+        (raw.prepare(`SELECT safe_mode FROM hq_reliability_verdicts ORDER BY seq DESC LIMIT 1`).get() as {
+          safe_mode: number;
+        }).safe_mode,
+      ).toBe(0);
+      const afterForgery = fx.reopen('process-three');
+      expect(afterForgery.ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+      expect(
+        afterForgery.ops.hqReliabilityPosture().integrity.observations.map((o) => o.finding),
+      ).toContain('evidence_chain_broken');
+      // And the acts safe mode exists to refuse are still refused, which is the
+      // consequence the finding actually turned on.
+      expectOk(afterForgery.ops.engageKillSwitch('*', 'founder', 'investigating'));
+      const release = afterForgery.ops.releaseKillSwitch('*', 'founder');
+      expect(release.ok).toBe(false);
+      expect(!release.ok && release.error.code).toBe('safe_mode_engaged');
+
       // The census sees the verdict ledger's guards, so dropping one is a
       // finding rather than a silent way to make the latch erasable.
       expect(missingImmutabilityGuards(raw)).toEqual([]);
       raw.exec('DROP TRIGGER trg_hq_reliability_verdicts_no_erase');
       expect(missingImmutabilityGuards(raw)).toEqual(['trg_hq_reliability_verdicts_no_erase']);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * The other half of the same sentence: an assessment that genuinely finds
+   * nothing blocking DOES clear it. Without this the corroboration rule could
+   * be satisfied by never clearing at all, which would be a different lie.
+   */
+  it('is still cleared by a real full assessment once the file genuinely stands', () => {
+    const fx = fileFixture({ processIdentity: 'process-one' });
+    try {
+      fx.raw().exec('DROP TRIGGER trg_hq_action_events_no_erase');
+      const booted = fx.reopen('process-two');
+      expect(booted.ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+      // Boot #2 re-created the guard, so the file as it now stands is healthy.
+      const cleared = expectOk(booted.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(cleared.safeMode).toBe(false);
+      // And the clearing verdict survives a restart, because it is corroborated.
+      expect(fx.reopen('process-three').ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
     } finally {
       fx.cleanup();
     }

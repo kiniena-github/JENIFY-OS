@@ -55,7 +55,7 @@ import {
   RUN_STATES,
   REPORTABLE_RUN_OUTCOMES,
   isReportableRunOutcome,
-  latestIntegrityVerdict,
+  standingIntegrityVerdict,
 } from '../src/application/reliability-command.js';
 import { verifyEvidenceChain } from '../src/operator/evidence.js';
 import { openHqDatabaseReadOnly } from '../src/store/db.js';
@@ -193,7 +193,7 @@ describe('the safe-mode verdict survives a restart, because it is RECORDED', () 
       breakChainByLegalAppend(fx);
       expectOk(fx.ops.assessHqIntegrity({ requestedBy: 'founder' }));
       const raw = fx.raw();
-      const stored = latestIntegrityVerdict(raw)!;
+      const stored = standingIntegrityVerdict(raw)!;
       expect(stored.safeMode).toBe(true);
       expect(stored.depth).toBe('full');
       expect([...stored.findings]).toContain('evidence_chain_broken');
@@ -215,12 +215,31 @@ describe('the safe-mode verdict survives a restart, because it is RECORDED', () 
           .run(row.id, '2020-01-01T00:00:00.000Z', 'full', 0, '[]', 'attacker', 'attacker'),
       ).toThrow(/append-only/);
       // Refused means intact.
-      expect(latestIntegrityVerdict(fx.raw())!.safeMode).toBe(true);
+      expect(standingIntegrityVerdict(fx.raw())!.safeMode).toBe(true);
       expect(
         (fx.raw().prepare(`SELECT id FROM hq_reliability_verdicts ORDER BY seq DESC LIMIT 1`).get() as {
           id: string;
         }).id,
       ).toBe(row.id);
+      // The write this test's three statements deliberately did NOT try, and
+      // the only one that ever cleared safe mode (Wave 5 correction round
+      // three, Low A9): a plain APPEND of a clean row, which is exactly what an
+      // append-only table permits. It lands as a row and settles nothing,
+      // because it carries no corroborating entry in the evidence chain.
+      raw
+        .prepare(
+          `INSERT INTO hq_reliability_verdicts
+             (id, assessed_at, depth, safe_mode, findings, process_id, assessed_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run('verdict-appended-clean', new Date().toISOString(), 'full', 0, '[]', 'attacker', 'attacker');
+      expect(
+        (fx.raw().prepare(`SELECT id FROM hq_reliability_verdicts ORDER BY seq DESC LIMIT 1`).get() as {
+          id: string;
+        }).id,
+      ).toBe('verdict-appended-clean');
+      expect(standingIntegrityVerdict(fx.raw())!.safeMode).toBe(true);
+      expect(fx.reopen('process-two').ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
     } finally {
       fx.cleanup();
     }
@@ -279,15 +298,63 @@ describe('the safe-mode verdict survives a restart, because it is RECORDED', () 
     (db as unknown as { close(): void }).close();
   });
 
+  /**
+   * The title claims the statement DOES what it says, and the body used to grep
+   * three substrings and execute nothing — while pinning a sentence whose
+   * second half was false (Wave 5 correction round three, Low A10). Each clause
+   * is now executed against a real file, and the substring check stays as the
+   * cheap half that catches a rewording.
+   */
   it('says what it does, and does what it says', () => {
     // The statement is shipped verbatim on every reliability view and in the
     // unauthenticated snapshot, so its wording is a claim HQ makes about
     // itself. The old sentence — "It is never cleared by a boot" — was simply
-    // false; the new one names the mechanism and names the case where the
+    // false; the current one names the mechanism and names the case where the
     // mechanism is absent.
     expect(SAFE_MODE_STATEMENT).toContain('APPENDED to HQ’s own verdict ledger');
     expect(SAFE_MODE_STATEMENT).toContain('a restart does not clear it');
+    expect(SAFE_MODE_STATEMENT).toContain('only a fresh full assessment that finds nothing blocking');
     expect(SAFE_MODE_STATEMENT).toContain('no Phase 13 ledger');
+
+    const fx = fileFixture();
+    try {
+      breakChainByLegalAppend(fx);
+      const engaged = expectOk(fx.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(engaged.safeMode).toBe(true);
+
+      // "APPENDED to HQ's own verdict ledger" — a row is really there, and it
+      // says what the assessment said.
+      const raw = fx.raw();
+      const stored = standingIntegrityVerdict(raw)!;
+      expect(stored.safeMode).toBe(true);
+      expect([...stored.findings]).toContain('evidence_chain_broken');
+
+      // "a restart does not clear it" — executed, not asserted.
+      expect(fx.reopen('process-two').ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+
+      // "only a fresh full assessment that finds nothing blocking does" — the
+      // half that was false. A raw APPEND of a clean verdict is the write an
+      // append-only ledger permits, and it used to clear the latch outright.
+      raw
+        .prepare(
+          `INSERT INTO hq_reliability_verdicts
+             (id, assessed_at, depth, safe_mode, findings, process_id, assessed_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run('verdict-says-clean', new Date().toISOString(), 'full', 0, '[]', 'attacker', 'attacker');
+      expect(fx.reopen('process-three').ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+
+      // And "READS and still reconciles" while "refuses the acts that would
+      // add to, approve, release or execute" — one of each, on the same facade.
+      const after = fx.reopen('process-four');
+      expect(after.ops.listRunsBounded().total).toBe(0);
+      expectOk(after.ops.engageKillSwitch('*', 'founder', 'investigating'));
+      const release = after.ops.releaseKillSwitch('*', 'founder');
+      expect(release.ok).toBe(false);
+      expect(!release.ok && release.error.code).toBe('safe_mode_engaged');
+    } finally {
+      fx.cleanup();
+    }
   });
 });
 

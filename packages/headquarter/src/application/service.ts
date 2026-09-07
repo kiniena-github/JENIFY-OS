@@ -562,7 +562,8 @@ import {
   isRunFailureCategory,
   isRunKind,
   isRunReconcileDecision,
-  latestIntegrityVerdict,
+  INTEGRITY_ASSESSED_EVIDENCE_KIND,
+  standingIntegrityVerdict,
   loadBackupRecords,
   loadRun,
   loadRunByKey,
@@ -2320,7 +2321,7 @@ export class HeadquarterOperations {
    * version did better is carried here — a recorded verdict that says ENGAGED
    * still engages even when its stored finding list could not be read back
    * through the closed vocabulary (`carryRecordedVerdict`), and the residual it
-   * disclosed about a raw appender is stated on `latestIntegrityVerdict`
+   * disclosed about a raw appender is stated on `standingIntegrityVerdict`
    * instead of glossed.
    */
   #integrityReport: HqIntegrityReport;
@@ -2559,7 +2560,7 @@ export class HeadquarterOperations {
     this.#processIdentity = options.processIdentity?.trim() || HQ_PROCESS_IDENTITY;
     // The cheap half, at every construction. See the field's own note for why
     // the expensive half is an explicit act instead.
-    const recordedVerdict = latestIntegrityVerdict(db);
+    const recordedVerdict = standingIntegrityVerdict(db);
     this.#integrityReport = structuralIntegrity(db, {
       guardsMissingAsFound: immutabilityAsFound.guardsMissing,
       // Only the ones HQ's own schema has just re-created count as a finding:
@@ -2726,10 +2727,11 @@ export class HeadquarterOperations {
     if (!this.#queuePrivileged) return;
     const privileged = this.#queuePrivileged;
     const findings = this.#integrityReport.observations.map((observation) => observation.finding);
+    const verdictId = `verdict-${uuid()}`;
     try {
       privileged.reserve(() => {
         appendIntegrityVerdict(this.#db, {
-          id: `verdict-${uuid()}`,
+          id: verdictId,
           assessedAt: nowIso(),
           depth: this.#integrityReport.depth,
           safeMode: true,
@@ -2739,8 +2741,12 @@ export class HeadquarterOperations {
         });
         privileged.appendEvidence({
           actor: this.#processIdentity,
-          kind: 'hq_integrity_assessed',
+          kind: INTEGRITY_ASSESSED_EVIDENCE_KIND,
           payload: {
+            // The row this entry corroborates. `standingIntegrityVerdict` will
+            // not let a CLEAR verdict clear without it, and the pair lands
+            // inside ONE reservation so it can never half-exist.
+            verdictId,
             depth: this.#integrityReport.depth,
             safeMode: true,
             safeModeChanged: true,
@@ -2845,6 +2851,13 @@ export class HeadquarterOperations {
    * decide. Nominations are advisory: `eligible` is computed ONLY from the
    * capability registry and the directory allow-list, so a source that
    * nominates an unauthorized, unknown, or disabled worker changes nothing.
+   */
+  /**
+   * Deliberately AVAILABLE in safe mode. It computes an advisory answer from
+   * the registry and the directory and changes no canonical state; the only
+   * thing it can write is an evidence note recording that a nomination source
+   * misbehaved. Nothing it returns authorizes anything — claiming is refused
+   * while safe mode stands, so a routing answer cannot become an act.
    */
   routeTask(taskId: string): OpsResult<TaskRouting> {
     const task = this.queue.get(taskId);
@@ -3555,6 +3568,18 @@ export class HeadquarterOperations {
    * entries #200 took away, even if a reserved name were later reused as a
    * principal id. It grants no approval, no capability and no execution right.
    *
+   * Deliberately AVAILABLE in safe mode (Wave 5 correction round three, Medium
+   * A8), which is the one entry in that column that needed arguing. It does
+   * append into the hash-chained log a latched `evidence_chain_broken` finding
+   * is a statement ABOUT — but every kind it can still write is a record of a
+   * system lane REFUSING to act — `claude_github_dispatch_refused` and `direct_order_dispatch_blocked` — the kinds that
+   * DECIDE a dispatch outcome are structurally excluded below, and the actor is
+   * a reserved system name that can never resolve to a principal or a worker.
+   * So it grants nothing, concludes nothing, and refusing it would leave a lane
+   * unable to record that it declined — losing truth in the posture built for
+   * not losing truth. The same argument as `startTask`/`submitResult`, which
+   * safe mode also leaves open.
+   *
    * NARROWED AGAIN for Option B (issue #219). Restricting the actor and closing
    * the kind set was still not enough for the kinds that DECIDE something: a
    * caller holding `ops` could write a terminal `claude_github_dispatch_failed`
@@ -3677,6 +3702,15 @@ export class HeadquarterOperations {
     providerId: string;
     founderId: string;
   }): OpsResult<WorkerProviderRecord> {
+    // Safe mode, FIRST and categorically (Wave 5 correction round three,
+    // Medium A8). A provider declaration is what lets a worker claim
+    // provider-bound work at all, so it ADDS authority — and `registerExecution
+    // Worker` beside it adds an identity WITH an allow-list. Both wrote through
+    // while HQ had declared its own record untrustworthy, which is exactly what
+    // `SAFE_MODE_STATEMENT` says it refuses. Withdrawing a declaration stays
+    // available, because that direction only ever removes an option.
+    const blocked = this.#safeModeRefusal('declare a worker execution provider');
+    if (blocked) return blocked;
     const principal = this.#assertApprovalAuthority(
       input.founderId,
       'declare a worker execution provider',
@@ -3772,6 +3806,12 @@ export class HeadquarterOperations {
     allowedCapabilities: readonly string[];
     founderId: string;
   }): OpsResult<WorkerDescriptor> {
+    // Safe mode, FIRST and categorically. This creates a worker identity WITH
+    // its `allowedCapabilities`, straight into the table `#grantOf` reads at
+    // every enforcement point — it ADDS AUTHORITY, and registration is
+    // create-only with no revoke path, so it is not something to undo later.
+    const blocked = this.#safeModeRefusal('register an execution worker');
+    if (blocked) return blocked;
     const principal = this.#assertApprovalAuthority(input.founderId, 'register an execution worker');
     if (principal) return principal;
 
@@ -3864,6 +3904,12 @@ export class HeadquarterOperations {
    * declaring one, and strictly narrowing in effect: the worker can then claim
    * no provider-bound task at all.
    */
+  /**
+   * Deliberately AVAILABLE in safe mode, and the reason is the direction it
+   * moves (Wave 5 correction round three, Medium A8): it can only ever take
+   * authority away. `declareWorkerProvider` is refused for the mirror-image
+   * reason. Removing a way to STOP something is never the safe answer.
+   */
   revokeWorkerProvider(input: { workerId: string; founderId: string }): OpsResult<boolean> {
     const principal = this.#assertApprovalAuthority(
       input.founderId,
@@ -3939,6 +3985,12 @@ export class HeadquarterOperations {
    * In-flight work is protected: `assertReplacementSafe` refuses while the
    * worker holds assigned/running/outcome_unknown tasks, so deactivation can
    * never orphan a claim.
+   */
+  /**
+   * Deliberately AVAILABLE in safe mode, for the same reason as
+   * `revokeWorkerProvider`: it is strictly narrowing, there is no reactivate
+   * method, and refusing it would remove a way to stop a worker while HQ is in
+   * the posture where stopping things matters most.
    */
   deactivateExecutionWorker(input: {
     workerId: string;
@@ -4356,6 +4408,15 @@ export class HeadquarterOperations {
    * nor the proposer, nor the message text has any say. The created task is an
    * ordinary task — a Founder-gated capability still lands in `needs_approval`
    * exactly as if it had been created any other way.
+   */
+  /**
+   * `proposeMission` above and this promotion are both deliberately AVAILABLE
+   * in safe mode, on exactly the argument the doc already records for
+   * `proposeAction` and `createTask` (Wave 5 correction round three, Medium
+   * A8): a proposal is INERT and reaches nothing, and the task a promotion
+   * creates cannot be claimed while safe mode stands, so nothing it carries can
+   * happen. Refusing them would stop a Founder recording the very work that
+   * fixes the store.
    */
   promoteProposal(input: {
     proposalId: string;
@@ -8105,10 +8166,11 @@ export class HeadquarterOperations {
     // latch is only updated once they have: a verdict HQ could not record is a
     // verdict HQ does not act on.
     const privileged = this.#requirePrivilegedQueue();
+    const verdictId = `verdict-${uuid()}`;
     privileged.reserve(() => {
       if (this.#reliabilityStorePresent) {
         appendIntegrityVerdict(this.#db, {
-          id: `verdict-${uuid()}`,
+          id: verdictId,
           assessedAt: nowIso(),
           depth: report.depth,
           safeMode: report.safeMode,
@@ -8119,8 +8181,13 @@ export class HeadquarterOperations {
       }
       privileged.appendEvidence({
         actor: input.requestedBy,
-        kind: 'hq_integrity_assessed',
+        kind: INTEGRITY_ASSESSED_EVIDENCE_KIND,
         payload: {
+          // The verdict row this entry corroborates — the pair that makes
+          // `SAFE_MODE_STATEMENT`'s "only a fresh full assessment clears it"
+          // true rather than aspirational. Null when there is no ledger to
+          // record a verdict in, which `verdictRecorded` already says.
+          verdictId: this.#reliabilityStorePresent ? verdictId : null,
           depth: report.depth,
           safeMode: report.safeMode,
           safeModeChanged: before !== report.safeMode,
