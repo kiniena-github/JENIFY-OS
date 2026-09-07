@@ -66,6 +66,7 @@
  * case: it is what a human reads before deciding to promote a mission.
  */
 
+import { createHash } from 'node:crypto';
 import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
@@ -80,7 +81,11 @@ import {
   validateApprovalClaimBinding,
   type ApprovalRejection,
 } from '../operator/approvals.js';
-import { assertNoSecretLikeContent, type EvidenceEntry } from '../operator/evidence.js';
+import {
+  EVIDENCE_GENESIS_HASH,
+  assertNoSecretLikeContent,
+  type EvidenceEntry,
+} from '../operator/evidence.js';
 import { CapabilityRegistry, type Capability, type RiskClass } from '../operator/capabilities.js';
 import {
   GLOBAL_SCOPE,
@@ -2290,6 +2295,34 @@ export class HeadquarterOperations {
   readonly #capabilityFromStore: (id: string) => Capability | null;
 
   /**
+   * The evidence HASH CHAIN, recomputed from the database (Wave 5 correction,
+   * Critical 1 on `c9ddecc`).
+   *
+   * `evidence_chain_broken` is one of only three findings that engage safe
+   * mode, and the full assessment is the ONLY path that can clear the latch.
+   * That assessment used to read `this.queue.evidence.verifyChain()` —
+   * `queue.evidence` is a public own-property object literal that `queue.ts`
+   * documents as safe to patch "because enforcement never dispatches through
+   * it". Feeding a safe-mode verdict from it made that premise false: with the
+   * chain genuinely broken and safe mode latched at boot, replacing
+   * `ops.queue.evidence.verifyChain` with `() => null` let the ordinary
+   * Founder assessment clear the latch, and `claimNext` was granted again over
+   * a record HQ could not stand behind.
+   *
+   * So the chain is verified HERE, over `#db`, by the `#capabilityFromStore`
+   * recipe: an own closure with no public surface and — unlike a delegation to
+   * `EvidenceLog.verifyChain` — no prototype an attacker can reach either.
+   * `EvidenceLog` is exported, so `EvidenceLog.prototype.verifyChain = () =>
+   * null` would defeat any route that dispatched through the class. The SQL and
+   * the digest are the same as `EvidenceLog.verifyChain`'s; that method stays
+   * as the public read for callers who legitimately want one.
+   *
+   * Returns the `seq` of the first entry that does not verify, or null when the
+   * whole chain does.
+   */
+  readonly #evidenceChainFromStore: () => number | null;
+
+  /**
    * The kill-switch ROW read, from the database (Sol M1, PR #266 review
    * 5124774932).
    *
@@ -2376,6 +2409,36 @@ export class HeadquarterOperations {
         idempotent: !!row.idempotent,
         enabled: !!row.enabled,
       };
+    };
+    // See `#evidenceChainFromStore` for why the chain is recomputed here rather
+    // than delegated to `queue.evidence.verifyChain` or to `EvidenceLog`.
+    this.#evidenceChainFromStore = (): number | null => {
+      const rows = db.prepare(`SELECT * FROM op_evidence ORDER BY seq`).all() as Record<
+        string,
+        unknown
+      >[];
+      let prevHash = EVIDENCE_GENESIS_HASH;
+      for (const row of rows) {
+        const at = row.at as string;
+        const taskId = (row.task_id as string | null) ?? '';
+        const actor = row.actor as string;
+        const kind = row.kind as string;
+        // Re-serialized exactly the way `EvidenceLog.verifyChain` does, so the
+        // two answers cannot diverge on a healthy chain.
+        let payloadJson: string;
+        try {
+          payloadJson = JSON.stringify(JSON.parse(row.payload as string));
+        } catch {
+          // An unparseable payload is a broken entry, not a passed one.
+          return Number(row.seq);
+        }
+        const expected = createHash('sha256')
+          .update([prevHash, row.id as string, at, taskId, actor, kind, payloadJson].join('|'))
+          .digest('hex');
+        if (row.prev_hash !== prevHash || row.hash !== expected) return Number(row.seq);
+        prevHash = row.hash as string;
+      }
+      return null;
     };
     // Phase 13: observe the append-only guards AS THE FILE WAS FOUND, before
     // any `ensure*Schema` call below re-creates a missing one. Those calls are
@@ -7666,7 +7729,10 @@ export class HeadquarterOperations {
     // assessment rather than a restart — a restart would re-create the guards
     // and then report the file it had just repaired.
     const report = fullIntegrity(this.#db, {
-      verifyEvidenceChain: () => this.queue.evidence.verifyChain(),
+      // The `#private` closure over `#db`, never `queue.evidence.verifyChain`
+      // and never `EvidenceLog`: this read decides whether the safe-mode latch
+      // clears, so it may not be reachable on any public surface or prototype.
+      verifyEvidenceChain: () => this.#evidenceChainFromStore(),
       reliabilitySchemaPresent: this.#reliabilityStorePresent,
     });
     this.#integrityReport = report;

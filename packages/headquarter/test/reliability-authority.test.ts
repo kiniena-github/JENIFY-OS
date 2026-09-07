@@ -21,6 +21,7 @@ import {
   registerReliabilityCommandCapability,
 } from '../src/application/reliability-command.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
+import { EvidenceLog } from '../src/operator/evidence.js';
 import { founderConsole } from '../src/application/console.js';
 
 function expectError(result: { ok: boolean; error?: { code: string; message: string } }): {
@@ -647,6 +648,62 @@ describe('safe mode', () => {
       );
       expect(source).not.toMatch(/clearSafeMode|forceSafeMode|overrideSafeMode|acknowledgeSafeMode/);
     } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * Wave 5 Critical 1: the assessment read the evidence chain through
+   * `queue.evidence.verifyChain` — a PUBLIC own-property closure the queue
+   * documents as safe to patch. `evidence_chain_broken` is one of only three
+   * blocking findings and the assessment is the only path that CLEARS the
+   * latch, so that read was the one lever a same-realm caller needed: break
+   * the chain, let a dropped guard latch safe mode at boot, replace
+   * `verifyChain` with `() => null`, and the ordinary Founder assessment
+   * cleared the latch over a record HQ could not stand behind.
+   *
+   * Patched on the instance AND on `EvidenceLog.prototype`, because a fix that
+   * merely moved the call to `PrivilegedQueueApi` would still dispatch through
+   * that exported class's prototype.
+   */
+  it('reads the evidence chain from private truth, so patching verifyChain cannot clear the latch', () => {
+    const fx = fileFixture();
+    const prototype = EvidenceLog.prototype as unknown as Record<string, unknown>;
+    const realVerify = prototype.verifyChain;
+    try {
+      // A guard is gone (safe mode latches at boot) AND the hash chain is
+      // genuinely broken by a raw writer that never ran HQ's code.
+      tamper(fx);
+      const raw = fx.raw();
+      const first = raw.prepare(`SELECT seq FROM op_evidence ORDER BY seq LIMIT 1`).get() as {
+        seq: number;
+      };
+      raw.prepare(`UPDATE op_evidence SET actor = 'forged-actor' WHERE seq = ?`).run(first.seq);
+
+      const restarted = fx.reopen('process-two');
+      const ops = restarted.ops;
+      expect(ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+
+      // The patch, taken on every surface a same-realm caller can reach.
+      ops.queue.evidence.verifyChain = () => null;
+      prototype.verifyChain = () => null;
+      expect(ops.queue.evidence.verifyChain()).toBeNull();
+      expect(new EvidenceLog(restarted.db).verifyChain()).toBeNull();
+
+      // The assessment is unmoved: the chain really is broken, so the latch
+      // stands and names the finding.
+      const assessed = expectOk(ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(assessed.depth).toBe('full');
+      expect(assessed.safeMode).toBe(true);
+      expect(assessed.observations.map((o) => o.finding)).toContain('evidence_chain_broken');
+      expect(ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+
+      // And nothing may claim against it.
+      const claim = ops.claimNext('claude', CAPS.openPr);
+      expect(claim.ok).toBe(false);
+      expect(!claim.ok && claim.error.code).toBe('safe_mode_engaged');
+    } finally {
+      prototype.verifyChain = realVerify;
       fx.cleanup();
     }
   });

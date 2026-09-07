@@ -24,7 +24,16 @@ export interface EvidenceEntry {
   hash: string;
 }
 
-const GENESIS_HASH = 'genesis';
+/**
+ * The chain's zero value. Exported as `EVIDENCE_GENESIS_HASH` so an
+ * enforcement-safe verifier can recompute the chain WITHOUT dispatching
+ * through this class's prototype — `EvidenceLog` is exported, so a same-realm
+ * caller can replace `EvidenceLog.prototype.verifyChain`, and a safe-mode
+ * verdict must not be reachable that way. See
+ * `HeadquarterOperations.#evidenceChainFromStore`.
+ */
+export const EVIDENCE_GENESIS_HASH = 'genesis';
+const GENESIS_HASH = EVIDENCE_GENESIS_HASH;
 
 /**
  * Best-effort guard: refuse evidence payloads that look like they carry
