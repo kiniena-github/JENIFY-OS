@@ -23,13 +23,19 @@
  *    record is false, and treating them as corruption would make safe mode a
  *    thing operators route around instead of a thing they act on.
  *
- * 3. **Cost is stated, not hidden.** `structuralIntegrity` is the cheap half
- *    (three `sqlite_master` reads and four pragmas) and is what a boot can
- *    afford on every construction. `fullIntegrity` adds `integrity_check`,
- *    `foreign_key_check` and a whole-log evidence-chain verification, which
- *    are O(database) and O(log), and it is therefore an explicit act. Which
- *    one produced a verdict is carried ON the verdict, so nobody can mistake a
- *    cheap pass for a full one.
+ * 3. **Cost is stated, not hidden.** `structuralIntegrity` is what a boot pays
+ *    for: three `sqlite_master` reads, four pragmas, and — since correction
+ *    cycle 2 of the Wave 5 review — the whole-log evidence-chain verification,
+ *    which is O(log) and measured rather than guessed. `fullIntegrity` adds
+ *    `integrity_check` and `foreign_key_check`, which are O(database), and is
+ *    therefore an explicit act. Which one produced a verdict is carried ON the
+ *    verdict, so nobody can mistake a cheap pass for a full one.
+ *
+ * 4. **Not-checked is never reported as fine.** The chain posture is carried
+ *    separately from the depth, in its own closed vocabulary, and
+ *    `not_verified` engages safe mode exactly as a break does. A reader — an
+ *    enforcement point, a Founder, or a stranger holding the unauthenticated
+ *    snapshot — is never told HQ is well about something HQ has not looked at.
  */
 
 import fs from 'node:fs';
@@ -107,6 +113,23 @@ export function readDurabilityPosture(db: HqDatabase): HqDurabilityPosture {
 /* The engine-immutable tables                                         */
 /* ------------------------------------------------------------------ */
 
+/**
+ * A schema object whose presence in a FILE proves the code that wrote it was
+ * already new enough to declare a particular guard.
+ *
+ * This is how the census tells "a guard this file's vintage never created"
+ * apart from "a guard someone dropped" — the distinction its own contract
+ * demands and that it could not previously make (Wave 5 review, correction
+ * cycle 2, MEDIUM). It is read FROM THE FILE rather than from a stored version
+ * marker on purpose: a marker lives in the same file the tamper is in and can
+ * be deleted along with the guard, whereas these witnesses are tables and
+ * columns HQ's own code needs, so removing one is a far larger and far more
+ * visible act than dropping a trigger.
+ */
+export type GuardVintageWitness =
+  | { kind: 'table'; table: string }
+  | { kind: 'column'; table: string; column: string };
+
 /** One engine-immutable ledger, and every guard the schema declares on it. */
 export interface EngineImmutableTable {
   table: string;
@@ -117,7 +140,82 @@ export interface EngineImmutableTable {
    * only the trio.
    */
   secondaryGuards: readonly string[];
+  /**
+   * Guards on this table — trio members included — that were introduced LATER
+   * than the table itself, mapped by suffix to the witness that proves a file
+   * is new enough to be held to them.
+   *
+   * Absent for every guard that arrived in the SAME commit as its table, which
+   * is the overwhelming majority: the table's own presence is then the witness,
+   * which is the rule the trio has always been checked under. Only four groups
+   * in the whole history of this schema need an entry here, and each was
+   * established from `git log -S` over `packages/headquarter/src` rather than
+   * from memory — see `HQ_GUARD_VINTAGE_PROVENANCE`.
+   */
+  laterThanTable?: Readonly<Record<string, GuardVintageWitness>>;
 }
+
+/**
+ * The archaeology behind every `laterThanTable` entry, recorded so a future
+ * reader can re-derive it instead of trusting it.
+ *
+ * Method: for each guard `g` and its table `t`,
+ * `git log --reverse -S"trg_…_g" -- packages/headquarter/src | head -1` versus
+ * the same for `CREATE TABLE IF NOT EXISTS t`. A mismatch is a guard that some
+ * released version of this repository's own code did not create, on a table it
+ * did. Run over all 28 listed tables and all 19 secondary guards, exactly four
+ * groups mismatched:
+ *
+ *  1. `hq_memory`'s trio and `supersede_only` — guards `5da1ed7` (Phase 5),
+ *     table `7e87392` (Phase 2 S4). Witness: the `derived_from` COLUMN, which
+ *     `5da1ed7` added to `hq_memory` in the same commit as those guards.
+ *  2. `hq_memory`'s `no_replace_idem` / `no_replace_rowid` — guards `2d72ce1`
+ *     (Wave 2). Witness: `hq_truth_records`, a table `2d72ce1` introduced.
+ *  3. `hq_mission_intents`' trio — `no_rewrite`/`no_erase` at `ee942dc`,
+ *     `no_replace` at `ece8050`, table at `43174bd` (Phase 3).
+ *  4. `hq_mission_events`' trio — same two commits, same table commit.
+ *
+ * For (3) and (4) neither correcting commit added a table or a column, so the
+ * witness is rounded UP to the next schema object in ancestry order —
+ * `hq_project_events`, introduced by `f65b2c9`, which follows `ece8050`.
+ * Rounding up is the safe direction: it can only make the census require a
+ * guard on FEWER files than strictly necessary, never on more, so it cannot
+ * produce a false finding. The cost is stated in the phase document's debt
+ * section rather than hidden here.
+ *
+ * Two guards the Wave 5 reviewer's probe reported on its "legitimate older
+ * file" — `trg_hq_products_no_replace_unique` and
+ * `trg_hq_product_artifacts_no_replace_version` — are NOT in this list, and
+ * checking rather than assuming is why: both appear in `f1ce71c`, the same
+ * commit as `hq_products` and `hq_product_artifacts`, verified by reading that
+ * commit's `product-command.ts` directly. No version of this code ever wrote a
+ * file with those tables and without those guards, so requiring them whenever
+ * the table is present is correct and stays.
+ */
+export const HQ_GUARD_VINTAGE_PROVENANCE = {
+  method: 'git log --reverse -S over packages/headquarter/src, guard trigger name versus CREATE TABLE',
+  mismatchedGroups: 4,
+  roundedUpGroups: ['hq_mission_intents', 'hq_mission_events'],
+} as const;
+
+/** The witness for the Phase 5 hardening of `hq_memory` (commit `5da1ed7`). */
+const MEMORY_PHASE_5_HARDENING: GuardVintageWitness = {
+  kind: 'column',
+  table: 'hq_memory',
+  column: 'derived_from',
+};
+
+/** The witness for Wave 2 (commit `2d72ce1`). */
+const WAVE_2: GuardVintageWitness = { kind: 'table', table: 'hq_truth_records' };
+
+/**
+ * The witness for the Phase 3 mission-guard corrections (`ee942dc`, `ece8050`),
+ * rounded up to the next schema object in ancestry order (`f65b2c9`).
+ */
+const AFTER_MISSION_GUARD_CORRECTIONS: GuardVintageWitness = {
+  kind: 'table',
+  table: 'hq_project_events',
+};
 
 /**
  * Every append-only ledger whose immutability is held by the ENGINE, with the
@@ -147,6 +245,21 @@ export interface EngineImmutableTable {
  * when an item is linked to a task, so it carries `no_relink` / `no_respec`
  * guards instead of the trio, and demanding the trio of it would be a false
  * finding.
+ *
+ * **`laterThanTable` was added by correction cycle 2 of the Wave 5 review, and
+ * it repairs a regression the first correction introduced.** Widening the
+ * census to the secondary guards was right; doing it with no schema-vintage
+ * awareness was not. `trg_hq_memory_no_replace_idem` and
+ * `trg_hq_memory_no_replace_rowid` arrived in `2d72ce1`, on a table that has
+ * existed since `7e87392`, so a database written by this repository's own code
+ * between those commits legitimately HAS the table and the trio and LACKS
+ * those two — and after the widening it booted into safe mode, refusing
+ * `claimNext`, `approveTask`, `releaseKillSwitch`, `executeAction` and every
+ * Founder-gated write on a healthy record. On the READ-ONLY snapshot path the
+ * ensures return early, so nothing ever repaired it and the false verdict was
+ * permanent: an unauthenticated reader was told `safeMode: true` about a
+ * database that was never tampered with. The fix is per-guard vintage, read
+ * from the file — not a narrower census.
  */
 export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = [
   { table: 'hq_action_intents', triggerPrefix: 'hq_action_intents', secondaryGuards: ['no_replace_unique'] },
@@ -163,9 +276,37 @@ export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = [
     // legal status move (CURRENT -> SUPERSEDED) for EVERY writer, and its
     // absence would let a raw connection move a superseded memory back.
     secondaryGuards: ['no_replace_idem', 'no_replace_rowid', 'supersede_only'],
+    // Every guard on this table postdates the table. Phase 2 Stage 4 created
+    // `hq_memory`; Phase 5 hardened it; Wave 2 added the two REPLACE guards.
+    laterThanTable: {
+      no_rewrite: MEMORY_PHASE_5_HARDENING,
+      no_erase: MEMORY_PHASE_5_HARDENING,
+      no_replace: MEMORY_PHASE_5_HARDENING,
+      supersede_only: MEMORY_PHASE_5_HARDENING,
+      no_replace_idem: WAVE_2,
+      no_replace_rowid: WAVE_2,
+    },
   },
-  { table: 'hq_mission_intents', triggerPrefix: 'hq_mission_intents', secondaryGuards: [] },
-  { table: 'hq_mission_events', triggerPrefix: 'hq_mission_events', secondaryGuards: [] },
+  {
+    table: 'hq_mission_intents',
+    triggerPrefix: 'hq_mission_intents',
+    secondaryGuards: [],
+    laterThanTable: {
+      no_rewrite: AFTER_MISSION_GUARD_CORRECTIONS,
+      no_erase: AFTER_MISSION_GUARD_CORRECTIONS,
+      no_replace: AFTER_MISSION_GUARD_CORRECTIONS,
+    },
+  },
+  {
+    table: 'hq_mission_events',
+    triggerPrefix: 'hq_mission_events',
+    secondaryGuards: [],
+    laterThanTable: {
+      no_rewrite: AFTER_MISSION_GUARD_CORRECTIONS,
+      no_erase: AFTER_MISSION_GUARD_CORRECTIONS,
+      no_replace: AFTER_MISSION_GUARD_CORRECTIONS,
+    },
+  },
   { table: 'hq_orchestration_runs', triggerPrefix: 'hq_orch_runs', secondaryGuards: [] },
   { table: 'hq_orchestration_run_items', triggerPrefix: 'hq_orch_run_items', secondaryGuards: [] },
   { table: 'hq_project_events', triggerPrefix: 'hq_project_events', secondaryGuards: [] },
@@ -249,6 +390,63 @@ export function declaredGuardsFor(entry: EngineImmutableTable): string[] {
   );
 }
 
+/** Every guard suffix the schema declares on one listed table. */
+export function declaredGuardSuffixesFor(entry: EngineImmutableTable): string[] {
+  return [...REQUIRED_IMMUTABILITY_GUARDS, ...entry.secondaryGuards];
+}
+
+/**
+ * The schema facts a vintage witness is checked against. An interface rather
+ * than a handle so the rule is testable without a database, and so the reads
+ * are taken ONCE per census rather than once per guard.
+ */
+export interface SchemaFacts {
+  hasTable(name: string): boolean;
+  hasColumn(table: string, column: string): boolean;
+}
+
+export function readSchemaFacts(db: HqDatabase): SchemaFacts {
+  const tables = tableNames(db);
+  const columns = new Map<string, Set<string>>();
+  return {
+    hasTable: (name) => tables.has(name),
+    hasColumn: (table, column) => {
+      if (!tables.has(table)) return false;
+      let known = columns.get(table);
+      if (!known) {
+        // Bound by the table's column count, and read at most once per table.
+        const rows = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+        known = new Set(rows.map((row) => row.name));
+        columns.set(table, known);
+      }
+      return known.has(column);
+    },
+  };
+}
+
+export function witnessPresent(witness: GuardVintageWitness, facts: SchemaFacts): boolean {
+  return witness.kind === 'table'
+    ? facts.hasTable(witness.table)
+    : facts.hasColumn(witness.table, witness.column);
+}
+
+/**
+ * The guards this FILE is actually held to on one listed table.
+ *
+ * Declared minus the ones whose vintage witness is absent. The table itself
+ * must be present — that check belongs to the caller, and is the older half of
+ * the same rule.
+ */
+export function requiredGuardsFor(entry: EngineImmutableTable, facts: SchemaFacts): string[] {
+  const required: string[] = [];
+  for (const suffix of declaredGuardSuffixesFor(entry)) {
+    const witness = entry.laterThanTable?.[suffix];
+    if (witness && !witnessPresent(witness, facts)) continue;
+    required.push(`trg_${entry.triggerPrefix}_${suffix}`);
+  }
+  return required;
+}
+
 /* ------------------------------------------------------------------ */
 /* Findings                                                            */
 /* ------------------------------------------------------------------ */
@@ -273,9 +471,15 @@ export function isHqIntegrityFinding(value: unknown): value is HqIntegrityFindin
 }
 
 /**
- * The three findings that mean HQ's own record cannot be trusted, and are
- * therefore the ONLY ones that engage safe mode. Argued in the module header;
+ * The three FINDINGS that mean HQ's own record cannot be trusted, and are
+ * therefore the only ones that engage safe mode. Argued in the module header;
  * pinned by a test so widening or narrowing it is a deliberate, reviewed act.
+ *
+ * Safe mode has exactly one other trigger, and it is not a finding because it
+ * is not something HQ found: an evidence-chain posture of `not_verified` — the
+ * fail-closed rule. A finding is a claim about the file, and "I did not look"
+ * is not one; it is recorded as `evidenceChain`, and `reportEngagesSafeMode` is
+ * the single place the two are combined.
  */
 export const SAFE_MODE_BLOCKING_FINDINGS: readonly HqIntegrityFinding[] = [
   'database_integrity_check_failed',
@@ -302,26 +506,78 @@ export interface HqIntegrityObservation {
 export const INTEGRITY_ASSESSMENT_DEPTHS = ['structural', 'full'] as const;
 export type IntegrityAssessmentDepth = (typeof INTEGRITY_ASSESSMENT_DEPTHS)[number];
 
+/**
+ * What actually happened to the evidence hash chain in THIS process — a
+ * closed, three-member vocabulary, carried on every verdict and published on
+ * the unauthenticated snapshot.
+ *
+ * It exists because "assessed and clean" and "not assessed at this depth" used
+ * to be the same published answer, and that answer was `safeMode: false`
+ * (Wave 5 review, correction cycle 2, HIGH). A reader — including a stranger
+ * holding `hq-snapshot.json` — was told HQ was fine about a chain HQ had never
+ * looked at.
+ *
+ *  - `verified`   — recomputed over the WHOLE log in this process, and it holds.
+ *  - `broken`     — recomputed and it does not hold, or it could not be
+ *                   recomputed at all. An unverifiable chain is treated as a
+ *                   broken one, which is the older rule, unchanged.
+ *  - `not_verified` — nobody asked. FAIL-CLOSED: it engages safe mode exactly
+ *                   as a break does, because HQ may not hand out the acts that
+ *                   add to, approve, release or execute against a record whose
+ *                   own audit chain it has not checked. It is reachable only by
+ *                   a caller that deliberately passes `null` for the
+ *                   verification, which is why that argument is REQUIRED rather
+ *                   than optional: "forgot to verify" must be a type error, not
+ *                   a silent all-clear.
+ */
+export const EVIDENCE_CHAIN_POSTURES = ['verified', 'broken', 'not_verified'] as const;
+export type EvidenceChainPosture = (typeof EVIDENCE_CHAIN_POSTURES)[number];
+
+export function isEvidenceChainPosture(value: unknown): value is EvidenceChainPosture {
+  return typeof value === 'string' && (EVIDENCE_CHAIN_POSTURES as readonly string[]).includes(value);
+}
+
 export interface HqIntegrityReport {
   depth: IntegrityAssessmentDepth;
+  /** What happened to the evidence chain in this process. Never inferred from `depth`. */
+  evidenceChain: EvidenceChainPosture;
   observations: HqIntegrityObservation[];
-  /** True when at least one blocking observation stands. */
+  /**
+   * True when at least one blocking observation stands, OR when the evidence
+   * chain was not verified in this process.
+   */
   safeMode: boolean;
   durability: HqDurabilityPosture;
 }
 
+/** Whether a verdict must refuse the enforcement-gated acts. */
+export function reportEngagesSafeMode(
+  observations: readonly HqIntegrityObservation[],
+  evidenceChain: EvidenceChainPosture,
+): boolean {
+  return observations.some((observation) => observation.blocking) || evidenceChain === 'not_verified';
+}
+
 export const SAFE_MODE_STATEMENT =
-  'Safe mode is a statement about HQ’s OWN stored record, not about the outside world. It engages only when ' +
-  'the engine reports the file corrupt, an append-only guard the schema declares is missing, or the evidence ' +
-  'hash chain does not verify. While engaged HQ still READS and still reconciles, and it refuses the acts ' +
-  'that would add to, approve, release or execute against a record it cannot stand behind. It is never ' +
-  'cleared by a boot: only a fresh assessment that finds nothing blocking clears it.';
+  'Safe mode is a statement about HQ’s OWN stored record, not about the outside world. It engages when the ' +
+  'engine reports the file corrupt, an append-only guard the schema declares is missing, the evidence hash ' +
+  'chain does not verify, or that chain has not been verified at all in this process — HQ does not claim to ' +
+  'stand behind a record it has not checked. While engaged HQ still READS and still reconciles, and it ' +
+  'refuses the acts that would add to, approve, release or execute against a record it cannot stand behind. ' +
+  'A BROKEN CHAIN CANNOT BE CLEARED BY RESTARTING: the chain is recomputed from the file at every ' +
+  'construction, so a new process re-finds the break rather than inheriting a clean slate. A MISSING-GUARD ' +
+  'finding is different and is stated rather than overclaimed: the schema ensures re-create a dropped guard, ' +
+  'so a later process legitimately finds a repaired file and the boot-time observation is not carried across ' +
+  'the restart — the durable record of it is the evidence entry a Founder assessment writes, not the latch.';
 
 export const INTEGRITY_DEPTH_STATEMENT =
-  'A structural assessment reads the schema catalogue and the durability pragmas only — cheap enough to run ' +
-  'at every construction. A full assessment additionally runs PRAGMA integrity_check, PRAGMA ' +
-  'foreign_key_check and a whole-log evidence-chain verification, which are proportional to the database and ' +
-  'to the log and are therefore an explicit act. A structural pass is never reported as a full one.';
+  'A structural assessment reads the schema catalogue, the durability pragmas and the evidence hash chain. ' +
+  'The chain is the one data-proportional check a construction pays for, deliberately: it is the only ' +
+  'blocking finding that survives in the FILE rather than being repaired by the ensures, so skipping it at ' +
+  'boot meant a restart cleared a chain break for free. A full assessment additionally runs PRAGMA ' +
+  'integrity_check and PRAGMA foreign_key_check, which are proportional to the whole database and are ' +
+  'therefore an explicit act. A structural pass is never reported as a full one, and what happened to the ' +
+  'chain is carried separately from the depth so neither can be inferred from the other.';
 
 /* ------------------------------------------------------------------ */
 /* The checks                                                          */
@@ -354,14 +610,21 @@ function triggerNames(db: HqDatabase): Set<string> {
  * matched `_no_rewrite`-style suffixes only could not report a dropped
  * `trg_hq_intel_budgets_no_replace_unique`, and that guard is the whole reason
  * an `INSERT OR REPLACE` cannot swap a Founder's spend ceiling.
+ *
+ * And since correction cycle 2 the same rule applies one level down, to the
+ * GUARD: a guard is required only when the file carries the schema object that
+ * proves the writing code already declared it. Requiring a guard of a file
+ * whose vintage never created it is the same mistake as requiring a guard on
+ * an absent table, and it engaged safe mode on healthy older databases — see
+ * `ENGINE_IMMUTABLE_TABLES`.
  */
 export function missingImmutabilityGuards(db: HqDatabase): string[] {
-  const tables = tableNames(db);
+  const facts = readSchemaFacts(db);
   const triggers = triggerNames(db);
   const missing: string[] = [];
   for (const entry of ENGINE_IMMUTABLE_TABLES) {
-    if (!tables.has(entry.table)) continue;
-    for (const name of declaredGuardsFor(entry)) {
+    if (!facts.hasTable(entry.table)) continue;
+    for (const name of requiredGuardsFor(entry, facts)) {
       if (!triggers.has(name)) missing.push(name);
     }
   }
@@ -369,16 +632,67 @@ export function missingImmutabilityGuards(db: HqDatabase): string[] {
 }
 
 /**
- * The CHEAP assessment: the schema catalogue and the durability pragmas.
+ * Fold a chain verification into a posture and, when it fails, an observation.
  *
- * Runs no table scan, so it is affordable on every construction of the
- * facade. It can detect the one tamper that matters most — an append-only
- * guard removed from a ledger that still exists — because a dropped trigger is
- * a `sqlite_master` fact, not a data fact.
+ * `verify` returns the `seq` of the first entry that does not verify, or null
+ * when the whole chain does. `null` for the FUNCTION means the caller has
+ * deliberately declined to verify, which is `not_verified` and fails closed.
+ */
+function assessEvidenceChain(
+  verify: (() => number | null) | null,
+  observations: HqIntegrityObservation[],
+): EvidenceChainPosture {
+  if (!verify) return 'not_verified';
+  let brokenAt: number | null | 'error';
+  try {
+    brokenAt = verify();
+  } catch {
+    brokenAt = 'error';
+  }
+  if (brokenAt === null) return 'verified';
+  observations.push({
+    finding: 'evidence_chain_broken',
+    blocking: true,
+    detail:
+      brokenAt === 'error'
+        ? 'The hash-chained evidence log could not be verified at all; HQ treats an unverifiable chain as a broken one.'
+        : `The hash-chained evidence log does not verify from entry seq ${brokenAt} onward.`,
+  });
+  return 'broken';
+}
+
+/**
+ * The assessment a CONSTRUCTION pays for: the schema catalogue, the durability
+ * pragmas, and the evidence hash chain.
+ *
+ * The catalogue and pragma reads run no table scan. The chain verification is
+ * O(log) and is here on purpose, because leaving it out was the Wave 5 HIGH:
+ * `evidence_chain_broken` is the only blocking finding whose evidence stays in
+ * the FILE — a dropped guard is re-created by the ensures, a corrupt page is
+ * found by the explicit assessment, but a broken chain simply sat there while
+ * every fresh process reported `safeMode: false` about it, and every HQ
+ * entrypoint is a fresh process. Verifying it here is what makes the latch
+ * survive a restart without storing anything a tamper could also edit: nothing
+ * is carried across the boot at all, the break is re-derived from the bytes.
+ *
+ * MEASURED COST, so this is a decision and not a hope: on this repository's
+ * own hardware the verification runs at roughly 9µs per evidence entry —
+ * ~2ms at 200 entries, ~15ms at 2,000, ~170ms at 20,000. It is linear and
+ * unbounded, and the phase document records that as disclosed debt rather than
+ * capping it: a cap would mean publishing `safeMode: false` about the
+ * unexamined tail, which is the exact lie this change exists to remove.
  */
 export function structuralIntegrity(
   db: HqDatabase,
   options: {
+    /**
+     * The whole-log chain verification, or `null` to state that this caller is
+     * deliberately not verifying. REQUIRED — see `EVIDENCE_CHAIN_POSTURES`.
+     *
+     * Injected rather than imported so this module stays a leaf of `store/`
+     * and cannot acquire a dependency on `operator/`.
+     */
+    verifyEvidenceChain: (() => number | null) | null;
     reliabilitySchemaPresent?: boolean;
     /**
      * The missing-guard list AS THE FILE WAS FOUND, observed before this
@@ -394,10 +708,11 @@ export function structuralIntegrity(
      * the file while they were absent.
      */
     guardsMissingAsFound?: readonly string[];
-  } = {},
+  },
 ): HqIntegrityReport {
   const observations: HqIntegrityObservation[] = [];
   const durability = readDurabilityPosture(db);
+  const evidenceChain = assessEvidenceChain(options.verifyEvidenceChain, observations);
 
   const missing = options.guardsMissingAsFound
     ? [...options.guardsMissingAsFound]
@@ -437,30 +752,34 @@ export function structuralIntegrity(
 
   return {
     depth: 'structural',
+    evidenceChain,
     observations,
-    safeMode: observations.some((observation) => observation.blocking),
+    safeMode: reportEngagesSafeMode(observations, evidenceChain),
     durability,
   };
 }
 
 /**
- * The FULL assessment. Everything structural, plus the three checks whose cost
- * is proportional to the data: the engine's own corruption check, referential
- * integrity, and a whole-log verification of the hash-chained evidence.
+ * The FULL assessment. Everything a construction checks, plus the two whose
+ * cost is proportional to the whole DATABASE rather than to the log: the
+ * engine's own corruption check and referential integrity.
  *
- * `verifyEvidenceChain` is injected rather than imported so this module stays a
- * leaf of `store/` and cannot acquire a dependency on `operator/`. The caller
- * passes `EvidenceLog.verifyChain`, which returns the `seq` of the first entry
- * that does not verify, or null when the whole chain does.
+ * The evidence-chain verification is no longer this function's own — it moved
+ * into `structuralIntegrity`, so a construction pays for it too and a restart
+ * can no longer clear a chain break. `verifyEvidenceChain` is still injected
+ * rather than imported so this module stays a leaf of `store/` and cannot
+ * acquire a dependency on `operator/`; the caller passes a closure over
+ * `verifyEvidenceChain(db)`, which returns the `seq` of the first entry that
+ * does not verify, or null when the whole chain does.
  */
 export function fullIntegrity(
   db: HqDatabase,
   options: {
-    verifyEvidenceChain?: () => number | null;
+    verifyEvidenceChain: (() => number | null) | null;
     reliabilitySchemaPresent?: boolean;
     /** See `structuralIntegrity`. Omitted here means "check the file as it stands now". */
     guardsMissingAsFound?: readonly string[];
-  } = {},
+  },
 ): HqIntegrityReport {
   const structural = structuralIntegrity(db, options);
   const observations = [...structural.observations];
@@ -498,32 +817,15 @@ export function fullIntegrity(
     // not a failure either. The depth on the verdict already says what ran.
   }
 
-  if (options.verifyEvidenceChain) {
-    let brokenAt: number | null | 'error' = null;
-    try {
-      brokenAt = options.verifyEvidenceChain();
-    } catch {
-      brokenAt = 'error';
-    }
-    if (brokenAt === 'error') {
-      observations.push({
-        finding: 'evidence_chain_broken',
-        blocking: true,
-        detail: 'The hash-chained evidence log could not be verified at all; HQ treats an unverifiable chain as a broken one.',
-      });
-    } else if (brokenAt !== null) {
-      observations.push({
-        finding: 'evidence_chain_broken',
-        blocking: true,
-        detail: `The hash-chained evidence log does not verify from entry seq ${brokenAt} onward.`,
-      });
-    }
-  }
-
+  // The chain is NOT re-verified here: `structuralIntegrity` already did it,
+  // once, and its observation is already in this list. Running it twice would
+  // double the one data-proportional cost an assessment shares with a boot,
+  // and — worse — two computations of the same verdict can disagree.
   return {
     depth: 'full',
+    evidenceChain: structural.evidenceChain,
     observations,
-    safeMode: observations.some((observation) => observation.blocking),
+    safeMode: reportEngagesSafeMode(observations, structural.evidenceChain),
     durability: structural.durability,
   };
 }

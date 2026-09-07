@@ -379,12 +379,19 @@ describe('the unauthenticated snapshot section', () => {
       expectOk(h.fixture.ops.recoverInterruptedRuns({ requestedBy: 'founder' }));
       const snapshot = liveSnapshotFromOperations(h.fixture.ops, { now: NOW.toISOString() });
       const section = snapshot.reliability!;
+      // Thirteen keys since the Wave 5 correction-cycle-2 HIGH: `evidenceChain`
+      // was ADDED, and this pin is widened deliberately rather than relaxed.
+      // It is a strengthening, not a loosening — the published shape now has to
+      // say what happened to HQ's hash chain, where before `safeMode: false`
+      // was the answer both when the chain had been verified and when it had
+      // never been looked at. Every other key is unchanged; nothing was removed.
       expect(Object.keys(section.data).sort()).toEqual([
         'assessmentDepth',
         'byKind',
         'byOutcome',
         'byState',
         'durabilityMeetsRequirement',
+        'evidenceChain',
         'findings',
         'needsReconciliation',
         'note',
@@ -393,6 +400,9 @@ describe('the unauthenticated snapshot section', () => {
         'storePresent',
         'verifiedBackups',
       ]);
+      // And it is a real member of the closed posture vocabulary, never text.
+      expect(['verified', 'broken', 'not_verified']).toContain(section.data.evidenceChain);
+      expect(section.data.evidenceChain).toBe('verified');
       expect(section.data.runs).toBe(1);
       expect(section.data.needsReconciliation).toBe(1);
       expect(section.data.byState.needs_reconciliation).toBe(1);

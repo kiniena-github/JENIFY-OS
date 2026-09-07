@@ -2254,8 +2254,39 @@ export class HeadquarterOperations {
    * re-derives its own precondition on every write is a guard whose cost grows
    * with the write rate, and one an attacker can time. Clearing it takes a
    * fresh assessment that finds nothing blocking.
+   *
+   * **The latch is per-process, and correction cycle 2 of the Wave 5 review is
+   * what made that safe rather than a hole.** A latch that only ever holds for
+   * one process is worth nothing against a restart, and every HQ entrypoint —
+   * `hq:order`, `hq:snapshot`, `hq:workforce`, `hq:dispatch-claude`,
+   * `hq:ingest-claude` — is a fresh process. The reviewer proved it: break the
+   * chain by a legal raw append, latch safe mode, exit, construct again with no
+   * assessment, and `claimNext` and `releaseKillSwitch` were ALLOWED while the
+   * break was still in the file, with the unauthenticated snapshot publishing
+   * `safeMode: false` about it.
+   *
+   * The fix carries nothing across the boot — a latch persisted in the file
+   * would live in the same file the tamper is in, and could be edited by the
+   * same access that broke the chain. Instead the construction RE-DERIVES the
+   * chain verdict from the bytes: `structuralIntegrity` now verifies the whole
+   * evidence chain, so a new process re-finds the break rather than starting
+   * clean, and a posture of `not_verified` fails closed here rather than
+   * reading as an all-clear.
    */
   #integrityReport: HqIntegrityReport;
+
+  /**
+   * The append-only guards that were absent when THIS process opened the file,
+   * before its schema ensures re-created them.
+   *
+   * Kept so a Founder assessment can record the observation durably in the
+   * evidence log (`assessHqIntegrity`), which is the only place it can survive:
+   * the ensures repair the file, so a later construction legitimately finds a
+   * healthy one and the boot-time observation is otherwise lost at exit. HQ
+   * writes NOTHING at construction — that property is pinned — so the record is
+   * made by the Founder act, not by the boot.
+   */
+  readonly #guardsMissingAtConstruction: readonly string[];
 
   /**
    * The external-action adapters, keyed by id — `#private`, handed in by the
@@ -2457,9 +2488,17 @@ export class HeadquarterOperations {
     this.#processIdentity = options.processIdentity?.trim() || HQ_PROCESS_IDENTITY;
     // The cheap half, at every construction. See the field's own note for why
     // the expensive half is an explicit act instead.
+    this.#guardsMissingAtConstruction = [...guardsMissingAsFound];
     this.#integrityReport = structuralIntegrity(db, {
       guardsMissingAsFound,
       reliabilitySchemaPresent: this.#reliabilityStorePresent,
+      // The evidence chain is verified HERE, at every construction, and that
+      // is the Wave 5 correction-cycle-2 HIGH (see the field's note). Before
+      // it, the constructor latched a verdict that had never looked at the
+      // chain; every HQ entrypoint is a fresh process, so a broken chain was
+      // cleared by nothing more than exiting — and the unauthenticated
+      // snapshot then published `safeMode: false` about it.
+      verifyEvidenceChain: this.#verifyEvidenceChainFromStore,
     });
     this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
@@ -5894,10 +5933,22 @@ export class HeadquarterOperations {
     const blocking = this.#integrityReport.observations
       .filter((observation) => observation.blocking)
       .map((observation) => observation.finding);
+    // A `not_verified` chain engages safe mode without producing a finding —
+    // "I did not look" is not something HQ found — so the reason has to be
+    // named separately or the refusal would read `SAFE MODE ()`. Categorical,
+    // from the closed posture vocabulary, never free text.
+    const reasons =
+      this.#integrityReport.evidenceChain === 'not_verified'
+        ? [...blocking, 'evidence_chain_not_verified']
+        : blocking;
     return fail(
       'safe_mode_engaged',
-      `Cannot ${action}: HQ is in SAFE MODE (${blocking.join(', ')}). ${SAFE_MODE_STATEMENT}`,
-      { findings: blocking, assessmentDepth: this.#integrityReport.depth },
+      `Cannot ${action}: HQ is in SAFE MODE (${reasons.join(', ')}). ${SAFE_MODE_STATEMENT}`,
+      {
+        findings: blocking,
+        assessmentDepth: this.#integrityReport.depth,
+        evidenceChain: this.#integrityReport.evidenceChain,
+      },
     );
   }
 
@@ -7702,9 +7753,19 @@ export class HeadquarterOperations {
     const before = this.#integrityReport.safeMode;
     // Deliberately WITHOUT `guardsMissingAsFound`: a fresh assessment asks
     // about the file as it stands NOW, which is the only way a boot-time
-    // finding can ever be cleared. That is also why clearing takes an
-    // assessment rather than a restart — a restart would re-create the guards
-    // and then report the file it had just repaired.
+    // finding can ever be cleared.
+    //
+    // Stated honestly rather than overclaimed (Wave 5 correction cycle 2,
+    // LOW 1): this does NOT mean a guard-tamper posture can only be cleared by
+    // a Founder act. The ensures are `CREATE TRIGGER IF NOT EXISTS`, so the
+    // construction that FOUND the guards missing also repaired them, and the
+    // next construction of a writable handle finds a healthy file and reports
+    // one. A restart therefore clears that posture too. What this assessment
+    // adds is the durable record — the evidence entry below carries the
+    // boot-time observation into the append-only log, where a restart cannot
+    // take it away. A chain break is the opposite case and needs none of this:
+    // it is re-derived from the file at every construction and cannot be
+    // cleared by exiting at all.
     const report = fullIntegrity(this.#db, {
       // The `#private` closure, NEVER `this.queue.evidence.verifyChain()`.
       // `evidence_chain_broken` is a safe-mode blocking finding, so the read
@@ -7719,9 +7780,20 @@ export class HeadquarterOperations {
       kind: 'hq_integrity_assessed',
       payload: {
         depth: report.depth,
+        evidenceChain: report.evidenceChain,
         safeMode: report.safeMode,
         safeModeChanged: before !== report.safeMode,
         findings: report.observations.map((observation) => observation.finding),
+        // The boot-time guard observation, carried into the append-only log —
+        // Wave 5 correction cycle 2, LOW 1. This assessment deliberately asks
+        // about the file AS IT NOW STANDS, and the ensures have already
+        // re-created any guard that was missing when this process opened it, so
+        // a fresh assessment CANNOT re-find that tamper and legitimately clears
+        // the posture. What it must not do is let the observation vanish with
+        // the process. A COUNT and the guard NAMES only — schema object names,
+        // never row content, the same rule every observation detail follows.
+        guardsMissingAtConstruction: this.#guardsMissingAtConstruction.length,
+        guardsMissingAtConstructionNames: [...this.#guardsMissingAtConstruction],
         executable: false,
       },
     });
@@ -7891,6 +7963,7 @@ export class HeadquarterOperations {
     return {
       safeMode: this.#integrityReport.safeMode,
       depth: this.#integrityReport.depth,
+      evidenceChain: this.#integrityReport.evidenceChain,
       observations: this.#integrityReport.observations.map((observation) => ({ ...observation })),
       durability: { ...this.#integrityReport.durability },
       safeModeStatement: SAFE_MODE_STATEMENT,
@@ -7939,13 +8012,24 @@ export class HeadquarterOperations {
    * `summarizeReliability`, and anything else is counted as `unrecognized`.
    */
   reliabilitySummary(): ReliabilitySnapshotView {
-    if (!this.#reliabilityStorePresent) return emptyReliabilitySnapshot(false);
+    // A pre-Phase-13 file has no run ledger, but it HAS an evidence chain and
+    // this process verified it. So the absent-store projection goes through the
+    // same fold with an empty register rather than through
+    // `emptyReliabilitySnapshot`, which asserts nothing about a chain and would
+    // publish `not_verified` about one that was in fact verified. Under-claiming
+    // is safer than over-claiming and still not what HQ knows.
+    const storePresent = this.#reliabilityStorePresent;
     return summarizeReliability({
-      storePresent: true,
-      runs: this.#listRunsFromStore(),
-      verifiedBackups: loadBackupRecords(this.#db).length,
+      storePresent,
+      runs: storePresent ? this.#listRunsFromStore() : [],
+      verifiedBackups: storePresent ? loadBackupRecords(this.#db).length : 0,
       safeMode: this.#integrityReport.safeMode,
       assessmentDepth: this.#integrityReport.depth,
+      // Published to a stranger, and it has to be: `safeMode: false` used to be
+      // the answer both when the chain had been verified clean and when it had
+      // never been looked at. The posture separates them, and `not_verified`
+      // makes `safeMode` true besides, so neither reading is available.
+      evidenceChain: this.#integrityReport.evidenceChain,
       findings: this.#integrityReport.observations.map((observation) => observation.finding),
       durabilityMeetsRequirement: this.#integrityReport.durability.meetsRequirement,
     });

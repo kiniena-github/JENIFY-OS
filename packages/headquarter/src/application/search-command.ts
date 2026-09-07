@@ -474,7 +474,13 @@ export const RETRIEVAL_GUARD_STATEMENT =
   'cannot obtain an unwrapped adapter and one installed later cannot opt out. Because the pipeline ' +
   'tokenizes first, those terms no longer carry the separators a credential shape needs: the seam guard is ' +
   'defence in depth against a caller that supplies its own untokenized terms, not the layer the pipeline ' +
-  'relies on.';
+  'relies on. The scan recognises a NAMED list of shapes, not credentials in general: OpenAI-style keys, ' +
+  'GitHub tokens and fine-grained PATs, Google API keys and OAuth access tokens, Slack tokens, Supabase ' +
+  'PATs, JWTs, PEM private-key blocks, HTTP Bearer values, AWS long-term access key ids, and key: value ' +
+  'assignments in free text. It does NOT recognise an AWS secret access key, a cloud connection string, ' +
+  'basic-auth credentials in a URL, or any secret shaped like ordinary prose — those are 40 characters of ' +
+  'base64 or plain words, and a rule that caught them would also reject the digests, ids and nonces HQ ' +
+  'legitimately renders.';
 
 /**
  * Raised when free text reaching a retrieval adapter fails the browser-safety
@@ -526,10 +532,19 @@ export class RetrievalSafetyError extends Error {
  *    that meets a credential in the shape `assertBrowserSafe` recognises;
  *  - the SEAM guard sees `input.terms`, which on the pipeline path are always
  *    `tokenize()` output — lowercased and split on `[^a-z0-9]+`. That strips
- *    every separator the eleven `SECRET_VALUE_PATTERNS` require (`sk-`, `ghp_`,
+ *    every separator the `SECRET_VALUE_PATTERNS` require (`sk-`, `ghp_`,
  *    a JWT's dots, `Bearer `, `api_key: `), and lowercasing defeats the
  *    case-sensitive ones besides, so on realistic pipeline input the seam scan
  *    does not fire at all.
+ *
+ * And the scan's SCOPE is named rather than implied (Wave 5 review, correction
+ * cycle 2, LOW 3). The Phase 14 document said this layer was pinned "against
+ * six real credential shapes"; a reviewer supplied a seventh — an AWS access
+ * key id, `AKIA…` — and the facade allowed it. The pattern is now present, and
+ * `SECRET_SHAPES_COVERED` / `SECRET_SHAPES_NOT_COVERED` in `live/redaction.ts`
+ * carry the full inventory in both directions, because "credential shapes"
+ * unqualified reads as "credentials", and an undisclosed scope limit on a
+ * safety scan is the limit that gets relied on.
  *
  * The seam guard is kept, and is worth keeping, for the caller the FACADE does
  * not cover: `resolveRetrievalAdapter` is exported, so an in-process caller can

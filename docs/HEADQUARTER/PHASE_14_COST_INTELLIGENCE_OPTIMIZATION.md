@@ -455,6 +455,21 @@ markers, untouched — nothing under `packages/server`, `packages/web`,
   and deliberately left open; this pass corrected the wording here and did NOT
   touch that one, so the two now differ in wording while agreeing in behaviour.
 
+  > **Correction (Wave 5 review, correction cycle 2, LOW 2).** The first
+  > correction's commit message and an earlier version of this bullet said the
+  > Wave 4 decision was left untouched "and **both docs say so**". That was
+  > false: only THIS document recorded it, and
+  > `PHASE_13_ADVANCED_RELIABILITY.md` contained zero occurrences of
+  > `byLifecycle`. A pushed commit message cannot be amended, so the claim has
+  > been made true instead — Phase 13's snapshot-fold section now records the
+  > same reachability asymmetry and names all three buckets
+  > (`byLifecycle`, `byCostProvenance`, `findings`) as one policy. The accurate
+  > statement today, checked rather than asserted: **`PHASE_13` and `PHASE_14`
+  > record the policy; `PHASE_12_PRODUCT_FACTORY.md` names `byLifecycle` as a
+  > published key but does NOT record the reachability decision** — which is
+  > exactly where the Wave 4 finding was left open, and it is still open. The
+  > Wave 4 behaviour is untouched.
+
 ## The `assertBrowserSafe` pre-real-adapter Low — exactly what was resolved
 
 **The recorded fact.** On the Phase 11 search / Ask Jenify path,
@@ -525,9 +540,38 @@ round, and it is now stated as it is:
   guarding; it is not the layer the pipeline relies on.
 
 `RETRIEVAL_GUARD_STATEMENT`, the module comments and the test names all say this
-now, and a new test PINS the tokenization fact itself against six real
-credential shapes — each refused at the facade, each inert at the seam once
-tokenized — so the claim cannot quietly become wrong again in either direction.
+now, and a test PINS the tokenization fact itself against seven real credential
+shapes — each refused at the facade, each inert at the seam once tokenized — so
+the claim cannot quietly become wrong again in either direction.
+
+> **Correction (Wave 5 review, correction cycle 2, LOW 3).** That sentence used
+> to say **six** shapes, and the sentence was true while the implication was
+> not: "six real credential shapes — each refused at the facade" reads as
+> coverage of credentials, and a reviewer produced a seventh that was ALLOWED —
+> `"AKIAIOSFODNN7EXAMPLE"`, an AWS long-term access key id. Pre-existing scope
+> of `SECRET_VALUE_PATTERNS`, not a Wave 5 regression, and an undisclosed scope
+> limit on a safety scan is the limit that gets relied on.
+>
+> The pattern is now present — `\bAKIA[0-9A-Z]{16}\b`, which costs no false
+> positive on ordinary text, all-caps prose, ids or hex digests, and is pinned
+> in both directions. The temporary `ASIA`/`ABIA`/`ACCA` prefixes are
+> deliberately NOT added: `ASIA` is an ordinary English word and the same rule
+> around it would be a live false-positive risk.
+>
+> More importantly the SCOPE is published as data rather than as prose.
+> `SECRET_SHAPES_COVERED` names all twelve: OpenAI-style keys, GitHub tokens,
+> GitHub fine-grained PATs, Google API keys, Google OAuth access tokens, Slack
+> tokens, Supabase PATs, JWTs, PEM private-key blocks, HTTP Bearer values, AWS
+> long-term access key ids, and `key: value` assignments in free text.
+> `SECRET_SHAPES_NOT_COVERED` names what is not: **an AWS SECRET access key**
+> (40 base64 characters with no prefix — shape-indistinguishable from the
+> digests and nonces HQ legitimately renders, so no shape rule can catch it
+> without breaking the snapshot), AWS temporary key ids, cloud connection
+> strings, basic-auth credentials in a URL, anything shaped like prose, and —
+> found while pinning this and recorded rather than worked around —
+> **unenumerated camelCase credential field names** such as `secretAccessKey`,
+> which the KEY rule's separator-anchored pattern does not match, so a shapeless
+> secret under such a name escapes both rules.
 
 **What was NOT resolved.** The scan is credential-SHAPE based
 (`assertBrowserSafe`'s key rule and value patterns); it is not a general
@@ -599,7 +643,7 @@ belongs to. This table says where, and what now pins each one.
 | Finding | Correction | Pinned by |
 |---|---|---|
 | MEDIUM 2 — the five secondary-unique guards were unpinned, and the census could not see them | `ENGINE_IMMUTABLE_TABLES` now declares each table's `secondaryGuards` and `missingImmutabilityGuards` reads them, so a dropped one produces a real `append_only_guard_missing` finding and engages safe mode | new `test/intelligence-durability.test.ts` (7 tests) and three new tests in `reliability-durability.test.ts` |
-| LOW 3 — the seam guard's scan is inert on tokenized terms | "The `assertBrowserSafe` pre-real-adapter Low" above, rewritten to name the FACADE scan as the guarantee | two new tests in `search-adapter-guard.test.ts`, one of which pins the tokenization fact against six real credential shapes |
+| LOW 3 — the seam guard's scan is inert on tokenized terms | "The `assertBrowserSafe` pre-real-adapter Low" above, rewritten to name the FACADE scan as the guarantee | two new tests in `search-adapter-guard.test.ts`, one of which pins the tokenization fact against **seven** real credential shapes (six at the time of that pass — see the correction-cycle-2 note in that section) |
 | LOW 4 — the returned escalation trigger could contradict the record | "Known limitations", and the facade now returns the STORED trigger | new test in `intelligence-authority.test.ts` |
 | LOW 5 — the `founder_gate` fail-closed default was unpinned | extracted as `riskClassForRouting`; audit row corrected | new unit test in `intelligence-core.test.ts` |
 | LOW 6 — `foldSpend` rendered `0` for an unknown amount | "Analytics: only what was observed"; the field is `null` now | new test in `intelligence-core.test.ts`, and the corrected assertion in `intelligence-authority.test.ts` |
@@ -637,3 +681,37 @@ per-table declaration beside the universal trio). The three pre-existing
 `it.skip` GAP markers under `packages/server` are untouched, and nothing under
 `packages/server`, `packages/web`, `packages/shared` or `packages/config-mesob`
 was changed.
+
+---
+
+## Wave 5 correction pass 2 (this branch, on top of `9782b45`)
+
+A SECOND, different fresh read-only hostile reviewer read the corrected head and
+returned CHANGES REQUIRED — 0 Critical / 1 High / 1 Medium / 3 Low. The two
+blocking findings are Phase 13's and are recorded in
+`PHASE_13_ADVANCED_RELIABILITY.md`. Two of the three Lows touch this document.
+
+| Finding | Correction | Pinned by |
+|---|---|---|
+| LOW 2 — "both docs say so" about the Wave 4 `byLifecycle.unrecognized` decision was false | the correction note under "Known limitations"; Phase 13's snapshot-fold section now records the reachability policy, so the claim is made TRUE rather than merely withdrawn | no test — it is a documentation fact and is stated as one |
+| LOW 3 — the facade credential scan's scope was undisclosed, and an AWS access key id was ALLOWED | the correction note under "The `assertBrowserSafe` pre-real-adapter Low"; `\bAKIA[0-9A-Z]{16}\b` added, and `SECRET_SHAPES_COVERED` / `SECRET_SHAPES_NOT_COVERED` published as data | three tests: two new in `live-redaction.test.ts` (the AWS shape; the false-positive control; the published inventories) and the seventh shape added to the tokenization pin in `search-adapter-guard.test.ts` |
+
+**One thing the census fix touched here, and it is a widening in HQ's favour.**
+`ENGINE_IMMUTABLE_TABLES` now carries per-guard schema-VINTAGE awareness. None
+of the five Phase 14 secondary-unique guards needs it: each was introduced in
+the same commit as its own table (`978aee9`), verified by `git log -S`, so each
+is required unconditionally whenever its table exists — exactly as before. The
+five real pins in `intelligence-durability.test.ts` are untouched and still
+pass.
+
+**Newly disclosed debt from this pass, both in `live/redaction.ts`.** The value
+rule covers twelve NAMED shapes and not credentials in general; the complement
+is published in `SECRET_SHAPES_NOT_COVERED`, and its most consequential entry is
+the AWS SECRET access key, which is 40 base64 characters with no prefix and
+therefore shape-indistinguishable from the digests and nonces HQ legitimately
+renders. Separately — found while pinning the above, and recorded rather than
+worked around — the KEY rule anchors on `_`/`-` boundaries plus a short
+enumerated set of camelCase forms, so an unenumerated camelCase name such as
+`secretAccessKey` is not matched BY NAME; a secret under such a name is caught
+only if its value has a recognised shape. Both are pinned by tests that assert
+the limit, so neither can be rediscovered as a surprise.

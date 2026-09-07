@@ -166,6 +166,17 @@ degraded durability posture risks the NEXT crash, but neither says a recorded
 fact is false, and treating them as corruption would make safe mode a thing
 operators route around instead of a thing they act on.
 
+**It has exactly one other trigger, and it is not a finding** (Wave 5 review,
+correction cycle 2): an evidence-chain posture of `not_verified`. A finding is a
+claim about the file, and "I did not look" is not one. It is carried as its own
+closed three-member vocabulary — `verified` / `broken` / `not_verified` — on the
+verdict, on `hqReliabilityPosture`, in the `safe_mode_engaged` refusal detail
+and on the unauthenticated snapshot, and `not_verified` engages safe mode
+exactly as a break does. That is the fail-closed rule: HQ never hands out the
+acts that add to, approve, release or execute against a record whose own audit
+chain it has not checked, and a reader is never told HQ is well about something
+HQ has not looked at.
+
 ### What it refuses, and what it deliberately does not
 
 | Refused | Kept available |
@@ -184,11 +195,49 @@ never removes a way to find out what is wrong.
 
 | Depth | What runs | When |
 |---|---|---|
-| `structural` | the schema catalogue (three `sqlite_master` reads) and the durability pragmas | **every construction of the facade** — cheap enough to afford there |
-| `full` | everything structural, plus `PRAGMA integrity_check`, `PRAGMA foreign_key_check` and a whole-log evidence-chain verification | only `assessHqIntegrity`, a Founder act — these are O(database) and O(log) |
+| `structural` | the schema catalogue (three `sqlite_master` reads), the durability pragmas, and the whole-log evidence-chain verification | **every construction of the facade** |
+| `full` | everything structural, plus `PRAGMA integrity_check` and `PRAGMA foreign_key_check` | only `assessHqIntegrity`, a Founder act — these are O(database) |
 
 The depth is carried ON the verdict and on the published snapshot, so a cheap
-pass can never be mistaken for a full one.
+pass can never be mistaken for a full one. The chain posture is carried
+SEPARATELY, so neither can be inferred from the other.
+
+> **Correction (Wave 5 review, correction cycle 2, HIGH).** That table used to
+> put the chain verification under `full` only, and the consequence was that a
+> **plain restart cleared an `evidence_chain_broken` safe mode**. The first
+> correction closed the PATCH route to defeating the verdict; it did not close
+> the RESTART route, which needs no patch and no privilege — just process exit.
+> The constructor latched `structuralIntegrity`, which never looked at the
+> chain; only `assessHqIntegrity` did; the latch was never persisted anywhere;
+> and every HQ entrypoint (`hq:order`, `hq:snapshot`, `hq:workforce`,
+> `hq:dispatch-claude`, `hq:ingest-claude`) is a fresh process. Break the chain
+> by a legal raw append, assess, watch `claimNext` and `releaseKillSwitch`
+> refuse — then construct a new facade with no assessment and both were ALLOWED,
+> with the unauthenticated snapshot publishing `safeMode: false` about it. That
+> last part is the exact failure the snapshot section of this document names as
+> the one it exists to prevent.
+>
+> **Fixed by verifying the chain at every construction.** Nothing is carried
+> across the boot, and that is the design rather than an omission: a persisted
+> latch would live in the same file the tamper is in and could be edited by the
+> same access that broke the chain, so the verdict is re-DERIVED from the bytes
+> instead. A new process re-finds the break because the break is still there.
+> Two alternatives were weighed and rejected — persisting the latch, for the
+> reason just given; and failing closed on the mere absence of a full assessment,
+> which alone would refuse every act on every boot and is an outage rather than
+> a safety posture. The fail-closed rule is kept for the case it fits, which is
+> the `not_verified` posture above.
+>
+> **The cost is measured, not assumed:** ~9µs per evidence entry on this
+> repository's own hardware — ~2ms at 200 entries, ~15ms at 2,000, ~170ms at
+> 20,000, against a CLI process start that already costs more than that in
+> TypeScript transform alone. It is linear and unbounded, and that is recorded
+> in the debt section rather than capped: a cap would mean publishing
+> `safeMode: false` about an unexamined tail, which is the lie this change
+> removes. Pinned by `reliability-safe-mode-restart.test.ts` (12 tests),
+> including the reviewer's probe verbatim, every enforcement point on the
+> restarted facade, the snapshot a stranger receives, the healthy control, and
+> the hostile patch re-proved at the new boot call site.
 
 **The boot-time observation is taken BEFORE the schema ensures, and that is
 load-bearing.** Every `ensure*Schema` is `CREATE TRIGGER IF NOT EXISTS`, so a
@@ -197,8 +246,31 @@ healthy file and report one — HQ would silently repair a tamper and say nothin
 about it. So the missing-guard list is observed as the file was FOUND and
 passed into the check. HQ can re-create the guards it declares; it cannot know
 what was written while they were absent, and safe mode is exactly the posture
-for that. Clearing therefore takes an explicit assessment of the file as it now
-stands, not a restart.
+for that.
+
+> **Correction (Wave 5 review, correction cycle 2, LOW 1).** This paragraph used
+> to end "Clearing therefore takes an explicit assessment of the file as it now
+> stands, not a restart." **That was false, and the doc is corrected rather than
+> the behaviour, deliberately.** The construction that FINDS the guards missing
+> also repairs them, so the next construction finds a healthy file and reports
+> one: a restart clears a guard-tamper posture, and so does a single Founder
+> assessment — which proves only that HQ repaired itself, not that nothing was
+> written while the guards were gone.
+>
+> The behaviour is kept because making the posture durable would require storing
+> the latch in the same file the tamper is in, where the same raw access that
+> dropped the trigger can also edit or append past the latch. An in-file latch
+> against an adversary who can write the file is theatre, and this phase does not
+> build theatre. A chain break needs none of it: it is re-derived from the bytes
+> at every construction, which is why that half genuinely does survive a restart.
+>
+> What IS added is the durable RECORD. `assessHqIntegrity` now carries the
+> construction-time observation into the append-only evidence log —
+> `guardsMissingAtConstruction` (a count) and
+> `guardsMissingAtConstructionNames` (schema object names, never row content) —
+> so the Founder act that clears the posture also writes down what the boot saw.
+> HQ still writes NOTHING at construction; that property is unchanged and
+> re-pinned. The residual limit is stated in the debt section.
 
 **Nothing clears it by assertion.** There is no override parameter, no force
 flag and no acknowledge, and a source scan pins that no such method name
@@ -359,10 +431,38 @@ kind: the text does not appear anywhere in the artifact, the count lands in
 `unrecognized`, every count is an integer, and the map total equals what was
 folded.
 
+**Which of those `unrecognized` buckets is actually REACHABLE from a stored row
+is asymmetric, and the asymmetry is recorded rather than smoothed over.**
+`byKind`, `byState` and `byOutcome` are genuinely reachable — the ledgers are
+append-only, an append is a permitted write, and a raw connection can land a row
+carrying free text in any of the three. The `findings` map is not: every finding
+name reaching the fold comes from HQ's own closed observation vocabulary, so the
+membership re-check there catches only a caller passing a raw fact directly. The
+bucket is KEPT anyway, because the key set is a published shape guarantee and
+the fold must stay closed by construction independently of who calls it — the
+same decision Wave 4 left open for `byLifecycle.unrecognized` in the Product
+Factory snapshot and Phase 14 records for `byCostProvenance.unrecognized`. This
+document and `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md` now state it in the
+same terms; `PHASE_12_PRODUCT_FACTORY.md` still names `byLifecycle` as a
+published key without recording the reachability decision, and that remains
+open rather than being quietly claimed as closed.
+
+> **Correction (Wave 5 review, correction cycle 2, LOW 2).** The first
+> correction's commit message and the Phase 14 document both said the Wave 4
+> `byLifecycle.unrecognized` decision had been left untouched "and both docs say
+> so". Only the Phase 14 document recorded it; this one contained zero
+> occurrences of `byLifecycle`. A pushed commit message cannot be amended, so
+> the claim is made true here instead — the paragraph above is that record — and
+> the Phase 14 document is corrected to say exactly which documents carry it.
+
 `safeMode` DOES cross, and that is the deliberate exception. A reader told
 everything is fine while HQ has said otherwise about itself has been lied to,
 and that is the one thing this phase exists to prevent. The finding CATEGORY
-crosses; the detail — which names schema objects — does not.
+crosses; the detail — which names schema objects — does not. Since correction
+cycle 2 the same rule extends to `evidenceChain`: a reader is told what happened
+to HQ's audit chain in the process that produced the file, in three closed
+words, so `safeMode: false` can never again stand in for "the chain was never
+looked at".
 
 The provenance note states four things a reader would otherwise supply
 themselves: that a concluded count is a count of RECORDS and not evidence that
@@ -503,25 +603,63 @@ timing-only concurrency tests. What was built:
   changing the dispatch and orchestration paths in the same wave that
   introduced the ledger.
 - **Safe mode is assessed at construction and on demand, not continuously.** A
-  corruption that appears while HQ is running is caught at the next boot or the
-  next explicit assessment, not at the moment it happens.
-- **The structural check cannot see everything.** It reads the schema catalogue
-  and the pragmas; a corrupt page, a broken chain and a referential violation
-  are only found by the full assessment.
+  corruption that appears while HQ is running is not caught at the moment it
+  happens. Precisely, since correction cycle 2: a **broken evidence chain** and
+  a **missing append-only guard** are caught at the next CONSTRUCTION, because
+  both are re-derived from the file; a **corrupt page** and a **referential
+  violation** are found only by an explicit `assessHqIntegrity`, because those
+  two are the O(database) checks a boot does not pay for. The earlier wording
+  said "caught at the next boot or the next explicit assessment" without that
+  split, and a broken chain was in fact caught at NEITHER a boot nor anything
+  short of a Founder act — that is the HIGH this cycle fixed.
+- **The construction-time chain verification is O(log) and unbounded.**
+  Measured at ~9µs per evidence entry (~2ms at 200 entries, ~15ms at 2,000,
+  ~170ms at 20,000), paid by every HQ process including every CLI command. It
+  is deliberately NOT capped: verifying a prefix and publishing `safeMode:
+  false` about the unexamined tail would be the same lie in a smaller costume.
+  If a deployment's log ever grows past the point where this is comfortable,
+  the answer is a rotated/anchored log design, not a partial check — and that
+  is a real future phase, not something to bolt on here.
 - **A missing append-only guard is detected, and the tamper window is not
   bounded.** HQ reports that a guard was absent when the file was found; it
   cannot say for how long, or what was written meanwhile. That is why the
   posture is "stop and investigate" rather than "here is the damage".
-- **Which guards the census can see** — corrected by the Wave 5 review (Medium
-  finding 2). It originally checked the trio only, on the reasoning that a
-  table's further guards were "that module's business" and that re-stating them
-  would drift. The consequence was that it could not report a dropped
-  `trg_hq_intel_budgets_no_replace_unique` at all. `ENGINE_IMMUTABLE_TABLES`
-  now declares each table's `secondaryGuards` and the census reads both, so a
-  dropped secondary guard produces a real `append_only_guard_missing` finding
-  and engages safe mode. The drift concern is answered where it belongs: a test
-  pins the whole declaration against the LIVE schema, so a phase that adds a
-  guard and forgets to declare it fails there.
+- **The guard-tamper posture is per-PROCESS, and a restart or a single
+  assessment clears it** (correction cycle 2, LOW 1 — see the correction under
+  "When it is assessed"). The construction repairs the file, so no later
+  construction can re-find the tamper. Making it durable would mean latching in
+  the same file the tamper is in, which the same raw access can edit. The
+  durable artefact is instead the evidence entry a Founder assessment writes,
+  carrying `guardsMissingAtConstruction`. **What remains open:** a process that
+  boots onto a tampered file and exits WITHOUT a Founder assessment leaves no
+  record of the tamper at all, because HQ writes nothing at construction.
+- **Which guards the census can see, and at which schema vintage.** The census
+  originally checked the trio only; the Wave 5 review's Medium 2 widened it to
+  each table's `secondaryGuards`, which was right. Doing so with no
+  schema-vintage awareness was not, and correction cycle 2 repaired that
+  regression: a database written by an OLDER version of this repository's own
+  code legitimately has a table and lacks a guard that version never created,
+  and the widened census called that `append_only_guard_missing` and engaged
+  safe mode on a healthy record — an outage on the first writable boot after an
+  upgrade, and a PERMANENT false `safeMode: true` on the read-only `hq:snapshot`
+  path, where the ensures return early and nothing ever repairs anything. A
+  guard is now required only when the file carries a schema object the code
+  declaring that guard also created (`laterThanTable`), read from the file
+  rather than from a stored version marker — a marker lives in the same file the
+  tamper is in. `git log -S` over all 28 listed tables and all 19 secondary
+  guards found exactly four mismatched groups, all on `hq_memory` and the two
+  `hq_mission_*` ledgers; every other guard arrived with its table and is
+  unconditionally required. **What remains open:** (a) for the two `hq_mission_*`
+  groups the witness is rounded UP to the next schema object in ancestry order,
+  because neither correcting commit added a table or a column — so on a file
+  written between Phase 3 and Phase 4 those six guards are not demanded even
+  though that version may have had them; rounding up can only under-require,
+  never produce a false finding. (b) Dropping a witness OBJECT would excuse its
+  guards — but a witness is a table or a column HQ's own code needs, so that is
+  a far larger and far more visible act than dropping a trigger, and it is the
+  same trade the "only tables that are PRESENT are checked" rule has always
+  made. (c) A typo'd witness would silently excuse a guard forever; a test pins
+  every declared witness against the LIVE schema so it cannot happen quietly.
 - **The independence check in `reconcileRun` is currently unreachable through
   the worker path**, because `assertApprovalAuthority` refuses any registered
   worker first, and only registered workers hold claims. It is kept as defence
@@ -602,3 +740,66 @@ Baseline at `c9ddecc` was 161 files / 3026 tests. Nothing was deleted, skipped,
 weakened or narrowed; the three pre-existing `it.skip` GAP markers under
 `packages/server` are untouched, and nothing under `packages/server`,
 `packages/web`, `packages/shared` or `packages/config-mesob` was changed.
+
+---
+
+## Wave 5 correction pass 2 (this branch, on top of `9782b45`)
+
+A SECOND, different fresh read-only hostile reviewer read the corrected head and
+returned CHANGES REQUIRED — 0 Critical / 1 High / 1 Medium / 3 Low. Both of the
+blocking findings are Phase 13's, and one of them is a regression the FIRST
+correction introduced. Both are corrected in place above, in the sections they
+belong to.
+
+| Finding | Where it is now recorded | Pinned by |
+|---|---|---|
+| HIGH — a plain restart cleared an `evidence_chain_broken` safe mode | "Safe mode → When it is assessed, and the cost of each", and the new `not_verified` posture under "Safe mode" | new `test/reliability-safe-mode-restart.test.ts` (12 tests) |
+| MEDIUM — the widened census raised a FALSE finding on a legitimate older database | "Known limitations → Which guards the census can see, and at which schema vintage" | new `test/reliability-guard-vintage.test.ts` (11 tests) |
+| LOW 1 — the guard-tamper posture is cleared by a restart or one assessment | the correction under "The boot-time observation is taken BEFORE the schema ensures", and the debt bullet; the DOC is corrected and the behaviour is kept, with the reason | one test in `reliability-safe-mode-restart.test.ts` for the durable record, plus the statement-truth tests |
+| LOW 2 — "both docs say so" about `byLifecycle.unrecognized` was false | the snapshot-fold section above now records the reachability policy, so the claim is made true rather than merely corrected | no test — it is a documentation fact, stated as such |
+| LOW 3 — undisclosed scope of the facade credential scan | `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md`, "The `assertBrowserSafe` pre-real-adapter Low" | three tests across `live-redaction.test.ts` and `search-adapter-guard.test.ts` |
+
+**The one published-shape change.** `reliability` gains a thirteenth key,
+`evidenceChain`, a closed three-member vocabulary carrying no text. The key-set
+pin in `reliability-surfaces.test.ts` was WIDENED, not relaxed: nothing was
+removed, and the addition is what stops `safeMode: false` from standing in for
+"the chain was never looked at". No `HQ_SNAPSHOT_VERSION` bump, for the same
+reason Phase 14 did not bump when it added a whole section: the change is purely
+additive and every consumer is in this repository.
+
+**The snapshot's by-shape safety, re-proved rather than assumed.** A scratch
+probe outside the repository seeded 112 distinct markers into every TEXT column
+of `hq_reliability_runs`, `hq_reliability_run_events`, `hq_reliability_backups`,
+all five `hq_intel_*` ledgers, `op_evidence` and `hq_events`, through legal raw
+appends, then serialized the snapshot: **0 markers reached the `reliability` or
+`intelligence` sections.** Six reached the `activity` section, which is the
+canonical `hq_events` feed and a deliberately published surface — not part of
+the by-shape guarantee. The same probe, run from a FRESH process over the
+tampered file, published `safeMode: true, evidenceChain: broken`, which is the
+HIGH proved end to end through the real snapshot path.
+
+**Verification after correction pass 2** (the whole battery, not a subset):
+
+| Command | Result |
+|---|---|
+| `npm run test:hq` | 164 files, 3073 tests passed |
+| `npm run typecheck --workspace @factoryos/headquarter` | clean |
+| `npm run test --workspace @factoryos/hq-host` | 23 files, 222 tests passed |
+| `npm run typecheck --workspace @factoryos/hq-host` | clean |
+| `npm run test --workspace @factoryos/hq-server` | 2 files, 20 tests passed |
+| `npm run typecheck --workspace @factoryos/hq-server` | clean |
+| `npm test` (root) | 37 files, 569 passed + 3 pre-existing skips |
+| `npm run build:site --workspace @factoryos/headquarter` | 10 pages, `hq-snapshot.json` written |
+| `npm run build` | clean, initial JS 215.66 kB / 69.22 kB gzip |
+
+Baseline at `9782b45` was 162 files / 3045 tests; this pass adds 28. **Nothing
+was deleted, skipped, weakened, narrowed or relaxed.** Five existing test files
+were touched and every change is additive or a required-argument update:
+`reliability-durability.test.ts` and `reliability-core.test.ts` now pass the
+chain verification that `structuralIntegrity` / `fullIntegrity` / the snapshot
+fold REQUIRE — a strengthening, because those assertions now cover the chain
+too; `reliability-surfaces.test.ts` widened the key-set pin by one; and
+`live-redaction.test.ts` and `search-adapter-guard.test.ts` gained cases. The
+three pre-existing `it.skip` GAP markers under `packages/server` are untouched,
+and nothing under `packages/server`, `packages/web`, `packages/shared` or
+`packages/config-mesob` was changed. No new dependency.

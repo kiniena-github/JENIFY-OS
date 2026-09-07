@@ -364,6 +364,7 @@ describe('the snapshot fold is closed by construction', () => {
       verifiedBackups: 0,
       safeMode: false,
       assessmentDepth: 'structural',
+      evidenceChain: 'verified',
       findings: ['append_only_guard_missing', 'a finding nobody defined'],
       durabilityMeetsRequirement: true,
     });

@@ -158,6 +158,12 @@ describe('the seam guard: defence in depth against a caller that supplies its ow
       'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpM',
       'Bearer abcdefghijklmnop1234',
       'api_key: abcd1234efgh5678',
+      // The seventh shape, added by correction cycle 2 of the Wave 5 review.
+      // This exact string was ALLOWED by the facade before the pattern
+      // existed, while the phase document claimed the layer was pinned against
+      // "six real credential shapes" — the count was true and the implication
+      // was not.
+      'AKIAIOSFODNN7EXAMPLE',
     ]) {
       // The facade scan sees this and refuses it.
       expect(() => assertRetrievalTextSafe({ text: credential }, 'search')).toThrow(
@@ -181,6 +187,15 @@ describe('the seam guard: defence in depth against a caller that supplies its ow
     expect(RETRIEVAL_GUARD_STATEMENT).toContain('defence in depth');
     // The old wording claimed the seam scan covered every adapter's free text.
     expect(RETRIEVAL_GUARD_STATEMENT).not.toContain('can be handed text HQ has not scanned');
+  });
+
+  it('names the shapes it covers and the ones it does not (Wave 5 correction cycle 2, LOW 3)', () => {
+    // "credential shapes" unqualified reads as "credentials". The statement
+    // now enumerates both directions, so a reader can tell what this layer is
+    // and is not without opening the regex array.
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('a NAMED list of shapes, not credentials in general');
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('AWS long-term access key ids');
+    expect(RETRIEVAL_GUARD_STATEMENT).toContain('does NOT recognise an AWS secret access key');
   });
 });
 

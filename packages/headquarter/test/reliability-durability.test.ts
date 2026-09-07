@@ -29,6 +29,7 @@ import {
   structuralIntegrity,
   verifyHqBackupFile,
 } from '../src/store/integrity.js';
+import { verifyEvidenceChain } from '../src/operator/evidence.js';
 import { reliabilitySchemaPresent } from '../src/application/reliability-command.js';
 import { HeadquarterOperations } from '../src/application/service.js';
 
@@ -262,6 +263,7 @@ describe('the engine-immutable inventory is checked against the live schema, not
       // census worth widening.
       const report = structuralIntegrity(raw, {
         guardsMissingAsFound: missingImmutabilityGuards(raw),
+        verifyEvidenceChain: () => verifyEvidenceChain(raw),
       });
       expect(report.safeMode).toBe(true);
       expect(report.observations.map((o) => o.finding)).toContain('append_only_guard_missing');
@@ -368,7 +370,7 @@ describe('the durability posture is reported, never pretended', () => {
       const dbPath = path.join(dir, 'weak.sqlite');
       const db = openHqDatabase(dbPath);
       db.pragma('synchronous = NORMAL');
-      const report = structuralIntegrity(db);
+      const report = structuralIntegrity(db, { verifyEvidenceChain: () => verifyEvidenceChain(db) });
       const finding = report.observations.find((o) => o.finding === 'durability_below_requirement');
       expect(finding).toBeTruthy();
       expect(finding!.blocking).toBe(false);
@@ -436,7 +438,9 @@ describe('the finding vocabulary and what blocks', () => {
   it('reports a healthy store as healthy at both depths', () => {
     const fx = fileFixture();
     try {
-      expect(structuralIntegrity(fx.db).safeMode).toBe(false);
+      expect(
+        structuralIntegrity(fx.db, { verifyEvidenceChain: () => verifyEvidenceChain(fx.db) }).safeMode,
+      ).toBe(false);
       const full = fullIntegrity(fx.db, {
         verifyEvidenceChain: () => fx.ops.queue.evidence.verifyChain(),
       });

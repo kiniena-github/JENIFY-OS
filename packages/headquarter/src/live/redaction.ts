@@ -42,6 +42,13 @@ const SECRET_KEY_PATTERN =
  * Known credential shapes. Deliberately shape-based rather than
  * entropy-based: a generic "looks random" rule would reject the hash-chained
  * evidence digests, claim nonces and UUIDs that HQ legitimately renders.
+ *
+ * **This is a NAMED list, not "credentials" in general**, and the Wave 5 review
+ * (correction cycle 2, LOW 3) is why that is said out loud. The Phase 14
+ * document claimed the facade scan was pinned "against six real credential
+ * shapes"; a reviewer handed it a seventh — an AWS access key id — and it was
+ * ALLOWED. `SECRET_SHAPES_COVERED` below is the honest inventory, and
+ * `SECRET_SHAPES_NOT_COVERED` is the equally honest complement.
  */
 const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
   /\bsk-[A-Za-z0-9_-]{16,}/, // OpenAI-style secret key
@@ -51,6 +58,16 @@ const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
   /\bya29\.[0-9A-Za-z_-]{20,}/, // Google OAuth access token
   /\bxox[baprs]-[A-Za-z0-9-]{10,}/, // Slack token
   /\bsbp_[a-f0-9]{32,}/, // Supabase personal access token
+  // AWS long-term access key id. Added by the Wave 5 review's LOW 3, which
+  // demonstrated `AKIAIOSFODNN7EXAMPLE` passing the facade untouched.
+  // `AKIA` followed by exactly 16 upper-case alphanumerics, on word
+  // boundaries: an all-caps token of exactly that length beginning with those
+  // four letters is not a thing ordinary prose, a run label, a capability id
+  // or a hex digest produces, so this costs no false positive. The temporary
+  // `ASIA`/`ABIA`/`ACCA` prefixes are deliberately NOT included — `ASIA` is an
+  // ordinary English word and the same rule around it would be a live
+  // false-positive risk in a company that operates internationally.
+  /\bAKIA[0-9A-Z]{16}\b/,
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/, // JWT
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/, // PEM private key
   /\bBearer\s+[A-Za-z0-9._-]{16,}/i, // Authorization header value
@@ -62,6 +79,54 @@ const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
   // matching — so a quoted secret in free text slipped past. Checking the
   // unescaped string closes that gap.
   /(api[_-]?key|secret|password|passwd|token)\s*[:=]\s*['"]?[^\s'"]{8,}/i,
+];
+
+/**
+ * The credential shapes the VALUE rule recognises, named so no document has to
+ * say "credential shapes" and mean "these twelve".
+ *
+ * Published as data rather than prose so a test can hold the list and the
+ * pattern array to the same length, and so the phase documents can quote it
+ * instead of paraphrasing it.
+ */
+export const SECRET_SHAPES_COVERED: readonly string[] = [
+  'OpenAI-style secret key (sk-…)',
+  'GitHub token (ghp_ / gho_ / ghu_ / ghs_ / ghr_)',
+  'GitHub fine-grained PAT (github_pat_…)',
+  'Google API key (AIza…)',
+  'Google OAuth access token (ya29.…)',
+  'Slack token (xoxb / xoxa / xoxp / xoxr / xoxs)',
+  'Supabase personal access token (sbp_…)',
+  'JSON Web Token (three dot-separated base64url segments)',
+  'PEM private key block',
+  'HTTP Authorization Bearer value',
+  'AWS long-term access key id (AKIA + 16)',
+  'key: value assignment in free text (api_key / secret / password / token)',
+];
+
+/**
+ * What the value rule does NOT recognise, recorded because an undisclosed
+ * scope limit on a safety scan is the limit that gets relied on.
+ *
+ * The first entry is the important one: an AWS SECRET access key is 40
+ * characters of base64 alphabet with no prefix and no structure, so no shape
+ * rule can find it without also rejecting digests, ids and nonces HQ
+ * legitimately renders. It is caught only when it appears under a
+ * credential-shaped FIELD NAME (the key rule) or as `secret: …` in free text.
+ */
+export const SECRET_SHAPES_NOT_COVERED: readonly string[] = [
+  'AWS secret access key (40 base64 characters, no prefix — shape-indistinguishable from a digest)',
+  'AWS temporary access key ids (ASIA / ABIA / ACCA — the prefix collides with ordinary words)',
+  'Azure and generic cloud connection strings',
+  'Basic-auth credentials embedded in a URL',
+  'any secret that looks like ordinary prose or an ordinary identifier',
+  // Found while pinning the above, and recorded rather than quietly worked
+  // around. The KEY rule anchors on `_`/`-` boundaries plus a short enumerated
+  // set of camelCase forms (apiKey, accessToken, privateKey, clientSecret), so
+  // an unenumerated camelCase compound such as `secretAccessKey` is not matched
+  // by NAME. Its value is still checked against every shape above; only a
+  // shapeless secret under such a name escapes both rules.
+  'unenumerated camelCase credential field names (e.g. secretAccessKey) — matched by value shape only',
 ];
 
 /**

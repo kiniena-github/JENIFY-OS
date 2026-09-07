@@ -1029,9 +1029,19 @@ export function liveSnapshotFromOperations(
                 'record. The findings map names the categories; no detail crosses.'
               : null,
             reliability.assessmentDepth === 'structural'
-              ? 'The verdict behind these counts came from a STRUCTURAL assessment — the schema catalogue and ' +
-                'the durability pragmas. It is not a claim that a full integrity_check has been run.'
+              ? 'The verdict behind these counts came from a STRUCTURAL assessment — the schema catalogue, ' +
+                'the durability pragmas and the evidence hash chain. It is not a claim that a full ' +
+                'integrity_check has been run.'
               : null,
+            reliability.evidenceChain === 'verified'
+              ? null
+              : reliability.evidenceChain === 'broken'
+                ? 'HQ’s hash-chained evidence log does NOT verify. That is a statement about HQ’s own audit ' +
+                  'record, and it is re-derived from the file at every construction, so it cannot be cleared ' +
+                  'by restarting.'
+                : 'HQ’s hash-chained evidence log was NOT verified in the process that produced this file, ' +
+                  'so nothing here is a claim that it holds. HQ treats that as safe mode rather than as an ' +
+                  'all-clear.',
             reliability.needsReconciliation > 0
               ? `${reliability.needsReconciliation} run(s) stand at an unknown outcome awaiting explicit ` +
                 'reconciliation. HQ never retries an uncertain outcome automatically.'

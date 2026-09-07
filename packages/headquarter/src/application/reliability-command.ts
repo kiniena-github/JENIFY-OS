@@ -54,7 +54,7 @@ import { createHash } from 'node:crypto';
 import type { HqDatabase } from '../store/db.js';
 import { canonicalJson } from '../operator/approvals.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
-import { isHqIntegrityFinding } from '../store/integrity.js';
+import { isEvidenceChainPosture, isHqIntegrityFinding } from '../store/integrity.js';
 import {
   ACTION_RECONCILE_DECISIONS,
   isActionReconcileDecision,
@@ -956,6 +956,12 @@ export interface HqIntegrityObservationView {
 export interface HqIntegrityView {
   safeMode: boolean;
   depth: 'structural' | 'full';
+  /**
+   * What happened to the evidence hash chain in the process that produced this
+   * verdict. Carried separately from `depth` so "verified clean" and "never
+   * looked at" can never arrive as the same answer (Wave 5 correction cycle 2).
+   */
+  evidenceChain: 'verified' | 'broken' | 'not_verified';
   observations: HqIntegrityObservationView[];
   durability: {
     journalMode: string;
@@ -1018,6 +1024,18 @@ export interface ReliabilitySnapshotView {
   /** Whether HQ is currently in safe mode, and how deep the assessment behind that was. */
   safeMode: boolean;
   assessmentDepth: 'structural' | 'full';
+  /**
+   * What happened to the evidence hash chain — a closed three-member
+   * vocabulary, no text, published to an unauthenticated reader.
+   *
+   * It is here because a `structural` depth used to be presented as an
+   * all-clear: `safeMode: false` was the snapshot's answer both when the chain
+   * had been verified and when it had never been checked, and every HQ
+   * entrypoint is a fresh process that had never checked it. A stranger reading
+   * this file was told HQ was fine about its own audit record on the strength
+   * of a check that had not run.
+   */
+  evidenceChain: 'verified' | 'broken' | 'not_verified';
   /** Counts keyed by the closed integrity-finding vocabulary; no detail text crosses. */
   findings: Record<string, number>;
   durabilityMeetsRequirement: boolean;
@@ -1039,8 +1057,12 @@ export function emptyReliabilitySnapshot(storePresent: boolean): ReliabilitySnap
     byOutcome: zeroed(RUN_OUTCOMES) as RunOutcomeCounts,
     needsReconciliation: 0,
     verifiedBackups: 0,
+    // No store, no verdict — and therefore no claim. `not_verified` is the
+    // honest posture for a projection that assessed nothing, and it keeps the
+    // empty snapshot from reading as an all-clear about a chain nobody checked.
     safeMode: false,
     assessmentDepth: 'structural',
+    evidenceChain: 'not_verified',
     findings: {},
     durabilityMeetsRequirement: true,
     note: RELIABILITY_SNAPSHOT_NOTE,
@@ -1051,7 +1073,10 @@ export const RELIABILITY_SNAPSHOT_NOTE =
   'Counts over closed vocabularies only. No run label, task/mission/action id, worker id, correlation id, ' +
   'backup path, digest or finding detail crosses to an unauthenticated reader. A concluded count is a count ' +
   'of RECORDS, not evidence that anything reached the outside world — no reliability path can perform an ' +
-  'external action. safeMode true means HQ has said so about itself; it is never inferred here.';
+  'external action. safeMode true means HQ has said so about itself; it is never inferred here. ' +
+  'evidenceChain says what happened to HQ’s hash-chained audit log in the process that produced these ' +
+  'counts: verified means it was recomputed in full and holds, broken means it does not, and not_verified ' +
+  'means it was not checked — which engages safe mode rather than reading as an all-clear.';
 
 /**
  * Fold the register into counts. Every increment passes a membership check and
@@ -1063,6 +1088,7 @@ export function summarizeReliability(input: {
   verifiedBackups: number;
   safeMode: boolean;
   assessmentDepth: 'structural' | 'full';
+  evidenceChain: 'verified' | 'broken' | 'not_verified';
   findings: readonly string[];
   durabilityMeetsRequirement: boolean;
 }): ReliabilitySnapshotView {
@@ -1096,6 +1122,9 @@ export function summarizeReliability(input: {
     verifiedBackups: input.verifiedBackups,
     safeMode: input.safeMode,
     assessmentDepth: input.assessmentDepth,
+    // The CHECKED value is the key here too: a caller handing a posture outside
+    // the closed vocabulary gets the fail-closed member, never its string.
+    evidenceChain: isEvidenceChainPosture(input.evidenceChain) ? input.evidenceChain : 'not_verified',
     findings,
     durabilityMeetsRequirement: input.durabilityMeetsRequirement,
     note: RELIABILITY_SNAPSHOT_NOTE,
