@@ -1,0 +1,1060 @@
+/**
+ * Phase 13 — Advanced Reliability: the RUN LEDGER, the recovery classification
+ * and the verified-backup register.
+ *
+ * HQ has to survive crashes, restarts, duplicate calls, two processes, partial
+ * provider failures and stale workers **without lying about what happened**.
+ * That is one property, and it decomposes into five laws. Every function below
+ * exists to keep one of them.
+ *
+ * 1. **A run is EXECUTION AUDIT; it is never task truth.** `op_tasks` plus
+ *    `ActivityStatus` stay the only answer to "what is the state of this
+ *    work"; `hq_missions` stays the only answer for a mission; the Phase 8
+ *    `hq_action_intents` / `hq_action_events` ledger stays the only answer for
+ *    an external action. A run row REFERENCES a canonical task (and optionally
+ *    a mission and an action) and holds what none of them holds: which PROCESS
+ *    was carrying the work, how many attempts it made, which correlation each
+ *    attempt used, and what category of failure ended it. Nothing in HQ reads
+ *    a run to decide eligibility, claiming, dispatch, approval, execution,
+ *    release or a kill switch — pinned behaviourally in both directions and by
+ *    a source scan of the four modules that decide whether work may run.
+ *
+ * 2. **An uncertain outcome is never retried automatically.** The whole point
+ *    of the phase. A run whose attempt was interrupted while it could have
+ *    reached the outside world becomes `needs_reconciliation` with outcome
+ *    `outcome_unknown`, and `runAdmitsAttempt` returns false for it forever.
+ *    Only a HUMAN reconciliation of `confirmed_not_executed` — a statement
+ *    that somebody checked the real world and nothing happened — opens a new
+ *    attempt generation. The rule is enforced twice: by this pure function and
+ *    by a UNIQUE index on the attempt key, so two processes cannot both open
+ *    the same generation even if one of them never ran this code.
+ *
+ * 3. **Fail closed on what HQ does not know.** A run whose capability cannot
+ *    be read is treated as side-effecting, so an interrupted attempt on it is
+ *    uncertain rather than conveniently "nothing happened". The safe answer is
+ *    the one that costs a human a phone call, never the one that costs a
+ *    duplicate external action.
+ *
+ * 4. **Recovery classifies; it never repairs and never reaches across
+ *    ledgers.** Restart recovery closes or flags THIS ledger's runs, and
+ *    REPORTS — as counts — the canonical work other ledgers already own and
+ *    already know how to resolve: Phase 8 actions standing at `attempted` or
+ *    `outcome_unknown`, tasks the queue moved to `outcome_unknown`, and tasks
+ *    holding an expired lease. It writes not one row into any of them. A
+ *    second writer into the action ledger is exactly the "second dispatch
+ *    authority" the architecture forbids.
+ *
+ * 5. **Nothing here executes anything.** There is no adapter handle, no
+ *    provider parameter, no target, no payload and no dispatch seam in this
+ *    module. A run records that an attempt happened; the attempt itself is
+ *    made by the canonical lane that owns it.
+ */
+
+import { createHash } from 'node:crypto';
+import type { HqDatabase } from '../store/db.js';
+import { canonicalJson } from '../operator/approvals.js';
+import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
+import { isHqIntegrityFinding } from '../store/integrity.js';
+import {
+  ACTION_RECONCILE_DECISIONS,
+  isActionReconcileDecision,
+  type ActionReconcileDecision,
+} from './action-gateway.js';
+
+/* ------------------------------------------------------------------ */
+/* Vocabulary (categorical only)                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * What kind of work a run is carrying. Three, because these are the three
+ * lanes HQ actually has that can be interrupted mid-flight. Metadata: the kind
+ * selects nothing and authorizes nothing.
+ */
+export const RUN_KINDS = ['orchestration', 'external_action', 'dispatch'] as const;
+export type RunKind = (typeof RUN_KINDS)[number];
+
+export function isRunKind(value: unknown): value is RunKind {
+  return typeof value === 'string' && (RUN_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * The run's own categorical state, DERIVED from its append-only events.
+ *
+ * Deliberately disjoint from `ActivityStatus` (the canonical task vocabulary),
+ * from `MissionStatus` and from `ActionState` — no member is shared, so no
+ * reader and no code path can mistake one for another, and a test pins the
+ * disjointness directly.
+ */
+export const RUN_STATES = ['open', 'attempting', 'needs_reconciliation', 'concluded'] as const;
+export type RunState = (typeof RUN_STATES)[number];
+
+export function isRunState(value: unknown): value is RunState {
+  return typeof value === 'string' && (RUN_STATES as readonly string[]).includes(value);
+}
+
+/**
+ * What actually happened, as far as HQ can honestly say.
+ *
+ * `outcome_unknown` is a first-class member rather than an error case, and
+ * `not_executed` means somebody established that nothing happened — it is
+ * never assumed from silence.
+ */
+export const RUN_OUTCOMES = ['none', 'succeeded', 'failed', 'not_executed', 'outcome_unknown'] as const;
+export type RunOutcome = (typeof RUN_OUTCOMES)[number];
+
+export function isRunOutcome(value: unknown): value is RunOutcome {
+  return typeof value === 'string' && (RUN_OUTCOMES as readonly string[]).includes(value);
+}
+
+/** The outcomes a worker may REPORT. `none` is the absence of a report, so it is not reportable. */
+export const REPORTABLE_RUN_OUTCOMES: readonly RunOutcome[] = [
+  'succeeded',
+  'failed',
+  'not_executed',
+  'outcome_unknown',
+];
+
+export function isReportableRunOutcome(value: unknown): value is RunOutcome {
+  return isRunOutcome(value) && REPORTABLE_RUN_OUTCOMES.includes(value);
+}
+
+/**
+ * WHY a run ended the way it did. Categorical, and there is deliberately no
+ * numeric confidence, probability or severity anywhere beside it.
+ */
+export const RUN_FAILURE_CATEGORIES = [
+  'none',
+  'provider_unavailable',
+  'provider_rejected',
+  'process_interrupted',
+  'stale_lease',
+  'stale_fence',
+  'duplicate_suppressed',
+  'integrity_safe_mode',
+  'cancelled',
+  'unknown',
+] as const;
+export type RunFailureCategory = (typeof RUN_FAILURE_CATEGORIES)[number];
+
+export function isRunFailureCategory(value: unknown): value is RunFailureCategory {
+  return typeof value === 'string' && (RUN_FAILURE_CATEGORIES as readonly string[]).includes(value);
+}
+
+/**
+ * The five interruption paths the phase is required to have an explicit answer
+ * for. Each names a real way HQ loses sight of work, and each maps to a
+ * classification rather than to a retry.
+ */
+export const RUN_INTERRUPTION_REASONS = [
+  'process_interrupted',
+  'stale_lease',
+  'provider_outage',
+  'partial_attempt',
+  'stale_fence',
+] as const;
+export type RunInterruptionReason = (typeof RUN_INTERRUPTION_REASONS)[number];
+
+export function isRunInterruptionReason(value: unknown): value is RunInterruptionReason {
+  return typeof value === 'string' && (RUN_INTERRUPTION_REASONS as readonly string[]).includes(value);
+}
+
+/** The append-only history of one run. */
+export const RUN_EVENT_KINDS = [
+  'opened',
+  'attempt_started',
+  'outcome_recorded',
+  'interrupted',
+  'reconciled',
+] as const;
+export type RunEventKind = (typeof RUN_EVENT_KINDS)[number];
+
+/**
+ * Reconciliation reuses the Phase 8 vocabulary VERBATIM rather than defining a
+ * near-identical one. Same judgement, same three answers, same authority — a
+ * second spelling of "somebody checked the real world" is precisely the kind
+ * of drift this phase exists to prevent.
+ */
+export const RUN_RECONCILE_DECISIONS = ACTION_RECONCILE_DECISIONS;
+export type RunReconcileDecision = ActionReconcileDecision;
+export const isRunReconcileDecision = isActionReconcileDecision;
+
+export const RUN_LEDGER_STATEMENT =
+  'A run is EXECUTION AUDIT. The canonical answer to “what is the state of this work” is the op_tasks row it ' +
+  'references; for a mission it is hq_missions; for an external action it is the Phase 8 action ledger. ' +
+  'Nothing in HQ reads a run state to decide eligibility, claiming, dispatch, approval, execution, release or ' +
+  'a kill switch, and no run path can execute anything.';
+
+export const RUN_RETRY_STATEMENT =
+  'An interrupted attempt that could have reached the outside world is recorded as outcome_unknown and is ' +
+  'NEVER retried automatically. Only a human reconciliation of confirmed_not_executed — a statement that the ' +
+  'real world was checked and nothing happened — opens a further attempt generation, and only for an ' +
+  'idempotent capability.';
+
+export const RECOVERY_SCOPE_STATEMENT =
+  'Restart recovery classifies runs in THIS ledger and writes nothing into any other. Interrupted canonical ' +
+  'work owned elsewhere — Phase 8 actions awaiting reconciliation, tasks the queue moved to outcome_unknown, ' +
+  'tasks holding an expired lease — is REPORTED as counts, with the canonical path that resolves each, and is ' +
+  'left exactly where it stands.';
+
+/* ------------------------------------------------------------------ */
+/* Capability (the CONFIGURATION vs INVOCATION trio)                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The capability behind the two FOUNDER acts of this phase: assessing the
+ * store's integrity, and recording a verified backup.
+ *
+ * NOT registered automatically: a deployment that wants them calls
+ * `registerReliabilityCommandCapability` as a deliberate configuration
+ * action, and until then both fail closed.
+ *
+ * `sideEffect: false` is honest — an assessment reads pragmas and the schema
+ * catalogue, and recording a backup reads a file and appends a row. Neither
+ * reaches anything outside HQ. The risk class is `founder_gate` because
+ * declaring the store healthy, or declaring a file a valid recovery point, is
+ * a Founder statement.
+ *
+ * Recovery and reconciliation deliberately do NOT sit behind this capability:
+ * they sit behind approval authority plus independence, exactly like
+ * `reconcileAction`, because they are judgements about what happened rather
+ * than grants to do something.
+ */
+export const RELIABILITY_COMMAND_CAPABILITY = {
+  id: 'hq.reliability_command',
+  description:
+    'Founder reliability command — assesses HQ store integrity and durability, and records a verified ' +
+    'backup as a recovery point. Reads and appends only; repairs nothing, restores nothing, executes nothing.',
+  riskClass: 'founder_gate',
+  sideEffect: false,
+  idempotent: true,
+} as const;
+
+/** Register the reliability-command capability — a CONFIGURATION action. */
+export function registerReliabilityCommandCapability(db: HqDatabase): void {
+  new CapabilityRegistry(db).register({ ...RELIABILITY_COMMAND_CAPABILITY });
+}
+
+export const RELIABILITY_COMMAND_RESERVED_CONTRACT = {
+  riskClass: RELIABILITY_COMMAND_CAPABILITY.riskClass,
+  sideEffect: RELIABILITY_COMMAND_CAPABILITY.sideEffect,
+  idempotent: RELIABILITY_COMMAND_CAPABILITY.idempotent,
+} as const;
+
+/** Which contract fields the registry's CURRENT row disagrees with, if any. */
+export function reliabilityCommandContractDrift(capability: Capability): string[] {
+  const drift: string[] = [];
+  if (capability.riskClass !== RELIABILITY_COMMAND_RESERVED_CONTRACT.riskClass) drift.push('riskClass');
+  if (capability.sideEffect !== RELIABILITY_COMMAND_RESERVED_CONTRACT.sideEffect) drift.push('sideEffect');
+  if (capability.idempotent !== RELIABILITY_COMMAND_RESERVED_CONTRACT.idempotent) drift.push('idempotent');
+  return drift;
+}
+
+export type ReliabilityCommandCapabilityState = 'missing' | 'altered' | 'disabled' | 'enabled';
+
+/** Classify the registry's current row from an ENFORCEMENT-SAFE read; never repairs. */
+export function reliabilityCommandCapabilityState(
+  capability: Capability | null,
+): ReliabilityCommandCapabilityState {
+  if (!capability) return 'missing';
+  if (reliabilityCommandContractDrift(capability).length > 0) return 'altered';
+  return capability.enabled ? 'enabled' : 'disabled';
+}
+
+/* ------------------------------------------------------------------ */
+/* Bounds                                                              */
+/* ------------------------------------------------------------------ */
+
+export const MAX_RUN_NOTE_LENGTH = 500;
+export const MAX_RUN_LABEL_LENGTH = 120;
+export const MAX_BACKUP_PATH_LENGTH = 1000;
+/** Bounded reads: the true total is always stated beside a bounded list. */
+export const RUN_READ_LIMIT = 50;
+export const BACKUP_READ_LIMIT = 25;
+/** Runs carried in the unauthenticated snapshot section: none (counts only). */
+export const RUN_SNAPSHOT_LIMIT = 0;
+
+/* ------------------------------------------------------------------ */
+/* Schema — three tables, all INSERT-only BY ENGINE                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The full Phase 7/8/12 trigger set on all three tables: no UPDATE of any
+ * column, no DELETE, a BEFORE INSERT guard on `id`/`seq` that closes REPLACE
+ * and UPSERT, and a second BEFORE INSERT guard on every SECONDARY unique
+ * index.
+ *
+ * That second guard is load-bearing HERE in a way it is nowhere else. The
+ * unique index on `hq_reliability_run_events.attempt_key` IS the cross-process
+ * duplicate-attempt guard: a REPLACE colliding on it would delete the standing
+ * reservation without any BEFORE DELETE firing (`recursive_triggers` is off by
+ * default and connection-scoped), freeing an attempt generation for a second
+ * real execution of the same work. The same reasoning applies to
+ * `hq_reliability_runs.run_key`, which is the duplicate-run guard.
+ */
+const RELIABILITY_DDL = `
+CREATE TABLE IF NOT EXISTS hq_reliability_runs (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  run_kind TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  mission_id TEXT,
+  action_id TEXT,
+  capability_id TEXT NOT NULL,
+  worker_id TEXT NOT NULL,
+  claim_fence INTEGER NOT NULL,
+  claim_nonce TEXT,
+  process_id TEXT NOT NULL,
+  label TEXT NOT NULL,
+  opened_at TEXT NOT NULL,
+  run_key TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_hq_reliability_runs_task ON hq_reliability_runs(task_id, seq);
+CREATE INDEX IF NOT EXISTS idx_hq_reliability_runs_process ON hq_reliability_runs(process_id, seq);
+
+CREATE TABLE IF NOT EXISTS hq_reliability_run_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  run_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  at TEXT NOT NULL,
+  process_id TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  attempt_key TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_hq_reliability_run_events_run ON hq_reliability_run_events(run_id, seq);
+-- ONE attempt per generation, enforced by the engine across processes.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hq_reliability_run_events_attempt
+  ON hq_reliability_run_events(attempt_key) WHERE attempt_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS hq_reliability_backups (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  backup_path TEXT NOT NULL,
+  content_digest TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  schema_tables INTEGER NOT NULL,
+  verified_at TEXT NOT NULL,
+  verified_by TEXT NOT NULL,
+  process_id TEXT NOT NULL,
+  note TEXT,
+  record_key TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_hq_reliability_backups_digest ON hq_reliability_backups(content_digest, seq);
+
+CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_runs_no_rewrite
+BEFORE UPDATE ON hq_reliability_runs
+BEGIN SELECT RAISE(ABORT, 'hq_reliability_runs is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_runs_no_erase
+BEFORE DELETE ON hq_reliability_runs
+BEGIN SELECT RAISE(ABORT, 'hq_reliability_runs is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_runs_no_replace
+BEFORE INSERT ON hq_reliability_runs
+WHEN EXISTS (SELECT 1 FROM hq_reliability_runs WHERE id = NEW.id)
+  OR (TYPEOF(NEW.seq) = 'integer' AND EXISTS (SELECT 1 FROM hq_reliability_runs WHERE seq = NEW.seq))
+BEGIN SELECT RAISE(ABORT, 'hq_reliability_runs is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_runs_no_replace_unique
+BEFORE INSERT ON hq_reliability_runs
+WHEN EXISTS (SELECT 1 FROM hq_reliability_runs WHERE run_key = NEW.run_key)
+BEGIN SELECT RAISE(ABORT, 'hq_reliability_runs is append-only (unique run_key already held)'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_run_events_no_rewrite
+BEFORE UPDATE ON hq_reliability_run_events
+BEGIN SELECT RAISE(ABORT, 'hq_reliability_run_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_run_events_no_erase
+BEFORE DELETE ON hq_reliability_run_events
+BEGIN SELECT RAISE(ABORT, 'hq_reliability_run_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_run_events_no_replace
+BEFORE INSERT ON hq_reliability_run_events
+WHEN EXISTS (SELECT 1 FROM hq_reliability_run_events WHERE id = NEW.id)
+  OR (TYPEOF(NEW.seq) = 'integer' AND EXISTS (SELECT 1 FROM hq_reliability_run_events WHERE seq = NEW.seq))
+BEGIN SELECT RAISE(ABORT, 'hq_reliability_run_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_run_events_no_replace_attempt
+BEFORE INSERT ON hq_reliability_run_events
+WHEN NEW.attempt_key IS NOT NULL
+  AND EXISTS (SELECT 1 FROM hq_reliability_run_events WHERE attempt_key = NEW.attempt_key)
+BEGIN SELECT RAISE(ABORT, 'hq_reliability_run_events is append-only (UNIQUE attempt_key already reserved)'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_backups_no_rewrite
+BEFORE UPDATE ON hq_reliability_backups
+BEGIN SELECT RAISE(ABORT, 'hq_reliability_backups is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_backups_no_erase
+BEFORE DELETE ON hq_reliability_backups
+BEGIN SELECT RAISE(ABORT, 'hq_reliability_backups is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_backups_no_replace
+BEFORE INSERT ON hq_reliability_backups
+WHEN EXISTS (SELECT 1 FROM hq_reliability_backups WHERE id = NEW.id)
+  OR (TYPEOF(NEW.seq) = 'integer' AND EXISTS (SELECT 1 FROM hq_reliability_backups WHERE seq = NEW.seq))
+BEGIN SELECT RAISE(ABORT, 'hq_reliability_backups is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_reliability_backups_no_replace_unique
+BEFORE INSERT ON hq_reliability_backups
+WHEN EXISTS (SELECT 1 FROM hq_reliability_backups WHERE record_key = NEW.record_key)
+BEGIN SELECT RAISE(ABORT, 'hq_reliability_backups is append-only (unique record_key already held)'); END;
+`;
+
+/**
+ * Idempotent; safe on every construction of the service.
+ *
+ * Never attempts DDL on a READ-ONLY handle: `hq:snapshot` legitimately builds
+ * the service over `openHqDatabaseReadOnly`, and a pre-Phase-13 file must be
+ * OBSERVED truthfully (`reliabilitySchemaPresent`), never migrated by a path
+ * that promised to write nothing.
+ */
+export function ensureReliabilitySchema(db: HqDatabase): void {
+  if (db.readonly) return;
+  db.exec(RELIABILITY_DDL);
+}
+
+/** True when this file carries the Phase 13 ledger — observation, never migration. */
+export function reliabilitySchemaPresent(db: HqDatabase): boolean {
+  return (
+    db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'hq_reliability_runs'`)
+      .get() !== undefined
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Keys                                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The derived dedupe key for a RUN.
+ *
+ * The caller's `idempotencyKey` is an INPUT to the digest, never the key
+ * itself — the mission/project/memory/truth/product rule — so an identical
+ * open dedupes to the standing run and a deliberately fresh one is possible.
+ *
+ * The claim fence is deliberately NOT an input. A run belongs to the WORK, not
+ * to one claim of it: if a worker crashes and the task is claimed again, the
+ * second open must find the first run and inherit its unresolved outcome
+ * rather than silently starting a clean one beside it. That is the whole
+ * cross-restart duplicate guard, and putting the fence in the key would defeat
+ * it.
+ */
+export function runIdempotencyKey(input: {
+  taskId: string;
+  runKind: RunKind;
+  actionId: string | null;
+  missionId: string | null;
+  label: string;
+  idempotencyKey: string | null;
+}): string {
+  const digest = createHash('sha256').update(canonicalJson(input)).digest('hex');
+  return `run:${digest.slice(0, 32)}`;
+}
+
+/**
+ * The durable per-generation attempt reservation. Backed by a UNIQUE partial
+ * index, so the ENGINE refuses a second attempt of the same generation even
+ * when the two callers are different processes that never shared memory.
+ */
+export function runAttemptKey(runKey: string, generation: number): string {
+  return `${runKey}#${generation}`;
+}
+
+/** The derived dedupe key for a backup record: one record per (path, digest). */
+export function backupRecordKey(input: { backupPath: string; contentDigest: string }): string {
+  const digest = createHash('sha256').update(canonicalJson(input)).digest('hex');
+  return `backup:${digest.slice(0, 32)}`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Stored rows                                                         */
+/* ------------------------------------------------------------------ */
+
+export interface RunRow {
+  seq: number;
+  id: string;
+  runKind: RunKind;
+  taskId: string;
+  missionId: string | null;
+  actionId: string | null;
+  capabilityId: string;
+  workerId: string;
+  claimFence: number;
+  claimNonce: string | null;
+  processId: string;
+  label: string;
+  openedAt: string;
+  runKey: string;
+}
+
+export interface RunEventRow {
+  seq: number;
+  id: string;
+  runId: string;
+  kind: RunEventKind;
+  actor: string;
+  at: string;
+  processId: string;
+  detail: Record<string, unknown>;
+  attemptKey: string | null;
+}
+
+export interface BackupRow {
+  seq: number;
+  id: string;
+  backupPath: string;
+  contentDigest: string;
+  sizeBytes: number;
+  schemaTables: number;
+  verifiedAt: string;
+  verifiedBy: string;
+  processId: string;
+  note: string | null;
+}
+
+function rowToRun(r: Record<string, unknown>): RunRow {
+  return {
+    seq: r.seq as number,
+    id: r.id as string,
+    // Read through the vocabulary check: a legal APPEND carrying a string
+    // outside the closed set must not become a typed member by assertion.
+    runKind: (isRunKind(r.run_kind) ? r.run_kind : 'orchestration') as RunKind,
+    taskId: r.task_id as string,
+    missionId: (r.mission_id as string | null) ?? null,
+    actionId: (r.action_id as string | null) ?? null,
+    capabilityId: r.capability_id as string,
+    workerId: r.worker_id as string,
+    claimFence: Number(r.claim_fence),
+    claimNonce: (r.claim_nonce as string | null) ?? null,
+    processId: r.process_id as string,
+    label: r.label as string,
+    openedAt: r.opened_at as string,
+    runKey: r.run_key as string,
+  };
+}
+
+function rowToRunEvent(r: Record<string, unknown>): RunEventRow {
+  const kind = String(r.kind);
+  return {
+    seq: r.seq as number,
+    id: r.id as string,
+    runId: r.run_id as string,
+    // An unrecognized kind is read as `interrupted` with no detail, which is
+    // the FAIL-CLOSED reading: an event HQ cannot interpret must not be able
+    // to conclude a run, and must not be able to look like an attempt either.
+    kind: ((RUN_EVENT_KINDS as readonly string[]).includes(kind) ? kind : 'interrupted') as RunEventKind,
+    actor: r.actor as string,
+    at: r.at as string,
+    processId: r.process_id as string,
+    detail: safeDetail(r.detail),
+    attemptKey: (r.attempt_key as string | null) ?? null,
+  };
+}
+
+function safeDetail(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function rowToBackup(r: Record<string, unknown>): BackupRow {
+  return {
+    seq: r.seq as number,
+    id: r.id as string,
+    backupPath: r.backup_path as string,
+    contentDigest: r.content_digest as string,
+    sizeBytes: Number(r.size_bytes),
+    schemaTables: Number(r.schema_tables),
+    verifiedAt: r.verified_at as string,
+    verifiedBy: r.verified_by as string,
+    processId: r.process_id as string,
+    note: (r.note as string | null) ?? null,
+  };
+}
+
+export function loadRun(db: HqDatabase, id: string): RunRow | null {
+  const row = db.prepare(`SELECT * FROM hq_reliability_runs WHERE id = ?`).get(id) as
+    | Record<string, unknown>
+    | undefined;
+  return row ? rowToRun(row) : null;
+}
+
+export function loadRunByKey(db: HqDatabase, runKey: string): RunRow | null {
+  const row = db.prepare(`SELECT * FROM hq_reliability_runs WHERE run_key = ?`).get(runKey) as
+    | Record<string, unknown>
+    | undefined;
+  return row ? rowToRun(row) : null;
+}
+
+export function loadRuns(db: HqDatabase): RunRow[] {
+  return (
+    db.prepare(`SELECT * FROM hq_reliability_runs ORDER BY seq`).all() as Record<string, unknown>[]
+  ).map(rowToRun);
+}
+
+export function loadRunEvents(db: HqDatabase, runId: string): RunEventRow[] {
+  return (
+    db
+      .prepare(`SELECT * FROM hq_reliability_run_events WHERE run_id = ? ORDER BY seq`)
+      .all(runId) as Record<string, unknown>[]
+  ).map(rowToRunEvent);
+}
+
+export function loadBackupRecords(db: HqDatabase): BackupRow[] {
+  return (
+    db.prepare(`SELECT * FROM hq_reliability_backups ORDER BY seq`).all() as Record<string, unknown>[]
+  ).map(rowToBackup);
+}
+
+/* ------------------------------------------------------------------ */
+/* The pure derivation core                                            */
+/* ------------------------------------------------------------------ */
+
+export interface RunEventView {
+  kind: RunEventKind;
+  actor: string;
+  at: string;
+  processId: string;
+  detail: Record<string, unknown>;
+}
+
+/**
+ * The ONE browser-safe projection of a run, shared by the control route and
+ * every facade read so the two can never disagree.
+ *
+ * Absent by shape: the derived `run_key` and `attempt_key` (a durable
+ * reservation identity is not a thing a reader needs and not a thing a caller
+ * should be able to echo back), and the claim nonce.
+ */
+export interface RunRecord {
+  id: string;
+  seq: number;
+  runKind: RunKind;
+  taskId: string;
+  missionId: string | null;
+  actionId: string | null;
+  capabilityId: string;
+  workerId: string;
+  claimFence: number;
+  /** The process that OPENED the run. A restart is visible as a different one. */
+  processId: string;
+  label: string;
+  openedAt: string;
+  /** DERIVED from the append-only events; never a stored column. */
+  state: RunState;
+  outcome: RunOutcome;
+  failureCategory: RunFailureCategory;
+  /** How many attempts were STARTED. A count of reservations, not of successes. */
+  attempts: number;
+  /** The generation a further attempt would take, if one were admitted at all. */
+  nextGeneration: number;
+  lastCorrelationId: string | null;
+  interruption: { reason: RunInterruptionReason; at: string; uncertain: boolean } | null;
+  reconciliation: { by: string; at: string; decision: RunReconcileDecision; note: string } | null;
+  /**
+   * True while a further attempt is REFUSED. `false` for every state except an
+   * unopened run and one reopened by a `confirmed_not_executed` reconciliation
+   * — the "never retry an uncertain side effect" law, in the projection.
+   */
+  admitsAttempt: boolean;
+  needsReconciliation: boolean;
+  events: RunEventView[];
+}
+
+function str(detail: Record<string, unknown>, key: string): string | null {
+  return typeof detail[key] === 'string' ? (detail[key] as string) : null;
+}
+
+/**
+ * How many times this run was reconciled as NOT executed. The next attempt's
+ * generation is one more — the `sideEffectGeneration` shape, deliberately, so
+ * the two ledgers count attempts the same way.
+ */
+export function runAttemptGeneration(events: readonly RunEventRow[]): number {
+  return (
+    events.filter(
+      (event) => event.kind === 'reconciled' && str(event.detail, 'decision') === 'confirmed_not_executed',
+    ).length + 1
+  );
+}
+
+/** Derive one run's view from its ledger. PURE: no I/O, no clock, no randomness. */
+export function deriveRunRecord(row: RunRow, events: readonly RunEventRow[]): RunRecord {
+  let state: RunState = 'open';
+  let outcome: RunOutcome = 'none';
+  let failureCategory: RunFailureCategory = 'none';
+  let attempts = 0;
+  let lastCorrelationId: string | null = null;
+  let interruption: RunRecord['interruption'] = null;
+  let reconciliation: RunRecord['reconciliation'] = null;
+  let reopened = false;
+
+  for (const event of events) {
+    switch (event.kind) {
+      case 'opened':
+        state = 'open';
+        break;
+      case 'attempt_started': {
+        attempts += 1;
+        state = 'attempting';
+        reopened = false;
+        lastCorrelationId = str(event.detail, 'correlationId') ?? lastCorrelationId;
+        break;
+      }
+      case 'outcome_recorded': {
+        const reported = str(event.detail, 'outcome');
+        // Fail closed: an outcome outside the closed vocabulary is read as
+        // unknown, which demands a human rather than concluding the run.
+        const value: RunOutcome = isReportableRunOutcome(reported) ? reported : 'outcome_unknown';
+        outcome = value;
+        const category = str(event.detail, 'failureCategory');
+        failureCategory = isRunFailureCategory(category) ? category : 'none';
+        state = value === 'outcome_unknown' ? 'needs_reconciliation' : 'concluded';
+        reopened = false;
+        break;
+      }
+      case 'interrupted': {
+        const reason = str(event.detail, 'reason');
+        const uncertain = event.detail.uncertain === true;
+        interruption = {
+          reason: isRunInterruptionReason(reason) ? reason : 'process_interrupted',
+          at: event.at,
+          uncertain,
+        };
+        outcome = uncertain ? 'outcome_unknown' : 'not_executed';
+        // The reason a recovery recorded doubles as the failure category when
+        // it is one; otherwise the interruption itself is the category.
+        const category = str(event.detail, 'failureCategory');
+        failureCategory = isRunFailureCategory(category) ? category : 'process_interrupted';
+        state = uncertain ? 'needs_reconciliation' : 'concluded';
+        reopened = false;
+        break;
+      }
+      case 'reconciled': {
+        const decision = str(event.detail, 'decision');
+        const value: RunReconcileDecision = isRunReconcileDecision(decision)
+          ? decision
+          : // Fail closed: an unreadable decision concludes nothing and reopens
+            // nothing; it is treated as the strictest of the three.
+            'confirmed_failed';
+        reconciliation = {
+          by: event.actor,
+          at: event.at,
+          decision: value,
+          note: str(event.detail, 'note') ?? '',
+        };
+        outcome =
+          value === 'confirmed_succeeded'
+            ? 'succeeded'
+            : value === 'confirmed_failed'
+              ? 'failed'
+              : 'not_executed';
+        state = 'concluded';
+        reopened = value === 'confirmed_not_executed';
+        break;
+      }
+    }
+  }
+
+  return {
+    id: row.id,
+    seq: row.seq,
+    runKind: row.runKind,
+    taskId: row.taskId,
+    missionId: row.missionId,
+    actionId: row.actionId,
+    capabilityId: row.capabilityId,
+    workerId: row.workerId,
+    claimFence: row.claimFence,
+    processId: row.processId,
+    label: row.label,
+    openedAt: row.openedAt,
+    state,
+    outcome,
+    failureCategory,
+    attempts,
+    nextGeneration: runAttemptGeneration(events),
+    lastCorrelationId,
+    interruption,
+    reconciliation,
+    admitsAttempt: state === 'open' || reopened,
+    needsReconciliation: state === 'needs_reconciliation',
+    events: events.map((event) => ({
+      kind: event.kind,
+      actor: event.actor,
+      at: event.at,
+      processId: event.processId,
+      detail: event.detail,
+    })),
+  };
+}
+
+/**
+ * May a further attempt be started at all?
+ *
+ * The law of the phase in one function. `attempting` is refused because an
+ * attempt is already open; `needs_reconciliation` is refused because HQ does
+ * not know what the last one did; a `concluded` run is refused unless the
+ * thing that concluded it was a human saying `confirmed_not_executed`.
+ */
+export function runAdmitsAttempt(record: RunRecord): boolean {
+  return record.admitsAttempt;
+}
+
+/**
+ * How an interrupted run is classified at restart — the crash-recovery core.
+ * PURE, so the rule can be exercised without a process, a file or a clock.
+ *
+ * `capabilitySideEffect` is FAIL-CLOSED at the call site: a capability row
+ * that cannot be read must be passed as `true`, so an interrupted attempt on
+ * an unreadable capability is uncertain rather than conveniently harmless.
+ */
+export function classifyInterruptedRun(
+  record: RunRecord,
+  input: { capabilitySideEffect: boolean; reason?: RunInterruptionReason },
+): { interrupted: boolean; uncertain: boolean; reason: RunInterruptionReason; outcome: RunOutcome } | null {
+  if (record.state !== 'open' && record.state !== 'attempting') return null;
+  const reason = input.reason ?? 'process_interrupted';
+  if (record.state === 'open') {
+    // No attempt was ever started, so nothing external can have happened. That
+    // is provable from the ledger rather than assumed, which is why it is the
+    // only case allowed to conclude without a human.
+    return { interrupted: true, uncertain: false, reason, outcome: 'not_executed' };
+  }
+  if (!input.capabilitySideEffect) {
+    // An attempt of a capability that CANNOT reach outside HQ leaves nothing to
+    // be uncertain about. `sideEffect` is the canonical column the queue itself
+    // uses to decide the same question at lease expiry.
+    return { interrupted: true, uncertain: false, reason, outcome: 'not_executed' };
+  }
+  return { interrupted: true, uncertain: true, reason, outcome: 'outcome_unknown' };
+}
+
+/* ------------------------------------------------------------------ */
+/* Views the facade returns                                            */
+/* ------------------------------------------------------------------ */
+
+/** One verified recovery point, as a reader sees it. */
+export interface BackupRecordView {
+  id: string;
+  seq: number;
+  backupPath: string;
+  /** sha256 HQ computed itself over the bytes it checked — never a declared one. */
+  contentDigest: string;
+  sizeBytes: number;
+  schemaTables: number;
+  verifiedAt: string;
+  verifiedBy: string;
+  processId: string;
+  note: string | null;
+  statement: string;
+}
+
+export const BACKUP_RECORD_STATEMENT =
+  'contentDigest is computed BY HQ over the exact bytes it opened and checked, so it pins what was verified. ' +
+  'HQ did not take this backup and cannot restore it: taking one safely belongs to the durable persistence ' +
+  'owner, and restoring is a deliberate operator act against a stopped process. This row says a file was ' +
+  'checked, by whom, and what it hashed to — nothing more.';
+
+export function backupRowToView(row: BackupRow): BackupRecordView {
+  return {
+    id: row.id,
+    seq: row.seq,
+    backupPath: row.backupPath,
+    contentDigest: row.contentDigest,
+    sizeBytes: row.sizeBytes,
+    schemaTables: row.schemaTables,
+    verifiedAt: row.verifiedAt,
+    verifiedBy: row.verifiedBy,
+    processId: row.processId,
+    note: row.note,
+    statement: BACKUP_RECORD_STATEMENT,
+  };
+}
+
+/** One run this recovery pass classified. Ids and categorical facts only. */
+export interface HqRecoveryClassification {
+  runId: string;
+  taskId: string;
+  openedByProcess: string;
+  reason: RunInterruptionReason;
+  uncertain: boolean;
+  outcome: RunOutcome;
+}
+
+/** Interrupted canonical work owned by OTHER ledgers — counted, never touched. */
+export interface HqCanonicalInterruptions {
+  actionsAwaitingReconciliation: number;
+  tasksOutcomeUnknown: number;
+  tasksWithExpiredLease: number;
+  resolvedBy: {
+    actionsAwaitingReconciliation: string;
+    tasksOutcomeUnknown: string;
+    tasksWithExpiredLease: string;
+  };
+  statement: string;
+}
+
+export interface HqRecoveryReport {
+  /** The process that PERFORMED the recovery; runs it opened are left alone. */
+  processIdentity: string;
+  classified: HqRecoveryClassification[];
+  interruptedTotal: number;
+  nowNeedingReconciliation: number;
+  canonical: HqCanonicalInterruptions;
+  safeMode: boolean;
+  retryStatement: string;
+}
+
+export interface HqIntegrityObservationView {
+  finding: string;
+  blocking: boolean;
+  detail: string;
+}
+
+export interface HqIntegrityView {
+  safeMode: boolean;
+  depth: 'structural' | 'full';
+  observations: HqIntegrityObservationView[];
+  durability: {
+    journalMode: string;
+    synchronous: number;
+    foreignKeys: boolean;
+    walAutocheckpoint: number;
+    readonly: boolean;
+    inMemory: boolean;
+    meetsRequirement: boolean;
+  };
+  safeModeStatement: string;
+  depthStatement: string;
+}
+
+export interface HqReliabilityPosture {
+  processIdentity: string;
+  storePresent: boolean;
+  integrity: HqIntegrityView;
+  runs: {
+    total: number;
+    needsReconciliation: number;
+    openOrAttempting: number;
+    /** Runs opened by a process that is not this one — the restart signal. */
+    openedByOtherProcesses: number;
+  };
+  verifiedBackups: number;
+  canonical: HqCanonicalInterruptions;
+  ledgerStatement: string;
+  retryStatement: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Snapshot summary — counts over closed vocabularies, and nothing else */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The extra bucket every map carries.
+ *
+ * `hq_reliability_runs` and `hq_reliability_run_events` are append-only
+ * ledgers on which an APPEND is the write the triggers deliberately permit, so
+ * a stored `run_kind`, state or outcome could be a string outside the closed
+ * vocabulary. It is counted as what HQ actually knows about it — that it is not
+ * one of these — and its TEXT never becomes a key. A truthful bucket, not a
+ * category of run.
+ */
+export const UNRECOGNIZED_BUCKET = 'unrecognized' as const;
+
+export type RunKindCounts = Record<RunKind | typeof UNRECOGNIZED_BUCKET, number>;
+export type RunStateCounts = Record<RunState | typeof UNRECOGNIZED_BUCKET, number>;
+export type RunOutcomeCounts = Record<RunOutcome | typeof UNRECOGNIZED_BUCKET, number>;
+
+export interface ReliabilitySnapshotView {
+  storePresent: boolean;
+  runs: number;
+  byKind: RunKindCounts;
+  byState: RunStateCounts;
+  byOutcome: RunOutcomeCounts;
+  needsReconciliation: number;
+  verifiedBackups: number;
+  /** Whether HQ is currently in safe mode, and how deep the assessment behind that was. */
+  safeMode: boolean;
+  assessmentDepth: 'structural' | 'full';
+  /** Counts keyed by the closed integrity-finding vocabulary; no detail text crosses. */
+  findings: Record<string, number>;
+  durabilityMeetsRequirement: boolean;
+  note: string;
+}
+
+function zeroed<T extends string>(members: readonly T[]): Record<string, number> {
+  const counts: Record<string, number> = { [UNRECOGNIZED_BUCKET]: 0 };
+  for (const member of members) counts[member] = 0;
+  return counts;
+}
+
+export function emptyReliabilitySnapshot(storePresent: boolean): ReliabilitySnapshotView {
+  return {
+    storePresent,
+    runs: 0,
+    byKind: zeroed(RUN_KINDS) as RunKindCounts,
+    byState: zeroed(RUN_STATES) as RunStateCounts,
+    byOutcome: zeroed(RUN_OUTCOMES) as RunOutcomeCounts,
+    needsReconciliation: 0,
+    verifiedBackups: 0,
+    safeMode: false,
+    assessmentDepth: 'structural',
+    findings: {},
+    durabilityMeetsRequirement: true,
+    note: RELIABILITY_SNAPSHOT_NOTE,
+  };
+}
+
+export const RELIABILITY_SNAPSHOT_NOTE =
+  'Counts over closed vocabularies only. No run label, task/mission/action id, worker id, correlation id, ' +
+  'backup path, digest or finding detail crosses to an unauthenticated reader. A concluded count is a count ' +
+  'of RECORDS, not evidence that anything reached the outside world — no reliability path can perform an ' +
+  'external action. safeMode true means HQ has said so about itself; it is never inferred here.';
+
+/**
+ * Fold the register into counts. Every increment passes a membership check and
+ * the CHECKED value — never the caller's string — becomes the key.
+ */
+export function summarizeReliability(input: {
+  storePresent: boolean;
+  runs: readonly RunRecord[];
+  verifiedBackups: number;
+  safeMode: boolean;
+  assessmentDepth: 'structural' | 'full';
+  findings: readonly string[];
+  durabilityMeetsRequirement: boolean;
+}): ReliabilitySnapshotView {
+  const byKind = zeroed(RUN_KINDS);
+  const byState = zeroed(RUN_STATES);
+  const byOutcome = zeroed(RUN_OUTCOMES);
+  let needsReconciliation = 0;
+  for (const run of input.runs) {
+    byKind[isRunKind(run.runKind) ? run.runKind : UNRECOGNIZED_BUCKET] += 1;
+    byState[isRunState(run.state) ? run.state : UNRECOGNIZED_BUCKET] += 1;
+    byOutcome[isRunOutcome(run.outcome) ? run.outcome : UNRECOGNIZED_BUCKET] += 1;
+    if (run.needsReconciliation) needsReconciliation += 1;
+  }
+  const findings: Record<string, number> = {};
+  for (const finding of input.findings) {
+    // The CHECKED value is the key, never the caller's string. A finding name
+    // outside the closed vocabulary is counted as `unrecognized` and its text
+    // is dropped — the Phase 12 snapshot-safety rule, applied to a map whose
+    // keys would otherwise come from a caller.
+    const key = isHqIntegrityFinding(finding) ? finding : UNRECOGNIZED_BUCKET;
+    findings[key] = (findings[key] ?? 0) + 1;
+  }
+  return {
+    storePresent: input.storePresent,
+    runs: input.runs.length,
+    byKind: byKind as RunKindCounts,
+    byState: byState as RunStateCounts,
+    byOutcome: byOutcome as RunOutcomeCounts,
+    needsReconciliation,
+    verifiedBackups: input.verifiedBackups,
+    safeMode: input.safeMode,
+    assessmentDepth: input.assessmentDepth,
+    findings,
+    durabilityMeetsRequirement: input.durabilityMeetsRequirement,
+    note: RELIABILITY_SNAPSHOT_NOTE,
+  };
+}

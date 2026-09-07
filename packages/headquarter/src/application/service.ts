@@ -530,6 +530,61 @@ import {
   type ProductType,
 } from './product-command.js';
 import {
+  BACKUP_READ_LIMIT,
+  MAX_BACKUP_PATH_LENGTH,
+  MAX_RUN_LABEL_LENGTH,
+  MAX_RUN_NOTE_LENGTH,
+  RECOVERY_SCOPE_STATEMENT,
+  RELIABILITY_COMMAND_CAPABILITY,
+  RUN_KINDS,
+  RUN_LEDGER_STATEMENT,
+  RUN_READ_LIMIT,
+  RUN_RECONCILE_DECISIONS,
+  RUN_RETRY_STATEMENT,
+  backupRecordKey,
+  backupRowToView,
+  classifyInterruptedRun,
+  deriveRunRecord,
+  emptyReliabilitySnapshot,
+  ensureReliabilitySchema,
+  isReportableRunOutcome,
+  isRunFailureCategory,
+  isRunKind,
+  isRunReconcileDecision,
+  loadBackupRecords,
+  loadRun,
+  loadRunByKey,
+  loadRunEvents,
+  loadRuns,
+  reliabilityCommandCapabilityState,
+  reliabilityCommandContractDrift,
+  reliabilitySchemaPresent,
+  runAttemptGeneration,
+  runAttemptKey,
+  runIdempotencyKey,
+  summarizeReliability,
+  type BackupRecordView,
+  type HqCanonicalInterruptions,
+  type HqIntegrityView,
+  type HqRecoveryClassification,
+  type HqRecoveryReport,
+  type HqReliabilityPosture,
+  type ReliabilitySnapshotView,
+  type RunFailureCategory,
+  type RunKind,
+  type RunOutcome,
+  type RunReconcileDecision,
+  type RunRecord,
+} from './reliability-command.js';
+import {
+  INTEGRITY_DEPTH_STATEMENT,
+  SAFE_MODE_STATEMENT,
+  fullIntegrity,
+  structuralIntegrity,
+  verifyHqBackupFile,
+  type HqIntegrityReport,
+} from '../store/integrity.js';
+import {
   PROJECT_ALLOWED_TRANSITIONS,
   canTransitionProject,
   isProjectStatus,
@@ -875,7 +930,19 @@ export type OpsErrorCode =
   | 'unknown_product'
   | 'unrecognized_product_type'
   | 'product_lifecycle_conflict'
-  | 'invalid_product_lifecycle_move';
+  | 'invalid_product_lifecycle_move'
+  // Phase 13 — advanced reliability. Six codes, and deliberately none that
+  // names a retry: there is no path here that reopens an uncertain outcome,
+  // so there is nothing for a refusal to be the opposite of.
+  // `safe_mode_engaged` is the one refusal HQ gives about ITSELF — it does not
+  // mean the request was wrong, it means HQ will not add to a record it cannot
+  // currently stand behind.
+  | 'safe_mode_engaged'
+  | 'unknown_run'
+  | 'run_state_conflict'
+  | 'run_attempt_refused'
+  | 'stale_run_claim'
+  | 'backup_verification_failed';
 // Phase 10 adds NO refusal code: its two reads cannot fail (a derivation over
 // whatever the canonical stores hold), `getBrief` answers null for an id that
 // is not in the ledger, and `issueBrief` refuses only through the codes the
@@ -1700,7 +1767,29 @@ export interface HeadquarterOperationsOptions {
    * `unknown_adapter`.
    */
   actionAdapters?: readonly ExternalActionAdapter[];
+  /**
+   * The identity of the PROCESS carrying this facade (Phase 13).
+   *
+   * Crash recovery classifies a run as interrupted when the process that
+   * opened it is not the process asking — that is the whole restart story, and
+   * it needs a name for "this process" that survives into the row.
+   *
+   * The default is minted ONCE per Node process at module load, so every
+   * facade in one process shares it and a genuine restart is genuinely a
+   * different one. It is supplied here only by a composition root (a host, a
+   * CLI, a test that is deliberately simulating a second process); nothing
+   * holding `ops` can change it, and it is never read from a request body.
+   */
+  processIdentity?: string;
 }
+
+/**
+ * This Node process's identity, minted once at module load.
+ *
+ * Deliberately not a hostname, a pid or anything an operator might read as
+ * stable across restarts: a restart MUST look different, and a pid is reused.
+ */
+const HQ_PROCESS_IDENTITY = `hq-process-${uuid()}`;
 
 /** Who an actor turned out to be, once resolved against both registries. */
 type ResolvedRequester =
@@ -1948,6 +2037,39 @@ export class HeadquarterOperations {
   readonly #productStorePresent: boolean;
 
   /**
+   * The Phase 13 run ledger / verified-backup register, same read-only-handle
+   * rule as every store flag above.
+   */
+  readonly #reliabilityStorePresent: boolean;
+
+  /** This process's identity. Written onto every run and every recovery. */
+  readonly #processIdentity: string;
+
+  /**
+   * The LATCHED safe-mode verdict, and the report behind it.
+   *
+   * ENFORCEMENT STATE, and therefore a `#private` field rather than anything a
+   * caller can reach: it is read by the guards that refuse Founder-gated
+   * writes, approvals, kill-switch releases, claims and external execution. A
+   * same-realm patch of any public reliability read changes what the patcher
+   * sees and nothing about what is refused.
+   *
+   * Assessed STRUCTURALLY at construction — the schema catalogue and the
+   * durability pragmas, which cost three catalogue reads and four pragmas and
+   * are therefore affordable on every construction. The full assessment
+   * (`integrity_check`, `foreign_key_check`, whole-log evidence verification)
+   * is proportional to the data and is an explicit act: `assessHqIntegrity`.
+   * Both latch here, and the depth is carried on the report so a cheap pass is
+   * never reported as a full one.
+   *
+   * Latched rather than recomputed per call on purpose: a guard that
+   * re-derives its own precondition on every write is a guard whose cost grows
+   * with the write rate, and one an attacker can time. Clearing it takes a
+   * fresh assessment that finds nothing blocking.
+   */
+  #integrityReport: HqIntegrityReport;
+
+  /**
    * The external-action adapters, keyed by id — `#private`, handed in by the
    * composition root once, and read by the gateway's execute path ONLY. There
    * is deliberately no register/unregister method: an adapter is an execution
@@ -2082,6 +2204,7 @@ export class HeadquarterOperations {
     ensureCollaborationSchema(db);
     ensureBriefSchema(db);
     ensureProductFactorySchema(db);
+    ensureReliabilitySchema(db);
     // A writable construction just ensured the mission/project/memory tables.
     // A READ-ONLY one (the hq:snapshot path) may be observing an older file
     // that has some or none of them — the ensures above deliberately write
@@ -2096,6 +2219,13 @@ export class HeadquarterOperations {
     this.#collaborationStorePresent = db.readonly ? collaborationSchemaPresent(db) : true;
     this.#briefStorePresent = db.readonly ? briefSchemaPresent(db) : true;
     this.#productStorePresent = db.readonly ? productFactorySchemaPresent(db) : true;
+    this.#reliabilityStorePresent = db.readonly ? reliabilitySchemaPresent(db) : true;
+    this.#processIdentity = options.processIdentity?.trim() || HQ_PROCESS_IDENTITY;
+    // The cheap half, at every construction. See the field's own note for why
+    // the expensive half is an explicit act instead.
+    this.#integrityReport = structuralIntegrity(db, {
+      reliabilitySchemaPresent: this.#reliabilityStorePresent,
+    });
     this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
     // Company memory (Phase 5, issue #265): the issue-#120 store, finally
@@ -2471,6 +2601,12 @@ export class HeadquarterOperations {
     if (!task) return fail('unknown_task', `Unknown task: ${input.taskId}`);
     const principal = this.#assertApprovalAuthority(input.founderId, 'approve');
     if (principal) return principal;
+    // Phase 13: an approval is a Founder decision recorded against a digest of
+    // the current record. A record HQ cannot stand behind is not one an
+    // approval may be bound to, and an approval written now would sit primed
+    // to run the moment safe mode clears.
+    const safeMode = this.#safeModeRefusal('approve a task');
+    if (safeMode) return safeMode;
     if (task.status !== 'needs_approval') {
       return fail(
         'task_not_awaiting_approval',
@@ -2612,6 +2748,13 @@ export class HeadquarterOperations {
     const cap = this.queue.capabilities.get(capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${capabilityId} is disabled`);
+    // Phase 13: a claim is the act that hands work to a worker. HQ does not
+    // hand out work whose approval, payload and capability rows it cannot
+    // currently stand behind. Refused loudly, and distinctly from
+    // `nothing_claimable` — "HQ is in safe mode" and "the queue is empty" are
+    // different facts, exactly as "not yours" and "empty" already are.
+    const safeMode = this.#safeModeRefusal('claim work');
+    if (safeMode) return safeMode;
 
     const human = this.#rejectHumanExecution(workerId, 'claim work');
     if (human) return human;
@@ -2882,6 +3025,13 @@ export class HeadquarterOperations {
   releaseKillSwitch(scope: string, founderId: string): OpsResult<null> {
     const principal = this.#assertApprovalAuthority(founderId, 'release the kill switch');
     if (principal) return principal;
+    // Phase 13, and the asymmetry is the point: ENGAGING a stop stays
+    // available in safe mode because it is the fail-safe direction, and
+    // RELEASING one is refused because it is the direction that lets work run
+    // again against a record HQ cannot stand behind. Denying a task is
+    // likewise never refused here, for the same reason engaging is not.
+    const safeMode = this.#safeModeRefusal('release the kill switch');
+    if (safeMode) return safeMode;
     this.#requirePrivilegedQueue().releaseKillSwitch(scope, founderId);
     return ok(null);
   }
@@ -5481,13 +5631,60 @@ export class HeadquarterOperations {
    * `drift` come from the owning module so each contract stays test-pinned
    * where it is defined.
    */
+  /**
+   * The SAFE-MODE guard (Phase 13).
+   *
+   * Refuses an act while HQ has said, about itself, that its stored record
+   * cannot be trusted — the engine reports the file corrupt, an append-only
+   * guard the schema declares is missing, or the evidence hash chain does not
+   * verify.
+   *
+   * Reads the `#private` latched report and nothing else, because this decides
+   * whether a write lands: a patch of `hqReliabilityPosture` or of any other
+   * public read must not be able to buy an approval, a claim or an external
+   * call. Pinned by a hostile-patch regression test on the instance, on the
+   * prototype, and against a facade constructed AFTER the patch.
+   *
+   * What safe mode deliberately does NOT refuse, because refusing it would
+   * make the posture less safe rather than more:
+   *  - every READ (a Founder who cannot see the store cannot fix it);
+   *  - recovery and reconciliation (they are the acts that resolve the state);
+   *  - a fresh integrity assessment and a verified-backup record (the acts
+   *    that clear it or preserve a recovery point);
+   *  - ENGAGING a kill switch, which is the fail-safe direction. Releasing one
+   *    is refused.
+   */
+  #safeModeRefusal(action: string): OpsResult<never> | null {
+    if (!this.#integrityReport.safeMode) return null;
+    const blocking = this.#integrityReport.observations
+      .filter((observation) => observation.blocking)
+      .map((observation) => observation.finding);
+    return fail(
+      'safe_mode_engaged',
+      `Cannot ${action}: HQ is in SAFE MODE (${blocking.join(', ')}). ${SAFE_MODE_STATEMENT}`,
+      { findings: blocking, assessmentDepth: this.#integrityReport.depth },
+    );
+  }
+
   #founderGateCapabilityGate(
     action: string,
     capabilityId: string,
     classify: (row: Capability | null) => 'missing' | 'altered' | 'disabled' | 'enabled',
     drift: (row: Capability) => string[],
     founderActNoun: string,
+    /**
+     * Phase 13: whether this act stays available while HQ is in safe mode.
+     * Default false — a Founder-gated command adds to the canonical record,
+     * and HQ does not add to a record it cannot stand behind. The reliability
+     * command passes true, because assessing the store and recording a
+     * verified backup are how safe mode is investigated and cleared.
+     */
+    permittedInSafeMode = false,
   ): OpsResult<never> | null {
+    if (!permittedInSafeMode) {
+      const safeMode = this.#safeModeRefusal(action);
+      if (safeMode) return safeMode;
+    }
     const row = this.#capabilityFromStore(capabilityId);
     const state = classify(row);
     if (state === 'enabled') return null;
@@ -6553,6 +6750,975 @@ export class HeadquarterOperations {
    */
   productStorePresent(): boolean {
     return this.#productStorePresent;
+  }
+
+  // ---- advanced reliability (Phase 13) ----
+
+  /**
+   * The Founder gate behind the two RELIABILITY COMMAND acts — assessing the
+   * store, and recording a verified backup. Recovery and reconciliation
+   * deliberately do not come through here; they sit behind approval authority
+   * plus independence, like `reconcileAction`.
+   */
+  #resolveReliabilityCommander(actor: string, action: string): OpsResult<never> | null {
+    return this.#resolveFounderGateActor(
+      actor,
+      action,
+      RELIABILITY_COMMAND_CAPABILITY.id,
+      'commanding HQ reliability',
+    );
+  }
+
+  /**
+   * The fail-closed capability gate for the same two acts, with
+   * `permittedInSafeMode` TRUE: assessing the store and recording a verified
+   * backup are how safe mode is investigated and cleared, so refusing them
+   * while it is engaged would make the posture a trap rather than a
+   * protection.
+   */
+  #reliabilityCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      RELIABILITY_COMMAND_CAPABILITY.id,
+      reliabilityCommandCapabilityState,
+      reliabilityCommandContractDrift,
+      'commanding HQ reliability',
+      true,
+    );
+  }
+
+  /**
+   * The canonical claim a run write must present, read ENFORCEMENT-SAFE.
+   *
+   * This is the whole authority model for opening a run and recording its
+   * attempts and outcome: the worker that HOLDS the live fenced claim on the
+   * canonical task is the one entity that can honestly say what that execution
+   * did. So the fact is read straight off `op_tasks` through `#db` —
+   * deliberately not through `queue.get`, which #200 documents as patchable
+   * and which enforcement never dispatches through.
+   *
+   * Deny by default in every direction: an unknown task, a task claimed by
+   * somebody else, a stale fence, and a task that is not in an executing state
+   * all refuse. It grants NOTHING — holding a claim already allows the worker
+   * to execute; this only lets it record what it did.
+   */
+  #runClaimFact(taskId: string): {
+    exists: boolean;
+    capabilityId: string;
+    status: string;
+    claimedBy: string | null;
+    fence: number;
+    claimNonce: string | null;
+  } {
+    const row = this.#db
+      .prepare(`SELECT capability_id, status, claimed_by, fence, claim_nonce FROM op_tasks WHERE id = ?`)
+      .get(taskId) as
+      | {
+          capability_id: string;
+          status: string;
+          claimed_by: string | null;
+          fence: number;
+          claim_nonce: string | null;
+        }
+      | undefined;
+    if (!row) {
+      return { exists: false, capabilityId: '', status: '', claimedBy: null, fence: -1, claimNonce: null };
+    }
+    return {
+      exists: true,
+      capabilityId: row.capability_id,
+      status: row.status,
+      claimedBy: row.claimed_by ?? null,
+      fence: Number(row.fence),
+      claimNonce: row.claim_nonce ?? null,
+    };
+  }
+
+  /** The statuses under which a worker genuinely holds an executing claim. */
+  #runClaimRefusal(
+    taskId: string,
+    workerId: string,
+    fence: number,
+    action: string,
+  ): OpsResult<never> | null {
+    const fact = this.#runClaimFact(taskId);
+    if (!fact.exists) return fail('unknown_task', `Unknown task: ${taskId}`);
+    if (fact.claimedBy !== workerId || fact.fence !== fence) {
+      return fail(
+        'stale_run_claim',
+        `Worker ${workerId} does not hold the current claim on task ${taskId} at fence ${fence} ` +
+          `(current ${fact.claimedBy ?? 'unclaimed'}/${fact.fence}); it cannot ${action}`,
+        { taskId },
+      );
+    }
+    if (fact.status !== 'assigned' && fact.status !== 'running') {
+      return fail(
+        'task_not_executing',
+        `Task ${taskId} is ${fact.status}; a run is recorded by the worker executing it`,
+        { status: fact.status },
+      );
+    }
+    return null;
+  }
+
+  /**
+   * One run's derived record, read PRIVATELY.
+   *
+   * ENFORCEMENT-SAFE for the reason `#productRecordFromStore` is: the current
+   * state decides whether a further attempt is admitted, and admitting one
+   * after an uncertain outcome is exactly the duplicate external action this
+   * phase exists to prevent. Derived from the append-only events off `#db`,
+   * never from `getRun()`.
+   */
+  #runRecordFromStore(id: string): RunRecord | null {
+    if (!this.#reliabilityStorePresent) return null;
+    const row = loadRun(this.#db, id);
+    if (!row) return null;
+    return deriveRunRecord(row, loadRunEvents(this.#db, id));
+  }
+
+  #listRunsFromStore(filter?: { taskId?: string; runKind?: RunKind }): RunRecord[] {
+    if (!this.#reliabilityStorePresent) return [];
+    // Fail closed: a supplied-but-unrecognized kind filter matches NOTHING.
+    if (filter?.runKind != null && !isRunKind(filter.runKind)) return [];
+    return loadRuns(this.#db)
+      .filter((row) => (filter?.taskId ? row.taskId === filter.taskId : true))
+      .filter((row) => (filter?.runKind ? row.runKind === filter.runKind : true))
+      .map((row) => deriveRunRecord(row, loadRunEvents(this.#db, row.id)));
+  }
+
+  /**
+   * Does this capability reach outside HQ? FAIL-CLOSED: a capability row that
+   * cannot be read is treated as side-effecting, so an interrupted attempt on
+   * it is uncertain rather than conveniently harmless. Read through the
+   * `#private` closure, never `queue.capabilities`.
+   */
+  #runCapabilityIsSideEffecting(capabilityId: string): boolean {
+    const capability = this.#capabilityFromStore(capabilityId);
+    return capability ? capability.sideEffect : true;
+  }
+
+  #appendRunEvent(input: {
+    runId: string;
+    kind: 'opened' | 'attempt_started' | 'outcome_recorded' | 'interrupted' | 'reconciled';
+    actor: string;
+    at: string;
+    detail: Record<string, unknown>;
+    attemptKey?: string | null;
+  }): void {
+    this.#db
+      .prepare(
+        `INSERT INTO hq_reliability_run_events (id, run_id, kind, actor, at, process_id, detail, attempt_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        uuid(),
+        input.runId,
+        input.kind,
+        input.actor,
+        input.at,
+        this.#processIdentity,
+        canonicalJson(input.detail),
+        input.attemptKey ?? null,
+      );
+  }
+
+  /**
+   * Open a run against a canonical task the calling worker is executing.
+   *
+   * A run is EXECUTION AUDIT and nothing else: it changes no task status,
+   * burns no approval, dispatches nothing and authorizes nothing. What it adds
+   * is the thing no canonical row holds — which PROCESS is carrying the work —
+   * so a restart can tell "interrupted" from "still running" without guessing.
+   *
+   * Duplicate-safe across processes and restarts by construction. The derived
+   * `run_key` deliberately excludes the claim fence, so a worker that crashed
+   * and re-claimed the same task finds the SAME run and inherits its
+   * unresolved outcome instead of starting a clean one beside it. The key is
+   * backed by a UNIQUE index and an append-only trigger, so the engine refuses
+   * the duplicate even when the two callers never shared memory.
+   */
+  openRun(input: {
+    taskId: string;
+    workerId: string;
+    fence: number;
+    runKind: RunKind;
+    label: string;
+    missionId?: string;
+    actionId?: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ run: RunRecord; deduplicated: boolean }> {
+    if (!input.taskId || !input.workerId) return fail('invalid_input', 'taskId and workerId are required');
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    if (!isRunKind(input.runKind)) {
+      return fail('invalid_input', `runKind must be one of: ${RUN_KINDS.join(', ')}`);
+    }
+    const label = missionText('label', input.label, MAX_RUN_LABEL_LENGTH, true);
+    if (!label.ok) return fail('invalid_input', label.message);
+    try {
+      assertNoSecretLikeContent({ label: label.value });
+    } catch {
+      return fail('invalid_input', 'The run label looks like it contains a credential; nothing was recorded.');
+    }
+    if (!this.#reliabilityStorePresent) {
+      return fail('invalid_input', 'run ledger unavailable on this database handle');
+    }
+    // Safe mode refuses OPENING new work to track, and deliberately not
+    // recovery or reconciliation of work already open.
+    const safeMode = this.#safeModeRefusal('open a run');
+    if (safeMode) return safeMode;
+    const claim = this.#runClaimRefusal(input.taskId, input.workerId, input.fence, 'open a run');
+    if (claim) return claim;
+    const fact = this.#runClaimFact(input.taskId);
+
+    const runKey = runIdempotencyKey({
+      taskId: input.taskId,
+      runKind: input.runKind,
+      actionId: input.actionId?.trim() || null,
+      missionId: input.missionId?.trim() || null,
+      label: label.value!,
+      idempotencyKey: input.idempotencyKey?.trim() || null,
+    });
+    const id = `run-${uuid()}`;
+    const at = nowIso();
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    privileged.reserve(() => {
+      const existing = loadRunByKey(this.#db, runKey);
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      this.#db
+        .prepare(
+          `INSERT INTO hq_reliability_runs
+             (id, run_kind, task_id, mission_id, action_id, capability_id, worker_id, claim_fence,
+              claim_nonce, process_id, label, opened_at, run_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.runKind,
+          input.taskId,
+          input.missionId?.trim() || null,
+          input.actionId?.trim() || null,
+          fact.capabilityId,
+          input.workerId,
+          input.fence,
+          fact.claimNonce,
+          this.#processIdentity,
+          label.value,
+          at,
+          runKey,
+        );
+      this.#appendRunEvent({
+        runId: id,
+        kind: 'opened',
+        actor: input.workerId,
+        at,
+        detail: { runKind: input.runKind, taskId: input.taskId, processId: this.#processIdentity },
+      });
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `run:${id}`,
+        status: null,
+        actor: input.workerId,
+        summary: `Run opened (${input.runKind}) for task ${input.taskId}`,
+        detail: { taskId: input.taskId, runKind: input.runKind, executable: false },
+      });
+      privileged.appendEvidence({
+        taskId: input.taskId,
+        actor: input.workerId,
+        kind: 'run_opened',
+        payload: { runId: id, runKind: input.runKind, processId: this.#processIdentity, executable: false },
+      });
+    });
+    if (dedupedTo) return ok({ run: this.#runRecordFromStore(dedupedTo)!, deduplicated: true });
+    return ok({ run: this.#runRecordFromStore(id)!, deduplicated: false });
+  }
+
+  /**
+   * Reserve the next ATTEMPT of a run — the duplicate-action guard, in the
+   * shape the Phase 8 side-effect key already established.
+   *
+   * Two independent refusals stand behind it, and both are needed. The pure
+   * derivation refuses an attempt from `attempting` (one is already open),
+   * from `needs_reconciliation` (HQ does not know what the last one did) and
+   * from `concluded` unless a human said `confirmed_not_executed`. And the
+   * UNIQUE index on `attempt_key` refuses a second reservation of the same
+   * generation from ANY process — including one that never ran this code.
+   *
+   * Returns the correlation id the caller must carry into whatever it is about
+   * to do, so an external system's record and HQ's record name the same
+   * attempt.
+   */
+  startRunAttempt(input: {
+    runId: string;
+    workerId: string;
+    fence: number;
+  }): OpsResult<{ run: RunRecord; correlationId: string; generation: number }> {
+    if (!input.runId || !input.workerId) return fail('invalid_input', 'runId and workerId are required');
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    if (!this.#reliabilityStorePresent) {
+      return fail('invalid_input', 'run ledger unavailable on this database handle');
+    }
+    const safeMode = this.#safeModeRefusal('start a run attempt');
+    if (safeMode) return safeMode;
+
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let correlationId = '';
+    let generation = 0;
+    privileged.reserve(() => {
+      const row = loadRun(this.#db, input.runId);
+      if (!row) {
+        refusal = { code: 'unknown_run', message: `Unknown run: ${input.runId}` };
+        return;
+      }
+      const claim = this.#runClaimRefusal(row.taskId, input.workerId, input.fence, 'start a run attempt');
+      if (claim && !claim.ok) {
+        refusal = claim.error;
+        return;
+      }
+      // Re-derived INSIDE the reservation, off the ledger, so a concurrent
+      // attempt cannot slip between a check and the insert.
+      const events = loadRunEvents(this.#db, input.runId);
+      const record = deriveRunRecord(row, events);
+      if (!record.admitsAttempt) {
+        refusal = {
+          code: 'run_attempt_refused',
+          message:
+            `Run ${input.runId} is ${record.state} with outcome ${record.outcome}; a further attempt is ` +
+            'refused. An uncertain outcome is never retried automatically — reconcile it explicitly after ' +
+            'checking the external system, and only a confirmed_not_executed opens another attempt.',
+          details: { state: record.state, outcome: record.outcome },
+        };
+        return;
+      }
+      generation = runAttemptGeneration(events);
+      correlationId = `${row.id}#${generation}`;
+      this.#appendRunEvent({
+        runId: input.runId,
+        kind: 'attempt_started',
+        actor: input.workerId,
+        at: nowIso(),
+        detail: { correlationId, generation, processId: this.#processIdentity },
+        attemptKey: runAttemptKey(row.runKey, generation),
+      });
+      privileged.appendEvidence({
+        taskId: row.taskId,
+        actor: input.workerId,
+        kind: 'run_attempt_started',
+        payload: { runId: input.runId, correlationId, generation, executable: false },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    return ok({ run: this.#runRecordFromStore(input.runId)!, correlationId, generation });
+  }
+
+  /**
+   * Record what the attempt did. `outcome_unknown` is a first-class answer and
+   * the honest one whenever the worker cannot tell — it moves the run to
+   * `needs_reconciliation`, where no further attempt is admitted until a human
+   * checks the real world.
+   */
+  recordRunOutcome(input: {
+    runId: string;
+    workerId: string;
+    fence: number;
+    outcome: RunOutcome;
+    failureCategory?: RunFailureCategory;
+    note?: string;
+  }): OpsResult<{ run: RunRecord }> {
+    if (!input.runId || !input.workerId) return fail('invalid_input', 'runId and workerId are required');
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    if (!isReportableRunOutcome(input.outcome)) {
+      return fail('invalid_input', 'outcome must be succeeded, failed, not_executed or outcome_unknown');
+    }
+    const failureCategory = input.failureCategory ?? 'none';
+    if (!isRunFailureCategory(failureCategory)) {
+      return fail('invalid_input', 'failureCategory is not a member of the closed vocabulary');
+    }
+    const note = missionText('note', input.note, MAX_RUN_NOTE_LENGTH, false);
+    if (!note.ok) return fail('invalid_input', note.message);
+    try {
+      assertNoSecretLikeContent({ note: note.value ?? '' });
+    } catch {
+      return fail('invalid_input', 'The run note looks like it contains a credential; nothing was recorded.');
+    }
+    if (!this.#reliabilityStorePresent) {
+      return fail('invalid_input', 'run ledger unavailable on this database handle');
+    }
+    const safeMode = this.#safeModeRefusal('record a run outcome');
+    if (safeMode) return safeMode;
+
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    privileged.reserve(() => {
+      const row = loadRun(this.#db, input.runId);
+      if (!row) {
+        refusal = { code: 'unknown_run', message: `Unknown run: ${input.runId}` };
+        return;
+      }
+      const claim = this.#runClaimRefusal(row.taskId, input.workerId, input.fence, 'record a run outcome');
+      if (claim && !claim.ok) {
+        refusal = claim.error;
+        return;
+      }
+      const record = deriveRunRecord(row, loadRunEvents(this.#db, input.runId));
+      if (record.state !== 'attempting') {
+        refusal = {
+          code: 'run_state_conflict',
+          message: `Run ${input.runId} is ${record.state}; an outcome is recorded against an open attempt`,
+          details: { state: record.state },
+        };
+        return;
+      }
+      this.#appendRunEvent({
+        runId: input.runId,
+        kind: 'outcome_recorded',
+        actor: input.workerId,
+        at: nowIso(),
+        detail: {
+          outcome: input.outcome,
+          failureCategory,
+          note: note.value ?? '',
+          correlationId: record.lastCorrelationId,
+        },
+      });
+      privileged.appendEvidence({
+        taskId: row.taskId,
+        actor: input.workerId,
+        kind: 'run_outcome_recorded',
+        payload: {
+          runId: input.runId,
+          outcome: input.outcome,
+          failureCategory,
+          correlationId: record.lastCorrelationId,
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    return ok({ run: this.#runRecordFromStore(input.runId)! });
+  }
+
+  /**
+   * CRASH / RESTART RECOVERY — the classification pass.
+   *
+   * Every run this ledger holds that is still `open` or `attempting` and was
+   * opened by a DIFFERENT process is, by definition, work whose carrier is
+   * gone. Each is classified truthfully and closed or flagged:
+   *
+   *  - never attempted → concluded `not_executed`. Provable from the ledger:
+   *    no attempt was ever reserved, so nothing external can have happened.
+   *  - attempted, capability has no side effect → concluded `not_executed`.
+   *    The capability cannot reach outside HQ, which is the same column the
+   *    queue itself uses at lease expiry.
+   *  - attempted, capability has (or may have) a side effect →
+   *    `needs_reconciliation`, outcome `outcome_unknown`. NEVER retried. A
+   *    capability row that cannot be read counts as side-effecting.
+   *
+   * Runs opened by THIS process are left strictly alone: they may genuinely be
+   * in flight, and closing them would be the recovery inventing a crash.
+   *
+   * It writes nothing into any other ledger. Interrupted canonical work owned
+   * elsewhere is REPORTED as counts with the canonical path that resolves it.
+   */
+  recoverInterruptedRuns(input: { requestedBy: string; reason?: 'process_interrupted' | 'stale_lease' | 'provider_outage' | 'partial_attempt' | 'stale_fence' }): OpsResult<HqRecoveryReport> {
+    const gate = this.#assertApprovalAuthority(input.requestedBy, 'recover interrupted runs');
+    if (gate) return gate;
+    if (!this.#reliabilityStorePresent) {
+      return fail('invalid_input', 'run ledger unavailable on this database handle');
+    }
+    const reason = input.reason ?? 'process_interrupted';
+    const privileged = this.#requirePrivilegedQueue();
+    const classified: HqRecoveryClassification[] = [];
+    privileged.reserve(() => {
+      for (const row of loadRuns(this.#db)) {
+        if (row.processId === this.#processIdentity) continue;
+        const record = deriveRunRecord(row, loadRunEvents(this.#db, row.id));
+        const verdict = classifyInterruptedRun(record, {
+          capabilitySideEffect: this.#runCapabilityIsSideEffecting(row.capabilityId),
+          reason,
+        });
+        if (!verdict) continue;
+        const at = nowIso();
+        this.#appendRunEvent({
+          runId: row.id,
+          kind: 'interrupted',
+          actor: input.requestedBy,
+          at,
+          detail: {
+            reason: verdict.reason,
+            uncertain: verdict.uncertain,
+            failureCategory: 'process_interrupted',
+            openedByProcess: row.processId,
+            recoveredByProcess: this.#processIdentity,
+          },
+        });
+        privileged.appendEvidence({
+          taskId: row.taskId,
+          actor: input.requestedBy,
+          kind: 'run_interrupted',
+          payload: {
+            runId: row.id,
+            reason: verdict.reason,
+            uncertain: verdict.uncertain,
+            outcome: verdict.outcome,
+            executable: false,
+          },
+        });
+        classified.push({
+          runId: row.id,
+          taskId: row.taskId,
+          openedByProcess: row.processId,
+          reason: verdict.reason,
+          uncertain: verdict.uncertain,
+          outcome: verdict.outcome,
+        });
+      }
+    });
+    return ok(this.#recoveryReport(classified));
+  }
+
+  /**
+   * What canonical work stands interrupted in ledgers this phase does not own.
+   *
+   * COUNTS only, and read straight off `#db`. Each line names the canonical
+   * path that resolves it, because the honest thing to do about somebody
+   * else's ledger is to point at its own door.
+   */
+  #canonicalInterruptions(): HqCanonicalInterruptions {
+    const actionsAwaitingReconciliation = this.#actionStorePresent
+      ? loadActionIntents(this.#db).filter((intent) => {
+          const view = deriveActionView(intent, loadActionEvents(this.#db, intent.id));
+          return view.state === 'attempted' || view.state === 'outcome_unknown';
+        }).length
+      : 0;
+    const tasksOutcomeUnknown = (
+      this.#db.prepare(`SELECT COUNT(*) AS n FROM op_tasks WHERE status = 'outcome_unknown'`).get() as {
+        n: number;
+      }
+    ).n;
+    const tasksWithExpiredLease = (
+      this.#db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM op_tasks
+           WHERE status IN ('assigned', 'running') AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`,
+        )
+        .get(nowIso()) as { n: number }
+    ).n;
+    return {
+      actionsAwaitingReconciliation,
+      tasksOutcomeUnknown,
+      tasksWithExpiredLease,
+      resolvedBy: {
+        actionsAwaitingReconciliation: 'HeadquarterOperations.reconcileAction (the Phase 8 gateway owns it)',
+        tasksOutcomeUnknown: 'HeadquarterOperations.reconcileTask (the Operator queue owns it)',
+        tasksWithExpiredLease: 'OperatorQueue.sweepExpiredLeases (the Operator queue owns it)',
+      },
+      statement: RECOVERY_SCOPE_STATEMENT,
+    };
+  }
+
+  #recoveryReport(classified: readonly HqRecoveryClassification[]): HqRecoveryReport {
+    const runs = this.#listRunsFromStore();
+    return {
+      processIdentity: this.#processIdentity,
+      classified: [...classified],
+      interruptedTotal: classified.length,
+      nowNeedingReconciliation: runs.filter((run) => run.needsReconciliation).length,
+      canonical: this.#canonicalInterruptions(),
+      safeMode: this.#integrityReport.safeMode,
+      retryStatement: RUN_RETRY_STATEMENT,
+    };
+  }
+
+  /**
+   * Reconcile a run whose outcome HQ does not know, after a human checked the
+   * real world.
+   *
+   * Same authority shape as `reconcileAction`, deliberately: approval
+   * authority, plus INDEPENDENCE from the worker that ran it — the entity
+   * whose attempt is in doubt does not get to declare what it did. And the
+   * same idempotency rule: `confirmed_not_executed` is refused for a
+   * non-idempotent capability, because reopening an attempt of something that
+   * cannot be safely repeated is how a duplicate irreversible act happens.
+   */
+  reconcileRun(input: {
+    runId: string;
+    decision: RunReconcileDecision;
+    note: string;
+    requestedBy: string;
+  }): OpsResult<{ run: RunRecord }> {
+    const runId = input.runId?.trim() ?? '';
+    if (!runId) return fail('invalid_input', 'runId is required');
+    if (!isRunReconcileDecision(input.decision)) {
+      return fail('invalid_input', `decision must be one of: ${RUN_RECONCILE_DECISIONS.join(', ')}`);
+    }
+    const note = missionText('note', input.note, MAX_RUN_NOTE_LENGTH, true);
+    if (!note.ok) return fail('invalid_input', note.message);
+    try {
+      assertNoSecretLikeContent({ note: note.value });
+    } catch {
+      return fail('invalid_input', 'The reconciliation note looks like it contains a credential; nothing was recorded.');
+    }
+    const gate = this.#assertApprovalAuthority(input.requestedBy, 'reconcile a run outcome');
+    if (gate) return gate;
+    if (!this.#reliabilityStorePresent) {
+      return fail('invalid_input', 'run ledger unavailable on this database handle');
+    }
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    privileged.reserve(() => {
+      const row = loadRun(this.#db, runId);
+      if (!row) {
+        refusal = { code: 'unknown_run', message: `Unknown run: ${runId}` };
+        return;
+      }
+      const record = deriveRunRecord(row, loadRunEvents(this.#db, runId));
+      if (record.state !== 'needs_reconciliation') {
+        refusal = {
+          code: 'run_state_conflict',
+          message: `Run ${runId} is ${record.state}; only a run whose outcome is unknown is reconciled`,
+          details: { state: record.state },
+        };
+        return;
+      }
+      if (row.workerId === input.requestedBy) {
+        refusal = {
+          code: 'not_permitted',
+          message: `${input.requestedBy} carried run ${runId} and cannot reconcile its outcome: reconciliation requires an independent principal`,
+          details: { actor: input.requestedBy },
+        };
+        return;
+      }
+      if (input.decision === 'confirmed_not_executed') {
+        const capability = this.#capabilityFromStore(row.capabilityId);
+        if (!capability?.idempotent) {
+          refusal = {
+            code: 'not_permitted',
+            message:
+              `Capability ${row.capabilityId} is not idempotent; an uncertain execution cannot be reopened for ` +
+              'another attempt — close it as succeeded or failed after investigation',
+            details: { capabilityId: row.capabilityId },
+          };
+          return;
+        }
+      }
+      const at = nowIso();
+      this.#appendRunEvent({
+        runId,
+        kind: 'reconciled',
+        actor: input.requestedBy,
+        at,
+        detail: {
+          decision: input.decision,
+          note: note.value,
+          correlationId: record.lastCorrelationId,
+        },
+      });
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `run:${runId}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `Run reconciled ${input.decision}`,
+        detail: { taskId: row.taskId, decision: input.decision, executable: false },
+      });
+      privileged.appendEvidence({
+        taskId: row.taskId,
+        actor: input.requestedBy,
+        kind: 'run_reconciled',
+        payload: {
+          runId,
+          decision: input.decision,
+          note: note.value,
+          correlationId: record.lastCorrelationId,
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    return ok({ run: this.#runRecordFromStore(runId)! });
+  }
+
+  /**
+   * Run the FULL integrity assessment and re-latch the safe-mode verdict.
+   *
+   * This is the only path that can CLEAR safe mode, and it clears it only by
+   * finding nothing blocking — there is deliberately no override parameter, no
+   * force flag and no "acknowledge" that turns a blocking finding into a
+   * cleared one. Repairing a corrupt store is a Founder act performed against
+   * a verified backup, outside HQ; HQ's job is to say so and to keep saying so
+   * until it is true.
+   *
+   * Permitted in safe mode by construction, and it writes exactly one thing:
+   * an evidence entry recording that the assessment happened and what it
+   * found (categorical finding names only).
+   */
+  assessHqIntegrity(input: { requestedBy: string }): OpsResult<HqIntegrityView> {
+    const refusedActor = this.#resolveReliabilityCommander(input.requestedBy, 'assess HQ store integrity');
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#reliabilityCapabilityGate('assess HQ store integrity');
+    if (refusedCapability) return refusedCapability;
+
+    const before = this.#integrityReport.safeMode;
+    const report = fullIntegrity(this.#db, {
+      verifyEvidenceChain: () => this.queue.evidence.verifyChain(),
+      reliabilitySchemaPresent: this.#reliabilityStorePresent,
+    });
+    this.#integrityReport = report;
+    this.#requirePrivilegedQueue().appendEvidence({
+      actor: input.requestedBy,
+      kind: 'hq_integrity_assessed',
+      payload: {
+        depth: report.depth,
+        safeMode: report.safeMode,
+        safeModeChanged: before !== report.safeMode,
+        findings: report.observations.map((observation) => observation.finding),
+        executable: false,
+      },
+    });
+    return ok(this.#integrityView());
+  }
+
+  /**
+   * Record a file as a VERIFIED recovery point.
+   *
+   * The verification is the whole value, so it is performed here rather than
+   * trusted from the caller: the path must be absolute, a regular non-symlink
+   * file within the size bound, must open as a readable SQLite database, must
+   * pass `integrity_check`, and must actually be an HQ database. Only then is
+   * a row written, carrying the sha256 HQ computed itself over the bytes it
+   * checked — never a digest the caller declared.
+   *
+   * HQ does not TAKE the backup and does not restore one. Taking a backup
+   * safely (inode reservation, no-replace publication, directory-entry
+   * commits) already lives in `@factoryos/hq-host`'s durable persistence
+   * owner, and restoring is a deliberate operator act against a stopped
+   * process. This is the register that says which files were checked, by
+   * whom, and what they hashed to.
+   */
+  recordVerifiedBackup(input: {
+    backupPath: string;
+    requestedBy: string;
+    note?: string;
+  }): OpsResult<{ backup: BackupRecordView; deduplicated: boolean }> {
+    const backupPath = input.backupPath?.trim() ?? '';
+    if (!backupPath) return fail('invalid_input', 'backupPath is required');
+    if (backupPath.length > MAX_BACKUP_PATH_LENGTH) {
+      return fail('invalid_input', `backupPath exceeds ${MAX_BACKUP_PATH_LENGTH} characters`);
+    }
+    const note = missionText('note', input.note, MAX_RUN_NOTE_LENGTH, false);
+    if (!note.ok) return fail('invalid_input', note.message);
+    const refusedActor = this.#resolveReliabilityCommander(input.requestedBy, 'record a verified backup');
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#reliabilityCapabilityGate('record a verified backup');
+    if (refusedCapability) return refusedCapability;
+    if (!this.#reliabilityStorePresent) {
+      return fail('invalid_input', 'backup register unavailable on this database handle');
+    }
+
+    const verification = verifyHqBackupFile(backupPath);
+    if (!verification.verified) {
+      return fail(
+        'backup_verification_failed',
+        `That file was not recorded as a recovery point: ${verification.refusals.join(', ')}. ` +
+          'A backup HQ has not verified is not a backup HQ will vouch for.',
+        { refusals: verification.refusals },
+      );
+    }
+
+    const recordKey = backupRecordKey({ backupPath, contentDigest: verification.digest! });
+    const id = `backup-${uuid()}`;
+    const at = nowIso();
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    privileged.reserve(() => {
+      const existing = this.#db
+        .prepare(`SELECT id FROM hq_reliability_backups WHERE record_key = ?`)
+        .get(recordKey) as { id: string } | undefined;
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      this.#db
+        .prepare(
+          `INSERT INTO hq_reliability_backups
+             (id, backup_path, content_digest, size_bytes, schema_tables, verified_at, verified_by,
+              process_id, note, record_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          backupPath,
+          verification.digest,
+          verification.sizeBytes,
+          verification.schemaTables,
+          at,
+          input.requestedBy,
+          this.#processIdentity,
+          note.value,
+          recordKey,
+        );
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `backup:${id}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: 'Verified HQ backup recorded as a recovery point',
+        detail: { sizeBytes: verification.sizeBytes, schemaTables: verification.schemaTables, executable: false },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'hq_backup_verified',
+        payload: {
+          backupId: id,
+          contentDigest: verification.digest,
+          sizeBytes: verification.sizeBytes,
+          schemaTables: verification.schemaTables,
+          executable: false,
+        },
+      });
+    });
+    if (dedupedTo) {
+      return ok({ backup: this.#backupView(dedupedTo)!, deduplicated: true });
+    }
+    return ok({ backup: this.#backupView(id)!, deduplicated: false });
+  }
+
+  // ---- reliability reads ----
+
+  /** One run's derived record, or null (including over a pre-Phase-13 read-only file). */
+  getRun(id: string): RunRecord | null {
+    if (!id) return null;
+    return this.#runRecordFromStore(id);
+  }
+
+  listRuns(filter?: { taskId?: string; runKind?: RunKind }): RunRecord[] {
+    return this.#listRunsFromStore(filter);
+  }
+
+  /** The bounded wire read: newest first, with the true total stated beside it. */
+  listRunsBounded(filter?: { taskId?: string; runKind?: RunKind }): {
+    runs: RunRecord[];
+    total: number;
+    truncated: boolean;
+  } {
+    const all = this.#listRunsFromStore(filter).reverse();
+    const page = all.slice(0, RUN_READ_LIMIT);
+    return { runs: page, total: all.length, truncated: all.length > page.length };
+  }
+
+  #backupView(id: string): BackupRecordView | null {
+    if (!this.#reliabilityStorePresent) return null;
+    const row = this.#db.prepare(`SELECT * FROM hq_reliability_backups WHERE id = ?`).get(id) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) return null;
+    return backupRowToView({
+      seq: row.seq as number,
+      id: row.id as string,
+      backupPath: row.backup_path as string,
+      contentDigest: row.content_digest as string,
+      sizeBytes: Number(row.size_bytes),
+      schemaTables: Number(row.schema_tables),
+      verifiedAt: row.verified_at as string,
+      verifiedBy: row.verified_by as string,
+      processId: row.process_id as string,
+      note: (row.note as string | null) ?? null,
+    });
+  }
+
+  listVerifiedBackupsBounded(): {
+    backups: BackupRecordView[];
+    total: number;
+    truncated: boolean;
+  } {
+    if (!this.#reliabilityStorePresent) return { backups: [], total: 0, truncated: false };
+    const all = loadBackupRecords(this.#db).reverse();
+    const page = all.slice(0, BACKUP_READ_LIMIT).map(backupRowToView);
+    return { backups: page, total: all.length, truncated: all.length > page.length };
+  }
+
+  #integrityView(): HqIntegrityView {
+    return {
+      safeMode: this.#integrityReport.safeMode,
+      depth: this.#integrityReport.depth,
+      observations: this.#integrityReport.observations.map((observation) => ({ ...observation })),
+      durability: { ...this.#integrityReport.durability },
+      safeModeStatement: SAFE_MODE_STATEMENT,
+      depthStatement: INTEGRITY_DEPTH_STATEMENT,
+    };
+  }
+
+  /**
+   * The Founder-facing reliability picture: the latched integrity verdict, the
+   * durability posture, what this ledger is holding, and what canonical work
+   * stands interrupted elsewhere. A pure READ — it re-assesses nothing and
+   * latches nothing, because a GET must never be the thing that changes a
+   * safety posture.
+   */
+  hqReliabilityPosture(): HqReliabilityPosture {
+    const runs = this.#listRunsFromStore();
+    return {
+      processIdentity: this.#processIdentity,
+      storePresent: this.#reliabilityStorePresent,
+      integrity: this.#integrityView(),
+      runs: {
+        total: runs.length,
+        needsReconciliation: runs.filter((run) => run.needsReconciliation).length,
+        openOrAttempting: runs.filter((run) => run.state === 'open' || run.state === 'attempting').length,
+        openedByOtherProcesses: runs.filter((run) => run.processId !== this.#processIdentity).length,
+      },
+      verifiedBackups: this.#reliabilityStorePresent ? loadBackupRecords(this.#db).length : 0,
+      canonical: this.#canonicalInterruptions(),
+      ledgerStatement: RUN_LEDGER_STATEMENT,
+      retryStatement: RUN_RETRY_STATEMENT,
+    };
+  }
+
+  /**
+   * Counts over closed vocabularies for the UNAUTHENTICATED artifact.
+   *
+   * ENFORCEMENT-SAFE, and it has to be: this is the one read on the path that
+   * produces `hq-snapshot.json`, so a same-realm patch of a public method here
+   * would be a patch of what the world is told. It reads
+   * `#listRunsFromStore` and the `#private` latched report — deliberately not
+   * `listRuns()` or `hqReliabilityPosture()`.
+   *
+   * No run label, task/mission/action id, worker id, correlation id, backup
+   * path, digest or finding detail crosses. The finding MAP is closed by
+   * construction: every key passes the vocabulary check inside
+   * `summarizeReliability`, and anything else is counted as `unrecognized`.
+   */
+  reliabilitySummary(): ReliabilitySnapshotView {
+    if (!this.#reliabilityStorePresent) return emptyReliabilitySnapshot(false);
+    return summarizeReliability({
+      storePresent: true,
+      runs: this.#listRunsFromStore(),
+      verifiedBackups: loadBackupRecords(this.#db).length,
+      safeMode: this.#integrityReport.safeMode,
+      assessmentDepth: this.#integrityReport.depth,
+      findings: this.#integrityReport.observations.map((observation) => observation.finding),
+      durabilityMeetsRequirement: this.#integrityReport.durability.meetsRequirement,
+    });
+  }
+
+  /**
+   * Whether this database carries the Phase 13 ledger. False only for a
+   * read-only handle over a pre-Phase-13 file; run reads then answer
+   * empty/null and the snapshot states the absence rather than an empty store.
+   */
+  reliabilityStorePresent(): boolean {
+    return this.#reliabilityStorePresent;
+  }
+
+  /** This process's identity — the fact a restart is detected by. */
+  hqProcessIdentity(): string {
+    return this.#processIdentity;
   }
 
   // ---- company memory (Phase 5 — Context + Mission Memory, #265) ----
@@ -8260,6 +9426,14 @@ export class HeadquarterOperations {
     if (!input.workerId) return fail('invalid_input', 'workerId is required');
     if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
     if (!this.#actionStorePresent) return fail('invalid_input', 'action ledger unavailable on this database handle');
+    // Phase 13, and this is the most consequential of the safe-mode guards:
+    // an external action is the one act HQ cannot walk back. The Intent Guard
+    // below re-validates canonical truth immediately before the adapter call;
+    // safe mode is the prior question of whether that canonical truth can be
+    // relied on at all. Refused before the reservation, so nothing is reserved
+    // and no side-effect key is burned.
+    const safeMode = this.#safeModeRefusal('execute an external action');
+    if (safeMode) return safeMode;
     const now = input.now ?? new Date();
     const privileged = this.#requirePrivilegedQueue();
 
