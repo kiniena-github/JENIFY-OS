@@ -45,8 +45,11 @@ const MAP = [
   { realmId: 'tenant-1', accountId: 'user-coo', principalId: 'coo' },
 ];
 
-function account(accountId: string): AuthenticatedAccount {
-  return { realmId: 'tenant-1', accountId, displayName: accountId, authenticatedAt: FRESH };
+/** A session older than the step-up window, so step-up asks for a password. */
+const STALE = new Date(NOW.getTime() - 60 * 60_000).toISOString();
+
+function account(accountId: string, authenticatedAt: string = FRESH): AuthenticatedAccount {
+  return { realmId: 'tenant-1', accountId, displayName: accountId, authenticatedAt };
 }
 /** A signed-in account mapped to NO principal at all. */
 const STAFF = account('user-staff');
@@ -70,6 +73,7 @@ function harness(options: { account?: AuthenticatedAccount | null } = {}): Harne
     sessions: { resolve: () => current },
     audit: { record: (event) => audit.push(event) },
     now: () => NOW,
+    credentials: { verify: (_account, password) => (password === 'correct-password' ? 'ok' : 'rejected') },
   };
   return {
     fixture,
@@ -324,6 +328,73 @@ describe('the reconcile route', () => {
       );
       expect(response.status).toBe(400);
       expect(h.fixture.ops.getRun(runId)!.state).toBe('needs_reconciliation');
+    } finally {
+      h.fixture.cleanup();
+    }
+  });
+
+  /**
+   * Wave 5 High 4. This was the only reconciliation route in HQ without
+   * step-up, while Phase 8's `actionReconcile` takes it unconditionally — and
+   * the two share their decision vocabulary BY IDENTITY because they are the
+   * same judgement. `confirmed_not_executed` here re-opens the run for another
+   * attempt generation, so the route also grants a further act.
+   */
+  it('takes STEP-UP unconditionally, exactly like the Phase 8 action reconcile route', () => {
+    const h = harness();
+    try {
+      const runId = unknownRun(h);
+      expectOk(h.fixture.ops.recoverInterruptedRuns({ requestedBy: 'founder' }));
+      const body = {
+        runId,
+        decision: 'confirmed_failed',
+        note: 'checked the provider; the request never landed',
+      };
+
+      // A session older than the step-up window, with no password: 401, and
+      // the run is untouched.
+      const bare = h.call(
+        { method: 'POST', path: CONTROL_ROUTES.reliabilityReconcile, body },
+        account('user-coo', STALE),
+      );
+      expect(bare.status).toBe(401);
+      expect((bare.body.error as { code: string }).code).toBe('step_up_required');
+      expect(h.fixture.ops.getRun(runId)!.state).toBe('needs_reconciliation');
+
+      // The wrong password: 403, still untouched.
+      const wrong = h.call({
+        method: 'POST',
+        path: CONTROL_ROUTES.reliabilityReconcile,
+        body: { ...body, stepUpPassword: 'nope' },
+      });
+      expect(wrong.status).toBe(403);
+      expect((wrong.body.error as { code: string }).code).toBe('step_up_failed');
+      expect(h.fixture.ops.getRun(runId)!.state).toBe('needs_reconciliation');
+
+      // The right password: through, and the password never reaches the audit.
+      const allowed = h.call({
+        method: 'POST',
+        path: CONTROL_ROUTES.reliabilityReconcile,
+        body: { ...body, stepUpPassword: 'correct-password' },
+      });
+      expect(allowed.status).toBe(200);
+      expect(h.fixture.ops.getRun(runId)!.outcome).toBe('failed');
+      expect(JSON.stringify(h.audit)).not.toContain('correct-password');
+    } finally {
+      h.fixture.cleanup();
+    }
+  });
+
+  it('advertises the reconcile control beside the recover one, as Phase 8 advertises its own', () => {
+    const h = harness();
+    try {
+      const controls = h.call({ method: 'GET', path: CONTROL_ROUTES.session }).body.controls as Record<
+        string,
+        boolean
+      >;
+      expect(controls.reliabilityRecover).toBe(true);
+      expect(controls.reliabilityReconcile).toBe(true);
+      expect(controls.actionReconcile).toBe(true);
     } finally {
       h.fixture.cleanup();
     }
