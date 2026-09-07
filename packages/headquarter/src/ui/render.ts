@@ -63,6 +63,8 @@ import {
   approvalsConsoleScript,
   connectionsLiveScript,
   commandCenterConsoleScript,
+  searchConsoleScript,
+  productFactoryConsoleScript,
   missionCommandConsoleScript,
   missionsConsoleScript,
   collaborationConsoleScript,
@@ -290,6 +292,19 @@ ${fields}
  * whole briefing is drawn inside the mount only from a live,
  * Founder-authenticated read of the same-origin control API.
  */
+/**
+ * The static Company Search + Ask Jenify panel (Phase 11). Inert by the
+ * site-wide rule: no input, no button, no form in emitted markup. The working
+ * search box and question box are drawn inside the mount by
+ * `searchConsoleScript` only when `/session` resolves a Founder.
+ */
+function companySearchPanel(): string {
+  return `<div class="panel">
+<p class="readonly-note">One place to search every canonical source HQ holds \u2014 missions, projects, tasks, company memory, truth records, collaboration sessions, external action intents, orchestration runs and the worker directory \u2014 and to ask a question in words and get an answer GROUNDED in the rows that were retrieved to answer it. Retrieval happens first; the answer is then composed from the fields of what came back, with every source named by its canonical table and id. When the record does not support an answer, HQ returns unknown or insufficient evidence rather than inventing one. There is no relevance score, rank, confidence or percentage anywhere in this surface: a hit states which of your terms it matched. Search and Ask Jenify are READS \u2014 they store nothing, rank nothing and grant nothing, and Founder-classified records are never searched for a reader who may not see them.</p>
+<div data-search-console></div>
+</div>`;
+}
+
 function commandCentrePanel(): string {
   return `<div class="panel">
 <p class="readonly-note">The Chief of Staff\u2019s one derived command layer over canonical company state: what needs the Founder, what is blocked, what changed since the last issued brief, what is verified, what is recorded unknown, and what HQ can safely do next \u2014 with the department projections and the recommendations that answer the inbox. Every item REFERENCES the canonical row it came from and duplicates no authority; nothing here is stored, so an item exists exactly while its source predicate holds and is gone the moment the source is decided elsewhere. A recommendation is a record and never a button: HQ has no route and no method that accepts one. There is no priority, score, confidence, percentage or ETA anywhere in this layer.</p>
@@ -636,6 +651,8 @@ ${event.status ? ` ${statusChip(event.status)}` : ` ${chip('note', 'neutral')}`}
 ${section('WHAT NEEDS THE FOUNDER', attentionPanel, 'founder-attention')}
 ${section('COMPANY COMMAND CENTRE — CHIEF OF STAFF', commandCentrePanel(), 'command-centre')}
 ${commandCenterConsoleScript()}
+${section('COMPANY SEARCH — ASK JENIFY', companySearchPanel(), 'company-search')}
+${searchConsoleScript()}
 ${section('DIRECT ORDER', directOrderComposer(orderRoutes), 'direct-order')}
 ${directOrderConsoleScript({
   ready: ROUTE_STATE_PRESENTATION.ready,
@@ -744,6 +761,11 @@ ${
 <div data-collaboration-console></div>
 </div>`;
 
+  const productFactory = `<div class="panel">
+<p class="readonly-note">The Product Factory (Phase 12): the products the Founder has registered, each REFERENCING a canonical project register entry rather than replacing one \u2014 with its product type, the problem it solves, who it is for, its immutable artifact versions and its own lifecycle. The lifecycle describes the PRODUCT and is never task or worker state: nothing in HQ derives eligibility, claiming, dispatch, approval or a kill-switch decision from it. Artifact history is append-only by the database engine itself \u2014 a new version is a new row and an in-place edit is refused, not merely discouraged. A plan template RECOMMENDS missions and grants nothing; each line becomes real work only by commanding a canonical mission on the Mission Room console above. There is no release, publish or deploy control here and no route behind one: reaching release_candidate or released records a state and contacts nothing, and an actual release is an external action through the Phase 8 gateway with its own risk assessment, Founder approval and kill switches. Read live from the same-origin control API; this static render holds no product data and claims none.</p>
+<div data-product-factory-console></div>
+</div>`;
+
   const projectRegister = `<div class="panel">
 <p class="readonly-note">The canonical project register (Phase 4): the projects the Founder has declared, each with its assigned missions and linked-task counts. Read live from the same-origin control API — this static render holds no register data and claims none. Distinct from the archive-derived label board below: a label on an event is not a register entry.</p>
 <div data-projects-console></div>
@@ -755,7 +777,7 @@ ${
     eyebrow: 'Company portfolio board',
     lede: 'The canonical project register, the missions each project carries, and the archive-derived activity board.',
     asOf: nowIso,
-    body: `${section('PROJECT REGISTER — CANONICAL', projectRegister, 'project-register')}${projectsConsoleScript()}${section('MISSION ROOM — FOUNDER COMMAND RECORD', missionRoom, 'mission-room')}${missionsConsoleScript()}${collaborationConsoleScript(COLLABORATION_ROLES)}${section('ACTIVITY BY PROJECT LABEL — ARCHIVE-DERIVED', board)}${timelineHtml}`,
+    body: `${section('PROJECT REGISTER — CANONICAL', projectRegister, 'project-register')}${projectsConsoleScript()}${section('MISSION ROOM — FOUNDER COMMAND RECORD', missionRoom, 'mission-room')}${missionsConsoleScript()}${collaborationConsoleScript(COLLABORATION_ROLES)}${section('PRODUCT FACTORY — WHAT THE COMPANY IS BUILDING', productFactory, 'product-factory')}${productFactoryConsoleScript()}${section('ACTIVITY BY PROJECT LABEL — ARCHIVE-DERIVED', board)}${timelineHtml}`,
     provenanceNote,
     sourceMode,
   });

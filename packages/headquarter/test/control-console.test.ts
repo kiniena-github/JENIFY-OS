@@ -107,6 +107,10 @@ describe('every page script speaks only to the control API and the snapshot', ()
       'fetch(COLLAB_PATH', // Phase 9: the Founder-gated collaboration session read
       'fetch(COLLAB_ROOM_PATH', // Phase 9: the parameterized Mission Room read
       'fetch(COMMAND_CENTER_PATH', // Phase 10: the Founder-gated command-centre briefing read
+      'fetch(SEARCH_PATH', // Phase 11: the Founder-gated unified search read
+      'fetch(ASK_PATH', // Phase 11: the Founder-gated Ask Jenify read
+      'fetch(PRODUCTS_PATH', // Phase 12: the Founder-gated product register read
+      'fetch(PRODUCT_DETAIL_PATH', // Phase 12: the parameterized product detail read
       'fetch(path,', // postJson's parameter; its call sites are audited below
     ];
     for (const page of HQ_PAGES) {
@@ -137,7 +141,7 @@ describe('every page script speaks only to the control API and the snapshot', ()
     }
   });
 
-  it('allow-lists every postJson call site against the twenty-three write routes', () => {
+  it('allow-lists every postJson call site against the twenty-six write routes', () => {
     // Three until Phase 3; the mission command/transition/amend writes joined
     // with issue #254; the project register, mission-linkage and workforce
     // writes joined with issue #262; the memory record write and the
@@ -182,6 +186,14 @@ describe('every page script speaks only to the control API and the snapshot', ()
             'COLLAB_PATH',
             'COLLAB_ADMIT_PATH',
             'BRIEF_PATH',
+            // Phase 12 widened the surface to twenty-six (register a product,
+            // move its lifecycle, version an artifact) WITH console call
+            // sites on projects.html's Product Factory console, so all three
+            // join. Nothing else does: the two product reads are GETs, and
+            // there is no release/publish/deploy path to call.
+            'PRODUCTS_PATH',
+            'PRODUCT_LIFECYCLE_PATH',
+            'PRODUCT_ARTIFACTS_PATH',
             'path',
           ].includes(match[1]!),
           `${page.file}: unexpected postJson target: ${match[1]}`,

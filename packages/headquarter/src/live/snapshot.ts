@@ -44,6 +44,8 @@ import { projectBrowserView, type ProjectBrowserView } from '../application/proj
 import type { MemoryBrowserView } from '../application/memory-command.js';
 import { TRUTH_SNAPSHOT_LIMIT, type TruthSnapshotView } from '../application/truth-command.js';
 import { COLLABORATION_SNAPSHOT_LIMIT, type CollaborationSnapshotView } from '../application/collaboration-command.js';
+import { SEARCH_SNAPSHOT_NOTE, type SearchIndexSnapshotView } from '../application/search-command.js';
+import { PRODUCT_SNAPSHOT_NOTE, type ProductFactorySnapshotView } from '../application/product-command.js';
 import {
   COMMAND_CENTER_PROVENANCE,
   COMMAND_CENTER_SNAPSHOT_LIMIT,
@@ -247,6 +249,38 @@ export interface HqSnapshot {
    * Founder-gated read.
    */
   commandCenter?: SnapshotSection<CommandCenterSnapshotView>;
+  /**
+   * The Phase 11 search SOURCE REGISTRY — and nothing else.
+   *
+   * Deliberately carries no document, title, snippet, id, term, question or
+   * result: search and Ask Jenify are Founder-gated reads, and an
+   * unauthenticated artifact has no vocabulary that classifies free text for
+   * an unauthenticated reader (the Phase 9 rule about a session's purpose,
+   * applied to every source at once). What crosses is which stores exist, how
+   * many documents an unauthenticated reader could search, how many
+   * classified documents were not searched, and which retrieval mode answers.
+   *
+   * The withheld count is a property of the CORPUS, never of a query — a
+   * per-query withheld count would be an oracle a reader could probe the
+   * private record with, one term at a time.
+   */
+  search?: SnapshotSection<SearchIndexSnapshotView>;
+  /**
+   * The Phase 12 Product Factory — COUNTS OVER CLOSED VOCABULARIES, and
+   * nothing else.
+   *
+   * Deliberately carries no product name, problem statement, target user,
+   * artifact name, locator, digest or id: every text field on that register
+   * is a company plan, and an unauthenticated artifact has no vocabulary
+   * that classifies free text for an unauthenticated reader (the Phase 9
+   * rule about a session's purpose, and the Phase 11 rule about a search
+   * snippet, applied to a register of things the company is building).
+   *
+   * A lifecycle count is a count of RECORDS. It is not a statement that
+   * anything was released, deployed or published — nothing in Phase 12 can
+   * do any of those, and the note says so on the artifact itself.
+   */
+  productFactory?: SnapshotSection<ProductFactorySnapshotView>;
 }
 
 /**
@@ -318,6 +352,10 @@ export interface SnapshotSources {
   collaboration?: { data: CollaborationSnapshotView; provenance: Provenance };
   /** The derived command layer (Phase 10). Optional — omitted means no canonical handle was read. */
   commandCenter?: { data: CommandCenterSnapshotView; provenance: Provenance };
+  /** The search source registry (Phase 11). Optional — omitted means no canonical handle was read. */
+  search?: { data: SearchIndexSnapshotView; provenance: Provenance };
+  /** The Product Factory counts (Phase 12). Optional — omitted means no canonical handle was read. */
+  productFactory?: { data: ProductFactorySnapshotView; provenance: Provenance };
   /**
    * Per-worker provider declarations (Phase 4). Optional: an omitted map
    * means the building context holds no declaration truth — every worker's
@@ -366,6 +404,8 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       ...(sources.truth ? [sources.truth.provenance.mode] : []),
       ...(sources.collaboration ? [sources.collaboration.provenance.mode] : []),
       ...(sources.commandCenter ? [sources.commandCenter.provenance.mode] : []),
+      ...(sources.search ? [sources.search.provenance.mode] : []),
+      ...(sources.productFactory ? [sources.productFactory.provenance.mode] : []),
     ]),
     note: sources.note ?? null,
     counts: {
@@ -447,6 +487,10 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       : {}),
     ...(sources.commandCenter
       ? { commandCenter: section(sources.commandCenter.provenance, sources.commandCenter.data) }
+      : {}),
+    ...(sources.search ? { search: section(sources.search.provenance, sources.search.data) } : {}),
+    ...(sources.productFactory
+      ? { productFactory: section(sources.productFactory.provenance, sources.productFactory.data) }
       : {}),
   };
 
@@ -633,6 +677,29 @@ export function liveSnapshotFromOperations(
     includeFounderOnly: options.includeFounderOnlyMemory === true,
     limit: COMMAND_CENTER_SNAPSHOT_LIMIT,
   });
+
+  // Phase 11 search registry: the SAME reading-layer privacy decision once
+  // more, and the smallest disclosure of the five. This section carries no
+  // text of any kind — no document, title, snippet, id, term, question or
+  // result — because search is a Founder-gated read and an unauthenticated
+  // artifact has no classification for the free text a hit would quote. What
+  // it publishes is the registry: which stores exist on this handle, how many
+  // documents an unauthenticated reader could search, and how many classified
+  // documents were not searched. That withheld count is corpus-wide and
+  // query-independent by construction; there is no query here to make it an
+  // oracle, and the surface that does take a query never publishes one.
+  const search = ops.searchIndexSummary({
+    includeFounderOnly: options.includeFounderOnlyMemory === true,
+  });
+
+  // Phase 12 Product Factory: counts only, and — unlike every section above
+  // — with no privacy parameter at all, because the register carries no
+  // classification. That is stated rather than assumed: a product record has
+  // no `founder_only` level in this phase, so a product the Founder does not
+  // want counted must not be registered here yet. What keeps the artifact
+  // safe is therefore not a filter but the SHAPE of the section: it is
+  // incapable of carrying a name, a locator, a digest or an id.
+  const productFactory = ops.productFactorySummary();
 
   return buildHqSnapshot({
     workerProviders,
@@ -862,6 +929,56 @@ export function liveSnapshotFromOperations(
               ? null
               : 'The hq_briefs ledger does not exist on this database handle, so no brief was ever issued ' +
                 'through it and none can be; briefs.total states that as 0 rather than implying an empty ledger.',
+          ]
+            .filter(Boolean)
+            .join(' ') || undefined,
+      },
+    },
+    productFactory: {
+      data: productFactory,
+      provenance: {
+        mode,
+        source: 'hq_products / hq_product_events / hq_product_artifacts via HeadquarterOperations.productFactorySummary',
+        asOf: at,
+        note:
+          [
+            PRODUCT_SNAPSHOT_NOTE,
+            productFactory.storePresent
+              ? null
+              : 'This database predates the Phase 12 Product Factory schema and was opened read-only, so no ' +
+                'product store exists to read. 0 states that absence; nothing was migrated.',
+            productFactory.byLifecycle.released > 0
+              ? `${productFactory.byLifecycle.released} product record(s) stand at the released lifecycle state. ` +
+                'That is a recorded state of a product, not evidence that anything was published: no Product ' +
+                'Factory path can perform an external action, and a real release runs through the Phase 8 ' +
+                'gateway with its own approval and audit.'
+              : null,
+          ]
+            .filter(Boolean)
+            .join(' ') || undefined,
+      },
+    },
+    search: {
+      data: search,
+      provenance: {
+        mode,
+        source:
+          'hq_missions / hq_projects / op_tasks / hq_products / hq_product_artifacts / hq_memory / ' +
+          'hq_truth_records / hq_collab_sessions / hq_action_intents / hq_orchestration_runs / ' +
+          'hq_specialists via HeadquarterOperations.searchIndexSummary (source registry only)',
+        asOf: at,
+        note:
+          [
+            SEARCH_SNAPSHOT_NOTE,
+            search.withheldFounderOnly > 0
+              ? `${search.withheldFounderOnly} founder_only document(s) exist in the corpus and are not ` +
+                'searchable by an unauthenticated reader; the readable total excludes them. That number is a ' +
+                'property of the corpus and not of any query.'
+              : null,
+            search.sources.some((source) => !source.storePresent)
+              ? 'At least one canonical store is absent from this database handle; its readable count is 0 by ' +
+                'absence, not by emptiness.'
+              : null,
           ]
             .filter(Boolean)
             .join(' ') || undefined,

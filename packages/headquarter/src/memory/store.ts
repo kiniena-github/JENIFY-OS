@@ -249,6 +249,13 @@ export class MemoryStore {
       body: input.body,
       sourceRefs: input.sourceRefs ?? [],
       related: input.related ?? {},
+      // Phase 11 hardening: `recorded.source` is caller-supplied free text
+      // that this store PERSISTS (recorded_source) and every reader publishes.
+      // It was the one persisted string neither this scan nor the validator
+      // looked at. The facade bounds and scans it too — deliberate defense in
+      // depth, not redundancy, because a trusted composition root can call
+      // this store directly.
+      recordedSource: input.recorded?.source ?? null,
     });
 
     const id = input.id ?? uuid();
