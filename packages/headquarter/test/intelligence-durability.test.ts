@@ -156,6 +156,10 @@ function populated(): ReturnType<typeof fileFixture> {
       currency: 'USD',
       unitKind: 'requests',
       decisionId: decision.id,
+      // A cost entry must DECLARE an identity, so a replay of the same
+      // observation is recognized rather than counted twice (Wave 5 correction
+      // round five, Low 3).
+      idempotencyKey: 'durability-seed',
     }),
   );
   return fx;

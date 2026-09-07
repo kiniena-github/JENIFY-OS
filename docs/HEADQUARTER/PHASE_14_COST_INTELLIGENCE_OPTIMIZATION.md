@@ -363,6 +363,36 @@ survives because it closes both directions, and the future half keeps the other
 lane's refusal by name. The consequence is stated rather than hidden: a genuine
 observation older than thirty days can no longer be recorded at all, and a lane
 importing historical spend would need a Founder decision about that bound.)
+
+**And `occurredAt` is no longer DEFAULTED into the entry's identity** (fifth
+correction round, Low 3). `costEntryKey` covers the identity — task, provider,
+model, instant, unit kind, idempotency key — and the facade used to pass a
+defaulted `nowIso()` as that instant, so an entry recorded without one carried a
+millisecond wall clock inside its own identity. Two identical calls therefore
+almost never collided: executed at a 0 ms, a 2 ms and a 30 ms gap, an unchanged
+replay of a 6000-unit entry was accepted as a NEW ROW every time and the
+Founder's provider ceiling observed 12000 from 6000 actually spent, reporting
+`blocked`. The direction is fail-safe — it over-reports and never grants — but a
+fabricated measurement in the false-alarm direction is as much a fabrication as
+one in the reassuring direction, and it also made the `cost_entry_conflict`
+protection above technically true and practically unreachable on the default
+path.
+
+The key now carries the DECLARED instant or nothing, and an entry that declares
+neither an `idempotencyKey` nor an `occurredAt` is REFUSED: HQ genuinely cannot
+tell a replay from a second real spend when the caller declares neither, and it
+will not invent a wall clock to say they differ (over-reporting) nor a match to
+say they are the same (under-reporting against a Founder ceiling). The
+`idempotencyKey` is therefore stated as what it is — the required mitigation
+whenever the caller has no observed instant to declare — rather than left as an
+unmentioned option. The cost, stated: every in-process caller of
+`recordIntelligenceCost` must now declare one of the two.
+
+This also answers a question carried from an earlier round rather than leaving
+it open. A previous reviewer saw a cost-entry probe shuffle between runs and
+hypothesized a script artefact; it was not one. It was this — the entry key
+contained `nowIso()` at millisecond resolution, so the same script produced a
+collision or a second row depending on how the clock fell.
 **What a RAW WRITER can still do to a budget, stated rather than left for a
 reader to find** (recorded by the Wave 5 review; not a defect, and not
 previously written down). `hq_intel_budgets` is append-only and versioned, and
@@ -1074,7 +1104,7 @@ sections they belong to:
 | HIGH B-2 — every non-deployment ceiling and both time windows were keyed on caller strings | mission and project come from `hq_mission_plan_items`/`hq_missions`; a `providerId` contradicting the canonical binding is `provider_binding_mismatch`; `occurredAt` is clamped to a bounded interval around `nowIso()` (one hour ahead, thirty days behind) | the ghost-mission, misattributed-provider and 2099-dated-entry cases, same file |
 | MEDIUM B-3 — "recompute the floor" was described as closing a forgery it only relocates | the comment and the doc say what recomputation does; structurally, `bound_provider`, the risk class and the review requirement are re-derived at READ time from `op_tasks`/`op_capabilities` | a raw append forging all three, same file |
 | MEDIUM B-4 — `rowToBudget` failed OPEN on a malformed row | `unrecognized` scope/window (matching nothing) and a `null` ceiling answering `requires_founder_decision` | the reviewer's one-append reproduction, same file |
-| MEDIUM B-5 — first-write-wins dedupe let a `billed 0` suppress a real amount | a second entry with the same identity and a different figure is `cost_entry_conflict`; an identical one still dedupes | same file |
+| MEDIUM B-5 — first-write-wins dedupe let a `billed 0` suppress a real amount | a second entry with the same identity and a different figure is `cost_entry_conflict`; an identical one still dedupes. **The fifth correction round makes that identity real** (Low 3): `occurredAt` used to DEFAULT to `nowIso()` and then feed `costEntryKey`, so the identity of an unkeyed entry contained a millisecond wall clock and two identical calls essentially never met — executed at 0 ms, 2 ms and 30 ms gaps, a replay of a 6000-unit entry was accepted as a second row every time and the Founder ceiling observed 12000 from 6000 spent. The key now uses the DECLARED instant only, and an entry that declares neither an `idempotencyKey` nor an `occurredAt` is refused, because HQ cannot then tell a replay from a second real spend and will not invent an answer in either direction | same file, plus `test/intelligence-cost-identity.test.ts` |
 | LOW B-6 — the escalation view's `requiresFounderDecision` came from the request, not the row | projected from the stored `budgetDecision`, like the trigger beside it | same file |
 | LOW B-7 — `MAX_COST_BASIS_LENGTH` never applied to an `estimated` basis, and the refusal was misnamed | the bound applies to every provenance; `basis_too_long` is its own refusal | same file |
 | LOW B-8 — `providerId`/`modelId` were scanned at the route and not at the facade | `assertBrowserSafe` at the facade, where `recordIntelligenceCost`'s only callers are | same file |

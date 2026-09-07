@@ -2,8 +2,8 @@
  * Append-only, hash-chained evidence log.
  *
  * Every operator decision and execution attempt lands here. Entries are never
- * updated or deleted, and that is held in THREE independent ways, because the
- * hash chain alone held only one of the three:
+ * updated or deleted, and that is held in FOUR independent ways, because the
+ * hash chain alone held only one of the four:
  *
  *  1. **The engine refuses the write.** `ensureEvidenceGuards` installs the
  *     same append-only trigger trio every other engine-immutable ledger
@@ -24,8 +24,16 @@
  *     the genesis value and had nothing to say about where the chain was
  *     supposed to END. Without the contiguity half, that same commitment was
  *     erased by the very next append — see the check itself.
+ *  4. **A commitment that does not live inside the log.** Points 1–3 all read
+ *     this table and ask whether it is self-consistent, and a writer that holds
+ *     the file open can make a shortened log perfectly self-consistent. HQ
+ *     therefore records the log's tip — its length and the hash at that seq —
+ *     into `hq_integrity_checkpoints`, a separate append-only ledger that is
+ *     itself engine-guarded and in the census, and `verifyEvidenceChain`
+ *     refuses a log that contradicts any commitment ever recorded there. See
+ *     `recordIntegrityCheckpoint` in `store/integrity.ts`.
  *
- * What is corrected rather than restated, twice:
+ * What is corrected rather than restated, three times:
  *
  *  - the header before the third correction round claimed "silent tampering or
  *    deletion breaks the chain and is detectable by verifyChain()". The
@@ -36,24 +44,43 @@
  *    deletion invisible again and the documented remedy — a Founder full
  *    assessment — certified the robbed log as intact (Wave 5 correction round
  *    four, High 2). The contiguity requirement is what makes point 3 hold
- *    against the next write rather than only at the instant before it.
+ *    against the next write rather than only at the instant before it;
+ *  - the header after THAT claimed points 1–3 named a real cost, in three
+ *    sentences that were all false (Wave 5 correction round five, High 1). It
+ *    said a coherent rewrite required RENUMBERING the survivors, that the
+ *    renumbering needs the UPDATE the engine guard refuses, that dropping the
+ *    guard is itself a blocking finding, and that a log dropped and re-created
+ *    whole is answered by the dropped-ledger census. Executed, none of it held:
+ *    `DROP TABLE op_evidence`, re-create it from its own `sqlite_master` SQL,
+ *    INSERT a shortened log with explicit seqs rehashed from the genesis value,
+ *    re-create the three triggers — no UPDATE anywhere, so that barrier is
+ *    never crossed; no write to `sqlite_sequence`, because SQLite rebuilds the
+ *    high-water mark from the explicit rowids; no census finding, because the
+ *    guards are back before HQ next constructs and the as-found census reads
+ *    `sqlite_master` at construction time only; and nothing from the
+ *    dropped-ledger detector, because the attacker re-created the table. Two
+ *    committed audit entries were erased and both the boot and the Founder's
+ *    full assessment read CLEAN. Point 4 is the answer, and it is a commitment
+ *    recorded outside this table rather than a fourth reading of the table.
  *
- * The residual is stated rather than glossed: against a writer that already
- * holds the database file open, dropping the triggers and then rewriting the
- * log coherently — deleting entries, RENUMBERING the survivors so no seq is
- * missing, recomputing every hash forward from the genesis value and lowering
- * `sqlite_sequence` to match — is still possible, and is not detected here.
- * That is now a whole-log rewrite rather than a tail delete: every step is an
- * additional deliberate act, the renumbering needs the UPDATE the engine guard
- * refuses, and dropping that guard is itself a blocking finding. A real
- * barrier, not a cryptographic boundary — HQ holds no key a foreign writer does
- * not also have.
+ * The residual is stated rather than glossed, and every barrier named in it has
+ * been tried: against a writer that already holds the database file open,
+ * rewriting the log coherently AND dropping `hq_integrity_checkpoints` (or
+ * appending to it a commitment that matches the forgery — which does not work
+ * on its own, because every commitment ever recorded is checked and the
+ * per-ledger comparison takes the maximum) leaves the forgery undetected once
+ * HQ has re-created the checkpoint ledger empty and a later process has nothing
+ * to measure against. That is more deliberate acts than before, across two
+ * engine-guarded ledgers and a census that reports each drop at the boot that
+ * observes it — a real cost, and still not a cryptographic boundary. HQ holds
+ * no key a foreign writer does not also have; nothing here pretends otherwise.
  */
 
 import { createHash } from 'node:crypto';
 import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
+import { contradictedChainCommitment } from '../store/integrity.js';
 
 export interface EvidenceEntry {
   seq: number;
@@ -187,6 +214,14 @@ export function assertNoSecretLikeContent(payload: Record<string, unknown>): voi
  * from 1, which is a property of the record rather than of the moment it is
  * read.
  *
+ * **And none of that survives a log that was re-created whole** (Wave 5
+ * correction round five, High 1). Links, contiguity and the high-water mark are
+ * all read out of the same table, so a writer that drops it and inserts a
+ * shortened, coherently rehashed replacement satisfies every one of them. The
+ * last check is therefore against `hq_integrity_checkpoints` — a commitment HQ
+ * recorded elsewhere, in an append-only ledger of its own — and it is the only
+ * one of the four that a rewrite of THIS table cannot satisfy.
+ *
  * A deletion in the MIDDLE with NO later append was always caught by the links
  * themselves: the following entry's `prev_hash` no longer matches its new
  * predecessor. With a later append it was not — the appended entries chain from
@@ -284,7 +319,20 @@ export function verifyEvidenceChain(db: HqDatabase): number | null {
   // first entry that does not verify — "the log stops being true here".
   const highWater = evidenceHighWaterMark(db);
   if (highWater != null && highWater > lastSeq) return lastSeq + 1;
-  return null;
+  // The DURABLE COMMITMENT, last (Wave 5 correction round five, High 1). Every
+  // check above reads this log and asks whether it is self-consistent, and a
+  // writer holding the file open can make a shortened log perfectly
+  // self-consistent — drop the table, re-create it from its own schema, insert
+  // a rehashed shorter log with explicit seqs, re-create the guards. Links,
+  // contiguity and the high-water mark all agree afterwards, because
+  // `sqlite_sequence` is rebuilt from the explicit rowids and no UPDATE was
+  // ever executed. The checkpoint ledger is the witness that does not live
+  // inside the record: see `recordIntegrityCheckpoint`.
+  //
+  // Checked AFTER the walk, deliberately: a genuine break in the links or a
+  // hole in the seqs keeps its own precise answer, and the commitment only
+  // speaks when the log has been made to look whole.
+  return contradictedChainCommitment(db);
 }
 
 export class EvidenceLog {

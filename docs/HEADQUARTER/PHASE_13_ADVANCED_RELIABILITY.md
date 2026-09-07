@@ -634,6 +634,7 @@ The strongest claim in the phase, established three ways — the Phase 12 recipe
 | the RECORDED verdict a construction re-reads | `latestIntegrityVerdict(db)` — a direct read of the append-only `hq_reliability_verdicts` ledger | whether a blocking verdict survives a restart | canonical. The ledger carries the full append-only trio; a raw connection can APPEND a `safe_mode = 1` row (the fail-closed direction) and can neither rewrite nor erase one. |
 | the APPEND-ONLY GUARDS ON THE AUDIT LOG ITSELF | the same `missingImmutabilityGuards` census, now that `op_evidence` is a declared `ENGINE_IMMUTABLE_TABLES` member | whether removing the guards on the hash-chained log is a blocking finding | canonical **since the third correction round (High A2)**. The table used to carry NO triggers at all, on the argument that "its guarantee is the chain rather than the engine" — so a raw `DELETE FROM op_evidence WHERE seq > 1` was simply permitted, and the chain then verified perfectly over what was left. |
 | the EVIDENCE-CHAIN verification that PRODUCES that verdict | `#verifyEvidenceChainFromStore` — a `#private` closure over `#db` and the module-level `verifyEvidenceChain`, deliberately NOT `queue.evidence.verifyChain()` | whether `evidence_chain_broken` engages safe mode, and whether an already-latched safe mode survives the next assessment | canonical **since the Wave 5 correction**; it previously read the patchable delegate. Pinned against a patch on the instance and on `EvidenceLog.prototype`, and against a facade constructed after it. Since the third correction round it verifies the chain's LENGTH as well as its links, against the AUTOINCREMENT high-water mark SQLite maintains — because walking forward from the genesis value proved that the entries PRESENT link to one another and said nothing about where the chain was supposed to END, so deleting the NEWEST entries left a log that verified perfectly. Since the FOURTH it also requires the seqs present to be CONTIGUOUS from 1, because the high-water comparison alone was erased by the next ordinary append: one entry later the largest seq present reached the mark again, the deleted seqs became a hole in the middle, and the appended entries chained from the surviving tip so the links did not object either. |
+| the DURABLE COMMITMENT both of those are measured against | `contradictedChainCommitment` and `regressedImmutableLedgers` — direct reads of the append-only `hq_integrity_checkpoints` ledger, over `#db`, with no injected closure and nothing patchable in the path | whether a log that was re-written WHOLE, or a ledger that is back EMPTY, engages safe mode | canonical **since the fifth correction round (High 1 / Medium 1)**. Every other check on this table reads the record and asks whether the record is self-consistent, which a coherent whole-log rewrite satisfies. This one asks whether the record agrees with a commitment HQ made about it earlier, in a different append-only ledger. Every commitment ever recorded is checked and the per-ledger comparison takes the MAXIMUM ever committed, so an appended checkpoint can only add a constraint. |
 | the APPEND-ONLY GUARD census that produces the other schema finding | `missingImmutabilityGuards(db)` over `ENGINE_IMMUTABLE_TABLES`, observed as the file was FOUND | whether `append_only_guard_missing` engages safe mode | canonical, and **widened twice by the Wave 5 review** — to the secondary-unique guards and `hq_memory`'s supersede rule (Medium 2), and to `hq_mission_plan_items`' three own guards (Medium 6). The declaration is **deep-frozen at module scope** (HIGH 2): it is public package API, `readonly` erases at runtime, and one `ENGINE_IMMUTABLE_TABLES.length = 0` used to empty the census and make a tampered file read clean. |
 | store presence | the constructor's `#reliabilityStorePresent` flag | whether a 0 means "absent" or "empty" | canonical, observed, never migrated. |
 | the ledger, for the unauthenticated snapshot | `#listRunsFromStore` and the `#private` report — deliberately NOT `listRuns()` or `hqReliabilityPosture()` | what `hq-snapshot.json`'s `reliability` section publishes | canonical. |
@@ -1369,6 +1370,30 @@ not re-litigate them: the `#private`-closure enforcement design held under
 hostile patching of every read surface tried, and the trigger/table census was
 exactly complete in both directions before `op_evidence` was added to it.
 
+## The FIFTH correction round: a commitment that lives outside the record
+
+A fresh read-only reviewer re-read the fourth-round head by EXECUTION and
+returned 0 Critical / 1 High / 1 Medium / 3 Low. Both the High and the Medium
+were the same defect one level apart: **every check HQ had read the record and
+asked whether the record was self-consistent**, and a writer that already holds
+the file open can make a shortened record perfectly self-consistent.
+
+| Finding | What was reproduced | What changed |
+|---|---|---|
+| **HIGH 1** — the evidence chain could be re-written WHOLE, and the shipped residual overstated three barriers that do not exist | `DROP TABLE op_evidence` → re-create from its own `sqlite_master` SQL → INSERT a shortened log with explicit seqs rehashed from the genesis value → re-create the three triggers. Links, contiguity and the `sqlite_sequence` high-water mark all agree; NO `UPDATE` is executed, nothing writes `sqlite_sequence`, the guards are back before HQ next constructs, and the dropped-ledger detector sees a table that is present. Two committed audit entries erased, boot CLEAN, Founder full assessment CLEAN. The cheaper tail-SUBSTITUTION variant (drop triggers → DELETE tail → INSERT replacements at the SAME seqs → re-create triggers) was equally clean. The residual list told the Founder this attack needed the UPDATE the engine refuses and left a blocking trace; it needed neither. | A durable checkpoint ledger, `hq_integrity_checkpoints`: append-only, engine-guarded with the same trio, declared in `ENGINE_IMMUTABLE_TABLES`, holding the evidence chain's length and the hash AT that seq plus each declared ledger's AUTOINCREMENT high-water mark. Written at every construction that finds nothing blocking and inside every clean assessment, never while safe mode is engaged, and never on a read-only handle. EVERY commitment ever recorded is checked and the per-ledger comparison takes the maximum ever committed, so appending a checkpoint that agrees with a forgery adds a satisfied row and removes nothing. `verifyEvidenceChain` returns the first contradicted length, and the cheap structural pass checks the commitment too — one indexed lookup — so the boot catches it as well as the assessment. |
+| **MEDIUM 1** — one Founder full assessment converted a confirmed destructive finding into a recorded CLEAN verdict | The boot census reported 31 dropped ledgers and engaged safe mode; `releaseKillSwitch` was refused. The full assessment — the documented remedy — asked about "the file as it now stands", found the ledgers HQ had itself re-created EMPTY, and recorded `safeMode: false` with an EMPTY findings list; `releaseKillSwitch` was then admitted. Identical for the seven-ledger subset. | Two halves. The ledgers THIS process found absent and re-created are carried into `fullIntegrity` and are not clearable by it: re-creating a ledger repairs the schema, not the rows. A missing GUARD stays clearable, deliberately, because re-creating a trigger genuinely does repair the file's guard set. The durable half is the checkpoint's high-water commitment, which is a fact about the file as it now stands and therefore survives restarts. |
+| **LOW 1** — the schema-ensured mark's false-ALARM direction was undisclosed | `hqSchemaEnsuredMarkPresent` accepted ANY non-zero `PRAGMA user_version`, which is the conventional application-schema slot. A fresh file another application had stamped `user_version = 7` booted `safeMode: true ["append_only_guard_missing"]`; the control fresh file booted clean. | A distinctive constant of HQ's own, read as an exact member of a closed set. A later build that raises the generation adds the new value beside the old one, which is a reviewed act rather than an arithmetic comparison that would accept a foreign stamp again. |
+| **LOW 2** — `assessHqIntegrity` threw an uncaught `SqliteError` on a read-only handle, and the comment beside it was false | `#reliabilityStorePresent` is TRUE for a read-only handle over a modern file, so the verdict append ran and the engine's error escaped the facade instead of an `OpsResult`. The comment claimed `verdictRecorded` was false for "a pre-correction file, or a read-only one"; the read-only half never got that far. | An explicit refusal, after the authority gates, naming why: the assessment records a verdict, the evidence entry that corroborates it and the checkpoint, and a verdict HQ cannot record is a verdict HQ does not act on. The comment now says what is true. |
+| **LOW 3** — a cost entry's identity contained a wall-clock default | `occurredAt` defaulted to `nowIso()` and fed `costEntryKey`, so at 0 ms, 2 ms and 30 ms gaps an unchanged replay of a 6000-unit entry was accepted as a NEW ROW and the Founder ceiling observed 12000 from 6000 spent. It also answers a question a previous round left open: the cost-entry shuffling an earlier reviewer saw across runs was this, not a script artefact. | The key carries the DECLARED instant or nothing, and an entry declaring neither an `idempotencyKey` nor an `occurredAt` is refused. Recorded in the Phase 14 document, where the claim it falsified lives. |
+
+**Two things this round deliberately did NOT do**, with the reason: it did not
+widen the closed finding vocabulary — a dropped ledger has always been reported
+as `append_only_guard_missing`, and a ledger that is back empty is the same
+finding measured a second way — and it did not make a boot-time observation
+permanently unclearable, because a build that declares a NEW ledger produces the
+same observation on every established file and permanent safe mode for a routine
+upgrade would be a worse failure than the one being closed.
+
 ### What is NOT fixed — all four lanes' disclosures, in one list
 
 Nothing below is closed by this wave, and each item is stated where it belongs
@@ -1378,27 +1403,63 @@ as well as here:
   against the chained `op_evidence` entry. A raw, well-formed, recognized append
   still moves a run's derived state; the engine guards refuse UPDATE, DELETE and
   REPLACE, not a forged new row.
-- The evidence chain's LENGTH commitment is two checks, not one: the seqs
-  present must be CONTIGUOUS from 1, and the largest one present must reach
-  SQLite's own AUTOINCREMENT high-water mark in `sqlite_sequence`, which a DELETE
-  does not lower. **The earlier wording of this item understated the cost of
-  getting past it, and the fourth correction round corrects both the wording and
-  the code.** It said a `sqlite_sequence` rewrite was needed; in fact NO rewrite
-  was needed at all, because the high-water check alone was erased by the next
-  ordinary append — HQ's own boot appends did it — and a tail deletion that
-  verified as BROKEN at the instant it happened verified as CLEAN one entry
-  later, with the documented remedy (one Founder full assessment) then certifying
-  the robbed log. The contiguity requirement is a property of the record that no
-  later write repairs. What is still NOT detected, stated exactly: a writer that
-  drops the guard and rewrites the WHOLE log coherently — deleting entries,
-  RENUMBERING the survivors so no seq is missing, recomputing every hash forward
-  from the genesis value and lowering `sqlite_sequence` to match. The renumbering
-  needs the UPDATE the engine guard refuses, dropping that guard is itself a
-  blocking finding, and HQ holds no key a foreign writer does not also have. A
-  real barrier, not a cryptographic boundary. Contiguity is also silent on a log
-  that was DROPPED and recreated whole, because the seqs then restart at 1 with
-  no gap — that is the dropped-ledger question, answered by the item below rather
-  than by this one.
+- The evidence chain's LENGTH commitment is three checks now, not two: the seqs
+  present must be CONTIGUOUS from 1, the largest one present must reach SQLite's
+  own AUTOINCREMENT high-water mark in `sqlite_sequence` (which a DELETE does not
+  lower), and the log must not contradict any DURABLE CHECKPOINT HQ has recorded
+  in `hq_integrity_checkpoints`. **Both earlier wordings of this item understated
+  the cost of getting past it, and each was corrected by the round that followed
+  it.** The fourth round corrected "a `sqlite_sequence` rewrite is needed" — no
+  rewrite was needed, because the high-water check alone was erased by the next
+  ordinary append (HQ's own boot appends did it) and a tail deletion that
+  verified as BROKEN one moment verified as CLEAN one entry later, with the
+  documented remedy then certifying the robbed log; contiguity is the property no
+  later write repairs. **The fifth round corrects the sentence the fourth round
+  wrote**, which named three barriers that were all false and cross-referenced a
+  fourth item that answered nothing. It said the surviving attack needed the
+  survivors RENUMBERED, that the renumbering needs the UPDATE the engine guard
+  refuses, that dropping that guard is itself a blocking finding, and that a log
+  dropped and re-created whole is the dropped-ledger question answered below.
+  Executed, none of it held: `DROP TABLE op_evidence`, re-create it from its own
+  `sqlite_master` SQL, INSERT a shortened log with explicit seqs rehashed forward
+  from the genesis value, re-create the three triggers. No `UPDATE` is executed
+  anywhere, so that barrier is never crossed; nothing writes `sqlite_sequence`,
+  because SQLite rebuilds the high-water mark from the explicit rowids; there is
+  no census finding, because the guards are back before HQ next constructs and
+  the as-found census reads `sqlite_master` at construction time only; and the
+  dropped-ledger detector reports nothing, because the attacker re-created the
+  table. Two committed audit entries were erased and BOTH the boot and the
+  Founder's full assessment read completely clean. The cheaper tail-SUBSTITUTION
+  variant — drop the triggers, DELETE the tail, INSERT replacement rows at the
+  SAME seqs, re-create the triggers — was equally clean, and it too executes no
+  `UPDATE`. What answers both is a commitment that does not live inside the log:
+  HQ records the chain's length and the hash at that seq into
+  `hq_integrity_checkpoints` at every construction that finds nothing blocking
+  and inside every clean assessment, every commitment ever recorded is checked,
+  and the per-ledger comparison takes the maximum ever committed — so appending a
+  checkpoint that agrees with the forgery adds a satisfied row and removes
+  nothing. **What is still NOT detected, with every barrier in the sentence
+  personally tried:** a writer that rewrites the log coherently AND drops
+  `hq_integrity_checkpoints` as well. Executed end to end, this is exactly what
+  it costs and no more. The drop IS reported — the ledger is a declared
+  `ENGINE_IMMUTABLE_TABLES` member carrying the engine's own trio, so the boot
+  that observes it engages safe mode, that process's full assessment still
+  reports it, and `releaseKillSwitch` is refused. Then: restart, and a SECOND
+  Founder full assessment in the new process clears it, because HQ has by then
+  re-created the ledger empty and no commitment survives to measure against.
+  Measured: `p2 boot=true assess=true release=refused`, `p3 boot=true
+  assess=false release=ADMITTED`. So the honest cost of the surviving attack is
+  one extra `DROP TABLE`, one restart and one further Founder act — more
+  deliberate acts across more guarded ledgers than the attack needed before, and
+  a cost rather than a boundary. HQ holds no key a foreign writer does not also
+  have, and nothing here pretends the commitment is one.
+
+  The other escape is the one already disclosed for the header mark, and the
+  checkpoint ledger does not change it: a writer that drops every declared
+  ledger AND zeroes `PRAGMA user_version` leaves a file that reads as a first
+  boot, so the census — and every commitment, which went with the ledger —
+  reports nothing at all. Executed: `boot=false [] release=ADMITTED` on the
+  first process afterwards.
 - A DROPPED declared ledger is a finding only on a handle that can WRITE, because
   the discriminator between "this file lost a ledger" and "this file predates
   it" is that HQ's own ensure pass re-creates what its schema declares. A
@@ -1425,6 +1486,47 @@ as well as here:
   covers the case where the stamp itself could not be written — the facade never
   fails a construction over the mark, so a file HQ could not stamp is a file HQ
   reads as new next time.
+
+  **The fifth correction round adds the half this item never had: what a full
+  ASSESSMENT does with the same observation.** The boot reported the drop and
+  engaged safe mode, and then one Founder full assessment — the documented
+  remedy, and the only thing that can clear a latch — asked about "the file as
+  it now stands", found the ledgers HQ had itself just re-created EMPTY, and
+  recorded `safeMode: false` with an EMPTY findings list. HQ affirmatively
+  certified a store it had told the Founder was gutted one call earlier, and
+  handed `releaseKillSwitch` back. Executed for the total erasure and, in
+  exactly the same shape, for the seven-ledger subset that shipped in an earlier
+  round. Two things changed. The ledgers this process found ABSENT and
+  re-created are carried into the assessment and are not clearable by it —
+  re-creating a ledger repairs the schema, not the rows, and no assessment of
+  the file as it now stands can un-destroy them (a missing GUARD is deliberately
+  still clearable, because HQ re-creating a trigger genuinely does repair the
+  file's guard set). And the checkpoint ledger described above commits each
+  declared ledger's AUTOINCREMENT high-water mark, which cannot fall in
+  legitimate operation, so a ledger that is back EMPTY contradicts a commitment
+  the file itself carries — a fact about the file as it now stands, reported
+  however many restarts have happened and clearable by nothing while it is true.
+
+  **What that leaves, executed rather than assumed.** The durable half only
+  bites where a checkpoint PRECEDED the destruction and where the destroyed
+  ledger had rows to lose: a ledger that was empty anyway commits no mark, and
+  the local-first cadence is what keeps the window short (every CLI command is a
+  new process, and every construction that finds nothing blocking commits). A
+  ledger HQ itself keeps writing to can also climb back ABOVE its committed mark
+  — `op_evidence` does, within a few boots — after which only the content-bound
+  chain commitment still contradicts it. So for a subset erasure that leaves
+  `hq_integrity_checkpoints` and `op_evidence` alone, that destroys only ledgers
+  with no rows, or that happens before HQ has ever committed, the boot that
+  observed the drop and the process it belongs to are still the only reporters:
+  safe mode is engaged and recorded, a restart does not clear it, but a full
+  assessment in a LATER process does. Measured on the exact reviewer scripts:
+  with a checkpoint in place, a total erasure that spares the checkpoint ledger
+  stays blocking through three further processes and three further Founder
+  assessments; without one, or with the checkpoint ledger dropped too, the
+  second process's assessment clears it — `p2 boot=true assess=true
+  release=refused`, then `p3 boot=true assess=false release=ADMITTED`. Dropping
+  a declared ledger that held NO rows is in the same position and always will
+  be: there was no high-water mark to commit to, and nothing was destroyed.
 - The verdict ledger is durable only where it EXISTS: a database written before
   this wave, or a read-only handle over one, carries no `hq_reliability_verdicts`
   table and the verdict is process-local there. `SAFE_MODE_STATEMENT` says so.
@@ -1442,7 +1544,11 @@ as well as here:
 - **An HQ database file created before this wave engages safe mode once, on its
   first boot afterwards**, because `trg_hq_mission_plan_items_no_erase` did not
   exist in it and the as-found census observes it missing. The finding is true
-  rather than spurious; one Founder full assessment clears it. Since the verdict
+  rather than spurious; one Founder full assessment clears it — and "clears it"
+  is the right phrase for THIS case, where a guard was missing and HQ's ensure
+  pass genuinely repaired it, in a way it is deliberately NOT the right phrase
+  for a file whose ledgers were destroyed (see the dropped-ledger item above,
+  which the fifth correction round separates from these). Since the verdict
   ledger survived this merge, that first boot also RECORDS the engagement, so it
   now persists across restarts until that assessment — stronger, and stated here
   rather than discovered in operation. A fresh file is unaffected.
@@ -1456,10 +1562,36 @@ as well as here:
   carries no paired evidence entry and so no longer clears a blocking verdict
   standing behind it. Both are the fail-closed direction and both are cleared by
   one Founder full assessment.
+- **The fifth correction round adds one more first-boot case, for the same
+  reason.** `hq_integrity_checkpoints` is a newly declared engine-immutable
+  ledger, so a file no writer of this build has opened does not carry it and the
+  as-found census says so once. Cleared by one Founder full assessment, and the
+  same fail-closed direction as the two above. The `PRAGMA user_version` mark
+  also changed value in that round — it is now HQ's own distinctive constant
+  rather than `1`, read as an exact member of a closed set — so a file stamped
+  by an earlier build of this wave reads as unmarked until its next writable
+  construction re-stamps it; the ledger half of the discriminator answers for it
+  meanwhile.
 - **A READ-ONLY handle over such a file cannot clear either**, because it
   creates nothing and assesses nothing. `hq:snapshot` over a database that no
   writer of this build has opened will report `append_only_guard_missing` until
-  one has. Open it once with a writable HQ command first.
+  one has. Open it once with a writable HQ command first. The fifth correction
+  round makes that refusal explicit rather than an exception: `assessHqIntegrity`
+  through a read-only handle used to reach the verdict append and throw the
+  engine's `SqliteError: attempt to write a readonly database` out of the facade,
+  and it now returns an `invalid_input` refusal saying why. Not reachable from
+  any shipped command — only `cli/snapshot.ts` builds a read-only facade and it
+  never assesses — but the facade's own rule is refusals, not exceptions.
+- **A foreign `PRAGMA user_version` is no longer read as HQ's mark** (fifth
+  correction round, Low 1). `user_version` is the conventional
+  application-schema slot and HQ has claimed it; reading "any non-zero value" as
+  HQ's own meant a file another application had stamped `user_version = 7`
+  booted `safeMode: true ["append_only_guard_missing"]` on first contact, with
+  every declared ledger reported absent from a database nothing had tampered
+  with. Only HQ's own constant counts now. The residual is unchanged in the
+  other direction and stated where it is read: HQ still OVERWRITES whatever was
+  in that slot when it ensures a file, so a foreign application's version
+  number is lost if HQ is ever pointed at its database.
 - Recovery's liveness correction is a REPAIR path, not a prevention.
 - A MODEL-scoped ceiling does not govern a decision write, because nothing in
   canonical truth binds a task to a model.

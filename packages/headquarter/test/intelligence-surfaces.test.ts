@@ -170,6 +170,10 @@ function seedLedgers(h: Harness): string {
       provenance: 'unknown',
       unitKind: 'unknown',
       decisionId: decision.id,
+      // A cost entry must DECLARE an identity, so a replay of the same
+      // observation is recognized rather than counted twice (Wave 5 correction
+      // round five, Low 3).
+      idempotencyKey: 'surfaces-seed',
     }),
   );
   return decision.id;

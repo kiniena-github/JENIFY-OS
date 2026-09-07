@@ -63,8 +63,21 @@ function decide(fx: IntelligenceFixture, over: Record<string, unknown> = {}) {
   } as Parameters<HeadquarterOperations['recordIntelligenceDecision']>[0]);
 }
 
+/**
+ * Every helper call is its own OBSERVATION, and says so.
+ *
+ * A cost entry must declare an identity — an `idempotencyKey` or the
+ * `occurredAt` it was observed at — because the wall clock HQ used to default
+ * into the key made a replay of an identical entry a second row, and a Founder
+ * ceiling then observed twice what was spent (Wave 5 correction round five,
+ * Low 3). A per-call key keeps each of these calls a distinct entry, exactly
+ * as before; a test that means two calls to be the SAME observation passes its
+ * own key and overrides this one.
+ */
+let costCallSeq = 0;
+
 function cost(fx: IntelligenceFixture, over: Record<string, unknown> = {}) {
-  return fx.ops.recordIntelligenceCost({
+  const input: Record<string, unknown> = {
     taskId: fx.claim.taskId,
     workerId: fx.claim.workerId,
     fence: fx.claim.fence,
@@ -72,7 +85,16 @@ function cost(fx: IntelligenceFixture, over: Record<string, unknown> = {}) {
     provenance: 'unknown',
     unitKind: 'unknown',
     ...over,
-  } as Parameters<HeadquarterOperations['recordIntelligenceCost']>[0]);
+  };
+  // ONLY when the test declares neither. A test that fixes `occurredAt` is
+  // declaring the identity itself — that is how the dedupe and conflict cases
+  // below meet — and a per-call key would silently take those cases apart.
+  if (input.occurredAt === undefined && input.idempotencyKey === undefined) {
+    input.idempotencyKey = `helper-cost-${(costCallSeq += 1)}`;
+  }
+  return fx.ops.recordIntelligenceCost(
+    input as Parameters<HeadquarterOperations['recordIntelligenceCost']>[0],
+  );
 }
 
 describe('the governing budget policy is DERIVED, never named by the caller', () => {
@@ -319,6 +341,11 @@ describe('a cost entry is attributed to canonical truth, not to what the caller 
         providerId: 'anthropic',
         provenance: 'unknown',
         unitKind: 'unknown',
+        // A cost entry must DECLARE an identity, so a replay of the same
+        // observation is recognized rather than counted twice (Wave 5
+        // correction round five, Low 3). Each spelling below is its own
+        // observation and carries its own key.
+        idempotencyKey: 'canonical-spelling',
         ...over,
       } as Parameters<HeadquarterOperations['recordIntelligenceCost']>[0]);
 
@@ -851,6 +878,10 @@ describe('every ceiling that governs the work binds, and every figure it rests o
         amountMinorUnits: 3_702,
         currency: 'USD',
         unitKind: 'tokens_total',
+        // A cost entry must DECLARE an identity, so a replay of the same
+        // observation is recognized rather than counted twice (Wave 5
+        // correction round five, Low 3).
+        idempotencyKey: 'provider-ceiling-spend',
       }),
     );
     // Readable under either spelling, because the read is folded exactly as the
