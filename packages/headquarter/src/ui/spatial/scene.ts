@@ -31,6 +31,7 @@ import {
   type Occupant,
   type ZoneState,
 } from './state.js';
+import { deepFreeze } from '../../contracts/freeze.js';
 
 /* ------------------------------------------------------------------ */
 /* Projection                                                          */
@@ -327,7 +328,7 @@ function prop(station: Station, zone: Zone, lit: boolean): string {
  * than remembered: `test/spatial-truth.test.ts` asserts every kind's marker
  * clears its contents, and that both records cover every StationKind.
  */
-export const PROP_EXTENT: Record<StationKind, number> = {
+export const PROP_EXTENT: Record<StationKind, number> = deepFreeze({
   desk: 1.41,
   review_bay: 1.41,
   console: 1.28,
@@ -336,13 +337,13 @@ export const PROP_EXTENT: Record<StationKind, number> = {
   uplink: 1.72,
   stack: 0.9,
   table: 0.42,
-};
+});
 
 /** Minimum gap between the top of a station's contents and its marker. */
 export const MARKER_CLEARANCE = 0.05;
 
 /** Where the marker floats, per station kind: clear of that prop's own height. */
-export const MARKER_HEIGHT: Record<StationKind, number> = {
+export const MARKER_HEIGHT: Record<StationKind, number> = deepFreeze({
   uplink: 1.95,
   bench: 1.15,
   bay: 1.05,
@@ -354,7 +355,7 @@ export const MARKER_HEIGHT: Record<StationKind, number> = {
   // reads as if it belonged there.
   desk: 1.5,
   review_bay: 1.5,
-};
+});
 
 /**
  * The marker's own geometry, in floor units above `MARKER_HEIGHT`.
@@ -366,13 +367,13 @@ export const MARKER_HEIGHT: Record<StationKind, number> = {
  * These are exported so the tests can assert the shapes stay disjoint rather
  * than trusting the numbers to stay right.
  */
-export const MARKER_GEOMETRY = {
+export const MARKER_GEOMETRY = deepFreeze({
   size: 0.14,
   dotBase: 0.0,
   dotTop: 0.17,
   stemBase: 0.32,
   stemTop: 0.95,
-} as const;
+} as const);
 
 function faultMarker(x: number, y: number, kind: StationKind): string {
   const base = MARKER_HEIGHT[kind];
