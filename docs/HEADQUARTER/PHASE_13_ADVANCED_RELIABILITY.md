@@ -1018,7 +1018,11 @@ timing-only concurrency tests. What was built:
   three that are not (`file_too_large`, `path_not_readable`,
   `verification_copy_failed`) are named in "Backup and restore" with the reason,
   rather than counted as if they were — and the split is derived by
-  `backup-refusal-vocabulary.test.ts` rather than counted by hand.
+  `backup-refusal-vocabulary.test.ts` rather than counted by hand. (This sentence
+  read "ten" of "thirteen" at `237fc76`, two constants behind, because round
+  twelve's pin on this page reads ONE phrasing of the pair and this is a second —
+  Wave 5 correction round thirteen, Medium 3. The pin now sweeps EVERY place on
+  this page that states the pair and checks both halves of each.)
 - **A real restore.** Backed up, verified, copied, verified again, opened as a
   working HQ, and the run read back out of the copy.
 
@@ -1856,6 +1860,21 @@ as well as here:
   `HQ_SCHEMA_ENSURED_MARKS` records: a foreign application's `application_id`
   must not be a false alarm at HQ's first boot over its file.
 
+  **CORRECTED at round ten, and this paragraph described the superseded
+  encoding until round thirteen (Low 3).** The slot no longer carries one exact
+  32-bit value read as a member of a closed set. It carries a 16-bit SIGNATURE
+  (`0x4851`, `HQ` in ASCII) in the high half and the greatest rowid HQ's
+  commitment ledger has ever reached in the low half, saturating at `0xFFFF`;
+  `0x48514350` is kept as a legacy stamp meaning "witnessed, mark unknown", for
+  back-compatibility with files committed on by an older build. That is a real
+  loss of specificity in the false-alarm direction — 65,535 accepted values
+  rather than one — and it is measured and argued where the encoding lives
+  (`HQ_COMMITMENT_WITNESS_MARK` in `store/integrity.ts`), together with the one
+  mark value the encoding gives up (a genuine mark of 17,232 encodes to exactly
+  the legacy value and is read back as "unknown"). This page's own convention is
+  that a superseded description carries the correction rather than being
+  silently rewritten, which is why the original sentence stands above it.
+
   **What it still does not answer, executed rather than asserted.** A writer
   that also runs `PRAGMA application_id = 0` puts the file back to unwitnessed —
   one further statement on top of the erasure, still silent, measured
@@ -1867,11 +1886,25 @@ as well as here:
   ordinary upgrade cost of any new mark and not a defence.
 
   The other escape is the one already disclosed for the header mark, and the
-  checkpoint ledger does not change it: a writer that drops every declared
-  ledger AND zeroes `PRAGMA user_version` leaves a file that reads as a first
-  boot, so the census — and every commitment, which went with the ledger —
-  reports nothing at all. Executed: `boot=false [] release=ADMITTED` on the
-  first process afterwards.
+  checkpoint ledger DOES change its price — this paragraph priced it two
+  statements too cheap and one restart too cheap until round thirteen (Low 2).
+  It read: "a writer that drops every declared ledger AND zeroes
+  `PRAGMA user_version` leaves a file that reads as a first boot … Executed:
+  `boot=false [] release=ADMITTED` on the first process afterwards." Re-executed
+  at `237fc76`, step by step on one warmed file:
+
+  - 33 `DROP TABLE`s, one per declared ledger: `boot=true
+    [append_only_guard_missing] assess=true release=REFUSED`;
+  - plus `PRAGMA user_version = 0` (34 statements): still `boot=true
+    [append_only_guard_missing] assess=true release=REFUSED`, on that process
+    and the next;
+  - plus `PRAGMA application_id = 0` (35 statements): the first process
+    afterwards is `boot=true [append_only_guard_missing] assess=FALSE []
+    release=ADMITTED`, and every process after that is `boot=false []`.
+
+  So the honest price is 35 statements, one restart and one Founder assessment —
+  not 34 and no restart. What did not change is the CLASS: HQ holds no key over
+  its own file, and a writer who already has it can rewrite both header slots.
 
 - **There were TWO durable commitments in the concurrent round-four/round-five
   lanes, and ONE survives.** The round-four lane recorded the chain tip on every
@@ -2245,8 +2278,8 @@ survived it.
   stated on `assertBrowserSafe` itself.
 - **Round seven closed two UNDISCLOSED classes of the zero-ink sweep, and
   re-states the third.** The set named five properties and two code points and
-  argued `\p{Zs}` out on the merits, but `\p{Mn}` non-spacing marks (1,796 code
-  points), `\p{Me}` enclosing marks (13) and `\p{Cn}` unassigned (810,961) were
+  argued `\p{Zs}` out on the merits, but `\p{Mn}` non-spacing marks (2,059 code
+  points), `\p{Me}` enclosing marks (13) and `\p{Cn}` unassigned (814,730) were
   in neither the set nor any residual list. Each broke
   `sk-ABCDEFGHIJKLMNOP0123` into two unmatched halves with every character of
   the key intact; U+0301 and U+0378 are the two the review named, and both were
@@ -2981,7 +3014,7 @@ same question the surviving answer is named at the code.
 | **MEDIUM NEW-5** — 26 exported ALL-CAPS constants were still unfrozen, and frozen `Set`s were mutable in content | The shipped pinning test enumerates `package.json#exports`, so it cannot see a module no entry point re-exports; the unfrozen count regrew to 26 distinct bindings over 225, across 131 `src/` modules. Separately, `deepFreeze`'s "It freezes ALL THE WAY DOWN" was NOT true of a `Set` or a `Map`: entries are not own properties, so `QUEUED_UNREACHABLE_STATUSES` — which `service.ts` decides a queued task's reachability on — accepted `.delete()` and `.add()`, and `QUERY_STOPWORDS` accepted `.clear()`. | **The other lane froze the same 26 independently** (its round-six pass), and that half of the finding is closed at `b986cff`. What this lane adds is the census that would have CAUGHT the regrowth — `frozen-constants-census.test.ts` enumerates `src/` itself rather than the entry points — and the collection fix: a frozen `Set`/`Map` now has its entries recursed into, with reading untouched. **The mutator half of that sentence was corrected at round ten (Medium 2):** own, non-configurable throwing properties shadow direct access only, so `Set.prototype.clear.call(x)` still emptied the vocabulary in one statement. `deepFreeze` now returns a `Proxy` over the collection rather than the collection, which carries no [[SetData]] slot and so refuses the prototype spelling too. The `freeze.ts` sentence is corrected rather than restated. Decision-bearing, stated either way: `PROJECT_ALLOWED_TRANSITIONS` is the gate behind `canTransitionProject` and `.active.length = 0` flips it true → false, which is NARROWING — a local denial of service on a Founder act, not an authority widening. The other 24 are `ui/spatial/*` geometry and presentation maps, `providers/codex/*` vocabularies and the review schema, `providers/claude/*` evidence kinds and the repo-slug pattern, and `control-console.ts`'s fetch allow-list; none is an authority gate. |
 | **MEDIUM NEW-6** — `provablyAvoidable` flipped retroactively and two published numbers contradicted each other | `decisionIsProvablyAvoidable` recomputed the floor from the CURRENT canonical risk class while `rowToDecision` served the STORED `floor_tier`. Executed: a Founder registry upsert flipped `provablyAvoidable` 1 → 0 and left the served record reporting `floorTier: deterministic_local` beside `requiredReviewTier: critical_review` — which cannot both be true, since the review requirement is one of the terms the floor's `max` is taken over. Undisclosed. | ONE computation answers both. `deriveDecisionRecord` recomputes the floor and SERVES it; `decisionIsProvablyAvoidable` reads that result rather than recomputing, so the two cannot diverge again. The stored value is carried as `floorTierAsRecorded`. The flip is kept — canonical truth really did move — but no longer silent: `riskClassChangedSinceIssue` per record, counted on `analytics.provablyAvoidable.riskClassChangedSinceIssue`, and stated in `AVOIDABLE_SPEND_STATEMENT`. |
 | **LOW NEW-7** — a source file the repository's own text tooling could not read | `test/connectors.github.test.ts` carried a raw U+0007 at byte 4903 and a raw U+202E beside it, so `git diff` rendered it `Bin 9424 -> 9429 bytes` — the exact hazard the NUL two characters earlier had been escaped to avoid. | Both escaped; that change now renders as one line out, one line in. **The other lane escaped the same two characters independently** (its round-six Low 6). What this lane adds is the derived assertion that replaces the hand check — `source-text-hygiene.test.ts` over every `.ts` file in `src/` and `test/` — and what that assertion then FOUND: four more raw U+001F separators in `src/application/product-command.ts`, `src/application/intelligence-command.ts` and `src/live/auth.ts`, each sitting under a Wave 5 Medium 10 comment claiming the separator had been written so the file "stays greppable". The comment described a fix that was never applied. All four are escapes now, same runtime value. |
-| **Two undisclosed sweep residuals** — `\p{Mn}`, `\p{Me}` and `\p{Cn}` carried a credential shape past the guard | The zero-ink sweep named five properties and argued `\p{Zs}` out on the merits, but non-spacing marks (1,796 code points), enclosing marks (13) and unassigned code points (810,961) were in neither the set nor any residual list. U+0301 and U+0378 are the two the review named. | CLOSED, not disclosed. A combining mark leaves every credential character intact and a reader strips the mark, so it is exactly this class. Marks are removed from an `NFKD`-decomposed copy BEFORE the pipeline — `NFKC` composes base + mark into a precomposed `Lu` letter, so a late erase misses it — and all three categories join the erase set as well. Measured after the fix: 1,809 marks swept, 0 survivors; 815 sampled unassigned code points, 0 survivors; no new refusal on accented prose in five languages or on any legitimate string the shipped suite pins. The fold is a SCAN COPY, so stored and served text is byte-unchanged. `\p{Zs}` still not folded, and `Xsk-…`/`9sk-…` still reach a written `hq-snapshot.json` — both pinned as disclosed rather than described. **Corrected at round nine (High 1): that closing sentence was incomplete — `\p{Co}` PRIVATE USE (137,468 code points) was also open, on no stated argument at all, and is closed at round nine.** |
+| **Two undisclosed sweep residuals** — `\p{Mn}`, `\p{Me}` and `\p{Cn}` carried a credential shape past the guard | The zero-ink sweep named five properties and argued `\p{Zs}` out on the merits, but non-spacing marks (2,059 code points), enclosing marks (13) and unassigned code points (814,730) were in neither the set nor any residual list. **Those two figures read 1,796 and 810,961 until Wave 5 correction round thirteen (Low 6)**: they were the sizes on an older ICU, and on the shipped runtime (Node v22.22.2, ICU 78.2, Unicode 17.0) they are 2,059 and 814,730. `\p{Me}` 13, `\p{Co}` 137,468 and `\p{Zs}` 17 were exact. They are now measured against the running engine and parsed back out of the prose by `redaction-invisible-classes.test.ts`, so the pair cannot drift apart again; the guarantee never moved with them, because the erase set is expressed as the PROPERTIES. U+0301 and U+0378 are the two the review named. | CLOSED, not disclosed. A combining mark leaves every credential character intact and a reader strips the mark, so it is exactly this class. Marks are removed from an `NFKD`-decomposed copy BEFORE the pipeline — `NFKC` composes base + mark into a precomposed `Lu` letter, so a late erase misses it — and all three categories join the erase set as well. Measured after the fix: 1,809 marks swept, 0 survivors; 815 sampled unassigned code points, 0 survivors; no new refusal on accented prose in five languages or on any legitimate string the shipped suite pins. The fold is a SCAN COPY, so stored and served text is byte-unchanged. `\p{Zs}` still not folded, and `Xsk-…`/`9sk-…` still reach a written `hq-snapshot.json` — both pinned as disclosed rather than described. **Corrected at round nine (High 1): that closing sentence was incomplete — `\p{Co}` PRIVATE USE (137,468 code points) was also open, on no stated argument at all, and is closed at round nine.** |
 
 ### What the second seventh-round lane does NOT claim
 
@@ -3089,7 +3122,12 @@ false alarm for a false reassurance is not a fix. The evasion is pinned in
   `evidence_chain_broken` over a log that verified perfectly, and one `INSERT`
   carrying that commitment UNCHANGED at rowid 1000 fabricated
   `append_only_guard_missing` — 224 distinct single-`INSERT` shapes in all,
-  counted by the enumeration that now ships. Both latched permanently on an
+  counted by the enumeration that now ships. That figure was RE-MEASURED at the
+  merged head rather than carried across it: with the pre-round-thirteen guard
+  restored (`BEFORE INSERT`, no tip-hash clause, no rowid clause) and the other
+  lane's `no_rowid_skip` dropped from this ledger, the shipped enumeration
+  composes 7,240 shapes, 326 of them LAND, and exactly 224 of those make an
+  intact store report something. Both latched permanently on an
   intact store; only a backup restore escaped. Both are bounded now, by a clause
   that mirrors `contradictedChainCommitment` exactly and by one that asserts the
   ledger's own row-count/greatest-rowid identity. The price is no longer
@@ -3151,41 +3189,68 @@ false alarm for a false reassurance is not a fix. The evasion is pinned in
   ledger is `op_evidence`. It is the same class as HIGH 3 and it is NOT fixed,
   because the only bound available for that check is the number being written.
   Stated at its price rather than described away.
-- **A raw writer can still weaken the gap baseline.** A forged checkpoint
-  committing a LARGER gap than the file has raises the baseline and hides a
-  later deletion. That is one write and it is silent — fail-OPEN, not a
-  fabricated finding — and it needs the same raw write to the file every residual
-  in this module needs. `no_overclaim` bounds marks and counts from above; it
-  does not bound a gap from below, because a legitimate gap cannot be
-  distinguished from a claimed one at write time.
+- **A raw writer can still weaken the gap baseline, and this bullet priced that
+  wrongly until round thirteen (High 1).** It said the way in was "a forged
+  checkpoint committing a LARGER gap than the file has raises the baseline" —
+  per-ledger, per-value, and needing a declared table to be named. The cheapest
+  path named no ledger at all and erased EVERY baseline at once: one `INSERT`
+  whose `ledger_rows` carried an EMPTY key made `committedLedgerGaps` build
+  `'$.' || j.key`, SQLite raise `bad JSON path: '$.'`, and the reader's own
+  `try/catch` return `{}` — all 33 baselines gone, permanently, because the
+  ledger is append-only. Measured against `237fc76`, control and attack identical
+  but for that `INSERT`, over a mid-ledger delete of `hq_reliability_verdicts`
+  rowid 2: control `p2..p6 boot=true["append_only_guard_missing"] assess=true
+  release=refused`; attack `p2 boot=true assess=false[] release=ADMITTED` and
+  `p3..p6 boot=false[] assess=false[] release=ADMITTED`. That was ONE statement
+  against the three this module quotes everywhere else, in the
+  false-reassurance direction, against the ledger that holds the safe-mode latch.
+  Closed in both halves: the guard now admits only the shape HQ's own writer
+  emits (`COMMITMENT_SHAPE_CLAUSES` — a valid JSON object, declared table names
+  as keys, non-negative integers as values), and the reader builds no JSON path
+  out of a key a row carries and fails CLOSED rather than open when the engine
+  refuses it. **What remains** is the narrower thing this bullet used to
+  describe: with the guards temporarily dropped — the same three-statement price
+  every other residual here pays — a checkpoint committing a LARGER gap for a
+  named ledger than the file has raises that ledger's baseline and hides a later
+  deletion of it. Still fail-OPEN, still silent, still not a fabricated finding.
+  `no_overclaim` bounds marks and counts from above; it does not bound a gap from
+  below, because a legitimate gap cannot be distinguished from a claimed one at
+  write time.
 - **A commitment written before this round carries no row count.** The
   `ledger_rows` column defaults to `'{}'` on existing rows, which is the truth
   about a row written before HQ committed any counts. The row-count and gap
   halves of the check begin at the next checkpoint that lands, which is the
   ordinary upgrade cost of a new commitment and not a defence.
 - **The structural pass got more expensive, and the module header now says so.**
-  Measured on the `warmedFile()` fixture: 48 statements executed per pass, of
+  Measured on the `warmedFile()` fixture: 52 statements executed per pass, of
   which 33 are a `COUNT(*)` + `MAX(rowid)` identity pair per declared ledger, 4
   are a further `MAX(rowid)` seek — **one per declared ledger the engine carries
   a positive `sqlite_sequence` row for, which is NOT the set HQ has committed
-  marks for; on this very fixture it is four against three** — and 11 are
+  marks for; on this very fixture it is four against three** — and 15 are
   catalogue, pragma and commitment-ledger reads that do not move. A `COUNT(*)`
   is O(rows) where the seek is not. It is paid deliberately, because the seek
-  cannot see a row removed from the middle and the count can. 48 is this
+  cannot see a row removed from the middle and the count can. 52 is this
   fixture's total and not the cost of a pass: the rule is
-  `STRUCTURAL_STATEMENT_BASE` (44) plus one per seek, which is 46 on a file HQ
-  has merely booted twice and 11 before the first commitment. (The figure this
+  `STRUCTURAL_STATEMENT_BASE` (48) plus one per seek, which is 50 on a file HQ
+  has merely booted twice and 15 before the first commitment. (The figure this
   row carried for two rounds — "46 prepared statements per pass and 0.87 ms
   averaged over 50" — was wrong in both halves; see the two concurrent rounds
-  below, and no duration ships anywhere any more.)
+  below, and no duration ships anywhere any more. **The figures it carried after
+  that — 48 / 44 / 46 / 11 — were wrong a FOURTH time, in the same direction,
+  and are corrected here in round thirteen (Medium 1): the instrument that
+  measured them wrapped `db.prepare` and could not see the four durability
+  pragmas `readDurabilityPosture` reads through `db.pragma()`, which are exactly
+  what the served sentence's own first clause promises a pass reads. The
+  instrument counts `db.pragma` and `db.exec` now, and every figure above moved
+  by four.**)
 - **Nothing here closes the count-preserving in-place REWRITE of the commitment
   ledger.** That residual is unchanged, and `reliability-commitment-residual.test.ts`
   still enforces it.
 - **A cost figure written in THIS document is read by no test.** The parse-back
   rule reaches `integrity.ts` — the served string, the module header and the
   docblock above `STRUCTURAL_STATEMENT_BASE` — and stops there. Executed:
-  changing "48 statements executed per pass" in the bullet above to "61" leaves
-  the whole suite at 191 files / 3425 tests passed. Disclosed at its price, with
+  changing "52 statements executed per pass" in the bullet above to "61" leaves
+  the whole suite at 193 files / 3451 tests passed. Disclosed at its price, with
   the cheapest close named, in the merge section at the end of this page.
 
 ### One residual RE-PRICED downwards at this head
@@ -3572,7 +3637,7 @@ A fresh read-only hostile review of `6ce93df` returned **0 Critical / 1 High /
 
 | Finding | What was wrong | What was done |
 |---|---|---|
-| **HIGH 1** — a PREFIX replay of HQ's own commitment ledger defeated all four commitment checks at once, permanently, and cleared a latched safe mode | `DROP TABLE hq_integrity_checkpoints`, replay the table's own DDL out of `sqlite_master`, and re-insert a PREFIX of its own genuine rows at the rowids they already carried. No hash is recomputed — every row written back is one HQ itself wrote — and no header write is needed, because round seven's yes/no witness stays true. `AUTOINCREMENT` rebuilds `sqlite_sequence` from those explicit rowids, so `elidedCommitmentLedgerRows`' `rows === top === mark` identity holds at a DIFFERENT number; `truncatedImmutableLedgers` compares `MAX(rowid)` against that same rebuilt mark and is satisfied; `regressedImmutableLedgers` reads `ledger_marks` out of the checkpoints just erased, and the surviving oldest checkpoint's own mark for this table is always at or below its own rowid; `contradictedChainCommitment` takes the maximum over the SURVIVING commitments, which the attacker chose. The `rows === 0` witness branch never runs, because the ledger is not empty. Measured by the review on a real file through the real facade: **18 statements** took commitments **7 → 1** and evidence **9 → 4**, with `boot=false []`, FULL Founder assessment `false []`, reboot `false []` and `releaseKillSwitch` **ADMITTED**; a file latched at `["append_only_guard_missing","evidence_chain_broken"]` read `false []` at boot, at full assessment and across two further reboots after a 25-statement rollback over three ledgers; and once the commitment ledger was rolled back this way, rows could be erased from any of the 33 declared ledgers with no finding at any depth. | The header slot now records HOW FAR the commitment ledger has ever reached, not merely THAT it has been reached. `application_id` carries the signature `0x4851` (`HQ`) in its high 16 bits and the greatest rowid the ledger has ever held in its low 16 bits, raised by `recordCommitmentWitness` and never lowered. `elidedCommitmentLedgerRows` reports a ledger holding fewer rows, or a lower greatest rowid, than that mark. A `DROP TABLE` cannot lower a number in the database header, and a replay cannot raise the ledger to meet it. Reproduced independently at this lane before the fix (7 statements at `6ce93df`, 8 at the merged head where the ledger carries a fourth guard; commitments 4 → 1, `elided=false`, `regressed=[]`, `truncated=[]`, `contradicted=null`, `boot=false [] full=false [] reboot=false []`, release ADMITTED) and closed after it (`boot=true [append_only_guard_missing] full=true`, release refused, across three restarts). |
+| **HIGH 1** — a PREFIX replay of HQ's own commitment ledger defeated all four commitment checks at once, permanently, and cleared a latched safe mode | `DROP TABLE hq_integrity_checkpoints`, replay the table's own DDL out of `sqlite_master`, and re-insert a PREFIX of its own genuine rows at the rowids they already carried. No hash is recomputed — every row written back is one HQ itself wrote — and no header write is needed, because round seven's yes/no witness stays true. `AUTOINCREMENT` rebuilds `sqlite_sequence` from those explicit rowids, so `elidedCommitmentLedgerRows`' `rows === top === mark` identity holds at a DIFFERENT number; `truncatedImmutableLedgers` compares `MAX(rowid)` against that same rebuilt mark and is satisfied; `regressedImmutableLedgers` reads `ledger_marks` out of the checkpoints just erased, and the surviving oldest checkpoint's own mark for this table is always at or below its own rowid; `contradictedChainCommitment` takes the maximum over the SURVIVING commitments, which the attacker chose. The `rows === 0` witness branch never runs, because the ledger is not empty. Measured by the review on a real file through the real facade: **18 statements** took commitments **7 → 1** and evidence **9 → 4**, with `boot=false []`, FULL Founder assessment `false []`, reboot `false []` and `releaseKillSwitch` **ADMITTED**; a file latched at `["append_only_guard_missing","evidence_chain_broken"]` read `false []` at boot, at full assessment and across two further reboots after a 25-statement rollback over three ledgers; and once the commitment ledger was rolled back this way, rows could be erased from any of the 33 declared ledgers with no finding at any depth. | The header slot now records HOW FAR the commitment ledger has ever reached, not merely THAT it has been reached. `application_id` carries the signature `0x4851` (`HQ`) in its high 16 bits and the greatest rowid the ledger has ever held in its low 16 bits, raised by `recordCommitmentWitness` and never lowered. `elidedCommitmentLedgerRows` reports a ledger holding fewer rows, or a lower greatest rowid, than that mark. A `DROP TABLE` cannot lower a number in the database header. **"and a replay cannot raise the ledger to meet it" stood here and was FALSE — see round thirteen's HIGH 2 below**: the mark is a COUNT, so a replay that PADS the prefix up to it with copies of a surviving row meets it exactly, and is silent from the very next boot. What the mark still closes is the UNPADDED replay this row measured. Reproduced independently at this lane before the fix (7 statements at `6ce93df`, 8 at the merged head where the ledger carries a fourth guard; commitments 4 → 1, `elided=false`, `regressed=[]`, `truncated=[]`, `contradicted=null`, `boot=false [] full=false [] reboot=false []`, release ADMITTED) and closed after it (`boot=true [append_only_guard_missing] full=true`, release refused, across three restarts). |
 | **LOW 1** — the phase document stated an anchor that would reopen the wave's own Critical | This page wrote the negative lookbehind with an underscore inside the character class. The code (`src/live/redaction.ts`) has never had the underscore and must not: `_` inside the class is the `\b` behaviour that carried `OPENAI_KEY_sk-…` onto the unauthenticated artifact (round four, Critical C1). The code was stronger than the document said, which is the direction a future reader "corrects" the wrong way. | The `_` is dropped from that sentence, and the drift is now machine-checked: `redaction-narrow-spaces.test.ts` reads every negative lookbehind out of `redaction.ts` itself, asserts they are all `(?<![A-Za-z0-9])`, and asserts this document nowhere spells the underscore form — which is why the sentence above describes it in words rather than quoting it. The behaviour on both sides of the boundary is pinned beside it: `OPENAI_KEY_sk-…` and `_sk-…` refused, `Xsk-…` and `9sk-…` admitted as disclosed. |
 | **LOW 2** — the `\p{Zs}` residual was retained on a justification whose only worked example does not hold | The comment said folding the class "would join ordinary prose into fabricated credential shapes (`...ask -driven-workflow`)". The review reverted-to-test it on a scratch copy with `\p{Zs}` folded across a 40-string corpus: exactly **1** verdict changed and that string was contrived, while the doc's own example was still ACCEPTED — the `(?<![A-Za-z0-9])` anchor sees the `a` of `ask`, and the run is far too short for `{16,}`. Meanwhile the residual carried a whole key to the unauthenticated artifact for all seventeen members, and "a space is visible, so it hides nothing" is at its weakest for U+2007 FIGURE SPACE and U+200A HAIR SPACE. | The fifteen `\p{Zs}` separators that are not a plain space — U+1680, U+2000–U+200A, U+202F, U+205F, U+3000 — are erased from the scan copy. U+0020 and U+00A0 are deliberately left alone: those two are what prose is made of, and folding them would join every word of every sentence. The whole-plane sweep's `\p{Zs}` survivor count moves **17 → 2**, and the two are now named rather than counted. The false-positive cost was measured rather than assumed, and so was the mechanism. |
 
@@ -4250,3 +4315,617 @@ handle installs no safe-mode gate, and a constructor gate is still the wrong
 fix, because the facade builds its queue during its own construction and a
 throwing constructor would make `assessHqIntegrity` — the only act that clears
 safe mode — unreachable on exactly the file that needs it.
+
+## Wave 5 correction round thirteen — a shipped detector defeated permanently at ONE permitted `INSERT`, and a cost clause wrong a fourth time because the instrument was blind to the term
+
+A fresh read-only hostile review of `237fc768e55ae50fab3deda87276ff3c56d34ff4`
+returned 0 Critical / 1 High / 1 Medium / 2 Low. All four are fixed here. Every
+figure below was executed at this head before it was written.
+
+### HIGH 1 — `committedLedgerGaps` built a JSON path out of a column a raw writer controls, and one empty key erased every baseline for ever
+
+`json_extract(c.ledger_marks, '$.' || j.key)` took `j.key` from `ledger_rows`.
+SQLite raises a hard `bad JSON path: '$.'` for an EMPTY key; the reader's own
+`try/catch` swallowed it and returned `{}`. Every gap baseline for all 33
+declared ledgers was gone, and gone permanently — the commitment ledger is
+append-only, so the poison row can never be removed.
+
+Nothing fired on the way in. `json_each('{"":0}')` gives `COUNT(*) = 1` and
+`COUNT(DISTINCT key) = 1`, so round twelve's ambiguity clause is silent, and no
+declared table is named, so no value bound is either. Executed against
+`237fc76`:
+
+```
+gaps before poison: [{"hq_integrity_checkpoints",0},{"hq_reliability_verdicts",0},{"op_evidence",0}]
+ambiguity check on {"":0} : {"c":1,"d":1}  -> equal, guard does not fire
+INSERT ACCEPTED by trg_hq_integrity_checkpoints_no_overclaim
+gaps after poison:  THROWS -> bad JSON path: '$.'
+```
+
+End to end, control and attack identical but for that one `INSERT`, against a
+mid-ledger delete of `hq_reliability_verdicts` rowid 2 — the ledger that holds
+the safe-mode latch:
+
+```
+CONTROL: p2..p6 boot=true["append_only_guard_missing"] assess=true release=refused
+ATTACK : p2 boot=true assess=false[] release=ADMITTED ; p3..p6 boot=false[] assess=false[] release=ADMITTED
+```
+
+That is the detector round seven's High 2 exists to provide, defeated in the
+FALSE-REASSURANCE direction, at one statement against the three this module
+quotes for every other tamper.
+
+**Fixed as a CLASS, not as an instance**, because this is the second round
+running in which a reader of these columns disagreed with the others on an input
+the guard admitted. Three changes:
+
+1. **The guard admits only the shape HQ's single writer emits.**
+   `COMMITMENT_SHAPE_CLAUSES` refuses any `ledger_marks` or `ledger_rows` that is
+   not a `TEXT` value, is not valid JSON, is not a top-level JSON OBJECT, or
+   carries a key that is not one of the 33 `ENGINE_IMMUTABLE_TABLES` names or a
+   value that is not a non-negative JSON integer.
+   `CHAIN_LENGTH_SHAPE_CLAUSE` does the same for the third column. Every one of
+   these was executed: the empty key, an undeclared key, a top-level array, an
+   empty array, a JSON scalar, a JSON number, malformed JSON, a BLOB that parses
+   as JSON, an INTEGER in the TEXT column, a nested object or array as a value, a
+   real / text / boolean / null value, a negative value on either half, and a
+   real / text / negative `chain_length` — all refused; `'{}'` and a re-statement
+   of HQ's own newest commitment still land, and HQ keeps committing boot after
+   boot.
+2. **No JSON path is built from anything a row carries.** `committedLedgerGaps`
+   joins the mark to the row count through a second `json_each` on `key`
+   (`LEFT JOIN`, so a key present in one column and absent from the other still
+   contributes the gap of 0 it contributed before, rather than being silently
+   dropped from the baseline).
+3. **The reader no longer fails OPEN.** `json_valid` moved from a `WHERE`
+   predicate into the `json_each` ARGUMENT in both readers, so neither can raise
+   on any content the column can hold — a `WHERE` predicate beside a
+   table-valued function is a planner decision, not a guarantee. The `catch` is
+   split: a COMPILE-time error (`no such table`, `no such column` — the two
+   benign reasons it was written for) still yields no baseline, which is the
+   truth about a file HQ has never committed on; a RUN-time error now yields the
+   STRICTEST baseline instead of none — a committed gap of zero for every
+   declared ledger, which is what a healthy ledger really has, so a holed ledger
+   is reported and a healthy store still reports nothing.
+
+**Two disclosure defects rode on it, and both are corrected.**
+`integrity.ts`'s round-twelve docblock claimed refusing the duplicate ambiguity
+"makes all five readers agree by making the only input they can differ on
+unreachable through the guard". The empty key was a second such input, reachable
+through that guard, and the sentence now says so and names the measurement.
+This page's residual bullet priced the gap fail-open as "a forged checkpoint
+committing a LARGER gap than the file has" — per-ledger, per-value; the cheapest
+path named no ledger at all. The bullet now states what was closed and what
+genuinely remains at the three-statement price.
+
+**A third claim was nearly shipped and was executed instead.** The obvious way
+to keep `json_valid = 0` in front of the `json_type`, `json_each` and
+`json_extract` beside it is to write it first and rely on `OR` short-circuiting.
+That was written and executed: on SQLite 3.53.2 a trigger `WHEN` clause whose
+terms carry subqueries evaluates them anyway, and an `INSERT` carrying
+`'{"op_evidence": '` came back as the engine's `malformed JSON` rather than as
+HQ's refusal. Documenting the order as a guarantee would have been the eleventh
+disclosure defect of this wave. Every expression over these columns is made
+TOTAL instead (`totalCommitmentJson`), and the test asserts the MESSAGE rather
+than merely that the row did not land.
+
+**The residual, unchanged in kind.** This is still a `BEFORE INSERT` guard: it
+bounds what LANDS. A row of the old shape planted with the guards temporarily
+dropped is still in the file — but the reader it defeated no longer builds a path
+out of it and no longer fails open, so the DETECTOR survives the planted row.
+Executed: plant the empty-key row through the three-statement path, then delete
+`hq_reliability_verdicts` rowid 2, and the mid-ledger deletion is still reported
+at every process afterwards. And the strict fallback gives up one thing, stated
+rather than traded silently: a ledger whose rowids legitimately had a hole
+BEFORE HQ first committed on it would be reported while the commitment columns
+are unreadable.
+
+### MEDIUM 1 — the cost clause undercounted by 4, a fourth time in the same direction, because `statementsExecutedByOneStructuralPass` could not see `db.pragma()`
+
+`INTEGRITY_DEPTH_STATEMENT` says a pass reads "the durability pragmas" in its
+own first clause and priced the fixed term at "11 catalogue, pragma and
+commitment-ledger reads". `readDurabilityPosture` reads `journal_mode`,
+`synchronous`, `foreign_keys` and `wal_autocheckpoint` through better-sqlite3's
+`db.pragma()`, which compiles and steps its own statement and never touches a
+prepared handle — and the instrument wrapped `db.prepare` only. The four were in
+neither the 11 nor the total.
+
+**The parse-back rule could not catch this**, because it compares the prose to a
+MEASUREMENT and the measurement shared the blind spot. So the instrument was
+fixed first: it now counts `db.pragma` and `db.exec` as well as prepared
+statements, and a new test asserts the four pragmas BY NAME off the `db.pragma`
+route, asserts that none of them appears in the prepared-statement stream (which
+is why they were missed), and pins `db.exec` at zero in a structural pass.
+
+Measured at this head with the fixed instrument:
+
+| File | prepared | pragma | exec | identities | seeks | fixed | total |
+|---|---|---|---|---|---|---|---|
+| pre-commitment | 11 | 4 | 0 | 0 | 1 | — | **15** |
+| booted twice | 46 | 4 | 0 | 33 | 2 | 15 | **50** |
+| `warmedFile()` | 47 | 4 | 0 | 33 | 4 | 15 | **52** |
+
+`STRUCTURAL_STATEMENT_BASE` is therefore **48**, not 44, and every figure that
+quotes it moved by four: the module header, the constant's docblock, the served
+sentence, and this page's residual bullet. The constant's own comparative moved
+too and is restated at what it measures rather than carried over — the
+pre-commitment branch gained the same four pragmas, so the ratio between the two
+branches fell from four to a little over three (50 / 15). Everything else the
+review independently confirmed about the clause is unchanged: the rule holds on
+both committed-on files, the pre-commitment branch reads zero identities, the
+seeked set is the `sqlite_sequence` set and demonstrably not the committed set,
+and a full assessment adds exactly `PRAGMA integrity_check` and
+`PRAGMA foreign_key_check`.
+
+**Figures in EARLIER sections of this page are historical.** Each `##` section
+records what a given round measured at its own head. They are not restated here
+and they are not rewritten; the numbers that describe THIS head are the ones in
+the table above, in the residual bullet, and in `integrity.ts`.
+
+### LOW 1 — a test docblock's count was stale by one
+
+`reliability-durability.test.ts`'s docblock said `BACKUP_REFUSAL_REASONS` "holds
+fifteen … Twelve are exercised". At `237fc76` the constant held **16** with
+**13** exercised, which is what the page correctly said. No assertion was ever
+unpinned — they all derive from the constant — but a false sentence in a test
+file is the same artifact as a false sentence in a served string. The docblock is
+corrected, and its two numbers are now parsed back out of the file itself and
+compared to the constant and to the sweep, so the next addition to the vocabulary
+fails a test rather than leaving a fourth stale sentence behind.
+
+**The new pin earned itself immediately, at the merge below.** The concurrent
+round-eleven lane added `candidate_census_unavailable` and a census file the
+sweep has to exclude, taking the constant to **17** and the exercised set to
+**14**. The corrected docblock went stale a THIRD time in as many merges — and
+this time a test failed instead of a reviewer having to notice, which is the
+whole point. The numbers above describe `237fc76`; the merged head's are 17
+and 14, asserted rather than written down.
+
+### LOW 2 — this wave's heaviest real-file tests were still at the 5 s default
+
+`reliability-crash-recovery.test.ts` had no explicit deadline anywhere while
+three of its tests `spawnSync` a real child `node` process against a file-backed
+SQLite database. Measured over two full runs with the whole package in parallel:
+**825–1137 ms** for those three, against the **361 ms** test that actually failed
+CI #552 with `Test timed out in 5000ms`. This is a residual of the previous
+round's timeout remediation rather than a false claim in it — that fix's claims
+were correctly scoped to its own two files.
+
+Treated the same way: an explicit per-test deadline of **60 s** (~53x the
+slowest observed run, the same headroom the other two files carry), a documented
+constant, no assertion changed, and **no** global `testTimeout` — raising the
+default would relax the deadline for every test in the package, including the
+many where a hang is the real signal.
+
+**The other nine tests in that file are deliberately left at the default** and
+that is stated rather than quietly done: they use the same file-backed fixture,
+spawn no child process, and measure 113–186 ms over the same two runs.
+**`decide-routing-cli.test.ts` is measured and deliberately NOT changed here**:
+its slowest test (`treats an unrecognised value as unknown rather than as a clean
+answer`) runs 1393 ms and 1410 ms over those two runs, at the same 5 s default. It is a different subsystem and
+not this round's finding, so it is recorded for whoever picks it up rather than
+folded into a commit that did not measure the rest of that file.
+
+### The reader audit this round's High required
+
+Every reader of `ledger_marks`, `ledger_rows` and `chain_length`, checked against
+each other over the input space the guard now admits — a `TEXT` value that is
+valid JSON, whose top-level type is `object`, whose keys are distinct members of
+the 33 declared ledger names, and whose values are non-negative JSON integers;
+plus a `chain_length` that is a non-negative SQL integer.
+
+| Reader | Spelling | Agrees over the admitted space because |
+|---|---|---|
+| `overclaimGuardDdl` value bounds | `json_extract(<total>, '$.<literal>')` | the path is a fixed literal built from the frozen `ENGINE_IMMUTABLE_TABLES`, never from a row; keys are distinct, so `json_extract` and `json_each` return the same single value for the same key |
+| `AMBIGUOUS_COMMITMENT_CLAUSES` | `json_each(<total>)` cardinality vs distinct keys | equal for every object with distinct keys; this clause is what makes "distinct" true of the admitted space in the first place |
+| `COMMITMENT_SHAPE_CLAUSES` | `TYPEOF` / `json_valid` / `json_type` / `json_each` | `TYPEOF` and `json_valid` are total by definition; the other two read the `<total>` expression, so no value the column can hold raises |
+| `committedGreatest` (both columns) | `json_each(<total>)` + `MAX(CAST(value AS INTEGER))` | one row per key, so `MAX` is that key's single value; non-declared keys are dropped in JS, and only positive integers are kept |
+| `committedLedgerGaps` | `json_each(<total>)` on both columns, joined on `key` | no path is built at all; `LEFT JOIN` preserves the previous `NULL → MAX ignores → 0` behaviour for a key present in rows and absent from marks, which HQ's writer cannot produce anyway (`rows > 0` implies `top >= 1`) |
+| `committedChainLength` | `MAX(chain_length)` | `chain_length` is a non-negative integer, so `Number.isInteger` keeps exactly what the column holds |
+| `contradictedChainCommitment` | `c.chain_length` joined to `op_evidence.seq` | same column, same type; the two readers cannot disagree on an integer |
+
+Outside the admitted space there is nothing left to agree about: those values are
+refused where they are written. The only remaining disagreement is over rows a
+raw writer planted at a build without these clauses, and that is closed at the
+READER rather than argued away — no reader builds a path out of a row, no reader
+raises on any content, and the one that used to fail open now fails closed.
+
+### The residual this round leaves standing, re-executed rather than carried over
+
+**A cost figure written in THIS document is still read by no test.** The
+parse-back rule reaches `integrity.ts` — the served string, the module header
+and the docblock above `STRUCTURAL_STATEMENT_BASE` — and stops there. Executed at
+THIS head rather than quoted from the round that first disclosed it: changing
+"52 statements executed per pass" in the residual bullet above to "61 statements
+executed per pass" and running the whole suite gives **193 files / 3451 tests
+passed**, unchanged. The figure is wrong and nothing fails. It is disclosed at
+that price; the cheapest close is a doc parse-back of the same shape as
+`reliability-durability.test.ts`'s backup-refusal count pin, and it is a separate
+scoped change rather than something to fold into a correction round.
+
+### The merge with the round-eleven third lane, which landed on `origin` while this round was in progress
+
+This round was built on `237fc768e55ae50fab3deda87276ff3c56d34ff4`. `origin`
+moved to `582c2398dd8c081762c90a6c05550a2ab49f3051` before the work was
+finished — the reconciliation recorded in the section immediately above — so
+this work was committed first and then MERGED with it: a true merge, both
+parents, nothing discarded. Two files conflicted textually and both were
+resolved by composing rather than choosing.
+
+ - `reliability-durability.test.ts`'s docblock. Both lanes rewrote the same
+   paragraph, and both were right about different things: the other lane removed
+   the free-standing figures and recorded that the constant had reached
+   seventeen, this one added a pin that reads the paragraph's own numbers back
+   out and compares them. Both are kept — and the pin FAILED on the first run
+   after the merge, because the other lane's new census file changes the
+   exercised set from thirteen to **fourteen**. It was corrected by measurement,
+   which is the pin doing exactly the job it was written for.
+ - `PHASE_13_ADVANCED_RELIABILITY.md`. Two new sections appended at the same
+   place; both kept, the other lane's first because it describes the head this
+   round builds on.
+
+`integrity.ts` merged without conflict: the other lane's changes are in the
+backup-verification vocabulary near the end of the file, this round's are in the
+module header, the cost constant, the over-claim guard and the two commitment
+readers.
+
+### Verification at the merged head
+
+All green, exit 0, run in this worktree.
+
+| Check | Round twelve merge (`237fc76`) | `origin` (`582c239`) | This merged head |
+|---|---|---|---|
+| `npm run test:hq` | 191 files / 3425 tests | 193 files / 3442 tests | **193 files / 3451 tests** |
+| `typecheck @factoryos/headquarter` | clean | clean | clean |
+| `@factoryos/hq-host` test + typecheck | 23 / 222, clean | 23 / 222, clean | **23 / 222**, clean |
+| `@factoryos/hq-server` test + typecheck | 2 / 20, clean | 2 / 20, clean | **2 / 20**, clean |
+| root `npm test` (`@factoryos/server`) | 37 / 569 + 3 skips | 37 / 569 + 3 skips | **37 / 569 + 3 pre-existing skips** |
+| `npm run build:site` | 10 pages | 10 pages | **10 pages** + `hq-snapshot.json` |
+| `npm run build` web initial JS | 215.66 kB / 69.22 kB gzip | same | **215.66 kB / 69.22 kB gzip** |
+
+The nine tests added by this round were also run against BOTH parent heads with
+the source untouched: **9 failed against `237fc76`** (the eight behavioural pins
+plus the docblock pin, the latter spliced into that head's own prose rather than
+copied whole, because a pin that reads its own file's docblock passes when the
+file is copied with it) and **8 failed against `582c239`**. Nothing was deleted,
+renamed, skipped, weakened or narrowed; no `.skip` / `.only` / `.todo` / `xit` /
+`xdescribe` was added, and no `as any`, `@ts-expect-error` or `eslint-disable`
+appears in an added line. Zero new dependencies. This round's own diff touches
+`packages/headquarter/` and `docs/HEADQUARTER/` only.
+## Wave 5 correction round THIRTEEN: the rowid channel, and four partial enumerations standing in for complete ones
+
+Two fresh read-only hostile reviews of `48dd026` returned 0 Critical, 4 High, 7
+Medium and 8 Low. This section records what was reproduced at the MERGED head
+(`237fc76`, which already carried rounds ten to twelve), what changed, and what
+is disclosed instead — priced by execution, never by estimate.
+
+This section was written against `237fc76` and then MERGED with a concurrent
+round-thirteen lane (`7d3581a`) that had run off the same base. Nothing was
+discarded in either direction: that lane's empty-key poison fix to
+`committedLedgerGaps`, its `db.pragma` instrument correction (which moved
+`STRUCTURAL_STATEMENT_BASE` from 44 to 48) and its seventeenth backup refusal all
+stand, and every figure THIS lane states was re-measured at the merged head
+rather than carried forward. Where both lanes touched one sentence — Phase 14's
+HIGH H2 row and this page's backup-count sentence — the merged text carries both
+corrections.
+
+**The class behind every High of this round, and of the three rounds before
+it**: a partial enumeration standing in for the complete one. `missionText(`
+call sites for "stores caller text"; eighteen curated parameter names for
+"caller-supplied text"; `sqlite_sequence` membership for "declared ledger";
+`MAX(rowid)` for "row count"; a count-and-top witness for "the same rows"; an
+inner `JOIN` for "canonical membership"; and now the append-only trio for "every
+way a row can enter a ledger". Each fix below makes its enumeration complete BY
+CONSTRUCTION and makes the pinning test enumerate the same way, rather than by a
+list somebody maintains.
+
+### HIGH 1 — one PERMITTED `INSERT` fabricated a permanent, unclearable safe mode on 32 of the 33 declared ledgers
+
+**Reproduced at `237fc76`.** `trg_<ledger>_no_replace` fires only on a
+*colliding* rowid, so an ordinary `INSERT` naming an explicit rowid ABOVE a
+declared ledger's current maximum was a write the append-only trio deliberately
+permitted. It widens `MAX(rowid) - COUNT(*)`, and `committedLedgerGaps` reads
+that widening as proof of a mid-ledger deletion. Executed through this package's
+own file fixture, one statement, no trigger dropped, no `sqlite_sequence` write,
+no restart: `hq_reliability_verdicts` went from `{rows:4, top:4}` to `{rows:5,
+top:104}` — **the row count went UP and nothing was removed** — and `p2`/`p3`
+then read `boot=true assess=true release=REFUSED`, permanently, with the
+Founder-facing detail saying the ledger no longer held what HQ's checkpoint
+recorded, "fewer rows, a lower greatest row, or a gap where a row used to be …
+None of those can happen while HQ is the only writer." The sweep found the
+statement ACCEPTED on 32 of the 33 declared ledgers; the 33rd,
+`hq_integrity_checkpoints`, falls to the same statement with valid JSON in its
+commitment columns. This is round seven's HIGH 3 re-opened one column over:
+`no_overclaim` bounds `ledger_marks`, `ledger_rows` and `chain_length`, and the
+rowid is a channel it does not bound.
+
+**Why no read-time rule could close it.** The two acts are indistinguishable
+from the file alone at any later moment. After a mid-ledger deletion of k rows
+and m appends a ledger reads `rows + m - k` / `top + m`; after one append d above
+the top it reads `rows + 1` / `top + d`. Both widen the gap by the same
+arithmetic and neither leaves any other trace. So this is closed where the write
+happens, exactly as round seven closed the over-claim.
+
+**What changed.** Every declared ledger now carries
+`trg_<prefix>_no_rowid_skip`, a `BEFORE INSERT` guard that refuses a rowid past
+what the engine itself would allocate:
+
+```sql
+WHEN NEW.rowid > 1 + MAX(COALESCE((SELECT MAX(rowid) FROM "<ledger>"), 0),
+                         COALESCE((SELECT seq FROM sqlite_sequence WHERE name = '<ledger>'), 0))
+```
+
+It is appended in `declaredGuardsFor` rather than written on 33 declaration
+lines, so the set is complete BY CONSTRUCTION — a ledger cannot be declared
+without declaring it — and `ensureLedgerRowidGuards` installs it by iterating
+`ENGINE_IMMUTABLE_TABLES` itself, beside `ensureIntegrityCheckpoints` and after
+the as-found census, so a dropped guard is reported before it is repaired. The
+live-schema pins in `reliability-durability.test.ts` (the trigger set on a real
+file EQUALS the union of the declarations, in both directions) then require it
+to actually exist on all 33.
+
+**Why the bound names `sqlite_sequence` as well as the rows.** A legitimate
+append lands at `MAX(rowid) + 1` on an implicit-rowid table and at
+`sqlite_sequence.seq + 1` on an AUTOINCREMENT one. A bound taken from the rows
+alone would refuse HQ's own next append after any burned counter and stop the
+store writing — strictly worse than the hole a burn opens. Taking the counter
+into the bound gives a writer who can raise it a rowid to skip to, and that buys
+nothing new: raising a declared ledger's high-water mark above its `MAX(rowid)`
+is already reported by `truncatedImmutableLedgers` on its own, in one statement,
+with no insert at all.
+
+**The Founder-facing detail no longer asserts what it cannot distinguish.** It
+now names both causes — a row removed from the middle, and a row written past
+the end — and says the guards refuse an INSERT at a position the engine would
+not have allocated, which is what makes "none of those can happen while HQ is
+the only writer" true rather than reassuring.
+
+**Executed after the fix.** The same statement is REFUSED on all 33 (`<ledger>
+rowids are contiguous`); `{rows:4, top:4}` is unchanged; `regressed []`; and
+`p2`–`p5` read `boot=false [] assess=false [] release=ADMITTED`. Pinned in
+`ledger-rowid-guard.test.ts`, whose sweep uses each ledger's REAL `CREATE TABLE`
+text taken from a live HQ file, proves an ordinary append is accepted on each
+one first, and fails on 4 of its 6 tests against the pre-fix code.
+
+**Two concurrent round-thirteen lanes closed this channel off the same base, and
+BOTH closures are kept — the narrower one is not subsumed.** The other lane
+bounded the rowid inside the over-claim guard, as `NEW.seq <> (SELECT COUNT(*)
+FROM hq_integrity_checkpoints)`, and moving that guard to `AFTER INSERT` is what
+the next bullet above is about. `no_rowid_skip` is broader — all 33 declared
+ledgers, where that clause only ever bounded one — so it is the mechanism this
+section prices, and being `BEFORE INSERT` it speaks first. It is NOT, however, a
+superset: it bounds the rowid from ABOVE only, so a reseat at or below the top
+that collides with nothing passes it. Executed on the commitment ledger at the
+merged head, with each guard left standing alone:
+
+```
+no_rowid_skip ALONE : seq=-1 ACCEPTED [elided=true] ; seq=0 ACCEPTED [elided=true] ;
+                      seq=1000 REFUSED 'rowids are contiguous'
+no_overclaim ALONE  : seq=-1, seq=0, seq=1000 all REFUSED 'may not commit beyond the record'
+both (as shipped)   : all three REFUSED
+```
+
+`-1` is not an exotic value: it is what SQLite itself reports for an omitted
+`AUTOINCREMENT` rowid, which is the measurement that forced the `AFTER INSERT`
+timing. Each admitted reseat raises this ledger's row count without raising its
+greatest rowid, and `elidedCommitmentLedgerRows` reads exactly that pair — so
+retiring the identity clause as "covered by the broader guard" would have
+reopened half of round thirteen's Exploit B under a merge that looked like
+consolidation. The two are complements: one is the only bound on the other 32
+ledgers, the other is the stricter bound on the one ledger whose own row count is
+read back. Both are pinned, each with the other's guard dropped so neither test
+can pass on the other's work — `ledger-rowid-guard.test.ts` for the first, and
+`commitment-overclaim.test.ts`'s reseat and complementarity probes for the
+second.
+
+### MEDIUM 1 — the burn enumeration named one spelling of three
+
+`committedLedgerGaps` cited `ledger-rowid-contiguity.test.ts` for which engine
+behaviours burn a rowid, and the citation named `INSERT … ON CONFLICT … DO
+UPDATE` as the one that does. Measured on the shipped runtime (SQLite 3.53.2):
+`INSERT OR IGNORE` on a conflict burns (`seq` 2→3) and `INSERT … ON CONFLICT DO
+NOTHING` burns (`seq` 3→4), each with `rows` and `top` unchanged, and the next
+genuine append then skips three rowids. All three spellings are now measured in
+that file and named in the docblock. The property itself was never at risk — the
+source sweeps in the same file already ban `INSERT OR IGNORE` outright and catch
+every `ON CONFLICT` target, over all 33 ledgers read from the declaration — it
+was the enumeration in the prose that was partial. The reviewer's finding was
+raised against `48dd026`, where the cited file did not exist at all; round twelve
+created it, and this round completes its engine half.
+
+### HIGH 2 — a PADDED prefix replay meets the header witness, and three sentences said it could not
+
+**Reproduced at `237fc76`.** The round-ten witness records the greatest rowid
+HQ's commitment ledger has ever reached, and `elidedCommitmentLedgerRows` reports
+`top < mark || rows < mark`. That is a COUNT, and a count is met by putting the
+right NUMBER of rows back rather than the right rows: `DROP TABLE
+hq_integrity_checkpoints`, replay the DDL out of `sqlite_master`, re-insert a
+PREFIX of the genuine rows, then PAD up to the mark `W` with copies of a
+surviving row at the erased rowids, changing only the UNIQUE `id`. Every
+commitment written back is one HQ itself made, so `no_overclaim` has nothing to
+refuse. Measured: 13 statements at `237fc76` (14 at this head, where the ledger
+carries `no_rowid_skip` as a seventh object to replay) took six genuine
+commitments to two plus four copies, with `rows === top === sqlite_sequence ===
+W`, `elided false`, `regressed []`, `truncated []`, `contradicted null`, and
+`p2`/`p3`/`p4` each `boot=false [] assess=false [] release=ADMITTED`.
+
+Three places said this could not happen, verbatim: *"A `DROP TABLE` cannot lower
+it and a replay cannot raise the ledger to meet it."* All three are corrected —
+this page, `HQ_COMMITMENT_WITNESS_MARK`'s docblock, and
+`reliability-commitment-prefix-replay.test.ts`'s header.
+
+**It is DISCLOSED rather than closed, and the reason is exact rather than an
+apology.** The attacker reads the genuine ledger before destroying it, so any
+predicate over the FILE's own content can be satisfied by writing content that
+satisfies it. The only predicate that could not be met is one over content the
+attacker cannot reconstruct, and there is none: the header slot carries 32 bits,
+16 of which are the signature. Two candidate closures were designed and rejected
+on the merits, and both are recorded so a later round does not rediscover them:
+
+1. **An "every checkpoint advances something" invariant.** True of
+   `recordIntegrityCheckpoint` by construction, and it does catch a pad built
+   from COPIES. Rejected because two processes that read the same state before
+   either writes produce two checkpoints committing identical quantities — an
+   ordinary concurrent boot — so the check can raise a PERMANENT finding over an
+   untampered file. That is the fabricating direction, which is the subject of
+   this round's HIGH 1 and is forbidden as strictly as the reassuring one. It
+   also buys little: the pad can be built from DISTINCT rows whose committed
+   quantities rise, which `no_overclaim` permits because they stay under the
+   file's real marks.
+2. **A content digest in the header's low bits.** Sixteen bits is a 65,536-way
+   collision search an attacker runs offline in under a second. Widening it means
+   either shrinking the signature — which round ten already measured as a real
+   loss in the false-alarm direction — or coupling `PRAGMA user_version`, which
+   round ten rejected because it would let ONE statement defeat both marks.
+
+What the mark still closes is the UNPADDED replay, which is what round ten
+measured; that case stays pinned in the same file, beside the executed
+disclosure of this one.
+
+### HIGH 4 and MEDIUM 2 — reported against `48dd026`, already closed at the merged head
+
+Both were reproduced by the reviewers against `48dd026` and both were closed by
+round ten, which the merge brought in. Re-executed at `237fc76` rather than
+taken on trust:
+
+- **HIGH 4** — four caller-supplied IDENTIFIER fields stored unscanned.
+  `registerExecutionWorker({ workerId: 'ghp_…' })`, `setIntelligenceBudget({
+  scopeId: 'ghp_…' })`, `recordModelObservation({ providerId: 'ghp_…' })`,
+  `recordModelObservation({ modelId: 'ghp_…' })` and `engageKillSwitch('ghp_…',
+  …)` are each refused `invalid_input` naming the exact field
+  (`String matches a known credential shape (at stored_text.workerId)`, and so
+  on). `callerTextRefusal` scans every own string field of every facade write's
+  input, and `facade-write-scan.test.ts` derives coverage PER (method,
+  parameter) pair with no curated vocabulary — the 18-name `FREE_TEXT_PARAMETERS`
+  list the finding names is gone. Not a defect at this head.
+- **MEDIUM 2** — the served depth statement's "46 statements". The served
+  sentence quotes no total at all now; it interpolates
+  `STRUCTURAL_STATEMENT_BASE` and states the seek term as a rule, with both
+  worked totals explained rather than one shipped as "the" cost.
+  `integrity-statement-truth.test.ts` pins it against instrumented counts on two
+  files with different seek terms and parses every number back out of the prose.
+  At the head this section was first written the constant was 44 (33 + 11); the
+  CONCURRENT round-thirteen lane merged in beside this one then found the
+  instrument itself blind to the four `db.pragma()` reads the served sentence
+  names in its own first clause, so the fixed term is 15 and the constant is
+  **48** (33 + 15), with 48 + 2 = 50 and 48 + 4 = 52 as the two files' totals.
+  Re-verified at the MERGED head rather than carried forward: changing the
+  constant from 48 to 49 in a scratch copy fails three of that file's tests.
+  Not a defect at this head.
+
+### MEDIUM 3, MEDIUM 4 and MEDIUM 5 — a stale count and three unpinned defences
+
+- **MEDIUM 3.** Round twelve's pin already reads ONE sentence on this page and
+  compares it to `BACKUP_REFUSAL_REASONS`. A SECOND sentence stating the same
+  pair claimed `ten` exercised of `thirteen` total, and went on saying so after
+  the constant moved, because no regex reached it. The sentence is corrected and
+  the sweep is generalised: every `"<number word> of the <number word>"` on this
+  page whose sentence goes on to say those refusals are exercised is now checked
+  in BOTH halves, rather than the one phrasing the regex was written around.
+  That generality earned itself immediately — the CONCURRENT round-thirteen lane
+  merged in beside this one raised the vocabulary to SEVENTEEN, moved the
+  exercised count to FOURTEEN and re-worded the sentence from "backup path
+  protections" to "backup refusals", which a phrasing-bound regex would have
+  stopped reading. Re-verified at the merged head: writing `ten of the seventeen`
+  in a scratch copy fails the sweep, naming the pair it read.
+- **MEDIUM 4.** `return seq` on an unparseable payload, in `verifyEvidenceChain`.
+  Mutated to `continue` it left 3425 tests green and turned a Founder assessment
+  that reported `evidence_chain_broken` into a clean one. Pinned in
+  `evidence-link-defences.test.ts`, with the exact seq asserted and the
+  no-false-alarm case (a payload that differs only in whitespace) beside it.
+- **MEDIUM 5.** The `prev_hash` comparison, at BOTH its sites — the walk and
+  `evidenceEntryLinkStands`. A row whose `prev_hash` column is forged while its
+  own `hash` stays correct over the REAL previous hash passes every other test in
+  both functions; without the comparison, `evidenceEntryLinkStands` answers
+  `true` for it, which would corroborate a verdict-clearing claim. Both sites are
+  pinned in the same file, and each mutation fails exactly its own test.
+
+### The LOW findings
+
+- **LOW 1 — a residual priced ABOVE its real cost, which is as much a false
+  claim as one priced below it.** `operator/evidence.ts` still read "Dropping
+  `hq_integrity_checkpoints` outright remains the other route, and still costs
+  the restart and the second Founder act the round-five text priced it at." The
+  round-ten header witness closed that route entirely. Re-executed at `237fc76`
+  — one `DROP TABLE`, nothing else — `p2`, `p3`, `p4` and `p5` each read
+  `boot=true [append_only_guard_missing] assess=true release=REFUSED`. The
+  sentence is corrected and the measurement is pinned in
+  `reliability-commitment-witness.test.ts`.
+- **LOW 2 — the drop-everything residual was priced two statements and one
+  restart too cheap.** Re-executed step by step on one warmed file, and written
+  out above beside the sentence it corrects: 33 `DROP TABLE`s alone, and 33 plus
+  `PRAGMA user_version = 0`, are both still `boot=true assess=true
+  release=REFUSED`; it takes `PRAGMA application_id = 0` as well — 35 statements
+  — and then ONE restart and ONE Founder assessment before the file reads clean.
+- **LOW 3 — the `application_id` encoding described here was the superseded
+  one.** Round ten replaced the single closed-set value `0x48514350` with a
+  16-bit signature plus a 16-bit mark, and this page went on describing the old
+  encoding with no correction marker, against its own convention. Corrected in
+  place, with the specificity cost and the one given-up mark value named.
+- **LOW 4 — dead public surface.** `readCommitmentWitness` was exported and
+  re-exported by `store/index.ts` with five hits, all inside `integrity.ts`, no
+  consumer and no test. It is module-private now, for the condition round six
+  made `integrityCheckpointLedgerPresent` module-private for; the two questions
+  callers ask (`commitmentWitnessPresent`, `committedCheckpointMark`) stay
+  exported.
+- **LOW 5 — an unpinned but contained defence.** Removing
+  `.filter(isHqIntegrityFinding)` from `rowToRecordedVerdict` left the suite
+  green and let a forged finding name reach `standingIntegrityVerdict`'s public
+  output. Pinned in `reliability-verdict-durability.test.ts` by a LEGAL append
+  carrying a forged name, with the containment (`carryRecordedVerdict`
+  re-filters, so no safe-mode decision sees it) asserted in the same test rather
+  than implied.
+- **LOW 6 — two Unicode category sizes measured on an older ICU.** `\p{Mn}` is
+  **2,059** and `\p{Cn}` **814,730** on the shipped runtime (Node v22.22.2, ICU
+  78.2, Unicode 17.0), not 1,796 and 810,961; `\p{Me}` 13, `\p{Co}` 137,468 and
+  `\p{Zs}` 17 were exact. All three sites are corrected, the figures now name the
+  Unicode version they were measured on, and
+  `redaction-invisible-classes.test.ts` measures every one of them against the
+  running engine and parses them back out of `redaction.ts`'s docblock. The
+  guarantee never moved with the numbers: the erase set is expressed as the
+  PROPERTIES, so a category that grows is covered the day the engine grows it.
+- **LOW 7 — recorded on `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md`.** The
+  enforcement-safe read audit described `#governingBudgetScopes` by its canonical
+  term alone, omitting `#durableTaskProjectScopes` and `#recordedScopesForTask`,
+  both of which are load-bearing elsewhere on that same page. Corrected there.
+- **LOW 8 — already closed at the merged head.** `integrity-statement-truth.test.ts`
+  carries `FILE_BACKED_BATTERY_TIMEOUT_MS = 60_000` on all six of its file-backed
+  batteries, as of `237fc76`. Not a defect at this head.
+
+### What round thirteen adds to the NOT-fixed list
+
+- **`no_rowid_skip` is a step, not a boundary**, at the same price as every
+  other engine guard in this module: three statements — `DROP TRIGGER`, the
+  insert, re-create. Counted rather than asserted, in
+  `ledger-rowid-guard.test.ts`, which then shows the census clean and
+  `regressedImmutableLedgers ["hq_reliability_verdicts"]` afterwards. A guard
+  re-created before the next boot is never observed missing, because the
+  as-found census reads `sqlite_master` at construction time only.
+- **A file written by a build older than this one reports one boot of safe
+  mode.** Its ledgers carry no `no_rowid_skip` trigger, so the as-found census
+  reports `append_only_guard_missing`. That is the ordinary cost of declaring a
+  new guard — `no_overclaim` had exactly the same one — and a missing GUARD is
+  cleared by ONE Founder assessment of the file as it then stands, because
+  re-creating a trigger really does repair the file's guard set.
+- **The `sqlite_sequence` manufacture residual is unchanged and is now also a
+  route to the gap.** One `UPDATE` raising a declared ledger's counter is
+  already reported as `append_only_ledger_truncated` over a ledger nobody
+  touched; the same write also lets HQ's own next append land past
+  `MAX(rowid) + 1` and widen the gap. Neither is closed, for the reason round
+  seven recorded: the only bound available for that check is the number being
+  written.
+- **A PADDED prefix replay of the commitment ledger is silent from the very next
+  boot** — 13 statements at `237fc76`, 14 at this head. Executed and asserted in
+  `reliability-commitment-prefix-replay.test.ts`, with the two candidate closures
+  that were designed and rejected on the merits written out beside it. See HIGH 2
+  above for why no predicate over the file's own content can close it.
+- **`UPDATE op_tasks SET id` still detaches a task from its mission and project
+  ceilings at three statements** — `DROP TRIGGER trg_op_tasks_no_reidentify`, the
+  `UPDATE`, re-create — and no read-side derivation can hold it, because
+  `hq_mission_plan_items.task_id` names the task BY ID and there is no second key
+  to resolve it by. Priced and asserted in `budget-scope-identity.test.ts`; the
+  full record is on `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md`.
+- **A verdict row's FORGED finding name still reaches nothing, but the row still
+  lands.** Appending to `hq_reliability_verdicts` is the write its guards
+  deliberately permit; what round thirteen pins is that the name is dropped at the
+  reader rather than that the append is refused.

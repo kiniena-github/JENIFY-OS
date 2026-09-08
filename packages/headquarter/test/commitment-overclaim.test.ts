@@ -39,6 +39,7 @@ import type { HqDatabase } from '../src/store/db.js';
 import {
   ENGINE_IMMUTABLE_TABLES,
   HQ_INTEGRITY_CHECKPOINT_TABLE,
+  LEDGER_ROWID_GUARD,
   contradictedChainCommitment,
   declaredGuardsFor,
   CHECKPOINT_COLUMNS_THAT_DECIDE_NOTHING,
@@ -50,6 +51,20 @@ import {
 } from '../src/store/integrity.js';
 
 const OVERCLAIM_GUARD = 'trg_hq_integrity_checkpoints_no_overclaim';
+
+/**
+ * The OTHER round-thirteen lane's rowid guard, as it stands on THIS ledger.
+ *
+ * Named from `LEDGER_ROWID_GUARD` and the checkpoint table's own trigger prefix
+ * rather than written out, so it tracks the declaration. Two concurrent lanes
+ * closed the rowid channel off the same base and both were kept at the merge —
+ * `no_rowid_skip` on all 33 declared ledgers, and the over-claim guard's
+ * `NEW.seq <> (SELECT COUNT(*) …)` identity clause on this one. The probes
+ * below drop this guard inside a rolled-back `SAVEPOINT` so the clause this
+ * file exists to pin is shown to refuse on its own, rather than passing on the
+ * broader guard that now sits in front of it.
+ */
+const ROWID_GUARD_ON_CHECKPOINT_LEDGER = `trg_${HQ_INTEGRITY_CHECKPOINT_TABLE}_${LEDGER_ROWID_GUARD}`;
 
 /**
  * 5 s is vitest's default and is not a measurement. The probes below open real
@@ -731,7 +746,49 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
         expect(attempt.accepted, 'one INSERT must not fabricate append_only_guard_missing').toBe(
           false,
         );
-        expect(attempt.message).toMatch(/may not commit beyond the record/);
+        // TWO guards refuse this now, from two concurrent round-thirteen lanes,
+        // and BOTH are asserted rather than one being taken as covering the
+        // other. `no_rowid_skip` is `BEFORE INSERT` so it speaks first here; the
+        // over-claim guard's own identity clause is proven separately below,
+        // with the rowid guard dropped, because a merge that let one lane's
+        // defence stand in for the other's would silently retire a clause
+        // nothing then tests.
+        expect(attempt.message).toMatch(
+          /rowids are contiguous|may not commit beyond the record/,
+        );
+        expect(ledgerReadings(raw)).toEqual(NOTHING_REPORTED);
+
+        // The over-claim guard, ALONE. Inside a rolled-back SAVEPOINT, so the
+        // file the rest of this test sees still carries both guards.
+        raw.exec('SAVEPOINT without_rowid_guard');
+        raw.exec(`DROP TRIGGER ${ROWID_GUARD_ON_CHECKPOINT_LEDGER}`);
+        expect(
+          (
+            raw
+              .prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='trigger' AND name = ?`)
+              .get(ROWID_GUARD_ON_CHECKPOINT_LEDGER) as { n: number }
+          ).n,
+          'the rowid guard must actually be gone for this half to mean anything',
+        ).toBe(0);
+        const alone = insertRow(raw, columns, {
+          ...genuine,
+          seq: 1000,
+          id: 'forged-seq-no-rowid-guard',
+          process_id: 'attacker',
+          recorded_by: 'attacker',
+        });
+        expect(alone.accepted, 'the over-claim guard must refuse this on its own').toBe(false);
+        expect(alone.message).toMatch(/may not commit beyond the record/);
+        raw.exec('ROLLBACK TO without_rowid_guard');
+        raw.exec('RELEASE without_rowid_guard');
+        expect(
+          (
+            raw
+              .prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='trigger' AND name = ?`)
+              .get(ROWID_GUARD_ON_CHECKPOINT_LEDGER) as { n: number }
+          ).n,
+          'the rowid guard must be back after the rollback',
+        ).toBe(1);
         expect(ledgerReadings(raw)).toEqual(NOTHING_REPORTED);
         raw.close();
 
@@ -951,37 +1008,69 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
             .get();
         const before = shape();
 
-        for (const spelling of ['INSERT', 'INSERT OR REPLACE', 'INSERT OR IGNORE']) {
-          // -1 is the placeholder value a `BEFORE INSERT` clause cannot tell from
-          // an omitted rowid; 0 and 1000 are the ordinary reseats. All three land
-          // OUTSIDE the ledger's identity and all three must be refused.
-          for (const seq of [-1, 0, 1000]) {
-            let landed = false;
-            let message = '';
-            try {
-              raw
-                .prepare(
-                  `${spelling} INTO ${HQ_INTEGRITY_CHECKPOINT_TABLE} ` +
-                    `(${columns.map((column) => `"${column}"`).join(', ')}) ` +
-                    `VALUES (${columns.map(() => '?').join(', ')})`,
-                )
-                .run(
-                  columns.map((column) =>
-                    column === 'seq'
-                      ? (seq as never)
-                      : column === 'id'
-                        ? (`reseat-${spelling}-${seq}` as never)
-                        : (genuine[column] as never),
-                  ),
-                );
-              landed = true;
-            } catch (error) {
-              message = error instanceof Error ? error.message : String(error);
-            }
-            expect(landed, `${spelling} at seq ${seq} must be refused`).toBe(false);
-            expect(message).toMatch(/may not commit beyond the record/);
+        /** One reseat attempt, with no HQ code in the path. */
+        const reseat = (spelling: string, seq: number, tag: string): { landed: boolean; message: string } => {
+          try {
+            raw
+              .prepare(
+                `${spelling} INTO ${HQ_INTEGRITY_CHECKPOINT_TABLE} ` +
+                  `(${columns.map((column) => `"${column}"`).join(', ')}) ` +
+                  `VALUES (${columns.map(() => '?').join(', ')})`,
+              )
+              .run(
+                columns.map((column) =>
+                  column === 'seq'
+                    ? (seq as never)
+                    : column === 'id'
+                      ? (`reseat-${tag}-${spelling}-${seq}` as never)
+                      : (genuine[column] as never),
+                ),
+              );
+            return { landed: true, message: '' };
+          } catch (error) {
+            return { landed: false, message: error instanceof Error ? error.message : String(error) };
+          }
+        };
+
+        const SPELLINGS = ['INSERT', 'INSERT OR REPLACE', 'INSERT OR IGNORE'];
+        // -1 is the placeholder value a `BEFORE INSERT` clause cannot tell from
+        // an omitted rowid; 0 and 1000 are the ordinary reseats. All three land
+        // OUTSIDE the ledger's identity and all three must be refused.
+        const RESEATS = [-1, 0, 1000];
+
+        // Pass one: the store as HQ actually builds it, carrying BOTH lanes'
+        // guards. `no_rowid_skip` bounds the rowid from above only, so it
+        // speaks for 1000 and is silent for -1 and 0; the over-claim guard's
+        // identity clause speaks for all three. Either refusal is HQ's own.
+        for (const spelling of SPELLINGS) {
+          for (const seq of RESEATS) {
+            const attempt = reseat(spelling, seq, 'both');
+            expect(attempt.landed, `${spelling} at seq ${seq} must be refused`).toBe(false);
+            expect(attempt.message).toMatch(
+              /rowids are contiguous|may not commit beyond the record/,
+            );
           }
         }
+
+        // Pass two: the over-claim guard ALONE, with the other lane's rowid
+        // guard dropped inside a rolled-back SAVEPOINT. This is what keeps the
+        // merge honest — the clause this lane added is shown to refuse every
+        // spelling at every reseat by itself, so it is not being carried by the
+        // broader guard that happens to sit in front of it.
+        raw.exec('SAVEPOINT without_rowid_guard');
+        raw.exec(`DROP TRIGGER ${ROWID_GUARD_ON_CHECKPOINT_LEDGER}`);
+        for (const spelling of SPELLINGS) {
+          for (const seq of RESEATS) {
+            const attempt = reseat(spelling, seq, 'alone');
+            expect(
+              attempt.landed,
+              `${spelling} at seq ${seq} must be refused by the over-claim guard alone`,
+            ).toBe(false);
+            expect(attempt.message).toMatch(/may not commit beyond the record/);
+          }
+        }
+        raw.exec('ROLLBACK TO without_rowid_guard');
+        raw.exec('RELEASE without_rowid_guard');
 
         // Nothing persisted, and — the half that matters — the AUTOINCREMENT
         // high-water mark is exactly where it was. A refusal that raised it
@@ -992,6 +1081,98 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
         raw.close();
 
         expectNoFinding(fx, ['after-reseat-spellings']);
+      } finally {
+        fx.cleanup();
+      }
+    },
+    FILE_BACKED_PROBE_TIMEOUT_MS,
+  );
+
+  /**
+   * WHY BOTH round-thirteen rowid closures are kept, executed rather than
+   * argued.
+   *
+   * Two concurrent lanes closed the rowid channel off the same base.
+   * `no_rowid_skip` is the broader one — all 33 declared ledgers, by
+   * construction — and the obvious merge is to keep it and retire the
+   * over-claim guard's narrower `NEW.seq <> (SELECT COUNT(*) …)` identity
+   * clause as subsumed. This test is what makes that merge impossible to
+   * perform by accident: `no_rowid_skip` bounds the rowid from ABOVE only, so
+   * on its own it ACCEPTS a reseat at 0 and at the `-1` the engine itself
+   * spells for an omitted AUTOINCREMENT key — and each of those raises this
+   * ledger's row count without raising its greatest rowid, which is exactly
+   * what `elidedCommitmentLedgerRows` reads. Retiring the identity clause would
+   * therefore have reopened half of Exploit B under a merge that looked like
+   * consolidation.
+   *
+   * It asserts a gap in the OTHER lane's guard deliberately. That is not a
+   * criticism of it — it was written for the gap-widening act, which it closes
+   * on 33 ledgers where this clause closed one — it is the measurement that
+   * says the two are complements, and it will fail if either the guard or the
+   * reader ever changes such that one really does subsume the other.
+   */
+  it(
+    'keeps both rowid closures, because the broader guard alone still admits two reseats here',
+    () => {
+      const fx = fileFixture();
+      try {
+        warm(fx);
+        fx.db.close();
+
+        const raw = fx.raw();
+        const columns = checkpointColumns(raw);
+        const genuine = newestWholeRow(raw);
+        expect(ledgerReadings(raw)).toEqual(NOTHING_REPORTED);
+
+        raw.exec('SAVEPOINT without_overclaim_guard');
+        raw.exec(`DROP TRIGGER ${OVERCLAIM_GUARD}`);
+
+        // Above the top: the broader guard's own case, and it holds.
+        const skipped = insertRow(raw, columns, {
+          ...genuine,
+          seq: 1000,
+          id: 'rowid-guard-alone-1000',
+        });
+        expect(skipped.accepted, 'no_rowid_skip must still refuse a rowid past the top').toBe(false);
+        expect(skipped.message).toMatch(/rowids are contiguous/);
+
+        // At or below the top, colliding with nothing: OUTSIDE its bound. Each
+        // lands, and each makes an intact store report — which is the finding
+        // the identity clause exists to refuse.
+        for (const seq of [-1, 0]) {
+          raw.exec('SAVEPOINT reseat');
+          const landed = insertRow(raw, columns, {
+            ...genuine,
+            seq,
+            id: `rowid-guard-alone-${seq}`,
+          });
+          expect(
+            landed.accepted,
+            `no_rowid_skip alone is expected to ADMIT the reseat at ${seq}`,
+          ).toBe(true);
+          expect(
+            elidedCommitmentLedgerRows(raw),
+            `the reseat at ${seq} must be shown to fabricate a finding, or this test proves nothing`,
+          ).toBe(true);
+          raw.exec('ROLLBACK TO reseat');
+          raw.exec('RELEASE reseat');
+        }
+
+        raw.exec('ROLLBACK TO without_overclaim_guard');
+        raw.exec('RELEASE without_overclaim_guard');
+
+        // And with both guards back, every one of the three is refused and the
+        // store reports nothing.
+        for (const seq of [-1, 0, 1000]) {
+          const attempt = insertRow(raw, columns, { ...genuine, seq, id: `both-${seq}` });
+          expect(attempt.accepted, `seq ${seq} must be refused with both guards standing`).toBe(
+            false,
+          );
+        }
+        expect(ledgerReadings(raw)).toEqual(NOTHING_REPORTED);
+        raw.close();
+
+        expectNoFinding(fx, ['after-complementarity']);
       } finally {
         fx.cleanup();
       }
@@ -1090,6 +1271,421 @@ describe('every column of the commitment ledger is bounded or declared to decide
       raw.exec(`DROP TRIGGER ${OVERCLAIM_GUARD}`);
       raw.exec(guard);
       expect(unboundedCheckpointColumns(raw)).toEqual([]);
+      raw.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+/* --------------------------------------------------------------------------
+ * Below: the SECOND round-thirteen lane's block, kept in full at the merge.
+ *
+ * Both lanes hardened this same guard off the same base, and both appended a
+ * new `describe` here. Neither is a restatement of the other: the block above
+ * is about the COLUMNS the guard left unbounded (`tip_hash`, the explicit
+ * `seq`) and the class enumeration that derives the obligation from
+ * `PRAGMA table_info`; the block below is about the SHAPE a commitment column
+ * may hold, and the empty key that defeated `committedLedgerGaps` permanently
+ * at one permitted `INSERT`. Nothing from either was dropped or weakened.
+ * ------------------------------------------------------------------------ */
+
+
+/**
+ * Wave 5, correction round thirteen, HIGH 1 — one permitted `INSERT`
+ * permanently and silently DISABLED the mid-ledger-deletion detector.
+ *
+ * `committedLedgerGaps` built a JSON path by CONCATENATION —
+ * `json_extract(c.ledger_marks, '$.' || j.key)` — out of `j.key`, which comes
+ * from `ledger_rows`, a column a raw writer controls. SQLite raises a hard
+ * `bad JSON path: '$.'` for an EMPTY key, the reader's `try/catch` swallowed it
+ * and returned `{}`, and every gap baseline for all 33 declared ledgers was
+ * gone — permanently, because the ledger is append-only and the poison row can
+ * never be removed.
+ *
+ * Neither existing clause fired on it: `json_each('{"":0}')` gives
+ * `COUNT(*) = 1` and `COUNT(DISTINCT key) = 1`, so the ambiguity clause is
+ * silent, and no declared table is named, so no value bound is either. Executed
+ * against `237fc76` on a file built by this package's own fixture, control and
+ * attack identical but for that one `INSERT`, against a mid-ledger delete of
+ * `hq_reliability_verdicts` rowid 2 — the ledger that holds the safe-mode latch:
+ *
+ * ```
+ * CONTROL: p2..p6 boot=true["append_only_guard_missing"] assess=true release=refused
+ * ATTACK : p2 boot=true assess=false[] release=ADMITTED ; p3..p6 boot=false[] assess=false[] release=ADMITTED
+ * ```
+ *
+ * That defeats exactly the detector round seven's High 2 exists to provide, in
+ * the FALSE-REASSURANCE direction, at ONE `INSERT` the schema deliberately
+ * permits — strictly cheaper than the three statements this module quotes for
+ * every other tamper.
+ *
+ * This block pins the CLASS rather than the instance, in both halves of the
+ * repair: the guard now admits only the shape HQ's single writer emits
+ * (`COMMITMENT_SHAPE_CLAUSES`), and the reader builds no JSON path out of a row
+ * and no longer fails OPEN when the engine refuses it.
+ */
+describe('a commitment whose SHAPE is not the one HQ writes is refused', () => {
+  /** Append one checkpoint with both JSON columns written as RAW TEXT. */
+  function appendShaped(
+    raw: HqDatabase,
+    marks: unknown,
+    rows: unknown,
+    chainLength: unknown = 0,
+  ): { accepted: boolean; message: string } {
+    try {
+      raw
+        .prepare(
+          `INSERT INTO ${HQ_INTEGRITY_CHECKPOINT_TABLE}
+             (id, recorded_at, chain_length, tip_hash, ledger_marks, ledger_rows, process_id, recorded_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          `forged-${Math.random().toString(36).slice(2)}`,
+          new Date().toISOString(),
+          chainLength,
+          '',
+          marks,
+          rows,
+          'attacker',
+          'attacker',
+        );
+      return { accepted: true, message: '' };
+    } catch (error) {
+      return { accepted: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** Do one write with a ledger's own engine guards temporarily removed. */
+  function throughTheGuards(raw: HqDatabase, table: string, write: (raw: HqDatabase) => void): void {
+    const triggers = raw
+      .prepare(`SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?`)
+      .all(table) as { name: string; sql: string }[];
+    expect(triggers.length).toBeGreaterThan(0);
+    for (const trigger of triggers) raw.exec(`DROP TRIGGER ${trigger.name}`);
+    write(raw);
+    for (const trigger of triggers) raw.exec(trigger.sql);
+  }
+
+  /** Remove the row at the MIDDLE of `hq_reliability_verdicts`, leaving the tail. */
+  function deleteMidLedgerRow(fx: FileFixture): void {
+    const raw = fx.raw();
+    const rowids = (
+      raw.prepare(`SELECT rowid AS rid FROM hq_reliability_verdicts ORDER BY rowid`).all() as {
+        rid: number;
+      }[]
+    ).map((row) => row.rid);
+    expect(rowids.length).toBeGreaterThanOrEqual(3);
+    throughTheGuards(raw, 'hq_reliability_verdicts', (db) =>
+      db.prepare(`DELETE FROM hq_reliability_verdicts WHERE rowid = ?`).run(rowids[1]),
+    );
+    raw.close();
+  }
+
+  /** Blocking at both depths, in further processes, with the guarded act refused. */
+  function expectStillDetected(fx: FileFixture, tags: readonly string[]): void {
+    for (const tag of tags) {
+      const process = fx.reopen(tag);
+      const boot = process.ops.hqReliabilityPosture().integrity;
+      const assessed = process.ops.assessHqIntegrity({ requestedBy: 'founder' });
+      expect(assessed.ok).toBe(true);
+      if (!assessed.ok) throw new Error('unreachable');
+      expect(assessed.data.safeMode, `${tag} assessment`).toBe(true);
+      expect(findings(assessed.data.observations), `${tag} assessment`).toContain(
+        'append_only_guard_missing',
+      );
+      expect(boot.safeMode || assessed.data.safeMode, `${tag} depth`).toBe(true);
+      expect(process.ops.releaseKillSwitch('global', 'founder').ok, `${tag} release`).toBe(false);
+      process.db.close();
+    }
+  }
+
+  it('refuses the empty-key poison, and the mid-ledger-deletion detector still fires', () => {
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+
+      const raw = fx.raw();
+      const last = newest(raw);
+      // The one statement that used to buy the whole detector, unchanged.
+      const poison = appendShaped(
+        raw,
+        last.ledger_marks,
+        JSON.stringify({ ...JSON.parse(last.ledger_rows), '': 0 }),
+        last.chain_length,
+      );
+      expect(poison.accepted, 'an empty JSON key must not reach the commitment ledger').toBe(false);
+      expect(poison.message).toMatch(/may not commit beyond the record/);
+      raw.close();
+
+      // And the detector it used to disable is intact: the mid-ledger delete is
+      // reported at every process afterwards, exactly as in the control.
+      deleteMidLedgerRow(fx);
+      const seen = fx.raw();
+      expect(regressedImmutableLedgers(seen)).toContain('hq_reliability_verdicts');
+      seen.close();
+      expectStillDetected(fx, ['empty-key-one', 'empty-key-two', 'empty-key-three']);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('keeps the gap baseline even when such a row is already in the file, which is the READER half', () => {
+    // The guard bounds what LANDS. A row written at a build without these
+    // clauses is still there afterwards, so the reader is fixed too: it builds
+    // no JSON path out of a key a row carries, and therefore cannot be made to
+    // raise. Planted here through the three-statement path, which is the only
+    // way such a row can now exist at all.
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+
+      const raw = fx.raw();
+      const last = newest(raw);
+      const guard = (
+        raw
+          .prepare(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name = ?`)
+          .get(OVERCLAIM_GUARD) as { sql: string }
+      ).sql;
+      raw.exec(`DROP TRIGGER ${OVERCLAIM_GUARD}`);
+      expect(
+        appendShaped(
+          raw,
+          last.ledger_marks,
+          JSON.stringify({ ...JSON.parse(last.ledger_rows), '': 0 }),
+          last.chain_length,
+        ).accepted,
+      ).toBe(true);
+      raw.exec(guard);
+      raw.close();
+
+      deleteMidLedgerRow(fx);
+      const seen = fx.raw();
+      // Against the previous head this list is EMPTY: the reader threw on the
+      // planted key, the catch returned no baseline at all, and the deletion
+      // was invisible for ever.
+      expect(regressedImmutableLedgers(seen)).toContain('hq_reliability_verdicts');
+      seen.close();
+      expectStillDetected(fx, ['planted-one', 'planted-two']);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('admits exactly the shape HQ writes, and refuses every other one, by executing each', () => {
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+      const raw = fx.raw();
+      const declared = ENGINE_IMMUTABLE_TABLES[0]!.table;
+
+      const refused: [string, unknown, unknown][] = [
+        ['the empty key', '{"":0}', '{}'],
+        ['the empty key on the row-count half', '{}', '{"":0}'],
+        ['an undeclared table name', '{"not_a_ledger_of_hqs":1}', '{}'],
+        ['a top-level array', '[1,2]', '{}'],
+        ['an empty top-level array', '[]', '{}'],
+        ['a JSON scalar', 'null', '{}'],
+        ['a JSON number', '5', '{}'],
+        ['malformed JSON', 'not json at all', '{}'],
+        ['a BLOB that parses as JSON', Buffer.from('{}', 'utf8'), '{}'],
+        ['an INTEGER in the JSON column', 5, '{}'],
+        ['a nested object as a value', `{"${declared}":{"a":1}}`, '{}'],
+        ['an array as a value', `{"${declared}":[1]}`, '{}'],
+        ['a real as a value', `{"${declared}":1.5}`, '{}'],
+        ['a text as a value', `{"${declared}":"1"}`, '{}'],
+        ['a boolean as a value', `{"${declared}":true}`, '{}'],
+        ['a null as a value', `{"${declared}":null}`, '{}'],
+        ['a NEGATIVE value', `{"${declared}":-1}`, '{}'],
+        ['a negative row count', '{}', `{"${declared}":-1}`],
+      ];
+      for (const [label, marks, rows] of refused) {
+        const outcome = appendShaped(raw, marks, rows);
+        expect(outcome.accepted, `${label} must be refused`).toBe(false);
+        expect(outcome.message, `${label} must be refused by HQ's own guard`).toMatch(
+          /may not commit beyond the record/,
+        );
+      }
+
+      // `chain_length` is the third column the same readers disagree over.
+      for (const [label, value] of [
+        ['a REAL chain length', 0.5],
+        ['a TEXT chain length', 'nine'],
+        ['a NEGATIVE chain length', -1],
+      ] as const) {
+        const outcome = appendShaped(raw, '{}', '{}', value);
+        expect(outcome.accepted, `${label} must be refused`).toBe(false);
+      }
+
+      // And the shapes that must keep landing, because refusing them would stop
+      // the commitment ledger advancing at all.
+      expect(appendShaped(raw, '{}', '{}').accepted, 'an empty commitment must still land').toBe(
+        true,
+      );
+      const genuine = newest(raw);
+      expect(
+        appendShaped(raw, genuine.ledger_marks, genuine.ledger_rows, genuine.chain_length).accepted,
+        "a re-statement of HQ's own newest commitment must still land",
+      ).toBe(true);
+      raw.close();
+
+      // Nothing above manufactured a finding, in either direction.
+      expectNoFinding(fx, ['shape-battery']);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('refuses malformed JSON with HQ’s own message rather than the engine’s exception', () => {
+    // Ordering is NOT what makes this hold, and assuming it was would have been
+    // a false disclosure. Writing `json_valid = 0` first and leaning on `OR`
+    // short-circuiting was tried and executed: on SQLite 3.53.2 a `WHEN` clause
+    // whose terms carry subqueries evaluates them anyway, and this very input
+    // came back as `malformed JSON`. Every expression over these columns is
+    // total instead, so the MESSAGE is asserted here — not merely that the row
+    // did not land, which would pass either way.
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+      const raw = fx.raw();
+      const outcome = appendShaped(raw, '{"op_evidence": ', '{}');
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.message).toMatch(/may not commit beyond the record/);
+      expect(outcome.message).not.toMatch(/malformed JSON/);
+      expect(outcome.message).not.toMatch(/JSON path/);
+      raw.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('still lets HQ commit, boot after boot, with the new clauses standing', () => {
+    // The half that must never move. A guard that also refused HQ's own
+    // checkpoints would stop the commitment ledger advancing, which is worse
+    // than the attack it closes.
+    const fx = fileFixture();
+    try {
+      const rows = (): number =>
+        (
+          fx.db.prepare(`SELECT COUNT(*) AS n FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`).get() as {
+            n: number;
+          }
+        ).n;
+      const before = rows();
+      warm(fx, 3);
+      expect(rows(), 'HQ must still be able to commit').toBeGreaterThan(before);
+      // Every landed commitment is inside the admitted space, checked against
+      // the same rule the guard applies rather than against the guard itself.
+      const declared = new Set(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table));
+      const landed = fx.db
+        .prepare(`SELECT chain_length, ledger_marks, ledger_rows FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`)
+        .all() as { chain_length: unknown; ledger_marks: string; ledger_rows: string }[];
+      expect(landed.length).toBeGreaterThan(0);
+      for (const row of landed) {
+        expect(Number.isInteger(row.chain_length)).toBe(true);
+        expect(Number(row.chain_length)).toBeGreaterThanOrEqual(0);
+        for (const column of [row.ledger_marks, row.ledger_rows]) {
+          const parsed = JSON.parse(column) as Record<string, unknown>;
+          expect(Array.isArray(parsed)).toBe(false);
+          for (const [key, value] of Object.entries(parsed)) {
+            expect(declared.has(key), `${key} must be a declared ledger`).toBe(true);
+            expect(Number.isInteger(value)).toBe(true);
+            expect(value as number).toBeGreaterThanOrEqual(0);
+          }
+        }
+      }
+      fx.db.close();
+      expectNoFinding(fx, ['still-committing-one', 'still-committing-two']);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('fails CLOSED when the engine cannot read a commitment column it can compile against', () => {
+    // The `catch` that made the defeat permanent rather than noisy. The two
+    // BENIGN reasons it was written for are compile-time errors (`no such
+    // table`, `no such column`) and still yield no baseline; anything raised
+    // while the statement RUNS now yields the STRICTEST baseline instead of
+    // none, so a ledger that has been holed is reported rather than excused.
+    //
+    // The failure is INJECTED rather than induced from data, and this test
+    // claims no more than that: after `COMMITMENT_SHAPE_CLAUSES` and the
+    // `CASE`-wrapped `json_each`, no content a raw writer can put in these
+    // columns makes the statement raise. What is asserted here is the
+    // FALLBACK's behaviour, which is defence against an engine-level failure
+    // (a corrupt page, an I/O error) that no test can arrange deterministically.
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+      deleteMidLedgerRow(fx);
+      // The GAP arm has to be the only one still holding, or this test would
+      // pass on the row-count arm and prove nothing about the fallback. Two
+      // further processes each APPEND a verdict row, which puts the count back
+      // above what HQ committed — measured here rather than assumed: identity
+      // goes 3 rows/top 3 to 2/3 at the delete and on to 6 rows/top 7, against a
+      // commitment of 3/3. Only `top - rows > committed gap` still fires.
+      for (const tag of ['heal-one', 'heal-two']) {
+        const healing = fx.reopen(tag);
+        healing.ops.assessHqIntegrity({ requestedBy: 'founder' });
+        healing.db.close();
+      }
+      const healed = fx.raw();
+      const identity = declaredLedgerIdentities(healed).hq_reliability_verdicts!;
+      const committed = JSON.parse(newest(healed).ledger_rows) as Record<string, number>;
+      expect(identity.rows).toBeGreaterThan(committed.hq_reliability_verdicts!);
+      expect(identity.top - identity.rows).toBeGreaterThan(0);
+      healed.close();
+
+      const raw = fx.raw();
+      const handle = raw as unknown as { prepare: (sql: string) => Record<string, unknown> };
+      const realPrepare = handle.prepare.bind(handle);
+      handle.prepare = (sql: string) => {
+        const statement = realPrepare(sql);
+        if (sql.includes(HQ_INTEGRITY_CHECKPOINT_TABLE) && sql.includes('AS gap')) {
+          statement.all = () => {
+            throw new Error('injected: the engine cannot read what this column holds');
+          };
+        }
+        return statement;
+      };
+      // Against the previous head this is `[]` — the gap read failed, the catch
+      // returned no baseline, and the holed ledger was excused.
+      expect(regressedImmutableLedgers(raw)).toContain('hq_reliability_verdicts');
+      handle.prepare = realPrepare;
+      raw.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('never reports a HEALTHY file when that fallback fires, which is the direction it must not fabricate in', () => {
+    // The fallback commits every declared ledger to a gap of zero, which is what
+    // a healthy one really has. So it can only report a ledger that NOW has a
+    // hole, and reports nothing on a store nothing has touched — the same rule
+    // this module applies to every other detector: fail closed, never fabricate.
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+      const raw = fx.raw();
+      const handle = raw as unknown as { prepare: (sql: string) => Record<string, unknown> };
+      const realPrepare = handle.prepare.bind(handle);
+      handle.prepare = (sql: string) => {
+        const statement = realPrepare(sql);
+        if (sql.includes(HQ_INTEGRITY_CHECKPOINT_TABLE) && sql.includes('AS gap')) {
+          statement.all = () => {
+            throw new Error('injected: the engine cannot read what this column holds');
+          };
+        }
+        return statement;
+      };
+      expect(regressedImmutableLedgers(raw)).toEqual([]);
+      handle.prepare = realPrepare;
       raw.close();
     } finally {
       fx.cleanup();

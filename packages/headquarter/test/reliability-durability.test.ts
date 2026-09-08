@@ -27,7 +27,12 @@ import {
   HQ_DURABILITY_REQUIREMENT,
   HQ_INTEGRITY_CHECKPOINT_TABLE,
   HQ_INTEGRITY_FINDINGS,
+  LEDGER_ROWID_GUARD,
+  WRITE_ONCE_IDENTITY_TABLES,
+  declaredIdentityGuardFor,
   REQUIRED_IMMUTABILITY_GUARDS,
+  ensureLedgerRowidGuards,
+  ensureWriteOnceIdentityGuards,
   SAFE_MODE_BLOCKING_FINDINGS,
   declaredGuardsFor,
   establishedImmutableTables,
@@ -389,9 +394,24 @@ describe('the engine-immutable inventory is checked against the live schema, not
     // there" was untrue whenever the phase also added a table. Asserting the
     // LIVE trigger set equals the union of the declarations closes it in the
     // direction that matters: a new guarded table is now a test failure.
+    //
+    // EXTENDED, not relaxed, in Wave 5 correction round thirteen (High 3). The
+    // schema gained a second declared class — write-once IDENTITY guards on
+    // tables that are legitimately updated and are therefore not append-only
+    // ledgers, `op_tasks` being the only member. The assertion is still that
+    // the live trigger set EQUALS the union of the DECLARATIONS; the union just
+    // has two terms now, so a guard on a table nobody declared is still a test
+    // failure, in either class.
     const liveTriggers = triggers.map((row) => row.name).sort();
-    const declaredTriggers = ENGINE_IMMUTABLE_TABLES.flatMap((entry) => declaredGuardsFor(entry)).sort();
+    const declaredTriggers = [
+      ...ENGINE_IMMUTABLE_TABLES.flatMap((entry) => declaredGuardsFor(entry)),
+      ...WRITE_ONCE_IDENTITY_TABLES.map((entry) => declaredIdentityGuardFor(entry)),
+    ].sort();
     expect(liveTriggers).toEqual(declaredTriggers);
+    // And the two classes are disjoint: an identity guard on a table that is
+    // also a declared ledger would be declared twice and censused twice.
+    const ledgerTables = new Set(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table));
+    expect(WRITE_ONCE_IDENTITY_TABLES.filter((entry) => ledgerTables.has(entry.table))).toEqual([]);
     db.close();
   });
 
@@ -561,6 +581,12 @@ describe('the engine-immutable inventory is checked against the live schema, not
       'trg_hq_mission_plan_items_no_replace',
       'trg_hq_mission_plan_items_no_relink',
       'trg_hq_mission_plan_items_no_respec',
+      // The UNIVERSAL guard, which every declared ledger carries whatever its
+      // base is (Wave 5 correction round thirteen, High 1). It is appended by
+      // `declaredGuardsFor` rather than listed per table precisely so a reduced
+      // base cannot omit it — the reduced base is what let this entry out of
+      // `no_rewrite`, and the rowid channel is not a column.
+      'trg_hq_mission_plan_items_no_rowid_skip',
     ]);
     // The rest are declared where they exist, and the census reads both.
     expect(declaredGuardsFor({
@@ -572,7 +598,16 @@ describe('the engine-immutable inventory is checked against the live schema, not
       'trg_hq_intel_budgets_no_erase',
       'trg_hq_intel_budgets_no_replace',
       'trg_hq_intel_budgets_no_replace_unique',
+      'trg_hq_intel_budgets_no_rowid_skip',
     ]);
+    // And the universal guard is universal by CONSTRUCTION: it is on every
+    // entry's declaration, taken from the declaration itself rather than from
+    // any list written here.
+    expect(
+      ENGINE_IMMUTABLE_TABLES.filter(
+        (entry) => !declaredGuardsFor(entry).includes(`trg_${entry.triggerPrefix}_${LEDGER_ROWID_GUARD}`),
+      ).map((entry) => entry.table),
+    ).toEqual([]);
     expect(
       ENGINE_IMMUTABLE_TABLES.filter((entry) => entry.secondaryGuards.length > 0).map(
         (entry) => entry.table,
@@ -1474,6 +1509,15 @@ describe('backup verification, against real bytes on disk', () => {
       // THIS test is about is the WAL sidecar, so the candidate is made a
       // sound HQ file and the sidecar behaviour is what it still measures.
       ensureEvidenceGuards(db);
+      // And the universal rowid guard, for the same reason and since the same
+      // census widened (Wave 5 correction round thirteen, High 1): every real
+      // HQ file carries it because every facade construction installs it, and a
+      // copy that does not is correctly refused `would_latch_safe_mode`.
+      ensureLedgerRowidGuards(db);
+      // And the write-once identity guards, for the same reason (round
+      // thirteen, High 3): the census covers them, so a copy that lacks one is
+      // refused rather than verified.
+      ensureWriteOnceIdentityGuards(db);
       // WAL mode with no checkpoint: the newest table is in the sidecar.
       expect(fs.existsSync(`${candidate}-wal`)).toBe(true);
       expect(fs.statSync(`${candidate}-wal`).size).toBeGreaterThan(0);
@@ -2057,10 +2101,24 @@ describe('the two nearly-true facts about a file HQ has been in', () => {
  * this wave, neither picked up by the prose. Nothing compared either number to
  * anything, which is the same reason the cost clause went wrong three times.
  * Both are compared here, against `BACKUP_REFUSAL_REASONS` itself rather than
- * against a figure typed into this file: the constant reached SEVENTEEN at the
+ * against a figure typed into this file: the constant reached seventeen at the
  * merge with the concurrent round-eleven lane, which added
  * `candidate_census_unavailable`, and this test caught the drift with no edit —
  * which is exactly what it was written to do.
+ *
+ * **This paragraph nevertheless went stale itself, twice, in exactly the way it
+ * was written to stop** (Wave 5 correction round thirteen, Low 1). It said the
+ * constant held fifteen with twelve exercised; the round-ten merge had already
+ * taken it to sixteen with thirteen, and the round-eleven merge above took it to
+ * seventeen. The tests derive their assertions from the constant, so nothing was
+ * ever unpinned — only the prose describing them was false, which is the same
+ * artifact-versus-behaviour gap the whole file exists to close. So the two
+ * numbers this paragraph states are no longer free-standing claims either: the
+ * third test below parses them back out of this very docblock and compares them
+ * to the constant and to the sweep. As measured at this head, the constant holds
+ * SEVENTEEN and FOURTEEN are exercised — and that second number is a third
+ * value in as many merges, which is precisely why it is asserted rather than
+ * written down: the pin caught the drift at the merge, with no edit.
  */
 const HERE_FOR_PHASE_13 = path.dirname(fileURLToPath(import.meta.url));
 
@@ -2143,13 +2201,46 @@ describe('the page’s count of the backup guard’s refusals is the constant’
     }
   });
 
+  /**
+   * EVERY place the page states the pair, not the one phrasing this regex was
+   * first written for (Wave 5 correction round thirteen, Medium 3).
+   *
+   * Round twelve added this pin and it read `"<n> of the <m> are exercised"`.
+   * A SECOND sentence on the same page said "ten of the thirteen backup path
+   * protections are all exercised", and it went on saying it after the constant
+   * moved to sixteen and the exercised set to thirteen, because no regex
+   * reached it. A pin that reads one phrasing of a claim is the same partial
+   * enumeration this whole correction round is about, so the sweep below finds
+   * every `"<number word> of the <number word>"` on the page whose sentence is
+   * about these refusals and checks BOTH halves of each.
+   */
   it('states how many are exercised, and names the ones that are not', () => {
     const page = fs.readFileSync(PHASE_13_PAGE, 'utf8');
-    const match = /(\w+) of the \w+ are exercised/.exec(page);
-    expect(match, 'the page must state how many refusals are exercised').toBeTruthy();
-
     const driven = exercised();
     const notDriven = BACKUP_REFUSAL_REASONS.filter((reason) => !driven.includes(reason));
+
+    // Any `"<number word> of the <number word>"` whose sentence goes on to say
+    // those refusals are exercised. Written as a general sweep rather than as
+    // the two phrasings this page happens to use today: the concurrent
+    // round-thirteen lane changed one of them from "backup path protections" to
+    // "backup refusals" while raising both constants, and a regex written
+    // around a phrasing would have stopped reading it.
+    const pairs = [...page.matchAll(/(\w+) of the (\w+)\b/g)].filter((pair) => {
+      if (NUMBER_WORDS[pair[1]!.toLowerCase()] === undefined) return false;
+      if (NUMBER_WORDS[pair[2]!.toLowerCase()] === undefined) return false;
+      return /exercis/i.test(page.slice(pair.index!, pair.index! + 200));
+    });
+    expect(pairs.length, 'the page must state the exercised/total pair at least once').toBeGreaterThan(
+      0,
+    );
+    for (const pair of pairs) {
+      expect(NUMBER_WORDS[pair[1]!.toLowerCase()], `"${pair[0]}" — exercised count`).toBe(driven.length);
+      expect(NUMBER_WORDS[pair[2]!.toLowerCase()], `"${pair[0]}" — total count`).toBe(
+        BACKUP_REFUSAL_REASONS.length,
+      );
+    }
+    const match = pairs[0];
+    expect(match, 'the page must state how many refusals are exercised').toBeTruthy();
     expect(NUMBER_WORDS[match![1]!.toLowerCase()]).toBe(driven.length);
     // And each unexercised one has to be admitted by name, with its reason —
     // a count that quietly absorbs a newly-unexercised reason is the failure.
@@ -2157,5 +2248,38 @@ describe('the page’s count of the backup guard’s refusals is the constant’
       expect(page, `the page must say ${reason} is not exercised`).toContain(`\`${reason}\``);
       expect(page).toMatch(new RegExp(`${reason}[\\s\\S]{0,400}?NOT exercised|NOT exercised[\\s\\S]{0,400}?${reason}|${reason}[\\s\\S]{0,400}?not exercised`));
     }
+  });
+
+  /**
+   * Round thirteen, Low 1 — the same rule turned on THIS FILE'S OWN prose.
+   *
+   * The two tests above pin the PAGE against the constant, and they held: the
+   * page says sixteen and thirteen and both are right. What nothing pinned was
+   * the docblock above them, which still said fifteen and twelve after the merge
+   * that added `would_latch_safe_mode`. No assertion was ever weakened by it —
+   * they all derive from the constant — but a false sentence in a test file is
+   * the same artifact as a false sentence in a served string, and this wave has
+   * now shipped ten defects that were defects in a disclosure.
+   *
+   * So the docblock's two numbers are parsed back out of this file and compared
+   * to the constant and to the sweep, exactly as the page's are.
+   */
+  it('states its own two counts in the docblock, and both are the measured ones', () => {
+    const source = fs.readFileSync(path.join(HERE_FOR_PHASE_13, 'reliability-durability.test.ts'), 'utf8');
+    const anchor = source.indexOf('const HERE_FOR_PHASE_13');
+    expect(anchor, 'the anchor this docblock sits above must exist').toBeGreaterThan(0);
+    const opened = source.lastIndexOf('/**', anchor);
+    expect(opened, 'that anchor must carry a docblock').toBeGreaterThan(0);
+    const prose = source
+      .slice(opened, anchor)
+      .split('\n')
+      .map((line) => line.replace(/^\s*\/?\*+\/?\s?/, ''))
+      .join(' ')
+      .replace(/\s+/g, ' ');
+
+    const stated = /constant holds (\w+) and (\w+) are exercised/i.exec(prose);
+    expect(stated, 'the docblock must state how many the constant holds and how many are driven').toBeTruthy();
+    expect(NUMBER_WORDS[stated![1]!.toLowerCase()]).toBe(BACKUP_REFUSAL_REASONS.length);
+    expect(NUMBER_WORDS[stated![2]!.toLowerCase()]).toBe(exercised().length);
   });
 });

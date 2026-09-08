@@ -915,6 +915,8 @@ import {
   INTEGRITY_DEPTH_STATEMENT,
   SAFE_MODE_STATEMENT,
   ensureIntegrityCheckpoints,
+  ensureLedgerRowidGuards,
+  ensureWriteOnceIdentityGuards,
   fullIntegrity,
   observeImmutabilityAsFound,
   recordHqSchemaEnsured,
@@ -2777,6 +2779,16 @@ export class HeadquarterOperations {
     // and in exactly the same position: after the as-found observation, so a
     // tamperer who dropped it is reported before HQ re-creates it empty.
     ensureIntegrityCheckpoints(db);
+    // The universal ROWID guard on every declared ledger, in the same position
+    // and for the same two reasons (Wave 5 correction round thirteen, High 1):
+    // after the as-found census so a dropped guard is reported before it is
+    // repaired, and after every `ensure*Schema` above so the ledgers this build
+    // declares are all present to be guarded. See `ensureLedgerRowidGuards`.
+    ensureLedgerRowidGuards(db);
+    // The write-once IDENTITY guards on the tables that are joined to by value
+    // and are not append-only ledgers (Wave 5 correction round thirteen,
+    // High 3). Same position, same rule: after the as-found census.
+    ensureWriteOnceIdentityGuards(db);
     // The durable "HQ has ensured this file" mark, stamped into
     // `PRAGMA user_version` AFTER the ensures and read BEFORE them, next time
     // (Wave 5 correction round four, High 1). It is the half of the
@@ -9780,13 +9792,42 @@ export class HeadquarterOperations {
     return [...projectIds].sort();
   }
 
+  /**
+   * **The mission comes from the PLAN ITEM's own column, and the join is a LEFT
+   * one** (Wave 5 correction round thirteen, High 3). This used to read
+   * `m.id AS mission_id` through `JOIN hq_missions m ON m.id = p.mission_id`,
+   * which made the mission scope depend on a row in ANOTHER table still
+   * carrying the identity the plan item names. `hq_missions` carries `no_erase`
+   * and `no_replace` and — until this round — nothing that guarded an UPDATE of
+   * `id`, so one raw `UPDATE hq_missions SET id = …`, no DDL and no row-count
+   * change, made the inner join match nothing: `governedBy` lost the mission,
+   * `permittedTiers` widened from `['deterministic_local']` to all five,
+   * `budgetDecision` went `blocked` -> `within_ceiling`, and a `critical_review`
+   * write that had been refused was ACCEPTED — while the Founder's own budget
+   * report still read `blocked`, so the report and the enforcement disagreed.
+   * 12 of 12 fresh ids, `structuralIntegrity` clean throughout.
+   *
+   * The authoritative link is `hq_mission_plan_items.mission_id`, which is
+   * write-once by its own `no_remission` guard, so it is read directly and the
+   * mission row is consulted only for the PROJECT it belongs to. The join being
+   * LEFT is the whole difference: a mission row that cannot be found no longer
+   * removes the mission scope, it only leaves the project one underived — and
+   * `#durableTaskProjectScopes` derives that from the append-only event log
+   * regardless.
+   *
+   * The identity itself is ALSO guarded now (`trg_hq_missions_no_reidentify`),
+   * so this is the read-side half of a fix whose write-side half stands beside
+   * it. Neither is a substitute for the other: the guard can be dropped and
+   * re-created in three statements like every other engine guard, and this
+   * derivation then still holds.
+   */
   #canonicalTaskScopes(taskId: string): { missionIds: string[]; projectIds: string[] } {
     if (!this.#missionStorePresent) return { missionIds: [], projectIds: [] };
     const rows = this.#db
       .prepare(
-        `SELECT DISTINCT m.id AS mission_id, m.project_id AS project_id
+        `SELECT DISTINCT p.mission_id AS mission_id, m.project_id AS project_id
            FROM hq_mission_plan_items p
-           JOIN hq_missions m ON m.id = p.mission_id
+           LEFT JOIN hq_missions m ON m.id = p.mission_id
           WHERE p.task_id = ?`,
       )
       .all(taskId) as { mission_id: string | null; project_id: string | null }[];

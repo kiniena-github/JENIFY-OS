@@ -205,9 +205,22 @@
  * re-creation per engine-guarded ledger, plus one `UPDATE` per ledger. No
  * census reports anything, because nothing is dropped and no row disappears.
  * That is a step, not a boundary, and no row-count invariant can close it — the
- * count is exactly what this version preserves. Dropping
+ * count is exactly what this version preserves.
+ *
+ * **Dropping `hq_integrity_checkpoints` outright is NO LONGER a route at any
+ * price, and this sentence priced one that no longer exists** (Wave 5
+ * correction round thirteen, Low 3 of that review). It read: "Dropping
  * `hq_integrity_checkpoints` outright remains the other route, and still costs
- * the restart and the second Founder act the round-five text priced it at.
+ * the restart and the second Founder act the round-five text priced it at."
+ * The round-ten header witness closed it: the ledger is a declared
+ * `ENGINE_IMMUTABLE_TABLES` member, so its absence is observed as found, and
+ * `PRAGMA application_id` records that HQ has committed on this file whatever
+ * happens to the table. Re-executed at `237fc76` on a warmed file — one
+ * `DROP TABLE`, nothing else — `p2`, `p3`, `p4` and `p5` each read
+ * `boot=true [append_only_guard_missing] assess=true release=REFUSED`. A
+ * residual priced above its real cost is as much a false claim as one priced
+ * below it, so the sentence is corrected rather than left standing, and the
+ * measurement is pinned in `reliability-commitment-witness.test.ts`.
  *
  * The other round-six lane reproduced the DELETE-and-re-seat wipe independently
  * — the one two paragraphs up, not the count-preserving rewrite priced
