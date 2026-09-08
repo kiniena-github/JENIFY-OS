@@ -862,33 +862,81 @@ that section. The artifact AS A WHOLE is a different question, and the answer
 is that it does carry Founder-typed text, in a file served with no
 authentication at all.
 
-The review named the task `title`. Measured at this head by writing a
-distinctive string into each field and searching the whole artifact, it is
-**four fields, not one** — the wider answer is recorded here rather than the
-narrower one that was reported:
+The round-ten review named the task `title`. Round ten measured **four** and
+wrote that number here. **A fresh hostile review at `f348f9a` planted canaries
+across the whole Founder-writable facade and found the disclosure was far too
+narrow; re-measured at the merged head with every plant executed through the
+real facade and every call asserted to have returned OK, it is
+twenty fields, not four** — `src/cli/snapshot.ts` writes the whole object
+`liveSnapshotFromOperations` returns, so everything in it is published:
 
-| Founder-typed field | Where it lands in `hq-snapshot.json` |
+| Founder-typed field | One measured path in `hq-snapshot.json` |
 |---|---|
-| `createTask` → `title` | `operations.data.<lane>[].title`, and folded into `commandCenter.data.attention.items[].summary` |
-| `createTask` → `project` | `operations.data.<lane>[].project` |
-| `denyTask` → `reason` | `operations.data.blocked[].blockReason`, `activity.data[].summary`, and the same `attention` summary |
-| `createTask` → `payload` | **nowhere.** Probed with the same method; it does not cross. |
+| `createProject.name` | `projects.data[].name`, and `missions.data[].projectName` |
+| `createProject.purpose` | `projects.data[].purpose` |
+| `createProject.stream` | `projects.data[].stream` |
+| `commandMission.title` | `missions.data[].title`, `projects.data[].missions[].title`, and the `commandCenter` attention summary |
+| `commandMission.objective` | `missions.data[].intentHistory[].objective` |
+| `commandMission.scope` | `missions.data[].scope` |
+| `commandMission.constraints` | `missions.data[].constraints[]` and `intentHistory[].constraints[]` |
+| `commandMission.acceptanceCriteria` | `missions.data[].acceptanceCriteria[]` and `intentHistory[].acceptanceCriteria[]` |
+| `commandMission.planItems` | `missions.data[].planItems[].summary` |
+| `commandMission.project` | `missions.data[].project` |
+| `amendMissionIntent.objective` | `missions.data[].objective` and `intentHistory[].objective` |
+| `amendMissionIntent.constraints` | `missions.data[].constraints[]` |
+| `amendMissionIntent.acceptanceCriteria` | `missions.data[].acceptanceCriteria[]` |
+| `amendMissionIntent.addPlanItems` | `missions.data[].planItems[].summary` |
+| `createTask.title` | `operations.data.<lane>[].title`, and the `commandCenter` attention summary |
+| `createTask.project` | `operations.data.<lane>[].project` |
+| `denyTask.reason` | `operations.data.blocked[].blockReason`, `activity.data[].summary`, the same attention summary |
+| `failTask.reason` | `activity.data[].summary` — worker-typed, and published |
+| `registerExecutionWorker.displayName` | `workforce.data[].displayName` |
+| `registerExecutionWorker.vendor` | `workforce.data[].vendor` |
 
-This is almost certainly intended, and it is why scanning these columns is
-load-bearing rather than tidy: `title`, `project` and `reason` are three of the
-columns a credential shape permanently bricked Founder routes through, and they
-are the same columns that reach the public artifact. It is also why the task
-PAYLOAD's carve-out from the credential scan is defensible — it is the one
-piece of caller text that is neither served to a Founder route nor published
-here, and its guard lives at the dispatch lane that would publish it.
+Fourteen further Founder- and worker-typed fields were planted and do NOT cross,
+and that half is pinned too, because it is what makes the payload carve-out from
+the credential scan defensible: `createTask.payload`,
+`commandMission.instruction`, `amendMissionIntent.amendment`,
+`engageKillSwitch.reason`, `setIntelligenceBudget.note`,
+`recordModelObservation.unitCostBasis`, `recordModelObservation.note`,
+`recordVerifiedBackup.backupPath`, `recordVerifiedBackup.note`,
+`postMissionMessage.body`, `postMissionMessage.refs`,
+`recordIntelligenceDecision.label`, `recordIntelligenceCost.basis`,
+`recordIntelligenceCost.note`.
 
-No behaviour is changed by this row. What changes is that the property is
-written down: **a task title, its project, and the reason a Founder gave for
-denying it are public.** Anyone composing one should know that, and any future
-field added beside them inherits the same question rather than the same
-silence. Pinned by `unauthenticated-founder-text.test.ts`, which writes a
-distinctive string into each of the four and asserts exactly this table — so
-the disclosure fails the suite if the behaviour changes in either direction.
+**No behaviour is changed by this table, and no credential can reach any of
+these fields** — every one of them is credential-scanned at its facade write,
+which is why that scan is load-bearing rather than tidy. The defect round
+fourteen closes is the FALSE DISCLOSURE and the vacuous pin: the previous
+version of `unauthenticated-founder-text.test.ts` planted canaries in two
+methods and asserted three `toContain` paths, so a field added beside them
+published silently.
+
+**What the pin does now.** `unauthenticated-founder-text.test.ts` plants a
+distinct canary in all 34 fields, asserts every facade call RETURNED OK (a
+canary that was never written would otherwise read as "does not cross"), asserts
+the crossing set EXACTLY in both directions, checks each published field lands
+at the path this table names, DERIVES the completeness of the plant from
+`service.ts` itself — every name in each exercised method's own
+`callerTextRefusal(input, [ … ])` list must be planted or exempted with a
+reason — and checks this table against the measured set, so the prose cannot
+drift from the behaviour again.
+
+**The scope of that derivation, stated rather than implied.** It is complete for
+the METHODS the scenario exercises, which are the Founder-driven writes the
+snapshot's sections are built from. It is not a claim about every method on the
+facade — `facade-write-scan.test.ts` owns that enumeration, over the call graph,
+for the credential scan. A method added to a snapshot section in a future phase
+has to be added to the canary table by hand, and nothing in the file can force
+that.
+
+**What this means in plain words:** a project's name, purpose and stream; a
+mission's title, objective, scope, constraints, acceptance criteria, plan-item
+summaries and project label, and every amendment to them; a task's title and
+project; the reason a Founder gave for denying it; the reason a WORKER gave for
+failing one; and a registered worker's display name and vendor — **are all
+public.** Anyone composing one should know that, and any future field added
+beside them inherits the same question rather than the same silence.
 
 **That is true of the store-ABSENT branch too, and it was not (Wave 5
 High 5).** `reliabilitySummary()` returned a hard-coded
@@ -4646,12 +4694,24 @@ commitment columns. This is round seven's HIGH 3 re-opened one column over:
 `no_overclaim` bounds `ledger_marks`, `ledger_rows` and `chain_length`, and the
 rowid is a channel it does not bound.
 
-**Why no read-time rule could close it.** The two acts are indistinguishable
-from the file alone at any later moment. After a mid-ledger deletion of k rows
-and m appends a ledger reads `rows + m - k` / `top + m`; after one append d above
-the top it reads `rows + 1` / `top + d`. Both widen the gap by the same
-arithmetic and neither leaves any other trace. So this is closed where the write
-happens, exactly as round seven closed the over-claim.
+**Why it is closed where the write happens.** After a mid-ledger deletion of k
+rows and m appends a ledger reads `rows + m - k` / `top + m`; after one append d
+above the top it reads `rows + 1` / `top + d`. Both widen the gap by the same
+arithmetic, so `committedLedgerGaps` reports them under one name.
+
+> **CORRECTED IN ROUND FOURTEEN (High 1).** This paragraph used to say the two
+> acts are "indistinguishable from the file alone at any later moment, so
+> nothing this reader could do would separate them". **That was false, and a
+> reviewer disproved it by execution.** They are separated exactly by a
+> predicate over data HQ already commits — `COUNT(*) WHERE rowid <= committed
+> top`, against the committed row count — because a ledger HQ only appends to
+> holds exactly its committed rows at or below its committed top for ever
+> after. `committedRemovalsBelowMark` is that reader, and the Founder-facing
+> detail now says WHICH of the two happened. What it does NOT separate is a hole
+> that was REFILLED from a ledger nothing touched, and that is said in the
+> reader's own docblock, in the detail text and in the test that pins it. The
+> channel is still closed at the write, but now for a reason that holds: the
+> guard also refuses the refill, which no read-time predicate can see.
 
 **What changed.** Every declared ledger now carries
 `trg_<prefix>_no_rowid_skip`, a `BEFORE INSERT` guard that refuses a rowid past
@@ -4694,6 +4754,90 @@ rowids are contiguous`); `{rows:4, top:4}` is unchanged; `regressed []`; and
 text taken from a live HQ file, proves an ordinary append is accepted on each
 one first, and fails on 4 of its 6 tests against the pre-fix code.
 
+### ROUND FOURTEEN, HIGH 1 and HIGH 2 — the bound had ONE side, and 30 ledgers were silent
+
+`no_rowid_skip` bounds the rowid from ABOVE only. Two live one-statement writes
+went through the open side, both reproduced at the merged head `8481269` through
+this package's own file fixture before anything was changed.
+
+**HIGH 1 — a mid-ledger deletion laundered back to a completely clean store.**
+
+```
+control (delete rowid 6 of an 11-row hq_reliability_verdicts, guards restored, 3 statements)
+  identity {"rows":10,"top":11}   missingGuards [] regressed ["hq_reliability_verdicts"] truncated []
+  structural safeMode true
+attack (+ ONE further PERMITTED INSERT at the freed rowid, nothing dropped, all guards in place)
+  identity {"rows":11,"top":11}   missingGuards [] regressed [] truncated []
+  structural safeMode false
+```
+
+Four statements to a completely clean store, against three for a finding that
+stands — the inversion this module says it forbids. Silent on 30 of the 33
+declared ledgers (all but `op_evidence`, which has the hash chain, and
+`hq_integrity_checkpoints`, which has `no_overclaim`), **including
+`hq_reliability_verdicts`, the safe-mode latch ledger, and
+`hq_reliability_run_events`, the ledger `RUN_RETRY_STATEMENT` rests on**.
+
+**HIGH 2 — one `INSERT` at rowid `-1` bricked HQ's own appends, kill switch
+included.** In a `BEFORE INSERT` trigger an auto-assigned rowid reads as the
+integer `-1` on this engine — measured against a probe trigger, and now pinned —
+so a row planted AT rowid -1 makes `no_replace`'s `EXISTS (… WHERE seq =
+NEW.seq)` true for every append that follows. Executed on `op_evidence`:
+
+```
+INSERT at rowid -1 accepted: true (no trigger dropped)
+census  missingGuards [] regressed [] truncated []   structural safeMode false
+engageKillSwitch   THREW UNCAUGHT  SqliteError: op_evidence is append-only
+assessHqIntegrity  THREW UNCAUGHT  SqliteError: op_evidence is append-only
+```
+
+One permitted statement, no restart, no DDL: HQ could no longer write, **the
+Founder could not engage the kill switch**, the clearing route threw instead of
+refusing, and every integrity reading said the store was clean.
+
+**What changed.** Every declared ledger now also carries
+`trg_<prefix>_no_rowid_reseat`, an `AFTER INSERT` guard:
+
+```sql
+WHEN NEW.rowid < 1 OR NEW.rowid <> (SELECT MAX(rowid) FROM "<ledger>")
+```
+
+It is declared in `declaredGuardsFor` beside `no_rowid_skip`, so the set stays
+complete BY CONSTRUCTION, and installed by the same loop over
+`ENGINE_IMMUTABLE_TABLES`. The timing is `AFTER INSERT` because neither clause
+can be asserted before the fact: an omitted AUTOINCREMENT key presents as `-1`
+there, which is a value a caller can also spell, and there is no `BEFORE`
+spelling that separates "the engine will choose" from "the caller chose -1" —
+the same measurement that forced `no_overclaim` to that timing. The upper bound
+cannot move with it, because after the insert `sqlite_sequence` has already been
+raised to the caller's own rowid and the engine's pre-insert allocation is no
+longer recoverable. So the channel has two bounds at two timings, and the phase
+document says which does what rather than implying one covers both.
+
+**Executed after the fix**, on the same file:
+
+```
+attack INSERT at the freed rowid: REFUSED 'hq_reliability_verdicts rowids are append-only'
+identity {"rows":10,"top":11}   regressed ["hq_reliability_verdicts"]   p2/p3 boot=true assess=true release=refused
+plant at rowid -1 (INSERT / OR REPLACE / OR IGNORE): all REFUSED
+engageKillSwitch ok:true   assessHqIntegrity ok:true
+```
+
+**And the three acts that used to throw now REFUSE.** `engageKillSwitch`,
+`releaseKillSwitch` and `assessHqIntegrity` return a refusal naming the store's
+own message when HQ's own append is refused, instead of throwing the driver's
+`SqliteError` out of the facade. `#integrityReport` is still not assigned on that
+path, so a verdict HQ could not record is still a verdict HQ does not act on —
+what changed is that the caller is told and the process stays up.
+
+Pinned in `ledger-rowid-guard.test.ts`: the 33-ledger reseat sweep against the
+real schemas in five spellings (the freed hole, rowid 0 and rowid -1 on a
+populated ledger, and 0 and -1 on an EMPTY one, where only the `< 1` clause can
+speak), the end-to-end laundering act on a real file, the `-1` plant with the
+kill switch still working, the refuse-not-throw contract, and the `NEW.rowid`
+measurement itself. Seven of that file's fourteen tests fail against the pre-fix
+tree.
+
 **Two concurrent round-thirteen lanes closed this channel off the same base, and
 BOTH closures are kept — the narrower one is not subsumed.** The other lane
 bounded the rowid inside the over-claim guard, as `NEW.seq <> (SELECT COUNT(*)
@@ -4706,11 +4850,32 @@ that collides with nothing passes it. Executed on the commitment ledger at the
 merged head, with each guard left standing alone:
 
 ```
+round thirteen, measured at the merged head of that round:
 no_rowid_skip ALONE : seq=-1 ACCEPTED [elided=true] ; seq=0 ACCEPTED [elided=true] ;
                       seq=1000 REFUSED 'rowids are contiguous'
 no_overclaim ALONE  : seq=-1, seq=0, seq=1000 all REFUSED 'may not commit beyond the record'
 both (as shipped)   : all three REFUSED
+
+round fourteen, with the bound from below now on all 33:
+broad guards ALONE  : seq=-1 REFUSED 'rowids are append-only' ; seq=0 REFUSED ;
+                      seq=1000 REFUSED 'rowids are contiguous'
+                      append at the TOP of a ledger a row was elided from: ACCEPTED
+no_overclaim ALONE  : all four REFUSED 'may not commit beyond the record'
+all three (shipped) : all four REFUSED
 ```
+
+> **UPDATED IN ROUND FOURTEEN.** The two reseats the round-thirteen table
+> records as ACCEPTED by `no_rowid_skip` alone are not accepted any more — the
+> seat guard closed them on all 33. The clauses are still not equivalent, and
+> the shape that separates them is the last line of the table: on a ledger a row
+> has been elided from, an ordinary append AT THE TOP satisfies both broad
+> guards (it is the greatest rowid, and it is within the allocation) and fails
+> the identity clause (it is not the row COUNT). Measured honestly, that append
+> does NOT launder the elision — `elidedCommitmentLedgerRows` still reads true
+> afterwards, which `commitment-overclaim.test.ts` asserts rather than assumes —
+> so the identity clause is kept for what it is: the only clause in the schema
+> that ties this ledger's rowid to its ROW COUNT, which is the relation that
+> reader reads.
 
 `-1` is not an exotic value: it is what SQLite itself reports for an omitted
 `AUTOINCREMENT` rowid, which is the measurement that forced the `AFTER INSERT`

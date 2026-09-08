@@ -1,39 +1,72 @@
 /**
  * The unauthenticated artifact IS a Founder-text publication surface —
- * disclosed rather than changed (Wave 5 correction round ten, NEW LOW).
+ * disclosed rather than changed (Wave 5 correction round ten, NEW LOW; the
+ * disclosure and the pin both CORRECTED in round fourteen, High 4).
  *
- * `hq-snapshot.json` is served with no authentication at all. The review named
- * ONE field, `snapshot.operations.data.queued[].title`. Measured here by
- * writing a distinctive string into each field and searching the whole
- * artifact, it is FOUR: a task's `title` and `project`, the `reason` a Founder
- * gave for a denial, and the derived `activity` / `commandCenter` summaries
- * that fold those strings in. The wider answer is what is recorded, in this
- * file and in `PHASE_13_ADVANCED_RELIABILITY.md`.
+ * `hq-snapshot.json` is served with no authentication at all, and
+ * `src/cli/snapshot.ts` writes the whole object `liveSnapshotFromOperations`
+ * returns — not a subset of it. The round-ten review named ONE field. Round ten
+ * measured FOUR and wrote "four fields, not one" into
+ * `PHASE_13_ADVANCED_RELIABILITY.md`, and this file pinned exactly two of them
+ * by planting canaries in two methods.
  *
- * That is almost certainly intended, and it is why scanning these columns is
- * load-bearing rather than tidy: they are the same columns a credential shape
- * permanently bricked Founder read routes through. It is also what makes the
- * task PAYLOAD's carve-out from the credential scan defensible — the payload is
- * the one piece of caller text that is neither served to a Founder route nor
- * published here, and its guard lives at the dispatch lane that would publish
- * it. That half is measured below too.
+ * **A fresh hostile review at `f348f9a` planted canaries across the whole
+ * Founder-writable facade and found the real number is far higher. Re-measured
+ * at the merged head with every plant executed rather than assumed — every
+ * facade call below is asserted to have RETURNED OK, because a canary that was
+ * never written proves nothing — it is 20 of 34.** The under-disclosure was the
+ * defect: the publication is intended, no credential can reach any of these
+ * fields (each is scanned at its facade write), and nothing about the behaviour
+ * is changed here.
  *
- * What was missing is that nobody said so. The phase document's privacy section
- * is written entirely about the `reliability` section — "no run label, task id,
- * mission id … or finding detail string" — which is accurate about that section
- * and reads, to anyone composing a task, as though no free text crosses at all.
+ * ## What this file now derives rather than lists
  *
- * So this file pins the disclosure in BOTH directions. If one of the four ever
- * stops crossing, or if the payload ever starts, the table in the phase
- * document becomes wrong and this fails. No behaviour is asserted here that the
- * code does not already have.
+ * The old pin planted canaries in two methods and asserted three `toContain`
+ * paths. A field added beside them published silently. This version:
+ *
+ *  - plants a distinct canary in EVERY Founder-writable text parameter of every
+ *    method the scenario exercises, and asserts the plant SUCCEEDED;
+ *  - asserts the crossing set EXACTLY, in both directions, so a new published
+ *    field and a newly-withheld one each fail;
+ *  - DERIVES the completeness of the plant from `service.ts` itself: every name
+ *    in each exercised method's own `callerTextRefusal(input, [...])` list must
+ *    be planted here or exempted with a reason, so a parameter added to one of
+ *    those methods fails this file rather than being published quietly;
+ *  - checks the phase document's table against the measured crossing set, so
+ *    the prose cannot drift from the behaviour in either direction.
+ *
+ * **The scope, stated rather than implied.** The derivation is complete for the
+ * METHODS the scenario exercises, which are the Founder-driven writes whose
+ * rows the snapshot's sections are built from. It is not a claim about every
+ * method on the facade: `facade-write-scan.test.ts` owns that enumeration, over
+ * the call graph, for the credential scan. A method added to a snapshot section
+ * in a future phase has to be added to `EXERCISED` here, and nothing in this
+ * file can force that — which is why it is written down instead of implied.
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { setupFixture, CAPS, expectOk } from './application.fixture.js';
+import { CAPS, expectOk } from './application.fixture.js';
+import { intelligenceFixture } from './intelligence.fixture.js';
 import { liveSnapshotFromOperations } from '../src/live/snapshot.js';
+import { openHqDatabase } from '../src/store/db.js';
+import { HeadquarterOperations } from '../src/application/service.js';
+import {
+  MISSION_COMMAND_CAPABILITY,
+} from '../src/application/mission-command.js';
+import { PROJECT_COMMAND_CAPABILITY } from '../src/application/project-command.js';
+import { INTELLIGENCE_COMMAND_CAPABILITY } from '../src/application/intelligence-command.js';
+import {
+  RELIABILITY_COMMAND_CAPABILITY,
+  registerReliabilityCommandCapability,
+} from '../src/application/reliability-command.js';
 
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SERVICE = path.join(HERE, '..', 'src', 'application', 'service.ts');
+const PHASE_13 = path.join(HERE, '..', '..', '..', 'docs', 'HEADQUARTER', 'PHASE_13_ADVANCED_RELIABILITY.md');
 const NOW = new Date('2026-09-08T09:00:00.000Z');
 
 /** Every path in a snapshot at which `needle` appears inside a string. */
@@ -52,61 +85,477 @@ function pathsCarrying(value: unknown, needle: string, at = 'snapshot', out: str
   return out;
 }
 
-/** One denied task carrying a distinctive string in each Founder-typed field. */
-function snapshotWithFounderText(): unknown {
-  const fx = setupFixture();
-  const created = expectOk(
-    fx.ops.createTask({
-      capabilityId: CAPS.openPr,
-      payload: { branch: 'main', instruction: 'PAYLOAD-MUST-NOT-BE-PUBLISHED' },
-      idempotencyKey: 'disclosure-probe',
-      requestedBy: 'claude',
-      title: 'TITLE-IS-PUBLISHED',
-      project: 'PROJECT-IS-PUBLISHED',
+/**
+ * The measured answer, as one table: `method.parameter` -> does the canary reach
+ * the unauthenticated artifact, and if so at one path that proves it.
+ *
+ * `crosses: true` rows ARE the disclosure. `crosses: false` rows are just as
+ * load-bearing: they are what makes the payload carve-out from the credential
+ * scan defensible, and what would fail if a future phase started publishing one
+ * of them.
+ */
+interface Canary {
+  /** `method.parameter`, and the canary text is derived from it. */
+  field: string;
+  crosses: boolean;
+  /** One measured path, for a `crosses: true` row. Not the only one. */
+  at?: string;
+}
+
+const CANARIES: readonly Canary[] = [
+  { field: 'createProject.name', crosses: true, at: 'snapshot.projects.data[0].name' },
+  { field: 'createProject.purpose', crosses: true, at: 'snapshot.projects.data[0].purpose' },
+  { field: 'createProject.stream', crosses: true, at: 'snapshot.projects.data[0].stream' },
+  { field: 'commandMission.title', crosses: true, at: 'snapshot.missions.data[0].title' },
+  { field: 'commandMission.objective', crosses: true, at: 'snapshot.missions.data[0].intentHistory[0].objective' },
+  { field: 'commandMission.scope', crosses: true, at: 'snapshot.missions.data[0].scope' },
+  { field: 'commandMission.constraints', crosses: true, at: 'snapshot.missions.data[0].intentHistory[0].constraints[0]' },
+  { field: 'commandMission.acceptanceCriteria', crosses: true, at: 'snapshot.missions.data[0].intentHistory[0].acceptanceCriteria[0]' },
+  { field: 'commandMission.planItems', crosses: true, at: 'snapshot.missions.data[0].planItems[0].summary' },
+  { field: 'commandMission.project', crosses: true, at: 'snapshot.missions.data[0].project' },
+  { field: 'commandMission.instruction', crosses: false },
+  { field: 'amendMissionIntent.amendment', crosses: false },
+  { field: 'amendMissionIntent.objective', crosses: true, at: 'snapshot.missions.data[0].objective' },
+  { field: 'amendMissionIntent.constraints', crosses: true, at: 'snapshot.missions.data[0].constraints[0]' },
+  { field: 'amendMissionIntent.acceptanceCriteria', crosses: true, at: 'snapshot.missions.data[0].acceptanceCriteria[0]' },
+  { field: 'amendMissionIntent.addPlanItems', crosses: true, at: 'snapshot.missions.data[0].planItems[1].summary' },
+  { field: 'createTask.title', crosses: true, at: 'snapshot.operations.data.blocked[0].title' },
+  { field: 'createTask.project', crosses: true, at: 'snapshot.operations.data.blocked[0].project' },
+  { field: 'createTask.payload', crosses: false },
+  { field: 'denyTask.reason', crosses: true, at: 'snapshot.operations.data.blocked[0].blockReason' },
+  { field: 'failTask.reason', crosses: true, at: 'snapshot.activity.data[1].summary' },
+  { field: 'engageKillSwitch.reason', crosses: false },
+  { field: 'registerExecutionWorker.displayName', crosses: true, at: 'snapshot.workforce.data[0].displayName' },
+  { field: 'registerExecutionWorker.vendor', crosses: true, at: 'snapshot.workforce.data[0].vendor' },
+  { field: 'setIntelligenceBudget.note', crosses: false },
+  { field: 'recordModelObservation.unitCostBasis', crosses: false },
+  { field: 'recordModelObservation.note', crosses: false },
+  { field: 'recordVerifiedBackup.backupPath', crosses: false },
+  { field: 'recordVerifiedBackup.note', crosses: false },
+  { field: 'postMissionMessage.body', crosses: false },
+  { field: 'postMissionMessage.refs', crosses: false },
+  { field: 'recordIntelligenceDecision.label', crosses: false },
+  { field: 'recordIntelligenceCost.basis', crosses: false },
+  { field: 'recordIntelligenceCost.note', crosses: false },
+];
+
+/** The canary text for one field — distinct per field, and searchable. */
+function canaryFor(field: string): string {
+  return `CANARY-${field.replace(/\./g, '-')}`;
+}
+
+/**
+ * The methods this scenario exercises, and the caller-text parameters of each
+ * that are deliberately NOT planted, with the reason.
+ *
+ * A name here is a claim that the parameter cannot carry Founder free text, and
+ * each is checkable against the method's own validation:
+ *
+ *  - `recordIntelligenceCost.providerId` and `.modelId` are bounded to a
+ *    registered provider and to an observed model id; a canary in either is
+ *    refused before any write, so planting one would measure the validator
+ *    rather than the artifact.
+ *  - `amendMissionIntent.specifyPlanItems` is a structured object list (seq,
+ *    capabilityId, payload) with no free-text member; its summary text comes
+ *    from `addPlanItems`, which IS planted.
+ */
+const NOT_PLANTED: Record<string, readonly string[]> = {
+  recordIntelligenceCost: ['providerId', 'modelId'],
+  amendMissionIntent: ['specifyPlanItems'],
+};
+
+interface Planted {
+  snapshot: unknown;
+  /** Every facade call the scenario made, and whether it returned ok. */
+  calls: { name: string; ok: boolean; error: string }[];
+  cleanup: () => void;
+}
+
+/**
+ * One scenario that writes a distinct canary into every field of `CANARIES`.
+ *
+ * Every call is recorded with its outcome, and the first test asserts they all
+ * returned ok — a canary that was never written would otherwise read as "does
+ * not cross" and quietly widen the disclosure's silence.
+ */
+function plantEveryCanary(): Planted {
+  const fx = intelligenceFixture();
+  const calls: { name: string; ok: boolean; error: string }[] = [];
+  const record = <T>(name: string, result: T): T => {
+    const outcome = result as { ok?: boolean; error?: unknown };
+    calls.push({
+      name,
+      ok: outcome?.ok === true,
+      error: outcome?.ok === true ? '' : JSON.stringify(outcome?.error ?? null),
+    });
+    return result;
+  };
+  const c = canaryFor;
+
+  registerReliabilityCommandCapability(fx.db);
+  fx.principals.register({
+    id: 'founder',
+    displayName: 'Founder',
+    originateCapabilities: [
+      CAPS.readStatus,
+      CAPS.openPr,
+      CAPS.indexDoc,
+      MISSION_COMMAND_CAPABILITY.id,
+      PROJECT_COMMAND_CAPABILITY.id,
+      INTELLIGENCE_COMMAND_CAPABILITY.id,
+      RELIABILITY_COMMAND_CAPABILITY.id,
+    ],
+    approvalAuthority: true,
+    active: true,
+  });
+
+  const project = expectOk(
+    record(
+      'createProject',
+      fx.ops.createProject({
+        name: c('createProject.name'),
+        purpose: c('createProject.purpose'),
+        stream: c('createProject.stream'),
+        requestedBy: 'founder',
+      }),
+    ),
+  ).project;
+
+  const mission = expectOk(
+    record(
+      'commandMission',
+      fx.ops.commandMission({
+        title: c('commandMission.title'),
+        objective: c('commandMission.objective'),
+        scope: c('commandMission.scope'),
+        constraints: [c('commandMission.constraints')],
+        acceptanceCriteria: [c('commandMission.acceptanceCriteria')],
+        planItems: [c('commandMission.planItems')],
+        project: c('commandMission.project'),
+        projectId: project.id,
+        instruction: c('commandMission.instruction'),
+        requestedBy: 'founder',
+      }),
+    ),
+  ).mission;
+
+  record(
+    'amendMissionIntent',
+    fx.ops.amendMissionIntent({
+      missionId: mission.id,
+      amendment: c('amendMissionIntent.amendment'),
+      objective: c('amendMissionIntent.objective'),
+      constraints: [c('amendMissionIntent.constraints')],
+      acceptanceCriteria: [c('amendMissionIntent.acceptanceCriteria')],
+      addPlanItems: [c('amendMissionIntent.addPlanItems')],
+      requestedBy: 'founder',
     }),
   );
-  fx.ops.denyTask({
-    taskId: created.task.id,
-    founderId: 'founder',
-    reason: 'REASON-IS-PUBLISHED',
+
+  const blocked = expectOk(
+    record(
+      'createTask',
+      fx.ops.createTask({
+        capabilityId: CAPS.openPr,
+        payload: { branch: 'main', instruction: c('createTask.payload') },
+        idempotencyKey: 'canary-blocked',
+        requestedBy: 'claude',
+        title: c('createTask.title'),
+        project: c('createTask.project'),
+      }),
+    ),
+  );
+  record(
+    'denyTask',
+    fx.ops.denyTask({
+      taskId: blocked.task.id,
+      founderId: 'founder',
+      reason: c('denyTask.reason'),
+    }),
+  );
+
+  const failing = expectOk(
+    record(
+      'createTask (the failing one)',
+      fx.ops.createTask({
+        capabilityId: CAPS.openPr,
+        payload: { branch: 'second' },
+        idempotencyKey: 'canary-failing',
+        requestedBy: 'claude',
+        title: 'an ordinary second task',
+      }),
+    ),
+  );
+  const claimed = expectOk(
+    record('claimNext', fx.ops.claimNext('claude', CAPS.openPr, undefined, failing.task.id)),
+  );
+  record('startTask', fx.ops.startTask(claimed.id, 'claude', claimed.fence));
+  record('failTask', fx.ops.failTask(claimed.id, 'claude', claimed.fence, c('failTask.reason')));
+
+  record('engageKillSwitch', fx.ops.engageKillSwitch('global', 'founder', c('engageKillSwitch.reason')));
+  record('releaseKillSwitch', fx.ops.releaseKillSwitch('global', 'founder'));
+
+  record(
+    'registerExecutionWorker',
+    fx.ops.registerExecutionWorker({
+      workerId: 'canary-worker',
+      displayName: c('registerExecutionWorker.displayName'),
+      vendor: c('registerExecutionWorker.vendor'),
+      role: 'parallel_implementer',
+      allowedCapabilities: [CAPS.openPr],
+      founderId: 'founder',
+    }),
+  );
+
+  record(
+    'setIntelligenceBudget',
+    fx.ops.setIntelligenceBudget({
+      scopeKind: 'deployment',
+      scopeId: 'deployment',
+      window: 'total',
+      ceilingMinorUnits: 100000,
+      currency: 'USD',
+      permittedTiers: ['deterministic_local', 'low_cost', 'standard', 'high', 'critical_review'],
+      setBy: 'founder',
+      note: c('setIntelligenceBudget.note'),
+    }),
+  );
+
+  record(
+    'recordModelObservation',
+    fx.ops.recordModelObservation({
+      providerId: 'anthropic',
+      modelId: 'canary-model',
+      locality: 'cloud',
+      availability: 'healthy',
+      unitCostProvenance: 'estimated',
+      unitCostMinorUnits: 25,
+      unitCostCurrency: 'USD',
+      unitCostUnitKind: 'requests',
+      unitCostBasis: c('recordModelObservation.unitCostBasis'),
+      source: 'founder_declared',
+      observedBy: 'founder',
+      note: c('recordModelObservation.note'),
+    }),
+  );
+
+  // A real HQ file, because `recordVerifiedBackup` verifies rather than trusts:
+  // the canary rides in the FILE NAME, which is the caller text it stores.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-canary-'));
+  const backupPath = path.join(dir, `${canaryFor('recordVerifiedBackup.backupPath')}.sqlite`);
+  const backup = openHqDatabase(backupPath);
+  void new HeadquarterOperations(backup);
+  backup.close();
+  record(
+    'recordVerifiedBackup',
+    fx.ops.recordVerifiedBackup({
+      backupPath,
+      requestedBy: 'founder',
+      note: c('recordVerifiedBackup.note'),
+    }),
+  );
+
+  record(
+    'postMissionMessage',
+    fx.ops.postMissionMessage({
+      threadId: mission.id,
+      author: 'founder',
+      body: c('postMissionMessage.body'),
+      refs: [c('postMissionMessage.refs')],
+    }),
+  );
+
+  const spending = expectOk(
+    record(
+      'createTask (the spending one)',
+      fx.ops.createTask({
+        capabilityId: CAPS.openPr,
+        payload: { branch: 'third' },
+        idempotencyKey: 'canary-spending',
+        requestedBy: 'claude',
+        title: 'an ordinary third task',
+      }),
+    ),
+  );
+  const claimedSpender = expectOk(
+    record(
+      'claimNext (the spending one)',
+      fx.ops.claimNext('claude', CAPS.openPr, undefined, spending.task.id),
+    ),
+  );
+  record(
+    'recordIntelligenceDecision',
+    fx.ops.recordIntelligenceDecision({
+      taskId: claimedSpender.id,
+      workerId: 'claude',
+      fence: claimedSpender.fence,
+      tier: 'critical_review',
+      label: c('recordIntelligenceDecision.label'),
+      complexity: 'routine',
+      contextSize: 'medium',
+      workKind: 'coding',
+      idempotencyKey: 'canary-decision',
+    }),
+  );
+  record(
+    'recordIntelligenceCost',
+    fx.ops.recordIntelligenceCost({
+      taskId: claimedSpender.id,
+      workerId: 'claude',
+      fence: claimedSpender.fence,
+      providerId: 'anthropic',
+      provenance: 'estimated',
+      amountMinorUnits: 10,
+      currency: 'USD',
+      unitKind: 'requests',
+      basis: c('recordIntelligenceCost.basis'),
+      note: c('recordIntelligenceCost.note'),
+      idempotencyKey: 'canary-cost',
+    }),
+  );
+
+  return {
+    snapshot: liveSnapshotFromOperations(fx.ops, { now: NOW.toISOString() }),
+    calls,
+    cleanup: () => {
+      fx.db.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+/** Every method body in `service.ts`, sliced from its declaration to the next. */
+function methodBodies(): Map<string, string> {
+  const lines = fs.readFileSync(SERVICE, 'utf8').split('\n');
+  const classStart = lines.findIndex((line) => /^export class HeadquarterOperations\b/.test(line));
+  expect(classStart).toBeGreaterThan(-1);
+  const starts: { name: string; line: number }[] = [];
+  for (let i = classStart; i < lines.length; i += 1) {
+    const match = /^ {2}(#?[A-Za-z_][A-Za-z0-9_]*)\s*[(<]/.exec(lines[i]!);
+    if (match && !['if', 'for', 'while', 'switch', 'catch', 'return', 'constructor', 'do', 'else', 'try'].includes(match[1]!)) {
+      starts.push({ name: match[1]!, line: i });
+    }
+  }
+  const bodies = new Map<string, string>();
+  starts.forEach((start, k) => {
+    const body = lines
+      .slice(start.line, k + 1 < starts.length ? starts[k + 1]!.line : lines.length)
+      .join('\n');
+    bodies.set(start.name, (bodies.get(start.name) ?? '') + body);
   });
-  return liveSnapshotFromOperations(fx.ops, { now: NOW.toISOString() });
+  return bodies;
+}
+
+/** The names in one method's own `callerTextRefusal(…, [ … ])` declared list. */
+function declaredCallerText(body: string): string[] {
+  const names = new Set<string>();
+  for (const match of body.matchAll(/callerTextRefusal\([^,]+,\s*\[([^\]]*)\]/g)) {
+    for (const part of match[1]!.split(',')) {
+      const name = /'([A-Za-z_][A-Za-z0-9_]*)'/.exec(part);
+      if (name) names.add(name[1]!);
+    }
+  }
+  return [...names].sort();
 }
 
 describe('what Founder-typed text crosses to the unauthenticated artifact', () => {
-  it('the task TITLE crosses, into the lane view and into the attention summary', () => {
-    const paths = pathsCarrying(snapshotWithFounderText(), 'TITLE-IS-PUBLISHED');
-    expect(paths).toContain('snapshot.operations.data.blocked[0].title');
-    expect(paths).toContain('snapshot.commandCenter.data.attention.items[0].summary');
+  it('plants every canary through the real facade, and every plant succeeds', () => {
+    const planted = plantEveryCanary();
+    try {
+      const refused = planted.calls.filter((call) => !call.ok);
+      expect(
+        refused.map((call) => `${call.name}: ${call.error}`),
+        'a canary that was never written would read as "does not cross"',
+      ).toEqual([]);
+      expect(planted.calls.length).toBeGreaterThanOrEqual(CANARIES.length / 2);
+    } finally {
+      planted.cleanup();
+    }
   });
 
-  it('the task PROJECT crosses', () => {
-    const paths = pathsCarrying(snapshotWithFounderText(), 'PROJECT-IS-PUBLISHED');
-    expect(paths).toContain('snapshot.operations.data.blocked[0].project');
+  it('crosses EXACTLY the fields the disclosure names, in both directions', () => {
+    const planted = plantEveryCanary();
+    try {
+      const measured = CANARIES.filter(
+        (canary) => pathsCarrying(planted.snapshot, canaryFor(canary.field)).length > 0,
+      ).map((canary) => canary.field);
+      const declared = CANARIES.filter((canary) => canary.crosses).map((canary) => canary.field);
+      // Exact, not `toContain`: a field that starts publishing and a field that
+      // stops both fail here, which is what "in either direction" means.
+      expect(measured.sort()).toEqual(declared.sort());
+      // And the measured totals, so the phase document's numbers are taken from
+      // an execution rather than from a sentence.
+      expect(CANARIES.length).toBe(34);
+      expect(declared.length).toBe(20);
+    } finally {
+      planted.cleanup();
+    }
   });
 
-  it('the Founder’s DENIAL REASON crosses — the field the review did not name', () => {
-    const paths = pathsCarrying(snapshotWithFounderText(), 'REASON-IS-PUBLISHED');
-    expect(paths).toContain('snapshot.operations.data.blocked[0].blockReason');
-    expect(paths).toContain('snapshot.activity.data[0].summary');
-    expect(paths).toContain('snapshot.commandCenter.data.attention.items[0].summary');
+  it('lands each published field at the path the disclosure names', () => {
+    const planted = plantEveryCanary();
+    try {
+      for (const canary of CANARIES) {
+        const paths = pathsCarrying(planted.snapshot, canaryFor(canary.field));
+        if (!canary.crosses) {
+          expect(paths, `${canary.field} must not cross`).toEqual([]);
+          continue;
+        }
+        expect(canary.at, `${canary.field} must name a measured path`).toBeTruthy();
+        expect(paths, `${canary.field}`).toContain(canary.at);
+      }
+    } finally {
+      planted.cleanup();
+    }
   });
 
-  it('the task PAYLOAD does not cross — which is what makes its scan carve-out defensible', () => {
-    expect(pathsCarrying(snapshotWithFounderText(), 'PAYLOAD-MUST-NOT-BE-PUBLISHED')).toEqual([]);
+  /**
+   * The completeness half. Every name a method's OWN `callerTextRefusal` list
+   * declares is Founder-writable text by that method's own reckoning, so it
+   * must either carry a canary here or be exempted with a reason. A parameter
+   * added to one of these methods therefore fails this file on the day it is
+   * added, rather than being published quietly beside the others.
+   */
+  it('plants a canary in every caller-text parameter the exercised methods declare', () => {
+    const bodies = methodBodies();
+    const planted = new Set(CANARIES.map((canary) => canary.field));
+    const exercised = [...new Set(CANARIES.map((canary) => canary.field.split('.')[0]!))];
+    expect(exercised.length).toBeGreaterThan(10);
+    const unplanted: string[] = [];
+    for (const method of exercised) {
+      const body = bodies.get(method);
+      expect(body, `${method} must exist on the facade`).toBeDefined();
+      for (const parameter of declaredCallerText(body!)) {
+        if ((NOT_PLANTED[method] ?? []).includes(parameter)) continue;
+        if (!planted.has(`${method}.${parameter}`)) unplanted.push(`${method}.${parameter}`);
+      }
+    }
+    expect(unplanted, 'a caller-text parameter reaches the artifact unmeasured').toEqual([]);
+    // And the exemptions are real parameters, not stale names: each must still
+    // be declared by its method, or the reason is describing something gone.
+    for (const [method, parameters] of Object.entries(NOT_PLANTED)) {
+      const declared = declaredCallerText(bodies.get(method) ?? '');
+      for (const parameter of parameters) {
+        expect(declared, `${method}.${parameter} is exempted but no longer declared`).toContain(
+          parameter,
+        );
+      }
+    }
   });
 
   it('the phase document says so, in the section a reader would look in', () => {
     // The disclosure is only worth having if it is written down where the
-    // privacy claim is made. If the row is deleted, this fails.
-    const doc = new URL(
-      '../../../docs/HEADQUARTER/PHASE_13_ADVANCED_RELIABILITY.md',
-      import.meta.url,
-    );
-    const text = fs.readFileSync(doc, 'utf8');
+    // privacy claim is made, and it is only worth having ACCURATE if the
+    // measurement is what is written. Both are checked.
+    const text = fs.readFileSync(PHASE_13, 'utf8');
     expect(text).toContain('The unauthenticated artifact IS a Founder-text publication surface');
-    expect(text).toContain('four fields, not one');
-    expect(text).toContain('denying it are public');
+    expect(text).toContain('twenty fields, not four');
     expect(text).toContain('unauthenticated-founder-text.test.ts');
+    for (const canary of CANARIES) {
+      if (!canary.crosses) continue;
+      expect(text, `${canary.field} is published and must be disclosed`).toContain(
+        `\`${canary.field}\``,
+      );
+    }
   });
 });
