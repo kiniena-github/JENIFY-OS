@@ -1471,7 +1471,7 @@ export function recordHqSchemaEnsured(db: HqDatabase): void {
  * something a TOTAL erasure destroys** (Wave 5 correction round seven, Critical
  * NEW-1 and High NEW-2). `elidedCommitmentLedgerRows` and
  * `truncatedImmutableLedgers` both start from the `sqlite_sequence` row, and
- * `regressedImmutableLedgers` reads `committedLedgerMarks` out of the very
+ * `regressedImmutableLedgers` reads `committedLedgerIdentities` out of the very
  * table that was emptied. So destroying the ledger outright was CHEAPER than
  * eliding a row from it — the inversion this module has had to close twice
  * before, in a third place:
@@ -3021,6 +3021,47 @@ function uniqueReentryTargets(): { table: string; triggerPrefix: string }[] {
 }
 
 /**
+ * Every secondary UNIQUE index on a write-once identity table that this module
+ * could NOT turn into a guard clause — the reported half of the fail-closed
+ * rule `SecondaryUniqueIndex.expressible` describes.
+ *
+ * ## Why it exists now
+ *
+ * Wave 5 correction round fifteen, Medium 2. This function was named as a live
+ * mechanism in FIVE places — twice in this file, once in
+ * `budget-scope-identity.test.ts`, twice in
+ * `PHASE_13_ADVANCED_RELIABILITY.md` — and defined in ZERO. "It is REPORTED by
+ * `unguardedUniqueIndexes` instead, so it fails a test rather than passing
+ * silently as covered" described a census that did not exist. The PROPERTY did
+ * hold by another route (an inexpressible index means no generated clause, and
+ * `declaredGuardsForIdentityTable` puts the trigger name into
+ * `missingImmutabilityGuards`'s census whenever the entry declares one), which
+ * is why it was a false mechanism claim and not an open hole — but a reader
+ * following the sentence would look for a function that is not there, and the
+ * next reviewer did.
+ *
+ * It is implemented rather than written out of the prose because the property
+ * it names is worth reading directly: `missingImmutabilityGuards` reports a
+ * MISSING TRIGGER NAME, which says a guard is absent without saying WHICH index
+ * nothing covers. This says that, in one call, over the live file.
+ *
+ * Returns `"<table>.<index>"` entries, sorted. Empty on a healthy file — every
+ * secondary unique index this schema declares is expressible, which is measured
+ * in `unique-index-reentry.test.ts` and asserted here by the guard test rather
+ * than assumed.
+ */
+export function unguardedUniqueIndexes(db: HqDatabase): string[] {
+  const unguarded: string[] = [];
+  for (const target of uniqueReentryTargets()) {
+    if (!tableIsPresent(db, target.table)) continue;
+    for (const index of secondaryUniqueIndexes(db, target.table)) {
+      if (!index.expressible) unguarded.push(`${target.table}.${index.name}`);
+    }
+  }
+  return unguarded.sort();
+}
+
+/**
  * Install the derived unique-index guard everywhere the file declares one.
  *
  * Dropped and re-created rather than `IF NOT EXISTS`, for the reason
@@ -3028,7 +3069,9 @@ function uniqueReentryTargets(): { table: string; triggerPrefix: string }[] {
  * file's indexes, so a guard written against a file that has since gained or
  * lost one must be rebuilt against the file as it now is. A table with no
  * expressible secondary unique index ends with no such trigger, which is what
- * `missingImmutabilityGuards` and `unguardedUniqueIndexes` both expect.
+ * `missingImmutabilityGuards` expects — and `unguardedUniqueIndexes` is where
+ * an index that could not be expressed is REPORTED by name, rather than only
+ * showing up as an absent trigger.
  *
  * Never fails a construction — the absence of the guard is the census's finding
  * at the next boot, the rule every other ensure in this module follows.

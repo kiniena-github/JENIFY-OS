@@ -2646,7 +2646,7 @@ export class HeadquarterOperations {
    * `queue.evidence` is a mutable own-property object literal that #200
    * deliberately documents as a patchable READ surface — safe exactly while no
    * enforcement decision is taken on it. `evidence_chain_broken` is one of the
-   * three `SAFE_MODE_BLOCKING_FINDINGS` and the only one that detects tampering
+   * four `SAFE_MODE_BLOCKING_FINDINGS` and the only one that detects tampering
    * with HQ's own audit record, and the full assessment is the ONLY path that
    * can clear the latch. So that closure WAS an enforcement decision reached
    * through a patchable convenience surface: with
@@ -5006,8 +5006,13 @@ export class HeadquarterOperations {
     }
     const reason = missionText('reason', input.reason, MAX_ASSIGNMENT_RATIONALE_LENGTH, true);
     if (!reason.ok) return fail('invalid_input', reason.message);
-    // Same class as the two above, and the sibling `assignAiMember` already
-    // scans its own `reason` (Wave 5 correction round six, Medium 4; found
+    // Same class as the two above, and the sibling this comment used to name —
+    // `assignAiMember` — does not exist in this package and never did (Wave 5
+    // correction round fifteen, Medium 2, found by the derived name guard
+    // rather than by a reviewer). The real sibling is
+    // `AiMemberRegistry.disable`'s own caller, which is this method: the scan
+    // below is where a disable reason is checked, and there is no second one
+    // (Wave 5 correction round six, Medium 4; found
     // independently as one of the unscanned facade writes in round seven —
     // two lanes wrote this guard, ONE of them survives, and the surviving
     // refusal message is the field-named one because that is what the other
@@ -9582,7 +9587,7 @@ export class HeadquarterOperations {
    * ENFORCEMENT-SAFE, and it is the single most important read in the phase:
    * this row decides whether a proposal is blocked, whether it needs a Founder
    * decision, and which tiers are permitted at all. A same-realm patch of
-   * `listIntelligenceBudgets` or `intelligenceBudgetDecision` must therefore
+   * `listIntelligenceBudgetsBounded` or `intelligenceBudgetDecision` must therefore
    * buy nothing — pinned on the instance, on the prototype, and against a
    * facade constructed AFTER the patch.
    */

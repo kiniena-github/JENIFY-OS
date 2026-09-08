@@ -908,7 +908,7 @@ published:
 | `engageKillSwitch.scope` | `operations.data.killSwitch.engagedScopes[].scope` |
 | `engageKillSwitch.founderId` | `operations.data.killSwitch.engagedScopes[].engagedBy` |
 
-Thirteen further Founder- and worker-typed fields were planted and do NOT cross,
+Fifteen further Founder- and worker-typed fields were planted and do NOT cross,
 and that half is pinned too, because it is what makes the payload carve-out from
 the credential scan defensible: `createTask.payload`,
 `commandMission.instruction`, `amendMissionIntent.amendment`,
@@ -917,7 +917,18 @@ the credential scan defensible: `createTask.payload`,
 `recordVerifiedBackup.backupPath`, `recordVerifiedBackup.note`,
 `postMissionMessage.body`, `postMissionMessage.refs`,
 `recordIntelligenceDecision.label`, `recordIntelligenceCost.basis`,
-`recordIntelligenceCost.note`.
+`recordIntelligenceCost.note`, `recordIntelligenceCost.providerId`,
+`recordIntelligenceCost.modelId`.
+
+The last two were EXEMPTED from the plant until Wave 5 correction round fifteen
+(Medium 4), with the reason "bounded to a registered provider and to an
+observed model id; a canary in either is refused before any write". Measured:
+an unregistered provider, a never-observed model and a canary providerId were
+all RECORDED, and only the model id was refused — by a lowercase-slug rule, not
+by observation. The `crosses: false` verdict stood, for the wrong reason. Both
+are planted now (the canary text is lowercase so it survives
+`normalizeProviderId`), and the artifact's silence about them is measured
+rather than argued.
 
 **Every one of those thirteen is now also checked for being IN THE STORE at the
 instant the snapshot is taken**, by sweeping every text column of every table in
@@ -5336,8 +5347,24 @@ Every price below is MEASURED at this head, not carried forward.
   `unguardedUniqueIndexes` rather than skipped silently — which is why the
   concurrent lane's derivation is the one the merge kept — and HQ's live schema
   carries none of those shapes, asserted rather than assumed.
-- **The unauthenticated artifact publishes twenty Founder- and worker-typed
-  fields**, unchanged in behaviour and now disclosed in full above. The
+  **`unguardedUniqueIndexes` was a name and not a function until Wave 5
+  correction round fifteen** (Medium 2): five sentences named it as a live
+  safeguard and nothing defined it. The property held by another route — an
+  inexpressible index gets no clause, and the missing trigger is censused by
+  `missingImmutabilityGuards` — so this was a false mechanism claim rather than
+  an open hole, but the artefact a reviewer follows pointed at nothing. It is
+  implemented now, in `store/integrity.ts`, and exercised on both branches
+  (empty on a healthy file; naming an expression index that cannot be spelled)
+  in `prose-names-a-real-mechanism.test.ts`. That same file is the derived
+  guard for the class: every backticked lowerCamelCase name in every comment
+  under `src/` must resolve against `src/`'s own non-comment source or be
+  exempted with a written reason. It caught two more on its first run —
+  `committedLedgerMarks` (the real reader is `committedLedgerIdentities`) and
+  `listIntelligenceBudgets` (the real method is
+  `listIntelligenceBudgetsBounded`) — both corrected at the source.
+- **The unauthenticated artifact publishes twenty-three Founder- and
+  worker-typed fields**, unchanged in behaviour and now disclosed in full
+  above. The
   derivation that keeps that table honest is complete for the METHODS the canary
   scenario exercises and is not a claim about the whole facade; a method added
   to a snapshot section in a future phase has to be added to the canary table by
@@ -6006,3 +6033,39 @@ the derivation — so the docblock can never quietly claim otherwise again.
   above rests on every declared ledger having a primary key, which is asserted per
   ledger in `ledger-row-position.test.ts`; a future ledger declared without one
   would be renumbered by a single `VACUUM`, and that test is what would say so.
+
+## Wave 5 correction round FIFTEEN — a hardened read beside an unhardened sibling, four times
+
+A fresh read-only hostile review of the frozen head `950a1b7` returned FAIL with
+3 Critical, 7 High, 4 Medium and 1 Low. Its own summary of the recurring shape
+is the most useful sentence in the report:
+
+> a hardened read gets installed next to an unhardened sibling, and the prose
+> then describes the hardened one as though it covered both.
+
+Every fix below is designed against that sentence: each closes the CLASS at
+every call site rather than the quoted instance, and each is held by a DERIVED
+guard — one that scans the source and fails on a call site nobody has written
+yet — rather than by a list of today's lines. The two enumerated regressions
+that shipped before were exactly how a Critical survived two lines beneath a
+hardened read.
+
+### The evidence figures, RE-MEASURED at this head
+
+The round-thirteen reconciliation table above records `197 files / 3494 tests`
+as its merged head, and that was the most recent figure in this document. It has
+not matched a head for several rounds. Re-measured here, and derived where a
+derivation is possible:
+
+| Figure | Previous figure in this document | This head |
+|---|---|---|
+| test FILES in `packages/headquarter/test` | 197 | **206** — DERIVED, not typed: `phase-doc-name-truth.test.ts` reads the directory and requires this table to state what it counts |
+| `npm run test:hq` | 197 files / 3494 tests | **206 files / 3622 tests, 0 failed** (measured at this head; a test-case count cannot be derived by a test inside the suite it counts, so it is recorded as a head-scoped measurement, which is the discipline this package already applies to every other suite figure) |
+| `SAFE_MODE_BLOCKING_FINDINGS` | 4 | **4**, and the count is now checked WHEREVER `src/` states it rather than only in `integrity.ts`'s own header — `service.ts` said "three" in the same diff |
+| unauthenticated artifact: crossing fields | 20 of 34 | **23 of 38** — see the disclosure section above |
+| `unguardedUniqueIndexes` | named 5 times, defined 0 times | **defined**, exercised on both branches, and the class held by `prose-names-a-real-mechanism.test.ts` |
+
+A test-case count typed into a document is read by nothing and goes stale on the
+next merge; that is the disclosure this table replaces rather than repeats. The
+FILE count is different — it is derivable, so it is derived, and this row fails
+the day a test file is added or removed without updating it.

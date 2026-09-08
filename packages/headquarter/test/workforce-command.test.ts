@@ -479,7 +479,9 @@ describe('the AI member registry facade — lifecycle, not authority', () => {
 
     // Wave 5 correction round six, Medium 4: the disable REASON is stored
     // caller text on an append-only registry row, and it went through no
-    // credential scan while `assignAiMember`'s own `reason` did. Same class as
+    // credential scan. (This comment used to compare it to `assignAiMember`,
+    // a name that does not exist in this package — corrected in Wave 5
+    // correction round fifteen, Medium 2.) Same class as
     // the backup note (High 4): a stored credential could not be removed.
     const poisoned = ops.disableAiMember({
       memberId: 'fable-main',

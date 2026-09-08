@@ -249,6 +249,47 @@ describe('prose that names a symbol or a count is checked against the repository
     ).toEqual([]);
   });
 
+  /**
+   * The test-FILE count in the phase document is DERIVED (Wave 5 correction
+   * round fifteen, Low 1).
+   *
+   * The hostile review's Low was that no evidence table in either shipped phase
+   * document matched the head: the most recent figure was `197 files / 3494
+   * tests` and the head measured 201 / 3587. Typing a new numeral would be the
+   * same defect with a fresher value — the numeral was right once too.
+   *
+   * A test-CASE count cannot be derived by a test running inside the suite it
+   * counts, so that half stays a head-scoped measurement, which is the rule
+   * this file's sibling test already enforces for the whole package: a
+   * PRESENT-TENSE "N tests in this package" is refused, a measurement at a
+   * named head is evidence. The FILE count is derivable, so it is derived
+   * here, and the row fails the day a test file is added or removed without
+   * the document being updated.
+   */
+  it('the phase document states the test-file count this package actually has', () => {
+    const files = fs.readdirSync(HERE).filter((entry) => entry.endsWith('.test.ts')).length;
+    // The sweep has to be looking at a real directory.
+    expect(files).toBeGreaterThan(100);
+    // Anchored to the round-FIFTEEN section, deliberately. Earlier rounds'
+    // tables are historical records of what a named head measured — re-writing
+    // them would destroy evidence rather than refresh it, which is the same
+    // distinction the sibling test above draws between a present-tense claim
+    // and a head-scoped measurement.
+    const whole = fs.readFileSync(PHASE_13, 'utf8');
+    const at = whole.indexOf('## Wave 5 correction round FIFTEEN');
+    expect(at, 'the round-fifteen section must exist').toBeGreaterThan(-1);
+    const text = whole.slice(at);
+    const row = /\|\s*test FILES in `packages\/headquarter\/test`\s*\|[^|]*\|\s*\*\*(\d+)\*\*/.exec(text);
+    expect(
+      row,
+      'the round-fifteen evidence table must carry a derived test-file row',
+    ).toBeTruthy();
+    expect(
+      Number(row![1]),
+      'the phase document states a test-file count this package does not have',
+    ).toBe(files);
+  });
+
   it('the checker can tell the renamed function from the dead name', () => {
     // Without this, an over-permissive resolver would pass the sweep above
     // while proving nothing. `standingIntegrityVerdict` is the real function;

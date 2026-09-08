@@ -52,7 +52,7 @@ import { describe, expect, it } from 'vitest';
 import { CAPS, expectOk } from './application.fixture.js';
 import { intelligenceFixture } from './intelligence.fixture.js';
 import { liveSnapshotFromOperations } from '../src/live/snapshot.js';
-import { openHqDatabase } from '../src/store/db.js';
+import { openHqDatabase, type HqDatabase } from '../src/store/db.js';
 import { HeadquarterOperations } from '../src/application/service.js';
 import {
   MISSION_COMMAND_CAPABILITY,
@@ -139,11 +139,26 @@ const CANARIES: readonly Canary[] = [
   { field: 'recordIntelligenceDecision.label', crosses: false },
   { field: 'recordIntelligenceCost.basis', crosses: false },
   { field: 'recordIntelligenceCost.note', crosses: false },
+  { field: 'recordIntelligenceCost.providerId', crosses: false },
+  { field: 'recordIntelligenceCost.modelId', crosses: false },
 ];
 
-/** The canary text for one field — distinct per field, and searchable. */
+/**
+ * The canary text for one field — distinct per field, and searchable.
+ *
+ * LOWERCASE (Wave 5 correction round fifteen, Medium 4). It used to be
+ * `CANARY-<field>`, which cannot be planted in any parameter the facade
+ * normalises or slug-checks: `recordIntelligenceCost.providerId` is passed
+ * through `normalizeProviderId`, so an upper-case canary is STORED in a form
+ * this file's own search would never find, and `modelId`'s slug rule refuses
+ * an upper-case value outright. Both were exempted with a reason that was
+ * false — "bounded to a registered provider and to an observed model id; a
+ * canary in either is refused before any write" — and one of them was not
+ * refused at all. A lowercase canary survives normalisation unchanged, so the
+ * measurement is of the artifact rather than of the search.
+ */
 function canaryFor(field: string): string {
-  return `CANARY-${field.replace(/\./g, '-')}`;
+  return `canary-${field.replace(/\./g, '-')}`.toLowerCase();
 }
 
 /**
@@ -153,16 +168,28 @@ function canaryFor(field: string): string {
  * A name here is a claim that the parameter cannot carry Founder free text, and
  * each is checkable against the method's own validation:
  *
- *  - `recordIntelligenceCost.providerId` and `.modelId` are bounded to a
- *    registered provider and to an observed model id; a canary in either is
- *    refused before any write, so planting one would measure the validator
- *    rather than the artifact.
+ *  - `recordIntelligenceCost.modelId` is bounded by a LOWERCASE-SLUG rule, and
+ *    that is the whole of its bound — measured, in
+ *    `intelligence-cost-identity.test.ts`, not supposed. It is planted here
+ *    like everything else, because the canary is lowercase; the entry stays in
+ *    `CANARIES` and is measured rather than exempted.
+ *
+ * The exemption this list USED to carry is gone, and it is worth recording
+ * why, because it is the failure this whole file exists to prevent (Wave 5
+ * correction round fifteen, Medium 4). It read: "`recordIntelligenceCost.providerId`
+ * and `.modelId` are bounded to a registered provider and to an observed model
+ * id; a canary in either is refused before any write." Measured: an
+ * UNREGISTERED provider, a NEVER-OBSERVED model and a canary providerId were
+ * all recorded — `provider_id` landed in `hq_intel_cost_entries` — and only
+ * the model id was refused, by the slug rule rather than by observation. The
+ * `crosses: false` verdict on the providerId survived, but for the wrong
+ * reason, and a verdict that survives for the wrong reason is a verdict nobody
+ * can rely on when the reason changes. Both are planted now.
  *  - `amendMissionIntent.specifyPlanItems` is a structured object list (seq,
  *    capabilityId, payload) with no free-text member; its summary text comes
  *    from `addPlanItems`, which IS planted.
  */
 const NOT_PLANTED: Record<string, readonly string[]> = {
-  recordIntelligenceCost: ['providerId', 'modelId'],
   amendMissionIntent: ['specifyPlanItems'],
 };
 
@@ -200,9 +227,7 @@ interface Planted {
  * this file has never heard of. Values are compared as strings because SQLite
  * columns are dynamically typed and HQ stores JSON blobs in TEXT columns.
  */
-function canariesStillInStore(db: {
-  prepare: (sql: string) => { all: (...params: unknown[]) => unknown[] };
-}, needles: readonly string[]): Set<string> {
+function canariesStillInStore(db: HqDatabase, needles: readonly string[]): Set<string> {
   const found = new Set<string>();
   const tables = db
     .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
@@ -489,7 +514,8 @@ function plantEveryCanary(): Planted {
       taskId: claimedSpender.id,
       workerId: 'claude',
       fence: claimedSpender.fence,
-      providerId: 'anthropic',
+      providerId: c('recordIntelligenceCost.providerId'),
+      modelId: c('recordIntelligenceCost.modelId'),
       provenance: 'estimated',
       amountMinorUnits: 10,
       currency: 'USD',
@@ -587,7 +613,7 @@ describe('what Founder-typed text crosses to the unauthenticated artifact', () =
       expect(measured.sort()).toEqual(declared.sort());
       // And the measured totals, so the phase document's numbers are taken from
       // an execution rather than from a sentence.
-      expect(CANARIES.length).toBe(36);
+      expect(CANARIES.length).toBe(38);
       expect(declared.length).toBe(23);
     } finally {
       planted.cleanup();
@@ -642,6 +668,29 @@ describe('what Founder-typed text crosses to the unauthenticated artifact', () =
           parameter,
         );
       }
+    }
+  });
+
+  /**
+   * The measured bound on the two parameters that used to be exempted with a
+   * false reason (Wave 5 correction round fifteen, Medium 4).
+   *
+   * The old exemption said both were "bounded to a registered provider and to
+   * an observed model id". Neither bound exists. This asserts what IS true, in
+   * the direction that matters: an UNREGISTERED provider and a NEVER-OBSERVED
+   * model are both recorded, and the value lands in `hq_intel_cost_entries` —
+   * so the `crosses: false` verdict above rests on the projection withholding
+   * it, not on the write refusing it.
+   */
+  it('records an unregistered provider and an unobserved model, and says so', () => {
+    const planted = plantEveryCanary();
+    try {
+      expect(planted.storedCanaries.has(canaryFor('recordIntelligenceCost.providerId'))).toBe(true);
+      expect(planted.storedCanaries.has(canaryFor('recordIntelligenceCost.modelId'))).toBe(true);
+      const recorded = planted.calls.find((call) => call.name === 'recordIntelligenceCost');
+      expect(recorded?.ok, 'the cost entry must have been written').toBe(true);
+    } finally {
+      planted.cleanup();
     }
   });
 

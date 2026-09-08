@@ -1177,6 +1177,67 @@ describe('the module header’s counts are the constants’ counts', () => {
     expect(NUMBER_WORDS[match![1]]).toBe(HQ_INTEGRITY_FINDINGS.length);
   });
 
+  /**
+   * The same claim, ANYWHERE in the package (Wave 5 correction round fifteen,
+   * Medium 3).
+   *
+   * The two tests around this one pin `integrity.ts`'s own header, which is
+   * where the count had been wrong twice. A hostile review then found it wrong
+   * a THIRD time, in a different file: `service.ts` said `evidence_chain_broken`
+   * is one of the "three" `SAFE_MODE_BLOCKING_FINDINGS` while `integrity.ts` in
+   * the same diff correctly said four. A pin on one file cannot see a sentence
+   * in another, so this sweeps every comment in `src/` that states a count
+   * beside either constant and checks it against the constant's length.
+   *
+   * Derived rather than corrected: the numeral in `service.ts` was edited too,
+   * but the numeral is not the fix — this is. A fourth file stating the count
+   * is checked on the day it is written.
+   */
+  it('is right about the count WHEREVER the package states it', () => {
+    const counts: Record<string, number> = {
+      SAFE_MODE_BLOCKING_FINDINGS: SAFE_MODE_BLOCKING_FINDINGS.length,
+      HQ_INTEGRITY_FINDINGS: HQ_INTEGRITY_FINDINGS.length,
+    };
+    const words = Object.keys(NUMBER_WORDS).join('|');
+    const src = path.join(HERE, '..', 'src');
+    const files: string[] = [];
+    const walk = (directory: string): void => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const full = path.join(directory, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith('.ts')) files.push(full);
+      }
+    };
+    walk(src);
+    const wrong: string[] = [];
+    let stated = 0;
+    for (const file of files) {
+      const lines = fs.readFileSync(file, 'utf8').split('\n');
+      for (const [constant, size] of Object.entries(counts)) {
+        // A three-line window, because a docblock wraps and the number word is
+        // routinely on the line before the constant it counts.
+        for (let i = 0; i < lines.length; i += 1) {
+          if (!lines[i]!.includes(constant)) continue;
+          const window = [lines[i - 1] ?? '', lines[i]!, lines[i + 1] ?? '']
+            .map((line) => line.replace(/^\s*\*\s?/, '').replace(/^\s*\/\/\s?/, ''))
+            .join(' ')
+            .replace(/\s+/g, ' ');
+          // A NUMBER WORD immediately governing the constant: "the four
+          // `SAFE_MODE_BLOCKING_FINDINGS`", "one of the three ...".
+          const match = new RegExp(`\\b(${words})\\s+\`?${constant}\``).exec(window);
+          if (!match) continue;
+          stated += 1;
+          if (NUMBER_WORDS[match[1]!] !== size) {
+            wrong.push(`${path.relative(src, file)}:${i + 1} says ${match[1]} for ${constant} (${size})`);
+          }
+        }
+      }
+    }
+    // The sweep has to find the claims it is checking, or it proves nothing.
+    expect(stated, 'no comment in src/ states either count — the sweep is vacuous').toBeGreaterThan(0);
+    expect(wrong, 'a comment states the wrong size for a safety constant').toEqual([]);
+  });
+
   it('says how many findings block, is right, and names every one of them', () => {
     const prose = headerProse();
     const match = /Only (\w+) findings engage safe mode/.exec(prose);
