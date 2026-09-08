@@ -69,7 +69,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { expectOk } from './application.fixture.js';
 import { fileFixture } from './reliability.fixture.js';
@@ -188,11 +188,40 @@ function withGuardLifted(dbPath: string, guard: string, damage: (raw: Database.D
   raw.close();
 }
 
-/** A file-backed HQ store that has completed a warm boot, so a commitment exists. */
-function warmedFile(): { dir: string; dbPath: string; cleanup: () => void } {
+/**
+ * The one warm store every scenario below starts from, built once.
+ *
+ * `warmedFile()` has thirteen call sites in this file and EIGHT of them are
+ * inside a single test, because each depth scenario has to damage its own
+ * database — a truncated ledger and a broken evidence chain cannot share one
+ * file. What those eight do NOT need is eight independent CONSTRUCTIONS of the
+ * identical undamaged store, and that is what they were paying for.
+ *
+ * The cost is not CPU. `openHqDatabase` sets `synchronous = FULL` on purpose —
+ * this file's own battery asserts `durability_below_requirement` when it is
+ * anything less — so every commit in a build is an fsync. Measured with
+ * `strace -f -c -e trace=fsync` at this head: 271 fsyncs for one warm build,
+ * and 2184 for the eight-scenario test. That is the highest fsync count of any
+ * test in the package, roughly eight times the ~250-275 the rest of the suite
+ * sits at.
+ *
+ * On this machine an fsync costs ~0.135 ms and the test runs in ~1.1 s, so the
+ * cost was invisible. A test's timeout is WALL time, though, and on slower
+ * storage the same 2184 fsyncs dominate it: at 2 ms per fsync the test takes
+ * 6.5 s and at 9 ms it takes 22 s, against vitest's 5000 ms default. That is
+ * what failed in CI, on a test no commit in this wave had touched.
+ *
+ * So the undamaged store is built ONCE, verified once, and COPIED per call. A
+ * cleanly closed HQ database is a single file with no WAL or shared-memory
+ * residue (verified below), so each scenario receives a byte-for-byte copy of
+ * the one store that was checked — strictly more deterministic than thirteen
+ * separate builds, not less, and it re-derives nothing.
+ */
+let warmTemplate: { dir: string; dbPath: string } | null = null;
+
+function warmTemplatePath(): string {
+  if (warmTemplate) return warmTemplate.dbPath;
   const fx = fileFixture();
-  const dbPath = fx.dbPath;
-  const dir = fx.dir;
   expectOk(
     fx.ops.startRunAttempt({
       runId: expectOk(
@@ -209,14 +238,48 @@ function warmedFile(): { dir: string; dbPath: string; cleanup: () => void } {
     }),
   );
   fx.db.close();
-  const warm = openHqDatabase(dbPath);
+  const warm = openHqDatabase(fx.dbPath);
   new HeadquarterOperations(warm);
   const committed = (
     warm.prepare(`SELECT COUNT(*) AS n FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`).get() as { n: number }
   ).n;
   expect(committed).toBeGreaterThan(0);
   warm.close();
-  return { dir, dbPath, cleanup: () => fx.cleanup() };
+
+  // The property that makes copying equivalent to rebuilding, asserted rather
+  // than assumed: after a clean close the store is ONE file. If a future change
+  // leaves a `-wal` or `-shm` beside it, copying the main file alone would hand
+  // out a store missing its most recent commits, and this fails instead.
+  expect(fs.readdirSync(path.dirname(fx.dbPath))).toEqual([path.basename(fx.dbPath)]);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-warm-template-'));
+  const dbPath = path.join(dir, path.basename(fx.dbPath));
+  fs.copyFileSync(fx.dbPath, dbPath);
+  fx.cleanup();
+  warmTemplate = { dir, dbPath };
+  return dbPath;
+}
+
+// Built in a hook rather than lazily inside whichever test happens to ask
+// first, so the one shared construction is charged to the shared setup and each
+// test's own budget covers only its own work. Vitest gives a hook 10 s and a
+// test 5 s, which is the right way round for a fixture every test reuses.
+beforeAll(() => {
+  warmTemplatePath();
+});
+
+afterAll(() => {
+  if (warmTemplate) fs.rmSync(warmTemplate.dir, { recursive: true, force: true });
+  warmTemplate = null;
+});
+
+/** A file-backed HQ store that has completed a warm boot, so a commitment exists. */
+function warmedFile(): { dir: string; dbPath: string; cleanup: () => void } {
+  const template = warmTemplatePath();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-warmed-'));
+  const dbPath = path.join(dir, path.basename(template));
+  fs.copyFileSync(template, dbPath);
+  return { dir, dbPath, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
 }
 
 /**
