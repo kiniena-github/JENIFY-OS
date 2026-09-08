@@ -59,6 +59,37 @@ import {
   registerMemoryCommandCapability,
 } from '../src/application/memory-command.js';
 
+/**
+ * The explicit deadline every FILE-backed probe on this branch carries, applied
+ * here to the one probe that was measured crossing vitest's 5000 ms DEFAULT.
+ *
+ * The default is a harness constant, not a measurement of anything, and the
+ * distinction matters here because the probe below opens, guards, attacks and
+ * re-opens a real SQLite FILE fifteen times — its cost tracks page-cache warmth
+ * and how many of the suite's 201 files are competing for the same four cores,
+ * not the work it does. Measured on this machine, `--reporter=verbose`, the
+ * probe's own reported duration:
+ *
+ *  - warm, whole suite in parallel: 1658 / 1695 / 1707 ms;
+ *  - warm, this file in isolation: 1381 / 1385 / 1397 / 1475 / 1504 / 1508 /
+ *    1511 / 1590 / 1602 ms;
+ *  - COLD (first run after checkout, page cache and transform cache empty):
+ *    4254 / 4934 / 5251 ms at the merge head `15523fe`, 5497 / 5654 / 5712 ms at
+ *    its first parent `28497f5`, and 5398 / 5451 / 5838 ms at its second parent
+ *    `3fcc271`.
+ *
+ * So the crossing is NOT something the merge introduced: both parents cross the
+ * same default by MORE than the merged head does, and the file this probe
+ * exercises is byte-identical at the merge base, at both parents and at the
+ * merge. What changed was the machine, not the work. The steady-state cost is
+ * ~1.7 s; 30_000 is the figure the sibling file-backed probes in
+ * `facade-write-scan.test.ts` carry, and it leaves better than 5x headroom over
+ * the worst cold reading above. Raising it does not weaken the probe — every
+ * assertion below is unchanged, and a probe that fails on cache warmth is a
+ * probe that reports the harness rather than the store.
+ */
+const FILE_BACKED_PROBE_TIMEOUT_MS = 30_000;
+
 function findings(observations: readonly { finding: string }[]): string[] {
   return observations.map((observation) => observation.finding);
 }
@@ -323,7 +354,10 @@ describe('the declared ledgers are enumerated from the DECLARATION, never from s
         fx.cleanup();
       }
     }
-  });
+    // Three ledgers, each with its own file, warmed, attacked and re-opened four
+    // times over — fifteen real file constructions in one probe, which is why
+    // this is the one arm in the file that needs the explicit deadline.
+  }, FILE_BACKED_PROBE_TIMEOUT_MS);
 
   /**
    * The other direction of the same enumeration: HQ commits about a ledger it
