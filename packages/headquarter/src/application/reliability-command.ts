@@ -874,10 +874,31 @@ export const RUN_RECONCILED_EVIDENCE_KIND = 'run_reconciled';
  * reaches it too — and latching safe mode on it would be an alarm HQ cannot
  * substantiate, which the same laws forbid in the alarm direction as in the
  * reassurance one. A writer who also appends a checkpoint row committing the
- * forged tip is not counted at all — three appends rather than two, the third
- * costing two extra reads because a bare `'{}'` commitment is refused by
- * `trg_hq_integrity_checkpoints_no_overclaim` — and that remains disclosed
- * rather than closed.
+ * forged tip is not counted at all — three appends rather than two — and that
+ * remains disclosed rather than closed.
+ *
+ * **What the third append actually costs, corrected** (Wave 5 correction round
+ * eighteen, Medium C). This paragraph said the third append costs "two extra
+ * reads because a bare `'{}'` commitment is refused by
+ * `trg_hq_integrity_checkpoints_no_overclaim`". The refusal is real; the price
+ * was overstated in the REASSURING direction. It costs ONE read — the tip row
+ * the forger already has to read — because that row's `seq` is both the
+ * `op_evidence` AUTOINCREMENT mark and its row count, so a commitment naming
+ * only `{"op_evidence": seq}` in both columns has a committed difference of
+ * zero that no gap clause refuses. Executed, on `publish_release` (public,
+ * irreversible, non-compensable):
+ *
+ * ```
+ * bare '{}'                 landed=false  may not commit beyond the record  -> counter stays 1
+ * copy of the prior row     landed=false  may not commit beyond the record  -> counter stays 1
+ * only `op_evidence`, seq   landed=true                                     -> counter 1 -> 0
+ * ```
+ *
+ * `test/wave5-round17-findings.test.ts` executes all three shapes and pins the
+ * one-read landing, so the corrected price is measured on every run rather
+ * than asserted here. The end state is what it was: every Founder-facing
+ * surface clean beside two real adapter executions of an irreversible public
+ * action.
  *
  * What it closes completely is the thing it was built for: one appended row,
  * by an actor nobody resolved, silently concluding a run HQ had said it could

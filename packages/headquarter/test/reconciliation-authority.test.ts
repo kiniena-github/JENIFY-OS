@@ -36,6 +36,7 @@ import {
   resolveUnknownDispatch,
 } from '../src/providers/claude/dispatch.js';
 import { taskActionDigest } from '../src/operator/approvals.js';
+import { HeadquarterOperations } from '../src/application/service.js';
 import type { DispatchCapableTransport, GitHubIssueRequest } from '../src/providers/claude/transport.js';
 
 const CLAUDE_ONLY = { CLAUDE_ROUTINE_URL: 'present', CLAUDE_ROUTINE_TOKEN: 'present' };
@@ -239,5 +240,53 @@ describe('an ambiguous dispatch outcome may only be decided by approval authorit
     expect(result.ok).toBe(false); // `not_dispatched` reports a refusal by design
     if (result.ok) throw new Error('unreachable');
     expect(result.error.message).toMatch(/reconciled as NOT dispatched/);
+  });
+});
+
+/**
+ * Round eighteen's audit of the whole dispatch lane, asked for alongside High
+ * A: `resolveUnknownDispatch` treated `ops.reconciliationAuthorityRefusal(...)
+ * === null` as its ONE authority gate before writing a terminal outcome, and
+ * asked it of a PUBLIC PROTOTYPE METHOD.
+ *
+ * Nobody exploited this — it is the same class as High A, found by auditing
+ * the remaining `ops.*` uses in `dispatch.ts` rather than by being told. The
+ * read now goes through `reconciliationAuthorityRefusalFor`, a module-private
+ * function binding, and the attack below is what says so.
+ */
+describe('the reconciliation authority gate is not decided by a patchable read', () => {
+  it('still refuses an unregistered id with `reconciliationAuthorityRefusal` forged', () => {
+    const { fixture, taskId } = taskWithUnknownDispatch();
+    const proto = HeadquarterOperations.prototype as unknown as Record<string, unknown>;
+    const saved = proto.reconciliationAuthorityRefusal;
+    // The maximally permissive lie: nobody is ever refused.
+    proto.reconciliationAuthorityRefusal = () => null;
+    let result;
+    try {
+      // The patch has to actually take, or the test proves nothing.
+      expect(fixture.ops.reconciliationAuthorityRefusal('nobody-in-particular')).toBeNull();
+      result = resolveUnknownDispatch(fixture.ops, {
+        evidence: fixture.dispatchEvidence,
+        taskId,
+        outcome: 'not_dispatched',
+        resolvedBy: 'nobody-in-particular',
+      });
+    } finally {
+      proto.reconciliationAuthorityRefusal = saved;
+    }
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error.message).toMatch(/Reconciliation refused/);
+    // The consequence, not just the message: the attempt stays unresolved and
+    // no terminal outcome was written for it.
+    expect(dispatchHistory(fixture.ops, taskId).state).toBe('unknown');
+    const terminals = fixture.ops.queue.evidence
+      .list(taskId)
+      .filter(
+        (entry) =>
+          entry.kind === CLAUDE_DISPATCH_EVIDENCE.failed ||
+          entry.kind === CLAUDE_DISPATCH_EVIDENCE.succeeded,
+      );
+    expect(terminals).toHaveLength(0);
   });
 });

@@ -6218,10 +6218,29 @@ observable, and the forgery itself is not refused.
 
 **The residual that remains, executed rather than reasoned about.** A writer
 that also appends a checkpoint committing its own tip is not counted — three
-appends rather than two. That third append is not free: the same INSERT with
-`'{}'` in both commitment columns is refused with `hq_integrity_checkpoints may
-not commit beyond the record`, so it costs two extra reads of the file's own
-ledger identities. Both halves are pinned by test.
+appends rather than two.
+
+**Corrected in round eighteen (Medium C): that third append costs ONE extra
+read, not two.** The sentence here said two, in the reassuring direction. The
+refusal it rested on is real — the same INSERT with `'{}'` in both commitment
+columns is refused with `hq_integrity_checkpoints may not commit beyond the
+record` — but so is a copy of the previous checkpoint's commitment, and the
+shape that DOES land needs only the tip row the forger already reads, because
+that row's `seq` is both the `op_evidence` AUTOINCREMENT mark and its row
+count. Executed on `publish_release` (public, irreversible, non-compensable):
+
+```
+bare '{}'                 landed=false  may not commit beyond the record  -> counter stays 1
+copy of the prior row     landed=false  may not commit beyond the record  -> counter stays 1
+only `op_evidence`, seq   landed=true                                     -> counter 1 -> 0
+```
+
+All three shapes are executed by `test/wave5-round17-findings.test.ts`, so the
+corrected price is measured on every run rather than asserted here. The end
+state is unchanged and is stated as what it is: every Founder-facing surface
+reads clean beside two real adapter executions of an irreversible public
+action. The STATE remains disclosed rather than closed; only the price was
+wrong.
 
 Mutation proof — the reconciliation commitment removed:
 
@@ -6352,5 +6371,203 @@ Mutation proof — the guard back to `== null`:
 | `npm run test --workspace @factoryos/hq-host` | — | **23 files / 222 passed** |
 | `npm run test --workspace @factoryos/hq-server` | — | **2 files / 20 passed** |
 | web initial JS | 215.66 kB / 69.22 kB gzip | **215.66 kB / 69.22 kB gzip** — unchanged |
+| `.execute(` on an adapter in all of `src/` | 1 | **1**, in the Phase 8 gateway |
+| `.skip` / `.only` / `.todo` / `.failing` in `packages/headquarter` | 0 | **0** |
+
+## Wave 5 correction round EIGHTEEN — the read that decided whether the hardened read ran, and two guards that claimed more than they enforced
+
+A read-only hostile review of the frozen head `c907bce` returned FAIL with 0
+Critical, 1 High, 2 Medium and 1 Low. Two of the four are the recurring shape
+the last seven rounds have shared — **prose that claims more than the code
+does** — and one of those two was a docblock in the guard written to end that
+shape.
+
+### HIGH A — `ops.policyContext` decided whether the Founder approval was checked at all
+
+`claudeDispatchEligibility` read the standing pre-approval set from
+`ops.policyContext` and handed it to `classifyCapability`. The resulting
+`classification.requiresApproval` is what gates the approval-expiry check round
+sixteen hardened one line below — so the hardened read was reachable only
+through a patchable one.
+
+`get policyContext()` is a `configurable` prototype accessor, and the instance
+also takes an own property of that name. Both spellings work. Executed on an
+approved `archive.index_document` task (`external_side_effect`, no standing
+pre-approval, status `queued`) whose approval was then expired:
+
+```
+policyContext: own=- proto=getter protoConfigurable=true
+BEFORE:                     {"eligible":false,"code":"approval_invalid", … "its Founder approval has expired. Nothing was dispatched."}
+AFTER (prototype patch):    {"eligible":true,"task":{… ,"status":"queued", …
+AFTER (own-property patch): {"eligible":true,"task":{… ,"status":"queued", …
+```
+
+The census excused it as "`policyContext` (a frozen options object)". The
+returned object IS frozen; the accessor that produces it is not, and the
+accessor is what the exploit replaced.
+
+Fixed with `policyContextFor` — the tenth module-private function binding,
+beside `taskRowFor` / `approvalRecordFor` / `specialistRecordFor` — over the
+`#policyCtx` field. `ops.policyContext` stays exactly as it is for the console
+and the snapshot, which display it.
+
+**The census is fixed by construction, in three parts, and only the third is
+load-bearing.** (1) The dispatch lane is now classified MEMBER BY MEMBER in
+`DISPATCH_LANE_FACADE_USES` rather than by one file-level argument. (2) Every
+member listed there is MEASURED patchable at runtime by
+`facadeMemberPatchability`, which reads the descriptor — own vs prototype,
+writable, configurable, shadowable — instead of reasoning about the value; and
+no reason in that file may argue from the immutability of what a member returns
+(a lint on the exact vocabulary `frozen` / `immutable` / `readonly value`,
+which is what it is and no more). (3) `a lying facade surface does not move the
+dispatch eligibility verdict` replaces EVERY public member
+`HeadquarterOperations` declares — derived from the class body, in both
+spellings, all at once — with a permissive proxy and re-measures the verdict.
+The test asserts the attack took hold before measuring: under the patch,
+`classifyCapability(capability, ops.policyContext).requiresApproval` is `false`,
+which is exactly how the gate was skipped.
+
+Mutation proof — the read put back to `ops.policyContext`:
+
+```
+× still reports `approval_invalid` with every declared facade member replaced
+    AssertionError: a Founder-facing dispatch verdict may not be forged: expected true to be false
+```
+
+### HIGH A, continued — the audit of the rest of the lane, which found one more
+
+The review asked for every other `ops.*` use in `dispatch.ts` to be audited the
+same way. Nine are mutations or writes the canonical layer re-enforces for
+itself. One was not: `resolveUnknownDispatch` took
+`ops.reconciliationAuthorityRefusal(actor) === null` as its ONE authority gate
+before writing a terminal outcome for an unresolved attempt, and asked it of a
+public prototype method. Nobody exploited it; it is the same class.
+
+Migrated to `reconciliationAuthorityRefusalFor` over a new `#private` method.
+Mutation proof — the read put back:
+
+```
+× still refuses an unregistered id with `reconciliationAuthorityRefusal` forged
+    AssertionError: expected 'Task 1d036061-…' to match /Reconciliation refused/
+    Received: "…the uncertain attempt was reconciled as NOT dispatched…"
+```
+
+That is an unregistered id closing an unresolved public dispatch, on the head
+this round started from.
+
+### MEDIUM B — the cardinality sweep, and a docblock that said "in any phrasing"
+
+The reviewer planted seven strings beside the single
+`SAFE_MODE_BLOCKING_FINDINGS` mention (actual size 4) and ran the real test.
+All seven passed:
+
+```
+EVADED  the seventh and last of these names        (ordinal)
+EVADED  both of which engage safe mode             (implies two)
+EVADED  only one blocking observation exists here  (`observation` was not a size-bearing noun)
+EVADED  this is a `three-name` vocabulary          (numeral inside a no-whitespace backticked span)
+EVADED  with that workaround 3 names are blocking  (`workaround` ends in `round`, an unanchored label)
+EVADED  it holds VII names                         (roman numeral)
+EVADED  a trio of names live here                  (collective outside both vocabularies)
+```
+
+Reproduced here before fixing, in both plant positions relative to the
+constant. All seven are now CAUGHT in both positions, and each is a fixture in
+`catches the seven phrasings that walked past the round-seventeen sweep’s
+successor`, mutation-proved one mechanism at a time:
+
+| Mechanism | Mutation | Failure |
+|---|---|---|
+| `REFERENCE_LABELS` anchored with `\b` | anchor removed | `EV9 … "with that workaround 3 names are blocking …" states a wrong size and must be caught: expected false to be true` |
+| `both: 2` | entry removed | `EV6 both (constant after) … expected false to be true` |
+| `observations?` in `SIZE_BEARING_NOUNS` | word removed | `EV7 pronoun before an unlisted noun (constant before) … expected false to be true` |
+| collectives `trio`…`octet` | `trio` removed | `EV11 collective … expected false to be true` |
+| ordinals refused | refusal removed | `EV5 ordinal … expected false to be true` |
+| quantity segments inside a code span | unwrap removed | `EV8 numeral in a no-whitespace code span … expected false to be true` |
+| all-caps roman numerals | branch removed | `EV10 roman numeral … expected false to be true` |
+
+**And the prose was narrowed to what is enforced**, which is the half of this
+finding that matters. "In any phrasing" is gone from the docblock and from the
+test name. The test is now `is right about the count wherever the package
+states it with a quantity the extractor recognises, within three lines`, and
+the docblock lists what "recognises" means and what it still does not: a
+collective outside the closed list, a single-character roman numeral, `one`
+before a noun nobody added to the closed list, a claim more than one line from
+the mention — measured, the same false claim planted four lines away still
+passes — and a size claim made with no quantity token at all.
+
+Two true comments in `src/` had to change to stay green, which is the sweep
+working as designed rather than a workaround: `runs BOTH depths` became `runs
+EACH depth` beside `HQ_INTEGRITY_FINDINGS` (7). Three nouns tried and reverted
+— `record`, `row`, `state` — because they occur in this package's prose about
+other things and made TRUE comments fail.
+
+### MEDIUM C — the third-append price was overstated in the reassuring direction
+
+`witnessReconciliations` and this document both said the third append of the
+checkpoint forgery costs "two extra reads because a bare `'{}'` commitment is
+refused". The refusal is real. The price was not: it costs ONE read.
+
+Executed on `publish_release` (public, irreversible, non-compensable), all
+three shapes against the real guard:
+
+```
+bare '{}'                 landed=false  may not commit beyond the record  -> counter stays 1
+copy of the prior row     landed=false  may not commit beyond the record  -> counter stays 1
+only `op_evidence`, seq   landed=true                                     -> counter 1 -> 0
+```
+
+The landing shape needs only the tip row the forger already reads, because that
+row's `seq` is both the `op_evidence` AUTOINCREMENT mark and its row count, so
+the committed difference is zero and no gap clause refuses it. All three shapes
+are now executed by `test/wave5-round17-findings.test.ts`, so the corrected
+price is measured on every run.
+
+Mutation proof — the one-read commitment off by one (`tip.seq - 1`):
+
+```
+SqliteError: hq_integrity_checkpoints may not commit beyond the record
+```
+
+The STATE is unchanged and remains disclosed rather than closed: every
+Founder-facing surface reads clean beside two real adapter executions of an
+irreversible public action. Only the price was wrong.
+
+The wording route was taken rather than the structural one. Making the counter
+per-checkpoint-witness would rest on `committedCheckpointMark`, whose
+`PRAGMA application_id` a writer holding the file can also rewrite, and would
+report every honest witness as uncommitted on a legacy or read-only handle that
+carries no witness — an alarm HQ cannot substantiate, which law 8 forbids in
+the same terms as the reassuring direction. That trade is recorded here rather
+than made silently.
+
+### LOW D — a census reason that misdescribed its consumer
+
+`ops.readMeta` was excused as one of the "reads whose only consumer is the text
+of a verdict". Its `title` and `project` are rendered by `renderDispatchIssue`
+into the body of a real GitHub issue, so its consumer is an external
+publication. Bound rather than merely re-described: `taskMetaFor`, the eleventh
+module binding. `readMeta` stays as the convenience read for display.
+
+Mutation proof — the read put back to `ops.readMeta(taskId)`:
+
+```
+× finds exactly the facade reads from other modules that are recorded
+    AssertionError: expected { …(107) } to deeply equal { …(106) }
+    +   "src/providers/claude/dispatch.ts::readMeta": 1,
+```
+
+### The evidence figures at this head
+
+| Figure | Round seventeen | This head |
+|---|---|---|
+| test FILES in `packages/headquarter/test` | 209 | **209** — no file added; every round-eighteen regression lives with its subject |
+| `npm run test:hq` | 209 files / 3651 tests | **209 files / 3655 tests, 0 failed** (head-scoped measurement) |
+| `npm test` (root, Mesob pilot untouched) | 37 files / 569 passed, 3 skips | **37 files / 569 passed, 3 pre-existing skips** |
+| `npm run test --workspace @factoryos/hq-host` | 23 files / 222 passed | **23 files / 222 passed** |
+| `npm run test --workspace @factoryos/hq-server` | 2 files / 20 passed | **2 files / 20 passed** |
+| `npm run build:site --workspace @factoryos/headquarter` | 10 pages | **10 pages + `hq-snapshot.json`** |
+| web initial JS | 215.66 kB / 69.22 kB gzip | **215.66 kB / 69.22 kB gzip** — unchanged |
+| module-private authority bindings | 9 | **12** — `policyContextFor`, `taskMetaFor`, `reconciliationAuthorityRefusalFor` added |
 | `.execute(` on an adapter in all of `src/` | 1 | **1**, in the Phase 8 gateway |
 | `.skip` / `.only` / `.todo` / `.failing` in `packages/headquarter` | 0 | **0** |

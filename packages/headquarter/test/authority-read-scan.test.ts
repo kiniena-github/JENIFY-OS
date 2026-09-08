@@ -102,7 +102,11 @@ import { describe, expect, it } from 'vitest';
 import { CAPS, expectOk, setupFixture } from './application.fixture.js';
 import * as ports from '../src/application/ports.js';
 import * as registryDirectory from '../src/application/registry-directory.js';
-import { HeadquarterOperations } from '../src/application/service.js';
+import { capabilityRowFor, HeadquarterOperations } from '../src/application/service.js';
+import { classifyCapability } from '../src/application/classification.js';
+import type { PolicyContext } from '../src/operator/policy.js';
+import { taskActionDigest } from '../src/operator/approvals.js';
+import { claudeDispatchEligibility } from '../src/providers/claude/dispatch.js';
 import { HeadquarterStore } from '../src/store/headquarter.js';
 import { HumanPrincipalRegistry } from '../src/application/principals.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
@@ -504,14 +508,11 @@ const FACADE_READS: Readonly<Record<string, number>> = {
   'src/live/snapshot.ts::listMissions': 1,
   'src/live/snapshot.ts::projectStorePresent': 1,
   'src/live/snapshot.ts::listProjects': 1,
-  'src/providers/claude/dispatch.ts::policyContext': 1,
   'src/providers/claude/dispatch.ts::queue': 2,
   'src/providers/claude/dispatch.ts::appendSystemEvidence': 1,
   'src/providers/claude/dispatch.ts::returnForFreshApproval': 1,
-  'src/providers/claude/dispatch.ts::readMeta': 1,
   'src/providers/claude/dispatch.ts::reserveEvidence': 2,
-  'src/providers/claude/dispatch.ts::claimNext': 1,
-  'src/providers/claude/dispatch.ts::reconciliationAuthorityRefusal': 1,};
+  'src/providers/claude/dispatch.ts::claimNext': 1,};
 
 /**
  * Every read of a PUBLISHED OWN-PROPERTY VIEW (`ops.directory.x`,
@@ -573,12 +574,101 @@ const FACADE_READER_REASONS: Readonly<Record<string, string>> = {
     'is governed by `unauthenticated-founder-text.test.ts` and the census there.',
   'src/providers/claude/dispatch.ts':
     'The one file in this list that can cause a REAL external side effect, and therefore the one ' +
-    'whose reads were audited member by member: the task row, the capability row, the kill switch, ' +
-    'the gateway history, the evidence rows, the approval record, the declared provider, the ' +
-    'assignability answer and the specialist record are ALL read through module-private function ' +
-    'bindings. What remains here is `policyContext` (a frozen options object), the queue mutations ' +
-    'classified in `QUEUE_READS`, and reads whose only consumer is the text of a verdict.',
+    'whose uses of the facade are classified MEMBER BY MEMBER in `DISPATCH_LANE_FACADE_USES` ' +
+    'below rather than argued for as a file. Every READ it takes — the task row, the capability ' +
+    'row, the kill switch, the gateway history, the evidence rows, the approval record, the ' +
+    'standing pre-approval set, the task meta, the declared provider, the assignability answer ' +
+    'and the specialist record — goes through a module-private function binding. What is left ' +
+    'here calls the facade to CHANGE something or to ask it to refuse, never to learn a fact ' +
+    'that a later line decides on.',
 };
+
+/**
+ * How the dispatch lane uses each facade member it still touches — kinds that
+ * deliberately do not include `enforcement`, because a read that decides
+ * belongs on a module binding and this file now has none.
+ *
+ * ## Why this exists (Wave 5 correction round eighteen, High A)
+ *
+ * `FACADE_READS` records COUNTS for this file and `FACADE_READER_REASONS`
+ * carried ONE argument for all of them. That argument said what remained was
+ * "`policyContext` (a frozen options object)" — and the frozenness was a
+ * property of the VALUE `freezePolicyContext` hands back, while the exploit
+ * replaced the ACCESSOR. `get policyContext()` is a configurable prototype
+ * accessor that an own property on the instance also shadows, and the context
+ * it produced decided `classification.requiresApproval`, i.e. whether the
+ * approval-expiry check hardened in round sixteen ran at all:
+ *
+ * ```
+ * BEFORE:                     {"eligible":false,"code":"approval_invalid", … expired …}
+ * AFTER (prototype patch):    {"eligible":true,"task":{… "status":"queued" …
+ * AFTER (own-property patch): {"eligible":true,"task":{… "status":"queued" …
+ * ```
+ *
+ * ## What the rules below actually enforce, and what they do not
+ *
+ *  1. DEFAULT DENY per member, both directions, against the `dispatch.ts`
+ *     slice of `FACADE_READS`.
+ *  2. Every member listed must be MEASURED patchable on a live instance
+ *     (`facadeMemberPatchability`). The classification therefore always
+ *     describes a patchable accessor; it cannot be about the value.
+ *  3. No reason here may argue from the immutability of what the member
+ *     returns. That is a lint on the exact excuse vocabulary that produced
+ *     this finding — `frozen`, `immutable`, `readonly value` — and nothing
+ *     more: it cannot judge whether a reason is otherwise true.
+ *
+ * The load-bearing half is not any of those three. It is
+ * `a lying facade surface does not move the dispatch eligibility verdict`
+ * below, which patches every declared member of the class at once and measures
+ * the verdict.
+ */
+const DISPATCH_LANE_FACADE_USES: Readonly<
+  Record<string, { count: number; kind: 'mutation'; reason: string }>
+> = {
+  queue: {
+    count: 2,
+    kind: 'mutation',
+    reason:
+      'The two queue calls this lane makes, both classified individually in `QUEUE_READS` above: ' +
+      'they ask the canonical queue to change a task, and the queue enforces for itself over its ' +
+      'own `#db` closures rather than trusting anything this file computed.',
+  },
+  appendSystemEvidence: {
+    count: 1,
+    kind: 'mutation',
+    reason:
+      'The lane recording that it REFUSED. The facade narrows this surface to reserved system ' +
+      'actors and to kinds that decide nothing; a patched slot loses a record of a refusal, which ' +
+      'is a loss of truth rather than a grant of authority.',
+  },
+  returnForFreshApproval: {
+    count: 1,
+    kind: 'mutation',
+    reason:
+      'The lane handing a task back for a new Founder approval — strictly the tightening ' +
+      'direction. A patched slot can decline to tighten; it cannot make an unapproved task ' +
+      'dispatchable, because the eligibility verdict is computed from module bindings.',
+  },
+  reserveEvidence: {
+    count: 2,
+    kind: 'mutation',
+    reason:
+      'The dispatch reservation, taken before anything is published so the durable identity ' +
+      'exists before the issue does. It writes; it tells this file no fact that a later line ' +
+      'decides on, and the grant it needs is the one the composition root issued.',
+  },
+  claimNext: {
+    count: 1,
+    kind: 'mutation',
+    reason:
+      'The canonical claim. It re-resolves the worker, the capability, the kill switch, the ' +
+      'assignment intent and the provider binding inside the facade and inside `OperatorQueue` ' +
+      'over `#private` state, so a patched slot here cannot hand out a claim the queue refuses.',
+  },
+};
+
+/** The excuse vocabulary that produced round eighteen's High A. */
+const VALUE_IMMUTABILITY_EXCUSES = /\bfrozen\b|\bimmutable\b|\breadonly (?:value|object)\b/i;
 
 /* ------------------------------------------------------------------ */
 /* The derivation                                                      */
@@ -778,6 +868,40 @@ function publishedViewCensus(): { reads: Record<string, number>; unknownMembers:
   return { reads, unknownMembers };
 }
 
+/**
+ * How patchable each declared facade member actually is, MEASURED on a live
+ * instance rather than argued about (Wave 5 correction round eighteen, High A).
+ *
+ * The census that missed High A classified `policyContext` by what the getter
+ * RETURNS — a frozen object — when what mattered was the getter itself:
+ * `configurable: true` on the prototype, and shadowable by an own property on
+ * the instance. This function answers only the question that matters: can a
+ * same-realm caller replace the thing the call site reads?
+ */
+function facadeMemberPatchability(
+  ops: HeadquarterOperations,
+): Record<string, { where: 'own' | 'prototype' | 'absent'; shape: string; patchable: boolean }> {
+  const out: Record<string, { where: 'own' | 'prototype' | 'absent'; shape: string; patchable: boolean }> = {};
+  for (const member of facadePublicMembers()) {
+    const own = Object.getOwnPropertyDescriptor(ops as object, member);
+    const proto = Object.getOwnPropertyDescriptor(HeadquarterOperations.prototype, member);
+    const descriptor = own ?? proto;
+    if (!descriptor) {
+      out[member] = { where: 'absent', shape: 'none', patchable: false };
+      continue;
+    }
+    const shape = descriptor.get ? 'accessor' : typeof descriptor.value;
+    // Replaceable by assignment (a writable data property), by
+    // `Object.defineProperty` (a configurable one), or — for anything reached
+    // through the prototype — by simply defining an own property that shadows
+    // it, which needs the INSTANCE to be extensible and nothing else.
+    const patchable =
+      descriptor.writable === true || descriptor.configurable === true || (!own && Object.isExtensible(ops));
+    out[member] = { where: own ? 'own' : 'prototype', shape, patchable };
+  }
+  return out;
+}
+
 /** `<file>::<member>` → occurrences, for facade reads from every other module. */
 function facadeReaderCensus(): Record<string, number> {
   const members = new Set(facadePublicMembers());
@@ -899,6 +1023,9 @@ describe('the patchable-surface census is derived from the declared surface', ()
       'export function declaredProviderFor(',
       'export function assignabilityProblemFor(',
       'export function specialistRecordFor(',
+      'export function policyContextFor(',
+      'export function taskMetaFor(',
+      'export function reconciliationAuthorityRefusalFor(',
     ]) {
       expect(service, binding).toContain(binding);
     }
@@ -941,6 +1068,58 @@ describe('the patchable-surface census is derived from the declared surface', ()
     for (const [key, value] of Object.entries(PUBLISHED_VIEW_READS)) {
       expect(value.reason.length, `${key}: the reason is what replaces the assertion`).toBeGreaterThan(80);
       expect(value.kind, `${key}: an enforcement read belongs on a module binding`).toBe('display');
+    }
+  });
+
+  it('classifies the external-side-effect lane member by member, and never by the value a member returns', () => {
+    const fx = setupFixture();
+    try {
+      const patchability = facadeMemberPatchability(fx.ops);
+      // The probe has to be looking at a real surface: the two shapes round
+      // eighteen's High A turned on are both present and both replaceable.
+      expect(patchability.policyContext).toEqual({
+        where: 'prototype',
+        shape: 'accessor',
+        patchable: true,
+      });
+      expect(patchability.readMeta).toEqual({ where: 'prototype', shape: 'function', patchable: true });
+      expect(patchability.queue.patchable).toBe(true);
+
+      // DEFAULT DENY per member for the one file that can cause a real
+      // external side effect, both directions.
+      const lane = Object.fromEntries(
+        Object.entries(FACADE_READS)
+          .filter(([key]) => key.startsWith('src/providers/claude/dispatch.ts::'))
+          .map(([key, count]) => [key.split('::')[1], count]),
+      );
+      expect(lane).toEqual(
+        Object.fromEntries(
+          Object.entries(DISPATCH_LANE_FACADE_USES).map(([member, value]) => [member, value.count]),
+        ),
+      );
+
+      for (const [member, value] of Object.entries(DISPATCH_LANE_FACADE_USES)) {
+        expect(value.reason.length, `${member}: the reason is what replaces the assertion`).toBeGreaterThan(80);
+        // Every member left in this lane is a PATCHABLE surface. That is the
+        // fact the classification is about, so it is measured here rather
+        // than assumed — and a member that stopped being patchable would be a
+        // change worth noticing too.
+        expect(patchability[member], `${member} is not a declared facade member`).toBeDefined();
+        expect(patchability[member].patchable, `${member}: measured patchability`).toBe(true);
+        // And the excuse that produced High A is refused outright: a reason
+        // here may not argue from the immutability of the value the member
+        // returns. This is a lint on that vocabulary, not a judgement of
+        // whether the rest of the sentence is true.
+        expect(
+          VALUE_IMMUTABILITY_EXCUSES.test(value.reason),
+          `${member}: a patchable accessor is not excused by what it returns`,
+        ).toBe(false);
+      }
+      for (const reason of Object.values(FACADE_READER_REASONS)) {
+        expect(VALUE_IMMUTABILITY_EXCUSES.test(reason)).toBe(false);
+      }
+    } finally {
+      fx.db.close();
     }
   });
 
@@ -1109,5 +1288,124 @@ describe('a lying worker-directory prototype changes nothing that is enforced', 
     expect(baseline).toEqual({ assignable: false, reason: 'worker_inactive' });
     const forged = withEveryDirectoryPrototypeLying(() => fx.ops.workers.assignability('claude'));
     expect(forged).toEqual({ assignable: false, reason: 'worker_inactive' });
+  });
+});
+
+/**
+ * A value that answers permissively to anything asked of it: every property is
+ * itself, every call returns itself, and it is truthy. Handed to every declared
+ * member of the facade at once by `withEveryFacadeMemberLying`.
+ *
+ * `preApprovedCapabilities.has(id)` returning this is what makes the lie BITE
+ * on `policyContext`: a truthy answer there is a standing Founder pre-approval
+ * for the task's capability, which is precisely what High A exploited.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const PERMISSIVE: any = new Proxy(function permissive(): void {}, {
+  get(_target, property) {
+    if (property === Symbol.toPrimitive) return () => 'permissive';
+    if (property === Symbol.iterator) return function* iterate() {};
+    // Not thenable: an accidental await must not hang a test.
+    if (property === 'then') return undefined;
+    return PERMISSIVE;
+  },
+  apply: () => PERMISSIVE,
+  construct: () => PERMISSIVE,
+  has: () => true,
+});
+
+/**
+ * Replace EVERY public member `HeadquarterOperations` declares — in both
+ * spellings a same-realm caller has — for the duration of `body`.
+ *
+ * Derived from `facadePublicMembers()`, so a member added in a future phase is
+ * attacked the day it is DECLARED, and a future authority read of the facade
+ * from this lane fails here without anybody remembering to list it. Both
+ * spellings, because round eighteen's High A worked either way: the prototype
+ * accessor is `configurable`, and an own property on the instance shadows
+ * whatever the prototype holds.
+ */
+function withEveryFacadeMemberLying<T>(ops: HeadquarterOperations, body: () => T): T {
+  const proto = HeadquarterOperations.prototype as object;
+  const saved: { target: object; name: string; descriptor: PropertyDescriptor | undefined }[] = [];
+  const patch = (target: object, name: string): void => {
+    const descriptor = Object.getOwnPropertyDescriptor(target, name);
+    if (descriptor && descriptor.configurable !== true && descriptor.writable !== true) return;
+    saved.push({ target, name, descriptor });
+    Object.defineProperty(target, name, {
+      value: PERMISSIVE,
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    });
+  };
+  for (const member of facadePublicMembers()) {
+    patch(proto, member);
+    patch(ops as object, member);
+  }
+  try {
+    return body();
+  } finally {
+    for (const { target, name, descriptor } of saved.reverse()) {
+      if (descriptor) Object.defineProperty(target, name, descriptor);
+      else delete (target as Record<string, unknown>)[name];
+    }
+  }
+}
+
+describe('a lying facade surface does not move the dispatch eligibility verdict', () => {
+  it('still reports `approval_invalid` with every declared facade member replaced', () => {
+    const fx = setupFixture();
+    // `archive.index_document` is `external_side_effect` and — unlike
+    // `github.open_pr` — carries NO standing pre-approval in this fixture, so
+    // `requiresApproval` is genuinely true and the approval-expiry gate is
+    // genuinely reached. That is the gate High A skipped.
+    const created = expectOk(
+      fx.ops.createTask({
+        capabilityId: CAPS.indexDoc,
+        payload: { doc: 'q3-plan', executionProvider: 'CLAUDE' },
+        idempotencyKey: 'round-eighteen-high-a',
+        requestedBy: 'founder',
+      }),
+    );
+    const taskId = created.task.id;
+    expectOk(
+      fx.ops.approveTask({
+        taskId,
+        founderId: 'coo',
+        expectedActionDigest: taskActionDigest(fx.ops.queue.get(taskId)!),
+      }),
+    );
+    // An ordinary lapse, expressed the way one actually happens.
+    fx.db
+      .prepare(`UPDATE hq_approvals SET expires_at = '2000-01-01T00:00:00.000Z' WHERE task_id = ?`)
+      .run(taskId);
+    expect(fx.ops.queue.get(taskId)!.status).toBe('queued');
+
+    const baseline = claudeDispatchEligibility(fx.ops, taskId);
+    expect(baseline.eligible).toBe(false);
+    if (!baseline.eligible) expect(baseline.code).toBe('approval_invalid');
+
+    const capability = capabilityRowFor(fx.ops, CAPS.indexDoc)!;
+    const forged = withEveryFacadeMemberLying(fx.ops, () => {
+      // The attack has to actually take, or the test proves nothing. Both
+      // spellings hold the lie, and the lie is SUFFICIENT: classified against
+      // the context the patched accessor now hands out, this capability no
+      // longer requires an approval at all — which is exactly how the
+      // expiry check was skipped.
+      expect(Object.getOwnPropertyDescriptor(fx.ops as object, 'policyContext')?.value).toBe(PERMISSIVE);
+      expect(
+        Object.getOwnPropertyDescriptor(HeadquarterOperations.prototype, 'policyContext')?.value,
+      ).toBe(PERMISSIVE);
+      expect(
+        classifyCapability(capability, (fx.ops as unknown as { policyContext: PolicyContext }).policyContext)
+          .requiresApproval,
+        'the lie must be capable of skipping the Founder gate',
+      ).toBe(false);
+      return claudeDispatchEligibility(fx.ops, taskId);
+    });
+    expect(forged.eligible, 'a Founder-facing dispatch verdict may not be forged').toBe(false);
+    if (!forged.eligible) expect(forged.code).toBe('approval_invalid');
+    fx.db.close();
   });
 });

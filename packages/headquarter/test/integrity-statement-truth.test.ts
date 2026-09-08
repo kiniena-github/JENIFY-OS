@@ -1186,12 +1186,86 @@ describe('the module header’s counts are the constants’ counts', () => {
     eighty: 80,
     ninety: 90,
     hundred: 100,
-    // Collective quantities that DO name a number.
+    // Collective quantities that DO name a number. A CLOSED list: a
+    // collective outside it — `sextuplet`, `myriad-and-one` — is not
+    // recognised, which is stated in the docblock rather than papered over.
     couple: 2,
     pair: 2,
     dozen: 12,
     score: 20,
+    // Added in round eighteen, Medium B: the reviewer wrote `a trio of names
+    // live here` past the sweep because no collective beyond `couple`/`pair`/
+    // `dozen`/`score` was recognised.
+    duo: 2,
+    brace: 2,
+    trio: 3,
+    quartet: 4,
+    quintet: 5,
+    sextet: 6,
+    septet: 7,
+    octet: 8,
+    // `both` is an ordinary English cardinal — "both of which engage safe
+    // mode" is a claim that the set holds two — and it evaded every previous
+    // version of this sweep (round eighteen, Medium B).
+    both: 2,
   };
+
+  /**
+   * Ordinals, which state a POSITION and therefore imply a size (round
+   * eighteen, Medium B).
+   *
+   * "the seventh and last of these names" is a claim that the vocabulary holds
+   * seven, and it walked past the sweep because no ordinal was recognised at
+   * all. Rather than reason about whether a given ordinal is a size claim or a
+   * pick from a set, an ordinal in the window of a safety constant is REFUSED:
+   * say the size as a cardinal. Digit ordinals (`7th`) are refused by the same
+   * rule.
+   */
+  const ORDINAL_WORDS: readonly string[] = [
+    'first',
+    'second',
+    'third',
+    'fourth',
+    'fifth',
+    'sixth',
+    'seventh',
+    'eighth',
+    'ninth',
+    'tenth',
+    'eleventh',
+    'twelfth',
+    'thirteenth',
+    'fourteenth',
+    'fifteenth',
+    'sixteenth',
+    'seventeenth',
+    'eighteenth',
+    'nineteenth',
+    'twentieth',
+  ];
+
+  /**
+   * A ROMAN numeral written as a standalone all-caps token of two characters
+   * or more — `VII`, `XII`, `IV` (round eighteen, Medium B).
+   *
+   * Two or more deliberately: single-character `I` is the first person, which
+   * this package's comments use constantly, and `V`/`X`/`L` alone are more
+   * often an initial than a number. So `I` as a roman one is NOT caught, and
+   * that limit is stated rather than glossed.
+   */
+  const ROMAN_NUMERAL = /^(?=[MDCLXVI]{2,}$)M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/;
+
+  function romanValue(token: string): number | null {
+    if (!ROMAN_NUMERAL.test(token)) return null;
+    const digits: Record<string, number> = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 };
+    let total = 0;
+    for (let i = 0; i < token.length; i += 1) {
+      const value = digits[token[i]!]!;
+      const next = digits[token[i + 1]!] ?? 0;
+      total += value < next ? -value : value;
+    }
+    return total;
+  }
 
   /**
    * Words that quantify a set without naming a number.
@@ -1252,10 +1326,52 @@ describe('the module header’s counts are the constants’ counts', () => {
    *
    * ## What is derived now
    *
-   * Word ORDER is gone. Every cardinal — number word OR digit — in the
-   * three-line window around a mention of the constant must equal that
-   * constant's length. A window may say nothing about the size; it may not say
-   * something WRONG about it in any phrasing.
+   * Word ORDER is gone. Every quantity token THE EXTRACTOR RECOGNISES, in the
+   * three-line window around a mention of the constant, must equal that
+   * constant's length or be refused outright. A window may say nothing about
+   * the size; if it uses a recognised quantity token, that token must be
+   * right.
+   *
+   * ## What "recognised" means, exactly (round eighteen, Medium B)
+   *
+   * The previous version of this docblock said "in any phrasing", and the test
+   * below was named that way too. A hostile review then wrote SEVEN phrasings
+   * past it — measured, by planting each beside the single
+   * `SAFE_MODE_BLOCKING_FINDINGS` mention and running this test:
+   *
+   * ```
+   * EVADED  the seventh and last of these names        (ordinal)
+   * EVADED  both of which engage safe mode             (implies two)
+   * EVADED  only one blocking observation exists here  (`observation` was not a size-bearing noun)
+   * EVADED  this is a `three-name` vocabulary          (numeral inside a no-whitespace backticked span)
+   * EVADED  with that workaround 3 names are blocking  (`workaround` ends in `round`, an unanchored REFERENCE_LABEL)
+   * EVADED  it holds VII names                         (roman numeral)
+   * EVADED  a trio of names live here                  (collective outside both vocabularies)
+   * ```
+   *
+   * All seven are now caught, and each is a fixture below. What is recognised
+   * is therefore: the cardinals in `NUMBER_WORDS` (including the collectives
+   * and `both`), decimal digits, the ordinals in `ORDINAL_WORDS` and digit
+   * ordinals (`7th`) — refused rather than valued — the vague quantifiers in
+   * `VAGUE_QUANTITY_WORDS` — also refused — and all-caps roman numerals of two
+   * characters or more.
+   *
+   * ## What is still NOT recognised, stated as a limit rather than a boast
+   *
+   *  - A collective or cardinal outside those CLOSED lists: `sextuplet`,
+   *    `baker's dozen`, a spelled-out compound like `twenty-three` reads as
+   *    `twenty` and `three` rather than as 23 (both are wrong beside a
+   *    four-name constant, so it is caught, but for the wrong reason).
+   *  - A single-character roman numeral. `I` is the first person and `V`, `X`
+   *    and `L` are usually initials in this package's prose.
+   *  - `one` used before a noun outside `SIZE_BEARING_NOUNS`, which is a
+   *    closed hand-written list. "only one blocking THING exists here" is
+   *    caught for `observation` and is NOT caught for a noun nobody added.
+   *  - Anything more than one line away from the line carrying the constant.
+   *    Measured: the same false claim planted four lines from the mention
+   *    still passes.
+   *  - A claim about a size made without any quantity token at all — "the
+   *    vocabulary has grown since" — which no lexical rule can check.
    *
    * Two carve-outs, both narrow, both stated because a carve-out nobody wrote
    * down is how the last version got away with matching one construction:
@@ -1272,7 +1388,17 @@ describe('the module header’s counts are the constants’ counts', () => {
    * Backticked code spans are stripped before extraction, so a digit inside an
    * identifier or a commit sha is not read as prose.
    */
-  const REFERENCE_LABELS = /(wave|phase|round|issue|option|lane|sol|pr|no\.|#)$/i;
+  /**
+   * ANCHORED (round eighteen, Medium B). This used to be
+   * `/(wave|phase|round|issue|option|lane|sol|pr|no\.|#)$/i` with no word
+   * boundary, so ANY word ending in a label word disarmed the cardinal after
+   * it: the reviewer wrote "with that workaround 3 names are blocking" past
+   * the sweep on the strength of `workaround` ending in `round`, and
+   * `background`, `subphase`, `plane` and `airlane` would all have done the
+   * same. The trailing `[-_.\s]*` is for the hyphenated form (`phase-13`),
+   * which the code-span change below now unwraps into prose.
+   */
+  const REFERENCE_LABELS = /(?:\b(?:wave|phase|round|issue|option|lane|sol|pr|no\.)|#)[-_.\s]*$/i;
 
   /**
    * Nouns that carry the SIZE of the thing being counted.
@@ -1284,7 +1410,17 @@ describe('the module header’s counts are the constants’ counts', () => {
   const CODE_SPAN_MARK = '«code»';
   const SIZE_BEARING_NOUNS = new RegExp(
     `(${CODE_SPAN_MARK}|` +
-      `\\b(names?|findings?|members?|entries|entry|items?|elements?|values?|kinds?|spellings?|constants?)\\b)`,
+      `\\b(names?|findings?|members?|entries|entry|items?|elements?|values?|kinds?|spellings?|constants?` +
+      // Round eighteen, Medium B: `observations` is the real field name on
+      // `HqIntegrityView`, and "only one blocking observation exists here"
+      // therefore read as a pronoun rather than as a claim of size one. ONE
+      // word was added, not a plausible-sounding sweep of nouns: this list is
+      // CLOSED and hand-written, a noun outside it still turns a size claim
+      // spelled with `one` into a pronoun, and that residual gap is stated in
+      // the docblock rather than claimed away. (`record`, `row` and `state`
+      // were tried and reverted — they occur in this package's prose about
+      // other things, and adding them made TRUE comments fail.)
+      `|observations?)\\b)`,
     'i',
   );
 
@@ -1308,8 +1444,25 @@ describe('the module header’s counts are the constants’ counts', () => {
   function unwrapCodeSpans(text: string): string {
     return text.replace(/`([^`]*)`/g, (_match, inner: string) => {
       const bare = inner.trim().toLowerCase();
+      // A span whose SEGMENTS include a quantity token states a cardinal even
+      // though the span as a whole has no whitespace: the reviewer wrote
+      // "this is a `three-name` vocabulary" past the sweep because the whole
+      // span was treated as an identifier and dropped (round eighteen,
+      // Medium B). Split on the separators an identifier uses.
+      const segments = bare.split(/[-_.]+/).filter(Boolean);
       const isQuantityToken =
-        bare in NUMBER_WORDS || VAGUE_QUANTITY_WORDS.includes(bare) || /^\d+$/.test(bare);
+        bare in NUMBER_WORDS ||
+        VAGUE_QUANTITY_WORDS.includes(bare) ||
+        ORDINAL_WORDS.includes(bare) ||
+        /^\d+$/.test(bare) ||
+        (segments.length > 1 &&
+          segments.some(
+            (segment) =>
+              segment in NUMBER_WORDS ||
+              VAGUE_QUANTITY_WORDS.includes(segment) ||
+              ORDINAL_WORDS.includes(segment) ||
+              /^\d+$/.test(segment),
+          ));
       // MARKED rather than blanked: an identifier states no cardinal, but it
       // is a THING with members, so `one of the \`X\`` must still read as a
       // claim about `X`'s size. Blanking it made the whole EV1 evasion
@@ -1328,13 +1481,16 @@ describe('the module header’s counts are the constants’ counts', () => {
    */
   function statedQuantities(text: string): { values: number[]; vague: string[] } {
     const prose = unwrapCodeSpans(text);
-    const words = [...Object.keys(NUMBER_WORDS), ...VAGUE_QUANTITY_WORDS].join('|');
+    const words = [...Object.keys(NUMBER_WORDS), ...VAGUE_QUANTITY_WORDS, ...ORDINAL_WORDS].join('|');
     const values: number[] = [];
     const vague: string[] = [];
-    const pattern = new RegExp(`\\b(${words}|\\d+)\\b`, 'gi');
+    // `\d+(?:st|nd|rd|th)` before the bare `\d+` alternative so `7th` is read
+    // as an ordinal rather than as the cardinal 7 (round eighteen, Medium B).
+    const pattern = new RegExp(`\\b(${words}|[MDCLXVI]{2,}|\\d+(?:st|nd|rd|th)|\\d+)\\b`, 'gi');
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(prose))) {
-      const token = match[1]!.toLowerCase();
+      const raw = match[1]!;
+      const token = raw.toLowerCase();
       const before = prose.slice(0, match.index).trimEnd();
       const after = prose.slice(match.index + match[1]!.length).trimStart();
       // A citation, not a count.
@@ -1362,6 +1518,21 @@ describe('the module header’s counts are the constants’ counts', () => {
       }
       if (VAGUE_QUANTITY_WORDS.includes(token)) {
         vague.push(token);
+        continue;
+      }
+      // An ordinal states a position and so implies a size, but "the second
+      // of the four" is a pick and "the seventh and last of these names" is a
+      // claim. Rather than guess which, both are REFUSED: say the size as a
+      // cardinal (round eighteen, Medium B).
+      if (ORDINAL_WORDS.includes(token) || /^\d+(?:st|nd|rd|th)$/.test(token)) {
+        vague.push(token);
+        continue;
+      }
+      // Roman numerals, all-caps only — see `ROMAN_NUMERAL`. A lower-case run
+      // of the same letters is an English word (`mix`, `did`), not a number.
+      if (raw === raw.toUpperCase() && /^[MDCLXVI]{2,}$/.test(raw)) {
+        const roman = romanValue(raw);
+        if (roman !== null) values.push(roman);
         continue;
       }
       const value = NUMBER_WORDS[token] ?? Number(token);
@@ -1444,7 +1615,57 @@ describe('the module header’s counts are the constants’ counts', () => {
     expect(statedQuantities('one of the `SAFE_MODE_BLOCKING_FINDINGS`').values).toEqual([1]);
   });
 
-  it('is right about the count WHEREVER the package states it, in any phrasing', () => {
+  it('catches the seven phrasings that walked past the round-seventeen sweep’s successor', () => {
+    /**
+     * Round eighteen, Medium B. The reviewer's own evading strings, verbatim,
+     * as a regression on the EXTRACTOR — the corpus is currently correct, so a
+     * sweep that quietly stopped working would still pass the corpus case.
+     *
+     * Each is measured in BOTH positions the plant can take relative to the
+     * constant, because position changed the answer for two of them on the
+     * shipped code: with the constant AFTER the text, the code-span mark makes
+     * `one` read as a size claim; with the constant BEFORE it, it does not.
+     */
+    const size = SAFE_MODE_BLOCKING_FINDINGS.length;
+    const evasions: Record<string, string> = {
+      'EV5 ordinal': 'the seventh and last of these names',
+      'EV6 both': 'both of which engage safe mode',
+      'EV7 pronoun before an unlisted noun': 'only one blocking observation exists here',
+      'EV8 numeral in a no-whitespace code span': 'this is a `three-name` vocabulary',
+      'EV9 unanchored reference label': 'with that workaround 3 names are blocking',
+      'EV10 roman numeral': 'it holds VII names',
+      'EV11 collective': 'a trio of names live here',
+    };
+    for (const [label, evasion] of Object.entries(evasions)) {
+      for (const [position, window] of Object.entries({
+        'constant after': `${evasion} \`SAFE_MODE_BLOCKING_FINDINGS\``,
+        'constant before': `\`SAFE_MODE_BLOCKING_FINDINGS\` is the vocabulary below. ${evasion}`,
+      })) {
+        const { values, vague } = statedQuantities(window);
+        expect(
+          values.some((value) => value !== size) || vague.length > 0,
+          `${label} (${position}): "${window}" states a wrong size and must be caught`,
+        ).toBe(true);
+      }
+    }
+    // The specific mechanics, so a future weakening names itself rather than
+    // just flipping one boolean.
+    expect(statedQuantities('with that workaround 3 names are blocking').values).toEqual([3]);
+    expect(statedQuantities('this is a `three-name` vocabulary').values).toEqual([3]);
+    expect(statedQuantities('it holds VII names').values).toEqual([7]);
+    expect(statedQuantities('a trio of names live here').values).toEqual([3]);
+    expect(statedQuantities('both of which engage safe mode').values).toEqual([2]);
+    expect(statedQuantities('the seventh and last of these names').vague).toEqual(['seventh']);
+    expect(statedQuantities('the 7th of these names').vague).toEqual(['7th']);
+    // The anchoring did not break the citations it exists to allow, and the
+    // hyphenated citation form now survives the code-span change too.
+    expect(statedQuantities('Wave 5, round ten, issue 200, `phase-13`').values).toEqual([]);
+    // Single-character roman numerals stay unrecognised on purpose: this
+    // package's comments are written in the first person.
+    expect(statedQuantities('I wrote this comment').values).toEqual([]);
+  });
+
+  it('is right about the count wherever the package states it with a quantity the extractor recognises, within three lines', () => {
     const counts: Record<string, number> = {
       SAFE_MODE_BLOCKING_FINDINGS: SAFE_MODE_BLOCKING_FINDINGS.length,
       HQ_INTEGRITY_FINDINGS: HQ_INTEGRITY_FINDINGS.length,

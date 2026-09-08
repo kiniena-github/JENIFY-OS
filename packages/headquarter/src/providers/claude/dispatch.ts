@@ -84,8 +84,11 @@ import {
   declaredProviderFor,
   gatewayActionHistoryFor,
   killSwitchEngagedFor,
+  policyContextFor,
+  reconciliationAuthorityRefusalFor,
   specialistRecordFor,
   taskEvidenceRowsFor,
+  taskMetaFor,
   taskRowFor,
   writeDispatchOutcome,
 } from '../../application/service.js';
@@ -352,7 +355,18 @@ export function claudeDispatchEligibility(
     };
   }
 
-  const classification = classifyCapability(capability, ops.policyContext);
+  // Enforcement-safe read (Wave 5 correction round eighteen, High A). This was
+  // the LAST patchable read on this lane, and it was the one that decided
+  // whether the hardened approval check below runs at all: `requiresApproval`
+  // is false for an `external_side_effect` capability that carries a standing
+  // pre-approval, so a context naming the task's capability skipped the gate
+  // entirely. `ops.policyContext` is a configurable prototype accessor and the
+  // instance also takes an own property of that name; both spellings turned
+  // `{"eligible":false,"code":"approval_invalid"}` into `{"eligible":true}` on
+  // an approval expiring in the year 2000. The previous census excused it
+  // because `freezePolicyContext` returns a FROZEN object — a fact about the
+  // value, not about the accessor that produces it.
+  const classification = classifyCapability(capability, policyContextFor(ops));
   if (classification.requiresApproval) {
     // Enforcement-safe read (Wave 5 correction round sixteen, Medium B-6).
     // `ops.queue.approvalFor` is a prototype slot, and the two reads directly
@@ -1123,7 +1137,13 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
     );
   }
 
-  const meta = ops.readMeta(taskId);
+  // Read through the module binding, not `ops.readMeta` (Wave 5 correction
+  // round eighteen, Low D). This moves no authority — but `title` and
+  // `project` are rendered into the BODY OF A REAL GITHUB ISSUE two lines
+  // below, so its consumer is an external publication, not the text of a
+  // verdict, and the census reason that called it the latter was wrong about
+  // where it goes.
+  const meta = taskMetaFor(ops, taskId);
   const dispatchedAt = now().toISOString();
   const issue = renderDispatchIssue({
     task: eligibility.task,
@@ -1655,7 +1675,10 @@ export function resolveUnknownDispatch(
   // boundary `approveTask` uses. No new identity mechanism: `'system'` and
   // registered workers are refused, and the id must resolve to a principal
   // holding approval authority.
-  const authorityRefusal = ops.reconciliationAuthorityRefusal(input.resolvedBy.trim());
+  // Enforcement-safe read (Wave 5 correction round eighteen, the audit High A
+  // asked for over the rest of this lane). This is the ONE authority gate on
+  // the terminal write below, and it was asked of a public prototype method.
+  const authorityRefusal = reconciliationAuthorityRefusalFor(ops, input.resolvedBy.trim());
   if (authorityRefusal) {
     return refuse('task_not_eligible', `Reconciliation refused: ${authorityRefusal}`, {
       resolvedBy: input.resolvedBy.trim(),

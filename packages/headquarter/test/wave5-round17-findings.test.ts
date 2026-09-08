@@ -367,38 +367,59 @@ describe('High 1: what the chain commitment does and does not detect, measured',
     // The RESIDUAL, executed rather than reasoned about: a writer that also
     // appends a checkpoint committing its own tip is not counted. Three
     // appends rather than two, and it is disclosed, not closed.
+    //
+    // THE PRICE IS MEASURED HERE, and it was overstated in the reassuring
+    // direction for one round (Wave 5 correction round eighteen, Medium C).
+    // The prose beside `witnessReconciliations` said the third append costs
+    // "two extra reads"; it costs ONE — the single row read below, whose
+    // `seq` serves as the `op_evidence` value in BOTH commitment columns. The
+    // three shapes are executed against the guard rather than argued about:
+    //
+    // ```
+    // bare '{}'                 read 1  landed=false  may not commit beyond the record  counter stays 1
+    // copy of the prior row     read 2  landed=false  may not commit beyond the record  counter stays 1
+    // only `op_evidence`, seq   read 1  landed=true                                     counter 1 -> 0
+    // ```
+    //
+    // READ ONE, and the only one the landing shape takes.
     const tip = fx.db.prepare(`SELECT seq, hash FROM op_evidence ORDER BY seq DESC LIMIT 1`).get() as {
       seq: number;
       hash: string;
     };
-    // The commitment guard refuses a checkpoint that does not also carry the
-    // ledger identities the file actually holds — measured: the same INSERT
-    // with `'{}'` in both commitment columns is REFUSED with
-    // "hq_integrity_checkpoints may not commit beyond the record". So the
-    // third append costs two extra reads, and no more than that.
-    const marks: Record<string, number> = {};
-    const heldRows: Record<string, number> = {};
-    for (const table of ['op_evidence', 'hq_integrity_checkpoints']) {
-      marks[table] = Number(
-        (fx.db.prepare(`SELECT COALESCE(MAX(rowid), 0) AS n FROM ${table}`).get() as { n: number }).n,
-      );
-      heldRows[table] = Number((fx.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n);
-    }
-    expect(() =>
+    const insert = (id: string, marks: string, rows: string): void => {
       fx.db
         .prepare(
           `INSERT INTO hq_integrity_checkpoints (id, recorded_at, chain_length, tip_hash, ledger_marks, ledger_rows, process_id, recorded_by)
-           VALUES ('cp-bare', 'now', ?, ?, '{}', '{}', 'p', 'attacker')`,
+           VALUES (?, 'now', ?, ?, ?, ?, 'p', 'attacker')`,
         )
-        .run(tip.seq, tip.hash),
-    ).toThrow(/may not commit beyond the record/);
-    fx.db
+        .run(id, tip.seq, tip.hash, marks, rows);
+    };
+    // A bare commitment is refused: the guard requires the commitment to carry
+    // the ledger identities the file actually holds.
+    expect(() => insert('cp-bare', '{}', '{}')).toThrow(/may not commit beyond the record/);
+    expect(uncommittedReconciliationWitnesses(fx.db), 'a refused commitment covers nothing').toBe(1);
+    // Nor does copying the previous checkpoint's commitment, which would be
+    // the other obvious way to avoid reading the file's identities. READ TWO,
+    // and it buys nothing.
+    const prior = fx.db
       .prepare(
-        `INSERT INTO hq_integrity_checkpoints (id, recorded_at, chain_length, tip_hash, ledger_marks, ledger_rows, process_id, recorded_by)
-         VALUES ('cp-forged', 'now', ?, ?, ?, ?, 'p', 'attacker')`,
+        `SELECT ledger_marks AS m, ledger_rows AS r FROM hq_integrity_checkpoints ORDER BY rowid DESC LIMIT 1`,
       )
-      .run(tip.seq, tip.hash, JSON.stringify(marks), JSON.stringify(heldRows));
+      .get() as { m: string; r: string };
+    expect(() => insert('cp-copied', prior.m, prior.r)).toThrow(/may not commit beyond the record/);
+    expect(uncommittedReconciliationWitnesses(fx.db), 'a refused commitment covers nothing').toBe(1);
+    // And the shape that DOES land, from the one read already taken: the tip
+    // `seq` is both the `op_evidence` AUTOINCREMENT mark and its row count, so
+    // the committed difference is zero and no gap clause refuses it. No second
+    // read, and no other ledger named at all.
+    const oneReadCommitment = JSON.stringify({ op_evidence: tip.seq });
+    insert('cp-forged', oneReadCommitment, oneReadCommitment);
     expect(uncommittedReconciliationWitnesses(fx.db)).toBe(0);
+    // The end state, stated as what it is: every Founder-facing surface reads
+    // clean beside two real adapter executions of an irreversible public
+    // action.
+    expect(fx.ops.hqReliabilityPosture().commitments.uncommittedReconciliationWitnesses).toBe(0);
+    expect(fx.ops.queue.evidence.verifyChain()).toBeNull();
   });
 });
 

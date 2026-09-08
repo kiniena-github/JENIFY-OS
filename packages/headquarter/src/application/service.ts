@@ -2407,6 +2407,57 @@ let readSpecialistRecord: (
   ops: HeadquarterOperations,
   workerId: string,
 ) => ReturnType<HeadquarterStore['getSpecialist']>;
+/**
+ * Same recipe for the STANDING PRE-APPROVAL SET (Wave 5 correction round
+ * eighteen, High A).
+ *
+ * Every sibling above was migrated because a patchable read decided something.
+ * `policyContext` was left behind on the argument that the object it returns is
+ * frozen — which is true of the VALUE and irrelevant to the ACCESSOR. `get
+ * policyContext()` is a configurable prototype accessor and the instance takes
+ * an own property of the same name, so both spellings replace it:
+ *
+ * ```
+ * BEFORE:                     {"eligible":false,"code":"approval_invalid", … "its Founder approval has expired. Nothing was dispatched."}
+ * AFTER (prototype patch):    {"eligible":true,"task":{… ,"status":"queued", …
+ * AFTER (own-property patch): {"eligible":true,"task":{… ,"status":"queued", …
+ * ```
+ *
+ * `claudeDispatchEligibility` hands this context to `classifyCapability`, and
+ * `classification.requiresApproval` decides whether the approval-expiry check
+ * round sixteen hardened runs AT ALL. So the hardened read one line below was
+ * reachable only through a patchable one. Published to `policyContextFor` and
+ * to nothing else; `ops.policyContext` stays exactly as it is for the console
+ * and the snapshot, which display it.
+ */
+let readPolicyContext: (ops: HeadquarterOperations) => PolicyContext;
+/**
+ * Same recipe for the `hq_op_task_meta` row (Wave 5 correction round eighteen,
+ * Low D).
+ *
+ * `readMeta` moves no authority, and the census reason that excused it was
+ * still wrong about WHERE it goes: its `title` and `project` are rendered by
+ * `renderDispatchIssue` into the body of a real GitHub issue, so its consumer
+ * is an external publication rather than the text of a verdict. Bound rather
+ * than merely re-described. Published to `taskMetaFor` and to nothing else;
+ * `readMeta` stays as the convenience read for display callers.
+ */
+let readTaskMeta: (ops: HeadquarterOperations, taskId: string) => TaskMeta | null;
+/**
+ * Same recipe for the reconciliation authority answer (Wave 5 correction round
+ * eighteen, High A's audit of the rest of the dispatch lane).
+ *
+ * Not one of the four findings — found by auditing every remaining `ops.*` use
+ * in `dispatch.ts` after High A, as the review asked. `resolveUnknownDispatch`
+ * treats `reconciliationAuthorityRefusal(actor) === null` as its ONE authority
+ * gate before writing a terminal outcome for an unresolved attempt, and the
+ * public method it asked is a prototype slot. Published to
+ * `reconciliationAuthorityRefusalFor` and to nothing else.
+ */
+let readReconciliationAuthorityRefusal: (
+  ops: HeadquarterOperations,
+  actor: string,
+) => string | null;
 
 export class HeadquarterOperations {
   readonly queue: OperatorQueue;
@@ -4310,6 +4361,37 @@ export class HeadquarterOperations {
    * audited, exactly as an approval refusal is.
    */
   reconciliationAuthorityRefusal(actor: string): string | null {
+    // The scan is written HERE as well as in the private method below, and
+    // that is deliberate rather than sloppy (Wave 5 correction round
+    // eighteen). `facade-write-scan.test.ts` derives coverage from a method's
+    // OWN body: a public write whose only scan lives in a helper it delegates
+    // to reads as an unscanned parameter, and the honest way to satisfy that
+    // derivation is to scan here, not to add an exemption. `actor` reaches
+    // storage through `#assertApprovalAuthority`'s audit append on either
+    // path, so both paths scan it. `assertNoCredentialShape` is a pure
+    // predicate over one string; running it twice costs nothing and skipping
+    // it on either path would cost the property.
+    try {
+      assertNoCredentialShape({ actor });
+    } catch (error) {
+      return errorMessage(error);
+    }
+    return this.#reconciliationAuthorityRefusal(actor);
+  }
+
+  /**
+   * The same answer, as an ECMAScript `#private` METHOD (Wave 5 correction
+   * round eighteen, High A's audit of the rest of the lane).
+   *
+   * The public method above is a prototype slot, and `resolveUnknownDispatch` used
+   * it as its ONE authority gate: `authorityRefusal === null` is what lets a
+   * terminal `claude_github_dispatch_failed` be written for an unresolved
+   * attempt. That is a decision about an irreversible external act taken by
+   * whoever the string names, so the lane reads it through
+   * `reconciliationAuthorityRefusalFor` and the public method stays for
+   * display callers.
+   */
+  #reconciliationAuthorityRefusal(actor: string): string | null {
     // `actor` REACHES STORAGE (Wave 5 correction round thirteen, Medium 1).
     // `#assertApprovalAuthority` audits a refusal by appending
     // `{ actorId: actor, action, reason }` to `op_evidence` — measured, not
@@ -4369,6 +4451,16 @@ export class HeadquarterOperations {
       ops: HeadquarterOperations,
       workerId: string,
     ): ReturnType<HeadquarterStore['getSpecialist']> => ops.#specialistFromStore(workerId);
+    // The same defensive copy the getter makes, taken from the `#private`
+    // field rather than from the accessor a caller can redefine.
+    readPolicyContext = (ops: HeadquarterOperations): PolicyContext =>
+      freezePolicyContext(ops.#policyCtx);
+    readTaskMeta = (ops: HeadquarterOperations, taskId: string): TaskMeta | null =>
+      ops.#metaFromStore(taskId);
+    readReconciliationAuthorityRefusal = (
+      ops: HeadquarterOperations,
+      actor: string,
+    ): string | null => ops.#reconciliationAuthorityRefusal(actor);
   }
 
   /**
@@ -17715,6 +17807,46 @@ export function specialistRecordFor(
   workerId: string,
 ): ReturnType<HeadquarterStore['getSpecialist']> {
   return readSpecialistRecord(ops, workerId);
+}
+
+/**
+ * The Founder's standing pre-approval set, for a caller whose decision turns on
+ * whether a capability is Founder-gated — the tenth module-private binding,
+ * beside `approvalRecordFor` (Wave 5 correction round eighteen, High A).
+ *
+ * A FUNCTION BINDING for the reason every sibling is one, and specifically
+ * because the previous argument for leaving this read alone was about the
+ * returned VALUE (`freezePolicyContext` hands out a frozen copy) rather than
+ * about the ACCESSOR, which is a configurable prototype getter that an
+ * instance-level own property also shadows. See `readPolicyContext` for the
+ * executed before/after. `ops.policyContext` stays exactly as it is — the
+ * deliberately patchable convenience read for DISPLAY.
+ */
+export function policyContextFor(ops: HeadquarterOperations): PolicyContext {
+  return readPolicyContext(ops);
+}
+
+/**
+ * The canonical `hq_op_task_meta` row, for a caller that PUBLISHES its
+ * contents — the eleventh module-private binding (Wave 5 correction round
+ * eighteen, Low D). `readMeta` stays as the patchable convenience read for
+ * display. See `readTaskMeta`.
+ */
+export function taskMetaFor(ops: HeadquarterOperations, taskId: string): TaskMeta | null {
+  return readTaskMeta(ops, taskId);
+}
+
+/**
+ * Why `actor` may not reconcile an unknown dispatch outcome, or null — the
+ * twelfth module-private binding (Wave 5 correction round eighteen).
+ * `reconciliationAuthorityRefusal` stays as the patchable convenience read for
+ * display. See `readReconciliationAuthorityRefusal`.
+ */
+export function reconciliationAuthorityRefusalFor(
+  ops: HeadquarterOperations,
+  actor: string,
+): string | null {
+  return readReconciliationAuthorityRefusal(ops, actor);
 }
 
 /**

@@ -1053,7 +1053,7 @@ export const SAFE_MODE_STATEMENT =
  *
  * The last sentence is a machine-checkable list, not decoration:
  * `integrity-statement-truth.test.ts` induces every member of
- * `HQ_INTEGRITY_FINDINGS` against a real file, runs BOTH depths over each, and
+ * `HQ_INTEGRITY_FINDINGS` against a real file, runs EACH depth over it, and
  * compares the executed full-exclusive set to the names parsed out of this
  * string. The prose therefore cannot drift from the behaviour again without
  * failing a test, which is the only reason it is safe to state it this
