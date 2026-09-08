@@ -27,12 +27,14 @@ import {
   HQ_DURABILITY_REQUIREMENT,
   HQ_INTEGRITY_CHECKPOINT_TABLE,
   HQ_INTEGRITY_FINDINGS,
+  LEDGER_ROWID_GUARDS,
   LEDGER_ROWID_GUARD,
-  LEDGER_ROWID_SEAT_GUARD,
   WRITE_ONCE_IDENTITY_TABLES,
-  declaredIdentityGuardsFor,
+  declaredGuardsForIdentityTable,
+  declaredIdentityGuardFor,
   REQUIRED_IMMUTABILITY_GUARDS,
   ensureLedgerRowidGuards,
+  ensureUniqueReentryGuards,
   ensureWriteOnceIdentityGuards,
   SAFE_MODE_BLOCKING_FINDINGS,
   declaredGuardsFor,
@@ -403,10 +405,17 @@ describe('the engine-immutable inventory is checked against the live schema, not
     // the live trigger set EQUALS the union of the DECLARATIONS; the union just
     // has two terms now, so a guard on a table nobody declared is still a test
     // failure, in either class.
+    //
+    // EXTENDED again in Wave 5 correction round fourteen (High 2): a write-once
+    // identity table declares its identity guard AND, where the file gives it a
+    // secondary unique index, the derived `no_unique_reentry` guard beside it.
+    // `declaredGuardsForIdentityTable` is the whole declaration for that class,
+    // so this side of the equality reads it rather than the single-guard
+    // accessor it used to — the assertion is unchanged and still an EQUALITY.
     const liveTriggers = triggers.map((row) => row.name).sort();
     const declaredTriggers = [
       ...ENGINE_IMMUTABLE_TABLES.flatMap((entry) => declaredGuardsFor(entry)),
-      ...WRITE_ONCE_IDENTITY_TABLES.flatMap((entry) => declaredIdentityGuardsFor(entry)),
+      ...WRITE_ONCE_IDENTITY_TABLES.flatMap((entry) => declaredGuardsForIdentityTable(entry)),
     ].sort();
     expect(liveTriggers).toEqual(declaredTriggers);
     // And the two classes are disjoint: an identity guard on a table that is
@@ -584,15 +593,17 @@ describe('the engine-immutable inventory is checked against the live schema, not
       'trg_hq_mission_plan_items_no_respec',
       // The UNIVERSAL guards, which every declared ledger carries whatever its
       // base is (Wave 5 correction round thirteen, High 1; round fourteen,
-      // High 1 and High 2). They are appended by `declaredGuardsFor` rather
+      // High 1 and Medium 2). They are appended by `declaredGuardsFor` rather
       // than listed per table precisely so a reduced base cannot omit them —
       // the reduced base is what let this entry out of `no_rewrite`, and the
-      // rowid channel is not a column. There are TWO because the channel has
-      // two sides: `no_rowid_skip` bounds the rowid from above and
-      // `no_rowid_reseat` from below, and a bound with one side was the defect
-      // round fourteen closed.
+      // rowid channel is not a column. The set grew from one name to three when
+      // the round-fourteen review found that "may not enter ABOVE the top" was
+      // one of three spellings of the same question: `no_rowid_reseat` closes a
+      // row entering AT OR BELOW the top (rowid 0, −1, a hole refill), and
+      // `no_rowid_move` closes a row changing position without entering at all.
       'trg_hq_mission_plan_items_no_rowid_skip',
       'trg_hq_mission_plan_items_no_rowid_reseat',
+      'trg_hq_mission_plan_items_no_rowid_move',
     ]);
     // The rest are declared where they exist, and the census reads both.
     expect(declaredGuardsFor({
@@ -606,20 +617,22 @@ describe('the engine-immutable inventory is checked against the live schema, not
       'trg_hq_intel_budgets_no_replace_unique',
       'trg_hq_intel_budgets_no_rowid_skip',
       'trg_hq_intel_budgets_no_rowid_reseat',
+      'trg_hq_intel_budgets_no_rowid_move',
     ]);
-    // And BOTH universal guards are universal by CONSTRUCTION: each is on every
-    // entry's declaration, taken from the declaration itself rather than from
-    // any list written here. Enumerated over the constants rather than by
-    // naming one of them, so a third side of the channel — or a fourth — cannot
-    // be declared and then left out of this check.
-    for (const guard of [LEDGER_ROWID_GUARD, LEDGER_ROWID_SEAT_GUARD]) {
-      expect(
-        ENGINE_IMMUTABLE_TABLES.filter(
-          (entry) => !declaredGuardsFor(entry).includes(`trg_${entry.triggerPrefix}_${guard}`),
-        ).map((entry) => entry.table),
-        `${guard} must be declared on every declared ledger`,
-      ).toEqual([]);
-    }
+    // And the universal guardS are universal by CONSTRUCTION: all three are on
+    // every entry's declaration, taken from the declaration itself rather than
+    // from any list written here. The assertion iterates
+    // `LEDGER_ROWID_GUARDS` — the declaration of WHICH guards are universal —
+    // so a fourth spelling added tomorrow is checked here without this line
+    // being touched.
+    expect(
+      ENGINE_IMMUTABLE_TABLES.filter((entry) =>
+        LEDGER_ROWID_GUARDS.some(
+          (guard) => !declaredGuardsFor(entry).includes(`trg_${entry.triggerPrefix}_${guard}`),
+        ),
+      ).map((entry) => entry.table),
+    ).toEqual([]);
+    expect([...LEDGER_ROWID_GUARDS]).toContain(LEDGER_ROWID_GUARD);
     expect(
       ENGINE_IMMUTABLE_TABLES.filter((entry) => entry.secondaryGuards.length > 0).map(
         (entry) => entry.table,
@@ -1530,6 +1543,11 @@ describe('backup verification, against real bytes on disk', () => {
       // thirteen, High 3): the census covers them, so a copy that lacks one is
       // refused rather than verified.
       ensureWriteOnceIdentityGuards(db);
+      // And the derived unique-index guard, for the same reason and since the
+      // same census widened again (Wave 5 correction round fourteen, High 2):
+      // `op_tasks` declares one on a live file, so a copy without it is
+      // correctly refused `would_latch_safe_mode` rather than verified.
+      ensureUniqueReentryGuards(db);
       // WAL mode with no checkpoint: the newest table is in the sidecar.
       expect(fs.existsSync(`${candidate}-wal`)).toBe(true);
       expect(fs.statSync(`${candidate}-wal`).size).toBeGreaterThan(0);

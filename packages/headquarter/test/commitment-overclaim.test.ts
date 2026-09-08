@@ -40,7 +40,8 @@ import {
   ENGINE_IMMUTABLE_TABLES,
   HQ_INTEGRITY_CHECKPOINT_TABLE,
   LEDGER_ROWID_GUARD,
-  LEDGER_ROWID_SEAT_GUARD,
+  LEDGER_ROWID_GUARDS,
+  LEDGER_ROWID_RESEAT_GUARD,
   contradictedChainCommitment,
   declaredGuardsFor,
   CHECKPOINT_COLUMNS_THAT_DECIDE_NOTHING,
@@ -68,15 +69,21 @@ const OVERCLAIM_GUARD = 'trg_hq_integrity_checkpoints_no_overclaim';
 const ROWID_GUARD_ON_CHECKPOINT_LEDGER = `trg_${HQ_INTEGRITY_CHECKPOINT_TABLE}_${LEDGER_ROWID_GUARD}`;
 
 /**
- * The bound from BELOW, added in round fourteen and named the same way.
+ * EVERY universal position guard on this ledger, which is what an isolation
+ * probe now has to remove to be left with the over-claim guard alone (Wave 5
+ * correction round fourteen, High 1 and Medium 2).
  *
- * Round thirteen's merge note said `no_rowid_skip` bounds the rowid from ABOVE
- * only and that the over-claim guard's identity clause was the only bound from
- * below — which was true, and true on ONE ledger out of 33. Round fourteen
- * closed the other 32 with `no_rowid_reseat`, so the probes below drop BOTH
- * broader guards when they mean to measure the identity clause on its own.
+ * The set grew from one name to three: round fourteen found that
+ * `no_rowid_skip` — "a row may not enter ABOVE the top" — was one of three
+ * spellings of the same question, and declared `no_rowid_reseat` (a row
+ * entering AT OR BELOW the top) and `no_rowid_move` (a row changing position
+ * without entering) beside it. Taken from `LEDGER_ROWID_GUARDS` rather than
+ * written out here, so a fourth spelling is removed by these probes on the day
+ * it is declared and the isolation stays real.
  */
-const SEAT_GUARD_ON_CHECKPOINT_LEDGER = `trg_${HQ_INTEGRITY_CHECKPOINT_TABLE}_${LEDGER_ROWID_SEAT_GUARD}`;
+const POSITION_GUARDS_ON_CHECKPOINT_LEDGER = LEDGER_ROWID_GUARDS.map(
+  (guard) => `trg_${HQ_INTEGRITY_CHECKPOINT_TABLE}_${guard}`,
+);
 
 /**
  * 5 s is vitest's default and is not a measurement. The probes below open real
@@ -773,18 +780,23 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
         // The over-claim guard, ALONE. Inside a rolled-back SAVEPOINT, so the
         // file the rest of this test sees still carries both guards.
         raw.exec('SAVEPOINT without_rowid_guard');
-        raw.exec(`DROP TRIGGER ${ROWID_GUARD_ON_CHECKPOINT_LEDGER}`);
-        // BOTH broader guards, since round fourteen: one bounds the rowid from
-        // above and one from below, so leaving either standing would let this
-        // pass be carried by a guard it does not exist to measure.
-        raw.exec(`DROP TRIGGER ${SEAT_GUARD_ON_CHECKPOINT_LEDGER}`);
+        // ALL the position guards, not just the one this probe used to remove:
+        // leaving `no_rowid_reseat` standing would let it, rather than the
+        // over-claim clause, do the refusing below.
+        for (const guard of POSITION_GUARDS_ON_CHECKPOINT_LEDGER) {
+          raw.exec(`DROP TRIGGER ${guard}`);
+        }
         expect(
           (
             raw
-              .prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='trigger' AND name = ?`)
-              .get(ROWID_GUARD_ON_CHECKPOINT_LEDGER) as { n: number }
+              .prepare(
+                `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='trigger' AND name IN (${POSITION_GUARDS_ON_CHECKPOINT_LEDGER.map(
+                  () => '?',
+                ).join(', ')})`,
+              )
+              .get(...POSITION_GUARDS_ON_CHECKPOINT_LEDGER) as { n: number }
           ).n,
-          'the rowid guard must actually be gone for this half to mean anything',
+          'the position guards must actually be gone for this half to mean anything',
         ).toBe(0);
         const alone = insertRow(raw, columns, {
           ...genuine,
@@ -800,11 +812,15 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
         expect(
           (
             raw
-              .prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='trigger' AND name = ?`)
-              .get(ROWID_GUARD_ON_CHECKPOINT_LEDGER) as { n: number }
+              .prepare(
+                `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='trigger' AND name IN (${POSITION_GUARDS_ON_CHECKPOINT_LEDGER.map(
+                  () => '?',
+                ).join(', ')})`,
+              )
+              .get(...POSITION_GUARDS_ON_CHECKPOINT_LEDGER) as { n: number }
           ).n,
-          'the rowid guard must be back after the rollback',
-        ).toBe(1);
+          'the position guards must be back after the rollback',
+        ).toBe(POSITION_GUARDS_ON_CHECKPOINT_LEDGER.length);
         expect(ledgerReadings(raw)).toEqual(NOTHING_REPORTED);
         raw.close();
 
@@ -1077,11 +1093,12 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
         // spelling at every reseat by itself, so it is not being carried by the
         // broader guard that happens to sit in front of it.
         raw.exec('SAVEPOINT without_rowid_guard');
-        raw.exec(`DROP TRIGGER ${ROWID_GUARD_ON_CHECKPOINT_LEDGER}`);
-        // BOTH broader guards, since round fourteen: one bounds the rowid from
-        // above and one from below, so leaving either standing would let this
-        // pass be carried by a guard it does not exist to measure.
-        raw.exec(`DROP TRIGGER ${SEAT_GUARD_ON_CHECKPOINT_LEDGER}`);
+        // Every position guard, for the reason given on
+        // `POSITION_GUARDS_ON_CHECKPOINT_LEDGER`: with `no_rowid_reseat`
+        // standing this pass would measure that guard instead of this clause.
+        for (const guard of POSITION_GUARDS_ON_CHECKPOINT_LEDGER) {
+          raw.exec(`DROP TRIGGER ${guard}`);
+        }
         for (const spelling of SPELLINGS) {
           for (const seq of RESEATS) {
             const attempt = reseat(spelling, seq, 'alone');
@@ -1190,7 +1207,26 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
         raw.exec('SAVEPOINT without_overclaim_guard');
         raw.exec(`DROP TRIGGER ${OVERCLAIM_GUARD}`);
 
-        // Above the top: the broad guard's own case, and it holds.
+        // FIRST, the fact round fourteen added: with the over-claim guard gone
+        // but the full position set standing, both reseats are refused anyway —
+        // `no_rowid_reseat` is the general answer to the same shape on all 33
+        // ledgers. This is asserted BEFORE the isolation below so the test
+        // records what actually protects the store today, and not only what one
+        // clause does on its own.
+        for (const seq of [-1, 0]) {
+          const held = insertRow(raw, columns, {
+            ...genuine,
+            seq,
+            id: `position-guards-hold-${seq}`,
+          });
+          expect(
+            held.accepted,
+            `the position guards must refuse the reseat at ${seq} with no over-claim guard`,
+          ).toBe(false);
+          expect(held.message).toMatch(/rowids are contiguous/);
+        }
+
+        // Above the top: the broader guard's own case, and it holds.
         const skipped = insertRow(raw, columns, {
           ...genuine,
           seq: 1000,
@@ -1199,22 +1235,31 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
         expect(skipped.accepted, 'no_rowid_skip must still refuse a rowid past the top').toBe(false);
         expect(skipped.message).toMatch(/rowids are contiguous/);
 
-        // Below the top, and under 1: the seat guard's own cases. Round
-        // thirteen recorded both as ADMITTED here; they are not admitted any
-        // more, and these are the lines that fail if the seat guard is ever
-        // narrowed back to the shape that let High 1 and High 2 through.
+        // At or below the top, colliding with nothing: OUTSIDE its bound. Each
+        // lands, and each makes an intact store report — which is the finding
+        // the identity clause exists to refuse.
+        raw.exec('SAVEPOINT without_reseat_guard');
+        raw.exec(`DROP TRIGGER trg_${HQ_INTEGRITY_CHECKPOINT_TABLE}_${LEDGER_ROWID_RESEAT_GUARD}`);
         for (const seq of [-1, 0]) {
-          const reseated = insertRow(raw, columns, {
+          raw.exec('SAVEPOINT reseat');
+          const landed = insertRow(raw, columns, {
             ...genuine,
             seq,
             id: `rowid-guard-alone-${seq}`,
           });
           expect(
-            reseated.accepted,
-            `no_rowid_reseat must refuse the reseat at ${seq} with the identity clause gone`,
-          ).toBe(false);
-          expect(reseated.message).toMatch(/rowids are append-only/);
+            landed.accepted,
+            `with BOTH the identity clause and no_rowid_reseat gone, the reseat at ${seq} lands`,
+          ).toBe(true);
+          expect(
+            elidedCommitmentLedgerRows(raw),
+            `the reseat at ${seq} must be shown to fabricate a finding, or this proves nothing`,
+          ).toBe(true);
+          raw.exec('ROLLBACK TO reseat');
+          raw.exec('RELEASE reseat');
         }
+        raw.exec('ROLLBACK TO without_reseat_guard');
+        raw.exec('RELEASE without_reseat_guard');
 
         // And the case that is STILL outside both broad guards: an append at
         // the ledger's own top, on a ledger a row has been elided from.

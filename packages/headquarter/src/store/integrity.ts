@@ -448,7 +448,18 @@ export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = deepFree
     // `no_rewrite` is deliberately absent. One raw `UPDATE hq_missions SET id`
     // then made `#canonicalTaskScopes`' inner join match nothing and unbound
     // the task from its mission ceiling, silently at both integrity depths.
-    secondaryGuards: ['no_reidentify'],
+    //
+    // `no_replace_unique` is the third half of the same sentence (Wave 5
+    // correction round fourteen, High 2). `no_replace` is `BEFORE INSERT ON
+    // … WHEN … id = NEW.id` and `no_reidentify` is `BEFORE UPDATE OF id`; this
+    // table also declares `UNIQUE(idempotency_key)`, and an `INSERT OR REPLACE`
+    // colliding THERE reached neither. It is declared per table AS WELL AS
+    // covered by the derived `no_unique_reentry` guard, and the two are not the
+    // same answer twice: this one is part of the mission module's own DDL and
+    // travels with the table, that one is derived from whatever indexes the
+    // file actually carries. Either alone would have closed the measured
+    // exploit; only the derived one closes the class.
+    secondaryGuards: ['no_reidentify', 'no_replace_unique'],
   },
   { table: 'hq_orchestration_runs', triggerPrefix: 'hq_orch_runs', secondaryGuards: [] },
   { table: 'hq_orchestration_run_items', triggerPrefix: 'hq_orch_run_items', secondaryGuards: [] },
@@ -583,67 +594,69 @@ export const REQUIRED_IMMUTABILITY_GUARDS = Object.freeze([
 export const LEDGER_ROWID_GUARD = 'no_rowid_skip';
 
 /**
- * The OTHER half of the same channel: the guard that refuses an INSERT at a
- * rowid at or BELOW the ledger's greatest row (Wave 5 correction round
- * fourteen, High 1 and High 2).
+ * The OTHER two halves of the same channel, and the reason there are three
+ * names here rather than one (Wave 5 correction round fourteen, High 1 and
+ * Medium 2).
  *
- * `LEDGER_ROWID_GUARD` bounds the rowid from ABOVE only, and a bound with one
- * side is the partial enumeration this correction round exists to close. Two
- * live one-statement writes went through the open side, both measured at
- * `8481269` through this package's own file fixture:
+ * Round thirteen closed "a row may not ENTER above the top". A fresh review
+ * closed neither of the two remaining spellings of the same question, and each
+ * was live at ONE statement on a healthy store:
  *
- *  - **the mid-ledger deletion laundered back to a clean store.** Delete rowid
- *    6 of an 11-row `hq_reliability_verdicts` with the guards temporarily gone
- *    and the file is durably blocking — `regressed
- *    ["hq_reliability_verdicts"]`, structural `safeMode true`. ONE further
- *    PERMITTED `INSERT` at the freed rowid, nothing dropped and every guard in
- *    place, put it back to `{rows:11, top:11}` and every reading to
- *    `missingGuards [] regressed [] truncated []`, structural `safeMode false`.
- *    Four statements to a completely clean store, against three for a finding
- *    that stands — the inversion this module forbids.
- *  - **the rowid `-1` plant that bricked HQ's own appends.** In a `BEFORE
- *    INSERT` trigger an auto-assigned rowid reads as the integer `-1` on this
- *    engine (measured, not assumed — see `ledgerRowidGuardDdl`), so a row
- *    planted AT rowid -1 makes `no_replace`'s `EXISTS (… WHERE seq = NEW.seq)`
- *    true for every append that follows. Executed on `op_evidence`: the plant
- *    was ACCEPTED with no trigger dropped, the census read
- *    `missingGuards [] regressed [] truncated []` and structural `safeMode
- *    false`, and then `engageKillSwitch` and `assessHqIntegrity` BOTH threw
- *    `SqliteError: op_evidence is append-only`. One permitted statement took
- *    the Founder's own stop button away while every integrity reading said the
- *    store was clean.
+ *  - **`no_rowid_reseat`** — a row entering AT OR BELOW the top.
+ *    `no_rowid_skip` is `NEW.rowid > 1 + MAX(top, sequence)`, one-sided by
+ *    construction, so rowid `0`, the `-1` the engine itself spells for an
+ *    omitted key, any negative, and a REFILL of a hole a deletion left all
+ *    passed it. Measured at `8481269`: one raw `INSERT` at `seq = 0` into
+ *    `op_evidence` was ACCEPTED with all four declared guards present, took the
+ *    log from `{c:5, lo:1, hi:5}` to `{c:6, lo:0, hi:5}`, and made
+ *    `verifyEvidenceChain` return `1` — every later process reported
+ *    `evidence_chain_broken` with `safeMode: true`, the documented remedy (a
+ *    full Founder assessment) re-derived it, and the ghost row cannot be
+ *    removed without DDL. The same clause is what makes a mid-ledger deletion
+ *    DURABLE: refilling the freed rowid used to restore `MAX(rowid) - COUNT(*)`
+ *    to zero and clear the finding for one extra statement.
+ *  - **`no_rowid_move`** — a row CHANGING position without entering. Neither
+ *    `INSERT` guard fires on an `UPDATE`, and the two ledgers that declare a
+ *    reduced base carry no `no_rewrite` to fall back on. Measured against the
+ *    engine: `UPDATE … SET rowid = 900` and `INSERT … ON CONFLICT … DO UPDATE
+ *    SET rowid = 500` both moved a row and widened the gap exactly as an
+ *    append above the top does.
  *
- * **Why a second trigger rather than a wider clause on the first.** The bound
- * that closes both is "the row that landed is the ledger's greatest, and it is
- * at least 1", and neither half can be asserted BEFORE the insert: an omitted
- * AUTOINCREMENT key presents as `-1` there, which is a value a caller can also
- * spell, so there is no `BEFORE` spelling that separates "the engine will
- * choose" from "the caller chose -1". `overclaimGuardDdl` met exactly this and
- * moved to `AFTER INSERT` for exactly this reason. The upper bound cannot move
- * with it — after the insert, `sqlite_sequence` has already been raised to the
- * caller's own rowid, so the engine's pre-insert allocation is no longer
- * recoverable — so the two bounds live in two triggers, at the two timings each
- * one needs. `RAISE(ABORT)` in an `AFTER INSERT` trigger rolls the statement
- * back: the row does not persist, and the surrounding transaction survives.
- *
- * Declared in `declaredGuardsFor` beside `LEDGER_ROWID_GUARD`, and for the same
- * reason: a per-table list standing in for "every declared ledger" is the
- * defect class, so the set is complete BY CONSTRUCTION.
+ * All three are appended in `declaredGuardsFor` for the reason the first one
+ * was: a per-table list standing in for "every declared ledger" is the defect
+ * class five consecutive rounds have been about. What is enumerated here is the
+ * WAY a row can enter or change position — enter above the top, enter at or
+ * below it, move once it is there — and that enumeration is now closed against
+ * the engine rather than against anybody's memory: `ledger-rowid-guard.test.ts`
+ * drives every conflict clause SQLite has (`INSERT`, `OR REPLACE`, `OR IGNORE`,
+ * `OR FAIL`, `OR ROLLBACK`, bare `REPLACE`), both upsert branches, a direct
+ * rowid `UPDATE`, and `VACUUM`, on all 33.
  */
-export const LEDGER_ROWID_SEAT_GUARD = 'no_rowid_reseat';
+export const LEDGER_ROWID_RESEAT_GUARD = 'no_rowid_reseat';
+
+/** See `LEDGER_ROWID_RESEAT_GUARD`. */
+export const LEDGER_ROWID_MOVE_GUARD = 'no_rowid_move';
+
+/**
+ * The three guards that hold a row's POSITION on every declared ledger,
+ * whatever that ledger's column base is. Ordered as they fire.
+ */
+export const LEDGER_ROWID_GUARDS: readonly string[] = Object.freeze([
+  LEDGER_ROWID_GUARD,
+  LEDGER_ROWID_RESEAT_GUARD,
+  LEDGER_ROWID_MOVE_GUARD,
+]);
 
 /**
  * Every guard name the schema declares on one listed table. The BASE guards —
  * the trio, or the reduced `requiredGuards` set where an entry declares one —
- * plus that entry's own, plus the two universal rowid guards (the bound from
- * above and the bound from below — see `LEDGER_ROWID_SEAT_GUARD`).
+ * plus that entry's own, plus the universal rowid-position guards.
  */
 export function declaredGuardsFor(entry: EngineImmutableTable): string[] {
   return [
     ...(entry.requiredGuards ?? REQUIRED_IMMUTABILITY_GUARDS),
     ...entry.secondaryGuards,
-    LEDGER_ROWID_GUARD,
-    LEDGER_ROWID_SEAT_GUARD,
+    ...LEDGER_ROWID_GUARDS,
   ].map((guard) => `trg_${entry.triggerPrefix}_${guard}`);
 }
 
@@ -671,47 +684,45 @@ export function declaredGuardsFor(entry: EngineImmutableTable): string[] {
 export interface WriteOnceIdentityTable {
   /** The table. */
   table: string;
-  /** The prefix its guards are named under. */
+  /** The prefix its guard is named under. */
   triggerPrefix: string;
   /** The column that is write-once. */
   column: string;
+  /**
+   * Whether this table also carries the DERIVED unique-index guard
+   * (`UNIQUE_REENTRY_GUARD`).
+   *
+   * DECLARED here rather than re-derived on every structural pass, and the
+   * reason is a measured cost, not a preference: reading it from the file costs
+   * a `PRAGMA index_list` plus a `PRAGMA index_info` per unique index plus, for
+   * a partial index, a `sqlite_master` read — 3 statements on this one table,
+   * on a pass whose whole fixed base is 15 and whose cost is a Founder-facing
+   * sentence. The declaration is not left unchecked for that: it is compared
+   * against `secondaryUniqueIndexes` of a LIVE file in
+   * `unique-index-reentry.test.ts`, so a table that gains or loses a unique
+   * index and does not change this flag fails a test on the day it changes.
+   */
+  uniqueIndexGuard: boolean;
+  /**
+   * Whether this table also carries an ERASE guard (`BEFORE DELETE`).
+   *
+   * The third spelling of "a row's identity changed", and the one this branch's
+   * own round-fourteen lane found live at TWO statements (High 3): `DELETE FROM
+   * op_tasks WHERE id = ?` followed by an `INSERT` of the same row under a
+   * fresh id detached the task from its mission and project ceilings with the
+   * row count preserved 3 -> 3, no DDL, and both integrity depths silent —
+   * `before governedBy=[deployment,mission] decision=blocked tiers=1` -> `after
+   * governedBy=[deployment] decision=within_ceiling tiers=5`. It is neither the
+   * `UPDATE` round thirteen closed nor the `INSERT OR REPLACE` the concurrent
+   * lane closed, so it needs a declaration of its own.
+   *
+   * DECLARED rather than assumed for every entry, because "nothing deletes from
+   * this table" is a fact about a table and not about the class: this
+   * repository contains no `DELETE FROM op_tasks` at all, which is what makes
+   * the guard safe here.
+   */
+  eraseGuard: boolean;
 }
-
-/**
- * EVERY way a row's identity can change, enumerated once instead of once per
- * spelling (Wave 5 correction round fourteen, High 3).
- *
- * Round thirteen closed `UPDATE op_tasks SET id` and declared exactly that one
- * guard, under a header naming "every way a row's identity can change". It was
- * one of three, and the other two were live and CHEAPER. Executed at `8481269`
- * on the round-thirteen scene, 12 of 12 fresh identities, with no DDL:
- *
- *  - **`INSERT OR REPLACE`, ONE statement, row count preserved 3 -> 3.** The
- *    victim task collides on the `(capability_id, idempotency_key)` UNIQUE
- *    index, so the engine DELETES it and puts the replacement in under a fresh
- *    `id`. `recursive_triggers` is off by default and connection-scoped, so no
- *    `BEFORE DELETE` fires. `before governedBy=[deployment,mission]
- *    decision=blocked tiers=1` -> `after governedBy=[deployment]
- *    decision=within_ceiling tiers=5`, `missingGuards []`, structural
- *    `safeMode false`.
- *  - **`DELETE` + `INSERT`, TWO statements, row count preserved 3 -> 3.** The
- *    same detachment, and `op_tasks` carried no `no_erase` at all.
- *
- * Both are the same primitive as the `UPDATE`, at a LOWER price than the three
- * statements the disclosure quoted for it — which is why the price sentence and
- * its pin are corrected in the same change.
- *
- * `hq_missions`, the other end of the same link, is a declared ledger and
- * already carried all three. `op_tasks` is not append-only — a task is
- * legitimately updated on almost every column — so it can never carry
- * `no_rewrite`, and this set is deliberately the identity trio and not the
- * ledger trio.
- */
-export const WRITE_ONCE_IDENTITY_GUARDS = Object.freeze([
-  'no_reidentify',
-  'no_erase',
-  'no_replace',
-] as const);
 
 /**
  * Every table outside `ENGINE_IMMUTABLE_TABLES` whose identity column is
@@ -721,175 +732,36 @@ export const WRITE_ONCE_IDENTITY_GUARDS = Object.freeze([
  * the census.
  */
 export const WRITE_ONCE_IDENTITY_TABLES: readonly WriteOnceIdentityTable[] = Object.freeze(
-  [Object.freeze({ table: 'op_tasks', triggerPrefix: 'op_tasks', column: 'id' })].map((entry) =>
+  [
+    Object.freeze({
+      table: 'op_tasks',
+      triggerPrefix: 'op_tasks',
+      column: 'id',
+      uniqueIndexGuard: true,
+      eraseGuard: true,
+    }),
+  ].map((entry) =>
     Object.freeze(entry),
   ),
 );
 
-/**
- * The guard name for one spelling of the identity change. Kept as a named
- * function rather than a template at each call site, so the census, the
- * installer and the pins all read the same string.
- */
-export function identityGuardName(entry: WriteOnceIdentityTable, guard: string): string {
-  return `trg_${entry.triggerPrefix}_${guard}`;
+/** The one guard name each write-once identity declares. */
+export function declaredIdentityGuardFor(entry: WriteOnceIdentityTable): string {
+  return `trg_${entry.triggerPrefix}_no_reidentify`;
 }
 
 /**
- * EVERY guard name a write-once identity declares — one per member of
- * `WRITE_ONCE_IDENTITY_GUARDS`, derived from that constant rather than written
- * out, so a fourth spelling declared tomorrow enters the census on the day it
- * is declared.
+ * EVERY guard name a write-once identity table declares: the identity guard,
+ * and the derived unique-index guard where the entry declares one.
  */
-export function declaredIdentityGuardsFor(entry: WriteOnceIdentityTable): string[] {
-  return WRITE_ONCE_IDENTITY_GUARDS.map((guard) => identityGuardName(entry, guard));
-}
-
-/**
- * The UNIQUE keys by which a row of this table can be REPLACED, read from the
- * FILE rather than from any list written here.
- *
- * `INSERT OR REPLACE` deletes whatever row collides on ANY unique key, not only
- * the primary one, and `recursive_triggers` is off by default and
- * connection-scoped — so that deletion fires no `BEFORE DELETE` trigger and a
- * `no_erase` guard cannot see it. The replacement guard therefore has to name
- * every unique key the table carries, and naming them by hand is the
- * enumeration defect this round exists to close: `op_tasks`' second unique
- * index, `(capability_id, idempotency_key)`, is the one the one-statement
- * exploit used, and it is not the primary key.
- *
- * Derived from `PRAGMA index_list` / `PRAGMA index_info`, so an index added by
- * a later migration is covered the day it is added.
- *
- * **PARTIAL unique indexes are INCLUDED, and that is the whole reason this is
- * derived rather than written out.** The index the one-statement exploit ran
- * through — `idx_op_tasks_idem ON op_tasks(capability_id, idempotency_key)
- * WHERE idempotency_key IS NOT NULL` — is partial, and the engine resolves a
- * REPLACE conflict on it exactly as it does on a total one. "A WHERE-qualified
- * uniqueness is not uniqueness" is true of the CONSTRAINT and false of the
- * DELETE it triggers, which is what this guard is about. The index's own
- * predicate is carried into the clause and applied to the EXISTING row; it is
- * not re-applied to `NEW`, which makes the guard an OVER-approximation whenever
- * the predicate constrains a column outside the key. Over-approximating refuses
- * an INSERT the engine would have accepted, so it is stated here rather than
- * left to be discovered: on HQ's own schema the predicate constrains a KEY
- * column, so the key equality already binds it and the guard fires on exactly
- * what the engine would replace. `budget-scope-identity.test.ts` measures the
- * derived key set against the live file, so an index of a different shape fails
- * there rather than silently changing what HQ accepts.
- *
- * Skipped, and fail-OPEN for that key: an index whose name is not a plain
- * identifier, a key with an expression column (`PRAGMA index_info` reports a
- * NULL name), and a partial index whose predicate cannot be read back out of
- * `sqlite_master`. This builds SQL and will not build SQL it cannot spell
- * exactly; the alternative — a pattern-matched column name inside a trigger
- * body — is worse than a disclosed gap, and the same test asserts that HQ's
- * schema carries none of those shapes.
- */
-function replaceableKeysFor(
-  db: HqDatabase,
-  table: string,
-): { columns: string[]; where: string }[] {
-  const plain = /^[A-Za-z_][A-Za-z0-9_]*$/;
-  const keys: { columns: string[]; where: string }[] = [];
-  try {
-    const indexes = db.prepare(`PRAGMA index_list("${table}")`).all() as {
-      name: unknown;
-      unique: unknown;
-      partial?: unknown;
-    }[];
-    for (const index of indexes) {
-      if (Number(index.unique) !== 1) continue;
-      const name = String(index.name);
-      if (!plain.test(name)) continue;
-      const columns = (db.prepare(`PRAGMA index_info("${name}")`).all() as { name: unknown }[]).map(
-        (column) => (column.name === null ? null : String(column.name)),
-      );
-      if (columns.length === 0) continue;
-      if (columns.some((column) => column === null || !plain.test(column))) continue;
-      let where = '';
-      if (Number(index.partial ?? 0) === 1) {
-        const sql = String(
-          (
-            db
-              .prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`)
-              .get(name) as { sql: unknown } | undefined
-          )?.sql ?? '',
-        );
-        const predicate = /\)\s*WHERE\s+([\s\S]+?)\s*;?\s*$/i.exec(sql);
-        // No readable predicate: the key is skipped rather than guessed at.
-        if (!predicate) continue;
-        where = predicate[1]!;
-      }
-      keys.push({ columns: columns as string[], where });
-    }
-    // A `TEXT PRIMARY KEY` or an `INTEGER PRIMARY KEY` may be the rowid alias
-    // or may carry its own auto-index; `PRAGMA table_info` names it either way,
-    // so the primary key is never missed because the engine chose not to
-    // materialise an index for it.
-    const pk = (
-      db.prepare(`PRAGMA table_info("${table}")`).all() as { name: unknown; pk: unknown }[]
-    )
-      .filter((column) => Number(column.pk) > 0)
-      .sort((a, b) => Number(a.pk) - Number(b.pk))
-      .map((column) => String(column.name));
-    if (pk.length > 0 && pk.every((column) => plain.test(column))) {
-      keys.push({ columns: pk, where: '' });
-    }
-  } catch {
-    // A table the engine cannot describe declares no key here; its guards'
-    // ABSENCE is the census's finding, which is the rule every other ensure in
-    // this module follows.
-    return [];
-  }
-  // De-duplicate: the primary key usually appears twice, once as an auto-index.
-  const seen = new Set<string>();
-  return keys.filter((key) => {
-    const signature = `${key.columns.join(' ')}|${key.where}`;
-    if (seen.has(signature)) return false;
-    seen.add(signature);
-    return true;
-  });
-}
-
-/**
- * The DDL for one write-once identity table's three guards, in the order they
- * are declared.
- *
- * Exported for the pins, which build a scratch table from the live schema and
- * install exactly what a real file carries rather than a re-spelling of it.
- */
-export function writeOnceIdentityGuardDdl(db: HqDatabase, entry: WriteOnceIdentityTable): string[] {
-  // Neither the table nor the column is interpolated from anything a row
-  // carries: both come out of the frozen literal above, and the key columns
-  // come from `PRAGMA` and are checked against a plain-identifier pattern.
-  const message = `${entry.table} ${entry.column} is write-once`;
-  const clauses = replaceableKeysFor(db, entry.table).map(
-    (key) =>
-      `EXISTS (SELECT 1 FROM "${entry.table}" WHERE ` +
-      key.columns.map((column) => `"${column}" = NEW."${column}"`).join(' AND ') +
-      (key.where === '' ? '' : ` AND (${key.where})`) +
-      `)`,
-  );
-  const ddl = [
-    `CREATE TRIGGER ${identityGuardName(entry, 'no_reidentify')}\n` +
-      `BEFORE UPDATE OF "${entry.column}" ON "${entry.table}"\n` +
-      `BEGIN SELECT RAISE(ABORT, '${message}'); END;`,
-    `CREATE TRIGGER ${identityGuardName(entry, 'no_erase')}\n` +
-      `BEFORE DELETE ON "${entry.table}"\n` +
-      `BEGIN SELECT RAISE(ABORT, '${entry.table} rows are not deleted'); END;`,
-  ];
-  // With no readable unique key there is nothing a REPLACE could collide with
-  // that this guard could name, so the trigger fires on nothing rather than on
-  // everything: refusing every INSERT would stop HQ creating tasks at all,
-  // which is strictly worse than the channel it would close.
-  ddl.push(
-    `CREATE TRIGGER ${identityGuardName(entry, 'no_replace')}\n` +
-      `BEFORE INSERT ON "${entry.table}"\n` +
-      `WHEN ${clauses.length > 0 ? clauses.join('\n  OR ') : '0'}\n` +
-      `BEGIN SELECT RAISE(ABORT, '${entry.table} rows are not replaced'); END;`,
-  );
-  return ddl;
+export function declaredGuardsForIdentityTable(entry: WriteOnceIdentityTable): string[] {
+  const names = [declaredIdentityGuardFor(entry)];
+  if (entry.uniqueIndexGuard) names.push(`trg_${entry.triggerPrefix}_${UNIQUE_REENTRY_GUARD}`);
+  // The erase guard, declared per entry for the reason the flag gives — and
+  // censused here rather than in a second place, because a guard nothing checks
+  // is a guard that can go missing quietly.
+  if (entry.eraseGuard) names.push(`trg_${entry.triggerPrefix}_no_erase`);
+  return names;
 }
 
 /**
@@ -906,15 +778,20 @@ export function ensureWriteOnceIdentityGuards(db: HqDatabase): void {
   for (const entry of WRITE_ONCE_IDENTITY_TABLES) {
     if (!tableIsPresent(db, entry.table)) continue;
     try {
-      // Dropped and re-created rather than `IF NOT EXISTS`, since round
-      // fourteen: the replacement guard's clause list is DERIVED from the
-      // unique keys the file carries, so a key added by a later migration has
-      // to enter the guard at the next construction. The other two are fixed
-      // text and are rebuilt with it so the three are always one generation.
-      for (const guard of declaredIdentityGuardsFor(entry)) {
-        db.exec(`DROP TRIGGER IF EXISTS ${guard}`);
+      // Neither name is interpolated from anything a row carries: both come out
+      // of the frozen literal above.
+      db.exec(
+        `CREATE TRIGGER IF NOT EXISTS ${declaredIdentityGuardFor(entry)}\n` +
+          `BEFORE UPDATE OF "${entry.column}" ON "${entry.table}"\n` +
+          `BEGIN SELECT RAISE(ABORT, '${entry.table} ${entry.column} is write-once'); END;`,
+      );
+      if (entry.eraseGuard) {
+        db.exec(
+          `CREATE TRIGGER IF NOT EXISTS trg_${entry.triggerPrefix}_no_erase\n` +
+            `BEFORE DELETE ON "${entry.table}"\n` +
+            `BEGIN SELECT RAISE(ABORT, '${entry.table} rows are not deleted'); END;`,
+        );
       }
-      for (const ddl of writeOnceIdentityGuardDdl(db, entry)) db.exec(ddl);
     } catch {
       // A guard HQ could not install is a finding at the next census, never a
       // failed construction — the rule every other ensure here follows.
@@ -1107,14 +984,14 @@ export const SAFE_MODE_STATEMENT =
   'EVERY declared ledger this file carries, how many rows it holds and the greatest row it reaches — in a ' +
   'separate append-only ledger, and a record that contradicts a commitment recorded outside it is blocking ' +
   'however consistent that record has been made to look. A row removed from the MIDDLE of a ledger is ' +
-  'blocking too, and stays blocking however much HQ appends afterwards, because HQ never writes back ' +
-  'into the gap it leaves: a declared ledger refuses an INSERT at any row position the engine would not ' +
-  'itself have allocated — past the end of the ledger, or back inside it at a freed position, or below ' +
-  'the first — so the gap is not filled and the rows HQ committed at or below its own recorded mark ' +
-  'cannot be made up again. That is a bound on writes HQ still guards. A writer that first removes the ' +
-  'guard can refill the gap, and a refilled gap is not distinguishable from a ledger nothing touched, ' +
-  'so HQ says that rather than promising a permanence it does not have. ' +
-  'A commitment that claims more than the file held when it was written is refused ' +
+  'blocking too, and stays blocking however much HQ appends afterwards, because an engine guard refuses ' +
+  'any later row that would fill the gap it leaves — a row may only enter a declared ledger as the ' +
+  'greatest it holds, and a row already in one may not change position. Those are guards on this file, ' +
+  'not properties of the engine: a writer that first removes them can fill the gap, and HQ says so rather ' +
+  'than promising otherwise. HQ also says WHICH of the two happened, by counting the rows a ledger still ' +
+  'holds at or below the greatest row HQ committed for it — a removal lowers that count and an append ' +
+  'past the end never touches it — and that reading does not separate a gap that was refilled from a ' +
+  'ledger nothing touched. A commitment that claims more than the file held when it was written is refused ' +
   'where it is written — every column of it that any check reads, including the hash it names for the ' +
   'chain and the position it is written at — so no APPEND to that ledger, on its own, can make HQ ' +
   'condemn a store that is intact. That is a bound on that one ledger and not a claim about the file: a ' +
@@ -1309,10 +1186,12 @@ export function missingImmutabilityGuards(db: HqDatabase): string[] {
   // schema declares is not on this file.
   for (const entry of WRITE_ONCE_IDENTITY_TABLES) {
     if (!tables.has(entry.table)) continue;
-    // ALL THREE, from `WRITE_ONCE_IDENTITY_GUARDS`, since round fourteen's
-    // High 3: round thirteen censused one of the three spellings a row's
-    // identity can change by, and the other two were live and cheaper.
-    for (const name of declaredIdentityGuardsFor(entry)) {
+    // The identity guard AND the derived unique-index guard beside it (Wave 5
+    // correction round fourteen, High 2). Read from the DECLARATION rather than
+    // from the file, so this census costs no extra statement — see
+    // `WriteOnceIdentityTable.uniqueIndexGuard` for the measured reason and for
+    // the test that holds the declaration to the file.
+    for (const name of declaredGuardsForIdentityTable(entry)) {
       if (!triggers.has(name)) missing.push(name);
     }
   }
@@ -2315,15 +2194,6 @@ function overclaimGuardDdl(db: HqDatabase): string {
     // reseat probes run once with both guards live and once with
     // `trg_hq_integrity_checkpoints_no_rowid_skip` dropped inside a rolled-back
     // SAVEPOINT, so this clause is shown to refuse on its own.
-    //
-    // Round fourteen brought the bound from below to the other 32 as well
-    // (`LEDGER_ROWID_SEAT_GUARD`), and this clause is STILL kept and still not
-    // subsumed: the seat guard refuses a rowid below the ledger's greatest,
-    // where this one refuses any rowid that is not the ledger's row COUNT — the
-    // stricter relation, and the exact one `elidedCommitmentLedgerRows` reads
-    // on this table. A ledger that legitimately carried a hole would satisfy
-    // the seat guard and fail this one, which is correct here and would be a
-    // false alarm anywhere else.
     `NEW.seq <> (SELECT COUNT(*) FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE})`,
   ];
   if (tableIsPresent(db, 'op_evidence')) {
@@ -2378,6 +2248,46 @@ function overclaimGuardDdl(db: HqDatabase): string {
         `COALESCE((SELECT MAX(rowid) FROM "${entry.table}"), 0)${self}`,
       `COALESCE(CAST(json_extract(${totalCommitmentJson('ledger_rows')}, '$.${entry.table}') AS INTEGER), 0) > ` +
         `(SELECT COUNT(*) FROM "${entry.table}")${self}`,
+      // **The GAP, which neither of the two clauses above bounds** (Wave 5
+      // correction round fourteen, Medium 1). Both are one-sided from ABOVE, so
+      // a commitment whose mark is HQ's own and whose row count is LOWER than
+      // the file holds passes both — and `committedLedgerGaps` reads
+      // `MAX(mark - rows)`, so that one permitted append raises the gap baseline
+      // for a named ledger permanently. Measured at `8481269` on
+      // `hq_reliability_verdicts`, the ledger that holds the safe-mode latch:
+      // ONE `INSERT` claiming `ledger_rows = {hq_reliability_verdicts: 1}` — a
+      // declared key, valid JSON, a non-negative integer at or below what the
+      // file held, exactly the shape HQ itself writes — was ACCEPTED, and the
+      // mid-ledger deletion the control detects (`p2..p4: safeMode true
+      // ["append_only_guard_missing"]`) then went UNDETECTED at every later
+      // process.
+      //
+      // The bound is the file's OWN gap at write time, which HQ's writer always
+      // satisfies by construction: `recordIntegrityCheckpoint` writes
+      // `marks[t] = identity.top` and `heldRows[t] = identity.rows` from the
+      // SAME `declaredLedgerIdentities` reading, so the difference it commits IS
+      // `MAX(rowid) - COUNT(*)`. A ledger omitted from both columns commits a
+      // difference of zero, which is never greater than a gap; a ledger that
+      // legitimately HAS a hole commits exactly that hole and is not refused.
+      //
+      // No `${self}` term: for the checkpoint ledger the `AFTER INSERT` timing
+      // raises both readings by one and the DIFFERENCE is unchanged, so
+      // subtracting the new row from each would cancel.
+      //
+      // Gated on `ledger_rows` actually NAMING the table, because that is
+      // precisely what `committedLedgerGaps` consumes: its `json_each` over
+      // `ledger_rows` is the FROM side and `ledger_marks` is LEFT JOINed to it,
+      // so a key absent from `ledger_rows` contributes no baseline at all and
+      // there is nothing there to bound. Bounding it anyway would refuse a
+      // PARTIAL commitment — a row count with no mark beside it — which HQ
+      // never writes but the ledger admits by design, and which
+      // `ledger-identity.test.ts` drives to prove the count term binds on its
+      // own. The clause is therefore exactly as wide as the reading it protects
+      // and no wider.
+      `(json_extract(${totalCommitmentJson('ledger_rows')}, '$.${entry.table}') IS NOT NULL` +
+        ` AND COALESCE(CAST(json_extract(${totalCommitmentJson('ledger_marks')}, '$.${entry.table}') AS INTEGER), 0) - ` +
+        `COALESCE(CAST(json_extract(${totalCommitmentJson('ledger_rows')}, '$.${entry.table}') AS INTEGER), 0) > ` +
+        `COALESCE((SELECT MAX(rowid) FROM "${entry.table}"), 0) - (SELECT COUNT(*) FROM "${entry.table}"))`,
     );
   }
   return (
@@ -2413,9 +2323,27 @@ function overclaimGuardDdl(db: HqDatabase): string {
  * `unboundedCheckpointColumns` derives it from `PRAGMA table_info` of the table
  * as the FILE declares it, checked against the guard as `sqlite_master` holds
  * it, and `commitment-overclaim.test.ts` fails when the two disagree. A column
- * added to this ledger tomorrow is either bounded by a clause that names it or
+ * added to this ledger tomorrow is either NAMED by a clause of the guard or
  * named here, on the day it is added — that is the part that closes the CLASS
  * rather than the two instances.
+ *
+ * **"Named by a clause", and deliberately not "bounded by one"** (Wave 5
+ * correction round fourteen, Low 1). This sentence used to say "bounded by a
+ * clause that names it", which is one step wider than the derivation actually
+ * takes: the check reads the guard's TEXT for the column's name, so a future
+ * clause that merely mentions a column would satisfy it while bounding nothing.
+ * No such clause exists today — every clause the guard carries is a comparison
+ * over the column it names, and `commitment-overclaim.test.ts` composes every
+ * hostile shape of every column and requires each to be refused at the write or
+ * to leave every reader silent, which is what actually establishes the bound.
+ * The derivation's job is narrower and is now stated at its real width: it
+ * catches a column NOBODY wrote a clause for. Evaluating a SQL expression out of
+ * a trigger's text to decide whether it constrains a value is a parser this
+ * module does not have and will not pretend to; the executed enumeration is the
+ * stronger check, and this one is the tripwire that says a new column has
+ * arrived. The comparison is also anchored properly now — the interpolated `.`
+ * used to be an unescaped regex metacharacter, so a hypothetical column
+ * `NEWXseq` in the guard's text would have satisfied the check for `seq`.
  *
  * Each name here is a claim, and each is checkable. `id` is caller text with a
  * `UNIQUE` index and its own `no_replace` clause, and no integrity reader reads
@@ -2434,7 +2362,7 @@ export const CHECKPOINT_COLUMNS_THAT_DECIDE_NOTHING: readonly string[] = Object.
 ]);
 
 /**
- * The columns of the commitment ledger that the over-claim guard does not name
+ * The columns of the commitment ledger that the over-claim guard does not NAME
  * and that are not declared to decide nothing.
  *
  * Read from the FILE — `PRAGMA table_info` for the columns, `sqlite_master` for
@@ -2442,12 +2370,26 @@ export const CHECKPOINT_COLUMNS_THAT_DECIDE_NOTHING: readonly string[] = Object.
  * column added by a later build, or a guard installed by an older one, is
  * measured as it actually stands.
  *
- * Fail-CLOSED in both directions that matter: a guard that is absent, or that no
- * longer names a column, reports every affected column rather than none, and a
- * column whose name is not a plain identifier is reported rather than pattern
- * matched. The empty list is returned only when the engine cannot answer at all,
- * which is the case `integrityCheckpointLedgerPresent` and the as-found census
- * already report as a finding of their own.
+ * **What this establishes, exactly** (Wave 5 correction round fourteen, Low 1).
+ * It establishes that the guard NAMES every deciding column, not that it BOUNDS
+ * one: the check is a text match on the guard's SQL. The stronger claim belongs
+ * to `commitment-overclaim.test.ts`, which drives every hostile shape of every
+ * column through the engine; this function is the tripwire for a column nobody
+ * has written any clause for. See `CHECKPOINT_COLUMNS_THAT_DECIDE_NOTHING` for
+ * why the stronger check is not attempted here.
+ *
+ * Two corrections to the match itself, in the fail-closed direction: the
+ * interpolated `.` is ESCAPED — it was a live regex metacharacter, so `NEWXseq`
+ * would have counted as naming `seq` — and SQL comments are stripped before the
+ * match, so a column named only in a `--` or block comment is reported rather
+ * than counted as covered.
+ *
+ * Fail-CLOSED in every other direction that matters: a guard that is absent, or
+ * that no longer names a column, reports every affected column rather than none,
+ * and a column whose name is not a plain identifier is reported rather than
+ * pattern matched. The empty list is returned only when the engine cannot answer
+ * at all, which is the case `integrityCheckpointLedgerPresent` and the as-found
+ * census already report as a finding of their own.
  */
 export function unboundedCheckpointColumns(db: HqDatabase): string[] {
   try {
@@ -2458,10 +2400,16 @@ export function unboundedCheckpointColumns(db: HqDatabase): string[] {
     const guard = db
       .prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`)
       .get(OVERCLAIM_GUARD) as { sql: unknown } | undefined;
-    const text = String(guard?.sql ?? '');
+    // Comments are not clauses. Block comments first, then line comments, so a
+    // `--` inside a `/* */` cannot leave a fragment behind.
+    const text = String(guard?.sql ?? '')
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/--[^\n]*/g, ' ');
     return columns.filter((column) => {
       if (CHECKPOINT_COLUMNS_THAT_DECIDE_NOTHING.includes(column)) return false;
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(column)) return true;
+      if (!PLAIN_IDENTIFIER.test(column)) return true;
+      // `\\.` — the dot is a literal, not "any character". It was the latter
+      // until round fourteen.
       return !new RegExp(`\\bNEW\\.${column}\\b`).test(text);
     });
   } catch {
@@ -2545,28 +2493,14 @@ function ensureLedgerRowsColumn(db: HqDatabase): void {
  * **The defect it closes.** `no_replace` fires only on a COLLIDING rowid, so an
  * ordinary `INSERT` naming an explicit rowid ABOVE the ledger's current maximum
  * was a write every declared ledger's guards deliberately permitted. It grows
- * `MAX(rowid) - COUNT(*)` exactly as removing a row from the middle does, so
- * `committedLedgerGaps` reports both under one name: after a mid-ledger
- * deletion of k rows followed by m appends the ledger reads `rows + m - k` /
- * `top + m`, and after one append at a rowid d above the top it reads
- * `rows + 1` / `top + d`.
- *
- * **The sentence that used to stand here — that the two are "indistinguishable
- * from the file alone, at any later moment, so nothing this reader could do
- * would separate them" — was FALSE, and a reviewer disproved it by execution**
- * (Wave 5 correction round fourteen, High 1). They are separated exactly, by a
- * predicate over data HQ already commits: `COUNT(*) WHERE rowid <= committed
- * top`, against the committed row count. A ledger HQ only appends to holds
- * exactly its committed rows at or below its committed top for ever after, so
- * a REMOVAL below that mark lowers the count and an append ABOVE it, at any
- * rowid whatever, does not. `committedRemovalsBelowMark` is that reader; it
- * does not fire on a hole that legitimately pre-dated the commitment, and it
- * does not separate a refilled hole from an untampered ledger — which is said
- * there in those words rather than implied away a second time.
- *
- * The channel is still closed where the WRITE happens, and that is now a choice
- * with a reason instead of a claim that no alternative existed: the write guard
- * also refuses the refill, which no read-time predicate can see.
+ * `MAX(rowid) - COUNT(*)` exactly as removing a row from the middle does, and
+ * `committedLedgerGaps` cannot tell the two apart from the file alone: after a
+ * mid-ledger deletion of k rows followed by m appends the ledger reads
+ * `rows + m - k` / `top + m`, and after one append at a rowid d above the top it
+ * reads `rows + 1` / `top + d`. Both raise the gap and neither leaves any other
+ * trace, so no read-time rule can separate them — which is why this is closed
+ * where the write happens rather than where it is read, exactly as
+ * `overclaimGuardDdl` closed the over-claim.
  *
  * Executed against `237fc76` on a real file through this package's own fixture:
  * one `INSERT` took `hq_reliability_verdicts` from `{rows:4, top:4}` to
@@ -2610,30 +2544,24 @@ function ensureLedgerRowsColumn(db: HqDatabase): void {
  * GUARD is cleared by ONE Founder assessment of the file as it then stands,
  * because re-creating a trigger really does repair the file's guard set.
  *
- * **What this bound does NOT cover, and what does** (recorded at the
- * round-thirteen merge, where two lanes closed this channel independently off
- * the same base and both are kept; corrected in round fourteen, where the
- * uncovered half turned out to be live on 30 of the 33). This clause bounds the
- * rowid from ABOVE only: `NEW.rowid > 1 + MAX(top, sequence)`. A rowid at or
- * below the top that collides with nothing — a hole, rowid 0, or the `-1` the
- * engine spells for an omitted AUTOINCREMENT key — passes it, and on a ledger
- * with no hole such a write raises `COUNT(*)` without raising `MAX(rowid)`.
- * That is not a widened gap, so it is invisible to `committedLedgerGaps`.
- *
- * Round thirteen answered that on ONE ledger: `elidedCommitmentLedgerRows` runs
- * on `hq_integrity_checkpoints` alone, and there the over-claim guard's
- * `NEW.seq <> (SELECT COUNT(*) …)` identity clause refuses it. The other 32
- * were silent, which is the finding round fourteen executed — including on
- * `hq_reliability_verdicts`, the safe-mode latch ledger, and
- * `hq_reliability_run_events`, the ledger `RUN_RETRY_STATEMENT` rests on. The
- * bound from below is now a guard of its own on all 33
- * (`LEDGER_ROWID_SEAT_GUARD`), so the three clauses are complements and none
- * was dropped in favour of another: this one is the only bound from above,
- * the seat guard is the only bound from below outside the commitment ledger,
- * and the over-claim clause is the stricter one on the ledger whose row count
- * is itself read. All three are pinned — `ledger-rowid-guard.test.ts` for the
- * two here, `commitment-overclaim.test.ts` for that one, each with the others'
- * guards removed so no pin can pass on another's work.
+ * **What this bound does NOT cover, and what covers it on the one ledger where
+ * it matters** (recorded at the round-thirteen merge, where two lanes closed
+ * this channel independently off the same base and both are kept). This clause
+ * bounds the rowid from ABOVE only: `NEW.rowid > 1 + MAX(top, sequence)`. A
+ * rowid at or below the top that collides with nothing — a hole, rowid 0, or
+ * the `-1` the engine spells for an omitted AUTOINCREMENT key — passes it, and
+ * on a ledger with no hole such a write raises `COUNT(*)` without raising
+ * `MAX(rowid)`. That is not a widened gap, so it is invisible to
+ * `committedLedgerGaps`; it IS read by `elidedCommitmentLedgerRows`, which runs
+ * on `hq_integrity_checkpoints` alone, and on that one ledger the over-claim
+ * guard's `NEW.seq <> (SELECT COUNT(*) …)` identity clause refuses it. The two
+ * clauses are therefore complements rather than duplicates, and neither was
+ * dropped in favour of the other: this one is the broader (33 ledgers by
+ * construction, and the only bound on the other 32), that one is the stricter
+ * on the ledger whose row count is itself read. Both are pinned —
+ * `ledger-rowid-guard.test.ts` for this one, `commitment-overclaim.test.ts` for
+ * that one, each with the other's guard removed so neither pin can pass on the
+ * other's work.
  */
 function ledgerRowidGuardDdl(db: HqDatabase, table: string, triggerPrefix: string): string {
   // The engine's own allocation for the next row: `MAX(rowid) + 1`, or the
@@ -2642,28 +2570,28 @@ function ledgerRowidGuardDdl(db: HqDatabase, table: string, triggerPrefix: strin
   // moment the trigger was written.
   //
   // **The two-term form is emitted ONLY when there are two terms** (Wave 5
-  // correction round fourteen, Low 1). SQLite's `MAX` is the scalar function
-  // with two or more arguments and the AGGREGATE with one, and an aggregate in
-  // a trigger's `WHEN` clause is not a compile error — the `CREATE TRIGGER`
-  // succeeds and every INSERT afterwards fails `misuse of aggregate function
-  // MAX()`, which on a declared ledger means HQ stops writing. Executed rather
-  // than reasoned about. It is not reachable on a real HQ file, because
-  // `sqlite_sequence` is created by the first AUTOINCREMENT table, survives
-  // dropping the last one and cannot itself be dropped; it was latent, and it
-  // is closed rather than left to the next schema that has no AUTOINCREMENT
-  // table at all.
+  // correction round fourteen, Low 1, merged from the concurrent lane). SQLite's
+  // `MAX` is the scalar function with two or more arguments and the AGGREGATE
+  // with one, and an aggregate in a trigger's `WHEN` clause is not a compile
+  // error — the `CREATE TRIGGER` succeeds and every INSERT afterwards fails
+  // `misuse of aggregate function MAX()`, which on a declared ledger means HQ
+  // stops writing. Executed rather than reasoned about. Not reachable on a real
+  // HQ file, because `sqlite_sequence` is created by the first AUTOINCREMENT
+  // table, survives dropping the last one and cannot itself be dropped; it was
+  // latent, and it is closed rather than left to a later schema with no
+  // AUTOINCREMENT table at all.
   const rowsTerm = `COALESCE((SELECT MAX(rowid) FROM "${table}"), 0)`;
   const bound = tableIsPresent(db, 'sqlite_sequence')
     ? `MAX(${rowsTerm}, COALESCE((SELECT seq FROM sqlite_sequence WHERE name = '${table}'), 0))`
     : rowsTerm;
   // An auto-assigned rowid reads as the INTEGER -1 here, deterministically on
-  // this engine — measured in `ledger-rowid-guard.test.ts` against a probe
-  // trigger, not inferred (Wave 5 correction round fourteen, Low 3; the comment
-  // that used to stand here said "NULL … and -1 in some engine builds"). -1
-  // compares false against this bound, so an ordinary append never reaches the
-  // RAISE — and -1 is exactly the value that made the `no_replace` bricking of
-  // High 2 work, which is why the SEAT guard below refuses a landed rowid under
-  // 1 rather than this one trying to spell the difference before the fact.
+  // this engine — measured against a probe trigger in
+  // `ledger-rowid-guard.test.ts`, not inferred (Wave 5 correction round
+  // fourteen, Low 3; the comment that used to stand here said "NULL … and -1 in
+  // some engine builds"). -1 compares false against this bound, so an ordinary
+  // append never reaches the RAISE — and -1 is exactly the value the reseat
+  // guard below has to refuse AFTER the insert, where it is no longer a
+  // placeholder.
   return (
     `CREATE TRIGGER trg_${triggerPrefix}_${LEDGER_ROWID_GUARD}\n` +
     `BEFORE INSERT ON "${table}"\n` +
@@ -2673,41 +2601,85 @@ function ledgerRowidGuardDdl(db: HqDatabase, table: string, triggerPrefix: strin
 }
 
 /**
- * The bound from BELOW — see `LEDGER_ROWID_SEAT_GUARD` for the two writes it
- * closes and for why it is a second trigger at a second timing.
+ * The clause that closes the OTHER side of the same bound: a row that enters at
+ * or BELOW the top (Wave 5 correction round fourteen, High 1 and Medium 2).
  *
- * Two clauses, and each is total over everything a caller can spell:
+ * `AFTER INSERT`, and the timing is the whole trick — the same measurement that
+ * forced `overclaimGuardDdl` to `AFTER`. In a `BEFORE INSERT` trigger SQLite
+ * reports an OMITTED rowid as the integer `-1`, on AUTOINCREMENT and implicit
+ * rowid tables alike, and `-1` is a value a caller can also supply. There is no
+ * `BEFORE` spelling that separates "the engine will choose" from "the caller
+ * chose `-1`", so a `BEFORE` lower bound either refuses every append HQ makes
+ * or admits every negative rowid an attacker names. `AFTER INSERT` reads the
+ * rowid the row ACTUALLY took, and the clause is then an identity rather than a
+ * bound: the row that just landed must BE the greatest the ledger holds.
  *
- *  - `NEW.rowid < 1` refuses a row planted at 0 or at a negative rowid. AFTER
- *    the insert `NEW.rowid` is the rowid the row ACTUALLY took, so the engine's
- *    own allocation — always at least 1 — never meets it, and the `-1` a caller
- *    supplies explicitly always does.
- *  - `NEW.rowid <> (SELECT MAX(rowid) FROM t)` refuses a row that did not land
- *    at the ledger's top: a hole left by a removal, or any other rowid below
- *    it. The subquery includes the row just inserted, so a legitimate append —
- *    which the engine places above every row in the table, including after a
- *    burned AUTOINCREMENT counter — always satisfies it.
+ * Everything that claim rests on is executed in `ledger-rowid-guard.test.ts`
+ * rather than reasoned about, and each of these was measured on this engine
+ * (3.53.2) before the guard shipped:
  *
- * It takes no reading of `sqlite_sequence` and therefore inherits none of that
- * table's writability: a raw writer that inflates the counter can still make
- * the engine allocate a high rowid, and the row it then appends is still the
- * ledger's greatest, so this guard neither fires on it nor is defeated by it.
- * That channel is the standing, separately disclosed `sqlite_sequence`
- * residual, unchanged by this guard in either direction.
- *
- * **What it does NOT close, stated rather than implied.** A writer that removes
- * this trigger, refills the hole and re-creates it pays three statements and
- * leaves a ledger whose rows, greatest rowid and gap are all exactly what HQ
- * committed. No predicate over the file separates that from an untampered
- * ledger — `regressedImmutableLedgers` says so in its own words, with the
- * worked case — and this guard does not claim to.
+ *  - it refuses rowid `0`, `-1`, `-9`, a skip, and a REFILL of a freed rowid;
+ *  - it permits an ordinary append, a multi-row `VALUES` append, a multi-row
+ *    `INSERT … SELECT`, an explicit rowid AT the top, and the engine's own next
+ *    allocation after a burned AUTOINCREMENT counter — so it never brings a
+ *    ledger to a stop, which is strictly worse than the gap it closes;
+ *  - it permits an append onto a ledger that ALREADY has a hole, because the
+ *    new row is still the greatest — an older file is never bricked by it;
+ *  - `RAISE(ABORT)` from `AFTER INSERT` persists nothing and burns no
+ *    AUTOINCREMENT value under `INSERT`, `INSERT OR REPLACE`, `OR IGNORE`,
+ *    `OR FAIL`, `OR ROLLBACK` and bare `REPLACE`, inside and outside an
+ *    explicit transaction — and an open transaction stays open, so `OR
+ *    ROLLBACK` does not become a way to discard a caller's other work.
  */
-function ledgerRowidSeatGuardDdl(table: string, triggerPrefix: string): string {
+function ledgerRowidReseatGuardDdl(table: string, triggerPrefix: string): string {
+  // **`NEW.rowid < 1` is kept beside the identity clause, and it is not
+  // redundant** (merged from the concurrent round-fourteen lane, which measured
+  // the case the identity clause alone admits). On a POPULATED ledger a plant
+  // at 0 or -1 is already refused, because it is not the greatest rowid. On an
+  // EMPTY one it is: a row planted at -1 IS the ledger's maximum, so
+  // `NEW.rowid <> MAX(rowid)` is false and the plant lands — and a landed row at
+  // rowid -1 makes `no_replace`'s `EXISTS (… WHERE seq = NEW.seq)` true for every
+  // auto-assigned append that follows, because an omitted key reads as -1 in a
+  // `BEFORE INSERT` trigger. Executed on `op_evidence` at `8481269`: the plant
+  // was ACCEPTED with no trigger dropped, every integrity reading said the store
+  // was clean, and `engageKillSwitch` and `assessHqIntegrity` BOTH threw
+  // `SqliteError: op_evidence is append-only` — the Founder's own stop button,
+  // gone at one permitted statement. The empty-ledger case is swept on all 33 in
+  // `ledger-rowid-guard.test.ts`.
   return (
-    `CREATE TRIGGER trg_${triggerPrefix}_${LEDGER_ROWID_SEAT_GUARD}\n` +
+    `CREATE TRIGGER trg_${triggerPrefix}_${LEDGER_ROWID_RESEAT_GUARD}\n` +
     `AFTER INSERT ON "${table}"\n` +
     `WHEN NEW.rowid < 1 OR NEW.rowid <> (SELECT MAX(rowid) FROM "${table}")\n` +
-    `BEGIN SELECT RAISE(ABORT, '${table} rowids are append-only'); END;`
+    `BEGIN SELECT RAISE(ABORT, '${table} rowids are contiguous'); END;`
+  );
+}
+
+/**
+ * The third spelling: a row that changes position without entering (Wave 5
+ * correction round fourteen, High 1 — the shared root cause).
+ *
+ * Neither `INSERT` guard sees an `UPDATE`, and two declared ledgers —
+ * `hq_missions` and `hq_mission_plan_items` — carry a REDUCED base with no
+ * `no_rewrite` behind it, precisely because their own columns legitimately
+ * move. Measured against the engine at `8481269`: `UPDATE … SET rowid = 900`
+ * and `INSERT … ON CONFLICT … DO UPDATE SET rowid = 500` each moved a row and
+ * took `MAX(rowid) - COUNT(*)` from 0 to a permanent 2 and 498 — the identical
+ * widening the round-thirteen exploit produced by appending above the top, and
+ * therefore the identical fabricated `append_only_guard_missing`.
+ *
+ * `WHEN NEW.rowid <> OLD.rowid` rather than `BEFORE UPDATE OF rowid`: the rowid
+ * is not a column a trigger's `OF` list can name on a table whose primary key
+ * is not an integer alias for it, and the comparison is total over both
+ * spellings. An ordinary `UPDATE` that leaves the rowid alone passes — measured
+ * — so `hq_memory`'s one legal status move and the plan-item link, supersede
+ * and work-spec writers are untouched.
+ */
+function ledgerRowidMoveGuardDdl(table: string, triggerPrefix: string): string {
+  return (
+    `CREATE TRIGGER trg_${triggerPrefix}_${LEDGER_ROWID_MOVE_GUARD}\n` +
+    `BEFORE UPDATE ON "${table}"\n` +
+    `WHEN NEW.rowid <> OLD.rowid\n` +
+    `BEGIN SELECT RAISE(ABORT, '${table} rowids are contiguous'); END;`
   );
 }
 
@@ -2736,13 +2708,269 @@ export function ensureLedgerRowidGuards(db: HqDatabase): void {
   for (const entry of ENGINE_IMMUTABLE_TABLES) {
     if (!tableIsPresent(db, entry.table)) continue;
     try {
-      db.exec(`DROP TRIGGER IF EXISTS trg_${entry.triggerPrefix}_${LEDGER_ROWID_GUARD}`);
+      for (const guard of LEDGER_ROWID_GUARDS) {
+        db.exec(`DROP TRIGGER IF EXISTS trg_${entry.triggerPrefix}_${guard}`);
+      }
       db.exec(ledgerRowidGuardDdl(db, entry.table, entry.triggerPrefix));
-      db.exec(`DROP TRIGGER IF EXISTS trg_${entry.triggerPrefix}_${LEDGER_ROWID_SEAT_GUARD}`);
-      db.exec(ledgerRowidSeatGuardDdl(entry.table, entry.triggerPrefix));
+      db.exec(ledgerRowidReseatGuardDdl(entry.table, entry.triggerPrefix));
+      db.exec(ledgerRowidMoveGuardDdl(entry.table, entry.triggerPrefix));
     } catch {
       // See the docstring: a guard HQ could not install is a finding at the
       // next census, never a failed construction.
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Unique-index re-entry                                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The name of the guard that refuses an INSERT which would collide on a
+ * SECONDARY unique index, derived from the file's own indexes.
+ *
+ * **Why a derived guard exists beside the hand-written `no_replace_unique`
+ * ones** (Wave 5 correction round fourteen, High 2). `REPLACE` resolves a
+ * conflict on ANY unique index by DELETING the standing row, and it skips
+ * `BEFORE DELETE` triggers while `recursive_triggers` is off — the engine
+ * default, connection-scoped, and therefore true of every ordinary connection
+ * however carefully HQ's own handle is configured. This codebase states that
+ * fact in ten places and, until this round, applied it one table at a time.
+ * The result was the same partial enumeration five rounds running:
+ *
+ *  - `hq_missions` declares `UNIQUE(idempotency_key)` and carried no
+ *    `no_replace_unique`. Measured at `8481269` through the real facade: one
+ *    `INSERT OR REPLACE` from an ordinary connection, at the victim's own
+ *    rowid, rewrote a mission's `id` to `HIJACKED-MISSION` with no trigger
+ *    dropped and `safeMode: false` at both depths in two later processes.
+ *  - `op_tasks`, the only member of `WRITE_ONCE_IDENTITY_TABLES`, carried NO
+ *    `no_replace*` guard at all. Measured on the shipped budget scene: one
+ *    `INSERT OR REPLACE` colliding on `idx_op_tasks_idem` rewrote the task's
+ *    `id`, `governedBy` lost the mission, `permittedTiers` widened from
+ *    `['deterministic_local']` to all five, `budgetDecision` went `blocked` ->
+ *    `within_ceiling`, and a `critical_review` write the exhausted Founder
+ *    ceiling had refused was ACCEPTED — with `missingImmutabilityGuards` empty
+ *    and `structuralIntegrity` silent.
+ *
+ * Both tables the branch declares a write-once identity for were bypassable at
+ * one statement. `hq_missions` takes a hand-written `no_replace_unique` beside
+ * its own DDL, because that is where its other guards live and it travels with
+ * the table; `op_tasks` takes THIS one, derived from `PRAGMA index_list` /
+ * `PRAGMA index_info` of the table as the FILE declares it, because it carried
+ * no `no_replace*` clause of any kind and a hand-written one would have been the
+ * third instance of the enumeration that keeps failing.
+ *
+ * **Where the class is closed, stated exactly.** Installing this guard on all
+ * 33 declared ledgers was built and MEASURED, and it is not shipped: see
+ * `uniqueReentryTargets` for the write path it broke. The class is closed by
+ * `unique-index-reentry.test.ts` instead, which enumerates every unique index
+ * of every declared ledger and every write-once identity table from the live
+ * schema and requires the engine itself to refuse a colliding `INSERT OR
+ * REPLACE` and `ON CONFLICT DO UPDATE` on each.
+ *
+ * **What it costs, disclosed rather than discovered.** A `BEFORE INSERT` trigger
+ * fires BEFORE conflict resolution, so this guard refuses EVERY conflict clause
+ * on the indexes it names — `REPLACE`, `INSERT OR REPLACE`, and
+ * `ON CONFLICT … DO UPDATE` alike, including a `DO UPDATE` that would only have
+ * touched an ordinary column. That is the same property the mission module's own
+ * DDL has stated since Phase 4 and it is deliberate: an upsert onto a write-once
+ * identity is exactly the shape the exploit had. Measured on both tables: no
+ * path in this repository upserts either one — `createTask` deduplicates by
+ * looking the idempotency key up first, and `commandMission` inserts — and
+ * `unique-index-reentry.test.ts` drives both of those real writers to show they
+ * are untouched. A future writer that WANTS an upsert here would have to say so
+ * and change the declaration.
+ */
+export const UNIQUE_REENTRY_GUARD = 'no_unique_reentry';
+
+/** One secondary (non-primary-key) UNIQUE index as the file declares it. */
+export interface SecondaryUniqueIndex {
+  /** The index name, as `sqlite_master` holds it. */
+  readonly name: string;
+  /** Its columns, in index order. */
+  readonly columns: readonly string[];
+  /**
+   * False when the index cannot be turned into a clause this module is willing
+   * to install: an expression column (which `PRAGMA index_info` reports with a
+   * null name), a column name that is not a plain identifier, or a PARTIAL
+   * index whose predicate is not exactly "every indexed column IS NOT NULL".
+   *
+   * Fail-CLOSED, and closed in the direction that cannot brick a store: such an
+   * index gets NO generated clause — a clause stricter than the engine's own
+   * conflict would refuse a legitimate append — and is REPORTED by
+   * `unguardedUniqueIndexes` instead, so it fails a test rather than passing
+   * silently as covered.
+   */
+  readonly expressible: boolean;
+}
+
+/** A column name this module is willing to interpolate into DDL. */
+const PLAIN_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Whether a partial index's predicate is exactly the NOT-NULL conjunction the
+ * generated clause encodes.
+ *
+ * Every partial unique index this schema declares is of that shape — measured,
+ * not assumed: `idx_hq_action_events_effect`, `idx_hq_memory_idem`,
+ * `idx_hq_truth_records_supersedes`, `idx_hq_truth_records_idem`,
+ * `idx_hq_truth_verifications_idem` and `idx_op_tasks_idem` are each
+ * `WHERE <col> IS NOT NULL` over their own indexed columns. Anything else is
+ * reported rather than guessed at.
+ */
+function partialPredicateIsNotNullOnly(sql: string, columns: readonly string[]): boolean {
+  const where = /\bWHERE\b([\s\S]*)$/i.exec(sql);
+  if (where === null) return false;
+  const terms = where[1]
+    .split(/\bAND\b/i)
+    .map((term) => term.replace(/[()\s"`[\]]/g, '').toLowerCase())
+    .filter((term) => term.length > 0);
+  if (terms.length === 0) return false;
+  const allowed = new Set(columns.map((column) => `${column.toLowerCase()}isnotnull`));
+  return terms.every((term) => allowed.has(term));
+}
+
+/**
+ * Every SECONDARY unique index one table carries, read from the FILE.
+ *
+ * "Secondary" means `PRAGMA index_list` `origin <> 'pk'` — the primary key is
+ * already held by each table's own `no_replace` clause, and re-stating it here
+ * would double a guarantee rather than add one. Returns an empty list for a
+ * table this file does not carry, and for an engine that cannot answer.
+ */
+export function secondaryUniqueIndexes(db: HqDatabase, table: string): SecondaryUniqueIndex[] {
+  try {
+    const list = (
+      db.prepare(`PRAGMA index_list("${table}")`).all() as {
+        name: unknown;
+        unique: unknown;
+        origin: unknown;
+        partial: unknown;
+      }[]
+    ).filter((row) => Number(row.unique) === 1 && String(row.origin) !== 'pk');
+    return list.map((row) => {
+      const name = String(row.name);
+      const columns = (
+        db.prepare(`PRAGMA index_info("${name}")`).all() as { name: unknown }[]
+      ).map((column) => (column.name === null ? null : String(column.name)));
+      const named = columns.filter((column): column is string => column !== null);
+      let expressible =
+        named.length === columns.length &&
+        named.length > 0 &&
+        named.every((column) => PLAIN_IDENTIFIER.test(column));
+      if (expressible && Number(row.partial) === 1) {
+        const sql = (
+          db
+            .prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`)
+            .get(name) as { sql: unknown } | undefined
+        )?.sql;
+        expressible = typeof sql === 'string' && partialPredicateIsNotNullOnly(sql, named);
+      }
+      return Object.freeze({ name, columns: Object.freeze(named), expressible });
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The `WHEN` term one unique index contributes to the derived guard.
+ *
+ * `IS NOT NULL` on every indexed column and then plain `=` equality, because
+ * that is EXACTLY the engine's own uniqueness rule: SQLite treats NULLs in a
+ * unique index as distinct, so a clause written with `IS` would refuse
+ * legitimate appends the index itself admits. The generated term is therefore
+ * neither wider nor narrower than the conflict it stands in for.
+ */
+function uniqueReentryTerm(table: string, index: SecondaryUniqueIndex): string {
+  const notNull = index.columns.map((column) => `NEW."${column}" IS NOT NULL`).join(' AND ');
+  const equal = index.columns.map((column) => `"${column}" = NEW."${column}"`).join(' AND ');
+  return `(${notNull} AND EXISTS (SELECT 1 FROM "${table}" WHERE ${equal}))`;
+}
+
+/**
+ * The derived guard for one table, or null when the file declares no secondary
+ * unique index on it that can be expressed.
+ *
+ * Null rather than a trigger with a `WHEN` that never fires: a guard that bounds
+ * nothing, declared so a census can count it, is the exact overstatement
+ * `unboundedCheckpointColumns` is being corrected for in this same round.
+ */
+export function uniqueReentryGuardDdl(
+  db: HqDatabase,
+  table: string,
+  triggerPrefix: string,
+): string | null {
+  const terms = secondaryUniqueIndexes(db, table)
+    .filter((index) => index.expressible)
+    .map((index) => uniqueReentryTerm(table, index));
+  if (terms.length === 0) return null;
+  return (
+    `CREATE TRIGGER trg_${triggerPrefix}_${UNIQUE_REENTRY_GUARD}\n` +
+    `BEFORE INSERT ON "${table}"\n` +
+    `WHEN ${terms.join('\n  OR ')}\n` +
+    `BEGIN SELECT RAISE(ABORT, '${table} unique keys are write-once'); END;`
+  );
+}
+
+/**
+ * Every table this module INSTALLS a derived unique-index guard on.
+ *
+ * **The write-once identity tables, and deliberately not all 33 declared
+ * ledgers** — that wider shape was built, measured and rejected on the merits
+ * (Wave 5 correction round fourteen, High 2). A guard installed on every
+ * declared ledger pre-empts the ENGINE's own `UNIQUE` conflict on the paths
+ * that legitimately rely on it: run against the full suite it turned
+ * `action-gateway`'s side-effect deduplication — a plain `INSERT` colliding on
+ * `hq_action_events.side_effect_key`, whose whole purpose is to raise
+ * `SQLITE_CONSTRAINT_UNIQUE` so the caller can see the side effect already
+ * happened — into a trigger `ABORT` with a different code, and the attempt
+ * stopped being recognised as a duplicate. Refusing a write HQ itself depends
+ * on is the outcome this module ranks strictly WORSE than the hole it would
+ * close, the same trade `ledgerRowidGuardDdl` records for `sqlite_sequence`.
+ *
+ * So the enforcement is placed exactly where the audit found a real gap, and
+ * the CLASS is closed by execution instead of by installation:
+ * `unique-index-reentry.test.ts` enumerates `PRAGMA index_list` /
+ * `PRAGMA index_info` over ALL 33 declared ledgers and every write-once
+ * identity table, and drives a real `INSERT OR REPLACE` and a real
+ * `INSERT … ON CONFLICT … DO UPDATE` colliding on each unique index against
+ * that table's REAL schema and REAL triggers, with `recursive_triggers` off.
+ * A unique index added tomorrow with nothing holding it fails that test on the
+ * day it is added, and the test asserts the refusal by execution rather than by
+ * reading a trigger's text for a column name — which is the weaker claim
+ * `unboundedCheckpointColumns` is corrected for in this same round.
+ */
+function uniqueReentryTargets(): { table: string; triggerPrefix: string }[] {
+  return WRITE_ONCE_IDENTITY_TABLES.map((entry) => ({
+    table: entry.table,
+    triggerPrefix: entry.triggerPrefix,
+  }));
+}
+
+/**
+ * Install the derived unique-index guard everywhere the file declares one.
+ *
+ * Dropped and re-created rather than `IF NOT EXISTS`, for the reason
+ * `ensureLedgerRowidGuards` does the same: the clause is derived from the
+ * file's indexes, so a guard written against a file that has since gained or
+ * lost one must be rebuilt against the file as it now is. A table with no
+ * expressible secondary unique index ends with no such trigger, which is what
+ * `missingImmutabilityGuards` and `unguardedUniqueIndexes` both expect.
+ *
+ * Never fails a construction — the absence of the guard is the census's finding
+ * at the next boot, the rule every other ensure in this module follows.
+ */
+export function ensureUniqueReentryGuards(db: HqDatabase): void {
+  if (db.readonly) return;
+  for (const target of uniqueReentryTargets()) {
+    if (!tableIsPresent(db, target.table)) continue;
+    try {
+      db.exec(`DROP TRIGGER IF EXISTS trg_${target.triggerPrefix}_${UNIQUE_REENTRY_GUARD}`);
+      const ddl = uniqueReentryGuardDdl(db, target.table, target.triggerPrefix);
+      if (ddl !== null) db.exec(ddl);
+    } catch {
+      // A guard HQ could not install is a finding at the next census.
     }
   }
 }
@@ -3033,8 +3261,24 @@ function committedGreatest(db: HqDatabase, column: 'ledger_marks' | 'ledger_rows
  * hides it, so the finding lasted less than one process. A gap does not heal.
  * For a ledger HQ only ever appends to, rowids run 1..N with no holes, so
  * `top - rows` is zero and STAYS zero however much it grows; removing k rows
- * from anywhere raises it to k for ever, because SQLite hands the next append
- * `MAX(rowid) + 1` and never reissues a rowid a deleted row held.
+ * from anywhere raises it to k, and it stays raised.
+ *
+ * **Why it stays raised is a GUARD, not an engine property, and saying
+ * otherwise was false** (Wave 5 correction round fourteen, Medium 2). This
+ * sentence used to end "because SQLite hands the next append `MAX(rowid) + 1`
+ * and never reissues a rowid a deleted row held". SQLite does exactly that when
+ * it CHOOSES the rowid — and it reissues a freed rowid whenever a caller
+ * SUPPLIES one, which is the only case that matters here. Executed at
+ * `8481269`: delete rowid 2 from `hq_reliability_verdicts` and three processes
+ * report `append_only_guard_missing`; delete rowid 2 and then `INSERT` at rowid
+ * 2 with forged content and a fresh id, and all three report nothing. Phase
+ * 13's only durable mid-ledger-deletion detector healed for ONE extra
+ * statement. What holds it now is `no_rowid_reseat` — an `AFTER INSERT`
+ * identity clause on all 33 declared ledgers, which refuses a row that is not
+ * the greatest the ledger holds — and `no_rowid_move`, which refuses a row that
+ * changes position without entering. Both are declared, so their absence is a
+ * census finding rather than a silent one, and the refusal of a hole refill is
+ * executed on every one of the 33 in `ledger-row-position.test.ts`.
  *
  * **What widens the gap is not only a REMOVAL, and reading it as proof of one
  * fabricated a permanent finding** (Wave 5 correction round thirteen, High 1).
@@ -3448,7 +3692,7 @@ export function regressedImmutableLedgers(db: HqDatabase): string[] {
  * does not separate C from U: a hole that is refilled restores the count as
  * well as the gap, and nothing in the file distinguishes the refilled row from
  * the one it replaced. C is closed at the WRITE instead
- * (`LEDGER_ROWID_SEAT_GUARD`), which is why that guard exists rather than this
+ * (`LEDGER_ROWID_RESEAT_GUARD`), which is why that guard exists rather than this
  * reader being asked to carry the whole channel. It also never fires on a hole
  * that legitimately pre-dated the commitment — the committed row count already
  * counted the hole — so it cannot fabricate a finding on a file HQ has merely
@@ -4040,10 +4284,10 @@ export function structuralIntegrity(
   // gone BACKWARDS is a fact about the file as it now stands, so it is reported
   // however many restarts have happened — see `regressedImmutableLedgers`.
   const regressed = regressedImmutableLedgers(db);
-  // WHICH of the two acts the gap term reports, separated rather than blurred
-  // (Wave 5 correction round fourteen, High 1). The detail used to tell the
-  // Founder a named ledger held "fewer rows … or a gap where a row used to be"
-  // whichever had happened, including when nothing had been removed at all.
+  // WHICH of the two acts the gap term is reporting, separated rather than
+  // blurred (Wave 5 correction round fourteen, High 1). The detail used to tell
+  // the Founder a named ledger held "fewer rows … or a gap where a row used to
+  // be" whichever had happened, including when nothing had been removed at all.
   // Computed only when there is already a finding, so it costs a healthy store
   // nothing — see `committedRemovalsBelowMark`.
   const removals = regressed.length > 0 ? committedRemovalsBelowMark(db, regressed) : [];
@@ -4053,9 +4297,10 @@ export function structuralIntegrity(
       ? ` ${regressed.length} declared ledger(s) no longer stand as HQ's own durable checkpoint ` +
         `records them — fewer rows, a lower greatest row, or a wider gap between the greatest row and ` +
         `the number of rows held: ${regressed.join(', ')}. None of those can happen while HQ is the ` +
-        `only writer: the guards refuse a DELETE, and they refuse an INSERT at a row position the ` +
-        `engine would not itself have allocated — above the end of a ledger or back inside it. So ` +
-        `those tables were DROPPED and are back empty, or ` +
+        `only writer: the guards refuse a DELETE, they refuse an INSERT at a row position the ` +
+        `engine would not itself have allocated — above the end of a ledger or back inside it — and ` +
+        `they refuse a row already there from changing position. So those tables were DROPPED and are ` +
+        `back empty, or ` +
         `rows were removed from them, or a row was written into one at a position HQ never allocated — ` +
         `each with the guards temporarily gone. A row removed from the MIDDLE leaves the rest of the ` +
         `ledger where it was and is reported here for the gap it leaves; so is a row inserted past the ` +
@@ -4067,7 +4312,7 @@ export function structuralIntegrity(
           : `no ledger here is missing rows from below HQ's committed mark`) +
         (planted.length > 0
           ? `, and ${planted.join(', ')} still hold(s) every row HQ committed, so what changed there is ` +
-            `a row written at a position HQ never allocated rather than a removal`
+            `a row written or moved to a position HQ never allocated rather than a removal`
           : ``) +
         `. That reading does not separate a hole that was REFILLED from a ledger nothing touched; the ` +
         `refill is refused where it is written instead. Re-creating a ledger does not bring back what ` +

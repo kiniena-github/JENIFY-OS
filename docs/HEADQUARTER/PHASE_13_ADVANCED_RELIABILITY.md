@@ -3256,14 +3256,33 @@ false alarm for a false reassurance is not a fix. The evasion is pinned in
   emits (`COMMITMENT_SHAPE_CLAUSES` — a valid JSON object, declared table names
   as keys, non-negative integers as values), and the reader builds no JSON path
   out of a key a row carries and fails CLOSED rather than open when the engine
-  refuses it. **What remains** is the narrower thing this bullet used to
-  describe: with the guards temporarily dropped — the same three-statement price
-  every other residual here pays — a checkpoint committing a LARGER gap for a
-  named ledger than the file has raises that ledger's baseline and hides a later
-  deletion of it. Still fail-OPEN, still silent, still not a fabricated finding.
-  `no_overclaim` bounds marks and counts from above; it does not bound a gap from
-  below, because a legitimate gap cannot be distinguished from a claimed one at
-  write time.
+  refuses it. **The "what remains" sentence that stood here was itself wrong, in
+  the understating direction, on the page whose theme is that prices are
+  measured** (Wave 5 correction round fourteen, Medium 1). It said the narrower
+  route cost "the same three-statement price every other residual here pays",
+  and ended "`no_overclaim` bounds marks and counts from above; it does not bound
+  a gap from below, because a legitimate gap cannot be distinguished from a
+  claimed one at write time". Both halves were false. The route cost ONE
+  statement: an `INSERT` whose `ledger_rows` read `{hq_reliability_verdicts: 1}`
+  — a declared key, valid JSON, a non-negative integer at or below what the file
+  held, exactly the shape HQ's own writer emits — passed every clause, because
+  each clause bounded a VALUE and none bounded the DIFFERENCE the reader
+  consumes. Executed at `8481269`, control and attack identical but for that one
+  `INSERT`, over a mid-ledger delete of `hq_reliability_verdicts` rowid 2:
+  control `p2..p6 boot=true["append_only_guard_missing"] assess=true
+  release=refused`; attack `p2 boot=true assess=false[] release=ADMITTED` and
+  `p3..p6 boot=false[] assess=false[] release=ADMITTED`. And a legitimate gap
+  CAN be distinguished from a claimed one at write time, because HQ's own writer
+  commits `marks[t] = MAX(rowid)` and `rows[t] = COUNT(*)` from one reading: the
+  gap it commits IS the file's gap, so bounding the committed difference by
+  `MAX(rowid) − COUNT(*)` refuses the forgery and never refuses HQ. That clause
+  is now in the guard, gated on the commitment naming a row count for the ledger
+  so it is exactly as wide as `committedLedgerGaps` and no wider — a PARTIAL
+  commitment, a row count with no mark beside it, is still admitted. **What
+  remains** is the ordinary residual: with the guard temporarily dropped — three
+  statements, counted in `commitment-gap-bound.test.ts` — the same append lands
+  and the same silence follows. Still fail-OPEN, still silent, still not a
+  fabricated finding, and now priced at what it actually costs.
 - **A commitment written before this round carries no row count.** The
   `ledger_rows` column defaults to `'{}'` on existing rows, which is the truth
   about a row written before HQ committed any counts. The row-count and gap
@@ -4915,8 +4934,10 @@ hq_integrity_checkpoints`, replay the DDL out of `sqlite_master`, re-insert a
 PREFIX of the genuine rows, then PAD up to the mark `W` with copies of a
 surviving row at the erased rowids, changing only the UNIQUE `id`. Every
 commitment written back is one HQ itself made, so `no_overclaim` has nothing to
-refuse. Measured: 13 statements at `237fc76` (14 at this head, where the ledger
-carries `no_rowid_skip` as a seventh object to replay) took six genuine
+refuse. Measured: 13 statements at `237fc76` (14 at the round-thirteen head, where the
+ledger carries `no_rowid_skip` as a seventh object to replay, and 16 at this one,
+where round fourteen declared `no_rowid_reseat` and `no_rowid_move` beside it)
+took six genuine
 commitments to two plus four copies, with `rows === top === sqlite_sequence ===
 W`, `elided false`, `regressed []`, `truncated []`, `contradicted null`, and
 `p2`/`p3`/`p4` each `boot=false [] assess=false [] release=ADMITTED`.
@@ -4941,18 +4962,26 @@ on the merits, and both are recorded so a later round does not rediscover them:
    which `no_overclaim` permits because they stay under the file's real marks,
    and the invariant is then satisfied by construction.
 
-   > **CORRECTED IN ROUND FOURTEEN (Low 4).** This rejection used to LEAD with a
-   > second reason — that "two processes that read the same state before either
-   > writes produce two checkpoints committing identical quantities — an ordinary
-   > concurrent boot". **That was not reproduced.** Executed: three real
-   > concurrent processes over one file, six full assessments each, 22
-   > checkpoints, **0 identical**, because every assessment appends its own
-   > evidence entry inside the same reservation that writes its checkpoint, so
-   > each checkpoint commits a chain length and tip hash no other carries. The
-   > claim is not disproved in general — no schedule was shown to be impossible —
-   > but it was stated as fact on evidence that did not exist. The closure stays
-   > rejected, on the reason above, which does not depend on it, and the
-   > measurement is pinned in `reliability-commitment-prefix-replay.test.ts`.
+   It is ALSO rejected because two processes that read the same state before
+   either writes produce two checkpoints committing identical quantities — an
+   ordinary concurrent boot — so the check can raise a PERMANENT finding over an
+   untampered file.
+
+   > **RE-TESTED IN ROUND FOURTEEN (Low 4), and the verdict did not change.** A
+   > reviewer reported that second reason as NOT reproduced: three real
+   > concurrent processes x six assessments, 20 checkpoints, 0 identical.
+   > Re-running the same experiment found the reviewer's result reproducible AND
+   > its opposite reproducible: over **eight** runs, six produced no identical
+   > pair and **two did** — once inside the suite itself (21 checkpoints, 20
+   > distinct), once from a standalone driver (22 checkpoints, 21 distinct) —
+   > each time between DIFFERENT processes. So the collision is real and
+   > INTERMITTENT, the sentence stands, and the finding is not a defect. What
+   > this round adds is the frequency and a test written so that neither sample
+   > can be reported as the settled answer:
+   > `reliability-commitment-prefix-replay.test.ts` asserts only what is stable —
+   > that all three processes committed, that one process never commits the same
+   > quantities twice (the deterministic half), and that any identical pair is
+   > between different processes (the claim the closure rests on).
 2. **A content digest in the header's low bits.** Sixteen bits is a 65,536-way
    collision search an attacker runs offline in under a second. Widening it means
    either shrinking the signature — which round ten already measured as a real
@@ -5099,9 +5128,11 @@ taken on trust:
   re-created before the next boot is never observed missing, because the
   as-found census reads `sqlite_master` at construction time only.
 - **A file written by a build older than this one reports one boot of safe
-  mode.** Its ledgers carry no `no_rowid_skip` trigger, so the as-found census
-  reports `append_only_guard_missing`. That is the ordinary cost of declaring a
-  new guard — `no_overclaim` had exactly the same one — and a missing GUARD is
+  mode.** Its ledgers carry no `no_rowid_skip` trigger — and, since round
+  fourteen, no `no_rowid_reseat` or `no_rowid_move` either, nor the derived
+  `no_unique_reentry` guard on `op_tasks` — so the as-found census reports
+  `append_only_guard_missing`. That is the ordinary cost of declaring a new
+  guard — `no_overclaim` had exactly the same one — and a missing GUARD is
   cleared by ONE Founder assessment of the file as it then stands, because
   re-creating a trigger really does repair the file's guard set.
 - **The `sqlite_sequence` manufacture residual is unchanged and is now also a
@@ -5112,7 +5143,8 @@ taken on trust:
   seven recorded: the only bound available for that check is the number being
   written.
 - **A PADDED prefix replay of the commitment ledger is silent from the very next
-  boot** — 13 statements at `237fc76`, 14 at this head. Executed and asserted in
+  boot** — 13 statements at `237fc76`, 14 at the round-thirteen head, 16 at this
+  one, because the ledger's declared guard set grew by two. Executed and asserted in
   `reliability-commitment-prefix-replay.test.ts`, with the two candidate closures
   that were designed and rejected on the merits written out beside it. See HIGH 2
   above for why no predicate over the file's own content can close it.
@@ -5122,6 +5154,27 @@ taken on trust:
   `hq_mission_plan_items.task_id` names the task BY ID and there is no second key
   to resolve it by. Priced and asserted in `budget-scope-identity.test.ts`; the
   full record is on `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md`.
+
+  **That price was true of the `UPDATE` and was read as the price of the
+  DETACHMENT, which it was not** (Wave 5 correction round fourteen, High 2). The
+  same detachment was reachable in ONE statement by a different spelling:
+  `INSERT OR REPLACE INTO op_tasks` colliding on `idx_op_tasks_idem` at the
+  victim's own rowid. `REPLACE` deletes the standing row without firing
+  `BEFORE DELETE` while `recursive_triggers` is off — the engine default on
+  every ordinary connection — and `no_reidentify` is `BEFORE UPDATE OF id`, so
+  nothing fired. Executed at `8481269` on the shipped budget scene: the task's
+  `id` became `HIJACKED-TASK`, `governedBy` lost the mission, `permittedTiers`
+  widened from `['deterministic_local']` to all five, `budgetDecision` went
+  `blocked` → `within_ceiling`, and a `critical_review` write the exhausted
+  Founder ceiling had refused was ACCEPTED, with `missingImmutabilityGuards`
+  empty and `structuralIntegrity` silent. `hq_missions` fell to the same
+  statement on `UNIQUE(idempotency_key)`. Both are closed —
+  `trg_op_tasks_no_unique_reentry`, derived from the table's own indexes, and
+  `trg_hq_missions_no_replace_unique` — and the CLASS is closed by execution in
+  `unique-index-reentry.test.ts`, which drives a colliding `INSERT OR REPLACE`
+  and a bare `REPLACE` on every unique index of all 33 declared ledgers and
+  every write-once identity table. The three-statement `UPDATE` route above is
+  unchanged and is still the standing residual.
 - **A verdict row's FORGED finding name still reaches nothing, but the row still
   lands.** Appending to `hq_reliability_verdicts` is the write its guards
   deliberately permit; what round thirteen pins is that the name is dropped at the
@@ -5160,12 +5213,14 @@ Every price below is MEASURED at this head, not carried forward.
   What it produces is an UNGOVERNED task, which is what `createTask` produces
   for any task not linked to a mission; it is NOT an identity change, and the
   victim task's ceiling still binds, which is asserted rather than assumed.
-- **`replaceableKeysFor` is fail-OPEN for three index shapes** — an index whose
-  name is not a plain identifier, a key with an expression column, and a partial
-  unique index whose predicate cannot be read back out of `sqlite_master`. It
-  builds SQL and will not build SQL it cannot spell exactly. HQ's live schema
-  carries none of those shapes, which is asserted rather than assumed, so the
-  gap is disclosed rather than live.
+- **The derived unique-index guard installs no clause for three index shapes** —
+  an index whose column name is not a plain identifier, a key with an expression
+  column, and a partial index whose predicate is not exactly the NOT-NULL
+  conjunction the generated clause encodes. It builds SQL and will not build SQL
+  it cannot spell exactly. Such an index is REPORTED by
+  `unguardedUniqueIndexes` rather than skipped silently — which is why the
+  concurrent lane's derivation is the one the merge kept — and HQ's live schema
+  carries none of those shapes, asserted rather than assumed.
 - **The unauthenticated artifact publishes twenty Founder- and worker-typed
   fields**, unchanged in behaviour and now disclosed in full above. The
   derivation that keeps that table honest is complete for the METHODS the canary
@@ -5507,6 +5562,33 @@ erasure with no false positive on restart, `VACUUM`, `.backup()` or
 `VACUUM INTO`; and `frozen-constants-census.test.ts` (18) for the retained
 pre-freeze reference. 161 tests across those eleven files, 161 passed.
 
+
+> **MERGE NOTE.** Two round-fourteen lanes ran concurrently against the same
+> base and both audited the rowid channel. Both sections are kept below in full,
+> and the merged head carries the UNION of their guarantees with ONE
+> implementation of each shared fix. What the merge decided, in the two places
+> the lanes overlapped:
+>
+>  - **the bound from below** — both lanes wrote `no_rowid_reseat`, with the
+>    same name and the same `AFTER INSERT` timing. The OTHER lane's version is
+>    the implementation kept, because it comes with `no_rowid_move` and a
+>    `LEDGER_ROWID_GUARDS` declaration that closes the whole question of how a
+>    row's position changes rather than one further side of it. THIS lane's
+>    `NEW.rowid < 1` term is kept ON that clause, because the identity clause
+>    alone admits a plant at rowid -1 on an EMPTY ledger — where the plant IS
+>    the maximum — and a landed row at -1 bricks every auto-assigned append that
+>    follows. Both lanes' sweeps are kept, and the empty-ledger case is now
+>    swept on all 33.
+>  - **the replacement route on `op_tasks`** — both lanes closed
+>    `INSERT OR REPLACE`. The other lane's DERIVED `no_unique_reentry` is the
+>    implementation kept, because it REPORTS a unique index it cannot express
+>    (`unguardedUniqueIndexes`) where this lane's version skipped one silently.
+>    THIS lane's `no_erase` is kept beside it, because the other lane did not
+>    close the `DELETE` + `INSERT` route, which was live at TWO statements.
+>
+> Everything else in the two sections is disjoint. Both prices, both sweeps and
+> both residual lists stand as written, with the numbers this merge re-measured.
+
 ## Wave 5 correction round FOURTEEN — a bound with one side, a rowid the engine spells for itself, and an enumeration that was one of three
 
 Two fresh read-only hostile reviewers audited `f348f9a` independently and
@@ -5525,14 +5607,15 @@ artifact canary), and a curated method vocabulary standing for every write
 enumeration complete BY CONSTRUCTION, and make the pinning test enumerate the
 same way — and where it cannot be complete, say so plainly instead of writing a
 sentence that implies it is. Three such boundaries are now written down: what
-`committedRemovalsBelowMark` cannot separate, what `replaceableKeysFor` skips,
-and what the canary derivation does and does not cover.
+`committedRemovalsBelowMark` cannot separate, which unique-index shapes the
+derived guard reports instead of guarding, and what the canary derivation does
+and does not cover.
 
 | finding | verdict | where |
 |---|---|---|
-| **HIGH 1** — `no_rowid_skip` bounds only from above, so a mid-ledger deletion is laundered to a clean store by ONE further permitted `INSERT`; silent on 30 of 33 ledgers | **FIXED** at the write (`no_rowid_reseat` on all 33) and at the read (`committedRemovalsBelowMark` separates a removal from a plant); the three false docblocks and the `SAFE_MODE_STATEMENT` clause corrected | the HIGH 1/HIGH 2 section above |
+| **HIGH 1** — `no_rowid_skip` bounds only from above, so a mid-ledger deletion is laundered to a clean store by ONE further permitted `INSERT`; silent on 30 of 33 ledgers | **FIXED** at the write (`no_rowid_reseat` on all 33 — the concurrent lane's implementation, which also adds `no_rowid_move`) and at the read (`committedRemovalsBelowMark` separates a removal from a plant); the three false docblocks and the `SAFE_MODE_STATEMENT` clause corrected | the HIGH 1/HIGH 2 section above, and the merge note |
 | **HIGH 2** — one permitted `INSERT` at rowid `-1` bricks HQ's own appends, kill switch included | **FIXED**; the plant is refused, and `engageKillSwitch`, `releaseKillSwitch` and `assessHqIntegrity` now REFUSE rather than throw when HQ's own store will not take the append | the same section |
-| **HIGH 3** — a seventh budget-ceiling route: `op_tasks` carried one identity guard of three | **FIXED**; `WRITE_ONCE_IDENTITY_GUARDS` declares all three and the replacement guard's keys are derived from the file, partial unique index included | `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md` |
+| **HIGH 3** — a seventh budget-ceiling route: `op_tasks` carried one identity guard of three | **FIXED**; the table now declares all three — `no_reidentify`, the concurrent lane's derived `no_unique_reentry` (partial unique index included), and this lane's `no_erase` | `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md`, and the merge note |
 | **HIGH 4** — the unauthenticated artifact publishes far more Founder-typed text than the disclosure says, and the pin was vacuous | **FIXED as a disclosure**: measured at 20 of 34, the table above rewritten, the pin now plants every field and asserts the exact crossing set in both directions | the publication-surface section above |
 | **MEDIUM 1** — the `op_tasks` residual was priced 3x too high | **FIXED**; prices measured per route | `PHASE_14…md` |
 | **MEDIUM 2** — `facade-write-scan.test.ts` gated on a curated METHOD vocabulary | **ALREADY FIXED at the merged head** by the concurrent round-thirteen lane, which closed `WRITE_MARKERS` over the call graph; the surviving overstatement ("no curated vocabulary anywhere") is corrected to the true scope | the HIGH 4 row of the round-thirteen reconciliation, with its scope note |
@@ -5541,7 +5624,7 @@ and what the canary derivation does and does not cover.
 | **LOW 1** — `ledgerRowidGuardDdl` emits a one-argument `MAX()` with no `sqlite_sequence` | **FIXED** (latent, not reachable on a real HQ file); pinned on `hq_missions`, one of the five non-AUTOINCREMENT ledgers | `ledger-rowid-guard.test.ts` |
 | **LOW 2** — stale worked figures in `integrity-statement-truth.test.ts` | **FIXED**; 46/48/11 → 50/52/15, and the comment now says why the assertions never caught it | that file |
 | **LOW 3** — the `NEW.rowid` comment | **FIXED**; the value is deterministically the integer `-1`, and it is now MEASURED by a probe trigger rather than described | `ledger-rowid-guard.test.ts` |
-| **LOW 4** — "concurrent boots produce identical checkpoints" was not reproduced | **NOT A DEFECT in the verdict, FIXED as wording**: three real concurrent processes × six assessments, 22 checkpoints, 0 identical. The closure stays rejected on its other reason, which does not depend on it | `reliability-commitment-prefix-replay.test.ts` |
+| **LOW 4** — "concurrent boots produce identical checkpoints" was not reproduced | **NOT A DEFECT.** Re-running the reviewer's own experiment EIGHT times reproduced their result six times and its OPPOSITE twice: the collision is real and intermittent, between different processes. The sentence stands; what is added is the frequency, and a test that cannot report either sample as settled | `reliability-commitment-prefix-replay.test.ts` |
 | **LOW 5** — the credential-scan false-positive cost misses git branch names | **FIXED as a disclosure**; the class is real and NARROW, executed at 5 refused of 15, with the boundary measured on both sides | the LOW 2 row above, and `credential-scan-false-positive-class.test.ts` |
 | **LOW 6** — `registerExecutionWorker` throws on an omitted field | **FIXED**; it refuses `invalid_input` and never raises | `worker-registration.test.ts` |
 | **LOW 7** — `hq_projects` is unguarded and uncensused | **RECORDED, not closed**: measured effect on the budget derivation is NONE, and the property that makes that true is pinned so a future join fails there first | `PHASE_14…md` |
@@ -5550,5 +5633,221 @@ and what the canary derivation does and does not cover.
 scratch worktree at `8481269` and confirmed to FAIL there, with the reason
 recorded per finding. A mutation sweep was then run over every defence added or
 touched: **24 mutations, 24 killed**, with two survivors on the first pass — the
-primary-key fallback in `replaceableKeysFor` and the three-guard identity census
+primary-key fallback in this lane's own key derivation (retired at the merge in
+favour of the other lane's, which reports rather than skips) and the three-guard
+identity census
 — each given the pin that kills it rather than being reported as covered.
+
+## Wave 5 correction round FOURTEEN: how a row enters or moves, and the unique index nobody guarded
+
+A fresh independent read-only hostile review of `24ac1b7` returned **FAIL — 0
+Critical / 2 High / 2 Medium / 1 Low**, and named one shared root cause across
+High 1, Medium 2 and half of High 2: **an enumeration of how a row can enter or
+change position in a ledger that stops one spelling short.** That is the fifth
+consecutive round whose High is a partial enumeration, so this round closes the
+QUESTION rather than the instances.
+
+Every finding below was re-confirmed by execution at `8481269` — a
+fast-forward past the reviewed `24ac1b7` — before anything was changed, and the
+refusal after the change was executed at the same place.
+
+### The question, enumerated
+
+There are exactly three ways a row's position in a rowid table changes, and
+round thirteen closed one of them:
+
+| spelling | guard | closed in |
+|---|---|---|
+| a row ENTERS above the top | `no_rowid_skip` (`BEFORE INSERT`) | round thirteen |
+| a row ENTERS at or below the top — rowid 0, `-1`, any negative, a hole refill | `no_rowid_reseat` (`AFTER INSERT`) | **round fourteen** |
+| a row already present MOVES — `UPDATE … SET rowid`, `ON CONFLICT … DO UPDATE SET rowid` | `no_rowid_move` (`BEFORE UPDATE`) | **round fourteen** |
+
+All three are appended by `declaredGuardsFor`, so the set is complete BY
+CONSTRUCTION on all 33 declared ledgers: a ledger cannot be declared without
+declaring all three, `ensureLedgerRowidGuards` installs them by iterating
+`ENGINE_IMMUTABLE_TABLES` itself, and the live-schema equality pins in
+`reliability-durability.test.ts` require them to actually exist. A fourth
+spelling added tomorrow is added to `LEDGER_ROWID_GUARDS` and every probe that
+isolates a guard picks it up without being edited, because those probes iterate
+that constant.
+
+`VACUUM` was the fourth candidate and is measured rather than assumed: on SQLite
+3.53.2 it renumbers implicit rowids only for a table with NO primary key, and all
+33 declared ledgers declare one (28 an `INTEGER PRIMARY KEY`, five a `TEXT` one).
+Executed on every ledger's real schema in `ledger-row-position.test.ts`, with a
+no-primary-key control that DOES renumber so the reading is a fact about these
+schemas rather than about the engine build. `ALTER TABLE` renumbering needs DDL
+and is the standing DDL residual, unchanged.
+
+### HIGH 1 — one `INSERT` at `seq = 0` on `op_evidence` fabricated a permanent, unclearable safe mode
+
+`no_rowid_skip` is `NEW.rowid > 1 + MAX(top, sequence)` — one-sided by
+construction — and `verifyEvidenceChain` starts at `expectedSeq = 1` and returns
+`1` as soon as a lower seq sorts first. A `BEFORE INSERT` trigger cannot carry a
+lower bound, because SQLite reports an omitted rowid as the integer `-1` on
+AUTOINCREMENT and implicit-rowid tables alike, so `0`, `-1` and every negative
+are indistinguishable from "the engine will choose".
+
+Executed at `8481269` on a store that verified perfectly, one raw statement, no
+DDL privilege:
+
+```
+before          op_evidence {c:5, lo:1, hi:5}, four declared guards present
+INSERT INTO op_evidence (seq,...) VALUES (0,'ghost-row',...)   ACCEPTED
+after           op_evidence {c:6, lo:0, hi:5}, four guards still present
+verifyEvidenceChain -> 1
+p2/p3/p4        assess safeMode=true ["evidence_chain_broken"]
+```
+
+A full Founder assessment — the documented remedy — re-derives it, and the ghost
+row cannot be removed without DDL.
+
+**Closed** by `no_rowid_reseat`: `AFTER INSERT … WHEN NEW.rowid <> (SELECT
+MAX(rowid) FROM "<t>")`. The `AFTER` timing is what makes a lower bound
+expressible at all — it reads the rowid the row ACTUALLY took — and it is the
+same measurement that forced `no_overclaim` to `AFTER INSERT` in round thirteen.
+Executed before shipping, on `op_evidence`'s real schema and then on all 33:
+
+- refuses rowid `0`, `-1`, `-9`, a skip, and a REFILL of a freed rowid;
+- permits an ordinary append, a multi-row `VALUES` append, a multi-row
+  `INSERT … SELECT`, an explicit rowid AT the top, the engine's own next
+  allocation after a BURNED `AUTOINCREMENT` counter, and an append onto a ledger
+  that already holds a hole — so no ledger is brought to a stop and no older file
+  is bricked;
+- `RAISE(ABORT)` from `AFTER INSERT` persists nothing and burns no
+  `AUTOINCREMENT` value under `INSERT`, `INSERT OR REPLACE`, `OR IGNORE`,
+  `OR FAIL`, `OR ROLLBACK` and bare `REPLACE`, inside and outside an explicit
+  transaction — and an open transaction STAYS open, so `OR ROLLBACK` does not
+  become a way to discard a caller's other work.
+
+After: the same statement throws `op_evidence rowids are contiguous`, the log is
+byte-identical, `verifyEvidenceChain` returns `null`, and `p2/p3/p4` all read
+`boot=false [] assess=false []`.
+
+### MEDIUM 2 — a mid-ledger deletion DID heal, and the mechanism sentence was false
+
+`committedLedgerGaps`' docblock said SQLite "never reissues a rowid a deleted row
+held". It does, whenever a caller supplies one — which is the only case that
+matters. Executed at `8481269` on `hq_reliability_verdicts`:
+
+```
+delete rowid 2                      p2/p3/p4 boot=true ["append_only_guard_missing"]
+delete rowid 2, then INSERT at 2    ACCEPTED, {c:4,t:4}, p2/p3/p4 boot=false []
+```
+
+Phase 13's only durable mid-ledger-deletion detector healed for +1 statement.
+The same `no_rowid_reseat` clause refuses the refill, executed on all 33; the
+mechanism sentence now says the guard holds it rather than the engine, and the
+`SAFE_MODE_STATEMENT` clause — served verbatim on the **unauthenticated**
+`hq-snapshot.json` — no longer says "the gap it leaves in the rows is never
+filled" but "an engine guard refuses any later row that would fill the gap …
+Those are guards on this file, not properties of the engine: a writer that first
+removes them can fill the gap, and HQ says so rather than promising otherwise."
+
+### HIGH 2 — one `INSERT OR REPLACE` on a SECONDARY unique index rewrote a write-once identity
+
+`REPLACE` resolves a conflict on ANY unique index by DELETING the standing row,
+and it skips `BEFORE DELETE` triggers while `recursive_triggers` is off — the
+engine default, connection-scoped, and therefore true of every ordinary
+connection whatever HQ's own handle is set to. This codebase states that fact in
+ten other modules and applied it one table at a time. Both tables the branch
+declares a write-once identity for were bypassable at ONE statement:
+
+- **`op_tasks`** — the only member of `WRITE_ONCE_IDENTITY_TABLES` — carried no
+  `no_replace*` clause at all. On the shipped `intelligenceFixture` budget scene:
+  one `INSERT OR REPLACE` colliding on `idx_op_tasks_idem` at the victim's own
+  rowid took the proposal from `{scopes:["deployment","mission"],
+  tiers:["deterministic_local"], budgetDecision:"blocked"}` to
+  `{scopes:["deployment"], tiers:[all five], budgetDecision:"within_ceiling"}`,
+  and a `critical_review` write the exhausted Founder ceiling had REFUSED was
+  accepted — with `missingImmutabilityGuards []` and `structuralIntegrity
+  safeMode false`.
+- **`hq_missions`** declares `UNIQUE(idempotency_key)` and carried no
+  unique-index guard. Through the real facade from an ordinary connection: the
+  mission's `id` became `HIJACKED-MISSION` with every declared guard standing and
+  two later processes reading `safeMode false []`.
+
+**Closed, and the class with it.** `hq_missions` takes a declared
+`no_replace_unique` in its own module's DDL; `op_tasks` takes the DERIVED
+`no_unique_reentry` guard, built from `PRAGMA index_list` / `PRAGMA index_info`
+of the table as the file declares it, with `IS NOT NULL` on every indexed column
+and plain `=` equality — exactly the engine's own uniqueness rule, so it is
+neither wider nor narrower than the conflict it stands in for.
+
+**Installing that derived guard on all 33 declared ledgers was built, measured
+and REJECTED**, and the measurement is why: it pre-empts the engine's own
+`UNIQUE` conflict on the paths that legitimately rely on it. Run against the full
+suite it turned `action-gateway`'s side-effect deduplication — a plain `INSERT`
+colliding on `hq_action_events.side_effect_key`, whose whole purpose is to raise
+`SQLITE_CONSTRAINT_UNIQUE` so the caller can see the side effect already happened
+— into a trigger `ABORT` with a different code, and the attempt stopped being
+recognised as a duplicate. Refusing a write HQ itself depends on is the outcome
+this module ranks strictly worse than the hole, the same trade
+`ledgerRowidGuardDdl` records for `sqlite_sequence`.
+
+So the CLASS is closed by EXECUTION rather than by installation:
+`unique-index-reentry.test.ts` enumerates every unique index of all 33 declared
+ledgers and every write-once identity table from `PRAGMA index_list` /
+`PRAGMA index_info` on a copy of the live schema — every table, index and trigger
+a real file has, with `recursive_triggers` at the engine default of OFF — and
+drives a colliding `INSERT OR REPLACE` and a bare `REPLACE` on each, requiring an
+abort with the standing row byte-identical afterwards. A unique index added
+tomorrow with nothing holding it fails that file on the day it is added, and it
+fails because the engine accepted a forgery rather than because a regex did not
+find a column name in a trigger's text.
+
+### MEDIUM 1 — the gap baseline was poisoned by ONE permitted append, not three statements
+
+Recorded in full on the bullet it corrects, above. In short: `no_overclaim`
+bounded `ledger_marks` and `ledger_rows` from above and nothing bounded the
+DIFFERENCE `committedLedgerGaps` consumes, so a commitment carrying HQ's own
+marks and a lower row count for one ledger passed every clause at ONE statement
+— and the page said that route cost three. The guard now bounds the committed
+gap by the file's own `MAX(rowid) − COUNT(*)`, gated on the commitment naming a
+row count for that ledger so it is exactly as wide as the reader and no wider.
+The sentence is corrected as well as the code.
+
+### LOW 1 — `unboundedCheckpointColumns` derives NAMED, not BOUNDED
+
+The check is `new RegExp("\\bNEW\\." + column + "\\b").test(triggerSql)`, and the
+docblock claimed it established that a column added tomorrow "is either BOUNDED
+by a clause that names it or named here". It establishes the weaker thing. The
+claim is now stated at its real width, with the reason the stronger check is not
+attempted (evaluating a SQL expression out of a trigger's text is a parser this
+module does not have and will not pretend to), and the executed enumeration in
+`commitment-overclaim.test.ts` is named as what actually establishes the bound.
+Two real defects in the match are fixed rather than only described: the
+interpolated `.` was an unescaped metacharacter, so `NEWXseq` satisfied the check
+for `seq`; and SQL comments are now stripped, so a column named only in a `--`
+or block comment is reported. Both are executed in
+`commitment-gap-bound.test.ts`, together with a test that ASSERTS the honest
+limit — a clause that names every deciding column and bounds nothing satisfies
+the derivation — so the docblock can never quietly claim otherwise again.
+
+### What round fourteen adds to the NOT-fixed list
+
+- **All five new guards are steps, not boundaries**, at the same three-statement
+  price as every other engine guard here: `DROP TRIGGER`, the write, re-create.
+  A guard re-created before the next boot is never observed missing, because the
+  as-found census reads `sqlite_master` at construction time only.
+- **The derived unique-index guard is installed on the write-once identity
+  tables only.** The 33 declared ledgers keep the hand-written
+  `no_replace_unique`-family guards they already carry; the class is held by an
+  executed test rather than by an installed clause, for the measured reason
+  above. That is a real difference and it is stated rather than smoothed over: a
+  unique index added to a declared ledger tomorrow is CAUGHT by a failing test on
+  the day it is added, not COVERED by a guard on that day.
+- **The unique-index guards refuse the `DO UPDATE` branch too, and that is
+  deliberate.** A `BEFORE INSERT` trigger fires before conflict resolution, so
+  `trg_op_tasks_no_unique_reentry` and `trg_hq_missions_no_replace_unique` abort
+  `REPLACE`, `INSERT OR REPLACE` and `ON CONFLICT … DO UPDATE` alike on the
+  indexes they name — including a `DO UPDATE` that would only have touched an
+  ordinary column. Measured on both tables. No path in this repository upserts
+  either one (`createTask` looks the idempotency key up first; `commandMission`
+  inserts), and both real writers are driven in `unique-index-reentry.test.ts`
+  to show they are untouched; a future writer that wants an upsert here has to
+  change the declaration rather than discover this.
+- **`VACUUM` is measured, not guaranteed.** No trigger sees it. The reading
+  above rests on every declared ledger having a primary key, which is asserted per
+  ledger in `ledger-row-position.test.ts`; a future ledger declared without one
+  would be renumbered by a single `VACUUM`, and that test is what would say so.

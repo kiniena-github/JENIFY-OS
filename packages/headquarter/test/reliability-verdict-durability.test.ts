@@ -477,9 +477,23 @@ describe('destroying the audit log is a finding, not silence', () => {
         WHEN NEW.rowid > 1 + MAX(COALESCE((SELECT MAX(rowid) FROM "op_evidence"), 0),
                                  COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'op_evidence'), 0))
         BEGIN SELECT RAISE(ABORT, 'op_evidence rowids are contiguous'); END;
+        -- And the OTHER two position guards, which the declaration gained in
+        -- Wave 5 correction round fourteen (High 1, Medium 2). Same reason
+        -- again, stated once: this test is about a census with NOTHING to
+        -- report, so the rebuild must satisfy every guard the schema declares
+        -- or it would pass for the wrong reason. The set is three now because
+        -- "may not enter above the top" turned out to be one of three spellings
+        -- of the same question.
+        -- The rowid-under-one term is this lane's, kept at the merge: on an EMPTY ledger
+        -- a plant at rowid -1 IS the maximum, so the identity clause alone
+        -- admits it — and a landed row at -1 bricks every auto-assigned append
+        -- that follows. See ledgerRowidReseatGuardDdl in store/integrity.ts.
         CREATE TRIGGER trg_op_evidence_no_rowid_reseat AFTER INSERT ON op_evidence
         WHEN NEW.rowid < 1 OR NEW.rowid <> (SELECT MAX(rowid) FROM "op_evidence")
-        BEGIN SELECT RAISE(ABORT, 'op_evidence rowids are append-only'); END;
+        BEGIN SELECT RAISE(ABORT, 'op_evidence rowids are contiguous'); END;
+        CREATE TRIGGER trg_op_evidence_no_rowid_move BEFORE UPDATE ON op_evidence
+        WHEN NEW.rowid <> OLD.rowid
+        BEGIN SELECT RAISE(ABORT, 'op_evidence rowids are contiguous'); END;
       `);
       // Nothing is missing by the guard census, and every check that lives
       // INSIDE the log — links, seq contiguity from 1, the `sqlite_sequence`

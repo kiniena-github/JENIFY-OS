@@ -41,7 +41,7 @@ import { HeadquarterOperations } from '../src/application/service.js';
 import {
   ENGINE_IMMUTABLE_TABLES,
   LEDGER_ROWID_GUARD,
-  LEDGER_ROWID_SEAT_GUARD,
+  LEDGER_ROWID_RESEAT_GUARD,
   committedRemovalsBelowMark,
   declaredGuardsFor,
   declaredLedgerIdentities,
@@ -439,7 +439,7 @@ describe('an INSERT at a rowid the engine has already passed is refused', () => 
       }[];
       return ENGINE_IMMUTABLE_TABLES.map((entry) => {
         const create = objects.find((row) => row.type === 'table' && row.name === entry.table);
-        const guards = [LEDGER_ROWID_GUARD, LEDGER_ROWID_SEAT_GUARD].map((guard) => {
+        const guards = [LEDGER_ROWID_GUARD, LEDGER_ROWID_RESEAT_GUARD].map((guard) => {
           const found = objects.find(
             (row) => row.type === 'trigger' && row.name === `trg_${entry.triggerPrefix}_${guard}`,
           );
@@ -499,7 +499,7 @@ describe('an INSERT at a rowid the engine has already passed is refused', () => 
             insert.run([seat, ...values()]);
             accepted.push(`${entry.table}@empty${seat}`);
           } catch (error) {
-            expect(String((error as Error).message)).toContain('rowids are append-only');
+            expect(String((error as Error).message)).toContain('rowids are contiguous');
           }
         }
         // Three ordinary appends, so the ledger has a middle to reseat into and
@@ -516,7 +516,7 @@ describe('an INSERT at a rowid the engine has already passed is refused', () => 
             insert.run([reseat, ...values()]);
             accepted.push(`${entry.table}@${reseat}`);
           } catch (error) {
-            expect(String((error as Error).message)).toContain('rowids are append-only');
+            expect(String((error as Error).message)).toContain('rowids are contiguous');
           }
         }
         // And the ordinary next append is still taken, at the top, so the
@@ -585,7 +585,7 @@ describe('an INSERT at a rowid the engine has already passed is refused', () => 
              VALUES (?, ${columns.map(() => '?').join(', ')})`,
           )
           .run([victim, ...columns.map((column) => whole[column] as never)]),
-      ).toThrow(/rowids are append-only/);
+      ).toThrow(/rowids are contiguous/);
       expect(regressedImmutableLedgers(raw)).toEqual([table]);
       // Nor by any other spelling of the same reseat.
       for (const spelling of ['INSERT OR REPLACE', 'INSERT OR IGNORE']) {
@@ -596,7 +596,7 @@ describe('an INSERT at a rowid the engine has already passed is refused', () => 
                VALUES (?, ${columns.map(() => '?').join(', ')})`,
             )
             .run([victim, ...columns.map((column) => whole[column] as never)]),
-        ).toThrow(/rowids are append-only/);
+        ).toThrow(/rowids are contiguous/);
       }
       raw.close();
 
@@ -650,7 +650,7 @@ describe('an INSERT at a rowid the engine has already passed is refused', () => 
                 column === 'id' ? (`planted-${spelling}` as never) : (seed[column] as never),
               ),
             ),
-        ).toThrow(/rowids are append-only/);
+        ).toThrow(/rowids are contiguous/);
       }
       expect(
         (raw.prepare(`SELECT COUNT(*) AS n FROM op_evidence WHERE seq < 1`).get() as { n: number })
@@ -739,12 +739,12 @@ describe('an INSERT at a rowid the engine has already passed is refused', () => 
       db.exec(
         `CREATE TRIGGER ledger_seat AFTER INSERT ON "ledger"
          WHEN NEW.rowid < 1 OR NEW.rowid <> (SELECT MAX(rowid) FROM "ledger")
-         BEGIN SELECT RAISE(ABORT, 'ledger rowids are append-only'); END;`,
+         BEGIN SELECT RAISE(ABORT, 'ledger rowids are contiguous'); END;`,
       );
       db.prepare(`INSERT INTO ledger (v) VALUES ('c')`).run();
       expect((db.prepare(`SELECT COUNT(*) AS n FROM ledger`).get() as { n: number }).n).toBe(3);
       expect(() => db.prepare(`INSERT INTO ledger (rowid, v) VALUES (-1, 'plant')`).run()).toThrow(
-        /rowids are append-only/,
+        /rowids are contiguous/,
       );
     } finally {
       db.close();
@@ -819,7 +819,7 @@ describe('an INSERT at a rowid the engine has already passed is refused', () => 
              VALUES (-1, ${columns.map(() => '?').join(', ')})`,
           )
           .run(columns.map((column) => distinctFiller(column.type, 3) as never)),
-      ).toThrow(/rowids are append-only/);
+      ).toThrow(/rowids are contiguous/);
     } finally {
       db.close();
     }
@@ -918,7 +918,7 @@ describe('a removal below the committed mark is told apart from an append past i
       const posture = process.ops.hqReliabilityPosture().integrity;
       const detail = posture.observations.map((observation) => observation.detail).join(' ');
       expect(detail).toContain('no ledger here is missing rows from below');
-      expect(detail).toContain('a row written at a position HQ never allocated');
+      expect(detail).toContain('a row written or moved to a position HQ never allocated');
       process.db.close();
     } finally {
       planted.cleanup();

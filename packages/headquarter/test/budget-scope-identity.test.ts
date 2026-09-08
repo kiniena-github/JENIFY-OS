@@ -50,10 +50,10 @@ import {
   ENGINE_IMMUTABLE_TABLES,
   WRITE_ONCE_IDENTITY_TABLES,
   declaredGuardsFor,
-  declaredIdentityGuardsFor,
+  declaredGuardsForIdentityTable,
+  ensureUniqueReentryGuards,
   ensureWriteOnceIdentityGuards,
-  writeOnceIdentityGuardDdl,
-  WRITE_ONCE_IDENTITY_GUARDS,
+  secondaryUniqueIndexes,
   missingImmutabilityGuards,
   structuralIntegrity,
 } from '../src/store/integrity.js';
@@ -317,17 +317,19 @@ describe('the identity guards are declared, so their absence is a finding', () =
     // updated on almost every column — so it is declared in the identity list.
     expect(ENGINE_IMMUTABLE_TABLES.map((candidate) => candidate.table)).not.toContain('op_tasks');
     expect(WRITE_ONCE_IDENTITY_TABLES.map((candidate) => candidate.table)).toEqual(['op_tasks']);
-    // ALL THREE spellings, since round fourteen's High 3: round thirteen
-    // declared `no_reidentify` alone under a header that named "every way a
-    // row's identity can change", and `INSERT OR REPLACE` (one statement) and
-    // `DELETE` + `INSERT` (two) were both live and both cheaper than the
-    // `UPDATE` it closed.
-    expect(declaredIdentityGuardsFor(WRITE_ONCE_IDENTITY_TABLES[0]!)).toEqual([
+    // ALL THREE spellings, since round fourteen's High 3 and the concurrent
+    // lane's High 2, merged: round thirteen declared `no_reidentify` alone
+    // under a header that named "every way a row's identity can change", and
+    // `INSERT OR REPLACE` (one statement, through the SECONDARY unique index)
+    // and `DELETE` + `INSERT` (two) were both live and both cheaper than the
+    // `UPDATE` it closed. The replacement half is the concurrent lane's derived
+    // `no_unique_reentry`, kept as the one implementation of that fix; the
+    // erase half is this lane's `no_erase`, which that lane did not close.
+    expect(declaredGuardsForIdentityTable(WRITE_ONCE_IDENTITY_TABLES[0]!)).toEqual([
       'trg_op_tasks_no_reidentify',
+      'trg_op_tasks_no_unique_reentry',
       'trg_op_tasks_no_erase',
-      'trg_op_tasks_no_replace',
     ]);
-    expect([...WRITE_ONCE_IDENTITY_GUARDS]).toEqual(['no_reidentify', 'no_erase', 'no_replace']);
   });
 
   /** Frozen all the way down, for the reason `ENGINE_IMMUTABLE_TABLES` is. */
@@ -406,7 +408,7 @@ describe('every spelling of an op_tasks identity change is refused', () => {
                 column === 'id' ? (`replaced-${attempt}` as never) : (row[column] as never),
               ),
             ),
-        ).toThrow(/op_tasks rows are not replaced/);
+        ).toThrow(/op_tasks unique keys are write-once/);
       }
       expect((raw.prepare(`SELECT COUNT(*) AS n FROM op_tasks`).get() as { n: number }).n).toBe(
         rowsBefore,
@@ -452,7 +454,9 @@ describe('every spelling of an op_tasks identity change is refused', () => {
    * enumeration is exactly the kind that misses one.
    *
    * Asserted against the LIVE schema, so an index added by a later migration
-   * either enters the guard or fails here.
+   * either enters the guard or is REPORTED as inexpressible — the merged
+   * mechanism fails closed by reporting rather than by skipping, which is why
+   * it is the implementation the merge kept.
    */
   it('derives the replaceable key set from the file, partial unique index included', () => {
     const current = scene();
@@ -461,42 +465,31 @@ describe('every spelling of an op_tasks identity change is refused', () => {
       const guard = (
         raw
           .prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`)
-          .get('trg_op_tasks_no_replace') as { sql: string }
+          .get('trg_op_tasks_no_unique_reentry') as { sql: string }
       ).sql;
-      expect(guard).toContain('"capability_id" = NEW."capability_id"');
-      expect(guard).toContain('"idempotency_key" = NEW."idempotency_key"');
-      expect(guard).toContain('idempotency_key IS NOT NULL');
-      expect(guard).toContain('"id" = NEW."id"');
+      expect(guard).toContain('capability_id');
+      expect(guard).toContain('idempotency_key');
 
-      // Every UNIQUE index the live file carries on this table is named by the
-      // guard, and none of them is one of the shapes `replaceableKeysFor`
-      // deliberately skips — which is what makes the skip a disclosed gap
-      // rather than a live one.
-      const indexes = raw.prepare(`PRAGMA index_list("op_tasks")`).all() as {
-        name: string;
-        unique: number;
-        partial: number;
-      }[];
-      const unique = indexes.filter((index) => index.unique === 1);
-      expect(unique.length).toBeGreaterThan(0);
-      for (const index of unique) {
-        const columns = (
-          raw.prepare(`PRAGMA index_info("${index.name}")`).all() as { name: string | null }[]
-        ).map((column) => column.name);
-        expect(columns.every((column) => column !== null), `${index.name} has an expression column`)
-          .toBe(true);
-        for (const column of columns) expect(guard).toContain(`"${column}" = NEW."${column}"`);
-        if (index.partial === 1) {
-          const sql = (
-            raw
-              .prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`)
-              .get(index.name) as { sql: string | null }
-          ).sql;
-          expect(sql, `${index.name} is partial and its predicate must be readable`).toMatch(
-            /\)\s*WHERE\s+/i,
-          );
-        }
+      // Every SECONDARY unique index the live file carries on this table is in
+      // the derived set and is expressible, so the disclosed fail-closed skip is
+      // a disclosed gap rather than a live one.
+      const derived = secondaryUniqueIndexes(current.fx.db, 'op_tasks');
+      expect(derived.length).toBeGreaterThan(0);
+      for (const index of derived) {
+        expect(index.expressible, `${index.name} must be expressible`).toBe(true);
+        for (const column of index.columns) expect(guard).toContain(column);
       }
+      const live = (
+        raw.prepare(`PRAGMA index_list("op_tasks")`).all() as {
+          name: string;
+          unique: number;
+          origin: string;
+        }[]
+      ).filter((index) => index.unique === 1 && index.origin !== 'pk');
+      expect(derived.map((index) => index.name).sort()).toEqual(
+        live.map((index) => index.name).sort(),
+      );
+      expect(derived.map((index) => index.name)).toContain('idx_op_tasks_idem');
     } finally {
       current.fx.db.close();
     }
@@ -517,15 +510,15 @@ describe('every spelling of an op_tasks identity change is refused', () => {
         (
           raw
             .prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`)
-            .get('trg_op_tasks_no_replace') as { sql: string }
+            .get('trg_op_tasks_no_unique_reentry') as { sql: string }
         ).sql;
-      expect(guardSql()).not.toContain('"claim_nonce" = NEW."claim_nonce"');
+      expect(guardSql()).not.toContain('claim_nonce');
       raw.exec(`CREATE UNIQUE INDEX zz_op_tasks_nonce ON op_tasks(claim_nonce)`);
-      ensureWriteOnceIdentityGuards(raw as never);
+      ensureUniqueReentryGuards(current.fx.db);
       expect(
         guardSql(),
         'a unique key added after the last construction must enter the guard',
-      ).toContain('"claim_nonce" = NEW."claim_nonce"');
+      ).toContain('claim_nonce');
       expect(missingImmutabilityGuards(raw as never)).toEqual([]);
     } finally {
       current.fx.db.close();
@@ -539,7 +532,7 @@ describe('every spelling of an op_tasks identity change is refused', () => {
    * which is how a guard goes missing quietly.
    */
   it('reports each of the three identity guards as missing when it is dropped', () => {
-    for (const guard of declaredIdentityGuardsFor(WRITE_ONCE_IDENTITY_TABLES[0]!)) {
+    for (const guard of declaredGuardsForIdentityTable(WRITE_ONCE_IDENTITY_TABLES[0]!)) {
       const current = scene();
       try {
         const raw = current.fx.db as unknown as Database.Database;
@@ -562,37 +555,41 @@ describe('every spelling of an op_tasks identity change is refused', () => {
   });
 
   /**
-   * The primary key is read from `PRAGMA table_info` as well as from the
-   * indexes, because an `INTEGER PRIMARY KEY` is the rowid alias and the engine
-   * materialises no auto-index for it. `op_tasks` has a `TEXT PRIMARY KEY`, so
-   * on the shipped schema the auto-index covers it and the fallback is
-   * invisible — which the round-fourteen mutation sweep found by removing it
-   * and breaking nothing. Measured directly instead, on the shape that needs
-   * it.
+   * The DERIVED half, on the shape it exists for.
+   *
+   * Two lanes closed the REPLACEMENT route in round fourteen and the merge kept
+   * ONE implementation — the concurrent lane's `no_unique_reentry`, derived
+   * from `PRAGMA index_list` / `index_info` over the SECONDARY unique indexes.
+   * That is the right one to keep: it reports an index it cannot express
+   * (`unguardedUniqueIndexes`) rather than skipping it silently, which is
+   * strictly better than the fail-open skip this lane had written.
+   *
+   * What this probe holds is the property BOTH lanes needed: the index the
+   * exploit ran through is PARTIAL, so a guard derived from total indexes alone
+   * — or written out by hand from the primary key — would have missed it
+   * entirely.
    */
-  it('names an INTEGER PRIMARY KEY, which carries no auto-index of its own', () => {
-    const db = new Database(':memory:');
+  it('derives the replacement guard from the PARTIAL unique index the exploit used', () => {
+    const current = scene();
     try {
-      db.exec(`CREATE TABLE zz_rowid_pk (id INTEGER PRIMARY KEY, v TEXT)`);
-      expect(
-        (db.prepare(`PRAGMA index_list("zz_rowid_pk")`).all() as unknown[]).length,
-        'this probe is only meaningful on a table with no index at all',
-      ).toBe(0);
-      const ddl = writeOnceIdentityGuardDdl(db as never, {
-        table: 'zz_rowid_pk',
-        triggerPrefix: 'zz_rowid_pk',
-        column: 'id',
-      });
-      const replace = ddl.find((text) => text.includes('no_replace'));
-      expect(replace, 'the replacement guard must be emitted').toBeDefined();
-      expect(replace!).toContain('"id" = NEW."id"');
-      for (const text of ddl) db.exec(text);
-      db.prepare(`INSERT INTO zz_rowid_pk (id, v) VALUES (1, 'a')`).run();
-      expect(() =>
-        db.prepare(`INSERT OR REPLACE INTO zz_rowid_pk (id, v) VALUES (1, 'b')`).run(),
-      ).toThrow(/zz_rowid_pk rows are not replaced/);
+      const raw = current.fx.db as unknown as Database.Database;
+      const indexes = secondaryUniqueIndexes(current.fx.db, 'op_tasks');
+      const partial = indexes.find((index) => index.name === 'idx_op_tasks_idem');
+      expect(partial, 'the index the exploit used must be in the derived set').toBeDefined();
+      expect(partial!.columns).toEqual(['capability_id', 'idempotency_key']);
+      expect(partial!.expressible, 'and it must be expressible, or it is only reported').toBe(true);
+      const guard = (
+        raw
+          .prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`)
+          .get('trg_op_tasks_no_unique_reentry') as { sql: string }
+      ).sql;
+      expect(guard).toContain('capability_id');
+      expect(guard).toContain('idempotency_key');
+      // Idempotent, and rebuilt against the file rather than remembered.
+      ensureUniqueReentryGuards(current.fx.db);
+      expect(missingImmutabilityGuards(raw as never)).toEqual([]);
     } finally {
-      db.close();
+      current.fx.db.close();
     }
   });
 
@@ -652,7 +649,7 @@ describe('what the guards do NOT close, executed at the price the disclosure sta
       },
       {
         name: 'INSERT OR REPLACE',
-        guards: ['trg_op_tasks_no_replace'],
+        guards: ['trg_op_tasks_no_unique_reentry'],
         run: (raw, taskId) => {
           const row = raw.prepare(`SELECT * FROM op_tasks WHERE id = ?`).get(taskId) as Record<
             string,
