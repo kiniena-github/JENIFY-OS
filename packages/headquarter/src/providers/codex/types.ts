@@ -7,6 +7,7 @@
  */
 
 import type { ProviderId, Role } from '../../routing/index.js';
+import { deepFreeze } from '../../contracts/freeze.js';
 
 // ---------------------------------------------------------------------------
 // Review request
@@ -38,10 +39,10 @@ export interface CodexReviewRequest {
 
 export type ReviewVerdict = 'PASS' | 'BLOCK';
 
-export const FINDING_SEVERITIES = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as const;
+export const FINDING_SEVERITIES = deepFreeze(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as const);
 export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
 
-export const FINDING_CATEGORIES = ['correctness', 'security', 'testing', 'performance', 'maintainability', 'other'] as const;
+export const FINDING_CATEGORIES = deepFreeze(['correctness', 'security', 'testing', 'performance', 'maintainability', 'other'] as const);
 export type FindingCategory = (typeof FINDING_CATEGORIES)[number];
 
 export interface ReviewFinding {
@@ -94,7 +95,7 @@ export interface CodexEvidence {
   usage: Record<string, number> | null;
 }
 
-export const EMPTY_EVIDENCE: CodexEvidence = {
+export const EMPTY_EVIDENCE: CodexEvidence = deepFreeze({
   modelProvider: null,
   actualModel: null,
   cliVersion: null,
@@ -104,7 +105,7 @@ export const EMPTY_EVIDENCE: CodexEvidence = {
   attestedRepoUrl: null,
   cwd: null,
   usage: null,
-};
+});
 
 // ---------------------------------------------------------------------------
 // Outcome

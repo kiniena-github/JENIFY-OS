@@ -31,6 +31,7 @@ import type { TaskState } from '../model.js';
 import type { FounderDashboard, ProjectBoardCard, WorkerStatus } from '../views.js';
 import type { Tone } from '../components.js';
 import { HQ_FLOOR, ROLE_ZONE, UNREGISTERED_ZONE, type Zone } from './world.js';
+import { deepFreeze } from '../../contracts/freeze.js';
 
 /**
  * What an occupant is doing, in the floor's own vocabulary.
@@ -48,7 +49,7 @@ export type OccupantActivity =
   | 'complete'
   | 'offline';
 
-export const ACTIVITY_PRESENTATION: Record<OccupantActivity, { label: string; tone: Tone }> = {
+export const ACTIVITY_PRESENTATION: Record<OccupantActivity, { label: string; tone: Tone }> = deepFreeze({
   working: { label: 'Working', tone: 'info' },
   reviewing: { label: 'In review', tone: 'violet' },
   queued: { label: 'Queued', tone: 'neutral' },
@@ -56,7 +57,7 @@ export const ACTIVITY_PRESENTATION: Record<OccupantActivity, { label: string; to
   awaiting_founder: { label: 'Waiting on Founder', tone: 'warn' },
   complete: { label: 'Last task completed', tone: 'accent' },
   offline: { label: 'Offline', tone: 'neutral' },
-};
+});
 
 /**
  * Canonical task status → floor activity.
@@ -65,7 +66,7 @@ export const ACTIVITY_PRESENTATION: Record<OccupantActivity, { label: string; to
  * later fails to compile here rather than silently falling through to a
  * cheerful default.
  */
-export const STATUS_ACTIVITY: Record<ActivityStatus, OccupantActivity> = {
+export const STATUS_ACTIVITY: Record<ActivityStatus, OccupantActivity> = deepFreeze({
   queued: 'queued',
   assigned: 'working',
   running: 'working',
@@ -75,13 +76,13 @@ export const STATUS_ACTIVITY: Record<ActivityStatus, OccupantActivity> = {
   outcome_unknown: 'blocked',
   needs_approval: 'awaiting_founder',
   completed: 'complete',
-};
+});
 
 /** Activities that mean a screen is lit and a figure is in motion. */
-export const ANIMATED_ACTIVITIES: readonly OccupantActivity[] = ['working', 'reviewing'];
+export const ANIMATED_ACTIVITIES: readonly OccupantActivity[] = deepFreeze(['working', 'reviewing']);
 
 /** Activities that put a room into the Founder's attention set. */
-export const ATTENTION_ACTIVITIES: readonly OccupantActivity[] = ['blocked', 'awaiting_founder'];
+export const ATTENTION_ACTIVITIES: readonly OccupantActivity[] = deepFreeze(['blocked', 'awaiting_founder']);
 
 export interface Occupant {
   /** Worker id from the canonical log or registry. */
@@ -123,12 +124,12 @@ export interface Fixture {
 /** How alive a room is. Derived, never asserted. */
 export type ZoneLiveness = 'active' | 'attention' | 'quiet' | 'unstaffed';
 
-export const LIVENESS_PRESENTATION: Record<ZoneLiveness, { label: string; tone: Tone }> = {
+export const LIVENESS_PRESENTATION: Record<ZoneLiveness, { label: string; tone: Tone }> = deepFreeze({
   active: { label: 'Active', tone: 'info' },
   attention: { label: 'Needs attention', tone: 'warn' },
   quiet: { label: 'Quiet', tone: 'neutral' },
   unstaffed: { label: 'Unstaffed', tone: 'neutral' },
-};
+});
 
 export interface ZoneState {
   zone: Zone;
@@ -606,8 +607,8 @@ function liveness(occupants: readonly Occupant[], fixtures: readonly Fixture[]):
  * claim, and the two can never collide to be arbitrated in the first place.
  * (Codex exact-head review of `936a682`, P2.)
  */
-export const WORKER_STATION_KINDS = ['desk', 'review_bay'] as const;
-export const FIXTURE_STATION_KINDS = ['uplink', 'bay', 'stack', 'bench', 'console', 'table'] as const;
+export const WORKER_STATION_KINDS = deepFreeze(['desk', 'review_bay'] as const);
+export const FIXTURE_STATION_KINDS = deepFreeze(['uplink', 'bay', 'stack', 'bench', 'console', 'table'] as const);
 
 /**
  * How badly a thing needs one of a room's limited stations.
@@ -617,7 +618,7 @@ export const FIXTURE_STATION_KINDS = ['uplink', 'bay', 'stack', 'bench', 'consol
  * 1 — it is positive evidence: active work, a lit fixture.
  * 2 — everything else. Its absence from the plan asserts nothing.
  */
-export const SEAT_PRIORITY = { attention: 0, positive: 1, ordinary: 2 } as const;
+export const SEAT_PRIORITY = deepFreeze({ attention: 0, positive: 1, ordinary: 2 } as const);
 
 /*
  * The four predicates below are the SINGLE definition of "needs attention"

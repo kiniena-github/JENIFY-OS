@@ -40,9 +40,10 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { deepFreeze } from '../../contracts/freeze.js';
 
 /** `owner/repo`, the only repository identity this module accepts. */
-export const REPO_SLUG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+export const REPO_SLUG_PATTERN = deepFreeze(/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/);
 
 /**
  * The ONE host this lane will publish to (issue #221, Codex P1 on `1d5b3bf`).

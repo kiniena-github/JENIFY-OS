@@ -109,6 +109,7 @@ import {
   type GitHubLabelResult,
   type GitHubTarget,
 } from './transport.js';
+import { deepFreeze } from '../../contracts/freeze.js';
 
 /** The only provider this adapter will ever dispatch. */
 export const DISPATCH_PROVIDER: ProviderId = 'CLAUDE';
@@ -118,13 +119,13 @@ export const DISPATCH_PROVIDER: ProviderId = 'CLAUDE';
  * a typo in a string literal would silently defeat the duplicate-dispatch guard,
  * which is the one guard whose failure costs a duplicate public issue.
  */
-export const CLAUDE_DISPATCH_EVIDENCE = {
+export const CLAUDE_DISPATCH_EVIDENCE = deepFreeze({
   refused: 'claude_github_dispatch_refused',
   attempted: 'claude_github_dispatch_attempted',
   succeeded: 'claude_github_dispatch_succeeded',
   failed: 'claude_github_dispatch_failed',
   correlated: 'claude_github_result_correlated',
-} as const;
+} as const);
 
 /** Actor recorded on evidence written by this adapter. Never a human's name. */
 export const DISPATCH_ACTOR = 'hq-claude-dispatch';

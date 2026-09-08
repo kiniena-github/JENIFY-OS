@@ -31,7 +31,48 @@
  * level in: `entry.secondaryGuards.length = 0` was reachable while the array
  * that held `entry` was frozen. Cycles are handled, so a self-referential
  * declaration cannot make this recurse forever.
+ *
+ * **"ALL THE WAY DOWN" was NOT TRUE OF A `Set` OR A `Map`, and the sentence
+ * that said so is corrected here rather than restated** (Wave 5 correction
+ * round seven, Medium NEW-5). A collection's ENTRIES are not own properties, so
+ * `Reflect.ownKeys` never reaches them and `Object.freeze` does not touch them:
+ * a frozen `Set` accepts `.add()`, `.delete()` and `.clear()` exactly as an
+ * unfrozen one does. Both of this package's `Set` vocabularies were reachable
+ * that way — `QUEUED_UNREACHABLE_STATUSES`, which `service.ts` decides a task's
+ * reachability on, and `QUERY_STOPWORDS`. `.delete()` on the first is the same
+ * class of exploit as `ENGINE_IMMUTABLE_TABLES.length = 0`: it narrows a
+ * closed vocabulary a decision is keyed by, without touching a single frozen
+ * property.
+ *
+ * So a collection is frozen in CONTENT as well as in shape: its entries are
+ * recursed into, and its mutators are replaced with own, non-configurable
+ * properties that THROW — the same failure mode a write to a frozen property
+ * has under ESM's always-strict semantics. Reading (`has`, `get`, `size`,
+ * iteration) is untouched, because reading is what a vocabulary is for.
  */
+const SET_MUTATORS: readonly string[] = Object.freeze(['add', 'delete', 'clear']);
+const MAP_MUTATORS: readonly string[] = Object.freeze(['set', 'delete', 'clear']);
+
+/**
+ * Replace a collection's mutators with throwing stubs, in place.
+ *
+ * Own, non-writable, non-configurable and non-enumerable: they shadow the
+ * prototype methods for this instance only, they survive the `Object.freeze`
+ * that follows, and they do not show up in an enumeration of the value.
+ */
+function refuseCollectionMutation(target: object, kind: 'Set' | 'Map'): void {
+  for (const name of kind === 'Set' ? SET_MUTATORS : MAP_MUTATORS) {
+    Object.defineProperty(target, name, {
+      value: () => {
+        throw new TypeError(`Cannot call ${name} on a frozen ${kind}`);
+      },
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    });
+  }
+}
+
 export function deepFreeze<T>(value: T, seen: WeakSet<object> = new WeakSet()): T {
   if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return value;
   const target = value as unknown as object;
@@ -44,6 +85,18 @@ export function deepFreeze<T>(value: T, seen: WeakSet<object> = new WeakSet()): 
     // this function's business.
     if (!descriptor || !('value' in descriptor)) continue;
     deepFreeze(descriptor.value, seen);
+  }
+  // The two containers whose contents live outside their own properties. Done
+  // BEFORE `Object.freeze`, because a frozen object takes no new property.
+  if (target instanceof Set) {
+    for (const entry of target as Set<unknown>) deepFreeze(entry, seen);
+    refuseCollectionMutation(target, 'Set');
+  } else if (target instanceof Map) {
+    for (const [key, entry] of target as Map<unknown, unknown>) {
+      deepFreeze(key, seen);
+      deepFreeze(entry, seen);
+    }
+    refuseCollectionMutation(target, 'Map');
   }
   return Object.freeze(value);
 }
