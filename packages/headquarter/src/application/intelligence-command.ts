@@ -2545,7 +2545,7 @@ function foldSpend(
     // `"a b"` with no currency and `"a"` with currency `"b"` would collapse into
     // one bogus group. U+001F is a character neither an identity nor a currency
     // code can contain.
-    const composite = `${id}${currency ?? ''}`;
+    const composite = `${id}\u001f${currency ?? ''}`;
     const entry = byKey.get(composite) ?? {
       id,
       currency,

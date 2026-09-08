@@ -808,10 +808,13 @@ export function deriveProductRecord(input: {
 
   const latestOf = new Map<string, number>();
   for (const artifact of input.artifacts) {
-    // U+001F UNIT SEPARATOR, not a raw NUL: a literal 0x00 makes this file
-    // binary to grep/git grep/ripgrep, which then skip its content entirely.
+    // U+001F UNIT SEPARATOR, written as an ESCAPE: a literal 0x00 makes this
+    // file binary to grep/git grep/ripgrep, which then skip its content
+    // entirely, and a RAW 0x1F is invisible to a reader even though git still
+    // treats the file as text. The separator was raw here until round seven's
+    // derived source-hygiene assertion found it (Low NEW-7's own class).
     // Same runtime value; the file stays greppable (Wave 5 Medium 10).
-    const line = `${artifact.kind}${artifact.name}`;
+    const line = `${artifact.kind}\u001f${artifact.name}`;
     latestOf.set(line, Math.max(latestOf.get(line) ?? 0, artifact.version));
   }
   const limit = Math.min(
@@ -830,7 +833,7 @@ export function deriveProductRecord(input: {
     note: artifact.note,
     recordedBy: artifact.recordedBy,
     recordedAt: artifact.recordedAt,
-    latest: latestOf.get(`${artifact.kind}${artifact.name}`) === artifact.version,
+    latest: latestOf.get(`${artifact.kind}\u001f${artifact.name}`) === artifact.version,
     digestStatement: ARTIFACT_DIGEST_STATEMENT,
   }));
 

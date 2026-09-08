@@ -123,7 +123,7 @@ describe('untrusted metadata', () => {
   });
 
   it('strips control characters and bidi overrides from titles', () => {
-    const item = normalized({ kind: 'issue', number: 9, title: 'a\u0000b‮cd' });
+    const item = normalized({ kind: 'issue', number: 9, title: 'a\u0000b\u202Ec\u0007d' });
     expect(item.title).toBe('a b c d');
   });
 });

@@ -197,7 +197,50 @@ export class BrowserSafetyError extends Error {
  * matched on the raw string anyway.
  */
 const ERASED_CODE_POINTS =
-  /[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Cc}\p{Zl}\p{Zp}͏⠀]/gu;
+  /[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Cc}\p{Zl}\p{Zp}\p{Mn}\p{Me}\p{Cn}͏⠀]/gu;
+
+/**
+ * Combining marks, removed from a DECOMPOSED copy before anything else runs.
+ *
+ * **The zero-ink sweep left three whole categories carrying a credential shape
+ * past the guard, and two of them were disclosed nowhere** (Wave 5 correction
+ * round seven, the undisclosed sweep residuals). `\p{Mn}` (1,796 code points),
+ * `\p{Me}` (13) and `\p{Cn}` unassigned (810,961) each broke
+ * `sk-ABCDEFGHIJKLMNOP0123` into two unmatched halves with every character of
+ * the key intact. U+0301 COMBINING ACUTE ACCENT and U+0378 (unassigned) are the
+ * two the review named, and neither appeared in any residual list.
+ *
+ * A combining mark is exactly the class this scan exists for: it leaves every
+ * credential character present, and a reader strips the mark — `sk-Á…` is read,
+ * copied and pasted as `sk-A…`. `\p{Cn}` is the same argument one step further:
+ * an unassigned code point has no glyph, so it carries no meaning a reader
+ * could act on, and prose does not contain it.
+ *
+ * **Why this is a SEPARATE step rather than three more entries in the erase
+ * set.** The erase runs LAST, after `NFKC` — and `NFKC` COMPOSES a base letter
+ * and its mark into a single precomposed character, so by the time the erase
+ * runs `A` + U+0301 is `Á`, which is `Lu` and not `Mn`. Removing the mark
+ * therefore has to happen on the DECOMPOSED form: `NFKD` first, marks out,
+ * then the ordinary pipeline. The categories are in the erase set as well,
+ * which catches the marks NFKD leaves standing on a base with no precomposed
+ * form (a digit, for instance).
+ *
+ * **What this costs, bounded rather than hoped.** Accented prose folds to
+ * unaccented prose in the SCAN COPY only — the original string is what is
+ * refused or published, exactly as for every other fold here. Stripping a mark
+ * removes characters; it cannot introduce a letter, so it cannot build `sk-`,
+ * `ghp_`, `AIza`, a PEM header, `Bearer ` or a JWT out of prose that did not
+ * already carry them. `live-redaction.test.ts`'s twelve legitimate strings and
+ * the round-seven suite's accented prose are both pinned against it.
+ *
+ * `\p{Zs}` is STILL not folded, on the argument that has not changed: a space
+ * is visible, so it hides nothing.
+ */
+const COMBINING_MARKS = /[\p{Mn}\p{Me}]/gu;
+
+function stripCombiningMarks(value: string): string {
+  return value.normalize('NFKD').replace(COMBINING_MARKS, '');
+}
 
 /**
  * The hyphen family, folded to ASCII `-`.
@@ -329,7 +372,7 @@ function foldConfusableLetters(value: string): string {
  */
 function normalizeForScan(value: string): string {
   return foldConfusableLetters(
-    value.normalize('NFKC').replace(HYPHEN_CONFUSABLES, '-'),
+    stripCombiningMarks(value).normalize('NFKC').replace(HYPHEN_CONFUSABLES, '-'),
   ).replace(ERASED_CODE_POINTS, '');
 }
 

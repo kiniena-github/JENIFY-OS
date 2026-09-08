@@ -1920,11 +1920,48 @@ survived it.
   out of ordinary text — `['task', '-oriented-workflow-item']` would be refused
   as an OpenAI key. Every candidate rule was a worse trade than the hole. It is
   stated on `assertBrowserSafe` itself.
+- **Round seven closed two UNDISCLOSED classes of the zero-ink sweep, and
+  re-states the third.** The set named five properties and two code points and
+  argued `\p{Zs}` out on the merits, but `\p{Mn}` non-spacing marks (1,796 code
+  points), `\p{Me}` enclosing marks (13) and `\p{Cn}` unassigned (810,961) were
+  in neither the set nor any residual list. Each broke
+  `sk-ABCDEFGHIJKLMNOP0123` into two unmatched halves with every character of
+  the key intact; U+0301 and U+0378 are the two the review named, and both were
+  disclosed nowhere. A combining mark is exactly the class this scan exists for
+  — it leaves the credential complete and a reader strips the mark — so both are
+  CLOSED rather than disclosed: marks are removed from an `NFKD`-decomposed copy
+  BEFORE the pipeline runs (because `NFKC` composes base + mark into a
+  precomposed letter, which is `Lu` and no longer `Mn` by the time the erase
+  runs), and all three categories join the erase set as well. Measured after the
+  fix: 1,809 marks swept, 0 survivors; 815 sampled unassigned code points, 0
+  survivors. False positives are measured rather than assumed — accented prose
+  in five languages plus every legitimate string the shipped suite pins still
+  pass, and the fold is a SCAN COPY, so what is stored and served is
+  byte-unchanged. `\p{Zs}` is still not folded, on the argument that has not
+  changed: a space is visible, so it hides nothing.
 - **A prefix that runs straight into a credential shape with no separator at all
   (`KEYsk-…`) is still not matched.** `(?<![A-Za-z0-9])` deliberately does not
   fire inside a letter run, because `task-oriented-approach` literally contains
   `sk-oriented-approach`. Anchoring is a heuristic; the architecture —
-  credentials never enter the control plane — is the guarantee.
+  credentials never enter the control plane — is the guarantee. Executed and
+  still open at round seven: `Xsk-…` and `9sk-…` reach a written
+  `hq-snapshot.json`.
+- **Round seven, Low NEW-7 — a source file the repository's own tooling could
+  not read, and a fix from an earlier round that had not actually been
+  applied.** `test/connectors.github.test.ts` carried a raw U+0007 BEL at byte
+  4903 and a raw U+202E beside it, so `git diff` rendered it `Bin 9424 -> 9429
+  bytes` — the exact hazard the NUL two characters earlier had been escaped to
+  avoid. Both are escaped now and that change renders as one line out, one line
+  in. The derived assertion that replaces the hand check
+  (`test/source-text-hygiene.test.ts`, every `.ts` file in `src/` and `test/`)
+  then found FOUR more raw U+001F separators in `src/application/
+  product-command.ts`, `src/application/intelligence-command.ts` and
+  `src/live/auth.ts` — each sitting under a comment from Wave 5 Medium 10
+  claiming the separator had been written so "the file stays greppable". The
+  comment described a fix that was not applied: git only treats a file as binary
+  on a NUL, so the file was greppable, but the separator was still an invisible
+  raw control character in source. All four are escapes now, same runtime value,
+  and the comments say what the code does.
 - **The chain-tip commitment is a barrier, not a cryptographic boundary.** A
   writer that already holds the file open can append a correctly-hashed entry,
   and can destroy `hq_integrity_checkpoints` and the evidence log together. **The

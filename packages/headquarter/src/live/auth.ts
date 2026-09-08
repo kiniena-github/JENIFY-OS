@@ -536,10 +536,13 @@ export function loadFounderBindings(raw: unknown): FounderMapResult {
           'A guessed username or email is never accepted in their place.',
       };
     }
-    // U+001F UNIT SEPARATOR, not a raw NUL: a literal 0x00 makes this file
-    // binary to grep/git grep/ripgrep, which then skip its content entirely.
+    // U+001F UNIT SEPARATOR, written as an ESCAPE: a literal 0x00 makes this
+    // file binary to grep/git grep/ripgrep, which then skip its content
+    // entirely, and a RAW 0x1F is invisible to a reader even though git still
+    // treats the file as text. The separator was raw here until round seven's
+    // derived source-hygiene assertion found it (Low NEW-7's own class).
     // Same runtime value; the file stays text (Wave 5 Medium 10).
-    const accountKey = `${realmId}${accountId}`;
+    const accountKey = `${realmId}\u001f${accountId}`;
     if (seenAccounts.has(accountKey)) {
       return {
         ok: false,

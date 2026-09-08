@@ -1431,6 +1431,18 @@ cross-reference:
   spelling already is. The bound that holds for the MERGED fold — and the two
   keywords (`apikey` and `cookie`) a modern Cyrillic alphabet can spell — is
   computed and disclosed in the Phase 13 residual list.
+- **Round seven widened the same scan to combining marks and unassigned code
+  points, and it reaches every write on this phase's surfaces.** `\p{Mn}`,
+  `\p{Me}` and `\p{Cn}` each carried a credential shape past the guard —
+  U+0301 and U+0378 among them — and none of the three was disclosed anywhere.
+  Marks are now stripped from an `NFKD` copy before the pipeline runs and all
+  three categories join the erase set; the fold is a SCAN COPY, so accented text
+  a Founder writes is stored and served byte-unchanged. Measured after the fix:
+  0 survivors over 1,809 marks and 815 sampled unassigned code points, and no
+  new refusal on accented prose in five languages. What is still open and
+  disclosed on both pages: a word character running straight into the prefix
+  (`Xsk-…`, `9sk-…`) reaches a written `hq-snapshot.json`, and `\p{Zs}` is
+  deliberately not folded.
 
 **Verification at the round-five merged head** (the whole matrix, all green,
 exit 0): `npm run test:hq` 166 files / 3192 tests; `npm test` (root) 37 files /
