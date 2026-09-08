@@ -123,6 +123,14 @@ describe('untrusted metadata', () => {
   });
 
   it('strips control characters and bidi overrides from titles', () => {
+    // Every one of the four written as an ESCAPE (Wave 5 correction round six,
+    // Low 6; the same finding arrived independently as round seven's Low
+    // NEW-7). \u0000 was escaped while the bidi override and the bell beside
+    // it were raw, so the fixture read as three characters in a source viewer,
+    // one of them re-ordered the line around it, and `git diff` rendered the
+    // whole file as `Bin 9424 -> 9429 bytes`. `test/source-text-hygiene.test.ts`
+    // is the derived assertion that keeps every .ts file in this package free
+    // of raw control characters and raw bidi controls.
     const item = normalized({ kind: 'issue', number: 9, title: 'a\u0000b\u202Ec\u0007d' });
     expect(item.title).toBe('a b c d');
   });

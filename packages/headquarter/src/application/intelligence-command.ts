@@ -768,6 +768,7 @@ export function ensureIntelligenceSchema(db: HqDatabase): void {
   if (db.readonly) return;
   db.exec(INTELLIGENCE_DDL);
   ensureCostEntryBindingColumn(db);
+  ensureCostEntryScopeColumns(db);
 }
 
 /**
@@ -797,6 +798,39 @@ function ensureCostEntryBindingColumn(db: HqDatabase): void {
   const columns = db.prepare(`PRAGMA table_info(hq_intel_cost_entries)`).all() as { name: string }[];
   if (!columns.some((column) => column.name === 'provider_bound')) {
     db.exec(`ALTER TABLE hq_intel_cost_entries ADD COLUMN provider_bound INTEGER`);
+  }
+}
+
+/**
+ * EVERY mission and project HQ derived for the entry's task at record time,
+ * not just the one that happened to sort first.
+ *
+ * Added by ALTER for the same reason `provider_bound` was, and to close the
+ * fourth route of the same nullification (Wave 5 correction round six, High 3).
+ * `mission_id` and `project_id` store `canonicalScopes.missionIds[0] ?? null`,
+ * so every reader that unions canonical membership with the stored column had a
+ * union that was complete only for the first-sorting scope. A task linked to two
+ * missions could have the OTHER mission's project ceiling nullified by moving
+ * that mission to a different project — `assignMissionToProject`, a supported
+ * facade call reachable with `hq.mission_command` alone, no approval authority
+ * and no intelligence grant. The victim project went from `blocked, observed
+ * 5000` to `within_ceiling, observed 0`, the refused decision was recorded, and
+ * the published report then credited the 5000 to the escape project, which had
+ * spent nothing.
+ *
+ * NULL means "recorded before these columns existed". Such a row reports its
+ * single column, which is exactly what it committed to — the same fail-honest
+ * reading `provider_bound` takes, and not a claim that the row was filed under
+ * nothing.
+ */
+function ensureCostEntryScopeColumns(db: HqDatabase): void {
+  const columns = db.prepare(`PRAGMA table_info(hq_intel_cost_entries)`).all() as { name: string }[];
+  const present = new Set(columns.map((column) => column.name));
+  if (!present.has('mission_ids')) {
+    db.exec(`ALTER TABLE hq_intel_cost_entries ADD COLUMN mission_ids TEXT`);
+  }
+  if (!present.has('project_ids')) {
+    db.exec(`ALTER TABLE hq_intel_cost_entries ADD COLUMN project_ids TEXT`);
   }
 }
 
@@ -1861,6 +1895,26 @@ export interface CostEntryRow {
    * the fail-closed reading.
    */
   providerBound: boolean;
+  /**
+   * EVERY mission HQ derived for this entry's task at the moment it recorded
+   * the entry, and every project those missions belonged to.
+   *
+   * `missionId`/`projectId` above hold ONE of N — `canonicalScopes.missionIds[0]`
+   * — and a task can legitimately be linked to several missions. Every reader
+   * that unioned canonical membership with the single column therefore had a
+   * union that was complete only for the mission or project that sorted first,
+   * and the other one's ceiling could be nullified by moving ITS mission to
+   * another project: no raw SQL, `hq.mission_command` alone, victim ceiling
+   * `blocked/observed 5000` → `within_ceiling/observed 0`, and the previously
+   * refused decision recorded (Wave 5 correction round six, High 3).
+   *
+   * HQ-derived, never caller-supplied, on an append-only row — so this is
+   * monotone and unforgeable in exactly the way the single columns were meant
+   * to be. On a row recorded before these columns existed the arrays are the
+   * single columns, which is what that row actually committed to.
+   */
+  missionIds: string[];
+  projectIds: string[];
   modelId: string | null;
   fact: CostFact;
   unitsObserved: number | null;
@@ -2013,6 +2067,25 @@ function rowToOutcome(r: Record<string, unknown>): DecisionOutcomeRow {
   };
 }
 
+/**
+ * The recorded scope-id set for one cost row: the JSON array column when the
+ * row carries one, UNION the single legacy column, de-duplicated and sorted.
+ *
+ * Union rather than "array if present, column otherwise", because the two can
+ * only ever agree — HQ writes the column from the array's first element — and a
+ * union is the fail-CLOSED reading if they ever did not: a scope named by
+ * either is a scope this spend was filed under, and a ceiling that has been
+ * charged stays charged.
+ */
+function recordedScopeIds(arrayColumn: unknown, singleColumn: unknown): string[] {
+  const ids = new Set<string>();
+  for (const value of jsonArray(arrayColumn)) {
+    if (typeof value === 'string' && value !== '') ids.add(value);
+  }
+  if (typeof singleColumn === 'string' && singleColumn !== '') ids.add(singleColumn);
+  return [...ids].sort();
+}
+
 function rowToCostEntry(r: Record<string, unknown>): CostEntryRow {
   return {
     seq: r.seq as number,
@@ -2026,6 +2099,14 @@ function rowToCostEntry(r: Record<string, unknown>): CostEntryRow {
     // `ensureCostEntryBindingColumn`: null (an older row) is the fail-closed
     // reading, never the convenient one.
     providerBound: Number(r.provider_bound) === 1,
+    // The FULL recorded attribution, with the single column folded in. A row
+    // written before `ensureCostEntryScopeColumns` existed carries no array, and
+    // what it committed to is exactly its one column — so that is what it
+    // reports, rather than nothing. A forged array is no more reachable than a
+    // forged `mission_id` was: both are HQ-derived columns on an append-only
+    // table, and only non-empty strings are taken.
+    missionIds: recordedScopeIds(r.mission_ids, r.mission_id),
+    projectIds: recordedScopeIds(r.project_ids, r.project_id),
     modelId: (r.model_id as string | null) ?? null,
     fact: readStoredCostFact({
       provenance: r.provenance,
@@ -2704,13 +2785,20 @@ export function summarizeIntelligenceAnalytics(input: {
       // "every mission this task belongs to NOW", and the recorded column
       // answers "the mission this spend was filed under", which no later
       // relinking can take away (Medium M5, and High H2's observation half).
+      //
+      // The recorded half is `missionIds`/`projectIds` — EVERY scope HQ derived
+      // at record time — and not the single `missionId`/`projectId` column,
+      // which holds one of N and made the union complete only for the
+      // first-sorting scope (Wave 5 correction round six, High 3). With the
+      // single column, moving the other mission to a fresh project credited the
+      // whole 5000 to a project that had spent nothing.
       byMission: foldSpendMany(input.costs, (row) => [
         ...input.canonicalScopesOf(row.taskId).missionIds,
-        ...(row.missionId ? [row.missionId] : []),
+        ...row.missionIds,
       ]),
       byProject: foldSpendMany(input.costs, (row) => [
         ...input.canonicalScopesOf(row.taskId).projectIds,
-        ...(row.projectId ? [row.projectId] : []),
+        ...row.projectIds,
       ]),
     },
     provablyAvoidable: {

@@ -220,14 +220,35 @@ describe('POST /command-center/brief — the one write', () => {
 
   it('refuses a body that names an actor, before anything is written', () => {
     const h = harness();
-    for (const key of ['requestedBy', 'actor', 'principalId', 'founderId', 'by', 'role']) {
+    // `issuedBy` joined the reserved set in the Wave 5 correction round six
+    // (Medium 7). It used to be accepted with a 201 — attributed to the mapped
+    // principal, so no authority ever moved, but the module's stated rule is
+    // that a client naming who is acting is REFUSED rather than ignored,
+    // "so a client that believes it can name a principal learns immediately
+    // that it cannot". `issuedBy` is the facade's own parameter name for that
+    // principal, so a 201 taught the opposite.
+    for (const key of [
+      'requestedBy',
+      'actor',
+      'principalId',
+      'founderId',
+      'by',
+      'role',
+      'issuedBy',
+      'setBy',
+      'observedBy',
+      'recordedBy',
+      'assessedBy',
+    ]) {
       const response = h.call({ path: CONTROL_ROUTES.commandCenterBrief, body: { [key]: 'mallory' } });
       expect(response.status, key).toBe(400);
       expect((response.body.error as { code: string }).code, key).toBe('client_identity_supplied');
     }
-    // `issuedBy` is not on the identity allow-list and is simply ignored: the
-    // receipt is attributed to the mapped principal regardless of the body.
-    const attributed = h.call({ path: CONTROL_ROUTES.commandCenterBrief, body: { issuedBy: 'mallory' } });
+    // Nothing was written by any of them.
+    expect(count(h.fixture, 'hq_briefs')).toBe(0);
+    // And a body key that names no principal at all is still simply ignored,
+    // so the widening did not turn into "refuse every unknown key".
+    const attributed = h.call({ path: CONTROL_ROUTES.commandCenterBrief, body: { headline: 'mallory' } });
     expect(attributed.status).toBe(201);
     expect((attributed.body.brief as { issuedBy: string }).issuedBy).toBe('founder');
     expect(count(h.fixture, 'hq_briefs')).toBe(1);

@@ -92,7 +92,17 @@
  *    `UPDATE sqlite_sequence` read clean. `sqlite_sequence` carries no triggers
  *    and cannot be brought under the census — it is an internal SQLite table —
  *    so what closes that is the commitment, which lives in a ledger that DOES
- *    carry the guards and IS censused.
+ *    carry the guards. **"And IS censused" was the half that did not hold**
+ *    (Wave 5 correction round six, High 1): the census reads `sqlite_master` at
+ *    construction time, and this header's own sentence two lines up says a
+ *    trigger dropped and re-created before the next boot is never observed
+ *    missing — so the SAME three statements emptied the witness ledger, and
+ *    both of its readers read the very rows deleted. Executed: boot clean, full
+ *    Founder assessment clean, `releaseKillSwitch` admitted. What makes the
+ *    ledger genuinely censused is `truncatedImmutableLedgers`, which generalises
+ *    the `MAX(rowid)` versus `sqlite_sequence` comparison this function already
+ *    makes for `op_evidence` to EVERY declared AUTOINCREMENT ledger and reports
+ *    `append_only_ledger_truncated`, blocking, at both depths.
  *
  * **And two further claims are corrected, from the other round-four lane:**
  *
@@ -161,19 +171,59 @@
  * because every commitment ever recorded is checked and the per-ledger
  * comparison takes the maximum.
  *
- * What SURVIVES, executed: the same in-place wipe with that invariant repaired
- * — the replacement inserted at an explicit `seq = 1`, then one `UPDATE
- * sqlite_sequence` for that ledger, which no trigger can guard. Measured
- * `boot=false assess=false release=ADMITTED`. The cheaper one-statement repair,
- * DELETING that `sqlite_sequence` row instead, was tried too and buys only the
- * process that follows: the assessment it was aiming to pass is itself the next
+ * What SURVIVES, and it is CHEAPER than the round-five text said (Wave 5
+ * correction round seven, Low 2). That text priced the surviving repair at "the
+ * replacement inserted at an explicit `seq = 1`, then one `UPDATE
+ * sqlite_sequence` for that ledger". The version WITHOUT the `sqlite_sequence`
+ * half was never executed, and the wave's own rule is that a residual is a
+ * load-bearing claim whose named barrier has to be removed and watched to fail
+ * before the sentence is written. Removed, it does not fail.
+ *
+ * The surviving path is a COUNT-PRESERVING in-place rewrite, and it needs no
+ * `sqlite_sequence` write, no explicit rowid, no `DELETE` and no `INSERT`. On
+ * each engine-guarded ledger the forgery touches: drop the ONE `BEFORE UPDATE`
+ * trigger, `UPDATE` the rows where they stand, re-create that one trigger. The
+ * row count, the greatest rowid and the AUTOINCREMENT high-water mark are all
+ * untouched, so `elidedCommitmentLedgerRows` answers `false` by construction.
+ * Executed end to end — an `op_evidence` entry's kind and payload rewritten in
+ * place and the chain re-hashed, then the commitments updated to agree —
+ * `p2/p3/p4 boot=false assess=false release=ADMITTED`, permanently.
+ *
+ * Worse for the round-five text than that: the path it DID name is caught on
+ * any file carrying more than one commitment. Collapsing three commitment rows
+ * to one regresses that ledger's own recorded high-water mark, and `p2` came
+ * back `boot=true assess=true release=safe_mode_engaged`. It was measured on a
+ * single-commitment file, where the collapse is invisible.
+ *
+ * The one-statement variant — DELETING the `sqlite_sequence` row after an
+ * elision — stays correctly priced: it buys the process that follows and no
+ * more, because the assessment it was aiming to pass is itself the next
  * commitment, which re-creates the mark from the surviving rowid and breaks the
- * identity again (`p3 boot=true assess=true release=refused`, permanently). So
- * the cost is one explicit rowid and one extra `UPDATE`, across two
- * engine-guarded ledgers and a census that reports a drop at the boot that
- * observes it — a real cost, and still not a cryptographic boundary. Dropping
- * `hq_integrity_checkpoints` outright is still the other route, and still costs
+ * identity again (`p3 boot=true assess=true release=refused`, permanently).
+ *
+ * So the honest cost of the surviving forgery is ONE `DROP TRIGGER` and its
+ * re-creation per engine-guarded ledger, plus one `UPDATE` per ledger. No
+ * census reports anything, because nothing is dropped and no row disappears.
+ * That is a step, not a boundary, and no row-count invariant can close it — the
+ * count is exactly what this version preserves. Dropping
+ * `hq_integrity_checkpoints` outright remains the other route, and still costs
  * the restart and the second Founder act the round-five text priced it at.
+ *
+ * The other round-six lane reproduced the DELETE-and-re-seat wipe independently
+ * — the one two paragraphs up, not the count-preserving rewrite priced
+ * immediately above it, which deletes nothing and which no rule in this module
+ * closes — and answered it with a second, weaker rule that is kept beside the
+ * row-count identity because it is not the same rule:
+ * `truncatedImmutableLedgers` asserts `MAX(rowid) >= sqlite_sequence` over EVERY
+ * declared AUTOINCREMENT ledger and reports `append_only_ledger_truncated`,
+ * blocking, at both depths. It is what closes the identical attack on the
+ * twenty-odd ledgers this ledger's own invariant says nothing about — most
+ * sharply `hq_reliability_run_events`, where emptying the ledger returned a
+ * correctly refused duplicate attempt to generation 1 and ADMITTED it, making
+ * `RUN_RETRY_STATEMENT`'s "an interrupted attempt is NEVER retried
+ * automatically" false. The row-count identity is strictly stronger for the
+ * commitment ledger, because a replacement row can restore the greatest rowid;
+ * neither subsumes the other.
  */
 
 import { createHash } from 'node:crypto';

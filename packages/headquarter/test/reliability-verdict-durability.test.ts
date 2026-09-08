@@ -30,6 +30,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { readFileSync, readdirSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import { CAPS, expectOk } from './application.fixture.js';
 import { fileFixture } from './reliability.fixture.js';
@@ -799,8 +802,8 @@ describe('the enforcement declarations are frozen, not merely typed readonly', (
     // Emptying `HQ_INTEGRITY_FINDINGS` used to make every snapshot finding
     // count as `unrecognized`; emptying `SAFE_MODE_BLOCKING_FINDINGS` used to
     // make nothing blocking at all.
-    expect([...SAFE_MODE_BLOCKING_FINDINGS]).toHaveLength(3);
-    expect([...HQ_INTEGRITY_FINDINGS]).toHaveLength(6);
+    expect([...SAFE_MODE_BLOCKING_FINDINGS]).toHaveLength(4);
+    expect([...HQ_INTEGRITY_FINDINGS]).toHaveLength(7);
   });
 
   /**
@@ -862,36 +865,61 @@ describe('the enforcement declarations are frozen, not merely typed readonly', (
    * `package.json#exports`, every exported ALL-CAPS binding that is an object
    * or an array, no name filter at all. A future constant is covered the day it
    * is exported, which is the property the previous version only claimed.
+   *
+   * **And the enumeration is now the WHOLE PACKAGE, not the sixteen barrels**
+   * (Wave 5 correction round six, Medium 6). The entry-point surface really was
+   * 202/202 frozen, and that measurement was honest — but `package.json#exports`
+   * is a bundler's view, not the process's. Anything in this repository can
+   * deep-import a module, and the running server does: a whole-package census
+   * found 26 module-level exported ALL-CAPS constants that no barrel re-exported
+   * frozen, three of them on an enforcement path.
+   *
+   *  - `providers/claude/transport.ts#REPO_SLUG_PATTERN` gates the real GitHub
+   *    dispatch target. `.test` lives on `RegExp.prototype`, so assigning an own
+   *    `test` turned `isValidTarget(hostile)` from `false` to `true` — permanent
+   *    architectural law 3 through an exported constant;
+   *  - `providers/codex/types.ts#EMPTY_EVIDENCE` is spread into EVERY codex
+   *    evidence object (`run.ts`, `evidence.ts`), so mutating it seeds a
+   *    fabricated `actualModel`/`cliVersion` into provider evidence — exactly
+   *    the fabrication class this wave exists to prevent;
+   *  - `CLAUDE_DISPATCH_EVIDENCE` names the evidence kinds the
+   *    duplicate-dispatch guard compares against.
+   *
+   * `src/cli/` is excluded and that is stated rather than quietly skipped: those
+   * modules run their work at import (`inventory.ts` writes a file at module
+   * scope), and they export no `const` at all — checked, not assumed.
    */
-  it('freezes EVERY exported closed vocabulary in the package, by enumeration', async () => {
-    const entryPoints = [
-      '../src/index.js',
-      '../src/contracts/index.js',
-      '../src/operator/index.js',
-      '../src/store/index.js',
-      '../src/archive/index.js',
-      '../src/connectors/index.js',
-      '../src/ui/index.js',
-      '../src/organization/index.js',
-      '../src/memory/index.js',
-      '../src/handover/index.js',
-      '../src/registry/index.js',
-      '../src/providers/index.js',
-      '../src/application/index.js',
-      '../src/routing/index.js',
-      '../src/live/index.js',
-      '../src/client/index.js',
-    ];
+  it('freezes EVERY exported closed vocabulary in the package, by enumeration over src/**/*.ts', async () => {
+    const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const srcRoot = join(packageRoot, 'src');
+    const sourceFiles = (dir: string): string[] => {
+      const found: string[] = [];
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) found.push(...sourceFiles(full));
+        else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) found.push(full);
+      }
+      return found;
+    };
+    const modules = sourceFiles(srcRoot)
+      .filter((file) => !file.includes(`${sep}cli${sep}`))
+      .sort();
+    // The CLI exclusion is safe only because those modules declare no exported
+    // constant at all. Asserted from the source text, so the day one does, this
+    // fails rather than silently leaving it out.
+    for (const file of sourceFiles(join(srcRoot, 'cli'))) {
+      expect(readFileSync(file, 'utf8'), file).not.toMatch(/^export const /m);
+    }
     const seen = new Map<string, unknown>();
-    for (const entry of entryPoints) {
-      const namespace = (await import(entry)) as Record<string, unknown>;
+    for (const file of modules) {
+      const namespace = (await import(pathToFileURL(file).href)) as Record<string, unknown>;
       for (const [name, value] of Object.entries(namespace)) {
         // ALL-CAPS is how this package spells a declared constant, and an
         // object or an array is what a `length = 0` or a property rewrite can
         // actually reach.
         if (!/^[A-Z][A-Z0-9_]*$/.test(name)) continue;
         if (value == null || typeof value !== 'object') continue;
-        if (!seen.has(name)) seen.set(name, value);
+        seen.set(`${relative(srcRoot, file)}#${name}`, value);
       }
     }
     const unfrozen = [...seen.entries()]
@@ -899,11 +927,30 @@ describe('the enforcement declarations are frozen, not merely typed readonly', (
       .map(([name]) => name)
       .sort();
     expect(unfrozen).toEqual([]);
-    // A count, so a future narrowing of the enumeration is visible rather than
-    // silently passing over an empty set. 202 bindings at this head.
-    expect(seen.size).toBeGreaterThanOrEqual(200);
-    // The two the previous scan could not see, named so a regression on either
-    // is reported by name rather than as an anonymous count.
+    // DEEP, not shallow: a frozen array of mutable entries is the same exploit
+    // one level in, which is why `deepFreeze` exists at all.
+    const deepUnfrozen: string[] = [];
+    const visitDeep = (value: unknown, label: string, cycles: WeakSet<object>): void => {
+      if (value == null || typeof value !== 'object') return;
+      const target = value as object;
+      if (cycles.has(target)) return;
+      cycles.add(target);
+      if (!Object.isFrozen(target)) deepUnfrozen.push(label);
+      for (const [key, child] of Object.entries(target as Record<string, unknown>)) {
+        visitDeep(child, `${label}.${key}`, cycles);
+      }
+    };
+    for (const [name, value] of seen) visitDeep(value, name, new WeakSet());
+    expect(deepUnfrozen).toEqual([]);
+    // Counts, so a future narrowing of the enumeration is visible rather than
+    // silently passing over an empty set. Measured at this head: 604 exported
+    // ALL-CAPS bindings across 16 barrels and every module behind them, and
+    // 2103 objects reached by walking into them.
+    expect(seen.size).toBeGreaterThanOrEqual(600);
+    // Named so a regression on any of them is reported by name rather than as
+    // an anonymous count. The last three are the enforcement-path constants the
+    // barrel-only enumeration could not see.
+    const bareNames = new Set([...seen.keys()].map((key) => key.split('#')[1]!));
     for (const name of [
       'FABRICATED_FIELD_NAMES',
       'STATE_CHANGING_METHODS',
@@ -920,10 +967,37 @@ describe('the enforcement declarations are frozen, not merely typed readonly', (
       'PROVIDER_HEALTH_STATES',
       'MODEL_AVAILABILITY_STATES',
       'LEXICAL_RETRIEVAL_ADAPTER',
+      'REPO_SLUG_PATTERN',
+      'EMPTY_EVIDENCE',
+      'CLAUDE_DISPATCH_EVIDENCE',
     ]) {
-      expect([...seen.keys()], name).toContain(name);
-      expect(Object.isFrozen(seen.get(name)), name).toBe(true);
+      expect([...bareNames], name).toContain(name);
     }
+  });
+
+  /**
+   * The freeze is the mechanism; THESE are the guarantees (Wave 5 correction
+   * round six, Medium 6). Both writes were executed against the previous head
+   * and both did what the exploit claimed.
+   */
+  it('refuses the two writes that redirected a dispatch target and seeded fabricated provider evidence', async () => {
+    const { REPO_SLUG_PATTERN, isValidTarget } = await import('../src/providers/claude/transport.js');
+    const hostile = { owner: 'attacker', repo: 'not a repo/../..', issueNumber: null };
+    expect(isValidTarget(hostile)).toBe(false);
+    // `test` is inherited from RegExp.prototype, so this used to install an OWN
+    // property and make every hostile slug valid.
+    expect(() => {
+      (REPO_SLUG_PATTERN as unknown as { test: unknown }).test = () => true;
+    }).toThrow(TypeError);
+    expect(isValidTarget(hostile)).toBe(false);
+
+    const { EMPTY_EVIDENCE } = await import('../src/providers/codex/types.js');
+    // Spread into every codex evidence object, so a seeded value becomes a
+    // fabricated attestation about which model actually ran.
+    expect(() => {
+      (EMPTY_EVIDENCE as unknown as { actualModel: unknown }).actualModel = 'gpt-5-fabricated';
+    }).toThrow(TypeError);
+    expect({ ...EMPTY_EVIDENCE }.actualModel).toBeNull();
   });
 
   /**

@@ -135,22 +135,56 @@ import { PROVIDERS, type ProviderId } from '../routing/providers.js';
  * `assertNoSecretLikeContent` heuristic — so nothing that used to be refused is
  * now accepted.
  *
- * **"EVERY facade write" was a HAND COUNT, and it was wrong** (Wave 5
- * correction round seven, High NEW-3). Three writes bounded their caller text
- * with `missionText` — which checks a LENGTH — and never reached this function
- * at all: `recordVerifiedBackup.note`, `recordIntelligenceOutcome.note` and
- * `disableAiMember.reason`. The first was live: `GET /api/hq/control/
- * reliability` answered `200`, one accepted `recordVerifiedBackup({ note:
- * 'sk-…' })` later it answered `500` for ever, because
- * `hq_reliability_backups` carries `no_rewrite`/`no_erase` and nothing takes
- * the row back out. Exactly the defect this function was introduced to close,
- * surviving in three places the count did not visit.
+ * **And it refuses ordinary prose the weak heuristic accepted. That cost is
+ * named here rather than left to be discovered** (Wave 5 correction round seven,
+ * Low 1). Two shapes carry it, both executed: `Bearer\s+[A-Za-z0-9._-]{16,}`
+ * matches "The bearer responsibilities were reassigned to the shift lead", and
+ * `sk-[A-Za-z0-9_-]{16,}` matches "Contract with Addis-Sk-Trading-Corporation
+ * renewed for 2027" — a plausible Ethiopian business name in a product whose
+ * first tenant is an Ethiopian factory. The refusal is `invalid_input`, there
+ * is no override, and rephrasing is the only remedy. It was NOT tightened,
+ * and that is a decision rather than an omission: this is the same function
+ * the READ boundary applies, so loosening it to admit the prose would loosen
+ * what may be PUBLISHED as well as what may be stored, and every candidate
+ * discriminator (require a digit in the run; require a longer run) is a real
+ * weakening of a fail-closed backstop that could not be shown not to admit a
+ * genuine credential. The exact refused strings are pinned in
+ * `credential-scan-cost.test.ts`, so the disclosure is enforced by the suite
+ * rather than asserted by a comment, and a future tightening has to move the
+ * disclosure with it.
  *
- * So the claim is no longer counted. `test/credential-scan-coverage.test.ts`
- * ENUMERATES every member of this file that calls `missionText` and asserts
- * each one also calls this scan, naming any that does not. A future write that
- * bounds its text and forgets to scan it fails that test by name, so the
- * sentence above cannot drift into being false again.
+ * **Which writes it covers, exactly** (Wave 5 correction round seven, Medium 2).
+ * The previous round said "every facade write" while `createTask`'s `title`
+ * and `project`, `failTask`'s `reason` and `registerExecutionWorker`'s
+ * `displayName` all reached storage unscanned — and each of those three was
+ * executed into a PERMANENT `500` on Founder read routes (`title` →
+ * `/state` + `/commandCenter`; `reason` → the same pair; `displayName` →
+ * `/state` + `/workforce` + `/commandCenter`), because no HQ command can
+ * rewrite those columns. The sentence is now true of the facade, with ONE
+ * carve-out that is named rather than implied: `createTask`'s task PAYLOAD.
+ * No control route serves a task payload — executed, and it bricked none while
+ * the title bricked two — the queue applies the evidence log's heuristic to it
+ * at `enqueue`, and the strict guard for it lives at the boundary that would
+ * PUBLISH it, the dispatch lane, whose independence from the submission guard
+ * two existing tests prove by writing a credential-shaped payload through
+ * `createTask` on purpose. The write sites and that single carve-out are
+ * enumerated by `facade-write-scan.test.ts`, which fails when a public method
+ * stores caller text without passing it through this function.
+ *
+ * **The other lane's count was wrong in three more places, and the claim is no
+ * longer counted at all** (round seven, High NEW-3, found independently of the
+ * Medium 2 above). `recordVerifiedBackup.note`,
+ * `recordIntelligenceOutcome.note` and `disableAiMember.reason` each bounded
+ * their caller text with `missionText` — which checks a LENGTH — and never
+ * reached this function. `recordVerifiedBackup` was live: `GET
+ * /api/hq/control/reliability` answered `200`, one accepted
+ * `recordVerifiedBackup({ note: 'sk-…' })` later it answered `500` for ever,
+ * because `hq_reliability_backups` carries `no_rewrite`/`no_erase`. So a SECOND
+ * derived assertion stands beside `facade-write-scan.test.ts`:
+ * `credential-scan-coverage.test.ts` enumerates every member of this file that
+ * calls `missionText` and names any that does not also call this scan. The two
+ * enumerate different things — public methods that store caller text, and
+ * length-bounded text fields — and neither subsumes the other, so both stand.
  */
 function assertNoCredentialShape(fields: Record<string, unknown>): void {
   assertBrowserSafe(fields, 'stored_text');
@@ -2991,10 +3025,40 @@ export class HeadquarterOperations {
    * and never accepted from the caller. Deny by default: an id in neither
    * registry can open nothing, and a human's origination grant confers no
    * execution right whatsoever (see `claimNext`/`startTask`).
+   *
+   * `title` and `project` are SCANNED here, before the enqueue (Wave 5
+   * correction round seven, Medium 2). Both are caller text, both land in
+   * `hq_op_task_meta`, and the title is published on the Founder `/state` and
+   * `/commandCenter` projections, which `control-api.ts`'s `safe()` walks with
+   * the strict `assertBrowserSafe`. Executed across three separate processes:
+   * a task created with `title: 'prod deploy sk-…'` was STORED, and every
+   * subsequent `GET /api/hq/control/state` answered `500 internal`, on that
+   * process and on every process after it. `hq_op_task_meta` has no
+   * title-rewrite path through any HQ command, so the outage was permanent —
+   * the same shape as the H3 outage this scan exists to close, on the one
+   * write H3 did not reach.
    */
   createTask(input: CreateTaskInput): OpsResult<CreatedTask> {
     if (!input.capabilityId || !input.requestedBy) {
       return fail('invalid_input', 'capabilityId and requestedBy are required');
+    }
+    // `title` and `project` only. The task PAYLOAD is deliberately NOT scanned
+    // here, and that boundary was drawn by execution rather than by taste: no
+    // control route serves a task payload (`control-api.ts` says so and the
+    // probe confirmed it — a payload carrying `sk-…` bricked no route, while
+    // the title bricked two), the queue applies the evidence log's own
+    // heuristic to it at `enqueue`, and the strict guard for it lives where it
+    // would actually be PUBLISHED: the dispatch boundary, which refuses to
+    // open an issue carrying one. `claude-dispatch.test.ts` and
+    // `dispatch-durable-label.test.ts` reach that boundary by writing a
+    // credential-shaped payload through this method on purpose, to prove the
+    // dispatch guard holds INDEPENDENTLY of the submission guard. Scanning the
+    // payload here would delete that defence-in-depth proof, so the payload
+    // stays with the guard that owns it.
+    try {
+      assertNoCredentialShape({ title: input.title ?? '', project: input.project ?? '' });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
     }
     const cap = this.queue.capabilities.get(input.capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${input.capabilityId}`);
@@ -3132,6 +3196,15 @@ export class HeadquarterOperations {
    * effect is impossible — a live fenced claim already exists, or the task
    * can never return to the queue. See `assignmentBarrier` for the exact
    * canonical predicate (Sol M1 on PR #263).
+   *
+   * `rationale` is scanned HERE and not only in `assignTaskAsFounder`
+   * (Wave 5 correction round seven, Medium 2). The browser wrapper scanned it;
+   * this method is exported public API in its own right, and it writes the
+   * meta row before its evidence append, so an unscanned rationale reached
+   * `hq_op_task_meta.assignment_rationale` with only the weak `key: value`
+   * heuristic behind it. Scanning both is not duplication — the wrapper scans
+   * before ITS gates so a refusal precedes any Founder-attributed evidence,
+   * and this scans before the first write on the direct path.
    */
   assignTask(
     taskId: string,
@@ -3141,6 +3214,11 @@ export class HeadquarterOperations {
   ): OpsResult<AssignmentIntent> {
     const task = this.queue.get(taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${taskId}`);
+    try {
+      assertNoCredentialShape({ rationale: rationale ?? '' });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
     const cap = this.queue.capabilities.get(task.capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${task.capabilityId}`);
 
@@ -3503,13 +3581,33 @@ export class HeadquarterOperations {
       );
     }
     try {
+      assertNoCredentialShape(result);
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+    try {
       return ok(this.queue.complete(taskId, workerId, fence, result, evidenceRefs));
     } catch (error) {
       return fail('operator_rejected', errorMessage(error), { taskId });
     }
   }
 
+  /**
+   * Report a failed execution.
+   *
+   * `reason` is caller text and it is scanned before the queue write (Wave 5
+   * correction round seven, Medium 2). It was the second permanent outage of the
+   * class, executed on the previous head: a failure reason carrying `sk-…` was
+   * accepted, landed on `op_tasks`, and then answered `500 internal` on
+   * `GET /api/hq/control/state` AND `/commandCenter` in every later process,
+   * with no HQ command able to rewrite the column.
+   */
   failTask(taskId: string, workerId: string, fence: number, reason: string): OpsResult<OperatorTask> {
+    try {
+      assertNoCredentialShape({ reason });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
     try {
       return ok(this.queue.fail(taskId, workerId, fence, reason));
     } catch (error) {
@@ -3524,6 +3622,13 @@ export class HeadquarterOperations {
    * human principal. (Approval authority is not required — reviewing a result
    * is not deciding a Founder approval.) Independence itself — never the
    * executing, submitting or requesting worker — is enforced by the queue.
+   *
+   * Deliberately AVAILABLE in safe mode, and it is the closest of the
+   * available mutators to an approval — the argument is on the phase document's
+   * "left available" table and is repeated here because it is a judgement
+   * rather than an obvious call: a `pass` verdict completes a task that was
+   * claimed and executed BEFORE safe mode engaged. Refusing the verdict does
+   * not un-execute it; it only leaves HQ unable to record what happened.
    */
   reviewTask(
     taskId: string,
@@ -3533,6 +3638,11 @@ export class HeadquarterOperations {
   ): OpsResult<OperatorTask> {
     if (verdict === 'fail' && !note) {
       return fail('invalid_input', 'A failed review requires a reason');
+    }
+    try {
+      assertNoCredentialShape({ note });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
     }
     const reviewer = this.#resolveActor(reviewerId, 'review');
     if (!reviewer.ok) return reviewer;
@@ -3552,6 +3662,12 @@ export class HeadquarterOperations {
    * The reconciler must be a known actor (same rule as review); independence
    * and the "never blindly re-queue a non-idempotent capability" rule are the
    * queue's.
+   *
+   * Deliberately AVAILABLE in safe mode (Wave 5 correction round seven, Medium
+   * 1 — it was in neither column of the shipped tables). It is one of the acts
+   * that RESOLVE an uncertain state, exactly like `reconcileRun`,
+   * `reconcileAction` and `recoverInterruptedRuns`; refusing it would make safe
+   * mode self-sustaining. `note` is scanned before the queue write.
    */
   reconcileTask(
     taskId: string,
@@ -3560,6 +3676,11 @@ export class HeadquarterOperations {
     note: string,
   ): OpsResult<OperatorTask> {
     if (!note) return fail('invalid_input', 'Reconciliation requires a note');
+    try {
+      assertNoCredentialShape({ note });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
     const reconciler = this.#resolveActor(by, 'reconcile');
     if (!reconciler.ok) return reconciler;
     try {
@@ -3599,6 +3720,15 @@ export class HeadquarterOperations {
    * Unauthenticated on purpose — it takes no actor, because it attributes
    * nothing to a human. It applies a consequence the canonical rules already
    * require, and the only thing it can produce is LESS authority than before.
+   *
+   * Deliberately AVAILABLE in safe mode (Wave 5 correction round seven, Medium
+   * 1 — it was in neither column of the shipped tables). It is STRICTLY
+   * NARROWING and it is a no-op unless an approval is already dead: it clears
+   * a task's binding to an approval that no longer admits execution, and the
+   * only state it can reach is `needs_approval` or `blocked`. The fresh
+   * decision that would follow is an ordinary `approveTask`, which safe mode
+   * refuses. Same argument as `revokeWorkerProvider` and
+   * `deactivateExecutionWorker`: it can only take authority away.
    */
   returnForFreshApproval(taskId: string): OpsResult<{
     /** True when an approval was found dead and the consequence was applied. */
@@ -3625,9 +3755,29 @@ export class HeadquarterOperations {
 
   // ---- kill switch (Founder only) ----
 
+  /**
+   * Engage a kill switch. The fail-safe direction, and available in safe mode
+   * for exactly that reason.
+   *
+   * `reason` is scanned before the write, and this was the worst of the four
+   * permanent outages of the class (Wave 5 correction round seven, Medium 2).
+   * Executed: `op_kill_switch.reason` is published by `killSwitchScopes()`
+   * onto the Founder `/state` and `/commandCenter` projections, no HQ command
+   * rewrites the column, and a reason carrying `sk-…` answered `500 internal`
+   * on both routes in every later process. The act it broke is the one a
+   * Founder reaches for in a hurry to stop everything — so a hurried
+   * paste would have taken the console down permanently at the moment it was
+   * most needed. Refused up front instead, with the switch not engaged and the
+   * caller told plainly why.
+   */
   engageKillSwitch(scope: string, founderId: string, reason: string): OpsResult<null> {
     const principal = this.#assertApprovalAuthority(founderId, 'engage the kill switch');
     if (principal) return principal;
+    try {
+      assertNoCredentialShape({ reason });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
     this.#requirePrivilegedQueue().engageKillSwitch(scope, founderId, reason);
     return ok(null);
   }
@@ -3979,6 +4129,14 @@ export class HeadquarterOperations {
    * It grants no provider identity. Registration and declaration stay two
    * separate acts, so neither one alone makes a worker able to take
    * CLAUDE-bound work.
+   *
+   * `displayName` and `vendor` are scanned before the first write (Wave 5
+   * correction round seven, Medium 2). It was the widest permanent outage of the
+   * three found this round, executed: a worker registered with
+   * `displayName: 'Worker sk-…'` answered `500 internal` on `/state`,
+   * `/workforce` AND `/commandCenter` in every process afterwards — and this
+   * command is CREATE-ONLY, so there is not even a re-registration that could
+   * take the name back out.
    */
   registerExecutionWorker(input: {
     workerId: string;
@@ -3996,6 +4154,11 @@ export class HeadquarterOperations {
     if (blocked) return blocked;
     const principal = this.#assertApprovalAuthority(input.founderId, 'register an execution worker');
     if (principal) return principal;
+    try {
+      assertNoCredentialShape({ displayName: input.displayName, vendor: input.vendor });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
 
     const workerId = input.workerId.trim();
     if (!workerId) return fail('invalid_input', 'A worker id is required.');
@@ -4334,20 +4497,61 @@ export class HeadquarterOperations {
    * the workforce display and advisory nomination. Founder-gated (approval
    * authority, the same bar as registering an execution worker).
    *
-   * NOT an execution enrolment: a member row grants nothing and is never
-   * consulted by enforcement. When the id matches a registered execution
+   * Not an execution enrolment in the shipped host, where the narrowing seam
+   * is deliberately unwired and a member row is display and advisory
+   * nomination only. It is NOT true that the row "grants nothing and is never
+   * consulted by enforcement" as a property of this method (Wave 5 correction
+   * round seven, Medium 1): it writes `grantedCapabilities`, and
+   * `RegistryWorkerDirectory` (`application/registry-directory.ts`) derives
+   * `effectiveCapabilities` from exactly that column and answers
+   * `allowedCapabilities` with it — which is what `#grantOf` and
+   * `evaluatePolicy` read at every enforcement point wherever
+   * `memberRegistry` IS passed. The sentence is corrected rather than
+   * softened, because the gate below rests on it.
+   *
+   * When the id matches a registered execution
    * worker the result says `enrichesExecutionWorker: true` — the same
    * identity described in both layers. An id registered as a HUMAN principal
    * is refused outright: the narrowing directory's `isRegistered` ORs the
    * member registry in, and a member row under a human's id would flip that
    * human into "worker identity" and silently strip their approval
    * authority.
+   *
+   * **REFUSED in safe mode.** It was in neither column of the shipped tables.
+   * `SAFE_MODE_STATEMENT` says HQ refuses the acts that would grant AUTHORITY
+   * over a record it cannot stand behind, and `registerExecutionWorker` and
+   * `declareWorkerProvider` are already refused for precisely this reason —
+   * the first writes an identity WITH its allow-list, this writes an allow-list
+   * a directory reads. That the shipped host does not currently wire the
+   * narrowing seam is a deployment fact, not a property of this method: the
+   * option exists, the class is exported public API, and a gate that holds
+   * only in one composition is not a gate. `disableAiMember` and
+   * `setAiMemberHealth` stay available, for the mirror-image reason
+   * `revokeWorkerProvider` and `deactivateExecutionWorker` do.
+   *
+   * The caller text it stores is scanned first (Wave 5 correction round seven,
+   * Medium 2): `displayName` reaches `/workforce` and `/commandCenter`, and
+   * there is no member-rename command that could take a refused value back
+   * out of a published projection.
    */
   registerAiMember(
     input: RegisterMemberInput & { founderId: string },
   ): OpsResult<{ member: AiMember; warnings: string[]; enrichesExecutionWorker: boolean }> {
+    const blocked = this.#safeModeRefusal('register an AI member');
+    if (blocked) return blocked;
     const refused = this.#assertApprovalAuthority(input.founderId, 'register an AI member');
     if (refused) return refused;
+    try {
+      assertNoCredentialShape({
+        displayName: input.displayName,
+        providerId: input.providerId,
+        modelId: input.modelId,
+        modelVersion: input.modelVersion,
+        toolMetadata: input.toolMetadata ?? null,
+      });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
     const registry = this.#aiMemberRegistry;
     if (!registry) {
       return fail(
@@ -4391,7 +4595,17 @@ export class HeadquarterOperations {
     }
   }
 
-  /** Disable an AI member (Founder-gated; display/advisory layer only). */
+  /**
+   * Disable an AI member (Founder-gated).
+   *
+   * Deliberately AVAILABLE in safe mode (Wave 5 correction round seven, Medium
+   * 1 — it was in neither column of the shipped tables). STRICTLY NARROWING:
+   * `status: 'disabled'` makes `RegistryWorkerDirectory.assignability` answer
+   * `worker_inactive`, so it can only ever take an option away, and it is the
+   * exact mirror of `registerAiMember` — which is refused for adding one.
+   * Same argument as `revokeWorkerProvider` and `deactivateExecutionWorker`.
+   * `reason` is scanned before the first write.
+   */
   disableAiMember(input: {
     memberId: string;
     reason: string;
@@ -4408,14 +4622,23 @@ export class HeadquarterOperations {
     }
     const reason = missionText('reason', input.reason, MAX_ASSIGNMENT_RATIONALE_LENGTH, true);
     if (!reason.ok) return fail('invalid_input', reason.message);
-    // The third site the round-seven sweep found unscanned (High NEW-3). The
-    // reason is stored on the member record AND appended to the evidence chain,
-    // where it is beyond recall; whether any current view serves it is not the
-    // question a write boundary gets to answer.
+    // Same class as the two above, and the sibling `assignAiMember` already
+    // scans its own `reason` (Wave 5 correction round six, Medium 4; found
+    // independently as one of the unscanned facade writes in round seven —
+    // two lanes wrote this guard, ONE of them survives, and the surviving
+    // refusal message is the field-named one because that is what the other
+    // fourteen credential refusals in this file say and it tells the caller
+    // WHICH input to rephrase). Reachability is not left open: the reason is
+    // stored on the member record AND appended to the evidence chain, and
+    // `src/cli/workforce.ts` builds the facade with the member registry on
+    // every actor-attributed action.
     try {
       assertNoCredentialShape({ reason: reason.value });
     } catch {
-      return fail('invalid_input', 'The disable reason looks like it contains a credential; nothing was recorded.');
+      return fail(
+        'invalid_input',
+        'The disable reason looks like it contains a credential; nothing was recorded.',
+      );
     }
     try {
       const privileged = this.#requirePrivilegedQueue();
@@ -4443,6 +4666,18 @@ export class HeadquarterOperations {
    * Declare an AI member's health. An explicit Founder statement, never a
    * probe: HQ asked nothing, so HQ records what the Founder observed, with
    * the timestamp of the declaration.
+   *
+   * Deliberately AVAILABLE in safe mode (Wave 5 correction round seven, Medium
+   * 1 — it was in neither column of the shipped tables). `health` is a closed
+   * vocabulary and it grants nothing: the only place any enforcement-adjacent
+   * code reads it is `registry/routing.ts`, which EXCLUDES a member whose
+   * health is `unavailable` from an ADVISORY ranking. So the most it can do is
+   * re-admit a member to a nomination list, and `routeTask` — whose whole
+   * output that is — is itself available in safe mode for the same reason: the
+   * claim a nomination might inform is refused while safe mode stands, so a
+   * routing answer cannot become an act. Refusing it would only stop the
+   * Founder recording that a member is down, which is a fact a store you
+   * cannot vouch for still needs.
    */
   setAiMemberHealth(input: {
     memberId: string;
@@ -4502,6 +4737,19 @@ export class HeadquarterOperations {
    * forged author escalates nothing — but attribution in the group room is
    * exactly what a human reads before deciding to promote a mission, so an
    * unknown id must not be able to publish under a trusted-looking name.
+   *
+   * Deliberately AVAILABLE in safe mode (Wave 5 correction round seven, Medium
+   * 1 — it was in neither column of the shipped tables). A message reaches
+   * nothing: it creates no task, touches no approval and grants nothing,
+   * whatever the text says, and the one bridge from a room to work —
+   * `promoteProposal` — creates a task that cannot be claimed while safe mode
+   * stands. Same argument the phase document already records for
+   * `proposeMission` and `proposeAction`. Refusing it would stop a Founder and
+   * a worker discussing the very outage they are trying to fix.
+   *
+   * `body` is scanned before the write (Wave 5 correction round seven, Medium
+   * 2): it is caller free text, `hq_mission_messages` is append-only, and no
+   * HQ command can rewrite the column.
    */
   postMissionMessage(input: {
     threadId: string;
@@ -4511,6 +4759,11 @@ export class HeadquarterOperations {
   }): OpsResult<{ messageId: string; containsActionLanguage: boolean }> {
     if (!input.threadId || !input.author) {
       return fail('invalid_input', 'threadId and author are required');
+    }
+    try {
+      assertNoCredentialShape({ body: input.body });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
     }
     const actor = this.#resolveActor(input.author, 'post to a group room');
     if (!actor.ok) return actor;
@@ -4616,6 +4869,18 @@ export class HeadquarterOperations {
     project?: string;
     title?: string;
   }): OpsResult<CreatedTask> {
+    // Scanned HERE as well as inside `createTask`, deliberately. The two
+    // fields are handed straight through, so today the delegated scan already
+    // refuses before any write — but "this write is safe because the method it
+    // calls scans" is exactly the kind of ordering assumption a later
+    // refactor breaks silently, and the enumeration in
+    // `facade-write-scan.test.ts` asks each text-storing write to carry its own
+    // guard rather than to inherit one.
+    try {
+      assertNoCredentialShape({ title: input.title ?? '', project: input.project ?? '' });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
     const proposal = this.getProposal(input.proposalId);
     if (!proposal) return fail('proposal_not_found', `Unknown proposal: ${input.proposalId}`);
     if (proposal.status !== 'proposed') {
@@ -4672,6 +4937,14 @@ export class HeadquarterOperations {
    * review of `ff105a2`). An unknown or deactivated identity could otherwise
    * close other people's proposals and write a false name into the evidence
    * trail.
+   *
+   * Deliberately AVAILABLE in safe mode (Wave 5 correction round seven, Medium
+   * 1 — it was in neither column of the shipped tables). It is the CLOSING
+   * direction of `promoteProposal`, which is itself available: rejection can
+   * only take an open proposal off the table, it creates nothing and
+   * authorizes nothing, and it is the same asymmetry that keeps `denyTask` and
+   * `engageKillSwitch` available while `approveTask` and `releaseKillSwitch`
+   * are refused. `note` is scanned before the first write.
    */
   rejectProposal(proposalId: string, by: string, note: string): OpsResult<MissionProposal> {
     const proposal = this.getProposal(proposalId);
@@ -4680,6 +4953,11 @@ export class HeadquarterOperations {
       return fail('proposal_not_open', `Proposal ${proposalId} is already ${proposal.status}`);
     }
     if (!note) return fail('invalid_input', 'Rejecting a proposal requires a note');
+    try {
+      assertNoCredentialShape({ note });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
     const actor = this.#resolveActor(by, 'reject a mission proposal');
     if (!actor.ok) return actor;
     this.#db
@@ -6310,8 +6588,9 @@ export class HeadquarterOperations {
    *
    * Refuses an act while HQ has said, about itself, that its stored record
    * cannot be trusted — the engine reports the file corrupt, an append-only
-   * guard the schema declares is missing, or the evidence hash chain does not
-   * verify.
+   * guard the schema declares is missing, a declared append-only ledger holds
+   * fewer rows than the engine's own high-water mark says it reached, or the
+   * evidence hash chain does not verify.
    *
    * Reads the `#private` latched report and nothing else, because this decides
    * whether a write lands: a patch of `hqReliabilityPosture` or of any other
@@ -8118,6 +8397,16 @@ export class HeadquarterOperations {
       return fail('invalid_input', 'run ledger unavailable on this database handle');
     }
     const reason = input.reason ?? 'process_interrupted';
+    // A closed union in the type, and scanned anyway: the type is not a
+    // runtime check, an untyped in-process caller can hand this method any
+    // string, and the value is carried into the run events this reports. One
+    // rule with no exceptions is worth more than an argument about which
+    // parameters are "really" free text.
+    try {
+      assertNoCredentialShape({ reason });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
     const privileged = this.#requirePrivilegedQueue();
     const classified: HqRecoveryClassification[] = [];
     privileged.reserve(() => {
@@ -8504,17 +8793,23 @@ export class HeadquarterOperations {
     }
     const note = missionText('note', input.note, MAX_RUN_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
-    // The scan every facade write applies, and this write was MISSING it (Wave
-    // 5 correction round seven, High NEW-3). `missionText` bounds a length; it
-    // is not the credential scan, and `hq_reliability_backups` carries
-    // `no_rewrite`/`no_erase`, so a `sk-…` note accepted here was served under
-    // `control-api.ts`'s strict scan and turned `GET /api/hq/control/
-    // reliability` into a permanent `500` that no DELETE or UPDATE could undo.
-    // Executed against `d97b8a6`: `200` -> one accepted write -> `500` for ever.
+    // The scan the "every facade write that stores caller text" rule promised
+    // and this method did not have (Wave 5 correction round six, High 4). The
+    // backup register is APPEND-ONLY and this note is served verbatim on
+    // `GET /api/hq/control/reliability`, which applies the strict scan to its
+    // whole response — so one accepted credential made that route 500 FOREVER:
+    // the row cannot be deleted, cannot be updated, and a restart re-reads it.
+    // Executed against the previous head with a real verified backup file: 200,
+    // then accepted, then 500 across a restart.
     try {
       assertNoCredentialShape({ note: note.value ?? '' });
     } catch {
-      return fail('invalid_input', 'The backup note looks like it contains a credential; nothing was recorded.');
+      return fail(
+        'invalid_input',
+        'The backup note looks like it contains a credential; nothing was recorded. The backup register is ' +
+          'append-only and this note is published on the Founder reliability route, so a stored credential ' +
+          'could be neither removed nor served.',
+      );
     }
     const refusedActor = this.#resolveReliabilityCommander(input.requestedBy, 'record a verified backup');
     if (refusedActor) return refusedActor;
@@ -8524,7 +8819,14 @@ export class HeadquarterOperations {
       return fail('invalid_input', 'backup register unavailable on this database handle');
     }
 
-    const verification = verifyHqBackupFile(backupPath);
+    // The live database's own path travels with the candidate, so registering
+    // the file HQ is running on as a "recovery point" is refused on identity
+    // (Wave 5 correction round six, Low 3). `sidecar_journal_present` catches
+    // it only while a process holds it open; SQLite removes the sidecars on a
+    // clean close, so between runs the live file verified perfectly.
+    const verification = verifyHqBackupFile(backupPath, {
+      liveDatabasePath: typeof this.#db.name === 'string' ? this.#db.name : null,
+    });
     if (!verification.verified) {
       return fail(
         'backup_verification_failed',
@@ -8540,6 +8842,22 @@ export class HeadquarterOperations {
     // it — the recovery point's identity is the file, and the key is derived
     // from it (Wave 5 Low).
     const verifiedPath = verification.resolvedPath ?? backupPath;
+    // The SECOND stored column. `note` is already refused above, by the guard
+    // the other lane placed before the actor gate, so this scan is narrowed to
+    // the path alone rather than repeating it (Wave 5 correction round seven,
+    // Medium 2, reconciled with round six High 4 — both lanes found this
+    // method, each closed a different column of it, and both closures stand).
+    // The path cannot be scanned up there: what is stored is the path HQ
+    // actually OPENED, which does not exist until `verifyHqBackupFile` has
+    // resolved it. `hq_reliability_backups` is append-only and both columns are
+    // published on the reliability view, which the read boundary scans, so a
+    // value the read refuses would be a permanent outage on the exact route a
+    // Founder needs while investigating one.
+    try {
+      assertNoCredentialShape({ backupPath: verifiedPath });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
     const recordKey = backupRecordKey({ backupPath: verifiedPath, contentDigest: verification.digest! });
     const id = `backup-${uuid()}`;
     const at = nowIso();
@@ -8906,13 +9224,20 @@ export class HeadquarterOperations {
           // mission, no later relinking can take it out of that mission's
           // measurement, and no caller can put it into another's.
           //
-          // The column still holds ONE of N missions, which is why the
-          // canonical half stays: it is what lets a task linked to a second
-          // mission accumulate against that mission's ceiling too.
+          // The recorded half is EVERY scope HQ derived at record time, not the
+          // single `mission_id`/`project_id` column (Wave 5 correction round
+          // six, High 3). That column holds one of N, so the union it produced
+          // was complete only for the mission or project that sorted first, and
+          // the OTHER one's ceiling could be nullified by moving its mission to
+          // a different project — `assignMissionToProject`, no raw SQL,
+          // `hq.mission_command` alone: `blocked, observed 5000` became
+          // `within_ceiling, observed 0` and the refused decision was recorded.
+          // The canonical half still stays: it is what lets a ceiling start
+          // governing a task that is linked to a mission AFTER the spend.
           case 'mission':
             return (
               canonicalOf(entry.taskId).missionIds.includes(scope.scopeId) ||
-              entry.missionId === scope.scopeId
+              entry.missionIds.includes(scope.scopeId)
             );
           // The project half takes a THIRD term, and for the same reason the
           // second one exists (Wave 5 correction round seven, High NEW-4):
@@ -8928,7 +9253,7 @@ export class HeadquarterOperations {
             return (
               canonicalOf(entry.taskId).projectIds.includes(scope.scopeId) ||
               durableProjectsOf(entry.taskId).includes(scope.scopeId) ||
-              entry.projectId === scope.scopeId
+              entry.projectIds.includes(scope.scopeId)
             );
           // The provider scope is measured against the task's canonical
           // BINDING, never against the caller-supplied column. On a bound task
@@ -9031,8 +9356,11 @@ export class HeadquarterOperations {
     const providerIds = new Set<string>();
     for (const entry of this.#costEntriesFromStore()) {
       if (entry.taskId !== taskId) continue;
-      if (entry.missionId) missionIds.add(entry.missionId);
-      if (entry.projectId) projectIds.add(entry.projectId);
+      // EVERY recorded scope, not the first-sorting one (Wave 5 correction
+      // round six, High 3): a governing set built from one of N left the other
+      // ceiling out of the evaluation entirely.
+      for (const missionId of entry.missionIds) missionIds.add(missionId);
+      for (const projectId of entry.projectIds) projectIds.add(projectId);
       // Only a binding HQ VOUCHED for. A caller-declared provider on an
       // unbound task is an attribution claim, not a scope — the same rule
       // `#entriesForScope` applies to the measurement.
@@ -10339,15 +10667,24 @@ export class HeadquarterOperations {
     }
     const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
-    // Missing here too, and latent rather than harmless (Wave 5 correction
-    // round seven, High NEW-3): the outcome row is append-only, so the day this
-    // note joins a served view the route it is served on is bricked for ever.
-    // A write that stores caller text is scanned whether or not today's readers
-    // happen to carry it — that asymmetry IS the defect.
+    // The 30th write site the "29 call sites" claim missed (Wave 5 correction
+    // round six, Medium 4), found again independently in round seven: its two
+    // sibling writes, `recordIntelligenceCost` and `setIntelligenceBudget`,
+    // already scanned their notes and this one did not. No read publishes this
+    // column TODAY, so nothing 500s — which makes it a latent brick rather than
+    // a live one: the row is append-only, so the first read that ever serves it
+    // repeats High 4 verbatim and cannot be undone. The rule is "every facade
+    // write that stores caller text", not "every one that is currently
+    // published". Two lanes wrote this guard against the same finding; one
+    // survives, with the field-named refusal message the rest of this file
+    // uses.
     try {
       assertNoCredentialShape({ note: note.value ?? '' });
     } catch {
-      return fail('invalid_input', 'The outcome note looks like it contains a credential; nothing was recorded.');
+      return fail(
+        'invalid_input',
+        'The outcome note looks like it contains a credential; nothing was recorded.',
+      );
     }
     if (!this.#intelligenceStorePresent) {
       return fail('invalid_input', 'intelligence ledger unavailable on this database handle');
@@ -10730,17 +11067,26 @@ export class HeadquarterOperations {
       this.#db
         .prepare(
           `INSERT INTO hq_intel_cost_entries
-             (id, task_id, mission_id, project_id, decision_id, provider_id, provider_bound, model_id,
+             (id, task_id, mission_id, project_id, mission_ids, project_ids, decision_id, provider_id,
+              provider_bound, model_id,
               provenance,
               amount_minor_units, currency, unit_kind, units_observed, basis, occurred_at, recorded_at,
               recorded_by, note, entry_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
           input.taskId,
           canonicalScopes.missionIds[0] ?? null,
           canonicalScopes.projectIds[0] ?? null,
+          // EVERY derived scope, not just the first (Wave 5 correction round
+          // six, High 3). The two single columns above are kept because they
+          // are what an older row carries and what several readers display; the
+          // MEASUREMENT reads these arrays, because a task linked to two
+          // missions files its spend under both and a ceiling that has been
+          // charged has to stay charged whichever of them is later moved.
+          JSON.stringify(canonicalScopes.missionIds),
+          JSON.stringify(canonicalScopes.projectIds),
           decisionId,
           providerId,
           // HQ's OWN statement about the caller's attribution claim, taken from
@@ -11759,6 +12105,29 @@ export class HeadquarterOperations {
    *
    * Acceptance executes nothing: no task, approval row, claim or dispatch is
    * touched, and no gate reads the acceptance to decide anything.
+   *
+   * **REFUSED in safe mode** (Wave 5 correction round seven, Medium 1). It had
+   * no such guard and was in neither column of the phase document's tables:
+   * an acceptance row was written, permanently, while HQ had latched
+   * `append_only_guard_missing` — executed, with `recordTruth` beside it
+   * correctly answering `safe_mode_engaged` as the control.
+   *
+   * The paragraph above is why this is a correction rather than an emergency:
+   * acceptance is inert, so nothing was primed to run. It is fixed anyway
+   * because of what the shipped sentence SAYS. `SAFE_MODE_STATEMENT` crosses
+   * to the Founder browser on every reliability view and in every refusal, and
+   * it says HQ refuses the acts that would APPROVE a record it cannot stand
+   * behind. This is the Founder's approval-authority, digest-bound,
+   * step-up-gated, one-shot acceptance of a truth record — the act that word
+   * denotes if anything does. An act the statement calls APPROVE must either
+   * be refused or be named in the kept-available table WITH its reason, as
+   * `denyTask`, `reviewTask` and `appendSystemEvidence` are; being in neither
+   * is what made "what safe mode refuses" a partial statement presented as a
+   * complete one for the third time in this wave.
+   *
+   * Placed after the approval-authority gate and before the store probe, so
+   * an unauthorised caller is still told they lack authority rather than
+   * learning HQ's posture from a refusal they could not have earned.
    */
   acceptTruth(input: {
     truthId: string;
@@ -11770,6 +12139,8 @@ export class HeadquarterOperations {
     if (!truthId) return fail('invalid_input', 'truthId is required');
     const gate = this.#assertApprovalAuthority(input.requestedBy, 'accept a truth record');
     if (gate) return gate;
+    const safeMode = this.#safeModeRefusal('accept a truth record');
+    if (safeMode) return safeMode;
     if (!this.#truthStorePresent) return fail('invalid_input', 'truth store unavailable on this database handle');
     const note = missionText('note', input.note, MAX_ACCEPTANCE_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);

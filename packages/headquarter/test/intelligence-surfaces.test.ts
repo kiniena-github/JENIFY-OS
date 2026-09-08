@@ -8,7 +8,17 @@
  *  - the three routes join the control API behind the SAME pipeline as every
  *    other route — origin/referer gate, client-identity scan of body AND
  *    query, Founder resolution, `safe()` on every response;
- *  - a signed-in non-Founder gets nothing, and a refused write changes no row;
+ *  - a signed-in account that the host's Founder MAP does not name gets
+ *    nothing, and a refused write changes no row. The TRUE property, corrected
+ *    in the Wave 5 correction round six (Low 5): this suite's non-Founder proof
+ *    was only ever made against an UNMAPPED account, and "non-Founder" was the
+ *    wrong word for what it proved. An account the map DOES name — `coo`, with
+ *    approval authority but no intelligence grant — reaches the read and is
+ *    correctly refused every write. That is the host's configuration decision,
+ *    not a defect: the map is what the deployment declares a Founder-console
+ *    principal to be, and `ResolvedFounder` is that declaration. Both halves are
+ *    now tested, so the difference is a stated property rather than an
+ *    unexamined one;
  *  - there is NO route that activates a provider, enables a paid service, buys
  *    anything, authorizes spend, records a routing decision, escalates one,
  *    records an outcome or records a cost — and no facade method sits behind
@@ -235,6 +245,42 @@ describe('the intelligence READ', () => {
       expect(response.status).toBe(403);
       expect(response.body.ok).toBe(false);
       expect(JSON.stringify(response.body)).not.toContain('ceilingMinorUnits');
+    } finally {
+      h.fixture.cleanup();
+    }
+  });
+
+  /**
+   * Wave 5 correction round six, Low 5 — the property the suite claimed and the
+   * property it proved were different sentences.
+   *
+   * A MAPPED non-Founder is not the same thing as an unmapped account, and only
+   * the unmapped case was ever tested. This pins what the mapped case actually
+   * does, in both directions, so the disclosure boundary is a decision on the
+   * record rather than a surprise.
+   */
+  it('lets a MAPPED non-Founder read, and refuses it every write', () => {
+    const h = harness({ account: account('user-coo') });
+    try {
+      // The READ is allowed: `coo` is named by the host's Founder map, which is
+      // what `ResolvedFounder` means. This is the true property.
+      const read = h.call({});
+      expect(read.status).toBe(200);
+      expect(read.body.ok).toBe(true);
+      // Every WRITE is refused, because a route write also takes the capability
+      // grant and `coo` holds none.
+      for (const [path, body] of [
+        [CONTROL_ROUTES.intelligenceObserve, OBSERVE_BODY],
+        [CONTROL_ROUTES.intelligenceBudget, BUDGET_BODY],
+      ] as const) {
+        const response = h.call({ method: 'POST', path, body });
+        expect(response.status, path).toBe(403);
+      }
+      expect(h.fixture.ops.listModelObservationsBounded().total).toBe(0);
+      expect(h.fixture.ops.listIntelligenceBudgetsBounded().total).toBe(0);
+      // And an account the map does NOT name gets nothing at all — the half the
+      // suite already proved, kept beside the half it did not.
+      expect(h.call({}, STAFF).status).toBe(403);
     } finally {
       h.fixture.cleanup();
     }
