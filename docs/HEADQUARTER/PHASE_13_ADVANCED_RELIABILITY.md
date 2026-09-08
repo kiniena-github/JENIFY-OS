@@ -1519,12 +1519,60 @@ as well as here:
   re-creates the high-water mark from the surviving rowid and breaks the
   identity again without any further help. Measured: `p2 boot=false
   assess=false release=ADMITTED`, then `p3 boot=true assess=true
-  release=refused` and `p4` the same, permanently. What the round bought is that
-  the version costing NOTHING is gone, and that the one-statement repair costs
-  the attacker every process after the one it bought. HQ holds no key
+  release=refused` and `p4` the same, permanently.
+
+  **"The version costing NOTHING is gone" was FALSE when round six shipped it,
+  and a third variant is what made it false** (round seven, High NEW-2). Neither
+  reading above sees an EMPTY ledger: `DELETE` every row AND `DELETE FROM
+  sqlite_sequence WHERE name = 'hq_integrity_checkpoints'` — two statements, no
+  replacement row at all — left `rows = 0` with no high-water mark to compare it
+  against, and `elidedCommitmentLedgerRows` returned early. Measured on
+  `d97b8a6`: `p2`–`p5` each `boot=false [] full=false [] release=ADMITTED`, zero
+  restarts and zero Founder acts, silent for ever. It is closed in the same
+  place as the Critical of that round — see the checkpoint-existence entry below
+  — and the sentence is re-priced rather than repeated: what is gone now is
+  every version costing nothing, and the one-statement repair still costs the
+  attacker every process after the one it bought. HQ holds no key
   a foreign writer does not also have; every fact this ledger rests on lives in
   the same file the attacker is already writing, and nothing here pretends the
   commitment is a boundary.
+
+- **Round seven, Critical NEW-1 — destroying the commitment ledger outright was
+  cheaper than eliding a row from it, and the file certified itself intact.**
+  Every check that guards the commitments read something the erasure destroys:
+  `regressedImmutableLedgers` reads `committedLedgerMarks` out of the table that
+  was emptied, so an empty table commits nothing and contradicts nothing; and
+  `elidedCommitmentLedgerRows` started from the `sqlite_sequence` row a `DROP
+  TABLE` takes with it. So `DROP TABLE hq_integrity_checkpoints` followed by a
+  replay of the table's own DDL out of `sqlite_master` — the table SQL, its
+  index and its three guards — left it PRESENT and empty, with nothing absent
+  for the as-found census to observe. Executed against `d97b8a6` on a file
+  carrying a genuinely latched `evidence_chain_broken`: `full=false []`,
+  `releaseKillSwitch` **ADMITTED**, and every later process `boot=false []`,
+  permanently. The same held with `op_evidence` dropped and replayed beside it,
+  and with `hq_reliability_verdicts`.
+
+  **What closes it: a witness that does not live in any table.** HQ stamps
+  `PRAGMA application_id` with `0x48514350` (`HQCP`) once a checkpoint row has
+  LANDED — never before, because a witness set beside a failed insert would be a
+  permanent finding true of nothing. `application_id` sits in the 100-byte
+  database header, `DROP TABLE` cannot reach it, `VACUUM` preserves it, SQLite
+  never writes it, and `user_version` is already using the other slot. A
+  commitment ledger that is PRESENT and holds NO rows on a witnessed file is
+  therefore blocking at both depths and across restarts, however it came to be
+  empty. Read as an exact member of a closed set, for the reason
+  `HQ_SCHEMA_ENSURED_MARKS` records: a foreign application's `application_id`
+  must not be a false alarm at HQ's first boot over its file.
+
+  **What it still does not answer, executed rather than asserted.** A writer
+  that also runs `PRAGMA application_id = 0` puts the file back to unwitnessed —
+  one further statement on top of the erasure, still silent, measured
+  (`boot=false`). That is the same residual class as zeroing `PRAGMA
+  user_version` or rewriting `sqlite_sequence`. What is closed is the
+  INVERSION: total erasure is no longer cheaper than partial erasure. And a
+  file whose commitments were all written by a build older than this witness
+  carries none of it until HQ's next checkpoint stamps the header, which is the
+  ordinary upgrade cost of any new mark and not a defence.
 
   The other escape is the one already disclosed for the header mark, and the
   checkpoint ledger does not change it: a writer that drops every declared
@@ -1878,12 +1926,18 @@ survived it.
   credentials never enter the control plane — is the guarantee.
 - **The chain-tip commitment is a barrier, not a cryptographic boundary.** A
   writer that already holds the file open can append a correctly-hashed entry,
-  and can destroy `hq_integrity_checkpoints` and the evidence log together —
-  which is itself a census finding on the checkpoint ledger, since it is
-  ensure-created and declared in `ENGINE_IMMUTABLE_TABLES`. HQ holds no key such
-  a writer does not also have. The measured cost of that combined attack, and
-  the fact that it is now ONE ledger to drop rather than two, are both in the
-  NOT-fixed list above.
+  and can destroy `hq_integrity_checkpoints` and the evidence log together. **The
+  sentence that used to stand here — that destroying both "is itself a census
+  finding on the checkpoint ledger, since it is ensure-created and declared in
+  `ENGINE_IMMUTABLE_TABLES`" — was FALSE, and executing it is what proved it**
+  (round seven, Critical NEW-1): a writer who replays the dropped table's own
+  DDL out of `sqlite_master` leaves nothing absent for the census to observe at
+  all. That is now blocking, and the check that answers it does not live in a
+  table: HQ stamps `PRAGMA application_id` once it has committed on a file, so a
+  commitment ledger that is present and EMPTY on a witnessed file is blocking
+  however it came to be empty. The residual is one further statement — `PRAGMA
+  application_id = 0` — and it is measured and listed above rather than
+  described as a boundary. HQ holds no key such a writer does not also have.
 - **`chainVerified: true` still cannot distinguish "checked and sound" from
   "there was nothing to check" on one file: one that has never recorded a
   verdict AND whose log is empty.** Every other case is now bounded by the

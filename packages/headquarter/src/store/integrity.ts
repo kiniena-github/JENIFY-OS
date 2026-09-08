@@ -606,7 +606,12 @@ export const SAFE_MODE_STATEMENT =
   'commitment recorded outside it is blocking however consistent that record has been made to look. That ' +
   'commitment ledger is checked against itself too: it is append-only and HQ is its only writer, so the ' +
   'rows it holds and the high-water mark the engine records for it are the same number, and commitments ' +
-  'removed from it in place are blocking as well.';
+  'removed from it in place are blocking as well. Destroying that ledger outright is blocking too, and ' +
+  'that check does not live in any table: HQ stamps the database header once it has committed on a file, ' +
+  'so a commitment ledger that is present and EMPTY on a file HQ has committed on is blocking however it ' +
+  'came to be empty — dropped and re-created, or emptied row by row. A writer that also rewrites the ' +
+  'header can still put the file back to unwitnessed; HQ holds no key over its own file and says so ' +
+  'rather than claiming a boundary it does not have.';
 
 export const INTEGRITY_DEPTH_STATEMENT =
   'A structural assessment reads the schema catalogue and the durability pragmas only — cheap enough to run ' +
@@ -923,6 +928,101 @@ export function recordHqSchemaEnsured(db: HqDatabase): void {
   }
 }
 
+/**
+ * The value HQ stamps into `PRAGMA application_id` once it has appended at
+ * least one row to its OWN commitment ledger — the durable witness that the
+ * ledger has held commitments on this file.
+ *
+ * **This exists because the commitment ledger's only witness to its own
+ * history lived inside the commitment ledger** (Wave 5 correction round seven,
+ * Critical NEW-1 and High NEW-2). Every check in this module measures some
+ * ledger AGAINST the commitments, and both of the checks that guard the
+ * commitments themselves read something the same erasure destroys:
+ * `regressedImmutableLedgers` reads `committedLedgerMarks` out of the table
+ * that was emptied, so an empty table commits nothing and contradicts nothing;
+ * and `elidedCommitmentLedgerRows` starts from the `sqlite_sequence` row, which
+ * a `DROP TABLE` takes with it and a second `DELETE` removes. So TOTAL erasure
+ * was cheaper than partial erasure — the inversion this module has had to close
+ * twice before, in a third place:
+ *
+ *  - `DROP TABLE hq_integrity_checkpoints`, replay its DDL out of the
+ *    `sqlite_master` SQL the drop was read from, and the table is PRESENT and
+ *    empty. Nothing was absent for the as-found census to see, no mark went
+ *    backwards, no commitment was contradicted. Executed against the previous
+ *    head with `evidence_chain_broken` genuinely latched: `FULL assessment
+ *    safeMode = false []`, `releaseKillSwitch` ADMITTED, and every later
+ *    process `boot = false []` — permanently. The same holds when
+ *    `op_evidence` or `hq_reliability_verdicts` is dropped and replayed
+ *    alongside it;
+ *  - `DELETE FROM hq_integrity_checkpoints` plus `DELETE FROM sqlite_sequence
+ *    WHERE name = 'hq_integrity_checkpoints'` — two statements, no replacement
+ *    row, no `DROP`. Zero restarts, zero Founder acts, silent for ever.
+ *
+ * `PRAGMA application_id` is the answer for the same reason `PRAGMA
+ * user_version` was the answer to the "drop everything" inversion: it lives in
+ * the 100-byte database header, `DROP TABLE` cannot reach it, `VACUUM` and
+ * `VACUUM INTO` preserve it, SQLite itself never writes it, and it is the one
+ * header slot `user_version` is not already using. A commitment ledger that is
+ * PRESENT and holds NO rows on a file carrying this witness is therefore
+ * blocking, and no restart and no assessment clears it while it is true.
+ *
+ * **A distinctive value read as an exact member of a closed set**, for the
+ * reason `HQ_SCHEMA_ENSURED_MARKS` records: `application_id` is the slot every
+ * SQLite application is invited to stamp its own format id into, and reading
+ * "any non-zero value" as HQ's own would make a foreign application's file a
+ * false alarm at HQ's first boot over it. `0x48514350` is `HQCP` in ASCII.
+ *
+ * **What it does not answer, stated rather than implied.** A writer that also
+ * zeroes `PRAGMA application_id` puts the file back to unwitnessed — one
+ * further statement on top of the erasure, still silent. That is the same
+ * residual class as zeroing `PRAGMA user_version` or rewriting
+ * `sqlite_sequence`: the file is HQ's, HQ holds no key over it, and every fact
+ * this module rests on lives in the file the attacker is already writing. What
+ * is closed is the INVERSION — destroying the commitments outright is no longer
+ * cheaper than eliding rows from them. And a file whose commitments were all
+ * written by a build older than this witness carries none of it until HQ's next
+ * checkpoint stamps it, which is the ordinary upgrade cost of any new mark.
+ */
+const HQ_COMMITMENT_WITNESS_MARK = 0x48514350;
+
+/** Every `application_id` value that means "HQ has committed on this file". */
+const HQ_COMMITMENT_WITNESS_MARKS: readonly number[] = Object.freeze([HQ_COMMITMENT_WITNESS_MARK]);
+
+/**
+ * Whether HQ has ever appended a row to its own commitment ledger ON THIS FILE,
+ * read from the database header rather than from any table.
+ */
+export function commitmentWitnessPresent(db: HqDatabase): boolean {
+  try {
+    const row = db.prepare(`PRAGMA application_id`).get() as Record<string, unknown> | undefined;
+    const value = Number(Object.values(row ?? {})[0] ?? 0);
+    return Number.isInteger(value) && HQ_COMMITMENT_WITNESS_MARKS.includes(value);
+  } catch {
+    // A handle that cannot answer the pragma contributes no evidence either
+    // way, exactly like the schema-ensured mark.
+    return false;
+  }
+}
+
+/**
+ * Stamp the witness. Called only AFTER a checkpoint row has actually landed,
+ * never before: a witness set beside a failed insert would be a permanent
+ * finding true of nothing, which is the forbidden direction.
+ *
+ * Silent on a read-only handle and on any engine refusal, for the reason
+ * `recordHqSchemaEnsured` gives: a construction may not fail because it could
+ * not leave a mark. The cost of not leaving it is one unwitnessed checkpoint,
+ * and the next one that lands stamps it.
+ */
+function recordCommitmentWitness(db: HqDatabase): void {
+  if (db.readonly) return;
+  try {
+    db.exec(`PRAGMA application_id = ${HQ_COMMITMENT_WITNESS_MARK}`);
+  } catch {
+    // See the header: never fail a construction over the mark.
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* The durable integrity checkpoint                                    */
 /* ------------------------------------------------------------------ */
@@ -970,12 +1070,16 @@ export function recordHqSchemaEnsured(db: HqDatabase): void {
  *
  * **What it fails open on, executed rather than assumed, and priced at the
  * CHEAPEST path found rather than the one easiest to describe.** A writer that
- * drops THIS table drops the commitments with it; the absence is a census
- * finding at the boot that observes it (the table is declared in
- * `ENGINE_IMMUTABLE_TABLES`) and, once HQ has re-created it empty, a later
- * process has nothing left to contradict. **That is not the cheap way, and the
- * previous round's residual named it as if it were** (Wave 5 correction round
- * six, Medium 1): the drop costs a restart and a second Founder act, while
+ * drops THIS table drops the commitments with it. Until Wave 5 correction round
+ * seven that bought silence outright: the drop is a census finding at the boot
+ * that observes it (the table is declared in `ENGINE_IMMUTABLE_TABLES`), but a
+ * writer who REPLAYS the table's own DDL out of `sqlite_master` before HQ next
+ * opens the file leaves nothing absent for the census to observe at all, and an
+ * empty commitment ledger contradicts nothing. `commitmentWitnessPresent` is
+ * the answer, and it is a header pragma rather than a table for exactly that
+ * reason. **The drop is also not the cheap way, and the round-five residual
+ * named it as if it were** (Wave 5 correction round six, Medium 1): the drop
+ * costs a restart and a second Founder act, while
  * wiping the ROWS in place — drop the three triggers, `DELETE`, INSERT one
  * agreeing replacement, re-create the triggers — left the table present, the
  * census silent and the forgery accepted from the very next boot at zero
@@ -1254,6 +1358,11 @@ export function recordIntegrityCheckpoint(
       input.processId,
       input.recordedBy,
     );
+    // The witness is stamped only once the row has LANDED — see
+    // `HQ_COMMITMENT_WITNESS_MARK`. A crash between the two leaves the file
+    // unwitnessed with a genuine commitment on it, which is fail-open for one
+    // row and is repaired by the next checkpoint that lands.
+    recordCommitmentWitness(db);
     return true;
   } catch {
     // A checkpoint HQ could not write is a commitment HQ does not hold. It is
@@ -1324,6 +1433,13 @@ export function contradictedChainCommitment(db: HqDatabase): number | null {
 export function regressedImmutableLedgers(db: HqDatabase): string[] {
   const committed = committedLedgerMarks(db);
   const names = Object.keys(committed);
+  // NO commitments is deliberately not a finding HERE, and that is not a hole
+  // (Wave 5 correction round seven, Critical NEW-1). This function measures
+  // ledgers AGAINST the commitments, so a file whose commitments were destroyed
+  // has nothing for it to measure and the honest answer is the empty list. The
+  // fact that the commitments THEMSELVES are gone is a different finding with a
+  // different witness, and it is reported by `elidedCommitmentLedgerRows`, which
+  // reads the database header rather than the table the erasure emptied.
   if (names.length === 0) return [];
   const current = immutableLedgerMarks(db);
   return names.filter((table) => (current[table] ?? 0) < committed[table]).sort();
@@ -1377,9 +1493,31 @@ export function regressedImmutableLedgers(db: HqDatabase): string[] {
  * Founder assessment it was aiming to pass, which is itself the next COMMITMENT
  * and re-creates the high-water mark from the surviving rowid. Measured:
  * `p2 boot=false assess=false release=ADMITTED`, then `p3 boot=true assess=true
- * release=refused`, `p4` the same, permanently. The honest gain is therefore
- * that the version costing NOTHING is gone, and that the cheap repair costs the
- * attacker every process after the one it bought.
+ * release=refused`, `p4` the same, permanently.
+ *
+ * **The previous round's "the version costing NOTHING is gone" was FALSE, and a
+ * third variant is what made it false** (Wave 5 correction round seven, High
+ * NEW-2). Neither reading above sees an EMPTY ledger: `DELETE` every row AND
+ * `DELETE FROM sqlite_sequence WHERE name = 'hq_integrity_checkpoints'` — two
+ * statements, no replacement row at all — left `rows = 0` with no high-water
+ * mark to compare it against, and the early return made it silent for ever.
+ * Measured on the previous head: `p2`–`p5` each `boot=false [] full=false []
+ * release=ADMITTED`. The `rows === 0` branch above is what closes it, and it
+ * closes the same-shaped Critical with it: `DROP TABLE` + a DDL replay out of
+ * the table's own `sqlite_master` SQL also leaves the ledger present and empty.
+ * Both now rest on the header witness rather than on anything in a table —
+ * see `HQ_COMMITMENT_WITNESS_MARK` for what that costs an attacker and what it
+ * still does not answer.
+ *
+ * So the honest statement of the gain, re-priced after that correction: the
+ * versions costing NOTHING are gone — total erasure by `DROP` + replay, and
+ * total erasure by two `DELETE`s, are both blocking and neither is cleared by a
+ * restart or by an assessment. The cheap ONE-statement repair costs the
+ * attacker every process after the one it bought. The DURABLE two-statement
+ * repair — a replacement row at an explicit `seq = 1` plus `UPDATE
+ * sqlite_sequence` — is unchanged and still silent, and now costs one further
+ * statement (`PRAGMA application_id = 0`) if the ledger is emptied outright
+ * instead.
  *
  * Scoped to this ONE ledger deliberately. The identity holds for it because HQ
  * is its only writer; extending a row COUNT to every other declared ledger would
@@ -1388,14 +1526,11 @@ export function regressedImmutableLedgers(db: HqDatabase): string[] {
  * does not own.
  */
 export function elidedCommitmentLedgerRows(db: HqDatabase): boolean {
+  // The ledger is absent from this file: that is the census's finding — the
+  // table is a declared `ENGINE_IMMUTABLE_TABLES` member — and inventing a
+  // second one here would report the same fact twice.
+  if (!integrityCheckpointLedgerPresent(db)) return false;
   try {
-    const highWater = db
-      .prepare(`SELECT seq FROM sqlite_sequence WHERE name = ?`)
-      .get(HQ_INTEGRITY_CHECKPOINT_TABLE) as { seq: unknown } | undefined;
-    const mark = Number(highWater?.seq ?? 0);
-    // No high-water mark at all: nothing has ever been committed on this file,
-    // which is a first boot and not a finding.
-    if (!Number.isInteger(mark) || mark <= 0) return false;
     const row = db
       .prepare(
         `SELECT COUNT(*) AS rows, COALESCE(MAX(rowid), 0) AS top FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`,
@@ -1404,11 +1539,26 @@ export function elidedCommitmentLedgerRows(db: HqDatabase): boolean {
     const rows = Number(row?.rows ?? 0);
     const top = Number(row?.top ?? 0);
     if (!Number.isInteger(rows) || !Number.isInteger(top)) return false;
+    // TOTAL erasure, measured against the one witness the erasure cannot reach
+    // (Wave 5 correction round seven, Critical NEW-1 / High NEW-2). A present
+    // but EMPTY commitment ledger contradicts nothing and carries no
+    // `sqlite_sequence` row to compare against, so both of the readings below
+    // are silent on it — which made `DROP` + DDL replay, and `DELETE` plus a
+    // second `DELETE FROM sqlite_sequence`, strictly cheaper than eliding a
+    // single row. `commitmentWitnessPresent` lives in the database header, so
+    // neither reaches it: see `HQ_COMMITMENT_WITNESS_MARK`.
+    if (rows === 0) return commitmentWitnessPresent(db);
+    const highWater = db
+      .prepare(`SELECT seq FROM sqlite_sequence WHERE name = ?`)
+      .get(HQ_INTEGRITY_CHECKPOINT_TABLE) as { seq: unknown } | undefined;
+    const mark = Number(highWater?.seq ?? 0);
+    // No high-water mark at all beside rows that exist: the one-statement
+    // repair, whose remaining price is measured in the header above.
+    if (!Number.isInteger(mark) || mark <= 0) return false;
     return rows !== mark || top !== mark;
   } catch {
-    // The ledger is absent from this file: that is the census's finding — the
-    // table is a declared `ENGINE_IMMUTABLE_TABLES` member — and inventing a
-    // second one here would report the same fact twice.
+    // An engine that cannot read a table it just reported present contributes
+    // no finding here; the census still holds.
     return false;
   }
 }
@@ -1657,10 +1807,12 @@ export function structuralIntegrity(
   // `elidedCommitmentLedgerRows`.
   const commitmentsElided = elidedCommitmentLedgerRows(db);
   const elisionDetail = commitmentsElided
-    ? ` HQ's own durable commitment ledger ${HQ_INTEGRITY_CHECKPOINT_TABLE} holds fewer rows than the ` +
-      `high-water mark the engine records for it. Nothing but HQ appends to that ledger and its guards ` +
-      `refuse a DELETE, so rows were removed from it with the guards temporarily gone. The commitments ` +
-      `every other check is measured against are therefore not the ones HQ made.`
+    ? ` HQ's own durable commitment ledger ${HQ_INTEGRITY_CHECKPOINT_TABLE} holds fewer rows than HQ has ` +
+      `committed on this file — either fewer than the high-water mark the engine records for it, or none ` +
+      `at all on a file whose database header records that HQ has appended to it. Nothing but HQ appends ` +
+      `to that ledger and its guards refuse a DELETE, so rows were removed from it with the guards ` +
+      `temporarily gone, or the whole ledger was destroyed and re-created empty. The commitments every ` +
+      `other check is measured against are therefore not the ones HQ made.`
     : '';
   // ONE observation per finding, because the counts in the unauthenticated
   // artifact and the wording of the refusal are keyed by the finding name. The
