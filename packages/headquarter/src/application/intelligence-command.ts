@@ -395,7 +395,12 @@ export const AVOIDABLE_SPEND_STATEMENT =
   'issued at a tier strictly above the floor the policy itself computed for its own recorded task ' +
   'characteristics, it was not an escalation, no reviewer tier was required of it, and its recorded result ' +
   'is quality_met. It is a statement about HQ’s own policy, not a claim about what a cheaper model ' +
-  'would have produced — HQ never ran one, so it cannot know that.';
+  'would have produced — HQ never ran one, so it cannot know that. The floor it is measured against is ' +
+  'RECOMPUTED from canonical truth as it stands now, not read back from the column the row stored, so this ' +
+  'set can change after a decision was issued: raising a capability’s risk class raises the floor and takes ' +
+  'decisions out of it. The floor served on each record is that same recomputation — the stored one is ' +
+  'carried beside it as floorTierAsRecorded — and riskClassChangedSinceIssue counts the records whose ' +
+  'canonical risk class has moved since they were written.';
 
 /* ------------------------------------------------------------------ */
 /* Capability (the CONFIGURATION vs INVOCATION trio)                   */
@@ -2118,6 +2123,35 @@ export interface DecisionRecord extends DecisionRow {
   escalatedAwayTo: string | null;
   /** Does the recorded tier satisfy the review requirement recorded with it? */
   satisfiesReviewRequirement: boolean;
+  /**
+   * The floor as the ROW records it, kept beside the served `floorTier` so the
+   * history is not lost when the two differ (Wave 5 correction round seven,
+   * Medium NEW-6).
+   *
+   * `floorTier` on this record is RECOMPUTED — from the same characteristics,
+   * with the same canonical risk class, that `decisionIsProvablyAvoidable`
+   * recomputes from. The two used to disagree: the avoidability flag was
+   * computed from the CURRENT canonical risk class while `rowToDecision` served
+   * the STORED `floor_tier`, so a Founder registry upsert that raised a
+   * capability's risk class flipped `provablyAvoidable` 1 → 0 while the served
+   * record still read `floorTier: deterministic_local` beside
+   * `requiredReviewTier: critical_review`. Those two cannot both be true — the
+   * review requirement is one of the terms the floor's `max` is taken over —
+   * and the contradiction was published on the Founder route and disclosed
+   * nowhere.
+   */
+  floorTierAsRecorded: StoredIntelligenceTier;
+  /**
+   * True when the canonical risk class this record was derived against differs
+   * from the one stored on the row.
+   *
+   * The visible half of the answer to the same finding: the flip is real —
+   * canonical truth moved — and it is a fact a reader is entitled to see rather
+   * than a silent retroactive change. `intelligenceAnalytics` counts these.
+   * Always false on a derivation with no canonical resolver, because there is
+   * then nothing to compare against.
+   */
+  riskClassChangedSinceIssue: boolean;
   /** Literal false. A recorded decision is still not authority. */
   grantsAuthority: false;
   statement: string;
@@ -2197,11 +2231,36 @@ export function deriveDecisionRecord(
   // neither can a forged pair.
   const canonicalReview = canonicalRiskClass ? REVIEW_REQUIREMENT[canonicalRiskClass] : null;
   const requiredReviewTier = maxRequiredReviewTier(row.requiredReviewTier, canonicalReview);
+  // The floor is SERVED from the same recomputation the avoidability flag is
+  // computed from (Wave 5 correction round seven, Medium NEW-6). Two published
+  // numbers over one row used to be computed two different ways: this record
+  // carried the STORED `floor_tier` while `decisionIsProvablyAvoidable`
+  // recomputed the floor from the CURRENT canonical risk class. A Founder
+  // registry upsert therefore flipped `provablyAvoidable` 1 → 0 and left the
+  // served record reporting `floorTier: deterministic_local` beside
+  // `requiredReviewTier: critical_review` — which cannot both be true, because
+  // the review requirement is one of the terms `computeRoutingProposal` takes
+  // the floor's `max` over. One computation now answers both, the stored value
+  // is carried as `floorTierAsRecorded` so no history is lost, and the fact
+  // that canonical truth moved is reported rather than absorbed.
+  const recomputedFloor = characteristics
+    ? computeRoutingProposal({
+        characteristics,
+        permittedTiers: INTELLIGENCE_TIERS,
+        budgetDecision: 'within_ceiling',
+      }).floorTier
+    : row.floorTier;
   return {
     ...row,
     boundProvider,
     characteristics,
     requiredReviewTier,
+    floorTier: recomputedFloor,
+    floorTierAsRecorded: row.floorTier,
+    riskClassChangedSinceIssue:
+      canonicalRiskClass != null &&
+      row.characteristics != null &&
+      row.characteristics.riskClass !== canonicalRiskClass,
     state,
     result: outcome?.result ?? 'result_unknown',
     reviewedByTier: outcome?.reviewedByTier ?? null,
@@ -2327,6 +2386,18 @@ export interface IntelligenceAnalyticsView {
   provablyAvoidable: {
     decisionIds: string[];
     total: number;
+    /**
+     * How many decisions were derived against a canonical risk class DIFFERENT
+     * from the one stored on the row (Wave 5 correction round seven, Medium
+     * NEW-6).
+     *
+     * `provablyAvoidable` is recomputed from the CURRENT canonical risk class,
+     * so a Founder registry upsert can flip a decision out of (or into) the set
+     * after it was issued. That is the honest answer — the floor really did
+     * move — but a number that changes retroactively with nothing on the view
+     * to say so is a number that misleads. This is the count that says so.
+     */
+    riskClassChangedSinceIssue: number;
     statement: string;
   };
   observations: {
@@ -2395,12 +2466,19 @@ export function decisionIsProvablyAvoidable(decision: DecisionRecord): boolean {
   // descriptions of the work that HQ has no canonical source for and does not
   // pretend to — a forged row can still understate those, which is recorded
   // debt rather than a closed hole.
-  const recomputed = computeRoutingProposal({
-    characteristics,
-    permittedTiers: INTELLIGENCE_TIERS,
-    budgetDecision: 'within_ceiling',
-  });
-  return tierRank(decision.tier) > tierRank(recomputed.floorTier);
+  //
+  // **ONE spelling of the recomputation, not two** (Wave 5 correction round
+  // seven, Medium NEW-6). This function used to recompute the floor here while
+  // `deriveDecisionRecord` served the STORED `floor_tier`, so the two published
+  // numbers over one row were computed different ways and could contradict each
+  // other in public. `deriveDecisionRecord` now performs the recomputation and
+  // this reads its result, so the flag and the served floor cannot diverge
+  // again — and a record built without characteristics returns above, before
+  // this line.
+  // Fail closed on a floor outside the vocabulary: a record built without the
+  // recomputation above cannot be pronounced avoidable.
+  if (!isIntelligenceTier(decision.floorTier)) return false;
+  return tierRank(decision.tier) > tierRank(decision.floorTier);
 }
 
 /**
@@ -2519,6 +2597,7 @@ export function summarizeIntelligenceAnalytics(input: {
   const perTier = new Map<StoredIntelligenceTier, TierResultCounts>();
   let escalated = 0;
   const avoidable: string[] = [];
+  let riskClassChanged = 0;
   for (const decision of input.decisions) {
     // The CHECKED value is the key, never the stored string.
     const tierKey = isIntelligenceTier(decision.tier) ? decision.tier : UNRECOGNIZED_BUCKET;
@@ -2527,6 +2606,7 @@ export function summarizeIntelligenceAnalytics(input: {
     bump(byResult, isDecisionResult(decision.result) ? decision.result : UNRECOGNIZED_BUCKET);
     if (decision.escalatedFrom != null) escalated += 1;
     if (decisionIsProvablyAvoidable(decision)) avoidable.push(decision.id);
+    if (decision.riskClassChangedSinceIssue) riskClassChanged += 1;
     const bucketKey: StoredIntelligenceTier = isIntelligenceTier(decision.tier)
       ? decision.tier
       : STORED_TIER_UNRECOGNIZED;
@@ -2636,6 +2716,7 @@ export function summarizeIntelligenceAnalytics(input: {
     provablyAvoidable: {
       decisionIds: avoidable,
       total: avoidable.length,
+      riskClassChangedSinceIssue: riskClassChanged,
       statement: AVOIDABLE_SPEND_STATEMENT,
     },
     observations: {

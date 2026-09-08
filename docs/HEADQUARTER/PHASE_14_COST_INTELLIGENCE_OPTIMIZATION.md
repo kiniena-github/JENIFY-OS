@@ -1334,6 +1334,34 @@ cross-cutting findings and the full verification table are in
 | **MEDIUM M5** — `analytics.cost.byMission`/`byProject` rested on the one-of-N stored column | Six runs, one task linked to two missions, one 5000 spend: four runs attributed 100% to mission A and 0 to B; two the reverse. This page claimed the stored columns "measure nothing"; they measured `intelligenceAnalytics()`, served on `/api/hq/control/intelligence`. | Folded from the same union the ceilings use. A task linked to two missions counts IN FULL under each, because HQ has no basis for a split and does not invent one. `summarizeIntelligenceAnalytics` takes the canonical derivation as a REQUIRED input, so a missing one cannot read clean. |
 | **MEDIUM M6** — a claim-holding worker poisoned the Founder's spend-by-provider report | `byProvider` folded the caller-declared `row.providerId` that the ceiling path had already stopped trusting: `[{"id":"openai","knownAmountMinorUnits":999999}]` went out for work HQ has no canonical statement ever ran there, while the ceiling correctly read `observed 0`. Two surfaces over one ledger, disagreeing about the same spend. | Folded on the binding HQ vouched for (`provider_bound`). An amount HQ cannot attribute lands in a categorical `unattributed` bucket rather than being credited to whoever the worker named. |
 
+### Round seven, Medium NEW-6 — `provablyAvoidable` flipped retroactively and two published numbers contradicted each other
+
+`decisionIsProvablyAvoidable` recomputed the tier floor from the **current**
+canonical risk class while `rowToDecision` served the **stored** `floor_tier`.
+Two published numbers over one row, computed two different ways. Executed: a
+Founder registry upsert that raised a capability's risk class flipped
+`provablyAvoidable` 1 → 0 **and** left the served record reporting `floorTier:
+deterministic_local` beside `requiredReviewTier: critical_review` — which this
+document itself says cannot both be true, because the review requirement is one
+of the terms `computeRoutingProposal` takes the floor's `max` over. Neither the
+flip nor the contradiction was disclosed anywhere.
+
+**ONE computation answers both now.** `deriveDecisionRecord` recomputes the
+floor from the canonically-corrected characteristics and SERVES that;
+`decisionIsProvablyAvoidable` reads its result instead of recomputing a second
+time, so the two cannot diverge again. The stored value is carried beside it as
+`floorTierAsRecorded`, so no history is lost. And the flip is REPORTED rather
+than absorbed: `riskClassChangedSinceIssue` on each record, counted on
+`analytics.provablyAvoidable.riskClassChangedSinceIssue`, and
+`AVOIDABLE_SPEND_STATEMENT` now says out loud that the floor is recomputed from
+canonical truth as it stands and that the set can therefore change after a
+decision was issued.
+
+The flip itself is kept rather than suppressed: raising a capability's risk
+class really does raise the floor, and a decision that was above the old floor
+may be at or below the new one. Excluding such rows would hide a real change in
+canonical truth; what was wrong was doing it silently and inconsistently.
+
 ### What the fourth round adds to Phase 14's NOT-fixed list
 
 - **A cost entry that HQ could not attribute to a provider is reported as

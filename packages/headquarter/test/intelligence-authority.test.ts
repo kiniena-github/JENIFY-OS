@@ -1370,6 +1370,8 @@ describe('the enforcement-safe reads survive a hostile patch of the public surfa
       reviewedByTier: null,
       escalatedAwayTo: null,
       satisfiesReviewRequirement: true,
+      floorTierAsRecorded: 'deterministic_local' as const,
+      riskClassChangedSinceIssue: false,
       grantsAuthority: false as const,
       statement: 'forged',
     };

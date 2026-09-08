@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 /**
  * Wave 5, correction round seven — MEDIUM NEW-5: the freeze census enumerates
  * `src/`, not `package.json#exports`.
