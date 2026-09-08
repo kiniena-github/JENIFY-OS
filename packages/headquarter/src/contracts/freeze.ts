@@ -75,15 +75,30 @@
  *   exists to withhold — a one-statement escape, executed before this sentence
  *   was written. The wrapper passes the view.
  *
- * "The raw collection never escapes" is a property of the CALL SITES as much as
- * of this module: the proxy target is the very object `deepFreeze` was handed,
- * so a caller that named its collection before freezing it would still hold a
- * mutable reference. Both of this package's frozen collections
+ * "The raw collection never escapes" used to be a property of the CALL SITES as
+ * much as of this module: the proxy target was the very object `deepFreeze` was
+ * handed, so a caller that named its collection before freezing it still held a
+ * mutable reference, and `Set.prototype.clear.call(named)` emptied the frozen
+ * view through it — `frozen.size` 2 -> 0, executed (Wave 5 correction round
+ * eleven, Low 1). Both of this package's frozen collections
  * (`QUEUED_UNREACHABLE_STATUSES` in `contracts/events.ts`, `QUERY_STOPWORDS` in
  * `application/search-command.ts`) construct the collection inline in the
- * `deepFreeze(...)` argument, so nothing outside this module names one. That is
- * stated rather than assumed, because it is the half a future call site could
- * break without touching this file.
+ * `deepFreeze(...)` argument, so nothing was exploitable — but a future call
+ * site could have broken the guarantee without touching this file, which is
+ * precisely the kind of assumption this wave keeps finding still standing.
+ *
+ * So the proxy target is now a PRIVATE COPY: `new Set(argument)` /
+ * `new Map(argument)`, with the argument's own property descriptors carried
+ * over so nothing is dropped. Whatever the caller still holds is a DIFFERENT
+ * collection from the one behind the view, and mutating it changes nothing the
+ * view reports. `instanceof Set`/`Map` is unaffected, so `live/redaction.ts`'s
+ * walker still reaches a frozen collection's entries.
+ *
+ * The consequence a caller must know: `deepFreeze(collection) !== collection`
+ * for a `Set` or a `Map`. That was already true — the return has been the view
+ * since round ten — and it is why `deepFreeze` has always been used as
+ * `export const X = deepFreeze(new Set([...]))` rather than for its side
+ * effect.
  *
  * ## Two lanes fixed this, and this is the one that shipped
  *
@@ -163,6 +178,14 @@ function contentFrozenCollection<T extends object>(target: T, kind: CollectionKi
       // Non-functions — `size` above all — are read through every time, so a
       // stale value can never be served.
       if (typeof value !== 'function') return value;
+      // `constructor` is a function-valued property that is NOT a method, and
+      // binding it made `view.constructor === Set` false — narrower than the
+      // header's "reading behaves exactly as it did" (Wave 5 correction round
+      // eleven, Low 2). Returned unbound, so identity checks against `Set` and
+      // `Map` read as they do on the real collection. It is not a mutator and
+      // it carries no [[SetData]] access, so nothing is opened by handing it
+      // back as it is.
+      if (property === 'constructor') return value;
       const bound =
         property === 'forEach'
           ? (callback: (...args: unknown[]) => unknown, thisArg?: unknown): void => {
@@ -225,11 +248,40 @@ export function deepFreeze<T>(value: T, seen: WeakMap<object, unknown> = new Wea
   seen.set(target, value);
 
   const collection = target instanceof Set ? 'Set' : target instanceof Map ? 'Map' : null;
-  const wrapper = collection === null ? null : contentFrozenCollection(target, collection);
+  // A PRIVATE copy, not the caller's own object (Wave 5 correction round
+  // eleven, Low 1). The proxy target used to BE the argument, so "the raw
+  // collection never escapes" was a property of the CALL SITES rather than of
+  // this module: a caller that named its collection before freezing it kept a
+  // mutable reference, and `Set.prototype.clear.call(named)` emptied the frozen
+  // view through it (`frozen.size` 2 -> 0, executed). Both of this package's
+  // call sites construct inline, so nothing was exploitable — but a future one
+  // could break the guarantee without touching this file, which is exactly the
+  // shape of assumption this wave keeps finding. Copying makes it a property of
+  // the module: whatever the caller still holds is now a DIFFERENT collection
+  // from the one behind the view, and mutating it changes nothing the view
+  // reports. `instanceof Set`/`Map` is unaffected — the backing object is a
+  // real collection of the same kind — so `redaction.ts`'s walker still reaches
+  // a frozen collection's entries.
+  const backing: object =
+    collection === 'Set'
+      ? new Set(target as Set<unknown>)
+      : collection === 'Map'
+        ? new Map(target as Map<unknown, unknown>)
+        : target;
+  if (backing !== target) {
+    // Own properties of a collection are rare and are not carried by the
+    // `new Set(...)` copy, so they are carried explicitly rather than silently
+    // dropped: freezing a value must never lose part of it.
+    for (const key of Reflect.ownKeys(target)) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
+      if (descriptor) Object.defineProperty(backing, key, descriptor);
+    }
+  }
+  const wrapper = collection === null ? null : contentFrozenCollection(backing, collection);
   if (wrapper !== null) seen.set(target, wrapper.view);
 
-  for (const key of Reflect.ownKeys(target)) {
-    const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
+  for (const key of Reflect.ownKeys(backing)) {
+    const descriptor = Reflect.getOwnPropertyDescriptor(backing, key);
     // Only DATA properties are recursed into. Reading an accessor here would
     // execute someone else's getter as a side effect of freezing, which is not
     // this function's business.
@@ -239,32 +291,32 @@ export function deepFreeze<T>(value: T, seen: WeakMap<object, unknown> = new Wea
     // to be repointed at it — otherwise "all the way down" would stop at the
     // raw `Set` a frozen object happens to hold.
     if (frozen !== descriptor.value && (descriptor.configurable === true || descriptor.writable === true)) {
-      Object.defineProperty(target, key, { ...descriptor, value: frozen });
+      Object.defineProperty(backing, key, { ...descriptor, value: frozen });
     }
   }
 
   if (collection === 'Set' && wrapper !== null) {
-    const entries = [...(target as Set<unknown>)];
+    const entries = [...(backing as Set<unknown>)];
     const frozen = entries.map((entry) => deepFreeze(entry, seen));
     if (frozen.some((entry, index) => entry !== entries[index])) {
       // Rebuilt through the prototype in one pass so iteration order survives.
       // Still legal: `seal` has not run yet.
-      Set.prototype.clear.call(target as Set<unknown>);
-      for (const entry of frozen) Set.prototype.add.call(target as Set<unknown>, entry);
+      Set.prototype.clear.call(backing as Set<unknown>);
+      for (const entry of frozen) Set.prototype.add.call(backing as Set<unknown>, entry);
     }
     wrapper.seal();
-    Object.freeze(target);
+    Object.freeze(backing);
     return wrapper.view as T;
   }
   if (collection === 'Map' && wrapper !== null) {
-    const entries = [...(target as Map<unknown, unknown>)];
+    const entries = [...(backing as Map<unknown, unknown>)];
     const frozen = entries.map(([key, entry]) => [deepFreeze(key, seen), deepFreeze(entry, seen)] as const);
     if (frozen.some(([key, entry], index) => key !== entries[index]![0] || entry !== entries[index]![1])) {
-      Map.prototype.clear.call(target as Map<unknown, unknown>);
-      for (const [key, entry] of frozen) Map.prototype.set.call(target as Map<unknown, unknown>, key, entry);
+      Map.prototype.clear.call(backing as Map<unknown, unknown>);
+      for (const [key, entry] of frozen) Map.prototype.set.call(backing as Map<unknown, unknown>, key, entry);
     }
     wrapper.seal();
-    Object.freeze(target);
+    Object.freeze(backing);
     return wrapper.view as T;
   }
 

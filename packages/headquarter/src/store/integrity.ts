@@ -3043,8 +3043,51 @@ export const BACKUP_REFUSAL_REASONS = Object.freeze([
    * nothing to say about a ledger that was emptied with its guards temporarily
    * dropped, which is well-formed by construction. A file that would latch safe
    * mode is not a recovery point, so it is refused here rather than verified.
+   *
+   * **Round ten closed only the half this module can compute alone, and the
+   * sentence above was false for the other half** (Wave 5 correction round
+   * eleven, High 1). `structuralIntegrity(db)` was called with NO options, so
+   * `options.recordedVerdict` was `undefined` and `carryRecordedVerdict` never
+   * saw the durable blocking verdict the CANDIDATE carries in its own
+   * `hq_reliability_verdicts` — the exact latch a live construction re-raises.
+   * Executed: a file whose boot had recorded
+   * `safe_mode=1 ["append_only_guard_missing"]`, and whose guard HQ's own
+   * ensure pass had since re-created, gave
+   * `structuralIntegrity(no opts).safeMode = false` and verified
+   * `{ verified: true, refusals: [], integrityVerdict: 'ok' }`, while the same
+   * bytes opened live gave `safeMode: true`. A second vector had the same
+   * root: a structural pass never verifies the evidence log's LINKS, so a
+   * backup whose `op_evidence` payload was rewritten in place at a seq behind
+   * the last checkpoint commitment also verified `ok` — executed, seq 1 of 3
+   * rewritten, `contradictedChainCommitment` unmoved because the committed tip
+   * is at seq 3.
+   *
+   * Both inputs live above `store/` — the verdict ledger is written by
+   * `application/`, and the whole-log verifier by `operator/` — so they arrive
+   * through `assessCandidate`, the same injection shape `fullIntegrity` uses
+   * for `verifyEvidenceChain` and for the same reason. An assessment that did
+   * not run is not one that passed: see `candidate_census_unavailable`.
    */
   'would_latch_safe_mode',
+  /**
+   * The candidate opened, but HQ could not run its OWN full assessment over
+   * the copy, so nothing here may claim that it passed one.
+   *
+   * `assessCandidate` is REQUIRED by the type and treated as required at
+   * runtime too, because this module is public package API a JavaScript caller
+   * can reach with no options at all (Wave 5 correction round eleven, High 1).
+   * The two facts it carries — the standing verdict the candidate records
+   * about itself, and whether its whole evidence log still verifies — cannot
+   * be computed inside `store/`: one belongs to `application/`, the other to
+   * `operator/`, and duplicating either computation here is exactly the drift
+   * `operator/evidence.ts` refuses ("one computation, not two").
+   *
+   * So an omitted, non-callable or throwing assessor is a REFUSAL and never a
+   * silent pass. This is the same fail-closed rule `fullIntegrity` applies to
+   * a missing `verifyEvidenceChain`, applied at the surface that publishes a
+   * verdict a Founder may certify permanently.
+   */
+  'candidate_census_unavailable',
 ] as const);
 export type BackupRefusalReason = (typeof BACKUP_REFUSAL_REASONS)[number];
 
@@ -3068,6 +3111,42 @@ const SQLITE_SIDECAR_SUFFIXES = Object.freeze(['-wal', '-shm', '-journal'] as co
  */
 const HQ_MARKER_TABLE = 'hq_events';
 
+/**
+ * What HQ's OWN full assessment says about the opened COPY of a candidate.
+ *
+ * Supplied by the caller rather than computed here, because the two facts that
+ * make it complete live above `store/` (Wave 5 correction round eleven, High
+ * 1):
+ *
+ *  - the standing verdict the candidate records ABOUT ITSELF, read from
+ *    `hq_reliability_verdicts` — an `application/` ledger, and the read is not
+ *    "the last row" but the corroborated walk `standingIntegrityVerdict`
+ *    performs, whose corroboration needs the evidence log's own hash formula;
+ *  - whether the whole evidence log verifies, which is `operator/`'s
+ *    `verifyEvidenceChain`.
+ *
+ * `application/reliability-command.ts#assessHqBackupCandidate` is the shipped
+ * implementation and the only one HQ itself passes. It reads; it must never
+ * write, migrate or repair, because the handle it is given is a read-only one
+ * over a scratch copy and a verification that repaired what it was checking
+ * would launder the tamper it exists to find.
+ */
+export interface HqBackupCandidateCensus {
+  /**
+   * Would opening these bytes live engage safe mode? Categorically, even when
+   * not one finding name behind it could be read back through the closed
+   * vocabulary — the fail-closed half `carryRecordedVerdict` returns.
+   */
+  safeMode: boolean;
+  /** The blocking findings behind it, by name. Never counted, always named. */
+  blockingFindings: readonly HqIntegrityFinding[];
+  /** True only when the WHOLE evidence log was walked and stood. */
+  chainVerified: boolean;
+}
+
+/** See `HqBackupCandidateCensus`. Required, and required at runtime too. */
+export type HqBackupCandidateAssessor = (db: HqDatabase) => HqBackupCandidateCensus;
+
 export interface BackupVerification {
   verified: boolean;
   refusals: BackupRefusalReason[];
@@ -3079,11 +3158,26 @@ export interface BackupVerification {
   /**
    * What HQ can say about the file's soundness, in one line.
    *
-   * `ok` means BOTH that `PRAGMA integrity_check` returned ok AND that HQ's own
-   * append-only census found nothing blocking in the copy. It used to mean only
-   * the first, while reading as the second — see `would_latch_safe_mode`.
+   * `ok` means ALL of: `PRAGMA integrity_check` returned ok; HQ's own
+   * append-only census found nothing blocking in the copy; the standing
+   * verdict the copy records about ITSELF is not a blocking one; and the whole
+   * evidence log was walked and stood. It used to mean only the first, while
+   * reading as the second — see `would_latch_safe_mode`. Anything else names
+   * which of them did not hold.
    */
   integrityVerdict: string | null;
+  /**
+   * Whether the copy's WHOLE evidence log was walked and verified.
+   *
+   * Reported rather than merely folded into `verified`, because "the chain
+   * stands" and "nothing blocking was found" are different claims and a
+   * recovery point is exactly where the difference matters. It is never `true`
+   * unless `assessCandidate` walked the log; a file refused before it could be
+   * opened reports `false`, which is "not verified in this check" and never
+   * "verified and broken" — the same reading `HqIntegrityReport.chainVerified`
+   * carries.
+   */
+  chainVerified: boolean;
   /**
    * The BLOCKING findings HQ's own census raised against the opened copy, by
    * name, or `[]` when it raised none and `null` when the census never ran
@@ -3234,7 +3328,20 @@ export function verifyHqBackupFile(
      * omits it. See `candidate_is_the_live_database`.
      */
     liveDatabasePath?: string | null;
-  } = {},
+    /**
+     * HQ's OWN full assessment of the opened COPY — REQUIRED, and treated as
+     * required at runtime, because a JavaScript caller can reach this function
+     * with no options at all and an assessment that did not run is not one
+     * that passed (Wave 5 correction round eleven, High 1).
+     *
+     * Injected rather than imported for the reason `fullIntegrity` injects
+     * `verifyEvidenceChain`: this module is a leaf of `store/`, and the two
+     * facts a complete answer needs are owned by `application/` (the verdict
+     * ledger) and `operator/` (the whole-log chain walk). Pass
+     * `assessHqBackupCandidate`; see `HqBackupCandidateCensus`.
+     */
+    assessCandidate: HqBackupCandidateAssessor;
+  },
 ): BackupVerification {
   const empty: BackupVerification = {
     verified: false,
@@ -3243,9 +3350,19 @@ export function verifyHqBackupFile(
     sizeBytes: null,
     schemaTables: null,
     integrityVerdict: null,
+    chainVerified: false,
     blockingFindings: null,
     resolvedPath: null,
   };
+  // Typed as required; read defensively anyway, because this is public package
+  // API a JavaScript caller can reach with no second argument at all. A
+  // TypeError thrown out of a verification would be neither a pass nor a
+  // refusal — and a caller who omits the assessor gets
+  // `candidate_census_unavailable` further down rather than an exception.
+  const given: {
+    liveDatabasePath?: string | null;
+    assessCandidate?: HqBackupCandidateAssessor;
+  } = (options ?? {}) as never;
   const target = typeof candidate === 'string' ? candidate.trim() : '';
   if (!target || !path.isAbsolute(target)) {
     return { ...empty, refusals: ['path_not_absolute'] };
@@ -3281,10 +3398,10 @@ export function verifyHqBackupFile(
   // The LIVE database, refused on identity rather than on shape. Resolved on
   // both sides, so an alias, a symlinked ancestor or a differently-spelled
   // absolute path names the same file here (Wave 5 correction round six, Low 3).
-  if (typeof options.liveDatabasePath === 'string' && options.liveDatabasePath !== '') {
+  if (typeof given.liveDatabasePath === 'string' && given.liveDatabasePath !== '') {
     let live: string | null = null;
     try {
-      live = fs.realpathSync(options.liveDatabasePath);
+      live = fs.realpathSync(given.liveDatabasePath);
     } catch {
       // An in-memory handle, or a path this process can no longer resolve:
       // there is no live FILE to collide with, so this check contributes
@@ -3456,19 +3573,68 @@ export function verifyHqBackupFile(
       // own marks, an elided commitment ledger and a contradicted chain
       // commitment. It does not catch a ledger the file never had.
       let blockingFindings: HqIntegrityFinding[] = [];
+      let wouldLatch = false;
       try {
         const census = structuralIntegrity(db);
         blockingFindings = census.observations
           .filter((observation) => observation.blocking)
           .map((observation) => observation.finding);
+        wouldLatch = census.safeMode;
       } catch {
         // A census that could not run is not a census that passed. The file
         // opened and answered `integrity_check`, so this is a shape this
         // module did not expect rather than a broken B-tree — either way it is
         // not a verified recovery point.
         blockingFindings = ['append_only_guard_missing'];
+        wouldLatch = true;
       }
-      if (blockingFindings.length > 0) refusals.push('would_latch_safe_mode');
+
+      // The half this module cannot compute alone (Wave 5 correction round
+      // eleven, High 1). The structural pass above is called with NO options
+      // on purpose — it is the FLOOR, computed from the copy itself and owing
+      // nothing to a caller — and it is exactly what left two holes: it never
+      // sees the standing verdict the candidate records about itself (that
+      // arrives as `recordedVerdict`, from an `application/` ledger), and it
+      // never walks the evidence log's links (that is `operator/`'s
+      // `verifyEvidenceChain`). Both are unioned in here rather than replacing
+      // the floor, so the injected assessor can only ever ADD refusals.
+      //
+      // Asked only of a file that IS an HQ database. A candidate with no
+      // marker table is already categorically refused `not_an_hq_database`,
+      // and asking somebody else's SQLite file for HQ's evidence log would add
+      // a second, misleading reason to a refusal that is already complete —
+      // it would say the file's audit chain is broken when the file has no
+      // audit chain to break. Nothing is admitted by the skip: the refusal
+      // stands either way.
+      let chainVerified = false;
+      const isHqDatabase = tables.has(HQ_MARKER_TABLE);
+      // `censusSettled` is "this question has an answer", which a non-HQ file
+      // satisfies by not being asked it.
+      let censusSettled = false;
+      try {
+        const assessed = isHqDatabase ? given.assessCandidate!(db) : null;
+        censusSettled = true;
+        chainVerified = assessed?.chainVerified === true;
+        wouldLatch = wouldLatch || assessed?.safeMode === true;
+        const merged = new Set<HqIntegrityFinding>(blockingFindings);
+        for (const finding of assessed?.blockingFindings ?? []) {
+          // Read through the closed vocabulary, never asserted into it: this
+          // list reaches the unauthenticated artifact's key set and a Founder
+          // refusal message, so a name from a future version is dropped rather
+          // than published. The ENGAGEMENT it came with is carried anyway, in
+          // `wouldLatch` — the same fail-closed split `carryRecordedVerdict`
+          // makes.
+          if (isHqIntegrityFinding(finding)) merged.add(finding);
+        }
+        blockingFindings = [...merged];
+      } catch {
+        // Omitted, not callable, or it threw. Never a pass — see
+        // `candidate_census_unavailable`.
+        censusSettled = false;
+        chainVerified = false;
+      }
+      if (!censusSettled) refusals.push('candidate_census_unavailable');
+      if (wouldLatch || blockingFindings.length > 0) refusals.push('would_latch_safe_mode');
 
       return {
         verified: refusals.length === 0,
@@ -3478,12 +3644,24 @@ export function verifyHqBackupFile(
         schemaTables: tables.size,
         // The published verdict says what was actually established. `ok` used
         // to be printed over a file HQ's own census would have refused to run
-        // on; now `ok` means both checks passed and anything else names which
-        // one did not.
-        integrityVerdict: (blockingFindings.length === 0
-          ? integrityVerdict
-          : `${integrityVerdict}; HQ append-only census: ${[...new Set(blockingFindings)].sort().join(', ')}`
-        ).slice(0, 400),
+        // on; now `ok` means every check passed and anything else names which
+        // one did not — including the case where HQ's own assessment could not
+        // run at all, which is a different sentence from "it ran and found
+        // nothing".
+        integrityVerdict: [
+          integrityVerdict,
+          blockingFindings.length > 0
+            ? `HQ append-only census: ${[...new Set(blockingFindings)].sort().join(', ')}`
+            : null,
+          wouldLatch && blockingFindings.length === 0
+            ? 'HQ append-only census: this file records a standing safe-mode verdict'
+            : null,
+          censusSettled ? null : "HQ's own assessment of this file could not run",
+        ]
+          .filter((part): part is string => part !== null)
+          .join('; ')
+          .slice(0, 400),
+        chainVerified,
         blockingFindings,
         resolvedPath: resolved,
       };

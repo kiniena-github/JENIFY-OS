@@ -79,17 +79,37 @@ const SERVICE = path.join(HERE, '..', 'src', 'application', 'service.ts');
  *
  * ## What is derived instead
  *
- * EVERY string parameter of EVERY facade write, one row per (method,
+ * EVERY caller-text parameter of EVERY facade write, one row per (method,
  * parameter) pair, with no curated vocabulary anywhere in the derivation. A
  * pair is covered when the parameter is a key of an `assertNoCredentialShape` /
  * `assertBrowserSafe` literal in that method's body, or when the method hands
- * its whole input object to `callerTextRefusal`, which scans every own string
- * field. The second form is why a parameter ADDED to an input type in a future
- * phase is covered the day it is added rather than the round after it is
- * exploited.
+ * its whole input object to `callerTextRefusal`, which scans every own field.
+ * The second form is why a parameter ADDED to an input type in a future phase
+ * is covered the day it is added rather than the round after it is exploited.
  *
- * The exemptions are named individually, with reasons, and there is exactly
- * one.
+ * ## The type filter that was the ninth spelling of it (round eleven, Medium 1)
+ *
+ * "Every STRING parameter" was both halves of the miss. The derivation matched
+ * `^string(\s*\|\s*null)?…$` and enumerated nothing else, and
+ * `callerTextRefusal` kept only `typeof value === 'string'` — so a `string[]`
+ * was invisible to the check AND unscanned by the guard. Two live sinks,
+ * executed against the previous head:
+ *
+ *  - `submitResult(taskId, workerId, fence, {ok:true}, ['sk-…'])` ACCEPTED,
+ *    landing in `op_evidence.payload` — `ENGINE_IMMUTABLE_TABLES[0]`, with
+ *    `no_erase` and `no_rewrite`, so the row is permanent;
+ *  - `postMissionMessage({ …, refs: ['sk-…'] })` ACCEPTED, landing in
+ *    `hq_chat_messages.refs`.
+ *
+ * Neither bricked a shipped route at that head, which is what the latent half
+ * of this class looks like rather than a defence of it. Both halves are closed
+ * here: the matcher below reads array-of-string types too, and the guard scans
+ * every own field of whatever type.
+ *
+ * The exemptions are named individually, with reasons, and the count of
+ * deliberately-unscanned fields is DERIVED from the source below rather than
+ * asserted in this sentence — the claim "there is exactly one" has been false
+ * twice.
  */
 
 /**
@@ -105,25 +125,60 @@ const SERVICE = path.join(HERE, '..', 'src', 'application', 'service.ts');
 const EXEMPT_PARAMETERS: readonly string[] = ['lookupPrincipal.id'];
 
 /**
- * The ONE piece of caller text a facade write deliberately does not scan: the
- * task PAYLOAD handed to `createTask`. Recorded here, and executed at the
- * bottom of this file rather than merely claimed.
+ * The pieces of caller text a facade write deliberately does not scan, as the
+ * SOURCE spells them: the third argument of every `callerTextRefusal` call.
  *
- * It survives the whole-input scan by construction rather than by exception:
- * `callerTextRefusal` reads own STRING fields, and a payload is a
- * `Record<string, unknown>`. No control route serves a task payload — probed
- * across every shipped route, and a payload carrying a credential shape bricked
- * none while the same shape in the title bricked two. The queue applies the
- * evidence log's own heuristic to it at `enqueue`, and the strict guard for it
- * lives at the boundary that would PUBLISH it: the dispatch lane, which refuses
- * to open an issue carrying one. `claude-dispatch.test.ts` and
- * `dispatch-durable-label.test.ts` reach that boundary by writing a
- * credential-shaped payload through `createTask` on purpose, precisely to prove
- * the dispatch guard holds INDEPENDENTLY of the submission guard. Scanning the
- * payload here would delete that defence-in-depth proof, so the payload stays
- * with the guard that owns it. `createTask`'s `title` and `project` ARE
- * scanned.
+ * Named at the call site rather than implied by a type filter (Wave 5
+ * correction round eleven, Medium 1). It used to survive "by construction" —
+ * `callerTextRefusal` read own STRING fields and a payload is a
+ * `Record<string, unknown>` — and that same construction silently exempted two
+ * `string[]` sinks nobody had named. An exemption that is a side effect of a
+ * type check is an exemption nobody can count; this one is written down where
+ * it applies, and counted here.
+ *
+ * What the one carve-out rests on is unchanged. No control route serves a task
+ * payload — probed across every shipped route, and a payload carrying a
+ * credential shape bricked none while the same shape in the title bricked two.
+ * The queue applies the evidence log's own heuristic to it at `enqueue`, and
+ * the strict guard for it lives at the boundary that would PUBLISH it: the
+ * dispatch lane, which refuses to open an issue carrying one.
+ * `claude-dispatch.test.ts` and `dispatch-durable-label.test.ts` reach that
+ * boundary by writing a credential-shaped payload through `createTask` on
+ * purpose, precisely to prove the dispatch guard holds INDEPENDENTLY of the
+ * submission guard. Scanning the payload here would delete that
+ * defence-in-depth proof, so the payload stays with the guard that owns it.
+ * `createTask`'s `title` and `project` ARE scanned.
  */
+function deliberatelyUnscannedFields(): string[] {
+  const lines = fs.readFileSync(SERVICE, 'utf8').split('\n');
+  const classStart = lines.findIndex((line) => /^export class HeadquarterOperations\b/.test(line));
+  const found: string[] = [];
+  let method = 'callerTextRefusal';
+  for (let i = classStart; i < lines.length; i += 1) {
+    const declaration = /^ {2}(#?[A-Za-z_][A-Za-z0-9_]*)\s*[(<]/.exec(lines[i]);
+    if (declaration && !CONTROL_WORDS.has(declaration[1])) method = declaration[1];
+    // Three arguments: the input, the already-scanned list, the carve-out list.
+    const call = /callerTextRefusal\([^,]+,\s*\[[^\]]*\]\s*,\s*\[([^\]]*)\]/.exec(lines[i]);
+    if (!call) continue;
+    for (const raw of call[1].split(',')) {
+      const field = raw.trim().replace(/^['"]|['"]$/g, '');
+      if (field) found.push(`${method}.${field}`);
+    }
+  }
+  return found.sort();
+}
+
+/**
+ * A parameter type that carries CALLER TEXT into storage.
+ *
+ * `string[]` is here because it was not, and two live sinks were the cost
+ * (Wave 5 correction round eleven, Medium 1). An array of caller strings is
+ * caller text exactly as much as one caller string is; the storage it reaches
+ * (`op_evidence.payload`, `hq_chat_messages.refs`) is append-only in both
+ * cases.
+ */
+const CALLER_TEXT_TYPE =
+  /^(?:readonly\s+)?string(?:\[\])?(?:\s*\|\s*null)?(?:\s*\|\s*undefined)?$/;
 
 const CONTROL_WORDS = new Set([
   'if',
@@ -242,15 +297,18 @@ function facadeWriteParameters(): ParameterFact[] {
     for (const declaration of splitTopLevel(inner)) {
       const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\??\s*:\s*([\s\S]*)$/.exec(declaration);
       if (!match) continue;
-      const type = match[2].trim().replace(/[)\s]+$/, '');
-      if (/^string(\s*\|\s*null)?(\s*\|\s*undefined)?$/.test(type)) parameters.push(match[1]);
+      // The default value is stripped before the type is read: `evidenceRefs:
+      // string[] = []` declares `string[]`, and reading the initializer as part
+      // of the type is one of the two ways that parameter stayed invisible.
+      const type = match[2].trim().replace(/=[\s\S]*$/, '').trim().replace(/[)\s]+$/, '');
+      if (CALLER_TEXT_TYPE.test(type)) parameters.push(match[1]);
       else if (type.startsWith('{') || /^[A-Z]/.test(type)) objectParameter = match[1];
     }
     if (objectParameter) {
       // The string fields of an inline object type, and of a named one, read
       // from the signature text itself.
       for (const field of signature.matchAll(
-        /(?:^|[{;,\n])\s*([A-Za-z_][A-Za-z0-9_]*)\s*\??\s*:\s*(string(?:\s*\|\s*null)?(?:\s*\|\s*undefined)?)\s*[;,\n)]/g,
+        /(?:^|[{;,\n])\s*([A-Za-z_][A-Za-z0-9_]*)\s*\??\s*:\s*((?:readonly\s+)?string(?:\[\])?(?:\s*\|\s*null)?(?:\s*\|\s*undefined)?)\s*[;,\n)]/g,
       )) {
         parameters.push(field[1]);
       }
@@ -264,11 +322,21 @@ function facadeWriteParameters(): ParameterFact[] {
       `callerTextRefusal\\(\\s*${objectParameter ?? '\\u0000'}\\s*[,)]`,
     ).test(body);
     const generic = literalKeys(body, 'callerTextRefusal');
+    // A field this method names in `deliberatelyUnscanned` is NOT credited by
+    // the whole-input scan — the whole point of naming it is that the scan
+    // skips it — so it has to earn its place in `EXEMPT_PARAMETERS` instead.
+    const carvedOut = new Set(
+      deliberatelyUnscannedFields()
+        .filter((pair) => pair.startsWith(`${name}.`))
+        .map((pair) => pair.slice(name.length + 1)),
+    );
     for (const parameter of new Set(parameters)) {
       facts.push({
         method: name,
         parameter,
-        covered: wholeInput || explicit.has(parameter) || generic.has(parameter),
+        covered:
+          !carvedOut.has(parameter) &&
+          (wholeInput || explicit.has(parameter) || generic.has(parameter)),
       });
     }
   }
@@ -284,14 +352,20 @@ function namedInputStringFields(parameterName: string, signature: string): strin
   if (at < 0) return [];
   const end = source.indexOf('\n}\n', at);
   const declaration = source.slice(at, end);
-  return [...declaration.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\??:\s*string\b/gm)].map((m) => m[1]);
+  return [
+    ...declaration.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\??:\s*(?:readonly\s+)?string\b/gm),
+  ].map((m) => m[1]);
 }
 
 describe('every STRING PARAMETER of every facade write reaches the one scan', () => {
   it('finds the parameters at all — the enumeration is not vacuous', () => {
     const facts = facadeWriteParameters();
-    // A floor on the pairs, not on the methods: the per-method count is exactly
-    // what hid three of these. 223 pairs across 60 methods at this head.
+    // A FLOOR on the pairs, not on the methods: the per-method count is exactly
+    // what hid three of these. Deliberately not an equality and deliberately
+    // not annotated with "N at this head" any more (Wave 5 correction round
+    // eleven, Low 4) — a written count in a comment is the thing that has gone
+    // stale in this wave over and over. What matters is that the enumeration
+    // reaches far more pairs than the handful named below.
     expect(facts.length).toBeGreaterThan(200);
     const pairs = facts.map((fact) => `${fact.method}.${fact.parameter}`);
     // The five the round-ten correction closed, plus a sample of the ones
@@ -306,8 +380,35 @@ describe('every STRING PARAMETER of every facade write reaches the one scan', ()
       'createTask.title',
       'createTask.project',
       'registerExecutionWorker.displayName',
+      // The two round-eleven sinks. Both are `string[]`, which the matcher
+      // used to skip entirely — so they were enumerated by neither half of the
+      // derivation and scanned by neither guard.
+      'submitResult.evidenceRefs',
+      'postMissionMessage.refs',
     ]) {
       expect(pairs, `${pair} is no longer recognised as a facade write parameter`).toContain(pair);
+    }
+  });
+
+  it('names every deliberately unscanned field, and there is exactly one', () => {
+    // DERIVED, not written down (Wave 5 correction round eleven, Medium 1).
+    // The sentence "there is exactly one carve-out" was false at the previous
+    // head — `createTask.payload`, `submitResult.evidenceRefs` and
+    // `postMissionMessage.refs` were all unscanned — because two of the three
+    // were exempted by a type filter nobody had to name. An exemption is now a
+    // literal at the call site, so it can be counted.
+    expect(deliberatelyUnscannedFields()).toEqual(['createTask.payload']);
+  });
+
+  it('a carved-out field is NOT credited by the whole-input scan', () => {
+    // The derivation must not launder the exemption it exists to expose: with
+    // `payload` named as deliberately unscanned, the pair has to be carried by
+    // `EXEMPT_PARAMETERS` if it is enumerated at all, never silently covered.
+    const facts = facadeWriteParameters();
+    for (const fact of facts) {
+      if (`${fact.method}.${fact.parameter}` === 'createTask.payload') {
+        expect(fact.covered).toBe(false);
+      }
     }
   });
 
@@ -753,6 +854,140 @@ describe('the five writes that permanently bricked a Founder read route now refu
         }),
       ),
     );
+    expect(probe.accepted).toBe(true);
+    expect(probe.brickedRoutes).toEqual([]);
+  });
+  it('an array of caller strings is refused at both round-eleven sinks', () => {
+    // Executed against the previous head, both were ACCEPTED and both landed
+    // in append-only storage: `op_evidence.payload` (`no_erase`/`no_rewrite`)
+    // and `hq_chat_messages.refs`. Neither bricked a shipped route, which is
+    // why the derivation above had to grow rather than the two call sites.
+    const submitted = probeWrite((ops) => {
+      const created = ops.createTask({
+        capabilityId: READ_STATUS,
+        payload: {},
+        idempotencyKey: 'refs-probe',
+        requestedBy: 'claude',
+      });
+      if (!created.ok) return refusal(created);
+      const claimed = ops.claimNext('claude', READ_STATUS, undefined, created.data.task.id);
+      if (!claimed.ok) return refusal(claimed);
+      const running = ops.startTask(created.data.task.id, 'claude', claimed.data.fence);
+      if (!running.ok) return refusal(running);
+      return refusal(
+        ops.submitResult(created.data.task.id, 'claude', running.data.fence, { ok: true }, [CREDENTIAL]),
+      );
+    });
+    expect(submitted.accepted).toBe(false);
+    expect(submitted.code).toBe('invalid_input');
+    expect(submitted.message).toContain('credential shape');
+    expect(submitted.brickedRoutes).toEqual([]);
+
+    const posted = probeWrite((ops) =>
+      refusal(
+        ops.postMissionMessage({
+          threadId: 'room-build',
+          author: 'founder',
+          body: 'hello',
+          refs: [CREDENTIAL],
+        }),
+      ),
+    );
+    expect(posted.accepted).toBe(false);
+    expect(posted.code).toBe('invalid_input');
+    expect(posted.message).toContain('credential shape');
+    expect(posted.brickedRoutes).toEqual([]);
+  });
+
+  it('the ordinary shapes of both still land, refs and all', () => {
+    // The other half of every round of this correction: a guard that refuses
+    // everything is not a fix.
+    const submitted = probeWrite((ops) => {
+      const created = ops.createTask({
+        capabilityId: READ_STATUS,
+        payload: {},
+        idempotencyKey: 'refs-ok',
+        requestedBy: 'claude',
+      });
+      if (!created.ok) return refusal(created);
+      const claimed = ops.claimNext('claude', READ_STATUS, undefined, created.data.task.id);
+      if (!claimed.ok) return refusal(claimed);
+      const running = ops.startTask(created.data.task.id, 'claude', claimed.data.fence);
+      if (!running.ok) return refusal(running);
+      return refusal(
+        ops.submitResult(created.data.task.id, 'claude', running.data.fence, { ok: true }, [
+          'https://github.com/kiniena-github/jenify-os/pull/271',
+          'docs/HEADQUARTER/PHASE_13_ADVANCED_RELIABILITY.md',
+        ]),
+      );
+    });
+    expect(submitted.accepted).toBe(true);
+    expect(submitted.brickedRoutes).toEqual([]);
+
+    const posted = probeWrite((ops) =>
+      refusal(
+        ops.postMissionMessage({
+          threadId: 'room-build',
+          author: 'founder',
+          body: 'Notes on the salt line',
+          refs: ['mission-1', 'የጨው ፋብሪካ'],
+        }),
+      ),
+    );
+    expect(posted.accepted).toBe(true);
+    expect(posted.brickedRoutes).toEqual([]);
+  });
+
+  it('the whole-input scan does not refuse ordinary human text — 16 shapes swept', () => {
+    // The availability half, re-verified after the type filter was removed.
+    // Every one of these is text a Founder or a worker may legitimately write,
+    // and each is swept through a STRING field and an ARRAY field of the same
+    // write; a scan that reaches more fields must not start refusing more
+    // content.
+    const shapes: string[] = [
+      'Ship the Mesob salt line report by Friday.',
+      '\u12e8\u1329\u12cd \u134b\u1265\u122a\u12ab \u122a\u1356\u122d\u1275',
+      '\u062a\u0642\u0631\u064a\u0631 \u0645\u0635\u0646\u0639 \u0627\u0644\u0645\u0644\u062d',
+      '\u0928\u092e\u0915 \u0915\u093e\u0930\u0916\u093e\u0928\u093e \u0930\u093f\u092a\u094b\u0930\u094d\u091f',
+      'Tuz fabrikas\u0131 raporu',
+      'Rapport de l\u2019usine de sel',
+      'B\u00e1o c\u00e1o nh\u00e0 m\u00e1y mu\u1ed1i',
+      'Ship it \ud83d\ude80 \u2014 the line is green \u2705',
+      'https://github.com/kiniena-github/jenify-os/pull/271',
+      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+      '3f2504e0-4f89-11d3-9a0c-0305e82c3301',
+      'aGVsbG8gd29ybGQgdGhpcyBpcyBub3QgYSBzZWNyZXQ=',
+      '/home/user/JENIFY-OS/docs/HEADQUARTER/PHASE_13_ADVANCED_RELIABILITY.md',
+      'non\u00a0breaking space',
+      'thin\u2009space',
+      'an \u2013 en dash',
+    ];
+    const probe = probeWrite((ops) => {
+      for (const [index, shape] of shapes.entries()) {
+        const created = ops.createTask({
+          capabilityId: READ_STATUS,
+          payload: {},
+          idempotencyKey: `sweep-${index}`,
+          requestedBy: 'claude',
+          title: shape,
+          project: shape,
+        });
+        if (!created.ok) {
+          return { ok: false, code: created.error.code, message: `createTask ${index}: ${created.error.message}` };
+        }
+        const posted = ops.postMissionMessage({
+          threadId: 'room-build',
+          author: 'founder',
+          body: shape,
+          refs: [shape],
+        });
+        if (!posted.ok) {
+          return { ok: false, code: posted.error.code, message: `postMissionMessage ${index}: ${posted.error.message}` };
+        }
+      }
+      return { ok: true, code: null, message: null };
+    });
+    expect(probe.message).toBe(null);
     expect(probe.accepted).toBe(true);
     expect(probe.brickedRoutes).toEqual([]);
   });

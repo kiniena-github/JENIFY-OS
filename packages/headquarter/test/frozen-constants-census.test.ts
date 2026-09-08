@@ -308,6 +308,55 @@ describe('a frozen collection is immutable through the PROTOTYPE too, not only t
     expect(frozen.size).toBe(1);
   });
 
+  it('a reference the caller kept before freezing cannot reach the view', async () => {
+    // Wave 5 correction round eleven, Low 1. The proxy target used to BE the
+    // caller's object, so "the raw collection never escapes" was a property of
+    // the CALL SITES: a caller that named its collection before freezing it
+    // kept a mutable reference, and `Set.prototype.clear.call(named)` emptied
+    // the frozen view through it — executed, `frozen.size` 2 -> 0. It is now a
+    // property of the module, because the view is over a private copy.
+    const { deepFreeze } = await import('../src/contracts/freeze.js');
+    const named = new Set(['review_passed', 'completed']);
+    const frozen = deepFreeze(named) as Set<string>;
+    expect(frozen.size).toBe(2);
+    // The caller's own object is still an ordinary Set — this test does not
+    // claim `deepFreeze` reaches back and freezes what it was handed.
+    Set.prototype.clear.call(named);
+    expect(named.size).toBe(0);
+    // The frozen view is untouched, which is the whole property.
+    expect(frozen.size).toBe(2);
+    expect([...frozen].sort()).toEqual(['completed', 'review_passed']);
+    // And the same for a Map, plus an addition through the retained reference.
+    const namedMap = new Map([['k', 1]]);
+    const frozenMap = deepFreeze(namedMap) as Map<string, number>;
+    Map.prototype.set.call(namedMap, 'k2', 2);
+    Map.prototype.delete.call(namedMap, 'k');
+    expect(frozenMap.size).toBe(1);
+    expect(frozenMap.get('k')).toBe(1);
+    expect(frozenMap.has('k2')).toBe(false);
+  });
+
+  it('reading a frozen collection really does behave as it did — constructor included', async () => {
+    // Wave 5 correction round eleven, Low 2. The `get` trap bound every
+    // function-valued property, `constructor` among them, so
+    // `frozen.constructor === Set` was FALSE while the module header said
+    // reading "behaves exactly as it did".
+    const { deepFreeze } = await import('../src/contracts/freeze.js');
+    const frozenSet = deepFreeze(new Set(['a'])) as Set<string>;
+    const frozenMap = deepFreeze(new Map([['k', 1]])) as Map<string, number>;
+    expect(frozenSet.constructor).toBe(Set);
+    expect(frozenMap.constructor).toBe(Map);
+    // The properties the walker and the vocabularies actually depend on.
+    expect(frozenSet instanceof Set).toBe(true);
+    expect(frozenMap instanceof Map).toBe(true);
+    expect(Object.isFrozen(frozenSet)).toBe(true);
+    // And handing `constructor` back unbound opens nothing: the mutators still
+    // refuse by both spellings.
+    expect(() => Set.prototype.clear.call(frozenSet)).toThrow(TypeError);
+    expect(() => (frozenSet as unknown as { clear: () => void }).clear()).toThrow(TypeError);
+    expect(frozenSet.size).toBe(1);
+  });
+
   it('forEach hands the callback the VIEW, never the collection it hides', async () => {
     const { QUERY_STOPWORDS } = await import('../src/application/search-command.js');
     const before = QUERY_STOPWORDS.size;

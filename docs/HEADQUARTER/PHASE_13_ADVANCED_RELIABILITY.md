@@ -373,6 +373,23 @@ that no longer has the disposition it claims fails it too.
 | `recordVerifiedBackup` | the act that preserves a recovery point while the store is untrusted. Same gate, same flag. |
 | `proposeAction` | a proposal is a request, not an authorization, and it reaches nothing; `authorizeAction` and `executeAction` are both refused. |
 
+**The residual this table does not cover, recorded rather than implied** (Wave 5
+correction round eleven, Low 3). Both tables enumerate `HeadquarterOperations`
+and the canonical boundary underneath it. `OperatorQueue` is also exported from
+`@factoryos/headquarter/operator`, and constructing a SECOND one directly over
+the same database handle — `new OperatorQueue(db, …)` — produces a queue whose
+constructor installs no safe-mode gate, and it claims freely under a genuine
+latch (executed: `-> CLAIMED fd36da5a… fence 1`). It is out of reach of a caller
+who holds only `HeadquarterOperations`: `#db` is `#private` on both, so the
+handle cannot be taken from the facade, and `ops.queue.claim` — the delegate the
+round-ten High 3 closed — is gated. What is left is a caller who already has the
+database handle, which is the same authority as opening the file, and against
+that authority no in-process gate is a boundary. It is NOT closed by a check in
+`OperatorQueue`'s own constructor, deliberately: the facade constructs its queue
+during its own construction, and a constructor that threw under a latch would
+make `assessHqIntegrity` — the only act that clears safe mode — unreachable on
+exactly the file that needs it.
+
 
 ### When it is assessed, and the cost of each
 
@@ -564,24 +581,54 @@ verified.**
 
 `verifyHqBackupFile` is read-only with respect to the CANDIDATE in the
 strongest available sense — the file is opened `O_RDONLY | O_NOFOLLOW` and
-never written, and no `-wal`/`-shm` is created beside it. Thirteen categorical
+never written, and no `-wal`/`-shm` is created beside it. Seventeen categorical
 refusals, never an exception: `path_not_absolute`, `path_not_normalized`,
 `path_missing`, `path_is_symlink`, `path_not_a_regular_file`,
 `path_not_readable`, `file_empty`, `file_too_large`,
-`sidecar_journal_present`, `verification_copy_failed`,
+`file_has_multiple_links`, `sidecar_journal_present`,
+`candidate_is_the_live_database`, `verification_copy_failed`,
 `not_a_readable_sqlite_database`, `integrity_check_failed`,
-`not_an_hq_database`. Ten of the thirteen are exercised against real files on
-disk — a relative path, an unnormalized absolute one, a missing one, a
-directory, an empty file, a symlink, a file of prose, a corrupted SQLite image,
-a valid SQLite database that is simply somebody else's, and a genuine backup
+`not_an_hq_database`, `would_latch_safe_mode`,
+`candidate_census_unavailable`. Fourteen of the seventeen are exercised against
+real files on disk — a relative path, an unnormalized absolute one, a missing
+one, a directory, an empty file, a symlink, a hard link to another name, the
+live database at its own path, a file of prose, a corrupted SQLite image,
+a valid SQLite database that is simply somebody else's, a genuine backup
 with a `-wal` dropped beside it (twice over: as a dropped sidecar, and as a
 live un-checkpointed WAL database whose newest table exists only in the
-sidecar). `file_too_large` is NOT exercised: it would mean writing a
-two-gigabyte file in a test, and a bound asserted by reading the constant
-rather than by crossing it is stated here as what it is. `path_not_readable`
-and `verification_copy_failed` are likewise not exercised — both need a
-filesystem HQ cannot read or write, which a test that must pass on any
-developer's machine cannot arrange honestly.
+sidecar), a file whose own record would latch safe mode, and a call that
+supplies no assessor at all. `file_too_large` is NOT exercised: it would mean
+writing a two-gigabyte file in a test, and a bound asserted by reading the
+constant rather than by crossing it is stated here as what it is.
+`path_not_readable` and `verification_copy_failed` are likewise not exercised —
+both need a filesystem HQ cannot read or write, which a test that must pass on
+any developer's machine cannot arrange honestly.
+
+> **Correction (Wave 5 correction round eleven, MEDIUM 2).** The three numbers
+> above were stale in three places and NO test pinned any of them: the list said
+> "Thirteen" while `BACKUP_REFUSAL_REASONS` held sixteen, and it omitted
+> `file_has_multiple_links`, `candidate_is_the_live_database` and
+> `would_latch_safe_mode` — each added by an earlier round of this same wave,
+> each with the count left behind. `backup-refusal-vocabulary.test.ts` now
+> derives the count, the enumeration and the exercised/not-exercised split from
+> the constant and from the test directory, so the sentence cannot drift again
+> without a red test.
+
+> **Correction (Wave 5 correction round eleven, HIGH 1).** `verifyHqBackupFile`
+> ran HQ's census as `structuralIntegrity(db)` with NO options, so the standing
+> verdict the candidate records ABOUT ITSELF was never read and the evidence
+> log's links were never walked. Executed: a file whose boot had recorded
+> `safe_mode=1 ["append_only_guard_missing"]`, its guard since re-created by
+> HQ's own ensure pass, verified `{ verified: true, refusals: [],
+> integrityVerdict: 'ok' }` while the same bytes opened live gave
+> `safeMode: true`; and a copy whose `op_evidence` payload was rewritten in
+> place at a seq behind the last checkpoint commitment verified `ok` too.
+> `recordVerifiedBackup` certified both into the INSERT-only register. Both
+> inputs live above `store/` — the verdict ledger in `application/`, the
+> whole-log verifier in `operator/` — so they now arrive through a REQUIRED
+> `assessCandidate` injection (`assessHqBackupCandidate`), the same shape
+> `fullIntegrity` uses for `verifyEvidenceChain`; an assessment that could not
+> run is `candidate_census_unavailable` rather than a pass.
 
 > **Correction (Wave 5 review, HIGH finding 3 / Medium 3 — both correction
 > lanes found it independently).** The digest and the checks were statements
@@ -954,11 +1001,12 @@ timing-only concurrency tests. What was built:
 - **A real file.** Engine immutability (UPDATE, DELETE, and both REPLACE-on-
   unique-index paths on all four tables — `hq_reliability_verdicts` included),
   the tamper that engages safe mode, the evidence-chain break, the restart that
-  no longer clears a verdict, and ten of the thirteen backup path protections
+  no longer clears a verdict, and fourteen of the seventeen backup refusals
   are all exercised against a real database in a real temporary directory. The
   three that are not (`file_too_large`, `path_not_readable`,
   `verification_copy_failed`) are named in "Backup and restore" with the reason,
-  rather than counted as if they were.
+  rather than counted as if they were — and the split is derived by
+  `backup-refusal-vocabulary.test.ts` rather than counted by hand.
 - **A real restore.** Backed up, verified, copied, verified again, opened as a
   working HQ, and the run read back out of the copy.
 
@@ -2581,7 +2629,7 @@ by reverting the fix, running the test, and restoring.
 | **HIGH 1** — the surviving witness ledger could be EMPTIED with no finding at any depth | Round five left `hq_integrity_checkpoints` as the only external witness for the evidence chain, protected by triggers only — and `operator/evidence.ts` already documented that a trigger dropped and re-created before the next boot is never observed missing. Three statements (`DROP TRIGGER ..._no_erase; DELETE FROM hq_integrity_checkpoints;` re-create) emptied it: both readers (`regressedImmutableLedgers`, `contradictedChainCommitment`) read the very rows deleted, so they returned `[]` and `null`. Executed — seed, one warm boot, attack, coherently rebuild `op_evidence` two committed entries short: boot `safeMode=false []`, full assessment `safeMode=false []`, `releaseKillSwitch` **ADMITTED**, no restart and no further Founder act. `sqlite_sequence.hq_integrity_checkpoints` still read 2 against 0 rows present, and nothing looked at it. | `truncatedImmutableLedgers` generalises the one comparison that already worked: `verifyEvidenceChain` has always checked `MAX(seq)` against `sqlite_sequence` for `op_evidence`, and that is why tail truncation is caught. It now runs over EVERY declared AUTOINCREMENT ledger, as `MAX(rowid)` versus the engine's own high-water mark, in `structuralIntegrity` — so both depths, at every construction, one b-tree seek per ledger. New blocking finding `append_only_ledger_truncated`; the finding vocabulary is 7 and the blocking list is 4. |
 | **HIGH 2** — the same pattern made `RUN_RETRY_STATEMENT` false | `RUN_RETRY_STATEMENT` ships on every reliability view: "An interrupted attempt ... is NEVER retried automatically." Executed: open a run, take attempt generation 1, second attempt correctly refused; then empty `hq_reliability_run_events` the same three ways → boot clean, full assessment clean, **attempt ADMITTED at generation 1**. The guard this module calls "the single most load-bearing secondary guard in the schema" was back in place and reserved nothing, because its rows were gone. | The same one rule. The doc's residual for this ledger was written only about forged APPENDS, which is precisely the claim the erasure defeated. |
 | **HIGH 3** — budget-ceiling nullification, fourth route | Phase 14 finding; see `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md`. | Two append-only columns holding EVERY derived scope, not one of N. |
-| **HIGH 4** — `recordVerifiedBackup({note})` permanently bricked `GET /api/hq/control/reliability` | `service.ts` used `missionText('note', ...)` with NO credential scan, in a method the shipped claim covers BY NAME ("every facade write that stores caller text goes through `assertNoCredentialShape` — 29 call sites"). Executed with a real verified backup file: `GET /reliability` 200 → `recordVerifiedBackup({note:'ghp_...'})` ACCEPTED → `GET /reliability` **500 forever**; `DELETE`/`UPDATE` on `hq_reliability_backups` both refused as append-only; still 500 after a restart. This was the round-four H3 defect left standing at a write site the sweep missed. | The scan is applied, with a refusal message that says why the register cannot take it back. A static audit now shows every one of the 29 methods that call `missionText` carrying a scan; `assertNoCredentialShape` has 32 call sites. |
+| **HIGH 4** — `recordVerifiedBackup({note})` permanently bricked `GET /api/hq/control/reliability` | `service.ts` used `missionText('note', ...)` with NO credential scan, in a method the shipped claim covers BY NAME ("every facade write that stores caller text goes through `assertNoCredentialShape` — 29 call sites"). Executed with a real verified backup file: `GET /reliability` 200 → `recordVerifiedBackup({note:'ghp_...'})` ACCEPTED → `GET /reliability` **500 forever**; `DELETE`/`UPDATE` on `hq_reliability_backups` both refused as append-only; still 500 after a restart. This was the round-four H3 defect left standing at a write site the sweep missed. | The scan is applied, with a refusal message that says why the register cannot take it back. The coverage is DERIVED rather than counted: `credential-scan-coverage.test.ts` enumerates every member that calls `missionText` and names any that does not also scan, and `facade-write-scan.test.ts` derives the same property per (method, parameter) pair. **The second of the two hand counts that stood here was stale by round eleven (Low 4): "29 `missionText` methods" is still exactly right — measured again at that head — but "`assertNoCredentialShape` has 32 call sites" had been 47 for several rounds, and is 48 after this one.** The number is removed rather than re-counted, because a present-tense count in a historical correction cell is a claim about the code that nothing checks; the two derived assertions are what the sentence now rests on. |
 | **HIGH 5** — `MAX_SCAN_DEPTH = 64` was fail-OPEN and the module claimed the opposite | `redaction.ts` said the depth bound and the cycle set are "both fail-CLOSED ... they stop the walk descending, they never stop a finding being raised". `JSON.stringify` has no depth limit, so stopping the walk IS stopping the finding. Executed through `proposeAction`, which applies BOTH scans and whose own comment says the payload "is stored permanently and handed verbatim to an adapter": depth 60–63 refused, **depth 64 and beyond ACCEPTED and the credential stored**, and the strict scan on the response stopped at 64 too, so `GET /api/hq/control/actions` served it rather than failing. | Reaching the bound now THROWS `BrowserSafetyError`: HQ refuses what it cannot read in full. The cycle set still returns silently, and the comment now says why the two are different — `seen` stops at a value already READ, `depth` stops at one that has NOT been. |
 | **MEDIUM 1** — `regressedImmutableLedgers` shipped load-bearing and covered by NO test | Mutating its body to `const regressed: string[] = []` passed the FULL suite (166/3192). Its only two assertions were `toEqual([])` on healthy files — no-false-positive checks that can only pass. | A hostile test that drops a declared ledger, lets HQ re-create it empty, restarts TWICE and proves the finding survives with `tablesAbsent`, `missingImmutabilityGuards` and `truncatedImmutableLedgers` all empty — so only the checkpoint's committed mark can answer. Verified to fail against the mutated body. |
 | **MEDIUM 2** — the round-four seam's pinning assertion was vacuous | Deleting `\|\| schemaEnsuredMarkBeforeMigration(db) === true` from `migrationRestoredImmutableTables` passed the FULL suite. The assertion carrying an 8-line comment about the round-four RECONCILIATION was `expect(finding!.detail).toContain('op_evidence')` — and the same detail already lists the missing GUARDS `trg_op_evidence_no_erase/_no_replace/_no_rewrite`, so it matched regardless. | The assertion is now on `observeImmutabilityAsFound(db).tablesAbsent`, which is the list that reconciliation actually produces. Verified: with the clause deleted, the test fails on that line. |

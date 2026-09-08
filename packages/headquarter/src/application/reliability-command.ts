@@ -54,11 +54,14 @@ import { createHash } from 'node:crypto';
 import { deepFreeze } from '../contracts/freeze.js';
 import type { HqDatabase } from '../store/db.js';
 import { canonicalJson } from '../operator/approvals.js';
-import { evidenceEntryLinkStands } from '../operator/evidence.js';
+import { evidenceEntryLinkStands, verifyEvidenceChain } from '../operator/evidence.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import {
   INTEGRITY_ASSESSMENT_DEPTHS,
   isHqIntegrityFinding,
+  structuralIntegrity,
+  type HqBackupCandidateCensus,
+  type HqIntegrityFinding,
   type IntegrityAssessmentDepth,
   type RecordedIntegrityVerdict,
 } from '../store/integrity.js';
@@ -912,6 +915,72 @@ export function standingIntegrityVerdict(db: HqDatabase): RecordedIntegrityVerdi
   return null;
 }
 
+/**
+ * HQ's OWN full assessment of a BACKUP CANDIDATE's opened copy.
+ *
+ * The half `store/integrity.ts` cannot compute alone, and the whole of what
+ * round eleven's High 1 was (Wave 5 correction round eleven). `verifyHqBackupFile`
+ * ran `structuralIntegrity(db)` with NO options, which means:
+ *
+ *  - `recordedVerdict` was `undefined`, so `carryRecordedVerdict` never saw the
+ *    durable blocking verdict the CANDIDATE carries in its own
+ *    `hq_reliability_verdicts` — the exact latch a live construction re-raises.
+ *    Executed: a file whose boot had recorded `safe_mode=1
+ *    ["append_only_guard_missing"]`, and whose guard HQ's own ensure pass had
+ *    since re-created, gave `structuralIntegrity(no opts).safeMode = false` and
+ *    verified `{ verified: true, refusals: [], integrityVerdict: 'ok' }` while
+ *    the same bytes opened live gave `safeMode: true`;
+ *  - a structural pass NEVER walks the evidence log's links, so a copy whose
+ *    `op_evidence` payload was rewritten in place behind the last checkpoint
+ *    commitment verified `ok` too. Executed: three entries, seq 1 rewritten,
+ *    `contradictedChainCommitment` unmoved because the committed tip is seq 3.
+ *
+ * The copy IS what a restore becomes, so it is asked exactly what a live
+ * construction and a Founder `assessHqIntegrity` would ask of it.
+ *
+ * **Reads only, and it must stay that way.** The handle is
+ * `openHqDatabaseReadOnly` over a scratch copy, and none of the three calls
+ * below writes, migrates, ensures or repairs: a verification that repaired what
+ * it was checking would launder the tamper it exists to find, which is the same
+ * boot-order rule `guardsMissingAsFound` exists for.
+ *
+ * **`immutableTablesAbsentAsFound` is deliberately not passed**, for the reason
+ * `verifyHqBackupFile` already records: an honest recovery point older than the
+ * phase that declared a ledger looks identical to a robbed one, and nothing is
+ * re-created here to resolve the ambiguity. A backup older than a phase is not
+ * refused for being old.
+ */
+export function assessHqBackupCandidate(db: HqDatabase): HqBackupCandidateCensus {
+  // The candidate's own standing verdict — the corroborated walk, not the last
+  // row. This is the input whose absence was the finding.
+  const recordedVerdict = standingIntegrityVerdict(db);
+  const structural = structuralIntegrity(db, {
+    recordedVerdict,
+    reliabilitySchemaPresent: reliabilitySchemaPresent(db),
+  });
+  const findings = new Set<HqIntegrityFinding>(
+    structural.observations
+      .filter((observation) => observation.blocking)
+      .map((observation) => observation.finding),
+  );
+  let chainVerified = false;
+  try {
+    chainVerified = verifyEvidenceChain(db) === null;
+  } catch {
+    // A walk that could not run is not a walk that passed.
+    chainVerified = false;
+  }
+  if (!chainVerified) findings.add('evidence_chain_broken');
+  return {
+    // `structural.safeMode` is categorical: it is true even when a recorded
+    // engagement carried no finding name this build can read back. Carried as
+    // it stands rather than reconstructed from the names.
+    safeMode: structural.safeMode || findings.size > 0,
+    blockingFindings: [...findings],
+    chainVerified,
+  };
+}
+
 function jsonStringArray(value: unknown): string[] {
   if (typeof value !== 'string') return [];
   try {
@@ -1328,8 +1397,14 @@ export const BACKUP_RECORD_STATEMENT =
   'nothing blocking — the declared immutability guards are present on every declared ledger the file ' +
   'carries, no ledger holds fewer rows than HQ’s own durable commitments record it held, HQ’s ' +
   'commitment ledger satisfies its own row-count identity, and the evidence log still carries the entry a ' +
-  'commitment pins it to. A file that would latch SAFE MODE if it were opened live is refused rather than ' +
+  'commitment pins it to. Two further checks, over those same bytes, because a census of the file as it ' +
+  'stands cannot see either of them: the standing verdict the candidate RECORDS ABOUT ITSELF is read back ' +
+  'from its own append-only verdict ledger and re-raised, so a file whose boot latched safe mode is refused ' +
+  'even after HQ’s own ensure pass has re-created the guard that latched it; and the WHOLE evidence log is ' +
+  'walked link by link, so a log rewritten in place behind the last checkpoint commitment is refused too. ' +
+  'A file that would latch SAFE MODE if it were opened live is refused rather than ' +
   'verified, so this register cannot certify a recovery point HQ has said it cannot stand behind. ' +
+  'An assessment that could NOT be run is refused as well, never treated as one that passed. ' +
   'WHAT IT STILL DOES NOT MEAN, stated rather than implied: a declared ledger the file does not carry AT ' +
   'ALL is not a finding here, because an honest recovery point older than the phase that declared the ' +
   'table looks identical to a robbed one and refusing both would refuse every genuinely old backup; and ' +
