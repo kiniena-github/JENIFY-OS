@@ -219,6 +219,29 @@ function warmedFile(): { dir: string; dbPath: string; cleanup: () => void } {
   return { dir, dbPath, cleanup: () => fx.cleanup() };
 }
 
+/**
+ * The explicit deadline every file-backed battery below carries.
+ *
+ * These build real, file-backed HQ stores, warm them through a boot, damage
+ * them in situ and re-execute a whole assessment over the result; the first one
+ * induces every finding in the vocabulary and runs BOTH depths over each. On a
+ * shared `ubuntu-latest` runner that first battery failed with
+ * `Test timed out in 5000ms` while passing on every other head and on every
+ * developer machine. Nothing about what the batteries cover is being reduced.
+ *
+ * Measured on this machine with the whole package running in parallel:
+ * 141-1225 ms per test, the slowest being the both-depths classification
+ * battery at 1225 ms (1219 ms with the file run alone). 60 s is ~49x that
+ * slowest observed run, and the cost-clause tests that share `warmedFile()`
+ * carry the same deadline because they do the same real-file work.
+ *
+ * Per test rather than a package-wide `testTimeout`: raising the global default
+ * would relax the deadline for all 3425 tests in this package, including the
+ * many where a hang is the real signal. Only the harness deadline changes here;
+ * every assertion is untouched.
+ */
+const FILE_BACKED_BATTERY_TIMEOUT_MS = 60_000;
+
 describe('the depth statement served to the Founder is derived from what the two depths actually detect', () => {
   it('classifies every finding in the vocabulary by executing it at both depths', () => {
     const structuralRaised = new Set<HqIntegrityFinding>();
@@ -430,7 +453,7 @@ describe('the depth statement served to the Founder is derived from what the two
         .map((name) => name.trim())
         .sort(),
     ).toEqual(fullExclusive);
-  });
+  }, FILE_BACKED_BATTERY_TIMEOUT_MS);
 
   it('no longer claims the structural pass reads the catalogue and the pragmas ONLY', () => {
     // The retired falsehood, pinned by its exact shape so it cannot come back
@@ -561,7 +584,7 @@ describe('the cost clause of the depth statement is derived from what a pass exe
     } finally {
       file.cleanup();
     }
-  });
+  }, FILE_BACKED_BATTERY_TIMEOUT_MS);
 
   /**
    * The statement TOTAL, as a rule rather than as one file's number.
@@ -713,7 +736,7 @@ describe('the cost clause of the depth statement is derived from what a pass exe
     expect(constantProse).toMatch(/overstate the unestablished case by four\s*times/);
     expect(before!.total * 4).toBeLessThanOrEqual(plain!.total);
     expect(before!.total * 5).toBeGreaterThan(warm!.total);
-  });
+  }, FILE_BACKED_BATTERY_TIMEOUT_MS);
 
   it('reads the commitment ledger with a SCAN and a temporary B-tree, not one indexed lookup', () => {
     const file = warmedFile();
@@ -744,7 +767,7 @@ describe('the cost clause of the depth statement is derived from what a pass exe
     } finally {
       file.cleanup();
     }
-  });
+  }, FILE_BACKED_BATTERY_TIMEOUT_MS);
 
   it('grows the ledger it scans, by a row per clean boot and per clean assessment', () => {
     const fx = fileFixture();
@@ -779,7 +802,7 @@ describe('the cost clause of the depth statement is derived from what a pass exe
     } finally {
       fx.cleanup();
     }
-  });
+  }, FILE_BACKED_BATTERY_TIMEOUT_MS);
 
   /**
    * Round eleven, Medium 1 — the cost clause's TOTAL, which nothing pinned.
@@ -922,7 +945,7 @@ describe('the cost clause of the depth statement is derived from what a pass exe
     } finally {
       file.cleanup();
     }
-  });
+  }, FILE_BACKED_BATTERY_TIMEOUT_MS);
 });
 
 describe('the module header’s counts are the constants’ counts', () => {
