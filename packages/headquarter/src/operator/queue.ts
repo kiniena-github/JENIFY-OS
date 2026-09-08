@@ -340,6 +340,57 @@ export class SafeModeEngaged extends Error {
 }
 
 /**
+ * A claim refused because the task carries a Founder assignment intent naming
+ * a DIFFERENT worker (Wave 5 correction round sixteen, Critical B-1).
+ *
+ * ## What was open
+ *
+ * The `assigned_to_other_worker` refusal existed in exactly one place —
+ * `HeadquarterOperations.claimNext`, which peeked at `this.queue
+ * .selectClaimable(...)` and then read the intent through `this.readMeta(...)`.
+ * Both are prototype slots. `HeadquarterOperations.prototype.readMeta = () =>
+ * null` turned
+ *
+ *     BASELINE claim by jules: {"code":"assigned_to_other_worker"}
+ *
+ * into
+ *
+ *     FORGED claim by jules:   {"ok":true,"claimedBy":"jules","fence":1}
+ *
+ * with `op_tasks` left at `claimed_by: jules, status: assigned, fence: 1` while
+ * `hq_op_task_meta` still named `claude`. `grep assignment src/operator/queue.ts`
+ * found three comment lines and no code: this file — the canonical claim
+ * boundary, and the ONLY code path that writes `op_tasks.claimed_by` — did not
+ * enforce the rule at all, so every caller that does not come through the
+ * facade was unguarded even without a patch.
+ *
+ * ## Why it is a class, and why the check is here
+ *
+ * Here, beside `assertAssignable` (deactivation) and `#assertProviderBinding`
+ * (provider identity), because those are the two neighbouring authorities with
+ * exactly the same property: they must hold for a caller holding a queue. The
+ * intent is read from `hq_op_task_meta` through a `#private` closure over
+ * `#db`, so no prototype and no public property participates in the answer.
+ *
+ * A distinct class rather than a bare `Error` so `claimNext` translates it back
+ * to the typed `assigned_to_other_worker` refusal — with the same `taskId` /
+ * `assignedTo` details the Founder-facing surface already renders — instead of
+ * a generic `operator_rejected`.
+ */
+export class AssignmentIntentViolation extends Error {
+  readonly taskId: string;
+  readonly assignedTo: string;
+  constructor(taskId: string, assignedTo: string, workerId: string) {
+    super(
+      `Task ${taskId} is assigned to ${assignedTo}; worker ${workerId} may not claim it`,
+    );
+    this.name = 'AssignmentIntentViolation';
+    this.taskId = taskId;
+    this.assignedTo = assignedTo;
+  }
+}
+
+/**
  * Tell this queue how to ask whether HQ is in SAFE MODE (Wave 5 correction
  * round ten, High 3).
  *
@@ -525,6 +576,17 @@ export class OperatorQueue {
    * for callers who never touch the service, so the check belongs here too.
    */
   readonly #grantedCapabilities: (workerId: string) => string[];
+  /**
+   * The ADVISORY assignment intent recorded for a task, read from
+   * `hq_op_task_meta` through a closure over `#db` (Wave 5 correction round
+   * sixteen, Critical B-1). See `AssignmentIntentViolation` for what was open.
+   *
+   * Returns null when no intent stands — and also when the table does not
+   * exist, which is the honest answer rather than a fail-open one: a queue
+   * constructed on a database that never ran `ensureApplicationSchema` has
+   * nowhere for an intent to have been recorded, so there is none to enforce.
+   */
+  readonly #assignmentIntentOf: (taskId: string) => string | null;
   readonly #listProviders: () => WorkerProviderRecord[];
 
   /**
@@ -687,6 +749,19 @@ export class OperatorQueue {
         return [];
       }
         };
+    this.#assignmentIntentOf = (taskId: string): string | null => {
+      try {
+        const row = db
+          .prepare(`SELECT assigned_worker_id FROM hq_op_task_meta WHERE task_id = ?`)
+          .get(taskId) as { assigned_worker_id: string | null } | undefined;
+        const assigned = row?.assigned_worker_id ?? null;
+        return typeof assigned === 'string' && assigned.length > 0 ? assigned : null;
+      } catch {
+        // The application-layer table is not present on this handle. No intent
+        // can have been recorded, so there is none to enforce.
+        return null;
+      }
+    };
     this.#listProviders = (): WorkerProviderRecord[] => {
       const rows = db
         .prepare(
@@ -1129,6 +1204,18 @@ export class OperatorQueue {
       }
       return null;
     }
+    // ASSIGNMENT INTENT, at the canonical boundary (Wave 5 correction round
+    // sixteen, Critical B-1). Before any mutation and before the single-use
+    // approval nonce can be consumed, beside the deactivation and
+    // provider-binding checks — the two neighbouring authorities with the same
+    // property. Read through `#assignmentIntentOf`, a closure over `#db`: the
+    // facade's copy of this rule dispatched through `this.readMeta`, a public
+    // prototype slot, and replacing it handed a Founder-assigned task to
+    // another worker.
+    const intendedFor = this.#assignmentIntentOf(selected.id);
+    if (intendedFor && intendedFor !== workerId) {
+      throw new AssignmentIntentViolation(selected.id, intendedFor, workerId);
+    }
     const candidate = { id: selected.id, fence: selected.fence };
     // Execution boundary (issue #53 correction A): an approval-gated task is
     // admitted only with a valid, unexpired, unconsumed approval bound to the
@@ -1150,52 +1237,74 @@ export class OperatorQueue {
     const leaseExpires = new Date(Date.now() + leaseMs).toISOString();
     const claimNonce = uuid();
     const claimFence = candidate.fence + 1;
-    const res = this.#db
-      .prepare(
-        `UPDATE op_tasks
-         SET status = 'assigned', fence = fence + 1, claimed_by = ?, lease_expires_at = ?, claim_nonce = ?, updated_at = ?
-         WHERE id = ? AND status = 'queued' AND fence = ?`,
-      )
-      .run(workerId, leaseExpires, claimNonce, nowIso(), candidate.id, candidate.fence);
-    if (res.changes === 0) return null; // lost the race; caller may retry
-    // Consume the single-use approval nonce exactly once, with the claim —
-    // recording WHICH claim consumed it (issues #77/#79): worker, exact task,
-    // fencing token, and the per-claim nonce, written in the same atomic
-    // conditional UPDATE as the consumption itself. start() re-verifies this
-    // binding.
-    if (cap && approvalRequired(cap, this.#policyCtx) && task.approvalId) {
-      const consumed = this.#db
+    /**
+     * THE COMMIT REGION — all of it, or none of it (Wave 5 correction round
+     * sixteen, High B-4).
+     *
+     * A claim writes the conditional `op_tasks` UPDATE, consumes the
+     * single-use approval nonce, records the history event and appends TWO
+     * hash-chained evidence rows. None of that was atomic, and a failure at
+     * the appends left a task genuinely claimed, with its approval genuinely
+     * spent, and no audit trail saying so.
+     *
+     * The reservation starts HERE and not at the top of the method
+     * deliberately: everything above is a refusal path, and two of those paths
+     * (`#recordBindingRefusal`, `#rejectAtExecutionBoundary`) WRITE the
+     * refusal to the evidence log and then return. Wrapping the whole method
+     * would roll those records back on the throw that follows one of them —
+     * the audit record of a refusal is not part of the claim, and must survive
+     * the claim not happening.
+     */
+    return this.#evidence.reserve(() => {
+      const res = this.#db
         .prepare(
-          `UPDATE hq_approvals
-           SET consumed_at = ?, consumed_by = ?, consumed_task_id = ?, consumed_fence = ?, consumed_claim_nonce = ?
-           WHERE id = ? AND consumed_at IS NULL`,
+          `UPDATE op_tasks
+           SET status = 'assigned', fence = fence + 1, claimed_by = ?, lease_expires_at = ?, claim_nonce = ?, updated_at = ?
+           WHERE id = ? AND status = 'queued' AND fence = ?`,
         )
-        .run(nowIso(), workerId, candidate.id, claimFence, claimNonce, task.approvalId);
-      if (consumed.changes === 0) {
-        // Nonce raced/replayed: undo nothing destructive — surface loudly.
-        throw new Error(`Approval nonce ${task.approvalId} was already consumed (replay rejected)`);
+        .run(workerId, leaseExpires, claimNonce, nowIso(), candidate.id, candidate.fence);
+      if (res.changes === 0) return null; // lost the race; caller may retry
+      // Consume the single-use approval nonce exactly once, with the claim —
+      // recording WHICH claim consumed it (issues #77/#79): worker, exact task,
+      // fencing token, and the per-claim nonce, written in the same atomic
+      // conditional UPDATE as the consumption itself. start() re-verifies this
+      // binding.
+      if (cap && approvalRequired(cap, this.#policyCtx) && task.approvalId) {
+        const consumed = this.#db
+          .prepare(
+            `UPDATE hq_approvals
+             SET consumed_at = ?, consumed_by = ?, consumed_task_id = ?, consumed_fence = ?, consumed_claim_nonce = ?
+             WHERE id = ? AND consumed_at IS NULL`,
+          )
+          .run(nowIso(), workerId, candidate.id, claimFence, claimNonce, task.approvalId);
+        if (consumed.changes === 0) {
+          // Nonce raced/replayed. The throw now also rolls the claim back,
+          // which is the honest outcome: a claim that could not spend its
+          // approval never happened.
+          throw new Error(`Approval nonce ${task.approvalId} was already consumed (replay rejected)`);
+        }
+        this.#evidence.append({
+          taskId: candidate.id,
+          actor: workerId,
+          kind: 'approval_consumed',
+          payload: {
+            approvalId: task.approvalId,
+            consumedBy: workerId,
+            consumedTaskId: candidate.id,
+            consumedFence: claimFence,
+            claimNonce,
+          },
+        });
       }
+      this.#recordEvent(candidate.id, 'assigned', workerId, `Claimed by ${workerId}`);
       this.#evidence.append({
         taskId: candidate.id,
         actor: workerId,
-        kind: 'approval_consumed',
-        payload: {
-          approvalId: task.approvalId,
-          consumedBy: workerId,
-          consumedTaskId: candidate.id,
-          consumedFence: claimFence,
-          claimNonce,
-        },
+        kind: 'claimed',
+        payload: { fence: candidate.fence + 1, leaseExpires },
       });
-    }
-    this.#recordEvent(candidate.id, 'assigned', workerId, `Claimed by ${workerId}`);
-    this.#evidence.append({
-      taskId: candidate.id,
-      actor: workerId,
-      kind: 'claimed',
-      payload: { fence: candidate.fence + 1, leaseExpires },
+      return this.#getTask(candidate.id)!;
     });
-    return this.#getTask(candidate.id)!;
   }
 
   /**
@@ -1328,6 +1437,33 @@ export class OperatorQueue {
    * other than the executing/submitting/requesting worker — can reach the
    * terminal `completed` status. Only read-only, no-side-effect capabilities
    * complete directly.
+   *
+   * ALL OF IT, OR NONE OF IT (Wave 5 correction round sixteen, High B-4).
+   *
+   * This method reproduced the exact defect the `atomic` wrapper in the
+   * constructor was written to close, and it was outside that wrapper's reach
+   * because membership of `PrivilegedQueueApi` — not the update-then-append
+   * SHAPE — was what the wrapper keyed on. With a
+   * `BEFORE INSERT ON op_evidence WHEN kind =
+   * 'execution_result_submitted_for_review' -> RAISE(ABORT)` trigger standing:
+   *
+   * ```
+   * RESULT: {"code":"operator_rejected","msg":"blocked"}
+   * AFTER : status running / review_state pending / submitted_by claude / result committed
+   * evidence rows for that kind: 0
+   * RESUBMIT: {"code":"operator_rejected", "…already has a result awaiting independent review;
+   *            it cannot be re-submitted"}
+   * ```
+   *
+   * The caller was told the submission failed; it had not. The task sat in the
+   * independent reviewer's queue with ZERO hash-chained audit rows behind it,
+   * and `HeadquarterOperations.submitResult`'s `reviewState === 'pending'`
+   * guard then wedged it there permanently.
+   *
+   * The fence check and the capability read stay OUTSIDE the reservation:
+   * they take no lock and write nothing, and a refusal from either must not
+   * open a write transaction. `test/queue-mutation-atomicity.test.ts` derives
+   * the obligation from this file's own shape rather than from this list.
    */
   complete(
     taskId: string,
@@ -1344,30 +1480,34 @@ export class OperatorQueue {
       if (task.status !== 'running') {
         throw new Error(`Task ${taskId} is not running (status: ${task.status})`);
       }
+      return this.#evidence.reserve(() => {
+        this.#db.prepare(`UPDATE op_tasks SET result = ? WHERE id = ?`).run(JSON.stringify(result), taskId);
+        this.#db
+          .prepare(
+            `UPDATE op_tasks SET review_state = 'pending', submitted_by = ?, submitted_at = ?,
+               lease_expires_at = NULL, updated_at = ? WHERE id = ?`,
+          )
+          .run(workerId, nowIso(), nowIso(), taskId);
+        this.#recordEvent(taskId, 'running', workerId, 'Result submitted; awaiting independent review');
+        this.#evidence.append({
+          taskId,
+          actor: workerId,
+          kind: 'execution_result_submitted_for_review',
+          payload: { result, refs: evidenceRefs },
+        });
+        return this.#getTask(taskId)!;
+      });
+    }
+    return this.#evidence.reserve(() => {
       this.#db.prepare(`UPDATE op_tasks SET result = ? WHERE id = ?`).run(JSON.stringify(result), taskId);
-      this.#db
-        .prepare(
-          `UPDATE op_tasks SET review_state = 'pending', submitted_by = ?, submitted_at = ?,
-             lease_expires_at = NULL, updated_at = ? WHERE id = ?`,
-        )
-        .run(workerId, nowIso(), nowIso(), taskId);
-      this.#recordEvent(taskId, 'running', workerId, 'Result submitted; awaiting independent review');
       this.#evidence.append({
         taskId,
         actor: workerId,
-        kind: 'execution_result_submitted_for_review',
+        kind: 'execution_result',
         payload: { result, refs: evidenceRefs },
       });
-      return this.#getTask(taskId)!;
-    }
-    this.#db.prepare(`UPDATE op_tasks SET result = ? WHERE id = ?`).run(JSON.stringify(result), taskId);
-    this.#evidence.append({
-      taskId,
-      actor: workerId,
-      kind: 'execution_result',
-      payload: { result, refs: evidenceRefs },
+      return this.#transition(taskId, 'completed', workerId, 'Execution completed');
     });
-    return this.#transition(taskId, 'completed', workerId, 'Execution completed');
   }
 
   /**
@@ -1402,10 +1542,20 @@ export class OperatorQueue {
     return this.#transition(taskId, 'review_failed', reviewerId, `Independent review failed: ${reason}`);
   }
 
+  /**
+   * The append comes FIRST here, which is what made this one safe while
+   * `complete` was not: a blocked append threw before the row moved, so the
+   * caller's error and the record agreed. That is safety by ORDERING, and
+   * ordering is not a property a future edit preserves — a reservation is.
+   * Wrapped (Wave 5 correction round sixteen, High B-4), and the ordering kept
+   * as defence in depth.
+   */
   fail(taskId: string, workerId: string, fence: number, reason: string): OperatorTask {
     this.#assertFence(taskId, workerId, fence);
-    this.#evidence.append({ taskId, actor: workerId, kind: 'execution_failed', payload: { reason } });
-    return this.#transition(taskId, 'review_failed', workerId, `Execution failed: ${reason}`);
+    return this.#evidence.reserve(() => {
+      this.#evidence.append({ taskId, actor: workerId, kind: 'execution_failed', payload: { reason } });
+      return this.#transition(taskId, 'review_failed', workerId, `Execution failed: ${reason}`);
+    });
   }
 
   // ---- lease expiry / OUTCOME_UNKNOWN ----
@@ -1415,8 +1565,18 @@ export class OperatorQueue {
    * re-queued. A side-effect task whose worker went silent while
    * assigned/running becomes OUTCOME_UNKNOWN and waits for explicit
    * reconciliation — never a blind retry.
+   *
+   * ONE TRANSACTION for the whole sweep (Wave 5 correction round sixteen, High
+   * B-4). Each row pairs a status transition with a history event, and a
+   * multi-row sweep that fails midway used to leave some tasks swept, some
+   * not, and a returned list that described neither. Audited by shape in
+   * `test/queue-mutation-atomicity.test.ts`.
    */
   sweepExpiredLeases(): { requeued: string[]; outcomeUnknown: string[] } {
+    return this.#evidence.reserve(() => this.#sweepExpiredLeasesInternal());
+  }
+
+  #sweepExpiredLeasesInternal(): { requeued: string[]; outcomeUnknown: string[] } {
     const now = nowIso();
     const rows = this.#db
       .prepare(
@@ -1518,7 +1678,11 @@ export class OperatorQueue {
     expiresAt: string | null;
     consumedAt: string | null;
   } | null {
-    const task = this.get(taskId);
+    // `#getTask`, not the public `get` beside it: even a DISPLAY read should
+    // not be self-inconsistent, and this one is consumed by
+    // `validateApproval` (Wave 5 correction round sixteen, Medium B-6). The
+    // deciding caller reads `approvalRecordFor` instead.
+    const task = this.#getTask(taskId);
     if (!task) return null;
     const record = this.#getApprovalRecord(task.approvalId);
     if (!record) return null;
@@ -1586,7 +1750,22 @@ export class OperatorQueue {
    * needs_approval for a fresh Founder decision. The stale approval binding
    * is cleared either way; approvals themselves are immutable records.
    */
+  /**
+   * ALL OF IT, OR NONE OF IT (Wave 5 correction round sixteen, High B-4).
+   *
+   * The same update-then-append shape as `complete`, reached from `claim` and
+   * from `start`: an evidence append, an `approval_id` clear, a transition and
+   * a `block_reason`/claim-field write. A failure between any two of them left
+   * a task whose approval had been voided in the row but not in the log, or
+   * the reverse. Reserved here rather than in the two callers, because both of
+   * them THROW or return immediately afterwards and a reservation around the
+   * caller would roll this record back with the refusal it documents.
+   */
   #rejectAtExecutionBoundary(task: OperatorTask, rejection: ApprovalRejection): void {
+    this.#evidence.reserve(() => this.#rejectAtExecutionBoundaryInternal(task, rejection));
+  }
+
+  #rejectAtExecutionBoundaryInternal(task: OperatorTask, rejection: ApprovalRejection): void {
     this.#evidence.append({
       taskId: task.id,
       actor: 'system',

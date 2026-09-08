@@ -79,6 +79,9 @@ import type { OperatorTask } from '../../operator/queue.js';
 import {
   assertDispatchEvidenceGrant,
   capabilityRowFor,
+  approvalRecordFor,
+  assignabilityProblemFor,
+  declaredProviderFor,
   gatewayActionHistoryFor,
   killSwitchEngagedFor,
   taskEvidenceRowsFor,
@@ -350,7 +353,14 @@ export function claudeDispatchEligibility(
 
   const classification = classifyCapability(capability, ops.policyContext);
   if (classification.requiresApproval) {
-    const rejection = validateApproval(ops.queue.approvalFor(taskId), taskActionDigest(task), now);
+    // Enforcement-safe read (Wave 5 correction round sixteen, Medium B-6).
+    // `ops.queue.approvalFor` is a prototype slot, and the two reads directly
+    // above this one had already been migrated off the patchable surfaces for
+    // exactly this reason. On an approval row with `expires_at: 2000-01-01`,
+    // patching it turned `{"eligible":false,"code":"approval_invalid"}` into
+    // `{"eligible":true}` — a false readiness verdict printed to the Founder
+    // by `src/cli/claude-dispatch.ts`.
+    const rejection = validateApproval(approvalRecordFor(ops, taskId), taskActionDigest(task), now);
     if (rejection) {
       return {
         eligible: false,
@@ -755,7 +765,13 @@ export function executorReadiness(
 ): ExecutorReadiness {
   const problems: string[] = [];
   const specialist = ops.directory.getSpecialist(workerId);
-  const declaredProvider = ops.queue.providerOf(workerId);
+  // Enforcement-safe reads (Wave 5 correction round sixteen, Medium B-6 /
+  // B-7). This verdict is Founder-facing and it states PROVIDER IDENTITY —
+  // law 10 — and the handover freeze. `ops.queue.providerOf` and
+  // `ops.queue.assignabilityProblem` are prototype slots; neither was
+  // exploited by the review, and both are migrated because what is being
+  // closed is the class, not the list of call sites somebody remembered.
+  const declaredProvider = declaredProviderFor(ops, workerId);
 
   if (!specialist) {
     problems.push(
@@ -795,7 +811,7 @@ export function executorReadiness(
   }
 
   if (specialist) {
-    const assignability = ops.queue.assignabilityProblem(workerId);
+    const assignability = assignabilityProblemFor(ops, workerId);
     if (assignability != null) problems.push(assignability);
   }
 

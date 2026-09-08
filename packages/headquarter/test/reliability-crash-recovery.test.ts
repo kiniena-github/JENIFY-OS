@@ -612,7 +612,22 @@ describe('recovery is scoped, repeatable and honest about what it did not touch'
       );
       const claimed = expectOk(fx.ops.claimNext('claude', CAPS.openPr, 1, created.task.id));
       expectOk(fx.ops.startTask(claimed.id, 'claude', claimed.fence));
-      // The lease was one millisecond; it is already in the past.
+      // The lease was one millisecond, and this used to rely on incidental
+      // elapsed time for it to be in the past. Round sixteen's atomicity fix
+      // (High B-4) put the whole of `OperatorQueue.claim` inside ONE
+      // transaction, which made the claim fast enough that the clock could
+      // still be inside that millisecond by the time the sweep ran — so the
+      // assertion below measured the scheduler, not the sweep. The expiry is
+      // now waited for explicitly. Strictly stronger: the race is gone in both
+      // directions, and nothing about what is asserted has changed.
+      const leaseExpiry = (
+        fx.raw().prepare(`SELECT lease_expires_at FROM op_tasks WHERE id = ?`).get(claimed.id) as {
+          lease_expires_at: string;
+        }
+      ).lease_expires_at;
+      while (new Date().toISOString() <= leaseExpiry) {
+        // A one-millisecond lease; this spins for at most that long.
+      }
       const sweep = fx.ops.queue.sweepExpiredLeases();
       expect(sweep.outcomeUnknown).toContain(claimed.id);
 

@@ -632,6 +632,24 @@ export interface RunEventRow {
   processId: string;
   detail: Record<string, unknown>;
   attemptKey: string | null;
+  /**
+   * Is this `reconciled` row CORROBORATED by the hash-chained evidence log?
+   * (Wave 5 correction round sixteen, Critical B-2.)
+   *
+   * Three values, and the third is the point:
+   *
+   *  - `true`  — a standing `run_reconciled` link in `op_evidence` names this
+   *    run, this actor and this decision;
+   *  - `false` — the evidence log WAS consulted and carries no such link. The
+   *    fold treats the event as uninterpretable and fails closed;
+   *  - `undefined` — nobody consulted an evidence log. `deriveRunRecord` is a
+   *    pure fold over the rows it is handed, and a caller holding rows without
+   *    a database cannot be told an answer that was never computed. Every read
+   *    of the real ledger goes through `loadRunEvents`, which always sets it on
+   *    a `reconciled` row; `test/authority-read-scan.test.ts` derives that
+   *    obligation from the source rather than trusting this sentence.
+   */
+  witnessed?: boolean;
 }
 
 export interface BackupRow {
@@ -738,11 +756,122 @@ export function loadRuns(db: HqDatabase): RunRow[] {
 }
 
 export function loadRunEvents(db: HqDatabase, runId: string): RunEventRow[] {
-  return (
+  const rows = (
     db
       .prepare(`SELECT * FROM hq_reliability_run_events WHERE run_id = ? ORDER BY seq`)
       .all(runId) as Record<string, unknown>[]
   ).map(rowToRunEvent);
+  return witnessReconciliations(db, runId, rows);
+}
+
+/**
+ * The kind of `op_evidence` entry `reconcileRun` appends beside the
+ * `reconciled` ledger row. ONE spelling, read by the corroboration below and
+ * written by the one place that reconciles a run — the same discipline
+ * `INTEGRITY_ASSESSED_EVIDENCE_KIND` already has.
+ */
+export const RUN_RECONCILED_EVIDENCE_KIND = 'run_reconciled';
+
+/**
+ * Mark each `reconciled` row `witnessed` (Wave 5 correction round sixteen,
+ * Critical B-2).
+ *
+ * ## What was open
+ *
+ * The `needs_reconciliation` latch pinned every event kind EXCEPT `reconciled`
+ * — `const pinned = state === 'needs_reconciliation' && event.kind !==
+ * 'reconciled'` — and `hq_reliability_run_events` carries no `CHECK` on `kind`,
+ * so one raw APPEND (the write the ledger's own triggers deliberately permit;
+ * no UPDATE, no DELETE, no DDL) forged the exemption:
+ *
+ * ```
+ * BEFORE: needs_reconciliation / outcome_unknown / needsReconciliation true / admitsAttempt false ; INBOX 1
+ *   INSERT INTO hq_reliability_run_events (...,'reconciled','attacker',...,'{"decision":"confirmed_not_executed",...}',NULL)
+ * AFTER : concluded / not_executed / needsReconciliation false / admitsAttempt true / reconciledBy "attacker" ; INBOX 0
+ * SECOND RUN: {"ok":true}   SECOND ATTEMPT: {"ok":true}
+ * ```
+ *
+ * That is strictly more than the `opened` attack the previous round closed, by
+ * the same attacker with the same power — and the docblock above the latch
+ * asserted the opposite: "Only a `reconciled` event — an independent
+ * principal, a step-up, the idempotency rule — may leave it." The fold verified
+ * none of those three, because a bare ledger row cannot carry them.
+ *
+ * ## What is enforced instead
+ *
+ * `reconcileRun` writes the ledger row and a `run_reconciled` evidence entry
+ * inside ONE reservation, so the pair lands together or not at all. This is
+ * `verdictIsCorroborated`'s recipe applied to the run ledger: a `reconciled`
+ * row concludes only if the hash-chained `op_evidence` log carries a STANDING
+ * link — `evidenceEntryLinkStands`, so a row with the right two fields and no
+ * valid hash is not corroboration — naming this run, this actor and this
+ * decision. Witnesses are consumed one per event, so a second `reconciled` row
+ * copying an honest one is unwitnessed rather than credited twice.
+ *
+ * An unwitnessed `reconciled` row is not an error and is not a conclusion: the
+ * fold routes it to the `default` branch, which already fails closed to
+ * `needs_reconciliation`. Appending noise can only ever keep a run uncertain.
+ *
+ * **The residual, stated rather than glossed.** HQ holds no key a foreign
+ * writer does not also have, so a writer that already holds the file open can
+ * forge the evidence entry too — at the cost of appending to the hash chain,
+ * which is itself guarded by the engine and by a durable length commitment
+ * (`verifyEvidenceChain`). Against that writer this is a real barrier and not a
+ * cryptographic boundary — the same residual already recorded for
+ * `standingIntegrityVerdict` and for `hq_reliability_run_events` itself. What
+ * it closes completely is the thing it was built for: one appended row, by an
+ * actor nobody resolved, silently concluding a run HQ had said it could not
+ * account for, and re-admitting a second attempt on a `side_effect = 1`
+ * capability.
+ */
+function witnessReconciliations(
+  db: HqDatabase,
+  runId: string,
+  rows: readonly RunEventRow[],
+): RunEventRow[] {
+  if (!rows.some((row) => row.kind === 'reconciled')) return [...rows];
+  const available = new Map<string, number>();
+  try {
+    const witnesses = db
+      .prepare(
+        `SELECT seq, actor, payload FROM op_evidence
+          WHERE kind = ?
+            AND json_valid(payload)
+            AND json_extract(payload, '$.runId') = ?
+          ORDER BY seq`,
+      )
+      .all(RUN_RECONCILED_EVIDENCE_KIND, runId) as {
+      seq: unknown;
+      actor: unknown;
+      payload: unknown;
+    }[];
+    for (const witness of witnesses) {
+      const seq = Number(witness.seq);
+      // A genuine LINK in the chain, not merely a row with the right fields.
+      if (!Number.isInteger(seq) || !evidenceEntryLinkStands(db, seq)) continue;
+      let decision: unknown;
+      try {
+        decision = (JSON.parse(String(witness.payload)) as Record<string, unknown>).decision;
+      } catch {
+        continue;
+      }
+      if (typeof witness.actor !== 'string' || typeof decision !== 'string') continue;
+      const key = JSON.stringify([witness.actor, decision]);
+      available.set(key, (available.get(key) ?? 0) + 1);
+    }
+  } catch {
+    // No evidence log to corroborate against is not corroboration. Every
+    // `reconciled` row stays unwitnessed, which the fold reads as uncertain.
+  }
+  return rows.map((row) => {
+    if (row.kind !== 'reconciled') return row;
+    const decision = row.detail.decision;
+    const key = JSON.stringify([row.actor, typeof decision === 'string' ? decision : null]);
+    const remaining = available.get(key) ?? 0;
+    if (remaining <= 0) return { ...row, witnessed: false };
+    available.set(key, remaining - 1);
+    return { ...row, witnessed: true };
+  });
 }
 
 export function loadBackupRecords(db: HqDatabase): BackupRow[] {
@@ -1133,7 +1262,15 @@ function str(detail: Record<string, unknown>, key: string): string | null {
 export function runAttemptGeneration(events: readonly RunEventRow[]): number {
   return (
     events.filter(
-      (event) => event.kind === 'reconciled' && str(event.detail, 'decision') === 'confirmed_not_executed',
+      (event) =>
+        event.kind === 'reconciled' &&
+        // The same corroboration the fold applies (Wave 5 correction round
+        // sixteen, Critical B-2): an unwitnessed `reconciled` row concludes
+        // nothing, so it must not advance the generation the next attempt is
+        // labelled with either — that counter is how the two ledgers agree
+        // about how many times this work was tried.
+        event.witnessed !== false &&
+        str(event.detail, 'decision') === 'confirmed_not_executed',
     ).length + 1
   );
 }
@@ -1201,12 +1338,41 @@ export function deriveRunRecord(row: RunRow, events: readonly RunEventRow[]): Ru
      * stays, because it does something this cannot: it turns the report into
      * TESTIMONY (`workerReport`) rather than merely discarding it.
      */
-    const pinned = state === 'needs_reconciliation' && event.kind !== 'reconciled';
+    /**
+     * A `reconciled` row is the one event allowed out of the latch, and it
+     * earns that ONLY with a witness (Wave 5 correction round sixteen,
+     * Critical B-2).
+     *
+     * `event.kind !== 'reconciled'` alone made the exemption forgeable by the
+     * exact write the previous round had accepted as the attacker's power:
+     * `hq_reliability_run_events` has no `CHECK` on `kind`, so one raw append
+     * of `kind='reconciled', actor='attacker'` concluded the run, emptied the
+     * Founder's reconciliation inbox and re-admitted a second attempt on a
+     * `side_effect = 1` capability. See `witnessReconciliations` for the
+     * executed before/after and for the corroboration that replaces it.
+     *
+     * `witnessed === false` means the evidence log was consulted and carries
+     * no standing `run_reconciled` link for this run/actor/decision. Such a
+     * row is not a conclusion and not a reconciliation — it is an event HQ
+     * cannot interpret, which is exactly what the `default` branch below is
+     * for.
+     */
+    const uncorroboratedReconciliation = event.kind === 'reconciled' && event.witnessed === false;
+    /**
+     * What the switch below folds. An uncorroborated `reconciled` row is
+     * routed to the `default` branch rather than given a branch of its own,
+     * because the answer the default already gives is the right one and
+     * because a second copy of "fail closed" is a second copy to drift.
+     */
+    const foldKind: string = uncorroboratedReconciliation
+      ? STORED_RUN_EVENT_UNRECOGNIZED
+      : event.kind;
+    const pinned = state === 'needs_reconciliation' && foldKind !== 'reconciled';
     const pinnedState: RunState = state;
     const pinnedOutcome: RunOutcome = outcome;
     const pinnedFailureCategory: RunFailureCategory = failureCategory;
     const pinnedReopened: boolean = reopened;
-    switch (event.kind) {
+    switch (foldKind) {
       case 'opened':
         state = 'open';
         break;

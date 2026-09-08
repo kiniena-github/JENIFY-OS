@@ -39,6 +39,24 @@
  * admits plus an unknown one, taken from the exported `RUN_EVENT_KINDS` the
  * writer itself validates against rather than from a list this file
  * maintains.
+ *
+ * ## Round sixteen: the sentence above was false, and the excluded kind worked
+ *
+ * "EVERY event kind" was written while the loop carried
+ * `if (kind === 'reconciled') continue;`. A raw
+ * `INSERT INTO hq_reliability_run_events (...,'reconciled','attacker',...)` —
+ * the same APPEND the previous round had accepted as the attacker's power —
+ * took the run from `needs_reconciliation / outcome_unknown / inbox 1` to
+ * `concluded / not_executed / reconciledBy "attacker" / inbox 0`, and a second
+ * run AND a second attempt on the `side_effect = 1` `github.open_pr` work both
+ * returned `{"ok":true}`. An open true finding pinned shut by a false claim.
+ *
+ * The fold no longer treats a `reconciled` row as self-authenticating: it
+ * concludes only when the hash-chained `op_evidence` log carries a standing
+ * `run_reconciled` link naming that run, actor and decision — the pair
+ * `reconcileRun` writes inside one reservation. The `continue` is gone and the
+ * loop now genuinely attacks the whole vocabulary; `still lets a REAL
+ * reconciliation conclude the run` proves the latch did not become a deadlock.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -155,7 +173,19 @@ describe('an uncertain run is left uncertain by every append except a reconcilia
 
   it('survives EVERY event kind the vocabulary admits, plus one it does not', () => {
     for (const kind of [...ledgerEventKinds(), 'a_kind_from_a_future_phase']) {
-      if (kind === 'reconciled') continue; // the one event that legitimately concludes
+      // `reconciled` is NO LONGER EXCLUDED (Wave 5 correction round sixteen,
+      // Critical B-2). It used to be skipped here with the comment "the one
+      // event that legitimately concludes", while this file's own docblock
+      // claimed to attack "EVERY event kind the ledger's vocabulary admits
+      // plus an unknown one" — so the excluded kind was the one that worked: a
+      // raw `INSERT ... 'reconciled', 'attacker' ...` concluded the run,
+      // emptied the reconciliation inbox and re-admitted a second attempt on a
+      // `side_effect = 1` capability. A `reconciled` row now concludes only
+      // when the hash-chained evidence log carries the `run_reconciled` link
+      // naming it, which a raw append to THIS ledger cannot produce. The real
+      // reconciliation is exercised by the case below, so nothing is lost by
+      // attacking this one.
+      //
       // A FRESH fixture per kind: `openRun` refuses a second run on work that
       // already stands uncertain, which is the guard under test.
       const fx = reliabilityFixture();

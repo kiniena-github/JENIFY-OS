@@ -25,6 +25,8 @@
  */
 
 import { CAPS, expectOk, setupFixture, type Fixture } from './application.fixture.js';
+import type { ExternalActionAdapter } from '../src/application/action-gateway.js';
+import type { AiMemberRegistry } from '../src/registry/members.js';
 import { claimReadOnlyTask, claimSideEffectTask } from './reliability.fixture.js';
 import {
   MISSION_COMMAND_CAPABILITY,
@@ -90,9 +92,26 @@ export interface IntelligenceFixture extends Fixture {
  * the other half of the same fail-closed pair.
  */
 export function intelligenceFixture(
-  options: { registerIntelligence?: boolean; grantIntelligence?: boolean } = {},
+  options: {
+    registerIntelligence?: boolean;
+    grantIntelligence?: boolean;
+    /**
+     * Passed straight through to `setupFixture`, which is the composition root
+     * for these tests exactly as the CLI is for a real run. Added so
+     * `unauthenticated-founder-text.test.ts` can plant a canary in
+     * `proposeAction`/`reconcileAction` — the action gateway refuses an
+     * unregistered adapter, and an exemption reading "unreachable here" would
+     * be a measurement of the fixture rather than of the artifact.
+     */
+    actionAdapters?: readonly ExternalActionAdapter[];
+    /** Passed straight through for the same reason as `actionAdapters`. */
+    aiMemberRegistry?: AiMemberRegistry;
+  } = {},
 ): IntelligenceFixture {
-  const fx = setupFixture();
+  const fx = setupFixture({
+    actionAdapters: options.actionAdapters,
+    aiMemberRegistry: options.aiMemberRegistry,
+  });
   if (options.registerIntelligence !== false) registerIntelligenceCommandCapability(fx.db);
   registerMissionCommandCapability(fx.db);
   registerProjectCommandCapability(fx.db);

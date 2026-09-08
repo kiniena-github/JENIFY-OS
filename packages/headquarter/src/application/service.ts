@@ -79,6 +79,7 @@ import {
   canonicalJson,
   taskActionDigest,
   validateApprovalClaimBinding,
+  type ApprovalRecordForValidation,
   type ApprovalRejection,
 } from '../operator/approvals.js';
 import {
@@ -93,6 +94,7 @@ import {
   type RiskClass,
 } from '../operator/capabilities.js';
 import {
+  AssignmentIntentViolation,
   GLOBAL_SCOPE,
   OperatorQueue,
   SafeModeEngaged,
@@ -761,6 +763,7 @@ import {
   RUN_KINDS,
   RUN_LEDGER_STATEMENT,
   RUN_READ_LIMIT,
+  RUN_RECONCILED_EVIDENCE_KIND,
   RUN_RECONCILE_DECISIONS,
   RUN_RETRY_STATEMENT,
   appendIntegrityVerdict,
@@ -1195,6 +1198,7 @@ import {
   type SearchIndexSnapshotView,
   type SearchSourceId,
 } from './search-command.js';
+import { assertAssignable } from '../handover/replacement.js';
 import { isClientIdentityKey } from '../live/auth.js';
 import { ensureMemoryTables, memorySchemaPresent, MemoryStore, searchMemory } from '../memory/store.js';
 import {
@@ -2317,6 +2321,63 @@ let readTaskEvidenceRows: (ops: HeadquarterOperations, taskId?: string) => Canon
  * return honestly. Published to `taskRowFor` and to nothing else.
  */
 let readTaskRow: (ops: HeadquarterOperations, taskId: string) => OperatorTask | null;
+/**
+ * Same recipe for the canonical `hq_mission_proposals` ROW (Wave 5 correction
+ * round sixteen, High B-3).
+ *
+ * `promoteProposal` is the ONE bridge from chat to executable work, and it
+ * decided on `this.getProposal(...)` — a public prototype method. With
+ * `HeadquarterOperations.prototype.getProposal` replaced to report
+ * `status: 'proposed'` and a substituted `payload`, an ALREADY-PROMOTED
+ * proposal promoted a second time:
+ *
+ * ```
+ * BASELINE second promotion: {"code":"proposal_not_open", ...}
+ * FORGED   second promotion: {"ok":true,"taskId":"cd4148fe-…"}
+ * op_tasks 1 → 2, the new row carrying {"branch":"attacker-controlled"} on
+ * github.open_pr, while hq_mission_proposals still read
+ * {"status":"promoted","payload":"{\"branch\":\"safe-branch\"}"}
+ * ```
+ *
+ * and the `mission_promoted_to_task` evidence attributed it to the honest
+ * proposal id. Published to `proposalRowFor` and to nothing else.
+ */
+let readProposalRow: (ops: HeadquarterOperations, proposalId: string) => MissionProposal | null;
+/**
+ * Same recipe for the `hq_approvals` row a task is currently bound to (Wave 5
+ * correction round sixteen, Medium B-6).
+ *
+ * `claudeDispatchEligibility` read it through `ops.queue.approvalFor(taskId)`
+ * — the task and capability reads immediately above it had been migrated for
+ * exactly this reason, and this one had not. On an approval row carrying
+ * `expires_at: 2000-01-01`:
+ *
+ * ```
+ * BASELINE {"eligible":false,"code":"approval_invalid","details":{"rejection":"approval_expired"}}
+ * FORGED   {"eligible":true}
+ * ```
+ *
+ * The publication itself still held further down the path, so what was forged
+ * was the READINESS VERDICT `src/cli/claude-dispatch.ts` prints to the
+ * Founder. Published to `approvalRecordFor` and to nothing else.
+ */
+let readApprovalRecord: (
+  ops: HeadquarterOperations,
+  taskId: string,
+) => ApprovalRecordForValidation | null;
+/**
+ * Same recipe for the two remaining reads the Founder-facing executor
+ * readiness verdict takes (Wave 5 correction round sixteen, Medium B-6 /
+ * B-7).
+ *
+ * `executorReadiness` printed PROVIDER IDENTITY — law 10 — and the handover
+ * freeze from `ops.queue.providerOf` and `ops.queue.assignabilityProblem`,
+ * both prototype slots and both invisible to the previous scan because it
+ * enumerated eight named surfaces. Neither was exploited by the review; both
+ * are migrated because the CLASS is what is being closed, not the list.
+ */
+let readDeclaredProvider: (ops: HeadquarterOperations, workerId: string) => string | null;
+let readAssignabilityProblem: (ops: HeadquarterOperations, workerId: string) => string | null;
 
 export class HeadquarterOperations {
   readonly queue: OperatorQueue;
@@ -2703,6 +2764,28 @@ export class HeadquarterOperations {
   readonly #killSwitchEngagedFromStore: (capabilityId?: string) => boolean;
 
   /**
+   * The ADVISORY assignment intent for a task, read from `hq_op_task_meta`
+   * through a closure over `#db` (Wave 5 correction round sixteen, Critical
+   * B-1).
+   *
+   * `claimNext` read it through `this.readMeta(...)`, a public prototype
+   * method. `HeadquarterOperations.prototype.readMeta = () => null` turned
+   * `{"code":"assigned_to_other_worker"}` into
+   * `{"ok":true,"claimedBy":"jules"}` and left `op_tasks` at `claimed_by:
+   * jules, status: assigned, fence: 1` with `hq_op_task_meta` still naming
+   * `claude` — and the stolen claim then ran `startTask` → `proposeAction` →
+   * `authorizeAction` → `executeAction` to a real adapter call.
+   *
+   * The `#capabilityFromStore` recipe: an own field holding a function defined
+   * in this module over `#db`, with no prototype in its dispatch path. The
+   * canonical enforcement of the same rule now also lives one layer lower, in
+   * `OperatorQueue.claim`, so a caller that never comes through this facade is
+   * refused too; this closure keeps the typed refusal ordering the Founder
+   * surface already renders.
+   */
+  readonly #assignmentIntentFromStore: (taskId: string) => string | null;
+
+  /**
    * The same canonical `op_kill_switch` read over an ARBITRARY scope list
    * (Phase 8). The gateway honours four scope families at once — global, the
    * task's capability, `external_action`, `provider:<id>` and `adapter:<id>`
@@ -2736,6 +2819,17 @@ export class HeadquarterOperations {
     };
     this.#killSwitchEngagedFromStore = (capabilityId?: string): boolean =>
       this.#engagedKillSwitchScopeFromStore([GLOBAL_SCOPE, ...(capabilityId ? [capabilityId] : [])]) !== null;
+    this.#assignmentIntentFromStore = (taskId: string): string | null => {
+      try {
+        const row = db
+          .prepare(`SELECT assigned_worker_id FROM hq_op_task_meta WHERE task_id = ?`)
+          .get(taskId) as { assigned_worker_id: string | null } | undefined;
+        const assigned = row?.assigned_worker_id ?? null;
+        return typeof assigned === 'string' && assigned.length > 0 ? assigned : null;
+      } catch {
+        return null;
+      }
+    };
     // Adapters are validated at construction: a broken contract is a
     // composition error and must surface where the composition happened.
     const adapters = new Map<string, ExternalActionAdapter>();
@@ -3720,12 +3814,20 @@ export class HeadquarterOperations {
     // a typed error in the catch. Answering it here would record it twice or
     // not at all, depending on the caller.
     const head = peek.task;
-    const intent = head ? this.readMeta(head.id)?.assignment : null;
-    if (head && intent && intent.workerId !== workerId) {
+    // Enforcement-safe read (Wave 5 correction round sixteen, Critical B-1):
+    // `this.readMeta(head.id)?.assignment` was a public prototype slot, and
+    // patching it to return null handed a Founder-assigned task to another
+    // worker, all the way through to a real external adapter call. The
+    // canonical copy of this rule now lives in `OperatorQueue.claim`, which
+    // holds for callers that never come through here; this one keeps the typed
+    // refusal ordering the Founder surface already renders, and reads
+    // `hq_op_task_meta` through a `#private` closure over the database.
+    const intendedFor = head ? this.#assignmentIntentFromStore(head.id) : null;
+    if (head && intendedFor && intendedFor !== workerId) {
       return fail(
         'assigned_to_other_worker',
-        `Task ${head.id} is assigned to ${intent.workerId}`,
-        { taskId: head.id, assignedTo: intent.workerId },
+        `Task ${head.id} is assigned to ${intendedFor}`,
+        { taskId: head.id, assignedTo: intendedFor },
       );
     }
     // Provider binding (issue #200, Codex P1 #1) is deliberately NOT
@@ -3751,6 +3853,18 @@ export class HeadquarterOperations {
           taskId: error.taskId,
           requiredProvider: error.requiredProvider,
           workerProvider: error.workerProvider,
+        });
+      }
+      // The canonical boundary's own assignment-intent refusal, translated
+      // back to the typed code this method already answers with (Wave 5
+      // correction round sixteen, Critical B-1). Ordinarily unreachable — the
+      // `#assignmentIntentFromStore` check above answers first — and kept so a
+      // caller that reaches the queue by any route gets one refusal with one
+      // name, exactly as `SafeModeEngaged` above.
+      if (error instanceof AssignmentIntentViolation) {
+        return fail('assigned_to_other_worker', error.message, {
+          taskId: error.taskId,
+          assignedTo: error.assignedTo,
         });
       }
       return fail('operator_rejected', errorMessage(error), { capabilityId });
@@ -4212,6 +4326,16 @@ export class HeadquarterOperations {
       ops.#taskEvidenceRowsFromStore(taskId);
     readTaskRow = (ops: HeadquarterOperations, taskId: string): OperatorTask | null =>
       ops.#taskRowFromStore(taskId);
+    readProposalRow = (ops: HeadquarterOperations, proposalId: string): MissionProposal | null =>
+      ops.#proposalFromStore(proposalId);
+    readApprovalRecord = (
+      ops: HeadquarterOperations,
+      taskId: string,
+    ): ApprovalRecordForValidation | null => ops.#approvalRecordFromStore(taskId);
+    readDeclaredProvider = (ops: HeadquarterOperations, workerId: string): string | null =>
+      ops.#declaredProviderFromStore(workerId);
+    readAssignabilityProblem = (ops: HeadquarterOperations, workerId: string): string | null =>
+      ops.#assignabilityProblemFromStore(workerId);
   }
 
   /**
@@ -4649,6 +4773,21 @@ export class HeadquarterOperations {
    * task needs reconciliation, before it can be safely replaced.
    */
   replacementPlan(workerId: string): OpsResult<ReplacementPlan> {
+    return ok(this.#replacementPlanFromStore(workerId));
+  }
+
+  /**
+   * The canonical in-flight-claim census behind `replacementPlan`, as a
+   * `#private` method (Wave 5 correction round sixteen, Medium B-7).
+   *
+   * `assertReplacementSafe` dispatched through the public `replacementPlan`,
+   * and `deactivateExecutionWorker` through the public `assertReplacementSafe`
+   * — a chain of two prototype slots in front of the guard that stops a worker
+   * holding live claims and `outcome_unknown` work from being deactivated out
+   * from under it. Not exploited by the review, and migrated because the class
+   * is what is being closed.
+   */
+  #replacementPlanFromStore(workerId: string): ReplacementPlan {
     const rows = this.#db
       .prepare(
         `SELECT id, status, capability_id FROM op_tasks
@@ -4662,12 +4801,17 @@ export class HeadquarterOperations {
       capabilityId: row.capability_id,
       requires: row.status === 'outcome_unknown' ? 'reconciliation' : 'handover',
     }));
-    return ok({ workerId, safe: blockers.length === 0, blockers });
+    return { workerId, safe: blockers.length === 0, blockers };
   }
 
   /** Convenience guard for a caller about to disable/replace a worker. */
   assertReplacementSafe(workerId: string): OpsResult<ReplacementPlan> {
-    const plan = this.replacementPlan(workerId);
+    return this.#replacementSafetyRefusal(workerId);
+  }
+
+  /** The guard itself, reached by `deactivateExecutionWorker` without a prototype in the path. */
+  #replacementSafetyRefusal(workerId: string): OpsResult<ReplacementPlan> {
+    const plan = ok(this.#replacementPlanFromStore(workerId));
     if (!plan.ok) return plan;
     if (!plan.data.safe) {
       return fail(
@@ -4726,7 +4870,7 @@ export class HeadquarterOperations {
         workerId: input.workerId,
       });
     }
-    const safe = this.assertReplacementSafe(input.workerId);
+    const safe = this.#replacementSafetyRefusal(input.workerId);
     if (!safe.ok) return safe;
     const deactivated: WorkerDescriptor = { ...specialist, active: false };
     const privileged = this.#requirePrivilegedQueue();
@@ -5278,7 +5422,13 @@ export class HeadquarterOperations {
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
-    const proposal = this.getProposal(input.proposalId);
+    // Enforcement-safe read (Wave 5 correction round sixteen, High B-3): this
+    // is the ONE bridge from chat to executable work, and `this.getProposal`
+    // is a public prototype slot. Patching it to report `status: 'proposed'`
+    // with a substituted payload promoted an already-promoted proposal a
+    // second time, into a fresh `github.open_pr` task carrying content nobody
+    // proposed. See `#proposalFromStore`.
+    const proposal = this.#proposalFromStore(input.proposalId);
     if (!proposal) return fail('proposal_not_found', `Unknown proposal: ${input.proposalId}`);
     if (proposal.status !== 'proposed') {
       return fail('proposal_not_open', `Proposal ${proposal.id} is already ${proposal.status}`, {
@@ -5346,7 +5496,10 @@ export class HeadquarterOperations {
   rejectProposal(proposalId: string, by: string, note: string): OpsResult<MissionProposal> {
     const unsafeCallerText = callerTextRefusal({ proposalId, by }, ['note']);
     if (unsafeCallerText) return unsafeCallerText;
-    const proposal = this.getProposal(proposalId);
+    // Enforcement-safe read, for the same reason as `promoteProposal`: the
+    // `status !== 'proposed'` guard below is what stops a decided proposal
+    // being decided again, and it may not be reached through a prototype slot.
+    const proposal = this.#proposalFromStore(proposalId);
     if (!proposal) return fail('proposal_not_found', `Unknown proposal: ${proposalId}`);
     if (proposal.status !== 'proposed') {
       return fail('proposal_not_open', `Proposal ${proposalId} is already ${proposal.status}`);
@@ -5373,27 +5526,14 @@ export class HeadquarterOperations {
     return ok(this.getProposal(proposalId)!);
   }
 
+  /**
+   * The deliberately PATCHABLE convenience read, for callers displaying a
+   * proposal. Every decision reads `#proposalFromStore` instead — see High
+   * B-3 there, and `test/authority-read-scan.test.ts`, which classifies each
+   * remaining read of this method in writing.
+   */
   getProposal(id: string): MissionProposal | null {
-    const row = this.#db.prepare(`SELECT * FROM hq_mission_proposals WHERE id = ?`).get(id) as
-      | Record<string, unknown>
-      | undefined;
-    if (!row) return null;
-    return {
-      id: row.id as string,
-      threadId: row.thread_id as string,
-      sourceMessageId: (row.source_message_id as string | null) ?? null,
-      capabilityId: row.capability_id as string,
-      payload: JSON.parse(row.payload as string),
-      idempotencyKey: (row.idempotency_key as string | null) ?? null,
-      digest: row.digest as string,
-      proposedBy: row.proposed_by as string,
-      proposedAt: row.proposed_at as string,
-      status: row.status as MissionProposalStatus,
-      taskId: (row.task_id as string | null) ?? null,
-      decidedBy: (row.decided_by as string | null) ?? null,
-      decidedAt: (row.decided_at as string | null) ?? null,
-      decisionNote: (row.decision_note as string | null) ?? null,
-    };
+    return this.#proposalFromStore(id);
   }
 
   listProposals(status?: MissionProposalStatus): MissionProposal[] {
@@ -9046,7 +9186,12 @@ export class HeadquarterOperations {
       privileged.appendEvidence({
         taskId: row.taskId,
         actor: input.requestedBy,
-        kind: 'run_reconciled',
+        // The WITNESS the fold corroborates a `reconciled` ledger row against
+        // (Wave 5 correction round sixteen, Critical B-2). One spelling, in
+        // `reliability-command.ts` beside the check that reads it, appended
+        // inside the same reservation as the ledger row so the pair lands
+        // together or not at all.
+        kind: RUN_RECONCILED_EVIDENCE_KIND,
         payload: {
           runId,
           decision: input.decision,
@@ -14114,6 +14259,105 @@ export class HeadquarterOperations {
     return readOperatorTaskRow(this.#db, taskId);
   }
 
+  /**
+   * The canonical `hq_mission_proposals` row, read directly — never the
+   * patchable public `getProposal` (Wave 5 correction round sixteen, High
+   * B-3).
+   *
+   * An ECMAScript `#private` METHOD, like `#taskRowFromStore` beside it: it is
+   * not installed on the prototype and no importer can name it. `getProposal`
+   * stays exactly as it is — the deliberately patchable convenience read for
+   * callers DISPLAYING a proposal — and delegates here, so there is one
+   * mapping rather than two that can drift.
+   */
+  /**
+   * The `hq_approvals` row a task is currently bound to, read directly — never
+   * the patchable public `queue.approvalFor` (Wave 5 correction round sixteen,
+   * Medium B-6).
+   *
+   * An ECMAScript `#private` METHOD, like `#taskRowFromStore` and
+   * `#proposalFromStore` beside it. Both halves are read here — the task's
+   * `approval_id` and then the approval row — because `queue.approvalFor`
+   * resolved the first half through `this.get`, the queue's own deliberately
+   * patchable convenience read, so hardening only the second would have
+   * hardened nothing.
+   */
+  /**
+   * The provider a worker is DECLARED as, read directly from
+   * `op_worker_providers` — never the patchable public `queue.providerOf`
+   * (Wave 5 correction round sixteen, Medium B-6 / B-7).
+   */
+  #declaredProviderFromStore(workerId: string): string | null {
+    const row = this.#db
+      .prepare(`SELECT provider_id FROM op_worker_providers WHERE worker_id = ?`)
+      .get(workerId) as { provider_id: string } | undefined;
+    return row?.provider_id ?? null;
+  }
+
+  /**
+   * Why this worker could not be assigned work, or null — the handover-freeze
+   * and deactivation answer, read through the module function that owns the
+   * rule rather than the patchable public `queue.assignabilityProblem`.
+   * `OperatorQueue.claim` still calls `assertAssignable` itself inside the
+   * write path, so this remains a report and grants nothing.
+   */
+  #assignabilityProblemFromStore(workerId: string): string | null {
+    try {
+      assertAssignable(this.#db, workerId);
+      return null;
+    } catch (error) {
+      return errorMessage(error);
+    }
+  }
+
+  #approvalRecordFromStore(taskId: string): ApprovalRecordForValidation | null {
+    const task = this.#db.prepare(`SELECT approval_id FROM op_tasks WHERE id = ?`).get(taskId) as
+      | { approval_id: string | null }
+      | undefined;
+    const approvalId = task?.approval_id ?? null;
+    if (!approvalId) return null;
+    const row = this.#db
+      .prepare(`SELECT decision, action_digest, expires_at, consumed_at FROM hq_approvals WHERE id = ?`)
+      .get(approvalId) as
+      | {
+          decision: string;
+          action_digest: string | null;
+          expires_at: string | null;
+          consumed_at: string | null;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      decision: row.decision,
+      actionDigest: row.action_digest,
+      expiresAt: row.expires_at,
+      consumedAt: row.consumed_at,
+    };
+  }
+
+  #proposalFromStore(proposalId: string): MissionProposal | null {
+    const row = this.#db
+      .prepare(`SELECT * FROM hq_mission_proposals WHERE id = ?`)
+      .get(proposalId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      id: row.id as string,
+      threadId: row.thread_id as string,
+      sourceMessageId: (row.source_message_id as string | null) ?? null,
+      capabilityId: row.capability_id as string,
+      payload: JSON.parse(row.payload as string) as Record<string, unknown>,
+      idempotencyKey: (row.idempotency_key as string | null) ?? null,
+      digest: row.digest as string,
+      proposedBy: row.proposed_by as string,
+      proposedAt: row.proposed_at as string,
+      status: row.status as MissionProposalStatus,
+      taskId: (row.task_id as string | null) ?? null,
+      decidedBy: (row.decided_by as string | null) ?? null,
+      decidedAt: (row.decided_at as string | null) ?? null,
+      decisionNote: (row.decision_note as string | null) ?? null,
+    };
+  }
+
   #missionStatusFromStore(missionId: string): { status: MissionStatus; intentSeq: number } | null {
     if (!this.#missionStorePresent) return null;
     const row = this.#db.prepare(`SELECT status FROM hq_missions WHERE id = ?`).get(missionId) as
@@ -17029,7 +17273,23 @@ export class HeadquarterOperations {
 
   // ---- task metadata (console labels + advisory assignment) ----
 
+  /**
+   * The deliberately PATCHABLE convenience read, for callers displaying a
+   * task's console labels and its advisory assignment. Every path that
+   * DECIDES or WRITES reads `#metaFromStore` instead — see High B-1 (the
+   * claim gate) and `#upsertMeta` (which merges onto what it reads, so a read
+   * returning null there would silently erase a Founder's assignment intent).
+   */
   readMeta(taskId: string): TaskMeta | null {
+    return this.#metaFromStore(taskId);
+  }
+
+  /**
+   * The canonical `hq_op_task_meta` row, read directly. An ECMAScript
+   * `#private` METHOD, like `#taskRowFromStore`: not on the prototype, and no
+   * importer can name it (Wave 5 correction round sixteen, Critical B-1).
+   */
+  #metaFromStore(taskId: string): TaskMeta | null {
     const row = this.#db.prepare(`SELECT * FROM hq_op_task_meta WHERE task_id = ?`).get(taskId) as
       | Record<string, unknown>
       | undefined;
@@ -17064,7 +17324,12 @@ export class HeadquarterOperations {
       assignmentRationale?: string | null;
     },
   ): void {
-    const existing = this.readMeta(taskId);
+    // `#metaFromStore`, never the public `readMeta`: this is a MERGE, so a
+    // read that returned null here would carry `null` into every field the
+    // patch does not name — including the Founder's assignment intent, which
+    // `OperatorQueue.claim` now enforces on (Wave 5 correction round sixteen,
+    // Critical B-1).
+    const existing = this.#metaFromStore(taskId);
     const next = {
       project: patch.project ?? existing?.project ?? null,
       title: patch.title ?? existing?.title ?? null,
@@ -17291,6 +17556,65 @@ export function capabilityRowFor(
  */
 export function taskRowFor(ops: HeadquarterOperations, taskId: string): OperatorTask | null {
   return readTaskRow(ops, taskId);
+}
+
+/**
+ * The canonical `hq_mission_proposals` row for a caller making an ENFORCEMENT
+ * decision — the sixth module-private binding, beside `taskRowFor` (Wave 5
+ * correction round sixteen, High B-3).
+ *
+ * A FUNCTION BINDING over a `#private` method, for the reason `taskRowFor` is
+ * one: an ES module binding cannot be reassigned by an importer and no
+ * prototype participates. `getProposal` stays exactly as it is — the
+ * deliberately patchable convenience read, for callers DISPLAYING a proposal.
+ * The reason this exists is that `promoteProposal` is the one bridge from chat
+ * to executable work and it decided on the prototype method; see
+ * `readProposalRow` for the executed before/after.
+ */
+export function proposalRowFor(
+  ops: HeadquarterOperations,
+  proposalId: string,
+): MissionProposal | null {
+  return readProposalRow(ops, proposalId);
+}
+
+/**
+ * The `hq_approvals` row a task is currently bound to, for a caller making an
+ * ENFORCEMENT decision — the seventh module-private binding, beside
+ * `taskRowFor` (Wave 5 correction round sixteen, Medium B-6).
+ *
+ * A FUNCTION BINDING for the reason every sibling is one: an ES module binding
+ * cannot be reassigned by an importer and no prototype participates.
+ * `queue.approvalFor` stays exactly as it is — the deliberately patchable
+ * convenience read for DISPLAY. See `readApprovalRecord` for the executed
+ * before/after.
+ */
+export function approvalRecordFor(
+  ops: HeadquarterOperations,
+  taskId: string,
+): ApprovalRecordForValidation | null {
+  return readApprovalRecord(ops, taskId);
+}
+
+/**
+ * The provider a worker is DECLARED as, for a caller reporting or deciding on
+ * provider identity (law 10) — a FUNCTION BINDING like `approvalRecordFor`.
+ * `queue.providerOf` stays as the patchable convenience read.
+ */
+export function declaredProviderFor(ops: HeadquarterOperations, workerId: string): string | null {
+  return readDeclaredProvider(ops, workerId);
+}
+
+/**
+ * Why a worker cannot be assigned work, or null — the handover-freeze and
+ * deactivation answer, as a FUNCTION BINDING. `queue.assignabilityProblem`
+ * stays as the patchable convenience read.
+ */
+export function assignabilityProblemFor(
+  ops: HeadquarterOperations,
+  workerId: string,
+): string | null {
+  return readAssignabilityProblem(ops, workerId);
 }
 
 /**

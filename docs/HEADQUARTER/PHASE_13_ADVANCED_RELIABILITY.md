@@ -878,7 +878,7 @@ Founder's stop-everything reason stays off the unauthenticated file. Measured
 with a second scope left ENGAGED, the reason, the scope and the engaging
 principal all cross, at
 `operations.data.killSwitch.engagedScopes[].reason` / `.scope` / `.engagedBy`.
-The count is **twenty-three fields, not four** — `src/cli/snapshot.ts` writes
+The count is **thirty-nine fields, not four** — `src/cli/snapshot.ts` writes
 the whole object `liveSnapshotFromOperations` returns, so everything in it is
 published:
 
@@ -907,30 +907,67 @@ published:
 | `engageKillSwitch.reason` | `operations.data.killSwitch.engagedScopes[].reason` — for every scope that is still ENGAGED |
 | `engageKillSwitch.scope` | `operations.data.killSwitch.engagedScopes[].scope` |
 | `engageKillSwitch.founderId` | `operations.data.killSwitch.engagedScopes[].engagedBy` |
+| `promoteProposal.project` | `operations.data.<lane>[].project` — the promoted task carries it |
+| `promoteProposal.title` | `operations.data.<lane>[].title` |
+| `updateProject.name` | `projects.data[].name` |
+| `updateProject.purpose` | `projects.data[].purpose` |
+| `updateProject.stream` | `projects.data[].stream` |
+| `transitionProject.note` | `projects.data[].history[].note` |
+| `recordMemory.title` | `memory.data[].title` |
+| `recordMemory.body` | `memory.data[].body` — the whole body, not a summary of it |
+| `recordMemory.project` | `memory.data[].project` |
+| `recordMemory.related` | `memory.data[].related.artifacts[]` |
+| `recordMemory.sourceRefs` | `memory.data[].sourceRefs[]` |
+| `recordMemory.tags` | `memory.data[].tags[]` |
+| `recordTruth.statement` | `truth.data.records[].statement` |
+| `verifyTruth.limitations` | `truth.data.records[].verifications[].limitations` |
+| `acceptTruth.note` | `truth.data.records[].acceptances[].note` |
+| `openCollaborationSession.title` | `collaboration.data.recent[].title` — the field the round-sixteen review published to prove the census was short |
 
-Fifteen further Founder- and worker-typed fields were planted and do NOT cross,
-and that half is pinned too, because it is what makes the payload carve-out from
-the credential scan defensible: `createTask.payload`,
-`commandMission.instruction`, `amendMissionIntent.amendment`,
-`setIntelligenceBudget.note`,
-`recordModelObservation.unitCostBasis`, `recordModelObservation.note`,
-`recordVerifiedBackup.backupPath`, `recordVerifiedBackup.note`,
-`postMissionMessage.body`, `postMissionMessage.refs`,
-`recordIntelligenceDecision.label`, `recordIntelligenceCost.basis`,
-`recordIntelligenceCost.note`, `recordIntelligenceCost.providerId`,
-`recordIntelligenceCost.modelId`.
+**The sixteen rows below the kill-switch group are round sixteen's correction,
+and the sentence they replace is the reason they are here** (Wave 5 correction
+round sixteen, High B-5). The paragraph above said `src/cli/snapshot.ts` writes
+the whole object `liveSnapshotFromOperations` returns "so everything in it is
+published", and then disclosed twenty-three fields. A fresh hostile review
+published a twenty-fourth — `openCollaborationSession.title` — because the
+census was a HAND-WRITTEN LIST and the completeness test that was supposed to
+guard it derived its method set from that same list:
 
-The last two were EXEMPTED from the plant until Wave 5 correction round fifteen
-(Medium 4), with the reason "bounded to a registered provider and to an
-observed model id; a canary in either is refused before any write". Measured:
-an unregistered provider, a never-observed model and a canary providerId were
-all RECORDED, and only the model id was refused — by a lowercase-slug rule, not
-by observation. The `crosses: false` verdict stood, for the wrong reason. Both
-are planted now (the canary text is lowercase so it survives
-`normalizeProviderId`), and the artifact's silence about them is measured
-rather than argued.
+```ts
+const exercised = [...new Set(CANARIES.map((c) => c.field.split('.')[0]))];
+```
 
-**Every one of those thirteen is now also checked for being IN THE STORE at the
+A method never added to `CANARIES` was therefore never checked. Measured at that
+head: 77 declared caller-text parameters on the facade, 38 in the census, 46
+declared and absent across 25 entirely unexercised methods. The test now derives
+`exercised` from `service.ts` — every facade method that declares a
+`callerTextRefusal` list — and requires each declared parameter to be planted or
+exempted in writing, so a method that starts scanning caller text in a future
+phase fails on the day it is written. Re-measured with all of them exercised
+through the real facade: **thirty-nine of eighty-two**.
+
+Forty-three further Founder- and worker-typed fields were planted and do NOT
+cross, and that half is pinned too, because it is what makes the payload
+carve-out from the credential scan defensible: `createTask.payload`, `commandMission.instruction`, `amendMissionIntent.amendment`, `setIntelligenceBudget.note`, `recordModelObservation.unitCostBasis`, `recordModelObservation.note`, `recordVerifiedBackup.backupPath`, `recordVerifiedBackup.note`, `postMissionMessage.body`, `postMissionMessage.refs`, `recordIntelligenceDecision.label`, `recordIntelligenceCost.basis`, `recordIntelligenceCost.note`, `recordIntelligenceCost.providerId`, `recordIntelligenceCost.modelId`, `approveTask.note`, `deactivateExecutionWorker.reason`, `assignTaskAsFounder.rationale`, `registerAiMember.displayName`, `registerAiMember.modelId`, `registerAiMember.modelVersion`, `registerAiMember.providerId`, `registerAiMember.toolMetadata`, `disableAiMember.reason`, `transitionMission.note`, `createProduct.name`, `createProduct.problem`, `createProduct.summary`, `createProduct.targetUsers`, `moveProductLifecycle.note`, `registerProductArtifact.locator`, `registerProductArtifact.name`, `registerProductArtifact.note`, `openRun.label`, `recordRunOutcome.note`, `reconcileRun.note`, `recordIntelligenceOutcome.note`, `proposeAction.target`, `reconcileAction.note`, `openCollaborationSession.purpose`, `recordContribution.artifactRefs`, `recordContribution.content`, `recordContribution.reason`.
+
+`recordIntelligenceCost.providerId` and `.modelId` were EXEMPTED from the plant
+until Wave 5 correction round fifteen (Medium 4), with the reason "bounded to a
+registered provider and to an observed model id; a canary in either is refused
+before any write". Measured: an unregistered provider, a never-observed model
+and a canary providerId were all RECORDED, and only the model id was refused —
+by a lowercase-slug rule, not by observation. The `crosses: false` verdict
+stood, for the wrong reason. Both are planted now (the canary text is lowercase
+so it survives `normalizeProviderId`), and the artifact's silence about them is
+measured rather than argued.
+
+Exactly TWO parameters remain exempted from the plant, each with a written and
+checkable reason: `amendMissionIntent.specifyPlanItems`, a structured object
+list with no free-text member (its text comes from `addPlanItems`, which is
+planted and crosses); and `recoverInterruptedRuns.reason`, whose type is a
+closed five-member union, so no canary can be planted in it at all — the
+scenario proves that by measuring it as never reaching the store.
+
+**Every planted canary is also checked for being IN THE STORE at the
 instant the snapshot is taken**, by sweeping every text column of every table in
 the file. That is the guard the kill-switch row needed and did not have: "the
 facade accepted the write" and "the value is there to be published" are
@@ -6059,10 +6096,10 @@ derivation is possible:
 
 | Figure | Previous figure in this document | This head |
 |---|---|---|
-| test FILES in `packages/headquarter/test` | 197 | **206** — DERIVED, not typed: `phase-doc-name-truth.test.ts` reads the directory and requires this table to state what it counts |
-| `npm run test:hq` | 197 files / 3494 tests | **206 files / 3622 tests, 0 failed** (measured at this head; a test-case count cannot be derived by a test inside the suite it counts, so it is recorded as a head-scoped measurement, which is the discipline this package already applies to every other suite figure) |
+| test FILES in `packages/headquarter/test` | 197 | **208** — DERIVED, not typed: `phase-doc-name-truth.test.ts` reads the directory and requires this table to state what it counts |
+| `npm run test:hq` | 197 files / 3494 tests | **208 files / 3639 tests, 0 failed** (measured at this head; a test-case count cannot be derived by a test inside the suite it counts, so it is recorded as a head-scoped measurement, which is the discipline this package already applies to every other suite figure) |
 | `SAFE_MODE_BLOCKING_FINDINGS` | 4 | **4**, and the count is now checked WHEREVER `src/` states it rather than only in `integrity.ts`'s own header — `service.ts` said "three" in the same diff |
-| unauthenticated artifact: crossing fields | 20 of 34 | **23 of 38** — see the disclosure section above |
+| unauthenticated artifact: crossing fields | 20 of 34 | **39 of 82** — see the disclosure section above; the previous figure of 23 was measured over a hand-written census whose completeness test derived its scope from that same census (round sixteen, High B-5) |
 | `unguardedUniqueIndexes` | named 5 times, defined 0 times | **defined**, exercised on both branches, and the class held by `prose-names-a-real-mechanism.test.ts` |
 
 A test-case count typed into a document is read by nothing and goes stale on the

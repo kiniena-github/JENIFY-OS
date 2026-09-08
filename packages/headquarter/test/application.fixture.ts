@@ -12,6 +12,7 @@ import { HeadquarterOperations, type DispatchEvidenceGrant } from '../src/applic
 import type { NominationSourcePort, WorkerNomination } from '../src/application/ports.js';
 import { HumanPrincipalRegistry } from '../src/application/principals.js';
 import type { ExternalActionAdapter } from '../src/application/action-gateway.js';
+import type { AiMemberRegistry } from '../src/registry/members.js';
 
 /** Capability ids used across the lane F tests. */
 export const CAPS = {
@@ -47,6 +48,15 @@ export function setupFixture(
     nominationSources?: readonly NominationSourcePort[];
     /** Phase 8: external-action adapters, supplied here because the fixture is the composition root. */
     actionAdapters?: readonly ExternalActionAdapter[];
+    /**
+     * Phase 4's AI Member Registry, wired here for the same reason: this is the
+     * composition root. Omitting it leaves the workforce facade truthfully
+     * `workforce_registry_unconfigured`, which is what most suites want;
+     * `unauthenticated-founder-text.test.ts` supplies one so
+     * `registerAiMember` / `disableAiMember` can be MEASURED rather than
+     * exempted as unreachable.
+     */
+    aiMemberRegistry?: AiMemberRegistry;
   } = {},
 ): Fixture {
   const db = openMemoryHqDatabase();
@@ -57,6 +67,7 @@ export function setupFixture(
     policyCtx: { preApprovedCapabilities: new Set<string>([CAPS.openPr]) },
     nominationSources: options.nominationSources,
     actionAdapters: options.actionAdapters,
+    aiMemberRegistry: options.aiMemberRegistry,
     grantDispatchEvidence: (grant) => {
       dispatchEvidence = grant;
     },
