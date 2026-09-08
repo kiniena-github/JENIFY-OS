@@ -1496,3 +1496,39 @@ typechecks clean; `npm run build:site` 10 pages + `hq-snapshot.json`;
 unchanged. The two concurrent round-six lanes and what the merge had to decide
 are recorded in `PHASE_13_ADVANCED_RELIABILITY.md`; no Phase 14 finding above was
 touched by the other lane, whose four commits are entirely Phase 13.
+
+## The SEVENTH correction round, second lane: the ceiling that stopped governing new work, and a floor served two ways
+
+A second read-only hostile reviewer read the same frozen head `d97b8a6` as the
+lane recorded in `PHASE_13_ADVANCED_RELIABILITY.md`, without either knowing about
+the other, and returned 1 Critical, 3 High, 2 Medium and 1 Low. Two of those are
+Phase 14 findings; the rest, the merge record and the full verification table
+are on the Phase 13 page.
+
+| Finding | What was reproduced | What changed |
+|---|---|---|
+| **HIGH NEW-4** — the ceiling fix did not cover NEW work under an already-exhausted ceiling | Round four's `spentUnder` union closes the routes only for a task that has ALREADY recorded spend; a task with none of its own was governed by the mutable `hq_missions.project_id` alone. Executed with the project ceiling exhausted by task A and the attack on task B in the same project, as a principal holding `originateCapabilities: ['hq.mission_command']`, `approvalAuthority: false` and no intelligence grant: `assignMissionToProject({projectId: null})` was accepted, `permittedTiers` widened from `["deterministic_local"]` to all five, and a `critical_review` record was **accepted** — while that same principal calling `setIntelligenceBudget` directly is correctly `refused(not_permitted)`, which is what makes the facade route an authority BYPASS rather than an authority. Raw `UPDATE hq_missions SET project_id = NULL` did the same. Re-verified against the other lane's head `b986cff` after the merge: still open there. | A THIRD term, derived from the APPEND-ONLY mission event log (`#durableTaskProjectScopes`): every project a task's mission(s) have EVER been bound to. `assignMissionToProject` already records both ends of every move, and `commandMission` now records the project a mission is created under, so clearing the link narrows nothing — the act of clearing it is itself the record that the project once governed. `hq_mission_events` is engine-guarded (`no_rewrite`, `no_erase`, `no_replace`) and a declared `ENGINE_IMMUTABLE_TABLES` member, so the union is monotone and unforgeable in the same sense the recorded-attribution half is. Applied identically to `#governingBudgetScopes` and `#entriesForScope`, so the governing set and the measurement agree by construction. Pinned by `intelligence-project-scope-durability.test.ts`, which also pins the half that already worked (`governedBy: task_project`, `observed 5000`) and the no-false-positive case (a task in no project is governed by the deployment baseline alone). |
+| **MEDIUM NEW-6** — `provablyAvoidable` flipped retroactively and two published numbers contradicted each other | `decisionIsProvablyAvoidable` recomputed the floor from the CURRENT canonical risk class while `rowToDecision` served the STORED `floor_tier`. Executed: a Founder registry upsert flipped `provablyAvoidable` 1 → 0 and left the served record reporting `floorTier: deterministic_local` beside `requiredReviewTier: critical_review` — which this page itself says cannot both be true, because the review requirement is one of the terms `computeRoutingProposal` takes the floor's `max` over. Neither the flip nor the contradiction was disclosed. | ONE computation answers both. `deriveDecisionRecord` recomputes the floor and SERVES it; `decisionIsProvablyAvoidable` reads that result rather than recomputing a second time. The stored value is carried as `floorTierAsRecorded`, so no history is lost. The flip is KEPT — raising a capability's risk class really does raise the floor — but no longer silent: `riskClassChangedSinceIssue` on each record, counted on `analytics.provablyAvoidable.riskClassChangedSinceIssue`, and `AVOIDABLE_SPEND_STATEMENT` now says out loud that the floor is recomputed from canonical truth as it stands and that the set can therefore change after a decision was issued. |
+
+### What this lane adds to Phase 14's NOT-fixed list
+
+- **A mission CREATED with a project by a build older than the `commanded`
+  event's `projectId` detail, never re-assigned through the facade, whose link
+  is then cleared by RAW SQL, leaves no history to derive from.** The FACADE
+  route is closed for such a mission regardless of build age, because
+  `assignMissionToProject` writes `from` at the moment it clears.
+- **A project a task's mission was once bound to keeps governing that task for
+  ever.** That is the fail-closed direction and the point of the derivation, and
+  it is the same trade the recorded-attribution union already makes: HQ does not
+  un-charge a ceiling because a link was later broken.
+- **The floor recomputation does not stop a forged `characteristics` row.** It
+  makes the two published numbers agree and reports when canonical truth moved;
+  the underlying forgery surface is unchanged and is disclosed on
+  `decisionIsProvablyAvoidable` where it always was.
+
+**Verification at the round-seven merged head** (the whole matrix, all green,
+exit 0): `npm run test:hq` 178 files / 3288 tests; `npm test` (root) 37 files /
+569 passed + 3 pre-existing skips; hq-host 23 / 222; hq-server 2 / 20; all four
+typechecks clean; `npm run build:site` 10 pages + `hq-snapshot.json`;
+`npm run build` all workspaces, web initial JS 215.66 kB / 69.22 kB gzip,
+unchanged.
