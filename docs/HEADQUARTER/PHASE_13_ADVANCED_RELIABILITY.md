@@ -919,14 +919,22 @@ timing-only concurrency tests. What was built:
   than a silent gap.
 - **An HQ database file created before this wave engages safe mode once, on its
   first boot afterwards.** `trg_hq_mission_plan_items_no_erase` and the
-  `hq_reliability_verdicts` guards did not exist in it. The census skips a table
-  that is ABSENT (so the verdict ledger produces nothing), but
-  `hq_mission_plan_items` EXISTS on such a file without its new guard, and the
-  as-found observation is taken before the schema ensures — by design, because
-  HQ cannot know what was written while a guard was gone. The finding is
-  therefore true rather than spurious, and it is cleared by one Founder full
-  assessment, which finds the re-created guard standing. A file created by this
-  code is unaffected. Stated here rather than discovered in operation.
+  `hq_reliability_verdicts` guards did not exist in it. `hq_mission_plan_items`
+  EXISTS on such a file without its new guard, and the as-found observation is
+  taken before the schema ensures — by design, because HQ cannot know what was
+  written while a guard was gone. The finding is therefore true rather than
+  spurious. **What it COSTS to clear depends on whether the file was missing a
+  guard or a whole ledger, and the sixth correction round corrects this sentence
+  too.** A missing GUARD on a table that is present is cleared by ONE Founder
+  full assessment, which finds the re-created guard standing. A pre-wave file is
+  also missing whole declared LEDGERS — `hq_reliability_verdicts` and, since the
+  fifth round, `hq_integrity_checkpoints` — and since the round that stopped a
+  destroyed ledger being laundered by re-creating it empty, an absent ledger is
+  carried for the life of the process that observed it. Such a file therefore
+  takes a restart and TWO Founder full assessments. See the newly-declared-ledger
+  item below for the measurement and for why the asymmetry is deliberate. A file
+  created by this code is unaffected. Stated here rather than discovered in
+  operation.
 - **The safe-mode latch reads the evidence chain from private truth.** Both
   correction lanes found this too (one as Critical 1, one as High 1).
   `assessHqIntegrity` used to pass `() => this.queue.evidence.verifyChain()`
@@ -1409,7 +1417,10 @@ as `append_only_guard_missing`, and a ledger that is back empty is the same
 finding measured a second way — and it did not make a boot-time observation
 permanently unclearable, because a build that declares a NEW ledger produces the
 same observation on every established file and permanent safe mode for a routine
-upgrade would be a worse failure than the one being closed.
+upgrade would be a worse failure than the one being closed. What it DID cost the
+routine upgrade was measured only in the sixth round, and it is a restart and a
+second Founder assessment rather than the one the three shipped sentences
+claimed; the sentences were corrected there.
 
 ### What is NOT fixed — all four lanes' disclosures, in one list
 
@@ -1460,52 +1471,111 @@ as well as here:
   and inside every clean assessment, every commitment ever recorded is checked,
   and the per-ledger comparison takes the maximum ever committed — so appending a
   checkpoint that agrees with the forgery adds a satisfied row and removes
-  nothing. **What is still NOT detected, with every barrier in the sentence
-  personally tried:** a writer that rewrites the log coherently AND drops
-  `hq_integrity_checkpoints` as well. **"Executed end to end, this is exactly
-  what it costs and no more" was false when it was written, and the round-six
-  correction closed the cheaper route it missed** (High 1): the witness did not
-  have to be DROPPED, it could be EMPTIED — `DROP TRIGGER
-  trg_hq_integrity_checkpoints_no_erase; DELETE FROM hq_integrity_checkpoints;`
-  and re-create the trigger. A guard dropped and re-created before the next boot
-  is never observed missing, which this page and `operator/evidence.ts` already
-  said; the consequence nobody followed through was that both readers of the
-  witness (`regressedImmutableLedgers`, `contradictedChainCommitment`) read the
-  very rows deleted, so they returned `[]` and `null`. Executed against
-  `6a0f6ae`: boot `safeMode=false []`, full Founder assessment `safeMode=false
-  []`, `releaseKillSwitch` ADMITTED over an `op_evidence` rebuilt two committed
-  entries short — no restart and no further Founder act. It is now
-  `append_only_ledger_truncated`, a blocking finding at both depths, from the
-  general form of the comparison `verifyEvidenceChain` has always made for
-  `op_evidence` alone: `MAX(rowid)` against the engine's own `sqlite_sequence`
-  high-water mark, which a DELETE cannot lower. The surviving cost is what
-  follows. The drop IS reported — the ledger is a declared
-  `ENGINE_IMMUTABLE_TABLES` member carrying the engine's own trio, so the boot
-  that observes it engages safe mode, that process's full assessment still
-  reports it, and `releaseKillSwitch` is refused. Then: restart, and a SECOND
-  Founder full assessment in the new process clears it, because HQ has by then
-  re-created the ledger empty and no commitment survives to measure against.
-  Measured again at the round-six head: `p2 boot=true
-  [append_only_guard_missing] assess=true release=refused`, `p3 boot=true
-  assess=false release=ADMITTED`, `p4 boot=false []`. So the honest cost of the
-  surviving attack is one extra `DROP TABLE`, one restart and one further
-  Founder act — more
-  deliberate acts across more guarded ledgers than the attack needed before, and
-  a cost rather than a boundary. HQ holds no key a foreign writer does not also
-  have, and nothing here pretends the commitment is one.
+  nothing. **The SIXTH round corrects the sentence the fifth round wrote**,
+  which named a barrier the attacker never has to cross. It said the surviving
+  attack is a writer that rewrites the log coherently AND DROPS
+  `hq_integrity_checkpoints`, and priced that at "one extra `DROP TABLE`, one
+  restart and one further Founder act". The drop variant does reproduce exactly
+  as written — `p2 boot=true assess=true release=refused`, `p3 boot=true
+  assess=false release=ADMITTED` — but it is not the cheap way. Wiping the
+  commitments' ROWS IN PLACE costs nothing at all: drop the ledger's three
+  triggers, `DELETE`, INSERT one replacement that agrees with the forged log,
+  re-create the triggers. The table is never absent, so the as-found census has
+  nothing to observe, and against the fifth-round head the forgery was accepted
+  from the very next boot — `BOOT safeMode = false []`, `FULL assessment
+  safeMode = false []`, `releaseKillSwitch ADMITTED? true`, zero restarts and
+  zero Founder acts. The same wipe also neutralised the durable half for a store
+  whose every OTHER declared ledger had been dropped: `p3 boot=false assess=false
+  release=ADMITTED`.
 
-  And one further residual, disclosed by the fix that closed the DELETE route
-  rather than by a reviewer: `sqlite_sequence` is an internal SQLite table, it
-  carries no triggers, `tableNames` excludes it by construction, and a writer
-  holding the file open can lower the mark it finds there. Emptying the
-  checkpoint ledger AND removing its `sqlite_sequence` row is therefore still
-  silent — measured at this head: `p2 boot=false [] assess=false
-  release=ADMITTED`. That is the same residual class as zeroing `PRAGMA
-  user_version`, it is one more deliberate act than the route that is now
-  closed, and it is stated here rather than left for the next reviewer to find.
-  A declared ledger that is not `AUTOINCREMENT` has no `sqlite_sequence` row at
-  all and contributes nothing to this check; every ledger the check currently
-  protects does have one.
+  What answers the free version is an invariant of the commitment ledger itself
+  rather than another commitment about it. It is `INTEGER PRIMARY KEY
+  AUTOINCREMENT`, HQ is its only writer and its `no_erase` guard refuses a
+  DELETE, so the rows it holds, its greatest rowid and the high-water mark
+  SQLite records for it are the same number — and an in-place elision breaks
+  that identity, because `sqlite_sequence` keeps the mark the deleted rows
+  reached. Both attacks above are now blocking at the boot, at the assessment,
+  and at every process afterwards. Before relying on it, six legitimate ways a
+  sequence value might be burned were executed against a table with this exact
+  schema — the `no_replace` guard's own `RAISE(ABORT)`, a `UNIQUE` violation, a
+  `NOT NULL` violation, a failed insert inside a transaction that later commits
+  other work, a multi-row `INSERT ... SELECT` whose second row fails, and an
+  explicit `ROLLBACK` of a good insert — and SQLite burned none of them;
+  `VACUUM` preserves all three numbers. A false permanent alarm here would have
+  been worse than the hole.
+
+  **What is still NOT detected, at the CHEAPEST price found rather than the one
+  easiest to describe, executed rather than asserted:** the same in-place wipe
+  with the invariant repaired — insert the replacement at an EXPLICIT `seq = 1`
+  and then `UPDATE sqlite_sequence SET seq = 1` for that ledger. Measured:
+  `rows/highwater={"c":1,"s":1} boot=false assess=false release=ADMITTED`. So
+  the honest price of the surviving attack is one explicit rowid and one extra
+  `UPDATE` against a table no trigger can guard — still zero restarts and zero
+  Founder acts, and cheaper than the `DROP TABLE` the previous round named. The
+  even cheaper ONE-statement repair was tried too and does not hold: `DELETE
+  FROM sqlite_sequence WHERE name = 'hq_integrity_checkpoints'` buys the
+  attacker the process that follows, the Founder assessment it was aiming to
+  pass included — and that assessment is itself the next COMMITMENT, which
+  re-creates the high-water mark from the surviving rowid and breaks the
+  identity again without any further help. Measured: `p2 boot=false
+  assess=false release=ADMITTED`, then `p3 boot=true assess=true
+  release=refused` and `p4` the same, permanently. What the round bought is that
+  the version costing NOTHING is gone, and that the one-statement repair costs
+  the attacker every process after the one it bought. HQ holds no key
+  a foreign writer does not also have; every fact this ledger rests on lives in
+  the same file the attacker is already writing, and nothing here pretends the
+  commitment is a boundary.
+
+  **Both round-six lanes reproduced that in-place wipe independently, and the
+  merge keeps both answers because they are not the same answer.** The other
+  lane reached it from the general direction: `verifyEvidenceChain` has always
+  ended its walk by comparing `op_evidence`'s last surviving seq against
+  `sqlite_sequence`, and that single comparison is why tail truncation of the
+  audit log is caught — but nothing generalised it, so EVERY other declared
+  ledger could be emptied by the same three statements with no finding at any
+  depth. `truncatedImmutableLedgers` makes that comparison — `MAX(rowid)` versus
+  the engine's high-water mark, one b-tree seek per ledger — for every declared
+  AUTOINCREMENT ledger, and reports the new blocking finding
+  `append_only_ledger_truncated` at both depths. It is what closes the identical
+  attack on `hq_reliability_run_events`, where emptying the ledger returned a
+  correctly refused duplicate attempt to generation 1 and ADMITTED it, making
+  `RUN_RETRY_STATEMENT`'s "an interrupted attempt is NEVER retried
+  automatically" false; that ledger's rows are the cross-process reservation, and
+  no commitment about the checkpoint ledger says anything about them. The row
+  COUNT identity above is in turn strictly stronger for the commitment ledger,
+  because a replacement row can restore the greatest rowid and satisfy the
+  general relation. Neither subsumes the other; both fire at both depths.
+
+  The merge also had to COMPOSE one thing rather than lay the two side by side.
+  The other lane's blocking finding means the boot that observes an inflated
+  `sqlite_sequence` appends its safe-mode verdict row — and SQLite gives that row
+  the inflated rowid, which made `min(seq, MAX(rowid))` commit the inflated value
+  after all and manufactured exactly the permanent finding true of nothing that
+  this round's Low 1 exists to prevent. The committed mark is therefore now
+  `MAX(rowid)` alone, with `sqlite_sequence` used only as the gate for "has this
+  ledger ever been appended to" (a DROP takes that row with it). That is strictly
+  stronger in both directions: it cannot be moved by any write to
+  `sqlite_sequence`, and every detection the `min` gave is unchanged.
+
+  For the OTHER declared ledgers the general check protects, the same
+  `sqlite_sequence` residual applies and its limit was measured rather than
+  assumed. `sqlite_sequence` is an internal SQLite table, it carries no
+  triggers, `tableNames` excludes it by construction, and a writer holding the
+  file open can lower or remove the mark it finds there — so emptying a ledger
+  AND removing its `sqlite_sequence` row silences the truncation check. What it
+  does NOT silence is the commitment: once any checkpoint has recorded a mark
+  for that ledger, the removal makes the current mark ZERO against a committed
+  one, and `regressedImmutableLedgers` reports it permanently. Executed on
+  `hq_reliability_run_events` at this head, both ways: with no warm boot before
+  the attack (no mark ever committed) `p2 boot=false [] assess=false
+  release=ADMITTED`; with ONE warm boot before it, `p2` and `p3` both
+  `boot=true [append_only_guard_missing] assess=true release=refused`. The
+  residual is therefore "empty a ledger HQ has never committed a mark for, and
+  remove its `sqlite_sequence` row" — the same residual class as zeroing
+  `PRAGMA user_version`, and narrower than it looks. A declared ledger that is
+  not `AUTOINCREMENT` has no `sqlite_sequence` row at all and contributes
+  nothing to this check; every ledger the check currently protects does have
+  one.
 
   The other escape is the one already disclosed for the header mark, and the
   checkpoint ledger does not change it: a writer that drops every declared
@@ -1543,14 +1613,24 @@ as well as here:
      back EMPTY" that survives restarts. The verdict-row commitment said nothing
      about any ledger but `op_evidence`.
 
-  **What was lost with it, stated rather than glossed.** The two commitments
+  **What was lost with it, stated rather than glossed — and RE-PRICED by the
+  sixth round, because the first price was understated.** The two commitments
   lived in two different append-only ledgers, so an attacker who wanted both
-  silenced had to drop both. With one mechanism there is one ledger to drop, and
-  that is exactly the residual measured immediately above (`p2 boot=true
-  assess=true release=refused`, `p3 boot=true assess=false release=ADMITTED`).
-  The trade was taken because the retired mechanism could be argued past by an
-  APPEND — a write the ledger permits — while the survivor cannot, and a second
-  barrier that a permitted write can retire is not a second barrier.
+  silenced had to drop both. With one mechanism the round-five text recorded the
+  cost as "there is now ONE ledger to drop", pointing at the drop residual
+  (`p2 boot=true assess=true release=refused`, `p3 boot=true assess=false
+  release=ADMITTED`). **That sentence was true of the drop and silent about the
+  cheaper act**, which the sixth round executed: until `elidedCommitmentLedgerRows`
+  existed the surviving ledger did not have to be DROPPED at all — wiping its
+  ROWS in place left the table present, the census silent and the forgery
+  accepted at zero restarts and zero Founder acts. So the honest statement of
+  what retiring the second commitment cost is: one ledger to drop OR to wipe in
+  place and re-seat, and the free version of the second of those is now closed —
+  see the re-priced residual immediately above for what the wipe costs today
+  (one explicit rowid plus one `UPDATE sqlite_sequence`). The trade itself still
+  stands on its three merits, because the retired mechanism could be argued past
+  by an APPEND — a write the ledger permits — while the survivor cannot, and a
+  second barrier that a permitted write can retire is not a second barrier.
 - A DROPPED declared ledger is a finding only on a handle that can WRITE, because
   the discriminator between "this file lost a ledger" and "this file predates
   it" is that HQ's own ensure pass re-creates what its schema declares. A
@@ -1654,10 +1734,29 @@ as well as here:
   standing behind it. Both are the fail-closed direction and both are cleared by
   one Founder full assessment.
 - **The fifth correction round adds one more first-boot case, for the same
-  reason.** `hq_integrity_checkpoints` is a newly declared engine-immutable
-  ledger, so a file no writer of this build has opened does not carry it and the
-  as-found census says so once. Cleared by one Founder full assessment, and the
-  same fail-closed direction as the two above. The `PRAGMA user_version` mark
+  reason, and it costs TWO Founder assessments rather than one.**
+  `hq_integrity_checkpoints` is a newly declared engine-immutable LEDGER, so a
+  file no writer of this build has opened does not carry it and the as-found
+  census says so once. Clearing it is not one assessment, and the sixth
+  correction round corrects that sentence rather than the code: a ledger this
+  process found absent and re-created is deliberately carried into
+  `fullIntegrity` for the whole life of that process — which is what stops a
+  DESTROYED ledger being laundered by re-creating it empty — so the first
+  process's assessment reports it again and refuses. It takes a RESTART and a
+  SECOND Founder full assessment, in a process that opened a file already
+  carrying the ledger. Measured on such a file: `p1 boot=true assess=true
+  release=refused`, `p2 boot=true assess=false release=ADMITTED`, `p3 boot=false`.
+  A newly declared GUARD is still one assessment — `q1 boot=true assess=false
+  release=ADMITTED` — because re-creating a trigger genuinely repairs the file's
+  guard set. **The asymmetry was NOT narrowed to "genuine upgrades only",
+  because the discriminator that would need does not survive forging.** The only
+  durable marks separating "a ledger this build newly declares" from "a ledger
+  destroyed" are `PRAGMA user_version` and the checkpoint commitments; both are
+  ordinary writable content of the same file, so a writer who drops a ledger and
+  stamps an older schema generation walks into the benign branch, and for the
+  commitment ledger itself no commitment survives its own destruction to appeal
+  to. Making the code match the old sentence would have made the residual above
+  CHEAPER, which is why the sentences moved instead. The `PRAGMA user_version` mark
   also changed value in that round — it is now HQ's own distinctive constant
   rather than `1`, read as an exact member of a closed set — so a file stamped
   by an earlier build of this wave reads as unmarked until its next writable
@@ -2232,7 +2331,7 @@ by reverting the fix, running the test, and restoring.
 
 | Command | Result |
 |---|---|
-| `npm run test:hq` | 166 files, **3209 passed**, 0 failed |
+| `npm run test:hq` | **167 files, 3220 passed**, 0 failed (the merged head; this lane alone was 166 / 3209) |
 | `npm run typecheck --workspace @factoryos/headquarter` | clean |
 | `npm run test --workspace @factoryos/hq-host` | 23 files, 222 passed |
 | `npm run typecheck --workspace @factoryos/hq-host` | clean |
@@ -2242,9 +2341,12 @@ by reverting the fix, running the test, and restoring.
 | `npm run build:site --workspace @factoryos/headquarter` | 10 pages + `hq-snapshot.json` |
 | `npm run build` | all workspaces built; web initial JS 215.66 kB / 69.22 kB gzip (unchanged) |
 
-Counted statically over `packages/headquarter/test`: **175 files / 3025 `it(`
-declarations**, up from the round-five merge's 175 / 3008. No test file and no
-`it(` was removed; nothing is skipped, narrowed or annotated away.
+Counted statically over `packages/headquarter/test` at the MERGED head: **176
+files / 3036 `it(` declarations**, up from the round-five merge's 175 / 3008.
+This lane alone was 175 / 3025; the other round-six lane contributes
+`reliability-commitment-ledger.test.ts` and its 11 declarations. No test file and
+no `it(` from either lane was removed; nothing is skipped, narrowed or annotated
+away.
 `package.json` and `package-lock.json` stay byte-identical to the wave base
 `f1ce71c`, no dependency was added, and the whole wave diff stays inside
 `packages/headquarter/` and `docs/HEADQUARTER/`.
@@ -2266,3 +2368,136 @@ tests); the freeze enumeration reports nothing unfrozen — over the whole packa
 now, not the entry-point surface; `founder_only` isolation holds and the
 mapped-non-Founder property is stated truthfully; and the unauthenticated
 snapshot leaks no canary.
+
+### The sixth round had TWO concurrent lanes, and this document describes the merged head
+
+Wave 5 diverged again. Two correction lanes worked the sixth round at the same
+time against different heads, without either knowing about the other:
+
+- **this section's lane** reviewed `6a0f6ae` — the round-five reconciliation as
+  it stood on `origin` — with two fresh reviewers, and returned 0 Critical / 5
+  High / 7 Medium / 7 Low;
+- **the section below** reviewed `bdec887`, the round-five head BEFORE that
+  reconciliation, with one fresh reviewer, and returned 0 Critical / 0 High / 2
+  Medium / 1 Low.
+
+Both are kept in full. Nothing from either was discarded, and the two sections
+are left as each lane wrote them rather than blended, so a reader can see what
+each review actually found. What the merge had to decide is recorded here:
+
+- **The two lanes reproduced the SAME core defect independently** — the
+  commitment ledger's rows can be wiped IN PLACE, leaving the table present and
+  the census silent — and answered it with two DIFFERENT rules. Both are kept
+  because neither subsumes the other: `elidedCommitmentLedgerRows` asserts the
+  commitment ledger's own count/rowid/high-water identity, which catches a wipe
+  that INSERTS a replacement restoring the greatest rowid;
+  `truncatedImmutableLedgers` asserts the weaker `MAX(rowid) >= high-water`
+  relation over EVERY declared AUTOINCREMENT ledger, which is what closes the
+  identical attack on the twenty-odd ledgers the first rule says nothing about —
+  most sharply `hq_reliability_run_events`, where the wipe returned a spent
+  attempt generation and made `RUN_RETRY_STATEMENT` false.
+- **One thing had to be COMPOSED rather than laid side by side.** The Low 1 fix
+  below committed `min(sqlite_sequence.seq, MAX(rowid))`. With
+  `append_only_ledger_truncated` present, the boot that observes an inflated
+  `sqlite_sequence` is BLOCKING and therefore appends a safe-mode verdict row —
+  which SQLite gives the inflated rowid, so the `min` committed the inflated
+  value after all and re-manufactured exactly the permanent finding true of
+  nothing that Low 1 exists to prevent. Reproduced during the merge. The
+  committed mark is now `MAX(rowid)` alone, with `sqlite_sequence` used only as
+  the gate for "has this ledger ever been appended to"; that is strictly stronger
+  in both directions and every detection the `min` gave is unchanged. The Low 1
+  test is ported with that reasoning inline, and it now also asserts the
+  stronger truth: the inflating boot is blocking, and the latch it leaves is
+  cleared by one Founder assessment rather than standing for ever.
+- **The vocabulary grew by one and the count assertions moved with it.** This
+  lane added `append_only_ledger_truncated` because in its attack every declared
+  guard is present when the census looks, so reporting it as
+  `append_only_guard_missing` would state something untrue of the file. The
+  other lane's elision finding stays folded into `append_only_guard_missing`,
+  where it belongs for the same reason. Vocabulary 7, blocking list 4.
+- **Both lanes' tests are kept**, `test/reliability-commitment-ledger.test.ts`
+  (11) beside this lane's additions to `reliability-durability.test.ts`, and the
+  matrix at the merged head is reported in this lane's verification table.
+
+## The SIXTH correction round: the commitment ledger's own rows, and two prices stated wrongly
+
+A fresh read-only reviewer re-read the fifth-round head by EXECUTION and
+returned 0 Critical / 0 High / 2 Medium / 1 Low. Both Mediums were
+documentation-honesty defects about the newest code: in each case a shipped
+sentence stated a cost or a remedy that the reviewer executed and found false in
+the direction of false reassurance. That is the third round in this wave where
+the finding was a DISCLOSURE, so the rule is written down here rather than
+learned again: **a residual is a load-bearing claim, and the version WITHOUT the
+barrier it names must be executed before the sentence is written.**
+
+| Finding | What was reproduced | What changed |
+|---|---|---|
+| **MEDIUM 1** — the surviving whole-log forgery costs materially less than the residual stated, and names a barrier the attacker never has to cross | The residual priced the surviving attack at "one extra `DROP TABLE`, one restart and one further Founder act". Wiping `hq_integrity_checkpoints` ROWS IN PLACE — drop its three triggers, `DELETE`, INSERT one coherent replacement, re-create the triggers — leaves the table PRESENT, so the as-found census has nothing to observe: `BOOT safeMode = false []`, `FULL assessment safeMode = false []`, `releaseKillSwitch ADMITTED? true`, at zero restarts and zero Founder acts. The same wipe neutralised the durable half for a store whose every OTHER declared ledger had been dropped (`p3 boot=false assess=false release=ADMITTED`). The DROP variant the residual described does reproduce exactly as written; it is simply not the cheap path. | `elidedCommitmentLedgerRows`: the commitment ledger is `INTEGER PRIMARY KEY AUTOINCREMENT`, HQ is its only writer and its `no_erase` guard refuses a DELETE, so its row COUNT, its greatest rowid and the engine's high-water mark for it are the same number. An in-place elision breaks that identity and is blocking at the boot, at the assessment and at every process afterwards. Verified against six legitimate ways a sequence value might be burned — none burns one in SQLite — before it was relied on. The residual now states the true remaining price, executed: one explicit rowid plus one `UPDATE sqlite_sequence`, which is still silent. |
+| **MEDIUM 2** — the documented remedy for this wave's own upgrade cost does not work, and the source comment contradicted the code it documented | Three sentences said a newly declared ledger's first boot is "cleared by one Founder full assessment". Carrying the restored-ledger list into `fullIntegrity` — which is what closed the previous round's Medium — made that false for every established file: `p1 boot=true assess=true release=refused`, `p2 boot=true assess=false release=ADMITTED`. The control, a dropped GUARD, still clears in one: `q1 boot=true assess=false release=ADMITTED`. It applies to every existing HQ database on first contact with this build. | The sentences, not the code. Narrowing the rule to "genuine upgrades only" needs a discriminator separating "a ledger this build newly declares" from "a ledger destroyed", and the only durable marks available — `PRAGMA user_version` and the checkpoint commitments — are ordinary writable content of the same file. A writer who drops a ledger and stamps an older generation walks into the benign branch, which would have made MEDIUM 1's residual cheaper; and the commitment ledger's own destruction takes every commitment about it. Two processes and two Founder assessments is now what `store/integrity.ts` and this document say, with the measurement beside it. |
+| **LOW 1** — a forged `sqlite_sequence` reading, once committed, latched safe mode permanently with no in-HQ remedy | `sqlite_sequence` is an ordinary writable table SQLite refuses to let a trigger guard, and the per-ledger commitment took the maximum ever recorded. Inflating `hq_reliability_verdicts` from 1 to 500000, letting ONE clean boot commit the reading and then restoring the true value produced a `regressedImmutableLedgers` entry TRUE OF NOTHING: `pB2/pB3/pB4 boot=true assess=true findings=["append_only_guard_missing"]`, clearable by nothing including `assessHqIntegrity`. Fail-closed, and the attacker already holds raw write — but a FABRICATED finding in the false-alarm direction, which the architectural law forbids symmetrically. | The committed mark is corroborated against the ledger's own `MAX(rowid)` and HQ commits the smaller of the two, which for a genuine append-only ledger are the same number. An inflated `sqlite_sequence` now commits nothing the rows do not support: `pB2/pB3/pB4 boot=false assess=false findings=[]`. `MAX(rowid)` is a single reverse seek, so the structural pass stays affordable — and its stated cost was corrected to say so rather than keeping the old "runs no table scan". |
+
+**What the LOW fix also bought, and what it did not.** Because the mark now
+tracks `MAX(rowid)`, rows removed IN PLACE from the TAIL of any declared ledger
+— drop the guards, `DELETE`, re-create the guards, which leaves
+`sqlite_sequence` untouched and was previously invisible — fall below the
+committed mark and are reported. Executed on `hq_reliability_verdicts`:
+`[tail p2] boot=true`. It is a one-process signal, not a durable one: HQ's own
+next append climbs the ledger back over the committed mark, which is the
+already-disclosed "climb back" residual and is unchanged by this round
+(`[tail p3] boot=false`). A MIDDLE-row deletion leaves the tail in place and is
+not detected at all (`[middle p2] boot=false assess=false release=ADMITTED`).
+Both are stated here because neither is closed.
+
+**A raw writer can still manufacture a one-process false alarm**, and this was
+executed rather than reasoned about: plant a row at rowid 500000 in a declared
+ledger, let one clean boot commit it, then remove that row with the guards
+dropped. Measured: `boot-1 safeMode=false`, `pB2 boot=true`, then `pB2 assess=false`
+and `pB3 boot=false` — HQ's own verdict append restores the mark. The finding is
+true of something the attacker really did, and it is no longer permanent; the
+metadata-only version, which was permanent and true of nothing, is gone. Any
+durable finding in this family remains unclearable by any in-HQ act by design —
+if one were ever raised falsely the only remedy would be a restore from a
+verified backup, and that is the accepted posture rather than an oversight.
+
+**What this round deliberately did NOT do.** It did not extend the row-COUNT
+identity to every OTHER declared ledger. That would assert an invariant over tables
+this module does not own, and it would break `structuralIntegrity`'s stated cost
+— a `COUNT(*)` is proportional to the rows, unlike the `MAX(rowid)` seek — for a
+check that a raw writer repairs with one `UPDATE` anyway. It did not widen the
+closed finding vocabulary: an elided commitment is `append_only_guard_missing`,
+the same finding measured a fourth way. And it did not weaken any behaviour the
+review confirmed at the fifth-round head, which the pinning tests hold.
+
+### Reconciled with the concurrent round-five lane
+
+The sixth round was reviewed and corrected against `bdec887`, the round-five
+head as it stood on `origin` at the time — NOT against the reconciliation the
+other lane published on the same branch (`6a0f6ae`, "Reconcile the round-five
+lanes: one witness for the evidence chain, both lanes' guarantees kept"). Both
+are kept; nothing from either was discarded. What that costs a reader is one
+correction and two clarifications, recorded here rather than left to be found:
+
+- **The reconciliation's own recorded cost was understated, and it is re-priced
+  in the NOT-fixed list above.** It said that retiring the verdict-row
+  commitment left "ONE ledger to drop". That was true of the DROP and silent
+  about the cheaper act: until `elidedCommitmentLedgerRows` existed, the one
+  surviving commitment ledger did not have to be dropped at all — its rows could
+  be wiped IN PLACE for nothing. The re-priced sentence is one ledger to drop OR
+  to wipe in place and re-seat, with the free version of the second now closed.
+  The trade itself is not disturbed: it was taken on three merits that this
+  round does not touch.
+- **MEDIUM 1's finding is load-bearing for the reconciled code specifically, not
+  only for `bdec887`.** The reconciliation made `hq_integrity_checkpoints` the
+  SINGLE surviving witness for the evidence chain's length. A single witness that
+  can be emptied in place for free is not a witness, so the row-identity check is
+  what makes the reconciliation's chosen trade hold at the price it claims.
+- **MEDIUM 1's exploit numbers were measured on `bdec887` and re-measured on the
+  merged head.** The merged tree adds `hq_missions` to the declared ledgers, so
+  the declared-ledger COUNT in any older sentence is not the count today; the
+  measurements are quoted by behaviour (`boot=`, `assess=`, `release=`) rather
+  than by ledger count wherever a number would drift.
+
+`elidedCommitmentLedgerRows` folds into `append_only_guard_missing`, the
+existing closed finding, so the vocabulary the reconciliation froze is unchanged
+by this round — the freeze enumeration reports nothing unfrozen at the merged
+head.

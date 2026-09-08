@@ -136,29 +136,68 @@
  *    full assessment read CLEAN. Point 4 is the answer, and it is a commitment
  *    recorded outside this table rather than a fourth reading of the table.
  *
- * The residual is stated rather than glossed, and every barrier named in it has
- * been tried. HQ holds no key a foreign writer does not also have, so a writer
- * that already holds the database file open can still APPEND a correctly-hashed
- * entry of its own; nothing here is a signature. Beyond that: rewriting the log
- * coherently AND dropping `hq_integrity_checkpoints` (or appending to it a
- * commitment that matches the forgery — which does not work on its own, because
- * every commitment ever recorded is checked and the per-ledger comparison takes
- * the maximum) leaves the forgery undetected once HQ has re-created the
- * checkpoint ledger empty and a later process has nothing to measure against.
- * DROPPING it is the surviving route and it is now the CHEAPEST one: emptying
- * it in place is a blocking finding (`append_only_ledger_truncated`), so the
- * attacker must either take the table away — which the boot that observes it
- * reports, and which costs a restart and a further Founder assessment — or
- * empty it AND remove its `sqlite_sequence` row, which is one more deliberate
- * act against an internal table no trigger can reach. Both are measured in the
- * phase document's residual list. That is more deliberate acts than before,
- * across two engine-guarded ledgers and a census that reports each drop at the
- * boot that observes it — a real cost, and still not a cryptographic
- * boundary. It is ONE ledger to drop rather
- * than two, because the concurrent lane's second commitment on the verdict
- * ledger was retired above rather than kept beside this one; that is the price
- * of one mechanism instead of two, and it is recorded here rather than left for
- * a reader to discover.
+ * The residual is stated rather than glossed, at the CHEAPEST price found and
+ * with the version WITHOUT each named barrier executed first. HQ holds no key a
+ * foreign writer does not also have, so a writer that already holds the database
+ * file open can still APPEND a correctly-hashed entry of its own; nothing here
+ * is a signature.
+ *
+ * Beyond that, TWO prices stated here in earlier rounds were both wrong in the
+ * reassuring direction, and both are corrected rather than left standing:
+ *
+ *  - the round-five sentence named DROPPING `hq_integrity_checkpoints` as what
+ *    the surviving attack costs (Wave 5 correction round six, Medium 1). The
+ *    drop reproduces exactly as written — a restart and a second Founder act —
+ *    but it was never the cheap path: wiping the commitments' ROWS in place —
+ *    drop the ledger's three triggers, `DELETE`, INSERT one row agreeing with
+ *    the forged log, re-create the triggers — left the table present, so the
+ *    as-found census had nothing to observe and the forgery was accepted from
+ *    the very next boot at zero restarts and zero Founder acts. That free
+ *    version is now blocking: the commitment ledger's row count, its greatest
+ *    rowid and its AUTOINCREMENT high-water mark are one number, or rows were
+ *    elided from it (`elidedCommitmentLedgerRows`);
+ *  - the round-five reconciliation recorded the cost of retiring the concurrent
+ *    lane's SECOND commitment (the verdict-row `evidence_tip_seq` /
+ *    `evidence_tip_hash` pair) as "there is now ONE ledger to drop" rather than
+ *    two. The trade itself was taken on the merits and stands — a barrier a
+ *    PERMITTED write can retire is not a second barrier — but its price was
+ *    understated in the same reassuring direction, because until the row check
+ *    above existed the surviving ledger did not have to be DROPPED at all. The
+ *    honest re-pricing is one ledger to drop OR to wipe in place and re-seat,
+ *    and the second of those is exactly what `elidedCommitmentLedgerRows`
+ *    closes; what remains of it is priced immediately below.
+ *
+ * Appending a commitment that matches the forgery has never worked on its own,
+ * because every commitment ever recorded is checked and the per-ledger
+ * comparison takes the maximum.
+ *
+ * What SURVIVES, executed: the same in-place wipe with that invariant repaired
+ * — the replacement inserted at an explicit `seq = 1`, then one `UPDATE
+ * sqlite_sequence` for that ledger, which no trigger can guard. Measured
+ * `boot=false assess=false release=ADMITTED`. The cheaper one-statement repair,
+ * DELETING that `sqlite_sequence` row instead, was tried too and buys only the
+ * process that follows: the assessment it was aiming to pass is itself the next
+ * commitment, which re-creates the mark from the surviving rowid and breaks the
+ * identity again (`p3 boot=true assess=true release=refused`, permanently). So
+ * the cost is one explicit rowid and one extra `UPDATE`, across two
+ * engine-guarded ledgers and a census that reports a drop at the boot that
+ * observes it — a real cost, and still not a cryptographic boundary. Dropping
+ * `hq_integrity_checkpoints` outright is still the other route, and still costs
+ * the restart and the second Founder act the round-five text priced it at.
+ *
+ * The other round-six lane reproduced the SAME in-place wipe independently and
+ * closed it with a second, weaker rule that is kept beside the row-count
+ * identity because it is not the same rule:
+ * `truncatedImmutableLedgers` asserts `MAX(rowid) >= sqlite_sequence` over EVERY
+ * declared AUTOINCREMENT ledger and reports `append_only_ledger_truncated`,
+ * blocking, at both depths. It is what closes the identical attack on the
+ * twenty-odd ledgers this ledger's own invariant says nothing about — most
+ * sharply `hq_reliability_run_events`, where emptying the ledger returned a
+ * correctly refused duplicate attempt to generation 1 and ADMITTED it, making
+ * `RUN_RETRY_STATEMENT`'s "an interrupted attempt is NEVER retried
+ * automatically" false. The row-count identity is strictly stronger for the
+ * commitment ledger, because a replacement row can restore the greatest rowid;
+ * neither subsumes the other.
  */
 
 import { createHash } from 'node:crypto';

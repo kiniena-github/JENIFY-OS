@@ -1447,3 +1447,12 @@ the full verification table and the re-verified guarantees are in
   `founder_only` memory.** That is the host's Founder map doing what it declares,
   not a defect, and it is now stated and tested rather than assumed away by a
   suite docstring that described a different property.
+
+**Verification at the sixth-round MERGED head** (the whole matrix, all green,
+exit 0): `npm run test:hq` 167 files / 3220 tests; `npm test` (root) 37 files /
+569 passed + 3 pre-existing skips; hq-host 23 / 222; hq-server 2 / 20; all four
+typechecks clean; `npm run build:site` 10 pages + `hq-snapshot.json`;
+`npm run build` all workspaces, web initial JS 215.66 kB / 69.22 kB gzip,
+unchanged. The two concurrent round-six lanes and what the merge had to decide
+are recorded in `PHASE_13_ADVANCED_RELIABILITY.md`; no Phase 14 finding above was
+touched by the other lane, whose four commits are entirely Phase 13.
