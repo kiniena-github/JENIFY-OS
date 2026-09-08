@@ -5330,7 +5330,13 @@ export class HeadquarterOperations {
     /** Client dedupe hint — an INPUT to the derived key, never the key. */
     idempotencyKey?: string;
   }): OpsResult<{ mission: MissionRecord; deduplicated: boolean }> {
-    const unsafeCallerText = callerTextRefusal(input, ['acceptanceCriteria', 'constraints', 'instruction', 'objective', 'planItems', 'planSpecs', 'project', 'scope', 'title']);
+    // `'planSpecs'` removed: it is a LOCAL of this method and a key of the
+    // explicit scan below, never a field of `input`, so naming it here skipped
+    // nothing (Wave 5 correction round thirteen, Low 2 — the same slip as
+    // `recordMemory`'s `'so'`, and found by the same derivation). The real
+    // object-form field is `plan`, which is not listed and is therefore scanned
+    // by the generic pass, which is correct.
+    const unsafeCallerText = callerTextRefusal(input, ['acceptanceCriteria', 'constraints', 'instruction', 'objective', 'planItems', 'project', 'scope', 'title']);
     if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const title = missionText('title', input.title, MAX_MISSION_TITLE_LENGTH, true);
@@ -5821,7 +5827,9 @@ export class HeadquarterOperations {
     supersedePlanItemSeqs?: number[];
     requestedBy: string;
   }): OpsResult<MissionRecord> {
-    const unsafeCallerText = callerTextRefusal(input, ['acceptanceCriteria', 'addPlanItems', 'addSpecs', 'amendment', 'constraints', 'objective', 'specifyPlanItems']);
+    // `'addSpecs'` removed for the reason `commandMission` gives above: a local
+    // and an explicit-scan key, not a field of `input` (round thirteen, Low 2).
+    const unsafeCallerText = callerTextRefusal(input, ['acceptanceCriteria', 'addPlanItems', 'amendment', 'constraints', 'objective', 'specifyPlanItems']);
     if (unsafeCallerText) return unsafeCallerText;
     if (!input.missionId || !input.requestedBy) {
       return fail('invalid_input', 'missionId and requestedBy are required');
@@ -10183,7 +10191,11 @@ export class HeadquarterOperations {
     note?: string;
     idempotencyKey?: string;
   }): OpsResult<{ observation: ModelObservationRow; deduplicated: boolean }> {
-    const unsafeCallerText = callerTextRefusal(input, ['basis', 'note']);
+    // `'basis'` removed: the explicit scan below spells the field
+    // `unitCostBasis` under the KEY `basis`, and the key is not the field
+    // (round thirteen, Low 2). `unitCostBasis` is now scanned by the generic
+    // pass as well, which is where it always should have been.
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
     if (unsafeCallerText) return unsafeCallerText;
     // The same fold as `recordIntelligenceCost`, so a registry observation and a
     // cost entry name a provider the same way and a Founder can write either
@@ -11696,7 +11708,17 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ record: MemoryBrowserView; deduplicated: boolean }> {
-    const unsafeCallerText = callerTextRefusal(input, ['body', 'project', 'related', 'so', 'sourceRefs', 'tags', 'title']);
+    // `'so'` used to sit between `related` and `sourceRefs` here and named no
+    // field this input declares, so it skipped nothing and was inert (Wave 5
+    // correction round thirteen, Low 2). It is DELETED rather than repaired to
+    // some guessed name: the six that remain are exactly the keys the explicit
+    // `assertNoCredentialShape` below scans that are also fields of `input`
+    // (`recordedSource` is the seventh key there, and is derived from
+    // `input.recorded` rather than being a field of its own — which is why
+    // `recorded` is not listed here and is scanned by the generic pass).
+    // `facade-write-scan.test.ts` now derives this list and requires every name
+    // in it to be a declared field, so the next such typo fails a test.
+    const unsafeCallerText = callerTextRefusal(input, ['body', 'project', 'related', 'sourceRefs', 'tags', 'title']);
     if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     if (!isMemoryKind(input.kind)) {
@@ -13403,7 +13425,11 @@ export class HeadquarterOperations {
     fence: number;
     now?: Date;
   }): OpsResult<{ action: ActionView; outcome: 'succeeded' | 'failed' | 'outcome_unknown' }> {
-    const unsafeCallerText = callerTextRefusal(input, ['message']);
+    // The list is EMPTY, and was `['message']` — a name this input does not
+    // declare, so it skipped nothing (round thirteen, Low 2). Every field of
+    // `executeAction`'s input is scanned by the generic pass, which is what an
+    // empty already-scanned list says.
+    const unsafeCallerText = callerTextRefusal(input);
     if (unsafeCallerText) return unsafeCallerText;
     const actionId = input.actionId?.trim() ?? '';
     if (!actionId) return fail('invalid_input', 'actionId is required');

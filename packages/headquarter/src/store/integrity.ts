@@ -815,6 +815,21 @@ export interface RecordedIntegrityVerdict {
  *    correctly-hashed entry, because HQ holds no key such a writer does not
  *    also have. The sentence says that, in words, instead of asserting a
  *    boundary the code cannot hold.
+ *
+ * A THIRD clause is qualified for the same reason (Wave 5 correction round
+ * thirteen, High 1). It used to end "so appending one cannot make HQ condemn a
+ * store that is intact" — an unqualified sentence, served on every reliability
+ * view, in every refusal, and on the unauthenticated `hq-snapshot.json`, about a
+ * guard that bounded three of the row's nine columns. One `INSERT` past the two
+ * it did not bound fabricated a permanent, unclearable safe mode on a healthy
+ * store, twice over. Both routes are closed (`overclaimGuardDdl`), and the
+ * sentence is still not restored to its absolute form, because it was making a
+ * claim wider than the mechanism ever had: the guard bounds APPENDS to ONE
+ * ledger, and a writer that first removes it, or that raises the engine's
+ * high-water mark for a different ledger in one `UPDATE`, still manufactures a
+ * finding HQ reports and keeps reporting. That second route is disclosed in
+ * Phase 13's NOT-fixed list and is not closed here, so the sentence names the
+ * scope it actually has.
  */
 export const SAFE_MODE_STATEMENT =
   'Safe mode is a statement about HQ’s OWN stored record, not about the outside world. It engages only when ' +
@@ -843,7 +858,12 @@ export const SAFE_MODE_STATEMENT =
   'however consistent that record has been made to look. A row removed from the MIDDLE of a ledger is ' +
   'blocking too, and stays blocking however much HQ appends afterwards, because the gap it leaves in the ' +
   'rows is never filled. A commitment that claims more than the file held when it was written is refused ' +
-  'where it is written, so appending one cannot make HQ condemn a store that is intact. That ' +
+  'where it is written — every column of it that any check reads, including the hash it names for the ' +
+  'chain and the position it is written at — so no APPEND to that ledger, on its own, can make HQ ' +
+  'condemn a store that is intact. That is a bound on that one ledger and not a claim about the file: a ' +
+  'writer that first removes the guard, or that raises the engine’s own high-water mark for some other ' +
+  'ledger, can still manufacture a finding HQ will then report and keep reporting. HQ holds no key such ' +
+  'a writer does not also have, so it says so rather than promising a boundary it does not have. That ' +
   'commitment ledger is checked against itself too: it is append-only and HQ is its only writer, so the ' +
   'rows it holds and the high-water mark the engine records for it are the same number, and commitments ' +
   'removed from it in place are blocking as well. Destroying that ledger outright, and rolling it back to ' +
@@ -1717,8 +1737,10 @@ const COMMITMENT_JSON_COLUMNS: readonly ['ledger_marks', 'ledger_rows'] = Object
  * `totalCommitmentJson`) — and is refused by `COMMITMENT_SHAPE_CLAUSES`'
  * `json_valid` term rather than by an exception out of this one.
  *
- * **The residual, executed rather than reasoned about.** This is a `BEFORE
- * INSERT` guard, so it bounds what LANDS and not what a file already holds. A
+ * **The residual, executed rather than reasoned about.** This is a write-time
+ * guard (`AFTER INSERT` since round thirteen, and `BEFORE INSERT` when this
+ * paragraph was written; either way the statement is rolled back and the row
+ * never persists), so it bounds what LANDS and not what a file already holds. A
  * duplicate-keyed row written by a raw writer at a build without this clause is
  * still read at its greatest value: planted at `48dd026` and then opened by this
  * build, `regressedImmutableLedgers ["op_evidence"]`, `append_only_guard_missing`
@@ -1840,8 +1862,12 @@ const DECLARED_LEDGER_NAME_LITERALS = ENGINE_IMMUTABLE_TABLES.map(
  * HQ's own message. `commitment-overclaim.test.ts` asserts that message on
  * malformed JSON rather than merely asserting that the row did not land.
  *
- * **The residual is unchanged and is not widened.** This is a `BEFORE INSERT`
- * guard: it bounds what LANDS, not what a file already holds. A row carrying an
+ * **The residual is unchanged and is not widened.** This is a write-time guard
+ * — `BEFORE INSERT` when this paragraph was written, and `AFTER INSERT` since
+ * the other round-thirteen lane's rowid clause forced the timing (see
+ * `overclaimGuardDdl`); either way the `RAISE(ABORT)` rolls the statement back
+ * and the row never persists, so what follows is unaffected. It bounds what
+ * LANDS, not what a file already holds. A row carrying an
  * empty key, a duplicate key or a negative value, written by a raw writer at a
  * build without these clauses, is still in the file afterwards — but the reader
  * it defeated no longer builds a JSON path out of it and no longer fails open on
@@ -1929,21 +1955,41 @@ const CHAIN_LENGTH_SHAPE_CLAUSE =
  * this construction is unbounded until the next one; that window is disclosed
  * rather than described away.
  *
- * **What it costs an attacker, stated at the price it actually is.** Three
- * statements instead of one: `DROP TRIGGER`, the forged `INSERT`, re-create.
- * That is the same price every other tamper in this module pays, and it is the
- * same standing residual — a guard dropped and re-created before the next boot
- * is never observed missing, because the as-found census reads `sqlite_master`
- * at construction time only. What is closed is the INVERSION: fabricating a
- * finding is no longer cheaper than everything else HQ defends against.
+ * **What it costs an attacker THROUGH THIS LEDGER, stated at the price it
+ * actually is.** Three statements instead of one: `DROP TRIGGER`, the forged
+ * `INSERT`, re-create. That is the same price every other tamper in this module
+ * pays, and it is the same standing residual — a guard dropped and re-created
+ * before the next boot is never observed missing, because the as-found census
+ * reads `sqlite_master` at construction time only. What is closed is the
+ * INVERSION *for this ledger*: fabricating a finding by appending to the
+ * commitment ledger is no longer cheaper than everything else HQ defends
+ * against. It is NOT a claim about the file as a whole, and that distinction is
+ * load-bearing: one `UPDATE sqlite_sequence` on a declared ledger still
+ * manufactures `append_only_ledger_truncated` at one statement, which this
+ * module does not close and Phase 13 carries in its NOT-fixed list.
  *
- * **That price was FALSE for one commit and is true again** (Wave 5 correction
- * round twelve, High 1). Between the round-seven guard and this round the
- * cheapest path was ONE statement, not three: a single `INSERT` whose
- * `ledger_marks` carried the same key twice slipped the bound without any
- * trigger being touched. The sentence above was not softened to accommodate
- * that — `AMBIGUOUS_COMMITMENT_CLAUSES` puts the one-statement path back out of
- * reach, and the three-statement price is re-measured rather than re-asserted.
+ * **That price has now been FALSE twice, and is re-measured rather than
+ * re-asserted each time.**
+ *
+ *  - Round twelve, High 1: between the round-seven guard and that round the
+ *    cheapest path was ONE statement — an `INSERT` whose `ledger_marks` carried
+ *    the same key twice slipped the bound without any trigger being touched.
+ *    `AMBIGUOUS_COMMITMENT_CLAUSES` closed it.
+ *  - **Round thirteen, High 1: it was still ONE statement, by two further
+ *    routes, and the round-twelve sentence that said otherwise had tested only
+ *    the route it had just fixed.** The guard bounded `ledger_marks`,
+ *    `ledger_rows` and `chain_length` and left `tip_hash` and the explicit `seq`
+ *    unbounded, though a reader acts on each. A single `INSERT` carrying HQ's
+ *    own newest commitment with only the hash changed fabricated
+ *    `evidence_chain_broken`; a single `INSERT` carrying that commitment
+ *    UNCHANGED at rowid 1000 fabricated `append_only_guard_missing`. Both
+ *    latched permanently on an intact store. Both are bounded now, and the price
+ *    is no longer asserted from the two clauses that were looked at: the
+ *    enumeration in `commitment-overclaim.test.ts` composes every hostile shape
+ *    of every column the file declares, singly and in the full cross-product
+ *    over the five that decide anything, and requires each to be refused at the
+ *    write or to leave every reader silent. The three-statement path is executed
+ *    beside it and still reaches.
  */
 function overclaimGuardDdl(db: HqDatabase): string {
   const clauses = [
@@ -1959,24 +2005,198 @@ function overclaimGuardDdl(db: HqDatabase): string {
     // `AMBIGUOUS_COMMITMENT_CLAUSES`.
     ...AMBIGUOUS_COMMITMENT_CLAUSES,
     `NEW.chain_length > COALESCE(CAST(json_extract(${totalCommitmentJson('ledger_marks')}, '$.op_evidence') AS INTEGER), 0)`,
+    // The ROWID, which HQ never supplies and which nothing bounded (round
+    // thirteen, High 1). `elidedCommitmentLedgerRows` compares this ledger's row
+    // count, its greatest rowid and its high-water mark, so a caller-chosen
+    // rowid moves two of those three without touching a single COMMITTED value:
+    // one `INSERT` of HQ's own newest commitment, unaltered, at rowid 1000
+    // reported `append_only_guard_missing` for ever on a store nothing else had
+    // touched.
+    //
+    // The clause asserts the ledger's IDENTITY rather than a value: the row that
+    // just landed must sit at the rowid that keeps the row count and the
+    // greatest rowid one number. That is the very relation the reader measures,
+    // so an append that preserves it can never make the reader speak, and one
+    // that breaks it never lands.
+    //
+    // **This is why the guard fires AFTER INSERT** (see the trigger below). In a
+    // `BEFORE INSERT` trigger on an `INTEGER PRIMARY KEY AUTOINCREMENT` column,
+    // an OMITTED rowid does not read as NULL — SQLite reports it as the integer
+    // `-1`, which is a value a caller can also supply explicitly, and one that
+    // lands at rowid -1 and breaks the identity exactly like 1000 does.
+    // Measured, not assumed: a `BEFORE` clause of the obvious shape
+    // (`TYPEOF(NEW.seq) = 'integer' AND NEW.seq <> MAX(rowid) + 1`) refused
+    // every checkpoint HQ writes, because HQ's own eight-column `INSERT` meets
+    // it too. There is no `BEFORE` spelling that separates "the engine will
+    // choose" from "the caller chose -1", so the timing moved instead of the
+    // clause being narrowed to the values that happen to be distinguishable.
+    // `RAISE(ABORT)` in an `AFTER INSERT` trigger rolls the statement back — the
+    // row does not persist, the AUTOINCREMENT sequence is not burned, and the
+    // refusal is the same one, under `INSERT`, `INSERT OR REPLACE` and
+    // `INSERT OR IGNORE` alike. All of that is executed in
+    // `commitment-overclaim.test.ts` rather than reasoned about.
+    //
+    // **This clause is KEPT beside `ledgerRowidGuardDdl`, and neither subsumes
+    // the other** (the round-thirteen merge; both lanes closed the rowid channel
+    // independently and off the same base). `no_rowid_skip` is broader — it is
+    // installed on all 33 declared ledgers by construction, where this clause
+    // only ever bounded this one — so it is the mechanism the price sentences
+    // now quote, and it fires FIRST here because it is `BEFORE INSERT`. But it
+    // bounds the rowid from ABOVE only (`NEW.rowid > 1 + MAX(top, sequence)`),
+    // which is the shape the gap-widening exploit had; this clause asserts the
+    // ledger's IDENTITY, so it additionally refuses a rowid at or BELOW the top
+    // that collides with nothing — a hole this ledger has never had, rowid 0,
+    // and the `-1` the engine itself spells for an omitted AUTOINCREMENT key.
+    // Each of those moves `COUNT(*)` without moving `MAX(rowid)` and is read by
+    // `elidedCommitmentLedgerRows` on exactly this table, so dropping this
+    // clause in favour of the broader guard would have reopened half of Exploit
+    // B. Both are executed, separately, in `commitment-overclaim.test.ts`: the
+    // reseat probes run once with both guards live and once with
+    // `trg_hq_integrity_checkpoints_no_rowid_skip` dropped inside a rolled-back
+    // SAVEPOINT, so this clause is shown to refuse on its own.
+    `NEW.seq <> (SELECT COUNT(*) FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE})`,
   ];
+  if (tableIsPresent(db, 'op_evidence')) {
+    // The TIP HASH, mirroring `contradictedChainCommitment` exactly (round
+    // thirteen, High 1). Round twelve reasoned about `chain_length` and never
+    // looked one column over: the reader compares `tip_hash` against the log's
+    // hash at that seq, nothing bounded `tip_hash`, and one `INSERT` whose every
+    // other column was the one HQ had just written fabricated
+    // `evidence_chain_broken` over a log that verified perfectly.
+    //
+    // `IS NOT` rather than `<>` for the reason the reader gives: the missing
+    // row is the case that matters, and `<>` against NULL is NULL rather than
+    // true. Gated on `chain_length > 0` because that is the identity every
+    // genuine checkpoint has — `recordIntegrityCheckpoint` writes
+    // `chain_length = tip.seq` and `tip_hash = tip.hash` from the SAME row of
+    // the log, and writes `0`/`''` when the log is empty, which commits nothing
+    // about the chain and which this clause therefore does not touch.
+    //
+    // Conditional on the table for the reason the header gives: a trigger naming
+    // a table this file does not carry throws at INSERT time and silently stops
+    // HQ committing anything at all. With `op_evidence` absent the chain half is
+    // unbounded here — and unreadable there, because `contradictedChainCommitment`
+    // catches the same missing table and returns null — so no finding can be
+    // fabricated through it either.
+    clauses.push(
+      `(NEW.chain_length > 0 AND ` +
+        `NEW.tip_hash IS NOT (SELECT hash FROM op_evidence WHERE seq = NEW.chain_length))`,
+    );
+  }
   for (const entry of ENGINE_IMMUTABLE_TABLES) {
     if (!tableIsPresent(db, entry.table)) continue;
+    // ONE ledger is changed by the very statement this guard judges — its own —
+    // and the `AFTER INSERT` timing means both readings below already include
+    // the row being written (round thirteen, High 1). Subtracting the new row
+    // restores exactly the bound this guard has always asserted: a commitment
+    // may not claim more than the file held WHEN IT WAS WRITTEN. It is sound
+    // because the identity clause above is evaluated over the same row — the
+    // ledger's count and greatest rowid are one number, so the state before this
+    // append is that number minus one, and a commitment about this ledger is
+    // measured against the file as the writer found it rather than as the
+    // writer left it. Every other declared ledger is untouched by this
+    // statement, so its two readings are the pre-insert ones already.
+    const self = entry.table === HQ_INTEGRITY_CHECKPOINT_TABLE ? ' - 1' : '';
     // The table name is never interpolated from anything a row carries: this
     // iterates `ENGINE_IMMUTABLE_TABLES`, a frozen literal in this module.
     clauses.push(
+      // Both lanes' changes to these two clauses are kept: the total-JSON
+      // wrapper, so an unparseable column reads as `'{}'` here rather than
+      // raising the engine's own message out of a `WHEN` clause; and the
+      // `${self}` subtraction, which the `AFTER INSERT` timing requires.
       `COALESCE(CAST(json_extract(${totalCommitmentJson('ledger_marks')}, '$.${entry.table}') AS INTEGER), 0) > ` +
-        `COALESCE((SELECT MAX(rowid) FROM "${entry.table}"), 0)`,
+        `COALESCE((SELECT MAX(rowid) FROM "${entry.table}"), 0)${self}`,
       `COALESCE(CAST(json_extract(${totalCommitmentJson('ledger_rows')}, '$.${entry.table}') AS INTEGER), 0) > ` +
-        `(SELECT COUNT(*) FROM "${entry.table}")`,
+        `(SELECT COUNT(*) FROM "${entry.table}")${self}`,
     );
   }
   return (
+    // AFTER, not BEFORE, since round thirteen — see the rowid clause above for
+    // the measurement that forced it. Nothing else about the guard changes: an
+    // `AFTER INSERT` `RAISE(ABORT)` rolls the statement back, so a refused
+    // commitment still never persists, still burns no sequence value, and still
+    // reports itself with the same message. What the timing buys is that
+    // `NEW.seq` is the rowid the row ACTUALLY took rather than a placeholder
+    // that a caller can also spell.
     `CREATE TRIGGER ${OVERCLAIM_GUARD}\n` +
-    `BEFORE INSERT ON ${HQ_INTEGRITY_CHECKPOINT_TABLE}\n` +
+    `AFTER INSERT ON ${HQ_INTEGRITY_CHECKPOINT_TABLE}\n` +
     `WHEN ${clauses.join('\n  OR ')}\n` +
     `BEGIN SELECT RAISE(ABORT, '${HQ_INTEGRITY_CHECKPOINT_TABLE} may not commit beyond the record'); END;`
   );
+}
+
+/**
+ * The commitment-ledger columns that DECIDE NOTHING, and therefore need no
+ * clause in the over-claim guard.
+ *
+ * **Why this list exists at all** (Wave 5 correction round thirteen, High 1).
+ * The guard's clause set was written out by hand, one column at a time, and
+ * three rounds running the defect was the same one: a partial enumeration
+ * standing in for the complete one, one column over. Round seven bounded
+ * `ledger_marks`; round seven's own follow-up bounded `ledger_rows` and
+ * `chain_length`; round twelve re-read all three for the duplicate-key parse and
+ * did not look at `tip_hash` or `seq`, both of which a reader acts on and
+ * neither of which anything bounded. Two of the nine columns, and both were
+ * live one-statement routes to a permanent fabricated safe mode.
+ *
+ * So the obligation is no longer carried by whoever remembers to add a clause.
+ * `unboundedCheckpointColumns` derives it from `PRAGMA table_info` of the table
+ * as the FILE declares it, checked against the guard as `sqlite_master` holds
+ * it, and `commitment-overclaim.test.ts` fails when the two disagree. A column
+ * added to this ledger tomorrow is either bounded by a clause that names it or
+ * named here, on the day it is added — that is the part that closes the CLASS
+ * rather than the two instances.
+ *
+ * Each name here is a claim, and each is checkable. `id` is caller text with a
+ * `UNIQUE` index and its own `no_replace` clause, and no integrity reader reads
+ * it. `recorded_at`, `process_id` and `recorded_by` are provenance: they are
+ * displayed and never compared against the file. None of the four appears in
+ * `contradictedChainCommitment`, `regressedImmutableLedgers`,
+ * `elidedCommitmentLedgerRows`, `truncatedImmutableLedgers`, `committedGreatest`,
+ * `committedLedgerGaps` or `committedChainLength` — which is the whole set of
+ * readings this ledger contributes to a finding.
+ */
+export const CHECKPOINT_COLUMNS_THAT_DECIDE_NOTHING: readonly string[] = Object.freeze([
+  'id',
+  'recorded_at',
+  'process_id',
+  'recorded_by',
+]);
+
+/**
+ * The columns of the commitment ledger that the over-claim guard does not name
+ * and that are not declared to decide nothing.
+ *
+ * Read from the FILE — `PRAGMA table_info` for the columns, `sqlite_master` for
+ * the guard's own text — rather than from anything this module remembers, so a
+ * column added by a later build, or a guard installed by an older one, is
+ * measured as it actually stands.
+ *
+ * Fail-CLOSED in both directions that matter: a guard that is absent, or that no
+ * longer names a column, reports every affected column rather than none, and a
+ * column whose name is not a plain identifier is reported rather than pattern
+ * matched. The empty list is returned only when the engine cannot answer at all,
+ * which is the case `integrityCheckpointLedgerPresent` and the as-found census
+ * already report as a finding of their own.
+ */
+export function unboundedCheckpointColumns(db: HqDatabase): string[] {
+  try {
+    const columns = (
+      db.prepare(`PRAGMA table_info(${HQ_INTEGRITY_CHECKPOINT_TABLE})`).all() as { name: unknown }[]
+    ).map((column) => String(column.name));
+    if (columns.length === 0) return [];
+    const guard = db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`)
+      .get(OVERCLAIM_GUARD) as { sql: unknown } | undefined;
+    const text = String(guard?.sql ?? '');
+    return columns.filter((column) => {
+      if (CHECKPOINT_COLUMNS_THAT_DECIDE_NOTHING.includes(column)) return false;
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(column)) return true;
+      return !new RegExp(`\\bNEW\\.${column}\\b`).test(text);
+    });
+  } catch {
+    return [];
+  }
 }
 
 /** Whether this file carries one table. Observation, never migration. */
@@ -2105,6 +2325,25 @@ function ensureLedgerRowsColumn(db: HqDatabase): void {
  * of declaring a new guard — the same one `no_overclaim` had — and a missing
  * GUARD is cleared by ONE Founder assessment of the file as it then stands,
  * because re-creating a trigger really does repair the file's guard set.
+ *
+ * **What this bound does NOT cover, and what covers it on the one ledger where
+ * it matters** (recorded at the round-thirteen merge, where two lanes closed
+ * this channel independently off the same base and both are kept). This clause
+ * bounds the rowid from ABOVE only: `NEW.rowid > 1 + MAX(top, sequence)`. A
+ * rowid at or below the top that collides with nothing — a hole, rowid 0, or
+ * the `-1` the engine spells for an omitted AUTOINCREMENT key — passes it, and
+ * on a ledger with no hole such a write raises `COUNT(*)` without raising
+ * `MAX(rowid)`. That is not a widened gap, so it is invisible to
+ * `committedLedgerGaps`; it IS read by `elidedCommitmentLedgerRows`, which runs
+ * on `hq_integrity_checkpoints` alone, and on that one ledger the over-claim
+ * guard's `NEW.seq <> (SELECT COUNT(*) …)` identity clause refuses it. The two
+ * clauses are therefore complements rather than duplicates, and neither was
+ * dropped in favour of the other: this one is the broader (33 ledgers by
+ * construction, and the only bound on the other 32), that one is the stricter
+ * on the ledger whose row count is itself read. Both are pinned —
+ * `ledger-rowid-guard.test.ts` for this one, `commitment-overclaim.test.ts` for
+ * that one, each with the other's guard removed so neither pin can pass on the
+ * other's work.
  */
 function ledgerRowidGuardDdl(db: HqDatabase, table: string, triggerPrefix: string): string {
   // The engine's own allocation for the next row: `MAX(rowid) + 1`, or the
@@ -2741,6 +2980,14 @@ export function contradictedChainCommitment(db: HqDatabase): number | null {
     // not a fix. The over-claim is refused where it is WRITTEN instead, by
     // `trg_hq_integrity_checkpoints_no_overclaim`, so nothing this check reads
     // has changed.
+    //
+    // BOTH columns this reads are bounded there, and for five rounds only one of
+    // them was (round thirteen, High 1). `chain_length` was bounded from round
+    // seven; `tip_hash` — which this comparison turns on, and which decides the
+    // finding whenever the log DOES carry a row at that seq — was not bounded at
+    // all, so one `INSERT` carrying HQ's own newest commitment with a different
+    // hash reported `evidence_chain_broken` here over a log that verified
+    // perfectly. The guard now mirrors this expression rather than half of it.
     const row = db
       .prepare(
         `SELECT c.chain_length AS len

@@ -3111,11 +3111,58 @@ false alarm for a false reassurance is not a fix. The evasion is pinned in
   parse — `committedLedgerGaps`, which takes keys out of one column with
   `json_each` and looks their marks up in the other with `json_extract`, in one
   expression — cannot be aligned by any single choice of parse, and refusing the
-  input makes all five readers agree. Re-priced after the fix: the one-statement
-  path is refused in every variant tried and the three-statement path still
-  reaches. Pinned in `commitment-overclaim.test.ts`.
-- **The duplicate-key refusal is a `BEFORE INSERT` guard, so it bounds what
-  LANDS and not what a file already holds.** A duplicate-keyed row written by a
+  input makes all five readers agree. Pinned in `commitment-overclaim.test.ts`.
+  **That re-pricing was itself wrong, and round THIRTEEN re-measured it by
+  enumeration rather than by variant.** The round-twelve sentence said "the
+  one-statement path is refused in every variant tried" — and every variant
+  tried was a variant of the route round twelve had just fixed. The guard
+  bounded `ledger_marks`, `ledger_rows` and `chain_length` and left `tip_hash`
+  and the explicit `seq` unbounded, though a reader acts on each: one `INSERT`
+  carrying HQ's own newest commitment with only the HASH changed fabricated
+  `evidence_chain_broken` over a log that verified perfectly, and one `INSERT`
+  carrying that commitment UNCHANGED at rowid 1000 fabricated
+  `append_only_guard_missing` — 224 distinct single-`INSERT` shapes in all,
+  counted by the enumeration that now ships. That figure was RE-MEASURED at the
+  merged head rather than carried across it: with the pre-round-thirteen guard
+  restored (`BEFORE INSERT`, no tip-hash clause, no rowid clause) and the other
+  lane's `no_rowid_skip` dropped from this ledger, the shipped enumeration
+  composes 7,240 shapes, 326 of them LAND, and exactly 224 of those make an
+  intact store report something. Both latched permanently on an
+  intact store; only a backup restore escaped. Both are bounded now, by a clause
+  that mirrors `contradictedChainCommitment` exactly and by one that asserts the
+  ledger's own row-count/greatest-rowid identity. The price is no longer
+  asserted from the clauses that were looked at: `commitment-overclaim.test.ts`
+  composes every hostile shape of every column the file declares, singly and in
+  the full cross-product over the five that decide anything, and requires each
+  to be refused at the write or to leave every reader silent — and the
+  three-statement path is executed beside it and still reaches.
+- **The rowid clause is why the guard fires `AFTER INSERT` rather than
+  `BEFORE`.** In a `BEFORE INSERT` trigger on an `INTEGER PRIMARY KEY
+  AUTOINCREMENT` column, an OMITTED rowid does not read as `NULL` — SQLite
+  reports it as the integer `-1`, which a caller can also supply explicitly and
+  which lands at rowid -1 and breaks the ledger's identity exactly as 1000 does.
+  Measured, not assumed: the obvious `BEFORE` clause refused every checkpoint HQ
+  writes. `RAISE(ABORT)` in an `AFTER INSERT` trigger rolls the statement back,
+  so a refused commitment still never persists and burns no sequence value —
+  executed under `INSERT`, `INSERT OR REPLACE` and `INSERT OR IGNORE` alike. The
+  one visible consequence is that the guard's two clauses about its OWN ledger
+  subtract the row being written, so the bound stays "what the file held when
+  the commitment was written" rather than silently gaining one.
+- **The recurring shape was PARTIAL ENUMERATION, and that is what round thirteen
+  closed rather than the two columns.** Round seven bounded `ledger_marks`; its
+  own follow-up bounded `ledger_rows` and `chain_length`; round twelve re-read
+  all three and never looked one column over. Each round then shipped a price
+  sentence resting on a clause set written out by hand. The obligation is now
+  derived: `unboundedCheckpointColumns` reads `PRAGMA table_info` of the ledger
+  as the FILE declares it and checks it against the guard as `sqlite_master`
+  holds it, `CHECKPOINT_COLUMNS_THAT_DECIDE_NOTHING` names the four columns no
+  reader reads, and a test fails when the two disagree — in both directions,
+  including a guard re-created with one clause missing. A column added to this
+  ledger is bounded, or explicitly excused, on the day it is added.
+- **The duplicate-key refusal is a WRITE-TIME guard (`BEFORE INSERT` when this
+  was written, `AFTER INSERT` since round thirteen; either way the statement is
+  rolled back and the row never persists), so it bounds what LANDS and not what
+  a file already holds.** A duplicate-keyed row written by a
   raw writer at a build without the clause is still read at its greatest value:
   planted at `48dd026`, then opened by the fixed build, it still gives
   `regressed ["op_evidence"]`, `append_only_guard_missing` and `safeMode: true`.
@@ -3440,7 +3487,7 @@ run over the whole wave rather than over the three sites the review named.
 
 | Finding | What was reproduced | What changed |
 |---|---|---|
-| **MEDIUM 2** — "a frozen `Set`/`Map` is frozen in CONTENT" was false, and a TEST TITLE advertised a proof it did not execute | Round seven answered the mutable-collection finding with own, non-configurable throwing `add`/`set`/`delete`/`clear`. An own property shadows the prototype for DIRECT property access only. `Set.prototype.clear.call(x)` reads no property of `x` at all — it reaches the internal slot — and emptied a `deepFreeze`d `QUEUED_UNREACHABLE_STATUSES` in ONE statement: `frozen? true`, `.clear() refused`, then `after Set.prototype.clear.call: [] size= 0` and `has("done") now: false`. That is the vocabulary `service.ts` decides `task_beyond_claiming` on; emptied, the barrier stops firing. `Set.prototype.add`/`delete` and `Map.prototype.set` reached the same way. Meanwhile `frozen-constants-census.test.ts` carried the title *"a frozen Set or Map is frozen in its CONTENTS, not only in its shape"* while asserting only that the four shadowed properties throw. | **FIXED, not narrowed.** There is no way to make a REAL `Set` refuse the prototype spelling short of patching `Set.prototype` for the whole process, so `deepFreeze` no longer hands out a real `Set`: it returns a `Proxy` over one, and the raw collection is closed over and never escapes. A `Proxy` carries no `[[SetData]]` slot, so `Set.prototype.clear.call(view)` throws `TypeError: Method Set.prototype.clear called on incompatible receiver`. Direct `view.clear()` still throws HQ's own `TypeError`, from the own stub returned verbatim by the trap (returning anything else would violate the proxy invariant for a non-configurable own property). **`forEach` had to be rewritten rather than forwarded**: it hands its callback the collection it was called on as a THIRD argument, and forwarding the raw target there was a one-statement escape — found by executing the naive design before it shipped, not after. Reading is untouched: `has`, `get`, `size`, `forEach`, `keys`/`values`/`entries`, `for…of`, spread, `Array.from`, the ES2025 set-composition methods, `instanceof Set` and `Object.isFrozen` all behave as before, and a nested or self-referential collection resolves to its view rather than to the raw reference. Measured cost, stated rather than waved away: a bare `.has()` is about 15 ns direct and about 38 ns through the view; the package has exactly two frozen collections (census over 122 `src/` modules) and two call sites — one `.has()` per task, one per query token — so the added cost is bounded by a few microseconds per search and `deepFreeze` itself runs only at module load. The test title now executes the prototype spelling, the `forEach` escape, the full read surface, a nested collection and a cycle. |
+| **MEDIUM 2** — "a frozen `Set`/`Map` is frozen in CONTENT" was false, and a TEST TITLE advertised a proof it did not execute | Round seven answered the mutable-collection finding with own, non-configurable throwing `add`/`set`/`delete`/`clear`. An own property shadows the prototype for DIRECT property access only. `Set.prototype.clear.call(x)` reads no property of `x` at all — it reaches the internal slot — and emptied a `deepFreeze`d `QUEUED_UNREACHABLE_STATUSES` in ONE statement: `frozen? true`, `.clear() refused`, then `after Set.prototype.clear.call: [] size= 0` and `has("done") now: false`. That is the vocabulary `service.ts` decides `task_beyond_claiming` on; emptied, the barrier stops firing. `Set.prototype.add`/`delete` and `Map.prototype.set` reached the same way. Meanwhile `frozen-constants-census.test.ts` carried the title *"a frozen Set or Map is frozen in its CONTENTS, not only in its shape"* while asserting only that the four shadowed properties throw. | **FIXED, not narrowed.** There is no way to make a REAL `Set` refuse the prototype spelling short of patching `Set.prototype` for the whole process, so `deepFreeze` no longer hands out a real `Set`: it returns a `Proxy` over one, and the raw collection is closed over and never escapes. A `Proxy` carries no `[[SetData]]` slot, so `Set.prototype.clear.call(view)` throws `TypeError: Method Set.prototype.clear called on incompatible receiver`. Direct `view.clear()` still throws HQ's own `TypeError`, from the own stub returned verbatim by the trap (returning anything else would violate the proxy invariant for a non-configurable own property). **`forEach` had to be rewritten rather than forwarded**: it hands its callback the collection it was called on as a THIRD argument, and forwarding the raw target there was a one-statement escape — found by executing the naive design before it shipped, not after. Reading is untouched: `has`, `get`, `size`, `forEach`, `keys`/`values`/`entries`, `for…of`, spread, `Array.from`, the ES2025 set-composition methods, `instanceof Set` and `Object.isFrozen` all behave as before, and a nested or self-referential collection resolves to its view rather than to the raw reference. Measured cost, stated rather than waved away: a bare `.has()` is about 15 ns direct and about 38 ns through the view; the package has exactly two frozen collections (census over every `src/` module outside `src/cli/**`, enumerated and floored by `frozen-constants-census.test.ts` rather than hand-counted — the "122" this cell used to name was never the count at any head in this repository's history, which runs 121 then 123 and was 131 on the day the sentence was written; round thirteen) and two call sites — one `.has()` per task, one per query token — so the added cost is bounded by a few microseconds per search and `deepFreeze` itself runs only at module load. The test title now executes the prototype spelling, the `forEach` escape, the full read surface, a nested collection and a cycle. |
 | **MEDIUM 1** — the project-scope derivation was documented as "unforgeable", and the residual priced the attack above its cheapest path | Phase 14 said the third term was "monotone and **unforgeable** … because `hq_mission_events` is engine-guarded", and scoped the residual to "a mission created with a project by a build older than the commanded-event detail, never re-assigned through the facade". A guard is a row in `sqlite_master` and this ledger carries no hash chain, so a CURRENT-build mission that WAS assigned through the facade is stripped in one count-preserving pass. Executed: `BEFORE gov=["deployment","project:task_project"] tiers=["deterministic_local"] criticalReview ok=false`; facade route unchanged (correctly still blocks); raw column unchanged (correctly still blocks); then 3 rows rewritten and `inplace gov=["deployment"] tiers=[all five] criticalReview ok=TRUE`. | **NARROWED AND DISCLOSED**, which is what the finding is: a disclosure defect, not a new capability. Closing it needs a hash chain over `hq_mission_events`, a material new mechanism this wave's own residual list already declines for the whole guarded-but-unhashed class. So "unforgeable" is gone from the derivation's header, from the `spentUnder` comment, from `intelligence-command.ts` and from both Phase 14 rows, replaced by "monotone against every SUPPORTED route"; and the count-preserving in-place rewrite class is now carried for this ledger in Phase 14's NOT-fixed list at its executed cost — three `DROP TRIGGER`, one `json_remove` update, three `CREATE TRIGGER`, one column clear; no `DELETE`, no `INSERT`, no row-count change, zero restarts, zero Founder acts. **The sweep found the same class also empties the `spentUnder` half** — the same one pass rewriting `mission_ids`/`project_ids` on `hq_intel_cost_entries` took an exhausted ceiling's `observed` from 5000 to 0 for a task that HAS spend of its own, the half three rounds had called always-held — and that both `structuralIntegrity` and `fullIntegrity` report `safeMode: false` with no observation afterwards. Both SUPPORTED routes remain correctly closed, pinned. |
 | **LOW 1** — `INTEGRITY_DEPTH_STATEMENT`'s cost clause understated its own structural pass, and was not pinned | The Founder-facing sentence said "one `MAX(rowid)` seek per declared ledger, and one `COUNT(*)` plus one indexed lookup over HQ's own small commitment ledger". `EXPLAIN QUERY PLAN`: `committedLedgerMarks` is `SCAN c` / `SCAN j VIRTUAL TABLE` / `USE TEMP B-TREE FOR GROUP BY`; the `COUNT(*)` is a covering-index SCAN; only `contradictedChainCommitment` is an indexed lookup. Direction fail-safe. | Re-MEASURED rather than re-estimated, and corrected in all three places it was restated (the constant, the module header, and this page's depth table). Counting the statements one pass executes: 15 on a warm store — three catalogue reads, TWO `MAX(rowid)` seeks for each of the three ledgers HQ has COMMITTED a mark for (not one per each of the 33 DECLARED), three `sqlite_sequence` reads, and three reads of the commitment ledger. And the ledger is not fixed in size: executed, it grows a row per clean boot AND per clean assessment. The round-eight statement-truth pin was GROWN rather than replaced — it was confirmed genuine — with three derived assertions: the seek count from instrumenting `db.prepare`, the ledger read's shape from `EXPLAIN QUERY PLAN` over the statement the pass really ran, and the growth from executing a boot and an assessment. |
 | **LOW 2** — the NFKD mark-strip introduced a new credential-shape false positive on accented hyphenated names | `ŠK-Slovan-Bratislava-1919` passed before this wave — `Š` is a precomposed `Lu` that `NFKC` leaves alone — and is refused now, because the `NFKD` strip folds it to `S` and the case-insensitive `sk-` rule fires, refusing the whole snapshot. The round-seven measurement was scoped to "accented prose in five languages", which does not cover hyphenated proper names. | **DISCLOSED, argued, and stated by enumeration rather than by adjective.** The class is exact: 53 non-ASCII letters fold to `s` and 42 to `k`, and a string is newly refused when one of the first is followed by one of the second at a non-alphanumeric boundary, then `-`, then 16+ of `[A-Za-z0-9_-]` — all 53 executed, all 53 refuse. Nothing wider: `Škoda-Auto-Mladá-Boleslav`, `Sköldebrand-Åkerström-Handelsbolaget` and `Ćwikliński-Żółkiewski-Przedsiębiorstwo` each execute and each pass, as do the twelve legitimate multi-script strings. Not fixed, because the ASCII spelling `SK-Slovan-Bratislava-1919` was ALREADY refused before this wave — the over-breadth is in the `sk-` shape, which accepts `-` in its tail because a real key does (`sk-proj-…`) — so the fold added SPELLINGS of an existing over-refusal rather than a new class, and narrowing a credential rule to buy back an availability cost measured at one two-letter prefix is a change in the direction of under-refusal. The evasion direction is re-executed and unmoved: U+0301, U+20DD, U+0378, U+05BF and U+0E31 are all still caught. |
@@ -4646,6 +4693,37 @@ rowids are contiguous`); `{rows:4, top:4}` is unchanged; `regressed []`; and
 `ledger-rowid-guard.test.ts`, whose sweep uses each ledger's REAL `CREATE TABLE`
 text taken from a live HQ file, proves an ordinary append is accepted on each
 one first, and fails on 4 of its 6 tests against the pre-fix code.
+
+**Two concurrent round-thirteen lanes closed this channel off the same base, and
+BOTH closures are kept — the narrower one is not subsumed.** The other lane
+bounded the rowid inside the over-claim guard, as `NEW.seq <> (SELECT COUNT(*)
+FROM hq_integrity_checkpoints)`, and moving that guard to `AFTER INSERT` is what
+the next bullet above is about. `no_rowid_skip` is broader — all 33 declared
+ledgers, where that clause only ever bounded one — so it is the mechanism this
+section prices, and being `BEFORE INSERT` it speaks first. It is NOT, however, a
+superset: it bounds the rowid from ABOVE only, so a reseat at or below the top
+that collides with nothing passes it. Executed on the commitment ledger at the
+merged head, with each guard left standing alone:
+
+```
+no_rowid_skip ALONE : seq=-1 ACCEPTED [elided=true] ; seq=0 ACCEPTED [elided=true] ;
+                      seq=1000 REFUSED 'rowids are contiguous'
+no_overclaim ALONE  : seq=-1, seq=0, seq=1000 all REFUSED 'may not commit beyond the record'
+both (as shipped)   : all three REFUSED
+```
+
+`-1` is not an exotic value: it is what SQLite itself reports for an omitted
+`AUTOINCREMENT` rowid, which is the measurement that forced the `AFTER INSERT`
+timing. Each admitted reseat raises this ledger's row count without raising its
+greatest rowid, and `elidedCommitmentLedgerRows` reads exactly that pair — so
+retiring the identity clause as "covered by the broader guard" would have
+reopened half of round thirteen's Exploit B under a merge that looked like
+consolidation. The two are complements: one is the only bound on the other 32
+ledgers, the other is the stricter bound on the one ledger whose own row count is
+read back. Both are pinned, each with the other's guard dropped so neither test
+can pass on the other's work — `ledger-rowid-guard.test.ts` for the first, and
+`commitment-overclaim.test.ts`'s reseat and complementarity probes for the
+second.
 
 ### MEDIUM 1 — the burn enumeration named one spelling of three
 

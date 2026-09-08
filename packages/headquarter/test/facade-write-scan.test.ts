@@ -271,6 +271,46 @@ function deliberatelyUnscannedFields(): string[] {
 }
 
 /**
+ * Every `method.field` a facade write names in `callerTextRefusal`'s
+ * ALREADY-SCANNED list, derived from the source exactly as the carve-out list
+ * beside it is.
+ *
+ * Wave 5, correction round THIRTEEN, Low 2. `callerTextRefusal` SKIPS every name
+ * in this list — that is what the argument is for — and `facadeWriteParameters`
+ * credited all of them anyway, because the whole-input scan `callerTextRefusal(
+ * input, …)` marked every parameter of the method covered and only
+ * `deliberatelyUnscanned` names were carved back out. The two lists have the
+ * same effect on the scan and had opposite effects on the derivation, so a real
+ * field moved into this list without an accompanying explicit scan would be
+ * unscanned AND reported as covered — the exact blind spot this file exists to
+ * end, in the file that ends it.
+ *
+ * The list is also checked for being a list of REAL fields: `recordMemory` named
+ * `'so'` here, which its input does not declare, so the entry was inert. Inert
+ * is the harmless outcome of a typo in this position; the harmful one is a name
+ * that IS a field, and nothing distinguished the two before this derivation.
+ */
+function alreadyScannedFields(): string[] {
+  const lines = fs.readFileSync(SERVICE, 'utf8').split('\n');
+  const classStart = lines.findIndex((line) => /^export class HeadquarterOperations\b/.test(line));
+  const found: string[] = [];
+  let method = 'callerTextRefusal';
+  for (let i = classStart; i < lines.length; i += 1) {
+    const declaration = /^ {2}(#?[A-Za-z_][A-Za-z0-9_]*)\s*[(<]/.exec(lines[i]);
+    if (declaration && !CONTROL_WORDS.has(declaration[1])) method = declaration[1];
+    // The SECOND argument: the input, then the already-scanned list. A third
+    // argument may follow and is `deliberatelyUnscannedFields`' business.
+    const call = /callerTextRefusal\([^,]+,\s*\[([^\]]*)\]/.exec(lines[i]);
+    if (!call) continue;
+    for (const raw of call[1].split(',')) {
+      const field = raw.trim().replace(/^['"]|['"]$/g, '');
+      if (field) found.push(`${method}.${field}`);
+    }
+  }
+  return found.sort();
+}
+
+/**
  * A parameter type that carries CALLER TEXT into storage.
  *
  * `string[]` is here because it was not, and two live sinks were the cost
@@ -439,15 +479,20 @@ interface ParameterFact {
 }
 
 /**
- * Every (facade write, string parameter) pair, with whether the parameter
- * reaches a scan. Derived from the source; no curated parameter vocabulary
- * takes part.
+ * Every public method of `HeadquarterOperations` that WRITES, with its declared
+ * parameter list sliced out of the source and its body.
+ *
+ * Extracted from `facadeWriteParameters` unchanged (Wave 5 correction round
+ * thirteen, Low 2) so the "is this a real field" derivation below and the
+ * "does this field reach a scan" derivation beneath it read the SAME slice of
+ * the same source. Two spellings of "the method's parameters" is how a name
+ * that is a field to one and a typo to the other goes unnoticed.
  */
-function facadeWriteParameters(): ParameterFact[] {
+function facadeWriteSignatures(): { name: string; signature: string; body: string }[] {
   const lines = fs.readFileSync(SERVICE, 'utf8').split('\n');
   const slices = methodSlices();
   const classified = writeClassifiedMethods();
-  const facts: ParameterFact[] = [];
+  const found: { name: string; signature: string; body: string }[] = [];
   for (const slice of slices) {
     const from = slice.line;
     const to = from + slice.body.split('\n').length;
@@ -475,6 +520,99 @@ function facadeWriteParameters(): ParameterFact[] {
       }
       signature += '\n';
     }
+    found.push({ name, signature, body });
+  }
+  return found;
+}
+
+/**
+ * The declared field names of one exported interface, wherever in `src/` it
+ * lives.
+ *
+ * `namedInputStringFields` reads `service.ts` only, which is enough for the
+ * inline input types the coverage derivation is about. It is NOT enough for
+ * "is this name a field at all": `registerAiMember` takes a
+ * `RegisterMemberInput` declared in `src/registry/members.ts`, and a check that
+ * could not see it would report five real fields as typos.
+ */
+const INTERFACE_INDEX = new Map<string, Set<string>>();
+
+function interfaceFields(name: string): Set<string> {
+  const cached = INTERFACE_INDEX.get(name);
+  if (cached) return cached;
+  const fields = new Set<string>();
+  const roots = [path.join(HERE, '..', 'src')];
+  const files: string[] = [];
+  while (roots.length > 0) {
+    const dir = roots.pop()!;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) roots.push(full);
+      else if (entry.name.endsWith('.ts')) files.push(full);
+    }
+  }
+  for (const file of files) {
+    const text = fs.readFileSync(file, 'utf8');
+    const at = text.indexOf(`export interface ${name} {`);
+    if (at < 0) continue;
+    const end = text.indexOf('\n}\n', at);
+    for (const field of text
+      .slice(at, end < 0 ? undefined : end)
+      .matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\??:/gm)) {
+      fields.add(field[1]);
+    }
+  }
+  INTERFACE_INDEX.set(name, fields);
+  return fields;
+}
+
+/**
+ * Every DECLARED field of every facade write's input, whatever its type.
+ *
+ * `facadeWriteParameters` enumerates only the fields that carry CALLER TEXT,
+ * which is the right scope for a scan-coverage question and the wrong one for
+ * "is this name a field at all" (Wave 5 correction round thirteen, Low 2).
+ * `recordMemory.related` is a `RelatedRefs`, `commandMission.planSpecs` is an
+ * object array — real fields, correctly outside the text enumeration, and a
+ * check that used that enumeration as its dictionary would have called all of
+ * them typos. Same slicing, no type filter.
+ */
+function facadeWriteDeclaredFields(): Map<string, Set<string>> {
+  const declared = new Map<string, Set<string>>();
+  for (const { name, signature } of facadeWriteSignatures()) {
+    const fields = new Set<string>();
+    for (const declaration of splitTopLevel(signature.slice(signature.indexOf('(') + 1))) {
+      const positional = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\??\s*:/.exec(declaration);
+      if (positional) fields.add(positional[1]);
+    }
+    for (const field of signature.matchAll(
+      /(?:^|[{;,\n])\s*([A-Za-z_][A-Za-z0-9_]*)\s*\??\s*:/g,
+    )) {
+      fields.add(field[1]);
+    }
+    // EVERY named type the signature mentions, read whole rather than filtered
+    // to its string fields — and every one, not just a trailing one:
+    // `registerAiMember(input: RegisterMemberInput & { founderId: string })`
+    // declares five of its fields through an intersection, and a regex anchored
+    // at the end of the signature saw none of them. `RegisterMemberInput` is
+    // also declared in ANOTHER module, so the interface index below spans `src/`
+    // rather than `service.ts` alone.
+    for (const named of signature.matchAll(/:\s*([A-Z][A-Za-z0-9_]*)/g)) {
+      for (const field of interfaceFields(named[1])) fields.add(field);
+    }
+    declared.set(name, fields);
+  }
+  return declared;
+}
+
+/**
+ * Every (facade write, string parameter) pair, with whether the parameter
+ * reaches a scan. Derived from the source; no curated parameter vocabulary
+ * takes part.
+ */
+function facadeWriteParameters(): ParameterFact[] {
+  const facts: ParameterFact[] = [];
+  for (const { name, signature, body } of facadeWriteSignatures()) {
     const inner = signature.slice(signature.indexOf('(') + 1);
     const parameters: string[] = [];
     let objectParameter: string | null = null;
@@ -517,13 +655,26 @@ function facadeWriteParameters(): ParameterFact[] {
         .filter((pair) => pair.startsWith(`${name}.`))
         .map((pair) => pair.slice(name.length + 1)),
     );
+    // A field named in ALREADY-SCANNED gets the same treatment, and did not
+    // (Wave 5 correction round thirteen, Low 2). `callerTextRefusal` skips both
+    // lists identically, so crediting one from the whole-input scan and not the
+    // other reported a skipped field as covered. It must earn coverage from an
+    // EXPLICIT scan in the method body — which is what naming it here asserts
+    // exists — or from being passed to `callerTextRefusal` by name.
+    const alreadyScanned = new Set(
+      alreadyScannedFields()
+        .filter((pair) => pair.startsWith(`${name}.`))
+        .map((pair) => pair.slice(name.length + 1)),
+    );
     for (const parameter of new Set(parameters)) {
       facts.push({
         method: name,
         parameter,
         covered:
           !carvedOut.has(parameter) &&
-          (wholeInput || explicit.has(parameter) || generic.has(parameter)),
+          ((wholeInput && !alreadyScanned.has(parameter)) ||
+            explicit.has(parameter) ||
+            generic.has(parameter)),
       });
     }
   }
@@ -736,6 +887,58 @@ describe('every STRING PARAMETER of every facade write reaches the one scan', ()
     // were exempted by a type filter nobody had to name. An exemption is now a
     // literal at the call site, so it can be counted.
     expect(deliberatelyUnscannedFields()).toEqual(['createTask.payload']);
+  });
+
+  it('names only REAL fields in the already-scanned list, so an inert entry cannot hide', () => {
+    // Wave 5, correction round thirteen, Low 2. `recordMemory` named `'so'`
+    // here and its input declares no such field, so the entry skipped nothing.
+    // A typo in this position is harmless only by luck: the same slip on a name
+    // that IS a field silently removes it from the scan. Derived from the
+    // source on both sides — the list from the call site, the fields from the
+    // signature — so neither can be asserted about the other in prose.
+    const declared = facadeWriteDeclaredFields();
+    const inert: string[] = [];
+    for (const pair of alreadyScannedFields()) {
+      const at = pair.indexOf('.');
+      const method = pair.slice(0, at);
+      const field = pair.slice(at + 1);
+      // Only methods this file's own enumeration reaches can be judged: a name
+      // on a method the write-marker filter never selected says nothing.
+      const fields = declared.get(method);
+      if (!fields) continue;
+      if (!fields.has(field)) inert.push(pair);
+    }
+    expect(inert, 'these already-scanned names are not fields of their method’s input').toEqual([]);
+    // Not vacuous: the list has to be reaching real call sites at all.
+    expect(alreadyScannedFields().length).toBeGreaterThan(20);
+    expect(alreadyScannedFields()).toContain('recordMemory.sourceRefs');
+    expect(alreadyScannedFields()).not.toContain('recordMemory.so');
+  });
+
+  it('an already-scanned field is NOT credited by the whole-input scan either', () => {
+    // The same laundering the carve-out test below forbids, in the other list
+    // (Wave 5 correction round thirteen, Low 2). `callerTextRefusal` skips both
+    // lists identically, so a name here must earn coverage from an EXPLICIT
+    // scan in the method body, never from `callerTextRefusal(input, …)` having
+    // been called at all.
+    //
+    // Executed against the derivation rather than argued: every already-scanned
+    // pair the enumeration reaches is checked to be covered by an explicit scan,
+    // which is what naming it asserts. If one were covered ONLY by the whole
+    // input, it would now be reported uncovered and this file's main assertion
+    // would fail — which is the point.
+    const facts = new Map(
+      facadeWriteParameters().map((fact) => [`${fact.method}.${fact.parameter}`, fact.covered]),
+    );
+    const uncovered: string[] = [];
+    for (const pair of alreadyScannedFields()) {
+      if (!facts.has(pair)) continue;
+      if (!facts.get(pair)) uncovered.push(pair);
+    }
+    expect(
+      uncovered,
+      'these fields are skipped by the generic scan and not scanned explicitly',
+    ).toEqual([]);
   });
 
   it('a carved-out field is NOT credited by the whole-input scan', () => {
@@ -1026,9 +1229,17 @@ function refusal(result: { ok: boolean; error?: { code: string; message?: string
  * (268 ms with the file run alone). 30 s is ~83x that slowest observed run.
  *
  * Per test rather than a package-wide `testTimeout`: raising the global default
- * would relax the deadline for every test in this package, including the
- * many where a hang is the real signal. Only the harness deadline changes here;
+ * would relax the deadline for every test in this package, including the many
+ * where a hang is the real signal. Only the harness deadline changes here;
  * every assertion is untouched.
+ *
+ * The sentence above used to say "all 3425 tests in this package" (Wave 5
+ * correction round thirteen, Low 3). The real count was 3442 by the time it
+ * shipped, and this same wave had just retired the hand counts from
+ * `PHASE_13_ADVANCED_RELIABILITY.md` on the grounds that a present-tense count
+ * in a comment is a claim about the code that nothing checks. The number is
+ * dropped rather than re-counted: nothing here depends on how many tests the
+ * package has, only on the deadline being per-test.
  */
 const FILE_BACKED_PROBE_TIMEOUT_MS = 30_000;
 
