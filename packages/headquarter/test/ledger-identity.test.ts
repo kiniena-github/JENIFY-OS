@@ -453,3 +453,81 @@ describe('no legitimate write path burns a rowid on a declared ledger', () => {
     }
   });
 });
+
+/**
+ * The third term of the regression rule, isolated.
+ *
+ * `regressedImmutableLedgers` reports a ledger when its greatest row FELL, when
+ * its row count FELL, or when the GAP between them GREW, and the three overlap
+ * heavily: on a ledger HQ has committed both halves for, a fallen count always
+ * comes with either a fallen top or a grown gap. That overlap is why a mutation
+ * removing the row-count term alone left the whole suite green — measured, and
+ * the reason this test exists rather than the term being dropped.
+ *
+ * It is NOT redundant. A commitment can carry a row count for a ledger and no
+ * mark for it, and then the count is the only term with anything to say. HQ
+ * never writes such a row — it commits both halves or neither — but the
+ * commitment ledger accepts appends by design, and `no_overclaim` bounds a
+ * partial row exactly as it bounds a whole one, so a partial commitment is a
+ * reachable state. The fail-closed reading of it is that the count still binds.
+ */
+describe('a committed row count binds even when no mark was committed beside it', () => {
+  it('reports a ledger whose count fell under a commitment that carried no mark', () => {
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+      const raw = fx.raw();
+      // A declared ledger HQ has committed NOTHING about, because it is empty:
+      // three rows go in through the guards, so no genuine checkpoint carries
+      // either half for it.
+      expect(declaredLedgerIdentities(raw).hq_briefs).toBeUndefined();
+      const insert = raw.prepare(
+        `INSERT INTO hq_briefs (id, issued_by, issued_at, event_seq, evidence_seq, content_digest, counts, idempotency_key)
+         VALUES (?, 'founder', '2026-01-01T00:00:00.000Z', 1, 1, 'digest', '{}', ?)`,
+      );
+      for (const n of [1, 2, 3]) insert.run(`brief-${n}`, `key-${n}`);
+      expect(declaredLedgerIdentities(raw).hq_briefs).toEqual({ rows: 3, top: 3 });
+
+      // A PARTIAL commitment: a row count, no mark. Bounded by the over-claim
+      // guard exactly as a whole one is — 3 is what the ledger really holds —
+      // so this is an append the ledger permits, not a forgery it refuses.
+      const last = raw
+        .prepare(
+          `SELECT chain_length, tip_hash, ledger_marks FROM hq_integrity_checkpoints ORDER BY seq DESC LIMIT 1`,
+        )
+        .get() as { chain_length: number; tip_hash: string; ledger_marks: string };
+      raw
+        .prepare(
+          `INSERT INTO hq_integrity_checkpoints
+             (id, recorded_at, chain_length, tip_hash, ledger_marks, ledger_rows, process_id, recorded_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'partial-commitment',
+          new Date().toISOString(),
+          last.chain_length,
+          last.tip_hash,
+          last.ledger_marks,
+          JSON.stringify({ hq_briefs: 3 }),
+          'hq_boot',
+          'hq_boot',
+        );
+      expect(regressedImmutableLedgers(raw)).toEqual([]);
+
+      // Now take the TAIL row away. The greatest row falls with it and the gap
+      // does not grow, and neither of those has a commitment to fall below —
+      // the count is the only term left.
+      throughTheGuards(raw, 'hq_briefs', (db) =>
+        db.exec('DELETE FROM hq_briefs WHERE rowid = (SELECT MAX(rowid) FROM hq_briefs)'),
+      );
+      expect(declaredLedgerIdentities(raw).hq_briefs).toEqual({ rows: 2, top: 2 });
+      expect(regressedImmutableLedgers(raw)).toEqual(['hq_briefs']);
+      raw.close();
+
+      expectPermanentlyBlocking(fx, ['partial-one', 'partial-two'], 'hq_briefs');
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
