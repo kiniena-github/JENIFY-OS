@@ -183,6 +183,49 @@ describe('which engine behaviours burn a rowid, established against the engine',
       db.close();
     }
   });
+
+  /**
+   * The two the round-twelve text left out (Wave 5 correction round thirteen,
+   * Medium 1). Naming the `DO UPDATE` branch and stopping there is a partial
+   * enumeration standing in for the complete one — the class every High of this
+   * wave has been — and the omission mattered, because the source sweeps below
+   * ban `INSERT OR IGNORE` and catch `ON CONFLICT DO NOTHING`, and the reason
+   * they must is exactly the fact that was not measured.
+   *
+   * Both are executed rather than reasoned about: a CONFLICT that inserts NO
+   * row still raises `sqlite_sequence`, in the `OR IGNORE` spelling and in the
+   * `DO NOTHING` spelling alike.
+   */
+  it('DOES burn on an ignored conflict, in both spellings, with no row inserted', () => {
+    const { db, insert, state } = scratch();
+    try {
+      expect(insert('one')).toBe('accepted');
+      expect(insert('two')).toBe('accepted');
+      expect(state()).toEqual({ top: 2, rows: 2, sequence: 2 });
+
+      db.prepare(`INSERT OR IGNORE INTO ledger (v) VALUES ('one')`).run();
+      expect(state(), 'INSERT OR IGNORE burned a counter on a conflict').toEqual({
+        top: 2,
+        rows: 2,
+        sequence: 3,
+      });
+
+      db.prepare(`INSERT INTO ledger (v) VALUES ('two') ON CONFLICT DO NOTHING`).run();
+      expect(state(), 'ON CONFLICT DO NOTHING burned a counter too').toEqual({
+        top: 2,
+        rows: 2,
+        sequence: 4,
+      });
+
+      // And the next genuine append skips THREE rowids, which is the permanent
+      // hole. That is what `committedLedgerGaps` would latch on a declared
+      // ledger, with no attacker involved at all.
+      expect(insert('three')).toBe('accepted');
+      expect(state()).toEqual({ top: 5, rows: 3, sequence: 5 });
+    } finally {
+      db.close();
+    }
+  });
 });
 
 describe('no burning construct in this package targets a declared ledger', () => {

@@ -442,8 +442,8 @@ describe('destroying the audit log is a finding, not silence', () => {
       expectOk(fx.ops.assessHqIntegrity({ requestedBy: 'founder' }));
 
       // The stronger form of the attack: the table comes back, with the same
-      // declared schema AND its own three append-only guards, so nothing the
-      // census looks at is missing. Only the CONTENT is gone.
+      // declared schema AND every append-only guard the schema declares on it,
+      // so nothing the census looks at is missing. Only the CONTENT is gone.
       const raw = fx.raw();
       raw.exec('DROP TABLE op_evidence');
       raw.exec(`
@@ -466,6 +466,16 @@ describe('destroying the audit log is a finding, not silence', () => {
         WHEN EXISTS (SELECT 1 FROM op_evidence WHERE id = NEW.id)
           OR (TYPEOF(NEW.seq) = 'integer' AND EXISTS (SELECT 1 FROM op_evidence WHERE seq = NEW.seq))
         BEGIN SELECT RAISE(ABORT, 'op_evidence is append-only'); END;
+        -- And the universal rowid guard the declaration gained in Wave 5
+        -- correction round thirteen (High 1). Rebuilt here for the same reason
+        -- the other three are: this test is about a census that has NOTHING to
+        -- report, so the rebuild has to satisfy every guard the schema
+        -- declares. Leaving it out would make the test pass for the wrong
+        -- reason — a missing guard rather than the commitment check.
+        CREATE TRIGGER trg_op_evidence_no_rowid_skip BEFORE INSERT ON op_evidence
+        WHEN NEW.rowid > 1 + MAX(COALESCE((SELECT MAX(rowid) FROM "op_evidence"), 0),
+                                 COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'op_evidence'), 0))
+        BEGIN SELECT RAISE(ABORT, 'op_evidence rowids are contiguous'); END;
       `);
       // Nothing is missing by the guard census, and every check that lives
       // INSIDE the log — links, seq contiguity from 1, the `sqlite_sequence`
@@ -1285,6 +1295,74 @@ describe('the unauthenticated artifact never says "fine" while HQ has said other
       // Still no detail text: the dropped trigger's NAME does not cross.
       expect(JSON.stringify(snapshot.reliability)).not.toContain('trg_hq_mission_intents_no_rewrite');
       readOnly.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+/**
+ * Wave 5, correction round thirteen — Low 5: the vocabulary filter on the
+ * verdict READER reached this head unpinned.
+ *
+ * `rowToRecordedVerdict` reads every stored finding through
+ * `isHqIntegrityFinding`, so a row appended by a raw writer cannot introduce a
+ * finding name outside the closed vocabulary. Removing that `.filter(...)` left
+ * the whole suite green at `237fc76`, and it changes the answer: a forged name
+ * reaches `standingIntegrityVerdict`'s PUBLIC output, which is what the
+ * reliability views, the refusals and the unauthenticated artifact are keyed
+ * by.
+ *
+ * It is CONTAINED — `carryRecordedVerdict` re-filters, so the forged name does
+ * not reach a safe-mode decision — and the containment is asserted here too, so
+ * the pin states the real reach rather than implying a worse one.
+ */
+describe('a verdict row’s findings are read through the closed vocabulary', () => {
+  it('drops a forged finding name from the reader’s own output', () => {
+    const fx = fileFixture();
+    try {
+      breakChainByLegalAppend(fx);
+      expectOk(fx.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      const raw = fx.raw();
+      const standing = standingIntegrityVerdict(raw)!;
+      expect(standing.safeMode).toBe(true);
+      expect([...standing.findings]).toContain('evidence_chain_broken');
+
+      // An APPEND is the write this ledger's guards deliberately permit, so no
+      // trigger has to be dropped: the forged name rides a legal insert.
+      raw
+        .prepare(
+          `INSERT INTO hq_reliability_verdicts
+             (id, assessed_at, depth, safe_mode, findings, process_id, assessed_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'verdict-forged-vocabulary',
+          '2030-01-01T00:00:00.000Z',
+          'full',
+          1,
+          JSON.stringify(['evidence_chain_broken', 'the_founder_must_call_this_number']),
+          'attacker',
+          'attacker',
+        );
+
+      const after = standingIntegrityVerdict(raw)!;
+      expect(after.safeMode, 'an ENGAGED verdict stands whoever appended it').toBe(true);
+      expect(
+        [...after.findings],
+        'a name outside the closed vocabulary never reaches the reader’s output',
+      ).toEqual(['evidence_chain_broken']);
+      raw.close();
+
+      // And the containment, stated rather than implied: the safe-mode decision
+      // the next process takes carries only vocabulary names either way.
+      const process = fx.reopen('after-forged-name');
+      const posture = process.ops.hqReliabilityPosture().integrity;
+      expect(posture.safeMode).toBe(true);
+      for (const observation of posture.observations) {
+        expect(HQ_INTEGRITY_FINDINGS as readonly string[]).toContain(observation.finding);
+      }
+      process.db.close();
     } finally {
       fx.cleanup();
     }

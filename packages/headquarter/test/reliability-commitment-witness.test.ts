@@ -153,6 +153,33 @@ function expectPermanentlyBlocking(fx: FileFixture, tags: readonly string[]): vo
 }
 
 describe('destroying HQ’s commitment ledger outright is blocking, not silent', () => {
+  /**
+   * The PLAIN drop — no replay, no header write, nothing else — pinned because
+   * `operator/evidence.ts` was still pricing it as a surviving route with a
+   * restart-and-second-assessment cost (Wave 5 correction round thirteen,
+   * Low 1). It has not been a route since round ten. Measured here so the
+   * corrected sentence is enforced rather than asserted, and so that a future
+   * change that re-opens it fails at this line.
+   */
+  it('refuses a PLAIN DROP TABLE of the commitment ledger, at every depth and for ever', () => {
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+
+      const raw = fx.raw();
+      expect(commitmentWitnessPresent(raw)).toBe(true);
+      expect(rowCount(raw, HQ_INTEGRITY_CHECKPOINT_TABLE)).toBeGreaterThan(0);
+      raw.exec('PRAGMA foreign_keys = OFF');
+      raw.exec(`DROP TABLE ${HQ_INTEGRITY_CHECKPOINT_TABLE}`);
+      raw.close();
+
+      expectPermanentlyBlocking(fx, ['dropped-one', 'dropped-two', 'dropped-three', 'dropped-four']);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
   it('refuses a DROP + DDL replay of the commitment ledger alone, for ever', () => {
     const fx = fileFixture();
     try {

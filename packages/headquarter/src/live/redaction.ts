@@ -243,8 +243,8 @@ const ERASED_CODE_POINTS =
  *
  * **The zero-ink sweep left three whole categories carrying a credential shape
  * past the guard, and two of them were disclosed nowhere** (Wave 5 correction
- * round seven, the undisclosed sweep residuals). `\p{Mn}` (1,796 code points),
- * `\p{Me}` (13) and `\p{Cn}` unassigned (810,961) each broke
+ * round seven, the undisclosed sweep residuals). `\p{Mn}` (2,059 code points),
+ * `\p{Me}` (13) and `\p{Cn}` unassigned (814,730) each broke
  * `sk-ABCDEFGHIJKLMNOP0123` into two unmatched halves with every character of
  * the key intact. U+0301 COMBINING ACUTE ACCENT and U+0378 (unassigned) are the
  * two the review named, and neither appeared in any residual list.
@@ -257,6 +257,18 @@ const ERASED_CODE_POINTS =
  * open by that same round on no stated argument at all, and is closed in the
  * erase set above (round nine, High 1) — it is not a combining mark, so it
  * needs no entry in THIS set.
+ *
+ * **Every count above is measured on the SHIPPED runtime, and says which one**
+ * (Wave 5 correction round thirteen, Low 6). They were written as 1,796 and
+ * 810,961, which were the sizes on an older ICU; on this build — Unicode 17.0,
+ * the version `process.versions.unicode` reports — `\p{Mn}` is 2,059 and
+ * `\p{Cn}` is 814,730, while `\p{Me}` (13), `\p{Co}` (137,468) and `\p{Zs}`
+ * (17) are unchanged. A category size is a property of the Unicode version the
+ * engine carries, not of this code, so the numbers are stated WITH that version
+ * and `redaction-invisible-classes.test.ts` parses them back out of this block
+ * and compares them to what the running engine actually reports. Nothing about
+ * the guarantee moves with them: the erase set is expressed as the PROPERTIES,
+ * so a category that grows is covered the day the engine grows it.
  *
  * **Why this is a SEPARATE step rather than three more entries in the erase
  * set.** The erase runs LAST, after `NFKC` — and `NFKC` COMPOSES a base letter
