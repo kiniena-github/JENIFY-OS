@@ -8888,18 +8888,25 @@ export class HeadquarterOperations {
           // mission, no later relinking can take it out of that mission's
           // measurement, and no caller can put it into another's.
           //
-          // The column still holds ONE of N missions, which is why the
-          // canonical half stays: it is what lets a task linked to a second
-          // mission accumulate against that mission's ceiling too.
+          // The recorded half is EVERY scope HQ derived at record time, not the
+          // single `mission_id`/`project_id` column (Wave 5 correction round
+          // six, High 3). That column holds one of N, so the union it produced
+          // was complete only for the mission or project that sorted first, and
+          // the OTHER one's ceiling could be nullified by moving its mission to
+          // a different project — `assignMissionToProject`, no raw SQL,
+          // `hq.mission_command` alone: `blocked, observed 5000` became
+          // `within_ceiling, observed 0` and the refused decision was recorded.
+          // The canonical half still stays: it is what lets a ceiling start
+          // governing a task that is linked to a mission AFTER the spend.
           case 'mission':
             return (
               canonicalOf(entry.taskId).missionIds.includes(scope.scopeId) ||
-              entry.missionId === scope.scopeId
+              entry.missionIds.includes(scope.scopeId)
             );
           case 'project':
             return (
               canonicalOf(entry.taskId).projectIds.includes(scope.scopeId) ||
-              entry.projectId === scope.scopeId
+              entry.projectIds.includes(scope.scopeId)
             );
           // The provider scope is measured against the task's canonical
           // BINDING, never against the caller-supplied column. On a bound task
@@ -9002,8 +9009,11 @@ export class HeadquarterOperations {
     const providerIds = new Set<string>();
     for (const entry of this.#costEntriesFromStore()) {
       if (entry.taskId !== taskId) continue;
-      if (entry.missionId) missionIds.add(entry.missionId);
-      if (entry.projectId) projectIds.add(entry.projectId);
+      // EVERY recorded scope, not the first-sorting one (Wave 5 correction
+      // round six, High 3): a governing set built from one of N left the other
+      // ceiling out of the evaluation entirely.
+      for (const missionId of entry.missionIds) missionIds.add(missionId);
+      for (const projectId of entry.projectIds) projectIds.add(projectId);
       // Only a binding HQ VOUCHED for. A caller-declared provider on an
       // unbound task is an attribution claim, not a scope — the same rule
       // `#entriesForScope` applies to the measurement.
@@ -10616,17 +10626,26 @@ export class HeadquarterOperations {
       this.#db
         .prepare(
           `INSERT INTO hq_intel_cost_entries
-             (id, task_id, mission_id, project_id, decision_id, provider_id, provider_bound, model_id,
+             (id, task_id, mission_id, project_id, mission_ids, project_ids, decision_id, provider_id,
+              provider_bound, model_id,
               provenance,
               amount_minor_units, currency, unit_kind, units_observed, basis, occurred_at, recorded_at,
               recorded_by, note, entry_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
           input.taskId,
           canonicalScopes.missionIds[0] ?? null,
           canonicalScopes.projectIds[0] ?? null,
+          // EVERY derived scope, not just the first (Wave 5 correction round
+          // six, High 3). The two single columns above are kept because they
+          // are what an older row carries and what several readers display; the
+          // MEASUREMENT reads these arrays, because a task linked to two
+          // missions files its spend under both and a ceiling that has been
+          // charged has to stay charged whichever of them is later moved.
+          JSON.stringify(canonicalScopes.missionIds),
+          JSON.stringify(canonicalScopes.projectIds),
           decisionId,
           providerId,
           // HQ's OWN statement about the caller's attribution claim, taken from
