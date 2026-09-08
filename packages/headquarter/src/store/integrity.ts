@@ -2700,6 +2700,19 @@ export function ensureLedgerRowidGuards(db: HqDatabase): void {
  * of every declared ledger and every write-once identity table from the live
  * schema and requires the engine itself to refuse a colliding `INSERT OR
  * REPLACE` and `ON CONFLICT DO UPDATE` on each.
+ *
+ * **What it costs, disclosed rather than discovered.** A `BEFORE INSERT` trigger
+ * fires BEFORE conflict resolution, so this guard refuses EVERY conflict clause
+ * on the indexes it names — `REPLACE`, `INSERT OR REPLACE`, and
+ * `ON CONFLICT … DO UPDATE` alike, including a `DO UPDATE` that would only have
+ * touched an ordinary column. That is the same property the mission module's own
+ * DDL has stated since Phase 4 and it is deliberate: an upsert onto a write-once
+ * identity is exactly the shape the exploit had. Measured on both tables: no
+ * path in this repository upserts either one — `createTask` deduplicates by
+ * looking the idempotency key up first, and `commandMission` inserts — and
+ * `unique-index-reentry.test.ts` drives both of those real writers to show they
+ * are untouched. A future writer that WANTS an upsert here would have to say so
+ * and change the declaration.
  */
 export const UNIQUE_REENTRY_GUARD = 'no_unique_reentry';
 

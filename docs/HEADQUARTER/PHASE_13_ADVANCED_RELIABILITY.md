@@ -5496,6 +5496,16 @@ the derivation — so the docblock can never quietly claim otherwise again.
   above. That is a real difference and it is stated rather than smoothed over: a
   unique index added to a declared ledger tomorrow is CAUGHT by a failing test on
   the day it is added, not COVERED by a guard on that day.
+- **The unique-index guards refuse the `DO UPDATE` branch too, and that is
+  deliberate.** A `BEFORE INSERT` trigger fires before conflict resolution, so
+  `trg_op_tasks_no_unique_reentry` and `trg_hq_missions_no_replace_unique` abort
+  `REPLACE`, `INSERT OR REPLACE` and `ON CONFLICT … DO UPDATE` alike on the
+  indexes they name — including a `DO UPDATE` that would only have touched an
+  ordinary column. Measured on both tables. No path in this repository upserts
+  either one (`createTask` looks the idempotency key up first; `commandMission`
+  inserts), and both real writers are driven in `unique-index-reentry.test.ts`
+  to show they are untouched; a future writer that wants an upsert here has to
+  change the declaration rather than discover this.
 - **`VACUUM` is measured, not guaranteed.** No trigger sees it. The reading
   above rests on every declared ledger having a primary key, which is asserted per
   ledger in `ledger-row-position.test.ts`; a future ledger declared without one
