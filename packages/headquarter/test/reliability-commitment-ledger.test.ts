@@ -47,6 +47,7 @@ import {
   HQ_INTEGRITY_CHECKPOINT_TABLE,
   SAFE_MODE_STATEMENT,
   committedCheckpointMark,
+  declaredLedgerIdentities,
   elidedCommitmentLedgerRows,
   declaredGuardsFor,
   immutableLedgerMarks,
@@ -593,6 +594,161 @@ describe('a committed ledger mark is corroborated by the rows, not taken from sq
         expect(process.ops.releaseKillSwitch('global', 'founder').ok, tag).toBe(true);
         process.db.close();
       }
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * The SAME attack with the barrier left in place (Wave 5 correction round
+   * fifteen, High 1).
+   *
+   * The test above restores `sqlite_sequence` to the true value before it
+   * asserts that one Founder assessment clears the latch — so the sentence it
+   * pinned in `PHASE_13_ADVANCED_RELIABILITY.md` ("the latch it leaves is
+   * cleared by one Founder assessment rather than standing for ever") was
+   * pinned by a run that never executed the version WITHOUT the restore. That is
+   * exactly what this wave's own round-six rule forbids: a residual is a
+   * load-bearing claim, and the version without the barrier it names must be
+   * executed before the sentence is written.
+   *
+   * This is that run. ONE statement, no DDL, no trigger dropped, no explicit
+   * rowid — and the latch does NOT clear, at any number of Founder assessments.
+   * The page's sentence is corrected to say so; this asserts the corrected
+   * sentence rather than the wished-for one.
+   *
+   * The loop, for a reader who has to decide whether it is a bug or a price:
+   * the inflating boot is BLOCKING, a blocking boot appends its own safe-mode
+   * verdict row to this very ledger, SQLite gives that row the rowid the burned
+   * counter names, `no_rowid_skip` permits it BY DESIGN (its `sequenceTerm`
+   * exists so HQ never refuses what the engine itself would allocate) and
+   * `no_rowid_reseat` permits it because the row IS the greatest the ledger
+   * holds. The gap `top − rows` is then far past the committed baseline, and
+   * only a CLEAN assessment commits a checkpoint — so nothing can re-baseline
+   * it. `SAFE_MODE_STATEMENT` already says a writer who "raises the engine's own
+   * high-water mark for some other ledger" can "manufacture a finding HQ will
+   * then report and keep reporting"; this pins that it means this, literally.
+   */
+  it('does NOT clear while the inflated mark stands, however many Founder assessments run', () => {
+    const fx = fileFixture();
+    try {
+      warm(fx, 3);
+
+      // p1: the file is clean and HQ will act on it.
+      const clean = fx.reopen('p1');
+      expect(clean.ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
+      expect(clean.ops.releaseKillSwitch('global', 'founder').ok).toBe(true);
+      clean.db.close();
+      fx.db.close();
+
+      // The whole attack: one UPDATE of an ordinary writable table no trigger
+      // can guard. The trigger count is asserted before and after so this can
+      // never quietly become the three-statement drop-and-recreate attack that
+      // every other tamper in this module pays for.
+      const tamper = fx.raw();
+      const triggers = (): number =>
+        (
+          tamper
+            .prepare(
+              `SELECT COUNT(*) AS n FROM sqlite_master
+                 WHERE type = 'trigger' AND tbl_name = 'hq_reliability_verdicts'`,
+            )
+            .get() as { n: number }
+        ).n;
+      const before = triggers();
+      expect(before).toBeGreaterThan(0);
+      tamper.exec(`UPDATE sqlite_sequence SET seq = 999 WHERE name = 'hq_reliability_verdicts'`);
+      expect(triggers(), 'the attack cost more than the one statement claimed').toBe(before);
+      tamper.close();
+
+      // p2 observes the inflated mark itself; p3 and p4 observe the gap the
+      // p2 boot's own verdict row left behind. All three are blocking, all
+      // three refuse the release, and a full FOUNDER assessment on each one
+      // finds something blocking rather than clearing.
+      const seen: string[][] = [];
+      for (const tag of ['p2', 'p3', 'p4']) {
+        const process = fx.reopen(tag);
+        const boot = process.ops.hqReliabilityPosture().integrity;
+        expect(boot.safeMode, tag).toBe(true);
+        seen.push(findings(boot.observations));
+        expect(process.ops.releaseKillSwitch('global', 'founder').ok, tag).toBe(false);
+
+        const assessed = process.ops.assessHqIntegrity({ requestedBy: 'founder' });
+        expect(assessed.ok, tag).toBe(true);
+        if (!assessed.ok) throw new Error('unreachable');
+        // The claim under test, negated and executed: the Founder act does not
+        // clear it.
+        expect(assessed.data.safeMode, `${tag}: a Founder assessment cleared it`).toBe(true);
+        expect(findings(assessed.data.observations).length, tag).toBeGreaterThan(0);
+        expect(process.ops.hqReliabilityPosture().integrity.safeMode, tag).toBe(true);
+        process.db.close();
+      }
+
+      // The first blocking observation is the inflated mark; from the second
+      // process on it is the gap that HQ's OWN verdict append left, which is
+      // the half that makes it permanent.
+      expect(seen[0]).toEqual(['append_only_ledger_truncated']);
+      expect(seen[1]).toEqual(['append_only_guard_missing']);
+      expect(seen[2]).toEqual(['append_only_guard_missing']);
+
+      const raw = fx.raw();
+      // Reported by the gap term, not by a fall in rows or top: the ledger has
+      // lost nothing, which is why the finding is true of nothing.
+      expect(regressedImmutableLedgers(raw)).toEqual(['hq_reliability_verdicts']);
+      const identity = declaredLedgerIdentities(raw)['hq_reliability_verdicts']!;
+      expect(identity.rows).toBeGreaterThan(0);
+      expect(identity.top, 'the gap is what the burned counter left').toBeGreaterThan(999);
+      raw.close();
+
+      // Putting the counter back is NOT the remedy either, and the first draft
+      // of this correction said it was — so it is executed rather than assumed.
+      // By now HQ's own verdict rows stand at the rowids the burned counter
+      // named; restoring `sqlite_sequence` to `MAX(rowid)` leaves those rows,
+      // and the gap, exactly where they are.
+      const restore = fx.raw();
+      restore.exec(
+        `UPDATE sqlite_sequence SET seq = (SELECT MAX(rowid) FROM hq_reliability_verdicts)
+           WHERE name = 'hq_reliability_verdicts'`,
+      );
+      expect(regressedImmutableLedgers(restore)).toEqual(['hq_reliability_verdicts']);
+      restore.close();
+      const repaired = fx.reopen('p5-after-restore');
+      const stillBlocked = repaired.ops.assessHqIntegrity({ requestedBy: 'founder' });
+      expect(stillBlocked.ok).toBe(true);
+      if (!stillBlocked.ok) throw new Error('unreachable');
+      expect(
+        findings(stillBlocked.data.observations),
+        'restoring the mark cleared it, so the corrected sentence is wrong again',
+      ).toEqual(['append_only_guard_missing']);
+      expect(repaired.ops.releaseKillSwitch('global', 'founder').ok).toBe(false);
+      repaired.db.close();
+
+      // What DOES clear it is a re-baseline of the committed gap — a direct
+      // `recordIntegrityCheckpoint` against the file as it now stands. No
+      // facade path performs it: both call sites are gated on `!safeMode`, and
+      // safe mode is engaged. It is executed here from a RAW handle so the
+      // mechanism is on the record rather than described, and so the reason it
+      // is not automated is visible: the same re-baseline clears a GENUINE
+      // mid-ledger deletion just as completely (measured beside this one —
+      // `regressed []`, `assess []`, `releaseKillSwitch ADMITTED`), which is
+      // why "re-baseline when the gap is the only blocking finding" was
+      // designed and rejected rather than shipped.
+      const rebaseline = fx.raw();
+      recordIntegrityCheckpoint(rebaseline, {
+        id: 'checkpoint-rebaselines-the-gap',
+        recordedAt: '2026-09-08T00:00:00.000Z',
+        processId: 'rebaselines-the-gap',
+        recordedBy: 'founder',
+      });
+      expect(regressedImmutableLedgers(rebaseline)).toEqual([]);
+      rebaseline.close();
+      const finally_ = fx.reopen('p6-after-rebaseline');
+      const cleared = finally_.ops.assessHqIntegrity({ requestedBy: 'founder' });
+      expect(cleared.ok).toBe(true);
+      if (!cleared.ok) throw new Error('unreachable');
+      expect(findings(cleared.data.observations)).toEqual([]);
+      expect(finally_.ops.releaseKillSwitch('global', 'founder').ok).toBe(true);
+      finally_.db.close();
     } finally {
       fx.cleanup();
     }
