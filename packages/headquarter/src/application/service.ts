@@ -5047,7 +5047,14 @@ export class HeadquarterOperations {
         actor: input.requestedBy,
         kind: 'commanded',
         toStatus: 'planned',
-        detail: { planItemCount: items.length },
+        // `projectId` joins the detail because the event log is the only
+        // APPEND-ONLY record of what a mission's project link has ever been,
+        // and `hq_missions.project_id` is mutable (Wave 5 correction round
+        // seven, High NEW-4). `assignMissionToProject` already records both
+        // ends of every move; a mission CREATED under a project had no such
+        // record at all, so a raw `UPDATE ... SET project_id = NULL` erased the
+        // only trace. `#durableTaskProjectScopes` reads it.
+        detail: { planItemCount: items.length, projectId },
       });
       privileged.appendEvidence({
         actor: input.requestedBy,
@@ -8838,6 +8845,15 @@ export class HeadquarterOperations {
       }
       return value;
     };
+    const durableProjectMemo = new Map<string, string[]>();
+    const durableProjectsOf = (taskId: string): string[] => {
+      let value = durableProjectMemo.get(taskId);
+      if (!value) {
+        value = this.#durableTaskProjectScopes(taskId);
+        durableProjectMemo.set(taskId, value);
+      }
+      return value;
+    };
     const providerMemo = new Map<string, string | null>();
     const boundProviderOf = (taskId: string): string | null => {
       if (providerMemo.has(taskId)) return providerMemo.get(taskId) ?? null;
@@ -8898,9 +8914,20 @@ export class HeadquarterOperations {
               canonicalOf(entry.taskId).missionIds.includes(scope.scopeId) ||
               entry.missionId === scope.scopeId
             );
+          // The project half takes a THIRD term, and for the same reason the
+          // second one exists (Wave 5 correction round seven, High NEW-4):
+          // `hq_missions.project_id` is mutable, so canonical membership can be
+          // narrowed after the fact. `#durableTaskProjectScopes` reads every
+          // project the task's mission(s) have EVER been bound to off the
+          // append-only mission event log, which no later relinking can shrink.
+          // Applied to the MEASUREMENT as well as to the governing set, so
+          // spend recorded after a link was broken still counts against the
+          // ceiling it is governed by — the two surfaces agree by construction
+          // rather than by argument.
           case 'project':
             return (
               canonicalOf(entry.taskId).projectIds.includes(scope.scopeId) ||
+              durableProjectsOf(entry.taskId).includes(scope.scopeId) ||
               entry.projectId === scope.scopeId
             );
           // The provider scope is measured against the task's canonical
@@ -9018,6 +9045,85 @@ export class HeadquarterOperations {
     };
   }
 
+  /**
+   * Every project a task's mission(s) have EVER been bound to, read off the
+   * append-only mission event log.
+   *
+   * **`#canonicalTaskScopes` alone was fail-open for the PROJECT half, and the
+   * round-four fix did not reach it** (Wave 5 correction round seven, High
+   * NEW-4). The `spentUnder` union closed the routes only for a task that has
+   * already recorded spend of its own; a task that has not is governed by the
+   * canonical link alone, and the canonical link is a MUTABLE column. Executed
+   * against `d97b8a6` with a project ceiling exhausted by task A and the attack
+   * on task B in the same project: a principal holding only
+   * `hq.mission_command` — no approval authority, no `hq.intelligence_command`
+   * — called `assignMissionToProject({ projectId: null })`, a supported facade
+   * call with no raw SQL, and `permittedTiers` widened from
+   * `["deterministic_local"]` to all five while a `critical_review` decision
+   * was ACCEPTED. That same principal calling `setIntelligenceBudget` directly
+   * is correctly `refused(not_permitted)`, which is what made the facade route
+   * an authority bypass rather than an authority. A raw `UPDATE hq_missions SET
+   * project_id = NULL` did the same.
+   *
+   * The membership is therefore derived from HISTORY rather than from the
+   * current column. `hq_mission_events` is append-only and engine-guarded
+   * (`no_rewrite`, `no_erase`, `no_replace`, and it is a declared
+   * `ENGINE_IMMUTABLE_TABLES` member), `assignMissionToProject` records BOTH
+   * ends of every move it makes, and `commandMission` records the project a
+   * mission was created under. So clearing the current link narrows nothing:
+   * the act of clearing it is itself the record that the project once governed.
+   * Monotone and unforgeable in the same sense the `spentUnder` union is — it
+   * can only ever ADD scopes, and no caller supplies one.
+   *
+   * **What it does not reach, stated rather than implied.** A mission CREATED
+   * with a project by a build older than this — whose `commanded` event
+   * therefore carries no `projectId` — and never re-assigned through the
+   * facade, whose link is then cleared by RAW SQL, leaves no history to derive
+   * from. The facade route is closed for such a mission regardless of build
+   * age, because `assignMissionToProject` writes `from` at the moment it
+   * clears. The raw-SQL route on a pre-existing mission is the residual, and it
+   * is in the phase document's NOT-fixed list.
+   */
+  #durableTaskProjectScopes(taskId: string): string[] {
+    if (!this.#missionStorePresent) return [];
+    const projectIds = new Set<string>();
+    try {
+      const rows = this.#db
+        .prepare(
+          `SELECT DISTINCT e.detail AS detail
+             FROM hq_mission_plan_items p
+             JOIN hq_mission_events e ON e.mission_id = p.mission_id
+            WHERE p.task_id = ?
+              AND e.kind IN ('project_assigned', 'commanded')
+              AND e.detail IS NOT NULL`,
+        )
+        .all(taskId) as { detail: unknown }[];
+      for (const row of rows) {
+        let detail: unknown;
+        try {
+          detail = JSON.parse(String(row.detail));
+        } catch {
+          // A detail column that does not parse carries no scope. It is a
+          // column a raw writer can put anything in, so it must be inert here
+          // rather than an exception — the `json_valid` precedent.
+          continue;
+        }
+        if (detail == null || typeof detail !== 'object') continue;
+        const record = detail as Record<string, unknown>;
+        for (const key of ['from', 'to', 'projectId']) {
+          const value = record[key];
+          if (typeof value === 'string' && value !== '') projectIds.add(value);
+        }
+      }
+    } catch {
+      // No mission event log on this handle: no history to derive from, which
+      // is the empty answer and not "unconstrained" — the canonical link and
+      // the recorded attribution still govern.
+      return [];
+    }
+    return [...projectIds].sort();
+  }
+
   #canonicalTaskScopes(taskId: string): { missionIds: string[]; projectIds: string[] } {
     if (!this.#missionStorePresent) return { missionIds: [], projectIds: [] };
     const rows = this.#db
@@ -9125,13 +9231,24 @@ export class HeadquarterOperations {
     // constraints — it is monotone in the fail-closed direction, and no caller
     // can name a scope here any more than before.
     const spentUnder = this.#recordedScopesForTask(taskId);
+    // And every project the task's mission(s) have EVER been bound to, from the
+    // append-only mission event log (Wave 5 correction round seven, High
+    // NEW-4). The union above closes the routes only for a task that has
+    // already recorded spend; a task with none of its own was governed by the
+    // MUTABLE `hq_missions.project_id` alone, so clearing the link — through a
+    // supported facade call held by a principal with no budget authority at
+    // all — took an exhausted ceiling out of the governing set. See
+    // `#durableTaskProjectScopes`.
+    const durableProjects = this.#durableTaskProjectScopes(taskId);
     const candidates: { kind: BudgetScope; id: string; from: GoverningBudgetScope['derivedFrom'] }[] = [
       ...[...new Set([...canonical.missionIds, ...spentUnder.missionIds])].map((id) => ({
         kind: 'mission' as const,
         id,
         from: 'task_mission' as const,
       })),
-      ...[...new Set([...canonical.projectIds, ...spentUnder.projectIds])].map((id) => ({
+      ...[
+        ...new Set([...canonical.projectIds, ...durableProjects, ...spentUnder.projectIds]),
+      ].map((id) => ({
         kind: 'project' as const,
         id,
         from: 'task_project' as const,
