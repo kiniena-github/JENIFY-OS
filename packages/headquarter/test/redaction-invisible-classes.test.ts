@@ -194,9 +194,14 @@ describe('and refuses nothing a Founder would legitimately write', () => {
   });
 
   it('does not refuse ordinary prose merely because a private-use glyph sits in it', () => {
-    // Erasing `\p{Co}` REMOVES characters from the scan copy; it cannot add a
-    // letter, so it cannot build a prefix out of prose that did not carry one.
-    // A private-use glyph in a sentence is still a sentence.
+    // Erasing `\p{Co}` REMOVES characters from the scan copy, so it cannot add
+    // a letter — but, as for every erase here, removing one CAN join the tokens
+    // on either side of it into a prefix neither carried alone. That inference
+    // was written the other way round for one round, in this comment and twice
+    // in `redaction.ts`, and is corrected in all three (round eleven, Low 2);
+    // the executed join is in `redaction-narrow-spaces.test.ts`. What these
+    // assertions actually show is the narrower and still useful thing: a
+    // private-use glyph in a sentence leaves the sentence a sentence.
     expect(() => assertBrowserSafe({ note: 'The \u{E000} glyph comes from a private font' })).not.toThrow();
     expect(() => assertBrowserSafe({ note: 'Report \u{F8FF} filed for the Mesob pilot' })).not.toThrow();
     // Measured rather than asserted, and disclosed rather than hidden: a

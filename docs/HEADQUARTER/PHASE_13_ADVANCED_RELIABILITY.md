@@ -2987,11 +2987,14 @@ false alarm for a false reassurance is not a fix. The evasion is pinned in
   halves of the check begin at the next checkpoint that lands, which is the
   ordinary upgrade cost of a new commitment and not a defence.
 - **The structural pass got more expensive, and the module header now says so.**
-  Measured at this head: 46 prepared statements per pass and 0.87 ms averaged
-  over 50, where 33 of those statements are a `COUNT(*)` + `MAX(rowid)` pair per
-  declared ledger. A `COUNT(*)` is O(rows) where the seek is not. It is paid
-  deliberately, because the seek cannot see a row removed from the middle and
-  the count can.
+  Measured at this head: 48 statements executed per pass, of which 33 are a
+  `COUNT(*)` + `MAX(rowid)` identity pair per declared ledger, 4 are a further
+  `MAX(rowid)` seek per COMMITTED ledger, and 11 are catalogue, pragma and
+  commitment-ledger reads that do not move. A `COUNT(*)` is O(rows) where the
+  seek is not. It is paid deliberately, because the seek cannot see a row
+  removed from the middle and the count can. (The figure this row carried for
+  two rounds — "46 prepared statements per pass and 0.87 ms averaged over 50" —
+  was wrong in both halves; see the eleventh round below.)
 - **Nothing here closes the count-preserving in-place REWRITE of the commitment
   ledger.** That residual is unchanged, and `reliability-commitment-residual.test.ts`
   still enforces it.
@@ -3301,12 +3304,13 @@ weakened. Three files conflicted.
   row COUNT is what sees a row removed from the MIDDLE. So the clause has now
   been wrong twice in one wave, in the same direction, and BOTH corrections are
   recorded rather than the latest written as if it had always been there.
-  RE-MEASURED at the merged head, the same way round ten measured: 46 statements
-  per structural pass and 0.871 ms averaged over 50, on a real file carrying
-  commitments — one `COUNT(*)` and one `MAX(rowid)` over each of the 33 declared
-  ledgers, one further `MAX(rowid)` seek per COMMITTED ledger, and five reads of
-  the commitment ledger, three of them `json_each` scans with a temporary
-  B-tree.
+  RE-MEASURED at the merged head, the same way round ten measured: one
+  `COUNT(*)` and one `MAX(rowid)` over each of the 33 declared ledgers, one
+  further `MAX(rowid)` seek per COMMITTED ledger, and five reads of the
+  commitment ledger, three of them `json_each` scans with a temporary B-tree.
+  **The TOTAL this round stated beside those shapes — "46 statements per
+  structural pass and 0.871 ms averaged over 50" — was itself wrong, and is
+  corrected in the eleventh round below.**
 - **Round ten's pin, grown rather than replaced.** Its test asserted "two
   `MAX(rowid)` seeks per committed ledger, not one per declared one", which is
   the right shape of assertion and the wrong numbers at the merged head. It now
@@ -3446,3 +3450,149 @@ line; with `redaction.ts` and this document reverted,
 `redaction-narrow-spaces.test.ts` failed on U+1680 and on the underscore anchor
 in this page, and `redaction-invisible-classes.test.ts` failed with
 `['U+0020','U+00A0','U+1680', …(14)]` against the expected two.
+
+## The ELEVENTH correction round: a served number that was wrong a third time, and two annotations that outran their tests
+
+A fresh read-only hostile review of `48dd026` returned **0 Critical / 0 High /
+1 Medium / 2 Low**. It manufactured no blocking finding: the commitment-witness
+closure held under prefix replay at all six prefix lengths, full replay to
+empty, prefix plus forged padding, `DELETE` all plus `DELETE FROM
+sqlite_sequence`, and the combination attack; `PRAGMA application_id` is
+transactional on this engine, including under `SAVEPOINT`/`ROLLBACK TO`. All
+three findings are honesty defects in prose, and none of them is a security
+hole. **Nothing in this round changes security behaviour.**
+
+The round is recorded here because all three share one cause, and it is the
+cause this wave keeps rediscovering: **a number that no test reads.**
+
+### MEDIUM 1 — the cost clause was wrong a THIRD time, in the same direction, inside the sentence written to stop it
+
+`INTEGRITY_DEPTH_STATEMENT` is served to the Founder as `depthStatement` on
+`GET /api/hq/control/reliability`. It said "Measured on a real file, the whole
+pass is **46 statements** and under a millisecond". The module header said
+"**46 statements** per pass and **0.871 ms** averaged over 50 … **Pinned in
+`integrity-statement-truth.test.ts` rather than estimated**", and this document
+repeated both.
+
+Re-measured at this head by instrumenting `db.prepare` on the branch's own
+`statementsExecutedByOneStructuralPass` call site, five runs, deterministic:
+**48**, not 46.
+
+**The "Pinned … rather than estimated" clause was false**, and that is the more
+serious half. `integrity-statement-truth.test.ts` pinned the SHAPES of the
+reads rigorously — identity reads equal to `ENGINE_IMMUTABLE_TABLES.length`,
+strictly fewer standalone seeks than that, `EXPLAIN QUERY PLAN` asked of the
+engine, retired phrasings asserted absent — and pinned **neither number**.
+That is precisely why a figure re-measured one round earlier drifted again
+while every test in the file kept passing. The clause had already been wrong
+twice in this wave, in the same direction, and the sentence recording those two
+corrections was itself the third.
+
+**The fix is not a better constant, because a bare total cannot stay right.**
+Two of its three terms are censuses rather than constants. Measured on the
+deterministic `warmedFile()` fixture:
+
+| Term | Scales with | Measured |
+|---|---|---|
+| `COUNT(*)` + `MAX(rowid)` identity read | ledgers DECLARED | 33 |
+| further `MAX(rowid)` seek | ledgers HQ has COMMITTED a mark for | 4 |
+| catalogue, pragma and commitment-ledger reads | nothing — fixed | 11 |
+| **total** | | **48** |
+
+The served sentence and the module header now state the three terms and the
+census they were measured against, and a new test asserts each term off one
+real pass, requires the total to be their sum, and **parses every number back
+out of both prose sites and compares it to the measurement**. Nothing retypes a
+figure for the prose to agree with. Mutation-checked three ways rather than
+asserted: restoring `46` in the served sentence fails (`expected 46 to be 48`),
+drifting the header's sum to `33 + 4 + 9 = 46` fails (`expected [33,4,9,46] to
+deeply equal [33,4,11,48]`), and reintroducing `0.871 ms` fails.
+
+**No duration is shipped anywhere any more, and none should have been.** The
+retired figure was 0.871 ms; the same measurement re-run at this head gives
+**0.830 ms** on this machine, and the review that found the error measured
+**1.023 ms** on another. A number that moves with the machine is not a property
+of the code and no test can pin one, so the sentence now claims nothing about
+time and a test forbids a timing figure from returning.
+
+### LOW 1 — a census annotation stated 225 where its own code measured 226
+
+`frozen-constants-census.test.ts` annotated its floors with "131 modules and
+225 distinct bindings at this head; the entry-point scan reaches 202 of them."
+Instrumented at this head: **131 files, 226 distinct bindings, 0 unfrozen**.
+The assertion is a floor (`>= 225`) and passed, so only the annotation was
+stale — by one.
+
+The `202` was worse than stale: it was a round-six measurement of a
+BARREL-based entry-point scan that `reliability-verdict-durability.test.ts` has
+since replaced with a path-based enumeration of `src/`, so it had stopped
+describing anything at all, and nothing asserted it anywhere.
+
+Corrected the way Medium 1 was: the floor is raised to the measured **226**, the
+`202` is dropped, and the numbers are now stated **only in the assertion** —
+not restated in prose beside it, which is what allowed the two to disagree. The
+floors stay floors on purpose: new exported vocabulary is ordinary, and the
+thing worth failing on is the enumeration SHRINKING.
+
+### LOW 2 — "it cannot build `sk-`, `ghp_` … out of prose that did not carry one" is false of the fold
+
+`redaction.ts` wrote that inference twice — once for the narrow-space fold and
+once for the combining-mark fold — and `redaction-invisible-classes.test.ts`
+repeated it a third time for `\p{Co}`. The premise is true and the conclusion
+does not follow: **removing a separator concatenates the tokens on either side
+of it**, so the scan copy can hold a prefix that no contiguous run of the
+original held. The same paragraph half-conceded it two sentences later ("What
+it CAN do is close a gap") while the sentence above still denied it.
+
+Executed against the real guard, and now pinned in
+`redaction-narrow-spaces.test.ts`: `the gh<U+200A>p_…`, `AI<U+3000>za…` and
+`Bear<U+200A>er …` carry no `ghp_`, `AIza` or `Bearer ` anywhere in the raw
+string and are all **REFUSED**, while the identical three strings written with
+a plain U+0020 — which this fold deliberately does not erase — are all
+**admitted**. That pair isolates the join as the whole cause.
+
+**The residual is not under-priced and the fold stays.** The review measured it
+over **138,600** real strings — this repository's own `PHASE_13` prose,
+`store/integrity.ts`'s source, and a French/Polish typography corpus, each
+against the 15 separators in 2 substitution styles — and found **15 verdicts
+changed, all 15 of them new refusals of one contrived `gh<U+200A>p_…` string,
+0 new accepts and 0 changes on real prose**. The direction is conservative: the
+cost is a false refusal on a contrived string, never a leak. So only the
+sentence changes, in all three places, and the retired wording is quoted rather
+than silently overwritten.
+
+### Verification at the eleventh-round head
+
+All green, exit 0. Baseline re-measured on this head (`e58b95c`) before any
+edit, and again after:
+
+| Check | Before | After |
+|---|---|---|
+| `npm run test:hq` | 190 files / 3397 tests | **190 files / 3401 tests** |
+| `npm run typecheck --workspace @factoryos/headquarter` | clean | clean |
+| `@factoryos/hq-host` test + typecheck | 23 / 222, clean | **23 / 222**, clean |
+| `@factoryos/hq-server` test + typecheck | 2 / 20, clean | **2 / 20**, clean |
+| root `npm test` | 37 / 569 + 3 skips | **37 / 569 + 3 pre-existing skips** |
+| `npm run build:site` | 10 pages | **10 pages** + `hq-snapshot.json` |
+| `npm run build` web initial JS | 215.66 kB / 69.22 kB gzip | **215.66 kB / 69.22 kB gzip** |
+
+Four tests added, no test file added, deleted, renamed, skipped or weakened.
+The diff against the accepted base `f1ce71c` touches `packages/server`,
+`packages/web`, `packages/shared`, `packages/config-mesob`, `packages/hq-host`,
+`apps`, `package.json` and `package-lock.json` **not at all**, and this round's
+own diff is confined to `packages/headquarter/` and `docs/HEADQUARTER/`. Zero
+new dependencies.
+
+**Each new assertion was verified to FAIL pre-fix** rather than merely to pass
+here — the source file was reverted to its `e58b95c` content from a scratch
+copy held outside the worktree, the new tests run against it, and the file
+restored. `integrity-statement-truth.test.ts`'s new test failed on
+`the depth statement must state its declared ledgers: expected null to be
+truthy`; `redaction-narrow-spaces.test.ts`'s new source assertion failed on
+`expected … not to contain 'it cannot introduce a letter, so it'`.
+
+**Stated honestly, because it is the point of Low 2:** the two BEHAVIOURAL
+tests added for the join pass against the pre-fix source as well, and always
+would have. The code was never wrong; only the sentence about it was. That is
+exactly why nothing caught it for a round, and it is the same failure mode as
+Medium 1 one level up — a claim no execution was ever compared against.

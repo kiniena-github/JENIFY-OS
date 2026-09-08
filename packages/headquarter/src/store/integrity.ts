@@ -55,10 +55,35 @@
  *    MERGED one, because the concurrent round-seven lane was closing High 2 in
  *    the same wave: reading each declared ledger's row COUNT is what sees a row
  *    removed from the MIDDLE, and a `COUNT(*)` IS proportional to the rows a
- *    ledger holds where a seek is not. RE-MEASURED at the merged head, the same
- *    way: 46 statements per pass and 0.871 ms averaged over 50, on a real file
- *    carrying commitments. Pinned in `integrity-statement-truth.test.ts` rather
- *    than estimated. `fullIntegrity` adds `integrity_check`,
+ *    ledger holds where a seek is not.
+ *
+ *    **And a THIRD time, in the same direction, inside the very sentence
+ *    written to stop the recurrence** (round eleven, Medium 1). "46 statements
+ *    per pass and 0.871 ms averaged over 50 … Pinned in
+ *    `integrity-statement-truth.test.ts` rather than estimated" was false in
+ *    BOTH halves. The pass executes 48 statements, not 46 — and nothing pinned
+ *    either number. That file pinned the SHAPES of the reads rigorously and
+ *    neither of the figures beside them, which is exactly how a re-measured
+ *    constant drifted a third time while its own test kept passing.
+ *
+ *    The correction is not a better constant, because a bare total cannot stay
+ *    right: two of its three terms are CENSUSES rather than constants. The pass
+ *    is one identity read per DECLARED ledger, one further seek per ledger HQ
+ *    has COMMITTED a mark for, and eleven catalogue, pragma and
+ *    commitment-ledger reads that do not move. Over the 33 ledgers this build
+ *    declares, with marks committed for four of them, that is 33 + 4 + 11 = 48
+ *    statements. All three terms and the total are asserted in
+ *    `integrity-statement-truth.test.ts` against its `warmedFile()` fixture,
+ *    and the numbers in the served sentence and in THIS paragraph are parsed
+ *    back out and compared to that measurement — so the prose and the pass
+ *    cannot drift apart again without failing.
+ *
+ *    **No time is quoted, here or in the served sentence.** The retired figure
+ *    was 0.871 ms; the same measurement re-run at this head gives 0.830 ms on
+ *    this machine, and the review that found the error measured 1.023 ms on
+ *    another. A duration that moves with the machine is not a property of the
+ *    code and no test can pin one, so it is not shipped as though it were.
+ *    `fullIntegrity` adds `integrity_check`,
  *    `foreign_key_check` and a whole-log evidence-chain verification, which
  *    are O(database) and O(log), and it is therefore an explicit act. Which
  *    one produced a verdict is carried ON the verdict, so nobody can mistake a
@@ -716,8 +741,12 @@ export const INTEGRITY_DEPTH_STATEMENT =
   'unlike the seek beside it, and that cost is paid deliberately: a seek cannot see a row removed from ' +
   'the MIDDLE of a ledger and a count can. The commitment ledger it scans is HQ’s own and is not fixed ' +
   'in size — it grows a row per clean boot and per clean assessment, so that term grows with HQ’s own ' +
-  'history. Measured on a real file, the whole pass is 46 statements and under a millisecond, which is ' +
-  'what keeps it affordable at every construction. It is ' +
+  'history. The whole pass is therefore not a fixed number of statements: it is one identity read per ' +
+  'declared ledger, one further seek per committed one, and 11 catalogue, pragma and commitment-ledger ' +
+  'reads that do not move. Over the 33 ledgers this build declares, with marks committed for 4 of them, ' +
+  'that is 48 statements — a total that moves with HQ’s own census and not with the rows those ledgers ' +
+  'hold, which is what keeps it affordable at every construction. No duration is quoted, because a time ' +
+  'measured on one machine is not a property of the code and no test can pin one. It is ' +
   'therefore not a ' +
   'catalogue read alone: a declared ledger that has been emptied, and an evidence log that contradicts a ' +
   'commitment HQ recorded outside it, are both found and both blocking at this depth. A full assessment ' +

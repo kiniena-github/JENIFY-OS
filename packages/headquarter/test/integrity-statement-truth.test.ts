@@ -555,6 +555,115 @@ describe('the cost clause of the depth statement is derived from what a pass exe
       fx.cleanup();
     }
   });
+
+  /**
+   * Round eleven, Medium 1 — the cost clause's TOTAL, which nothing pinned.
+   *
+   * The three tests above pin the SHAPES of the reads, and have since round
+   * ten. The figures shipped beside them were asserted NOWHERE: the served
+   * sentence and the module header both said "46 statements per pass and
+   * 0.871 ms averaged over 50", and both added "Pinned in
+   * `integrity-statement-truth.test.ts` rather than estimated" — in this file,
+   * which contained neither number. The pass really executes 48. That is the
+   * THIRD time in one wave this clause has been wrong in the same direction,
+   * the third inside the sentence written to stop the recurrence, and it
+   * happened while every test here passed.
+   *
+   * So the number is not simply replaced with a better one. A bare total cannot
+   * stay right, because two of its three terms are CENSUSES: the identity reads
+   * scale with the ledgers HQ DECLARES and the seeks with the ledgers HQ has
+   * COMMITTED a mark for. Only the third term — the catalogue, pragma and
+   * commitment-ledger reads — is fixed.
+   *
+   * The total is therefore fixture-dependent BY CONSTRUCTION, and this test
+   * treats it that way. Each of the three terms is measured off one real pass
+   * over the deterministic `warmedFile()` fixture, the total is required to be
+   * their sum, and then every number the served sentence and the module header
+   * state is PARSED BACK OUT of the prose and compared to the measurement.
+   * Nothing below retypes a figure for the prose to agree with, which is the
+   * same rule the rest of this file follows and the one the shipped constants
+   * escaped.
+   */
+  it('ships a total that is its own three measured terms, and no duration at all', () => {
+    const file = warmedFile();
+    try {
+      const pass = statementsExecutedByOneStructuralPass(file.dbPath);
+      const identities = pass.sql.filter((sql) =>
+        /^SELECT COUNT\(\*\) AS held, COALESCE\(MAX\(rowid\), 0\) AS top FROM /.test(sql),
+      );
+      const seeks = pass.sql.filter((sql) => /^SELECT MAX\(rowid\) AS top FROM /.test(sql));
+      const fixedReads = pass.sql.length - identities.length - seeks.length;
+      const total = pass.sql.length;
+      pass.close();
+
+      // The three terms, measured, and the total as their sum rather than as a
+      // fourth independent claim.
+      expect(identities.length).toBe(ENGINE_IMMUTABLE_TABLES.length);
+      expect(seeks.length).toBe(4);
+      expect(fixedReads).toBe(11);
+      expect(total).toBe(identities.length + seeks.length + fixedReads);
+
+      // ...and the served sentence's arithmetic IS that arithmetic.
+      const declaredClaim = /Over the (\d+) ledgers this build declares/.exec(
+        INTEGRITY_DEPTH_STATEMENT,
+      );
+      const committedClaim = /with marks committed for (\d+) of them/.exec(
+        INTEGRITY_DEPTH_STATEMENT,
+      );
+      const fixedClaim = /and (\d+) catalogue, pragma and commitment-ledger reads/.exec(
+        INTEGRITY_DEPTH_STATEMENT,
+      );
+      const totalClaim = /that is (\d+) statements/.exec(INTEGRITY_DEPTH_STATEMENT);
+      for (const [term, match] of [
+        ['declared ledgers', declaredClaim],
+        ['committed marks', committedClaim],
+        ['fixed reads', fixedClaim],
+        ['total statements', totalClaim],
+      ] as const) {
+        expect(match, `the depth statement must state its ${term}`).toBeTruthy();
+      }
+      expect(Number(declaredClaim![1])).toBe(identities.length);
+      expect(Number(committedClaim![1])).toBe(seeks.length);
+      expect(Number(fixedClaim![1])).toBe(fixedReads);
+      expect(Number(totalClaim![1])).toBe(total);
+
+      // The module header states the same sum, spelled as a sum, and it is read
+      // out of the source rather than trusted.
+      const header = fs.readFileSync(INTEGRITY_SOURCE, 'utf8');
+      const headerEnd = header.indexOf('*/');
+      expect(headerEnd).toBeGreaterThan(0);
+      const headerProse = header
+        .slice(0, headerEnd)
+        .split('\n')
+        .map((line) => line.replace(/^\s*\/?\*+\s?/, ''))
+        .join(' ')
+        .replace(/\s+/g, ' ');
+      const headerSum = /that is (\d+) \+ (\d+) \+ (\d+) = (\d+) statements/.exec(headerProse);
+      expect(headerSum, 'the module header must state the cost as a sum of its terms').toBeTruthy();
+      expect(headerSum!.slice(1).map(Number)).toEqual([
+        identities.length,
+        seeks.length,
+        fixedReads,
+        total,
+      ]);
+
+      // The retired figures, by their exact shape, so a revert cannot bring
+      // them back quietly — the same rule the retired PHRASINGS are held to
+      // above.
+      expect(INTEGRITY_DEPTH_STATEMENT).not.toMatch(/46 statements/);
+      expect(INTEGRITY_DEPTH_STATEMENT).not.toMatch(/under a millisecond/i);
+
+      // And NO duration of any kind is served. 0.871 ms shipped as though it
+      // were a property of the code; re-running that measurement gives a
+      // different answer on every machine it is run on, so there is nothing
+      // here for a test to pin and the sentence claims nothing.
+      expect(INTEGRITY_DEPTH_STATEMENT).not.toMatch(/millisecond/i);
+      expect(INTEGRITY_DEPTH_STATEMENT).not.toMatch(/\bms\b/);
+      expect(INTEGRITY_DEPTH_STATEMENT).not.toMatch(/\d+(?:\.\d+)?\s*(?:ms|milliseconds?|seconds?)\b/i);
+    } finally {
+      file.cleanup();
+    }
+  });
 });
 
 describe('the module header’s counts are the constants’ counts', () => {

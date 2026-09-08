@@ -176,3 +176,76 @@ describe('the anchor the phase document states is the anchor the code has', () =
     expect(() => assertBrowserSafe({ note: '9sk-ABCDEFGHIJKLMNOP0123' })).not.toThrow();
   });
 });
+
+/**
+ * Round eleven, Low 2 — the fold's cost sentence claimed something the fold
+ * does not do.
+ *
+ * `redaction.ts` said, of this fold and of the combining-mark fold beside it,
+ * that erasing a character "cannot introduce a letter, so it cannot build
+ * `sk-`, `ghp_`, `AIza`, a PEM header, a JWT or `Bearer ` out of prose that did
+ * not carry one". The first clause is true and the inference from it is false.
+ * REMOVING a separator concatenates whatever sat on either side of it, so the
+ * scan copy can contain a contiguous prefix that no contiguous run of the
+ * original contained. The paragraph half-conceded it two sentences later —
+ * "What it CAN do is close a gap" — while the sentence above still said the
+ * opposite.
+ *
+ * The residual is not under-priced and the fold stays: every case below is a
+ * REFUSAL, which is the conservative direction — an availability cost on a
+ * contrived string, never a leak — and none of them is prose. What was wrong
+ * was the sentence, so the sentence is corrected and this block is what makes
+ * the corrected version checkable instead of merely more careful.
+ */
+describe('the fold cannot introduce a letter, but joining two tokens can still build a prefix', () => {
+  /**
+   * The separator between the two halves is a character the fold ERASES, and
+   * neither half is a credential prefix on its own. Both are written out of
+   * escapes rather than typed, so the separator is unambiguous in the source.
+   */
+  const HAIR = '\u200a';
+  const IDEOGRAPHIC = '\u3000';
+
+  it('refuses a prefix that exists only once the separator between its halves is erased', () => {
+    const joined: readonly (readonly [string, string])[] = [
+      [`the gh${HAIR}p_abcdefghijklmnopqrst`, 'ghp_ built across U+200A'],
+      [`AI${IDEOGRAPHIC}za0123456789abcdefghij`, 'AIza built across U+3000'],
+      [`Bear${HAIR}er 0123456789abcdefghij`, 'Bearer built across U+200A'],
+    ];
+    for (const [value, why] of joined) {
+      // The RAW string carries no such prefix, so this is not the guard's
+      // raw-string arm firing: the fold is what creates the shape.
+      expect(value, why).not.toMatch(/ghp_|AIza|Bearer /);
+      expect(() => assertBrowserSafe({ note: value }), why).toThrow();
+    }
+  });
+
+  it('admits the identical shapes when the separator is one the fold leaves alone', () => {
+    // U+0020 is deliberately NOT folded. The same three strings with a plain
+    // space are admitted, which isolates the JOIN as the whole cause of the
+    // refusals above rather than anything else in the guard.
+    expect(() => assertBrowserSafe({ note: 'the gh p_abcdefghijklmnopqrst' })).not.toThrow();
+    expect(() => assertBrowserSafe({ note: 'AI za0123456789abcdefghij' })).not.toThrow();
+    expect(() => assertBrowserSafe({ note: 'Bear er 0123456789abcdefghij' })).not.toThrow();
+  });
+
+  it('says that in the source, in both places, and no longer says the opposite', () => {
+    const prose = fs.readFileSync(REDACTION, 'utf8').replace(/\s+\*?\s*/g, ' ');
+    // The retired INFERENCE, by its exact shape, so a revert cannot bring it
+    // back quietly. It was written twice — once for the separator fold and
+    // once for the combining-mark fold beside it.
+    //
+    // What is pinned is the step from the true premise to the false
+    // conclusion, and not the words of the conclusion itself: both paragraphs
+    // now QUOTE the sentence they retired, which is this wave's rule for a
+    // correction, so a `not.toContain` on the quoted wording would forbid
+    // recording the history. The premise is still there, the conclusion is
+    // still quoted, and the join between them is what may never return.
+    expect(prose).not.toContain('it cannot introduce a letter, so it');
+    expect(prose).not.toContain('cannot introduce a letter, so it cannot build');
+    // What replaces it, in both places: the letter claim survives untouched,
+    // the false inference from it is gone, and the join is stated instead.
+    expect([...prose.matchAll(/cannot introduce a letter/g)]).toHaveLength(2);
+    expect([...prose.matchAll(/can join adjacent tokens/g)]).toHaveLength(2);
+  });
+});
