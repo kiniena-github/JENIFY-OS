@@ -180,6 +180,55 @@ describe('a decision label that the read boundary would refuse is refused at the
     }
   });
 
+  /**
+   * Wave 5 correction round six, Medium 4 — the 30th write site the "29 call
+   * sites" claim missed.
+   *
+   * `recordIntelligenceOutcome`'s `note` stored caller text with no credential
+   * scan while its six sibling methods all refused the same string. No read
+   * publishes the column today, so nothing 500s — which made it a LATENT brick
+   * rather than a live one: `hq_intel_decision_outcomes` is append-only, so the
+   * first read that ever serves it repeats High 4 verbatim and cannot be
+   * undone.
+   */
+  it('refuses every credential shape as an OUTCOME note, and records nothing', () => {
+    for (const note of poisoning) {
+      const fx = intelligenceFixture();
+      fx.budget([...INTELLIGENCE_TIERS]);
+      const decision = expectOk(decide(fx)).decision;
+      const refusal = expectError(
+        fx.ops.recordIntelligenceOutcome({
+          decisionId: decision.id,
+          workerId: fx.claim.workerId,
+          fence: fx.claim.fence,
+          result: 'quality_met',
+          note,
+        }),
+      );
+      expect(refusal.code, note).toBe('invalid_input');
+      expect(refusal.message, note).toContain('credential');
+      // Nothing was appended, so nothing is waiting to be published.
+      expect(
+        (fx.db.prepare(`SELECT COUNT(*) AS n FROM hq_intel_decision_outcomes`).get() as {
+          n: number;
+        }).n,
+        note,
+      ).toBe(0);
+      // An ordinary note on the same decision is still accepted.
+      expect(
+        expectOk(
+          fx.ops.recordIntelligenceOutcome({
+            decisionId: decision.id,
+            workerId: fx.claim.workerId,
+            fence: fx.claim.fence,
+            result: 'quality_met',
+            note: 'the review found nothing',
+          }),
+        ).decision.result,
+      ).toBe('quality_met');
+    }
+  });
+
   it('still accepts an ordinary decision label', () => {
     const fx = intelligenceFixture();
     fx.budget([...INTELLIGENCE_TIERS]);

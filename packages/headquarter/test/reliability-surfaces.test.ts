@@ -16,6 +16,7 @@
  *    vocabularies and no identifier, path, digest or detail string of any kind.
  */
 
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   handleControlRequest,
@@ -548,6 +549,63 @@ describe('the unauthenticated snapshot section', () => {
         expect(Number.isInteger(value)).toBe(true);
       }
       expect(runId).toBeTruthy();
+    } finally {
+      h.fixture.cleanup();
+    }
+  });
+});
+
+/**
+ * Wave 5 correction round six, High 4 — the write site the round-four fix
+ * missed, at the one method the shipped claim covers BY NAME.
+ *
+ * `PHASE_14…md` says "every facade write that stores caller text goes through
+ * `assertNoCredentialShape`". `recordVerifiedBackup` did not: its `note` went
+ * through `missionText` and no further. `hq_reliability_backups` is append-only
+ * — DELETE and UPDATE are both refused by the engine — and this route applies
+ * the strict scan to its whole response, so one accepted credential made
+ * `GET /api/hq/control/reliability` answer 500 forever. Executed against the
+ * previous head with a real verified backup file: 200, accepted, 500, and still
+ * 500 after a restart.
+ */
+describe('a backup note that the read boundary would refuse is refused at the WRITE', () => {
+  const poisoning = [
+    'sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345',
+    'rotate ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123 before Friday',
+    '-----BEGIN RSA PRIVATE KEY-----',
+    'Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+  ];
+
+  it('refuses every credential shape, records nothing, and leaves the route answering 200', async () => {
+    const h = harness();
+    try {
+      expect(h.call({ path: CONTROL_ROUTES.reliability }).status).toBe(200);
+      const backupPath = path.join(h.fixture.dir, 'verified.sqlite');
+      await h.fixture.db.backup(backupPath);
+      for (const note of poisoning) {
+        const refused = h.fixture.ops.recordVerifiedBackup({
+          backupPath,
+          requestedBy: 'founder',
+          note,
+        });
+        expect(refused.ok, note).toBe(false);
+        expect(!refused.ok && refused.error.code, note).toBe('invalid_input');
+        expect(!refused.ok && refused.error.message, note).toContain('credential');
+        // Nothing was written — the register is append-only, so a row here
+        // could never be taken back.
+        expect(h.fixture.ops.listVerifiedBackupsBounded().total, note).toBe(0);
+        // And the Founder route still answers.
+        expect(h.call({ path: CONTROL_ROUTES.reliability }).status, note).toBe(200);
+      }
+      // An ordinary note is still accepted, so the scan did not become a ban on
+      // saying anything about a backup.
+      const accepted = h.fixture.ops.recordVerifiedBackup({
+        backupPath,
+        requestedBy: 'founder',
+        note: 'nightly copy, verified before the release',
+      });
+      expect(accepted.ok).toBe(true);
+      expect(h.call({ path: CONTROL_ROUTES.reliability }).status).toBe(200);
     } finally {
       h.fixture.cleanup();
     }

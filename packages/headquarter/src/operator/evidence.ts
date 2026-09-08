@@ -92,7 +92,17 @@
  *    `UPDATE sqlite_sequence` read clean. `sqlite_sequence` carries no triggers
  *    and cannot be brought under the census — it is an internal SQLite table —
  *    so what closes that is the commitment, which lives in a ledger that DOES
- *    carry the guards and IS censused.
+ *    carry the guards. **"And IS censused" was the half that did not hold**
+ *    (Wave 5 correction round six, High 1): the census reads `sqlite_master` at
+ *    construction time, and this header's own sentence two lines up says a
+ *    trigger dropped and re-created before the next boot is never observed
+ *    missing — so the SAME three statements emptied the witness ledger, and
+ *    both of its readers read the very rows deleted. Executed: boot clean, full
+ *    Founder assessment clean, `releaseKillSwitch` admitted. What makes the
+ *    ledger genuinely censused is `truncatedImmutableLedgers`, which generalises
+ *    the `MAX(rowid)` versus `sqlite_sequence` comparison this function already
+ *    makes for `op_evidence` to EVERY declared AUTOINCREMENT ledger and reports
+ *    `append_only_ledger_truncated`, blocking, at both depths.
  *
  * **And two further claims are corrected, from the other round-four lane:**
  *
@@ -135,9 +145,16 @@
  * every commitment ever recorded is checked and the per-ledger comparison takes
  * the maximum) leaves the forgery undetected once HQ has re-created the
  * checkpoint ledger empty and a later process has nothing to measure against.
- * That is more deliberate acts than before, across two engine-guarded ledgers
- * and a census that reports each drop at the boot that observes it — a real
- * cost, and still not a cryptographic boundary. It is ONE ledger to drop rather
+ * DROPPING it is the surviving route and it is now the CHEAPEST one: emptying
+ * it in place is a blocking finding (`append_only_ledger_truncated`), so the
+ * attacker must either take the table away — which the boot that observes it
+ * reports, and which costs a restart and a further Founder assessment — or
+ * empty it AND remove its `sqlite_sequence` row, which is one more deliberate
+ * act against an internal table no trigger can reach. Both are measured in the
+ * phase document's residual list. That is more deliberate acts than before,
+ * across two engine-guarded ledgers and a census that reports each drop at the
+ * boot that observes it — a real cost, and still not a cryptographic
+ * boundary. It is ONE ledger to drop rather
  * than two, because the concurrent lane's second commitment on the verdict
  * ledger was retired above rather than kept beside this one; that is the price
  * of one mechanism instead of two, and it is recorded here rather than left for

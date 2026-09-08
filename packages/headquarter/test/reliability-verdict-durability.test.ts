@@ -802,8 +802,8 @@ describe('the enforcement declarations are frozen, not merely typed readonly', (
     // Emptying `HQ_INTEGRITY_FINDINGS` used to make every snapshot finding
     // count as `unrecognized`; emptying `SAFE_MODE_BLOCKING_FINDINGS` used to
     // make nothing blocking at all.
-    expect([...SAFE_MODE_BLOCKING_FINDINGS]).toHaveLength(3);
-    expect([...HQ_INTEGRITY_FINDINGS]).toHaveLength(6);
+    expect([...SAFE_MODE_BLOCKING_FINDINGS]).toHaveLength(4);
+    expect([...HQ_INTEGRITY_FINDINGS]).toHaveLength(7);
   });
 
   /**

@@ -4391,6 +4391,16 @@ export class HeadquarterOperations {
     }
     const reason = missionText('reason', input.reason, MAX_ASSIGNMENT_RATIONALE_LENGTH, true);
     if (!reason.ok) return fail('invalid_input', reason.message);
+    // Same class as the two above, and the sibling `assignAiMember` already
+    // scans its own `reason` (Wave 5 correction round six, Medium 4).
+    try {
+      assertNoCredentialShape({ reason: reason.value });
+    } catch {
+      return fail(
+        'invalid_input',
+        'The disable reason looks like it contains a credential; nothing was recorded.',
+      );
+    }
     try {
       const privileged = this.#requirePrivilegedQueue();
       return ok(
@@ -6277,8 +6287,9 @@ export class HeadquarterOperations {
    *
    * Refuses an act while HQ has said, about itself, that its stored record
    * cannot be trusted — the engine reports the file corrupt, an append-only
-   * guard the schema declares is missing, or the evidence hash chain does not
-   * verify.
+   * guard the schema declares is missing, a declared append-only ledger holds
+   * fewer rows than the engine's own high-water mark says it reached, or the
+   * evidence hash chain does not verify.
    *
    * Reads the `#private` latched report and nothing else, because this decides
    * whether a write lands: a patch of `hqReliabilityPosture` or of any other
@@ -8471,6 +8482,24 @@ export class HeadquarterOperations {
     }
     const note = missionText('note', input.note, MAX_RUN_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
+    // The scan the "every facade write that stores caller text" rule promised
+    // and this method did not have (Wave 5 correction round six, High 4). The
+    // backup register is APPEND-ONLY and this note is served verbatim on
+    // `GET /api/hq/control/reliability`, which applies the strict scan to its
+    // whole response — so one accepted credential made that route 500 FOREVER:
+    // the row cannot be deleted, cannot be updated, and a restart re-reads it.
+    // Executed against the previous head with a real verified backup file: 200,
+    // then accepted, then 500 across a restart.
+    try {
+      assertNoCredentialShape({ note: note.value ?? '' });
+    } catch {
+      return fail(
+        'invalid_input',
+        'The backup note looks like it contains a credential; nothing was recorded. The backup register is ' +
+          'append-only and this note is published on the Founder reliability route, so a stored credential ' +
+          'could be neither removed nor served.',
+      );
+    }
     const refusedActor = this.#resolveReliabilityCommander(input.requestedBy, 'record a verified backup');
     if (refusedActor) return refusedActor;
     const refusedCapability = this.#reliabilityCapabilityGate('record a verified backup');
@@ -8479,7 +8508,14 @@ export class HeadquarterOperations {
       return fail('invalid_input', 'backup register unavailable on this database handle');
     }
 
-    const verification = verifyHqBackupFile(backupPath);
+    // The live database's own path travels with the candidate, so registering
+    // the file HQ is running on as a "recovery point" is refused on identity
+    // (Wave 5 correction round six, Low 3). `sidecar_journal_present` catches
+    // it only while a process holds it open; SQLite removes the sidecars on a
+    // clean close, so between runs the live file verified perfectly.
+    const verification = verifyHqBackupFile(backupPath, {
+      liveDatabasePath: typeof this.#db.name === 'string' ? this.#db.name : null,
+    });
     if (!verification.verified) {
       return fail(
         'backup_verification_failed',
@@ -10184,6 +10220,21 @@ export class HeadquarterOperations {
     }
     const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
+    // The 30th write site the "29 call sites" claim missed (Wave 5 correction
+    // round six, Medium 4). No read publishes this column TODAY, so nothing
+    // 500s — which makes it a latent brick rather than a live one: the row is
+    // append-only, so the first read that ever serves it repeats High 4
+    // verbatim and cannot be undone. Its six sibling methods all refuse the
+    // same string, and the rule is "every facade write that stores caller
+    // text", not "every one that is currently published".
+    try {
+      assertNoCredentialShape({ note: note.value ?? '' });
+    } catch {
+      return fail(
+        'invalid_input',
+        'The outcome note looks like it contains a credential; nothing was recorded.',
+      );
+    }
     if (!this.#intelligenceStorePresent) {
       return fail('invalid_input', 'intelligence ledger unavailable on this database handle');
     }
