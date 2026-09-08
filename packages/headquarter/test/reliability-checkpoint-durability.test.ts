@@ -133,8 +133,14 @@ describe('the evidence log commits to a witness that does not live inside it', (
         'the guards are back, so the as-found census has nothing to report',
         // FOUR since Wave 5 correction round thirteen (High 1): the universal
         // rowid guard joined the trio on every declared ledger, and this
-        // forgery replays the triggers it captured, so it replays four.
-      ).toBe(4);
+        // forgery replays the triggers it captured, so it replays four. SIX
+        // since round fourteen (High 1, Medium 2), which found that guard to be
+        // one of three spellings of "how a row enters or changes position" and
+        // declared the other two — `no_rowid_reseat` and `no_rowid_move` —
+        // beside it. The number is a count of what the DECLARATION now carries
+        // on `op_evidence`; the forgery is unchanged and still replays whatever
+        // it captured.
+      ).toBe(6);
       // And the durable commitment catches it anyway. The answer is the FIRST
       // committed length the shortened log no longer reaches — the same shape
       // of answer every other chain check gives, "the log stops being true

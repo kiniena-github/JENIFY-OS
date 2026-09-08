@@ -916,6 +916,7 @@ import {
   SAFE_MODE_STATEMENT,
   ensureIntegrityCheckpoints,
   ensureLedgerRowidGuards,
+  ensureUniqueReentryGuards,
   ensureWriteOnceIdentityGuards,
   fullIntegrity,
   observeImmutabilityAsFound,
@@ -2789,6 +2790,13 @@ export class HeadquarterOperations {
     // and are not append-only ledgers (Wave 5 correction round thirteen,
     // High 3). Same position, same rule: after the as-found census.
     ensureWriteOnceIdentityGuards(db);
+    // The DERIVED unique-index guard, on every declared ledger and every
+    // write-once identity table (Wave 5 correction round fourteen, High 2).
+    // Same position and same rule as the two above: after the as-found census,
+    // and after every `ensure*Schema`, because the clause is derived from the
+    // INDEXES those schemas create — a guard built before them would be built
+    // against a file that does not yet declare what it must cover.
+    ensureUniqueReentryGuards(db);
     // The durable "HQ has ensured this file" mark, stamped into
     // `PRAGMA user_version` AFTER the ensures and read BEFORE them, next time
     // (Wave 5 correction round four, High 1). It is the half of the

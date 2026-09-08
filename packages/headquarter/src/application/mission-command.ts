@@ -330,6 +330,25 @@ BEGIN SELECT RAISE(ABORT, 'hq_missions identity is write-once'); END;
 CREATE TRIGGER IF NOT EXISTS trg_hq_missions_no_reidentify
 BEFORE UPDATE OF id ON hq_missions
 BEGIN SELECT RAISE(ABORT, 'hq_missions identity is write-once'); END;
+
+-- And the guard that makes the same sentence true of an INSERT that collides
+-- on the table's OTHER unique index (Wave 5 correction round fourteen, High 2).
+-- hq_missions declares UNIQUE(idempotency_key); no_replace tests NEW.id only,
+-- and REPLACE resolves a conflict on ANY unique index by DELETING the standing
+-- row without firing BEFORE DELETE while recursive_triggers is off -- the
+-- engine default, connection-scoped, and therefore true of every ordinary
+-- writer whatever HQ's own handle is set to. So no_erase did not fire either,
+-- and no_rowid_skip did not fire because the forgery kept the victim's rowid.
+-- Executed at 8481269 through the real facade: one INSERT OR REPLACE from an
+-- ordinary connection rewrote a mission's id to HIJACKED-MISSION with every
+-- declared guard still present and safeMode false at both depths in two later
+-- processes. Nothing in this repository REPLACEs a mission: commandMission
+-- inserts, and the idempotency key is looked up first.
+CREATE TRIGGER IF NOT EXISTS trg_hq_missions_no_replace_unique
+BEFORE INSERT ON hq_missions
+WHEN NEW.idempotency_key IS NOT NULL
+  AND EXISTS (SELECT 1 FROM hq_missions WHERE idempotency_key = NEW.idempotency_key)
+BEGIN SELECT RAISE(ABORT, 'hq_missions identity is write-once (unique idempotency_key already held)'); END;
 `;
 
 /**

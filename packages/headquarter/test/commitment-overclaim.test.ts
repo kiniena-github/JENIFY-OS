@@ -40,6 +40,8 @@ import {
   ENGINE_IMMUTABLE_TABLES,
   HQ_INTEGRITY_CHECKPOINT_TABLE,
   LEDGER_ROWID_GUARD,
+  LEDGER_ROWID_GUARDS,
+  LEDGER_ROWID_RESEAT_GUARD,
   contradictedChainCommitment,
   declaredGuardsFor,
   CHECKPOINT_COLUMNS_THAT_DECIDE_NOTHING,
@@ -65,6 +67,23 @@ const OVERCLAIM_GUARD = 'trg_hq_integrity_checkpoints_no_overclaim';
  * broader guard that now sits in front of it.
  */
 const ROWID_GUARD_ON_CHECKPOINT_LEDGER = `trg_${HQ_INTEGRITY_CHECKPOINT_TABLE}_${LEDGER_ROWID_GUARD}`;
+
+/**
+ * EVERY universal position guard on this ledger, which is what an isolation
+ * probe now has to remove to be left with the over-claim guard alone (Wave 5
+ * correction round fourteen, High 1 and Medium 2).
+ *
+ * The set grew from one name to three: round fourteen found that
+ * `no_rowid_skip` — "a row may not enter ABOVE the top" — was one of three
+ * spellings of the same question, and declared `no_rowid_reseat` (a row
+ * entering AT OR BELOW the top) and `no_rowid_move` (a row changing position
+ * without entering) beside it. Taken from `LEDGER_ROWID_GUARDS` rather than
+ * written out here, so a fourth spelling is removed by these probes on the day
+ * it is declared and the isolation stays real.
+ */
+const POSITION_GUARDS_ON_CHECKPOINT_LEDGER = LEDGER_ROWID_GUARDS.map(
+  (guard) => `trg_${HQ_INTEGRITY_CHECKPOINT_TABLE}_${guard}`,
+);
 
 /**
  * 5 s is vitest's default and is not a measurement. The probes below open real
@@ -761,14 +780,23 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
         // The over-claim guard, ALONE. Inside a rolled-back SAVEPOINT, so the
         // file the rest of this test sees still carries both guards.
         raw.exec('SAVEPOINT without_rowid_guard');
-        raw.exec(`DROP TRIGGER ${ROWID_GUARD_ON_CHECKPOINT_LEDGER}`);
+        // ALL the position guards, not just the one this probe used to remove:
+        // leaving `no_rowid_reseat` standing would let it, rather than the
+        // over-claim clause, do the refusing below.
+        for (const guard of POSITION_GUARDS_ON_CHECKPOINT_LEDGER) {
+          raw.exec(`DROP TRIGGER ${guard}`);
+        }
         expect(
           (
             raw
-              .prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='trigger' AND name = ?`)
-              .get(ROWID_GUARD_ON_CHECKPOINT_LEDGER) as { n: number }
+              .prepare(
+                `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='trigger' AND name IN (${POSITION_GUARDS_ON_CHECKPOINT_LEDGER.map(
+                  () => '?',
+                ).join(', ')})`,
+              )
+              .get(...POSITION_GUARDS_ON_CHECKPOINT_LEDGER) as { n: number }
           ).n,
-          'the rowid guard must actually be gone for this half to mean anything',
+          'the position guards must actually be gone for this half to mean anything',
         ).toBe(0);
         const alone = insertRow(raw, columns, {
           ...genuine,
@@ -784,11 +812,15 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
         expect(
           (
             raw
-              .prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='trigger' AND name = ?`)
-              .get(ROWID_GUARD_ON_CHECKPOINT_LEDGER) as { n: number }
+              .prepare(
+                `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='trigger' AND name IN (${POSITION_GUARDS_ON_CHECKPOINT_LEDGER.map(
+                  () => '?',
+                ).join(', ')})`,
+              )
+              .get(...POSITION_GUARDS_ON_CHECKPOINT_LEDGER) as { n: number }
           ).n,
-          'the rowid guard must be back after the rollback',
-        ).toBe(1);
+          'the position guards must be back after the rollback',
+        ).toBe(POSITION_GUARDS_ON_CHECKPOINT_LEDGER.length);
         expect(ledgerReadings(raw)).toEqual(NOTHING_REPORTED);
         raw.close();
 
@@ -1058,7 +1090,12 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
         // spelling at every reseat by itself, so it is not being carried by the
         // broader guard that happens to sit in front of it.
         raw.exec('SAVEPOINT without_rowid_guard');
-        raw.exec(`DROP TRIGGER ${ROWID_GUARD_ON_CHECKPOINT_LEDGER}`);
+        // Every position guard, for the reason given on
+        // `POSITION_GUARDS_ON_CHECKPOINT_LEDGER`: with `no_rowid_reseat`
+        // standing this pass would measure that guard instead of this clause.
+        for (const guard of POSITION_GUARDS_ON_CHECKPOINT_LEDGER) {
+          raw.exec(`DROP TRIGGER ${guard}`);
+        }
         for (const spelling of SPELLINGS) {
           for (const seq of RESEATS) {
             const attempt = reseat(spelling, seq, 'alone');
@@ -1127,6 +1164,25 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
         raw.exec('SAVEPOINT without_overclaim_guard');
         raw.exec(`DROP TRIGGER ${OVERCLAIM_GUARD}`);
 
+        // FIRST, the fact round fourteen added: with the over-claim guard gone
+        // but the full position set standing, both reseats are refused anyway —
+        // `no_rowid_reseat` is the general answer to the same shape on all 33
+        // ledgers. This is asserted BEFORE the isolation below so the test
+        // records what actually protects the store today, and not only what one
+        // clause does on its own.
+        for (const seq of [-1, 0]) {
+          const held = insertRow(raw, columns, {
+            ...genuine,
+            seq,
+            id: `position-guards-hold-${seq}`,
+          });
+          expect(
+            held.accepted,
+            `the position guards must refuse the reseat at ${seq} with no over-claim guard`,
+          ).toBe(false);
+          expect(held.message).toMatch(/rowids are contiguous/);
+        }
+
         // Above the top: the broader guard's own case, and it holds.
         const skipped = insertRow(raw, columns, {
           ...genuine,
@@ -1139,6 +1195,8 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
         // At or below the top, colliding with nothing: OUTSIDE its bound. Each
         // lands, and each makes an intact store report — which is the finding
         // the identity clause exists to refuse.
+        raw.exec('SAVEPOINT without_reseat_guard');
+        raw.exec(`DROP TRIGGER trg_${HQ_INTEGRITY_CHECKPOINT_TABLE}_${LEDGER_ROWID_RESEAT_GUARD}`);
         for (const seq of [-1, 0]) {
           raw.exec('SAVEPOINT reseat');
           const landed = insertRow(raw, columns, {
@@ -1157,6 +1215,8 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
           raw.exec('ROLLBACK TO reseat');
           raw.exec('RELEASE reseat');
         }
+        raw.exec('ROLLBACK TO without_reseat_guard');
+        raw.exec('RELEASE without_reseat_guard');
 
         raw.exec('ROLLBACK TO without_overclaim_guard');
         raw.exec('RELEASE without_overclaim_guard');
