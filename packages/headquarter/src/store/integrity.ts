@@ -12,22 +12,32 @@
  * 1. **A finding is a closed vocabulary member, never free text.** Every
  *    finding carries a `detail` string for a human, but the FINDING itself —
  *    the thing a decision is taken on and the only thing that reaches an
- *    unauthenticated artifact — is one of six names.
+ *    unauthenticated artifact — is one of seven names.
  *
- * 2. **Blocking is a short, argued list.** Only three findings engage safe
- *    mode: the engine says the file is corrupt, an append-only guard that the
- *    schema declares is missing, or the evidence hash chain does not verify.
- *    Each means HQ's own record cannot be trusted. A referential-integrity
- *    violation and a degraded durability posture are REPORTED and do not
- *    engage safe mode — they are real defects, but neither says the standing
- *    record is false, and treating them as corruption would make safe mode a
- *    thing operators route around instead of a thing they act on.
+ * 2. **Blocking is a short, argued list.** Only four findings engage safe
+ *    mode: `database_integrity_check_failed` (the engine says the file is
+ *    corrupt), `append_only_guard_missing` (a guard the schema declares was
+ *    absent from the file, or a declared ledger contradicts HQ's own durable
+ *    checkpoint), `append_only_ledger_truncated` (a declared ledger holds
+ *    fewer rows than the engine's own high-water mark says it reached) and
+ *    `evidence_chain_broken` (the hash chain does not verify, or the log
+ *    contradicts a commitment recorded outside it). Each means HQ's own record
+ *    cannot be trusted. A referential-integrity violation and a degraded
+ *    durability posture are REPORTED and do not engage safe mode — they are
+ *    real defects, but neither says the standing record is false, and treating
+ *    them as corruption would make safe mode a thing operators route around
+ *    instead of a thing they act on.
+ *
+ *    Both counts above are pinned to the constants they describe by
+ *    `integrity-statement-truth.test.ts`, because this docblock said "six" and
+ *    "three" for the whole of Wave 5 while `HQ_INTEGRITY_FINDINGS` grew to
+ *    seven and `SAFE_MODE_BLOCKING_FINDINGS` to four beneath it.
  *
  * 3. **Cost is stated, not hidden.** `structuralIntegrity` is the cheap half —
  *    the `sqlite_master` reads, four pragmas, one `MAX(rowid)` seek per
- *    declared ledger and one `COUNT(*)` over HQ's own small commitment ledger,
- *    none of which is proportional to the size of a ledger — and is what a boot
- *    can afford on every construction. `fullIntegrity` adds `integrity_check`,
+ *    declared ledger, and one `COUNT(*)` plus one indexed lookup over HQ's own
+ *    small commitment ledger, none of which is proportional to the size of a
+ *    ledger — and is what a boot can afford on every construction. `fullIntegrity` adds `integrity_check`,
  *    `foreign_key_check` and a whole-log evidence-chain verification, which
  *    are O(database) and O(log), and it is therefore an explicit act. Which
  *    one produced a verdict is carried ON the verdict, so nobody can mistake a
@@ -635,11 +645,38 @@ export const SAFE_MODE_STATEMENT =
   'header can still put the file back to unwitnessed; HQ holds no key over its own file and says so ' +
   'rather than claiming a boundary it does not have.';
 
+/**
+ * What each assessment depth actually costs and actually finds — the sentence
+ * `hqReliabilityPosture` serves to the Founder as `depthStatement`.
+ *
+ * It said "reads the schema catalogue and the durability pragmas ONLY" for the
+ * whole of Wave 5, and that stopped being true four correction rounds before
+ * anybody re-read it (round eight, Medium 1). The cheap pass now also reads the
+ * bounded marks HQ keeps about its own append-only records, and reports
+ * `append_only_ledger_truncated` and `evidence_chain_broken` on its own. The
+ * direction of the error was fail-SAFE — HQ detected more than it said — which
+ * is exactly why nothing caught it, and is not a reason to leave it standing.
+ *
+ * The last sentence is a machine-checkable list, not decoration:
+ * `integrity-statement-truth.test.ts` induces every member of
+ * `HQ_INTEGRITY_FINDINGS` against a real file, runs BOTH depths over each, and
+ * compares the executed full-exclusive set to the names parsed out of this
+ * string. The prose therefore cannot drift from the behaviour again without
+ * failing a test, which is the only reason it is safe to state it this
+ * precisely.
+ */
 export const INTEGRITY_DEPTH_STATEMENT =
-  'A structural assessment reads the schema catalogue and the durability pragmas only — cheap enough to run ' +
-  'at every construction. A full assessment additionally runs PRAGMA integrity_check, PRAGMA ' +
-  'foreign_key_check and a whole-log evidence-chain verification, which are proportional to the database and ' +
-  'to the log and are therefore an explicit act. A structural pass is never reported as a full one.';
+  'A structural assessment reads the schema catalogue, the durability pragmas, and the bounded marks HQ ' +
+  'keeps about its own append-only records — one MAX(rowid) seek per declared ledger, and one COUNT(*) ' +
+  'plus one indexed lookup over HQ’s own small commitment ledger. None of those is proportional to the ' +
+  'data, which is what keeps it cheap enough to run at every construction. It is therefore not a ' +
+  'catalogue read alone: a declared ledger that has been emptied, and an evidence log that contradicts a ' +
+  'commitment HQ recorded outside it, are both found and both blocking at this depth. A full assessment ' +
+  'additionally runs PRAGMA integrity_check, PRAGMA foreign_key_check and a whole-log evidence-chain ' +
+  'verification, which are proportional to the database and to the log and are therefore an explicit act; ' +
+  'only a full assessment can report the chain as verified, and a structural pass is never reported as a ' +
+  'full one. Findings only a full assessment can raise: database_integrity_check_failed, ' +
+  'foreign_key_violations.';
 
 /* ------------------------------------------------------------------ */
 /* The checks                                                          */
