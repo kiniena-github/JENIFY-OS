@@ -245,58 +245,122 @@ operators route around instead of a thing they act on.
 
 ### What it refuses, and what it deliberately does not
 
+The asymmetry is the point: safe mode never removes a way to STOP something and
+never removes a way to find out what is wrong.
+
 | Refused | Kept available |
 |---|---|
 | every Founder-gated command write (mission, project, memory, truth, orchestrate, collaboration, brief, product) | every READ — a Founder who cannot see the store cannot fix it |
 | `approveTask` — an approval bound now would sit primed to run the moment safe mode clears | `denyTask` — the fail-safe direction |
+| `acceptTruth` — the Founder's approval-authority, digest-bound, one-shot ACCEPTANCE of a truth record; the act `SAFE_MODE_STATEMENT`'s word "APPROVE" denotes if it denotes anything | `reviewTask` — a verdict on work that was claimed and executed BEFORE safe mode engaged |
 | `authorizeAction` — the external-action analogue of the same argument: the `authorized` snapshot is captured from canonical truth HQ has just declared untrustworthy, it outlives the clearing of safe mode, and `executeAction` compares against it | `proposeAction` — a proposal is a request, not an authorization, and it reaches nothing |
 | `releaseKillSwitch` | `engageKillSwitch` — the fail-safe direction |
-| `registerExecutionWorker`, `declareWorkerProvider` — the two that ADD authority | `revokeWorkerProvider`, `deactivateExecutionWorker` — the two that remove it |
-| `claimNext` — refused as `safe_mode_engaged`, distinctly from `nothing_claimable` | `recoverInterruptedRuns` and `reconcileRun` — the acts that resolve the state |
+| `registerExecutionWorker`, `declareWorkerProvider`, `registerAiMember` — the three that ADD authority | `revokeWorkerProvider`, `deactivateExecutionWorker`, `disableAiMember` — the three that remove it |
+| `claimNext` — refused as `safe_mode_engaged`, distinctly from `nothing_claimable` | `recoverInterruptedRuns`, `reconcileRun`, `reconcileTask`, `reconcileAction` — the acts that resolve the state |
 | `executeAction` — refused BEFORE the reservation, so no side-effect key is burned | `assessHqIntegrity` and `recordVerifiedBackup` — the acts that investigate and clear it |
-| `openRun` / `startRunAttempt` / `recordRunOutcome` | |
-| `recordIntelligenceDecision`, `escalateIntelligenceDecision`, `recordIntelligenceOutcome`, `recordIntelligenceCost`, `recordModelObservation`, `setIntelligenceBudget` (Phase 14) | |
-
-The asymmetry is the point: safe mode never removes a way to STOP something and
-never removes a way to find out what is wrong.
+| `openRun` / `startRunAttempt` / `recordRunOutcome` | `startTask`, `heartbeat`, `submitResult`, `failTask` — work already claimed and already running, which must still be able to report |
+| `recordIntelligenceDecision`, `escalateIntelligenceDecision`, `recordIntelligenceOutcome`, `recordIntelligenceCost`, `recordModelObservation`, `setIntelligenceBudget` (Phase 14) | `returnForFreshApproval` — strictly narrowing: it can only clear a dead approval |
 
 **This table was right and the one-sentence `SAFE_MODE_STATEMENT` was broader
 than it** (Wave 5 correction round four, Low L6). The shipped sentence said HQ
 "refuses the acts that would ADD TO … a record it cannot stand behind", while
 `createTask`, `proposeMission`, `appendSystemEvidence`, `recordVerifiedBackup`
 and `engageKillSwitch` all add rows under an engaged latch — each for the reason
-given in the second table below. The sentence now names what is actually
+given in the tables below. The sentence now names what is actually
 refused: acts that would APPROVE, RELEASE, EXECUTE against or grant AUTHORITY
 over that record.
 
-**The mutators deliberately left AVAILABLE, each with its reason** (Wave 5
-review, Medium finding 7 — `authorizeAction` was in neither column, and neither
-was anything else in this list, so "what safe mode refuses" was a partial
-statement presented as a complete one).
+**Both columns are now EXHAUSTIVE, and the suite enforces that** (Wave 5
+correction round seven, Medium 1). Three times in this wave a mutator turned out
+to be in neither column — `authorizeAction` in the review, `registerExecutionWorker`
+and `declareWorkerProvider` in round three, and in round seven `acceptTruth`,
+`registerAiMember`, `disableAiMember`, `setAiMemberHealth`, `postMissionMessage`,
+`reconcileTask`, `rejectProposal` and `returnForFreshApproval` all at once. A
+narrative table cannot stop that happening a fourth time, so the two tables
+below name EVERY public method of `HeadquarterOperations` that writes, one row
+each, and `safe-mode-disposition.test.ts` derives the same two sets from
+`application/service.ts` and fails when they differ in either direction. A new
+mutator that lands in neither table fails the suite; a method listed in a table
+that no longer has the disposition it claims fails it too.
 
-That table was still incomplete, and one of the entries missing from it granted
-AUTHORITY (Wave 5 correction round three, Medium A8). `registerExecutionWorker`
-created a worker identity WITH its `allowedCapabilities` straight into
-`hq_specialists` — the table `#grantOf` reads at every enforcement point — while
-HQ had declared its own record untrustworthy, and registration is create-only
-with no revoke path. `declareWorkerProvider` is the same act one field across:
-it is what lets a worker claim provider-bound work at all. Both are REFUSED now,
-and `SAFE_MODE_STATEMENT` names them. The five that remain available were each
-decided deliberately rather than by omission, and the reason is recorded on the
-method as well as here.
+#### Every facade write REFUSED while safe mode is engaged
+
+| Refused | Why |
+|---|---|
+| `approveTask` | an approval bound to a record HQ cannot stand behind would sit primed to run the moment safe mode clears. |
+| `acceptTruth` | the Founder's approval-authority, digest-bound, step-up-gated, one-shot acceptance of a truth record. Acceptance executes nothing — no task, approval row, claim or dispatch is touched — which is why this was a Medium rather than a High; it is refused anyway because an act the shipped sentence calls APPROVE must either be refused or be here in the other table with its reason. |
+| `claimNext` | a claim hands work to a worker. Refused as `safe_mode_engaged`, distinctly from `nothing_claimable`. |
+| `releaseKillSwitch` | the direction that lets work run again. |
+| `declareWorkerProvider` | it is what lets a worker claim provider-bound work at all, so it ADDS authority. |
+| `registerExecutionWorker` | creates a worker identity WITH its `allowedCapabilities`, straight into the table `#grantOf` reads at every enforcement point. Create-only, with no revoke path. |
+| `registerAiMember` | writes `grantedCapabilities`, from which `RegistryWorkerDirectory` derives the `effectiveCapabilities` it answers `allowedCapabilities` with. That the shipped host leaves the narrowing seam unwired is a deployment fact, not a property of the method. |
+| `assignTaskAsFounder` | the Founder-gated wrapper is gated by the `hq.workforce_assign` trio, and every Founder-gated command write is refused. (The bare `assignTask` stays available — see the other table.) |
+| `commandMission` | Founder-gated command write. |
+| `transitionMission` | Founder-gated command write. |
+| `amendMissionIntent` | Founder-gated command write. |
+| `linkMissionPlanItem` | Founder-gated command write. |
+| `orchestrateMission` | Founder-gated command write; `apply` links plan items to tasks. |
+| `assignMissionToProject` | Founder-gated command write. |
+| `createProject` | Founder-gated command write. |
+| `updateProject` | Founder-gated command write. |
+| `transitionProject` | Founder-gated command write. |
+| `createProduct` | Founder-gated command write. |
+| `moveProductLifecycle` | Founder-gated command write. |
+| `registerProductArtifact` | Founder-gated command write. |
+| `openRun` | opens the run ledger's record of an execution HQ is about to admit. |
+| `startRunAttempt` | records that an attempt is running against canonical truth HQ cannot vouch for. |
+| `recordRunOutcome` | records the outcome of that attempt. |
+| `recordModelObservation` | Founder-gated command write (Phase 14). |
+| `setIntelligenceBudget` | Founder-gated command write (Phase 14) — a budget is a standing authorization to spend. |
+| `recordIntelligenceDecision` | Founder-gated command write (Phase 14). |
+| `escalateIntelligenceDecision` | Founder-gated command write (Phase 14). |
+| `recordIntelligenceOutcome` | Founder-gated command write (Phase 14). |
+| `recordIntelligenceCost` | Founder-gated command write (Phase 14). |
+| `recordMemory` | Founder-gated command write. |
+| `recordTruth` | Founder-gated command write. |
+| `verifyTruth` | Founder-gated command write. |
+| `authorizeAction` | the `authorized` snapshot is captured from canonical truth HQ has just declared untrustworthy, it outlives the clearing of safe mode, and `executeAction` compares against it. |
+| `executeAction` | the one act HQ cannot walk back. Refused BEFORE the reservation, so no side-effect key is burned. |
+| `openCollaborationSession` | Founder-gated command write. |
+| `admitCollaborator` | Founder-gated command write; admission is an addition. |
+| `recordContribution` | Founder-gated command write. |
+| `assembleCollaborationContext` | Founder-gated: it writes the assembled bundle. |
+| `issueBrief` | Founder-gated command write. |
+
+#### Every facade write LEFT AVAILABLE while safe mode is engaged, each with its reason
 
 | Left available | Why |
 |---|---|
 | `createTask` | a queued task is a request that cannot execute: claiming it is refused, so nothing it carries can happen while safe mode stands. Refusing creation would stop a Founder recording the very work that fixes the store. |
 | `assignTask` | assignment narrows who MAY claim; the claim itself is refused. It removes an option, it never adds one. |
-| `startTask`, `submitResult` | both belong to work already claimed and already running. Refusing them would strand a live execution with nowhere to report, which loses truth rather than protecting it. |
-| `reviewTask` | a `pass` verdict completes a task and is the closest of these to an approval, but the task it completes was claimed and executed BEFORE safe mode engaged. Refusing the verdict does not un-execute it; it only leaves HQ unable to record what happened. **Stated as the argued judgement it is, not as an obvious one.** |
-| `proposeAction`, `proposeMission`, `promoteProposal` | a proposal reaches nothing and authorizes nothing; `authorizeAction` and `executeAction` are both refused, and the task a promotion creates cannot be claimed, so none of the three can become an act. |
 | `routeTask` | advisory routing. `eligible` is computed from the capability registry and the directory allow-list, it changes no canonical state, and the claim it might inform is refused anyway. The only thing it can write is an evidence note saying a nomination source misbehaved. |
-| `appendSystemEvidence` | the entry that had to be ARGUED, because it appends into the very hash chain a latched `evidence_chain_broken` finding is a statement about. Every kind it can still write records a system lane REFUSING to act (`claude_github_dispatch_refused`, `direct_order_dispatch_blocked`); the kinds that DECIDE a dispatch outcome are structurally excluded and reachable only through the constructor grant; and the actor is a reserved system name that can never resolve to a principal or a worker. It grants nothing and concludes nothing, and refusing it would leave a lane unable to record that it declined — losing truth in the posture built for not losing truth. The same argument as `startTask`/`submitResult`. |
-| `revokeWorkerProvider`, `deactivateExecutionWorker` | strictly NARROWING: each can only take authority away, and there is no reactivate method. `declareWorkerProvider` and `registerExecutionWorker` are refused for the mirror-image reason. |
-| `reconcileAction`, `reconcileRun`, `recoverInterruptedRuns` | the acts that RESOLVE an uncertain state. Refusing them would make safe mode self-sustaining. |
-| `engageKillSwitch`, `denyTask` | the fail-safe directions. |
+| `denyTask` | the fail-safe direction. |
+| `startTask` | belongs to work already claimed and already running. Refusing it would strand a live execution with nowhere to report. |
+| `heartbeat` | the same, one field across: it only says the live claim is still alive. |
+| `submitResult` | the same. Refusing it loses truth rather than protecting it. |
+| `failTask` | reporting a failed execution is the fail-safe direction of `submitResult`. |
+| `reviewTask` | a `pass` verdict completes a task and is the closest of these to an approval, but the task it completes was claimed and executed BEFORE safe mode engaged. Refusing the verdict does not un-execute it; it only leaves HQ unable to record what happened. **Stated as the argued judgement it is, not as an obvious one.** |
+| `reconcileTask` | one of the acts that RESOLVE an uncertain state, exactly like `reconcileRun` and `reconcileAction`. Refusing it would make safe mode self-sustaining. |
+| `returnForFreshApproval` | strictly NARROWING and a no-op unless an approval is already dead: it clears a task's binding to an approval that no longer admits execution. The fresh decision that would follow is an ordinary `approveTask`, which is refused. |
+| `engageKillSwitch` | the fail-safe direction. |
+| `appendSystemEvidence` | the entry that had to be ARGUED, because it appends into the very hash chain a latched `evidence_chain_broken` finding is a statement about. Every kind it can still write records a system lane REFUSING to act (`claude_github_dispatch_refused`, `direct_order_dispatch_blocked`); the kinds that DECIDE a dispatch outcome are structurally excluded and reachable only through the constructor grant; and the actor is a reserved system name that can never resolve to a principal or a worker. It grants nothing and concludes nothing, and refusing it would leave a lane unable to record that it declined — losing truth in the posture built for not losing truth. |
+| `reserveEvidence` | atomicity, not authority: it runs a callback in one write transaction and writes nothing itself, and every gate inside the callback still applies. |
+| `lookupPrincipal` | a read. It is in this table because the enumeration covers every public method the source scan reaches, and leaving it out would be the same silent omission this table exists to end. |
+| `revokeWorkerProvider` | strictly NARROWING: it can only take authority away, and there is no reactivate method. `declareWorkerProvider` is refused for the mirror-image reason. |
+| `deactivateExecutionWorker` | the same. `registerExecutionWorker` is refused for the mirror-image reason. |
+| `disableAiMember` | the same, one registry across: `status: 'disabled'` makes `assignability` answer `worker_inactive`. `registerAiMember` is refused for the mirror-image reason. |
+| `setAiMemberHealth` | a closed vocabulary that grants nothing. The only enforcement-adjacent reader is `registry/routing.ts`, which excludes an `unavailable` member from an ADVISORY ranking — so the most it can do is re-admit a member to a nomination list, and `routeTask`, whose whole output that is, is available for the same reason. Refusing it would only stop the Founder recording that a member is down. |
+| `postMissionMessage` | storage only. It creates no task, touches no approval and grants nothing, whatever the text says; the one bridge from a room to work creates a task that cannot be claimed. Refusing it would stop a Founder and a worker discussing the outage they are fixing. |
+| `proposeMission` | a proposal reaches nothing and authorizes nothing. |
+| `promoteProposal` | the task a promotion creates cannot be claimed while safe mode stands, so it cannot become an act. |
+| `rejectProposal` | the CLOSING direction of `promoteProposal`: it can only take an open proposal off the table. The same asymmetry that keeps `denyTask` available while `approveTask` is refused. |
+| `recoverInterruptedRuns` | one of the acts that RESOLVE an uncertain state. |
+| `reconcileRun` | the same. |
+| `reconcileAction` | the same. |
+| `assessHqIntegrity` | the act that investigates safe mode and is the only thing that clears it. Its capability gate passes `permittedInSafeMode = true` on purpose. |
+| `recordVerifiedBackup` | the act that preserves a recovery point while the store is untrusted. Same gate, same flag. |
+| `proposeAction` | a proposal is a request, not an authorization, and it reaches nothing; `authorizeAction` and `executeAction` are both refused. |
+
 
 ### When it is assessed, and the cost of each
 
@@ -1504,15 +1568,37 @@ as well as here:
   `VACUUM` preserves all three numbers. A false permanent alarm here would have
   been worse than the hole.
 
-  **What is still NOT detected, at the CHEAPEST price found rather than the one
-  easiest to describe, executed rather than asserted:** the same in-place wipe
-  with the invariant repaired — insert the replacement at an EXPLICIT `seq = 1`
-  and then `UPDATE sqlite_sequence SET seq = 1` for that ledger. Measured:
-  `rows/highwater={"c":1,"s":1} boot=false assess=false release=ADMITTED`. So
-  the honest price of the surviving attack is one explicit rowid and one extra
-  `UPDATE` against a table no trigger can guard — still zero restarts and zero
-  Founder acts, and cheaper than the `DROP TABLE` the previous round named. The
-  even cheaper ONE-statement repair was tried too and does not hold: `DELETE
+  **What is still NOT detected — RE-PRICED in round six, because the version
+  WITHOUT the barrier the last price named was never executed (Low 2).** The
+  round-five sentence here read "insert the replacement at an EXPLICIT
+  `seq = 1` and then `UPDATE sqlite_sequence SET seq = 1` for that ledger",
+  measured `rows/highwater={"c":1,"s":1} boot=false assess=false
+  release=ADMITTED`. Two things are wrong with it. First, that path is not the
+  cheapest. Second, on a file carrying more than ONE commitment it is CAUGHT:
+  collapsing three commitment rows into one regresses this ledger's own recorded
+  high-water mark, and the next process came back `boot=true assess=true
+  release=safe_mode_engaged`. It was measured on a single-commitment file, where
+  the collapse is invisible.
+
+  The path that actually survives elides nothing, so there is no identity to
+  repair and no `sqlite_sequence` write at all. Keep the ROW COUNT and rewrite
+  the rows IN PLACE: `DROP TRIGGER` the ONE `BEFORE UPDATE` guard of the three,
+  one `UPDATE hq_integrity_checkpoints SET chain_length = …, tip_hash = …,
+  ledger_marks = …`, re-create that one trigger. Count, greatest rowid and
+  high-water mark are untouched by construction. Executed end to end with
+  `op_evidence` itself rewritten in place and re-chained, so the forgery is real
+  rather than notional: `p2/p3/p4 boot=false assess=false release=ADMITTED`,
+  permanently. Zero `sqlite_sequence` writes, zero `DELETE`s, zero `INSERT`s,
+  zero explicit rowids, one trigger of three per ledger touched. The whole
+  sequence is in `reliability-commitment-residual.test.ts`, which asserts the
+  hole as well as the closure — a residual nobody can execute is a residual
+  nobody can price.
+
+  So the honest gain of `elidedCommitmentLedgerRows` is narrower than it was
+  written to be: it closes every version that DELETES rows, at every price. It
+  does not close the version that rewrites them in place, and no row-count
+  invariant can — the count is exactly what that version preserves. The
+  even cheaper ONE-statement repair of an ELISION was tried too and does not hold: `DELETE
   FROM sqlite_sequence WHERE name = 'hq_integrity_checkpoints'` buys the
   attacker the process that follows, the Founder assessment it was aiming to
   pass included — and that assessment is itself the next COMMITMENT, which
@@ -1576,7 +1662,9 @@ as well as here:
   what retiring the second commitment cost is: one ledger to drop OR to wipe in
   place and re-seat, and the free version of the second of those is now closed —
   see the re-priced residual immediately above for what the wipe costs today
-  (one explicit rowid plus one `UPDATE sqlite_sequence`). The trade itself still
+  (one `DROP TRIGGER` and its re-creation per ledger, plus one `UPDATE` per
+  ledger; no `sqlite_sequence` write, contrary to what round five recorded
+  here). The trade itself still
   stands on its three merits, because the retired mechanism could be argued past
   by an APPEND — a write the ledger permits — while the survivor cannot, and a
   second barrier that a permitted write can retire is not a second barrier.
@@ -1784,6 +1872,25 @@ as well as here:
   refusal is the right answer. `live-redaction.test.ts` pins the boundary from
   both sides rather than leaving it argued.
 - A credential split across two search fields still passes both scans.
+- **The strict scan REFUSES ordinary Founder prose that the weak heuristic
+  accepted, and that cost is disclosed here rather than left to be discovered**
+  (Wave 5 correction round six, Low 1). Round four's disclosure said "nothing
+  that used to be refused is now accepted" — true, and only half the trade. Two
+  shapes carry the other half, both executed: `Bearer\s+[A-Za-z0-9._-]{16,}`
+  refuses "The bearer responsibilities were reassigned to the shift lead", and
+  `sk-[A-Za-z0-9_-]{16,}` refuses "Contract with Addis-Sk-Trading-Corporation
+  renewed for 2027" — a plausible Ethiopian business name in a product whose
+  first tenant is an Ethiopian salt factory. The answer is `invalid_input`,
+  there is no override, and rephrasing is the only remedy. The patterns were
+  deliberately NOT loosened: this is the SAME function the read boundary
+  applies, so admitting the prose would loosen what may be published as well as
+  what may be stored, and every candidate discriminator was a real weakening of
+  a fail-closed backstop — "require a digit in the run" admits a real 16-character
+  all-letter token about 6.6% of the time, and "require a longer run" only moves
+  an arbitrary boundary. `credential-scan-cost.test.ts` pins the exact refused
+  sentences and the near misses that are still accepted, so this disclosure is
+  enforced by the suite and a future tightening has to move it rather than
+  quietly change the trade.
 - A `cp` of a live WAL-mode database is a copy of an arbitrary prefix of the
   truth, and HQ cannot tell you so from the bytes. **The claim that it "still
   verifies, and always will" was too strong in BOTH directions and is corrected
@@ -2221,7 +2328,7 @@ barrier it names must be executed before the sentence is written.**
 
 | Finding | What was reproduced | What changed |
 |---|---|---|
-| **MEDIUM 1** — the surviving whole-log forgery costs materially less than the residual stated, and names a barrier the attacker never has to cross | The residual priced the surviving attack at "one extra `DROP TABLE`, one restart and one further Founder act". Wiping `hq_integrity_checkpoints` ROWS IN PLACE — drop its three triggers, `DELETE`, INSERT one coherent replacement, re-create the triggers — leaves the table PRESENT, so the as-found census has nothing to observe: `BOOT safeMode = false []`, `FULL assessment safeMode = false []`, `releaseKillSwitch ADMITTED? true`, at zero restarts and zero Founder acts. The same wipe neutralised the durable half for a store whose every OTHER declared ledger had been dropped (`p3 boot=false assess=false release=ADMITTED`). The DROP variant the residual described does reproduce exactly as written; it is simply not the cheap path. | `elidedCommitmentLedgerRows`: the commitment ledger is `INTEGER PRIMARY KEY AUTOINCREMENT`, HQ is its only writer and its `no_erase` guard refuses a DELETE, so its row COUNT, its greatest rowid and the engine's high-water mark for it are the same number. An in-place elision breaks that identity and is blocking at the boot, at the assessment and at every process afterwards. Verified against six legitimate ways a sequence value might be burned — none burns one in SQLite — before it was relied on. The residual now states the true remaining price, executed: one explicit rowid plus one `UPDATE sqlite_sequence`, which is still silent. |
+| **MEDIUM 1** — the surviving whole-log forgery costs materially less than the residual stated, and names a barrier the attacker never has to cross | The residual priced the surviving attack at "one extra `DROP TABLE`, one restart and one further Founder act". Wiping `hq_integrity_checkpoints` ROWS IN PLACE — drop its three triggers, `DELETE`, INSERT one coherent replacement, re-create the triggers — leaves the table PRESENT, so the as-found census has nothing to observe: `BOOT safeMode = false []`, `FULL assessment safeMode = false []`, `releaseKillSwitch ADMITTED? true`, at zero restarts and zero Founder acts. The same wipe neutralised the durable half for a store whose every OTHER declared ledger had been dropped (`p3 boot=false assess=false release=ADMITTED`). The DROP variant the residual described does reproduce exactly as written; it is simply not the cheap path. | `elidedCommitmentLedgerRows`: the commitment ledger is `INTEGER PRIMARY KEY AUTOINCREMENT`, HQ is its only writer and its `no_erase` guard refuses a DELETE, so its row COUNT, its greatest rowid and the engine's high-water mark for it are the same number. An in-place elision breaks that identity and is blocking at the boot, at the assessment and at every process afterwards. Verified against six legitimate ways a sequence value might be burned — none burns one in SQLite — before it was relied on. **The remaining price this row recorded was itself wrong, and is corrected in round six (Low 2): "one explicit rowid plus one `UPDATE sqlite_sequence`" is neither the cheapest surviving path nor a silent one — on a file with more than one commitment it is CAUGHT (`boot=true assess=true release=safe_mode_engaged`), because collapsing the rows regresses the ledger's own recorded high-water mark.** The path that survives keeps the row COUNT and rewrites the rows in place: one `DROP TRIGGER` of the `BEFORE UPDATE` guard, one `UPDATE`, re-create that trigger — no `DELETE`, no `INSERT`, no explicit rowid and no `sqlite_sequence` write at all (`p2/p3/p4 boot=false assess=false release=ADMITTED`). This check closes every version that DELETES rows; no row-count invariant can close the version that preserves the count. |
 | **MEDIUM 2** — the documented remedy for this wave's own upgrade cost does not work, and the source comment contradicted the code it documented | Three sentences said a newly declared ledger's first boot is "cleared by one Founder full assessment". Carrying the restored-ledger list into `fullIntegrity` — which is what closed the previous round's Medium — made that false for every established file: `p1 boot=true assess=true release=refused`, `p2 boot=true assess=false release=ADMITTED`. The control, a dropped GUARD, still clears in one: `q1 boot=true assess=false release=ADMITTED`. It applies to every existing HQ database on first contact with this build. | The sentences, not the code. Narrowing the rule to "genuine upgrades only" needs a discriminator separating "a ledger this build newly declares" from "a ledger destroyed", and the only durable marks available — `PRAGMA user_version` and the checkpoint commitments — are ordinary writable content of the same file. A writer who drops a ledger and stamps an older generation walks into the benign branch, which would have made MEDIUM 1's residual cheaper; and the commitment ledger's own destruction takes every commitment about it. Two processes and two Founder assessments is now what `store/integrity.ts` and this document say, with the measurement beside it. |
 | **LOW 1** — a forged `sqlite_sequence` reading, once committed, latched safe mode permanently with no in-HQ remedy | `sqlite_sequence` is an ordinary writable table SQLite refuses to let a trigger guard, and the per-ledger commitment took the maximum ever recorded. Inflating `hq_reliability_verdicts` from 1 to 500000, letting ONE clean boot commit the reading and then restoring the true value produced a `regressedImmutableLedgers` entry TRUE OF NOTHING: `pB2/pB3/pB4 boot=true assess=true findings=["append_only_guard_missing"]`, clearable by nothing including `assessHqIntegrity`. Fail-closed, and the attacker already holds raw write — but a FABRICATED finding in the false-alarm direction, which the architectural law forbids symmetrically. | The committed mark is corroborated against the ledger's own `MAX(rowid)` and HQ commits the smaller of the two, which for a genuine append-only ledger are the same number. An inflated `sqlite_sequence` now commits nothing the rows do not support: `pB2/pB3/pB4 boot=false assess=false findings=[]`. `MAX(rowid)` is a single reverse seek, so the structural pass stays affordable — and its stated cost was corrected to say so rather than keeping the old "runs no table scan". |
 
@@ -2290,3 +2397,32 @@ correction and two clarifications, recorded here rather than left to be found:
 existing closed finding, so the vocabulary the reconciliation froze is unchanged
 by this round — the freeze enumeration reports nothing unfrozen at the merged
 head.
+
+## The SEVENTH correction round: a Founder APPROVAL that safe mode admitted, and four more write/read asymmetries
+
+A fresh read-only hostile review of the merged head `d97b8a6` — the true merge
+of the two round-six correction lanes — returned 0 Critical, 0 High, 2 Medium
+and 2 Low. All four are addressed here. Two are code fixes with new pinning
+suites; one is a disclosure the code deliberately does not change; one is a
+residual re-priced after executing the version without the barrier it named.
+
+| Finding | What was reproduced | What answers it |
+|---|---|---|
+| **MEDIUM 1** — `acceptTruth` wrote a permanent acceptance while safe mode was engaged, and was in neither column of the safe-mode tables | `acceptTruth` had no `#safeModeRefusal`. Executed: with `append_only_guard_missing` latched, `acceptTruth -> ACCEPTED`, while `recordTruth` beside it correctly answered `safe_mode_engaged`. `SAFE_MODE_STATEMENT` — shipped verbatim on every reliability view and in every refusal — says HQ refuses the acts that would APPROVE a record it cannot stand behind, and this is the Founder's approval-authority, digest-bound, step-up-gated, one-shot acceptance of one. Seven more mutators were in neither column with it: `registerAiMember`, `disableAiMember`, `setAiMemberHealth`, `postMissionMessage`, `reconcileTask`, `rejectProposal`, `returnForFreshApproval`. The honest mitigation, which is why this is a Medium: acceptance executes nothing — no task, approval row, claim or dispatch is touched, and no gate reads it. | `acceptTruth` and `registerAiMember` are REFUSED; the other six are named in the kept-available table with their reasons. `registerAiMember` is refused because it writes `grantedCapabilities`, from which `RegistryWorkerDirectory` derives the `effectiveCapabilities` it answers `allowedCapabilities` with — the same argument that already refuses `registerExecutionWorker`; that the shipped host leaves the narrowing seam unwired is a deployment fact, not a property of the method, and its docstring's "grants nothing and is never consulted by enforcement" is corrected rather than softened. Both safe-mode tables above now name EVERY public facade write, one row each, and `safe-mode-disposition.test.ts` derives the same two sets from the source and fails when they differ in either direction — so a mutator cannot land in neither column a fourth time. |
+| **MEDIUM 2** — write-scan ≠ read-scan at five more sites; one accepted write permanently 500s a Founder read route | Round four's "every facade write … 29 call sites … the asymmetry is closed" was premature. Executed across separate processes, each to a permanent outage no HQ command can undo: `createTask`'s `title` → `500` on `/state` and `/commandCenter`; `createTask`'s `project` → `/state`; `failTask`'s `reason` → both; `registerExecutionWorker`'s `displayName` → `/state`, `/workforce` and `/commandCenter`, from a CREATE-ONLY command; `engageKillSwitch`'s `reason` → both, on the act a Founder reaches for in a hurry to stop everything. Two of the five (`createTask`, `engageKillSwitch`) were found by the sweep rather than by the review. | All five scan `assertNoCredentialShape` before the first write, as do `assignTask`, `submitResult`, `reviewTask`, `reconcileTask`, `postMissionMessage`, `rejectProposal`, `promoteProposal`, `registerAiMember`, `disableAiMember`, `recordVerifiedBackup`, `recordIntelligenceOutcome` and `recoverInterruptedRuns`, which the same sweep reached. `facade-write-scan.test.ts` enumerates the facade's text-storing writes FROM THE SOURCE and fails when one does not call the function, then proves the five outages end to end over every shipped control route in two fresh processes. ONE carve-out is named and itself executed: `createTask`'s task PAYLOAD, which no control route serves and whose strict guard lives at the dispatch boundary that would publish it — two existing tests write a credential-shaped payload through `createTask` on purpose to prove that boundary holds independently. |
+| **LOW 1** — the strict scan newly refuses ordinary Founder prose, undisclosed | `Bearer\s+[A-Za-z0-9._-]{16,}` refuses "The bearer responsibilities were reassigned to the shift lead"; `sk-[A-Za-z0-9_-]{16,}` refuses "Contract with Addis-Sk-Trading-Corporation renewed for 2027". Both were ACCEPTED by the weak heuristic these sites used before round four, and round four's disclosure said only that nothing formerly refused is now accepted. | **DISCLOSED, not changed.** The patterns are not loosened: this is the same function the READ boundary applies, so admitting the prose would loosen what may be published as well as what may be stored, and no candidate discriminator could be shown not to admit a genuine credential. The exact sentences and the near misses that stay accepted are pinned in `credential-scan-cost.test.ts`, alongside a non-regression group proving the evasion direction is untouched — so the disclosure is suite-enforced and a future tightening has to move it. |
+| **LOW 2** — the round-six residual priced the surviving forgery above its cheapest path, and one source sentence was false of that path | The residual said the cheapest surviving repair is "the replacement inserted at an explicit `seq = 1`, then one `UPDATE sqlite_sequence` for that ledger". Executed on a file with three genuine commitments, that path is CAUGHT (`boot=true assess=true release=safe_mode_engaged`) — it was measured on a single-commitment file. The path that survives keeps the ROW COUNT and rewrites the rows in place: one `DROP TRIGGER` of the `BEFORE UPDATE` guard, one `UPDATE`, re-create that trigger. No `DELETE`, no `INSERT`, no explicit rowid, and ZERO `sqlite_sequence` writes. Executed end to end with `op_evidence` itself rewritten in place and re-chained: `p2/p3/p4 boot=false assess=false release=ADMITTED`. | Both sentences corrected at source (`store/integrity.ts`, `operator/evidence.ts`) and in the NOT-fixed list above, to the cheapest path that could actually be executed. `reliability-commitment-residual.test.ts` runs all three variants — the elision (blocking), the path round five named (blocking on a multi-commitment file), and the count-preserving rewrite (silent for ever) — so the residual is enforced by the suite rather than described. The honest gain of `elidedCommitmentLedgerRows` is now stated narrowly: it closes every version that DELETES rows, and no row-count invariant can close the version that preserves the count. |
+
+### What this round does NOT claim
+
+- LOW 1 is a disclosure, not a fix. The refusal is real, there is no override,
+  and a Founder who writes either sentence must rephrase.
+- LOW 2 is a re-pricing, not a closure. The count-preserving in-place rewrite is
+  open, and the security posture is unchanged by this round: the disclosed
+  variant was equally silent, and both need raw write to the file.
+- The safe-mode table enforcement is a SOURCE derivation plus behavioural spot
+  checks, not a proof that every one of the 39 refused methods refuses at
+  runtime. The derivation reads the gates that decide it, the READ list is
+  cross-checked against the same write markers so it cannot hide a mutator, and
+  the four dispositions this round turns on are proven against a real
+  file-backed database with a real latched finding.

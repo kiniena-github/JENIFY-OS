@@ -1333,16 +1333,16 @@ export function regressedImmutableLedgers(db: HqDatabase): string[] {
  * HQ's OWN commitment ledger, checked for rows that have been elided IN PLACE.
  *
  * **The cheapest surviving forgery did not need to drop this table at all**
- * (Wave 5 correction round six, Medium 1). The residual shipped in the previous
- * round priced the surviving whole-log forgery at "one extra `DROP TABLE`, one
+ * (Wave 5 correction round six, Medium 1). The residual shipped in the round
+ * before priced the surviving whole-log forgery at "one extra `DROP TABLE`, one
  * restart and one further Founder act" — a real cost, but not the one an
  * attacker pays. Wiping the commitments' ROWS IN PLACE — drop the three
  * triggers, `DELETE`, INSERT one replacement that agrees with the forged log,
  * re-create the triggers — leaves the table PRESENT, so the as-found census has
  * nothing to observe, no drop is ever reported, and the forgery was silent from
  * the very next boot: zero restarts, zero Founder acts, `releaseKillSwitch`
- * admitted immediately. Measured against the previous head: `BOOT safeMode =
- * false []`, `FULL assessment safeMode = false []`, `releaseKillSwitch
+ * admitted immediately. Measured against the previous head: `BOOT safeMode
+ * = false []`, `FULL assessment safeMode = false []`, `releaseKillSwitch
  * ADMITTED? true`.
  *
  * What answers it is an invariant of the table itself rather than a commitment
@@ -1350,8 +1350,16 @@ export function regressedImmutableLedgers(db: HqDatabase): string[] {
  * it and nothing else ever writes it, and its `no_erase` guard refuses a
  * DELETE — so the number of rows it holds, the greatest rowid it holds and the
  * high-water mark SQLite records for it are the SAME NUMBER, always. Eliding a
- * row breaks that identity in a way the elision cannot repair by itself:
- * `sqlite_sequence` keeps the mark the deleted rows reached.
+ * row breaks that identity, and an elision cannot repair it by removing
+ * something else: `sqlite_sequence` keeps the mark the deleted rows reached.
+ *
+ * **What that does NOT answer, and the sentence above used to imply it did**
+ * (Wave 5 correction round seven, Low 2). This check sees an ELISION. The
+ * cheapest surviving forgery elides nothing: it REWRITES the surviving rows in
+ * place, which preserves the count, the greatest rowid and the high-water mark
+ * by construction, so there is no identity to repair and nothing here to
+ * detect. That is priced honestly a few paragraphs down rather than left as an
+ * implication.
  *
  * **Checked against every legitimate way a sequence value could be burned,
  * before it was relied on.** A statement that fails does NOT advance
@@ -1367,19 +1375,44 @@ export function regressedImmutableLedgers(db: HqDatabase): string[] {
  *
  * **What it costs an attacker, executed rather than asserted, at the cheapest
  * path found rather than the one easiest to describe.** It is more steps, not a
- * boundary: `sqlite_sequence` is writable and no trigger can guard it. Two
- * repairs were tried and both are cheaper to describe than to price honestly.
- * The DURABLE one is two statements — insert the replacement at an EXPLICIT
- * `seq = 1`, then `UPDATE sqlite_sequence SET seq = 1` for this table — and it
- * stays silent for ever (`rows/highwater={"c":1,"s":1} boot=false assess=false
- * release=ADMITTED`). The ONE-statement version, `DELETE FROM sqlite_sequence
- * WHERE name = ...`, buys the process that follows and no more — including the
- * Founder assessment it was aiming to pass, which is itself the next COMMITMENT
- * and re-creates the high-water mark from the surviving rowid. Measured:
- * `p2 boot=false assess=false release=ADMITTED`, then `p3 boot=true assess=true
- * release=refused`, `p4` the same, permanently. The honest gain is therefore
- * that the version costing NOTHING is gone, and that the cheap repair costs the
- * attacker every process after the one it bought.
+ * boundary — and the price the previous round wrote here was the wrong one, in
+ * the reassuring direction, because the version WITHOUT the barrier it named
+ * was never executed (Wave 5 correction round seven, Low 2).
+ *
+ * The round-five text said the durable repair is two statements: insert the
+ * replacement at an EXPLICIT `seq = 1`, then `UPDATE sqlite_sequence SET
+ * seq = 1` for this table. Executed on a file carrying THREE genuine
+ * commitments, that path is not merely expensive, it is CAUGHT — collapsing
+ * three rows to one regresses this ledger's own recorded high-water mark, and
+ * `p2` came back `boot=true assess=true release=safe_mode_engaged`. It was
+ * measured on a single-commitment file, where the collapse is invisible.
+ *
+ * The path that actually survives needs neither the explicit rowid nor any
+ * `sqlite_sequence` write at all: keep the ROW COUNT and rewrite the rows IN
+ * PLACE. `DROP TRIGGER` the ONE `BEFORE UPDATE` guard (not all three), one
+ * `UPDATE hq_integrity_checkpoints SET chain_length = …, tip_hash = …,
+ * ledger_marks = …`, re-create that one trigger. Count, greatest rowid and
+ * high-water mark are all untouched, so this function answers `false`.
+ * Executed end to end, with `op_evidence` itself rewritten in place and
+ * re-chained so the forgery is real rather than notional:
+ * `p2/p3/p4 boot=false assess=false release=ADMITTED`, permanently. Zero
+ * `sqlite_sequence` writes, zero `DELETE`s, zero `INSERT`s, zero explicit
+ * rowids, one trigger of three.
+ *
+ * The one-statement variant the round-five text also priced — `DELETE FROM
+ * sqlite_sequence WHERE name = ...` after an elision — remains correctly
+ * priced: it buys the process that follows and no more, because the Founder
+ * assessment it was aiming to pass is itself the next COMMITMENT and re-creates
+ * the mark from the surviving rowid (`p2 boot=false assess=false
+ * release=ADMITTED`, then `p3` and `p4` `boot=true assess=true
+ * release=refused`, permanently).
+ *
+ * So the honest gain of this check is narrower than it was written to be: it
+ * closes the version that DELETES rows, at every price. It does not close the
+ * version that rewrites them in place, and no row-count invariant can — the
+ * count is exactly what that version preserves. What it costs there is one
+ * trigger dropped and re-created on each engine-guarded ledger the forgery
+ * touches, which is a step, not a boundary.
  *
  * Scoped to this ONE ledger deliberately. The identity holds for it because HQ
  * is its only writer; extending a row COUNT to every other declared ledger would
