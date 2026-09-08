@@ -134,6 +134,23 @@ import { PROVIDERS, type ProviderId } from '../routing/providers.js';
  * `assertBrowserSafe` applies the shape rules AND then the same
  * `assertNoSecretLikeContent` heuristic — so nothing that used to be refused is
  * now accepted.
+ *
+ * **"EVERY facade write" was a HAND COUNT, and it was wrong** (Wave 5
+ * correction round seven, High NEW-3). Three writes bounded their caller text
+ * with `missionText` — which checks a LENGTH — and never reached this function
+ * at all: `recordVerifiedBackup.note`, `recordIntelligenceOutcome.note` and
+ * `disableAiMember.reason`. The first was live: `GET /api/hq/control/
+ * reliability` answered `200`, one accepted `recordVerifiedBackup({ note:
+ * 'sk-…' })` later it answered `500` for ever, because
+ * `hq_reliability_backups` carries `no_rewrite`/`no_erase` and nothing takes
+ * the row back out. Exactly the defect this function was introduced to close,
+ * surviving in three places the count did not visit.
+ *
+ * So the claim is no longer counted. `test/credential-scan-coverage.test.ts`
+ * ENUMERATES every member of this file that calls `missionText` and asserts
+ * each one also calls this scan, naming any that does not. A future write that
+ * bounds its text and forgets to scan it fails that test by name, so the
+ * sentence above cannot drift into being false again.
  */
 function assertNoCredentialShape(fields: Record<string, unknown>): void {
   assertBrowserSafe(fields, 'stored_text');
@@ -4391,6 +4408,15 @@ export class HeadquarterOperations {
     }
     const reason = missionText('reason', input.reason, MAX_ASSIGNMENT_RATIONALE_LENGTH, true);
     if (!reason.ok) return fail('invalid_input', reason.message);
+    // The third site the round-seven sweep found unscanned (High NEW-3). The
+    // reason is stored on the member record AND appended to the evidence chain,
+    // where it is beyond recall; whether any current view serves it is not the
+    // question a write boundary gets to answer.
+    try {
+      assertNoCredentialShape({ reason: reason.value });
+    } catch {
+      return fail('invalid_input', 'The disable reason looks like it contains a credential; nothing was recorded.');
+    }
     try {
       const privileged = this.#requirePrivilegedQueue();
       return ok(
@@ -8471,6 +8497,18 @@ export class HeadquarterOperations {
     }
     const note = missionText('note', input.note, MAX_RUN_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
+    // The scan every facade write applies, and this write was MISSING it (Wave
+    // 5 correction round seven, High NEW-3). `missionText` bounds a length; it
+    // is not the credential scan, and `hq_reliability_backups` carries
+    // `no_rewrite`/`no_erase`, so a `sk-…` note accepted here was served under
+    // `control-api.ts`'s strict scan and turned `GET /api/hq/control/
+    // reliability` into a permanent `500` that no DELETE or UPDATE could undo.
+    // Executed against `d97b8a6`: `200` -> one accepted write -> `500` for ever.
+    try {
+      assertNoCredentialShape({ note: note.value ?? '' });
+    } catch {
+      return fail('invalid_input', 'The backup note looks like it contains a credential; nothing was recorded.');
+    }
     const refusedActor = this.#resolveReliabilityCommander(input.requestedBy, 'record a verified backup');
     if (refusedActor) return refusedActor;
     const refusedCapability = this.#reliabilityCapabilityGate('record a verified backup');
@@ -10184,6 +10222,16 @@ export class HeadquarterOperations {
     }
     const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
+    // Missing here too, and latent rather than harmless (Wave 5 correction
+    // round seven, High NEW-3): the outcome row is append-only, so the day this
+    // note joins a served view the route it is served on is bricked for ever.
+    // A write that stores caller text is scanned whether or not today's readers
+    // happen to carry it — that asymmetry IS the defect.
+    try {
+      assertNoCredentialShape({ note: note.value ?? '' });
+    } catch {
+      return fail('invalid_input', 'The outcome note looks like it contains a credential; nothing was recorded.');
+    }
     if (!this.#intelligenceStorePresent) {
       return fail('invalid_input', 'intelligence ledger unavailable on this database handle');
     }
