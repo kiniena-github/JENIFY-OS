@@ -638,12 +638,18 @@ export const SAFE_MODE_STATEMENT =
   'commitment recorded outside it is blocking however consistent that record has been made to look. That ' +
   'commitment ledger is checked against itself too: it is append-only and HQ is its only writer, so the ' +
   'rows it holds and the high-water mark the engine records for it are the same number, and commitments ' +
-  'removed from it in place are blocking as well. Destroying that ledger outright is blocking too, and ' +
-  'that check does not live in any table: HQ stamps the database header once it has committed on a file, ' +
-  'so a commitment ledger that is present and EMPTY on a file HQ has committed on is blocking however it ' +
-  'came to be empty — dropped and re-created, or emptied row by row. A writer that also rewrites the ' +
-  'header can still put the file back to unwitnessed; HQ holds no key over its own file and says so ' +
-  'rather than claiming a boundary it does not have.';
+  'removed from it in place are blocking as well. Destroying that ledger outright, and rolling it back to ' +
+  'an earlier part of itself, are blocking too, and ' +
+  'that check does not live in any table: HQ stamps into the database header both THAT it has committed ' +
+  'on a file and HOW FAR its own commitment ledger has ever reached, a number that only ever goes up. ' +
+  'So a commitment ledger that is present and EMPTY on a file HQ has committed on is blocking however it ' +
+  'came to be empty — dropped and re-created, or emptied row by row — and so is one that holds FEWER ' +
+  'commitments than that header records, however genuine the rows it still holds are: dropping the ledger ' +
+  'and replaying a PREFIX of its own real rows rebuilds every reading that lives inside the file, and does ' +
+  'not reach the one that does not. What that still does not stop is a rewrite that keeps every row and ' +
+  'every rowid and changes what the rows SAY, and a writer that also rewrites the ' +
+  'header can put the file back to unwitnessed or back to a lower mark; HQ holds no key over its own file ' +
+  'and says so rather than claiming a boundary it does not have.';
 
 /**
  * What each assessment depth actually costs and actually finds — the sentence
@@ -1017,37 +1023,142 @@ export function recordHqSchemaEnsured(db: HqDatabase): void {
  * "any non-zero value" as HQ's own would make a foreign application's file a
  * false alarm at HQ's first boot over it. `0x48514350` is `HQCP` in ASCII.
  *
+ * **The header now carries HOW MANY commitments HQ has made, not merely THAT
+ * it has made one** (Wave 5 correction round ten, High 1). A yes/no witness
+ * closed the TOTAL erasure and left the PARTIAL one open, which is the same
+ * inversion in a fourth place: `DROP TABLE hq_integrity_checkpoints`, replay
+ * the table's own DDL, and re-insert a PREFIX of its own genuine rows at their
+ * own explicit rowids. The ledger is present and non-empty, so the `rows === 0`
+ * witness branch never runs; `AUTOINCREMENT` rebuilds `sqlite_sequence` from
+ * those explicit rowids, so rows, greatest rowid and high-water mark are one
+ * number again and `elidedCommitmentLedgerRows` answered `false`;
+ * `truncatedImmutableLedgers` compares against that same rebuilt mark and is
+ * satisfied; `regressedImmutableLedgers` reads `ledger_marks` out of the
+ * checkpoints that were just erased, and the surviving OLDEST checkpoint's own
+ * recorded mark for this table is always at or below its own rowid, so a prefix
+ * always satisfies it; and `contradictedChainCommitment` takes the maximum over
+ * the SURVIVING commitments, which the attacker chose. No hash is recomputed —
+ * the rows replayed are HQ's own — and no header write is needed, because the
+ * yes/no witness stayed true. Executed against `6ce93df` on a real file through
+ * the real facade: 18 statements took commitments 7 -> 1 and evidence 9 -> 4,
+ * and boot, a FULL Founder assessment and two further reboots all read
+ * `safeMode = false []` with `releaseKillSwitch` ADMITTED. It cleared a
+ * genuinely latched `["append_only_guard_missing","evidence_chain_broken"]`
+ * too, and generalised: once the commitment ledger is rolled back this way,
+ * rows can be removed from any declared ledger with nothing left to measure
+ * them against.
+ *
+ * What answers it is a number that only ever goes UP and that does not live in
+ * any table: the greatest rowid HQ's commitment ledger has ever reached,
+ * carried in the low 16 bits of the same header slot. A `DROP TABLE` cannot
+ * lower it, a replay cannot raise the ledger to meet it, and HQ itself only
+ * ever raises it — so a ledger holding fewer commitments than the header
+ * records is blocking, at both depths and across every restart.
+ *
+ * **The encoding, and the one value it costs.** The high 16 bits are the
+ * signature `0x4851` (`HQ` in ASCII); the low 16 bits are the committed mark,
+ * at least 1 and saturating at `0xFFFF`. The legacy value `0x48514350` is read
+ * as "witnessed, mark unknown" so that a file committed on by a build older
+ * than this one raises nothing until its next checkpoint stamps a mark — the
+ * ordinary upgrade cost of any new mark, in the fail-open direction. That one
+ * special case has a price and it is stated rather than hidden: a genuine mark
+ * of 17232 (`0x4350`) encodes to exactly the legacy value and is therefore read
+ * back as "unknown", so the check is vacuous for that ONE checkpoint out of
+ * 65535 and repairs itself at the next one. Saturation is the other stated
+ * cost: past 65535 committed checkpoints the mark stops advancing, so a
+ * rollback WITHIN the saturated range is not caught, while any rollback below
+ * 65535 still is.
+ *
+ * **Reading a 16-bit signature is a real change in specificity, in the
+ * false-alarm direction, and it is measured rather than waved past.** The
+ * closed set was one exact 32-bit value; it is now 65535 values sharing the
+ * ASCII prefix `HQ`. The consequence is unchanged in KIND — a foreign file
+ * whose `application_id` HQ mistakes for its own is read as witnessed, and HQ
+ * would then find its own freshly-ensured commitment ledger empty on it — and
+ * that consequence already existed for the single legacy value. It is 65535
+ * times more likely than it was and still requires a foreign application to
+ * have chosen an id beginning `HQ`. The alternative considered and rejected was
+ * to corroborate the witness with `PRAGMA user_version`, which would have made
+ * ONE statement against `user_version` defeat both marks at once — a worse
+ * trade in the direction that matters.
+ *
  * **What it does not answer, stated rather than implied.** A writer that also
- * zeroes `PRAGMA application_id` puts the file back to unwitnessed — one
- * further statement on top of the erasure, executed and still silent. That is
- * the same residual class as zeroing `PRAGMA user_version` or rewriting
- * `sqlite_sequence`: the file is HQ's, HQ holds no key over it, and every fact
- * this module rests on lives in the file the attacker is already writing. What
- * is closed is the INVERSION — destroying the commitments outright is no longer
- * cheaper than eliding rows from them. And a file whose commitments were all
- * written by a build older than this witness carries none of it until HQ's next
- * checkpoint stamps the header, which is the ordinary upgrade cost of any new
- * mark and not a defence.
+ * rewrites `PRAGMA application_id` puts the file back to unwitnessed, or back
+ * to a lower mark that matches the prefix it replayed — one further statement
+ * on top of the erasure, executed and still silent. That is the same residual
+ * class as zeroing `PRAGMA user_version` or rewriting `sqlite_sequence`: the
+ * file is HQ's, HQ holds no key over it, and every fact this module rests on
+ * lives in the file the attacker is already writing. What is closed is the
+ * INVERSION — neither destroying the commitments outright nor rolling them back
+ * to a prefix is cheaper than eliding rows from them.
  */
 const HQ_COMMITMENT_WITNESS_MARK = 0x48514350;
 
-/** Every `application_id` value that means "HQ has committed on this file". */
-const HQ_COMMITMENT_WITNESS_MARKS: readonly number[] = Object.freeze([HQ_COMMITMENT_WITNESS_MARK]);
+/** The high 16 bits every `application_id` HQ stamps carries: `HQ` in ASCII. */
+const HQ_COMMITMENT_WITNESS_SIGNATURE = 0x4851;
+
+/** The greatest commitment mark the low 16 bits can carry. Saturates here. */
+const HQ_COMMITMENT_MARK_CEILING = 0xffff;
+
+/** What HQ's `application_id` says: whether it has committed, and how far. */
+export interface CommitmentWitness {
+  /** True when this file carries HQ's own signature in the header slot. */
+  witnessed: boolean;
+  /**
+   * The greatest rowid HQ's commitment ledger had reached when the header was
+   * last stamped, or 0 for a witnessed file that carries no mark (a legacy
+   * stamp, or the one colliding value the encoding gives up).
+   */
+  mark: number;
+}
+
+const UNWITNESSED: CommitmentWitness = Object.freeze({ witnessed: false, mark: 0 });
+
+/** Decode one `application_id` value. Pure, so both directions can be tested. */
+export function decodeCommitmentWitness(value: number): CommitmentWitness {
+  if (!Number.isInteger(value)) return UNWITNESSED;
+  // The legacy stamp: witnessed, mark unknown. Read FIRST, so the build that
+  // predates the mark raises nothing and so the one colliding mark value is
+  // fail-open rather than a finding true of nothing.
+  if (value === HQ_COMMITMENT_WITNESS_MARK) return { witnessed: true, mark: 0 };
+  const signature = (value >>> 16) & 0xffff;
+  const mark = value & 0xffff;
+  if (signature !== HQ_COMMITMENT_WITNESS_SIGNATURE || mark < 1) return UNWITNESSED;
+  return { witnessed: true, mark };
+}
+
+/** Encode a commitment mark into the header slot. Saturates at the ceiling. */
+export function encodeCommitmentWitness(mark: number): number {
+  const bounded = Math.min(Math.max(Math.trunc(mark), 1), HQ_COMMITMENT_MARK_CEILING);
+  return ((HQ_COMMITMENT_WITNESS_SIGNATURE << 16) | bounded) >>> 0;
+}
+
+/** HQ's header witness for this file, read from the header rather than a table. */
+export function readCommitmentWitness(db: HqDatabase): CommitmentWitness {
+  try {
+    const row = db.prepare(`PRAGMA application_id`).get() as Record<string, unknown> | undefined;
+    return decodeCommitmentWitness(Number(Object.values(row ?? {})[0] ?? 0));
+  } catch {
+    // A handle that cannot answer the pragma contributes no evidence either
+    // way, exactly like the schema-ensured mark.
+    return UNWITNESSED;
+  }
+}
 
 /**
  * Whether HQ has ever appended a row to its own commitment ledger ON THIS FILE,
  * read from the database header rather than from any table.
  */
 export function commitmentWitnessPresent(db: HqDatabase): boolean {
-  try {
-    const row = db.prepare(`PRAGMA application_id`).get() as Record<string, unknown> | undefined;
-    const value = Number(Object.values(row ?? {})[0] ?? 0);
-    return Number.isInteger(value) && HQ_COMMITMENT_WITNESS_MARKS.includes(value);
-  } catch {
-    // A handle that cannot answer the pragma contributes no evidence either
-    // way, exactly like the schema-ensured mark.
-    return false;
-  }
+  return readCommitmentWitness(db).witnessed;
+}
+
+/**
+ * How many commitments HQ's header records that its own ledger has held, or 0
+ * when the file carries no mark at all.
+ */
+export function committedCheckpointMark(db: HqDatabase): number {
+  return readCommitmentWitness(db).mark;
 }
 
 /**
@@ -1055,15 +1166,35 @@ export function commitmentWitnessPresent(db: HqDatabase): boolean {
  * never before: a witness set beside a failed insert would be a permanent
  * finding true of nothing, which is the forbidden direction.
  *
+ * **Monotone, and that is the whole property.** The stored mark is raised and
+ * never lowered, so nothing HQ itself does can walk a real finding back: a file
+ * whose ledger has been rolled back is blocking, and the next checkpoint HQ
+ * would write on it (at a lower rowid) leaves the header alone. HQ does not
+ * reach here at all while safe mode is engaged — both callers refuse to commit
+ * then — and this guard is the second lock on the same door rather than a
+ * substitute for it.
+ *
+ * A `PRAGMA application_id` write is TRANSACTIONAL in SQLite (verified against
+ * this engine, not assumed), so the stamp made beside a checkpoint inside the
+ * assessment's reservation is rolled back with it. An inflated mark surviving a
+ * rolled-back insert would be exactly the permanent finding true of nothing
+ * that `immutableLedgerMarks` had to be re-derived to prevent.
+ *
  * Silent on a read-only handle and on any engine refusal, for the reason
  * `recordHqSchemaEnsured` gives: a construction may not fail because it could
  * not leave a mark. The cost of not leaving it is one unwitnessed checkpoint,
  * and the next one that lands stamps it.
  */
-function recordCommitmentWitness(db: HqDatabase): void {
+function recordCommitmentWitness(db: HqDatabase, mark: number): void {
   if (db.readonly) return;
   try {
-    db.exec(`PRAGMA application_id = ${HQ_COMMITMENT_WITNESS_MARK}`);
+    const stamped = encodeCommitmentWitness(mark);
+    const current = readCommitmentWitness(db);
+    // Only ever UP. A legacy stamp carries no mark, so the first mark of any
+    // size replaces it; after that the header is a high-water mark like every
+    // other one this module rests on.
+    if (current.witnessed && current.mark >= decodeCommitmentWitness(stamped).mark) return;
+    db.exec(`PRAGMA application_id = ${stamped}`);
   } catch {
     // See the header: never fail a construction over the mark.
   }
@@ -1437,11 +1568,13 @@ export function recordIntegrityCheckpoint(
     Object.entries(marks).some(([table, mark]) => mark > (committedMarks[table] ?? 0));
   if (!advanced) return false;
   try {
-    db.prepare(
-      `INSERT INTO ${HQ_INTEGRITY_CHECKPOINT_TABLE}
+    const landed = db
+      .prepare(
+        `INSERT INTO ${HQ_INTEGRITY_CHECKPOINT_TABLE}
          (id, recorded_at, chain_length, tip_hash, ledger_marks, process_id, recorded_by)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
+      )
+      .run(
       input.id,
       input.recordedAt,
       tip?.seq ?? 0,
@@ -1450,11 +1583,13 @@ export function recordIntegrityCheckpoint(
       input.processId,
       input.recordedBy,
     );
-    // The witness is stamped only once the row has LANDED — see
-    // `HQ_COMMITMENT_WITNESS_MARK`. A crash between the two leaves the file
-    // unwitnessed with a genuine commitment on it, which is fail-open for one
-    // row and is repaired by the next checkpoint that lands.
-    recordCommitmentWitness(db);
+    // The witness is stamped only once the row has LANDED, and it carries the
+    // rowid that row actually got — see `HQ_COMMITMENT_WITNESS_MARK`. A crash
+    // between the two leaves the file behind by one commitment, which is
+    // fail-open for one row and is repaired by the next checkpoint that lands.
+    // `lastInsertRowid` rather than a second `MAX(rowid)` read: it is the rowid
+    // THIS statement wrote, so no concurrent append can be mistaken for it.
+    recordCommitmentWitness(db, Number(landed.lastInsertRowid));
     return true;
   } catch {
     // A checkpoint HQ could not write is a commitment HQ does not hold. It is
@@ -1561,13 +1696,30 @@ export function regressedImmutableLedgers(db: HqDatabase): string[] {
  * row breaks that identity, and an elision cannot repair it by removing
  * something else: `sqlite_sequence` keeps the mark the deleted rows reached.
  *
- * **What that does NOT answer, and the sentence above used to imply it did**
- * (Wave 5 correction round seven, Low 2). This check sees an ELISION. The
- * cheapest surviving forgery elides nothing: it REWRITES the surviving rows in
- * place, which preserves the count, the greatest rowid and the high-water mark
- * by construction, so there is no identity to repair and nothing here to
- * detect. That is priced honestly a few paragraphs down rather than left as an
- * implication.
+ * **What the in-file identity does NOT answer, and the sentence above used to
+ * imply it did** (Wave 5 correction round seven, Low 2). Read on its own it
+ * sees an ELISION. A forgery that REWRITES the surviving rows in place
+ * preserves the count, the greatest rowid and the high-water mark by
+ * construction, so there is no identity to repair and nothing in that reading
+ * to detect. That is priced honestly a few paragraphs down rather than left as
+ * an implication.
+ *
+ * **And the identity was satisfiable by REBUILDING it, which is why the header
+ * mark had to be read here too** (Wave 5 correction round ten, High 1). The
+ * round-seven text said the cheapest surviving forgery elides nothing. That was
+ * false when it was written and it is corrected rather than softened: a forgery
+ * that DROPS this table and replays a PREFIX of its own genuine rows at their
+ * own explicit rowids elides four of seven commitments and satisfies every one
+ * of the three in-file readings, because `AUTOINCREMENT` rebuilds
+ * `sqlite_sequence` from the rowids the attacker chose. Rows, greatest rowid
+ * and high-water mark are one number again — a DIFFERENT number. Executed
+ * against `6ce93df` through the real facade: 18 statements, commitments 7 -> 1,
+ * evidence 9 -> 4, `boot=false [] full=false [] reboot=false []`,
+ * `releaseKillSwitch` ADMITTED, and a genuinely latched
+ * `["append_only_guard_missing","evidence_chain_broken"]` cleared. The identity
+ * is therefore checked against a number the replay cannot rebuild, because it
+ * is not in the file's tables at all: the greatest rowid this ledger has ever
+ * reached, in the database header — see `HQ_COMMITMENT_WITNESS_MARK`.
  *
  * **Checked against every legitimate way a sequence value could be burned,
  * before it was relied on.** A statement that fails does NOT advance
@@ -1615,12 +1767,34 @@ export function regressedImmutableLedgers(db: HqDatabase): string[] {
  * release=ADMITTED`, then `p3` and `p4` `boot=true assess=true
  * release=refused`, permanently).
  *
- * So the honest gain of this check is narrower than it was written to be: it
- * closes the version that DELETES rows, at every price. It does not close the
- * version that rewrites them in place, and no row-count invariant can — the
- * count is exactly what that version preserves. What it costs there is one
- * trigger dropped and re-created on each engine-guarded ledger the forgery
- * touches, which is a step, not a boundary.
+ * So the honest gain of this check is narrower than it was written to be, and
+ * the sentence that used to stand here — "it closes the version that DELETES
+ * rows, at every price" — was false of the code in TWO directions and is
+ * replaced by the measured statement (round ten, High 1).
+ *
+ * What it does close: every version that leaves this ledger holding fewer
+ * commitments than HQ's header records it once held, whichever way the rows
+ * went — deleted in place, deleted with the high-water mark deleted beside
+ * them, dropped and replayed empty, or dropped and replayed as a PREFIX of its
+ * own genuine rows. All four are blocking at both depths and across restarts,
+ * and no assessment clears one while it is true.
+ *
+ * What it does not close, at its measured price:
+ *
+ *  - **the in-place REWRITE**, and no row-count invariant can — the count, the
+ *    greatest rowid and the header mark are exactly what that version
+ *    preserves. Its price is one `BEFORE UPDATE` trigger dropped and re-created
+ *    on each engine-guarded ledger the forgery touches. That is the cheapest
+ *    surviving forgery: three statements on this ledger, and it elides nothing;
+ *  - **any of the four erasures PLUS one `PRAGMA application_id` write** that
+ *    puts the header back to a mark matching what was replayed (or to zero,
+ *    which returns the file to unwitnessed). Measured at this head: one further
+ *    statement, and boot, full assessment and reboot read `false []` again.
+ *    HQ holds no key over its own file, and this is the same residual class as
+ *    zeroing `PRAGMA user_version`.
+ *
+ * Both are steps, not boundaries, and they are recorded in the phase document's
+ * residual list at those prices.
  *
  * Scoped to this ONE ledger deliberately. The identity holds for it because HQ
  * is its only writer; extending a row COUNT to every other declared ledger would
@@ -1675,7 +1849,18 @@ export function elidedCommitmentLedgerRows(db: HqDatabase): boolean {
     // anything the erasure could take with it (round seven, Critical NEW-1 /
     // High NEW-2). A present but EMPTY commitment ledger on a file HQ has
     // committed on is blocking however it came to be empty.
-    if (rows === 0) return commitmentWitnessPresent(db);
+    const witness = readCommitmentWitness(db);
+    if (rows === 0) return witness.witnessed;
+    // PARTIAL erasure, measured against the same header (round ten, High 1).
+    // The header records the greatest rowid this ledger has EVER reached, and
+    // that number only goes up, so a ledger now holding fewer commitments than
+    // it — a `DROP` and a replay of a PREFIX of its own genuine rows, which
+    // rebuilds every in-file reading below from the rowids it chose — is
+    // blocking. Both readings are compared because the two ways of shortening
+    // the ledger show up in different ones: a prefix lowers the greatest rowid,
+    // and a replay that keeps the greatest rowid but drops rows beneath it
+    // lowers the count.
+    if (witness.mark > 0 && (top < witness.mark || rows < witness.mark)) return true;
     const highWater = db
       .prepare(`SELECT seq FROM sqlite_sequence WHERE name = ?`)
       .get(HQ_INTEGRITY_CHECKPOINT_TABLE) as { seq: unknown } | undefined;

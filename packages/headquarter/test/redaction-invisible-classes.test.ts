@@ -279,10 +279,13 @@ describe('the whole Unicode plane, swept against the guard', () => {
     // The survivors are ordinary VISIBLE characters — punctuation, symbols and
     // the letters and digits the anchoring heuristic deliberately admits.
     expect(survived).toBeGreaterThan(100_000);
-    // The one open invisible-ish class, at its exact size. `\p{Zs}` is argued
-    // out of the erase set on the merits and disclosed on both phase pages; if
-    // that ever changes, this number changes with it and the disclosure has to
-    // move too.
-    expect(spaceSurvivors).toHaveLength(17);
+    // The one open invisible-ish class, at its exact size — 17 for eight
+    // rounds, and 2 since round ten closed the fifteen `\p{Zs}` separators
+    // that are not a plain space (Low 2). They are named rather than counted
+    // now, because the two that remain are a deliberate choice and not a
+    // residue: folding U+0020 and U+00A0 would join every word of every
+    // sentence in the scan copy. If that ever changes, this list changes with
+    // it and the disclosure has to move too.
+    expect(spaceSurvivors).toEqual(['U+0020', 'U+00A0']);
   }, 120_000);
 });

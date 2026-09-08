@@ -46,6 +46,7 @@ import {
   ENGINE_IMMUTABLE_TABLES,
   HQ_INTEGRITY_CHECKPOINT_TABLE,
   SAFE_MODE_STATEMENT,
+  committedCheckpointMark,
   elidedCommitmentLedgerRows,
   immutableLedgerMarks,
   recordIntegrityCheckpoint,
@@ -296,7 +297,13 @@ describe('HQ’s own commitment ledger is checked against itself', () => {
     }
   });
 
-  it('states the remaining price honestly: repairing sqlite_sequence too is still silent', () => {
+  it('catches the sqlite_sequence repair too, now that the header records how far the ledger reached', () => {
+    // This test pinned a DISCLOSED RESIDUAL for two rounds: repairing the row
+    // identity — insert the replacement at rowid 1 and push `sqlite_sequence`
+    // back down to match — left this check with nothing to say, and the boot
+    // that followed read clean. Round ten closed it, so the residual it
+    // pinned is gone and what it pins now is the closure. The assertions are
+    // strictly stronger in every line; nothing was relaxed to make them pass.
     const fx = fileFixture();
     try {
       warm(fx);
@@ -306,22 +313,34 @@ describe('HQ’s own commitment ledger is checked against itself', () => {
       forgeShortenedLog(raw, 2);
       wipeCommitmentsInPlace(raw, { repairSequence: true });
       const shape = checkpointShape(raw);
-      // The invariant is repaired, so this check has nothing to say — which is
-      // the disclosed residual, pinned so the residual cannot quietly become a
-      // claim that the attack is closed.
+      // Every reading that lives INSIDE the file agrees with itself again...
       expect(shape).toEqual({ rows: 1, top: 1, highWater: 1 });
-      expect(elidedCommitmentLedgerRows(raw)).toBe(false);
+      // ...and the one that does not live in the file reports the collapse.
+      expect(committedCheckpointMark(raw)).toBeGreaterThan(1);
+      expect(elidedCommitmentLedgerRows(raw)).toBe(true);
       raw.close();
 
       const after = fx.reopen('sequence-repaired');
-      expect(after.ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
+      const posture = after.ops.hqReliabilityPosture().integrity;
+      expect(posture.safeMode).toBe(true);
+      expect(findings(posture.observations)).toContain('append_only_guard_missing');
+      const assessed = after.ops.assessHqIntegrity({ requestedBy: 'founder' });
+      expect(assessed.ok).toBe(true);
+      if (!assessed.ok) throw new Error('unreachable');
+      expect(assessed.data.safeMode).toBe(true);
+      expect(after.ops.releaseKillSwitch('global', 'founder').ok).toBe(false);
       after.db.close();
     } finally {
       fx.cleanup();
     }
   });
 
-  it('costs the cheaper one-statement repair every process after the first', () => {
+  it('no longer sells even one clean process for the cheaper one-statement repair', () => {
+    // The other half of the same closed residual. Removing the
+    // `sqlite_sequence` row rather than matching it used to buy the ONE
+    // process the forgery needed, and only HQ's own next commitment broke the
+    // identity again. The header mark is not in `sqlite_sequence`, so there is
+    // no clean process to buy any more — the first boot after the wipe blocks.
     const fx = fileFixture();
     try {
       warm(fx);
@@ -330,25 +349,12 @@ describe('HQ’s own commitment ledger is checked against itself', () => {
       const raw = fx.raw();
       forgeShortenedLog(raw, 2);
       wipeCommitmentsInPlace(raw, { repairSequence: false, omitOwnMark: true });
-      // One statement instead of two: remove the high-water row rather than
-      // matching it. Nothing to compare against, so this boot reads clean.
       raw.exec(`DELETE FROM sqlite_sequence WHERE name = '${HQ_INTEGRITY_CHECKPOINT_TABLE}'`);
-      expect(elidedCommitmentLedgerRows(raw)).toBe(false);
+      expect(checkpointShape(raw).highWater).toBe(0);
+      expect(elidedCommitmentLedgerRows(raw)).toBe(true);
       raw.close();
 
-      const bought = fx.reopen('the-one-clean-process');
-      expect(bought.ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
-      // The Founder assessment the forgery was aiming to pass does pass — and
-      // it is also the act that appends the next commitment.
-      const boughtAssessment = bought.ops.assessHqIntegrity({ requestedBy: 'founder' });
-      expect(boughtAssessment.ok).toBe(true);
-      if (!boughtAssessment.ok) throw new Error('unreachable');
-      expect(boughtAssessment.data.safeMode).toBe(false);
-      bought.db.close();
-
-      // And then HQ's own next commitment re-creates the mark from the rowid
-      // the forged row still carries, so the identity breaks again by itself.
-      for (const tag of ['and-then-one', 'and-then-two']) {
+      for (const tag of ['the-process-it-used-to-buy', 'and-then-one', 'and-then-two']) {
         const process = fx.reopen(tag);
         expect(process.ops.hqReliabilityPosture().integrity.safeMode, tag).toBe(true);
         const assessed = process.ops.assessHqIntegrity({ requestedBy: 'founder' });

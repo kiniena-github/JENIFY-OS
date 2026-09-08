@@ -1628,7 +1628,16 @@ as well as here:
   nobody can price.
 
   So the honest gain of `elidedCommitmentLedgerRows` is narrower than it was
-  written to be: it closes every version that DELETES rows, at every price. It
+  written to be — and the sentence that stood here for two rounds, "it closes
+  every version that DELETES rows, at every price", was FALSE of the code in
+  both of its halves. Round ten corrects it rather than softening it: a PREFIX
+  replay deletes rows and was silent (see the round-ten entry below), and even
+  now every version can be bought back with one further `PRAGMA application_id`
+  write. What the check closes is every version that leaves the ledger holding
+  fewer commitments than HQ's header records it once held — deleted in place,
+  deleted with the high-water mark deleted beside them, dropped and replayed
+  empty, or dropped and replayed as a prefix — and it closes none of them
+  against a writer willing to spend that one further statement. It
   does not close the version that rewrites them in place, and no row-count
   invariant can — the count is exactly what that version preserves. The
   even cheaper ONE-statement repair of an ELISION was tried too and does not hold: `DELETE
@@ -2908,9 +2917,15 @@ fast-forwarded to `3bdb2d1` under the review; the corrections are on that head.
 ### What this round does NOT claim, and the price it measured
 
 - The anchoring residual is unchanged and still open: `Xsk-…` and `9sk-…` reach
-  a written `hq-snapshot.json`, because `(?<![A-Za-z0-9_])` deliberately does
+  a written `hq-snapshot.json`, because `(?<![A-Za-z0-9])` deliberately does
   not fire inside a letter run — `task-oriented-approach` literally contains
   `sk-oriented-approach`. Architecture, not anchoring, is the guarantee.
+  (The anchor was written here with an underscore in the class for one round,
+  which was the `\b` behaviour this wave's own Critical C1 removed: `_` INSIDE
+  the class would let `OPENAI_KEY_sk-…` onto the artifact. The code has never
+  had it — corrected in round ten, Low 1. Verified at that head: the code
+  refuses `OPENAI_KEY_sk-…` and `_sk-…`, and passes `Xsk-…` and `9sk-…` exactly
+  as disclosed above.)
 - `\p{Zs}` is still not folded, on the argument that has not changed.
 - **The measured price of closing `\p{Co}`, stated rather than hidden:** a
   private-use code point sitting exactly where a word character would otherwise
@@ -2945,3 +2960,93 @@ new dependencies.
 source file was reverted to its `3bdb2d1` content from a scratch copy held
 outside the worktree, the new tests run against it, and the file restored. The
 measured pre-fix failures are recorded with each finding above.
+
+## The TENTH correction round: the commitment ledger rolled back to a PREFIX of itself
+
+A fresh read-only hostile review of `6ce93df` returned **0 Critical / 1 High /
+0 Medium / 2 Low**, all reproduced by execution.
+
+| Finding | What was wrong | What was done |
+|---|---|---|
+| **HIGH 1** — a PREFIX replay of HQ's own commitment ledger defeated all four commitment checks at once, permanently, and cleared a latched safe mode | `DROP TABLE hq_integrity_checkpoints`, replay the table's own DDL out of `sqlite_master`, and re-insert a PREFIX of its own genuine rows at the rowids they already carried. No hash is recomputed — every row written back is one HQ itself wrote — and no header write is needed, because round seven's yes/no witness stays true. `AUTOINCREMENT` rebuilds `sqlite_sequence` from those explicit rowids, so `elidedCommitmentLedgerRows`' `rows === top === mark` identity holds at a DIFFERENT number; `truncatedImmutableLedgers` compares `MAX(rowid)` against that same rebuilt mark and is satisfied; `regressedImmutableLedgers` reads `ledger_marks` out of the checkpoints just erased, and the surviving oldest checkpoint's own mark for this table is always at or below its own rowid; `contradictedChainCommitment` takes the maximum over the SURVIVING commitments, which the attacker chose. The `rows === 0` witness branch never runs, because the ledger is not empty. Measured by the review on a real file through the real facade: **18 statements** took commitments **7 → 1** and evidence **9 → 4**, with `boot=false []`, FULL Founder assessment `false []`, reboot `false []` and `releaseKillSwitch` **ADMITTED**; a file latched at `["append_only_guard_missing","evidence_chain_broken"]` read `false []` at boot, at full assessment and across two further reboots after a 25-statement rollback over three ledgers; and once the commitment ledger was rolled back this way, rows could be erased from any of the 33 declared ledgers with no finding at any depth. | The header slot now records HOW FAR the commitment ledger has ever reached, not merely THAT it has been reached. `application_id` carries the signature `0x4851` (`HQ`) in its high 16 bits and the greatest rowid the ledger has ever held in its low 16 bits, raised by `recordCommitmentWitness` and never lowered. `elidedCommitmentLedgerRows` reports a ledger holding fewer rows, or a lower greatest rowid, than that mark. A `DROP TABLE` cannot lower a number in the database header, and a replay cannot raise the ledger to meet it. Reproduced independently at this lane before the fix (7 statements, commitments 4 → 1, `elided=false`, `regressed=[]`, `truncated=[]`, `contradicted=null`, `boot=false [] full=false [] reboot=false []`, release ADMITTED) and closed after it (`boot=true [append_only_guard_missing] full=true`, release refused, across three restarts). |
+| **LOW 1** — the phase document stated an anchor that would reopen the wave's own Critical | This page wrote the negative lookbehind as `(?<![A-Za-z0-9_])`. The code (`src/live/redaction.ts`) has never had the underscore and must not: `_` inside the class is the `\b` behaviour that carried `OPENAI_KEY_sk-…` onto the unauthenticated artifact (round four, Critical C1). The code was stronger than the document said, which is the direction a future reader "corrects" the wrong way. | The `_` is dropped from that sentence, and the drift is now machine-checked: `redaction-narrow-spaces.test.ts` reads every negative lookbehind out of `redaction.ts` itself, asserts they are all `(?<![A-Za-z0-9])`, and asserts this document does not contain the underscore form. The behaviour on both sides of the boundary is pinned beside it: `OPENAI_KEY_sk-…` and `_sk-…` refused, `Xsk-…` and `9sk-…` admitted as disclosed. |
+| **LOW 2** — the `\p{Zs}` residual was retained on a justification whose only worked example does not hold | The comment said folding the class "would join ordinary prose into fabricated credential shapes (`...ask -driven-workflow`)". The review reverted-to-test it on a scratch copy with `\p{Zs}` folded across a 40-string corpus: exactly **1** verdict changed and that string was contrived, while the doc's own example was still ACCEPTED — the `(?<![A-Za-z0-9])` anchor sees the `a` of `ask`, and the run is far too short for `{16,}`. Meanwhile the residual carried a whole key to the unauthenticated artifact for all seventeen members, and "a space is visible, so it hides nothing" is at its weakest for U+2007 FIGURE SPACE and U+200A HAIR SPACE. | The fifteen `\p{Zs}` separators that are not a plain space — U+1680, U+2000–U+200A, U+202F, U+205F, U+3000 — are erased from the scan copy. U+0020 and U+00A0 are deliberately left alone: those two are what prose is made of, and folding them would join every word of every sentence. The whole-plane sweep's `\p{Zs}` survivor count moves **17 → 2**, and the two are now named rather than counted. The false-positive cost was measured rather than assumed, and so was the mechanism. |
+
+### What the tenth round measured, including where a first attempt did not work
+
+- **The `\p{Zs}` fold cannot live in `ERASED_CODE_POINTS`, and that was found by
+  running it rather than by reasoning about it.** That set is applied LAST, and
+  `NFKC`/`NFKD` run before it — compatibility normalization maps fourteen of the
+  fifteen onto a plain U+0020. With all fifteen added to the erase set and
+  nothing else changed, the whole-plane sweep still found **16** `\p{Zs}`
+  survivors carrying a key; only U+1680, the one member with no compatibility
+  decomposition, dropped out. The erase therefore happens on the RAW string,
+  before any normalization, and the ordering property is pinned by a test that
+  asserts the decompositions themselves.
+- **The false-positive cost of that fold, measured on the typography that
+  actually uses those separators.** French narrow-no-break and thin-space
+  punctuation around `:`, French grouped numbers, and Japanese/Chinese prose
+  spaced with U+3000 were run against the guard with the fold in place, together
+  with the shipped multilingual corpus and every string the existing suites pin:
+  **zero refusals changed**. The retired justification's own example is pinned as
+  still ACCEPTED, so the sentence cannot come back.
+- **The seven legitimate operations the review confirmed clean were re-run
+  against the header mark, and all seven stay clean:** `VACUUM`, `.backup()`,
+  `VACUUM INTO`, a failed `INSERT` inside a committing transaction, an explicit
+  `ROLLBACK`, a `UNIQUE`/`RAISE(ABORT)` abort, and `SAVEPOINT` + `ROLLBACK TO`.
+  The header slot survives all three whole-file copies, and none of the four
+  failed or undone writes moves it. A `PRAGMA application_id` write is
+  TRANSACTIONAL in this engine — verified rather than assumed, and pinned —
+  which is what stops the stamp made inside a clean assessment's reservation
+  from surviving a rollback of that reservation as an inflated mark.
+- **HQ cannot walk its own finding back.** A genuine checkpoint appended by HQ's
+  own writer onto a rolled-back ledger lands at a lower rowid and leaves the
+  header alone, so the file stays blocking. Pinned.
+
+### What the tenth round adds to the NOT-fixed list
+
+- **One further `PRAGMA application_id` write buys any of the erasures back.** A
+  writer that rewrites the header to a mark matching the prefix it replayed — or
+  to zero, which returns the file to unwitnessed — is silent again: measured at
+  this head as ONE statement, after which boot, full assessment and reboot all
+  read `false []`. This is the same residual class as zeroing `PRAGMA
+  user_version` or rewriting `sqlite_sequence`. HQ holds no key over its own
+  file, and every fact this module rests on lives in the file the attacker is
+  already writing.
+- **The count-preserving in-place REWRITE is unchanged and remains the cheapest
+  surviving forgery.** It elides nothing, so it changes no count, no rowid and no
+  header mark. Its price is one `BEFORE UPDATE` trigger dropped and re-created on
+  each engine-guarded ledger the forgery touches.
+- **The header mark saturates at 65,535.** Past that many committed checkpoints
+  it stops advancing, so a rollback WITHIN the saturated range is not caught;
+  any rollback below 65,535 still is. Pinned by an encoding test.
+- **Exactly one mark value is given up, in the fail-open direction.** A genuine
+  mark of 17,232 encodes to the legacy round-seven stamp `0x48514350` and is read
+  back as "witnessed, mark unknown", so the check is vacuous for that ONE
+  checkpoint out of 65,535 and repairs itself at the next. Pinned.
+- **The witness signature is now 16 bits rather than an exact 32-bit value.** A
+  foreign file whose `application_id` begins with the ASCII `HQ` is read as
+  HQ-witnessed — the same consequence that already existed for the single legacy
+  value, now 65,536 times more likely and still requiring a foreign application
+  to have chosen an id beginning `HQ`. Corroborating the witness with `PRAGMA
+  user_version` was considered and rejected: it would let ONE statement against
+  `user_version` defeat both marks at once.
+- **A file committed on by a build older than this mark carries no mark until its
+  next checkpoint stamps one.** The ordinary upgrade cost of any new mark, in the
+  fail-open direction.
+- **Two `\p{Zs}` members still carry a key to the artifact:** U+0020 and U+00A0.
+  Deliberate, argued above, and pinned by name in the whole-plane sweep.
+
+**Each fix was verified to FAIL pre-fix** rather than merely to pass here: the
+source file was reverted to its `6ce93df` content from a scratch copy held
+outside the worktree, the new tests run against it, and the file restored.
+Measured: `reliability-commitment-prefix-replay.test.ts` **13 of 13 failed**
+(three of them the bare `expected false to be true` on
+`elidedCommitmentLedgerRows` for the three attack shapes);
+`reliability-commitment-ledger.test.ts` **2 of 11 failed** and
+`reliability-commitment-residual.test.ts` **1 of 6**, which are the three
+assertions that pinned a residual this round CLOSES and are now stronger in every
+line; with `redaction.ts` and this document reverted,
+`redaction-narrow-spaces.test.ts` failed on U+1680 and on the underscore anchor
+in this page, and `redaction-invisible-classes.test.ts` failed with
+`['U+0020','U+00A0','U+1680', …(14)]` against the expected two.

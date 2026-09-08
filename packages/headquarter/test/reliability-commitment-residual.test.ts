@@ -140,11 +140,15 @@ describe('the commitment-ledger row identity closes the DELETE-and-re-seat forge
       raw.prepare(`UPDATE sqlite_sequence SET seq = 1 WHERE name = ?`).run(LEDGER);
       for (const trigger of triggers) raw.exec(trigger.sql);
       const after = shape(raw);
-      // The row identity IS repaired by that path...
+      // The row identity IS repaired by that path, in every reading that lives
+      // inside the file...
       expect(after).toEqual({ rows: 1, greatestRowid: 1, highWaterMark: 1 });
-      expect(elidedCommitmentLedgerRows(raw)).toBe(false);
+      // ...and since round ten it is reported anyway, by the greatest rowid
+      // this ledger has ever reached, which HQ keeps in the database header
+      // where a `DELETE` and a `sqlite_sequence` write cannot reach it.
+      expect(elidedCommitmentLedgerRows(raw)).toBe(true);
       raw.close();
-      // ...and it is caught anyway, by the recorded high-water mark.
+      // It is caught by the recorded per-ledger high-water mark as well.
       const p2 = posture(fx, 'p2');
       expect(p2.bootSafeMode).toBe(true);
       expect(p2.assessSafeMode).toBe(true);
