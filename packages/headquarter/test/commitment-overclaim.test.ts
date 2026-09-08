@@ -41,11 +41,23 @@ import {
   HQ_INTEGRITY_CHECKPOINT_TABLE,
   contradictedChainCommitment,
   declaredGuardsFor,
+  CHECKPOINT_COLUMNS_THAT_DECIDE_NOTHING,
   declaredLedgerIdentities,
+  elidedCommitmentLedgerRows,
   regressedImmutableLedgers,
+  truncatedImmutableLedgers,
+  unboundedCheckpointColumns,
 } from '../src/store/integrity.js';
 
 const OVERCLAIM_GUARD = 'trg_hq_integrity_checkpoints_no_overclaim';
+
+/**
+ * 5 s is vitest's default and is not a measurement. The probes below open real
+ * file-backed HQ databases and, in the enumeration, compose several thousand
+ * raw `INSERT`s against one, so each carries the deadline this branch gives
+ * every file-backed probe rather than inheriting the harness default.
+ */
+const FILE_BACKED_PROBE_TIMEOUT_MS = 120_000;
 
 function findings(observations: readonly { finding: string }[]): string[] {
   return observations.map((observation) => observation.finding);
@@ -546,6 +558,538 @@ describe('a commitment whose JSON does not have one value per key is refused', (
       appendRawJson(raw, JSON.stringify({ op_evidence: 999 }), '{}', last.chain_length);
       raw.exec(guard);
       expect(regressedImmutableLedgers(raw)).toContain('op_evidence');
+      raw.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+/**
+ * Wave 5, correction round THIRTEEN, HIGH 1 — the guard bounded THREE of the
+ * row's columns and left `tip_hash` and the explicit `seq` unbounded, so ONE
+ * permitted `INSERT` still fabricated a permanent, unclearable safe mode while
+ * three shipped sentences said it could not.
+ *
+ * The adversary is the one this guard was built for and priced against: a local
+ * process with raw SQLite write access, using INSERT only — no DDL, no
+ * `DROP TRIGGER`, no `UPDATE`, no `sqlite_sequence` write, no restart and no
+ * Founder act. Appending to this ledger is exactly the write its own
+ * append-only trio deliberately permits.
+ *
+ *  - **Exploit A, a forged tip hash at a legal chain length.** Every clause the
+ *    guard carried passed: `chain_length` did not exceed the committed
+ *    `op_evidence` mark, that mark did not exceed the ledger's `MAX(rowid)`,
+ *    `ledger_rows` claimed nothing, and both JSON columns had one value per key.
+ *    `contradictedChainCommitment` then read `tip_hash` — which nothing bounded
+ *    — and reported `evidence_chain_broken` over a log that verified perfectly.
+ *  - **Exploit B, a caller-chosen rowid, with every COMMITTED value truthful.**
+ *    `trg_hq_integrity_checkpoints_no_replace` refuses an explicit `seq` that
+ *    already exists, and a hostile one does not exist. The row landed at rowid
+ *    1000, `elidedCommitmentLedgerRows` compared the ledger's row count against
+ *    its greatest rowid, and reported `append_only_guard_missing` — HQ telling
+ *    the Founder its own commitment ledger had been rewritten, on a file where
+ *    only an append had happened.
+ *
+ * Both were unclearable: the finding is re-derived from the file as it stands,
+ * the forged row cannot be deleted or updated by its own guards, and every
+ * restart re-raises it. Safe mode then permanently refuses approve, claim,
+ * release-kill-switch, execute-external-action, register-worker and
+ * declare-provider — the whole control plane — on a healthy store.
+ *
+ * The ROOT CAUSE is the class, not the two instances: round twelve reasoned
+ * about `chain_length` explicitly and never looked one column over. So the last
+ * block below is not another exploit — it derives the guard's obligations from
+ * `PRAGMA table_info` and fails the day a column is added without a bound.
+ */
+describe('no single INSERT a raw writer can compose fabricates a finding', () => {
+  /** Every column of the commitment ledger, as the FILE declares them. */
+  function checkpointColumns(raw: HqDatabase): string[] {
+    return (
+      raw.prepare(`PRAGMA table_info(${HQ_INTEGRITY_CHECKPOINT_TABLE})`).all() as { name: string }[]
+    ).map((column) => column.name);
+  }
+
+  /** The newest genuine commitment, EVERY column of it. */
+  function newestWholeRow(raw: HqDatabase): Record<string, unknown> {
+    return raw
+      .prepare(`SELECT * FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE} ORDER BY seq DESC LIMIT 1`)
+      .get() as Record<string, unknown>;
+  }
+
+  /**
+   * One raw `INSERT` naming exactly the columns given, with no HQ code in the
+   * path. Returns whether it landed and the refusal when it did not.
+   */
+  function insertRow(
+    raw: HqDatabase,
+    columns: readonly string[],
+    values: Record<string, unknown>,
+  ): { accepted: boolean; message: string } {
+    try {
+      raw
+        .prepare(
+          `INSERT INTO ${HQ_INTEGRITY_CHECKPOINT_TABLE} ` +
+            `(${columns.map((column) => `"${column}"`).join(', ')}) ` +
+            `VALUES (${columns.map(() => '?').join(', ')})`,
+        )
+        .run(columns.map((column) => values[column] as never));
+      return { accepted: true, message: '' };
+    } catch (error) {
+      return { accepted: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /**
+   * Every reading that can turn this ledger into a BLOCKING finding.
+   *
+   * Derived from `structuralIntegrity`, not chosen: `regressedImmutableLedgers`
+   * and `elidedCommitmentLedgerRows` are the two inputs to its
+   * `append_only_guard_missing`, `truncatedImmutableLedgers` is its
+   * `append_only_ledger_truncated`, and `contradictedChainCommitment` is its
+   * `evidence_chain_broken` — which is also the one this ledger contributes to
+   * the FULL depth's chain verification. Nothing else in the module reads
+   * `hq_integrity_checkpoints` into an observation.
+   */
+  function ledgerReadings(raw: HqDatabase): {
+    regressed: string[];
+    truncated: string[];
+    contradicted: number | null;
+    elided: boolean;
+  } {
+    return {
+      regressed: regressedImmutableLedgers(raw),
+      truncated: truncatedImmutableLedgers(raw),
+      contradicted: contradictedChainCommitment(raw),
+      elided: elidedCommitmentLedgerRows(raw),
+    };
+  }
+
+  const NOTHING_REPORTED = { regressed: [], truncated: [], contradicted: null, elided: false };
+
+  it(
+    'refuses Exploit A: a forged tip hash at a legal chain length, in one INSERT',
+    () => {
+      const fx = fileFixture();
+      try {
+        warm(fx);
+        fx.db.close();
+
+        const raw = fx.raw();
+        const columns = checkpointColumns(raw);
+        const genuine = newestWholeRow(raw);
+        expect(Number(genuine.chain_length)).toBeGreaterThan(0);
+        // Every OTHER column is exactly what HQ itself committed a moment ago —
+        // the marks, the row counts and the chain length all still fit the file.
+        // Only the hash is forged, and it is a well-formed 64-hex one so nothing
+        // can refuse it for its shape.
+        const forgedHash = '0'.repeat(64);
+        expect(forgedHash).not.toBe(String(genuine.tip_hash));
+        const attempt = insertRow(raw, columns, {
+          ...genuine,
+          seq: null,
+          id: 'forged-tip-hash',
+          tip_hash: forgedHash,
+          process_id: 'attacker',
+          recorded_by: 'attacker',
+        });
+        expect(attempt.accepted, 'one INSERT must not fabricate evidence_chain_broken').toBe(false);
+        expect(attempt.message).toMatch(/may not commit beyond the record/);
+        expect(ledgerReadings(raw)).toEqual(NOTHING_REPORTED);
+        raw.close();
+
+        expectNoFinding(fx, ['forged-tip-one', 'forged-tip-two']);
+      } finally {
+        fx.cleanup();
+      }
+    },
+    FILE_BACKED_PROBE_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses Exploit B: a caller-chosen rowid, with every committed value truthful',
+    () => {
+      const fx = fileFixture();
+      try {
+        warm(fx);
+        fx.db.close();
+
+        const raw = fx.raw();
+        const columns = checkpointColumns(raw);
+        const genuine = newestWholeRow(raw);
+        // NOTHING here is a lie about the file. The chain length, the tip hash,
+        // the marks and the row counts are the ones HQ wrote. Only the ROWID is
+        // hostile, and `no_replace` refuses an explicit `seq` that already
+        // EXISTS — 1000 does not.
+        const attempt = insertRow(raw, columns, {
+          ...genuine,
+          seq: 1000,
+          id: 'forged-seq',
+          process_id: 'attacker',
+          recorded_by: 'attacker',
+        });
+        expect(attempt.accepted, 'one INSERT must not fabricate append_only_guard_missing').toBe(
+          false,
+        );
+        expect(attempt.message).toMatch(/may not commit beyond the record/);
+        expect(ledgerReadings(raw)).toEqual(NOTHING_REPORTED);
+        raw.close();
+
+        expectNoFinding(fx, ['forged-seq-one', 'forged-seq-two']);
+      } finally {
+        fx.cleanup();
+      }
+    },
+    FILE_BACKED_PROBE_TIMEOUT_MS,
+  );
+
+  /**
+   * MINIMALITY, by enumeration rather than by sample.
+   *
+   * The two three-statement tests above this block establish that three
+   * statements SUFFICE. Neither establishes that ONE does not, and that is the
+   * half the shipped price sentence actually asserts — so it is the half that
+   * has to be executed. Every column the file declares is perturbed through
+   * every hostile shape this ledger's readers can tell apart, singly and then in
+   * the full cross-product over the five columns that DECIDE anything; each
+   * attempt is either refused at the write, or lands and is read back through
+   * every reading that can turn this ledger into a blocking finding.
+   *
+   * Each attempt runs inside a `SAVEPOINT` that is rolled back, so the file the
+   * next attempt sees is the intact one — `sqlite_sequence` included, which is
+   * an ordinary table and rolls back with everything else.
+   */
+  it(
+    'no single INSERT, over every column and every shape, makes an intact store report anything',
+    () => {
+      const fx = fileFixture();
+      try {
+        warm(fx);
+        fx.db.close();
+
+        const raw = fx.raw();
+        const columns = checkpointColumns(raw);
+        const genuine = newestWholeRow(raw);
+        const before = ledgerReadings(raw);
+        expect(before, 'the store must be intact before the enumeration').toEqual(NOTHING_REPORTED);
+        const shapeBefore = raw
+          .prepare(
+            `SELECT COUNT(*) AS rows, COALESCE(MAX(rowid), 0) AS top ` +
+              `FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`,
+          )
+          .get() as { rows: number; top: number };
+
+        const marks = JSON.parse(String(genuine.ledger_marks)) as Record<string, number>;
+        const held = JSON.parse(String(genuine.ledger_rows)) as Record<string, number>;
+        const chain = Number(genuine.chain_length);
+        const existingId = (
+          raw
+            .prepare(`SELECT id FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE} ORDER BY seq LIMIT 1`)
+            .get() as { id: string }
+        ).id;
+
+        /**
+         * The hostile shapes, per column. Written against what the READERS can
+         * distinguish — an over-claim, an under-claim, a forged hash, a chosen
+         * rowid, a duplicated JSON key, a scalar, malformed JSON, a wrong type —
+         * plus, in every set, the value HQ itself would have written, so the
+         * enumeration cannot pass by refusing everything.
+         */
+        const shapes: Record<string, unknown[]> = {
+          seq: [null, shapeBefore.top + 1, 1, 0, -1, 1000, 2 ** 31, 'x'],
+          id: ['fresh-id', existingId, ''],
+          recorded_at: [String(genuine.recorded_at), '', 'not-a-time'],
+          chain_length: [chain, 0, chain + 1, 999_999, -1],
+          tip_hash: [String(genuine.tip_hash), '', '0'.repeat(64), 'f'.repeat(64), 'not-a-hash'],
+          ledger_marks: [
+            String(genuine.ledger_marks),
+            '{}',
+            JSON.stringify({ ...marks, op_evidence: (marks.op_evidence ?? 0) + 1000 }),
+            `{"op_evidence":${marks.op_evidence ?? 0},"op_evidence":999999}`,
+            'null',
+            '{"op_evidence":',
+          ],
+          ledger_rows: [
+            String(genuine.ledger_rows),
+            '{}',
+            JSON.stringify({ ...held, op_evidence: (held.op_evidence ?? 0) + 1000 }),
+            `{"op_evidence":${held.op_evidence ?? 0},"op_evidence":999999}`,
+            'null',
+            '{"op_evidence":',
+          ],
+          process_id: ['attacker', ''],
+          recorded_by: ['attacker', ''],
+        };
+        // The enumeration is over the FILE's columns, so a column added to the
+        // ledger without a shape set here fails loudly rather than being skipped.
+        expect(Object.keys(shapes).sort()).toEqual([...columns].sort());
+
+        /** The columns whose value any reader of this ledger acts on. */
+        const deciding = ['seq', 'chain_length', 'tip_hash', 'ledger_marks', 'ledger_rows'];
+
+        let attempts = 0;
+        let landed = 0;
+        const fabricated: string[] = [];
+        const attempt = (values: Record<string, unknown>, label: string): void => {
+          attempts += 1;
+          raw.exec('SAVEPOINT probe');
+          const result = insertRow(raw, columns, values);
+          if (result.accepted) {
+            landed += 1;
+            const after = ledgerReadings(raw);
+            if (JSON.stringify(after) !== JSON.stringify(NOTHING_REPORTED)) {
+              fabricated.push(`${label} -> ${JSON.stringify(after)}`);
+            }
+          }
+          raw.exec('ROLLBACK TO probe');
+          raw.exec('RELEASE probe');
+        };
+
+        // 1. Every column, every shape, one at a time.
+        let fresh = 0;
+        for (const column of columns) {
+          for (const value of shapes[column]) {
+            fresh += 1;
+            attempt(
+              { ...genuine, seq: null, id: `single-${fresh}`, ...{ [column]: value } },
+              `single ${column}=${String(value)}`,
+            );
+          }
+        }
+
+        // 2. The full cross-product over the columns that decide something,
+        //    because a bound that holds one column at a time can still be walked
+        //    round by two at once — which is exactly how Exploit A got past a
+        //    guard that already bounded `chain_length`.
+        for (const seq of shapes.seq) {
+          for (const chainLength of shapes.chain_length) {
+            for (const tipHash of shapes.tip_hash) {
+              for (const ledgerMarks of shapes.ledger_marks) {
+                for (const ledgerRows of shapes.ledger_rows) {
+                  fresh += 1;
+                  attempt(
+                    {
+                      ...genuine,
+                      id: `combo-${fresh}`,
+                      seq,
+                      chain_length: chainLength,
+                      tip_hash: tipHash,
+                      ledger_marks: ledgerMarks,
+                      ledger_rows: ledgerRows,
+                      process_id: 'attacker',
+                      recorded_by: 'attacker',
+                    },
+                    `combo seq=${String(seq)} len=${String(chainLength)} tip=${String(tipHash).slice(0, 8)} ` +
+                      `marks=${String(ledgerMarks)} rows=${String(ledgerRows)}`,
+                  );
+                }
+              }
+            }
+          }
+        }
+
+        expect(fabricated, 'a single INSERT still fabricates a finding').toEqual([]);
+        // Not vacuous in either direction: the enumeration reached thousands of
+        // attempts, and some of them LANDED — a ledger that simply refused every
+        // append would satisfy the assertion above while proving nothing.
+        expect(attempts).toBeGreaterThan(1_000);
+        expect(landed, 'the ledger must still accept an ordinary append').toBeGreaterThan(0);
+        expect(deciding.every((column) => columns.includes(column))).toBe(true);
+
+        // The file is exactly where it started: every attempt was rolled back.
+        expect(
+          raw
+            .prepare(
+              `SELECT COUNT(*) AS rows, COALESCE(MAX(rowid), 0) AS top ` +
+                `FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`,
+            )
+            .get(),
+        ).toEqual(shapeBefore);
+        expect(ledgerReadings(raw)).toEqual(NOTHING_REPORTED);
+        raw.close();
+
+        expectNoFinding(fx, ['after-enumeration']);
+      } finally {
+        fx.cleanup();
+      }
+    },
+    FILE_BACKED_PROBE_TIMEOUT_MS,
+  );
+
+  /**
+   * What the `AFTER INSERT` timing costs and does not cost, executed.
+   *
+   * The rowid clause could not be spelled `BEFORE INSERT`: SQLite reports an
+   * omitted `AUTOINCREMENT` rowid there as the integer `-1`, which is a value a
+   * caller can also supply and which lands at rowid -1 and breaks the ledger's
+   * identity exactly as 1000 does. Moving the timing is what separates "the
+   * engine will choose" from "the caller chose". Three properties have to hold
+   * for that to be a free move, and each is measured here rather than asserted
+   * in the docblock: the refusal still reaches every spelling of an `INSERT`,
+   * the rejected row does not persist, and it does not burn a sequence value —
+   * a burned one would leave `elidedCommitmentLedgerRows` reporting for ever,
+   * which is the very failure this round is closing.
+   */
+  it(
+    'refuses the reseat under every INSERT spelling, and burns no sequence value doing it',
+    () => {
+      const fx = fileFixture();
+      try {
+        warm(fx);
+        fx.db.close();
+
+        const raw = fx.raw();
+        const columns = checkpointColumns(raw);
+        const genuine = newestWholeRow(raw);
+        const shape = (): unknown =>
+          raw
+            .prepare(
+              `SELECT (SELECT COUNT(*) FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}) AS rows, ` +
+                `(SELECT COALESCE(MAX(rowid), 0) FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}) AS top, ` +
+                `(SELECT seq FROM sqlite_sequence WHERE name = '${HQ_INTEGRITY_CHECKPOINT_TABLE}') AS mark`,
+            )
+            .get();
+        const before = shape();
+
+        for (const spelling of ['INSERT', 'INSERT OR REPLACE', 'INSERT OR IGNORE']) {
+          // -1 is the placeholder value a `BEFORE INSERT` clause cannot tell from
+          // an omitted rowid; 0 and 1000 are the ordinary reseats. All three land
+          // OUTSIDE the ledger's identity and all three must be refused.
+          for (const seq of [-1, 0, 1000]) {
+            let landed = false;
+            let message = '';
+            try {
+              raw
+                .prepare(
+                  `${spelling} INTO ${HQ_INTEGRITY_CHECKPOINT_TABLE} ` +
+                    `(${columns.map((column) => `"${column}"`).join(', ')}) ` +
+                    `VALUES (${columns.map(() => '?').join(', ')})`,
+                )
+                .run(
+                  columns.map((column) =>
+                    column === 'seq'
+                      ? (seq as never)
+                      : column === 'id'
+                        ? (`reseat-${spelling}-${seq}` as never)
+                        : (genuine[column] as never),
+                  ),
+                );
+              landed = true;
+            } catch (error) {
+              message = error instanceof Error ? error.message : String(error);
+            }
+            expect(landed, `${spelling} at seq ${seq} must be refused`).toBe(false);
+            expect(message).toMatch(/may not commit beyond the record/);
+          }
+        }
+
+        // Nothing persisted, and — the half that matters — the AUTOINCREMENT
+        // high-water mark is exactly where it was. A refusal that raised it
+        // would put `rows`, `top` and `mark` out of step and manufacture the
+        // finding by another route.
+        expect(shape()).toEqual(before);
+        expect(ledgerReadings(raw)).toEqual(NOTHING_REPORTED);
+        raw.close();
+
+        expectNoFinding(fx, ['after-reseat-spellings']);
+      } finally {
+        fx.cleanup();
+      }
+    },
+    FILE_BACKED_PROBE_TIMEOUT_MS,
+  );
+});
+
+/**
+ * The CLASS, not the two instances.
+ *
+ * Round seven bounded `ledger_marks`. Its own follow-up bounded `ledger_rows`
+ * and `chain_length`. Round twelve re-read all three for the duplicate-key parse
+ * and never looked at `tip_hash` or `seq`. Every one of those rounds shipped a
+ * sentence stating the price of a guard whose clause set had been written out by
+ * hand, and every one of them was one column short of the enumeration the
+ * sentence assumed.
+ *
+ * This block does not test a column. It derives the obligation from
+ * `PRAGMA table_info` of the ledger as the FILE declares it, checks it against
+ * the guard as `sqlite_master` holds it, and fails when the two disagree — so
+ * the next column added to this table is bounded, or explicitly declared to
+ * decide nothing, on the day it is added rather than in the round that finds it.
+ */
+describe('every column of the commitment ledger is bounded or declared to decide nothing', () => {
+  it('leaves no column of the real table outside the guard’s clause set', () => {
+    const fx = fileFixture();
+    try {
+      // Against the real, constructed store — not against the DDL string, which
+      // is what a hand-written enumeration was already checking itself against.
+      expect(unboundedCheckpointColumns(fx.db)).toEqual([]);
+      fx.db.close();
+      const raw = fx.raw();
+      expect(unboundedCheckpointColumns(raw)).toEqual([]);
+
+      // Not vacuous: the derivation must actually SEE the table's columns, and
+      // the four it excuses must be a strict subset of them.
+      const columns = (
+        raw.prepare(`PRAGMA table_info(${HQ_INTEGRITY_CHECKPOINT_TABLE})`).all() as {
+          name: string;
+        }[]
+      ).map((column) => column.name);
+      expect(columns.length).toBeGreaterThan(CHECKPOINT_COLUMNS_THAT_DECIDE_NOTHING.length);
+      for (const excused of CHECKPOINT_COLUMNS_THAT_DECIDE_NOTHING) {
+        expect(columns, `${excused} is excused but is not a column of the ledger`).toContain(
+          excused,
+        );
+      }
+      // And every column NOT excused is named by the guard's own text, which is
+      // the property `unboundedCheckpointColumns` returns the complement of.
+      const guard = (
+        raw
+          .prepare(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name = ?`)
+          .get(OVERCLAIM_GUARD) as { sql: string }
+      ).sql;
+      for (const column of columns) {
+        if (CHECKPOINT_COLUMNS_THAT_DECIDE_NOTHING.includes(column)) continue;
+        expect(guard, `${column} is unbounded in the over-claim guard`).toContain(`NEW.${column}`);
+      }
+      raw.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('reports a column the guard stops naming, and reports every one when the guard is gone', () => {
+    // The derivation has to FAIL when the property fails, or it is decoration.
+    // Both directions are executed against a real file: a guard re-created
+    // without one clause, and no guard at all.
+    const fx = fileFixture();
+    try {
+      fx.db.close();
+      const raw = fx.raw();
+      const guard = (
+        raw
+          .prepare(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name = ?`)
+          .get(OVERCLAIM_GUARD) as { sql: string }
+      ).sql;
+
+      raw.exec(`DROP TRIGGER ${OVERCLAIM_GUARD}`);
+      // Fail-CLOSED: no guard means nothing is bounded, and every deciding
+      // column is reported rather than none.
+      expect(unboundedCheckpointColumns(raw).sort()).toEqual(
+        ['chain_length', 'ledger_marks', 'ledger_rows', 'seq', 'tip_hash'].sort(),
+      );
+
+      // One clause removed — the exact shape of the round-thirteen defect.
+      const withoutTipHash = guard
+        .split('\n')
+        .filter((line) => !line.includes('NEW.tip_hash'))
+        .join('\n');
+      expect(withoutTipHash).not.toContain('NEW.tip_hash');
+      raw.exec(withoutTipHash);
+      expect(unboundedCheckpointColumns(raw)).toEqual(['tip_hash']);
+
+      raw.exec(`DROP TRIGGER ${OVERCLAIM_GUARD}`);
+      raw.exec(guard);
+      expect(unboundedCheckpointColumns(raw)).toEqual([]);
       raw.close();
     } finally {
       fx.cleanup();
