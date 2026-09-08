@@ -60,26 +60,57 @@
  * reachable fails too and the list cannot rot into a record of things that
  * used to be true.
  *
- * ## The three blind spots, closed by DENIAL rather than by resolution
+ * ## The blind spots, closed by DENIAL rather than by resolution
  *
  * The previous scan matched property chains only, so `const q = ops.queue;
- * q.get(id)` (aliasing), `const { get } = ops.queue` (destructuring) and
- * `ops.queue['get'](id)` (computed access) were all invisible. Resolving them
- * needs a type-aware pass this file deliberately does not build. Instead every
- * `.queue` occurrence that is NOT immediately followed by `.<identifier>` is a
- * FAILURE, listed by file and line, unless it appears in `HANDLE_ESCAPES` with
- * a reason. Aliasing, destructuring, computed access and passing the handle as
- * a value are therefore all refused rather than silently missed. That is a
- * narrower guarantee than "we can see through aliases", and it is stated as
- * what it is.
+ * q.get(id)` (aliasing), `const { get } = ops.queue` (destructuring off the
+ * queue) and `ops.queue['get'](id)` (computed access on the queue) were all
+ * invisible. Resolving them needs a type-aware pass this file deliberately does
+ * not build. Instead every `.queue` occurrence that is NOT immediately followed
+ * by `.<identifier>` is a FAILURE, listed by file and line, unless it appears
+ * in `HANDLE_ESCAPES` with a reason.
  *
- * ## What this still cannot see, stated plainly
+ * **That rule covers only the shapes that CONTAIN a literal `.queue`, and the
+ * sentence which used to stand here said otherwise** (Wave 5 correction round
+ * seventeen, Medium-1). It read: "Aliasing, destructuring, computed access and
+ * passing the handle as a value are therefore all refused rather than silently
+ * missed." A hostile review ran this file's own helpers on
  *
- *  - A queue obtained WITHOUT a `.queue` property access — a future call site
- *    that constructs its own `OperatorQueue`, or receives one as a parameter
- *    named anything else — is not matched by either census. What bounds that
- *    today is that `OperatorQueue`'s own enforcement reads `#db` closures, so
- *    a second instance over the same database enforces the same rules.
+ * ```
+ * A  const { queue } = ops; queue.approvalFor(id);
+ *       queue census reads=[] escapes=[]  facade census []  => INVISIBLE
+ * D  const note = 'a // b'; const r = ops.queue.approvalFor(id);
+ *       => INVISIBLE
+ * ```
+ *
+ * Case A takes the handle off the facade through a BINDING PATTERN, which has
+ * no `.queue` in it, and case D was hidden by `withoutComments` treating a `//`
+ * inside a STRING LITERAL as a comment and blanking the rest of the line — a
+ * fourth blind spot admitted nowhere. Both are closed:
+ * `handleExtractionEscapes` denies binding patterns naming `queue` and computed
+ * `['queue']` access under the same default-deny rule, and `withoutComments` is
+ * a string-aware scanner. Neither shape occurs in `src/` today, so both
+ * detectors carry their own regression case against the review's exact strings
+ * — an empty corpus result would otherwise pass while checking nothing.
+ *
+ * ## What this still cannot see, stated plainly and completely
+ *
+ *  - A queue obtained WITHOUT a `.queue` property access, a `{ queue }` binding
+ *    or a `['queue']` access — a future call site that constructs its own
+ *    `OperatorQueue`, or receives one as a parameter named anything else — is
+ *    not matched. What bounds that today is that `OperatorQueue`'s own
+ *    enforcement reads `#db` closures, so a second instance over the same
+ *    database enforces the same rules.
+ *  - A binding pattern is matched only when it names the identifier `queue`
+ *    and fits on ONE line. `const {\n  queue,\n} = ops;` is not matched, and
+ *    neither is a rename that happens two steps away (`const o = ops; const {
+ *    queue } = o;` IS matched — the pattern is on the receiver-free half — but
+ *    `const q = pickHandle(ops)` is not).
+ *  - `withoutComments` is a character scanner, not a tokenizer: a `//` inside a
+ *    REGULAR EXPRESSION literal is still read as a comment, and the contents of
+ *    a template literal — including `${…}` interpolations — are treated as
+ *    string content, so a `.queue` read written inside an interpolation is
+ *    invisible.
  *  - `ops.<member>` reads are matched on receivers spelled `ops`, `operations`
  *    or `hq`. A facade bound to a differently-named local is not counted. The
  *    receiver census is a REPORT of what the package does today; the
@@ -88,6 +119,8 @@
  *    tell a read that decides from a read that displays — that is what the
  *    written `reason` on every classification is for, and a reason is a claim
  *    a human made, not a fact this file proved.
+ *  - It scans `src/` only. A read from `test/`, `tools/` or a consuming
+ *    workspace is outside it by construction.
  *
  * The second half of the file is the RUNTIME form of the same rule, and it is
  * derived too: every exported class in the worker-directory modules has every
@@ -565,16 +598,132 @@ function read(relative: string): string {
 }
 
 /**
- * Blank out comments, preserving line structure.
+ * Blank out comments, preserving line structure — and NOT blanking a `//` that
+ * lives inside a string literal (Wave 5 correction round seventeen, Medium-1).
  *
  * Comments are where the migration's REASONS live — every hardened call site
  * carries a note naming the surface it no longer reads — so a scan that
  * counted them would report the fix as the defect.
+ *
+ * The previous version treated `//` anywhere as the start of a comment, so
+ *
+ * ```ts
+ * const note = 'a // b'; const r = ops.queue.approvalFor(id);
+ * ```
+ *
+ * had everything after the `//` BLANKED, hiding live code from every census in
+ * this file. A single-character scanner is used instead: it tracks `'`, `"`,
+ * `` ` `` and regex-free escape handling, and only starts a comment outside a
+ * string. There is no live occurrence of that shape in `src/` today; the point
+ * is that the scan can no longer be silenced by one.
+ *
+ * What it still does not parse: a `//` inside a REGULAR EXPRESSION literal
+ * (`/a\\/\\/b/`) is not distinguished from a comment, and template-literal
+ * `${…}` interpolations are treated as string content rather than code — so a
+ * `.queue` read written inside an interpolation is invisible. Both are stated
+ * rather than resolved: distinguishing division from a regex literal needs a
+ * real tokenizer, which this file deliberately does not build.
  */
 function withoutComments(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, (match) => match.replace(/[^\n]/g, ' '))
-    .replace(/(^|[^:])\/\/[^\n]*/g, (match, before: string) => before + ' '.repeat(match.length - before.length));
+  const out: string[] = [];
+  let index = 0;
+  let quote: string | null = null;
+  while (index < source.length) {
+    const character = source[index]!;
+    const next = source[index + 1];
+    if (quote) {
+      if (character === '\\') {
+        out.push(character, source[index + 1] ?? '');
+        index += 2;
+        continue;
+      }
+      if (character === quote) quote = null;
+      out.push(character);
+      index += 1;
+      continue;
+    }
+    if (character === "'" || character === '"' || character === '`') {
+      quote = character;
+      out.push(character);
+      index += 1;
+      continue;
+    }
+    if (character === '/' && next === '/') {
+      while (index < source.length && source[index] !== '\n') {
+        out.push(' ');
+        index += 1;
+      }
+      continue;
+    }
+    if (character === '/' && next === '*') {
+      while (index < source.length && !(source[index] === '*' && source[index + 1] === '/')) {
+        out.push(source[index] === '\n' ? '\n' : ' ');
+        index += 1;
+      }
+      out.push('  ');
+      index += 2;
+      continue;
+    }
+    out.push(character);
+    index += 1;
+  }
+  return out.join('');
+}
+
+/**
+ * Every DESTRUCTURING binding or COMPUTED access that could take a queue handle
+ * off an object without ever writing `.queue` (Wave 5 correction round
+ * seventeen, Medium-1).
+ *
+ * ## The sentence this replaces, and why it was false
+ *
+ * The header used to read: "Aliasing, destructuring, computed access and
+ * passing the handle as a value are therefore all refused rather than silently
+ * missed." Only the shapes that CONTAIN a literal `.queue` were refused. A
+ * hostile review ran the file's own helpers on
+ *
+ * ```ts
+ * const { queue } = ops; queue.approvalFor(id);
+ * ```
+ *
+ * and measured `queue census reads=[] escapes=[]  facade census []  =>
+ * INVISIBLE` — the handle was taken off the facade by a destructuring pattern,
+ * which has no `.queue` in it, and used through a bare local, which has no
+ * receiver either census recognises.
+ *
+ * Both shapes are DENIED here, by the same default-deny rule the `.queue`
+ * escapes use: a binding pattern that names `queue`, and a computed
+ * `['queue']` / `["queue"]` access, are failures unless listed in
+ * `HANDLE_ESCAPES` with a reason. There is no live occurrence of either in
+ * `src/` today, which is what makes the empty expectation meaningful rather
+ * than vacuous — a call site that introduces one fails on the day it is
+ * written.
+ */
+function handleExtractionEscapes(): { key: string; where: string }[] {
+  const found: { key: string; where: string }[] = [];
+  for (const relative of sourceFiles()) {
+    if (relative === QUEUE_DEFINITION_FILE) continue;
+    const source = withoutComments(read(relative));
+    const patterns: RegExp[] = [
+      // `const { queue } = ops`, `const { queue: q } = ops`, `{ a, queue } = x`
+      /\{[^{}\n]*\bqueue\b[^{}\n]*\}\s*(?:=|:)\s*[A-Za-z_$]/g,
+      // `ops['queue']`, `ops["queue"]`
+      /\[\s*['"]queue['"]\s*\]/g,
+    ];
+    for (const pattern of patterns) {
+      let match: RegExpExecArray | null;
+      while ((match = pattern.exec(source))) {
+        const line = source.slice(0, match.index).split('\n').length;
+        const text = (source.split('\n')[line - 1] ?? '').trim().replace(/\s+/g, ' ');
+        const escapeKey = Object.keys(HANDLE_ESCAPES).find(
+          (candidate) =>
+            candidate.startsWith(`${relative}:`) && text.includes(candidate.slice(relative.length + 1)),
+        );
+        found.push({ key: escapeKey ?? `${relative}:${text}`, where: `${relative}:${line}` });
+      }
+    }
+  }
+  return found;
 }
 
 /**
@@ -743,6 +892,54 @@ describe('the patchable-surface census is derived from the declared surface', ()
     );
   });
 
+  it('refuses a handle taken off an object WITHOUT writing `.queue` at all', () => {
+    // Round seventeen, Medium-1: `const { queue } = ops;` and `ops['queue']`
+    // were invisible to every census in this file, which is what made the
+    // header's "destructuring … refused rather than silently missed" false.
+    const extractions = handleExtractionEscapes();
+    const unexplained = extractions.filter((escape) => !(escape.key in HANDLE_ESCAPES));
+    expect(unexplained.map((escape) => `${escape.where} ${escape.key}`)).toEqual([]);
+  });
+
+  it('the two new denials really would catch the shapes the review measured', () => {
+    // A regression on the DETECTOR, not on the corpus: `src/` contains neither
+    // shape today, so the empty expectation above would pass even if the
+    // patterns had quietly stopped matching. These are the review's own
+    // strings, verbatim.
+    const destructure = /\{[^{}\n]*\bqueue\b[^{}\n]*\}\s*(?:=|:)\s*[A-Za-z_$]/;
+    const computed = /\[\s*['"]queue['"]\s*\]/;
+    expect(destructure.test('const { queue } = ops; queue.approvalFor(id);')).toBe(true);
+    expect(destructure.test('const { store, queue } = options;')).toBe(true);
+    expect(destructure.test('const { queue: q } = ops;')).toBe(true);
+    expect(computed.test("const q = ops['queue'];")).toBe(true);
+    expect(computed.test('const q = ops["queue"];')).toBe(true);
+    // And shapes that are NOT a handle extraction stay quiet, or the denial
+    // would be unusable and would be turned off.
+    expect(destructure.test('const { get } = ops.queue;')).toBe(false);
+    expect(computed.test('queue.approvalFor(id)')).toBe(false);
+  });
+
+  it('does not treat a `//` inside a string literal as the start of a comment', () => {
+    // The fourth blind spot, admitted nowhere before round seventeen: the old
+    // `withoutComments` blanked the rest of the line, hiding live code.
+    const line = `const note = 'a // b'; const r = ops.queue.approvalFor(id);`;
+    const stripped = withoutComments(line);
+    expect(stripped, 'the live read must survive the comment strip').toContain(
+      'ops.queue.approvalFor',
+    );
+    // A REAL comment is still blanked, or the strip would report the fix as the
+    // defect (which is the reason it exists at all).
+    expect(withoutComments(`ops.queue.get(id); // ops.queue.approvalFor(id)`)).not.toContain(
+      'approvalFor',
+    );
+    expect(withoutComments(`/* ops.queue.approvalFor(id) */ ops.queue.get(id);`)).not.toContain(
+      'approvalFor',
+    );
+    // And the line structure is preserved, which every "at line N" message here
+    // depends on.
+    expect(withoutComments('a\n// b\nc').split('\n').length).toBe(3);
+  });
+
   it('finds exactly the facade self-reads that are classified, with the counts stated', () => {
     const classified = Object.fromEntries(
       Object.entries(FACADE_SELF_READS).map(([key, value]) => [key, value.count]),
@@ -805,6 +1002,54 @@ describe('the patchable-surface census is derived from the declared surface', ()
     ]) {
       expect(service, binding).toContain(binding);
     }
+  });
+
+  it('says which of those bindings are actually CALLED, and which are only published', () => {
+    // Round seventeen, Low-2. The assertion above says a target EXISTS, and the
+    // sentence beside it invited a reader to take that as evidence that the
+    // migration happened. Measured on `85b720d`, `proposalRowFor` had ZERO
+    // callers anywhere in `src/` — the decision it was built for,
+    // `promoteProposal`, reaches the same `#private` method DIRECTLY through
+    // `this.#proposalFromStore`, because it lives in the defining module and
+    // does not need the module binding. There is no shipped HTTP route and no
+    // other module that decides on a proposal, so there is nothing honest to
+    // wire it to.
+    //
+    // So the state is DERIVED and stated rather than glossed: each binding is
+    // counted, the counts are asserted in both directions, and a binding with
+    // no caller is recorded as published-and-unused rather than cited as proof
+    // of a migration. Wiring one, or deleting one, fails this test.
+    const bindings = [
+      'taskRowFor',
+      'capabilityRowFor',
+      'killSwitchEngagedFor',
+      'taskEvidenceRowsFor',
+      'gatewayActionHistoryFor',
+      'proposalRowFor',
+      'approvalRecordFor',
+      'declaredProviderFor',
+      'assignabilityProblemFor',
+    ];
+    const callers: Record<string, number> = {};
+    for (const relative of sourceFiles()) {
+      const source = withoutComments(read(relative));
+      for (const binding of bindings) {
+        // Calls only: the declaration itself and the import line are not uses.
+        const pattern = new RegExp(`(?<!function\\s)\\b${binding}\\s*\\(`, 'g');
+        const hits = source.match(pattern)?.length ?? 0;
+        if (hits > 0) callers[binding] = (callers[binding] ?? 0) + hits;
+      }
+    }
+    const unused = bindings.filter((binding) => !callers[binding]);
+    // The measured answer at the head that closed round seventeen's Low-2.
+    // Exact, in both directions: a binding that gains a caller and a binding
+    // that loses its last one both fail here.
+    expect(unused, 'the published-but-uncalled set is measured, not assumed').toEqual([
+      'proposalRowFor',
+    ]);
+    // And the rest really are called, so this is not a test that passes because
+    // it counted nothing.
+    expect(Object.keys(callers).length).toBe(bindings.length - 1);
   });
 
   it('reads the run ledger through the loader that corroborates a reconciliation', () => {
