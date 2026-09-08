@@ -265,7 +265,111 @@ function rowToTask(row: Record<string, unknown> | undefined): OperatorTask | nul
   };
 }
 
+/**
+ * Module-private. Assigned once by `OperatorQueue`'s `static {}` block below,
+ * and reachable from no other module — the same recipe `service.ts` uses for
+ * `readCapabilityRow` and `readKillSwitchEngaged`, applied across a module
+ * boundary. It is what lets the facade hand this file the safe-mode verdict
+ * without putting a property on the queue, on its prototype, or on any object
+ * a caller holding `ops.queue` can reach.
+ */
+let addSafeModeGate: (queue: OperatorQueue, gate: () => boolean) => void;
+
+/**
+ * A claim refused because HQ has said it cannot stand behind its own record.
+ *
+ * A distinct class rather than a bare `Error`, so `HeadquarterOperations`
+ * translates it back to the typed `safe_mode_engaged` refusal a Founder
+ * already sees from `claimNext` rather than to a generic `operator_rejected`.
+ */
+export class SafeModeEngaged extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SafeModeEngaged';
+  }
+}
+
+/**
+ * Tell this queue how to ask whether HQ is in SAFE MODE (Wave 5 correction
+ * round ten, High 3).
+ *
+ * ## What was open
+ *
+ * `HeadquarterOperations.queue` is a `public readonly` field, and this file
+ * contained ZERO occurrences of `safeMode`. With safe mode genuinely latched,
+ * `ops.claimNext(...)` was refused `safe_mode_engaged` while
+ * `ops.queue.claim(...)` succeeded — and it was not one method: the whole
+ * lifecycle ran, `queue.claim` → `start` → `heartbeat` → `complete`, with the
+ * task reaching `running` under a latch that exists to stop exactly that. The
+ * phase document meanwhile told the Founder that a queued task is safe because
+ * "claiming it is refused, so nothing it carries can happen while safe mode
+ * stands", which was false as written.
+ *
+ * ## Why the enforcement is HERE
+ *
+ * Because this is the layer that actually owns the act. `claimNext` is a
+ * convenience wrapper; `OperatorQueue.claim` is the canonical execution
+ * boundary — it is where the kill switch is re-read (`#killSwitchEngagedInternal`),
+ * where least privilege is re-checked, and where the approval nonce is
+ * consumed. A refusal that lives only in the wrapper is a refusal a caller can
+ * step around, which is what happened.
+ *
+ * ## Why it cannot be patched off
+ *
+ * The gates live in a `#private` field. There is no property on the queue, on
+ * `OperatorQueue.prototype`, or on any object reachable from `ops.queue` that
+ * names them, and this function can only ADD one. Gates are OR-ed and a gate
+ * that throws counts as ENGAGED, so a caller that installs a permissive gate
+ * of its own cannot mask the facade's real one — the fail-closed direction.
+ *
+ * ## What is deliberately NOT gated
+ *
+ * `start`, `heartbeat`, `complete`, `fail`, `releaseClaim` and
+ * `sweepExpiredLeases` stay available, because the facade's own documented
+ * disposition leaves `startTask`, `heartbeat`, `submitResult` and `failTask`
+ * available on purpose: they belong to work that was claimed and started
+ * BEFORE the latch, and refusing them would strand a live execution with
+ * nowhere to report. Safe mode must never remove a way to STOP something or a
+ * way to FIND OUT what is wrong. Closing `claim` is what makes that asymmetry
+ * true rather than merely stated: with no new claim, no new execution begins,
+ * and the lifecycle the review ran end to end cannot start.
+ */
+export function installQueueSafeModeGate(queue: OperatorQueue, gate: () => boolean): void {
+  addSafeModeGate(queue, gate);
+}
+
 export class OperatorQueue {
+  /**
+   * Every safe-mode verdict this queue must consult before handing out a
+   * claim. `#private`, append-only through `installQueueSafeModeGate`, and
+   * OR-ed: see that function for why both properties matter.
+   */
+  readonly #safeModeGates: (() => boolean)[] = [];
+
+  static {
+    addSafeModeGate = (queue: OperatorQueue, gate: () => boolean): void => {
+      queue.#safeModeGates.push(gate);
+    };
+  }
+
+  /**
+   * Whether any installed gate says HQ cannot stand behind its own record.
+   *
+   * A gate that THROWS counts as engaged. "I could not find out" is not a
+   * reason to hand out work — the same fail-closed reading `carryRecordedVerdict`
+   * applies to a verdict whose findings it cannot parse.
+   */
+  #safeModeEngaged(): boolean {
+    for (const gate of this.#safeModeGates) {
+      try {
+        if (gate()) return true;
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * READ-ONLY capability view for callers holding a queue.
    *
@@ -891,9 +995,28 @@ export class OperatorQueue {
     leaseMs = 5 * 60_000,
     onlyTaskId?: string,
   ): OperatorTask | null {
-    // Deny-by-default, and FIRST: before any read, any state mutation, and
-    // crucially before the single-use approval nonce is consumed below, so a
-    // rejected claim can never burn an approval or inflate a fencing token.
+    // SAFE MODE, and first of all — before assignability, before least
+    // privilege, before the kill switch, and long before the single-use
+    // approval nonce below (Wave 5 correction round ten, High 3). A claim is
+    // the act that hands work to a worker, and HQ does not hand out work whose
+    // approval, payload and capability rows it has just told the Founder it
+    // cannot stand behind. Enforced HERE rather than only in
+    // `HeadquarterOperations.claimNext`, because this is the canonical
+    // boundary: the wrapper's refusal was steppable through the facade's own
+    // `public readonly queue`, and the entire claim → start → heartbeat →
+    // complete lifecycle ran under a genuinely latched safe mode. See
+    // `installQueueSafeModeGate`.
+    if (this.#safeModeEngaged()) {
+      throw new SafeModeEngaged(
+        'Cannot claim work: HQ is in SAFE MODE. A claim is the act that hands work to a worker, ' +
+          'and HQ does not hand out work against a record it has said it cannot stand behind. ' +
+          'Work already claimed may still start, heartbeat, report and fail.',
+      );
+    }
+    // Deny-by-default, and FIRST after the latch: before any read, any state
+    // mutation, and crucially before the single-use approval nonce is consumed
+    // below, so a rejected claim can never burn an approval or inflate a
+    // fencing token.
     assertAssignable(this.#db, workerId);
     // Least privilege, at the canonical boundary rather than only at the
     // service. Before selection, before any mutation, and before the

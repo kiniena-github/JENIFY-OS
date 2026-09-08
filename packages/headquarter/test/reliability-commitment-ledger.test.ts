@@ -321,7 +321,7 @@ describe('HQ’s own commitment ledger is checked against itself', () => {
     }
   });
 
-  it('costs the cheaper one-statement repair every process after the first', () => {
+  it('costs the cheaper one-statement repair the very assessment it was aiming to pass', () => {
     const fx = fileFixture();
     try {
       warm(fx);
@@ -336,14 +336,27 @@ describe('HQ’s own commitment ledger is checked against itself', () => {
       expect(elidedCommitmentLedgerRows(raw)).toBe(false);
       raw.close();
 
-      const bought = fx.reopen('the-one-clean-process');
+      const bought = fx.reopen('the-one-clean-boot');
+      // The BOOT still reads clean: nothing it looks at contradicts anything.
       expect(bought.ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
-      // The Founder assessment the forgery was aiming to pass does pass — and
-      // it is also the act that appends the next commitment.
+      // And that clean boot is itself the act that takes the purchase back.
+      //
+      // **This price was re-measured at round ten and is one process worse for
+      // the attacker than the sentence it replaces** (Medium 4). Until then
+      // `immutableLedgerMarks` was driven by a `sqlite_sequence` scan, so the
+      // five declared ledgers that are not AUTOINCREMENT contributed no mark,
+      // and on this file no mark had ADVANCED — `recordIntegrityCheckpoint`
+      // therefore wrote nothing at this boot and the forgery bought a clean
+      // Founder assessment as well as a clean boot. The marks now cover every
+      // declared ledger, this boot's commitment does land, and it re-creates
+      // the commitment ledger's high-water mark above the row count the
+      // attacker's DELETE left behind. So the assessment the forgery was
+      // aiming to pass is refused in the very process it bought.
       const boughtAssessment = bought.ops.assessHqIntegrity({ requestedBy: 'founder' });
       expect(boughtAssessment.ok).toBe(true);
       if (!boughtAssessment.ok) throw new Error('unreachable');
-      expect(boughtAssessment.data.safeMode).toBe(false);
+      expect(boughtAssessment.data.safeMode).toBe(true);
+      expect(bought.ops.releaseKillSwitch('global', 'founder').ok).toBe(false);
       bought.db.close();
 
       // And then HQ's own next commitment re-creates the mark from the rowid

@@ -301,7 +301,7 @@ that no longer has the disposition it claims fails it too.
 |---|---|
 | `approveTask` | an approval bound to a record HQ cannot stand behind would sit primed to run the moment safe mode clears. |
 | `acceptTruth` | the Founder's approval-authority, digest-bound, step-up-gated, one-shot acceptance of a truth record. Acceptance executes nothing — no task, approval row, claim or dispatch is touched — which is why this was a Medium rather than a High; it is refused anyway because an act the shipped sentence calls APPROVE must either be refused or be here in the other table with its reason. |
-| `claimNext` | a claim hands work to a worker. Refused as `safe_mode_engaged`, distinctly from `nothing_claimable`. |
+| `claimNext` | a claim hands work to a worker. Refused as `safe_mode_engaged`, distinctly from `nothing_claimable`. **And the refusal now lives at the CANONICAL boundary as well** (Wave 5 correction round ten, High 3). It used to live only here, in the wrapper, while `HeadquarterOperations.queue` is a `public readonly` field and `src/operator/queue.ts` contained zero occurrences of `safeMode` — so with safe mode genuinely latched, `ops.claimNext(...)` was refused and `ops.queue.claim(...)` SUCCEEDED, and a hostile reviewer ran the whole lifecycle through the delegate (`claim` → `start` → `heartbeat` → `complete`, task reaching `running`). `OperatorQueue.claim` now consults the latch first, through a `#private` gate installed by this facade and unreachable from any object a caller holds. Pinned by `queue-safe-mode-enforcement.test.ts`, including a hostile-patch case. |
 | `releaseKillSwitch` | the direction that lets work run again. |
 | `declareWorkerProvider` | it is what lets a worker claim provider-bound work at all, so it ADDS authority. |
 | `registerExecutionWorker` | creates a worker identity WITH its `allowedCapabilities`, straight into the table `#grantOf` reads at every enforcement point. Create-only, with no revoke path. |
@@ -343,7 +343,7 @@ that no longer has the disposition it claims fails it too.
 
 | Left available | Why |
 |---|---|
-| `createTask` | a queued task is a request that cannot execute: claiming it is refused, so nothing it carries can happen while safe mode stands. Refusing creation would stop a Founder recording the very work that fixes the store. |
+| `createTask` | a queued task is a request that cannot execute: claiming it is refused, so nothing it carries can happen while safe mode stands. Refusing creation would stop a Founder recording the very work that fixes the store. **This sentence was FALSE as written until round ten and is now true** (High 3): the claim refusal lived only in `claimNext`, and the same task was claimable through `ops.queue.claim` — so a queued task carried plenty that could happen. The refusal is now enforced in `OperatorQueue.claim` itself. |
 | `assignTask` | assignment narrows who MAY claim; the claim itself is refused. It removes an option, it never adds one. |
 | `routeTask` | advisory routing. `eligible` is computed from the capability registry and the directory allow-list, it changes no canonical state, and the claim it might inform is refused anyway. The only thing it can write is an evidence note saying a nomination source misbehaved. |
 | `denyTask` | the fail-safe direction. |
@@ -794,6 +794,42 @@ folded.
 everything is fine while HQ has said otherwise about itself has been lied to,
 and that is the one thing this phase exists to prevent. The finding CATEGORY
 crosses; the detail — which names schema objects — does not.
+
+### The unauthenticated artifact IS a Founder-text publication surface
+
+Stated plainly here for the first time (Wave 5 correction round ten, NEW LOW).
+Everything above is about the `reliability` section, and it is accurate about
+that section. The artifact AS A WHOLE is a different question, and the answer
+is that it does carry Founder-typed text, in a file served with no
+authentication at all.
+
+The review named the task `title`. Measured at this head by writing a
+distinctive string into each field and searching the whole artifact, it is
+**four fields, not one** — the wider answer is recorded here rather than the
+narrower one that was reported:
+
+| Founder-typed field | Where it lands in `hq-snapshot.json` |
+|---|---|
+| `createTask` → `title` | `operations.data.<lane>[].title`, and folded into `commandCenter.data.attention.items[].summary` |
+| `createTask` → `project` | `operations.data.<lane>[].project` |
+| `denyTask` → `reason` | `operations.data.blocked[].blockReason`, `activity.data[].summary`, and the same `attention` summary |
+| `createTask` → `payload` | **nowhere.** Probed with the same method; it does not cross. |
+
+This is almost certainly intended, and it is why scanning these columns is
+load-bearing rather than tidy: `title`, `project` and `reason` are three of the
+columns a credential shape permanently bricked Founder routes through, and they
+are the same columns that reach the public artifact. It is also why the task
+PAYLOAD's carve-out from the credential scan is defensible — it is the one
+piece of caller text that is neither served to a Founder route nor published
+here, and its guard lives at the dispatch lane that would publish it.
+
+No behaviour is changed by this row. What changes is that the property is
+written down: **a task title, its project, and the reason a Founder gave for
+denying it are public.** Anyone composing one should know that, and any future
+field added beside them inherits the same question rather than the same
+silence. Pinned by `unauthenticated-founder-text.test.ts`, which writes a
+distinctive string into each of the four and asserts exactly this table — so
+the disclosure fails the suite if the behaviour changes in either direction.
 
 **That is true of the store-ABSENT branch too, and it was not (Wave 5
 High 5).** `reliabilitySummary()` returned a hard-coded
@@ -2544,10 +2580,32 @@ by reverting the fix, running the test, and restoring.
   boot=false [] assess=false release=ADMITTED`. It is one more deliberate act
   than the route that is now closed, and it is the same residual class as
   zeroing `PRAGMA user_version`.
-- **A declared ledger that is not `AUTOINCREMENT` contributes nothing to the
-  truncation check.** It has no `sqlite_sequence` row, so there is no mark to
-  contradict. Every ledger the check currently protects does have one; this is
-  stated rather than covered by a mark that would always read zero.
+- **The five declared ledgers that are not `AUTOINCREMENT` are covered by the
+  COMMITMENT check rather than by the engine's high-water check, and until Wave
+  5 correction round ten they were covered by NEITHER.** The row that stood here
+  was a tautology — it said such a ledger "contributes nothing" and named
+  neither the count nor the ledgers — and what it glossed over was a fail-OPEN
+  hole against the identical attack the other twenty-eight are protected from.
+  The five are `hq_memory`, `hq_mission_intents`, `hq_mission_plan_items`,
+  `hq_missions` and `hq_orchestration_runs`, out of thirty-three declared.
+  Measured as a matched pair at the reviewed head, running the same three
+  statements (drop the ledger's triggers, `DELETE`, re-create the triggers
+  verbatim) against one of the five and against the control: erasing
+  `hq_missions` gave `safeMode: false, blocking: []` and a FULL assessment of
+  `{}` with three committed missions gone, while erasing `op_evidence` correctly
+  gave `safeMode: true, blocking: ['append_only_ledger_truncated']`.
+  `immutableLedgerMarks` is now driven by the DECLARATION rather than by a
+  `sqlite_sequence` scan — the mark it publishes was always `MAX(rowid)`; the
+  sequence row was only deciding which tables got one — so every declared ledger
+  contributes a commitment and `regressedImmutableLedgers` compares it. It is
+  sound for exactly these tables because all thirty-three declare `no_erase`, so
+  `MAX(rowid)` on a declared ledger only ever rises.
+  **The difference that remains, stated rather than smoothed over:**
+  `truncatedImmutableLedgers` measures a ledger against the ENGINE's own
+  high-water mark, which genuinely does not exist for the five, so their alarm
+  needs a prior healthy boot to have recorded a commitment first. Pinned by
+  `immutable-ledger-truncation-coverage.test.ts`, which also fails if a sixth
+  non-`AUTOINCREMENT` ledger is declared without this row being revisited.
 - **`DROP TABLE hq_integrity_checkpoints` remains the surviving route**, at the
   cost re-measured at this head: `p2 boot=true [append_only_guard_missing]
   assess=true release=refused`, `p3 boot=true assess=false release=ADMITTED`,

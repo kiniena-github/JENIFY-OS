@@ -625,3 +625,114 @@ describe('the unauthenticated artifact', () => {
     }
   });
 });
+
+/**
+ * Wave 5 correction round ten, HIGH 5 — the Phase-14 write/read asymmetry,
+ * proved end to end on the route it bricks.
+ *
+ * `setIntelligenceBudget` scanned `{ note }` only, and its `scopeId` got
+ * `canonicalBudgetScopeId` plus a length check. `recordModelObservation`
+ * scanned `{ note, basis }`, and its `providerId`/`modelId` got only
+ * `isIdentifierSlug` — whose `SLUG = /^[a-z0-9][a-z0-9._:-]*$/` admits `sk-…`
+ * and `ghp_…` verbatim. Both tables are INSERT-only, the guard lived at the
+ * HTTP boundary alone (`control-api.ts:4226` and `:4153`), and every in-process
+ * FACADE caller went round it — so one accepted write permanently `500`-ed
+ * `GET /intelligence` with no row to take back out.
+ *
+ * The sibling eleven lines away (`recordIntelligenceCost`) had the correct
+ * guard the whole time — `assertBrowserSafe({ providerId, modelId })` — which
+ * is NEW MEDIUM A: the fix is to apply the guard the file already had,
+ * consistently, rather than to invent one.
+ */
+describe('a FACADE Phase-14 write cannot brick the Founder intelligence route', () => {
+  const CREDENTIAL_SLUG = 'sk-abcdefghijklmnop0123456789';
+
+  it('refuses a credential-shaped budget scopeId, and the route stays 200', () => {
+    const h = harness();
+    try {
+      expect(h.call({}).status).toBe(200);
+      const refused = h.fixture.ops.setIntelligenceBudget({
+        ...BUDGET_BODY,
+        scopeKind: 'provider',
+        scopeId: CREDENTIAL_SLUG,
+        window: 'total',
+        permittedTiers: [...INTELLIGENCE_TIERS],
+        setBy: 'founder',
+      });
+      expect(refused.ok).toBe(false);
+      if (refused.ok) throw new Error('unreachable');
+      expect(refused.error.code).toBe('invalid_input');
+      expect(refused.error.message).toContain('credential shape');
+      // The row the refusal did not write is the whole guarantee: the table is
+      // INSERT-only, so an accepted write here is permanent.
+      const after = h.call({});
+      expect(after.status).toBe(200);
+      expect(JSON.stringify(after.body)).not.toContain(CREDENTIAL_SLUG);
+    } finally {
+      h.fixture.cleanup();
+    }
+  });
+
+  it('refuses a credential-shaped observation providerId and modelId, and the route stays 200', () => {
+    for (const attempt of [
+      { providerId: CREDENTIAL_SLUG, modelId: 'claude-generic' },
+      { providerId: 'anthropic', modelId: CREDENTIAL_SLUG },
+    ]) {
+      const h = harness();
+      try {
+        expect(h.call({}).status).toBe(200);
+        const refused = h.fixture.ops.recordModelObservation({
+          ...OBSERVE_BODY,
+          ...attempt,
+          locality: 'cloud',
+          availability: 'unknown',
+          unitCostProvenance: 'unknown',
+          unitCostUnitKind: 'unknown',
+          source: 'founder_declared',
+          observedBy: 'founder',
+        });
+        expect(refused.ok, JSON.stringify(attempt)).toBe(false);
+        if (refused.ok) throw new Error('unreachable');
+        expect(refused.error.code).toBe('invalid_input');
+        expect(refused.error.message).toContain('credential shape');
+        const after = h.call({});
+        expect(after.status, JSON.stringify(attempt)).toBe(200);
+        expect(JSON.stringify(after.body)).not.toContain(CREDENTIAL_SLUG);
+      } finally {
+        h.fixture.cleanup();
+      }
+    }
+  });
+
+  it('an ordinary budget scope and model observation still land, and are still served', () => {
+    // The guard refuses credential SHAPES, not identifiers — without this the
+    // two tests above could be a refusal of everything.
+    const h = harness();
+    try {
+      expectOk(
+        h.fixture.ops.setIntelligenceBudget({
+          ...BUDGET_BODY,
+          scopeKind: 'provider',
+          scopeId: 'anthropic',
+          window: 'total',
+          permittedTiers: [...INTELLIGENCE_TIERS],
+          setBy: 'founder',
+        }),
+      );
+      expectOk(
+        h.fixture.ops.recordModelObservation({
+          ...OBSERVE_BODY,
+          locality: 'cloud',
+          availability: 'unknown',
+          unitCostProvenance: 'unknown',
+          unitCostUnitKind: 'unknown',
+          source: 'founder_declared',
+          observedBy: 'founder',
+        }),
+      );
+      expect(h.call({}).status).toBe(200);
+    } finally {
+      h.fixture.cleanup();
+    }
+  });
+});
