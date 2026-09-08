@@ -57,20 +57,63 @@
  *    MERGED one, because the concurrent round-seven lane was closing High 2 in
  *    the same wave: reading each declared ledger's row COUNT is what sees a row
  *    removed from the MIDDLE, and a `COUNT(*)` IS proportional to the rows a
- *    ledger holds where a seek is not. The THIRD correction (round twelve,
- *    Medium 1) retires the practice rather than the instance: "46 statements per
- *    pass" was true of one fixture at one commit and of nothing else, and "one
- *    seek for each ledger HQ has committed a mark for" named the wrong set —
- *    the standalone seek is taken while walking `sqlite_sequence`, so on the
- *    fixture's own warmed file it reaches four ledgers where HQ has committed
- *    marks for three. So no total is written here any more: the cost is
- *    `STRUCTURAL_STATEMENT_BASE` plus one seek per declared ledger with a
- *    positive `sqlite_sequence` row, that base is a pinned constant the
+ *    ledger holds where a seek is not.
+ *
+ *    **And a THIRD time, in the same direction, inside the very sentence
+ *    written to stop the recurrence.** Two concurrent lanes off the same base
+ *    found it independently — round eleven's Medium 1 and round twelve's
+ *    Medium 1 — and this paragraph is the merge of both, because each saw a
+ *    different half of it. "46 statements per pass and 0.871 ms averaged over
+ *    50 … Pinned in `integrity-statement-truth.test.ts` rather than estimated"
+ *    was false in BOTH halves: the pass executes 48 statements on the fixture
+ *    that figure was taken from, and nothing pinned either number. That file
+ *    pinned the SHAPES of the reads rigorously and neither of the figures
+ *    beside them, which is exactly how a re-measured constant drifted a third
+ *    time while its own test kept passing.
+ *
+ *    The correction is not a better constant, because a bare total cannot stay
+ *    right: two of its three terms are CENSUSES rather than constants. The pass
+ *    is one identity read per DECLARED ledger, one further standalone
+ *    `MAX(rowid)` seek, and eleven catalogue, pragma and commitment-ledger
+ *    reads that do not move. Over the 33 ledgers this build declares, the two
+ *    terms that do NOT move with the store's history are 33 + 11 = 44
+ *    statements.
+ *
+ *    **The seek term is NOT "one per ledger HQ has committed a mark for", which
+ *    is what the first attempt at this correction wrote and what the sentence
+ *    below said for three rounds.** `truncatedImmutableLedgers` takes that seek
+ *    while walking `sqlite_sequence`, so it reaches every declared ledger the
+ *    engine carries a positive `sqlite_sequence` row for — on the fixture's own
+ *    warmed file that is FOUR ledgers where HQ has committed marks for THREE,
+ *    it can reach a ledger HQ has committed nothing about, and it omits the
+ *    declared ledgers that are not AUTOINCREMENT however much HQ has committed
+ *    about them. The two sets coincide in SIZE on that fixture and in nothing
+ *    else, which is why a count-only assertion would have passed on the wrong
+ *    rule.
+ *
+ *    So no total is written here as though it were the cost of a pass: the cost
+ *    is `STRUCTURAL_STATEMENT_BASE` plus one seek per declared ledger with a
+ *    positive `sqlite_sequence` row — on the warmed fixture 44 + 4 = 48
+ *    statements, and on a file HQ has merely booted twice 44 + 2 = 46
+ *    statements, which is the whole reason a single total is the wrong thing to
+ *    ship. That base is a pinned constant the
  *    Founder-facing sentence interpolates, and
  *    `integrity-statement-truth.test.ts` asserts the RULE against instrumented
- *    counts on two different files instead of asserting a number against
- *    nothing, which is how the first two went unnoticed. Timing is unchanged and
- *    still under a millisecond. `fullIntegrity` adds `integrity_check`,
+ *    counts on TWO files whose seek terms differ, decomposes one real pass into
+ *    its three terms, compares the seeked set to the `sqlite_sequence` set it
+ *    really comes from and shows it DIFFERENT from the committed set, and
+ *    parses every number in the served sentence and in THIS paragraph back out
+ *    and compares it to the measurement — instead of asserting a number against
+ *    nothing, which is how the first two went unnoticed.
+ *
+ *    **No time is quoted, here or in the served sentence.** The retired figure
+ *    was 0.871 ms; the same measurement re-run gives 0.830 ms on one machine
+ *    and the review that found the error measured 1.023 ms on another. A
+ *    duration that moves with the machine is not a property of the code and no
+ *    test can pin one, so it is not shipped as though it were — not even as
+ *    "under a millisecond", which the other lane's correction still carried and
+ *    which a test now forbids along with every other timing shape.
+ *    `fullIntegrity` adds `integrity_check`,
  *    `foreign_key_check` and a whole-log evidence-chain verification, which
  *    are O(database) and O(log), and it is therefore an explicit act. Which
  *    one produced a verdict is carried ON the verdict, so nobody can mistake a
@@ -722,15 +765,20 @@ export const SAFE_MODE_STATEMENT =
  * The FIXED part of a structural pass's statement count — everything that does
  * not depend on how many ledgers the engine carries a `sqlite_sequence` row for.
  *
+ * **What it is made of, as a sum rather than as a figure.** It is the 33
+ * identity reads over the declared ledgers plus the 11 catalogue, pragma and
+ * commitment-ledger reads that do not move: 33 + 11 = 44 statements. Both terms
+ * are measured off one real pass and compared to this constant.
+ *
  * **Why a constant here rather than a number in the sentence.** The cost clause
  * has now shipped a wrong total three times in one wave, always understating,
  * and each time the number was true of the file it was measured on and of no
  * other. A pass costs this base plus one standalone `MAX(rowid)` seek for each
  * declared ledger with a positive `sqlite_sequence` row, and that second term
- * moves with the store's own history. Measured at this head, the same way, on
- * two files that differ in exactly that term: a file HQ has booted twice carries
- * two such ledgers and executes 46 statements; one carrying a run attempt
- * carries four and executes 48.
+ * moves with the store's own history. Measured the same way on two files that
+ * differ in exactly that term: a file HQ has booted twice carries 2 such
+ * ledgers and executes 46 statements; one carrying a run attempt carries 4 and
+ * executes 48 statements.
  *
  * **It is the cost on a file HQ HAS COMMITTED ON, which is the only file the
  * expensive half runs over at all.** With no checkpoint there is nothing to
@@ -742,10 +790,12 @@ export const SAFE_MODE_STATEMENT =
  *
  * `integrity-statement-truth.test.ts` asserts the RULE — the executed statement
  * count equals this base plus the measured seek count, on both committed-on
- * files, and the 33 identity reads are absent before the first commitment — so
- * the base cannot drift without failing a test, and the Founder-facing sentence
- * interpolates it rather than restating it. The three previous corrections were
- * all possible because the pin never compared a number to anything.
+ * files, and the 33 identity reads are absent before the first commitment — and
+ * it PARSES every number above back out of this docblock and compares it to
+ * that measurement, so neither the base nor any figure beside it can drift
+ * without failing a test, and the Founder-facing sentence interpolates the
+ * constant rather than restating it. The three previous corrections were all
+ * possible because the pin never compared a number to anything.
  */
 export const STRUCTURAL_STATEMENT_BASE = 44;
 
@@ -764,13 +814,17 @@ export const INTEGRITY_DEPTH_STATEMENT =
   'unlike the seek beside it, and that cost is paid deliberately: a seek cannot see a row removed from ' +
   'the MIDDLE of a ledger and a count can. The commitment ledger it scans is HQ’s own and is not fixed ' +
   'in size — it grows a row per clean boot and per clean assessment, so that term grows with HQ’s own ' +
-  'history. On a file HQ has committed on, the pass costs ' +
+  'history. The whole pass is therefore not a fixed number of statements, and no total is quoted here: ' +
+  'it is one identity read per declared ledger, one further seek per declared ledger the engine carries ' +
+  'a positive sqlite_sequence row for, and 11 catalogue, pragma and commitment-ledger reads that do not ' +
+  'move. Over the 33 ledgers this build declares, that is ' +
   `${STRUCTURAL_STATEMENT_BASE} statements plus one for each of those seeks — stated as the rule ` +
   'rather than as one file’s total, because the seek term is not a constant and a total measured on ' +
-  'one file has now been shipped wrong three times. Before the first commitment there is nothing to ' +
-  'compare a ledger against, so the per-ledger identity reads do not run at all and the pass is about ' +
-  'a quarter of that. Either way it runs in under a millisecond, which is ' +
-  'what keeps it affordable at every construction. It is ' +
+  'one file has now been shipped wrong three times. It moves with HQ’s own census and not with the rows ' +
+  'those ledgers hold, which is what keeps it affordable at every construction. Before the first ' +
+  'commitment there is nothing to compare a ledger against, so the per-ledger identity reads do not run ' +
+  'at all and the pass is about a quarter of that. No duration is quoted, because a time measured on ' +
+  'one machine is not a property of the code and no test can pin one. It is ' +
   'therefore not a ' +
   'catalogue read alone: a declared ledger that has been emptied, and an evidence log that contradicts a ' +
   'commitment HQ recorded outside it, are both found and both blocking at this depth. A full assessment ' +

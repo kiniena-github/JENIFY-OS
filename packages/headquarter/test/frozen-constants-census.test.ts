@@ -74,10 +74,22 @@ describe('every exported closed vocabulary in src/ is frozen, by enumeration ove
     }
     expect(unfrozen).toEqual([]);
     // Floors, so a narrowing of the enumeration is visible rather than quietly
-    // passing over an empty set. 131 modules and 225 distinct bindings at this
-    // head; the entry-point scan reaches 202 of them.
+    // passing over an empty set. New exported vocabulary is ordinary; the thing
+    // worth failing on is the enumeration SHRINKING.
+    //
+    // The two numbers below ARE the measurement at this head, and they are
+    // stated nowhere else — not restated in this comment, and not carried in
+    // prose beside the assertion (round eleven, Low 1). What used to sit here
+    // said "225 distinct bindings at this head" while this very code measured
+    // 226, and added "the entry-point scan reaches 202 of them", which nothing
+    // asserted anywhere: 202 was a round-six measurement of a BARREL-based
+    // scan that `reliability-verdict-durability.test.ts` has since replaced
+    // with a path-based enumeration of `src/`, so it had stopped describing
+    // anything at all. An unasserted number in a comment is exactly how the
+    // wave's cost clause drifted three times, and the fix is the same one:
+    // keep the number where a test reads it, or do not ship it.
     expect(files).toBeGreaterThanOrEqual(131);
-    expect(seen.size).toBeGreaterThanOrEqual(225);
+    expect(seen.size).toBeGreaterThanOrEqual(226);
   });
 
   it('freezes the gate the entry-point scan could not see', async () => {

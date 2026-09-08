@@ -3074,14 +3074,29 @@ false alarm for a false reassurance is not a fix. The evasion is pinned in
   halves of the check begin at the next checkpoint that lands, which is the
   ordinary upgrade cost of a new commitment and not a defence.
 - **The structural pass got more expensive, and the module header now says so.**
-  Measured at this head: 46 prepared statements per pass and 0.87 ms averaged
-  over 50, where 33 of those statements are a `COUNT(*)` + `MAX(rowid)` pair per
-  declared ledger. A `COUNT(*)` is O(rows) where the seek is not. It is paid
-  deliberately, because the seek cannot see a row removed from the middle and
-  the count can.
+  Measured on the `warmedFile()` fixture: 48 statements executed per pass, of
+  which 33 are a `COUNT(*)` + `MAX(rowid)` identity pair per declared ledger, 4
+  are a further `MAX(rowid)` seek — **one per declared ledger the engine carries
+  a positive `sqlite_sequence` row for, which is NOT the set HQ has committed
+  marks for; on this very fixture it is four against three** — and 11 are
+  catalogue, pragma and commitment-ledger reads that do not move. A `COUNT(*)`
+  is O(rows) where the seek is not. It is paid deliberately, because the seek
+  cannot see a row removed from the middle and the count can. 48 is this
+  fixture's total and not the cost of a pass: the rule is
+  `STRUCTURAL_STATEMENT_BASE` (44) plus one per seek, which is 46 on a file HQ
+  has merely booted twice and 11 before the first commitment. (The figure this
+  row carried for two rounds — "46 prepared statements per pass and 0.87 ms
+  averaged over 50" — was wrong in both halves; see the two concurrent rounds
+  below, and no duration ships anywhere any more.)
 - **Nothing here closes the count-preserving in-place REWRITE of the commitment
   ledger.** That residual is unchanged, and `reliability-commitment-residual.test.ts`
   still enforces it.
+- **A cost figure written in THIS document is read by no test.** The parse-back
+  rule reaches `integrity.ts` — the served string, the module header and the
+  docblock above `STRUCTURAL_STATEMENT_BASE` — and stops there. Executed:
+  changing "48 statements executed per pass" in the bullet above to "61" leaves
+  the whole suite at 191 files / 3425 tests passed. Disclosed at its price, with
+  the cheapest close named, in the merge section at the end of this page.
 
 ### One residual RE-PRICED downwards at this head
 
@@ -3390,26 +3405,38 @@ weakened. Three files conflicted.
   is recorded rather than the latest written as if it had always been there.
   The round-eleven re-measurement — "46 statements per structural pass and
   0.871 ms averaged over 50" with "one further `MAX(rowid)` seek per COMMITTED
-  ledger" — shipped to the Founder verbatim and was wrong in both terms
-  (round twelve, Medium 1). Instrumented at that head on that lane's own
-  `warmedFile()` construction, a pass executed 47 statements, not 46, and 48 at
-  the head that corrected it; on a plain established file it executed 46. The
+  ledger" — shipped to the Founder verbatim and was wrong in both terms. **Two
+  concurrent lanes off this same base found it independently, and both are
+  recorded below**: round eleven's Medium 1 re-measured the total at 48 and
+  retired the duration outright; round twelve's Medium 1 showed that no total
+  can be right, because the seek term is a census. Instrumented on that lane's
+  own `warmedFile()` construction, a pass executed 47 statements, not 46, and 48
+  at the head that corrected it; on a plain established file it executed 46. The
   number was never a constant. And the seek set is not the committed set: the
   standalone seek is taken while walking `sqlite_sequence`, so it reached four
   ledgers where HQ had committed marks for three, and it can reach a ledger HQ
   has committed nothing about.
-- **So no total is written in prose any more.** The cost is stated as the RULE:
-  `STRUCTURAL_STATEMENT_BASE` (44) plus one statement for each declared ledger
-  carrying a positive `sqlite_sequence` row, on a file HQ has committed on —
-  measured at 46 with two such ledgers and 48 with four. Before the first
-  commitment there is nothing to compare a ledger against, so the 33 identity
+- **So no total is written in prose any more, and no duration either.** The cost
+  is stated as the RULE:
+  `STRUCTURAL_STATEMENT_BASE` (44 — the 33 identity reads plus the 11 fixed
+  catalogue, pragma and commitment-ledger reads) plus one statement for each
+  declared ledger carrying a positive `sqlite_sequence` row, on a file HQ has
+  committed on — measured at 46 with two such ledgers and 48 with four. Before
+  the first commitment there is nothing to compare a ledger against, so the 33
+  identity
   reads do not run at all and a pass is 11 statements; quoting the committed-on
   figure as the cost of every pass would overstate that case four times over, so
   both branches are stated. The base is a constant the Founder-facing sentence
   interpolates rather than restates, and
   `integrity-statement-truth.test.ts` asserts the rule against instrumented
-  counts on two files whose seek terms differ. Timing is unchanged, still under
-  a millisecond. The reason all three corrections were needed is the same one
+  counts on two files whose seek terms differ, decomposes one real pass into its
+  three terms, and parses every number in both prose sites back out and compares
+  it to the measurement. **No timing figure ships at all** — round eleven's
+  point, kept over round twelve's "still under a millisecond", because a
+  duration that reads 0.830 ms on one machine and 1.023 ms on another is not a
+  property of the code and no test can pin one; a test now forbids `millisecond`,
+  a bare `ms` and any `<number> ms/seconds` shape from returning to the served
+  sentence. The reason all three corrections were needed is the same one
   each time: the pin never compared a number to anything.
 - **Round ten's pin, grown rather than replaced — and grown again in round
   twelve, because its TITLE claimed more than its assertions executed.** It was
@@ -3421,10 +3448,13 @@ weakened. Three files conflicted.
   DIFFERENT from the committed set on the same file. Its test asserted "two
   `MAX(rowid)` seeks per committed ledger, not one per declared one", which is
   the right shape of assertion and the wrong numbers at the merged head. It now
-  counts BOTH reads — the identity per declared ledger and the standalone seek
-  per committed one — and asserts each against the census rather than against
-  the sentence, which is strictly stronger than either lane's version. Both
-  retired phrasings are still pinned as retired, by their exact shape.
+  counts BOTH reads — the identity per declared ledger and the standalone seek,
+  which the bullet above establishes is per `sqlite_sequence`-carrying ledger
+  and not per committed one — and asserts each against the census rather than
+  against the sentence, which is strictly stronger than either lane's version.
+  Both retired phrasings are still pinned as retired, by their exact shape, and
+  "one further `MAX(rowid)` seek for each ledger HQ has committed a mark for"
+  joins them.
 - **Phase 14's H2 cell.** Both lanes corrected the same sentence. Round ten's
   correction survives on the merits — it disproves "unforgeable" by execution
   rather than by argument, with a count-preserving in-place rewrite of
@@ -3558,6 +3588,166 @@ line; with `redaction.ts` and this document reverted,
 in this page, and `redaction-invisible-classes.test.ts` failed with
 `['U+0020','U+00A0','U+1680', …(14)]` against the expected two.
 
+## The ELEVENTH correction round: a served number that was wrong a third time, and two annotations that outran their tests
+
+A fresh read-only hostile review of `48dd026` returned **0 Critical / 0 High /
+1 Medium / 2 Low**. It manufactured no blocking finding: the commitment-witness
+closure held under prefix replay at all six prefix lengths, full replay to
+empty, prefix plus forged padding, `DELETE` all plus `DELETE FROM
+sqlite_sequence`, and the combination attack; `PRAGMA application_id` is
+transactional on this engine, including under `SAVEPOINT`/`ROLLBACK TO`. All
+three findings are honesty defects in prose, and none of them is a security
+hole. **Nothing in this round changes security behaviour.**
+
+The round is recorded here because all three share one cause, and it is the
+cause this wave keeps rediscovering: **a number that no test reads.**
+
+### MEDIUM 1 — the cost clause was wrong a THIRD time, in the same direction, inside the sentence written to stop it
+
+`INTEGRITY_DEPTH_STATEMENT` is served to the Founder as `depthStatement` on
+`GET /api/hq/control/reliability`. It said "Measured on a real file, the whole
+pass is **46 statements** and under a millisecond". The module header said
+"**46 statements** per pass and **0.871 ms** averaged over 50 … **Pinned in
+`integrity-statement-truth.test.ts` rather than estimated**", and this document
+repeated both.
+
+Re-measured at this head by instrumenting `db.prepare` on the branch's own
+`statementsExecutedByOneStructuralPass` call site, five runs, deterministic:
+**48**, not 46.
+
+**The "Pinned … rather than estimated" clause was false**, and that is the more
+serious half. `integrity-statement-truth.test.ts` pinned the SHAPES of the
+reads rigorously — identity reads equal to `ENGINE_IMMUTABLE_TABLES.length`,
+strictly fewer standalone seeks than that, `EXPLAIN QUERY PLAN` asked of the
+engine, retired phrasings asserted absent — and pinned **neither number**.
+That is precisely why a figure re-measured one round earlier drifted again
+while every test in the file kept passing. The clause had already been wrong
+twice in this wave, in the same direction, and the sentence recording those two
+corrections was itself the third.
+
+**The fix is not a better constant, because a bare total cannot stay right.**
+Two of its three terms are censuses rather than constants. Measured on the
+deterministic `warmedFile()` fixture:
+
+| Term | Scales with | Measured |
+|---|---|---|
+| `COUNT(*)` + `MAX(rowid)` identity read | ledgers DECLARED | 33 |
+| further `MAX(rowid)` seek | ledgers HQ has COMMITTED a mark for | 4 |
+| catalogue, pragma and commitment-ledger reads | nothing — fixed | 11 |
+| **total** | | **48** |
+
+> **The middle row's "Scales with" is itself wrong, and the merge with the
+> concurrent round-twelve lane corrects it** — see the merge section at the end
+> of this page. The standalone seek is taken while walking `sqlite_sequence`, so
+> it is one per declared ledger the engine carries a positive `sqlite_sequence`
+> row for. On this very fixture that set has four members where HQ has committed
+> marks for three, so the counts coincide and the sets do not, and a
+> count-only assertion passes on the wrong rule. **The served sentence therefore
+> ships no total at all in the merged code**: it ships
+> `STRUCTURAL_STATEMENT_BASE` (33 + 11 = 44) plus one per seek, which is 48 on
+> this fixture, 46 on a file HQ has merely booted twice, and 11 before the first
+> commitment. This round's three measured TERMS survive unchanged and are
+> asserted term by term; only the second term's attribution and the shipping of
+> a total are superseded.
+
+The served sentence and the module header now state the three terms and the
+census they were measured against, and a new test asserts each term off one
+real pass, requires the total to be their sum, and **parses every number back
+out of both prose sites and compares it to the measurement**. Nothing retypes a
+figure for the prose to agree with. Mutation-checked three ways rather than
+asserted: restoring `46` in the served sentence fails (`expected 46 to be 48`),
+drifting the header's sum to `33 + 4 + 9 = 46` fails (`expected [33,4,9,46] to
+deeply equal [33,4,11,48]`), and reintroducing `0.871 ms` fails.
+
+**No duration is shipped anywhere any more, and none should have been.** The
+retired figure was 0.871 ms; the same measurement re-run at this head gives
+**0.830 ms** on this machine, and the review that found the error measured
+**1.023 ms** on another. A number that moves with the machine is not a property
+of the code and no test can pin one, so the sentence now claims nothing about
+time and a test forbids a timing figure from returning.
+
+### LOW 1 — a census annotation stated 225 where its own code measured 226
+
+`frozen-constants-census.test.ts` annotated its floors with "131 modules and
+225 distinct bindings at this head; the entry-point scan reaches 202 of them."
+Instrumented at this head: **131 files, 226 distinct bindings, 0 unfrozen**.
+The assertion is a floor (`>= 225`) and passed, so only the annotation was
+stale — by one.
+
+The `202` was worse than stale: it was a round-six measurement of a
+BARREL-based entry-point scan that `reliability-verdict-durability.test.ts` has
+since replaced with a path-based enumeration of `src/`, so it had stopped
+describing anything at all, and nothing asserted it anywhere.
+
+Corrected the way Medium 1 was: the floor is raised to the measured **226**, the
+`202` is dropped, and the numbers are now stated **only in the assertion** —
+not restated in prose beside it, which is what allowed the two to disagree. The
+floors stay floors on purpose: new exported vocabulary is ordinary, and the
+thing worth failing on is the enumeration SHRINKING.
+
+### LOW 2 — "it cannot build `sk-`, `ghp_` … out of prose that did not carry one" is false of the fold
+
+`redaction.ts` wrote that inference twice — once for the narrow-space fold and
+once for the combining-mark fold — and `redaction-invisible-classes.test.ts`
+repeated it a third time for `\p{Co}`. The premise is true and the conclusion
+does not follow: **removing a separator concatenates the tokens on either side
+of it**, so the scan copy can hold a prefix that no contiguous run of the
+original held. The same paragraph half-conceded it two sentences later ("What
+it CAN do is close a gap") while the sentence above still denied it.
+
+Executed against the real guard, and now pinned in
+`redaction-narrow-spaces.test.ts`: `the gh<U+200A>p_…`, `AI<U+3000>za…` and
+`Bear<U+200A>er …` carry no `ghp_`, `AIza` or `Bearer ` anywhere in the raw
+string and are all **REFUSED**, while the identical three strings written with
+a plain U+0020 — which this fold deliberately does not erase — are all
+**admitted**. That pair isolates the join as the whole cause.
+
+**The residual is not under-priced and the fold stays.** The review measured it
+over **138,600** real strings — this repository's own `PHASE_13` prose,
+`store/integrity.ts`'s source, and a French/Polish typography corpus, each
+against the 15 separators in 2 substitution styles — and found **15 verdicts
+changed, all 15 of them new refusals of one contrived `gh<U+200A>p_…` string,
+0 new accepts and 0 changes on real prose**. The direction is conservative: the
+cost is a false refusal on a contrived string, never a leak. So only the
+sentence changes, in all three places, and the retired wording is quoted rather
+than silently overwritten.
+
+### Verification at the eleventh-round head
+
+All green, exit 0. Baseline re-measured on this head (`e58b95c`) before any
+edit, and again after:
+
+| Check | Before | After |
+|---|---|---|
+| `npm run test:hq` | 190 files / 3397 tests | **190 files / 3401 tests** |
+| `npm run typecheck --workspace @factoryos/headquarter` | clean | clean |
+| `@factoryos/hq-host` test + typecheck | 23 / 222, clean | **23 / 222**, clean |
+| `@factoryos/hq-server` test + typecheck | 2 / 20, clean | **2 / 20**, clean |
+| root `npm test` | 37 / 569 + 3 skips | **37 / 569 + 3 pre-existing skips** |
+| `npm run build:site` | 10 pages | **10 pages** + `hq-snapshot.json` |
+| `npm run build` web initial JS | 215.66 kB / 69.22 kB gzip | **215.66 kB / 69.22 kB gzip** |
+
+Four tests added, no test file added, deleted, renamed, skipped or weakened.
+The diff against the accepted base `f1ce71c` touches `packages/server`,
+`packages/web`, `packages/shared`, `packages/config-mesob`, `packages/hq-host`,
+`apps`, `package.json` and `package-lock.json` **not at all**, and this round's
+own diff is confined to `packages/headquarter/` and `docs/HEADQUARTER/`. Zero
+new dependencies.
+
+**Each new assertion was verified to FAIL pre-fix** rather than merely to pass
+here — the source file was reverted to its `e58b95c` content from a scratch
+copy held outside the worktree, the new tests run against it, and the file
+restored. `integrity-statement-truth.test.ts`'s new test failed on
+`the depth statement must state its declared ledgers: expected null to be
+truthy`; `redaction-narrow-spaces.test.ts`'s new source assertion failed on
+`expected … not to contain 'it cannot introduce a letter, so it'`.
+
+**Stated honestly, because it is the point of Low 2:** the two BEHAVIOURAL
+tests added for the join pass against the pre-fix source as well, and always
+would have. The code was never wrong; only the sentence about it was. That is
+exactly why nothing caught it for a round, and it is the same failure mode as
+Medium 1 one level up — a claim no execution was ever compared against.
+
 ## Wave 5 correction round twelve — the over-claim guard bypassed at ONE statement, and four measurements that had never been compared to anything
 
 A fresh read-only hostile review of `100a927` returned 0 Critical / 1 High /
@@ -3650,3 +3840,183 @@ corrects had cited. The other seven assertions in that new file pass at both
 heads by design: they pin a property that was already TRUE at `48dd026`, where
 the defect was the evidence for it rather than the property itself, and a pin
 that failed there would mean the store had a rowid burn it does not have.
+
+## The merge of correction rounds eleven and twelve
+
+`origin` moved to `46f409b` — the round-eleven lane — while the round-twelve
+lane was being verified locally at `ba13d99`. Both were taken off the same base,
+`e58b95c`, so neither contains the other. Merged, never rebased: the result is a
+true merge commit with both parents, and **nothing from either lane is
+discarded**. Two files conflicted with markers
+(`docs/HEADQUARTER/PHASE_13_ADVANCED_RELIABILITY.md` and
+`packages/headquarter/src/store/integrity.ts`); three more overlapped without
+one and are treated below as the seams they are.
+
+Both lanes' round sections are kept whole and in order — round eleven, then
+round twelve — because each contains measurements the other never took. What
+follows is only what the merge itself had to decide.
+
+### The duplicate fix: the cost clause, corrected twice, independently
+
+Both lanes found the same defect — `INTEGRITY_DEPTH_STATEMENT` and the module
+header shipping "46 statements per pass and 0.871 ms averaged over 50 … Pinned
+in `integrity-statement-truth.test.ts` rather than estimated", where the file
+pinned neither figure. **One implementation survives, on the merits, and both
+lanes' regression tests are kept and ported.**
+
+- **Round twelve's derivation survives.** Round eleven's replacement stated a
+  three-term census and shipped its total: 33 identity reads per DECLARED
+  ledger + 4 seeks per ledger HQ has **COMMITTED** a mark for + 11 fixed reads =
+  48. The second term's attribution is wrong. The standalone seek is taken while
+  walking `sqlite_sequence`, so it is one per declared ledger the engine carries
+  a positive `sqlite_sequence` row for. On round eleven's own `warmedFile()`
+  fixture those two sets have the same SIZE — four — while HQ has committed
+  marks for three, so round eleven's assertion
+  `expect(Number(committedClaim![1])).toBe(seeks.length)` passed on the wrong
+  rule, which is the exact failure mode its own round was written to stop.
+  Round twelve compares the seeked SET to the `sqlite_sequence` SET and shows it
+  different from the committed set on the same file, which is a comparison a
+  count cannot fake. It also shows why no total can be shipped at all: the seek
+  term is a census, so the same code costs 48 statements on the warmed fixture
+  and 46 on a file HQ has merely booted twice, and 11 with zero identity reads
+  before the first commitment. So the served sentence ships
+  `STRUCTURAL_STATEMENT_BASE` (33 + 11 = 44) plus one per seek, as a rule.
+- **Round eleven's three measured TERMS survive**, unchanged, and are now
+  asserted term by term off one real pass — 33 identity reads, 4 seeks, 11 fixed
+  reads, and the base required to be the two of them that do not move with the
+  store's history. Round twelve had measured the total and the seek census but
+  had never decomposed the fixed remainder.
+- **Round eleven's NO-DURATION rule survives, and it is the stricter one, so it
+  wins over round twelve's wording.** Round twelve kept "Either way it runs in
+  under a millisecond" in the served sentence. That is a duration, it was
+  measured at 0.871 ms when it shipped, at 0.830 ms on one machine and 1.023 ms
+  on another, and no test can pin one. It is removed from the served sentence
+  and from the module header, and round eleven's assertions are kept verbatim —
+  `/millisecond/i`, `/\bms\b/` and `/\d+(?:\.\d+)?\s*(?:ms|milliseconds?|seconds?)\b/i`
+  may not match `INTEGRITY_DEPTH_STATEMENT`. Executed: putting "Either way it
+  runs in under a millisecond" back fails with `expected 'A structural
+  assessment reads the sch…' not to match /under a millisecond/i`.
+- **Round eleven's PARSE-BACK rule survives and is applied to round twelve's own
+  prose, which had escaped it.** Round twelve wrote the rule instead of a total
+  and then illustrated it with four figures no test read: "carries two such
+  ledgers and executes 46 statements; one carrying a run attempt carries four
+  and executes 48", "measured at 11 statements and ZERO identity reads", and
+  "overstate the unestablished case by four times". Writing a rule does not
+  exempt the numbers that illustrate it. Every one of them is now read back out
+  of the source — the module header, and the docblock above
+  `STRUCTURAL_STATEMENT_BASE` — and compared to the pass this test just
+  instrumented. Executed: drifting the docblock's `46` to `47` fails with
+  `expected [ 2, 47, 4, 48 ] to deeply equal [ 2, 46, 4, 48 ]`.
+
+Round eleven's test keeps its identity and its assertions; it is renamed from
+"ships a total that is its own three measured terms, and no duration at all" to
+"ships its three measured terms and no total or duration at all", because under
+the merged rule the served sentence ships no total. Nothing was deleted,
+skipped, weakened or narrowed: the merged file carries both lanes' tests, and
+the merged suite is at or above both parents in test files and in per-file `it(`
+count.
+
+### The five seams, and how each was resolved
+
+Three of them carried no conflict marker at all.
+
+1. **`INTEGRITY_DEPTH_STATEMENT` and the module header** (marker). Resolved
+   above.
+2. **`integrity-statement-truth.test.ts`** (NO marker — both lanes appended
+   different tests to the same describe block, so git merged them silently).
+   Round eleven's new test asserts against prose round twelve had already
+   rewritten. Left alone it would have required the served sentence to say "with
+   marks committed for 4 of them" and "that is 48 statements", both of which the
+   merged sentence correctly refuses to say. Ported to the merged rule: the term
+   assertions and the arithmetic stay, the wrong-set claim is replaced by an
+   assertion that the sentence attributes the seek to the `sqlite_sequence`
+   census AND does not carry the retired attribution, and the total assertion is
+   replaced by `not.toMatch(/\d+ statements(?! plus one for each of those
+   seeks)/)` — the base in the rule form is the only statement count the
+   sentence may carry. Executed: restoring "one further seek per committed one"
+   fails.
+3. **This page's cost row and residual bullet** (marker on one, none on the
+   other). Round eleven rewrote the "structural pass got more expensive" bullet
+   to "4 are a further `MAX(rowid)` seek per COMMITTED ledger"; round twelve had
+   rewritten the depth table at the top of this page to the `sqlite_sequence`
+   attribution. Both are now the `sqlite_sequence` attribution, with the
+   four-against-three difference stated where the number is, and the bullet says
+   48 is that fixture's total rather than the cost of a pass. Round eleven's own
+   section keeps its table and carries a quoted correction of the one row the
+   merge changed, rather than being silently rewritten. One further sentence in
+   the round-seven/round-ten merge section — "the identity per declared ledger
+   and the standalone seek per committed one" — was superseded by round twelve's
+   finding and is corrected here.
+4. **`frozen-constants-census.test.ts`** (NO marker — round eleven edited the
+   floors near the top, round twelve appended a `deepFreeze` describe block at
+   the bottom). Round eleven's annotation asserts the floors ARE the measurement
+   at this head, so the merge had to re-measure rather than assume: instrumented
+   at the merged head, **226 distinct bindings, 131 files, 0 unfrozen** — round
+   eleven's raised floor of 226 is still exactly the measurement after round
+   twelve's `freeze.ts` changes, which add no exported ALL-CAPS binding. Both
+   sides kept unchanged.
+5. **`redaction.ts` and the citation sweep** (NO marker — round eleven rewrote
+   the two "it cannot build a prefix" paragraphs, round twelve rewrote the
+   s-then-k class paragraph between them). The two corrections are about
+   different claims and neither contradicts the other: round eleven's is about
+   what an ERASE can join, round twelve's is about what a single-letter
+   enumeration could SEE. Round twelve's citation sweep — which fails whenever
+   `src/` names a `*.test.ts` the package does not have — was run against round
+   eleven's new sentences, which cite `redaction-narrow-spaces.test.ts` and
+   `live-redaction.test.ts`; both exist and the sweep passes.
+
+### Verification at the merged head
+
+All green, exit 0, run in this worktree.
+
+| Check | Round eleven (`46f409b`) | Round twelve (`ba13d99`) | Merged |
+|---|---|---|---|
+| `npm run test:hq` | 190 files / 3401 tests | 191 files / 3421 tests | **191 files / 3425 tests** |
+| repo-wide `*.test.ts` files | 252 | 253 | **253** |
+| repo-wide `it(` declarations | 4039 | 4059 | **4063** |
+| `typecheck @factoryos/headquarter` | clean | clean | clean |
+| `@factoryos/hq-host` test + typecheck | 23 / 222, clean | 23 / 222, clean | **23 / 222**, clean |
+| `@factoryos/hq-server` test + typecheck | 2 / 20, clean | 2 / 20, clean | **2 / 20**, clean |
+| root `npm test` | 37 / 569 + 3 skips | 37 / 569 + 3 skips | **37 / 569 + 3 pre-existing skips** |
+| `npm run build:site` | 10 pages | 10 pages | **10 pages** + `hq-snapshot.json` |
+| `npm run build` web initial JS | 215.66 kB / 69.22 kB gzip | same | **215.66 kB / 69.22 kB gzip** |
+
+No test file in either parent is missing from the merge, and **no file has fewer
+`it(` declarations than it had in either parent** — enumerated file by file
+rather than compared in total. Nothing was deleted, renamed, skipped, weakened
+or narrowed; no `.skip` / `.only` / `.todo` / `xit` / `xdescribe` was added, and
+no `as any`, `@ts-expect-error` or `eslint-disable` appears in an added line.
+Zero new dependencies. The diff against the accepted base `f1ce71c` touches
+`packages/server`, `packages/web`, `packages/shared`, `packages/config-mesob`,
+`packages/hq-host`, `apps`, `package.json` and `package-lock.json` not at all.
+
+Both lanes' headline guarantees were re-executed here rather than carried over:
+the duplicate-key over-claim and the plain over-claim are both REFUSED
+(`commitment-overclaim.test.ts`, 13 tests); the cost pin compares the seeked set
+to the `sqlite_sequence` set and shows it different from the committed set; the
+citation sweep passes; the backup-refusal count pin passes; the sealed-property
+`deepFreeze` escape throws; round eleven's term census, no-duration rule and
+parse-back rule all hold, with the three mutations above executed to show they
+are not vacuous.
+
+### The one residual the merge leaves standing, executed before it is written
+
+**A cost figure written in THIS document is still read by no test.** The parse-
+back rule the merge extended reaches `integrity.ts` — the served string, the
+module header, and the docblock above `STRUCTURAL_STATEMENT_BASE` — and stops
+there. Executed rather than reasoned about: changing "48 statements executed per
+pass" in the residual bullet above to "61 statements executed per pass" and
+running the whole suite gives **191 files / 3425 tests passed**, unchanged. The
+figure is wrong and nothing fails.
+
+It is disclosed rather than closed, and the price is stated rather than argued.
+It is not a defect this merge introduced — both parents already carried
+unasserted cost figures on this page, and it is the same class the wave has now
+hit four times. What the merge did do is move every such figure in the SOURCE
+under a test, which is where the served sentence and the constant come from; a
+figure on this page is a description of them and cannot reach the Founder except
+by being read here. The cheapest close is a doc parse-back of the same shape as
+`reliability-durability.test.ts`'s backup-refusal count pin, which already reads
+a number out of this page and compares it to a constant. That is a separate,
+scoped change with its own review, not something to fold into a reconciliation
+whose rule is that nothing is discarded and nothing new is invented.
