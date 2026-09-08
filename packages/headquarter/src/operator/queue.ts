@@ -18,7 +18,7 @@
 
 import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
-import { nowIso } from '../store/db.js';
+import { isMissingTableError, nowIso } from '../store/db.js';
 import { assertTransition, type ActivityStatus } from '../contracts/events.js';
 import { CapabilityRegistry, readStoredRiskClass, type Capability } from './capabilities.js';
 
@@ -581,10 +581,19 @@ export class OperatorQueue {
    * `hq_op_task_meta` through a closure over `#db` (Wave 5 correction round
    * sixteen, Critical B-1). See `AssignmentIntentViolation` for what was open.
    *
-   * Returns null when no intent stands — and also when the table does not
-   * exist, which is the honest answer rather than a fail-open one: a queue
+   * Returns null when no intent stands — and also when the table DOES NOT
+   * EXIST, which is the honest answer rather than a fail-open one: a queue
    * constructed on a database that never ran `ensureApplicationSchema` has
    * nowhere for an intent to have been recorded, so there is none to enforce.
+   *
+   * That sentence described the intent and not the code until Wave 5
+   * correction round seventeen (Medium-4): the `catch` was UNCONDITIONAL, so
+   * `DROP TABLE hq_op_task_meta` and a `prepare` patched to throw only for
+   * this one SELECT both produced `{"ok":true,"claimedBy":"jules"}` on work
+   * the Founder had assigned to `claude`. Absence is now distinguished from
+   * every other failure, and every other failure is RETHROWN — a claim
+   * boundary that cannot read its gate refuses rather than concluding there
+   * is none. See `isMissingTableError` and the constructor closure.
    */
   readonly #assignmentIntentOf: (taskId: string) => string | null;
   readonly #listProviders: () => WorkerProviderRecord[];
@@ -756,9 +765,24 @@ export class OperatorQueue {
           .get(taskId) as { assigned_worker_id: string | null } | undefined;
         const assigned = row?.assigned_worker_id ?? null;
         return typeof assigned === 'string' && assigned.length > 0 ? assigned : null;
-      } catch {
-        // The application-layer table is not present on this handle. No intent
-        // can have been recorded, so there is none to enforce.
+      } catch (error) {
+        // ABSENCE of the table, and nothing else (Wave 5 correction round
+        // seventeen, Medium-4). The `catch` used to be unconditional and the
+        // docblock above called that "the honest answer rather than a
+        // fail-open one" — it was a fail-open one for every error that is NOT
+        // absence. Measured on `85b720d`:
+        //
+        //   A7  DROP TABLE hq_op_task_meta;  claimNext('jules', github.open_pr)
+        //         -> {"ok":true,"claimedBy":"jules","fence":1}
+        //   A6  Database.prototype.prepare patched to throw ONLY for this
+        //       SELECT -> the identical stolen claim
+        //
+        // An error in READING the gate was read as "there is no gate". A
+        // database that never ran `ensureApplicationSchema` is genuinely
+        // absence and still answers null; every other failure is rethrown, so
+        // the claim boundary refuses rather than proceeding on an answer
+        // nobody obtained.
+        if (!isMissingTableError(error)) throw error;
         return null;
       }
     };

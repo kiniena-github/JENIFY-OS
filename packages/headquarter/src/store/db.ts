@@ -179,7 +179,7 @@ function ensureColumns(db: HqDatabase): void {
   for (const up of COLUMN_UPGRADES) {
     const cols = db.prepare(`PRAGMA table_info(${up.table})`).all() as { name: string }[];
     if (!cols.some((c) => c.name === up.column)) {
-      db.exec(`ALTER TABLE ${up.table} ADD COLUMN ${up.column} ${up.ddl}`);
+      execSchemaDdl(db, `ALTER TABLE ${up.table} ADD COLUMN ${up.column} ${up.ddl}`);
     }
   }
 }
@@ -364,7 +364,7 @@ export function migrateHqDatabase(db: HqDatabase): HqDatabase {
     // recorded in the same try for the same reason — either both facts are
     // observed at that instant or neither is.
   }
-  db.exec(DDL);
+  execSchemaDdl(db, DDL);
   ensureColumns(db);
   return db;
 }
@@ -422,6 +422,149 @@ export function openHqDatabaseReadOnly(path: string = DEFAULT_HQ_DB_PATH): HqDat
 /** In-memory database for tests. */
 export function openMemoryHqDatabase(): HqDatabase {
   return openHqDatabase(':memory:');
+}
+
+/**
+ * Run one read, retrying ONCE if SQLite reports that the schema changed under
+ * it (Wave 5 correction round sixteen; moved here and made re-preparing in
+ * round seventeen, Medium-3).
+ *
+ * `SQLITE_SCHEMA` is not corruption and it is not a defect in the caller: it is
+ * what the engine says when another connection ran DDL between the time a
+ * statement was prepared and the time it was stepped, and the documented
+ * handling is to prepare again. HQ's own boot path runs `CREATE TABLE IF NOT
+ * EXISTS` from every process at construction, so this is a race the package
+ * deliberately creates and must survive.
+ *
+ * ONE retry, not a loop: a second failure is a real condition and must be
+ * reported rather than spun on. Nothing about what is observed changes.
+ *
+ * **This helper only helps a caller whose `read` can PREPARE AGAIN.** Wrapping
+ * it around a call to an already-bound statement retries the same stale
+ * statement and fails identically — which is exactly the defect round
+ * seventeen found: the round-sixteen retry was applied to `tableNames`, whose
+ * callback re-prepares, while `specialistDirectoryReads` prepared once at
+ * construction and could never recover. For a bound `get`, use
+ * `bindSchemaResilientGet` below rather than this.
+ */
+export function retryOnSchemaChange<T>(read: () => T): T {
+  try {
+    return read();
+  } catch (error) {
+    if (!isSchemaChangeError(error)) throw error;
+    return read();
+  }
+}
+
+/** Is this the engine's "another connection changed the schema" signal? */
+export function isSchemaChangeError(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === 'SQLITE_SCHEMA';
+}
+
+/**
+ * Run one DDL batch, retrying ONCE if the schema changed under it (Wave 5
+ * correction round seventeen, Medium-3).
+ *
+ * THE ONE SPELLING of `db.exec` in `src/`, and that is the point rather than a
+ * tidiness preference. HQ's boot path runs `CREATE TABLE IF NOT EXISTS` from
+ * every process at construction, so every `ensure*Schema` pass races every
+ * other process's. The round-seventeen fix to `specialistDirectoryReads` closed
+ * the site a 32-run measurement had caught and the NEXT 64 runs surfaced a
+ * third site — `ensurePrincipalSchema`, one `db.exec` away — which is the same
+ * "fix the named line, leave the class open" failure this wave keeps repeating.
+ * Routing every DDL exec through here makes a site added in a future phase
+ * covered by construction; `schema-change-resilience.test.ts` derives that no
+ * bare `db.exec` survives in `src/`.
+ *
+ * `exec` re-parses its SQL on every call, so a plain retry genuinely
+ * re-prepares here — unlike a bound `get`, which needs
+ * `bindSchemaResilientGet`.
+ *
+ * It deliberately does NOT check `db.readonly`: the read-only guards stay
+ * exactly where their own callers put them, so this changes nothing but the
+ * retry.
+ */
+export function execSchemaDdl(db: HqDatabase, sql: string): void {
+  retryOnSchemaChange(() => {
+    // The ONE remaining `db.exec` in `src/`. Every other DDL site routes here;
+    // `schema-change-resilience.test.ts` derives that and fails if a second
+    // one appears.
+    db.exec(sql);
+  });
+}
+
+/**
+ * Is this the engine saying the table is NOT THERE, as opposed to any other
+ * failure to read it (Wave 5 correction round seventeen, Medium-4)?
+ *
+ * The distinction is load-bearing wherever an absent table is treated as "there
+ * is nothing to enforce": absence is a fact about a database that never ran a
+ * later phase's schema, and every other error is a failure to obtain an answer.
+ * Conflating the two turns a gate into a fail-open one, which is exactly what
+ * `#assignmentIntentOf` and its twin in `service.ts` used to do.
+ *
+ * Matched on better-sqlite3's own message (`no such table: <name>`), because
+ * the engine reports it with the generic `SQLITE_ERROR` code — the code alone
+ * cannot distinguish it from a syntax error or a patched `prepare`. The
+ * message is the only signal available, so it is the one used, and a message
+ * this does not recognise is NOT treated as absence: unrecognised means
+ * rethrown, which is the fail-closed direction.
+ */
+export function isMissingTableError(error: unknown): boolean {
+  const message = (error as { message?: unknown } | null)?.message;
+  return typeof message === 'string' && /\bno such table\b/i.test(message);
+}
+
+/**
+ * Prepare a statement once, return its `get` already bound, and RE-PREPARE it
+ * once if the engine reports the schema changed under it (Wave 5 correction
+ * round seventeen, Medium-3).
+ *
+ * ## The two properties this has to hold at the same time
+ *
+ * 1. **No mutable prototype on the call path.** Enforcement calls a closure
+ *    directly: `db.prepare` is bound at construction, `Statement.prototype.get`
+ *    is captured at construction, and `Function.prototype.call` is bound to it
+ *    at construction — so the RETRY path introduces no lookup the primary path
+ *    did not already make. That is the `bindGet` recipe, unchanged in
+ *    substance.
+ *
+ * 2. **Survivable across a concurrent DDL.** The previous shape bound
+ *    `statement.get` once and kept it forever, so a schema change under it was
+ *    permanently fatal to that instance. Measured on `85b720d` over 32 runs of
+ *    `reliability-commitment-prefix-replay.test.ts`: 2 failures, both
+ *    `SqliteError: database schema has changed` out of `row` in
+ *    `specialistDirectoryReads` — inside `#resolveRequester`, i.e. thrown out
+ *    of an ENFORCEMENT decision by a read whose own docblock said "a malformed
+ *    grant grants NOTHING rather than throwing out of an enforcement
+ *    decision". Fail-closed, so never a bypass; but the class was described as
+ *    survived and it was not.
+ *
+ * The retry re-prepares and re-binds, then runs once more. A second
+ * `SQLITE_SCHEMA` is a real condition and is thrown.
+ */
+export function bindSchemaResilientGet(
+  db: HqDatabase,
+  sql: string,
+): (...params: unknown[]) => unknown {
+  const prepare = db.prepare.bind(db);
+  let statement = prepare(sql);
+  // The ORIGINAL `Statement.prototype.get`, captured now, so re-preparing later
+  // never consults a prototype a caller could have replaced in between.
+  const rawGet = statement.get as (...params: unknown[]) => unknown;
+  const invoke = Function.prototype.call.bind(rawGet) as (
+    target: unknown,
+    ...params: unknown[]
+  ) => unknown;
+  return (...params: unknown[]): unknown => {
+    try {
+      return invoke(statement, ...params);
+    } catch (error) {
+      if (!isSchemaChangeError(error)) throw error;
+      statement = prepare(sql);
+      return invoke(statement, ...params);
+    }
+  };
 }
 
 export function nowIso(): string {
