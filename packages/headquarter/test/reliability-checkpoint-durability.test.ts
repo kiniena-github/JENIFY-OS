@@ -240,13 +240,33 @@ describe('the evidence log commits to a witness that does not live inside it', (
         seq: number;
         hash: string;
       };
+      // The row is composed the way HQ composes one — `chain_length` beside the
+      // `op_evidence` mark it IS, and the row count beside it — because
+      // `trg_hq_integrity_checkpoints_no_overclaim` refuses a commitment that
+      // over-claims either (Wave 5 correction round seven, High 3), and a row
+      // that omitted the marks would model a WEAKER attacker than this test is
+      // about: it would be refused for its shape rather than defeated on the
+      // merits. The point stands where it always did — a fresh commitment that
+      // AGREES with the forged log adds a satisfied row and removes none.
+      const held = (
+        raw.prepare(`SELECT COUNT(*) AS n FROM op_evidence`).get() as { n: number }
+      ).n;
       raw
         .prepare(
           `INSERT INTO hq_integrity_checkpoints
-             (id, recorded_at, chain_length, tip_hash, ledger_marks, process_id, recorded_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+             (id, recorded_at, chain_length, tip_hash, ledger_marks, ledger_rows, process_id, recorded_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run('forged-checkpoint', new Date().toISOString(), tip.seq, tip.hash, '{}', 'attacker', 'attacker');
+        .run(
+          'forged-checkpoint',
+          new Date().toISOString(),
+          tip.seq,
+          tip.hash,
+          JSON.stringify({ op_evidence: tip.seq }),
+          JSON.stringify({ op_evidence: held }),
+          'attacker',
+          'attacker',
+        );
       expect(contradictedChainCommitment(raw)).not.toBeNull();
       raw.close();
 

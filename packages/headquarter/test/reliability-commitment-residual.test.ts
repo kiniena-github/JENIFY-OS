@@ -30,9 +30,20 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fileFixture, type FileFixture } from './reliability.fixture.js';
 import type { HqDatabase } from '../src/store/db.js';
-import { elidedCommitmentLedgerRows } from '../src/store/integrity.js';
+import {
+  ENGINE_IMMUTABLE_TABLES,
+  declaredGuardsFor,
+  elidedCommitmentLedgerRows,
+} from '../src/store/integrity.js';
 
 const LEDGER = 'hq_integrity_checkpoints';
+
+/** Every guard the schema DECLARES on the commitment ledger. */
+function declaredCheckpointGuards(): string[] {
+  const entry = ENGINE_IMMUTABLE_TABLES.find((row) => row.table === LEDGER);
+  if (!entry) throw new Error('the commitment ledger is no longer a declared ledger');
+  return declaredGuardsFor(entry);
+}
 
 interface TriggerRow {
   name: string;
@@ -87,7 +98,11 @@ describe('the commitment-ledger row identity closes the DELETE-and-re-seat forge
       const triggers = raw
         .prepare(`SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?`)
         .all(LEDGER) as TriggerRow[];
-      expect(triggers.length).toBe(3);
+      // DERIVED rather than hand-counted (Wave 5 correction round seven, High
+      // 3): what this asserts is "every guard the schema declares is on the
+      // ledger before the attack takes them off", and the literal was that
+      // number only until `no_overclaim` was declared beside the trio.
+      expect(triggers.map((trigger) => trigger.name).sort()).toEqual(declaredCheckpointGuards().sort());
       for (const trigger of triggers) raw.exec(`DROP TRIGGER ${trigger.name}`);
       raw.exec(`DELETE FROM ${LEDGER} WHERE seq = (SELECT MIN(seq) FROM ${LEDGER})`);
       for (const trigger of triggers) raw.exec(trigger.sql);
