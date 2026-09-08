@@ -69,7 +69,7 @@
 import { v4 as uuid } from 'uuid';
 import { deepFreeze } from '../contracts/freeze.js';
 import type { HqDatabase } from '../store/db.js';
-import { nowIso } from '../store/db.js';
+import { bindSchemaResilientGet, isMissingTableError, nowIso } from '../store/db.js';
 import { HeadquarterStore } from '../store/headquarter.js';
 import { QUEUED_UNREACHABLE_STATUSES, type ActivityStatus } from '../contracts/events.js';
 import type { WorkerDescriptor, WorkerRole } from '../contracts/workers.js';
@@ -2281,11 +2281,16 @@ function freezePolicyContext(ctx: PolicyContext | undefined): PolicyContext {
  * can replace.
  *
  * This is a narrowing, not a guarantee — see the note at the call site.
+ *
+ * DELEGATES to `bindSchemaResilientGet` (Wave 5 correction round seventeen,
+ * Medium-3) rather than binding a statement that can never be prepared again.
+ * The narrowing is identical — the same construction-captured `prepare` and
+ * `get` — and a concurrent DDL no longer throws out of an enforcement decision.
+ * `#resolveRequester` reads the principal row through this, and it is on the
+ * same call path as the directory read the 32-run measurement caught.
  */
 function bindGet(db: HqDatabase, sql: string): (...params: unknown[]) => unknown {
-  const stmt = db.prepare(sql);
-  const get = stmt.get.bind(stmt) as (...params: unknown[]) => unknown;
-  return get;
+  return bindSchemaResilientGet(db, sql);
 }
 
 /**
@@ -2826,7 +2831,12 @@ export class HeadquarterOperations {
           .get(taskId) as { assigned_worker_id: string | null } | undefined;
         const assigned = row?.assigned_worker_id ?? null;
         return typeof assigned === 'string' && assigned.length > 0 ? assigned : null;
-      } catch {
+      } catch (error) {
+        // ABSENCE only — the twin of `OperatorQueue`'s `#assignmentIntentOf`,
+        // corrected for the same reason (Wave 5 correction round seventeen,
+        // Medium-4). An unconditional catch reads "I could not read the gate"
+        // as "there is no gate", which is fail-open on an enforcement answer.
+        if (!isMissingTableError(error)) throw error;
         return null;
       }
     };
@@ -3572,28 +3582,41 @@ export class HeadquarterOperations {
     }
 
     const at = nowIso();
-    this.#upsertMeta(taskId, {
-      assignedWorkerId: workerId,
-      assignedBy,
-      assignedAt: at,
-      assignmentRationale: rationale ?? null,
-    });
-    // Annotation only (status null): history records the routing decision
-    // without pretending the task changed state.
-    this.#store.appendEvent({
-      subjectKind: 'task',
-      subjectId: taskId,
-      status: null,
-      actor: assignedBy,
-      summary: `Assignment intent recorded for ${workerId}`,
-      detail: { workerId, advisory: true, rationale: rationale ?? null },
-    });
-    this.#requirePrivilegedQueue().appendEvidence({
-      taskId,
-      actor: assignedBy,
-      kind: 'assignment_intent_recorded',
-      payload: { workerId, rationale: rationale ?? null },
-    });
+    // ONE reservation over the row write, the annotation and the evidence
+    // append (Wave 5 correction round seventeen, High-1). The intent row is
+    // what `#assignmentIntentOf` enforces at the claim boundary, so an intent
+    // that lands with no hash-chained audit row behind it is a live gate
+    // nobody can account for. See `queue-mutation-atomicity.test.ts`, whose
+    // shape guard now covers this file.
+    const privileged = this.#requirePrivilegedQueue();
+    try {
+      privileged.reserve(() => {
+        this.#upsertMeta(taskId, {
+          assignedWorkerId: workerId,
+          assignedBy,
+          assignedAt: at,
+          assignmentRationale: rationale ?? null,
+        });
+        // Annotation only (status null): history records the routing decision
+        // without pretending the task changed state.
+        this.#store.appendEvent({
+          subjectKind: 'task',
+          subjectId: taskId,
+          status: null,
+          actor: assignedBy,
+          summary: `Assignment intent recorded for ${workerId}`,
+          detail: { workerId, advisory: true, rationale: rationale ?? null },
+        });
+        privileged.appendEvidence({
+          taskId,
+          actor: assignedBy,
+          kind: 'assignment_intent_recorded',
+          payload: { workerId, rationale: rationale ?? null },
+        });
+      });
+    } catch (error) {
+      return fail('operator_rejected', errorMessage(error), { taskId });
+    }
     return ok({ taskId, workerId, assignedBy, assignedAt: at, rationale: rationale ?? null });
   }
 
@@ -5350,35 +5373,44 @@ export class HeadquarterOperations {
       payload: input.payload,
       idempotencyKey,
     });
-    this.#db
-      .prepare(
-        `INSERT INTO hq_mission_proposals
+    // ONE reservation over the proposal row and its evidence append (Wave 5
+    // correction round seventeen, High-1).
+    const privileged = this.#requirePrivilegedQueue();
+    try {
+      privileged.reserve(() => {
+        this.#db
+          .prepare(
+            `INSERT INTO hq_mission_proposals
            (id, thread_id, source_message_id, capability_id, payload, idempotency_key, digest,
             proposed_by, proposed_at, status)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed')`,
-      )
-      .run(
-        id,
-        input.threadId,
-        input.sourceMessageId ?? null,
-        input.capabilityId,
-        JSON.stringify(input.payload),
-        idempotencyKey,
-        digest,
-        input.proposedBy,
-        at,
-      );
-    this.#requirePrivilegedQueue().appendEvidence({
-      actor: input.proposedBy,
-      kind: 'mission_proposed',
-      payload: {
-        proposalId: id,
-        threadId: input.threadId,
-        capabilityId: input.capabilityId,
-        digest,
-        executable: false,
-      },
-    });
+          )
+          .run(
+            id,
+            input.threadId,
+            input.sourceMessageId ?? null,
+            input.capabilityId,
+            JSON.stringify(input.payload),
+            idempotencyKey,
+            digest,
+            input.proposedBy,
+            at,
+          );
+        privileged.appendEvidence({
+          actor: input.proposedBy,
+          kind: 'mission_proposed',
+          payload: {
+            proposalId: id,
+            threadId: input.threadId,
+            capabilityId: input.capabilityId,
+            digest,
+            executable: false,
+          },
+        });
+      });
+    } catch (error) {
+      return fail('operator_rejected', errorMessage(error), { proposalId: id });
+    }
     return ok(this.getProposal(id)!);
   }
 
@@ -5443,36 +5475,64 @@ export class HeadquarterOperations {
       );
     }
 
-    const created = this.createTask({
-      capabilityId: proposal.capabilityId,
-      payload: proposal.payload,
-      idempotencyKey: proposal.idempotencyKey ?? undefined,
-      requestedBy: input.promotedBy,
-      project: input.project,
-      title: input.title,
-    });
-    if (!created.ok) return created;
-
-    this.#db
-      .prepare(
-        `UPDATE hq_mission_proposals
+    // ONE reservation over the WHOLE promotion (Wave 5 correction round
+    // seventeen, High-1): the task creation, the proposal row's one-way state
+    // change, the `sourceProposalId` meta and the hash-chained evidence
+    // append. Measured before the fix, with a `BEFORE INSERT ON op_evidence
+    // WHEN NEW.kind = 'mission_promoted_to_task' -> RAISE(ABORT)` trigger
+    // standing:
+    //
+    // ```
+    // RESULT: THREW blocked                    <- the caller was told it failed
+    // AFTER : tasks 1, proposalStatus promoted, evidenceRows 0,
+    //         task capability github.open_pr status queued
+    // CLAIM : {"ok":true,"claimedBy":"claude"} <- claimable, with no audit row
+    // RE-PROMOTE: {"ok":false,"code":"proposal_not_open"}  <- permanently wedged
+    // ```
+    //
+    // `createTask` is inside the reservation on purpose. It is its own
+    // transaction, which nests as a savepoint; leaving it outside would leave
+    // exactly the orphan executable task the measurement above found.
+    const privileged = this.#requirePrivilegedQueue();
+    let created: OpsResult<CreatedTask> | null = null;
+    try {
+      privileged.reserve(() => {
+        const attempt = this.createTask({
+          capabilityId: proposal.capabilityId,
+          payload: proposal.payload,
+          idempotencyKey: proposal.idempotencyKey ?? undefined,
+          requestedBy: input.promotedBy,
+          project: input.project,
+          title: input.title,
+        });
+        created = attempt;
+        if (!attempt.ok) return;
+        this.#db
+          .prepare(
+            `UPDATE hq_mission_proposals
          SET status = 'promoted', task_id = ?, decided_by = ?, decided_at = ?
          WHERE id = ? AND status = 'proposed'`,
-      )
-      .run(created.data.task.id, input.promotedBy, nowIso(), proposal.id);
-    this.#upsertMeta(created.data.task.id, { sourceProposalId: proposal.id });
-    this.#requirePrivilegedQueue().appendEvidence({
-      taskId: created.data.task.id,
-      actor: input.promotedBy,
-      kind: 'mission_promoted_to_task',
-      payload: {
-        proposalId: proposal.id,
-        threadId: proposal.threadId,
-        sourceMessageId: proposal.sourceMessageId,
-        capabilityId: proposal.capabilityId,
-      },
+          )
+          .run(attempt.data.task.id, input.promotedBy, nowIso(), proposal.id);
+        this.#upsertMeta(attempt.data.task.id, { sourceProposalId: proposal.id });
+        privileged.appendEvidence({
+          taskId: attempt.data.task.id,
+          actor: input.promotedBy,
+          kind: 'mission_promoted_to_task',
+          payload: {
+            proposalId: proposal.id,
+            threadId: proposal.threadId,
+            sourceMessageId: proposal.sourceMessageId,
+            capabilityId: proposal.capabilityId,
+          },
+        });
+      });
+    } catch (error) {
+      return fail('operator_rejected', errorMessage(error), { proposalId: proposal.id });
+    }
+    return created ?? fail('operator_rejected', 'The promotion produced no result', {
+      proposalId: proposal.id,
     });
-    return created;
   }
 
   /**
@@ -5512,17 +5572,30 @@ export class HeadquarterOperations {
     }
     const actor = this.#resolveActor(by, 'reject a mission proposal');
     if (!actor.ok) return actor;
-    this.#db
-      .prepare(
-        `UPDATE hq_mission_proposals SET status = 'rejected', decided_by = ?, decided_at = ?, decision_note = ?
+    // ONE reservation over the one-way state change and its evidence append
+    // (Wave 5 correction round seventeen, High-1). Measured before the fix,
+    // under a `BEFORE INSERT ON op_evidence WHEN NEW.kind =
+    // 'mission_proposal_rejected'` abort trigger: `REJECT THREW: blocked` and
+    // `{"status":"rejected","evidenceRows":0}` — the proposal was closed
+    // permanently, attributed to nobody in the hash chain.
+    const privileged = this.#requirePrivilegedQueue();
+    try {
+      privileged.reserve(() => {
+        this.#db
+          .prepare(
+            `UPDATE hq_mission_proposals SET status = 'rejected', decided_by = ?, decided_at = ?, decision_note = ?
          WHERE id = ? AND status = 'proposed'`,
-      )
-      .run(by, nowIso(), note, proposalId);
-    this.#requirePrivilegedQueue().appendEvidence({
-      actor: by,
-      kind: 'mission_proposal_rejected',
-      payload: { proposalId, note },
-    });
+          )
+          .run(by, nowIso(), note, proposalId);
+        privileged.appendEvidence({
+          actor: by,
+          kind: 'mission_proposal_rejected',
+          payload: { proposalId, note },
+        });
+      });
+    } catch (error) {
+      return fail('operator_rejected', errorMessage(error), { proposalId });
+    }
     return ok(this.getProposal(proposalId)!);
   }
 
@@ -17570,6 +17643,19 @@ export function taskRowFor(ops: HeadquarterOperations, taskId: string): Operator
  * The reason this exists is that `promoteProposal` is the one bridge from chat
  * to executable work and it decided on the prototype method; see
  * `readProposalRow` for the executed before/after.
+ *
+ * **It has NO CALLER in `src/` today, and that is recorded rather than glossed**
+ * (Wave 5 correction round seventeen, Low-2). `promoteProposal` reaches the
+ * same `#private` method DIRECTLY, as `this.#proposalFromStore`, because it
+ * lives in this module and does not need the binding to get there — so the
+ * defect B-3 opened is closed by that call site, not by this export. There is
+ * no shipped HTTP route for proposal promotion and no other module that decides
+ * on a proposal, so there is nothing honest to wire this to; it is published
+ * for the FIRST such caller, and until one exists it is a target and not
+ * evidence that a migration happened. `authority-read-scan.test.ts` measures
+ * the caller count of every binding in this family and asserts that
+ * published-but-uncalled set exactly, in both directions, so this sentence
+ * fails the day it stops being true.
  */
 export function proposalRowFor(
   ops: HeadquarterOperations,
