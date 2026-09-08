@@ -90,7 +90,7 @@
 import { founderConsole, type ApprovalCard } from '../application/console.js';
 import { hydrateRooms } from '../client/hydrate.js';
 import { liveSnapshotFromOperations } from './snapshot.js';
-import { capabilityRowFor } from '../application/service.js';
+import { capabilityRowFor, taskRowFor } from '../application/service.js';
 import type { HeadquarterOperations } from '../application/service.js';
 import { taskActionDigest } from '../operator/approvals.js';
 import type { ProviderId, SecretsEnv } from '../routing/providers.js';
@@ -803,7 +803,12 @@ export function handleControlRequest(
  * its provider; without one, the routing contract answers, as it did before.
  */
 function isDispatchBlocked(deps: ControlApiDeps, taskId: string): boolean {
-  const task = deps.ops.queue.get(taskId);
+  // The canonical row, never `queue.get` (Wave 5 correction round fifteen,
+  // Critical 1). This verdict is rendered as a Founder-facing BLOCKED badge on
+  // the order card; the class rule is that no route in this file looks a task
+  // up through the patchable convenience read, so a display that becomes a
+  // decision cannot inherit a forged row.
+  const task = taskRowFor(deps.ops, taskId);
   if (!task) return false;
   return directOrderDispatchBlocked(task, deps.secretsEnv, {
     alreadyDispatched: dispatchHistory(deps.ops, taskId).state === 'dispatched',
@@ -3661,7 +3666,17 @@ function approve(
   // Step-up is decided from the CANONICAL capability of the task named in the
   // request, never from a risk class the client sends. An unknown task is
   // refused here rather than being allowed to skip the check and fail later.
-  const task = deps.ops.queue.get(taskId);
+  //
+  // The TASK row comes from `taskRowFor`, not `queue.get` (Wave 5 correction
+  // round fifteen, Critical 1). Hardening the capability read below while
+  // leaving this line on the patchable public read hardened nothing: a
+  // capability is looked up BY a task, so `ops.queue.get = (id) => ({
+  // ...real(id), capabilityId: 'bench.read_only' })` made the enforcement-safe
+  // capability read return an honest row for the WRONG capability,
+  // `STEP_UP_RISK_CLASSES` stopped matching, `verifyStepUp` never ran, and a
+  // stale Founder session approved a `founder_gate` order with a verifier
+  // rejecting every password — measured, 401 -> 200, task CLAIMED.
+  const task = taskRowFor(deps.ops, taskId);
   if (!task) {
     audit('refused', 'unknown_task', founder);
     return refusal(404, 'unknown_task', `Unknown task: ${taskId}`);

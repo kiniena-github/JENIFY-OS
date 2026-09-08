@@ -266,6 +266,56 @@ function rowToTask(row: Record<string, unknown> | undefined): OperatorTask | nul
 }
 
 /**
+ * The canonical `op_tasks` row, read straight from the database — the ONE task
+ * read every enforcement decision in the package goes through (Wave 5
+ * correction round fifteen, Critical 1).
+ *
+ * ## Why this exists, and why it is a module function
+ *
+ * `OperatorQueue.get` is a prototype method that `#200` documents as a
+ * DISPLAY read: "enforcement does NOT dispatch through this". That sentence
+ * was true of the queue and false of everything above it. A hostile review
+ * replaced `ops.queue.get` with a closure returning `{ ...real(id),
+ * capabilityId: 'bench.read_only' }` and:
+ *
+ *  - `control-api.ts`'s `approve` route looked the capability up by the FORGED
+ *    id, `STEP_UP_RISK_CLASSES` no longer matched, `verifyStepUp` never ran,
+ *    and a stale Founder session approved a `founder_gate` order with every
+ *    password rejected — `401 step_up_required` became
+ *    `200 {"ok":true,"status":"queued"}`;
+ *  - `approveTask` read the capability-scoped kill switch for the FORGED
+ *    capability, so an approval landed with `op_kill_switch.engaged = 1` on
+ *    the task's real capability.
+ *
+ * The capability ROW had been hardened (`capabilityRowFor` →
+ * `#capabilityFromStore`); the TASK row it is looked up BY had not. That is
+ * the recurring shape: a hardened read installed next to an unhardened
+ * sibling.
+ *
+ * An ES module binding cannot be reassigned by an importing module and there
+ * is no prototype on the path, so this is the same enforcement-safe recipe
+ * `capabilityRowFor` uses, published one layer lower so the queue's own
+ * `#getTask` and the service's `#taskRowFromStore` are literally the same
+ * computation and cannot drift.
+ *
+ * FAIL CLOSED on an unreadable payload: a row whose `payload` column does not
+ * parse is reported as ABSENT rather than throwing out of a decision, which is
+ * what `#taskRowFromStore` already did and what every caller of a canonical
+ * read in this package does.
+ */
+export function readOperatorTaskRow(db: HqDatabase, taskId: string): OperatorTask | null {
+  const row = db.prepare(`SELECT * FROM op_tasks WHERE id = ?`).get(taskId) as
+    | Record<string, unknown>
+    | undefined;
+  if (!row) return null;
+  try {
+    return rowToTask(row);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Module-private. Assigned once by `OperatorQueue`'s `static {}` block below,
  * and reachable from no other module — the same recipe `service.ts` uses for
  * `readCapabilityRow` and `readKillSwitchEngaged`, applied across a module
@@ -565,9 +615,7 @@ export class OperatorQueue {
     // an attacker can reach participates in the enforcement path. The SQL is
     // the same as `WorkerProviderDirectory`'s; the read side of that class
     // stays exported for callers who legitimately want an object.
-    this.#getTask = (taskId: string): OperatorTask | null => rowToTask(
-      db.prepare(`SELECT * FROM op_tasks WHERE id = ?`).get(taskId) as Record<string, unknown> | undefined,
-    );
+    this.#getTask = (taskId: string): OperatorTask | null => readOperatorTaskRow(db, taskId);
     this.#capabilityOf = (capabilityId: string): Capability | null => {
       const row = db.prepare(`SELECT * FROM op_capabilities WHERE id = ?`).get(capabilityId) as
         | Record<string, unknown>

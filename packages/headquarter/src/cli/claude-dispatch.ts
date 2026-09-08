@@ -37,7 +37,7 @@
  */
 
 import { openHqDatabase } from '../store/db.js';
-import { HeadquarterOperations, type DispatchEvidenceGrant } from '../application/service.js';
+import { HeadquarterOperations, taskRowFor, type DispatchEvidenceGrant } from '../application/service.js';
 import {
   LOCAL_ADMIN_ACK_FLAG,
   LOCAL_ADMIN_INTERFACE_NOTICE,
@@ -189,7 +189,7 @@ function main(): void {
     // claim and consumes no approval. Passing `--as-worker` here therefore
     // publishes and reserves nothing.
     if (executorWorkerId) {
-      const capabilityId = ops.queue.get(taskId)?.capabilityId ?? null;
+      const capabilityId = taskRowFor(ops, taskId)?.capabilityId ?? null;
       const readiness = executorReadiness(ops, executorWorkerId, capabilityId);
       console.log(
         `  executor:    ${executorWorkerId} — ${

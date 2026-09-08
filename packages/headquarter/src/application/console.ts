@@ -25,6 +25,7 @@ import type { ActivityStatus } from '../contracts/events.js';
 import type { ReviewState } from '../operator/queue.js';
 import { taskActionDigest } from '../operator/approvals.js';
 import { classifyCapability, type TaskClassification } from './classification.js';
+import { capabilityRowFor, taskRowFor } from './service.js';
 import type { HeadquarterOperations, TaskMeta } from './service.js';
 
 export interface ConsoleTask {
@@ -139,9 +140,15 @@ function requesterAuthenticationOf(task: { payload?: Record<string, unknown> | n
 
 export function founderConsole(ops: HeadquarterOperations, now: Date = new Date()): FounderConsole {
   const toConsoleTask = (taskId: string): ConsoleTask | null => {
-    const task = ops.queue.get(taskId);
+    // Canonical reads, even though this file RENDERS rather than decides
+    // (Wave 5 correction round fifteen, Critical 1). The console is what a
+    // Founder reads before approving, and the card carries the very
+    // `actionDigest` the approval echoes back; a display that a decision is
+    // taken from is not a display. `taskRowFor`/`capabilityRowFor` are the
+    // enforcement-safe bindings, so no convenience surface reaches this card.
+    const task = taskRowFor(ops, taskId);
     if (!task) return null;
-    const capability = ops.queue.capabilities.get(task.capabilityId);
+    const capability = capabilityRowFor(ops, task.capabilityId);
     if (!capability) return null;
     const meta: TaskMeta | null = ops.readMeta(task.id);
     return {
@@ -208,7 +215,7 @@ export function founderConsole(ops: HeadquarterOperations, now: Date = new Date(
     .flatMap((task) => {
       const base = toConsoleTask(task.id);
       if (!base) return [];
-      const capability = ops.queue.capabilities.get(task.capabilityId)!;
+      const capability = capabilityRowFor(ops, task.capabilityId)!;
       const allowedDecisions: OutcomeUnknownCard['allowedDecisions'] = [
         'confirmed_done',
         'confirmed_failed',

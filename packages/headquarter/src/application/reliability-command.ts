@@ -1170,6 +1170,42 @@ export function deriveRunRecord(row: RunRow, events: readonly RunEventRow[]): Ru
   };
 
   for (const event of events) {
+    /**
+     * THE LATCH (Wave 5 correction round fifteen, Critical 3 — introduced by
+     * this diff).
+     *
+     * `needs_reconciliation` is the one state that means "HQ does not know
+     * whether a real external act happened, and a human must say". Only a
+     * `reconciled` event — an independent principal, a step-up, the
+     * idempotency rule — may leave it. Everything else is testimony or a
+     * counter.
+     *
+     * That rule was written out branch by branch, and the FIRST branch was
+     * missing it: `case 'opened': state = 'open'` was unconditional, so one
+     * append of `kind='opened'` — an append the ledger's own triggers
+     * permit, no UPDATE, no DELETE, no DDL — moved a run from
+     * `needs_reconciliation` back to `open`, cleared `needsReconciliation`,
+     * lifted the `openRun` guard, and let a SECOND attempt run on the same
+     * `side_effect = 1` `github.open_pr` work. The Founder's reconciliation
+     * inbox went from one item to zero at the same instant: the erased
+     * uncertainty was also the erased prompt to look at it. Reproduced end to
+     * end and regression-covered in `test/reliability-fold-latch.test.ts`.
+     *
+     * Three neighbouring branches carried their own copy of the guard and one
+     * did not, which is precisely why this is now ONE structural invariant
+     * over the whole fold instead of N copies of a sentence. A branch added in
+     * a future phase inherits it without being enumerated: the state, outcome,
+     * failure category and reopened flag are snapshotted before the switch and
+     * restored after it whenever the run stands at `needs_reconciliation` and
+     * the event is not a reconciliation. `outcome_recorded`'s explicit guard
+     * stays, because it does something this cannot: it turns the report into
+     * TESTIMONY (`workerReport`) rather than merely discarding it.
+     */
+    const pinned = state === 'needs_reconciliation' && event.kind !== 'reconciled';
+    const pinnedState: RunState = state;
+    const pinnedOutcome: RunOutcome = outcome;
+    const pinnedFailureCategory: RunFailureCategory = failureCategory;
+    const pinnedReopened: boolean = reopened;
     switch (event.kind) {
       case 'opened':
         state = 'open';
@@ -1277,6 +1313,12 @@ export function deriveRunRecord(row: RunRow, events: readonly RunEventRow[]): Ru
         reopened = false;
         break;
       }
+    }
+    if (pinned) {
+      state = pinnedState;
+      outcome = pinnedOutcome;
+      failureCategory = pinnedFailureCategory;
+      reopened = pinnedReopened;
     }
   }
 

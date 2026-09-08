@@ -24,6 +24,7 @@
  */
 
 import type { RiskClass } from '../operator/capabilities.js';
+import type { HqDatabase } from '../store/db.js';
 import type { HeadquarterStore } from '../store/headquarter.js';
 
 /**
@@ -83,9 +84,117 @@ export interface NominationSourcePort {
 }
 
 /**
+ * The same three answers as `WorkerDirectoryPort`, as OWN-PROPERTY CLOSURES
+ * rather than prototype methods (Wave 5 correction round fifteen, Critical 2
+ * and High 2).
+ *
+ * ## Why a second shape of the same interface exists
+ *
+ * `HeadquarterOperations` held its directory in a `#private` field and called
+ * `this.#workers.assignability(workerId)` — private storage, public dispatch.
+ * `#workers` holds an instance of the EXPORTED `SpecialistDirectoryAdapter` /
+ * `NarrowingWorkerDirectory`, so the call resolved through a replaceable
+ * prototype every time it ran. A hostile review disabled a member through
+ * ordinary configuration (no raw DB write), watched `executeAction` refuse
+ * with `worker_not_assignable` and zero adapter calls, then set
+ * `NarrowingWorkerDirectory.prototype.assignability = () => ({assignable:true})`
+ * and got `{"ok":true,"reversibility":"irreversible","visibility":"public"}`
+ * with the adapter called ONCE — an irreversible public external act by a
+ * worker the Registry said was disabled. Two lines above, `#grantOf` was
+ * already hardened; the sibling read beside it was not.
+ *
+ * The same shape reached least privilege: `#grantOf`'s database-backed closure
+ * applied only when NEITHER `options.workers` NOR `options.memberRegistry` was
+ * supplied, so supplying either silently opted back into prototype dispatch,
+ * and `NarrowingWorkerDirectory.prototype.allowedCapabilities = () => [cap]`
+ * turned `not_permitted` into `{"ok":true,"status":"assigned"}`.
+ *
+ * A closure captured at construction has no prototype on the path at call
+ * time. That is the same narrowing — not the same as a guarantee — the
+ * constructor's `bindGet` note already states: an attacker who runs BEFORE
+ * construction can still patch what is captured, and the boundary that closes
+ * that is a separate process, not an in-process fix.
+ */
+export interface WorkerDirectoryReads {
+  isRegistered: (workerId: string) => boolean;
+  allowedCapabilities: (workerId: string) => readonly string[];
+  assignability: (workerId: string) => WorkerAssignability;
+}
+
+/**
+ * Bind a caller-supplied `WorkerDirectoryPort`'s three reads once, at
+ * construction.
+ *
+ * The honest limit, stated rather than implied: this removes the OUTER
+ * prototype from the call path. A port the CALLER composed can still dispatch
+ * internally however it likes — HQ did not build it and cannot reach inside
+ * it. For the composition HQ builds itself (`composeDirectoryReads`), no
+ * prototype participates at any layer.
+ */
+export function bindDirectoryReads(port: WorkerDirectoryPort): WorkerDirectoryReads {
+  const isRegistered = port.isRegistered.bind(port);
+  const allowedCapabilities = port.allowedCapabilities.bind(port);
+  const assignability = port.assignability.bind(port);
+  return { isRegistered, allowedCapabilities, assignability };
+}
+
+/**
+ * The specialist-directory rule, as one pure function.
+ *
+ * Shared by `SpecialistDirectoryAdapter` (the exported port, unchanged for the
+ * callers that want an object) and by `specialistDirectoryReads` (the
+ * prototype-free closures enforcement uses), so the two answers cannot drift
+ * while only one of them is trusted — the same argument the queue's
+ * `rowToTask` already carries.
+ */
+export function specialistAssignability(
+  worker: { active: boolean } | null | undefined,
+): WorkerAssignability {
+  if (!worker) return { assignable: false, reason: 'worker_unknown' };
+  if (!worker.active) return { assignable: false, reason: 'worker_inactive' };
+  return { assignable: true };
+}
+
+/**
+ * The default directory's three reads, over `hq_specialists`, with statements
+ * prepared and their `get` bound once — the `bindGet` recipe the constructor's
+ * principal and grant lookups already use, applied to the whole directory.
+ *
+ * Deny by default throughout, including on an unparseable
+ * `allowed_capabilities` column: a malformed grant grants NOTHING rather than
+ * throwing out of an enforcement decision.
+ */
+export function specialistDirectoryReads(db: HqDatabase): WorkerDirectoryReads {
+  const statement = db.prepare(`SELECT id, allowed_capabilities, active FROM hq_specialists WHERE id = ?`);
+  const get = statement.get.bind(statement) as (workerId: string) => Record<string, unknown> | undefined;
+  const row = (workerId: string): { allowedCapabilities: string[]; active: boolean } | null => {
+    const found = get(workerId);
+    if (!found) return null;
+    let allowedCapabilities: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(String(found.allowed_capabilities));
+      if (Array.isArray(parsed)) allowedCapabilities = parsed.filter((c): c is string => typeof c === 'string');
+    } catch {
+      allowedCapabilities = [];
+    }
+    return { allowedCapabilities, active: !!found.active };
+  };
+  return {
+    isRegistered: (workerId: string) => row(workerId) !== null,
+    allowedCapabilities: (workerId: string) => row(workerId)?.allowedCapabilities ?? [],
+    assignability: (workerId: string) => specialistAssignability(row(workerId)),
+  };
+}
+
+/**
  * Default `WorkerDirectoryPort` over the foundation's specialist directory
  * (`hq_specialists`). Deny by default: unknown workers get no capabilities and
  * are not assignable.
+ *
+ * Kept exactly as it was for the callers that legitimately want an object.
+ * `HeadquarterOperations` no longer holds one: it uses
+ * `specialistDirectoryReads` instead, for the reason `WorkerDirectoryReads`
+ * documents.
  */
 export class SpecialistDirectoryAdapter implements WorkerDirectoryPort {
   constructor(private store: HeadquarterStore) {}
@@ -99,9 +208,6 @@ export class SpecialistDirectoryAdapter implements WorkerDirectoryPort {
   }
 
   assignability(workerId: string): WorkerAssignability {
-    const worker = this.store.getSpecialist(workerId);
-    if (!worker) return { assignable: false, reason: 'worker_unknown' };
-    if (!worker.active) return { assignable: false, reason: 'worker_inactive' };
-    return { assignable: true };
+    return specialistAssignability(this.store.getSpecialist(workerId));
   }
 }

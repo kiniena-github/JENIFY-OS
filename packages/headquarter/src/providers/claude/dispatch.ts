@@ -78,9 +78,11 @@ import { EXECUTION_PROVIDER_KEY, readProviderBinding } from '../../operator/prov
 import type { OperatorTask } from '../../operator/queue.js';
 import {
   assertDispatchEvidenceGrant,
+  capabilityRowFor,
   gatewayActionHistoryFor,
   killSwitchEngagedFor,
   taskEvidenceRowsFor,
+  taskRowFor,
   writeDispatchOutcome,
 } from '../../application/service.js';
 import type {
@@ -255,11 +257,21 @@ export function claudeDispatchEligibility(
   taskId: string,
   now: Date = new Date(),
 ): EligibilityVerdict {
-  const task = ops.queue.get(taskId);
+  // Both reads through the enforcement-safe function bindings, never the
+  // patchable public convenience surfaces (Wave 5 correction round fifteen,
+  // Medium 1). The kill-switch and gateway-history reads below were already
+  // hardened, each with a comment saying "this verdict decides a
+  // publication" — and the two reads that produce the task and its capability
+  // sat above them on `ops.queue.get` / `ops.queue.capabilities.get`. The
+  // publication itself is protected further down the path (`claimNext`
+  // re-reads `#capabilityOf`; a hostile review got zero GitHub issues out of
+  // two attempts), but the verdict a Founder READS was forgeable, and a
+  // forgeable eligibility verdict is what a Founder acts on.
+  const task = taskRowFor(ops, taskId);
   if (!task) {
     return { eligible: false, code: 'unknown_task', message: `Unknown task: ${taskId}` };
   }
-  const capability = ops.queue.capabilities.get(task.capabilityId);
+  const capability = capabilityRowFor(ops, task.capabilityId);
   if (!capability) {
     return {
       eligible: false,
@@ -841,7 +853,9 @@ function releaseHandoffClaim(
 ): ClaimReleaseOutcome {
   let claimedBy = 'unknown';
   try {
-    const task = ops.queue.get(taskId);
+    // Canonical, not the patchable read: this decides whether HQ calls
+    // `releaseClaim` and with which fence.
+    const task = taskRowFor(ops, taskId);
     if (!task || task.claimedBy == null) return { kind: 'not_held' };
     if (task.status !== 'assigned' && task.status !== 'running') return { kind: 'not_held' };
     claimedBy = task.claimedBy;

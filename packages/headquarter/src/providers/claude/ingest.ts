@@ -38,7 +38,12 @@
  *   than followed.
  */
 
-import { assertDispatchEvidenceGrant, writeDispatchOutcome } from '../../application/service.js';
+import {
+  assertDispatchEvidenceGrant,
+  taskEvidenceRowsFor,
+  taskRowFor,
+  writeDispatchOutcome,
+} from '../../application/service.js';
 import type { DispatchEvidenceGrant, HeadquarterOperations } from '../../application/service.js';
 import { taskActionDigest } from '../../operator/approvals.js';
 import { PROVIDER_REGISTRY } from '../../routing/providers.js';
@@ -204,8 +209,11 @@ function alreadyCorrelated(
   issueNumber: number,
   reportUrl: string | null,
 ): boolean {
-  return ops.queue.evidence
-    .list(taskId)
+  // Canonical rows, never `queue.evidence.list` (Wave 5 correction round
+  // fifteen, found by the derived scan). This answer decides whether a report
+  // is attached to canonical work a SECOND time; a display surface that hid
+  // the correlation entry would re-admit an already-recorded external result.
+  return taskEvidenceRowsFor(ops, taskId)
     .some(
       (entry) =>
         entry.kind === CLAUDE_DISPATCH_EVIDENCE.correlated &&
@@ -284,8 +292,11 @@ function recordCorrelation(
 
   // The authority for "which task is this issue?" is what HQ itself wrote when
   // it dispatched — never a task id supplied by a caller or read from a body.
-  const match = ops.queue.evidence
-    .list()
+  // Canonical rows, never `queue.evidence.list` (Wave 5 correction round
+  // fifteen). This is the authority for "which task is this issue?", i.e.
+  // which canonical task a PUBLIC GitHub issue's result gets attached to. It
+  // was reading the surface #200 documents as patchable.
+  const match = taskEvidenceRowsFor(ops)
     .find(
       (entry) =>
         entry.kind === CLAUDE_DISPATCH_EVIDENCE.succeeded &&
@@ -303,7 +314,9 @@ function recordCorrelation(
     };
   }
 
-  const task = ops.queue.get(input.taskId);
+  // Canonical, never `queue.get` (Wave 5 correction round fifteen, Critical
+  // 1): what this task is decides whether a dispatch RESULT is attached to it.
+  const task = taskRowFor(ops, input.taskId);
   if (!task) {
     return { ok: false, code: 'unknown_dispatch', message: `Task ${input.taskId} no longer exists.` };
   }
@@ -431,7 +444,7 @@ export function ingestClaudeResult(ops: HeadquarterOperations, options: IngestOp
   } catch (error) {
     return refuse('evidence_grant_invalid', error instanceof Error ? error.message : String(error));
   }
-  if (!ops.queue.get(taskId)) return refuse('unknown_task', `No task ${taskId} exists.`);
+  if (!taskRowFor(ops, taskId)) return refuse('unknown_task', `No task ${taskId} exists.`);
   if (!isValidTarget(options.target)) {
     return refuse('target_mismatch', 'An ingestion target must be a valid owner/repo pair.');
   }
