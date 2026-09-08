@@ -254,6 +254,123 @@ describe('the disclosed residual is reachable at the cost the disclosure states'
   });
 });
 
+/**
+ * Wave 5, correction round twelve — Low 2: the residual's own SQL did not
+ * reproduce its own effect.
+ *
+ * The residual says the same pass "also empties the `spentUnder` half —
+ * `UPDATE hq_intel_cost_entries SET mission_ids='[]', project_ids='[]'` … takes
+ * an exhausted ceiling's `observed` from 5000 to 0". It does not.
+ * `recordedScopeIds` reads the JSON array column UNION the single legacy column
+ * — deliberately, as the fail-closed reading — and
+ * `recordIntelligenceCost` writes BOTH, so clearing the two array columns leaves
+ * `mission_id` and `project_id` still naming the scope and the ceiling still
+ * charged. Nothing executed that `UPDATE` before it was disclosed.
+ *
+ * The residual is real; its price was understated by two columns. Both are
+ * executed here, so the corrected sentence is the one the suite enforces.
+ */
+describe('the spentUnder half of the residual costs four columns, not two', () => {
+  /** The `observed` figure for a scope, through the facade that publishes it. */
+  function observedFor(fx: IntelligenceFixture, scopeId: string): { decision: string; observed: number | null } {
+    const view = expectOk(
+      fx.ops.intelligenceBudgetDecision({ scopeKind: 'project', scopeId, window: 'total' }),
+    );
+    return { decision: view.decision, observed: view.observedMinorUnits };
+  }
+
+  /** Lift the ledger's guards, run one UPDATE, put them back. */
+  function rewriteInPlace(raw: Database.Database, set: string): number {
+    const guards = raw
+      .prepare(
+        `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'hq_intel_cost_entries'`,
+      )
+      .all() as { name: string; sql: string }[];
+    expect(guards.length, 'the ledger must really be guarded').toBeGreaterThan(0);
+    const before = (
+      raw.prepare(`SELECT COUNT(*) AS n FROM hq_intel_cost_entries`).get() as { n: number }
+    ).n;
+    for (const guard of guards) raw.exec(`DROP TRIGGER "${guard.name}"`);
+    const changed = raw.prepare(`UPDATE hq_intel_cost_entries SET ${set}`).run().changes;
+    for (const guard of guards) raw.exec(guard.sql);
+    // Count-preserving, which is what makes the class invisible.
+    expect((raw.prepare(`SELECT COUNT(*) AS n FROM hq_intel_cost_entries`).get() as { n: number }).n).toBe(
+      before,
+    );
+    return changed;
+  }
+
+  /**
+   * The residual's own pass, up to but not including the cost-entry rewrite.
+   *
+   * The `spentUnder` sentence is the SECOND half of one pass: the first half
+   * severs canonical and durable membership (`hq_mission_events` rewritten,
+   * `hq_missions.project_id` cleared), and only then is the recorded
+   * attribution on the cost row the last thing holding the ceiling.
+   */
+  function severCanonicalMembership(current: Scene): void {
+    const raw = current.fx.db as unknown as Database.Database;
+    const guards = raw
+      .prepare(`SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'hq_mission_events'`)
+      .all() as { name: string; sql: string }[];
+    for (const guard of guards) raw.exec(`DROP TRIGGER "${guard.name}"`);
+    raw
+      .prepare(`UPDATE hq_mission_events SET detail = json_remove(detail, '$.projectId', '$.to', '$.from')`)
+      .run();
+    for (const guard of guards) raw.exec(guard.sql);
+    raw.exec(`UPDATE hq_missions SET project_id = NULL`);
+  }
+
+  it('leaves the ceiling charged when only the two array columns are cleared', () => {
+    const current = scene();
+    const { fx } = current;
+    const raw = fx.db as unknown as Database.Database;
+    expect(observedFor(fx, current.projectId)).toEqual({ decision: 'blocked', observed: 5000 });
+    severCanonicalMembership(current);
+    // Still charged: the recorded attribution on the row is doing the work now,
+    // which is the whole point of the union.
+    expect(observedFor(fx, current.projectId).observed).toBe(5000);
+
+    // Exactly the statement the disclosure named.
+    expect(rewriteInPlace(raw, `mission_ids = '[]', project_ids = '[]'`)).toBeGreaterThan(0);
+
+    // The singular columns still carry the attribution, so the spend is still
+    // filed under the project and the ceiling still binds.
+    const after = observedFor(fx, current.projectId);
+    expect(after.observed, 'the two-column rewrite does not reach the spend').toBe(5000);
+    expect(after.decision).toBe('blocked');
+  });
+
+  it('reaches it when the two singular columns go with them', () => {
+    const current = scene();
+    const { fx } = current;
+    const raw = fx.db as unknown as Database.Database;
+    expect(observedFor(fx, current.projectId)).toEqual({ decision: 'blocked', observed: 5000 });
+    severCanonicalMembership(current);
+    expect(observedFor(fx, current.projectId).observed).toBe(5000);
+
+    expect(
+      rewriteInPlace(
+        raw,
+        `mission_ids = '[]', project_ids = '[]', mission_id = NULL, project_id = NULL`,
+      ),
+    ).toBeGreaterThan(0);
+
+    const after = observedFor(fx, current.projectId);
+    expect(after.observed, 'the four-column rewrite does reach it').toBe(0);
+  });
+
+  it('states the four columns on the Phase 14 page rather than the two', () => {
+    const page = fs.readFileSync(PHASE_14, 'utf8');
+    expect(page).toContain(
+      "UPDATE hq_intel_cost_entries SET mission_ids='[]', project_ids='[]', mission_id=NULL, project_id=NULL",
+    );
+    expect(page).not.toMatch(
+      /UPDATE hq_intel_cost_entries SET mission_ids='\[\]', project_ids='\[\]'` under/,
+    );
+  });
+});
+
 describe('the prose around the derivation no longer claims an absolute the code cannot hold', () => {
   it('drops “unforgeable” from the derivation’s own header and states the rewrite class instead', () => {
     const source = fs.readFileSync(SERVICE_SOURCE, 'utf8');
