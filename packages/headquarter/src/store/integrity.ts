@@ -33,27 +33,36 @@
  *    "three" for the whole of Wave 5 while `HQ_INTEGRITY_FINDINGS` grew to
  *    seven and `SAFE_MODE_BLOCKING_FINDINGS` to four beneath it.
  *
- * 3. **Cost is stated, not hidden — and it went UP at round seven.**
- *    `structuralIntegrity` is the cheap half and is what a boot can afford on
- *    every construction. The round-eight correction rewrote this paragraph to
- *    say "one `MAX(rowid)` seek per declared ledger, and one `COUNT(*)` plus one
- *    indexed lookup over HQ's own small commitment ledger, none of which is
- *    proportional to the size of a ledger", and the concurrent round-seven lane
- *    made the last clause false in the same wave: closing High 2 costs a
- *    `COUNT(*)` per declared ledger, and a `COUNT(*)` IS proportional to the
- *    rows a ledger holds. MEASURED at the merged head, on a file carrying
- *    commitments: 46 prepared statements per pass — two `sqlite_master` reads,
- *    the durability pragmas, one `PRAGMA application_id`, one `sqlite_sequence`
- *    scan, three `json_each` aggregates over the small commitment ledger, one
- *    `COUNT(*)`/`MAX(rowid)` pair over it, three standalone `MAX(rowid)` seeks,
- *    one indexed chain-commitment join, and a `COUNT(*)` + `MAX(rowid)` pair over
- *    EACH of the 33 declared ledgers. Wall clock on a real file: 0.87 ms per
- *    structural pass, averaged over 50. That cost is paid deliberately, because
- *    a `MAX(rowid)` seek cannot see a row removed from the MIDDLE of a ledger and
- *    a count can. `fullIntegrity` adds `integrity_check`, `foreign_key_check` and
- *    a whole-log evidence-chain verification, which are O(database) and O(log),
- *    and it is therefore an explicit act. Which one produced a verdict is
- *    carried ON the verdict, so nobody can mistake a cheap pass for a full one.
+ * 3. **Cost is stated, not hidden, and it went UP.** `structuralIntegrity` is
+ *    the cheap half — the `sqlite_master` reads, four pragmas, one `COUNT(*)`
+ *    and one `MAX(rowid)` over EACH of the 33 declared ledgers, one further
+ *    `MAX(rowid)` seek for each ledger HQ has committed a mark for, and five
+ *    reads of HQ's own commitment ledger: a `COUNT(*)` served by a covering
+ *    index, one indexed lookup joined to `op_evidence` by rowid, and three full
+ *    SCANs of that ledger which expand every row's marks through `json_each`
+ *    and group them in a temporary B-tree.
+ *
+ *    **This clause has been wrong twice in one wave, in the same direction, and
+ *    both corrections are recorded rather than the latest one written as if it
+ *    had always been there.** It first said "one `MAX(rowid)` seek per declared
+ *    ledger … one `COUNT(*)` plus one indexed lookup", which round ten (Low 1)
+ *    disproved in three ways by counting the statements a pass executes and
+ *    asking the engine for their plans: the seeks were two per COMMITTED ledger
+ *    rather than one per DECLARED one, the third read was a scan with a temp
+ *    B-tree rather than a lookup, and the commitment ledger is not fixed in
+ *    size — it grows a row per clean boot and per clean assessment. Round
+ *    ten's replacement was true of the head it was measured at and false of the
+ *    MERGED one, because the concurrent round-seven lane was closing High 2 in
+ *    the same wave: reading each declared ledger's row COUNT is what sees a row
+ *    removed from the MIDDLE, and a `COUNT(*)` IS proportional to the rows a
+ *    ledger holds where a seek is not. RE-MEASURED at the merged head, the same
+ *    way: 46 statements per pass and 0.871 ms averaged over 50, on a real file
+ *    carrying commitments. Pinned in `integrity-statement-truth.test.ts` rather
+ *    than estimated. `fullIntegrity` adds `integrity_check`,
+ *    `foreign_key_check` and a whole-log evidence-chain verification, which
+ *    are O(database) and O(log), and it is therefore an explicit act. Which
+ *    one produced a verdict is carried ON the verdict, so nobody can mistake a
+ *    cheap pass for a full one.
  */
 
 import fs from 'node:fs';
@@ -693,12 +702,17 @@ export const SAFE_MODE_STATEMENT =
  */
 export const INTEGRITY_DEPTH_STATEMENT =
   'A structural assessment reads the schema catalogue, the durability pragmas, and the marks HQ ' +
-  'keeps about its own append-only records — for each declared ledger one MAX(rowid) seek and one ' +
-  'COUNT(*), plus an indexed lookup over HQ’s own small commitment ledger. The COUNT(*) IS ' +
-  'proportional to the rows a ledger holds, unlike the seek beside it, and that cost is paid ' +
-  'deliberately: a seek cannot see a row removed from the MIDDLE of a ledger and a count can. Measured ' +
-  'on a real file it is under a millisecond, which is what keeps it affordable at every construction. ' +
-  'It is therefore not a ' +
+  'keeps about its own append-only records — one COUNT(*) and one MAX(rowid) over each declared ledger, ' +
+  'one further MAX(rowid) seek for each ledger HQ has committed a mark for, and five reads of HQ’s own ' +
+  'commitment ledger: a COUNT(*) served by a covering index, one indexed lookup joined to the evidence ' +
+  'log by rowid, and three full SCANs of that ledger which expand every row’s marks through json_each ' +
+  'and group them in a temporary B-tree. Counting a ledger’s rows IS proportional to the rows it holds, ' +
+  'unlike the seek beside it, and that cost is paid deliberately: a seek cannot see a row removed from ' +
+  'the MIDDLE of a ledger and a count can. The commitment ledger it scans is HQ’s own and is not fixed ' +
+  'in size — it grows a row per clean boot and per clean assessment, so that term grows with HQ’s own ' +
+  'history. Measured on a real file, the whole pass is 46 statements and under a millisecond, which is ' +
+  'what keeps it affordable at every construction. It is ' +
+  'therefore not a ' +
   'catalogue read alone: a declared ledger that has been emptied, and an evidence log that contradicts a ' +
   'commitment HQ recorded outside it, are both found and both blocking at this depth. A full assessment ' +
   'additionally runs PRAGMA integrity_check, PRAGMA foreign_key_check and a whole-log evidence-chain ' +
