@@ -220,3 +220,59 @@ describe('registration grants strictly less than dispatch needs', () => {
     expect(fixture.ops.queue.capabilities.get(DIRECT_ORDER_CAPABILITY.id)?.enabled).toBe(false);
   });
 });
+
+/**
+ * Wave 5, correction round fourteen — Low 6: an in-process call that OMITS a
+ * required field threw a `TypeError` out of the facade instead of returning
+ * `invalid_input`.
+ *
+ * `input.allowedCapabilities.length` and `input.workerId.trim()` both
+ * dereferenced a field this method never checked was present. Not reachable
+ * through the control API, which validates the body first — which is why it is a
+ * Low — but a facade method's contract is that it ANSWERS, and a refusal is an
+ * answer where a throw is not. The same class as Medium 3 next door, one layer
+ * up: a reader, or a writer, must be total over what it can actually be handed.
+ */
+describe('registerExecutionWorker answers rather than throws on a malformed input', () => {
+  it('refuses every omitted required field with invalid_input, and never raises', () => {
+    for (const omitted of ['workerId', 'allowedCapabilities'] as const) {
+      const fixture = fixtureWithFounder();
+      const input: Record<string, unknown> = {
+        workerId: 'omission-probe',
+        displayName: 'Omission probe',
+        vendor: 'anthropic',
+        role: 'build_lead',
+        allowedCapabilities: [CAPS.readStatus],
+        founderId: 'chair',
+      };
+      delete input[omitted];
+      let result: { ok: boolean; error?: { code: string } };
+      expect(() => {
+        result = fixture.ops.registerExecutionWorker(
+          input as Parameters<Fixture['ops']['registerExecutionWorker']>[0],
+        );
+      }, `omitting ${omitted} must not raise`).not.toThrow();
+      expect(result!.ok, `omitting ${omitted} must be refused`).toBe(false);
+      expect(result!.error!.code, `omitting ${omitted}`).toBe('invalid_input');
+      // And nothing was registered by the refused call.
+      expect(fixture.store.getSpecialist('omission-probe') ?? null).toBe(null);
+    }
+  });
+
+  it('refuses a wrong-typed allowedCapabilities the same way', () => {
+    for (const value of [null, 'read_status', 42, {}]) {
+      const fixture = fixtureWithFounder();
+      const result = fixture.ops.registerExecutionWorker({
+        workerId: 'type-probe',
+        displayName: 'Type probe',
+        vendor: 'anthropic',
+        role: 'build_lead',
+        allowedCapabilities: value,
+        founderId: 'chair',
+      } as unknown as Parameters<Fixture['ops']['registerExecutionWorker']>[0]);
+      expect(result.ok, `allowedCapabilities = ${JSON.stringify(value)}`).toBe(false);
+      if (result.ok) throw new Error('unreachable');
+      expect(result.error.code).toBe('invalid_input');
+    }
+  });
+});

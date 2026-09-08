@@ -261,3 +261,84 @@ describe('disclosing the false positive does not move the evasion direction', ()
     expect(refuses('a perfectly ordinary sentence about salt production')).toBe(false);
   });
 });
+
+/**
+ * Wave 5, correction round fourteen — Low 5: a real refusal class the disclosed
+ * cost did not name, GIT BRANCH NAMES.
+ *
+ * The shipped disclosure prices the `sk-` rule's availability cost in accented
+ * proper names and in prose. It does not mention the one string shape this
+ * repository's own automation protocol mandates by name: a branch, spelled
+ * `ai/<issue>-<slug>` or `claude/<slug>`, which routinely reaches facade text
+ * fields (a mission title, a task title, a plan-item summary, a note). A slug
+ * that begins `sk-` and runs long enough is refused, and a Founder or worker
+ * pasting one gets a credential refusal for a branch name.
+ *
+ * Measured rather than described, and the boundary is measured too, because
+ * "branch names are refused" would be as wrong in the other direction: the rule
+ * is anchored at a non-alphanumeric boundary and needs 16 following characters,
+ * so the great majority of real branch names pass and the refusal is narrow.
+ *
+ * The DECISION is unchanged and is the same one round ten recorded: disclose
+ * rather than narrow. `sk-` followed by sixteen key characters is the shape of a
+ * live OpenAI key, the ASCII spelling was refused before this wave, and
+ * narrowing a credential rule to buy back an availability cost is a change in
+ * the direction of under-refusal. What changes is that the cost is now stated
+ * where a reader will meet it.
+ */
+describe('the refusal class the disclosed cost did not name: git branch names', () => {
+  /** Branch names this repository's own protocol produces, and near neighbours. */
+  const BRANCHES: readonly { name: string; refused: boolean }[] = [
+    // Refused: `sk-` at a boundary with sixteen or more following characters.
+    { name: 'feature/sk-rework-of-the-evaporation-model', refused: true },
+    { name: 'ai/271-sk-rework-of-the-evaporation-model', refused: true },
+    { name: 'claude/sk-rework-of-the-evaporation', refused: true },
+    { name: 'sk-rework-of-the-evaporation-model', refused: true },
+    // The boundary itself, both sides of it.
+    { name: 'feature/sk-abcdefghijklmnop', refused: true },
+    { name: 'feature/sk-abcdefghijklmno', refused: false },
+    // Passed: everything else, including the shapes that look closest.
+    { name: 'ai/267-sk-rework', refused: false },
+    { name: 'docs/sk-notes', refused: false },
+    { name: 'feature/task-scheduler-improvements', refused: false },
+    { name: 'feature/skew-correction', refused: false },
+    { name: 'ai/12-skip-broken-test', refused: false },
+    { name: 'ai/267-rowid-guard', refused: false },
+    { name: 'claude/wave5-fix', refused: false },
+    { name: 'release/2026-09', refused: false },
+    { name: 'main', refused: false },
+  ];
+
+  it('refuses exactly the branch names whose slug carries a full key shape', () => {
+    for (const branch of BRANCHES) {
+      expect(refuses(branch.name), branch.name).toBe(branch.refused);
+    }
+    // The class is real and it is NARROW, and both halves are the disclosure.
+    expect(BRANCHES.filter((branch) => branch.refused).length).toBe(5);
+    expect(BRANCHES.filter((branch) => !branch.refused).length).toBe(10);
+  });
+
+  it('is what the anchored rule and its length bound produce, not an accident', () => {
+    const source = fs.readFileSync(REDACTION_SOURCE, 'utf8');
+    // The two properties the boundary above depends on. If either moves, the
+    // table above stops describing the behaviour and this fails with it.
+    expect(source).toContain('(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}');
+  });
+
+  it('the disclosure names this class where a reader would meet it', () => {
+    const page = fs.readFileSync(
+      path.join(
+        path.dirname(fileURLToPath(import.meta.url)),
+        '..',
+        '..',
+        '..',
+        'docs',
+        'HEADQUARTER',
+        'PHASE_13_ADVANCED_RELIABILITY.md',
+      ),
+      'utf8',
+    );
+    expect(page).toContain('a git BRANCH NAME');
+    expect(page).toContain('feature/sk-rework-of-the-evaporation-model');
+  });
+});

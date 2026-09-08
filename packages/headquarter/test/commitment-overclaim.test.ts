@@ -1078,14 +1078,17 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
           for (const seq of RESEATS) {
             const attempt = reseat(spelling, seq, 'both');
             expect(attempt.landed, `${spelling} at seq ${seq} must be refused`).toBe(false);
+            // Three refusals can speak here now, and any of them is HQ's own:
+            // the bound from above, the bound from below (round fourteen), and
+            // the over-claim guard's identity clause.
             expect(attempt.message).toMatch(
-              /rowids are contiguous|may not commit beyond the record/,
+              /rowids are contiguous|rowids are append-only|may not commit beyond the record/,
             );
           }
         }
 
         // Pass two: the over-claim guard ALONE, with the other lane's rowid
-        // guard dropped inside a rolled-back SAVEPOINT. This is what keeps the
+        // guards dropped inside a rolled-back SAVEPOINT. This is what keeps the
         // merge honest — the clause this lane added is shown to refuse every
         // spelling at every reseat by itself, so it is not being carried by the
         // broader guard that happens to sit in front of it.
@@ -1126,30 +1129,47 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
   );
 
   /**
-   * WHY BOTH round-thirteen rowid closures are kept, executed rather than
-   * argued.
+   * WHY ALL THREE rowid closures are kept, executed rather than argued.
    *
-   * Two concurrent lanes closed the rowid channel off the same base.
-   * `no_rowid_skip` is the broader one — all 33 declared ledgers, by
-   * construction — and the obvious merge is to keep it and retire the
+   * Two concurrent round-thirteen lanes closed the rowid channel off the same
+   * base. `no_rowid_skip` is the broad one — all 33 declared ledgers, by
+   * construction — and the obvious merge was to keep it and retire the
    * over-claim guard's narrower `NEW.seq <> (SELECT COUNT(*) …)` identity
    * clause as subsumed. This test is what makes that merge impossible to
-   * perform by accident: `no_rowid_skip` bounds the rowid from ABOVE only, so
-   * on its own it ACCEPTS a reseat at 0 and at the `-1` the engine itself
-   * spells for an omitted AUTOINCREMENT key — and each of those raises this
-   * ledger's row count without raising its greatest rowid, which is exactly
-   * what `elidedCommitmentLedgerRows` reads. Retiring the identity clause would
-   * therefore have reopened half of Exploit B under a merge that looked like
-   * consolidation.
+   * perform by accident.
    *
-   * It asserts a gap in the OTHER lane's guard deliberately. That is not a
-   * criticism of it — it was written for the gap-widening act, which it closes
-   * on 33 ledgers where this clause closed one — it is the measurement that
-   * says the two are complements, and it will fail if either the guard or the
-   * reader ever changes such that one really does subsume the other.
+   * **What round thirteen measured, and why the measurement changed.** Round
+   * thirteen showed `no_rowid_skip` bounds the rowid from ABOVE only, so on its
+   * own it ACCEPTED a reseat at 0 and at the `-1` the engine itself spells for
+   * an omitted AUTOINCREMENT key. That was true of this ledger and true of the
+   * other 32, and round fourteen closed it everywhere with `no_rowid_reseat`,
+   * which this ledger carries too. The two reseats the old assertion named are
+   * therefore no longer admitted by the broad guards, and asserting that they
+   * are would now be asserting a hole that is closed. The assertion is REPLACED
+   * rather than deleted, by the case that still separates the clauses:
+   *
+   *  - the seat guard refuses a rowid that is not the ledger's GREATEST;
+   *  - the identity clause refuses a rowid that is not the ledger's ROW COUNT.
+   *
+   * Those are the same number only while the ledger has no hole, and the shape
+   * that separates them is executed below: on a ledger a row has been elided
+   * from, an ORDINARY append at the top is ADMITTED by both broad guards and
+   * REFUSED by the identity clause.
+   *
+   * **That shape is recorded as a measurement, not sold as a defence, and the
+   * difference is measured rather than asserted.** The append does NOT hide the
+   * elision — `elidedCommitmentLedgerRows` still reads true afterwards, which
+   * this test asserts rather than assumes, because the count and the greatest
+   * rowid are still one apart. So the identity clause is not carrying an
+   * exploit here; what it carries is the only clause in the schema that ties
+   * this ledger's rowid to its ROW COUNT, which is exactly the relation that
+   * reader reads. Retiring it would leave that reader's invariant asserted
+   * nowhere at the write, on the one ledger every other check is measured
+   * against. All three are kept for that reason, and this test fails if any
+   * change ever makes one really subsume another.
    */
   it(
-    'keeps both rowid closures, because the broader guard alone still admits two reseats here',
+    'keeps all three rowid closures: the broad guards admit an append the identity clause refuses',
     () => {
       const fx = fileFixture();
       try {
@@ -1160,6 +1180,29 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
         const columns = checkpointColumns(raw);
         const genuine = newestWholeRow(raw);
         expect(ledgerReadings(raw)).toEqual(NOTHING_REPORTED);
+
+        const ERASE_GUARD = `trg_${HQ_INTEGRITY_CHECKPOINT_TABLE}_no_erase`;
+        const eraseGuardSql = (
+          raw
+            .prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`)
+            .get(ERASE_GUARD) as { sql: string }
+        ).sql;
+        /** Elide the oldest commitment in place, guards restored afterwards. */
+        const elideOldest = (): number => {
+          const oldest = (
+            raw
+              .prepare(`SELECT MIN(rowid) AS rid FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`)
+              .get() as { rid: number }
+          ).rid;
+          raw.exec(`DROP TRIGGER ${ERASE_GUARD}`);
+          raw.prepare(`DELETE FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE} WHERE rowid = ?`).run(oldest);
+          raw.exec(eraseGuardSql);
+          return (
+            raw
+              .prepare(`SELECT MAX(rowid) AS rid FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`)
+              .get() as { rid: number }
+          ).rid;
+        };
 
         raw.exec('SAVEPOINT without_overclaim_guard');
         raw.exec(`DROP TRIGGER ${OVERCLAIM_GUARD}`);
@@ -1206,11 +1249,11 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
           });
           expect(
             landed.accepted,
-            `no_rowid_skip alone is expected to ADMIT the reseat at ${seq}`,
+            `with BOTH the identity clause and no_rowid_reseat gone, the reseat at ${seq} lands`,
           ).toBe(true);
           expect(
             elidedCommitmentLedgerRows(raw),
-            `the reseat at ${seq} must be shown to fabricate a finding, or this test proves nothing`,
+            `the reseat at ${seq} must be shown to fabricate a finding, or this proves nothing`,
           ).toBe(true);
           raw.exec('ROLLBACK TO reseat');
           raw.exec('RELEASE reseat');
@@ -1218,17 +1261,61 @@ describe('no single INSERT a raw writer can compose fabricates a finding', () =>
         raw.exec('ROLLBACK TO without_reseat_guard');
         raw.exec('RELEASE without_reseat_guard');
 
+        // And the case that is STILL outside both broad guards: an append at
+        // the ledger's own top, on a ledger a row has been elided from.
+        raw.exec('SAVEPOINT holed_append');
+        const top = elideOldest();
+        expect(
+          elidedCommitmentLedgerRows(raw),
+          'the elision must be visible before the laundering append, or this proves nothing',
+        ).toBe(true);
+        const holed = insertRow(raw, columns, {
+          ...genuine,
+          seq: top + 1,
+          id: 'holed-top-append',
+        });
+        expect(
+          holed.accepted,
+          'the broad guards are expected to ADMIT an append at the ledger’s own top',
+        ).toBe(true);
+        // Measured, not assumed: the append does NOT hide the elision. This is
+        // the line that stops the shape above being written up as an exploit it
+        // is not.
+        expect(
+          elidedCommitmentLedgerRows(raw),
+          'the append at the top must NOT hide the elision',
+        ).toBe(true);
+        raw.exec('ROLLBACK TO holed_append');
+        raw.exec('RELEASE holed_append');
+
         raw.exec('ROLLBACK TO without_overclaim_guard');
         raw.exec('RELEASE without_overclaim_guard');
 
-        // And with both guards back, every one of the three is refused and the
-        // store reports nothing.
+        // With every guard back: the three reseats are refused, and so is the
+        // append at the top of a holed ledger — the one shape the identity
+        // clause refuses and the broad guards admit.
         for (const seq of [-1, 0, 1000]) {
           const attempt = insertRow(raw, columns, { ...genuine, seq, id: `both-${seq}` });
-          expect(attempt.accepted, `seq ${seq} must be refused with both guards standing`).toBe(
+          expect(attempt.accepted, `seq ${seq} must be refused with every guard standing`).toBe(
             false,
           );
         }
+        raw.exec('SAVEPOINT holed_append_refused');
+        const topAgain = elideOldest();
+        const refused = insertRow(raw, columns, {
+          ...genuine,
+          seq: topAgain + 1,
+          id: 'holed-top-append-refused',
+        });
+        expect(
+          refused.accepted,
+          'the identity clause must refuse the holed-ledger append with every guard standing',
+        ).toBe(false);
+        expect(refused.message).toMatch(/may not commit beyond the record/);
+        expect(elidedCommitmentLedgerRows(raw), 'the elision must still be visible').toBe(true);
+        raw.exec('ROLLBACK TO holed_append_refused');
+        raw.exec('RELEASE holed_append_refused');
+
         expect(ledgerReadings(raw)).toEqual(NOTHING_REPORTED);
         raw.close();
 

@@ -165,3 +165,83 @@ describe('the action ledger across a full close and reopen', () => {
     check.close();
   });
 });
+
+/**
+ * Wave 5, correction round fourteen — Medium 3: a reader that RAISES on content
+ * a raw writer can put in a JSON column.
+ *
+ * `rowToIntent` and `rowToEvent` called `JSON.parse` on six and one column and
+ * let the `SyntaxError` out. Executed at the merged head `8481269`: ONE
+ * permitted `INSERT` into `hq_action_intents` carrying non-JSON in a JSON column
+ * made `hqReliabilityPosture()` — the Founder console's own reader — throw
+ * `SyntaxError: Unexpected token 'o' … is not valid JSON` instead of refusing.
+ * `assessHqIntegrity` still answered, so it is a console denial rather than a
+ * latch bypass; it is the same class the commitment columns closed in round
+ * twelve ("this reader must not raise on any content a raw writer can put in
+ * the column"), simply not applied here.
+ *
+ * The row is a PERMITTED append — no trigger dropped, no DDL — which is why the
+ * answer is at the reader rather than at a guard.
+ */
+describe('the action-intent reader is total over anything a raw writer can store', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('refuses to raise on non-JSON in any JSON column, and the console still answers', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hq-action-total-'));
+    dirs.push(dir);
+    const dbPath = join(dir, 'headquarter.sqlite');
+    const db = openHqDatabase(dbPath);
+    try {
+      const store = new HeadquarterStore(db);
+      const ops = new HeadquarterOperations(db, { store });
+      expect(ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
+      ensureActionGatewaySchema(db);
+
+      const raw = db as unknown as import('better-sqlite3').Database;
+      const columns = (raw.prepare(`PRAGMA table_info(hq_action_intents)`).all() as {
+        name: string;
+        type: string;
+        pk: number;
+      }[]).filter((column) => column.pk === 0);
+      expect(columns.length).toBeGreaterThan(0);
+      // Every column gets the same unparseable text — the JSON ones included.
+      // The write is PERMITTED: nothing is dropped and no rowid is chosen.
+      raw
+        .prepare(
+          `INSERT INTO hq_action_intents (${columns.map((c) => `"${c.name}"`).join(', ')})
+           VALUES (${columns.map(() => '?').join(', ')})`,
+        )
+        .run(
+          columns.map((column) =>
+            String(column.type).toUpperCase().includes('INT')
+              ? (0 as never)
+              : ('not json at all {' as never),
+          ),
+        );
+
+      // The console answers instead of throwing, which is the whole finding.
+      expect(ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
+      // `assessHqIntegrity` is gated on the reliability grant, which this bare
+      // fixture does not hold — so what is asserted is that it ANSWERS with its
+      // own refusal rather than raising the driver's parse error.
+      const assessed = ops.assessHqIntegrity({ requestedBy: 'founder' });
+      expect(typeof assessed.ok, 'it must ANSWER rather than raise').toBe('boolean');
+      // And a reader that reaches the row itself gets the EMPTY value of the
+      // shape it expects rather than a raise — the fail-safe direction, since an
+      // intent whose payload reads as `{}` no longer matches its own stored
+      // digest.
+      const listed = ops.listActionsBounded();
+      const planted = listed.actions.find((action) => action.id === 'not json at all {');
+      expect(planted, 'the planted row must be readable rather than fatal').toBeDefined();
+      expect(planted!.riskFactors, 'an unreadable array column reads as empty').toEqual([]);
+      expect(planted!.contextEvidenceRefs).toEqual([]);
+      expect(planted!.contextTruthRefs).toEqual([]);
+      expect(planted!.compensation, 'an unreadable compensation is no compensation').toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+});

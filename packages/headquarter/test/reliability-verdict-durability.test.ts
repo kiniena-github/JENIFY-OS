@@ -466,12 +466,13 @@ describe('destroying the audit log is a finding, not silence', () => {
         WHEN EXISTS (SELECT 1 FROM op_evidence WHERE id = NEW.id)
           OR (TYPEOF(NEW.seq) = 'integer' AND EXISTS (SELECT 1 FROM op_evidence WHERE seq = NEW.seq))
         BEGIN SELECT RAISE(ABORT, 'op_evidence is append-only'); END;
-        -- And the universal rowid guard the declaration gained in Wave 5
-        -- correction round thirteen (High 1). Rebuilt here for the same reason
-        -- the other three are: this test is about a census that has NOTHING to
-        -- report, so the rebuild has to satisfy every guard the schema
-        -- declares. Leaving it out would make the test pass for the wrong
-        -- reason — a missing guard rather than the commitment check.
+        -- And the universal rowid guards the declaration gained in Wave 5
+        -- correction round thirteen (High 1) and round fourteen (High 1 and
+        -- High 2). Rebuilt here for the same reason the other three are: this
+        -- test is about a census that has NOTHING to report, so the rebuild has
+        -- to satisfy every guard the schema declares. Leaving either out would
+        -- make the test pass for the wrong reason — a missing guard rather than
+        -- the commitment check.
         CREATE TRIGGER trg_op_evidence_no_rowid_skip BEFORE INSERT ON op_evidence
         WHEN NEW.rowid > 1 + MAX(COALESCE((SELECT MAX(rowid) FROM "op_evidence"), 0),
                                  COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'op_evidence'), 0))
@@ -483,8 +484,12 @@ describe('destroying the audit log is a finding, not silence', () => {
         -- or it would pass for the wrong reason. The set is three now because
         -- "may not enter above the top" turned out to be one of three spellings
         -- of the same question.
+        -- The rowid-under-one term is this lane's, kept at the merge: on an EMPTY ledger
+        -- a plant at rowid -1 IS the maximum, so the identity clause alone
+        -- admits it — and a landed row at -1 bricks every auto-assigned append
+        -- that follows. See ledgerRowidReseatGuardDdl in store/integrity.ts.
         CREATE TRIGGER trg_op_evidence_no_rowid_reseat AFTER INSERT ON op_evidence
-        WHEN NEW.rowid <> (SELECT MAX(rowid) FROM "op_evidence")
+        WHEN NEW.rowid < 1 OR NEW.rowid <> (SELECT MAX(rowid) FROM "op_evidence")
         BEGIN SELECT RAISE(ABORT, 'op_evidence rowids are contiguous'); END;
         CREATE TRIGGER trg_op_evidence_no_rowid_move BEFORE UPDATE ON op_evidence
         WHEN NEW.rowid <> OLD.rowid

@@ -81,12 +81,26 @@ const SERVICE = path.join(HERE, '..', 'src', 'application', 'service.ts');
  * ## What is derived instead
  *
  * EVERY caller-text parameter of EVERY facade write, one row per (method,
- * parameter) pair, with no curated vocabulary anywhere in the derivation. A
+ * parameter) pair, with no curated vocabulary in the PARAMETER derivation. A
  * pair is covered when the parameter is a key of an `assertNoCredentialShape` /
  * `assertBrowserSafe` literal in that method's body, or when the method hands
  * its whole input object to `callerTextRefusal`, which scans every own field.
  * The second form is why a parameter ADDED to an input type in a future phase
  * is covered the day it is added rather than the round after it is exploited.
+ *
+ * **The METHOD half has a curated base case, and saying otherwise was the
+ * overstatement a fresh review reported** (Wave 5 correction round fourteen,
+ * Medium 2, reported against `f348f9a`). This sentence used to read "with no
+ * curated vocabulary anywhere in the derivation", which is true of the
+ * parameters and false of the methods: `writeClassifiedMethods()` starts from
+ * `WRITE_MARKERS`, a curated regex of write SPELLINGS, and closes it over the
+ * class's own call graph. The finding's own substance — that the per-body regex
+ * skipped `recordIntelligenceDecision` and `escalateIntelligenceDecision`,
+ * whose write lives in `#insertDecision` — was already fixed at the merged head
+ * by the concurrent round-thirteen lane, and both are classified and scanned
+ * below. What the classifier can still miss is a write in a spelling
+ * `WRITE_MARKERS` does not name, reached through a module-level function rather
+ * than a method of this class. That is the boundary, stated instead of denied.
  *
  * ## The type filter that was the ninth spelling of it (round eleven, Medium 1)
  *

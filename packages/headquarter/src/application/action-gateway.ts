@@ -516,6 +516,68 @@ export interface ActionEventRow {
   sideEffectKey: string | null;
 }
 
+/**
+ * Read one JSON column TOTALLY — never raising on any content a raw writer can
+ * put in it (Wave 5 correction round fourteen, Medium 3).
+ *
+ * `rowToIntent` and `rowToEvent` called `JSON.parse` on six and one column
+ * respectively and let the `SyntaxError` out. Executed at the merged head
+ * `8481269`: ONE permitted `INSERT` into `hq_action_intents` carrying non-JSON
+ * in a JSON column made `hqReliabilityPosture()` — the Founder console's own
+ * reader — throw `SyntaxError: Unexpected token 'o' … is not valid JSON`
+ * instead of refusing. `assessHqIntegrity` still answered, so it is a console
+ * denial rather than a latch bypass; it is the same class the commitment
+ * columns closed in round twelve ("this reader must not raise on any content a
+ * raw writer can put in the column"), which had simply not been applied here.
+ *
+ * The fallback is the EMPTY value of the shape the caller expects, and the
+ * direction of that choice is stated rather than assumed: an intent whose
+ * payload reads as `{}` no longer matches its own stored `payload_digest`, so
+ * every path that acts on a payload refuses it, and an intent whose
+ * `risk_factors` read as `[]` shows a Founder no factors rather than a page
+ * that will not render. Returning nothing at all would be the same denial by
+ * another name; raising is the outcome this exists to stop.
+ */
+function totalJsonObject(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The same, for a column that holds an array of strings. */
+function totalJsonStringArray(value: unknown): string[] {
+  if (typeof value !== 'string') return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The same, for the nullable compensation column. Unreadable content reads as
+ * "no compensation recorded", which is the fail-safe direction: a reverser that
+ * cannot be read is not a reverser HQ will offer.
+ */
+function totalCompensation(value: unknown): ActionCompensation | null {
+  if (typeof value !== 'string' || value === '') return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as ActionCompensation)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function rowToIntent(r: Record<string, unknown>): ActionIntentRow {
   return {
     seq: r.seq as number,
@@ -527,15 +589,15 @@ function rowToIntent(r: Record<string, unknown>): ActionIntentRow {
     adapterId: r.adapter_id as string,
     actionType: r.action_type as string,
     target: r.target as string,
-    payload: JSON.parse(r.payload as string) as Record<string, unknown>,
+    payload: totalJsonObject(r.payload),
     payloadDigest: r.payload_digest as string,
     riskLevel: r.risk_level as ActionRiskLevel,
-    riskFactors: JSON.parse(r.risk_factors as string) as string[],
+    riskFactors: totalJsonStringArray(r.risk_factors),
     visibility: r.visibility as ActionVisibility,
     reversibility: r.reversibility as ActionReversibility,
-    compensation: r.compensation ? (JSON.parse(r.compensation as string) as ActionCompensation) : null,
-    contextEvidenceRefs: JSON.parse(r.context_evidence_refs as string) as string[],
-    contextTruthRefs: JSON.parse(r.context_truth_refs as string) as string[],
+    compensation: totalCompensation(r.compensation),
+    contextEvidenceRefs: totalJsonStringArray(r.context_evidence_refs),
+    contextTruthRefs: totalJsonStringArray(r.context_truth_refs),
     requestedBy: r.requested_by as string,
     requestedAt: r.requested_at as string,
     sideEffectKeyBase: r.side_effect_key_base as string,
@@ -550,7 +612,7 @@ function rowToEvent(r: Record<string, unknown>): ActionEventRow {
     state: r.state as ActionState,
     actor: r.actor as string,
     at: r.at as string,
-    detail: JSON.parse(r.detail as string) as Record<string, unknown>,
+    detail: totalJsonObject(r.detail),
     sideEffectKey: (r.side_effect_key as string | null) ?? null,
   };
 }
