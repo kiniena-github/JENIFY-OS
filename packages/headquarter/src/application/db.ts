@@ -19,6 +19,7 @@
  */
 
 import type { HqDatabase } from '../store/db.js';
+import { execSchemaDdl } from '../store/db.js';
 
 const APPLICATION_DDL = `
 CREATE TABLE IF NOT EXISTS hq_op_task_meta (
@@ -63,5 +64,5 @@ CREATE INDEX IF NOT EXISTS idx_hq_mission_proposals_status
  */
 export function ensureApplicationSchema(db: HqDatabase): void {
   if (db.readonly) return;
-  db.exec(APPLICATION_DDL);
+  execSchemaDdl(db, APPLICATION_DDL);
 }

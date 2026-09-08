@@ -151,7 +151,9 @@ import type { HqDatabase } from './db.js';
 import {
   HQ_SCHEMA_ENSURED_MARK,
   isHqSchemaEnsuredMark,
+  execSchemaDdl,
   openHqDatabaseReadOnly,
+  retryOnSchemaChange,
   schemaEnsuredMarkBeforeMigration,
   tableNamesBeforeMigration,
 } from './db.js';
@@ -785,13 +787,15 @@ export function ensureWriteOnceIdentityGuards(db: HqDatabase): void {
     try {
       // Neither name is interpolated from anything a row carries: both come out
       // of the frozen literal above.
-      db.exec(
+      execSchemaDdl(
+        db,
         `CREATE TRIGGER IF NOT EXISTS ${declaredIdentityGuardFor(entry)}\n` +
           `BEFORE UPDATE OF "${entry.column}" ON "${entry.table}"\n` +
           `BEGIN SELECT RAISE(ABORT, '${entry.table} ${entry.column} is write-once'); END;`,
       );
       if (entry.eraseGuard) {
-        db.exec(
+        execSchemaDdl(
+          db,
           `CREATE TRIGGER IF NOT EXISTS trg_${entry.triggerPrefix}_no_erase\n` +
             `BEFORE DELETE ON "${entry.table}"\n` +
             `BEGIN SELECT RAISE(ABORT, '${entry.table} rows are not deleted'); END;`,
@@ -1156,9 +1160,13 @@ export const INTEGRITY_DEPTH_STATEMENT =
 /* The checks                                                          */
 /* ------------------------------------------------------------------ */
 
-/**
- * Run one read, re-preparing ONCE if SQLite reports that the schema changed
- * under it (Wave 5 correction round sixteen).
+/*
+ * `retryOnSchemaChange` used to be defined here. It now lives in
+ * `src/store/db.ts` beside `bindSchemaResilientGet`, so the package has ONE
+ * spelling of the schema-change rule rather than two that can drift, and so
+ * the helper sits next to the note explaining that it only helps a caller
+ * whose callback can PREPARE AGAIN (Wave 5 correction round seventeen,
+ * Medium-3). The original note, kept because it records the observation:
  *
  * `SQLITE_SCHEMA` is not corruption and it is not a defect in the caller: it
  * is what the engine says when another connection ran DDL between the time a
@@ -1174,16 +1182,6 @@ export const INTEGRITY_DEPTH_STATEMENT =
  * reported rather than spun on. Nothing about what is observed changes — the
  * same statement is run against the same handle.
  */
-function retryOnSchemaChange<T>(read: () => T): T {
-  try {
-    return read();
-  } catch (error) {
-    const code = (error as { code?: unknown } | null)?.code;
-    if (code !== 'SQLITE_SCHEMA') throw error;
-    return read();
-  }
-}
-
 function tableNames(db: HqDatabase): Set<string> {
   const rows = retryOnSchemaChange(
     () =>
@@ -1492,7 +1490,7 @@ export function hqSchemaEnsuredMarkPresent(db: HqDatabase): boolean {
 export function recordHqSchemaEnsured(db: HqDatabase): void {
   if (db.readonly) return;
   try {
-    db.exec(`PRAGMA user_version = ${HQ_SCHEMA_ENSURED_MARK}`);
+    execSchemaDdl(db, `PRAGMA user_version = ${HQ_SCHEMA_ENSURED_MARK}`);
   } catch {
     // See the header: never fail a construction over the mark.
   }
@@ -1754,7 +1752,7 @@ function recordCommitmentWitness(db: HqDatabase, mark: number): void {
     // size replaces it; after that the header is a high-water mark like every
     // other one this module rests on.
     if (current.witnessed && current.mark >= decodeCommitmentWitness(stamped).mark) return;
-    db.exec(`PRAGMA application_id = ${stamped}`);
+    execSchemaDdl(db, `PRAGMA application_id = ${stamped}`);
   } catch {
     // See the header: never fail a construction over the mark.
   }
@@ -2503,14 +2501,14 @@ function tableIsPresent(db: HqDatabase, table: string): boolean {
  */
 export function ensureIntegrityCheckpoints(db: HqDatabase): void {
   if (db.readonly) return;
-  db.exec(INTEGRITY_CHECKPOINT_DDL);
+  execSchemaDdl(db, INTEGRITY_CHECKPOINT_DDL);
   ensureLedgerRowsColumn(db);
   try {
     // Dropped and re-created rather than `IF NOT EXISTS`: its clause list is
     // derived from the ledgers this file carries, and a ledger created since the
     // last construction has to enter the bound — see `overclaimGuardDdl`.
-    db.exec(`DROP TRIGGER IF EXISTS ${OVERCLAIM_GUARD}`);
-    db.exec(overclaimGuardDdl(db));
+    execSchemaDdl(db, `DROP TRIGGER IF EXISTS ${OVERCLAIM_GUARD}`);
+    execSchemaDdl(db, overclaimGuardDdl(db));
   } catch {
     // See `ensureLedgerRowsColumn`: never fail a construction over a guard HQ
     // could not install. Its ABSENCE is then the census's finding, because it is
@@ -2540,7 +2538,8 @@ function ensureLedgerRowsColumn(db: HqDatabase): void {
       name: unknown;
     }[];
     if (columns.some((column) => String(column.name) === 'ledger_rows')) return;
-    db.exec(
+    execSchemaDdl(
+      db,
       `ALTER TABLE ${HQ_INTEGRITY_CHECKPOINT_TABLE} ADD COLUMN ledger_rows TEXT NOT NULL DEFAULT '{}'`,
     );
   } catch {
@@ -2772,11 +2771,11 @@ export function ensureLedgerRowidGuards(db: HqDatabase): void {
     if (!tableIsPresent(db, entry.table)) continue;
     try {
       for (const guard of LEDGER_ROWID_GUARDS) {
-        db.exec(`DROP TRIGGER IF EXISTS trg_${entry.triggerPrefix}_${guard}`);
+        execSchemaDdl(db, `DROP TRIGGER IF EXISTS trg_${entry.triggerPrefix}_${guard}`);
       }
-      db.exec(ledgerRowidGuardDdl(db, entry.table, entry.triggerPrefix));
-      db.exec(ledgerRowidReseatGuardDdl(entry.table, entry.triggerPrefix));
-      db.exec(ledgerRowidMoveGuardDdl(entry.table, entry.triggerPrefix));
+      execSchemaDdl(db, ledgerRowidGuardDdl(db, entry.table, entry.triggerPrefix));
+      execSchemaDdl(db, ledgerRowidReseatGuardDdl(entry.table, entry.triggerPrefix));
+      execSchemaDdl(db, ledgerRowidMoveGuardDdl(entry.table, entry.triggerPrefix));
     } catch {
       // See the docstring: a guard HQ could not install is a finding at the
       // next census, never a failed construction.
@@ -3117,9 +3116,9 @@ export function ensureUniqueReentryGuards(db: HqDatabase): void {
   for (const target of uniqueReentryTargets()) {
     if (!tableIsPresent(db, target.table)) continue;
     try {
-      db.exec(`DROP TRIGGER IF EXISTS trg_${target.triggerPrefix}_${UNIQUE_REENTRY_GUARD}`);
+      execSchemaDdl(db, `DROP TRIGGER IF EXISTS trg_${target.triggerPrefix}_${UNIQUE_REENTRY_GUARD}`);
       const ddl = uniqueReentryGuardDdl(db, target.table, target.triggerPrefix);
-      if (ddl !== null) db.exec(ddl);
+      if (ddl !== null) execSchemaDdl(db, ddl);
     } catch {
       // A guard HQ could not install is a finding at the next census.
     }

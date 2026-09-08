@@ -25,6 +25,7 @@
 
 import type { RiskClass } from '../operator/capabilities.js';
 import type { HqDatabase } from '../store/db.js';
+import { bindSchemaResilientGet } from '../store/db.js';
 import type { HeadquarterStore } from '../store/headquarter.js';
 
 /**
@@ -156,17 +157,30 @@ export function specialistAssignability(
 }
 
 /**
- * The default directory's three reads, over `hq_specialists`, with statements
- * prepared and their `get` bound once — the `bindGet` recipe the constructor's
- * principal and grant lookups already use, applied to the whole directory.
+ * The default directory's three reads, over `hq_specialists`, with the
+ * statement prepared and its `get` bound once — the `bindGet` recipe the
+ * constructor's principal and grant lookups already use, applied to the whole
+ * directory.
  *
  * Deny by default throughout, including on an unparseable
  * `allowed_capabilities` column: a malformed grant grants NOTHING rather than
  * throwing out of an enforcement decision.
+ *
+ * That sentence was true of a MALFORMED GRANT and false of a concurrent DDL
+ * (Wave 5 correction round seventeen, Medium-3). The bound `get` could never
+ * be re-prepared, so `SQLITE_SCHEMA` — which HQ's own `CREATE TABLE IF NOT
+ * EXISTS` boot path provokes whenever a second process starts against the same
+ * file — threw straight out of `#resolveRequester`. Measured over 32 runs of
+ * `reliability-commitment-prefix-replay.test.ts` on `85b720d`: 2 failures,
+ * both here at `row`. `bindSchemaResilientGet` re-prepares once and retries,
+ * from a `prepare` captured at construction so no prototype joins the call
+ * path; see its docblock for why the two properties are compatible.
  */
 export function specialistDirectoryReads(db: HqDatabase): WorkerDirectoryReads {
-  const statement = db.prepare(`SELECT id, allowed_capabilities, active FROM hq_specialists WHERE id = ?`);
-  const get = statement.get.bind(statement) as (workerId: string) => Record<string, unknown> | undefined;
+  const get = bindSchemaResilientGet(
+    db,
+    `SELECT id, allowed_capabilities, active FROM hq_specialists WHERE id = ?`,
+  ) as (workerId: string) => Record<string, unknown> | undefined;
   const row = (workerId: string): { allowedCapabilities: string[]; active: boolean } | null => {
     const found = get(workerId);
     if (!found) return null;

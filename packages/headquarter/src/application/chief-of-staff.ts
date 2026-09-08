@@ -57,6 +57,7 @@ import type { MissionStatus } from '../contracts/mission.js';
 import type { ActionRiskLevel, ActionState } from './action-gateway.js';
 import type { SubjectDrift, TruthEntityKind, TruthState, TruthVerificationSummary } from './truth-command.js';
 import type { CollaborationPrivacy, CollaborationRole, SessionStanding } from './collaboration-command.js';
+import { execSchemaDdl } from '../store/db.js';
 
 // ---- vocabulary (categorical only) ----
 
@@ -395,7 +396,7 @@ BEGIN SELECT RAISE(ABORT, 'hq_briefs is append-only'); END;
 /** Idempotent; readonly-safe (the post-Phase-3 ensure*Schema pattern). */
 export function ensureBriefSchema(db: HqDatabase): void {
   if (db.readonly) return;
-  db.exec(BRIEF_DDL);
+  execSchemaDdl(db, BRIEF_DDL);
 }
 
 /** True when the brief ledger exists in this file — observation, never migration. */

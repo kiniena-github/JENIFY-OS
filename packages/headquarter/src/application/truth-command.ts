@@ -31,6 +31,7 @@ import type { HqDatabase } from '../store/db.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import { canonicalJson } from '../operator/approvals.js';
 import type { MemoryPrivacy } from '../memory/schema.js';
+import { execSchemaDdl } from '../store/db.js';
 
 // ---- vocabulary (categorical only) ----
 
@@ -459,7 +460,7 @@ BEGIN SELECT RAISE(ABORT, 'hq_truth_acceptances is append-only (one acceptance p
 /** Idempotent; readonly-safe (the post-Phase-3 ensure*Schema pattern). */
 export function ensureTruthSchema(db: HqDatabase): void {
   if (db.readonly) return;
-  db.exec(TRUTH_DDL);
+  execSchemaDdl(db, TRUTH_DDL);
 }
 
 /** True when the truth tables exist in this file — observation, never migration. */

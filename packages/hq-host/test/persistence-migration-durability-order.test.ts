@@ -100,13 +100,18 @@ describe('HQ migrating-open durability ordering', () => {
     // The connection is where durability is selected...
     const connectBody = source.slice(connectStart, migrateStart);
     expect(connectBody).toContain("db.pragma('synchronous = FULL')");
-    expect(connectBody).not.toContain('db.exec(DDL)');
+    // The DDL spelling is `execSchemaDdl(db, DDL)` since Wave 5 correction
+    // round seventeen (Medium-3), which routes every DDL exec in the package
+    // through one schema-change-retrying helper. The PROPERTY asserted here is
+    // unchanged: no schema write in the connect step, every schema write in the
+    // migrate step.
+    expect(connectBody).not.toContain('execSchemaDdl(db, DDL)');
     expect(connectBody).not.toContain('ensureColumns(db)');
 
     // ...and migration, which carries every schema write, is a separate step
     // the caller runs afterwards.
     const migrateBody = source.slice(migrateStart);
-    expect(migrateBody).toContain('db.exec(DDL)');
+    expect(migrateBody).toContain('execSchemaDdl(db, DDL)');
     expect(migrateBody).toContain('ensureColumns(db)');
   });
 

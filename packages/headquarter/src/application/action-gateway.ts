@@ -34,6 +34,7 @@ import { deepFreeze } from '../contracts/freeze.js';
 import type { HqDatabase } from '../store/db.js';
 import { canonicalJson } from '../operator/approvals.js';
 import type { RiskClass } from '../operator/capabilities.js';
+import { execSchemaDdl } from '../store/db.js';
 
 // ---- vocabulary (categorical only) ----
 
@@ -556,7 +557,7 @@ BEGIN SELECT RAISE(ABORT, 'hq_action_events is append-only (UNIQUE side_effect_k
 /** Idempotent; readonly-safe (the post-Phase-3 ensure*Schema pattern). */
 export function ensureActionGatewaySchema(db: HqDatabase): void {
   if (db.readonly) return;
-  db.exec(ACTION_DDL);
+  execSchemaDdl(db, ACTION_DDL);
 }
 
 /** True when the ledger tables exist in this file — observation, never migration. */

@@ -17,7 +17,7 @@
 
 import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
-import { nowIso } from '../store/db.js';
+import { execSchemaDdl, nowIso } from '../store/db.js';
 import type { NewActivityEvent } from '../contracts/events.js';
 import { assertNoSecretLikeContent } from '../operator/evidence.js';
 import type { ArchiveRecord, DateConfidence } from '../archive/schema.js';
@@ -156,14 +156,14 @@ BEGIN SELECT RAISE(ABORT, 'hq_memory is insert-only (rowid already held)'); END;
  */
 export function ensureMemoryTables(db: HqDatabase): void {
   if (db.readonly) return;
-  db.exec(DDL);
+  execSchemaDdl(db, DDL);
   const existing = new Set(
     (db.prepare(`PRAGMA table_info(hq_memory)`).all() as { name: string }[]).map((c) => c.name),
   );
   for (const upgrade of COLUMN_UPGRADES) {
-    if (!existing.has(upgrade.column)) db.exec(upgrade.ddl);
+    if (!existing.has(upgrade.column)) execSchemaDdl(db, upgrade.ddl);
   }
-  db.exec(HARDENING_DDL);
+  execSchemaDdl(db, HARDENING_DDL);
 }
 
 /** True when the hq_memory table exists in this file — observation, never migration. */

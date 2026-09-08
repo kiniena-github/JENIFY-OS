@@ -40,7 +40,7 @@ import { createHash } from 'node:crypto';
 import { deepFreeze } from '../contracts/freeze.js';
 import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
-import { nowIso } from '../store/db.js';
+import { execSchemaDdl, nowIso } from '../store/db.js';
 import { canonicalJson } from '../operator/approvals.js';
 import { CapabilityRegistry, type Capability, type RiskClass } from '../operator/capabilities.js';
 import { isProjectStatus, type ProjectStatus } from '../contracts/project.js';
@@ -204,7 +204,7 @@ export function ensureProjectCommandSchema(db: HqDatabase): void {
     // The foundation DDL creates this table on every migrated database; this
     // branch keeps the module self-sufficient over a bare handle without
     // editing store/db.ts. Same column set, deliberately.
-    db.exec(`CREATE TABLE hq_projects (
+    execSchemaDdl(db, `CREATE TABLE hq_projects (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       stream TEXT NOT NULL,
@@ -215,9 +215,9 @@ export function ensureProjectCommandSchema(db: HqDatabase): void {
     )`);
   }
   for (const upgrade of PROJECT_COLUMN_UPGRADES) {
-    if (!columnExists(db, 'hq_projects', upgrade.column)) db.exec(upgrade.ddl);
+    if (!columnExists(db, 'hq_projects', upgrade.column)) execSchemaDdl(db, upgrade.ddl);
   }
-  db.exec(PROJECT_EVENTS_DDL);
+  execSchemaDdl(db, PROJECT_EVENTS_DDL);
 }
 
 /**

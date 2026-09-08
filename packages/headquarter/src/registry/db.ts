@@ -9,6 +9,7 @@
  */
 
 import type { HqDatabase } from '../store/db.js';
+import { execSchemaDdl } from '../store/db.js';
 
 const REGISTRY_DDL = `
 CREATE TABLE IF NOT EXISTS hq_member_capabilities (
@@ -95,11 +96,14 @@ function migrateLegacyRoleEligibilityColumn(db: HqDatabase): void {
   const names = new Set(columns.map((c) => c.name));
   if (names.has('assigned_roles') || !names.has('role_eligibility')) return;
 
-  db.exec(`ALTER TABLE hq_ai_members ADD COLUMN assigned_roles TEXT NOT NULL DEFAULT '[]'`);
-  db.exec(`UPDATE hq_ai_members SET assigned_roles = role_eligibility`);
+  execSchemaDdl(db, `ALTER TABLE hq_ai_members ADD COLUMN assigned_roles TEXT NOT NULL DEFAULT '[]'`);
+  // A migration BACKFILL rather than DDL, routed through the same helper for
+  // the same reason: it runs in the same boot-time race, and one spelling is
+  // what keeps a future site from being missed.
+  execSchemaDdl(db, `UPDATE hq_ai_members SET assigned_roles = role_eligibility`);
 }
 
 export function ensureRegistrySchema(db: HqDatabase): void {
-  db.exec(REGISTRY_DDL);
+  execSchemaDdl(db, REGISTRY_DDL);
   migrateLegacyRoleEligibilityColumn(db);
 }

@@ -54,7 +54,7 @@ import { createHash } from 'node:crypto';
 import { deepFreeze } from '../contracts/freeze.js';
 import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
-import { nowIso } from '../store/db.js';
+import { execSchemaDdl, nowIso } from '../store/db.js';
 import { canonicalJson } from '../operator/approvals.js';
 import { CapabilityRegistry, type Capability, type RiskClass } from '../operator/capabilities.js';
 
@@ -397,7 +397,7 @@ BEGIN SELECT RAISE(ABORT, 'hq_product_artifacts is append-only (unique idempoten
  */
 export function ensureProductFactorySchema(db: HqDatabase): void {
   if (db.readonly) return;
-  db.exec(PRODUCT_DDL);
+  execSchemaDdl(db, PRODUCT_DDL);
 }
 
 /** True when this file carries the Phase 12 schema — observation, never migration. */

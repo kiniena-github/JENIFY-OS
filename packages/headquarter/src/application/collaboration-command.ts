@@ -53,6 +53,7 @@ import type { ActivityStatus } from '../contracts/events.js';
 import type { MissionStatus } from '../contracts/mission.js';
 import { MEMORY_PRIVACY_LEVELS, isMemoryPrivacy, type MemoryPrivacy } from '../memory/schema.js';
 import type { TruthState } from './truth-command.js';
+import { execSchemaDdl } from '../store/db.js';
 
 // ---- vocabulary (categorical only) ----
 
@@ -435,10 +436,10 @@ BEGIN SELECT RAISE(ABORT, 'hq_collab_relations is append-only'); END;
  */
 export function ensureCollaborationSchema(db: HqDatabase): void {
   if (db.readonly) return;
-  db.exec(COLLABORATION_DDL);
+  execSchemaDdl(db, COLLABORATION_DDL);
   const columns = db.prepare(`PRAGMA table_info(hq_collab_sessions)`).all() as { name: string }[];
   if (!columns.some((column) => column.name === 'privacy')) {
-    db.exec(`ALTER TABLE hq_collab_sessions ADD COLUMN privacy TEXT NOT NULL DEFAULT 'internal'`);
+    execSchemaDdl(db, `ALTER TABLE hq_collab_sessions ADD COLUMN privacy TEXT NOT NULL DEFAULT 'internal'`);
   }
 }
 

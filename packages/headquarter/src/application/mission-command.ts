@@ -44,7 +44,7 @@ import { createHash } from 'node:crypto';
 import { deepFreeze } from '../contracts/freeze.js';
 import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
-import { nowIso } from '../store/db.js';
+import { execSchemaDdl, nowIso } from '../store/db.js';
 import { canonicalJson } from '../operator/approvals.js';
 import { CapabilityRegistry, type Capability, type RiskClass } from '../operator/capabilities.js';
 import {
@@ -361,7 +361,7 @@ BEGIN SELECT RAISE(ABORT, 'hq_missions identity is write-once (unique idempotenc
  */
 export function ensureMissionCommandSchema(db: HqDatabase): void {
   if (db.readonly) return;
-  db.exec(MISSION_COMMAND_DDL);
+  execSchemaDdl(db, MISSION_COMMAND_DDL);
   // Phase 4: the canonical mission -> project relationship. Additive,
   // idempotent, module-owned (this module owns hq_missions). Distinct from
   // the free-text `project` LABEL column above it, which stays a label —
@@ -369,7 +369,7 @@ export function ensureMissionCommandSchema(db: HqDatabase): void {
   // application/project-command.ts) and is validated at the facade.
   const cols = db.prepare(`PRAGMA table_info(hq_missions)`).all() as { name: string }[];
   if (!cols.some((c) => c.name === 'project_id')) {
-    db.exec(`ALTER TABLE hq_missions ADD COLUMN project_id TEXT`);
+    execSchemaDdl(db, `ALTER TABLE hq_missions ADD COLUMN project_id TEXT`);
   }
   // Phase 6 (issue #265): the Founder work SPEC on a plan item — the explicit
   // structured statement (capability id + canonical-JSON payload) that lets
@@ -381,14 +381,14 @@ export function ensureMissionCommandSchema(db: HqDatabase): void {
   // it, so the append-only history explains every spec.
   const itemCols = db.prepare(`PRAGMA table_info(hq_mission_plan_items)`).all() as { name: string }[];
   if (!itemCols.some((c) => c.name === 'spec_capability_id')) {
-    db.exec(`ALTER TABLE hq_mission_plan_items ADD COLUMN spec_capability_id TEXT`);
-    db.exec(`ALTER TABLE hq_mission_plan_items ADD COLUMN spec_payload TEXT`);
-    db.exec(`ALTER TABLE hq_mission_plan_items ADD COLUMN spec_set_in_intent_seq INTEGER`);
+    execSchemaDdl(db, `ALTER TABLE hq_mission_plan_items ADD COLUMN spec_capability_id TEXT`);
+    execSchemaDdl(db, `ALTER TABLE hq_mission_plan_items ADD COLUMN spec_payload TEXT`);
+    execSchemaDdl(db, `ALTER TABLE hq_mission_plan_items ADD COLUMN spec_set_in_intent_seq INTEGER`);
   }
   // Engine-held, the relink-guard recipe: a spec, once stated, is never
   // re-pointed — changing the work means superseding the item and adding a
   // new one, which the append-only intent history then records.
-  db.exec(`
+  execSchemaDdl(db, `
 CREATE TRIGGER IF NOT EXISTS trg_hq_mission_plan_items_no_respec
 BEFORE UPDATE OF spec_capability_id, spec_payload, spec_set_in_intent_seq
 ON hq_mission_plan_items

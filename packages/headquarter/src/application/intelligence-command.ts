@@ -78,6 +78,7 @@ import { canonicalJson } from '../operator/approvals.js';
 import { UNRECOGNIZED_BUCKET } from './reliability-command.js';
 import { CapabilityRegistry, RISK_CLASSES, type Capability, type RiskClass } from '../operator/capabilities.js';
 import { PROVIDER_HEALTH_STATES, type ProviderHealth } from '../providers/contracts.js';
+import { execSchemaDdl } from '../store/db.js';
 
 /* ------------------------------------------------------------------ */
 /* Vocabulary — categorical only                                       */
@@ -779,7 +780,7 @@ BEGIN SELECT RAISE(ABORT, 'hq_intel_cost_entries is append-only (unique entry_ke
  */
 export function ensureIntelligenceSchema(db: HqDatabase): void {
   if (db.readonly) return;
-  db.exec(INTELLIGENCE_DDL);
+  execSchemaDdl(db, INTELLIGENCE_DDL);
   ensureCostEntryBindingColumn(db);
   ensureCostEntryScopeColumns(db);
 }
@@ -810,7 +811,7 @@ export function ensureIntelligenceSchema(db: HqDatabase): void {
 function ensureCostEntryBindingColumn(db: HqDatabase): void {
   const columns = db.prepare(`PRAGMA table_info(hq_intel_cost_entries)`).all() as { name: string }[];
   if (!columns.some((column) => column.name === 'provider_bound')) {
-    db.exec(`ALTER TABLE hq_intel_cost_entries ADD COLUMN provider_bound INTEGER`);
+    execSchemaDdl(db, `ALTER TABLE hq_intel_cost_entries ADD COLUMN provider_bound INTEGER`);
   }
 }
 
@@ -840,10 +841,10 @@ function ensureCostEntryScopeColumns(db: HqDatabase): void {
   const columns = db.prepare(`PRAGMA table_info(hq_intel_cost_entries)`).all() as { name: string }[];
   const present = new Set(columns.map((column) => column.name));
   if (!present.has('mission_ids')) {
-    db.exec(`ALTER TABLE hq_intel_cost_entries ADD COLUMN mission_ids TEXT`);
+    execSchemaDdl(db, `ALTER TABLE hq_intel_cost_entries ADD COLUMN mission_ids TEXT`);
   }
   if (!present.has('project_ids')) {
-    db.exec(`ALTER TABLE hq_intel_cost_entries ADD COLUMN project_ids TEXT`);
+    execSchemaDdl(db, `ALTER TABLE hq_intel_cost_entries ADD COLUMN project_ids TEXT`);
   }
 }
 

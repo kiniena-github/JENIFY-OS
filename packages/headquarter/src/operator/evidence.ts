@@ -242,7 +242,7 @@
 import { createHash } from 'node:crypto';
 import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
-import { nowIso } from '../store/db.js';
+import { execSchemaDdl, nowIso } from '../store/db.js';
 import { contradictedChainCommitment } from '../store/integrity.js';
 
 export interface EvidenceEntry {
@@ -309,7 +309,7 @@ BEGIN SELECT RAISE(ABORT, 'op_evidence is append-only'); END;
  */
 export function ensureEvidenceGuards(db: HqDatabase): void {
   if (db.readonly) return;
-  db.exec(EVIDENCE_GUARD_DDL);
+  execSchemaDdl(db, EVIDENCE_GUARD_DDL);
 }
 
 /**

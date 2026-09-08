@@ -26,7 +26,7 @@
 import { createHash } from 'node:crypto';
 import { deepFreeze } from '../contracts/freeze.js';
 import type { HqDatabase } from '../store/db.js';
-import { nowIso } from '../store/db.js';
+import { execSchemaDdl, nowIso } from '../store/db.js';
 import { v4 as uuid } from 'uuid';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import { canonicalJson } from '../operator/approvals.js';
@@ -154,7 +154,7 @@ BEGIN SELECT RAISE(ABORT, 'hq_orchestration_run_items is append-only'); END;
 /** Idempotent; readonly-safe (the post-Phase-3 ensure*Schema pattern). */
 export function ensureOrchestratorSchema(db: HqDatabase): void {
   if (db.readonly) return;
-  db.exec(ORCHESTRATOR_DDL);
+  execSchemaDdl(db, ORCHESTRATOR_DDL);
 }
 
 export function orchestratorSchemaPresent(db: HqDatabase): boolean {

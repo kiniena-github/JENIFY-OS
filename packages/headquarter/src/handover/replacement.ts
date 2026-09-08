@@ -40,7 +40,7 @@
 
 import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
-import { nowIso } from '../store/db.js';
+import { execSchemaDdl, nowIso } from '../store/db.js';
 import { HeadquarterStore } from '../store/headquarter.js';
 import type { MemoryStore } from '../memory/store.js';
 import { generateHandoverPackage, type HandoverPackage } from './package.js';
@@ -127,7 +127,7 @@ CREATE INDEX IF NOT EXISTS idx_hq_handovers_predecessor ON hq_handovers(predeces
 
 /** Idempotent — safe to call on every HandoverStore construction. */
 export function ensureHandoverTables(db: HqDatabase): void {
-  db.exec(DDL);
+  execSchemaDdl(db, DDL);
 }
 
 function rowToHandover(r: Record<string, unknown>): HandoverRecord {
