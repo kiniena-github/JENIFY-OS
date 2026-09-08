@@ -96,10 +96,13 @@ import {
   GLOBAL_SCOPE,
   OperatorQueue,
   SafeModeEngaged,
+  canonicalApprovalFor,
+  canonicalTaskFor,
   installQueueSafeModeGate,
   type OperatorTask,
   type PrivilegedQueueApi,
   type ReconcileDecision,
+  type TaskApprovalRecord,
 } from '../operator/queue.js';
 import {
   ProviderBindingViolation,
@@ -2296,6 +2299,18 @@ let readGatewayActionHistory: (ops: HeadquarterOperations, taskId: string) => Ga
  * `queue.evidence.list` display surface.
  */
 let readTaskEvidenceRows: (ops: HeadquarterOperations, taskId: string) => CanonicalEvidenceRow[];
+/**
+ * Same recipe for the canonical `op_tasks` row and the approval bound to it
+ * (Wave 5 correction round fourteen, Critical 3 / High 7): the Claude dispatch
+ * lane and the Founder approve route both took their task from `ops.queue.get`
+ * — a patchable method on a patchable field, documented as a DISPLAY read —
+ * and then decided a kill switch, a step-up demand and a publication on it.
+ */
+let readCanonicalTaskRow: (ops: HeadquarterOperations, taskId: string) => OperatorTask | null;
+let readCanonicalTaskApproval: (
+  ops: HeadquarterOperations,
+  taskId: string,
+) => TaskApprovalRecord | null;
 
 export class HeadquarterOperations {
   readonly queue: OperatorQueue;
@@ -2381,6 +2396,80 @@ export class HeadquarterOperations {
   readonly #principalOf: (id: string) => HumanPrincipal | null;
   readonly #grantOf: (workerId: string) => readonly string[];
   readonly #isRegisteredWorker: (workerId: string) => boolean;
+  /**
+   * Whether a worker may take on work, read the way its grant already is
+   * (Wave 5 correction round fourteen, Critical 4).
+   *
+   * `#grantOf` was built prototype-free for exactly this class of defect
+   * (issue #200 — "patch the directory prototype and forge a least-privilege
+   * grant"), and `#gatewayGate` — the gate on `executeAction`, the ONE path in
+   * HQ that makes a real external side effect — read the two facts two lines
+   * apart, one hardened and one not:
+   *
+   * ```
+   * const assignability = this.#workers.assignability(workerId);  // patchable
+   * if (!this.#grantOf(workerId).includes(intent.capabilityId))   // closure
+   * ```
+   *
+   * `this.#workers` is a `SpecialistDirectoryAdapter`, and that class is
+   * EXPORTED, so `assignability` resolved through a prototype any same-realm
+   * caller can replace. Reproduced by the review: a worker with `active = 0` in
+   * `hq_specialists` executed `publish_release` on `releases/v9` — declared
+   * `visibility: public`, `reversibility: irreversible`, `compensation: null` —
+   * with the adapter called once and the durable record reading
+   * `proposed -> authorized -> attempted -> succeeded`. A Founder deactivating a
+   * worker was therefore not enforced at the highest-consequence boundary in
+   * the codebase.
+   *
+   * Same residual as `#grantOf`, stated rather than implied: when a composition
+   * SUPPLIES its own `workers` port or a member registry, this delegates to it,
+   * because that port is then the authority and HQ has no canonical row to read
+   * instead. The default construction — every shipped one — reads
+   * `hq_specialists` through a bound statement with no prototype in the path.
+   */
+  readonly #assignabilityOf: (workerId: string) => WorkerAssignability;
+  /**
+   * The canonical `op_tasks` row, read through `OperatorQueue`'s own
+   * `#private` closure rather than the patchable public `queue.get`
+   * (Wave 5 correction round fourteen, Critical 3).
+   *
+   * `queue.ts` states verbatim that "enforcement does NOT dispatch through
+   * this". That was true of the queue and false of this facade: `approveTask`
+   * took its task from `queue.get` and handed the resulting object's
+   * `capabilityId` to the canonical `#killSwitchEngagedFromStore` — canonical
+   * closure, forged ARGUMENT — so a capability-scoped kill switch was bypassed
+   * and a durable `hq_approvals risk_class=destructive` row was written while
+   * the Founder's stop stood engaged. `OperatorQueue.#approve` re-reads
+   * canonically but never checks the switch, so `approveTask` was the only
+   * kill-switch gate on that path.
+   *
+   * `canonicalTaskFor` is an ES module binding over a module-private `let` that
+   * only `OperatorQueue`'s static block can assign, and the queue instance is
+   * captured HERE, at construction, rather than looked up as `this.queue` at
+   * call time — `queue` is a public field and a `readonly` in TypeScript erases,
+   * so a call-time lookup would be one more replaceable step in the path.
+   */
+  readonly #taskFromStore: (taskId: string) => OperatorTask | null;
+  /** The approval bound to a task, through the same closure family. */
+  readonly #approvalFromStore: (taskId: string) => TaskApprovalRecord | null;
+  /**
+   * The canonical `hq_specialists` row, read without `HeadquarterStore.prototype`
+   * on the path (Wave 5 correction round fourteen, Critical 2's second half).
+   *
+   * `HeadquarterStore` is exported, so `getSpecialist` is a prototype slot a
+   * same-realm caller can replace — that is the second of the two forgeries the
+   * review used to mint durable `op_tasks` rows for a worker holding neither
+   * grant. Three facade WRITES still read it directly: the duplicate check in
+   * `registerExecutionWorker` (a forged null lets a Founder-gated create-only
+   * command OVERWRITE an existing worker's allow-list through `ON CONFLICT DO
+   * UPDATE`), the descriptor `deactivateExecutionWorker` re-upserts, and the
+   * `enrichesExecutionWorker` fact `registerAiMember` writes into evidence.
+   *
+   * `directory.getSpecialist` — the public display seam — is deliberately left
+   * on the store, exactly as `queue.get` is: a caller that patches a read it
+   * uses to look at things lies only to itself.
+   */
+  readonly #specialistFromStore: (workerId: string) => WorkerDescriptor | null;
   readonly #nominationSources: readonly NominationSourcePort[];
   readonly #policyCtx: PolicyContext;
   /** Write side of the worker → provider map. Private by design — see below. */
@@ -2674,11 +2763,18 @@ export class HeadquarterOperations {
    * Phase 8 also migrated the load-bearing Low-7 call sites onto the
    * single-capability closure above: `approveTask` (an approval primed to
    * run the instant a switch releases), `claimNext` (a claim/dispatch
-   * decision) and the `orchestrateMission` apply precheck. The one call site
-   * deliberately LEFT on `queue.killSwitchEngaged` is `#missionExecutionState`,
-   * which is a derived read projection (the Mission Room's picture) that
-   * decides no write — a lie there misinforms the patcher's own display and
-   * changes nothing that is enforced.
+   * decision) and the `orchestrateMission` apply precheck.
+   *
+   * `#missionExecutionState` — the Mission Room's picture — was deliberately
+   * left on `queue.killSwitchEngaged` on the argument that a lie in a display
+   * misinforms only the patcher. That argument still holds and the call site is
+   * migrated anyway (Wave 5 correction round fourteen, carried Low): the
+   * Founder's emergency-stop panel is the one display where "showing the
+   * patcher's own lie" is indistinguishable from "showing the Founder a stop
+   * that is not there", the closure costs the same as the delegate, and there
+   * is now no call site in this file whose kill-switch answer comes from a
+   * surface a caller can replace — a property a guard can state, which
+   * "all except one, for a reason" was not.
    */
   readonly #engagedKillSwitchScopeFromStore: (scopes: readonly string[]) => string | null;
 
@@ -2923,6 +3019,15 @@ export class HeadquarterOperations {
     // its own queue is exactly the composition the delegate route was reached
     // through, and gates are OR-ed, so adding one can only ever refuse more.
     installQueueSafeModeGate(this.queue, () => this.#integrityReport.safeMode);
+    // The queue instance is captured HERE rather than read as `this.queue` at
+    // call time: `queue` is a public field, TypeScript's `readonly` erases, and
+    // an enforcement read must not resolve through anything a same-realm caller
+    // can replace (Wave 5 correction round fourteen, Critical 3).
+    const canonicalQueue = this.queue;
+    this.#taskFromStore = (taskId: string): OperatorTask | null =>
+      canonicalTaskFor(canonicalQueue, taskId);
+    this.#approvalFromStore = (taskId: string): TaskApprovalRecord | null =>
+      canonicalApprovalFor(canonicalQueue, taskId);
     this.#queuePrivileged = granted;
     // The WRITE side of the worker → provider map lives here and nowhere else
     // (issue #200, Codex round-3 P1 #1). It is private: the only ways in are
@@ -2985,15 +3090,71 @@ export class HeadquarterOperations {
               return [];
             }
           };
-    this.#isRegisteredWorker = options.workers
-      ? (workerId: string) => this.#workers.isRegistered(workerId)
-      : (workerId: string) => specialistGet(workerId) !== undefined;
+    // Same delegate condition as `#grantOf` and `#assignabilityOf` (Wave 5
+    // correction round fourteen, Critical 2). `NarrowingWorkerDirectory.isRegistered`
+    // deliberately ORs the two sources — recognising a Registry-only id as a
+    // WORKER identity is what stops it being mistaken for a human principal and
+    // picking up the human path — so a supplied registry has to be consulted.
+    // Without a registry the answer is `hq_specialists` read through a bound
+    // statement, with no `SpecialistDirectoryAdapter.prototype` on the path.
+    this.#isRegisteredWorker =
+      options.workers || options.memberRegistry
+        ? (workerId: string) => this.#workers.isRegistered(workerId)
+        : (workerId: string) => specialistGet(workerId) !== undefined;
+    // The SAME recipe, and the same delegate condition, as `#grantOf` above —
+    // `narrowByRegistry` composes the member registry over the specialist
+    // directory, so a supplied registry is part of the authority and must be
+    // consulted (Wave 5 correction round fourteen, Critical 4). Everywhere
+    // else, `hq_specialists.active` is read through a bound statement, so the
+    // `SpecialistDirectoryAdapter.prototype.assignability` a worker can replace
+    // is not on the path. The refusal REASONS match the adapter's exactly: the
+    // built-in directory can only tell unknown from inactive.
+    const activeGet = bindGet(db, `SELECT active FROM hq_specialists WHERE id = ?`);
+    const specialistRowGet = bindGet(db, `SELECT * FROM hq_specialists WHERE id = ?`);
+    this.#specialistFromStore = (workerId: string): WorkerDescriptor | null => {
+      const row = specialistRowGet(workerId) as Record<string, unknown> | undefined;
+      if (!row) return null;
+      let allowedCapabilities: string[];
+      try {
+        const parsed: unknown = JSON.parse(row.allowed_capabilities as string);
+        allowedCapabilities = Array.isArray(parsed)
+          ? parsed.filter((c): c is string => typeof c === 'string')
+          : [];
+      } catch {
+        // An unreadable allow-list is the EMPTY one, never the convenient one —
+        // the same fail-closed rule `#grantOf` applies.
+        allowedCapabilities = [];
+      }
+      return {
+        id: row.id as string,
+        displayName: row.display_name as string,
+        vendor: row.vendor as string,
+        role: row.role as WorkerDescriptor['role'],
+        allowedCapabilities,
+        active: !!row.active,
+      };
+    };
+    this.#assignabilityOf =
+      options.workers || options.memberRegistry
+        ? (workerId: string) => this.#workers.assignability(workerId)
+        : (workerId: string) => {
+            const row = activeGet(workerId) as { active: number } | undefined;
+            if (!row) return { assignable: false, reason: 'worker_unknown' };
+            if (!row.active) return { assignable: false, reason: 'worker_inactive' };
+            return { assignable: true };
+          };
     this.directory = {
       listSpecialists: () => this.#store.listSpecialists(),
       latestStatusPerSubject: () => this.#store.latestStatusPerSubject(),
       getSpecialist: (workerId: string) => this.#store.getSpecialist(workerId),
     };
 
+    // The PORT passthrough, unchanged and deliberately so: this is the public
+    // display surface over whatever directory was composed, and narrowing it to
+    // the enforcement closures would silently change what a composition that
+    // supplied its own directory reports about itself. Enforcement does not read
+    // this object — it reads `#grantOf` / `#isRegisteredWorker` / `#assignabilityOf`
+    // directly — which is exactly the separation #200 asked for.
     this.workers = {
       allowedCapabilities: (workerId: string) => this.#workers.allowedCapabilities(workerId),
       isRegistered: (workerId: string) => this.#workers.isRegistered(workerId),
@@ -3168,7 +3329,7 @@ export class HeadquarterOperations {
 
   /** Explain a capability's gates. Registry-derived; payload-blind. */
   classify(capabilityId: string): OpsResult<TaskClassification> {
-    const cap = this.queue.capabilities.get(capabilityId);
+    const cap = this.#capabilityFromStore(capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${capabilityId}`);
     return ok(classifyCapability(cap, this.#policyCtx));
   }
@@ -3232,7 +3393,7 @@ export class HeadquarterOperations {
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
-    const cap = this.queue.capabilities.get(input.capabilityId);
+    const cap = this.#capabilityFromStore(input.capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${input.capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${cap.id} is disabled`);
 
@@ -3280,9 +3441,9 @@ export class HeadquarterOperations {
   routeTask(taskId: string): OpsResult<TaskRouting> {
     const unsafeCallerText = callerTextRefusal({ taskId });
     if (unsafeCallerText) return unsafeCallerText;
-    const task = this.queue.get(taskId);
+    const task = this.#taskFromStore(taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${taskId}`);
-    const cap = this.queue.capabilities.get(task.capabilityId);
+    const cap = this.#capabilityFromStore(task.capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${task.capabilityId}`);
 
     const merged = new Map<string, { sources: string[]; rationales: string[] }>();
@@ -3316,10 +3477,10 @@ export class HeadquarterOperations {
 
     const nominations: EvaluatedNomination[] = [...merged.entries()]
       .map(([workerId, entry]) => {
-        const assignability = this.#workers.assignability(workerId);
+        const assignability = this.#assignabilityOf(workerId);
         const operatorDecision = evaluatePolicy(
           cap,
-          { workerId, allowedCapabilities: [...this.#workers.allowedCapabilities(workerId)] },
+          { workerId, allowedCapabilities: [...this.#grantOf(workerId)] },
           this.#policyCtx,
         );
         return {
@@ -3388,14 +3549,14 @@ export class HeadquarterOperations {
   ): OpsResult<AssignmentIntent> {
     const unsafeCallerText = callerTextRefusal({ taskId, workerId, assignedBy, rationale }, ['rationale']);
     if (unsafeCallerText) return unsafeCallerText;
-    const task = this.queue.get(taskId);
+    const task = this.#taskFromStore(taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${taskId}`);
     try {
       assertNoCredentialShape({ rationale: rationale ?? '' });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
-    const cap = this.queue.capabilities.get(task.capabilityId);
+    const cap = this.#capabilityFromStore(task.capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${task.capabilityId}`);
 
     // The actor RECORDING the intent must be someone: this writes an
@@ -3408,13 +3569,13 @@ export class HeadquarterOperations {
     const barrier = assignmentBarrier(task);
     if (barrier) return { ok: false, error: barrier };
 
-    const assignability = this.#workers.assignability(workerId);
+    const assignability = this.#assignabilityOf(workerId);
     if (!assignability.assignable) {
       return this.#rejectNotAssignable(workerId, assignability, 'assign_task');
     }
     const decision = evaluatePolicy(
       cap,
-      { workerId, allowedCapabilities: [...this.#workers.allowedCapabilities(workerId)] },
+      { workerId, allowedCapabilities: [...this.#grantOf(workerId)] },
       this.#policyCtx,
     );
     if (decision.outcome === 'deny') {
@@ -3463,7 +3624,7 @@ export class HeadquarterOperations {
   approveTask(input: ApproveTaskInput): OpsResult<OperatorTask> {
     const unsafeCallerText = callerTextRefusal(input, ['note']);
     if (unsafeCallerText) return unsafeCallerText;
-    const task = this.queue.get(input.taskId);
+    const task = this.#taskFromStore(input.taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${input.taskId}`);
     const principal = this.#assertApprovalAuthority(input.founderId, 'approve');
     if (principal) return principal;
@@ -3480,7 +3641,7 @@ export class HeadquarterOperations {
         { status: task.status },
       );
     }
-    const cap = this.queue.capabilities.get(task.capabilityId);
+    const cap = this.#capabilityFromStore(task.capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${task.capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${cap.id} is disabled`);
     // Enforcement-safe read (Phase 8, the carried-forward Low 7): this answer
@@ -3543,7 +3704,7 @@ export class HeadquarterOperations {
   denyTask(input: DenyTaskInput): OpsResult<OperatorTask> {
     const unsafeCallerText = callerTextRefusal(input, ['reason']);
     if (unsafeCallerText) return unsafeCallerText;
-    const task = this.queue.get(input.taskId);
+    const task = this.#taskFromStore(input.taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${input.taskId}`);
     const principal = this.#assertApprovalAuthority(input.founderId, 'deny');
     if (principal) return principal;
@@ -3615,7 +3776,7 @@ export class HeadquarterOperations {
   ): OpsResult<OperatorTask> {
     const unsafeCallerText = callerTextRefusal({ workerId, capabilityId, onlyTaskId });
     if (unsafeCallerText) return unsafeCallerText;
-    const cap = this.queue.capabilities.get(capabilityId);
+    const cap = this.#capabilityFromStore(capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${capabilityId} is disabled`);
     // Phase 13: a claim is the act that hands work to a worker. HQ does not
@@ -3628,7 +3789,7 @@ export class HeadquarterOperations {
 
     const human = this.#rejectHumanExecution(workerId, 'claim work');
     if (human) return human;
-    const assignability = this.#workers.assignability(workerId);
+    const assignability = this.#assignabilityOf(workerId);
     if (!assignability.assignable) {
       return this.#rejectNotAssignable(workerId, assignability, 'claim');
     }
@@ -3714,7 +3875,7 @@ export class HeadquarterOperations {
     if (unsafeCallerText) return unsafeCallerText;
     const human = this.#rejectHumanExecution(workerId, 'start work');
     if (human) return human;
-    const assignability = this.#workers.assignability(workerId);
+    const assignability = this.#assignabilityOf(workerId);
     if (!assignability.assignable) {
       return this.#rejectNotAssignable(workerId, assignability, 'start', { taskId });
     }
@@ -3776,7 +3937,7 @@ export class HeadquarterOperations {
     // `no_erase` and `no_rewrite`, so the row is permanent.
     const unsafeCallerText = callerTextRefusal({ taskId, workerId, evidenceRefs });
     if (unsafeCallerText) return unsafeCallerText;
-    const existing = this.queue.get(taskId);
+    const existing = this.#taskFromStore(taskId);
     if (!existing) return fail('unknown_task', `Unknown task: ${taskId}`);
     if (existing.reviewState === 'pending') {
       return fail(
@@ -3951,11 +4112,11 @@ export class HeadquarterOperations {
   }> {
     const unsafeCallerText = callerTextRefusal({ taskId });
     if (unsafeCallerText) return unsafeCallerText;
-    const task = this.queue.get(taskId);
+    const task = this.#taskFromStore(taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${taskId}`);
     try {
       const rejection = this.#requirePrivilegedQueue().returnForFreshApproval(taskId);
-      const after = this.queue.get(taskId);
+      const after = this.#taskFromStore(taskId);
       return ok({
         returned: rejection !== null,
         rejection,
@@ -4143,6 +4304,12 @@ export class HeadquarterOperations {
       ops.#gatewayActionHistoryFromStore(taskId);
     readTaskEvidenceRows = (ops: HeadquarterOperations, taskId: string): CanonicalEvidenceRow[] =>
       ops.#taskEvidenceRowsFromStore(taskId);
+    readCanonicalTaskRow = (ops: HeadquarterOperations, taskId: string): OperatorTask | null =>
+      ops.#taskFromStore(taskId);
+    readCanonicalTaskApproval = (
+      ops: HeadquarterOperations,
+      taskId: string,
+    ): TaskApprovalRecord | null => ops.#approvalFromStore(taskId);
   }
 
   /**
@@ -4270,7 +4437,7 @@ export class HeadquarterOperations {
     }
     // A claim of publication needs the claim it happened under.
     if ((CLAIM_BOUND_EVIDENCE_KINDS as readonly string[]).includes(entry.kind)) {
-      const task = entry.taskId ? this.queue.get(entry.taskId) : null;
+      const task = entry.taskId ? this.#taskFromStore(entry.taskId) : null;
       if (!task) {
         throw new Error(
           `${entry.kind} names no task that exists. A record of a publication is written against ` +
@@ -4477,7 +4644,7 @@ export class HeadquarterOperations {
         { workerId },
       );
     }
-    if (this.#store.getSpecialist(workerId)) {
+    if (this.#specialistFromStore(workerId)) {
       return fail(
         'invalid_input',
         `Worker ${workerId} is already registered. Registration is create-only: it will not ` +
@@ -4494,7 +4661,7 @@ export class HeadquarterOperations {
         { workerId },
       );
     }
-    const unknown = input.allowedCapabilities.filter((id) => this.queue.capabilities.get(id) == null);
+    const unknown = input.allowedCapabilities.filter((id) => this.#capabilityFromStore(id) == null);
     if (unknown.length > 0) {
       return fail(
         'unknown_capability',
@@ -4646,7 +4813,7 @@ export class HeadquarterOperations {
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
-    const specialist = this.#store.getSpecialist(input.workerId);
+    const specialist = this.#specialistFromStore(input.workerId);
     if (!specialist) {
       return fail('invalid_input', `Unknown worker: ${input.workerId}`, {
         workerId: input.workerId,
@@ -4753,8 +4920,8 @@ export class HeadquarterOperations {
     if (unsafeCallerText) return unsafeCallerText;
     const routed = this.routeTask(taskId);
     if (!routed.ok) return routed;
-    const task = this.queue.get(taskId)!;
-    const cap = this.queue.capabilities.get(task.capabilityId)!;
+    const task = this.#taskFromStore(taskId)!;
+    const cap = this.#capabilityFromStore(task.capabilityId)!;
     const declaredProviders = new Map(
       this.queue.listWorkerProviders().map((d) => [d.workerId, d.providerId] as const),
     );
@@ -4763,7 +4930,7 @@ export class HeadquarterOperations {
       .listSpecialists()
       .map((specialist) => {
         const granted = this.#grantOf(specialist.id);
-        const assignability = this.#workers.assignability(specialist.id);
+        const assignability = this.#assignabilityOf(specialist.id);
         const decision = evaluatePolicy(
           cap,
           { workerId: specialist.id, allowedCapabilities: [...granted] },
@@ -4883,7 +5050,7 @@ export class HeadquarterOperations {
         { memberId },
       );
     }
-    const enrichesExecutionWorker = this.#store.getSpecialist(memberId) != null;
+    const enrichesExecutionWorker = this.#specialistFromStore(memberId) != null;
     try {
       const privileged = this.#requirePrivilegedQueue();
       return ok(
@@ -5120,7 +5287,7 @@ export class HeadquarterOperations {
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
-    const cap = this.queue.capabilities.get(input.capabilityId);
+    const cap = this.#capabilityFromStore(input.capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${input.capabilityId}`);
 
     const id = uuid();
@@ -6677,7 +6844,7 @@ export class HeadquarterOperations {
       .listSpecialists()
       .filter((specialist) => {
         const granted = this.#grantOf(specialist.id);
-        const assignability = this.#workers.assignability(specialist.id);
+        const assignability = this.#assignabilityOf(specialist.id);
         const decision = evaluatePolicy(
           cap,
           { workerId: specialist.id, allowedCapabilities: [...granted] },
@@ -6719,7 +6886,7 @@ export class HeadquarterOperations {
       ...new Set(
         specified
           .map((item) => item.specCapabilityId!)
-          .filter((capabilityId) => this.queue.killSwitchEngaged(capabilityId)),
+          .filter((capabilityId) => this.#killSwitchEngagedFromStore(capabilityId)),
       ),
     ].sort();
     // Derived readiness, CATEGORICAL: every live work item is linked, every
@@ -6749,8 +6916,8 @@ export class HeadquarterOperations {
         blocked: linkedTasks.filter((task) => task.status === 'blocked').map((task) => task.taskId),
       },
       killSwitch: {
-        global: this.queue.killSwitchEngaged(),
-        orchestrate: this.queue.killSwitchEngaged(MISSION_ORCHESTRATE_CAPABILITY.id),
+        global: this.#killSwitchEngagedFromStore(),
+        orchestrate: this.#killSwitchEngagedFromStore(MISSION_ORCHESTRATE_CAPABILITY.id),
         engagedSpecScopes,
       },
       dependsOn: mission.dependsOn.map((missionId) => ({
@@ -14107,7 +14274,7 @@ export class HeadquarterOperations {
       'ok' in error ? { ok: false, error: (error as { ok: false; error: OpsError }).error } : { ok: false, error };
     const human = this.#rejectHumanExecution(workerId, 'execute an external action');
     if (human) return refuse(human);
-    const assignability = this.#workers.assignability(workerId);
+    const assignability = this.#assignabilityOf(workerId);
     if (!assignability.assignable) return refuse(this.#rejectNotAssignable(workerId, assignability, 'execute an external action'));
     if (!this.#grantOf(workerId).includes(intent.capabilityId)) {
       return refuse({
@@ -15534,7 +15701,7 @@ export class HeadquarterOperations {
         { workerId },
       );
     }
-    const assignability = this.#workers.assignability(workerId);
+    const assignability = this.#assignabilityOf(workerId);
     if (!assignability.assignable) return this.#rejectNotAssignable(workerId, assignability, action);
     return null;
   }
@@ -16946,12 +17113,12 @@ export class HeadquarterOperations {
    * a registered, active principal. Neither can supply its own allow-list.
    */
   #resolveRequester(actor: string, action: string): OpsResult<ResolvedRequester> {
-    if (this.#workers.isRegistered(actor)) {
-      const assignability = this.#workers.assignability(actor);
+    if (this.#isRegisteredWorker(actor)) {
+      const assignability = this.#assignabilityOf(actor);
       if (!assignability.assignable) {
         return this.#rejectNotAssignable(actor, assignability, action);
       }
-      return ok({ kind: 'worker', allowedCapabilities: this.#workers.allowedCapabilities(actor) });
+      return ok({ kind: 'worker', allowedCapabilities: this.#grantOf(actor) });
     }
     const human = resolvePrincipal({ get: (id: string) => this.#principalOf(id) }, actor);
     if (!human.ok) {
@@ -17135,6 +17302,38 @@ export interface CanonicalEvidenceRow {
  */
 export function taskEvidenceRowsFor(ops: HeadquarterOperations, taskId: string): CanonicalEvidenceRow[] {
   return readTaskEvidenceRows(ops, taskId);
+}
+
+/**
+ * The canonical `op_tasks` row for a caller making an ENFORCEMENT decision — a
+ * FUNCTION BINDING for the reason `capabilityRowFor` is one (Wave 5 correction
+ * round fourteen, Critical 3).
+ *
+ * Two decisions were being taken on `ops.queue.get`, which `operator/queue.ts`
+ * documents verbatim as a read enforcement does not dispatch through:
+ *
+ *   1. `approveTask` passed the returned object's `capabilityId` to the
+ *      canonical `#killSwitchEngagedFromStore`. The closure was canonical and
+ *      the ARGUMENT was forged, so a capability-scoped kill switch was bypassed
+ *      and a durable `hq_approvals risk_class=destructive` row was written
+ *      while the Founder's stop stood engaged.
+ *   2. The Founder approve route decided the step-up demand from
+ *      `capabilityRowFor(deps.ops, task.capabilityId)` — canonical row, forged
+ *      id. With a stale session and a verifier rejecting every password,
+ *      `401 step_up_required` became `200 {"ok":true}`.
+ *
+ * `queue.get` stays exactly as it is for callers that are DISPLAYING a task.
+ */
+export function taskRowFor(ops: HeadquarterOperations, taskId: string): OperatorTask | null {
+  return readCanonicalTaskRow(ops, taskId);
+}
+
+/** The approval bound to a task, read canonically. Same recipe, same reason. */
+export function taskApprovalFor(
+  ops: HeadquarterOperations,
+  taskId: string,
+): TaskApprovalRecord | null {
+  return readCanonicalTaskApproval(ops, taskId);
 }
 
 export function createHeadquarterOperations(

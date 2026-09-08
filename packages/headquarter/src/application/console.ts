@@ -25,6 +25,7 @@ import type { ActivityStatus } from '../contracts/events.js';
 import type { ReviewState } from '../operator/queue.js';
 import { taskActionDigest } from '../operator/approvals.js';
 import { classifyCapability, type TaskClassification } from './classification.js';
+import { capabilityRowFor, taskRowFor } from './service.js';
 import type { HeadquarterOperations, TaskMeta } from './service.js';
 
 export interface ConsoleTask {
@@ -139,9 +140,14 @@ function requesterAuthenticationOf(task: { payload?: Record<string, unknown> | n
 
 export function founderConsole(ops: HeadquarterOperations, now: Date = new Date()): FounderConsole {
   const toConsoleTask = (taskId: string): ConsoleTask | null => {
-    const task = ops.queue.get(taskId);
+    // Canonical reads (Wave 5 correction round fourteen, Critical 1/3 class).
+    // This is the Founder's picture of the queue and the source of the
+    // `allowedDecisions` a reconcile write is taken from, so it may not be
+    // assembled from the two surfaces `operator/queue.ts` documents as
+    // patchable.
+    const task = taskRowFor(ops, taskId);
     if (!task) return null;
-    const capability = ops.queue.capabilities.get(task.capabilityId);
+    const capability = capabilityRowFor(ops, task.capabilityId);
     if (!capability) return null;
     const meta: TaskMeta | null = ops.readMeta(task.id);
     return {
@@ -208,7 +214,7 @@ export function founderConsole(ops: HeadquarterOperations, now: Date = new Date(
     .flatMap((task) => {
       const base = toConsoleTask(task.id);
       if (!base) return [];
-      const capability = ops.queue.capabilities.get(task.capabilityId)!;
+      const capability = capabilityRowFor(ops, task.capabilityId)!;
       const allowedDecisions: OutcomeUnknownCard['allowedDecisions'] = [
         'confirmed_done',
         'confirmed_failed',

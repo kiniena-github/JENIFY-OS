@@ -78,9 +78,12 @@ import { EXECUTION_PROVIDER_KEY, readProviderBinding } from '../../operator/prov
 import type { OperatorTask } from '../../operator/queue.js';
 import {
   assertDispatchEvidenceGrant,
+  capabilityRowFor,
   gatewayActionHistoryFor,
   killSwitchEngagedFor,
+  taskApprovalFor,
   taskEvidenceRowsFor,
+  taskRowFor,
   writeDispatchOutcome,
 } from '../../application/service.js';
 import type {
@@ -255,11 +258,25 @@ export function claudeDispatchEligibility(
   taskId: string,
   now: Date = new Date(),
 ): EligibilityVerdict {
-  const task = ops.queue.get(taskId);
+  // EVERY read in this verdict is canonical, not just the two that carried a
+  // comment saying so (Wave 5 correction round fourteen, High 7). `queue.get`
+  // and `queue.capabilities.get` are the two surfaces `operator/queue.ts`
+  // documents as patchable DISPLAY reads, and this function took four checks
+  // from them — the task named on the row, `status !== 'queued'`, the provider
+  // binding, `capability.enabled` and whether the approval clause runs at all —
+  // three lines above a comment stating that this verdict reads canonical state
+  // because it "decides whether a public issue is published". Forging either
+  // made the verdict ELIGIBLE with the capability disabled or the Founder's
+  // kill switch engaged. `OperatorQueue.claim` re-reads canonically and refused
+  // the publication regardless, so this was a defence-in-depth failure and a
+  // forgeable Founder-facing verdict (`hq:dispatch-claude --check-only`) rather
+  // than a publication bypass — and it is closed at the layer that states the
+  // invariant rather than left to the backstop its own comment does not cite.
+  const task = taskRowFor(ops, taskId);
   if (!task) {
     return { eligible: false, code: 'unknown_task', message: `Unknown task: ${taskId}` };
   }
-  const capability = ops.queue.capabilities.get(task.capabilityId);
+  const capability = capabilityRowFor(ops, task.capabilityId);
   if (!capability) {
     return {
       eligible: false,
@@ -338,7 +355,7 @@ export function claudeDispatchEligibility(
 
   const classification = classifyCapability(capability, ops.policyContext);
   if (classification.requiresApproval) {
-    const rejection = validateApproval(ops.queue.approvalFor(taskId), taskActionDigest(task), now);
+    const rejection = validateApproval(taskApprovalFor(ops, taskId), taskActionDigest(task), now);
     if (rejection) {
       return {
         eligible: false,
@@ -841,7 +858,9 @@ function releaseHandoffClaim(
 ): ClaimReleaseOutcome {
   let claimedBy = 'unknown';
   try {
-    const task = ops.queue.get(taskId);
+    // Canonical: this decides whether a claim RELEASE is attempted and under
+    // whose fence, which is a write.
+    const task = taskRowFor(ops, taskId);
     if (!task || task.claimedBy == null) return { kind: 'not_held' };
     if (task.status !== 'assigned' && task.status !== 'running') return { kind: 'not_held' };
     claimedBy = task.claimedBy;

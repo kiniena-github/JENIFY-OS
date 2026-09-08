@@ -38,7 +38,7 @@
  *   than followed.
  */
 
-import { assertDispatchEvidenceGrant, writeDispatchOutcome } from '../../application/service.js';
+import { assertDispatchEvidenceGrant, taskRowFor, writeDispatchOutcome } from '../../application/service.js';
 import type { DispatchEvidenceGrant, HeadquarterOperations } from '../../application/service.js';
 import { taskActionDigest } from '../../operator/approvals.js';
 import { PROVIDER_REGISTRY } from '../../routing/providers.js';
@@ -303,7 +303,9 @@ function recordCorrelation(
     };
   }
 
-  const task = ops.queue.get(input.taskId);
+  // Canonical read: this decides whether a dispatch correlation is WRITTEN
+  // (Wave 5 correction round fourteen, Critical 3 class).
+  const task = taskRowFor(ops, input.taskId);
   if (!task) {
     return { ok: false, code: 'unknown_dispatch', message: `Task ${input.taskId} no longer exists.` };
   }
@@ -431,7 +433,7 @@ export function ingestClaudeResult(ops: HeadquarterOperations, options: IngestOp
   } catch (error) {
     return refuse('evidence_grant_invalid', error instanceof Error ? error.message : String(error));
   }
-  if (!ops.queue.get(taskId)) return refuse('unknown_task', `No task ${taskId} exists.`);
+  if (!taskRowFor(ops, taskId)) return refuse('unknown_task', `No task ${taskId} exists.`);
   if (!isValidTarget(options.target)) {
     return refuse('target_mismatch', 'An ingestion target must be a valid owner/repo pair.');
   }

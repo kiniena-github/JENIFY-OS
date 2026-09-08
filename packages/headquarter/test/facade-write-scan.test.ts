@@ -46,7 +46,13 @@ import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { HumanPrincipalRegistry } from '../src/application/principals.js';
 import { CONTROL_ROUTES, handleControlRequest } from '../src/live/control-api.js';
 import { CAPS, expectOk, setupFixture } from './application.fixture.js';
-import { classMemberSlices } from './source-members.js';
+import {
+  CONTROL_WORDS,
+  WRITE_MARKERS,
+  methodSlices,
+  writeClassifiedMethods,
+  type MethodSlice,
+} from './facade-call-graph.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SERVICE = path.join(HERE, '..', 'src', 'application', 'service.ts');
@@ -336,117 +342,6 @@ function alreadyScannedFields(): string[] {
  */
 const CALLER_TEXT_TYPE =
   /^(?:readonly\s+)?string(?:\[\])?(?:\s*\|\s*null)?(?:\s*\|\s*undefined)?$/;
-
-const CONTROL_WORDS = new Set([
-  'if',
-  'for',
-  'switch',
-  'while',
-  'catch',
-  'return',
-  'constructor',
-  'do',
-  'else',
-  'try',
-]);
-
-/**
- * Markers that a method body writes DIRECTLY.
- *
- * Kept exactly as it was, because it is no longer the classifier — it is the
- * base case of one. `writeClassifiedMethods()` closes it over the class's own
- * call graph, which is what a public method whose only write lives in a
- * `#private` helper needs (round thirteen, Medium 1).
- */
-const WRITE_MARKERS =
-  /(?:INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM)|appendEvidence\(|appendEvent\(|#upsertMeta\(|#requirePrivilegedQueue\(\)|postMessage\(|registry\.(?:register|disable|setHealth|assign|update)\(|#workerProviderRegistrar\.|#appendRunEvent\(|this\.queue\.(?:start|heartbeat|complete|fail|claim)\(/;
-
-interface MethodSlice {
-  name: string;
-  /** The source from this declaration to the next one. */
-  body: string;
-  /** The line the declaration starts on, zero-based. */
-  line: number;
-}
-
-/**
- * Every member of `HeadquarterOperations`, `#private` ones included, sliced
- * from its declaration to the next.
- *
- * The `#private` members are why this exists: they are never part of the
- * answer — the surface under test is public — but they are how a public method
- * reaches a write, so the graph has to contain them.
- *
- * The segmentation itself moved to `source-members.ts` (Wave 5 correction
- * round fourteen, Medium 15). The regex that used to live here —
- * `/^ {2}(#?[A-Za-z_][A-Za-z0-9_]*)\s*[(<]/` — could not see a member declared
- * `async`, `static`, `get`, `set`, `private`, `protected` or `override`, and an
- * unseen member is not skipped but FOLDED INTO THE PREVIOUS SLICE: the previous
- * method is credited with writes and parameters that are not its own, and the
- * unseen one contributes no (method, parameter) pair at all. Measured at
- * `3fcc271`: 249 visible, one invisible (`get policyContext()`). The sibling
- * guard in `credential-scan-coverage.test.ts` carried a second, differently
- * incomplete copy — which is how a member invisible to one and visible to the
- * other stays unreported by both. There is now one slicer, asserted against
- * these files in `source-members.test.ts`.
- */
-function methodSlices(): MethodSlice[] {
-  const source = fs.readFileSync(SERVICE, 'utf8');
-  const classStart = source
-    .split('\n')
-    .findIndex((line) => /^export class HeadquarterOperations\b/.test(line));
-  expect(classStart).toBeGreaterThan(-1);
-  return classMemberSlices(source, { fromLine: classStart, exclude: CONTROL_WORDS }).map((slice) => ({
-    name: slice.name,
-    line: slice.line,
-    body: slice.body,
-  }));
-}
-
-/**
- * Every PUBLIC method that reaches a write, directly or through the class's own
- * call graph — the same fixpoint `safe-mode-disposition.test.ts` computes for
- * the safe-mode dispositions, applied here to the credential scan.
- *
- * Over-approximating on purpose. An edge is any `this.name(` or `this.#name(`
- * the body mentions, with no attempt to decide whether the branch holding it
- * can be taken, so the answer is a SUPERSET of what actually writes. That
- * direction is the safe one: a method wrongly included has to scan its
- * parameters or be named in `EXEMPT_PARAMETERS` with its reason, and a method
- * wrongly excluded is exactly the class of miss this replaces.
- */
-function writeClassifiedMethods(): Set<string> {
-  const slices = methodSlices();
-  const bodies = new Map<string, string>();
-  for (const slice of slices) {
-    // Overloads and re-declared names accumulate rather than overwrite.
-    bodies.set(slice.name, (bodies.get(slice.name) ?? '') + slice.body);
-  }
-  const writers = new Set<string>();
-  for (const [name, body] of bodies) if (WRITE_MARKERS.test(body)) writers.add(name);
-  const callees = new Map<string, Set<string>>();
-  for (const [name, body] of bodies) {
-    const found = new Set<string>();
-    for (const call of body.matchAll(/this\.(#?[A-Za-z_][A-Za-z0-9_]*)\s*\(/g)) {
-      if (bodies.has(call[1])) found.add(call[1]);
-    }
-    callees.set(name, found);
-  }
-  for (let grew = true; grew; ) {
-    grew = false;
-    for (const [name, called] of callees) {
-      if (writers.has(name)) continue;
-      for (const callee of called) {
-        if (writers.has(callee)) {
-          writers.add(name);
-          grew = true;
-          break;
-        }
-      }
-    }
-  }
-  return new Set([...writers].filter((name) => !name.startsWith('#')));
-}
 
 /**
  * The keys of every object literal handed to `call` in `body`.

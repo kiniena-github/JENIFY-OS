@@ -14,10 +14,15 @@
  *                          function binding) reports the engaged switch
  *   - the gateway's `executeAction` refuses (pinned again in its own suite)
  *
- * The one call site deliberately LEFT on the delegate is `#missionExecutionState`,
- * a derived read projection: the last test shows a forged delegate CAN lie to
- * that display — and that the lie decides nothing, because the same apply that
- * reported "clear" still refused.
+ * `#missionExecutionState` — the Mission Room's derived projection — was the one
+ * call site deliberately left on the delegate, on the argument that a lie in a
+ * display harms only the patcher. It is migrated as of Wave 5 correction round
+ * fourteen (carried Low B-L3): the Founder's emergency-stop panel is the one
+ * display where that argument stops being comfortable, and the closure costs
+ * what the delegate costs. The last test now demands the TRUE answer from the
+ * projection under a forged delegate, and still asserts that the apply beside it
+ * refuses — so `service.ts` has no kill-switch read left on a patchable surface,
+ * which is a property a guard can state and "all but one, for a reason" was not.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -159,7 +164,17 @@ describe('orchestrateMission apply precheck reads the canonical kill-switch row'
     expect(count(fx, 'hq_orchestration_runs')).toBe(0);
   });
 
-  it('the derived Mission Room projection is deliberately left on the delegate — it CAN be lied to and decides nothing', () => {
+  it('the Mission Room projection reads the canonical row too — the forged delegate cannot even lie to the DISPLAY', () => {
+    // STRENGTHENED (Wave 5 correction round fourteen, carried Low B-L3). This
+    // used to assert the opposite — that `#missionExecutionState` reports the
+    // forged answer, because a display lie was held to harm only the patcher.
+    // The argument was sound and the site is migrated anyway: the Founder's
+    // emergency-stop panel is the one display where "showing the patcher its
+    // own lie" and "showing the Founder a stop that is not there" are the same
+    // pixels, and `#killSwitchEngagedFromStore` costs exactly what the delegate
+    // costs. The replacement assertion is strictly stronger — it demands the
+    // TRUE answer where the previous one accepted the forged one — and the
+    // write-side assertion beside it is kept unchanged.
     const fx = orchestratorFixture();
     const mission = expectOk(
       fx.ops.commandMission({
@@ -171,15 +186,15 @@ describe('orchestrateMission apply precheck reads the canonical kill-switch row'
     ).mission;
     expectOk(fx.ops.engageKillSwitch('*', 'founder', 'emergency stop'));
     withForgedDelegate(fx, () => {
-      // The projection reports the forged answer (a display lie the patcher tells itself)...
+      // The projection reports the ROW, not the forged delegate.
       const state = expectOk(fx.ops.getMissionExecutionState(mission.id));
-      expect(state.killSwitch.global).toBe(false);
-      // ...while the WRITE decision beside it still reads the row and refuses.
+      expect(state.killSwitch.global).toBe(true);
+      // And the WRITE decision beside it still reads the row and refuses.
       const apply = fx.ops.orchestrateMission({ missionId: mission.id, mode: 'apply', requestedBy: 'founder' });
       expect(apply.ok).toBe(false);
       if (!apply.ok) expect(apply.error.code).toBe('kill_switch_engaged');
     });
-    // Unpatched, the projection tells the truth again.
+    // Unpatched, unchanged.
     expect(expectOk(fx.ops.getMissionExecutionState(mission.id)).killSwitch.global).toBe(true);
     expect(count(fx, 'op_tasks')).toBe(0);
   });

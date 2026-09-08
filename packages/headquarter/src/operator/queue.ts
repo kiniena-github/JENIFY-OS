@@ -338,6 +338,58 @@ export function installQueueSafeModeGate(queue: OperatorQueue, gate: () => boole
   addSafeModeGate(queue, gate);
 }
 
+/**
+ * Module-private. Assigned once by `OperatorQueue`'s static block; unreachable
+ * and unassignable from any other module, which is what makes `canonicalTaskFor`
+ * an enforcement-safe path rather than a second patchable surface.
+ */
+let readCanonicalTask: (queue: OperatorQueue, taskId: string) => OperatorTask | null;
+/** Same recipe for the approval bound to a task — see `canonicalApprovalFor`. */
+let readCanonicalApproval: (queue: OperatorQueue, taskId: string) => TaskApprovalRecord | null;
+
+/** The `hq_approvals` facts `validateApproval` needs, and nothing else. */
+export interface TaskApprovalRecord {
+  decision: string;
+  actionDigest: string | null;
+  expiresAt: string | null;
+  consumedAt: string | null;
+}
+
+/**
+ * The canonical `op_tasks` row for a caller making an ENFORCEMENT decision
+ * about a task (Wave 5 correction round fourteen, Critical 3).
+ *
+ * A FUNCTION BINDING, not a method, for the reason `capabilityRowFor` is one:
+ * an ES module binding cannot be reassigned by an importing module, and the
+ * `#private` closure it calls is not a property of the class or of any
+ * instance. So there is nothing on the path from this call to the database for
+ * a same-realm caller to replace.
+ *
+ * `OperatorQueue.get` stays exactly as it is: the convenience read,
+ * deliberately patchable, for callers that are DISPLAYING a task rather than
+ * deciding on one.
+ */
+export function canonicalTaskFor(queue: OperatorQueue, taskId: string): OperatorTask | null {
+  return readCanonicalTask(queue, taskId);
+}
+
+/**
+ * The approval currently bound to a task, for a caller making an ENFORCEMENT
+ * decision on it — the same recipe and the same reason as `canonicalTaskFor`.
+ *
+ * `approvalFor` is a prototype method, so the Claude dispatch lane reading
+ * `ops.queue.approvalFor(...)` resolved BOTH the queue handle (a public field)
+ * and the method (a prototype slot) through surfaces a same-realm caller can
+ * replace, on the one verdict that decides whether a public GitHub issue is
+ * published.
+ */
+export function canonicalApprovalFor(
+  queue: OperatorQueue,
+  taskId: string,
+): TaskApprovalRecord | null {
+  return readCanonicalApproval(queue, taskId);
+}
+
 export class OperatorQueue {
   /**
    * Every safe-mode verdict this queue must consult before handing out a
@@ -1400,9 +1452,41 @@ export class OperatorQueue {
   // ---- reads / internals ----
 
   /**
-   * Public read. Enforcement does NOT dispatch through this — `claim`, `start`
-   * and their private helpers use `#getTask` — so patching it changes what the
-   * patcher sees and nothing about what the queue enforces.
+   * Publishes the canonical task read to `canonicalTaskFor`, and to nothing
+   * else (Wave 5 correction round fourteen, Critical 3).
+   *
+   * The sentence on `get` below was true of THIS class and false of its
+   * callers, and the difference was load-bearing. `OperatorQueue.claim`/`start`
+   * really do use `#getTask` — but `HeadquarterOperations.approveTask` took its
+   * task from the public `get` and then handed that object's `capabilityId` to
+   * the canonical `#killSwitchEngagedFromStore`. The closure was canonical and
+   * the ARGUMENT was forged, so a capability-scoped kill switch was bypassed
+   * and a durable `hq_approvals risk_class=destructive` row was written while
+   * the switch stood engaged; over the real HTTP approve route, with a stale
+   * session and a verifier that rejected every password, `401
+   * step_up_required` became `200 {"ok":true}`.
+   *
+   * A `static {}` block is the only place outside an instance method that can
+   * name `#getTask`, so the reader is handed to a MODULE-PRIVATE `let` that no
+   * other module can name or reassign — the `capabilityRowFor` recipe from
+   * `application/service.ts`. Nothing is added to the class, the prototype or
+   * any instance, so `get` can stay exactly the patchable convenience read
+   * #200 designed it to be while enforcement stops depending on it.
+   */
+  static {
+    readCanonicalTask = (queue: OperatorQueue, taskId: string): OperatorTask | null =>
+      queue.#getTask(taskId);
+    readCanonicalApproval = (queue: OperatorQueue, taskId: string): TaskApprovalRecord | null =>
+      queue.approvalFor(taskId);
+  }
+
+  /**
+   * Public read, for callers DISPLAYING a task rather than deciding on one.
+   *
+   * Enforcement does not dispatch through this — `claim`, `start` and their
+   * private helpers use `#getTask`, and an enforcement caller in another module
+   * reads `canonicalTaskFor` — so patching it changes what the patcher sees and
+   * nothing about what is enforced.
    */
   get(id: string): OperatorTask | null {
     return this.#getTask(id);
@@ -1435,7 +1519,11 @@ export class OperatorQueue {
     expiresAt: string | null;
     consumedAt: string | null;
   } | null {
-    const task = this.get(taskId);
+    // `#getTask`, never the patchable public `get` (Wave 5 correction round
+    // fourteen, High 7): the Claude dispatch lane's approval clause reads this,
+    // and a forged `get` returning a task whose `approvalId` names an approval
+    // for OTHER work made that clause answer about the wrong row.
+    const task = this.#getTask(taskId);
     if (!task) return null;
     const record = this.#getApprovalRecord(task.approvalId);
     if (!record) return null;

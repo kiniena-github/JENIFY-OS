@@ -38,6 +38,7 @@ import { classifyCapability, type TaskClassification } from '../application/clas
 import { founderConsole, type FounderConsole } from '../application/console.js';
 import { directOrderDispatchBlocked } from './orders.js';
 import { dispatchHistory } from '../providers/claude/dispatch.js';
+import { taskRowFor } from '../application/service.js';
 import type { HeadquarterOperations } from '../application/service.js';
 import { missionBrowserView, type MissionBrowserView } from '../application/mission-command.js';
 import { projectBrowserView, type ProjectBrowserView } from '../application/project-command.js';
@@ -631,7 +632,9 @@ function withDispatchBlocked(
   providerDispatchable?: (provider: ProviderId) => boolean | null,
 ): FounderConsole {
   const mark = <T extends { taskId: string }>(card: T): T => {
-    const task = ops.queue.get(card.taskId);
+    // Canonical: `dispatchBlocked` is published on the Founder snapshot and
+    // read back by the console as the reason a Direct Order cannot go out.
+    const task = taskRowFor(ops, card.taskId);
     if (!task) return card;
     return {
       ...card,

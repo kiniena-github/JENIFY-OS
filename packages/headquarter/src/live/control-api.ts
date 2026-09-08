@@ -90,7 +90,7 @@
 import { founderConsole, type ApprovalCard } from '../application/console.js';
 import { hydrateRooms } from '../client/hydrate.js';
 import { liveSnapshotFromOperations } from './snapshot.js';
-import { capabilityRowFor } from '../application/service.js';
+import { capabilityRowFor, taskRowFor } from '../application/service.js';
 import type { HeadquarterOperations } from '../application/service.js';
 import { taskActionDigest } from '../operator/approvals.js';
 import type { ProviderId, SecretsEnv } from '../routing/providers.js';
@@ -803,7 +803,7 @@ export function handleControlRequest(
  * its provider; without one, the routing contract answers, as it did before.
  */
 function isDispatchBlocked(deps: ControlApiDeps, taskId: string): boolean {
-  const task = deps.ops.queue.get(taskId);
+  const task = taskRowFor(deps.ops, taskId);
   if (!task) return false;
   return directOrderDispatchBlocked(task, deps.secretsEnv, {
     alreadyDispatched: dispatchHistory(deps.ops, taskId).state === 'dispatched',
@@ -3661,7 +3661,14 @@ function approve(
   // Step-up is decided from the CANONICAL capability of the task named in the
   // request, never from a risk class the client sends. An unknown task is
   // refused here rather than being allowed to skip the check and fail later.
-  const task = deps.ops.queue.get(taskId);
+  // The CANONICAL row, never `queue.get` (Wave 5 correction round fourteen,
+  // Critical 3b). `capabilityRowFor` below reads the database, but it was being
+  // handed a `capabilityId` taken from the patchable display read — canonical
+  // closure, forged argument. Executed over this route with a stale session and
+  // a verifier that rejected every password: `401 step_up_required` became
+  // `200 {"ok":true}` and a `founder_gate` approval was recorded as decided by
+  // the Founder.
+  const task = taskRowFor(deps.ops, taskId);
   if (!task) {
     audit('refused', 'unknown_task', founder);
     return refusal(404, 'unknown_task', `Unknown task: ${taskId}`);
