@@ -2129,7 +2129,14 @@ survived it.
   in five languages plus every legitimate string the shipped suite pins still
   pass, and the fold is a SCAN COPY, so what is stored and served is
   byte-unchanged. `\p{Zs}` is still not folded, on the argument that has not
-  changed: a space is visible, so it hides nothing.
+  changed: a space is visible, so it hides nothing. **Corrected at round nine
+  (High 1): this bullet's list of what round seven left open was FALSE.**
+  `\p{Co}` PRIVATE USE — 137,468 code points, taking the identical argument to
+  the `\p{Cn}` this bullet describes as closed — was open, and appeared in no
+  residual list, no comment and no test. It is in the erase set from round
+  nine, and after that fix `\p{Zs}` and the anchoring residual in the bullet
+  below are the whole open list, derived from a whole-plane sweep rather than
+  written down.
 - **A prefix that runs straight into a credential shape with no separator at all
   (`KEYsk-…`) is still not matched.** `(?<![A-Za-z0-9])` deliberately does not
   fire inside a letter run, because `task-oriented-approach` literally contains
@@ -2780,7 +2787,7 @@ same question the surviving answer is named at the code.
 | **MEDIUM NEW-5** — 26 exported ALL-CAPS constants were still unfrozen, and frozen `Set`s were mutable in content | The shipped pinning test enumerates `package.json#exports`, so it cannot see a module no entry point re-exports; the unfrozen count regrew to 26 distinct bindings over 225, across 131 `src/` modules. Separately, `deepFreeze`'s "It freezes ALL THE WAY DOWN" was NOT true of a `Set` or a `Map`: entries are not own properties, so `QUEUED_UNREACHABLE_STATUSES` — which `service.ts` decides a queued task's reachability on — accepted `.delete()` and `.add()`, and `QUERY_STOPWORDS` accepted `.clear()`. | **The other lane froze the same 26 independently** (its round-six pass), and that half of the finding is closed at `b986cff`. What this lane adds is the census that would have CAUGHT the regrowth — `frozen-constants-census.test.ts` enumerates `src/` itself rather than the entry points — and the collection fix: a frozen `Set`/`Map` now has its entries recursed into and its mutators replaced with own, non-configurable properties that THROW, with reading untouched. The `freeze.ts` sentence is corrected rather than restated. Decision-bearing, stated either way: `PROJECT_ALLOWED_TRANSITIONS` is the gate behind `canTransitionProject` and `.active.length = 0` flips it true → false, which is NARROWING — a local denial of service on a Founder act, not an authority widening. The other 24 are `ui/spatial/*` geometry and presentation maps, `providers/codex/*` vocabularies and the review schema, `providers/claude/*` evidence kinds and the repo-slug pattern, and `control-console.ts`'s fetch allow-list; none is an authority gate. |
 | **MEDIUM NEW-6** — `provablyAvoidable` flipped retroactively and two published numbers contradicted each other | `decisionIsProvablyAvoidable` recomputed the floor from the CURRENT canonical risk class while `rowToDecision` served the STORED `floor_tier`. Executed: a Founder registry upsert flipped `provablyAvoidable` 1 → 0 and left the served record reporting `floorTier: deterministic_local` beside `requiredReviewTier: critical_review` — which cannot both be true, since the review requirement is one of the terms the floor's `max` is taken over. Undisclosed. | ONE computation answers both. `deriveDecisionRecord` recomputes the floor and SERVES it; `decisionIsProvablyAvoidable` reads that result rather than recomputing, so the two cannot diverge again. The stored value is carried as `floorTierAsRecorded`. The flip is kept — canonical truth really did move — but no longer silent: `riskClassChangedSinceIssue` per record, counted on `analytics.provablyAvoidable.riskClassChangedSinceIssue`, and stated in `AVOIDABLE_SPEND_STATEMENT`. |
 | **LOW NEW-7** — a source file the repository's own text tooling could not read | `test/connectors.github.test.ts` carried a raw U+0007 at byte 4903 and a raw U+202E beside it, so `git diff` rendered it `Bin 9424 -> 9429 bytes` — the exact hazard the NUL two characters earlier had been escaped to avoid. | Both escaped; that change now renders as one line out, one line in. **The other lane escaped the same two characters independently** (its round-six Low 6). What this lane adds is the derived assertion that replaces the hand check — `source-text-hygiene.test.ts` over every `.ts` file in `src/` and `test/` — and what that assertion then FOUND: four more raw U+001F separators in `src/application/product-command.ts`, `src/application/intelligence-command.ts` and `src/live/auth.ts`, each sitting under a Wave 5 Medium 10 comment claiming the separator had been written so the file "stays greppable". The comment described a fix that was never applied. All four are escapes now, same runtime value. |
-| **Two undisclosed sweep residuals** — `\p{Mn}`, `\p{Me}` and `\p{Cn}` carried a credential shape past the guard | The zero-ink sweep named five properties and argued `\p{Zs}` out on the merits, but non-spacing marks (1,796 code points), enclosing marks (13) and unassigned code points (810,961) were in neither the set nor any residual list. U+0301 and U+0378 are the two the review named. | CLOSED, not disclosed. A combining mark leaves every credential character intact and a reader strips the mark, so it is exactly this class. Marks are removed from an `NFKD`-decomposed copy BEFORE the pipeline — `NFKC` composes base + mark into a precomposed `Lu` letter, so a late erase misses it — and all three categories join the erase set as well. Measured after the fix: 1,809 marks swept, 0 survivors; 815 sampled unassigned code points, 0 survivors; no new refusal on accented prose in five languages or on any legitimate string the shipped suite pins. The fold is a SCAN COPY, so stored and served text is byte-unchanged. `\p{Zs}` still not folded, and `Xsk-…`/`9sk-…` still reach a written `hq-snapshot.json` — both pinned as disclosed rather than described. |
+| **Two undisclosed sweep residuals** — `\p{Mn}`, `\p{Me}` and `\p{Cn}` carried a credential shape past the guard | The zero-ink sweep named five properties and argued `\p{Zs}` out on the merits, but non-spacing marks (1,796 code points), enclosing marks (13) and unassigned code points (810,961) were in neither the set nor any residual list. U+0301 and U+0378 are the two the review named. | CLOSED, not disclosed. A combining mark leaves every credential character intact and a reader strips the mark, so it is exactly this class. Marks are removed from an `NFKD`-decomposed copy BEFORE the pipeline — `NFKC` composes base + mark into a precomposed `Lu` letter, so a late erase misses it — and all three categories join the erase set as well. Measured after the fix: 1,809 marks swept, 0 survivors; 815 sampled unassigned code points, 0 survivors; no new refusal on accented prose in five languages or on any legitimate string the shipped suite pins. The fold is a SCAN COPY, so stored and served text is byte-unchanged. `\p{Zs}` still not folded, and `Xsk-…`/`9sk-…` still reach a written `hq-snapshot.json` — both pinned as disclosed rather than described. **Corrected at round nine (High 1): that closing sentence was incomplete — `\p{Co}` PRIVATE USE (137,468 code points) was also open, on no stated argument at all, and is closed at round nine.** |
 
 ### What the second seventh-round lane does NOT claim
 
@@ -2884,3 +2891,57 @@ only" wording still present, `expected 6 to be 7`, and `expected 3 to be 4`.
 The eight-scenario battery itself RAN clean against that head, which is the
 point: the behaviour was already correct and only the sentences describing it
 were not.
+
+## The NINTH correction round: a credential class closed for its twin and not for itself, and the sentence that hid it
+
+A fresh read-only hostile review of the round-eight head (`ae4bf908`) returned
+**0 Critical / 1 High / 1 Medium / 1 Low**, all reproduced by execution, and
+recorded that every other security-relevant claim it tested held. The branch had
+fast-forwarded to `3bdb2d1` under the review; the corrections are on that head.
+
+| Finding | What was wrong | What was done |
+|---|---|---|
+| **HIGH 1** — `\p{Co}` PRIVATE USE carried a credential past the guard onto the unauthenticated artifact, disclosed nowhere | Executed end to end on the round-eight head: `createTask({title: 'sk-<U+E000>ABCDEFGHIJKLMNOP0123456789'})` was ACCEPTED where the plain form is refused `invalid_input`, `liveSnapshotFromOperations` and `assertBrowserSafe` both PASSED, and the written `hq-snapshot.json` carried `"title": "sk-ABCDEFGHIJKLMNOP0123456789"` with the hidden code point intact and invisible; U+F8FF and U+100000 behaved identically. That end-to-end run is the REVIEW's measurement. Reproduced independently at this lane before the fix, and the number this round measured itself: on `3bdb2d1`, all six credential shapes (`sk-`, `ghp_`, `github_pat_`, `AIza`, a PEM header, `Bearer `) passed `assertBrowserSafe` for U+E000, U+F8FF, U+100000 and U+FFFFD, and a sweep of the whole category found **137,468 of 137,468 private-use code points surviving** — 0 after the fix. The class is 137,468 code points and it was in no residual list, no comment and no test. Round seven had closed `\p{Cn}` on the argument that an unassigned code point has no glyph and does not occur in prose — the argument applies verbatim to `\p{Co}`, so one twin was closed and the other left open. | `\p{Co}` joins `ERASED_CODE_POINTS` beside `\p{Cn}`, with the same argument recorded at the code. Pinned two ways in `redaction-invisible-classes.test.ts`: all **137,468** private-use code points swept against the guard (0 survivors, and the count asserted so a narrowed sweep is visible), and the three the review executed refused in all six credential shapes. False positives measured, not assumed: the five accented-prose languages and every legitimate string the shipped suite pins still pass, and CJK, Arabic and emoji prose were added to that list. One measured price is disclosed below. |
+| **MEDIUM 2** — a shipped sentence claimed a full-plane sweep that existed nowhere | `credential-scan-cost.test.ts` said "the full-plane sweep lives in `live-redaction.test.ts`". That file's largest sweep is a 65-code-point C0/C1 block; the only `0..0x10ffff` loops in the package are in `redaction-invisible-classes.test.ts` and they COLLECT members of a named category rather than testing the plane against the guard, with the `\p{Cn}` case sampling every 997th point. This is the sentence a reviewer reads to decide the sweep is complete and stop looking, and it is why HIGH 1 survived seven rounds. | The sentence is made TRUE rather than merely corrected. A real whole-plane sweep was added: every one of the **1,112,064** non-surrogate code points is pushed through `assertBrowserSafe` inside `sk-…`, and no member of the zero-ink categories — named independently of the guard, so dropping one from `ERASED_CODE_POINTS` fails here — may survive. Measured at this head: 1,112,064 visited, **155,327 survivors, 0 of them zero-ink, 17 of them `\p{Zs}`**. The survivor count is asserted non-zero so a guard that refused everything could not pass vacuously, and the `\p{Zs}` count is pinned exactly, so the one deliberately open class cannot change size without the disclosure moving with it. Runtime ~11 s. |
+| **LOW 3** — two published numbers on one served decision record could still contradict, via a forged column | Round seven made one computation answer both the served `floorTier` and the avoidability flag, but fed that computation `characteristics` carrying only the CANONICAL risk class, while the record publishes `maxRequiredReviewTier(stored, canonical)` — the max, deliberately, so a forged NULL cannot drop the requirement. A raw `required_review_tier` ABOVE the canonical class therefore still produced the pair the source comment says cannot both be true: `floorTier: deterministic_local` beside `requiredReviewTier: critical_review`. Needs a raw DB write and is fail-closed (`satisfiesReviewRequirement: false`, and the decision drops out of `provablyAvoidable`), so nothing rested on it; what was wrong is what was PUBLISHED. | The served floor is the `max` over the review tier the record actually SERVES, not over the canonical one alone. Pinned by a hostile raw APPEND — the write the append-only triggers permit, so no guard is dropped — of a `read_only` decision carrying a forged `critical_review`: the served floor now reads `critical_review`, `floorTierAsRecorded` still reads `deterministic_local` so the forgery stays visible, and the fail-closed behaviour is unchanged. The legitimate path is untouched: an unrecognized stored floor is left exactly as it is rather than raised to a recognized tier the row never earned. |
+
+### What this round does NOT claim, and the price it measured
+
+- The anchoring residual is unchanged and still open: `Xsk-…` and `9sk-…` reach
+  a written `hq-snapshot.json`, because `(?<![A-Za-z0-9_])` deliberately does
+  not fire inside a letter run — `task-oriented-approach` literally contains
+  `sk-oriented-approach`. Architecture, not anchoring, is the guarantee.
+- `\p{Zs}` is still not folded, on the argument that has not changed.
+- **The measured price of closing `\p{Co}`, stated rather than hidden:** a
+  private-use code point sitting exactly where a word character would otherwise
+  anchor the prefix — `ta<U+E000>sk-oriented-approach` — is refused. That
+  refusal is NOT caused by this round: `assertBrowserSafe` tests every pattern
+  against the raw string as well as the folded copy, and in the raw string the
+  character before `sk-` is a private-use code point rather than the `k` that
+  makes the plain word legitimate. It is pinned as a `toThrow` beside the plain
+  word's `not.toThrow`, so the boundary is recorded rather than discovered
+  again. No accented, CJK, Arabic, Greek, Cyrillic or emoji prose is affected.
+- LOW 3 is a coherence fix on a published pair, not a new defence. The forgery
+  it concerns was already fail-closed and still needs raw database write.
+- The whole-plane sweep asserts that no member of the NAMED zero-ink categories
+  survives. JS cannot measure ink, so naming the categories is the practical
+  proxy for "a reader cannot see it", and that is stated at the test rather
+  than implied.
+
+**Verification at the round-nine head** (the whole matrix, all green, exit 0):
+`npm run test:hq` **179 files / 3297 tests** (round-eight head was 179 / 3292;
+the whole delta is five new tests in two existing files); `npm test` (root)
+**37 files / 569 passed + 3 pre-existing skips**; hq-host **23 / 222**;
+hq-server **2 / 20**; typechecks clean for `@factoryos/headquarter`,
+`@factoryos/hq-host` and `@factoryos/hq-server`; `npm run build:site` 10 pages +
+`hq-snapshot.json`; `npm run build` all workspaces, web initial JS
+**215.66 kB / 69.22 kB gzip** (unchanged). The diff against the accepted base
+`f1ce71c` touches `packages/server`, `packages/web`, `packages/shared`,
+`packages/config-mesob`, `packages/hq-host`, `apps`, `package.json` and
+`package-lock.json` not at all, and no test file was deleted or renamed. Zero
+new dependencies.
+
+**Each fix was verified to FAIL pre-fix** rather than merely to pass here: the
+source file was reverted to its `3bdb2d1` content from a scratch copy held
+outside the worktree, the new tests run against it, and the file restored. The
+measured pre-fix failures are recorded with each finding above.

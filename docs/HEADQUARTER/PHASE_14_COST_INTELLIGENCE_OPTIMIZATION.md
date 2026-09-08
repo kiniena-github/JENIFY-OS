@@ -1454,10 +1454,18 @@ cross-reference:
   three categories join the erase set; the fold is a SCAN COPY, so accented text
   a Founder writes is stored and served byte-unchanged. Measured after the fix:
   0 survivors over 1,809 marks and 815 sampled unassigned code points, and no
-  new refusal on accented prose in five languages. What is still open and
-  disclosed on both pages: a word character running straight into the prefix
-  (`Xsk-…`, `9sk-…`) reaches a written `hq-snapshot.json`, and `\p{Zs}` is
-  deliberately not folded.
+  new refusal on accented prose in five languages. **Corrected at round nine
+  (High 1): the "what is still open" clause that stood here was FALSE.** It
+  named only the anchoring residual and `\p{Zs}`, and `\p{Co}` PRIVATE USE —
+  137,468 code points, taking the identical argument to the `\p{Cn}` this round
+  closed — was open, in no residual list, no comment and no test. It is closed
+  at round nine. What is still open and disclosed on both pages, after that
+  fix: a word character running straight into the prefix (`Xsk-…`, `9sk-…`)
+  reaches a written `hq-snapshot.json`, and `\p{Zs}` is deliberately not
+  folded. Those two are now the whole list, and the claim is DERIVED rather
+  than written: the whole-plane sweep in
+  `redaction-invisible-classes.test.ts` pushes all 1,112,064 non-surrogate code
+  points through the guard and fails if any zero-ink one survives.
 
 **Verification at the round-five merged head** (the whole matrix, all green,
 exit 0): `npm run test:hq` 166 files / 3192 tests; `npm test` (root) 37 files /
@@ -1571,6 +1579,50 @@ call `missionText` (measured: 29).
 
 **Verification at the round-eight head** (the whole matrix, all green, exit 0):
 `npm run test:hq` 179 files / 3292 tests; `npm test` (root) 37 files / 569
+passed + 3 pre-existing skips; hq-host 23 / 222; hq-server 2 / 20; typechecks
+clean for `@factoryos/headquarter`, `@factoryos/hq-host` and
+`@factoryos/hq-server`; `npm run build:site` 10 pages + `hq-snapshot.json`;
+`npm run build` all workspaces, web initial JS 215.66 kB / 69.22 kB gzip,
+unchanged.
+
+### The NINTH correction round: Phase 14's half
+
+A fresh read-only hostile review of the round-eight head returned **0 Critical /
+1 High / 1 Medium / 1 Low**, all reproduced by execution. Two of the three touch
+this page's surfaces.
+
+**HIGH 1 — `\p{Co}` PRIVATE USE carried a credential shape past the credential
+scan.** It reaches every write on this phase's surfaces, because
+`recordIntelligenceDecision`'s labels and `recordCostEntry`'s notes go through
+the same `assertNoCredentialShape`, and it reached the unauthenticated
+`hq-snapshot.json` through `assertBrowserSafe`. 137,468 code points, in no
+residual list, no comment and no test, while `\p{Cn}` — which takes the
+identical argument — had been closed a round earlier. Closed at the code, and
+pinned by a sweep of all 137,468 with the count asserted. The "what is still
+open" sentence on this page, corrected above, was false because of it.
+
+**LOW 3 — the served `floorTier` and the served `requiredReviewTier` on one
+decision record could still contradict each other.** This is the narrower
+survivor of round seven's MEDIUM NEW-6, on this page's own surface: the floor
+recomputation was fed the CANONICAL review requirement while the record
+publishes the MAX of the canonical and the stored column, so a forged
+`required_review_tier` above the canonical class produced `floorTier:
+deterministic_local` beside `requiredReviewTier: critical_review`. The served
+floor is now the max over the review tier the record actually SERVES.
+`floorTierAsRecorded` still carries the row's own value, so the forgery stays
+visible, and the fail-closed behaviour the reviewer measured
+(`satisfiesReviewRequirement: false`, the decision out of `provablyAvoidable`)
+is unchanged — as is the legitimate raise/lower path, which round seven pinned
+and this round leaves alone.
+
+The round's MEDIUM is recorded on `PHASE_13_ADVANCED_RELIABILITY.md`: a shipped
+test comment claimed a full-plane sweep that existed nowhere, which is why
+HIGH 1 survived seven rounds. It is now true — 1,112,064 non-surrogate code
+points swept against the guard, 155,327 survivors, 0 of them zero-ink, 17 of
+them `\p{Zs}`.
+
+**Verification at the round-nine head** (the whole matrix, all green, exit 0):
+`npm run test:hq` 179 files / 3297 tests; `npm test` (root) 37 files / 569
 passed + 3 pre-existing skips; hq-host 23 / 222; hq-server 2 / 20; typechecks
 clean for `@factoryos/headquarter`, `@factoryos/hq-host` and
 `@factoryos/hq-server`; `npm run build:site` 10 pages + `hq-snapshot.json`;

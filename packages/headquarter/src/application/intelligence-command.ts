@@ -2220,6 +2220,14 @@ export interface DecisionRecord extends DecisionRow {
    * review requirement is one of the terms the floor's `max` is taken over —
    * and the contradiction was published on the Founder route and disclosed
    * nowhere.
+   *
+   * That fix left one narrower way to the same contradiction, closed in round
+   * nine (Low 3): the recomputation folds in the requirement of the CANONICAL
+   * risk class, while the served `requiredReviewTier` is the max of that and
+   * the stored column. A raw write that raised `required_review_tier` above the
+   * canonical class therefore still produced the impossible pair. The served
+   * floor is now the max over the served requirement, so the two published
+   * numbers are coherent whatever the stored column says.
    */
   floorTierAsRecorded: StoredIntelligenceTier;
   /**
@@ -2324,13 +2332,41 @@ export function deriveDecisionRecord(
   // the floor's `max` over. One computation now answers both, the stored value
   // is carried as `floorTierAsRecorded` so no history is lost, and the fact
   // that canonical truth moved is reported rather than absorbed.
-  const recomputedFloor = characteristics
+  const proposedFloor: StoredIntelligenceTier = characteristics
     ? computeRoutingProposal({
         characteristics,
         permittedTiers: INTELLIGENCE_TIERS,
         budgetDecision: 'within_ceiling',
       }).floorTier
     : row.floorTier;
+  // And the floor's `max` is taken over the tier this record actually SERVES,
+  // not over the canonical one alone (Wave 5 correction round nine, Low 3).
+  //
+  // The round-seven fix above made one computation answer both numbers, but it
+  // left one way for them to contradict each other in public. `characteristics`
+  // above carries only the CANONICAL risk class, so `computeRoutingProposal`
+  // folds in `REVIEW_REQUIREMENT[canonical]` and nothing else — while the
+  // `requiredReviewTier` this record publishes is the MAX of the stored column
+  // and the canonical requirement, deliberately, so a forged NULL cannot drop
+  // the requirement. A raw `UPDATE ... SET required_review_tier` ABOVE the
+  // canonical class therefore produced exactly the pair the comment above says
+  // cannot both be true: `floorTier: deterministic_local` beside
+  // `requiredReviewTier: critical_review`.
+  //
+  // It is fail-closed already — `satisfiesReviewRequirement` reads false and
+  // the decision drops out of `provablyAvoidable` — so no spend claim rested on
+  // it. What it published was an incoherent pair, and the fix is to close the
+  // loop the sentence already asserts: whatever review tier is SERVED is one of
+  // the terms the served floor is the max over.
+  //
+  // An unrecognized stored floor is left exactly as it is rather than raised to
+  // a recognized tier: `decisionIsProvablyAvoidable` fails closed on a floor
+  // outside the vocabulary, and replacing it here would hand that path a
+  // recognized value it never earned.
+  const recomputedFloor: StoredIntelligenceTier =
+    requiredReviewTier != null && isIntelligenceTier(proposedFloor)
+      ? maxTier(proposedFloor, requiredReviewTier)
+      : proposedFloor;
   return {
     ...row,
     boundProvider,

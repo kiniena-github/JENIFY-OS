@@ -18,6 +18,12 @@
  * `floorTierAsRecorded` so no history is lost; and `riskClassChangedSinceIssue`
  * — per record and counted on the analytics view — says out loud that canonical
  * truth moved under a number a reader may have written down.
+ *
+ * Round NINE (Low 3) closes the last route to the same contradiction: the
+ * recomputation was fed the CANONICAL review requirement while the record
+ * publishes the MAX of the canonical and the stored one, so a forged
+ * `required_review_tier` above the canonical class still produced the pair. The
+ * floor is now the max over the review tier this record actually SERVES.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -28,6 +34,7 @@ import {
   INTELLIGENCE_TIERS,
   AVOIDABLE_SPEND_STATEMENT,
   REVIEW_REQUIREMENT,
+  RISK_FLOOR,
   computeRoutingProposal,
   isIntelligenceTier,
   tierRank,
@@ -108,6 +115,95 @@ describe('a decision’s floor and its avoidability are ONE computation', () => 
     expect(analytics.provablyAvoidable.riskClassChangedSinceIssue).toBe(1);
     expect(AVOIDABLE_SPEND_STATEMENT).toContain('RECOMPUTED from canonical truth as it stands now');
     expect(AVOIDABLE_SPEND_STATEMENT).toContain('riskClassChangedSinceIssue');
+  });
+
+  /**
+   * Wave 5 correction round NINE, Low 3 — the one remaining way to the same
+   * contradiction, through a FORGED column.
+   *
+   * The round-seven fix made one computation answer both numbers, but it fed
+   * that computation `characteristics` carrying only the CANONICAL risk class,
+   * while the record PUBLISHES `maxRequiredReviewTier(stored, canonical)` — the
+   * max, deliberately, so a forged NULL cannot drop the requirement. A stored
+   * `required_review_tier` ABOVE the canonical class therefore still produced
+   * the impossible pair the comment above says cannot occur.
+   *
+   * It needs a raw append and is fail-closed either way. What was wrong is what
+   * was PUBLISHED: two numbers over one row that cannot both be true.
+   */
+  it('raises the served floor when a FORGED review tier outranks the canonical one', () => {
+    const fx = intelligenceFixture();
+    fx.budget([...INTELLIGENCE_TIERS]);
+
+    // `repo.read_status` is `read_only`: no reviewer required, floor
+    // `deterministic_local`. So the canonical answer for this row asks for
+    // nothing, and every raised number below comes from the forged column.
+    expect(REVIEW_REQUIREMENT.read_only).toBeNull();
+    expect(RISK_FLOOR.read_only).toBe('deterministic_local');
+
+    // A raw APPEND — the write the append-only triggers deliberately permit, so
+    // this needs no dropped guard and is the shape a forger actually has.
+    const forgedId = 'inteldec-forged-review-tier-above-canonical';
+    fx.db
+      .prepare(
+        `INSERT INTO hq_intel_decisions
+           (id, task_id, mission_id, project_id, tier, floor_tier, required_review_tier,
+            escalated_from, escalation_trigger, bound_provider, characteristics, permitted_tiers,
+            budget_decision, label, issued_at, issued_by, process_id, decision_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        forgedId,
+        fx.readOnlyClaim.taskId,
+        null,
+        null,
+        'low_cost',
+        'deterministic_local',
+        // The forgery: a review tier the canonical risk class never asked for.
+        'critical_review',
+        null,
+        null,
+        null,
+        JSON.stringify({
+          complexity: 'trivial',
+          contextSize: 'small',
+          workKind: 'classification',
+          latency: 'unspecified',
+          privacy: 'unrestricted',
+          riskClass: 'read_only',
+        }),
+        JSON.stringify(INTELLIGENCE_TIERS),
+        'within_ceiling',
+        'forged',
+        new Date().toISOString(),
+        'attacker',
+        'attacker-process',
+        `forged-key-${forgedId}`,
+      );
+
+    const read = fx.ops.getIntelligenceDecision(forgedId)!;
+    // The published requirement is the MAX, which is the round-three answer and
+    // stays exactly as it was: a forger cannot LOWER it, so the max keeps the
+    // stronger of the two.
+    expect(read.requiredReviewTier).toBe('critical_review');
+    // THE FINDING. This used to read `deterministic_local` beside the line
+    // above — the pair the source comment says cannot both be true, because the
+    // review requirement is one of the terms the floor is the max over.
+    expect(read.floorTier).toBe('critical_review');
+    const servedFloor = read.floorTier;
+    if (!isIntelligenceTier(servedFloor)) {
+      throw new Error('the served floor must be a member of the closed tier vocabulary');
+    }
+    expect(tierRank(servedFloor)).toBeGreaterThanOrEqual(tierRank(read.requiredReviewTier!));
+
+    // History is still not lost: the row said `deterministic_local` and that is
+    // still readable, which is how a reader can see the forgery at all.
+    expect(read.floorTierAsRecorded).toBe('deterministic_local');
+    // And the fail-closed behaviour the reviewer measured is unchanged: the
+    // recorded tier does not satisfy the requirement, so the decision cannot be
+    // pronounced avoidable.
+    expect(read.satisfiesReviewRequirement).toBe(false);
+    expect(fx.ops.intelligenceAnalytics().provablyAvoidable.decisionIds).not.toContain(forgedId);
   });
 
   it('serves the floor the policy itself computes, for every recorded decision', () => {
