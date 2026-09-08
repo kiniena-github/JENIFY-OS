@@ -29,9 +29,14 @@
  *    instead of a thing they act on.
  *
  *    Both counts above are pinned to the constants they describe by
- *    `integrity-statement-truth.test.ts`, because this docblock said "six" and
- *    "three" for the whole of Wave 5 while `HQ_INTEGRITY_FINDINGS` grew to
- *    seven and `SAFE_MODE_BLOCKING_FINDINGS` to four beneath it.
+ *    `integrity-statement-truth.test.ts`, because this docblock understated
+ *    both of them for the whole of Wave 5 while the vocabulary and the
+ *    blocking set grew beneath it. The stale numerals that used to be quoted
+ *    in this sentence are deliberately gone: the sweep in that test now reads
+ *    EVERY cardinal in the three lines around a mention of either constant,
+ *    and prose that narrates an old wrong count beside the constant it was
+ *    wrong about is indistinguishable, to a scan, from prose that is currently
+ *    wrong (Wave 5 correction round sixteen, Medium B-8).
  *
  * 3. **Cost is stated, not hidden, and it went UP.** `structuralIntegrity` is
  *    the cheap half — the `sqlite_master` reads, four pragmas, one `COUNT(*)`
@@ -1151,10 +1156,41 @@ export const INTEGRITY_DEPTH_STATEMENT =
 /* The checks                                                          */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Run one read, re-preparing ONCE if SQLite reports that the schema changed
+ * under it (Wave 5 correction round sixteen).
+ *
+ * `SQLITE_SCHEMA` is not corruption and it is not a defect in the caller: it
+ * is what the engine says when another connection ran DDL between the time a
+ * statement was prepared and the time it was stepped, and the documented
+ * handling is to prepare again. HQ's boot observation reads `sqlite_master`
+ * from every process at construction, and `reliability-commitment-prefix-replay.test.ts`
+ * starts three real ones against the same file on purpose — so this is a race
+ * the package deliberately creates and must survive. Observed once as
+ * `SqliteError: database schema has changed` out of
+ * `observeImmutabilityAsFound` in one of that test's subprocesses.
+ *
+ * ONE retry, not a loop: a second failure is a real condition and must be
+ * reported rather than spun on. Nothing about what is observed changes — the
+ * same statement is run against the same handle.
+ */
+function retryOnSchemaChange<T>(read: () => T): T {
+  try {
+    return read();
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code !== 'SQLITE_SCHEMA') throw error;
+    return read();
+  }
+}
+
 function tableNames(db: HqDatabase): Set<string> {
-  const rows = db
-    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
-    .all() as { name: string }[];
+  const rows = retryOnSchemaChange(
+    () =>
+      db
+        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
+        .all() as { name: string }[],
+  );
   return new Set(rows.map((row) => row.name));
 }
 

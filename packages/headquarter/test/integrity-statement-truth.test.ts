@@ -1178,27 +1178,112 @@ describe('the module header’s counts are the constants’ counts', () => {
   });
 
   /**
-   * The same claim, ANYWHERE in the package (Wave 5 correction round fifteen,
-   * Medium 3).
+   * The same claim, ANYWHERE in the package, IN ANY PHRASING (Wave 5
+   * correction round fifteen Medium 3; the phrasing half corrected in round
+   * sixteen, Medium B-8).
    *
    * The two tests around this one pin `integrity.ts`'s own header, which is
    * where the count had been wrong twice. A hostile review then found it wrong
    * a THIRD time, in a different file: `service.ts` said `evidence_chain_broken`
    * is one of the "three" `SAFE_MODE_BLOCKING_FINDINGS` while `integrity.ts` in
-   * the same diff correctly said four. A pin on one file cannot see a sentence
-   * in another, so this sweeps every comment in `src/` that states a count
-   * beside either constant and checks it against the constant's length.
+   * the same diff correctly said four. So this sweeps every comment in `src/`
+   * that states a count beside either constant.
    *
-   * Derived rather than corrected: the numeral in `service.ts` was edited too,
-   * but the numeral is not the fix — this is. A fourth file stating the count
-   * is checked on the day it is written.
+   * ## What was still open, and why a sweep can be worse than no sweep
+   *
+   * The sweep matched ONE construction — `\b(one|two|…|ten)\s+\`?CONSTANT\`?`,
+   * a number word IMMEDIATELY BEFORE the constant. Measured by the round-sixteen
+   * review: `SAFE_MODE_BLOCKING_FINDINGS` is mentioned four times in `src/` and
+   * the sweep caught ONE of them; `HQ_INTEGRITY_FINDINGS` seven times and it
+   * caught NONE. Ordinary rewording walked straight past it — the review listed
+   * four phrasings that do, and every one of them is now a fixture below. And
+   * the test's own docblock called this "the count WHEREVER the package states
+   * it", which is the failure this whole file exists to end: a guard that
+   * overclaims is itself a finding.
+   *
+   * ## What is derived now
+   *
+   * Word ORDER is gone. Every cardinal — number word OR digit — in the
+   * three-line window around a mention of the constant must equal that
+   * constant's length. A window may say nothing about the size; it may not say
+   * something WRONG about it in any phrasing.
+   *
+   * Two carve-outs, both narrow, both stated because a carve-out nobody wrote
+   * down is how the last version got away with matching one construction:
+   *
+   *  - a REFERENCE-LABELLED number — `Wave 5`, `round ten`, `issue 200`,
+   *    `Phase 13`, `option 1`, `lane 3`, `PR 266` — is a citation, not a count.
+   *    The label word must immediately precede the number.
+   *  - `one` used as a PRONOUN — "one of the four …", "the only one that …" —
+   *    is not a claim that the set holds one member. Recognised by the word
+   *    that immediately follows or precedes it, and nothing else: "one of
+   *    three names in `SAFE_MODE_BLOCKING_FINDINGS`" still leaves `three`
+   *    exposed, which is the point.
+   *
+   * Backticked code spans are stripped before extraction, so a digit inside an
+   * identifier or a commit sha is not read as prose.
    */
-  it('is right about the count WHEREVER the package states it', () => {
+  const REFERENCE_LABELS = /(wave|phase|round|issue|option|lane|sol|pr|no\.|#)$/i;
+
+  /**
+   * Every cardinal a sentence STATES, as numbers. Exported through the closure
+   * so the test below can attack the extractor directly with the exact
+   * phrasings that evaded its predecessor.
+   */
+  function statedCardinals(text: string): number[] {
+    const prose = text.replace(/`[^`]*`/g, ' ');
+    const words = Object.keys(NUMBER_WORDS).join('|');
+    const found: number[] = [];
+    const pattern = new RegExp(`\\b(${words}|\\d+)\\b`, 'gi');
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(prose))) {
+      const token = match[1]!.toLowerCase();
+      const before = prose.slice(0, match.index).trimEnd();
+      const after = prose.slice(match.index + match[1]!.length).trimStart();
+      // A citation, not a count.
+      if (REFERENCE_LABELS.test(before)) continue;
+      if (token === 'one') {
+        // Pronoun uses: "one of …", "the only one …", "no one", "another one".
+        if (/^of\b/i.test(after)) continue;
+        if (/\b(only|no|another|each|every|same|that|this|which)$/i.test(before)) continue;
+      }
+      const value = NUMBER_WORDS[token] ?? Number(token);
+      if (Number.isFinite(value)) found.push(value);
+    }
+    return found;
+  }
+
+  it('catches the four phrasings that walked past the previous sweep', () => {
+    // The reviewer's own evading strings, verbatim. A regression on the
+    // EXTRACTOR, not on the corpus: the corpus is currently correct, so a
+    // sweep that had quietly stopped working would still pass the case below.
+    const size = SAFE_MODE_BLOCKING_FINDINGS.length;
+    const evasions = [
+      '`SAFE_MODE_BLOCKING_FINDINGS` holds three names',
+      'one of three names in `SAFE_MODE_BLOCKING_FINDINGS`',
+      'all 3 `SAFE_MODE_BLOCKING_FINDINGS`',
+      'three of the `SAFE_MODE_BLOCKING_FINDINGS`',
+    ];
+    for (const evasion of evasions) {
+      const cardinals = statedCardinals(evasion);
+      expect(cardinals, evasion).not.toEqual([]);
+      expect(
+        cardinals.some((value) => value !== size),
+        `${evasion} states a wrong size and must be caught`,
+      ).toBe(true);
+    }
+    // And the constructions that are NOT claims about the size stay quiet, or
+    // the sweep would be unusable and would be turned off.
+    expect(statedCardinals('one of the four `SAFE_MODE_BLOCKING_FINDINGS`')).toEqual([4]);
+    expect(statedCardinals('the only one that detects tampering')).toEqual([]);
+    expect(statedCardinals('Wave 5 correction round fifteen, issue 200')).toEqual([]);
+  });
+
+  it('is right about the count WHEREVER the package states it, in any phrasing', () => {
     const counts: Record<string, number> = {
       SAFE_MODE_BLOCKING_FINDINGS: SAFE_MODE_BLOCKING_FINDINGS.length,
       HQ_INTEGRITY_FINDINGS: HQ_INTEGRITY_FINDINGS.length,
     };
-    const words = Object.keys(NUMBER_WORDS).join('|');
     const src = path.join(HERE, '..', 'src');
     const files: string[] = [];
     const walk = (directory: string): void => {
@@ -1210,30 +1295,39 @@ describe('the module header’s counts are the constants’ counts', () => {
     };
     walk(src);
     const wrong: string[] = [];
+    let mentions = 0;
     let stated = 0;
     for (const file of files) {
       const lines = fs.readFileSync(file, 'utf8').split('\n');
       for (const [constant, size] of Object.entries(counts)) {
-        // A three-line window, because a docblock wraps and the number word is
-        // routinely on the line before the constant it counts.
+        // A three-line window, because a docblock wraps and the number is
+        // routinely on a different line from the constant it counts.
         for (let i = 0; i < lines.length; i += 1) {
           if (!lines[i]!.includes(constant)) continue;
+          mentions += 1;
           const window = [lines[i - 1] ?? '', lines[i]!, lines[i + 1] ?? '']
             .map((line) => line.replace(/^\s*\*\s?/, '').replace(/^\s*\/\/\s?/, ''))
             .join(' ')
             .replace(/\s+/g, ' ');
-          // A NUMBER WORD immediately governing the constant: "the four
-          // `SAFE_MODE_BLOCKING_FINDINGS`", "one of the three ...".
-          const match = new RegExp(`\\b(${words})\\s+\`?${constant}\``).exec(window);
-          if (!match) continue;
+          const cardinals = statedCardinals(window);
+          if (cardinals.length === 0) continue;
           stated += 1;
-          if (NUMBER_WORDS[match[1]!] !== size) {
-            wrong.push(`${path.relative(src, file)}:${i + 1} says ${match[1]} for ${constant} (${size})`);
+          for (const value of cardinals) {
+            if (value !== size) {
+              wrong.push(
+                `${path.relative(src, file)}:${i + 1} states ${value} beside ${constant} (${size}): ${window.slice(0, 160)}`,
+              );
+            }
           }
         }
       }
     }
-    // The sweep has to find the claims it is checking, or it proves nothing.
+    // Both halves are asserted. The sweep has to SEE the mentions, and it has
+    // to see at least one that states a size — a sweep that found neither
+    // would pass while checking nothing, which is how the previous version
+    // reported `HQ_INTEGRITY_FINDINGS` as fully checked while catching zero of
+    // its seven mentions.
+    expect(mentions, 'the sweep found no mention of either constant in src/').toBeGreaterThanOrEqual(8);
     expect(stated, 'no comment in src/ states either count — the sweep is vacuous').toBeGreaterThan(0);
     expect(wrong, 'a comment states the wrong size for a safety constant').toEqual([]);
   });
