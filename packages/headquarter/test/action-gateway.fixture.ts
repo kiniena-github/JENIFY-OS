@@ -27,7 +27,16 @@ export interface FakeAdapter extends ExternalActionAdapter {
   externalRef: Record<string, unknown> | null;
 }
 
-/** Three action types spanning the reversibility/visibility space. */
+/**
+ * Three action types spanning the reversibility/visibility space.
+ *
+ * The two that are not both internal and reversible declare
+ * `sideEffectIdentityFields`, because `adapterContractProblems` requires it of
+ * them (Wave 5 correction round fifteen, High 5): an action HQ cannot walk
+ * back must state which payload fields it acts on, so a field the adapter
+ * ignores cannot mint a fresh side-effect key. `write_note` deliberately
+ * omits it, so the documented internal/reversible fallback stays exercised.
+ */
 export const FAKE_ACTIONS: Readonly<Record<string, ActionTypeContract>> = {
   write_note: {
     description: 'Write an internal note (reversible; the adapter can delete it).',
@@ -40,12 +49,14 @@ export const FAKE_ACTIONS: Readonly<Record<string, ActionTypeContract>> = {
     visibility: 'external',
     reversibility: 'compensable',
     compensation: { supported: true, method: 'delete_comment', description: 'Removes the comment; readers may have seen it.' },
+    sideEffectIdentityFields: ['text'],
   },
   publish_release: {
     description: 'Publish a public release (irreversible; no compensation exists).',
     visibility: 'public',
     reversibility: 'irreversible',
     compensation: null,
+    sideEffectIdentityFields: ['tag'],
   },
 };
 

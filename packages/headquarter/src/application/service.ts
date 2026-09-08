@@ -861,6 +861,7 @@ import {
   canonicalBudgetScopeId,
   isIdentifierSlug,
   normalizeProviderId,
+  LOCAL_ONLY_TIER,
   isIntelligenceTier,
   isModelAvailability,
   isModelCapabilityFact,
@@ -1060,6 +1061,7 @@ import {
   sideEffectGeneration,
   sideEffectHolder,
   sideEffectKey,
+  sideEffectIdentityPayload,
   sideEffectKeyBase,
   snapshotDrift,
   stateAdmitsAttempt,
@@ -1306,6 +1308,12 @@ export type OpsErrorCode =
   | 'tier_not_permitted'
   | 'tier_below_policy_floor'
   | 'review_tier_required'
+  // Wave 5 correction round fifteen, High 3: a caller-named tier on work
+  // recorded as `local_only`. Distinct from `tier_not_permitted`, which is
+  // about what the budget policy will pay for; this one is about where the
+  // work's MATERIAL may go, and no budget, permitted set or escalation
+  // widens it.
+  | 'privacy_requires_local'
   | 'intelligence_routing_refused'
   | 'escalation_refused'
   // Added by the Wave 5 correction (Medium finding B-5): a second cost entry
@@ -4082,6 +4090,17 @@ export class HeadquarterOperations {
     // and here the direction is the reassuring one, so a throw would have been
     // worse than useless: the caller could not tell "released" from "the store
     // refused" without catching a driver error.
+    //
+    // The message below is TRUE because the mutation is atomic (Wave 5
+    // correction round fifteen, High 6). It used to be a lie: the queue's
+    // `#releaseKillSwitch` updated `op_kill_switch` and then appended the
+    // evidence, untransacted, so with the append refused the row had already
+    // committed at `engaged = 0` and this branch reported "the kill switch is
+    // STILL engaged" over a released switch — measured, with a task queued and
+    // `claimNext` CLAIMED, and no `kill_switch_released` row anywhere. Both
+    // kill-switch mutations, and every other mutation on the privileged
+    // surface, now commit their row and their evidence together; see the
+    // `atomic` wrapper in `operator/queue.ts`.
     try {
       this.#requirePrivilegedQueue().releaseKillSwitch(scope, founderId);
     } catch (error) {
@@ -10863,9 +10882,34 @@ export class HeadquarterOperations {
   /**
    * The one place a recorded tier is checked against the policy — law 6.
    *
-   * Four refusals, and no path around them: a proposal that named no tier at
-   * all, a tier the policy does not permit, a tier below the computed floor,
-   * and a tier that does not satisfy a required reviewer tier.
+   * FIVE refusals, and no path around them: a proposal that named no tier at
+   * all, a `local_only` privacy requirement, a tier the policy does not
+   * permit, a tier below the computed floor, and a tier that does not satisfy
+   * a required reviewer tier.
+   *
+   * The privacy one was missing, and the docblock here said "Four refusals,
+   * and no path around them" while `intelligence-command.ts` called
+   * `local_only` "a hard constraint … Where the work's material may go" (Wave
+   * 5 correction round fifteen, High 3 — introduced by this diff).
+   * `computeRoutingProposal` applies the privacy CAP correctly, so a proposal
+   * with no caller-named tier was right; naming a tier bypassed the proposal
+   * entirely and this method never looked at
+   * `proposal.characteristics.privacy`. Reproduced: a router proposal of
+   * `deterministic_local` plus an explicit `tier: 'critical_review'` recorded
+   * `{"ok":true,"tier":"critical_review"}` with
+   * `"privacy":"local_only"` on the ledger row — HQ's own record saying the
+   * material may go to a cloud tier on work declared local-only.
+   *
+   * Checked FIRST among the requested-tier refusals, deliberately: it is the
+   * only one of the five that is about where DATA may go rather than about
+   * what the policy will pay for, so it is the reason a caller should be told
+   * even when a cheaper refusal would also apply.
+   *
+   * The escalation path funnels through here too (see
+   * `escalateIntelligenceDecision`), with a `proposal` recomputed from the
+   * prior decision's stored characteristics — so an escalation cannot climb
+   * out of `local_only` either. That path had NO privacy input at all before
+   * this.
    */
   #resolveRecordedTier(
     proposal: RoutingProposal,
@@ -10884,6 +10928,16 @@ export class HeadquarterOperations {
     }
     if (!isIntelligenceTier(requested)) {
       return fail('invalid_input', `tier must be one of: ${INTELLIGENCE_TIERS.join(', ')}`);
+    }
+    if (proposal.characteristics.privacy === 'local_only' && requested !== LOCAL_ONLY_TIER) {
+      return fail(
+        'privacy_requires_local',
+        `This work is recorded as ${proposal.characteristics.privacy}, which admits ${LOCAL_ONLY_TIER} and ` +
+          `nothing else, so tier ${requested} is refused. Where the work's material may go is a hard ` +
+          'constraint, not a preference a caller can name its way past — and it is not widened by a budget, ' +
+          'a permitted set, or an escalation.',
+        { privacy: proposal.characteristics.privacy, admissibleTier: LOCAL_ONLY_TIER },
+      );
     }
     if (proposal.budgetDecision === 'blocked') {
       return fail(
@@ -13337,7 +13391,24 @@ export class HeadquarterOperations {
       },
     });
     const payloadDigest = actionPayloadDigest(input.payload);
-    const effectBase = sideEffectKeyBase({ taskId, adapterId, actionType, target: target.value!, payloadDigest });
+    // The SIDE-EFFECT identity is what the ADAPTER declares it acts on, which
+    // is not the same thing as the payload HQ stores (Wave 5 correction round
+    // fifteen, High 5). `payloadDigest` above stays a digest of the whole
+    // payload — it is the integrity check on the stored row, and
+    // `#gatewayGate` recomputes it before any execution. The identity below is
+    // the projection onto `contract.sideEffectIdentityFields`, so a field the
+    // adapter ignores cannot mint a fresh `effect:…` key: on the frozen head,
+    // the same comment on `issues/42` with `_nonce: 1|2|3` produced three
+    // distinct keys and THREE real adapter executions.
+    const effectBase = sideEffectKeyBase({
+      taskId,
+      adapterId,
+      actionType,
+      target: target.value!,
+      payloadDigest: actionPayloadDigest(
+        sideEffectIdentityPayload(input.payload, contract.sideEffectIdentityFields),
+      ),
+    });
 
     const privileged = this.#requirePrivilegedQueue();
     let dedupedTo: string | null = null;
@@ -14185,6 +14256,36 @@ export class HeadquarterOperations {
         code: 'not_permitted',
         message: `Worker ${workerId} is not allowed capability ${intent.capabilityId} (least privilege)`,
         details: { workerId, capabilityId: intent.capabilityId },
+      });
+    }
+    // THE BACKSTOP THAT DID NOT EXIST (Wave 5 correction round fifteen,
+    // High 7 — introduced by this diff).
+    //
+    // `rowToIntent` reads an unreadable `payload` column as `{}` rather than
+    // throwing, and the docblock at `totalJsonObject` justified that with:
+    // "an intent whose payload reads as `{}` no longer matches its own stored
+    // `payload_digest`, so every path that acts on a payload refuses it".
+    // Nothing recomputed the digest. `actionPayloadDigest` had exactly ONE
+    // call site in the package — `proposeAction`, where the row is written —
+    // so the sentence described a mechanism that was never built. Reproduced:
+    // a raw INSERT of an intent whose payload column holds `[object Object]`
+    // authorized and executed, and the adapter received `payload: {}` against
+    // a real `target` of `issues/7`. An external act performed with content
+    // HQ could not read is exactly the fabrication the gateway exists to
+    // prevent — the adapter is handed an empty object and does whatever an
+    // empty object means to it.
+    //
+    // Placed in `#gatewayGate` deliberately: this is the ONE gate BOTH
+    // `authorizeAction` and `executeAction` pass, so the refusal lands before
+    // an authorization is bound as well as before an adapter is called.
+    if (actionPayloadDigest(intent.payload) !== intent.payloadDigest) {
+      return refuse({
+        code: 'action_digest_mismatch',
+        message:
+          `Action ${intent.id}: the stored payload does not match its own recorded payload_digest, so HQ ` +
+          'cannot say what this action would do. An external act is never performed on content HQ cannot ' +
+          'read — an unreadable payload is refused, not executed as an empty one.',
+        details: { actionId: intent.id, recordedDigest: intent.payloadDigest },
       });
     }
     const adapter = this.#actionAdapters.get(intent.adapterId);

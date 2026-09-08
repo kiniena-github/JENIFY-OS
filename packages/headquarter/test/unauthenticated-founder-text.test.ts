@@ -124,7 +124,9 @@ const CANARIES: readonly Canary[] = [
   { field: 'createTask.payload', crosses: false },
   { field: 'denyTask.reason', crosses: true, at: 'snapshot.operations.data.blocked[0].blockReason' },
   { field: 'failTask.reason', crosses: true, at: 'snapshot.activity.data[1].summary' },
-  { field: 'engageKillSwitch.reason', crosses: false },
+  { field: 'engageKillSwitch.reason', crosses: true, at: 'snapshot.operations.data.killSwitch.engagedScopes[0].reason' },
+  { field: 'engageKillSwitch.scope', crosses: true, at: 'snapshot.operations.data.killSwitch.engagedScopes[0].scope' },
+  { field: 'engageKillSwitch.founderId', crosses: true, at: 'snapshot.operations.data.killSwitch.engagedScopes[0].engagedBy' },
   { field: 'registerExecutionWorker.displayName', crosses: true, at: 'snapshot.workforce.data[0].displayName' },
   { field: 'registerExecutionWorker.vendor', crosses: true, at: 'snapshot.workforce.data[0].vendor' },
   { field: 'setIntelligenceBudget.note', crosses: false },
@@ -168,7 +170,61 @@ interface Planted {
   snapshot: unknown;
   /** Every facade call the scenario made, and whether it returned ok. */
   calls: { name: string; ok: boolean; error: string }[];
+  /**
+   * Every canary text that is actually IN THE STORE at the instant the
+   * snapshot is taken, found by sweeping every text column of every table
+   * (Wave 5 correction round fifteen, High 4).
+   *
+   * The docblock above warns that a canary which was never WRITTEN reads as
+   * "does not cross", and the first test checks every facade call returned ok.
+   * That was not enough, and the gap shipped: `engageKillSwitch.reason` was
+   * written successfully — and then the very next line of the scenario
+   * RELEASED the switch, so the state carrying it was gone before the
+   * snapshot. The row read `crosses: false`, and the shipped census told a
+   * reader that the Founder's stop-everything reason does not reach an
+   * unauthenticated file. It does.
+   *
+   * "Written ok" and "still in the store" are different properties, and only
+   * the second one makes a `crosses: false` verdict mean anything. This is the
+   * second one, swept from `sqlite_master` so a table added in a future phase
+   * is included without being named.
+   */
+  storedCanaries: Set<string>;
   cleanup: () => void;
+}
+
+/**
+ * Every canary text present in any TEXT-ish column of any table in the file.
+ *
+ * Derived from `sqlite_master` and `PRAGMA table_info`, so it covers ledgers
+ * this file has never heard of. Values are compared as strings because SQLite
+ * columns are dynamically typed and HQ stores JSON blobs in TEXT columns.
+ */
+function canariesStillInStore(db: {
+  prepare: (sql: string) => { all: (...params: unknown[]) => unknown[] };
+}, needles: readonly string[]): Set<string> {
+  const found = new Set<string>();
+  const tables = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
+    .all() as { name: string }[];
+  for (const { name } of tables) {
+    let rows: Record<string, unknown>[] = [];
+    try {
+      rows = db.prepare(`SELECT * FROM "${name}"`).all() as Record<string, unknown>[];
+    } catch {
+      // A view or virtual table that will not plainly select is not a store of
+      // canary text; skipping it cannot hide one, because the canary would
+      // still have to have been written to a real table to get there.
+      continue;
+    }
+    for (const row of rows) {
+      for (const value of Object.values(row)) {
+        if (typeof value !== 'string') continue;
+        for (const needle of needles) if (value.includes(needle)) found.add(needle);
+      }
+    }
+  }
+  return found;
 }
 
 /**
@@ -294,6 +350,36 @@ function plantEveryCanary(): Planted {
 
   record('engageKillSwitch', fx.ops.engageKillSwitch('global', 'founder', c('engageKillSwitch.reason')));
   record('releaseKillSwitch', fx.ops.releaseKillSwitch('global', 'founder'));
+  // A SECOND scope, engaged and DELIBERATELY LEFT ENGAGED (Wave 5 correction
+  // round fifteen, High 4).
+  //
+  // The scenario used to engage the global scope at the line above and release
+  // it at the line below, and then snapshot — measuring the one state in which
+  // there is provably nothing to publish. `engageKillSwitch.reason` therefore
+  // read `crosses: false`, and the shipped census said the Founder's
+  // stop-everything reason does not reach the unauthenticated artifact. It
+  // does: `snapshot.operations.data.killSwitch.engagedScopes[]` carries the
+  // reason, the scope and the engaging principal for every scope that is still
+  // engaged. The engaging PRINCIPAL is planted by registering one whose id is
+  // the canary, because `founderId` must resolve to a registered principal
+  // holding approval authority — a canary that the validator refuses would
+  // measure the validator, which is exactly the false-exemption pattern
+  // Medium 4 of the same review reported one file over.
+  fx.principals.register({
+    id: c('engageKillSwitch.founderId'),
+    displayName: 'Canary Founder',
+    originateCapabilities: [],
+    approvalAuthority: true,
+    active: true,
+  });
+  record(
+    'engageKillSwitch (left engaged)',
+    fx.ops.engageKillSwitch(
+      c('engageKillSwitch.scope'),
+      c('engageKillSwitch.founderId'),
+      c('engageKillSwitch.reason'),
+    ),
+  );
 
   record(
     'registerExecutionWorker',
@@ -417,6 +503,7 @@ function plantEveryCanary(): Planted {
   return {
     snapshot: liveSnapshotFromOperations(fx.ops, { now: NOW.toISOString() }),
     calls,
+    storedCanaries: canariesStillInStore(fx.db, CANARIES.map((canary) => canaryFor(canary.field))),
     cleanup: () => {
       fx.db.close();
       fs.rmSync(dir, { recursive: true, force: true });
@@ -468,6 +555,21 @@ describe('what Founder-typed text crosses to the unauthenticated artifact', () =
         'a canary that was never written would read as "does not cross"',
       ).toEqual([]);
       expect(planted.calls.length).toBeGreaterThanOrEqual(CANARIES.length / 2);
+
+      // ...AND every canary is still in the store when the snapshot is taken
+      // (Wave 5 correction round fifteen, High 4). "The facade accepted it" and
+      // "it is there to be published" are different properties, and the census
+      // shipped a `crosses: false` that rested on the first: the scenario
+      // engaged the kill switch, released it on the next line, and then
+      // measured. A canary the store no longer holds measures NOTHING about
+      // the artifact, so it is a failure here rather than a quiet `false`.
+      const missing = CANARIES.map((canary) => canary.field).filter(
+        (field) => !planted.storedCanaries.has(canaryFor(field)),
+      );
+      expect(
+        missing,
+        'a canary that is not in the store at snapshot time cannot be read as "does not cross"',
+      ).toEqual([]);
     } finally {
       planted.cleanup();
     }
@@ -485,8 +587,8 @@ describe('what Founder-typed text crosses to the unauthenticated artifact', () =
       expect(measured.sort()).toEqual(declared.sort());
       // And the measured totals, so the phase document's numbers are taken from
       // an execution rather than from a sentence.
-      expect(CANARIES.length).toBe(34);
-      expect(declared.length).toBe(20);
+      expect(CANARIES.length).toBe(36);
+      expect(declared.length).toBe(23);
     } finally {
       planted.cleanup();
     }
@@ -549,7 +651,7 @@ describe('what Founder-typed text crosses to the unauthenticated artifact', () =
     // measurement is what is written. Both are checked.
     const text = fs.readFileSync(PHASE_13, 'utf8');
     expect(text).toContain('The unauthenticated artifact IS a Founder-text publication surface');
-    expect(text).toContain('twenty fields, not four');
+    expect(text).toContain('twenty-three fields, not four');
     expect(text).toContain('unauthenticated-founder-text.test.ts');
     for (const canary of CANARIES) {
       if (!canary.crosses) continue;

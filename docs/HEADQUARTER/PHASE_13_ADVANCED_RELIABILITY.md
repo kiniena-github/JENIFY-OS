@@ -867,8 +867,20 @@ wrote that number here. **A fresh hostile review at `f348f9a` planted canaries
 across the whole Founder-writable facade and found the disclosure was far too
 narrow; re-measured at the merged head with every plant executed through the
 real facade and every call asserted to have returned OK, it is
-twenty fields, not four** — `src/cli/snapshot.ts` writes the whole object
-`liveSnapshotFromOperations` returns, so everything in it is published:
+twenty fields, not four.**
+
+**And that measurement was still wrong in one place, because the scenario
+measured the wrong STATE** (Wave 5 correction round fifteen, High 4). The
+scenario engaged the kill switch and released it on the very next line before
+snapshotting — the one state in which there is provably nothing to publish — so
+`engageKillSwitch.reason` read "does not cross" and this document said the
+Founder's stop-everything reason stays off the unauthenticated file. Measured
+with a second scope left ENGAGED, the reason, the scope and the engaging
+principal all cross, at
+`operations.data.killSwitch.engagedScopes[].reason` / `.scope` / `.engagedBy`.
+The count is **twenty-three fields, not four** — `src/cli/snapshot.ts` writes
+the whole object `liveSnapshotFromOperations` returns, so everything in it is
+published:
 
 | Founder-typed field | One measured path in `hq-snapshot.json` |
 |---|---|
@@ -892,17 +904,28 @@ twenty fields, not four** — `src/cli/snapshot.ts` writes the whole object
 | `failTask.reason` | `activity.data[].summary` — worker-typed, and published |
 | `registerExecutionWorker.displayName` | `workforce.data[].displayName` |
 | `registerExecutionWorker.vendor` | `workforce.data[].vendor` |
+| `engageKillSwitch.reason` | `operations.data.killSwitch.engagedScopes[].reason` — for every scope that is still ENGAGED |
+| `engageKillSwitch.scope` | `operations.data.killSwitch.engagedScopes[].scope` |
+| `engageKillSwitch.founderId` | `operations.data.killSwitch.engagedScopes[].engagedBy` |
 
-Fourteen further Founder- and worker-typed fields were planted and do NOT cross,
+Thirteen further Founder- and worker-typed fields were planted and do NOT cross,
 and that half is pinned too, because it is what makes the payload carve-out from
 the credential scan defensible: `createTask.payload`,
 `commandMission.instruction`, `amendMissionIntent.amendment`,
-`engageKillSwitch.reason`, `setIntelligenceBudget.note`,
+`setIntelligenceBudget.note`,
 `recordModelObservation.unitCostBasis`, `recordModelObservation.note`,
 `recordVerifiedBackup.backupPath`, `recordVerifiedBackup.note`,
 `postMissionMessage.body`, `postMissionMessage.refs`,
 `recordIntelligenceDecision.label`, `recordIntelligenceCost.basis`,
 `recordIntelligenceCost.note`.
+
+**Every one of those thirteen is now also checked for being IN THE STORE at the
+instant the snapshot is taken**, by sweeping every text column of every table in
+the file. That is the guard the kill-switch row needed and did not have: "the
+facade accepted the write" and "the value is there to be published" are
+different properties, and only the second makes a "does not cross" verdict mean
+anything. A canary the store no longer holds is a FAILURE in
+`unauthenticated-founder-text.test.ts`, not a quiet `false`.
 
 **No behaviour is changed by this table, and no credential can reach any of
 these fields** — every one of them is credential-scanned at its facade write,

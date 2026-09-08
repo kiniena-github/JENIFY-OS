@@ -171,6 +171,19 @@ export const PRIVACY_REQUIREMENTS = deepFreeze(['unrestricted', 'local_only'] as
 export type PrivacyRequirement = (typeof PRIVACY_REQUIREMENTS)[number];
 
 /**
+ * The ONE tier `local_only` admits, named once so the proposal's privacy cap
+ * and the recorded-tier refusal cannot drift apart (Wave 5 correction round
+ * fifteen, High 3).
+ *
+ * They already had: `computeRoutingProposal` applied the cap, and
+ * `#resolveRecordedTier` — "the one place a recorded tier is checked against
+ * the policy" — never read `privacy` at all, so naming a tier explicitly
+ * bypassed a constraint this file calls hard. Two spellings of "local only
+ * means local" is exactly the drift a shared constant removes.
+ */
+export const LOCAL_ONLY_TIER: IntelligenceTier = 'deterministic_local';
+
+/**
  * Where HQ's knowledge of a cost figure came from.
  *
  * The four the directive names, and no fifth. `unknown` is a first-class
@@ -1398,7 +1411,7 @@ export function computeRoutingProposal(input: {
   }
 
   if (c.privacy === 'local_only') {
-    if (tierRank(floorTier) > tierRank('deterministic_local')) {
+    if (tierRank(floorTier) > tierRank(LOCAL_ONLY_TIER)) {
       return {
         ...base,
         tier: null,
@@ -1407,7 +1420,7 @@ export function computeRoutingProposal(input: {
         localPathTaken: false,
       };
     }
-    if (!input.permittedTiers.includes('deterministic_local')) {
+    if (!input.permittedTiers.includes(LOCAL_ONLY_TIER)) {
       return {
         ...base,
         tier: null,

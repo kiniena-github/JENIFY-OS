@@ -127,6 +127,41 @@ export interface ActionTypeContract {
   visibility: ActionVisibility;
   reversibility: ActionReversibility;
   compensation: ActionCompensation | null;
+  /**
+   * The payload fields this action type's identity is made of — WHAT THE
+   * ADAPTER ACTS ON (Wave 5 correction round fifteen, High 5).
+   *
+   * ## What was open
+   *
+   * The durable side-effect identity was task + adapter + action type +
+   * target + a digest of the WHOLE payload, and the docblock on
+   * `sideEffectKeyBase` claimed the ledger "admits ONE attempt per generation"
+   * of a side effect. A hostile review sent the same task, adapter, action
+   * type, target `issues/42` and text three times with `_nonce: 1`, `2`, `3`
+   * — a field the adapter ignores entirely — and got three distinct
+   * `effect:…#1` keys and THREE adapter executions. HQ's idea of "the same
+   * side effect" was a property of the message, and the real side effect is a
+   * property of the world.
+   *
+   * Only the adapter knows which fields it acts on, so only the adapter can
+   * say. Declaring `['text']` makes `_nonce` inert: the identity digest is
+   * taken over the PROJECTION of the payload onto these fields, so a field
+   * outside them cannot mint a fresh key. An empty array means the identity is
+   * the target alone.
+   *
+   * ## Required exactly where a duplicate cannot be walked back
+   *
+   * `adapterContractProblems` REQUIRES this on any action type that is not
+   * both `internal` and `reversible` — the ones where a second execution is a
+   * second real, unrecoverable act. An adapter that will not say what it acts
+   * on is not one HQ will perform an irreversible or externally-visible action
+   * through, and the refusal happens at construction. For an internal,
+   * reversible action it may be omitted, and the identity then falls back to
+   * the whole payload — the pre-correction behaviour, stated rather than
+   * implied, because a duplicate there is compensable by the adapter's own
+   * declared method.
+   */
+  sideEffectIdentityFields?: readonly string[];
 }
 
 export interface ActionExecutionRequest {
@@ -194,6 +229,29 @@ export function adapterContractProblems(adapter: ExternalActionAdapter): string[
     }
     if (contract.compensation && (contract.compensation.supported !== true || !contract.compensation.method?.trim())) {
       problems.push(`action type ${type}: compensation must be supported with a named method`);
+    }
+    // An action HQ cannot walk back must state WHAT IT ACTS ON (Wave 5
+    // correction round fifteen, High 5). Required on everything that is not
+    // both internal and reversible, because that is exactly the set where a
+    // second execution is a second real, unrecoverable act — and a payload
+    // field the adapter ignores was enough to mint a fresh side-effect key and
+    // get one. Refused at CONSTRUCTION, so an adapter that will not say cannot
+    // be wired in at all.
+    const identityRequired = !(contract.visibility === 'internal' && contract.reversibility === 'reversible');
+    const fields = contract.sideEffectIdentityFields;
+    if (identityRequired && fields === undefined) {
+      problems.push(
+        `action type ${type}: declares ${contract.visibility}/${contract.reversibility} without ` +
+          'sideEffectIdentityFields — an action HQ cannot walk back must state which payload fields it ' +
+          'acts on, or a field the adapter ignores mints a fresh side-effect key and repeats the act',
+      );
+    }
+    if (fields !== undefined) {
+      if (!Array.isArray(fields) || fields.some((field) => typeof field !== 'string' || field.trim() === '')) {
+        problems.push(`action type ${type}: sideEffectIdentityFields must be an array of non-empty field names`);
+      } else if (new Set(fields).size !== fields.length) {
+        problems.push(`action type ${type}: sideEffectIdentityFields names the same field twice`);
+      }
     }
   }
   return problems;
@@ -315,11 +373,42 @@ export function actionIdempotencyKey(input: {
 }
 
 /**
+ * Project a payload onto the fields an action type declares its identity is
+ * made of.
+ *
+ * A declared field that is ABSENT from the payload is carried as absent rather
+ * than as `undefined`/`null`, so "no such field" and "the field is null" stay
+ * distinguishable — they are different acts.
+ */
+export function sideEffectIdentityPayload(
+  payload: Record<string, unknown>,
+  fields: readonly string[] | undefined,
+): Record<string, unknown> {
+  if (fields === undefined) return payload;
+  const projected: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (Object.prototype.hasOwnProperty.call(payload, field)) projected[field] = payload[field];
+  }
+  return projected;
+}
+
+/**
  * The durable side-effect identity: task + adapter + action type + target +
- * payload digest. Two DIFFERENT action intents with the same base name the
- * same external side effect, and the ledger admits ONE attempt per generation
- * of it — by unique index, so the engine refuses the duplicate even under two
- * processes.
+ * the digest of what the ADAPTER declares it acts on.
+ *
+ * Two action intents with the same base name the same external side effect,
+ * and the ledger admits ONE attempt per generation of it — by unique index, so
+ * the engine refuses the duplicate even under two processes.
+ *
+ * The precise claim, corrected (Wave 5 correction round fifteen, High 5): "the
+ * same side effect" means the same declared identity. Where the action type
+ * declares `sideEffectIdentityFields` — required on everything that is not
+ * both internal and reversible — a payload field the adapter ignores cannot
+ * mint a fresh key, which is what `_nonce: 1|2|3` did on the frozen head to
+ * get three real executions of one comment. Where it does not (internal,
+ * reversible actions only), the identity is still the whole payload and a
+ * cosmetic difference still splits it; that residue is stated here rather than
+ * denied, and it is bounded to actions the adapter has declared it can undo.
  */
 export function sideEffectKeyBase(input: {
   taskId: string;
@@ -537,6 +626,22 @@ export interface ActionEventRow {
  * `risk_factors` read as `[]` shows a Founder no factors rather than a page
  * that will not render. Returning nothing at all would be the same denial by
  * another name; raising is the outcome this exists to stop.
+ *
+ * ## That first sentence described a mechanism that did not exist
+ *
+ * Wave 5 correction round fifteen, High 7. `actionPayloadDigest` had exactly
+ * ONE call site in the package — `proposeAction`, where the row is written.
+ * Nothing recomputed it from a LOADED payload, so "every path that acts on a
+ * payload refuses it" was a claim nobody had measured: a raw INSERT of an
+ * intent whose payload column held `[object Object]` was authorized and
+ * executed, and the adapter received `payload: {}` against a real target of
+ * `issues/7`. An external act performed with content HQ could not read.
+ *
+ * The backstop now exists, in `HeadquarterOperations.#gatewayGate` — the one
+ * gate BOTH `authorizeAction` and `executeAction` pass — so the sentence above
+ * is true of the code as well as of the intention. See
+ * `test/wave5-round15-high-findings.test.ts` for the reproduction and the
+ * mutation proof.
  */
 function totalJsonObject(value: unknown): Record<string, unknown> {
   if (typeof value !== 'string') return {};

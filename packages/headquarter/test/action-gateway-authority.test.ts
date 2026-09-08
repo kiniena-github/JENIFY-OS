@@ -115,6 +115,11 @@ describe('the risk engine is categorical, deterministic and monotone', () => {
           visibility: 'public',
           reversibility: 'irreversible',
           compensation: { supported: true, method: 'y', description: 'z' },
+          // Declared so this stays a ONE-problem contract: the contradiction
+          // under test, and not also the missing side-effect identity a
+          // public/irreversible action type is now required to state (Wave 5
+          // correction round fifteen, High 5).
+          sideEffectIdentityFields: [],
         },
       },
     });

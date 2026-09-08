@@ -588,16 +588,51 @@ export class OperatorQueue {
     // that dereference `#evidence`, and a caller is free to use them the moment
     // it is handed them. A `#private` field read before initialisation throws.
     this.#evidence = new EvidenceLog(db);
+    /**
+     * ONE TRANSACTION PER PRIVILEGED MUTATION (Wave 5 correction round
+     * fifteen, High 6).
+     *
+     * Every mutation on this surface pairs a canonical row write with an
+     * append to the hash-chained evidence log, and none of them was atomic.
+     * `#releaseKillSwitch` was the one a hostile review executed: with a
+     * `BEFORE INSERT ON op_evidence WHEN kind='kill_switch_released' ->
+     * RAISE(ABORT)` trigger in place, the `UPDATE op_kill_switch SET engaged =
+     * 0` had already committed when the append threw, and
+     * `HeadquarterOperations.releaseKillSwitch` caught the throw and reported
+     * `operator_rejected … the kill switch is STILL engaged`. Measured after
+     * that call: `op_kill_switch.engaged = 0`, `killSwitchEngaged` false, a
+     * task queued, `claimNext` CLAIMED, and zero `kill_switch_released` rows
+     * anywhere. HQ told the Founder the opposite of the truth about the one
+     * control they reach for to stop everything, AND lost the audit record of
+     * the release.
+     *
+     * The fix is structural rather than per-method: the wrapper is applied
+     * HERE, at the one place the privileged API is issued, so a mutation added
+     * to `PrivilegedQueueApi` in a future phase is atomic by construction
+     * instead of by somebody remembering. `deny`, `approve`, `reviewPass`,
+     * `reviewFail`, `reconcile`, `returnForFreshApproval` and `enqueue` all
+     * have the identical update-then-append shape and all get it.
+     *
+     * `reserve` is deliberately NOT wrapped: it IS the transaction primitive,
+     * and `appendEvidence` is a single statement with nothing to be atomic
+     * with. Nesting is safe — better-sqlite3 runs an inner `transaction()`
+     * as a SAVEPOINT — so a caller that already holds a reservation is
+     * unaffected.
+     */
+    const atomic = <A extends unknown[], R>(fn: (...args: A) => R): ((...args: A) => R) => {
+      const wrapped = db.transaction(fn as (...args: unknown[]) => R);
+      return (...args: A): R => wrapped(...args) as R;
+    };
     grantPrivileged?.({
-      approve: (taskId, by, opts) => this.#approve(taskId, by, opts),
-      deny: (taskId, reason, by) => this.#deny(taskId, reason, by),
-      engageKillSwitch: (scope, by, reason) => this.#engageKillSwitch(scope, by, reason),
-      releaseKillSwitch: (scope, by) => this.#releaseKillSwitch(scope, by),
-      reviewPass: (taskId, reviewerId, note) => this.#reviewPass(taskId, reviewerId, note),
-      reviewFail: (taskId, reviewerId, reason) => this.#reviewFail(taskId, reviewerId, reason),
-      reconcile: (taskId, decision, by, note) => this.#reconcile(taskId, decision, by, note),
-      returnForFreshApproval: (taskId) => this.#returnForFreshApproval(taskId),
-      enqueue: (req) => this.#enqueue(req),
+      approve: atomic((taskId, by, opts) => this.#approve(taskId, by, opts)),
+      deny: atomic((taskId, reason, by) => this.#deny(taskId, reason, by)),
+      engageKillSwitch: atomic((scope, by, reason) => this.#engageKillSwitch(scope, by, reason)),
+      releaseKillSwitch: atomic((scope, by) => this.#releaseKillSwitch(scope, by)),
+      reviewPass: atomic((taskId, reviewerId, note) => this.#reviewPass(taskId, reviewerId, note)),
+      reviewFail: atomic((taskId, reviewerId, reason) => this.#reviewFail(taskId, reviewerId, reason)),
+      reconcile: atomic((taskId, decision, by, note) => this.#reconcile(taskId, decision, by, note)),
+      returnForFreshApproval: atomic((taskId) => this.#returnForFreshApproval(taskId)),
+      enqueue: atomic((req) => this.#enqueue(req)),
       appendEvidence: (entry) => this.#evidence.append(entry),
       reserve: (fn) => this.#evidence.reserve(fn),
     });
