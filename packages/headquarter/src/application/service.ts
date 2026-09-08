@@ -4425,6 +4425,24 @@ export class HeadquarterOperations {
       return fail('invalid_input', errorMessage(error));
     }
 
+    // SHAPE first, and total over an input that omits a field (Wave 5
+    // correction round fourteen, Low 6). `input.allowedCapabilities.length`
+    // and `input.workerId.trim()` both dereferenced a field this method never
+    // checked was there, so an in-process call that omitted one threw a
+    // `TypeError` out of the facade instead of returning `invalid_input`. Not
+    // reachable through the control API, which validates the body first — which
+    // is why it is a Low and not a High — but a facade method's contract is
+    // that it answers, and a refusal is an answer where a throw is not.
+    if (typeof input.workerId !== 'string') {
+      return fail('invalid_input', 'A worker id is required.');
+    }
+    if (!Array.isArray(input.allowedCapabilities)) {
+      return fail(
+        'invalid_input',
+        'allowedCapabilities is required: a worker with no stated allow-list would be a worker ' +
+          'whose authority nothing bounds.',
+      );
+    }
     const workerId = input.workerId.trim();
     if (!workerId) return fail('invalid_input', 'A worker id is required.');
     // Worker identity and HUMAN identity are separate registries, and an id in

@@ -42,7 +42,13 @@ import { claimSideEffectTask } from './reliability.fixture.js';
 import { intelligenceFixture, type IntelligenceFixture } from './intelligence.fixture.js';
 import { INTELLIGENCE_TIERS } from '../src/application/intelligence-command.js';
 import { MISSION_COMMAND_CAPABILITY } from '../src/application/mission-command.js';
-import { fullIntegrity, structuralIntegrity } from '../src/store/integrity.js';
+import {
+  ENGINE_IMMUTABLE_TABLES,
+  WRITE_ONCE_IDENTITY_TABLES,
+  fullIntegrity,
+  missingImmutabilityGuards,
+  structuralIntegrity,
+} from '../src/store/integrity.js';
 import { verifyEvidenceChain } from '../src/operator/evidence.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -419,5 +425,344 @@ describe('the prose around the derivation no longer claims an absolute the code 
     expect(page).toMatch(/count-preserving in-place rewrite/i);
     expect(page).toMatch(/hq_mission_events/);
     expect(page).toMatch(/json_remove/);
+  });
+});
+
+/**
+ * A PROJECT ceiling exhausted by one task, and a second task in the same
+ * project whose only tie to the ceiling is its plan item. Shared by the two
+ * round-fourteen describes below.
+ */
+interface ProjectScene {
+  fx: IntelligenceFixture;
+  projectId: string;
+  taskId: string;
+}
+
+function exhaustedProjectScene(): ProjectScene {
+  const fx = intelligenceFixture();
+  const project = expectOk(
+    fx.ops.createProject({
+      name: 'The project whose ceiling is exhausted',
+      purpose: 'Carry the mission under test',
+      requestedBy: 'founder',
+    }),
+  ).project;
+  const mission = expectOk(
+    fx.ops.commandMission({
+      title: 'Mission carrying two tasks',
+      objective: 'One task spends, the other only belongs',
+      planItems: ['The work that spends', 'The work that only belongs'],
+      projectId: project.id,
+      requestedBy: 'founder',
+    }),
+  ).mission;
+  expectOk(
+    fx.ops.linkMissionPlanItem({
+      missionId: mission.id,
+      planItemSeq: 1,
+      taskId: fx.claim.taskId,
+      requestedBy: 'founder',
+    }),
+  );
+  const victim = claimSideEffectTask(fx, 'the-project-scope-victim');
+  expectOk(
+    fx.ops.linkMissionPlanItem({
+      missionId: mission.id,
+      planItemSeq: 2,
+      taskId: victim.taskId,
+      requestedBy: 'founder',
+    }),
+  );
+  fx.budget([...INTELLIGENCE_TIERS]);
+  fx.budget(['deterministic_local'], {
+    scopeKind: 'project',
+    scopeId: project.id,
+    window: 'total',
+    ceilingMinorUnits: 1,
+  });
+  expectOk(
+    fx.ops.recordIntelligenceCost({
+      taskId: fx.claim.taskId,
+      workerId: fx.claim.workerId,
+      fence: fx.claim.fence,
+      providerId: 'anthropic',
+      provenance: 'billed',
+      amountMinorUnits: 5000,
+      currency: 'USD',
+      unitKind: 'requests',
+      idempotencyKey: 'the-spend-that-exhausted-the-project',
+    }),
+  );
+  return { fx, projectId: project.id, taskId: victim.taskId };
+}
+
+function sceneProposal(scene: ProjectScene) {
+  return expectOk(
+    scene.fx.ops.intelligenceRoutingProposal({
+      taskId: scene.taskId,
+      complexity: 'routine',
+      contextSize: 'medium',
+      workKind: 'coding',
+    }),
+  );
+}
+
+function scopeKindsFor(scene: ProjectScene): string[] {
+  return sceneProposal(scene)
+    .governedBy.map((scope) => String(scope.scopeKind))
+    .sort();
+}
+
+/**
+ * Wave 5, correction round fourteen — Medium 4: the `op_tasks.payload` route to
+ * a PROVIDER ceiling is correctly disclosed and carried NO pin, so closing or
+ * widening it would have been silent.
+ *
+ * Phase 14's NOT-fixed list says `op_tasks.payload` remains mutable and
+ * uncensused, and that what still depends on the live payload is which provider
+ * scope governs a NEW decision on a task that has recorded no spend of its own.
+ * That is true, and it is executed here at the price it actually costs — ONE
+ * `UPDATE`, no DDL, no row-count change — so that the residual cannot drift in
+ * either direction: closing it fails this test and sends whoever closed it to
+ * the page, and widening it fails the assertions about what still holds.
+ */
+describe('the disclosed op_tasks.payload route to a provider ceiling, pinned', () => {
+  interface ProviderScene {
+    fx: IntelligenceFixture;
+    /** The task with NO recorded spend, governed only by its live binding. */
+    taskId: string;
+    workerId: string;
+    fence: number;
+  }
+
+  /** A PROVIDER ceiling exhausted by one task, and a second bound to the same. */
+  function providerScene(): ProviderScene {
+    const fx = intelligenceFixture();
+    const raw = fx.db as unknown as Database.Database;
+    const spender = fx.claim;
+    const victim = claimSideEffectTask(fx, 'the-provider-bound-victim');
+    // The binding lives in the task payload, which is what the disclosure is
+    // about. It is set the way the queue's own reader reads it.
+    raw
+      .prepare(`UPDATE op_tasks SET payload = json_set(payload, '$.executionProvider', 'CLAUDE')`)
+      .run();
+    fx.budget([...INTELLIGENCE_TIERS]);
+    fx.budget(['deterministic_local'], {
+      scopeKind: 'provider',
+      scopeId: 'claude',
+      window: 'total',
+      ceilingMinorUnits: 1,
+    });
+    expectOk(
+      fx.ops.recordIntelligenceCost({
+        taskId: spender.taskId,
+        workerId: spender.workerId,
+        fence: spender.fence,
+        providerId: 'claude',
+        provenance: 'billed',
+        amountMinorUnits: 5000,
+        currency: 'USD',
+        unitKind: 'requests',
+        idempotencyKey: 'the-spend-that-exhausted-the-provider',
+      }),
+    );
+    return { fx, taskId: victim.taskId, workerId: victim.workerId, fence: victim.fence };
+  }
+
+  function proposal(scene: ProviderScene) {
+    return expectOk(
+      scene.fx.ops.intelligenceRoutingProposal({
+        taskId: scene.taskId,
+        complexity: 'routine',
+        contextSize: 'medium',
+        workKind: 'coding',
+      }),
+    );
+  }
+
+  function scopeKinds(scene: ProviderScene): string[] {
+    return proposal(scene)
+      .governedBy.map((scope) => String(scope.scopeKind))
+      .sort();
+  }
+
+  it('nullifies a provider ceiling at ONE statement, invisibly, exactly as disclosed', () => {
+    const scene = providerScene();
+    try {
+      const raw = scene.fx.db as unknown as Database.Database;
+      expect(scopeKinds(scene), 'before').toEqual(['deployment', 'provider']);
+      expect(proposal(scene).permittedTiers).toEqual(['deterministic_local']);
+      expect(
+        String((proposal(scene) as unknown as { budgetDecision: unknown }).budgetDecision),
+      ).toBe('blocked');
+      expect(
+        scene.fx.ops.recordIntelligenceDecision({
+          taskId: scene.taskId,
+          workerId: scene.workerId,
+          fence: scene.fence,
+          tier: 'critical_review',
+          label: 'the write the exhausted provider ceiling should refuse',
+          complexity: 'routine',
+          contextSize: 'medium',
+          workKind: 'coding',
+          idempotencyKey: 'provider-critical-before',
+        }).ok,
+      ).toBe(false);
+
+      const rowsBefore = (raw.prepare(`SELECT COUNT(*) AS n FROM op_tasks`).get() as { n: number }).n;
+      let statements = 0;
+      raw
+        .prepare(`UPDATE op_tasks SET payload = json_remove(payload, '$.executionProvider') WHERE id = ?`)
+        .run(scene.taskId);
+      statements += 1;
+      expect(statements, 'one statement, no DDL — the disclosed price').toBe(1);
+      expect((raw.prepare(`SELECT COUNT(*) AS n FROM op_tasks`).get() as { n: number }).n).toBe(
+        rowsBefore,
+      );
+
+      expect(scopeKinds(scene), 'the residual: the provider scope is gone').toEqual(['deployment']);
+      expect(proposal(scene).permittedTiers.length).toBe(INTELLIGENCE_TIERS.length);
+      expect(
+        String((proposal(scene) as unknown as { budgetDecision: unknown }).budgetDecision),
+      ).toBe('within_ceiling');
+      expect(
+        scene.fx.ops.recordIntelligenceDecision({
+          taskId: scene.taskId,
+          workerId: scene.workerId,
+          fence: scene.fence,
+          tier: 'critical_review',
+          label: 'the write the nullified ceiling now admits',
+          complexity: 'routine',
+          contextSize: 'medium',
+          workKind: 'coding',
+          idempotencyKey: 'provider-critical-after',
+        }).ok,
+        'the residual really does admit the refused write',
+      ).toBe(true);
+
+      // And it is invisible at both integrity depths, which is the other half
+      // of the disclosure rather than an aside.
+      expect(structuralIntegrity(scene.fx.db, {}).safeMode).toBe(false);
+      expect(
+        fullIntegrity(scene.fx.db, { verifyEvidenceChain: () => verifyEvidenceChain(scene.fx.db) })
+          .safeMode,
+      ).toBe(false);
+    } finally {
+      // The intelligence fixture is `:memory:`-backed and owns no file.
+      scene.fx.db.close();
+    }
+  });
+
+  /**
+   * The half that still HOLDS, so the pin bounds the residual rather than only
+   * demonstrating it: a provider ceiling the task has ALREADY SPENT UNDER keeps
+   * governing it however the live payload is rewritten, because the attribution
+   * on its own cost entries is HQ-derived and append-only.
+   */
+  it('keeps governing a task that has already spent under the provider ceiling', () => {
+    const scene = providerScene();
+    try {
+      const raw = scene.fx.db as unknown as Database.Database;
+      expectOk(
+        scene.fx.ops.recordIntelligenceCost({
+          taskId: scene.taskId,
+          workerId: scene.workerId,
+          fence: scene.fence,
+          providerId: 'claude',
+          provenance: 'billed',
+          amountMinorUnits: 1,
+          currency: 'USD',
+          unitKind: 'requests',
+          idempotencyKey: 'the-victims-own-spend',
+        }),
+      );
+      raw
+        .prepare(`UPDATE op_tasks SET payload = json_remove(payload, '$.executionProvider') WHERE id = ?`)
+        .run(scene.taskId);
+      expect(
+        scopeKinds(scene),
+        'a ceiling already spent under keeps governing, whatever the live payload says',
+      ).toEqual(['deployment', 'provider']);
+      expect(proposal(scene).permittedTiers).toEqual(['deterministic_local']);
+    } finally {
+      scene.fx.db.close();
+    }
+  });
+
+  it('the phase document still carries this residual, at the price measured here', () => {
+    const page = fs.readFileSync(PHASE_14, 'utf8');
+    expect(page).toContain('`op_tasks.payload` remains mutable and uncensused');
+    expect(page).toContain('which provider scope governs a NEW decision on');
+    expect(page).toContain('intelligence-project-scope-residual.test.ts');
+  });
+});
+
+/**
+ * Wave 5, correction round fourteen — Low 7: `hq_projects` carries NO engine
+ * guard and is in NEITHER census, and the measured effect on the budget
+ * derivation is NONE.
+ *
+ * Both halves are executed here, and the second is why this is recorded rather
+ * than closed. `hq_projects` is not in `ENGINE_IMMUTABLE_TABLES` and not in
+ * `WRITE_ONCE_IDENTITY_TABLES`, so a raw `DELETE FROM hq_projects` and a raw
+ * `UPDATE hq_projects SET id` are both ACCEPTED, with `missingImmutabilityGuards
+ * []` and `structuralIntegrity safeMode: false` — nothing observes either. And
+ * the project ceiling keeps binding through both, because project membership is
+ * derived from the APPEND-ONLY mission event log (`#durableTaskProjectScopes`),
+ * which records the project a mission was created under and both ends of every
+ * later move, and never from the project ROW.
+ *
+ * That is the property this test exists to hold: if the derivation ever starts
+ * reading `hq_projects` — a join added for a name, a filter added for an active
+ * flag — the ceiling stops binding here and this fails, which is the moment the
+ * table would need a guard and a census entry. Adding those today would declare
+ * a guarantee nothing depends on, and this module's own rule is that a guard
+ * nothing checks is a guard that can go missing quietly.
+ */
+describe('hq_projects is unguarded and uncensused, and the ceiling does not depend on it', () => {
+  it('accepts a raw DELETE and a raw identity rewrite, and the project ceiling still binds', () => {
+    const scene = exhaustedProjectScene();
+    try {
+      const raw = scene.fx.db as unknown as Database.Database;
+      expect(
+        raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?`).all('hq_projects'),
+        'the disclosure is that this table carries no guard',
+      ).toEqual([]);
+      expect(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table)).not.toContain('hq_projects');
+      expect(WRITE_ONCE_IDENTITY_TABLES.map((entry) => entry.table)).not.toContain('hq_projects');
+
+      const before = scopeKindsFor(scene);
+      expect(before).toContain('project');
+
+      // Both writes, each rolled back so the second measures the same state.
+      for (const write of [
+        () => raw.prepare(`UPDATE hq_projects SET id = ? WHERE id = ?`).run('renamed-project', scene.projectId),
+        () => raw.prepare(`DELETE FROM hq_projects WHERE id = ?`).run(scene.projectId),
+      ]) {
+        raw.exec('SAVEPOINT unguarded_projects');
+        write();
+        expect(
+          scopeKindsFor(scene),
+          'the project ceiling is derived from the append-only mission event log, not from this row',
+        ).toEqual(before);
+        expect(
+          String((sceneProposal(scene) as unknown as { budgetDecision: unknown }).budgetDecision),
+        ).toBe('blocked');
+        // And nothing observes the write, which is the other half of the record.
+        expect(missingImmutabilityGuards(scene.fx.db)).toEqual([]);
+        expect(structuralIntegrity(scene.fx.db, {}).safeMode).toBe(false);
+        raw.exec('ROLLBACK TO unguarded_projects');
+        raw.exec('RELEASE unguarded_projects');
+      }
+    } finally {
+      scene.fx.db.close();
+    }
+  });
+
+  it('the phase document records it, with the measured effect', () => {
+    const page = fs.readFileSync(PHASE_14, 'utf8');
+    expect(page).toContain('`hq_projects` carries no engine guard and is in neither census');
+    expect(page).toContain('the measured effect on the budget derivation is NONE');
   });
 });

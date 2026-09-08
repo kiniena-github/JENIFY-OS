@@ -1397,6 +1397,36 @@ canonical truth; what was wrong was doing it silently and inconsistently.
   depends on the live payload is which provider scope governs a NEW decision on
   a task that has not yet recorded any spend. A write-once guard on the column
   was implemented and withdrawn — see the Phase 13 document for why.
+  **PINNED since round fourteen (Medium 4), which found this residual correctly
+  disclosed and carrying no assertion at all, so closing or widening it would
+  have been silent.** Executed in
+  `intelligence-project-scope-residual.test.ts` at the price it costs: ONE
+  `UPDATE op_tasks SET payload = json_remove(payload, '$.executionProvider')`,
+  no DDL and no row-count change, takes `governedBy` from
+  `[deployment, provider]` to `[deployment]`, `permittedTiers` from
+  `['deterministic_local']` to all five, `budgetDecision` from `blocked` to
+  `within_ceiling`, and a `critical_review` write that was REFUSED is then
+  ACCEPTED — with `structuralIntegrity` and `fullIntegrity` both reporting
+  `safeMode: false`. The same file pins the half that HOLDS, so the residual is
+  bounded rather than only demonstrated: a provider ceiling the task has already
+  SPENT under keeps governing it however the live payload is rewritten.
+- **`hq_projects` carries no engine guard and is in neither census**, so a raw
+  `DELETE FROM hq_projects` and a raw `UPDATE hq_projects SET id` are both
+  ACCEPTED with `missingImmutabilityGuards []` and `structuralIntegrity
+  safeMode: false` — nothing observes either (round fourteen, Low 7).
+  **RECORDED rather than closed, because
+  the measured effect on the budget derivation is NONE:** project membership is derived from the APPEND-ONLY
+  mission event log, which records the project a mission was created under and
+  both ends of every later move, and never from the project ROW. Executed with
+  a project ceiling exhausted and the attack on a task with no spend of its own:
+  `governedBy` still `[deployment, project]`, `permittedTiers` still
+  `['deterministic_local']`, `budgetDecision` still `blocked`, through both
+  writes. Declaring guards on it today would declare a guarantee nothing depends
+  on, and a guard nothing checks is a guard that can go missing quietly — so the
+  property is PINNED instead, in
+  `intelligence-project-scope-residual.test.ts`: if the derivation ever starts
+  reading `hq_projects`, the ceiling stops binding there and that test fails,
+  which is the moment the table needs a guard and a census entry.
 - **A MODEL-scoped ceiling still does not govern a decision write**, unchanged:
   nothing in canonical truth binds a task to a model, so `byModel` stays on the
   entry's own column and a model ceiling is readable but not binding.

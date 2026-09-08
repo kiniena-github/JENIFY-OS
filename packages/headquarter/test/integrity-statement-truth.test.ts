@@ -713,12 +713,20 @@ describe('the cost clause of the depth statement is derived from what a pass exe
    *
    * The concurrent lane's rule is applied to this lane's own prose as well
    * (round eleven, Medium 1, merged): the worked figures in
-   * `STRUCTURAL_STATEMENT_BASE`'s docblock — 2 seeks and 46 statements on a file
-   * HQ has merely booted twice, 4 and 48 on the warmed one, and 11 statements
+   * `STRUCTURAL_STATEMENT_BASE`'s docblock — 2 seeks and 50 statements on a file
+   * HQ has merely booted twice, 4 and 52 on the warmed one, and 15 statements
    * with zero identity reads before the first commitment — are PARSED BACK OUT
    * of the source and compared to these measurements. Writing a rule instead of
    * a total does not exempt the numbers that illustrate it; leaving illustrative
    * figures unasserted is how the first three drifted.
+   *
+   * **This paragraph itself carried the fourth wrong set** (Wave 5 correction
+   * round fourteen, Low 2). It went on saying 46/48/11 after the base moved to
+   * 48 and the fixed term to 15, and nothing caught it because the ASSERTIONS
+   * below parse the figures out of `integrity.ts` — they never read this
+   * comment. The figures here are now the ones the source states and the
+   * measurement produces; a comment is not self-checking, so this one is
+   * written to be checkable by eye against the constant it quotes.
    */
   it('costs a fixed base plus one statement per seek, on two files with different seek counts', () => {
     const declared = new Set(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table));

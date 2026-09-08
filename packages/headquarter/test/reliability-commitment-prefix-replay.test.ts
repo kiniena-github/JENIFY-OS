@@ -46,6 +46,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import { fileFixture, type FileFixture } from './reliability.fixture.js';
@@ -598,15 +599,27 @@ describe('the sentence that crosses to the Founder says what the code does', () 
  *
  *  1. **A "each checkpoint advances something" invariant.** It is true of
  *     `recordIntegrityCheckpoint` by construction and it does catch a pad built
- *     from COPIES. It is rejected because two processes that read the same state
- *     before either writes produce two checkpoints committing identical
- *     quantities — a legitimate concurrent boot — so the check can raise a
- *     PERMANENT finding over an untampered file. A fabricated finding is
- *     forbidden in the alarm direction exactly as in the reassurance one, which
- *     is the whole subject of this correction round. And it buys little even if
- *     it were safe: the pad can be built from DISTINCT rows whose committed
- *     quantities rise, which `no_overclaim` permits because they stay under the
- *     file's real marks.
+ *     from COPIES. It is rejected because it buys nothing an attacker cannot
+ *     step around: the pad can be built from DISTINCT rows whose committed
+ *     quantities RISE, which `no_overclaim` permits because they stay under the
+ *     file's real marks, and the invariant is then satisfied by construction.
+ *
+ *     **The concurrency hazard this rejection used to lead with was NOT
+ *     reproduced, and the wording is corrected rather than the verdict** (Wave 5
+ *     correction round fourteen, Low 4). The sentence said flatly that "two
+ *     processes that read the same state before either writes produce two
+ *     checkpoints committing identical quantities — a legitimate concurrent
+ *     boot". Executed: three real concurrent processes over one file, six full
+ *     assessments each, 22 checkpoints, **0 identical**. Each assessment appends
+ *     its own evidence entry inside the same reservation that writes its
+ *     checkpoint, so every checkpoint commits a chain length and tip hash no
+ *     other checkpoint carries. That does not make the hazard impossible —
+ *     nothing here proves a schedule that produces a collision cannot exist —
+ *     but it is not something this repository has observed, and stating it as a
+ *     fact was stating more than the evidence supports. The closure stays
+ *     rejected on the reason above, which does not depend on it.
+ *     `concurrent boots do not produce identical checkpoints` below is the
+ *     measurement.
  *  2. **A content digest in the header's low bits.** Sixteen bits is a 65,536-way
  *     collision search an attacker runs offline in under a second, and widening
  *     it means either shrinking the signature — which round ten already measured
@@ -723,4 +736,103 @@ describe('the header mark is a COUNT, and a padded replay meets it', () => {
       fx.cleanup();
     }
   });
+});
+
+/**
+ * The measurement behind the round-fourteen correction to the FIRST rejected
+ * closure (Low 4).
+ *
+ * The rejection used to lead with "two processes that read the same state
+ * before either writes produce two checkpoints committing identical quantities
+ * — a legitimate concurrent boot", stated as a fact. It was not reproduced, and
+ * this is the experiment that says so: three REAL concurrent processes, each
+ * running six full assessments against one file, and every checkpoint the file
+ * ends up holding commits a distinct quadruple of (`ledger_marks`,
+ * `ledger_rows`, `chain_length`, `tip_hash`).
+ *
+ * The reason is structural rather than lucky: an assessment appends its own
+ * evidence entry inside the SAME reservation that writes its checkpoint, so the
+ * chain length and tip hash a checkpoint commits already include that
+ * assessment's own entry, and no two can carry the same pair.
+ *
+ * This does NOT prove no schedule could collide, and the corrected wording says
+ * so. It proves the sentence was asserting more than anything measured, which
+ * is why the sentence changed and the verdict did not.
+ */
+describe('concurrent boots do not produce identical checkpoints', () => {
+  it('gives every checkpoint distinct committed quantities across three real processes', async () => {
+    const fx = fileFixture();
+    try {
+      expect(fx.ops.assessHqIntegrity({ requestedBy: 'founder' }).ok).toBe(true);
+      const dbPath = fx.dbPath;
+      fx.db.close();
+
+      const script = path.join(fx.dir, 'concurrent-assessor.ts');
+      fs.writeFileSync(
+        script,
+        `import { openHqDatabase } from '${new URL('../src/store/db.ts', import.meta.url).pathname}';\n` +
+          `import { HeadquarterOperations } from '${new URL('../src/application/service.ts', import.meta.url).pathname}';\n` +
+          `import { HeadquarterStore } from '${new URL('../src/store/headquarter.ts', import.meta.url).pathname}';\n` +
+          `const db = openHqDatabase(process.argv[2]);\n` +
+          `const ops = new HeadquarterOperations(db, { store: new HeadquarterStore(db), processIdentity: process.argv[3] });\n` +
+          `for (let i = 0; i < 6; i += 1) {\n` +
+          `  const r = ops.assessHqIntegrity({ requestedBy: 'founder' });\n` +
+          `  if (!r.ok) { console.log('CHILD_ERROR ' + JSON.stringify(r.error)); process.exit(2); }\n` +
+          `}\n` +
+          `db.close();\n` +
+          `console.log('CHILD_DONE ' + process.argv[3]);\n`,
+      );
+
+      const children = ['assessor-a', 'assessor-b', 'assessor-c'].map(
+        (id) =>
+          new Promise<{ id: string; code: number | null; out: string }>((resolve) => {
+            const child = spawn(process.execPath, ['--import', 'tsx', script, dbPath, id], {
+              cwd: new URL('..', import.meta.url).pathname,
+            });
+            let out = '';
+            child.stdout.on('data', (chunk: Buffer) => {
+              out += chunk.toString();
+            });
+            child.stderr.on('data', (chunk: Buffer) => {
+              out += chunk.toString();
+            });
+            child.on('exit', (code) => resolve({ id, code, out }));
+          }),
+      );
+      const finished = await Promise.all(children);
+      for (const child of finished) {
+        expect(child.code, `${child.id} did not finish cleanly: ${child.out}`).toBe(0);
+        expect(child.out).toContain(`CHILD_DONE ${child.id}`);
+      }
+
+      const raw = fx.raw();
+      const rows = raw
+        .prepare(
+          `SELECT seq, ledger_marks, ledger_rows, chain_length, tip_hash, process_id
+             FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE} ORDER BY seq`,
+        )
+        .all() as {
+        seq: number;
+        ledger_marks: string;
+        ledger_rows: string;
+        chain_length: number;
+        tip_hash: string;
+        process_id: string;
+      }[];
+      // All three children really did commit, so this is a measurement of
+      // concurrency rather than of one process that won every race.
+      expect(new Set(rows.map((row) => row.process_id)).size).toBeGreaterThanOrEqual(3);
+      expect(rows.length).toBeGreaterThan(6);
+      const quantities = rows.map((row) =>
+        JSON.stringify([row.ledger_marks, row.ledger_rows, row.chain_length, row.tip_hash]),
+      );
+      expect(
+        new Set(quantities).size,
+        'the rejected closure was justified by identical concurrent checkpoints; there are none',
+      ).toBe(quantities.length);
+      raw.close();
+    } finally {
+      fx.cleanup();
+    }
+  }, 180_000);
 });

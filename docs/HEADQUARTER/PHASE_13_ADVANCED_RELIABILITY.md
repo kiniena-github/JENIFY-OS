@@ -3538,7 +3538,7 @@ run over the whole wave rather than over the three sites the review named.
 | **MEDIUM 2** — "a frozen `Set`/`Map` is frozen in CONTENT" was false, and a TEST TITLE advertised a proof it did not execute | Round seven answered the mutable-collection finding with own, non-configurable throwing `add`/`set`/`delete`/`clear`. An own property shadows the prototype for DIRECT property access only. `Set.prototype.clear.call(x)` reads no property of `x` at all — it reaches the internal slot — and emptied a `deepFreeze`d `QUEUED_UNREACHABLE_STATUSES` in ONE statement: `frozen? true`, `.clear() refused`, then `after Set.prototype.clear.call: [] size= 0` and `has("done") now: false`. That is the vocabulary `service.ts` decides `task_beyond_claiming` on; emptied, the barrier stops firing. `Set.prototype.add`/`delete` and `Map.prototype.set` reached the same way. Meanwhile `frozen-constants-census.test.ts` carried the title *"a frozen Set or Map is frozen in its CONTENTS, not only in its shape"* while asserting only that the four shadowed properties throw. | **FIXED, not narrowed.** There is no way to make a REAL `Set` refuse the prototype spelling short of patching `Set.prototype` for the whole process, so `deepFreeze` no longer hands out a real `Set`: it returns a `Proxy` over one, and the raw collection is closed over and never escapes. A `Proxy` carries no `[[SetData]]` slot, so `Set.prototype.clear.call(view)` throws `TypeError: Method Set.prototype.clear called on incompatible receiver`. Direct `view.clear()` still throws HQ's own `TypeError`, from the own stub returned verbatim by the trap (returning anything else would violate the proxy invariant for a non-configurable own property). **`forEach` had to be rewritten rather than forwarded**: it hands its callback the collection it was called on as a THIRD argument, and forwarding the raw target there was a one-statement escape — found by executing the naive design before it shipped, not after. Reading is untouched: `has`, `get`, `size`, `forEach`, `keys`/`values`/`entries`, `for…of`, spread, `Array.from`, the ES2025 set-composition methods, `instanceof Set` and `Object.isFrozen` all behave as before, and a nested or self-referential collection resolves to its view rather than to the raw reference. Measured cost, stated rather than waved away: a bare `.has()` is about 15 ns direct and about 38 ns through the view; the package has exactly two frozen collections (census over every `src/` module outside `src/cli/**`, enumerated and floored by `frozen-constants-census.test.ts` rather than hand-counted — the "122" this cell used to name was never the count at any head in this repository's history, which runs 121 then 123 and was 131 on the day the sentence was written; round thirteen) and two call sites — one `.has()` per task, one per query token — so the added cost is bounded by a few microseconds per search and `deepFreeze` itself runs only at module load. The test title now executes the prototype spelling, the `forEach` escape, the full read surface, a nested collection and a cycle. |
 | **MEDIUM 1** — the project-scope derivation was documented as "unforgeable", and the residual priced the attack above its cheapest path | Phase 14 said the third term was "monotone and **unforgeable** … because `hq_mission_events` is engine-guarded", and scoped the residual to "a mission created with a project by a build older than the commanded-event detail, never re-assigned through the facade". A guard is a row in `sqlite_master` and this ledger carries no hash chain, so a CURRENT-build mission that WAS assigned through the facade is stripped in one count-preserving pass. Executed: `BEFORE gov=["deployment","project:task_project"] tiers=["deterministic_local"] criticalReview ok=false`; facade route unchanged (correctly still blocks); raw column unchanged (correctly still blocks); then 3 rows rewritten and `inplace gov=["deployment"] tiers=[all five] criticalReview ok=TRUE`. | **NARROWED AND DISCLOSED**, which is what the finding is: a disclosure defect, not a new capability. Closing it needs a hash chain over `hq_mission_events`, a material new mechanism this wave's own residual list already declines for the whole guarded-but-unhashed class. So "unforgeable" is gone from the derivation's header, from the `spentUnder` comment, from `intelligence-command.ts` and from both Phase 14 rows, replaced by "monotone against every SUPPORTED route"; and the count-preserving in-place rewrite class is now carried for this ledger in Phase 14's NOT-fixed list at its executed cost — three `DROP TRIGGER`, one `json_remove` update, three `CREATE TRIGGER`, one column clear; no `DELETE`, no `INSERT`, no row-count change, zero restarts, zero Founder acts. **The sweep found the same class also empties the `spentUnder` half** — the same one pass rewriting `mission_ids`/`project_ids` on `hq_intel_cost_entries` took an exhausted ceiling's `observed` from 5000 to 0 for a task that HAS spend of its own, the half three rounds had called always-held — and that both `structuralIntegrity` and `fullIntegrity` report `safeMode: false` with no observation afterwards. Both SUPPORTED routes remain correctly closed, pinned. |
 | **LOW 1** — `INTEGRITY_DEPTH_STATEMENT`'s cost clause understated its own structural pass, and was not pinned | The Founder-facing sentence said "one `MAX(rowid)` seek per declared ledger, and one `COUNT(*)` plus one indexed lookup over HQ's own small commitment ledger". `EXPLAIN QUERY PLAN`: `committedLedgerMarks` is `SCAN c` / `SCAN j VIRTUAL TABLE` / `USE TEMP B-TREE FOR GROUP BY`; the `COUNT(*)` is a covering-index SCAN; only `contradictedChainCommitment` is an indexed lookup. Direction fail-safe. | Re-MEASURED rather than re-estimated, and corrected in all three places it was restated (the constant, the module header, and this page's depth table). Counting the statements one pass executes: 15 on a warm store — three catalogue reads, TWO `MAX(rowid)` seeks for each of the three ledgers HQ has COMMITTED a mark for (not one per each of the 33 DECLARED), three `sqlite_sequence` reads, and three reads of the commitment ledger. And the ledger is not fixed in size: executed, it grows a row per clean boot AND per clean assessment. The round-eight statement-truth pin was GROWN rather than replaced — it was confirmed genuine — with three derived assertions: the seek count from instrumenting `db.prepare`, the ledger read's shape from `EXPLAIN QUERY PLAN` over the statement the pass really ran, and the growth from executing a boot and an assessment. |
-| **LOW 2** — the NFKD mark-strip introduced a new credential-shape false positive on accented hyphenated names | `ŠK-Slovan-Bratislava-1919` passed before this wave — `Š` is a precomposed `Lu` that `NFKC` leaves alone — and is refused now, because the `NFKD` strip folds it to `S` and the case-insensitive `sk-` rule fires, refusing the whole snapshot. The round-seven measurement was scoped to "accented prose in five languages", which does not cover hyphenated proper names. | **DISCLOSED, argued, and stated by enumeration rather than by adjective.** The class is exact: 53 non-ASCII letters fold to `s` and 42 to `k`, and a string is newly refused when one of the first is followed by one of the second at a non-alphanumeric boundary, then `-`, then 16+ of `[A-Za-z0-9_-]` — all 53 executed, all 53 refuse. Nothing wider: `Škoda-Auto-Mladá-Boleslav`, `Sköldebrand-Åkerström-Handelsbolaget` and `Ćwikliński-Żółkiewski-Przedsiębiorstwo` each execute and each pass, as do the twelve legitimate multi-script strings. Not fixed, because the ASCII spelling `SK-Slovan-Bratislava-1919` was ALREADY refused before this wave — the over-breadth is in the `sk-` shape, which accepts `-` in its tail because a real key does (`sk-proj-…`) — so the fold added SPELLINGS of an existing over-refusal rather than a new class, and narrowing a credential rule to buy back an availability cost measured at one two-letter prefix is a change in the direction of under-refusal. The evasion direction is re-executed and unmoved: U+0301, U+20DD, U+0378, U+05BF and U+0E31 are all still caught. |
+| **LOW 2** — the NFKD mark-strip introduced a new credential-shape false positive on accented hyphenated names | `ŠK-Slovan-Bratislava-1919` passed before this wave — `Š` is a precomposed `Lu` that `NFKC` leaves alone — and is refused now, because the `NFKD` strip folds it to `S` and the case-insensitive `sk-` rule fires, refusing the whole snapshot. The round-seven measurement was scoped to "accented prose in five languages", which does not cover hyphenated proper names. | **DISCLOSED, argued, and stated by enumeration rather than by adjective.** The class is exact: 53 non-ASCII letters fold to `s` and 42 to `k`, and a string is newly refused when one of the first is followed by one of the second at a non-alphanumeric boundary, then `-`, then 16+ of `[A-Za-z0-9_-]` — all 53 executed, all 53 refuse. Nothing wider: `Škoda-Auto-Mladá-Boleslav`, `Sköldebrand-Åkerström-Handelsbolaget` and `Ćwikliński-Żółkiewski-Przedsiębiorstwo` each execute and each pass, as do the twelve legitimate multi-script strings. Not fixed, because the ASCII spelling `SK-Slovan-Bratislava-1919` was ALREADY refused before this wave — the over-breadth is in the `sk-` shape, which accepts `-` in its tail because a real key does (`sk-proj-…`) — so the fold added SPELLINGS of an existing over-refusal rather than a new class, and narrowing a credential rule to buy back an availability cost measured at one two-letter prefix is a change in the direction of under-refusal. The evasion direction is re-executed and unmoved: U+0301, U+20DD, U+0378, U+05BF and U+0E31 are all still caught. **ROUND FOURTEEN (Low 5) adds the class this cost did not name: a git BRANCH NAME.** This repository's own automation protocol mandates `ai/<issue>-<slug>` and `claude/<slug>` branches, and a branch name routinely reaches a facade text field — a mission title, a task title, a plan-item summary, a note. `feature/sk-rework-of-the-evaporation-model` is REFUSED, and so are `ai/271-sk-rework-of-the-evaporation-model`, `claude/sk-rework-of-the-evaporation` and the bare `sk-rework-of-the-evaporation-model`: the rule is `(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}`, so a slug beginning `sk-` at any non-alphanumeric boundary with sixteen or more following characters meets it. The class is REAL and it is NARROW, and both halves are the disclosure: measured over fifteen real and near-miss branch names, 5 are refused and 10 pass, including `ai/267-sk-rework` (too short), `docs/sk-notes`, `feature/task-scheduler-improvements`, `feature/skew-correction` and `ai/12-skip-broken-test`. The boundary is measured on both sides (`feature/sk-abcdefghijklmnop` refused, `feature/sk-abcdefghijklmno` passed). The DECISION is unchanged for the reason above — the ASCII spelling was already refused, and narrowing a credential rule to buy back availability is a change in the direction of under-refusal — and the class is executed in `credential-scan-false-positive-class.test.ts` rather than described. |
 
 ### The absolutes sweep this round ran, and what it found
 
@@ -4936,14 +4936,23 @@ on the merits, and both are recorded so a later round does not rediscover them:
 
 1. **An "every checkpoint advances something" invariant.** True of
    `recordIntegrityCheckpoint` by construction, and it does catch a pad built
-   from COPIES. Rejected because two processes that read the same state before
-   either writes produce two checkpoints committing identical quantities — an
-   ordinary concurrent boot — so the check can raise a PERMANENT finding over an
-   untampered file. That is the fabricating direction, which is the subject of
-   this round's HIGH 1 and is forbidden as strictly as the reassuring one. It
-   also buys little: the pad can be built from DISTINCT rows whose committed
-   quantities rise, which `no_overclaim` permits because they stay under the
-   file's real marks.
+   from COPIES. Rejected because it buys nothing an attacker cannot step around:
+   the pad can be built from DISTINCT rows whose committed quantities RISE,
+   which `no_overclaim` permits because they stay under the file's real marks,
+   and the invariant is then satisfied by construction.
+
+   > **CORRECTED IN ROUND FOURTEEN (Low 4).** This rejection used to LEAD with a
+   > second reason — that "two processes that read the same state before either
+   > writes produce two checkpoints committing identical quantities — an ordinary
+   > concurrent boot". **That was not reproduced.** Executed: three real
+   > concurrent processes over one file, six full assessments each, 22
+   > checkpoints, **0 identical**, because every assessment appends its own
+   > evidence entry inside the same reservation that writes its checkpoint, so
+   > each checkpoint commits a chain length and tip hash no other carries. The
+   > claim is not disproved in general — no schedule was shown to be impossible —
+   > but it was stated as fact on evidence that did not exist. The closure stays
+   > rejected, on the reason above, which does not depend on it, and the
+   > measurement is pinned in `reliability-commitment-prefix-replay.test.ts`.
 2. **A content digest in the header's low bits.** Sixteen bits is a 65,536-way
    collision search an attacker runs offline in under a second. Widening it means
    either shrinking the signature — which round ten already measured as a real
@@ -4968,8 +4977,24 @@ taken on trust:
   (`String matches a known credential shape (at stored_text.workerId)`, and so
   on). `callerTextRefusal` scans every own string field of every facade write's
   input, and `facade-write-scan.test.ts` derives coverage PER (method,
-  parameter) pair with no curated vocabulary — the 18-name `FREE_TEXT_PARAMETERS`
-  list the finding names is gone. Not a defect at this head.
+  parameter) pair with no curated vocabulary in the PARAMETER half — the
+  18-name `FREE_TEXT_PARAMETERS` list the finding names is gone. Not a defect at
+  this head.
+
+  > **SCOPE CORRECTED IN ROUND FOURTEEN (Medium 2).** "No curated vocabulary" is
+  > true of the PARAMETER half and was never true of the METHOD half. Which
+  > methods count as WRITES starts from `WRITE_MARKERS`, a curated regex of write
+  > spellings, and round thirteen closed that regex over the class's own call
+  > graph so a public method whose write lives in a `#private` helper is
+  > classified — which is exactly the defect a fresh review reported against
+  > `f348f9a`, and it is ALREADY FIXED at the merged head by the concurrent
+  > round-thirteen lane. The two ledger writers the reviewer named,
+  > `recordIntelligenceDecision` and `escalateIntelligenceDecision`, are
+  > classified and scanned. What the classifier can still miss is a write in a
+  > spelling `WRITE_MARKERS` does not name, reached through a module-level
+  > function rather than a method of this class; no such method exists at this
+  > head, and that is the honest boundary rather than "no curated vocabulary
+  > anywhere".
 - **MEDIUM 2** — the served depth statement's "46 statements". The served
   sentence quotes no total at all now; it interpolates
   `STRUCTURAL_STATEMENT_BASE` and states the seek term as a rule, with both
@@ -5101,6 +5126,72 @@ taken on trust:
   lands.** Appending to `hq_reliability_verdicts` is the write its guards
   deliberately permit; what round thirteen pins is that the name is dropped at the
   reader rather than that the append is refused.
+
+### What round fourteen adds to the NOT-fixed list
+
+Every price below is MEASURED at this head, not carried forward.
+
+- **`no_rowid_reseat` is a step, not a boundary**, at exactly the price its
+  sibling carries: three statements — `DROP TRIGGER`, the write, re-create — and
+  a guard re-created before the next boot is never observed missing, because the
+  as-found census reads `sqlite_master` at construction time only. What that
+  buys back is the LAUNDERING of a mid-ledger deletion: with the guard gone, one
+  further insert at the freed rowid restores rows, greatest rowid and gap to
+  exactly what HQ committed, and **no predicate over the file separates that
+  from an untampered ledger**. `committedRemovalsBelowMark` says so in its own
+  docblock with the worked four-case table, the detail text says so to the
+  Founder, and `ledger-rowid-guard.test.ts` asserts it — the refilled hole is
+  reported by nothing, deliberately, rather than being claimed as covered.
+- **A file written by a build older than this one reports one boot of safe
+  mode**, unchanged in kind and now for two guards rather than one: a file
+  carrying no `no_rowid_reseat` trigger reports `append_only_guard_missing` at
+  its first boot under this build, and ONE Founder assessment of the file as it
+  then stands clears it, because re-creating a trigger really does repair the
+  file's guard set. The same is true of `op_tasks`' two new identity guards.
+- **The `op_tasks` identity residual is now three routes at three prices**, all
+  executed in `budget-scope-identity.test.ts` rather than quoted: `UPDATE
+  op_tasks SET id` at three statements (`trg_op_tasks_no_reidentify`), `INSERT
+  OR REPLACE` at three (`trg_op_tasks_no_replace`), and `DELETE` + `INSERT` at
+  four (`trg_op_tasks_no_erase`, two writes, re-create). The round-thirteen page
+  priced the first at three while the cheapest was ONE; the full record is on
+  `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md`.
+- **A raw `INSERT` of a NEW `op_tasks` row is admitted at ONE statement and no
+  trigger can close it**, because it is byte-for-byte the shape of `createTask`.
+  What it produces is an UNGOVERNED task, which is what `createTask` produces
+  for any task not linked to a mission; it is NOT an identity change, and the
+  victim task's ceiling still binds, which is asserted rather than assumed.
+- **`replaceableKeysFor` is fail-OPEN for three index shapes** — an index whose
+  name is not a plain identifier, a key with an expression column, and a partial
+  unique index whose predicate cannot be read back out of `sqlite_master`. It
+  builds SQL and will not build SQL it cannot spell exactly. HQ's live schema
+  carries none of those shapes, which is asserted rather than assumed, so the
+  gap is disclosed rather than live.
+- **The unauthenticated artifact publishes twenty Founder- and worker-typed
+  fields**, unchanged in behaviour and now disclosed in full above. The
+  derivation that keeps that table honest is complete for the METHODS the canary
+  scenario exercises and is not a claim about the whole facade; a method added
+  to a snapshot section in a future phase has to be added to the canary table by
+  hand.
+- **`hq_projects` carries no engine guard and is in neither census**, and the
+  measured effect on the budget derivation is NONE — recorded, with the
+  measurement and the pin, in `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md`'s
+  NOT-fixed list.
+- **The `sk-` credential shape refuses a class of git BRANCH NAME**, disclosed
+  above with the executed boundary (5 refused of 15 real and near-miss names).
+  Unchanged decision: the ASCII spelling was already refused, and narrowing a
+  credential rule to buy back availability is a change in the direction of
+  under-refusal.
+- **`facade-write-scan.test.ts`'s METHOD classification has a curated base
+  case.** `WRITE_MARKERS` is a regex of write spellings, closed over the class's
+  own call graph; a write in a spelling it does not name, reached through a
+  module-level function rather than a method of this class, would be missed. No
+  such method exists at this head.
+- **An unreadable JSON column now reads as EMPTY rather than raising**, which is
+  a choice with a cost: an action intent whose `payload` reads as `{}` no longer
+  matches its own stored digest, so every path that acts on a payload refuses
+  it, and a Founder sees an intent with no risk factors rather than a console
+  that will not render. Raising is the outcome that was closed; reading the
+  planted content is not something any reader could do.
 
 ## Wave 5 correction round thirteen, the THIRD lane: the classifier, not the parameters
 
@@ -5415,3 +5506,49 @@ with the candidate sha256 unchanged and no sidecars;
 erasure with no false positive on restart, `VACUUM`, `.backup()` or
 `VACUUM INTO`; and `frozen-constants-census.test.ts` (18) for the retained
 pre-freeze reference. 161 tests across those eleven files, 161 passed.
+
+## Wave 5 correction round FOURTEEN — a bound with one side, a rowid the engine spells for itself, and an enumeration that was one of three
+
+Two fresh read-only hostile reviewers audited `f348f9a` independently and
+returned **0 Critical / 4 High / 4 Medium / 7 Low**. This branch had already
+moved to `8481269` by the time the round started — the concurrent round-thirteen
+classifier lane had landed — so **every finding was re-executed at the merged
+head before anything was changed**, and two of them were found already closed
+there. The verdicts below are per finding, and every price is the one measured
+at `8481269` rather than the one reported.
+
+**The class, for the fifth consecutive round: a partial enumeration standing in
+for the complete one.** A bound with one side (`no_rowid_skip`), one identity
+spelling of three (`op_tasks`), two methods standing for a whole facade (the
+artifact canary), and a curated method vocabulary standing for every write
+(`WRITE_MARKERS`). The answer this round is the same in each case — make the
+enumeration complete BY CONSTRUCTION, and make the pinning test enumerate the
+same way — and where it cannot be complete, say so plainly instead of writing a
+sentence that implies it is. Three such boundaries are now written down: what
+`committedRemovalsBelowMark` cannot separate, what `replaceableKeysFor` skips,
+and what the canary derivation does and does not cover.
+
+| finding | verdict | where |
+|---|---|---|
+| **HIGH 1** — `no_rowid_skip` bounds only from above, so a mid-ledger deletion is laundered to a clean store by ONE further permitted `INSERT`; silent on 30 of 33 ledgers | **FIXED** at the write (`no_rowid_reseat` on all 33) and at the read (`committedRemovalsBelowMark` separates a removal from a plant); the three false docblocks and the `SAFE_MODE_STATEMENT` clause corrected | the HIGH 1/HIGH 2 section above |
+| **HIGH 2** — one permitted `INSERT` at rowid `-1` bricks HQ's own appends, kill switch included | **FIXED**; the plant is refused, and `engageKillSwitch`, `releaseKillSwitch` and `assessHqIntegrity` now REFUSE rather than throw when HQ's own store will not take the append | the same section |
+| **HIGH 3** — a seventh budget-ceiling route: `op_tasks` carried one identity guard of three | **FIXED**; `WRITE_ONCE_IDENTITY_GUARDS` declares all three and the replacement guard's keys are derived from the file, partial unique index included | `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md` |
+| **HIGH 4** — the unauthenticated artifact publishes far more Founder-typed text than the disclosure says, and the pin was vacuous | **FIXED as a disclosure**: measured at 20 of 34, the table above rewritten, the pin now plants every field and asserts the exact crossing set in both directions | the publication-surface section above |
+| **MEDIUM 1** — the `op_tasks` residual was priced 3x too high | **FIXED**; prices measured per route | `PHASE_14…md` |
+| **MEDIUM 2** — `facade-write-scan.test.ts` gated on a curated METHOD vocabulary | **ALREADY FIXED at the merged head** by the concurrent round-thirteen lane, which closed `WRITE_MARKERS` over the call graph; the surviving overstatement ("no curated vocabulary anywhere") is corrected to the true scope | the HIGH 4 row of the round-thirteen reconciliation, with its scope note |
+| **MEDIUM 3** — `hqReliabilityPosture()` throws uncaught on one permitted append | **FIXED**; the action-intent reader is total over anything a raw writer can store | pinned in `action-gateway-durability.test.ts` |
+| **MEDIUM 4** — the `op_tasks.payload` provider-scope route carried no pin | **FIXED**; the disclosed residual is now executed at its one-statement price, with the half that HOLDS pinned beside it | `PHASE_14…md` |
+| **LOW 1** — `ledgerRowidGuardDdl` emits a one-argument `MAX()` with no `sqlite_sequence` | **FIXED** (latent, not reachable on a real HQ file); pinned on `hq_missions`, one of the five non-AUTOINCREMENT ledgers | `ledger-rowid-guard.test.ts` |
+| **LOW 2** — stale worked figures in `integrity-statement-truth.test.ts` | **FIXED**; 46/48/11 → 50/52/15, and the comment now says why the assertions never caught it | that file |
+| **LOW 3** — the `NEW.rowid` comment | **FIXED**; the value is deterministically the integer `-1`, and it is now MEASURED by a probe trigger rather than described | `ledger-rowid-guard.test.ts` |
+| **LOW 4** — "concurrent boots produce identical checkpoints" was not reproduced | **NOT A DEFECT in the verdict, FIXED as wording**: three real concurrent processes × six assessments, 22 checkpoints, 0 identical. The closure stays rejected on its other reason, which does not depend on it | `reliability-commitment-prefix-replay.test.ts` |
+| **LOW 5** — the credential-scan false-positive cost misses git branch names | **FIXED as a disclosure**; the class is real and NARROW, executed at 5 refused of 15, with the boundary measured on both sides | the LOW 2 row above, and `credential-scan-false-positive-class.test.ts` |
+| **LOW 6** — `registerExecutionWorker` throws on an omitted field | **FIXED**; it refuses `invalid_input` and never raises | `worker-registration.test.ts` |
+| **LOW 7** — `hq_projects` is unguarded and uncensused | **RECORDED, not closed**: measured effect on the budget derivation is NONE, and the property that makes that true is pinned so a future join fails there first | `PHASE_14…md` |
+
+**How each fix was verified.** Every pin was run against the pre-fix tree in a
+scratch worktree at `8481269` and confirmed to FAIL there, with the reason
+recorded per finding. A mutation sweep was then run over every defence added or
+touched: **24 mutations, 24 killed**, with two survivors on the first pass — the
+primary-key fallback in `replaceableKeysFor` and the three-guard identity census
+— each given the pin that kills it rather than being reported as covered.
