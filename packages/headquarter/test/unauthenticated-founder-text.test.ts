@@ -63,17 +63,50 @@
  * of it. Every parameter such a method declares must be PLANTED here or
  * EXEMPTED with a written reason, and both halves are checked — an exemption
  * must still name a parameter the method declares, and must give more than a
- * phrase of argument. The census is **thirty-nine of eighty-two** at this head,
- * and the two remaining exemptions are `amendMissionIntent.specifyPlanItems`
- * (a structured object list with no free-text member) and
- * `recoverInterruptedRuns.reason` (a closed five-member union type, proved by
- * measuring that no canary ever reaches the store through it).
+ * phrase of argument. The two remaining exemptions are
+ * `amendMissionIntent.specifyPlanItems` (a structured object list with no
+ * free-text member) and `recoverInterruptedRuns.reason` (a closed five-member
+ * union type, proved by measuring that no canary ever reaches the store
+ * through it).
+ *
+ * ## Round seventeen: the derivation had a regex that could not cross a comma
+ *
+ * The census the paragraph above calls derived was **thirty-nine of
+ * eighty-two**, and both numerals were too small. `declaredCallerText` matched
+ * `callerTextRefusal\([^,]+,\s*\[…\]`, and `[^,]+` CANNOT CROSS A COMMA — so
+ * every call site whose first argument is an object literal with more than one
+ * key was invisible to it. Measured on `85b720d`: **37 of 43** declaring facade
+ * methods derived, six invisible — `assignTask.rationale`, `failTask.reason`,
+ * `reviewTask.note`, `reconcileTask.note`, `engageKillSwitch.reason` and
+ * `rejectProposal.note`. Four of the six were in NEITHER column of the census,
+ * and a hostile review published two of them:
+ *
+ * ```
+ * reconcileTask.note: CROSSES at snapshot.activity.data.1.summary
+ *    "Reconciled not-executed: CANARY-REVIEWC-reconcileTasknote"
+ * reviewTask.note:    CROSSES at snapshot.activity.data.0.summary
+ *    "Independent review failed: CANARY-REVIEWC-reviewTasknote"
+ * ```
+ *
+ * The first argument is BRACE-MATCHED now (see `declaredCallerText`), the four
+ * hidden parameters are planted and exercised for real, and everything was
+ * re-measured rather than adjusted by arithmetic. **The census is
+ * FORTY-ONE OF EIGHTY-SIX at this head**, across **43** declaring methods; the
+ * floor on `exercised` moved from 37 to 43 with it. `assignTask.rationale` and
+ * `rejectProposal.note` measured as NOT crossing, which is what makes the two
+ * that do a measurement rather than a guess.
  *
  * **What this still does not claim.** It is a claim about caller text the
- * facade itself declares it scans. A field published from a value HQ derives
- * rather than one a caller typed is outside it by construction, and
- * `facade-write-scan.test.ts` owns the enumeration over the call graph for the
- * credential scan.
+ * facade itself declares it scans, through a LITERAL array at the call site: a
+ * declared list built in a variable, spread in, or computed would still be
+ * read as declaring nothing. There is no such call site in `service.ts` today.
+ * A field published from a value HQ derives rather than one a caller typed is
+ * outside it by construction, and `facade-write-scan.test.ts` owns the
+ * enumeration over the call graph for the credential scan. And a `crosses:
+ * false` row is a measurement of ONE scenario: a parameter that only publishes
+ * in a state this scenario never reaches would read as quiet here — which is
+ * exactly the trap `engageKillSwitch.reason` fell into in round fifteen, and
+ * why `reviewTask.note` is planted on a FAIL verdict rather than a pass.
  */
 
 import fs from 'node:fs';
@@ -180,7 +213,7 @@ const CANARIES: readonly Canary[] = [
   { field: 'createTask.project', crosses: true, at: 'snapshot.operations.data.blocked[0].project' },
   { field: 'createTask.payload', crosses: false },
   { field: 'denyTask.reason', crosses: true, at: 'snapshot.operations.data.blocked[0].blockReason' },
-  { field: 'failTask.reason', crosses: true, at: 'snapshot.activity.data[4].summary' },
+  { field: 'failTask.reason', crosses: true, at: 'snapshot.activity.data[7].summary' },
   { field: 'engageKillSwitch.reason', crosses: true, at: 'snapshot.operations.data.killSwitch.engagedScopes[0].reason' },
   { field: 'engageKillSwitch.scope', crosses: true, at: 'snapshot.operations.data.killSwitch.engagedScopes[0].scope' },
   { field: 'engageKillSwitch.founderId', crosses: true, at: 'snapshot.operations.data.killSwitch.engagedScopes[0].engagedBy' },
@@ -242,6 +275,12 @@ const CANARIES: readonly Canary[] = [
   { field: 'recordContribution.artifactRefs', crosses: false },
   { field: 'recordContribution.content', crosses: false },
   { field: 'recordContribution.reason', crosses: false },
+  // Round seventeen (High-2): the four the comma-blind derivation hid that
+  // were in NEITHER column of the 82-entry census. Measured, not assumed.
+  { field: 'assignTask.rationale', crosses: false },
+  { field: 'rejectProposal.note', crosses: false },
+  { field: 'reviewTask.note', crosses: true, at: 'snapshot.activity.data[1].summary' },
+  { field: 'reconcileTask.note', crosses: true, at: 'snapshot.activity.data[0].summary' },
 ];
 
 /**
@@ -827,6 +866,113 @@ function plantEveryCanary(): Planted {
     }),
   );
 
+  /* ---------------------------------------------------------------- */
+  /* Round seventeen: the six the derivation could not SEE (High-2)     */
+  /* ---------------------------------------------------------------- */
+  //
+  // `declaredCallerText`'s `[^,]+` could not cross a comma, so every method
+  // whose `callerTextRefusal` first argument is a multi-key object literal was
+  // invisible to the completeness half. Four of the six it hid were in neither
+  // column of the 82-entry census (`failTask.reason` and
+  // `engageKillSwitch.reason` were already planted above), and two of those
+  // four PUBLISH. They are planted here like everything else, and measured.
+
+  // A SECOND proposal, so the rejection has something open to close: the first
+  // one is already `promoted` and `rejectProposal` refuses a decided proposal.
+  const rejectable = expectOk(
+    record(
+      'proposeMission (for the rejection)',
+      fx.ops.proposeMission({
+        threadId: mission.id,
+        capabilityId: CAPS.openPr,
+        payload: { branch: 'rejected' },
+        idempotencyKey: 'canary-rejection',
+        proposedBy: 'claude',
+      }),
+    ),
+  );
+  record(
+    'rejectProposal',
+    fx.ops.rejectProposal(rejectable.id, 'founder', c('rejectProposal.note')),
+  );
+
+  // `assignTask` — the ADVISORY intent, distinct from `assignTaskAsFounder`
+  // above and declaring its own `rationale`.
+  const intended = expectOk(
+    record(
+      'createTask (the one an advisory intent is recorded for)',
+      fx.ops.createTask({
+        capabilityId: CAPS.openPr,
+        payload: { branch: 'fifth' },
+        idempotencyKey: 'canary-intended',
+        requestedBy: 'claude',
+        title: 'an ordinary fifth task',
+      }),
+    ),
+  );
+  record(
+    'assignTask',
+    fx.ops.assignTask(intended.task.id, 'claude', 'founder', c('assignTask.rationale')),
+  );
+
+  // `reviewTask.note` — on a FAIL verdict, because a `pass` note is not
+  // published and measuring the quiet direction would have read as "does not
+  // cross" for the wrong reason.
+  const reviewed = expectOk(
+    record(
+      'createTask (the reviewed one)',
+      fx.ops.createTask({
+        capabilityId: CAPS.openPr,
+        payload: { branch: 'sixth' },
+        idempotencyKey: 'canary-reviewed',
+        requestedBy: 'claude',
+        title: 'an ordinary sixth task',
+      }),
+    ),
+  );
+  const claimedReviewed = expectOk(
+    record('claimNext (the reviewed one)', fx.ops.claimNext('claude', CAPS.openPr, undefined, reviewed.task.id)),
+  );
+  record(
+    'startTask (the reviewed one)',
+    fx.ops.startTask(claimedReviewed.id, 'claude', claimedReviewed.fence),
+  );
+  record(
+    'submitResult (the reviewed one)',
+    fx.ops.submitResult(claimedReviewed.id, 'claude', claimedReviewed.fence, { pr: 'https://example.invalid/6' }),
+  );
+  record('reviewTask', fx.ops.reviewTask(claimedReviewed.id, 'codex', 'fail', c('reviewTask.note')));
+
+  // `reconcileTask.note` — a side-effect task whose worker went silent, which
+  // is the only state the facade accepts a reconciliation in.
+  const abandoned = expectOk(
+    record(
+      'createTask (the abandoned one)',
+      fx.ops.createTask({
+        capabilityId: CAPS.openPr,
+        payload: { branch: 'seventh' },
+        idempotencyKey: 'canary-abandoned',
+        requestedBy: 'claude',
+        title: 'an ordinary seventh task',
+      }),
+    ),
+  );
+  const claimedAbandoned = expectOk(
+    record(
+      'claimNext (the abandoned one)',
+      fx.ops.claimNext('claude', CAPS.openPr, -1_000, abandoned.task.id),
+    ),
+  );
+  record(
+    'startTask (the abandoned one)',
+    fx.ops.startTask(claimedAbandoned.id, 'claude', claimedAbandoned.fence),
+  );
+  fx.ops.queue.sweepExpiredLeases();
+  record(
+    'reconcileTask',
+    fx.ops.reconcileTask(claimedAbandoned.id, 'confirmed_not_executed', 'founder', c('reconcileTask.note')),
+  );
+
   record(
     'transitionMission',
     fx.ops.transitionMission({
@@ -1125,11 +1271,60 @@ function methodBodies(): Map<string, string> {
   return bodies;
 }
 
-/** The names in one method's own `callerTextRefusal(…, [ … ])` declared list. */
+/**
+ * The names in one method's own `callerTextRefusal(…, [ … ])` declared list.
+ *
+ * BRACE-MATCHED on the first argument (Wave 5 correction round seventeen,
+ * High-2). It used to read `callerTextRefusal\([^,]+,\s*\[([^\]]*)\]`, and
+ * `[^,]+` CANNOT CROSS A COMMA — so every call site whose first argument is an
+ * object literal with more than one key was invisible. Measured on `85b720d`:
+ * 37 of 43 declaring facade methods derived, six invisible —
+ * `assignTask.rationale`, `failTask.reason`, `reviewTask.note`,
+ * `reconcileTask.note`, `engageKillSwitch.reason` and `rejectProposal.note`.
+ * Two of the six PUBLISH to the unauthenticated artifact and the shipped
+ * census named neither:
+ *
+ * ```
+ * reconcileTask.note: CROSSES at snapshot.activity.data.1.summary
+ * reviewTask.note:    CROSSES at snapshot.activity.data.0.summary
+ * ```
+ *
+ * The walker tracks `(`/`[`/`{` nesting and stops at the first TOP-LEVEL comma
+ * or the closing paren, so `callerTextRefusal({ taskId, by, note }, ['note'])`
+ * and `callerTextRefusal(input)` are both read correctly. A one-argument call
+ * declares nothing, which is the honest answer rather than a skipped one.
+ *
+ * What it still cannot see: the argument must be a LITERAL array at the call
+ * site. A list built in a variable, spread in, or computed would be read as
+ * declaring nothing — there is no such call site in `service.ts` today, and
+ * the count assertions below would fall if one were added without a canary.
+ */
 function declaredCallerText(body: string): string[] {
   const names = new Set<string>();
-  for (const match of body.matchAll(/callerTextRefusal\([^,]+,\s*\[([^\]]*)\]/g)) {
-    for (const part of match[1]!.split(',')) {
+  const call = /callerTextRefusal\(/g;
+  let match: RegExpExecArray | null;
+  while ((match = call.exec(body))) {
+    let depth = 0;
+    let firstArgumentEnd = -1;
+    for (let i = match.index + match[0].length; i < body.length; i += 1) {
+      const character = body[i]!;
+      if (character === '(' || character === '[' || character === '{') depth += 1;
+      else if (character === ')' || character === ']' || character === '}') {
+        if (depth === 0) {
+          firstArgumentEnd = i;
+          break;
+        }
+        depth -= 1;
+      } else if (character === ',' && depth === 0) {
+        firstArgumentEnd = i;
+        break;
+      }
+    }
+    // `)` here means a one-argument call: it declares no named parameters.
+    if (firstArgumentEnd < 0 || body[firstArgumentEnd] === ')') continue;
+    const declared = /^\s*\[([^\]]*)\]/.exec(body.slice(firstArgumentEnd + 1));
+    if (!declared) continue;
+    for (const part of declared[1]!.split(',')) {
       const name = /'([A-Za-z_][A-Za-z0-9_]*)'/.exec(part);
       if (name) names.add(name[1]!);
     }
@@ -1179,8 +1374,8 @@ describe('what Founder-typed text crosses to the unauthenticated artifact', () =
       expect(measured.sort()).toEqual(declared.sort());
       // And the measured totals, so the phase document's numbers are taken from
       // an execution rather than from a sentence.
-      expect(CANARIES.length).toBe(82);
-      expect(declared.length).toBe(39);
+      expect(CANARIES.length).toBe(86);
+      expect(declared.length).toBe(41);
     } finally {
       planted.cleanup();
     }
@@ -1236,7 +1431,7 @@ describe('what Founder-typed text crosses to the unauthenticated artifact', () =
     const exercised = [...bodies.entries()]
       .filter(([name, body]) => !name.startsWith('#') && declaredCallerText(body).length > 0)
       .map(([name]) => name);
-    expect(exercised.length).toBeGreaterThanOrEqual(37);
+    expect(exercised.length).toBeGreaterThanOrEqual(43);
     const unplanted: string[] = [];
     for (const method of exercised) {
       const body = bodies.get(method);
@@ -1290,7 +1485,7 @@ describe('what Founder-typed text crosses to the unauthenticated artifact', () =
     // measurement is what is written. Both are checked.
     const text = fs.readFileSync(PHASE_13, 'utf8');
     expect(text).toContain('The unauthenticated artifact IS a Founder-text publication surface');
-    expect(text).toContain('thirty-nine fields, not four');
+    expect(text).toContain('forty-one fields, not four');
     expect(text).toContain('unauthenticated-founder-text.test.ts');
     for (const canary of CANARIES) {
       if (!canary.crosses) continue;
