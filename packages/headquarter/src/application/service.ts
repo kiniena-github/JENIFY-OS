@@ -881,6 +881,7 @@ import {
   INTEGRITY_DEPTH_STATEMENT,
   SAFE_MODE_STATEMENT,
   ensureIntegrityCheckpoints,
+  ensureLedgerRowidGuards,
   fullIntegrity,
   observeImmutabilityAsFound,
   recordHqSchemaEnsured,
@@ -2743,6 +2744,12 @@ export class HeadquarterOperations {
     // and in exactly the same position: after the as-found observation, so a
     // tamperer who dropped it is reported before HQ re-creates it empty.
     ensureIntegrityCheckpoints(db);
+    // The universal ROWID guard on every declared ledger, in the same position
+    // and for the same two reasons (Wave 5 correction round thirteen, High 1):
+    // after the as-found census so a dropped guard is reported before it is
+    // repaired, and after every `ensure*Schema` above so the ledgers this build
+    // declares are all present to be guarded. See `ensureLedgerRowidGuards`.
+    ensureLedgerRowidGuards(db);
     // The durable "HQ has ensured this file" mark, stamped into
     // `PRAGMA user_version` AFTER the ensures and read BEFORE them, next time
     // (Wave 5 correction round four, High 1). It is the half of the

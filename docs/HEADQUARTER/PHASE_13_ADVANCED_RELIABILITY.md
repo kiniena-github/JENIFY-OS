@@ -4020,3 +4020,126 @@ by being read here. The cheapest close is a doc parse-back of the same shape as
 a number out of this page and compares it to a constant. That is a separate,
 scoped change with its own review, not something to fold into a reconciliation
 whose rule is that nothing is discarded and nothing new is invented.
+
+## Wave 5 correction round THIRTEEN: the rowid channel, and four partial enumerations standing in for complete ones
+
+Two fresh read-only hostile reviews of `48dd026` returned 0 Critical, 4 High, 7
+Medium and 8 Low. This section records what was reproduced at the MERGED head
+(`237fc76`, which already carried rounds ten to twelve), what changed, and what
+is disclosed instead — priced by execution, never by estimate.
+
+**The class behind every High of this round, and of the three rounds before
+it**: a partial enumeration standing in for the complete one. `missionText(`
+call sites for "stores caller text"; eighteen curated parameter names for
+"caller-supplied text"; `sqlite_sequence` membership for "declared ledger";
+`MAX(rowid)` for "row count"; a count-and-top witness for "the same rows"; an
+inner `JOIN` for "canonical membership"; and now the append-only trio for "every
+way a row can enter a ledger". Each fix below makes its enumeration complete BY
+CONSTRUCTION and makes the pinning test enumerate the same way, rather than by a
+list somebody maintains.
+
+### HIGH 1 — one PERMITTED `INSERT` fabricated a permanent, unclearable safe mode on 32 of the 33 declared ledgers
+
+**Reproduced at `237fc76`.** `trg_<ledger>_no_replace` fires only on a
+*colliding* rowid, so an ordinary `INSERT` naming an explicit rowid ABOVE a
+declared ledger's current maximum was a write the append-only trio deliberately
+permitted. It widens `MAX(rowid) - COUNT(*)`, and `committedLedgerGaps` reads
+that widening as proof of a mid-ledger deletion. Executed through this package's
+own file fixture, one statement, no trigger dropped, no `sqlite_sequence` write,
+no restart: `hq_reliability_verdicts` went from `{rows:4, top:4}` to `{rows:5,
+top:104}` — **the row count went UP and nothing was removed** — and `p2`/`p3`
+then read `boot=true assess=true release=REFUSED`, permanently, with the
+Founder-facing detail saying the ledger no longer held what HQ's checkpoint
+recorded, "fewer rows, a lower greatest row, or a gap where a row used to be …
+None of those can happen while HQ is the only writer." The sweep found the
+statement ACCEPTED on 32 of the 33 declared ledgers; the 33rd,
+`hq_integrity_checkpoints`, falls to the same statement with valid JSON in its
+commitment columns. This is round seven's HIGH 3 re-opened one column over:
+`no_overclaim` bounds `ledger_marks`, `ledger_rows` and `chain_length`, and the
+rowid is a channel it does not bound.
+
+**Why no read-time rule could close it.** The two acts are indistinguishable
+from the file alone at any later moment. After a mid-ledger deletion of k rows
+and m appends a ledger reads `rows + m - k` / `top + m`; after one append d above
+the top it reads `rows + 1` / `top + d`. Both widen the gap by the same
+arithmetic and neither leaves any other trace. So this is closed where the write
+happens, exactly as round seven closed the over-claim.
+
+**What changed.** Every declared ledger now carries
+`trg_<prefix>_no_rowid_skip`, a `BEFORE INSERT` guard that refuses a rowid past
+what the engine itself would allocate:
+
+```sql
+WHEN NEW.rowid > 1 + MAX(COALESCE((SELECT MAX(rowid) FROM "<ledger>"), 0),
+                         COALESCE((SELECT seq FROM sqlite_sequence WHERE name = '<ledger>'), 0))
+```
+
+It is appended in `declaredGuardsFor` rather than written on 33 declaration
+lines, so the set is complete BY CONSTRUCTION — a ledger cannot be declared
+without declaring it — and `ensureLedgerRowidGuards` installs it by iterating
+`ENGINE_IMMUTABLE_TABLES` itself, beside `ensureIntegrityCheckpoints` and after
+the as-found census, so a dropped guard is reported before it is repaired. The
+live-schema pins in `reliability-durability.test.ts` (the trigger set on a real
+file EQUALS the union of the declarations, in both directions) then require it
+to actually exist on all 33.
+
+**Why the bound names `sqlite_sequence` as well as the rows.** A legitimate
+append lands at `MAX(rowid) + 1` on an implicit-rowid table and at
+`sqlite_sequence.seq + 1` on an AUTOINCREMENT one. A bound taken from the rows
+alone would refuse HQ's own next append after any burned counter and stop the
+store writing — strictly worse than the hole a burn opens. Taking the counter
+into the bound gives a writer who can raise it a rowid to skip to, and that buys
+nothing new: raising a declared ledger's high-water mark above its `MAX(rowid)`
+is already reported by `truncatedImmutableLedgers` on its own, in one statement,
+with no insert at all.
+
+**The Founder-facing detail no longer asserts what it cannot distinguish.** It
+now names both causes — a row removed from the middle, and a row written past
+the end — and says the guards refuse an INSERT at a position the engine would
+not have allocated, which is what makes "none of those can happen while HQ is
+the only writer" true rather than reassuring.
+
+**Executed after the fix.** The same statement is REFUSED on all 33 (`<ledger>
+rowids are contiguous`); `{rows:4, top:4}` is unchanged; `regressed []`; and
+`p2`–`p5` read `boot=false [] assess=false [] release=ADMITTED`. Pinned in
+`ledger-rowid-guard.test.ts`, whose sweep uses each ledger's REAL `CREATE TABLE`
+text taken from a live HQ file, proves an ordinary append is accepted on each
+one first, and fails on 4 of its 6 tests against the pre-fix code.
+
+### MEDIUM 1 — the burn enumeration named one spelling of three
+
+`committedLedgerGaps` cited `ledger-rowid-contiguity.test.ts` for which engine
+behaviours burn a rowid, and the citation named `INSERT … ON CONFLICT … DO
+UPDATE` as the one that does. Measured on the shipped runtime (SQLite 3.53.2):
+`INSERT OR IGNORE` on a conflict burns (`seq` 2→3) and `INSERT … ON CONFLICT DO
+NOTHING` burns (`seq` 3→4), each with `rows` and `top` unchanged, and the next
+genuine append then skips three rowids. All three spellings are now measured in
+that file and named in the docblock. The property itself was never at risk — the
+source sweeps in the same file already ban `INSERT OR IGNORE` outright and catch
+every `ON CONFLICT` target, over all 33 ledgers read from the declaration — it
+was the enumeration in the prose that was partial. The reviewer's finding was
+raised against `48dd026`, where the cited file did not exist at all; round twelve
+created it, and this round completes its engine half.
+
+### What round thirteen adds to the NOT-fixed list
+
+- **`no_rowid_skip` is a step, not a boundary**, at the same price as every
+  other engine guard in this module: three statements — `DROP TRIGGER`, the
+  insert, re-create. Counted rather than asserted, in
+  `ledger-rowid-guard.test.ts`, which then shows the census clean and
+  `regressedImmutableLedgers ["hq_reliability_verdicts"]` afterwards. A guard
+  re-created before the next boot is never observed missing, because the
+  as-found census reads `sqlite_master` at construction time only.
+- **A file written by a build older than this one reports one boot of safe
+  mode.** Its ledgers carry no `no_rowid_skip` trigger, so the as-found census
+  reports `append_only_guard_missing`. That is the ordinary cost of declaring a
+  new guard — `no_overclaim` had exactly the same one — and a missing GUARD is
+  cleared by ONE Founder assessment of the file as it then stands, because
+  re-creating a trigger really does repair the file's guard set.
+- **The `sqlite_sequence` manufacture residual is unchanged and is now also a
+  route to the gap.** One `UPDATE` raising a declared ledger's counter is
+  already reported as `append_only_ledger_truncated` over a ledger nobody
+  touched; the same write also lets HQ's own next append land past
+  `MAX(rowid) + 1` and widen the gap. Neither is closed, for the reason round
+  seven recorded: the only bound available for that check is the number being
+  written.

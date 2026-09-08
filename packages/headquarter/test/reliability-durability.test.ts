@@ -27,7 +27,9 @@ import {
   HQ_DURABILITY_REQUIREMENT,
   HQ_INTEGRITY_CHECKPOINT_TABLE,
   HQ_INTEGRITY_FINDINGS,
+  LEDGER_ROWID_GUARD,
   REQUIRED_IMMUTABILITY_GUARDS,
+  ensureLedgerRowidGuards,
   SAFE_MODE_BLOCKING_FINDINGS,
   declaredGuardsFor,
   establishedImmutableTables,
@@ -558,6 +560,12 @@ describe('the engine-immutable inventory is checked against the live schema, not
       'trg_hq_mission_plan_items_no_replace',
       'trg_hq_mission_plan_items_no_relink',
       'trg_hq_mission_plan_items_no_respec',
+      // The UNIVERSAL guard, which every declared ledger carries whatever its
+      // base is (Wave 5 correction round thirteen, High 1). It is appended by
+      // `declaredGuardsFor` rather than listed per table precisely so a reduced
+      // base cannot omit it — the reduced base is what let this entry out of
+      // `no_rewrite`, and the rowid channel is not a column.
+      'trg_hq_mission_plan_items_no_rowid_skip',
     ]);
     // The rest are declared where they exist, and the census reads both.
     expect(declaredGuardsFor({
@@ -569,7 +577,16 @@ describe('the engine-immutable inventory is checked against the live schema, not
       'trg_hq_intel_budgets_no_erase',
       'trg_hq_intel_budgets_no_replace',
       'trg_hq_intel_budgets_no_replace_unique',
+      'trg_hq_intel_budgets_no_rowid_skip',
     ]);
+    // And the universal guard is universal by CONSTRUCTION: it is on every
+    // entry's declaration, taken from the declaration itself rather than from
+    // any list written here.
+    expect(
+      ENGINE_IMMUTABLE_TABLES.filter(
+        (entry) => !declaredGuardsFor(entry).includes(`trg_${entry.triggerPrefix}_${LEDGER_ROWID_GUARD}`),
+      ).map((entry) => entry.table),
+    ).toEqual([]);
     expect(
       ENGINE_IMMUTABLE_TABLES.filter((entry) => entry.secondaryGuards.length > 0).map(
         (entry) => entry.table,
@@ -1471,6 +1488,11 @@ describe('backup verification, against real bytes on disk', () => {
       // THIS test is about is the WAL sidecar, so the candidate is made a
       // sound HQ file and the sidecar behaviour is what it still measures.
       ensureEvidenceGuards(db);
+      // And the universal rowid guard, for the same reason and since the same
+      // census widened (Wave 5 correction round thirteen, High 1): every real
+      // HQ file carries it because every facade construction installs it, and a
+      // copy that does not is correctly refused `would_latch_safe_mode`.
+      ensureLedgerRowidGuards(db);
       // WAL mode with no checkpoint: the newest table is in the sidecar.
       expect(fs.existsSync(`${candidate}-wal`)).toBe(true);
       expect(fs.statSync(`${candidate}-wal`).size).toBeGreaterThan(0);
