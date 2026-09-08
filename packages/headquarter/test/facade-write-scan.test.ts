@@ -34,7 +34,7 @@
  * control route — the shape of proof the outage itself was found with.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -385,6 +385,113 @@ interface WriteProbe {
 }
 
 /**
+ * The seeded, unwritten-to store every probe below starts from, built once.
+ *
+ * Every one of the fifteen probes in this file needs the SAME starting state —
+ * the schema, `hq.read_status`, the two specialists and the Founder — and then
+ * needs its own file to attempt its own write against. Only the second half of
+ * that has to be per-probe. The first half was being rebuilt fifteen times.
+ *
+ * The cost is fsync, not CPU: `openHqDatabase` sets `synchronous = FULL`, so
+ * every commit in the seeding is a flush to storage. Measured at this head with
+ * `strace -f -c -e trace=fsync`, one probe was 263 fsyncs, and
+ * `recordModelObservation` — the only test here that probes TWICE, because it
+ * has two credential-shaped fields to refuse — was 526, the highest in the
+ * file. On this machine that is 295 ms and invisible. A timeout is wall time
+ * though, and on slower storage those 526 flushes are the whole of it: at 9 ms
+ * per fsync this test takes 5.4 s against vitest's 5000 ms default, which is
+ * what failed in CI while its 263-fsync siblings passed.
+ *
+ * So the seeding is done ONCE and the file is COPIED per probe. A cleanly
+ * closed HQ database is a single file with no WAL or shared-memory residue
+ * (asserted below), so each probe gets a byte-for-byte copy of the same seeded
+ * store. Nothing about what a probe DOES changes: it still attempts its write
+ * against its own fresh file, and still replays every control route from two
+ * separate opens afterwards.
+ */
+let seededTemplate: { dir: string; dbPath: string } | null = null;
+
+function seededTemplatePath(): string {
+  if (seededTemplate) return seededTemplate.dbPath;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-write-scan-template-'));
+  const dbPath = path.join(dir, 'hq.sqlite');
+  const db = openHqDatabase(dbPath);
+  const store = new HeadquarterStore(db);
+  new CapabilityRegistry(db).register({
+    id: READ_STATUS,
+    description: 'read',
+    riskClass: 'read_only',
+    sideEffect: false,
+    idempotent: true,
+  });
+  store.upsertSpecialist({
+    id: 'claude',
+    displayName: 'Claude',
+    vendor: 'anthropic',
+    role: 'build_lead',
+    allowedCapabilities: [READ_STATUS],
+    active: true,
+  });
+  store.upsertSpecialist({
+    id: 'codex',
+    displayName: 'Codex',
+    vendor: 'openai',
+    role: 'reviewer_gatekeeper',
+    allowedCapabilities: [READ_STATUS],
+    active: true,
+  });
+  new HumanPrincipalRegistry(db).register({
+    id: 'founder',
+    displayName: 'Founder',
+    originateCapabilities: [READ_STATUS],
+    approvalAuthority: true,
+    active: true,
+  });
+
+  // The clean boot, done HERE rather than fifteen times over.
+  //
+  // This is where the cost actually was, and it is worth naming precisely
+  // because it is not where it looks. Constructing `HeadquarterOperations`
+  // over a store that has never booted performs that store's one-time
+  // initialisation, and that initialisation is 225 of a probe's 253 fsyncs —
+  // measured by stage below. Every construction AFTER the first, on the same
+  // file, costs about 7. So a probe was paying a full first boot, and the two
+  // replay passes that follow it were nearly free by comparison.
+  //
+  // Booting the template once therefore moves 225 fsyncs per probe into 225
+  // fsyncs per FILE. It does not make the probe start from a different kind of
+  // store: an HQ that a Founder can reach has necessarily booted already, and
+  // the write attempt, both replay passes and every assertion are unchanged.
+  new HeadquarterOperations(db, {
+    store,
+    policyCtx: { preApprovedCapabilities: new Set<string>([READ_STATUS]) },
+  });
+  db.close();
+
+  // The property that makes copying equivalent to re-seeding, asserted rather
+  // than assumed: after a clean close the store is ONE file. A `-wal` or `-shm`
+  // left beside it would mean the copy handed to a probe was missing the most
+  // recent commits, and this fails instead of seeding a probe short.
+  expect(fs.readdirSync(dir)).toEqual([path.basename(dbPath)]);
+
+  seededTemplate = { dir, dbPath };
+  return dbPath;
+}
+
+// Built in a hook rather than lazily inside whichever probe happens to run
+// first, so the one shared seeding-and-boot is charged to the shared setup and
+// each test's own budget covers only its own work. Vitest gives a hook 10 s and
+// a test 5 s, which is the right way round for a fixture every probe reuses.
+beforeAll(() => {
+  seededTemplatePath();
+});
+
+afterAll(() => {
+  if (seededTemplate) fs.rmSync(seededTemplate.dir, { recursive: true, force: true });
+  seededTemplate = null;
+});
+
+/**
  * Attempt one write carrying a credential shape, then read every shipped
  * control route from two SEPARATE processes over the same file. Two processes
  * because the original defect was permanent, not transient: the first outage
@@ -393,8 +500,10 @@ interface WriteProbe {
 function probeWrite(
   act: (ops: HeadquarterOperations) => { ok: boolean; code: string | null; message: string | null },
 ): WriteProbe {
+  const template = seededTemplatePath();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-write-scan-'));
   const dbPath = path.join(dir, 'hq.sqlite');
+  fs.copyFileSync(template, dbPath);
   const open = () => {
     const db = openHqDatabase(dbPath);
     const store = new HeadquarterStore(db);
@@ -409,37 +518,7 @@ function probeWrite(
     let code: string | null = null;
     let message: string | null = null;
     {
-      const { db, ops, store } = open();
-      new CapabilityRegistry(db).register({
-        id: READ_STATUS,
-        description: 'read',
-        riskClass: 'read_only',
-        sideEffect: false,
-        idempotent: true,
-      });
-      store.upsertSpecialist({
-        id: 'claude',
-        displayName: 'Claude',
-        vendor: 'anthropic',
-        role: 'build_lead',
-        allowedCapabilities: [READ_STATUS],
-        active: true,
-      });
-      store.upsertSpecialist({
-        id: 'codex',
-        displayName: 'Codex',
-        vendor: 'openai',
-        role: 'reviewer_gatekeeper',
-        allowedCapabilities: [READ_STATUS],
-        active: true,
-      });
-      new HumanPrincipalRegistry(db).register({
-        id: 'founder',
-        displayName: 'Founder',
-        originateCapabilities: [READ_STATUS],
-        approvalAuthority: true,
-        active: true,
-      });
+      const { db, ops } = open();
       const outcome = act(ops);
       accepted = outcome.ok;
       code = outcome.code;
