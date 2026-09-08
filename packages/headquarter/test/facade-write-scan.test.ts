@@ -491,6 +491,29 @@ function refusal(result: { ok: boolean; error?: { code: string; message?: string
   };
 }
 
+/**
+ * The explicit deadline every file-backed probe below carries.
+ *
+ * Vitest's 5 s default is not a statement about these tests. Each one creates a
+ * real SQLite file, opens it in three separate stores and replays every shipped
+ * control route twice over it — that is the shape of proof the outage was found
+ * with, and none of it is being reduced. On a shared `ubuntu-latest` runner one
+ * of them (`recordModelObservation`, which runs the probe twice) failed with
+ * `Test timed out in 5000ms` while passing on every other head and on every
+ * developer machine; its siblings run the same helper and sit within 1.5x of
+ * it, so they are at the same risk and are treated the same way.
+ *
+ * Measured on this machine with the whole package running in parallel:
+ * 160-361 ms per test, the slowest being `recordModelObservation` at 361 ms
+ * (268 ms with the file run alone). 30 s is ~83x that slowest observed run.
+ *
+ * Per test rather than a package-wide `testTimeout`: raising the global default
+ * would relax the deadline for all 3425 tests in this package, including the
+ * many where a hang is the real signal. Only the harness deadline changes here;
+ * every assertion is untouched.
+ */
+const FILE_BACKED_PROBE_TIMEOUT_MS = 30_000;
+
 describe('the five writes that permanently bricked a Founder read route now refuse instead', () => {
   it('createTask refuses a credential-shaped title, and no route is bricked', () => {
     const probe = probeWrite((ops) =>
@@ -507,7 +530,7 @@ describe('the five writes that permanently bricked a Founder read route now refu
     expect(probe.accepted).toBe(false);
     expect(probe.code).toBe('invalid_input');
     expect(probe.brickedRoutes).toEqual([]);
-  });
+  }, FILE_BACKED_PROBE_TIMEOUT_MS);
 
   it('createTask refuses a credential-shaped project, and no route is bricked', () => {
     const probe = probeWrite((ops) =>
@@ -524,7 +547,7 @@ describe('the five writes that permanently bricked a Founder read route now refu
     expect(probe.accepted).toBe(false);
     expect(probe.code).toBe('invalid_input');
     expect(probe.brickedRoutes).toEqual([]);
-  });
+  }, FILE_BACKED_PROBE_TIMEOUT_MS);
 
   it('failTask refuses a credential-shaped reason, and no route is bricked', () => {
     const probe = probeWrite((ops) => {
@@ -550,7 +573,7 @@ describe('the five writes that permanently bricked a Founder read route now refu
     expect(probe.accepted).toBe(false);
     expect(probe.code).toBe('invalid_input');
     expect(probe.brickedRoutes).toEqual([]);
-  });
+  }, FILE_BACKED_PROBE_TIMEOUT_MS);
 
   it('registerExecutionWorker refuses a credential-shaped displayName, and no route is bricked', () => {
     const probe = probeWrite((ops) =>
@@ -568,7 +591,7 @@ describe('the five writes that permanently bricked a Founder read route now refu
     expect(probe.accepted).toBe(false);
     expect(probe.code).toBe('invalid_input');
     expect(probe.brickedRoutes).toEqual([]);
-  });
+  }, FILE_BACKED_PROBE_TIMEOUT_MS);
 
   it('engageKillSwitch refuses a credential-shaped reason, and no route is bricked', () => {
     const probe = probeWrite((ops) =>
@@ -577,7 +600,7 @@ describe('the five writes that permanently bricked a Founder read route now refu
     expect(probe.accepted).toBe(false);
     expect(probe.code).toBe('invalid_input');
     expect(probe.brickedRoutes).toEqual([]);
-  });
+  }, FILE_BACKED_PROBE_TIMEOUT_MS);
 
   it('the fail-safe act still works with an ordinary reason — the guard refuses credentials, not stopping', () => {
     const probe = probeWrite((ops) =>
@@ -585,7 +608,7 @@ describe('the five writes that permanently bricked a Founder read route now refu
     );
     expect(probe.accepted).toBe(true);
     expect(probe.brickedRoutes).toEqual([]);
-  });
+  }, FILE_BACKED_PROBE_TIMEOUT_MS);
 
   it('the payload carve-out is exactly that, and no wider: a credential-shaped PAYLOAD is stored and bricks nothing', () => {
     // The executed half of the carve-out recorded at the top of this file. If
@@ -603,7 +626,7 @@ describe('the five writes that permanently bricked a Founder read route now refu
     );
     expect(probe.accepted).toBe(true);
     expect(probe.brickedRoutes).toEqual([]);
-  });
+  }, FILE_BACKED_PROBE_TIMEOUT_MS);
 
   /* ---------------------------------------------------------------- */
   /* Round ten: the five parameters the per-METHOD credit hid.          */
@@ -629,7 +652,7 @@ describe('the five writes that permanently bricked a Founder read route now refu
     expect(probe.accepted).toBe(false);
     expect(probe.code).toBe('invalid_input');
     expect(probe.brickedRoutes).toEqual([]);
-  });
+  }, FILE_BACKED_PROBE_TIMEOUT_MS);
 
   it('engageKillSwitch refuses a credential-shaped scope, and no route is bricked', () => {
     // HIGH 2. `scope` reached `#requirePrivilegedQueue().engageKillSwitch`
@@ -641,7 +664,7 @@ describe('the five writes that permanently bricked a Founder read route now refu
     expect(probe.code).toBe('invalid_input');
     expect(probe.message).toContain('credential shape');
     expect(probe.brickedRoutes).toEqual([]);
-  });
+  }, FILE_BACKED_PROBE_TIMEOUT_MS);
 
   it('setIntelligenceBudget refuses a credential-shaped scopeId', () => {
     // HIGH 5. `scopeId` got `canonicalBudgetScopeId` and a length check; the
@@ -666,7 +689,7 @@ describe('the five writes that permanently bricked a Founder read route now refu
     // assertion passes against the head the outage was found on.
     expect(probe.message).toContain('credential shape');
     expect(probe.brickedRoutes).toEqual([]);
-  });
+  }, FILE_BACKED_PROBE_TIMEOUT_MS);
 
   it('recordModelObservation refuses a credential-shaped providerId and modelId', () => {
     // HIGH 5, the other half. `isIdentifierSlug`'s
@@ -694,7 +717,7 @@ describe('the five writes that permanently bricked a Founder read route now refu
       expect(probe.message, JSON.stringify(attempt)).toContain('credential shape');
       expect(probe.brickedRoutes, JSON.stringify(attempt)).toEqual([]);
     }
-  });
+  }, FILE_BACKED_PROBE_TIMEOUT_MS);
 
   it('the sibling that already had it right is unchanged: recordIntelligenceCost still refuses', () => {
     // NEW MEDIUM A. The correct guard was eleven lines away the whole time —
@@ -717,7 +740,7 @@ describe('the five writes that permanently bricked a Founder read route now refu
     expect(probe.accepted).toBe(false);
     expect(probe.code).toBe('invalid_input');
     expect(probe.brickedRoutes).toEqual([]);
-  });
+  }, FILE_BACKED_PROBE_TIMEOUT_MS);
 
   it('an ordinary worker id, kill-switch scope, budget scope and model id all still land', () => {
     // The guard refuses credential SHAPES, not identifiers. Without this the
@@ -738,7 +761,7 @@ describe('the five writes that permanently bricked a Founder read route now refu
     });
     expect(probe.accepted).toBe(true);
     expect(probe.brickedRoutes).toEqual([]);
-  });
+  }, FILE_BACKED_PROBE_TIMEOUT_MS);
 
   it('the ordinary shape of each write still lands', () => {
     const probe = probeWrite((ops) =>
@@ -755,5 +778,5 @@ describe('the five writes that permanently bricked a Founder read route now refu
     );
     expect(probe.accepted).toBe(true);
     expect(probe.brickedRoutes).toEqual([]);
-  });
+  }, FILE_BACKED_PROBE_TIMEOUT_MS);
 });
