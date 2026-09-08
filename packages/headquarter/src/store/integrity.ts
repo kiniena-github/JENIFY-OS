@@ -927,6 +927,26 @@ export interface RecordedIntegrityVerdict {
  * finding HQ reports and keeps reporting. That second route is disclosed in
  * Phase 13's NOT-fixed list and is not closed here, so the sentence names the
  * scope it actually has.
+ *
+ * **Where this statement is actually served, measured** (Wave 5 correction round
+ * fifteen, Medium 2). The paragraph above, `service.ts`'s durability note and
+ * Phase 13's round-fourteen entry all said this constant is served on the
+ * unauthenticated `hq-snapshot.json`. It was not: it reached `#integrityView()`
+ * only — `assessHqIntegrity` and `hqReliabilityPosture`, both AUTHENTICATED —
+ * plus the refusal message at the safe-mode gate. Executed with safe mode
+ * genuinely engaged at `c23dd0a`, the full text, the mid-ledger clause and even
+ * the opening words "Safe mode is a statement" were all absent from the
+ * snapshot. `hq-snapshot.json`'s reliability section comes from
+ * `reliabilitySummary()`, which this constant never reached.
+ *
+ * The three sentences are now TRUE rather than narrowed: the summary carries
+ * `safeModeStatement`, the same constant, so the audience really is every
+ * reliability view, every refusal, and the unauthenticated artifact. It is fixed
+ * text with no path, id or finding detail in it, so widening the audience
+ * discloses nothing the artifact did not already disclose — and a reader who
+ * sees `safeMode: true` on a world-readable file with no explanation of what it
+ * means is precisely the reader this sentence was written for.
+ * `live-snapshot.test.ts` pins both halves.
  */
 export const SAFE_MODE_STATEMENT =
   'Safe mode is a statement about HQ’s OWN stored record, not about the outside world. It engages only when ' +
@@ -1351,7 +1371,7 @@ export function establishedImmutableTables(db: HqDatabase): string[] {
  * without depending on any table surviving: it lives in the 100-byte database
  * header, `DROP TABLE` cannot reach it, `VACUUM` preserves it, and SQLite
  * itself never writes it. So "drop everything" no longer buys silence — the
- * mark is still there, the census runs over a file with 30 declared ledgers
+ * mark is still there, the census runs over a file with every declared ledger
  * absent, and safe mode engages.
  *
  * Deliberately NOT a content check over the tables. That was tried and is
@@ -1489,10 +1509,17 @@ export function recordHqSchemaEnsured(db: HqDatabase): void {
  * `sqlite_sequence` are the mark again and both comparisons below are false.
  * Executed against `237fc76` on a real file: 13 statements took six genuine
  * commitments to two plus four copies, and `p2`/`p3`/`p4` each read
- * `boot=false [] assess=false [] release=ADMITTED`. Re-measured at THIS head it
- * is 14, because the ledger carries one more guard for the replay to put back
- * (`no_rowid_skip`) — the price is counted from the replay itself in the pin
- * rather than written down, so it moves when the schema does. It is DISCLOSED at that
+ * `boot=false [] assess=false [] release=ADMITTED`. The price rises whenever the
+ * ledger gains a schema object for the replay to put back, and this sentence
+ * used to carry the number — which then went stale twice: it read 13 after
+ * `no_rowid_skip` was added, and 14 after `no_rowid_reseat` and `no_rowid_move`
+ * were added beside it (Wave 5 correction round fifteen, Low 1). The numeral is
+ * therefore GONE rather than refreshed a third time. What the price is at any
+ * head is derived, not written: `reliability-commitment-prefix-replay.test.ts`
+ * counts the replay's own statements and asserts them against
+ * `1 + objects.length + keep + (mark − keep)` over the ledger's real
+ * `sqlite_master` entries, so the figure moves with the schema and no sentence
+ * can be left behind by it. It is DISCLOSED at that
  * price rather than closed, and the reason is exact: the attacker reads the
  * genuine ledger before destroying it, so any predicate over the file's own
  * content can be satisfied by writing content that satisfies it. The two
@@ -2834,15 +2861,26 @@ export function uniqueReentryGuardDdl(
   table: string,
   triggerPrefix: string,
 ): string | null {
-  const terms = secondaryUniqueIndexes(db, table)
-    .filter((index) => index.expressible)
-    .map((index) => uniqueReentryTerm(table, index));
+  const indexes = secondaryUniqueIndexes(db, table).filter((index) => index.expressible);
+  const terms = indexes.map((index) => uniqueReentryTerm(table, index));
   if (terms.length === 0) return null;
+  // The message NAMES the columns it stands in for (Wave 5 correction round
+  // fifteen, Medium 4). It used to say only "unique keys are write-once", and a
+  // caller downstream classified a concurrent duplicate by looking for the
+  // column name in the engine's error text — so installing this guard renamed
+  // the collision out from under that caller. Naming the columns is not what
+  // fixes the caller (that is `sideEffectHolder`, a structural read), but a
+  // guard that refuses a write ought to say WHICH declared uniqueness it
+  // refused it for, and a `RAISE` text that omits it is strictly less useful in
+  // a log. The names come from `PRAGMA index_info` and are already constrained
+  // to `PLAIN_IDENTIFIER` by `secondaryUniqueIndexes`, so there is nothing to
+  // quote-escape here that could reach the DDL.
+  const named = [...new Set(indexes.flatMap((index) => index.columns))].join(', ');
   return (
     `CREATE TRIGGER trg_${triggerPrefix}_${UNIQUE_REENTRY_GUARD}\n` +
     `BEFORE INSERT ON "${table}"\n` +
     `WHEN ${terms.join('\n  OR ')}\n` +
-    `BEGIN SELECT RAISE(ABORT, '${table} unique keys are write-once'); END;`
+    `BEGIN SELECT RAISE(ABORT, '${table} unique keys are write-once (${named})'); END;`
   );
 }
 
@@ -2850,17 +2888,51 @@ export function uniqueReentryGuardDdl(
  * Every table this module INSTALLS a derived unique-index guard on.
  *
  * **The write-once identity tables, and deliberately not all 33 declared
- * ledgers** — that wider shape was built, measured and rejected on the merits
- * (Wave 5 correction round fourteen, High 2). A guard installed on every
- * declared ledger pre-empts the ENGINE's own `UNIQUE` conflict on the paths
- * that legitimately rely on it: run against the full suite it turned
- * `action-gateway`'s side-effect deduplication — a plain `INSERT` colliding on
- * `hq_action_events.side_effect_key`, whose whole purpose is to raise
- * `SQLITE_CONSTRAINT_UNIQUE` so the caller can see the side effect already
- * happened — into a trigger `ABORT` with a different code, and the attempt
- * stopped being recognised as a duplicate. Refusing a write HQ itself depends
- * on is the outcome this module ranks strictly WORSE than the hole it would
- * close, the same trade `ledgerRowidGuardDdl` records for `sqlite_sequence`.
+ * ledgers** — that wider shape was built, measured and rejected (Wave 5
+ * correction round fourteen, High 2).
+ *
+ * **The reason recorded for that rejection was wrong, and it is replaced here
+ * with the measured one** (Wave 5 correction round fifteen, Medium 4). It used
+ * to say the wider guard "pre-empts the ENGINE's own `UNIQUE` conflict on the
+ * paths that legitimately rely on it", turning `action-gateway`'s side-effect
+ * deduplication "into a trigger `ABORT` with a different code". Executed on
+ * `hq_action_events` at `c23dd0a`, the code is IDENTICAL with and without this
+ * guard:
+ *
+ * ```
+ * without: code=SQLITE_CONSTRAINT_TRIGGER
+ *          msg="hq_action_events is append-only (UNIQUE side_effect_key already reserved)"
+ * with:    code=SQLITE_CONSTRAINT_TRIGGER
+ *          msg="hq_action_events unique keys are write-once"
+ * ```
+ *
+ * The engine's `SQLITE_CONSTRAINT_UNIQUE` was ALREADY pre-empted at that head
+ * by the shipped `trg_hq_action_events_no_replace_unique`
+ * (`application/action-gateway.ts`). What actually broke was one substring
+ * test — `errorMessage(error).includes('side_effect_key')` in
+ * `executeAction`'s catch — and a classification resting on a trigger's message
+ * text is a defect in its own right, so it is fixed there rather than worked
+ * around here: the duplicate arm now asks `sideEffectHolder`, a read of the
+ * ledger that cannot be renamed. This guard's `RAISE` text also names the
+ * colliding columns now, so it says which uniqueness it stood in for.
+ *
+ * **Re-measured with both of those fixed, the wider form still does not ship,
+ * and the real obstacle is this.** Installing it on all 33 declared ledgers
+ * SHADOWS the hand-written `no_replace_unique`-family guard each of those
+ * ledgers already carries: a `BEFORE INSERT` trigger fires ahead of the
+ * declared one, so every refusal that used to say "<table> is append-only" now
+ * says "<table> unique keys are write-once", and every ledger's declared guard
+ * SET grows by one. Measured against the full suite at this head, that is 36
+ * failures across 20 files — tests that pin which guard held a write-once
+ * identity, and tests that derive each ledger's guard inventory. It buys
+ * nothing against it: the round-fourteen audit found ZERO unguarded secondary
+ * unique indexes across all 54 on the 33 ledgers, so the wider install adds no
+ * coverage today and its only value would be forward coverage for an index
+ * added tomorrow — which `unique-index-reentry.test.ts` already catches on the
+ * day it is added, by execution against the real schema. Duplicating 33
+ * existing guards, shadowing their reasons and rewriting 35 pins to buy a
+ * coverage that is already held is the worse trade, and that — not a changed
+ * error code — is why the enforcement stays where the audit found a real gap.
  *
  * So the enforcement is placed exactly where the audit found a real gap, and
  * the CLASS is closed by execution instead of by installation:

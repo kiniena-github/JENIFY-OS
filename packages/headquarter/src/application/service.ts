@@ -2541,6 +2541,14 @@ export class HeadquarterOperations {
    * through the closed vocabulary (`carryRecordedVerdict`), and the residual it
    * disclosed about a raw appender is stated on `standingIntegrityVerdict`
    * instead of glossed.
+   *
+   * "and to `hq-snapshot.json`" above was FALSE when it was written and is true
+   * now (Wave 5 correction round fifteen, Medium 2). `SAFE_MODE_STATEMENT`
+   * reached `#integrityView()` and the refusal message only, both authenticated;
+   * executed with safe mode engaged at `c23dd0a` it was on no part of the
+   * unauthenticated artifact. `summarizeReliability` now composes it into the
+   * snapshot's reliability section — the same constant, once, so the two
+   * surfaces cannot say different things — and `live-snapshot.test.ts` pins it.
    */
   #integrityReport: HqIntegrityReport;
 
@@ -2790,12 +2798,25 @@ export class HeadquarterOperations {
     // and are not append-only ledgers (Wave 5 correction round thirteen,
     // High 3). Same position, same rule: after the as-found census.
     ensureWriteOnceIdentityGuards(db);
-    // The DERIVED unique-index guard, on every declared ledger and every
-    // write-once identity table (Wave 5 correction round fourteen, High 2).
-    // Same position and same rule as the two above: after the as-found census,
-    // and after every `ensure*Schema`, because the clause is derived from the
-    // INDEXES those schemas create — a guard built before them would be built
-    // against a file that does not yet declare what it must cover.
+    // The DERIVED unique-index guard, on the WRITE-ONCE IDENTITY TABLES only
+    // (Wave 5 correction round fourteen, High 2). Same position and same rule
+    // as the two above: after the as-found census, and after every
+    // `ensure*Schema`, because the clause is derived from the INDEXES those
+    // schemas create — a guard built before them would be built against a file
+    // that does not yet declare what it must cover.
+    //
+    // This comment used to say "on every declared ledger and every write-once
+    // identity table", which was the opposite of the decision recorded two
+    // directories away (Wave 5 correction round fifteen, Medium 1). Measured at
+    // `c23dd0a`, exactly one such trigger exists on a fresh file —
+    // `trg_op_tasks_no_unique_reentry` — because `uniqueReentryTargets`
+    // (`store/integrity.ts`) maps `WRITE_ONCE_IDENTITY_TABLES` and nothing else.
+    // The 33 declared ledgers keep their hand-written `no_replace_unique`-family
+    // guards and are held by an EXECUTED test (`unique-index-reentry.test.ts`)
+    // rather than by an installed clause. `uniqueReentryTargets` carries the
+    // measurement that rejected the wider form; this is the comment a
+    // maintainer reads at the install site, so it points there instead of
+    // asserting a coverage the call does not have.
     ensureUniqueReentryGuards(db);
     // The durable "HQ has ensured this file" mark, stamped into
     // `PRAGMA user_version` AFTER the ensures and read BEFORE them, next time
@@ -13465,6 +13486,8 @@ export class HeadquarterOperations {
       generation: number;
     } | null = null;
     let taskId: string | null = null;
+    /** The side-effect key this attempt tried to reserve, or null if it never got that far. */
+    let attemptedEffectKey: string | null = null;
     try {
       privileged.reserve(() => {
         const intent = loadActionIntent(this.#db, actionId);
@@ -13512,6 +13535,12 @@ export class HeadquarterOperations {
         }
         const generation = sideEffectGeneration(this.#db, intent.sideEffectKeyBase);
         const effectKey = sideEffectKey(intent.sideEffectKeyBase, generation);
+        // Hoisted out of the transaction so the CATCH below can ask the ledger
+        // a structural question instead of reading a trigger's message text
+        // (Wave 5 correction round fifteen, Medium 4). Set as soon as the key
+        // exists, because the throw it is needed for happens after this point
+        // and `reserved` is only assigned at the very end of the closure.
+        attemptedEffectKey = effectKey;
         const holder = sideEffectHolder(this.#db, effectKey);
         if (holder) {
           refusal = {
@@ -13560,11 +13589,31 @@ export class HeadquarterOperations {
       // A UNIQUE violation on the side-effect key is the engine refusing a
       // concurrent duplicate — surfaced either by the index itself or, since
       // the secondary-index guard, by the BEFORE INSERT trigger that fires
-      // first and names the key; anything else means the reservation could
-      // not be written, and an unrecorded guard is no guard — nothing executes.
+      // first; anything else means the reservation could not be written, and
+      // an unrecorded guard is no guard — nothing executes.
+      //
+      // **The trigger arm asks the LEDGER, not the message** (Wave 5 correction
+      // round fifteen, Medium 4). It used to read
+      // `errorMessage(error).includes('side_effect_key')`, which made a
+      // fail-closed classification depend on a substring of a trigger's
+      // `RAISE(ABORT, …)` text: renaming that trigger's message, or installing
+      // a second guard on this table whose message names the collision
+      // differently, silently downgraded a genuine concurrent duplicate from
+      // `duplicate_external_action` to `operator_rejected`. Measured: with the
+      // derived `no_unique_reentry` guard installed on `hq_action_events` the
+      // engine code is `SQLITE_CONSTRAINT_TRIGGER` either way and only the text
+      // changes, so the text was the whole discriminator.
+      //
+      // `sideEffectHolder` is that discriminator instead: the reserving
+      // transaction has rolled back, so a row standing under THIS attempt's
+      // side-effect key is by construction a row some OTHER attempt committed.
+      // It is a fact about the ledger, it cannot be renamed, and it is exactly
+      // the same read the in-transaction duplicate check above already makes.
       const code = (error as { code?: string }).code;
       const reservedByTrigger =
-        code === 'SQLITE_CONSTRAINT_TRIGGER' && errorMessage(error).includes('side_effect_key');
+        code === 'SQLITE_CONSTRAINT_TRIGGER' &&
+        attemptedEffectKey !== null &&
+        sideEffectHolder(this.#db, attemptedEffectKey) !== null;
       if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT' || reservedByTrigger) {
         return this.#refuseAction(actionId, taskId, 'execute', {
           code: 'duplicate_external_action',
