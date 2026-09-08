@@ -662,7 +662,7 @@ describe('destroying the audit log is a finding, not silence', () => {
    *
    * Its other half — "the clearing is still correct" — is WRONG, and the
    * concurrent lane executed the case that proves it (round five, Medium 1): a
-   * full assessment over a file whose 31 declared ledgers had been dropped found
+   * full assessment over a file whose declared ledgers had ALL been dropped found
    * the ledgers HQ had itself re-created EMPTY, recorded `safeMode: false` with
    * an empty findings list, and handed `releaseKillSwitch` back. So the ledgers
    * THIS process found absent are now carried into the assessment and are not
@@ -1284,7 +1284,18 @@ describe('the unauthenticated artifact never says "fine" while HQ has said other
       expect(summary.runs).toBe(0);
       expect(summary.verifiedBackups).toBe(0);
       expect(summary.needsReconciliation).toBe(0);
-      // The key set is unchanged — twelve, and the same twelve.
+      // The key set is the same on both branches — that is the property this
+      // assertion exists for: the store-absent answer and the store-present one
+      // are composed once and cannot drift into different shapes.
+      //
+      // Thirteen since Wave 5 correction round fifteen, Medium 2:
+      // `safeModeStatement` was added because three shipped sentences claimed
+      // `SAFE_MODE_STATEMENT` was served on the unauthenticated artifact and it
+      // was on no part of it. It is a fixed constant with no per-file data, so
+      // the "no detail text crosses" assertion below is unaffected — and this
+      // branch, the read-only pre-Phase-13 file, is exactly the one that used to
+      // publish "everything is fine", so it is the branch that most needs to say
+      // what safe mode means.
       expect(Object.keys(summary).sort()).toEqual(
         [
           'assessmentDepth',
@@ -1297,6 +1308,7 @@ describe('the unauthenticated artifact never says "fine" while HQ has said other
           'note',
           'runs',
           'safeMode',
+          'safeModeStatement',
           'storePresent',
           'verifiedBackups',
         ].sort(),

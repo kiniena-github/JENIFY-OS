@@ -58,6 +58,7 @@ import { evidenceEntryLinkStands, verifyEvidenceChain } from '../operator/eviden
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import {
   INTEGRITY_ASSESSMENT_DEPTHS,
+  SAFE_MODE_STATEMENT,
   isHqIntegrityFinding,
   structuralIntegrity,
   type HqBackupCandidateCensus,
@@ -1538,6 +1539,27 @@ export interface ReliabilitySnapshotView {
   /** Counts keyed by the closed integrity-finding vocabulary; no detail text crosses. */
   findings: Record<string, number>;
   durabilityMeetsRequirement: boolean;
+  /**
+   * What safe mode MEANS, carried on the artifact that states it (Wave 5
+   * correction round fifteen, Medium 2).
+   *
+   * Three shipped sentences — `SAFE_MODE_STATEMENT`'s own docblock,
+   * `service.ts`'s durability note and Phase 13's round-fourteen entry — said
+   * the statement is served on the unauthenticated `hq-snapshot.json`. It was
+   * not: it reached `#integrityView()` only, which is behind
+   * `assessHqIntegrity` and `hqReliabilityPosture`, both authenticated.
+   * Executed with safe mode genuinely engaged at `c23dd0a`, the statement did
+   * not appear on the snapshot in any form. So the disclosure was narrower than
+   * the pages claimed, and this field is what makes the pages true rather than
+   * the pages being narrowed to match.
+   *
+   * It is a fixed CONSTANT and carries no per-file data — no path, no finding
+   * detail, no id — so it changes nothing about what this view discloses.
+   * `safeMode` beside it is still the fact; this is the sentence that says what
+   * the fact means, and an unauthenticated reader seeing `safeMode: true` with
+   * no explanation is exactly the reader it was written for.
+   */
+  safeModeStatement: string;
   note: string;
 }
 
@@ -1638,6 +1660,11 @@ export function summarizeReliability(input: {
     assessmentDepth: input.assessmentDepth,
     findings,
     durabilityMeetsRequirement: input.durabilityMeetsRequirement,
+    // Composed here, in the ONE place both the store-present and store-absent
+    // branches pass through, for the reason `reliabilitySummary` gives for
+    // composing the integrity fields exactly once: two places to write it are
+    // two places for it to drift.
+    safeModeStatement: SAFE_MODE_STATEMENT,
     note: RELIABILITY_SNAPSHOT_NOTE,
   };
 }

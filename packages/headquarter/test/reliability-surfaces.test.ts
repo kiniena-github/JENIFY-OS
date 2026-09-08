@@ -462,6 +462,15 @@ describe('the unauthenticated snapshot section', () => {
         'note',
         'runs',
         'safeMode',
+        // Added by Wave 5 correction round fifteen, Medium 2. Three shipped
+        // sentences claimed `SAFE_MODE_STATEMENT` was served on this
+        // unauthenticated artifact and it was on no part of it — executed with
+        // safe mode genuinely engaged at `c23dd0a`, the statement did not
+        // appear in any form. It is a fixed CONSTANT carrying no per-file data,
+        // so the privacy assertions below are unaffected and the whole-artifact
+        // identifier scan still holds; what changes is that the disclosure is
+        // now as wide as the pages say it is.
+        'safeModeStatement',
         'storePresent',
         'verifiedBackups',
       ]);

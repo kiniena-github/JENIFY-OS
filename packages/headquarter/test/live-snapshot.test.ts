@@ -32,6 +32,7 @@ import { openHqDatabase, openHqDatabaseReadOnly } from '../src/store/db.js';
 import { HeadquarterOperations } from '../src/application/service.js';
 import { ensureApplicationSchema } from '../src/application/db.js';
 import { ensurePrincipalSchema } from '../src/application/principals.js';
+import { SAFE_MODE_STATEMENT } from '../src/store/integrity.js';
 
 const NOW = '2026-08-28T12:00:00Z';
 const CLAUDE_ONLY = { CLAUDE_ROUTINE_URL: 'present', CLAUDE_ROUTINE_TOKEN: 'present' };
@@ -670,5 +671,66 @@ describe('a static build cannot claim live operational provenance', () => {
     expect(staticSectionMode(undefined)).toBe('sample');
     expect(staticSectionMode('sample')).toBe('sample');
     expect(staticSectionMode('reconstructed')).toBe('reconstructed');
+  });
+});
+
+/**
+ * Wave 5 correction round fifteen, MEDIUM 2 — what safe mode MEANS is served on
+ * the artifact that states it.
+ *
+ * Three shipped sentences said `SAFE_MODE_STATEMENT` is served on the
+ * unauthenticated `hq-snapshot.json`: its own docblock in `store/integrity.ts`,
+ * the durability note in `application/service.ts`, and Phase 13's round-fourteen
+ * entry. Executed at `c23dd0a` with safe mode genuinely engaged, the statement
+ * was on NO part of the snapshot — full text false, the mid-ledger clause false,
+ * even the opening words "Safe mode is a statement" false. It reached
+ * `#integrityView()` only, which is behind `assessHqIntegrity` and
+ * `hqReliabilityPosture`, both authenticated, plus the refusal message.
+ *
+ * The choice made was to widen the artifact rather than narrow the sentence: the
+ * statement is a fixed constant carrying no per-file data, and an unauthenticated
+ * reader who sees `safeMode: true` with no explanation is exactly the reader it
+ * was written for. This pins that choice both ways — the statement is there, and
+ * it is the SAME constant rather than a second paraphrase that could drift.
+ */
+describe('the unauthenticated snapshot carries the safe-mode statement it is said to carry', () => {
+  it('serves SAFE_MODE_STATEMENT verbatim in the reliability section', () => {
+    const fx = setupFixture();
+    const snapshot = liveSnapshotFromOperations(fx.ops, { now: NOW, mode: 'live' });
+    const section = snapshot.reliability;
+    expect(section, 'the snapshot carries no reliability section').toBeDefined();
+    expect(section!.data.safeModeStatement).toBe(SAFE_MODE_STATEMENT);
+    // Verbatim on the SERIALIZED artifact, which is what
+    // `cli/snapshot.ts` writes — a field that survives `JSON.stringify` is the
+    // claim, not a field that exists on the object.
+    expect(JSON.stringify(snapshot)).toContain('Safe mode is a statement about');
+  });
+
+  it('is one constant, not a paraphrase the two surfaces can drift apart on', () => {
+    const fx = setupFixture();
+    const snapshot = liveSnapshotFromOperations(fx.ops, { now: NOW, mode: 'live' });
+    // The authenticated view and the unauthenticated artifact must carry the
+    // identical string. Two spellings of "what safe mode means" is exactly the
+    // second truth this codebase refuses everywhere else.
+    const authenticated = fx.ops.hqReliabilityPosture().integrity.safeModeStatement;
+    expect(snapshot.reliability!.data.safeModeStatement).toBe(authenticated);
+  });
+
+  it('still says it when safe mode is actually engaged, which is when it matters', () => {
+    const fx = setupFixture();
+    // A dropped append-only guard is the cheapest genuine engagement.
+    fx.db.exec('DROP TRIGGER trg_op_evidence_no_erase');
+    const restarted = new HeadquarterOperations(fx.db, { store: fx.store });
+    const snapshot = liveSnapshotFromOperations(restarted, { now: NOW, mode: 'live' });
+    expect(snapshot.reliability!.data.safeMode).toBe(true);
+    expect(snapshot.reliability!.data.safeModeStatement).toBe(SAFE_MODE_STATEMENT);
+  });
+
+  it('adds no per-file data: the statement carries no path, id or finding detail', () => {
+    // Why widening the artifact was safe. The constant is fixed text; if a
+    // future edit interpolated anything into it, this fails.
+    expect(SAFE_MODE_STATEMENT).not.toMatch(/[/\\][A-Za-z0-9_.-]+\.sqlite/);
+    expect(SAFE_MODE_STATEMENT).not.toContain('${');
+    expect(SAFE_MODE_STATEMENT.length).toBeGreaterThan(500);
   });
 });
