@@ -1306,10 +1306,18 @@ canonical attribution instead — a deliberate behaviour change, not a compatibl
 one.
 
 **Added by the third correction round**, and each stated where it belongs as
-well as here: a cost entry's stored `mission_id` and `project_id` still hold one
-value each and are recorded ATTRIBUTION only — every ceiling is measured from
-`hq_mission_plan_items` instead, so the columns can be read as a summary but
-never as the measurement; spend recorded against a provider the task is not
+well as here. The first item is kept in the tense it was written in, because
+three later rounds superseded it and a reader arriving here needs to know that
+(corrected at round seven, Low 6, where it was still standing in the PRESENT
+tense): round three said a cost entry's stored `mission_id` and `project_id`
+hold one value each and are recorded ATTRIBUTION only, with every ceiling
+measured from `hq_mission_plan_items` instead. That is no longer how a ceiling
+is measured. Round four made the stored attribution one half of a UNION and
+therefore load-bearing; round six replaced the one-of-N columns with
+`mission_ids`/`project_ids`; round seven added a third term derived from the
+append-only mission event log. The columns are a term in the measurement now,
+not a summary beside it — see High H2 and HIGH NEW-4. What remains true of round
+three is the rest of its list: spend recorded against a provider the task is not
 canonically bound to is kept in the deployment total and measures no PROVIDER
 ceiling, which means an unbound lane's provider ceiling cannot be filled at all
 rather than being fillable by anyone; the provider fold is a CASE fold and
@@ -1329,7 +1337,7 @@ cross-cutting findings and the full verification table are in
 
 | Finding | What was reproduced | What changed |
 |---|---|---|
-| **HIGH H2** — an exhausted budget ceiling could be nullified: `blocked, observed 5000` became `within_ceiling, observed 0`, and the refused write then succeeded | The previous round moved ceiling measurement off the append-only cost ledger's own columns onto three MUTABLE, UNCENSUSED tables: `hq_mission_plan_items.mission_id`, `hq_missions` (joined at `service.ts`) and `op_tasks.payload`. The hardening guarded `DELETE` and a `task_id` relink and nothing else. Three routes: **(a)** a principal with `originateCapabilities: ['hq.mission_command']`, no approval authority and no `hq.intelligence_command`, calling `assignMissionToProject({projectId: null})` — a supported facade call, no raw SQL; **(b)** `UPDATE hq_mission_plan_items SET mission_id` (the `no_relink` guard is declared `BEFORE UPDATE OF task_id`), `UPDATE hq_missions SET project_id = NULL`, `DELETE FROM hq_missions`; **(c)** `UPDATE op_tasks SET payload`. Nothing in the census or safe mode fired on any of it. The reviewer separated the halves by re-running against a reverted copy: the ENFORCEMENT drop-out was pre-existing; what this wave ADDED was that `observed` collapses to 0, removing the last place a Founder could see the spend the ceiling was exhausted by. | One rule closes all three: **canonical membership UNION the attribution HQ itself recorded**. `mission_id`, `project_id` and a new `provider_bound` flag are derived by HQ at record time from canonical truth — no caller supplies one — and the rows are append-only. **The round-six correction had to finish it (High 3): the rule was right and the recorded half was incomplete**, so the union was NOT monotone for a task linked to two or more missions. `mission_id`/`project_id` store `canonicalScopes.missionIds[0] ?? null` — ONE of N — so the union was complete only for the mission or project that sorted first, and a FOURTH route reached the same nullification with no raw SQL at all: `assignMissionToProject` on the mission owning the project the row did not store, by the same `hq.mission_command`-only principal. Executed: victim project `blocked, observed 5000` → `within_ceiling, observed 0`, the refused `recordIntelligenceDecision` RECORDED, and `byProject` crediting the 5000 to the escape project. Two further append-only columns — `mission_ids` and `project_ids`, added by `ensureCostEntryScopeColumns` and holding EVERY scope HQ derived at record time — are what make the sentence true; a row written before they existed reports its single column, which is exactly what that row committed to. With them the union really is monotone and unforgeable. The `mission` scope always held; only `project` was reachable this way. It is applied identically to `#entriesForScope` (the observed figure) and `#governingBudgetScopes` (which policies bind), so the pre-existing enforcement half is closed with the new one rather than beside it. `provider_bound` takes the provider ceiling off `op_tasks.payload` entirely for work that already happened. Engine guards for the raw routes: `trg_hq_mission_plan_items_no_remission`, and `trg_hq_missions_no_erase` / `_no_replace` with `hq_missions` joining `ENGINE_IMMUTABLE_TABLES` under a reduced base. **And it was still an OVERCLAIM for a task with no spend of its own** (round seven, High NEW-4): the recorded half has nothing to add for NEW work under a ceiling some OTHER task exhausted, so such a task was governed by the mutable `hq_missions.project_id` alone. Executed against `d97b8a6` with the ceiling exhausted by task A and the attack on task B in the same project, as a principal with `originateCapabilities: ['hq.mission_command']`, `approvalAuthority: false` and no intelligence grant: `assignMissionToProject({projectId: null})` was accepted, `permittedTiers` widened from `["deterministic_local"]` to all five, and a `critical_review` record was ACCEPTED — while that same principal calling `setIntelligenceBudget` directly is correctly `refused(not_permitted)`. Raw `UPDATE hq_missions SET project_id = NULL` did the same. A THIRD term closes it: project membership is also derived from the APPEND-ONLY mission event log (`#durableTaskProjectScopes`), which records both ends of every `assignMissionToProject` move and — since round seven — the project a mission was created under, so clearing the link narrows nothing. Applied identically to the governing set and to the measurement. |
+| **HIGH H2** — an exhausted budget ceiling could be nullified: `blocked, observed 5000` became `within_ceiling, observed 0`, and the refused write then succeeded | The previous round moved ceiling measurement off the append-only cost ledger's own columns onto three MUTABLE, UNCENSUSED tables: `hq_mission_plan_items.mission_id`, `hq_missions` (joined at `service.ts`) and `op_tasks.payload`. The hardening guarded `DELETE` and a `task_id` relink and nothing else. Three routes: **(a)** a principal with `originateCapabilities: ['hq.mission_command']`, no approval authority and no `hq.intelligence_command`, calling `assignMissionToProject({projectId: null})` — a supported facade call, no raw SQL; **(b)** `UPDATE hq_mission_plan_items SET mission_id` (the `no_relink` guard is declared `BEFORE UPDATE OF task_id`), `UPDATE hq_missions SET project_id = NULL`, `DELETE FROM hq_missions`; **(c)** `UPDATE op_tasks SET payload`. Nothing in the census or safe mode fired on any of it. The reviewer separated the halves by re-running against a reverted copy: the ENFORCEMENT drop-out was pre-existing; what this wave ADDED was that `observed` collapses to 0, removing the last place a Founder could see the spend the ceiling was exhausted by. | One rule closes all three: **canonical membership UNION the attribution HQ itself recorded**. `mission_id`, `project_id` and a new `provider_bound` flag are derived by HQ at record time from canonical truth — no caller supplies one — and the rows are append-only. **The round-six correction had to finish it (High 3): the rule was right and the recorded half was incomplete**, so the union was NOT monotone for a task linked to two or more missions. `mission_id`/`project_id` store `canonicalScopes.missionIds[0] ?? null` — ONE of N — so the union was complete only for the mission or project that sorted first, and a FOURTH route reached the same nullification with no raw SQL at all: `assignMissionToProject` on the mission owning the project the row did not store, by the same `hq.mission_command`-only principal. Executed: victim project `blocked, observed 5000` → `within_ceiling, observed 0`, the refused `recordIntelligenceDecision` RECORDED, and `byProject` crediting the 5000 to the escape project. Two further append-only columns — `mission_ids` and `project_ids`, added by `ensureCostEntryScopeColumns` and holding EVERY scope HQ derived at record time — are what make the sentence true; a row written before they existed reports its single column, which is exactly what that row committed to. **This sentence read "with them the union really is monotone and unforgeable", and it was false when it shipped — in rounds four, six and seven** (corrected at round seven, Medium 6). Those two columns make the RECORDED half complete; they do not make the union monotone, because the union's other half is canonical membership NOW, which a facade call can narrow — which is exactly what NEW-4 below then executed 12 times out of 12. What makes it monotone is the THIRD term, and the honest statement is the one at the end of this cell rather than this one. The `mission` scope always held; only `project` was reachable this way. It is applied identically to `#entriesForScope` (the observed figure) and `#governingBudgetScopes` (which policies bind), so the pre-existing enforcement half is closed with the new one rather than beside it. `provider_bound` takes the provider ceiling off `op_tasks.payload` entirely for work that already happened. Engine guards for the raw routes: `trg_hq_mission_plan_items_no_remission`, and `trg_hq_missions_no_erase` / `_no_replace` with `hq_missions` joining `ENGINE_IMMUTABLE_TABLES` under a reduced base. **And it was still an OVERCLAIM for a task with no spend of its own** (round seven, High NEW-4): the recorded half has nothing to add for NEW work under a ceiling some OTHER task exhausted, so such a task was governed by the mutable `hq_missions.project_id` alone. Executed against `d97b8a6` with the ceiling exhausted by task A and the attack on task B in the same project, as a principal with `originateCapabilities: ['hq.mission_command']`, `approvalAuthority: false` and no intelligence grant: `assignMissionToProject({projectId: null})` was accepted, `permittedTiers` widened from `["deterministic_local"]` to all five, and a `critical_review` record was ACCEPTED — while that same principal calling `setIntelligenceBudget` directly is correctly `refused(not_permitted)`. Raw `UPDATE hq_missions SET project_id = NULL` did the same. A THIRD term closes it: project membership is also derived from the APPEND-ONLY mission event log (`#durableTaskProjectScopes`), which records both ends of every `assignMissionToProject` move and — since round seven — the project a mission was created under, so clearing the link narrows nothing. Applied identically to the governing set and to the measurement. |
 | **HIGH H3** — one accepted write permanently bricked BOTH new Founder read routes | `openRun` and `recordIntelligenceDecision` scanned their labels with the weak `api_key: value` heuristic while `control-api.ts` applies the strict, shape-based `assertBrowserSafe` to every response. `sk-…`, `ghp_…`, a PEM header and `Bearer …` were all STORED; the rows are append-only; `GET /api/control/reliability` and `GET /api/control/intelligence` then answered `500 {"code":"internal"}` on every subsequent read, forever, with no DELETE or UPDATE able to undo it. | Every facade write that stores caller text goes through one function, `assertNoCredentialShape`, which is the SAME `assertBrowserSafe` the read boundary uses — **46 call sites at this head** (29 when this row was written; round six found three write sites the sweep had missed and round seven another five, and the count is re-measured at the merged head rather than carried forward from either lane — see High 4 and Medium 4 below, and the round-seven correction that follows). Any text a write accepts and a read refuses is a permanent outage waiting to be typed, so the asymmetry is closed rather than the two labels patched. The two refusal messages (Low L2) are corrected with it: they claimed shape detection the weak check did not perform. **Corrected again in round seven (Medium 2): "29 call sites" and "the asymmetry is closed" were both premature.** Five facade writes still stored caller text unscanned, and each was executed to the outage — `createTask`'s `title` (`500` on `/state` and `/commandCenter`) and `project` (`/state`), `failTask`'s `reason` (both), `registerExecutionWorker`'s `displayName` (`/state`, `/workforce`, `/commandCenter`, from a create-only command) and `engageKillSwitch`'s `reason` (both, on the act a Founder reaches for to stop everything). All five are scanned now, and the claim is no longer a count in a document: `facade-write-scan.test.ts` enumerates the facade's text-storing writes from the source and fails when one of them does not call the function. One carve-out is named rather than implied — `createTask`'s task PAYLOAD, which no control route serves and whose strict guard lives at the dispatch boundary that would publish it; that carve-out is itself executed in the same file. **And three more, found independently in the other round-seven lane (High NEW-3):** `recordVerifiedBackup.note`, `recordIntelligenceOutcome.note` and `disableAiMember.reason` bounded their text with `missionText` — a LENGTH check — and never reached the scan; `recordVerifiedBackup` was live and bricked `GET /api/hq/control/reliability` exactly as this row describes. All three are scanned, and a SECOND derived assertion stands beside `facade-write-scan.test.ts`: `credential-scan-coverage.test.ts` enumerates every member of `service.ts` that calls `missionText` (29 at this head) and names any that does not also call the scan. The two enumerate different things — public methods that store caller text, and length-bounded text fields — and neither subsumes the other, so both stand. |
 | **MEDIUM M5** — `analytics.cost.byMission`/`byProject` rested on the one-of-N stored column | Six runs, one task linked to two missions, one 5000 spend: four runs attributed 100% to mission A and 0 to B; two the reverse. This page claimed the stored columns "measure nothing"; they measured `intelligenceAnalytics()`, served on `/api/hq/control/intelligence`. | Folded from the same union the ceilings use. A task linked to two missions counts IN FULL under each, because HQ has no basis for a split and does not invent one. `summarizeIntelligenceAnalytics` takes the canonical derivation as a REQUIRED input, so a missing one cannot read clean. |
 | **MEDIUM M6** — a claim-holding worker poisoned the Founder's spend-by-provider report | `byProvider` folded the caller-declared `row.providerId` that the ceiling path had already stopped trusting: `[{"id":"openai","knownAmountMinorUnits":999999}]` went out for work HQ has no canonical statement ever ran there, while the ceiling correctly read `observed 0`. Two surfaces over one ledger, disagreeing about the same spend. | Folded on the binding HQ vouched for (`provider_bound`). An amount HQ cannot attribute lands in a categorical `unattributed` bucket rather than being credited to whoever the worker named. |
@@ -1474,9 +1482,21 @@ the full verification table and the re-verified guarantees are in
   the attribution HQ recorded, so re-pointing a mission at another project makes
   the new project's report include spend incurred before the move — and makes
   that project's own ceiling start governing the work, which is the fail-closed
-  direction and the reason the union is shaped this way. What High 3 closed is
-  the other half: the project that INCURRED the spend can no longer lose it.
-  Asserted explicitly in route (d) rather than left implicit.
+  direction and the reason the union is shaped this way. Both halves re-measured
+  at THIS head: a project moved under is credited `observed 5000` once it carries
+  a ceiling of its own, and the project that INCURRED the spend still reads
+  `blocked, observed 5000` after the move.
+  **The other half was attributed to the wrong round, and was false when this
+  bullet shipped** (corrected at round seven, Medium 6). It said "what High 3
+  closed is the other half: the project that INCURRED the spend can no longer
+  lose it", and High 3 did not close it — a seventh-round review executed the
+  loss 12 times out of 12 against the head this bullet was written at, by moving
+  a mission P1 → P2, spending under P2 until the ceiling blocked, then moving
+  P2 → P3: `within_ceiling 0`, the refused decision RECORDED, and `byProject`
+  crediting P3, which had spent nothing. What closes it is HIGH NEW-4's third
+  term, the derivation from the append-only mission event log, and it is closed
+  at this head — the same route now leaves P2 `blocked, observed 5000` with the
+  decision still refused.
 - **`mission_ids`/`project_ids` are NULL on rows recorded before this round.**
   Such a row reports its single `mission_id`/`project_id`, which is what it
   committed to; a task that was linked to two missions before the upgrade keeps
@@ -1485,8 +1505,14 @@ the full verification table and the re-verified guarantees are in
   will not invent one.
 - **A mapped non-Founder reads every Founder console route, including
   `founder_only` memory.** That is the host's Founder map doing what it declares,
-  not a defect, and it is now stated and tested rather than assumed away by a
-  suite docstring that described a different property.
+  not a defect. **It was stated and NOT tested, for two rounds** (corrected at
+  round seven, Medium 7): this bullet said "stated and tested", and the only
+  mapped-non-Founder test in the package covered the intelligence routes. It is
+  tested now, in `test/read-boundary-pinned.test.ts`: a mapped `coo` with no
+  approval authority and no originate grants receives the full body of a
+  `founder_only` memory record on `/memory`, `/memory/search` and `/search`, and
+  an identically-authenticated account the map does NOT name receives none of
+  it — which is what makes the map an authority grant rather than an accident.
 
 **Verification at the sixth-round MERGED head** (the whole matrix, all green,
 exit 0): `npm run test:hq` 167 files / 3220 tests; `npm test` (root) 37 files /
@@ -1532,3 +1558,61 @@ exit 0): `npm run test:hq` 178 files / 3288 tests; `npm test` (root) 37 files /
 typechecks clean; `npm run build:site` 10 pages + `hq-snapshot.json`;
 `npm run build` all workspaces, web initial JS 215.66 kB / 69.22 kB gzip,
 unchanged.
+
+## The seventh round's THIRD hostile review, and what it changed in Phase 14
+
+Two fresh reviewers read `2891123` and returned **0 Critical / 5 High / 7 Medium
+/ 9 Low**. Three of their findings touch this phase. Two of the three were
+already CLOSED by the concurrent lane that pushed `ae4bf90` while this one
+worked, and that is said plainly rather than claimed as this lane's:
+
+- **`createTask({title, project})` as an unscanned facade write** — their HIGH
+  5, closed by the other lane's round-seven Medium 2. Verified here by
+  execution rather than by reading the diff: both fields are refused
+  `invalid_input`, with the refusal naming the field (`String matches a known
+  credential shape (at stored_text.title)`).
+- **The intermediate-scope budget route** — their HIGH 4, closed by the other
+  lane's HIGH NEW-4. Verified here by executing the exact route they name: move
+  a mission P1 → P2, spend 5000 under P2 until the ceiling reads `blocked` and
+  the worker decision is refused, then move P2 → P3. At this head P2 still reads
+  `blocked, observed 5000`, the retried decision is still refused
+  `budget_ceiling_blocks`, and P3 is credited 0 until it carries a ceiling of its
+  own. Two sentences on this page that were false BECAUSE of that route are
+  corrected above (Medium 6).
+
+What this lane changed here:
+
+| Finding | What was reproduced, on `ae4bf90` | What changed |
+|---|---|---|
+| **MEDIUM 5** — the fail-closed default in `#entriesForScope` was completely unpinned | Mutating `default: return false` to `return true` — an unrecognized budget scope matching EVERY cost entry — left the whole package suite green at 178 files / 3288 tests. Unreachable today, and undocumented as a fail-closed default. | Both halves pinned in `read-boundary-pinned.test.ts`. The BOUNDARY that makes it unreachable is executed — five unknown scope kinds refused `invalid_input`, every real member of `BUDGET_SCOPES` accepted — and a derived assertion requires a `case` for every member of that vocabulary, so a scope added without one falls to a default that measures NOTHING rather than everything. The source-level half is what kills the mutation, and it is written that way on purpose: an unreachable branch cannot be executed, and saying so is better than leaving the property documented and unenforced. |
+| **MEDIUM 7** — a shipped claim of test coverage that did not exist | This page said a mapped non-Founder reading every Founder console route, including `founder_only` memory, "is now stated **and tested**". The read half is real and was reproduced; no test asserted it, and the only mapped-non-Founder test covered the intelligence routes. | Tested now, over the routes that sentence names — see the corrected bullet above. |
+| **LOW 5 / LOW 6** — two sentences that the code beside them contradicts | `service.ts` said of a cost entry's stored scope columns "the stored columns stay as recorded attribution and measure nothing", immediately above the round-four paragraph that adds them to the predicate. This page repeated the same round-three claim in the PRESENT tense. | Both corrected in place, with the round that changed each named, because a reader arriving at the three-term union needs to know which round added which term. |
+
+### What this lane adds to Phase 14's NOT-fixed list
+
+- **`#entriesForScope`'s `default` remains unreachable, and its pin is a source
+  assertion rather than an execution.** `isBudgetScope` refuses an unknown scope
+  at the boundary, so no supported call reaches the branch. The assertion that
+  it returns `false` reads the source. That is weaker than an executed test and
+  it is stated as such; what it buys is that the mutation which flips it is
+  caught, and that a scope added to the vocabulary without a case is caught too.
+- **The mapped-non-Founder read is a property of the HOST's Founder map, and
+  testing it does not narrow it.** A host that maps an account to a principal
+  has granted that account the Founder console. The test asserts the behaviour
+  and its boundary; it does not make the map safer.
+
+**Verification at the head this section describes** (the whole matrix, all
+green, exit 0, every number measured rather than carried forward):
+`npm run test:hq` **181 files / 3309 tests**; `npm test` (root) **37 files / 569
+passed + 3 pre-existing skips**; `packages/hq-host` **23 files / 222 tests**;
+`apps/hq-server` **2 files / 20 tests**; four typechecks clean
+(`headquarter`, `hq-host`, `hq-server`, root build); `npm run build:site`
+10 Headquarter pages + `hq-snapshot.json`; `npm run build` all workspaces, web
+initial JS **215.66 kB / 69.22 kB gzip** — unchanged. Against `ae4bf90` the
+suite gained 3 files and 21 tests and lost none: no test file was deleted or
+renamed, and no test file holds fewer `it(` than it did. The diff against the
+accepted base `f1ce71c` touches `packages/server`, `packages/web`,
+`packages/shared`, `packages/config-mesob`, `packages/hq-host`, `apps/`,
+`package.json` and `package-lock.json` not at all; no `.skip`/`.only`/`.todo`/
+`xit`/`xdescribe` was added anywhere, and no `as any`, `@ts-expect-error` or
+`eslint-disable` appears in any added line.

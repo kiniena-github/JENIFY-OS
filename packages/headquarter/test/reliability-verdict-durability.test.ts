@@ -942,10 +942,16 @@ describe('the enforcement declarations are frozen, not merely typed readonly', (
     };
     for (const [name, value] of seen) visitDeep(value, name, new WeakSet());
     expect(deepUnfrozen).toEqual([]);
+
     // Counts, so a future narrowing of the enumeration is visible rather than
-    // silently passing over an empty set. Measured at this head: 604 exported
+    // silently passing over an empty set. RE-MEASURED at this head (Wave 5
+    // correction round seven, Low 9 — the numbers here were carried forward from
+    // the head they were taken at, and an identical enumeration run against the
+    // code they described already returned three more of each): 607 exported
     // ALL-CAPS bindings across 16 barrels and every module behind them, and
-    // 2103 objects reached by walking into them.
+    // 2106 objects reached by walking into them. The assertion below is a floor
+    // rather than an equality on purpose — new exported vocabulary is ordinary,
+    // and the thing worth failing on is the enumeration SHRINKING.
     expect(seen.size).toBeGreaterThanOrEqual(600);
     // Named so a regression on any of them is reported by name rather than as
     // an anonymous count. The last three are the enforcement-path constants the

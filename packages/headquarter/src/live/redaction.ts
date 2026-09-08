@@ -532,6 +532,22 @@ function namesACredentialHolder(key: string): boolean {
  * so the hole is stated here and in the phase document rather than papered over.
  * The architecture is what answers it: credentials never enter the control
  * plane, and no HQ writer splits a value across fields.
+ *
+ * **The KEY rule reaches exactly one level, and the refusal message reads wider
+ * than that** (Wave 5 correction round seven, Low 8). "Field names a credential
+ * holder and carries a value" applies only where the value is a string or a
+ * number: `{token: 'x'}` and `{token: 12345}` are refused, and
+ * `{token: {v: 'x'}}` and `{token: ['x']}` are not, because the walk descends
+ * into the container and the key it then sees is `v` or an index rather than
+ * `token`. That is the right trade — refusing every object under a
+ * credential-named key would refuse `{apiKeyStatus: {present: true}}`, which is
+ * exactly the PRESENCE shape this boundary exists to allow — but it is narrower
+ * than the sentence sounds, so it is written down. What still covers the nested
+ * case is the VALUE rule, which runs on every string at every depth: a
+ * credential-SHAPED string is refused wherever it sits. What is not covered is
+ * a credential that is neither shaped like one nor a direct scalar under a
+ * credential-named key, and that is the same residual the split-value paragraph
+ * above states.
  */
 export function assertBrowserSafe(payload: unknown, rootPath = 'snapshot'): void {
   walk(payload, rootPath, (value, path, key) => {

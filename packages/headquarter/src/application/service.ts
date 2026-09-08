@@ -9201,8 +9201,20 @@ export class HeadquarterOperations {
           // `hq_mission_plan_items` is the one place HQ records that a task
           // belongs to a mission, so deriving membership from it here is the
           // canonical-truth answer rather than a second store that can drift
-          // from it. The stored columns stay as recorded attribution and
-          // measure nothing.
+          // from it.
+          //
+          // **The stored columns DO measure, and the sentence that used to sit
+          // here said they did not** (Wave 5 correction round seven, Low 5). It
+          // read "the stored columns stay as recorded attribution and measure
+          // nothing", and the round-four paragraph immediately below it — which
+          // adds `entry.missionIds` to this very predicate — has contradicted it
+          // ever since. What round three took away was the stored columns being
+          // the ONLY answer; what round four gave back was their being one of
+          // two, unioned, so that a link broken afterwards cannot take a
+          // recorded spend out of the ceiling that governed it. Corrected here
+          // rather than deleted, because a reader arriving at the union needs to
+          // know which round changed what.
+          //
           // CANONICAL membership UNION the attribution HQ itself recorded on
           // the entry (Wave 5 correction round four, High H2).
           //
