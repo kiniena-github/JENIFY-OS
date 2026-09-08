@@ -1800,16 +1800,70 @@ scenario that can see them: a task with its OWN recorded spend, after the plan
 item's `no_remission` guard is dropped, `mission_id` re-pointed and the guard put
 back. Each mutation fails those tests and no others.
 
-### What round thirteen adds to Phase 14's NOT-fixed list
+### ROUND FOURTEEN, HIGH 3 — a seventh route, and a price that was three times too high
 
-- **`UPDATE op_tasks SET id` still detaches a task at three statements** —
-  `DROP TRIGGER trg_op_tasks_no_reidentify`, the `UPDATE`, re-create — and no
-  read-side derivation can hold it: `hq_mission_plan_items.task_id` names the
-  task BY ID and there is no second key to resolve it by. Executed at that
-  price, with `missingImmutabilityGuards []` and `structuralIntegrity
-  safeMode: false` afterwards, and asserted in
-  `budget-scope-identity.test.ts` so that closing it fails there rather than
-  leaving a stale residual on this page.
+Round thirteen closed `UPDATE op_tasks SET id` and declared exactly that one
+guard, under a header naming "every way a row's identity can change". It was one
+of three spellings, and the other two were live and CHEAPER than the one that
+was closed. Reproduced at the merged head `8481269` on the round-thirteen scene,
+12 of 12 fresh identities, no DDL, row count preserved 3 -> 3:
+
+| route | statements at `8481269` | outcome |
+|---|---|---|
+| `INSERT OR REPLACE INTO op_tasks` | **1** | `before governedBy=[deployment,mission] decision=blocked tiers=1` -> `after governedBy=[deployment] decision=within_ceiling tiers=5`, victim row gone |
+| `DELETE` + `INSERT` | **2** | the same detachment, row count preserved |
+| `UPDATE op_tasks SET id` | 3 (guard dropped and re-created) | the route round thirteen closed |
+
+The REPLACE route ran through the PARTIAL unique index `(capability_id,
+idempotency_key)`, not through the primary key: the engine deletes the colliding
+row to resolve the conflict, and `recursive_triggers` is off by default and
+connection-scoped, so no `BEFORE DELETE` fires on the attacker's own connection.
+`missingGuards []` and `structuralIntegrity safeMode: false` after every one.
+
+**Fixed.** `WRITE_ONCE_IDENTITY_GUARDS` now declares all three spellings —
+`no_reidentify`, `no_erase`, `no_replace` — and `declaredIdentityGuardsFor`
+derives the census from that constant, so a fourth spelling declared tomorrow is
+censused on the day it is declared. The replacement guard's clause list is
+DERIVED from the unique keys the FILE carries (`PRAGMA index_list` /
+`index_info`, partial indexes included with their own predicate), not from a
+list written by hand — which is what the round-thirteen enumeration would have
+missed, since the exploit's key is not the primary one. Pinned in
+`budget-scope-identity.test.ts`: both refusals at 12 of 12 fresh identities with
+`recursive_triggers` explicitly OFF, the derived key set measured against the
+live schema, the guard rebuilt when a unique index is added, and `createTask`
+plus its idempotency-key dedupe still working.
+
+### MEDIUM 1 (round fourteen) — the round-thirteen residual was priced 3x too high
+
+The sentence that stood here said `UPDATE op_tasks SET id` "still detaches a task
+at three statements" and `budget-scope-identity.test.ts` asserted
+`expect(statements).toBe(3)` under the heading "executed at the price the
+disclosure states". The same detachment cost **2** statements and no DDL
+(`DELETE` + `INSERT`) or **1** (`INSERT OR REPLACE`). Both of those are closed
+above, and the price of what remains is now MEASURED per route in that file
+rather than quoted:
+
+### What round thirteen and round fourteen leave on Phase 14's NOT-fixed list
+
+- **Every identity route still costs three statements with the relevant guard
+  dropped** — `DROP TRIGGER`, the write, re-create — measured at exactly three
+  for both `UPDATE op_tasks SET id` (`trg_op_tasks_no_reidentify`) and `INSERT
+  OR REPLACE` (`trg_op_tasks_no_replace`), and at FOUR for `DELETE` + `INSERT`
+  (`trg_op_tasks_no_erase`, two writes, re-create). No read-side derivation can
+  hold any of them: `hq_mission_plan_items.task_id` names the task BY ID and
+  there is no second key to resolve it by. Executed at those prices, with
+  `missingImmutabilityGuards []` and `structuralIntegrity safeMode: false`
+  afterwards, and asserted in `budget-scope-identity.test.ts` so that closing a
+  route fails there rather than leaving a stale residual on this page.
+- **A raw `INSERT` of a NEW task under a fresh id and a fresh idempotency key is
+  admitted at ONE statement, and no trigger can close it**: it is byte-for-byte
+  the shape of `createTask`, so no `BEFORE INSERT` clause separates them. What it
+  produces is an UNGOVERNED task — the same thing `createTask` produces for any
+  task not linked to a mission — and it is NOT an identity change: the victim
+  task is still there, still linked to its plan item, and its ceiling still
+  binds. Both halves are executed in `budget-scope-identity.test.ts`, including
+  the assertion that the governed task's ceiling still binds afterwards, so the
+  disclosure cannot drift in either direction.
 - **The mission identity guard is the same three-statement residual**, but the
   READ-side half stands without it, which is why the mission scope survives a
   raw rewrite even with the guard gone. That is proven rather than argued, in

@@ -30,7 +30,7 @@ import {
   LEDGER_ROWID_GUARD,
   LEDGER_ROWID_SEAT_GUARD,
   WRITE_ONCE_IDENTITY_TABLES,
-  declaredIdentityGuardFor,
+  declaredIdentityGuardsFor,
   REQUIRED_IMMUTABILITY_GUARDS,
   ensureLedgerRowidGuards,
   ensureWriteOnceIdentityGuards,
@@ -406,7 +406,7 @@ describe('the engine-immutable inventory is checked against the live schema, not
     const liveTriggers = triggers.map((row) => row.name).sort();
     const declaredTriggers = [
       ...ENGINE_IMMUTABLE_TABLES.flatMap((entry) => declaredGuardsFor(entry)),
-      ...WRITE_ONCE_IDENTITY_TABLES.map((entry) => declaredIdentityGuardFor(entry)),
+      ...WRITE_ONCE_IDENTITY_TABLES.flatMap((entry) => declaredIdentityGuardsFor(entry)),
     ].sort();
     expect(liveTriggers).toEqual(declaredTriggers);
     // And the two classes are disjoint: an identity guard on a table that is

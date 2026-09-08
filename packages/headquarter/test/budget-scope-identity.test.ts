@@ -41,8 +41,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import type Database from 'better-sqlite3';
-import { expectOk } from './application.fixture.js';
+import Database from 'better-sqlite3';
+import { CAPS, expectOk } from './application.fixture.js';
 import { claimSideEffectTask } from './reliability.fixture.js';
 import { intelligenceFixture, type IntelligenceFixture } from './intelligence.fixture.js';
 import { INTELLIGENCE_TIERS } from '../src/application/intelligence-command.js';
@@ -50,7 +50,10 @@ import {
   ENGINE_IMMUTABLE_TABLES,
   WRITE_ONCE_IDENTITY_TABLES,
   declaredGuardsFor,
-  declaredIdentityGuardFor,
+  declaredIdentityGuardsFor,
+  ensureWriteOnceIdentityGuards,
+  writeOnceIdentityGuardDdl,
+  WRITE_ONCE_IDENTITY_GUARDS,
   missingImmutabilityGuards,
   structuralIntegrity,
 } from '../src/store/integrity.js';
@@ -314,7 +317,17 @@ describe('the identity guards are declared, so their absence is a finding', () =
     // updated on almost every column — so it is declared in the identity list.
     expect(ENGINE_IMMUTABLE_TABLES.map((candidate) => candidate.table)).not.toContain('op_tasks');
     expect(WRITE_ONCE_IDENTITY_TABLES.map((candidate) => candidate.table)).toEqual(['op_tasks']);
-    expect(declaredIdentityGuardFor(WRITE_ONCE_IDENTITY_TABLES[0]!)).toBe('trg_op_tasks_no_reidentify');
+    // ALL THREE spellings, since round fourteen's High 3: round thirteen
+    // declared `no_reidentify` alone under a header that named "every way a
+    // row's identity can change", and `INSERT OR REPLACE` (one statement) and
+    // `DELETE` + `INSERT` (two) were both live and both cheaper than the
+    // `UPDATE` it closed.
+    expect(declaredIdentityGuardsFor(WRITE_ONCE_IDENTITY_TABLES[0]!)).toEqual([
+      'trg_op_tasks_no_reidentify',
+      'trg_op_tasks_no_erase',
+      'trg_op_tasks_no_replace',
+    ]);
+    expect([...WRITE_ONCE_IDENTITY_GUARDS]).toEqual(['no_reidentify', 'no_erase', 'no_replace']);
   });
 
   /** Frozen all the way down, for the reason `ENGINE_IMMUTABLE_TABLES` is. */
@@ -330,45 +343,442 @@ describe('the identity guards are declared, so their absence is a finding', () =
   });
 });
 
-describe('what the guards do NOT close, executed at the price the disclosure states', () => {
-  /**
-   * `op_tasks`' identity guard is a trigger, so it is the same three-statement
-   * residual every engine guard in this package carries. With it dropped, the
-   * rename really does detach the task: `hq_mission_plan_items.task_id` names
-   * the task by ID and there is no second key to resolve it by, so no read-side
-   * derivation can hold this one. Asserted so that CLOSING it fails here and
-   * sends whoever closed it to the disclosure, rather than leaving a stale
-   * residual on the page.
-   */
-  it('still detaches a task whose id is rewritten with the guard dropped, in three statements', () => {
+/**
+ * Wave 5, correction round fourteen — High 3 and Medium 1: the OTHER TWO
+ * spellings of the same identity change, and the price of all of them.
+ *
+ * Round thirteen closed `UPDATE op_tasks SET id` and declared exactly that one
+ * guard, under a header naming "every way a row's identity can change". Two
+ * further spellings were live at `8481269`, and both were CHEAPER than the one
+ * that was closed. Executed on this same scene, 12 of 12 fresh identities, no
+ * DDL, row count preserved 3 -> 3:
+ *
+ *  - `INSERT OR REPLACE`, ONE statement. The victim collides on the partial
+ *    UNIQUE index `(capability_id, idempotency_key)`, the engine deletes it and
+ *    puts the replacement in under a fresh `id`, and with `recursive_triggers`
+ *    off — the engine default, and connection-scoped, so the writer chooses —
+ *    no `BEFORE DELETE` fires. `before governedBy=[deployment,mission]
+ *    decision=blocked tiers=1` -> `after governedBy=[deployment]
+ *    decision=within_ceiling tiers=5`, `missingGuards []`, structural
+ *    `safeMode false`.
+ *  - `DELETE` + `INSERT`, TWO statements, the same result. `op_tasks` carried
+ *    no `no_erase` at all.
+ *
+ * Both are pinned here in every spelling, and the price of the residual is
+ * MEASURED per route rather than quoted from the round-thirteen sentence, which
+ * said three statements for a detachment that cost one.
+ */
+describe('every spelling of an op_tasks identity change is refused', () => {
+  /** The columns of `op_tasks`, and the victim row whole. */
+  function victim(raw: Database.Database, taskId: string): { columns: string[]; row: Record<string, unknown> } {
+    const row = raw.prepare(`SELECT * FROM op_tasks WHERE id = ?`).get(taskId) as Record<
+      string,
+      unknown
+    >;
+    return { columns: Object.keys(row), row };
+  }
+
+  it('refuses INSERT OR REPLACE, on twelve fresh identities, with recursive_triggers OFF', () => {
     const current = scene();
     try {
       expectCeilingBinds(current, 'before');
       const raw = current.fx.db as unknown as Database.Database;
+      // The attacker's own connection setting, and the one that makes the
+      // `no_erase` guard blind: the engine default is OFF and it is
+      // connection-scoped, so nothing HQ does can make a foreign writer's
+      // REPLACE fire a BEFORE DELETE.
+      raw.exec(`PRAGMA recursive_triggers = OFF`);
+      expect(
+        (raw.prepare(`PRAGMA recursive_triggers`).get() as { recursive_triggers: number })
+          .recursive_triggers,
+      ).toBe(0);
+      const rowsBefore = (raw.prepare(`SELECT COUNT(*) AS n FROM op_tasks`).get() as { n: number }).n;
+      const { columns, row } = victim(raw, current.taskId);
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        expect(() =>
+          raw
+            .prepare(
+              `INSERT OR REPLACE INTO op_tasks (${columns.map((c) => `"${c}"`).join(', ')})
+               VALUES (${columns.map(() => '?').join(', ')})`,
+            )
+            .run(
+              columns.map((column) =>
+                column === 'id' ? (`replaced-${attempt}` as never) : (row[column] as never),
+              ),
+            ),
+        ).toThrow(/op_tasks rows are not replaced/);
+      }
+      expect((raw.prepare(`SELECT COUNT(*) AS n FROM op_tasks`).get() as { n: number }).n).toBe(
+        rowsBefore,
+      );
+      expect(
+        (
+          raw.prepare(`SELECT COUNT(*) AS n FROM op_tasks WHERE id = ?`).get(current.taskId) as {
+            n: number;
+          }
+        ).n,
+        'the victim row must still be there',
+      ).toBe(1);
+      expectCeilingBinds(current, 'after-replace');
+    } finally {
+      current.fx.db.close();
+    }
+  });
+
+  it('refuses DELETE, on twelve attempts, so the two-statement route costs a guard', () => {
+    const current = scene();
+    try {
+      expectCeilingBinds(current, 'before');
+      const raw = current.fx.db as unknown as Database.Database;
+      const rowsBefore = (raw.prepare(`SELECT COUNT(*) AS n FROM op_tasks`).get() as { n: number }).n;
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        expect(() =>
+          raw.prepare(`DELETE FROM op_tasks WHERE id = ?`).run(current.taskId),
+        ).toThrow(/op_tasks rows are not deleted/);
+      }
+      expect((raw.prepare(`SELECT COUNT(*) AS n FROM op_tasks`).get() as { n: number }).n).toBe(
+        rowsBefore,
+      );
+      expectCeilingBinds(current, 'after-delete');
+    } finally {
+      current.fx.db.close();
+    }
+  });
+
+  /**
+   * The replacement guard's key set is DERIVED from the file, and the key the
+   * exploit ran through is a PARTIAL unique index. A guard written from the
+   * primary key alone would have missed it entirely, and the round-thirteen
+   * enumeration is exactly the kind that misses one.
+   *
+   * Asserted against the LIVE schema, so an index added by a later migration
+   * either enters the guard or fails here.
+   */
+  it('derives the replaceable key set from the file, partial unique index included', () => {
+    const current = scene();
+    try {
+      const raw = current.fx.db as unknown as Database.Database;
       const guard = (
         raw
           .prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`)
-          .get('trg_op_tasks_no_reidentify') as { sql: string }
+          .get('trg_op_tasks_no_replace') as { sql: string }
       ).sql;
-      let statements = 0;
-      raw.exec(`DROP TRIGGER trg_op_tasks_no_reidentify`);
-      statements += 1;
-      raw.prepare(`UPDATE op_tasks SET id = ? WHERE id = ?`).run('renamed-task', current.taskId);
-      statements += 1;
-      raw.exec(guard);
-      statements += 1;
-      expect(statements).toBe(3);
+      expect(guard).toContain('"capability_id" = NEW."capability_id"');
+      expect(guard).toContain('"idempotency_key" = NEW."idempotency_key"');
+      expect(guard).toContain('idempotency_key IS NOT NULL');
+      expect(guard).toContain('"id" = NEW."id"');
 
-      const renamed: Scene = { ...current, taskId: 'renamed-task' };
-      expect(scopeKinds(renamed), 'the residual: the mission scope is gone').toEqual(['deployment']);
-      expect(proposal(renamed).permittedTiers.length).toBe(INTELLIGENCE_TIERS.length);
-      // And it is invisible to the structural depth, which is the other half of
-      // the disclosure.
+      // Every UNIQUE index the live file carries on this table is named by the
+      // guard, and none of them is one of the shapes `replaceableKeysFor`
+      // deliberately skips — which is what makes the skip a disclosed gap
+      // rather than a live one.
+      const indexes = raw.prepare(`PRAGMA index_list("op_tasks")`).all() as {
+        name: string;
+        unique: number;
+        partial: number;
+      }[];
+      const unique = indexes.filter((index) => index.unique === 1);
+      expect(unique.length).toBeGreaterThan(0);
+      for (const index of unique) {
+        const columns = (
+          raw.prepare(`PRAGMA index_info("${index.name}")`).all() as { name: string | null }[]
+        ).map((column) => column.name);
+        expect(columns.every((column) => column !== null), `${index.name} has an expression column`)
+          .toBe(true);
+        for (const column of columns) expect(guard).toContain(`"${column}" = NEW."${column}"`);
+        if (index.partial === 1) {
+          const sql = (
+            raw
+              .prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`)
+              .get(index.name) as { sql: string | null }
+          ).sql;
+          expect(sql, `${index.name} is partial and its predicate must be readable`).toMatch(
+            /\)\s*WHERE\s+/i,
+          );
+        }
+      }
+    } finally {
+      current.fx.db.close();
+    }
+  });
+
+  /**
+   * And the guard TRACKS the file: it is dropped and re-created at every
+   * construction, so a unique index added by a later migration enters the
+   * clause list on the next boot rather than the round after it is exploited.
+   * `IF NOT EXISTS` would leave the old clause list standing for ever, which is
+   * the shape the round-thirteen guard had.
+   */
+  it('rebuilds the replacement guard against the unique keys the file now carries', () => {
+    const current = scene();
+    try {
+      const raw = current.fx.db as unknown as Database.Database;
+      const guardSql = () =>
+        (
+          raw
+            .prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`)
+            .get('trg_op_tasks_no_replace') as { sql: string }
+        ).sql;
+      expect(guardSql()).not.toContain('"claim_nonce" = NEW."claim_nonce"');
+      raw.exec(`CREATE UNIQUE INDEX zz_op_tasks_nonce ON op_tasks(claim_nonce)`);
+      ensureWriteOnceIdentityGuards(raw as never);
+      expect(
+        guardSql(),
+        'a unique key added after the last construction must enter the guard',
+      ).toContain('"claim_nonce" = NEW."claim_nonce"');
+      expect(missingImmutabilityGuards(raw as never)).toEqual([]);
+    } finally {
+      current.fx.db.close();
+    }
+  });
+
+  /**
+   * EVERY one of the three is censused, and a dropped one engages safe mode.
+   * Round thirteen censused `no_reidentify` alone, and the round-fourteen
+   * mutation sweep found that reducing the census back to it broke nothing —
+   * which is how a guard goes missing quietly.
+   */
+  it('reports each of the three identity guards as missing when it is dropped', () => {
+    for (const guard of declaredIdentityGuardsFor(WRITE_ONCE_IDENTITY_TABLES[0]!)) {
+      const current = scene();
+      try {
+        const raw = current.fx.db as unknown as Database.Database;
+        expect(missingImmutabilityGuards(raw as never)).toEqual([]);
+        raw.exec(`DROP TRIGGER ${guard}`);
+        expect(missingImmutabilityGuards(raw as never), `${guard} must be censused`).toEqual([
+          guard,
+        ]);
+        // And it is a BLOCKING finding, not a note: the census feeds
+        // `append_only_guard_missing`.
+        const report = structuralIntegrity(raw as never, {});
+        expect(report.safeMode, `${guard} must engage safe mode`).toBe(true);
+        expect(report.observations.map((observation) => observation.finding)).toContain(
+          'append_only_guard_missing',
+        );
+      } finally {
+        current.fx.db.close();
+      }
+    }
+  });
+
+  /**
+   * The primary key is read from `PRAGMA table_info` as well as from the
+   * indexes, because an `INTEGER PRIMARY KEY` is the rowid alias and the engine
+   * materialises no auto-index for it. `op_tasks` has a `TEXT PRIMARY KEY`, so
+   * on the shipped schema the auto-index covers it and the fallback is
+   * invisible — which the round-fourteen mutation sweep found by removing it
+   * and breaking nothing. Measured directly instead, on the shape that needs
+   * it.
+   */
+  it('names an INTEGER PRIMARY KEY, which carries no auto-index of its own', () => {
+    const db = new Database(':memory:');
+    try {
+      db.exec(`CREATE TABLE zz_rowid_pk (id INTEGER PRIMARY KEY, v TEXT)`);
+      expect(
+        (db.prepare(`PRAGMA index_list("zz_rowid_pk")`).all() as unknown[]).length,
+        'this probe is only meaningful on a table with no index at all',
+      ).toBe(0);
+      const ddl = writeOnceIdentityGuardDdl(db as never, {
+        table: 'zz_rowid_pk',
+        triggerPrefix: 'zz_rowid_pk',
+        column: 'id',
+      });
+      const replace = ddl.find((text) => text.includes('no_replace'));
+      expect(replace, 'the replacement guard must be emitted').toBeDefined();
+      expect(replace!).toContain('"id" = NEW."id"');
+      for (const text of ddl) db.exec(text);
+      db.prepare(`INSERT INTO zz_rowid_pk (id, v) VALUES (1, 'a')`).run();
+      expect(() =>
+        db.prepare(`INSERT OR REPLACE INTO zz_rowid_pk (id, v) VALUES (1, 'b')`).run(),
+      ).toThrow(/zz_rowid_pk rows are not replaced/);
+    } finally {
+      db.close();
+    }
+  });
+
+  /** And HQ's own writer is untouched: tasks are still created and updated. */
+  it('leaves createTask and the ordinary task lifecycle working', () => {
+    const current = scene();
+    try {
+      const raw = current.fx.db as unknown as Database.Database;
+      const before = (raw.prepare(`SELECT COUNT(*) AS n FROM op_tasks`).get() as { n: number }).n;
+      const extra = claimSideEffectTask(current.fx, 'an-ordinary-later-task');
+      expect(extra.taskId).toBeTruthy();
+      expect((raw.prepare(`SELECT COUNT(*) AS n FROM op_tasks`).get() as { n: number }).n).toBe(
+        before + 1,
+      );
+      // The dedupe path, which is the one place HQ meets the partial unique key
+      // the replacement guard now names.
+      const duplicate = expectOk(
+        current.fx.ops.createTask({
+          capabilityId: CAPS.openPr,
+          payload: { branch: 'an-ordinary-later-task' },
+          idempotencyKey: 'an-ordinary-later-task',
+          requestedBy: 'claude',
+        }),
+      );
+      expect(duplicate.task.id, 'the idempotency key must still deduplicate').toBe(extra.taskId);
+      expect((raw.prepare(`SELECT COUNT(*) AS n FROM op_tasks`).get() as { n: number }).n).toBe(
+        before + 1,
+      );
+    } finally {
+      current.fx.db.close();
+    }
+  });
+});
+
+describe('what the guards do NOT close, executed at the price the disclosure states', () => {
+  /**
+   * Each guard is a trigger, so each is the same standing three-statement
+   * residual every engine guard in this package carries — and the PRICE is
+   * measured per route here rather than quoted, because the round-thirteen
+   * sentence quoted three for a detachment that cost one (round fourteen,
+   * Medium 1).
+   *
+   * With the relevant guard dropped, the detachment really does happen:
+   * `hq_mission_plan_items.task_id` names the task by ID and there is no second
+   * key to resolve it by, so no read-side derivation can hold this one.
+   * Asserted so that CLOSING a route fails here and sends whoever closed it to
+   * the disclosure, rather than leaving a stale residual on the page.
+   */
+  it('still detaches a task, and the cheapest route with a guard dropped costs three statements', () => {
+    const routes: { name: string; guards: string[]; run: (raw: Database.Database, taskId: string) => void }[] = [
+      {
+        name: 'UPDATE op_tasks SET id',
+        guards: ['trg_op_tasks_no_reidentify'],
+        run: (raw, taskId) => {
+          raw.prepare(`UPDATE op_tasks SET id = ? WHERE id = ?`).run('renamed-task', taskId);
+        },
+      },
+      {
+        name: 'INSERT OR REPLACE',
+        guards: ['trg_op_tasks_no_replace'],
+        run: (raw, taskId) => {
+          const row = raw.prepare(`SELECT * FROM op_tasks WHERE id = ?`).get(taskId) as Record<
+            string,
+            unknown
+          >;
+          const columns = Object.keys(row);
+          raw.exec(`PRAGMA recursive_triggers = OFF`);
+          raw
+            .prepare(
+              `INSERT OR REPLACE INTO op_tasks (${columns.map((c) => `"${c}"`).join(', ')})
+               VALUES (${columns.map(() => '?').join(', ')})`,
+            )
+            .run(
+              columns.map((column) =>
+                column === 'id' ? ('renamed-task' as never) : (row[column] as never),
+              ),
+            );
+        },
+      },
+    ];
+    const prices: Record<string, number> = {};
+    for (const route of routes) {
+      const current = scene();
+      try {
+        expectCeilingBinds(current, `before-${route.name}`);
+        const raw = current.fx.db as unknown as Database.Database;
+        const sql = route.guards.map(
+          (name) =>
+            (
+              raw
+                .prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`)
+                .get(name) as { sql: string }
+            ).sql,
+        );
+        let statements = 0;
+        for (const name of route.guards) {
+          raw.exec(`DROP TRIGGER ${name}`);
+          statements += 1;
+        }
+        route.run(raw, current.taskId);
+        statements += 1;
+        for (const text of sql) {
+          raw.exec(text);
+          statements += 1;
+        }
+        prices[route.name] = statements;
+
+        const renamed: Scene = { ...current, taskId: 'renamed-task' };
+        expect(scopeKinds(renamed), `${route.name}: the mission scope is gone`).toEqual([
+          'deployment',
+        ]);
+        expect(proposal(renamed).permittedTiers.length).toBe(INTELLIGENCE_TIERS.length);
+        // And it is invisible to the structural depth, which is the other half
+        // of the disclosure.
+        expect(missingImmutabilityGuards(raw as never)).toEqual([]);
+        expect(structuralIntegrity(raw as never, {}).safeMode).toBe(false);
+      } finally {
+        // The intelligence fixture is `:memory:`-backed and owns no file, so
+        // there is nothing to clean up beyond letting it go out of scope.
+        current.fx.db.close();
+      }
+    }
+    // Measured, and this is the number the phase document quotes.
+    expect(prices).toEqual({ 'UPDATE op_tasks SET id': 3, 'INSERT OR REPLACE': 3 });
+  });
+
+  /**
+   * The route NO trigger can close, priced honestly rather than counted as
+   * fixed (round fourteen, High 3).
+   *
+   * A raw `INSERT` of a NEW task under a fresh id and a fresh idempotency key
+   * is byte-for-byte the shape of `createTask`, so no `BEFORE INSERT` clause can
+   * separate them. It costs ONE statement and no DDL, and what it produces is
+   * an UNGOVERNED task — the same thing `createTask` produces for any task that
+   * is not linked to a mission.
+   *
+   * What it is NOT is an identity change: the victim task is still there, still
+   * linked to its plan item, and its ceiling still binds. That distinction is
+   * asserted here, because the difference between "the ceiling stopped binding
+   * on the governed task" and "a writer with the file open made a new task"
+   * is the whole reason one of these is closed and the other is disclosed.
+   */
+  it('still admits a raw INSERT of a NEW ungoverned task, at one statement', () => {
+    const current = scene();
+    try {
+      expectCeilingBinds(current, 'before');
+      const raw = current.fx.db as unknown as Database.Database;
+      const rowsBefore = (raw.prepare(`SELECT COUNT(*) AS n FROM op_tasks`).get() as { n: number }).n;
+      const row = raw.prepare(`SELECT * FROM op_tasks WHERE id = ?`).get(current.taskId) as Record<
+        string,
+        unknown
+      >;
+      const columns = Object.keys(row);
+      let statements = 0;
+      raw
+        .prepare(
+          `INSERT INTO op_tasks (${columns.map((c) => `"${c}"`).join(', ')})
+           VALUES (${columns.map(() => '?').join(', ')})`,
+        )
+        .run(
+          columns.map((column) =>
+            column === 'id'
+              ? ('cloned-task' as never)
+              : column === 'idempotency_key'
+                ? ('cloned-idempotency-key' as never)
+                : (row[column] as never),
+          ),
+        );
+      statements += 1;
+      expect(statements, 'one statement, no DDL — the disclosed price').toBe(1);
+      expect((raw.prepare(`SELECT COUNT(*) AS n FROM op_tasks`).get() as { n: number }).n).toBe(
+        rowsBefore + 1,
+      );
+
+      // The residual: the NEW task is ungoverned, exactly as a task created
+      // outside a mission is.
+      const clone: Scene = { ...current, taskId: 'cloned-task' };
+      expect(scopeKinds(clone)).toEqual(['deployment']);
+      expect(proposal(clone).permittedTiers.length).toBe(INTELLIGENCE_TIERS.length);
+
+      // And the half that is NOT a residual: the governed task is untouched and
+      // its ceiling still binds.
+      expectCeilingBinds(current, 'after-clone');
       expect(missingImmutabilityGuards(raw as never)).toEqual([]);
       expect(structuralIntegrity(raw as never, {}).safeMode).toBe(false);
     } finally {
-      // The intelligence fixture is `:memory:`-backed and owns no file, so
-      // there is nothing to clean up beyond letting it go out of scope.
       current.fx.db.close();
     }
   });

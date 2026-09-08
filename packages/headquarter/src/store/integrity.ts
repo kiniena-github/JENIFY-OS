@@ -671,11 +671,47 @@ export function declaredGuardsFor(entry: EngineImmutableTable): string[] {
 export interface WriteOnceIdentityTable {
   /** The table. */
   table: string;
-  /** The prefix its guard is named under. */
+  /** The prefix its guards are named under. */
   triggerPrefix: string;
   /** The column that is write-once. */
   column: string;
 }
+
+/**
+ * EVERY way a row's identity can change, enumerated once instead of once per
+ * spelling (Wave 5 correction round fourteen, High 3).
+ *
+ * Round thirteen closed `UPDATE op_tasks SET id` and declared exactly that one
+ * guard, under a header naming "every way a row's identity can change". It was
+ * one of three, and the other two were live and CHEAPER. Executed at `8481269`
+ * on the round-thirteen scene, 12 of 12 fresh identities, with no DDL:
+ *
+ *  - **`INSERT OR REPLACE`, ONE statement, row count preserved 3 -> 3.** The
+ *    victim task collides on the `(capability_id, idempotency_key)` UNIQUE
+ *    index, so the engine DELETES it and puts the replacement in under a fresh
+ *    `id`. `recursive_triggers` is off by default and connection-scoped, so no
+ *    `BEFORE DELETE` fires. `before governedBy=[deployment,mission]
+ *    decision=blocked tiers=1` -> `after governedBy=[deployment]
+ *    decision=within_ceiling tiers=5`, `missingGuards []`, structural
+ *    `safeMode false`.
+ *  - **`DELETE` + `INSERT`, TWO statements, row count preserved 3 -> 3.** The
+ *    same detachment, and `op_tasks` carried no `no_erase` at all.
+ *
+ * Both are the same primitive as the `UPDATE`, at a LOWER price than the three
+ * statements the disclosure quoted for it — which is why the price sentence and
+ * its pin are corrected in the same change.
+ *
+ * `hq_missions`, the other end of the same link, is a declared ledger and
+ * already carried all three. `op_tasks` is not append-only — a task is
+ * legitimately updated on almost every column — so it can never carry
+ * `no_rewrite`, and this set is deliberately the identity trio and not the
+ * ledger trio.
+ */
+export const WRITE_ONCE_IDENTITY_GUARDS = Object.freeze([
+  'no_reidentify',
+  'no_erase',
+  'no_replace',
+] as const);
 
 /**
  * Every table outside `ENGINE_IMMUTABLE_TABLES` whose identity column is
@@ -690,9 +726,170 @@ export const WRITE_ONCE_IDENTITY_TABLES: readonly WriteOnceIdentityTable[] = Obj
   ),
 );
 
-/** The one guard name each write-once identity declares. */
-export function declaredIdentityGuardFor(entry: WriteOnceIdentityTable): string {
-  return `trg_${entry.triggerPrefix}_no_reidentify`;
+/**
+ * The guard name for one spelling of the identity change. Kept as a named
+ * function rather than a template at each call site, so the census, the
+ * installer and the pins all read the same string.
+ */
+export function identityGuardName(entry: WriteOnceIdentityTable, guard: string): string {
+  return `trg_${entry.triggerPrefix}_${guard}`;
+}
+
+/**
+ * EVERY guard name a write-once identity declares — one per member of
+ * `WRITE_ONCE_IDENTITY_GUARDS`, derived from that constant rather than written
+ * out, so a fourth spelling declared tomorrow enters the census on the day it
+ * is declared.
+ */
+export function declaredIdentityGuardsFor(entry: WriteOnceIdentityTable): string[] {
+  return WRITE_ONCE_IDENTITY_GUARDS.map((guard) => identityGuardName(entry, guard));
+}
+
+/**
+ * The UNIQUE keys by which a row of this table can be REPLACED, read from the
+ * FILE rather than from any list written here.
+ *
+ * `INSERT OR REPLACE` deletes whatever row collides on ANY unique key, not only
+ * the primary one, and `recursive_triggers` is off by default and
+ * connection-scoped — so that deletion fires no `BEFORE DELETE` trigger and a
+ * `no_erase` guard cannot see it. The replacement guard therefore has to name
+ * every unique key the table carries, and naming them by hand is the
+ * enumeration defect this round exists to close: `op_tasks`' second unique
+ * index, `(capability_id, idempotency_key)`, is the one the one-statement
+ * exploit used, and it is not the primary key.
+ *
+ * Derived from `PRAGMA index_list` / `PRAGMA index_info`, so an index added by
+ * a later migration is covered the day it is added.
+ *
+ * **PARTIAL unique indexes are INCLUDED, and that is the whole reason this is
+ * derived rather than written out.** The index the one-statement exploit ran
+ * through — `idx_op_tasks_idem ON op_tasks(capability_id, idempotency_key)
+ * WHERE idempotency_key IS NOT NULL` — is partial, and the engine resolves a
+ * REPLACE conflict on it exactly as it does on a total one. "A WHERE-qualified
+ * uniqueness is not uniqueness" is true of the CONSTRAINT and false of the
+ * DELETE it triggers, which is what this guard is about. The index's own
+ * predicate is carried into the clause and applied to the EXISTING row; it is
+ * not re-applied to `NEW`, which makes the guard an OVER-approximation whenever
+ * the predicate constrains a column outside the key. Over-approximating refuses
+ * an INSERT the engine would have accepted, so it is stated here rather than
+ * left to be discovered: on HQ's own schema the predicate constrains a KEY
+ * column, so the key equality already binds it and the guard fires on exactly
+ * what the engine would replace. `budget-scope-identity.test.ts` measures the
+ * derived key set against the live file, so an index of a different shape fails
+ * there rather than silently changing what HQ accepts.
+ *
+ * Skipped, and fail-OPEN for that key: an index whose name is not a plain
+ * identifier, a key with an expression column (`PRAGMA index_info` reports a
+ * NULL name), and a partial index whose predicate cannot be read back out of
+ * `sqlite_master`. This builds SQL and will not build SQL it cannot spell
+ * exactly; the alternative — a pattern-matched column name inside a trigger
+ * body — is worse than a disclosed gap, and the same test asserts that HQ's
+ * schema carries none of those shapes.
+ */
+function replaceableKeysFor(
+  db: HqDatabase,
+  table: string,
+): { columns: string[]; where: string }[] {
+  const plain = /^[A-Za-z_][A-Za-z0-9_]*$/;
+  const keys: { columns: string[]; where: string }[] = [];
+  try {
+    const indexes = db.prepare(`PRAGMA index_list("${table}")`).all() as {
+      name: unknown;
+      unique: unknown;
+      partial?: unknown;
+    }[];
+    for (const index of indexes) {
+      if (Number(index.unique) !== 1) continue;
+      const name = String(index.name);
+      if (!plain.test(name)) continue;
+      const columns = (db.prepare(`PRAGMA index_info("${name}")`).all() as { name: unknown }[]).map(
+        (column) => (column.name === null ? null : String(column.name)),
+      );
+      if (columns.length === 0) continue;
+      if (columns.some((column) => column === null || !plain.test(column))) continue;
+      let where = '';
+      if (Number(index.partial ?? 0) === 1) {
+        const sql = String(
+          (
+            db
+              .prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`)
+              .get(name) as { sql: unknown } | undefined
+          )?.sql ?? '',
+        );
+        const predicate = /\)\s*WHERE\s+([\s\S]+?)\s*;?\s*$/i.exec(sql);
+        // No readable predicate: the key is skipped rather than guessed at.
+        if (!predicate) continue;
+        where = predicate[1]!;
+      }
+      keys.push({ columns: columns as string[], where });
+    }
+    // A `TEXT PRIMARY KEY` or an `INTEGER PRIMARY KEY` may be the rowid alias
+    // or may carry its own auto-index; `PRAGMA table_info` names it either way,
+    // so the primary key is never missed because the engine chose not to
+    // materialise an index for it.
+    const pk = (
+      db.prepare(`PRAGMA table_info("${table}")`).all() as { name: unknown; pk: unknown }[]
+    )
+      .filter((column) => Number(column.pk) > 0)
+      .sort((a, b) => Number(a.pk) - Number(b.pk))
+      .map((column) => String(column.name));
+    if (pk.length > 0 && pk.every((column) => plain.test(column))) {
+      keys.push({ columns: pk, where: '' });
+    }
+  } catch {
+    // A table the engine cannot describe declares no key here; its guards'
+    // ABSENCE is the census's finding, which is the rule every other ensure in
+    // this module follows.
+    return [];
+  }
+  // De-duplicate: the primary key usually appears twice, once as an auto-index.
+  const seen = new Set<string>();
+  return keys.filter((key) => {
+    const signature = `${key.columns.join(' ')}|${key.where}`;
+    if (seen.has(signature)) return false;
+    seen.add(signature);
+    return true;
+  });
+}
+
+/**
+ * The DDL for one write-once identity table's three guards, in the order they
+ * are declared.
+ *
+ * Exported for the pins, which build a scratch table from the live schema and
+ * install exactly what a real file carries rather than a re-spelling of it.
+ */
+export function writeOnceIdentityGuardDdl(db: HqDatabase, entry: WriteOnceIdentityTable): string[] {
+  // Neither the table nor the column is interpolated from anything a row
+  // carries: both come out of the frozen literal above, and the key columns
+  // come from `PRAGMA` and are checked against a plain-identifier pattern.
+  const message = `${entry.table} ${entry.column} is write-once`;
+  const clauses = replaceableKeysFor(db, entry.table).map(
+    (key) =>
+      `EXISTS (SELECT 1 FROM "${entry.table}" WHERE ` +
+      key.columns.map((column) => `"${column}" = NEW."${column}"`).join(' AND ') +
+      (key.where === '' ? '' : ` AND (${key.where})`) +
+      `)`,
+  );
+  const ddl = [
+    `CREATE TRIGGER ${identityGuardName(entry, 'no_reidentify')}\n` +
+      `BEFORE UPDATE OF "${entry.column}" ON "${entry.table}"\n` +
+      `BEGIN SELECT RAISE(ABORT, '${message}'); END;`,
+    `CREATE TRIGGER ${identityGuardName(entry, 'no_erase')}\n` +
+      `BEFORE DELETE ON "${entry.table}"\n` +
+      `BEGIN SELECT RAISE(ABORT, '${entry.table} rows are not deleted'); END;`,
+  ];
+  // With no readable unique key there is nothing a REPLACE could collide with
+  // that this guard could name, so the trigger fires on nothing rather than on
+  // everything: refusing every INSERT would stop HQ creating tasks at all,
+  // which is strictly worse than the channel it would close.
+  ddl.push(
+    `CREATE TRIGGER ${identityGuardName(entry, 'no_replace')}\n` +
+      `BEFORE INSERT ON "${entry.table}"\n` +
+      `WHEN ${clauses.length > 0 ? clauses.join('\n  OR ') : '0'}\n` +
+      `BEGIN SELECT RAISE(ABORT, '${entry.table} rows are not replaced'); END;`,
+  );
+  return ddl;
 }
 
 /**
@@ -709,13 +906,15 @@ export function ensureWriteOnceIdentityGuards(db: HqDatabase): void {
   for (const entry of WRITE_ONCE_IDENTITY_TABLES) {
     if (!tableIsPresent(db, entry.table)) continue;
     try {
-      // Neither name is interpolated from anything a row carries: both come out
-      // of the frozen literal above.
-      db.exec(
-        `CREATE TRIGGER IF NOT EXISTS ${declaredIdentityGuardFor(entry)}\n` +
-          `BEFORE UPDATE OF "${entry.column}" ON "${entry.table}"\n` +
-          `BEGIN SELECT RAISE(ABORT, '${entry.table} ${entry.column} is write-once'); END;`,
-      );
+      // Dropped and re-created rather than `IF NOT EXISTS`, since round
+      // fourteen: the replacement guard's clause list is DERIVED from the
+      // unique keys the file carries, so a key added by a later migration has
+      // to enter the guard at the next construction. The other two are fixed
+      // text and are rebuilt with it so the three are always one generation.
+      for (const guard of declaredIdentityGuardsFor(entry)) {
+        db.exec(`DROP TRIGGER IF EXISTS ${guard}`);
+      }
+      for (const ddl of writeOnceIdentityGuardDdl(db, entry)) db.exec(ddl);
     } catch {
       // A guard HQ could not install is a finding at the next census, never a
       // failed construction — the rule every other ensure here follows.
@@ -1110,8 +1309,12 @@ export function missingImmutabilityGuards(db: HqDatabase): string[] {
   // schema declares is not on this file.
   for (const entry of WRITE_ONCE_IDENTITY_TABLES) {
     if (!tables.has(entry.table)) continue;
-    const name = declaredIdentityGuardFor(entry);
-    if (!triggers.has(name)) missing.push(name);
+    // ALL THREE, from `WRITE_ONCE_IDENTITY_GUARDS`, since round fourteen's
+    // High 3: round thirteen censused one of the three spellings a row's
+    // identity can change by, and the other two were live and cheaper.
+    for (const name of declaredIdentityGuardsFor(entry)) {
+      if (!triggers.has(name)) missing.push(name);
+    }
   }
   return missing.sort();
 }
