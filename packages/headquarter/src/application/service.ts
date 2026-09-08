@@ -4046,6 +4046,18 @@ export class HeadquarterOperations {
    * audited, exactly as an approval refusal is.
    */
   reconciliationAuthorityRefusal(actor: string): string | null {
+    // `actor` REACHES STORAGE (Wave 5 correction round thirteen, Medium 1).
+    // `#assertApprovalAuthority` audits a refusal by appending
+    // `{ actorId: actor, action, reason }` to `op_evidence` — measured, not
+    // supposed: `safe-mode-disposition.test.ts` counts exactly one row on each
+    // refusing branch. The write is behind a private helper, so the per-body
+    // write-marker scan never classified this method as a write and the
+    // parameter was enumerated by nothing.
+    try {
+      assertNoCredentialShape({ actor });
+    } catch (error) {
+      return errorMessage(error);
+    }
     const refusal = this.#assertApprovalAuthority(actor, 'reconcile an unknown dispatch outcome');
     if (!refusal || refusal.ok) return null;
     return refusal.error.message;
@@ -4606,6 +4618,15 @@ export class HeadquarterOperations {
     founderId: string;
     rationale?: string;
   }): OpsResult<AssignmentIntent> {
+    // Every id, BEFORE the founder gate (Wave 5 correction round thirteen,
+    // Medium 1). `#resolveFounderGateActor` → `#resolveRequester` appends
+    // `{ actorId: founderId, action: 'assign task <taskId>', reason }` to
+    // `op_evidence` when the actor does not resolve, so `founderId` and
+    // `taskId` both reach append-only storage before `assignTask`'s own scan
+    // is ever reached. `rationale` is already scanned below, with its own
+    // bound and its own message.
+    const unsafeCallerText = callerTextRefusal(input, ['rationale']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.taskId || !input.workerId) {
       return fail('invalid_input', 'taskId and workerId are required');
     }
@@ -4651,6 +4672,13 @@ export class HeadquarterOperations {
    * `providerConnectivity` where that truth actually lives.
    */
   evaluateTaskEligibility(taskId: string): OpsResult<TaskEligibilityReport> {
+    // `routeTask` appends a `routing_evaluated` evidence row — measured at one
+    // row in `safe-mode-disposition.test.ts` — so this is a read that writes,
+    // and the id it writes is this parameter. It did reach `routeTask`'s own
+    // scan, but only because this delegation is the first statement; scanning
+    // here is what makes that independent of statement order.
+    const unsafeCallerText = callerTextRefusal({ taskId });
+    if (unsafeCallerText) return unsafeCallerText;
     const routed = this.routeTask(taskId);
     if (!routed.ok) return routed;
     const task = this.queue.get(taskId)!;
@@ -10570,6 +10598,14 @@ export class HeadquarterOperations {
     tier?: IntelligenceTier;
     idempotencyKey?: string;
   }): OpsResult<{ decision: DecisionRecord; deduplicated: boolean }> {
+    // `taskId` and `workerId` reach `hq_intel_decisions.task_id` /
+    // `.issued_by` through `#insertDecision` (Wave 5 correction round
+    // thirteen, Medium 1). The INSERT is behind that private helper, so this
+    // method's own body carried no write marker and none of its parameters was
+    // enumerated by the facade write scan. `label` keeps its own bound and its
+    // own refusal message immediately below.
+    const unsafeCallerText = callerTextRefusal(input, ['label']);
+    if (unsafeCallerText) return unsafeCallerText;
     const label = missionText('label', input.label, MAX_DECISION_LABEL_LENGTH, true);
     if (!label.ok) return fail('invalid_input', label.message);
     try {
@@ -10823,6 +10859,11 @@ export class HeadquarterOperations {
     trigger: EscalationTrigger;
     idempotencyKey?: string;
   }): OpsResult<{ decision: DecisionRecord; deduplicated: boolean; escalation: EscalationProposal }> {
+    // Same helper, same reason as `recordIntelligenceDecision` (Wave 5
+    // correction round thirteen, Medium 1): the escalation record is written
+    // by `#insertDecision`, and `workerId` lands in `issued_by`.
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.decisionId || !input.workerId) {
       return fail('invalid_input', 'decisionId and workerId are required');
     }
@@ -14967,6 +15008,13 @@ export class HeadquarterOperations {
     taskId?: string;
     requestedBy: string;
   }): OpsResult<CollaborationContextBundle> {
+    // `requestedBy` reaches `op_evidence` (Wave 5 correction round thirteen,
+    // Medium 1): both identity branches resolve through `#resolveRequester`,
+    // which appends `{ actorId, action, reason }` when the id resolves to
+    // neither a worker nor a principal. The append is two helpers down, so
+    // this method's own body carried no write marker.
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const sessionId = input.sessionId?.trim() ?? '';
     if (!sessionId) return fail('invalid_input', 'sessionId is required');

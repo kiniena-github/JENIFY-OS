@@ -45,6 +45,7 @@ import { HeadquarterStore } from '../src/store/headquarter.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { HumanPrincipalRegistry } from '../src/application/principals.js';
 import { CONTROL_ROUTES, handleControlRequest } from '../src/live/control-api.js';
+import { CAPS, expectOk, setupFixture } from './application.fixture.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SERVICE = path.join(HERE, '..', 'src', 'application', 'service.ts');
@@ -110,19 +111,120 @@ const SERVICE = path.join(HERE, '..', 'src', 'application', 'service.ts');
  * deliberately-unscanned fields is DERIVED from the source below rather than
  * asserted in this sentence — the claim "there is exactly one" has been false
  * twice.
+ *
+ * ## The tenth spelling: the CLASSIFIER, not the parameters (round thirteen, Medium 1)
+ *
+ * Everything above enumerates the parameters of the methods `WRITE_MARKERS`
+ * matches. The regex reads ONE method body, so a public method whose write
+ * happens inside a `#private` helper is not a write as far as this file is
+ * concerned — and every parameter it declares contributes ZERO rows to the
+ * derivation. Neither the pair floor nor any per-method count could fire,
+ * because an excluded method is not counted at all.
+ *
+ * Eight public methods were in that hole. Five of them genuinely write:
+ *
+ *  - `reconciliationAuthorityRefusal(actor)` — `#assertApprovalAuthority`
+ *    appends `{ actorId: actor, action, reason }` to `op_evidence` on a
+ *    refusal, MEASURED at one row per refusing branch in
+ *    `safe-mode-disposition.test.ts`;
+ *  - `assignTaskAsFounder` — `#resolveFounderGateActor` → `#resolveRequester`
+ *    appends `{ actorId: founderId, action: 'assign task <taskId>' }` when the
+ *    actor does not resolve, BEFORE `assignTask`'s own scan is reached;
+ *  - `assembleCollaborationContext` — the same `#resolveRequester` append,
+ *    carrying `requestedBy`;
+ *  - `recordIntelligenceDecision` and `escalateIntelligenceDecision` —
+ *    `#insertDecision` holds the `INSERT INTO hq_intel_decisions`, and
+ *    `taskId` / `workerId` land in `task_id` / `issued_by`;
+ *  - `evaluateTaskEligibility` — `this.routeTask` appends `routing_evaluated`,
+ *    also measured at one row.
+ *
+ * None of them was a live outage at the previous head: each unscanned value is
+ * bounded by canonical truth before its write, or lands only in
+ * `op_evidence.payload`, which no control route serves. That is the point.
+ * The defence rested on properties nobody had enumerated, which is the exact
+ * substitution — a reasoned argument standing in for a derivation — this file
+ * exists to end. All six are scanned at the source now, and the classifier
+ * below follows the call graph so the next one cannot hide behind a helper.
+ *
+ * Two further spellings of the same under-reading are closed with it:
+ *
+ *  - a named input type was resolved only when `export interface X {` was
+ *    declared in `service.ts` itself, so `registerAiMember`'s
+ *    `RegisterMemberInput` — which lives in `registry/members.ts` — enumerated
+ *    NOTHING. It is covered at runtime by `callerTextRefusal(input, …)`, but by
+ *    luck rather than by the mechanism, because the derivation could not see a
+ *    single one of its parameters. Interfaces are resolved across `src/` now;
+ *  - the inline-object field matcher required `;`, `,`, a newline or `)` after
+ *    the type, so a single-field object closed by `}` on the same line —
+ *    `assessHqIntegrity(input: { requestedBy: string })` — also enumerated
+ *    nothing.
  */
 
 /**
- * The one string parameter of a method the write-marker scan reaches that does
- * not go through the scan, and why.
+ * The string parameters of a write-classified method that do NOT go through
+ * the scan, each with the reason and the mechanism that makes it safe.
  *
  * `lookupPrincipal(id)` is a READ — `return this.#principalOf(id)` is its whole
  * body — and the phase document's LEFT-AVAILABLE table already says so in the
- * same words. It is reached here only because the write-marker regex matches
- * text in the documentation block above it. It stores nothing, so there is
- * nothing for a credential shape to be stored in.
+ * same words. It is reached here because the body slice a method is read from
+ * runs to the NEXT method declaration, and the declarations that follow this
+ * one are `#private` FIELDS with documentation of their own; the write marker
+ * matches that text. It stores nothing, so there is nothing for a credential
+ * shape to be stored in.
+ *
+ * `intelligenceBudgetDecision(scopeId)` and `intelligenceRoutingProposal(taskId)`
+ * are the call graph's two OVER-APPROXIMATIONS. Both are on the READ list of
+ * `safe-mode-disposition.test.ts`, which names them as reads the reachability
+ * reaches only through a branch they cannot take — and MEASURES both, by table
+ * delta against a real database, as writing no row at all. The exemption rests
+ * on that measurement, not on this sentence: if either ever writes, the delta
+ * there stops being empty and that file fails.
+ *
+ * Nothing else is exempt. Every other string parameter of every method the
+ * classifier reaches — including the six the round-thirteen correction found —
+ * reaches `assertNoCredentialShape` through one of the three covered forms.
  */
-const EXEMPT_PARAMETERS: readonly string[] = ['lookupPrincipal.id'];
+const EXEMPT_PARAMETERS: readonly string[] = [
+  'lookupPrincipal.id',
+  'intelligenceBudgetDecision.scopeId',
+  'intelligenceRoutingProposal.taskId',
+];
+
+/**
+ * The public methods this file classifies as writes ONLY because the call
+ * graph is followed — each invisible to the per-body `WRITE_MARKERS` predicate
+ * that classified them before.
+ *
+ * Asserted in both directions below, so the derivation cannot quietly stop
+ * finding them and cannot quietly start finding a method by accident.
+ */
+const TRANSITIVE_ONLY_WRITES: readonly string[] = [
+  'assembleCollaborationContext',
+  'assignTaskAsFounder',
+  'escalateIntelligenceDecision',
+  'evaluateTaskEligibility',
+  'intelligenceBudgetDecision',
+  'intelligenceRoutingProposal',
+  'reconciliationAuthorityRefusal',
+  'recordIntelligenceDecision',
+];
+
+/**
+ * Write-classified methods that declare NO caller-text parameter at all, with
+ * the reason each is genuinely empty rather than under-read.
+ *
+ * A roster rather than a count, and asserted by EQUALITY: this is the
+ * assertion that fires the day a future phase adds a text parameter to one of
+ * them. The method drops out of the derived set, the equality fails, and the
+ * new parameter has to be enumerated — and therefore scanned or exempted —
+ * before the build is green again. Three methods used to sit here, and two of
+ * them (`registerAiMember`, `assessHqIntegrity`) were under-read rather than
+ * empty; both enumerate their parameters now.
+ *
+ * `reserveEvidence<T>(fn: () => T)` takes a callback and nothing else. There is
+ * no caller text in its signature to scan.
+ */
+const ZERO_PARAMETER_WRITES: readonly string[] = ['reserveEvidence'];
 
 /**
  * The pieces of caller text a facade write deliberately does not scan, as the
@@ -193,8 +295,93 @@ const CONTROL_WORDS = new Set([
   'try',
 ]);
 
+/**
+ * Markers that a method body writes DIRECTLY.
+ *
+ * Kept exactly as it was, because it is no longer the classifier — it is the
+ * base case of one. `writeClassifiedMethods()` closes it over the class's own
+ * call graph, which is what a public method whose only write lives in a
+ * `#private` helper needs (round thirteen, Medium 1).
+ */
 const WRITE_MARKERS =
   /(?:INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM)|appendEvidence\(|appendEvent\(|#upsertMeta\(|#requirePrivilegedQueue\(\)|postMessage\(|registry\.(?:register|disable|setHealth|assign|update)\(|#workerProviderRegistrar\.|#appendRunEvent\(|this\.queue\.(?:start|heartbeat|complete|fail|claim)\(/;
+
+interface MethodSlice {
+  name: string;
+  /** The source from this declaration to the next one. */
+  body: string;
+  /** The line the declaration starts on, zero-based. */
+  line: number;
+}
+
+/**
+ * Every member of `HeadquarterOperations`, `#private` ones included, sliced
+ * from its declaration to the next.
+ *
+ * The `#private` members are why this exists: they are never part of the
+ * answer — the surface under test is public — but they are how a public method
+ * reaches a write, so the graph has to contain them.
+ */
+function methodSlices(): MethodSlice[] {
+  const lines = fs.readFileSync(SERVICE, 'utf8').split('\n');
+  const classStart = lines.findIndex((line) => /^export class HeadquarterOperations\b/.test(line));
+  expect(classStart).toBeGreaterThan(-1);
+  const starts: { name: string; line: number }[] = [];
+  for (let i = classStart; i < lines.length; i += 1) {
+    const match = /^ {2}(#?[A-Za-z_][A-Za-z0-9_]*)\s*[(<]/.exec(lines[i]);
+    if (match && !CONTROL_WORDS.has(match[1])) starts.push({ name: match[1], line: i });
+  }
+  return starts.map((start, k) => ({
+    name: start.name,
+    line: start.line,
+    body: lines.slice(start.line, k + 1 < starts.length ? starts[k + 1].line : lines.length).join('\n'),
+  }));
+}
+
+/**
+ * Every PUBLIC method that reaches a write, directly or through the class's own
+ * call graph — the same fixpoint `safe-mode-disposition.test.ts` computes for
+ * the safe-mode dispositions, applied here to the credential scan.
+ *
+ * Over-approximating on purpose. An edge is any `this.name(` or `this.#name(`
+ * the body mentions, with no attempt to decide whether the branch holding it
+ * can be taken, so the answer is a SUPERSET of what actually writes. That
+ * direction is the safe one: a method wrongly included has to scan its
+ * parameters or be named in `EXEMPT_PARAMETERS` with its reason, and a method
+ * wrongly excluded is exactly the class of miss this replaces.
+ */
+function writeClassifiedMethods(): Set<string> {
+  const slices = methodSlices();
+  const bodies = new Map<string, string>();
+  for (const slice of slices) {
+    // Overloads and re-declared names accumulate rather than overwrite.
+    bodies.set(slice.name, (bodies.get(slice.name) ?? '') + slice.body);
+  }
+  const writers = new Set<string>();
+  for (const [name, body] of bodies) if (WRITE_MARKERS.test(body)) writers.add(name);
+  const callees = new Map<string, Set<string>>();
+  for (const [name, body] of bodies) {
+    const found = new Set<string>();
+    for (const call of body.matchAll(/this\.(#?[A-Za-z_][A-Za-z0-9_]*)\s*\(/g)) {
+      if (bodies.has(call[1])) found.add(call[1]);
+    }
+    callees.set(name, found);
+  }
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const [name, called] of callees) {
+      if (writers.has(name)) continue;
+      for (const callee of called) {
+        if (writers.has(callee)) {
+          writers.add(name);
+          grew = true;
+          break;
+        }
+      }
+    }
+  }
+  return new Set([...writers].filter((name) => !name.startsWith('#')));
+}
 
 /**
  * The keys of every object literal handed to `call` in `body`.
@@ -258,21 +445,18 @@ interface ParameterFact {
  */
 function facadeWriteParameters(): ParameterFact[] {
   const lines = fs.readFileSync(SERVICE, 'utf8').split('\n');
-  const classStart = lines.findIndex((line) => /^export class HeadquarterOperations\b/.test(line));
-  expect(classStart).toBeGreaterThan(-1);
-  const starts: { name: string; line: number }[] = [];
-  for (let i = classStart; i < lines.length; i += 1) {
-    const match = /^ {2}(#?[A-Za-z_][A-Za-z0-9_]*)\s*[(<]/.exec(lines[i]);
-    if (match && !CONTROL_WORDS.has(match[1])) starts.push({ name: match[1], line: i });
-  }
+  const slices = methodSlices();
+  const classified = writeClassifiedMethods();
   const facts: ParameterFact[] = [];
-  for (let k = 0; k < starts.length; k += 1) {
-    const from = starts[k].line;
-    const to = k + 1 < starts.length ? starts[k + 1].line : lines.length;
-    const name = starts[k].name;
+  for (const slice of slices) {
+    const from = slice.line;
+    const to = from + slice.body.split('\n').length;
+    const name = slice.name;
     if (name.startsWith('#')) continue;
-    const body = lines.slice(from, to).join('\n');
-    if (!WRITE_MARKERS.test(body)) continue;
+    const body = slice.body;
+    // The CALL GRAPH decides, not the regex over this one body (round
+    // thirteen, Medium 1).
+    if (!classified.has(name)) continue;
     // The declared parameter list, cut at the character that closes it — NOT at
     // the end of that line, which also carries the return type. Reading the
     // return type as parameters is how `messageId`, `correlationId` and
@@ -306,9 +490,12 @@ function facadeWriteParameters(): ParameterFact[] {
     }
     if (objectParameter) {
       // The string fields of an inline object type, and of a named one, read
-      // from the signature text itself.
+      // from the signature text itself. `}` is a terminator because a
+      // single-field object closed on its own line — `input: { requestedBy:
+      // string }` on `assessHqIntegrity` — matched none of the others and so
+      // enumerated NOTHING (round thirteen, Medium 1).
       for (const field of signature.matchAll(
-        /(?:^|[{;,\n])\s*([A-Za-z_][A-Za-z0-9_]*)\s*\??\s*:\s*((?:readonly\s+)?string(?:\[\])?(?:\s*\|\s*null)?(?:\s*\|\s*undefined)?)\s*[;,\n)]/g,
+        /(?:^|[{;,\n])\s*([A-Za-z_][A-Za-z0-9_]*)\s*\??\s*:\s*((?:readonly\s+)?string(?:\[\])?(?:\s*\|\s*null)?(?:\s*\|\s*undefined)?)\s*[;,\n)}]/g,
       )) {
         parameters.push(field[1]);
       }
@@ -343,18 +530,67 @@ function facadeWriteParameters(): ParameterFact[] {
   return facts;
 }
 
-/** The string fields of a NAMED input interface declared in the same file. */
+/**
+ * Every `export interface X { … }` declared anywhere under `src/`, by name.
+ *
+ * Across module boundaries on purpose (round thirteen, Medium 1). The previous
+ * version read `service.ts` alone, so `registerAiMember(input:
+ * RegisterMemberInput & { founderId: string })` — whose interface lives in
+ * `registry/members.ts` — enumerated not one of its parameters. The method IS
+ * scanned at runtime, by `callerTextRefusal(input, …)`; the derivation simply
+ * could not see it, which makes the coverage luck rather than mechanism, and
+ * would have kept a NEW field of that interface invisible too.
+ *
+ * The first declaration of a name wins. A name declared twice under `src/` is
+ * a collision this deliberately does not try to resolve: over-reading fields
+ * costs a scan that is already there, under-reading costs a miss.
+ */
+function exportedInterfaces(): Map<string, string> {
+  const roots = [path.join(HERE, '..', 'src')];
+  const found = new Map<string, string>();
+  const walk = (directory: string): void => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const full = path.join(directory, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith('.ts')) {
+        const source = fs.readFileSync(full, 'utf8');
+        for (const match of source.matchAll(/^export interface ([A-Z][A-Za-z0-9_]*) \{$/gm)) {
+          if (found.has(match[1])) continue;
+          const end = source.indexOf('\n}\n', match.index!);
+          found.set(match[1], source.slice(match.index!, end < 0 ? source.length : end));
+        }
+      }
+    }
+  };
+  for (const root of roots) walk(root);
+  return found;
+}
+
+let interfaceCache: Map<string, string> | null = null;
+
+/**
+ * The string fields of a NAMED input interface, wherever under `src/` it is
+ * declared.
+ *
+ * EVERY interface named in the type is read, not just the first, because an
+ * input type is routinely an intersection — `RegisterMemberInput & { founderId:
+ * string }` — and the inline half is already read from the signature.
+ */
 function namedInputStringFields(parameterName: string, signature: string): string[] {
-  const named = new RegExp(`\\b${parameterName}\\s*:\\s*([A-Z][A-Za-z0-9_]*)`).exec(signature);
+  const named = new RegExp(`\\b${parameterName}\\s*\\??\\s*:\\s*([^,)]*)`).exec(signature);
   if (!named) return [];
-  const source = fs.readFileSync(SERVICE, 'utf8');
-  const at = source.indexOf(`export interface ${named[1]} {`);
-  if (at < 0) return [];
-  const end = source.indexOf('\n}\n', at);
-  const declaration = source.slice(at, end);
-  return [
-    ...declaration.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\??:\s*(?:readonly\s+)?string\b/gm),
-  ].map((m) => m[1]);
+  interfaceCache ??= exportedInterfaces();
+  const fields: string[] = [];
+  for (const reference of named[1].matchAll(/\b([A-Z][A-Za-z0-9_]*)\b/g)) {
+    const declaration = interfaceCache.get(reference[1]);
+    if (!declaration) continue;
+    for (const field of declaration.matchAll(
+      /^\s*(?:readonly\s+)?([A-Za-z_][A-Za-z0-9_]*)\??:\s*(?:readonly\s+)?string\b/gm,
+    )) {
+      fields.push(field[1]);
+    }
+  }
+  return fields;
 }
 
 describe('every STRING PARAMETER of every facade write reaches the one scan', () => {
@@ -366,7 +602,7 @@ describe('every STRING PARAMETER of every facade write reaches the one scan', ()
     // eleven, Low 4) — a written count in a comment is the thing that has gone
     // stale in this wave over and over. What matters is that the enumeration
     // reaches far more pairs than the handful named below.
-    expect(facts.length).toBeGreaterThan(200);
+    expect(facts.length).toBeGreaterThan(280);
     const pairs = facts.map((fact) => `${fact.method}.${fact.parameter}`);
     // The five the round-ten correction closed, plus a sample of the ones
     // earlier rounds already had. Each was a live, permanent outage.
@@ -387,6 +623,108 @@ describe('every STRING PARAMETER of every facade write reaches the one scan', ()
       'postMissionMessage.refs',
     ]) {
       expect(pairs, `${pair} is no longer recognised as a facade write parameter`).toContain(pair);
+    }
+  });
+
+  it('classifies a write behind a #private helper as a write — the call graph, not one body', () => {
+    // ROUND THIRTEEN, MEDIUM 1. The predicate that decided this used to read a
+    // single method body, so a public method whose only write happens inside a
+    // helper was not a write here and contributed ZERO (method, parameter)
+    // pairs. Nothing could fire on that: a pair floor cannot count rows a
+    // method never produced, and there was no method-level assertion at all.
+    const classified = writeClassifiedMethods();
+    const direct = new Set(
+      methodSlices()
+        .filter((slice) => !slice.name.startsWith('#') && WRITE_MARKERS.test(slice.body))
+        .map((slice) => slice.name),
+    );
+    // The classifier is a strict WIDENING of the one it replaces: everything
+    // the per-body predicate found is still found.
+    expect([...direct].filter((name) => !classified.has(name))).toEqual([]);
+    // And the widening is exactly the roster, in both directions.
+    expect([...classified].filter((name) => !direct.has(name)).sort()).toEqual(
+      [...TRANSITIVE_ONLY_WRITES].sort(),
+    );
+    // The CONTRAST, spelled out, because it is the finding: each of these is
+    // invisible to the predicate that used to be the whole classification.
+    for (const name of TRANSITIVE_ONLY_WRITES) {
+      expect(direct.has(name), `${name} should be invisible to the DIRECT predicate`).toBe(false);
+    }
+    // `recordIntelligenceDecision` is the sharpest case: its `INSERT INTO
+    // hq_intel_decisions` lives in `#insertDecision`, one call away.
+    const insertDecision = methodSlices().find((slice) => slice.name === '#insertDecision');
+    expect(insertDecision, '#insertDecision no longer exists').toBeDefined();
+    expect(WRITE_MARKERS.test(insertDecision!.body)).toBe(true);
+  });
+
+  it('every write-classified method enumerates a parameter, or is named as having none', () => {
+    // The METHOD-LEVEL assertion the pair floor could never be (round
+    // thirteen, Medium 1). A method that enumerates nothing is either a method
+    // with no caller text or a method this file is under-reading, and the two
+    // used to be indistinguishable: `registerAiMember` and `assessHqIntegrity`
+    // both enumerated zero, one because its input type lived in another
+    // module and one because its inline object closed with `}`.
+    //
+    // Asserted by EQUALITY, so adding a text parameter to a method on this
+    // roster fails here until the parameter is enumerated — and therefore
+    // scanned or exempted.
+    const facts = facadeWriteParameters();
+    const withParameters = new Set(facts.map((fact) => fact.method));
+    const empty = [...writeClassifiedMethods()].filter((name) => !withParameters.has(name)).sort();
+    expect(empty).toEqual([...ZERO_PARAMETER_WRITES].sort());
+  });
+
+  it('resolves an input type declared in ANOTHER module', () => {
+    // `RegisterMemberInput` lives in `registry/members.ts`. Reading only
+    // `service.ts` made every one of `registerAiMember`'s parameters invisible
+    // to the derivation, which left it covered by luck rather than mechanism.
+    const service = fs.readFileSync(SERVICE, 'utf8');
+    expect(
+      service.includes('export interface RegisterMemberInput {'),
+      'RegisterMemberInput moved into service.ts; this test no longer proves cross-module resolution',
+    ).toBe(false);
+    const pairs = new Set(
+      facadeWriteParameters().map((fact) => `${fact.method}.${fact.parameter}`),
+    );
+    for (const parameter of ['displayName', 'providerId', 'modelId', 'modelVersion']) {
+      expect(pairs, `registerAiMember.${parameter} is not enumerated`).toContain(
+        `registerAiMember.${parameter}`,
+      );
+    }
+    // And the single-field inline object, the other spelling of enumerating
+    // nothing.
+    expect(pairs).toContain('assessHqIntegrity.requestedBy');
+    // Every one of them reaches the scan, which is what the derivation could
+    // not previously say.
+    for (const fact of facadeWriteParameters()) {
+      if (fact.method === 'registerAiMember' || fact.method === 'assessHqIntegrity') {
+        expect(fact.covered, `${fact.method}.${fact.parameter} is not covered`).toBe(true);
+      }
+    }
+  });
+
+  it('the parameters of every transitively-classified write reach the scan', () => {
+    // The six that genuinely write are covered at the SOURCE now, not excused
+    // here. The two the call graph only over-approximates are in
+    // `EXEMPT_PARAMETERS` with their measurement named.
+    const facts = facadeWriteParameters();
+    const byMethod = new Map<string, ParameterFact[]>();
+    for (const fact of facts) {
+      byMethod.set(fact.method, [...(byMethod.get(fact.method) ?? []), fact]);
+    }
+    for (const method of [
+      'reconciliationAuthorityRefusal',
+      'assignTaskAsFounder',
+      'assembleCollaborationContext',
+      'recordIntelligenceDecision',
+      'escalateIntelligenceDecision',
+      'evaluateTaskEligibility',
+    ]) {
+      const parameters = byMethod.get(method) ?? [];
+      expect(parameters.length, `${method} enumerates no parameter`).toBeGreaterThan(0);
+      for (const fact of parameters) {
+        expect(fact.covered, `${method}.${fact.parameter} does not reach a scan`).toBe(true);
+      }
     }
   });
 
@@ -688,7 +1026,7 @@ function refusal(result: { ok: boolean; error?: { code: string; message?: string
  * (268 ms with the file run alone). 30 s is ~83x that slowest observed run.
  *
  * Per test rather than a package-wide `testTimeout`: raising the global default
- * would relax the deadline for all 3425 tests in this package, including the
+ * would relax the deadline for every test in this package, including the
  * many where a hang is the real signal. Only the harness deadline changes here;
  * every assertion is untouched.
  */
@@ -1093,4 +1431,167 @@ describe('the five writes that permanently bricked a Founder read route now refu
     expect(probe.accepted).toBe(true);
     expect(probe.brickedRoutes).toEqual([]);
   }, FILE_BACKED_PROBE_TIMEOUT_MS);
+});
+
+/* ------------------------------------------------------------------ */
+/* Round thirteen: the six writes behind a helper, refusing at runtime. */
+/* ------------------------------------------------------------------ */
+
+describe('the writes the call graph found refuse a credential shape, and ordinary input still lands', () => {
+  /**
+   * In-memory rather than file-backed, deliberately.
+   *
+   * The file-backed probes above exist because those five writes BRICKED a
+   * Founder read route, and only a fresh process over a real file proves an
+   * outage survives a restart. These six never bricked a route: each unscanned
+   * value was bounded by canonical truth before its write or landed only in
+   * `op_evidence.payload`, which no control route serves. What has to be proven
+   * here is the refusal itself, and the memory fixture proves that at a
+   * hundredth of the cost.
+   */
+  it('reconciliationAuthorityRefusal refuses a credential-shaped actor and appends nothing', () => {
+    const fx = setupFixture();
+    const before = fx.db.prepare('SELECT COUNT(*) AS n FROM op_evidence').get() as { n: number };
+    const message = fx.ops.reconciliationAuthorityRefusal(CREDENTIAL);
+    expect(message).toContain('credential');
+    const after = fx.db.prepare('SELECT COUNT(*) AS n FROM op_evidence').get() as { n: number };
+    // The point of scanning BEFORE the helper: the audit append that used to
+    // carry the credential does not happen at all.
+    expect(after.n).toBe(before.n);
+    // An ordinary actor still gets its real answer: `null` for a principal
+    // holding approval authority, a refusal message for one that does not.
+    expect(fx.ops.reconciliationAuthorityRefusal('founder')).toBe(null);
+    expect(fx.ops.reconciliationAuthorityRefusal('analyst')).toContain('may not');
+  });
+
+  it('assignTaskAsFounder refuses a credential-shaped id before the founder gate audits it', () => {
+    const fx = setupFixture();
+    const created = expectOk(
+      fx.ops.createTask({
+        capabilityId: CAPS.readStatus,
+        payload: { repo: 'jenify-os' },
+        requestedBy: 'claude',
+      }),
+    );
+    for (const [field, input] of [
+      ['taskId', { taskId: CREDENTIAL, workerId: 'claude', founderId: 'founder' }],
+      ['workerId', { taskId: created.task.id, workerId: CREDENTIAL, founderId: 'founder' }],
+      ['founderId', { taskId: created.task.id, workerId: 'claude', founderId: CREDENTIAL }],
+    ] as const) {
+      const before = fx.db.prepare('SELECT COUNT(*) AS n FROM op_evidence').get() as { n: number };
+      const result = fx.ops.assignTaskAsFounder(input);
+      expect(result.ok, `${field} was accepted`).toBe(false);
+      if (result.ok) continue;
+      expect(result.error.code).toBe('invalid_input');
+      expect(result.error.message, `${field} is not named in the refusal`).toContain(field);
+      const after = fx.db.prepare('SELECT COUNT(*) AS n FROM op_evidence').get() as { n: number };
+      expect(after.n, `${field} reached the audit append`).toBe(before.n);
+    }
+  });
+
+  it('assembleCollaborationContext refuses a credential-shaped requestedBy and appends nothing', () => {
+    const fx = setupFixture();
+    const before = fx.db.prepare('SELECT COUNT(*) AS n FROM op_evidence').get() as { n: number };
+    const result = fx.ops.assembleCollaborationContext({
+      sessionId: 'session-1',
+      role: 'builder',
+      requestedBy: CREDENTIAL,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('invalid_input');
+      expect(result.error.message).toContain('requestedBy');
+    }
+    const after = fx.db.prepare('SELECT COUNT(*) AS n FROM op_evidence').get() as { n: number };
+    expect(after.n).toBe(before.n);
+  });
+
+  it('the two intelligence writes refuse a credential shape in every id they store', () => {
+    const fx = setupFixture();
+    for (const [field, input] of [
+      [
+        'taskId',
+        { taskId: CREDENTIAL, workerId: 'claude', fence: 1, label: 'route', complexity: 'routine', contextSize: 'medium', workKind: 'coding' },
+      ],
+      [
+        'workerId',
+        { taskId: 'task-1', workerId: CREDENTIAL, fence: 1, label: 'route', complexity: 'routine', contextSize: 'medium', workKind: 'coding' },
+      ],
+      [
+        'idempotencyKey',
+        { taskId: 'task-1', workerId: 'claude', fence: 1, label: 'route', complexity: 'routine', contextSize: 'medium', workKind: 'coding', idempotencyKey: CREDENTIAL },
+      ],
+    ] as const) {
+      const result = fx.ops.recordIntelligenceDecision(input as never);
+      expect(result.ok, `recordIntelligenceDecision.${field} was accepted`).toBe(false);
+      if (result.ok) continue;
+      expect(result.error.code).toBe('invalid_input');
+      expect(result.error.message, `${field} is not named`).toContain(field);
+    }
+    for (const [field, input] of [
+      ['decisionId', { decisionId: CREDENTIAL, workerId: 'claude', fence: 1, trigger: 'review_required' }],
+      ['workerId', { decisionId: 'inteldec-1', workerId: CREDENTIAL, fence: 1, trigger: 'review_required' }],
+      [
+        'idempotencyKey',
+        { decisionId: 'inteldec-1', workerId: 'claude', fence: 1, trigger: 'review_required', idempotencyKey: CREDENTIAL },
+      ],
+    ] as const) {
+      const result = fx.ops.escalateIntelligenceDecision(input as never);
+      expect(result.ok, `escalateIntelligenceDecision.${field} was accepted`).toBe(false);
+      if (result.ok) continue;
+      expect(result.error.code).toBe('invalid_input');
+      expect(result.error.message, `${field} is not named`).toContain(field);
+    }
+  });
+
+  it('evaluateTaskEligibility refuses a credential-shaped taskId and records no routing evidence', () => {
+    const fx = setupFixture();
+    const before = fx.db.prepare('SELECT COUNT(*) AS n FROM op_evidence').get() as { n: number };
+    const result = fx.ops.evaluateTaskEligibility(CREDENTIAL);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('invalid_input');
+      expect(result.error.message).toContain('taskId');
+    }
+    const after = fx.db.prepare('SELECT COUNT(*) AS n FROM op_evidence').get() as { n: number };
+    expect(after.n).toBe(before.n);
+  });
+
+  it('the ordinary shape of each of the six still works', () => {
+    const fx = setupFixture();
+    const created = expectOk(
+      fx.ops.createTask({
+        capabilityId: CAPS.readStatus,
+        payload: { repo: 'jenify-os' },
+        requestedBy: 'claude',
+      }),
+    );
+    // The advisory assignment, the eligibility read and the authority answer
+    // all still do what they did — the guard refuses credentials, not work.
+    //
+    // `assignTaskAsFounder` needs the `hq.workforce_assign` trio this fixture
+    // does not grant, so what is asserted is the one thing that matters here:
+    // ordinary input reaches the FOUNDER GATE and is answered by it. A
+    // `not_permitted` from the gate is the refusal this call always got; an
+    // `invalid_input` would mean the new scan had started refusing work.
+    const assigned = fx.ops.assignTaskAsFounder({
+      taskId: created.task.id,
+      workerId: 'claude',
+      founderId: 'founder',
+      rationale: 'closest to the change',
+    });
+    expect(assigned.ok).toBe(false);
+    if (!assigned.ok) expect(assigned.error.code).toBe('not_permitted');
+    expect(expectOk(fx.ops.evaluateTaskEligibility(created.task.id)).taskId).toBe(created.task.id);
+    expect(fx.ops.reconciliationAuthorityRefusal('founder')).toBe(null);
+    // And an unknown-but-ordinary id still gets the refusal it always got,
+    // rather than the credential message.
+    const unknown = fx.ops.assembleCollaborationContext({
+      sessionId: 'session-1',
+      role: 'builder',
+      requestedBy: 'nobody',
+    });
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.error.code).not.toBe('invalid_input');
+  });
 });

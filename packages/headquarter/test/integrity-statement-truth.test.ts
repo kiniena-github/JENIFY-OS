@@ -299,7 +299,7 @@ function warmedFile(): { dir: string; dbPath: string; cleanup: () => void } {
  * carry the same deadline because they do the same real-file work.
  *
  * Per test rather than a package-wide `testTimeout`: raising the global default
- * would relax the deadline for all 3425 tests in this package, including the
+ * would relax the deadline for every test in this package, including the
  * many where a hang is the real signal. Only the harness deadline changes here;
  * every assertion is untouched.
  */

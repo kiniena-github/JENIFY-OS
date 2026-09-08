@@ -1705,7 +1705,7 @@ this page's surfaces.
 
 **HIGH 1 — `\p{Co}` PRIVATE USE carried a credential shape past the credential
 scan.** It reaches every write on this phase's surfaces, because
-`recordIntelligenceDecision`'s labels and `recordCostEntry`'s notes go through
+`recordIntelligenceDecision`'s labels and `recordIntelligenceCost`'s notes go through
 the same `assertNoCredentialShape`, and it reached the unauthenticated
 `hq-snapshot.json` through `assertBrowserSafe`. 137,468 code points, in no
 residual list, no comment and no test, while `\p{Cn}` — which takes the

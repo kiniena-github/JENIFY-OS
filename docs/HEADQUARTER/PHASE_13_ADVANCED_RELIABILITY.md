@@ -793,7 +793,7 @@ The strongest claim in the phase, established three ways — the Phase 12 recipe
 | the capability's idempotency | `#capabilityFromStore` | whether `confirmed_not_executed` may reopen an attempt | canonical. |
 | the reliability-command capability row | `#capabilityFromStore` | whether an assessment or a backup record may proceed | canonical, unchanged from the Phase 4/5/7/12 pattern. |
 | the SAFE-MODE verdict | the `#private` `#integrityReport` field, latched from the structural assessment AND from the last row of `hq_reliability_verdicts` | whether a Founder-gated write, an approval, an external-action authorization, a kill-switch release, a claim or an external execution proceeds | canonical. Pinned against a patch of `hqReliabilityPosture` and `reliabilitySummary` on instance, prototype, and a later-constructed facade — and, **since the Wave 5 correction of HIGH 1**, against a plain RESTART, which used to clear it. |
-| the RECORDED verdict a construction re-reads | `latestIntegrityVerdict(db)` — a direct read of the append-only `hq_reliability_verdicts` ledger | whether a blocking verdict survives a restart | canonical. The ledger carries the full append-only trio; a raw connection can APPEND a `safe_mode = 1` row (the fail-closed direction) and can neither rewrite nor erase one. |
+| the RECORDED verdict a construction re-reads | `standingIntegrityVerdict(db)` — a direct read of the append-only `hq_reliability_verdicts` ledger | whether a blocking verdict survives a restart | canonical. The ledger carries the full append-only trio; a raw connection can APPEND a `safe_mode = 1` row (the fail-closed direction) and can neither rewrite nor erase one. |
 | the APPEND-ONLY GUARDS ON THE AUDIT LOG ITSELF | the same `missingImmutabilityGuards` census, now that `op_evidence` is a declared `ENGINE_IMMUTABLE_TABLES` member | whether removing the guards on the hash-chained log is a blocking finding | canonical **since the third correction round (High A2)**. The table used to carry NO triggers at all, on the argument that "its guarantee is the chain rather than the engine" — so a raw `DELETE FROM op_evidence WHERE seq > 1` was simply permitted, and the chain then verified perfectly over what was left. |
 | the EVIDENCE-CHAIN verification that PRODUCES that verdict | `#verifyEvidenceChainFromStore` — a `#private` closure over `#db` and the module-level `verifyEvidenceChain`, deliberately NOT `queue.evidence.verifyChain()` | whether `evidence_chain_broken` engages safe mode, and whether an already-latched safe mode survives the next assessment | canonical **since the Wave 5 correction**; it previously read the patchable delegate. Pinned against a patch on the instance and on `EvidenceLog.prototype`, and against a facade constructed after it. Since the third correction round it verifies the chain's LENGTH as well as its links, against the AUTOINCREMENT high-water mark SQLite maintains — because walking forward from the genesis value proved that the entries PRESENT link to one another and said nothing about where the chain was supposed to END, so deleting the NEWEST entries left a log that verified perfectly. Since the FOURTH it also requires the seqs present to be CONTIGUOUS from 1, because the high-water comparison alone was erased by the next ordinary append: one entry later the largest seq present reached the mark again, the deleted seqs became a hole in the middle, and the appended entries chained from the surviving tip so the links did not object either. |
 | the DURABLE COMMITMENT both of those are measured against | `contradictedChainCommitment` and `regressedImmutableLedgers` — direct reads of the append-only `hq_integrity_checkpoints` ledger, over `#db`, with no injected closure and nothing patchable in the path | whether a log that was re-written WHOLE, or a ledger that is back EMPTY, engages safe mode | canonical **since the fifth correction round (High 1 / Medium 1)**. Every other check on this table reads the record and asks whether the record is self-consistent, which a coherent whole-log rewrite satisfies. This one asks whether the record agrees with a commitment HQ made about it earlier, in a different append-only ledger. Every commitment ever recorded is checked and the per-ledger comparison takes the MAXIMUM ever committed, so an appended checkpoint can only add a constraint. |
@@ -1550,7 +1550,7 @@ the canonical budget-scope derivation and spend attribution,
 and the `redaction.ts` corrections. From the second round: the CRITICAL above,
 `run_key_conflict`, the `no_erase` guard and its reduced census base,
 `readStoredCostFact`'s two further parity gaps, the bounded `decisionId`, and
-the honest residual disclosure now stated on `latestIntegrityVerdict`.
+the honest residual disclosure now stated on `standingIntegrityVerdict`.
 
 ### One seam the merge had to close itself
 
@@ -3142,9 +3142,12 @@ false alarm for a false reassurance is not a fix. The evasion is pinned in
 - **A cost figure written in THIS document is read by no test.** The parse-back
   rule reaches `integrity.ts` — the served string, the module header and the
   docblock above `STRUCTURAL_STATEMENT_BASE` — and stops there. Executed:
-  changing "48 statements executed per pass" in the bullet above to "61" leaves
-  the whole suite at 191 files / 3425 tests passed. Disclosed at its price, with
-  the cheapest close named, in the merge section at the end of this page.
+  changing "48 statements executed per pass" in the bullet above to "61" left
+  the whole suite green and unchanged — measured at `5126ffe`, where the suite
+  was 191 files / 3425 tests. That figure describes THAT head and is not
+  re-measured here; the current one is in the reconciled table at the end of
+  this page. Disclosed at its price, with the cheapest close named, in the
+  merge section at the end of this page.
 
 ### One residual RE-PRICED downwards at this head
 
@@ -4058,8 +4061,10 @@ back rule the merge extended reaches `integrity.ts` — the served string, the
 module header, and the docblock above `STRUCTURAL_STATEMENT_BASE` — and stops
 there. Executed rather than reasoned about: changing "48 statements executed per
 pass" in the residual bullet above to "61 statements executed per pass" and
-running the whole suite gives **191 files / 3425 tests passed**, unchanged. The
-figure is wrong and nothing fails.
+running the whole suite gave **191 files / 3425 tests passed**, unchanged —
+**measured at `5126ffe`**, the head this section describes. The suite has grown
+since; the reconciled table below carries the current figure. The point stands
+whatever the count is: the figure is wrong and nothing fails.
 
 It is disclosed rather than closed, and the price is stated rather than argued.
 It is not a defect this merge introduced — both parents already carried
@@ -4208,3 +4213,148 @@ handle installs no safe-mode gate, and a constructor gate is still the wrong
 fix, because the facade builds its queue during its own construction and a
 throwing constructor would make `assessHqIntegrity` — the only act that clears
 safe mode — unreachable on exactly the file that needs it.
+
+## The THIRTEENTH correction round: the classifier, not the parameters
+
+A fresh read-only hostile review of the round-twelve reconciled head returned
+**0 Critical / 0 High / 1 Medium / 4 Low**, and could not break any enforcement
+guarantee. All five are closed here.
+
+### MEDIUM 1 — a derivation gap, not a live exploit
+
+`facade-write-scan.test.ts` claims that "no string parameter of a facade write
+reaches storage unscanned" and that "a parameter ADDED to an input type in a
+future phase is covered the day it is added". Both were true only of the 64
+public methods its `WRITE_MARKERS` regex happened to match — a regex over ONE
+method body. A public method whose write happens inside a `#private` helper was
+not a write as far as that file was concerned, and every parameter it declared
+contributed **zero** rows to the derivation. Nothing could fire on that: the
+only floor was `expect(facts.length).toBeGreaterThan(200)` against 262 derived
+pairs, and a method excluded from the write set produces no pairs at all.
+
+Eight public methods sat in that hole. **This was not a live outage.** Every
+unscanned value was traced to its sink and none could reach storage carrying a
+credential shape and correspond to anything: the two `idempotencyKey`s are
+folded into `decisionIdempotencyKey()`, a `sha256(canonicalJson(...))`, so only
+the digest lands; `taskId`, `workerId`, `decisionId`, `requestedBy` and `actor`
+are each bounded by `#runClaimRefusal`, `#resolveDecisionReference`,
+`#resolveContributor` or `#assertApprovalAuthority` before any write; and what
+does reach append-only storage on a refusal lands in `op_evidence.payload`,
+which no control route serves. What was wrong is that the defence rested on
+properties nobody had enumerated — the exact substitution of a reasoned argument
+for a derivation that this file exists to end.
+
+Six of the eight genuinely write, and all six now scan at the source:
+
+| Method | What writes, and where the write is | Now |
+|---|---|---|
+| `reconciliationAuthorityRefusal` | `#assertApprovalAuthority` appends `{actorId: actor, action, reason}` to `op_evidence` on a refusal | `assertNoCredentialShape({actor})` first; measured to append nothing on a credential shape |
+| `assignTaskAsFounder` | `#resolveFounderGateActor` → `#resolveRequester` appends `{actorId: founderId, action: 'assign task <taskId>'}` before `assignTask`'s own scan is reached | `callerTextRefusal(input, ['rationale'])` first |
+| `assembleCollaborationContext` | the same `#resolveRequester` append, carrying `requestedBy` | `callerTextRefusal(input)` first |
+| `recordIntelligenceDecision` | `#insertDecision` holds the `INSERT INTO hq_intel_decisions`; `taskId` / `workerId` land in `task_id` / `issued_by` | `callerTextRefusal(input, ['label'])` first |
+| `escalateIntelligenceDecision` | the same `#insertDecision` | `callerTextRefusal(input)` first |
+| `evaluateTaskEligibility` | `this.routeTask` appends `routing_evaluated` | `callerTextRefusal({taskId})` first, so the coverage no longer depends on that delegation being the first statement |
+
+The other two — `intelligenceBudgetDecision` and `intelligenceRoutingProposal` —
+are the call graph's over-approximations. Both are on the READ list of
+`safe-mode-disposition.test.ts`, which already names them as reads the
+reachability reaches only through a branch they cannot take, and MEASURES both
+by table delta as writing no row at all. They are exempt here on that
+measurement, named with it, rather than scanned as if they wrote.
+
+Two further spellings of the same under-reading are closed with it. A named
+input type was resolved only when `export interface X {` was declared in
+`service.ts` itself, so `registerAiMember`'s `RegisterMemberInput` — which lives
+in `registry/members.ts` — enumerated **nothing**; it is scanned at runtime, but
+by luck rather than by the mechanism. And the inline-object field matcher
+required `;`, `,`, a newline or `)` after the type, so
+`assessHqIntegrity(input: { requestedBy: string })` enumerated nothing either.
+
+**What now fires.** The classifier follows the class's own call graph — the same
+fixpoint `safe-mode-disposition.test.ts` computes for the safe-mode
+dispositions — and three method-level assertions were added beside the pair
+floor, which was raised from 200 to 280:
+
+- the set of methods classified ONLY transitively must equal a named roster, in
+  both directions, and each must be invisible to the direct predicate;
+- every write-classified method must enumerate a parameter or appear in a
+  ZERO-PARAMETER roster, asserted by EQUALITY — so adding a text parameter to
+  one of them fails the build until it is enumerated;
+- the six that genuinely write must have every parameter reach a scan.
+
+**Derivation at this head:** 148 public methods, **72** classified as writes
+(was 64), **296** (method, parameter) pairs (was 262), one zero-parameter write
+(`reserveEvidence<T>(fn: () => T)`), three exempt pairs (`lookupPrincipal.id`,
+`intelligenceBudgetDecision.scopeId`, `intelligenceRoutingProposal.taskId`).
+
+**Executed against the pre-fix source**: the new derivation reports 14 uncovered
+pairs across the six methods; the pre-fix derivation, asserted against the new
+claims, misses all eight transitively-classified methods, reports
+`assessHqIntegrity` and `registerAiMember` as enumerating zero parameters, and
+does not contain `registerAiMember.displayName` among its 262 pairs. Four of the
+six new behavioural refusals fail against the pre-fix source
+(`reconciliationAuthorityRefusal` answers `may not …` rather than a credential
+refusal; the other three answer `not_permitted`, `unknown_principal` and
+`unknown_task`).
+
+### The four Lows, all doc/comment honesty
+
+- **LOW 1** — the enforcement-safe read audit's row for "the RECORDED verdict a
+  construction re-reads" named a function that exists nowhere. Dead name, then
+  live one: `latestIntegrityVerdict` → `standingIntegrityVerdict`
+  (`application/reliability-command.ts`), renamed inside this wave by `ba02f81`,
+  with the rename recorded two pages down and the table row never updated. Both mentions corrected, and **pinned**: `phase-doc-name-truth.test.ts`
+  requires every backticked code identifier in that table's "Reads through"
+  column to resolve to a real declaration under `src/`, and proves the checker
+  can tell the two names apart.
+- **LOW 2** — `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md` named
+  `recordCostEntry` where the method is `recordIntelligenceCost`, and the
+  sentence was otherwise true of it. Corrected, and added to a retired-name
+  register in the same test. A general sweep of every backticked camelCase word in these
+  two pages is NOT viable — it collides with vitest matchers, node calls and
+  JSON keys, and the allow-list would go stale the way the rows did — so the
+  register is narrow on purpose.
+- **LOW 3** — two test files (`integrity-statement-truth.test.ts`,
+  `facade-write-scan.test.ts`) said "would relax the deadline for all 3425 tests
+  in this package". The package had 3442. The number is removed rather than
+  re-measured, because the reason a global `testTimeout` is the wrong instrument
+  is that it reaches every test however many there are. Pinned: no test file in
+  the package may state a present-tense whole-suite count. The three HISTORICAL
+  measurements at a named head are deliberately not swept — they record what an
+  experiment produced and stay true.
+- **LOW 4** — two superseded suite figures on this page read as present-tense
+  claims about "the whole suite". Both now name the head they were measured at
+  (`5126ffe`), rather than being rewritten. The other two occurrences were
+  already head-scoped by their own section headings. **The disclosure this page
+  already carries is unchanged and still true: a cost figure written in THIS
+  document is read by no test.**
+
+### Verification at the round-thirteen head
+
+All green, exit 0, run in this worktree.
+
+| Check | Reconciled round-twelve head (`582c239`) | Round thirteen |
+|---|---|---|
+| `npm run test:hq` | 193 files / 3442 tests | **194 files / 3457 tests** |
+| `typecheck @factoryos/headquarter` | clean | **clean** |
+| `@factoryos/hq-host` test + typecheck | 23 / 222, clean | **23 / 222**, clean |
+| `@factoryos/hq-server` test + typecheck | 2 / 20, clean | **2 / 20**, clean |
+| root `npm test` | 37 / 569 + 3 skips | **37 / 569 + 3 pre-existing skips** |
+| `npm run build` (web initial JS) | 215.66 kB / 69.22 kB gzip | **215.66 kB / 69.22 kB gzip** |
+| `npm run build:site` | 10 pages + `hq-snapshot.json` | **10 pages + `hq-snapshot.json`** |
+
+The re-attack battery holds unchanged: `registerExecutionWorker`,
+`engageKillSwitch`, `setIntelligenceBudget` and `recordModelObservation` all
+still refuse `invalid_input` with the field named, legitimate forms still land,
+and no `CONTROL_ROUTES` GET is bricked including after restart;
+`submitResult(..., ['sk-…'])` and `postMissionMessage({refs:['sk-…']})` still
+refuse, nested forms included, while ordinary refs arrays still land; under a
+genuine latch `ops.queue.claim` throws, `ops.claimNext` refuses
+`safe_mode_engaged`, and `assessHqIntegrity` / `engageKillSwitch` /
+`hqReliabilityPosture` stay available; `verifyHqBackupFile` answers
+`chainVerified: true`, `candidate_census_unavailable` and
+`would_latch_safe_mode` on the four cases with the candidate sha256 unchanged
+and no sidecars; all five non-AUTOINCREMENT ledgers are still caught on erasure
+with no false positive on restart, `VACUUM`, `.backup()` or `VACUUM INTO`; and
+the frozen collections still refuse every mutator spelling while remaining
+`instanceof Set` and spreadable.
