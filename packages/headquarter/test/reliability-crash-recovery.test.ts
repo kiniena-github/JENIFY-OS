@@ -107,6 +107,48 @@ function crashAfter(
   return { runId: runId!, correlationId: correlationId! };
 }
 
+/**
+ * The three tests below spawn a REAL child `node` process against a real
+ * file-backed SQLite database, and they are the heaviest tests this wave has
+ * (Wave 5 correction round thirteen, Low 2).
+ *
+ * The timeout remediation of the previous round gave explicit deadlines to
+ * `facade-write-scan.test.ts` and `integrity-statement-truth.test.ts`, and its
+ * claims were correctly scoped to those two files. This file was left at
+ * vitest's 5 s default with no explicit deadline at all, which is a residual of
+ * that fix rather than a false claim in it: the test that actually failed CI
+ * #552 with `Test timed out in 5000ms` measured 361 ms, and each of these three
+ * measures more than twice that. The child has to be spawned, transpile TypeScript
+ * on the way up, open the database, reserve an attempt and then SIGKILL itself,
+ * and a shared runner under load stretches process spawn far more than it
+ * stretches an in-process query.
+ *
+ * Measured on this machine with the whole package running in parallel:
+ * 825-1137 ms for these three, the slowest being the `outcome_unknown`
+ * classification at 1137 ms (882 ms with the file run alone). 60 s is ~53x that
+ * slowest observed run, which is the same headroom the other two files carry.
+ *
+ * **The other nine tests in this file are deliberately left at the default**,
+ * and that is stated rather than quietly done. They use the same file-backed
+ * fixture but spawn no child process, and they measure 129-186 ms under the same
+ * parallel load — well under the 361 ms that failed. Widening the deadline to
+ * every test that touches a file would give up the signal a hang carries in the
+ * ones that are genuinely fast.
+ *
+ * Per test rather than a package-wide `testTimeout`: raising the global default
+ * would relax the deadline for all 3427 tests in this package, including the
+ * many where a hang is the real signal. Only the harness deadline changes here;
+ * every assertion is untouched.
+ *
+ * **A sibling residual, measured and deliberately not changed here.**
+ * `decide-routing-cli.test.ts` carries a 1393 ms test (`treats an unrecognised
+ * value as unknown rather than as a clean answer`, measured under the same
+ * parallel load) at the same 5 s default. It is a different subsystem and not
+ * this correction's finding, so it is recorded here for whoever picks it up
+ * rather than folded into a commit that did not measure the rest of that file.
+ */
+const CHILD_PROCESS_TIMEOUT_MS = 60_000;
+
 describe('a real process dies mid-attempt, and the next one tells the truth about it', () => {
   it('classifies the interrupted SIDE-EFFECT attempt as outcome_unknown and never retries it', () => {
     const fx = fileFixture({ processIdentity: 'the-process-that-recovers' });
@@ -153,7 +195,7 @@ describe('a real process dies mid-attempt, and the next one tells the truth abou
     } finally {
       fx.cleanup();
     }
-  });
+  }, CHILD_PROCESS_TIMEOUT_MS);
 
   it('concludes a crash BEFORE any attempt as not_executed, because the ledger proves it', () => {
     const fx = fileFixture({ processIdentity: 'the-process-that-recovers' });
@@ -169,7 +211,7 @@ describe('a real process dies mid-attempt, and the next one tells the truth abou
     } finally {
       fx.cleanup();
     }
-  });
+  }, CHILD_PROCESS_TIMEOUT_MS);
 
   it('leaves the canonical task exactly where the crash left it', () => {
     const fx = fileFixture({ processIdentity: 'the-process-that-recovers' });
@@ -188,7 +230,7 @@ describe('a real process dies mid-attempt, and the next one tells the truth abou
     } finally {
       fx.cleanup();
     }
-  });
+  }, CHILD_PROCESS_TIMEOUT_MS);
 });
 
 describe('recovery is scoped, repeatable and honest about what it did not touch', () => {

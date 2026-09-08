@@ -468,17 +468,50 @@ describe('the depth statement served to the Founder is derived from what the two
 });
 
 /**
- * Run one structural pass with `db.prepare` instrumented, and return every SQL
- * statement it actually EXECUTED — not every statement it prepared, because a
- * prepared statement that is never stepped costs nothing.
+ * Run one structural pass with every route to the engine instrumented, and
+ * return every SQL statement it actually EXECUTED — not every statement it
+ * prepared, because a prepared statement that is never stepped costs nothing.
+ *
+ * ## Round thirteen, Medium 1 — the instrument was BLIND to a term the
+ * sentence it checks names explicitly
+ *
+ * This wrapped `db.prepare` only, so it could not see a statement that never
+ * goes through a prepared handle. `readDurabilityPosture` runs four of them —
+ * `journal_mode`, `synchronous`, `foreign_keys` and `wal_autocheckpoint` —
+ * through better-sqlite3's `db.pragma()`, which compiles and steps its own
+ * statement internally. The depth statement names "the durability pragmas" in
+ * its very first clause and prices the fixed term at "11 catalogue, pragma and
+ * commitment-ledger reads", and those four were in neither the 11 nor the total:
+ * the real fixed term is 15 and the base is 48, the FOURTH undercount this
+ * clause has shipped and the fourth in the same direction.
+ *
+ * The parse-back rule that catches the other three could not catch this one,
+ * because the rule compares the prose to a MEASUREMENT and the measurement
+ * itself was missing the term. So the instrument is fixed first and the number
+ * second: `db.exec` is wrapped too (it executes SQL without a prepared handle
+ * at all — measured at 0 in a structural pass, which is a fact worth pinning
+ * rather than assuming), and `db.pragma` is wrapped and recorded as the
+ * `PRAGMA <name>` it runs. A future check that reaches the engine by any of the
+ * three routes is counted.
  */
-function statementsExecutedByOneStructuralPass(dbPath: string): { sql: string[]; close: () => void } {
+function statementsExecutedByOneStructuralPass(dbPath: string): {
+  sql: string[];
+  pragmas: string[];
+  execs: string[];
+  close: () => void;
+} {
   const db = openHqDatabase(dbPath);
   const executed: string[] = [];
+  const pragmas: string[] = [];
+  const execs: string[] = [];
   const handle = db as unknown as {
     prepare: (sql: string) => Record<string, unknown>;
+    exec: (sql: string) => unknown;
+    pragma: (source: string, options?: unknown) => unknown;
   };
   const realPrepare = handle.prepare.bind(handle);
+  const realExec = handle.exec.bind(handle);
+  const realPragma = handle.pragma.bind(handle);
   handle.prepare = (sql: string) => {
     const statement = realPrepare(sql);
     const normalized = sql.replace(/\s+/g, ' ').trim();
@@ -492,11 +525,28 @@ function statementsExecutedByOneStructuralPass(dbPath: string): { sql: string[];
     }
     return statement;
   };
+  handle.exec = (sql: string) => {
+    execs.push(sql.replace(/\s+/g, ' ').trim());
+    return realExec(sql);
+  };
+  handle.pragma = (source: string, options?: unknown) => {
+    pragmas.push(String(source).replace(/\s+/g, ' ').trim());
+    return realPragma(source, options);
+  };
   const outcome = structuralIntegrity(db, {});
   // A pass that found something would be measuring a different code path.
   expect([...findingsOf(outcome.observations)]).toEqual([]);
   handle.prepare = realPrepare;
-  return { sql: executed, close: () => db.close() };
+  handle.exec = realExec;
+  handle.pragma = realPragma;
+  return {
+    // Every route to the engine, in one list, because the sentence being checked
+    // prices STATEMENTS and does not care which API carried them.
+    sql: [...executed, ...pragmas.map((name) => `PRAGMA ${name}`), ...execs],
+    pragmas,
+    execs,
+    close: () => db.close(),
+  };
 }
 
 describe('the cost clause of the depth statement is derived from what a pass executes', () => {
@@ -731,11 +781,79 @@ describe('the cost clause of the depth statement is derived from what a pass exe
     const preCommitment = /measured at (\d+) statements and ZERO identity reads/.exec(constantProse);
     expect(preCommitment, 'the constant must state the pre-commitment branch').toBeTruthy();
     expect(Number(preCommitment![1])).toBe(before!.total);
-    // "overstate … by four times" is the only comparative it makes, and it is
-    // measured rather than rhetorical.
-    expect(constantProse).toMatch(/overstate the unestablished case by four\s*times/);
-    expect(before!.total * 4).toBeLessThanOrEqual(plain!.total);
-    expect(before!.total * 5).toBeGreaterThan(warm!.total);
+    // "overstate … by three times" is the only comparative it makes, and it is
+    // measured rather than rhetorical. It said FOUR until round thirteen's
+    // Medium 1: the pre-commitment branch reads the same four durability pragmas
+    // the committed-on branch does, so counting them raised the smaller number
+    // proportionally more and the ratio fell. Both bounds move with the
+    // comparative, so a stale word fails here.
+    expect(constantProse).toMatch(/overstate the unestablished case by three\s*times/);
+    expect(before!.total * 3).toBeLessThanOrEqual(plain!.total);
+    expect(before!.total * 4).toBeGreaterThan(warm!.total);
+  }, FILE_BACKED_BATTERY_TIMEOUT_MS);
+
+  /**
+   * Round thirteen, Medium 1 — the INSTRUMENT, checked before the number it
+   * produces.
+   *
+   * The three previous undercounts of this clause were caught by parsing the
+   * prose back out of the source and comparing it to a measurement. That rule
+   * cannot catch an undercount the MEASUREMENT shares, and it did not: the
+   * measurement wrapped `db.prepare`, `readDurabilityPosture` reads four pragmas
+   * through `db.pragma()`, and "the durability pragmas" the sentence names in
+   * its first clause were in neither the fixed term nor the total.
+   *
+   * So the instrument itself is asserted here. It is not enough that the numbers
+   * agree — they agreed for three rounds while being wrong together.
+   */
+  it('counts the durability pragmas, which do not go through a prepared statement', () => {
+    const file = warmedFile();
+    try {
+      const pass = statementsExecutedByOneStructuralPass(file.dbPath);
+      // The four the served sentence promises a pass reads, by name, taken off
+      // the `db.pragma` route rather than assumed to be somewhere in the total.
+      expect([...pass.pragmas].sort()).toEqual([
+        'foreign_keys',
+        'journal_mode',
+        'synchronous',
+        'wal_autocheckpoint',
+      ]);
+      // They are not prepared statements, which is exactly why they were missed:
+      // none of them appears in the prepared-statement stream.
+      const prepared = pass.sql.filter((sql) => !sql.startsWith('PRAGMA '));
+      for (const name of pass.pragmas) {
+        expect(prepared.some((sql) => sql.includes(name))).toBe(false);
+      }
+      // `db.exec` is the third route to the engine. A structural pass takes it
+      // zero times; that is pinned rather than assumed, so a future check that
+      // used it could not slip past the count either.
+      expect(pass.execs).toEqual([]);
+      // And the fixed term the sentence prices includes them: the total minus
+      // the two census terms is 15, of which 4 are these.
+      const identities = pass.sql.filter((sql) =>
+        /^SELECT COUNT\(\*\) AS held, COALESCE\(MAX\(rowid\), 0\) AS top FROM /.test(sql),
+      ).length;
+      const seeks = pass.sql.filter((sql) => /^SELECT MAX\(rowid\) AS top FROM /.test(sql)).length;
+      const fixed = pass.sql.length - identities - seeks;
+      expect(fixed).toBe(STRUCTURAL_STATEMENT_BASE - ENGINE_IMMUTABLE_TABLES.length);
+      expect(fixed - pass.pragmas.length).toBe(
+        STRUCTURAL_STATEMENT_BASE - ENGINE_IMMUTABLE_TABLES.length - 4,
+      );
+      pass.close();
+
+      // The served sentence names the term it used to omit, and may not carry
+      // the retired figure again.
+      expect(INTEGRITY_DEPTH_STATEMENT).toContain(
+        `${STRUCTURAL_STATEMENT_BASE - ENGINE_IMMUTABLE_TABLES.length} catalogue, pragma and ` +
+          `commitment-ledger reads that do not move`,
+      );
+      expect(INTEGRITY_DEPTH_STATEMENT).not.toMatch(
+        /11 catalogue, pragma and commitment-ledger reads/,
+      );
+      expect(INTEGRITY_DEPTH_STATEMENT).toMatch(/durability pragmas themselves/);
+    } finally {
+      file.cleanup();
+    }
   }, FILE_BACKED_BATTERY_TIMEOUT_MS);
 
   it('reads the commitment ledger with a SCAN and a temporary B-tree, not one indexed lookup', () => {
@@ -860,7 +978,12 @@ describe('the cost clause of the depth statement is derived from what a pass exe
       // independent claim.
       expect(identities.length).toBe(ENGINE_IMMUTABLE_TABLES.length);
       expect(seeks.length).toBe(4);
-      expect(fixedReads).toBe(11);
+      // 15, not 11, since round thirteen's Medium 1: the four durability
+      // pragmas go through `db.pragma()` and the instrument above now counts
+      // them. Deliberately a literal — this line is the independent claim the
+      // parse-back below is compared against, so deriving it would make the
+      // comparison circular.
+      expect(fixedReads).toBe(15);
       expect(total).toBe(identities.length + seeks.length + fixedReads);
       expect(STRUCTURAL_STATEMENT_BASE).toBe(identities.length + fixedReads);
 

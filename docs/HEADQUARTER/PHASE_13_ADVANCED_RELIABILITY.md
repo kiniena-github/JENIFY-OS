@@ -3061,41 +3061,68 @@ false alarm for a false reassurance is not a fix. The evasion is pinned in
   ledger is `op_evidence`. It is the same class as HIGH 3 and it is NOT fixed,
   because the only bound available for that check is the number being written.
   Stated at its price rather than described away.
-- **A raw writer can still weaken the gap baseline.** A forged checkpoint
-  committing a LARGER gap than the file has raises the baseline and hides a
-  later deletion. That is one write and it is silent — fail-OPEN, not a
-  fabricated finding — and it needs the same raw write to the file every residual
-  in this module needs. `no_overclaim` bounds marks and counts from above; it
-  does not bound a gap from below, because a legitimate gap cannot be
-  distinguished from a claimed one at write time.
+- **A raw writer can still weaken the gap baseline, and this bullet priced that
+  wrongly until round thirteen (High 1).** It said the way in was "a forged
+  checkpoint committing a LARGER gap than the file has raises the baseline" —
+  per-ledger, per-value, and needing a declared table to be named. The cheapest
+  path named no ledger at all and erased EVERY baseline at once: one `INSERT`
+  whose `ledger_rows` carried an EMPTY key made `committedLedgerGaps` build
+  `'$.' || j.key`, SQLite raise `bad JSON path: '$.'`, and the reader's own
+  `try/catch` return `{}` — all 33 baselines gone, permanently, because the
+  ledger is append-only. Measured against `237fc76`, control and attack identical
+  but for that `INSERT`, over a mid-ledger delete of `hq_reliability_verdicts`
+  rowid 2: control `p2..p6 boot=true["append_only_guard_missing"] assess=true
+  release=refused`; attack `p2 boot=true assess=false[] release=ADMITTED` and
+  `p3..p6 boot=false[] assess=false[] release=ADMITTED`. That was ONE statement
+  against the three this module quotes everywhere else, in the
+  false-reassurance direction, against the ledger that holds the safe-mode latch.
+  Closed in both halves: the guard now admits only the shape HQ's own writer
+  emits (`COMMITMENT_SHAPE_CLAUSES` — a valid JSON object, declared table names
+  as keys, non-negative integers as values), and the reader builds no JSON path
+  out of a key a row carries and fails CLOSED rather than open when the engine
+  refuses it. **What remains** is the narrower thing this bullet used to
+  describe: with the guards temporarily dropped — the same three-statement price
+  every other residual here pays — a checkpoint committing a LARGER gap for a
+  named ledger than the file has raises that ledger's baseline and hides a later
+  deletion of it. Still fail-OPEN, still silent, still not a fabricated finding.
+  `no_overclaim` bounds marks and counts from above; it does not bound a gap from
+  below, because a legitimate gap cannot be distinguished from a claimed one at
+  write time.
 - **A commitment written before this round carries no row count.** The
   `ledger_rows` column defaults to `'{}'` on existing rows, which is the truth
   about a row written before HQ committed any counts. The row-count and gap
   halves of the check begin at the next checkpoint that lands, which is the
   ordinary upgrade cost of a new commitment and not a defence.
 - **The structural pass got more expensive, and the module header now says so.**
-  Measured on the `warmedFile()` fixture: 48 statements executed per pass, of
+  Measured on the `warmedFile()` fixture: 52 statements executed per pass, of
   which 33 are a `COUNT(*)` + `MAX(rowid)` identity pair per declared ledger, 4
   are a further `MAX(rowid)` seek — **one per declared ledger the engine carries
   a positive `sqlite_sequence` row for, which is NOT the set HQ has committed
-  marks for; on this very fixture it is four against three** — and 11 are
+  marks for; on this very fixture it is four against three** — and 15 are
   catalogue, pragma and commitment-ledger reads that do not move. A `COUNT(*)`
   is O(rows) where the seek is not. It is paid deliberately, because the seek
-  cannot see a row removed from the middle and the count can. 48 is this
+  cannot see a row removed from the middle and the count can. 52 is this
   fixture's total and not the cost of a pass: the rule is
-  `STRUCTURAL_STATEMENT_BASE` (44) plus one per seek, which is 46 on a file HQ
-  has merely booted twice and 11 before the first commitment. (The figure this
+  `STRUCTURAL_STATEMENT_BASE` (48) plus one per seek, which is 50 on a file HQ
+  has merely booted twice and 15 before the first commitment. (The figure this
   row carried for two rounds — "46 prepared statements per pass and 0.87 ms
   averaged over 50" — was wrong in both halves; see the two concurrent rounds
-  below, and no duration ships anywhere any more.)
+  below, and no duration ships anywhere any more. **The figures it carried after
+  that — 48 / 44 / 46 / 11 — were wrong a FOURTH time, in the same direction,
+  and are corrected here in round thirteen (Medium 1): the instrument that
+  measured them wrapped `db.prepare` and could not see the four durability
+  pragmas `readDurabilityPosture` reads through `db.pragma()`, which are exactly
+  what the served sentence's own first clause promises a pass reads. The
+  instrument counts `db.pragma` and `db.exec` now, and every figure above moved
+  by four.**)
 - **Nothing here closes the count-preserving in-place REWRITE of the commitment
   ledger.** That residual is unchanged, and `reliability-commitment-residual.test.ts`
   still enforces it.
 - **A cost figure written in THIS document is read by no test.** The parse-back
   rule reaches `integrity.ts` — the served string, the module header and the
   docblock above `STRUCTURAL_STATEMENT_BASE` — and stops there. Executed:
-  changing "48 statements executed per pass" in the bullet above to "61" leaves
-  the whole suite at 191 files / 3425 tests passed. Disclosed at its price, with
+  changing "52 statements executed per pass" in the bullet above to "61" leaves
+  the whole suite at 191 files / 3434 tests passed. Disclosed at its price, with
   the cheapest close named, in the merge section at the end of this page.
 
 ### One residual RE-PRICED downwards at this head
@@ -4020,3 +4047,243 @@ by being read here. The cheapest close is a doc parse-back of the same shape as
 a number out of this page and compares it to a constant. That is a separate,
 scoped change with its own review, not something to fold into a reconciliation
 whose rule is that nothing is discarded and nothing new is invented.
+
+## Wave 5 correction round thirteen — a shipped detector defeated permanently at ONE permitted `INSERT`, and a cost clause wrong a fourth time because the instrument was blind to the term
+
+A fresh read-only hostile review of `237fc768e55ae50fab3deda87276ff3c56d34ff4`
+returned 0 Critical / 1 High / 1 Medium / 2 Low. All four are fixed here. Every
+figure below was executed at this head before it was written.
+
+### HIGH 1 — `committedLedgerGaps` built a JSON path out of a column a raw writer controls, and one empty key erased every baseline for ever
+
+`json_extract(c.ledger_marks, '$.' || j.key)` took `j.key` from `ledger_rows`.
+SQLite raises a hard `bad JSON path: '$.'` for an EMPTY key; the reader's own
+`try/catch` swallowed it and returned `{}`. Every gap baseline for all 33
+declared ledgers was gone, and gone permanently — the commitment ledger is
+append-only, so the poison row can never be removed.
+
+Nothing fired on the way in. `json_each('{"":0}')` gives `COUNT(*) = 1` and
+`COUNT(DISTINCT key) = 1`, so round twelve's ambiguity clause is silent, and no
+declared table is named, so no value bound is either. Executed against
+`237fc76`:
+
+```
+gaps before poison: [{"hq_integrity_checkpoints",0},{"hq_reliability_verdicts",0},{"op_evidence",0}]
+ambiguity check on {"":0} : {"c":1,"d":1}  -> equal, guard does not fire
+INSERT ACCEPTED by trg_hq_integrity_checkpoints_no_overclaim
+gaps after poison:  THROWS -> bad JSON path: '$.'
+```
+
+End to end, control and attack identical but for that one `INSERT`, against a
+mid-ledger delete of `hq_reliability_verdicts` rowid 2 — the ledger that holds
+the safe-mode latch:
+
+```
+CONTROL: p2..p6 boot=true["append_only_guard_missing"] assess=true release=refused
+ATTACK : p2 boot=true assess=false[] release=ADMITTED ; p3..p6 boot=false[] assess=false[] release=ADMITTED
+```
+
+That is the detector round seven's High 2 exists to provide, defeated in the
+FALSE-REASSURANCE direction, at one statement against the three this module
+quotes for every other tamper.
+
+**Fixed as a CLASS, not as an instance**, because this is the second round
+running in which a reader of these columns disagreed with the others on an input
+the guard admitted. Three changes:
+
+1. **The guard admits only the shape HQ's single writer emits.**
+   `COMMITMENT_SHAPE_CLAUSES` refuses any `ledger_marks` or `ledger_rows` that is
+   not a `TEXT` value, is not valid JSON, is not a top-level JSON OBJECT, or
+   carries a key that is not one of the 33 `ENGINE_IMMUTABLE_TABLES` names or a
+   value that is not a non-negative JSON integer.
+   `CHAIN_LENGTH_SHAPE_CLAUSE` does the same for the third column. Every one of
+   these was executed: the empty key, an undeclared key, a top-level array, an
+   empty array, a JSON scalar, a JSON number, malformed JSON, a BLOB that parses
+   as JSON, an INTEGER in the TEXT column, a nested object or array as a value, a
+   real / text / boolean / null value, a negative value on either half, and a
+   real / text / negative `chain_length` — all refused; `'{}'` and a re-statement
+   of HQ's own newest commitment still land, and HQ keeps committing boot after
+   boot.
+2. **No JSON path is built from anything a row carries.** `committedLedgerGaps`
+   joins the mark to the row count through a second `json_each` on `key`
+   (`LEFT JOIN`, so a key present in one column and absent from the other still
+   contributes the gap of 0 it contributed before, rather than being silently
+   dropped from the baseline).
+3. **The reader no longer fails OPEN.** `json_valid` moved from a `WHERE`
+   predicate into the `json_each` ARGUMENT in both readers, so neither can raise
+   on any content the column can hold — a `WHERE` predicate beside a
+   table-valued function is a planner decision, not a guarantee. The `catch` is
+   split: a COMPILE-time error (`no such table`, `no such column` — the two
+   benign reasons it was written for) still yields no baseline, which is the
+   truth about a file HQ has never committed on; a RUN-time error now yields the
+   STRICTEST baseline instead of none — a committed gap of zero for every
+   declared ledger, which is what a healthy ledger really has, so a holed ledger
+   is reported and a healthy store still reports nothing.
+
+**Two disclosure defects rode on it, and both are corrected.**
+`integrity.ts`'s round-twelve docblock claimed refusing the duplicate ambiguity
+"makes all five readers agree by making the only input they can differ on
+unreachable through the guard". The empty key was a second such input, reachable
+through that guard, and the sentence now says so and names the measurement.
+This page's residual bullet priced the gap fail-open as "a forged checkpoint
+committing a LARGER gap than the file has" — per-ledger, per-value; the cheapest
+path named no ledger at all. The bullet now states what was closed and what
+genuinely remains at the three-statement price.
+
+**A third claim was nearly shipped and was executed instead.** The obvious way
+to keep `json_valid = 0` in front of the `json_type`, `json_each` and
+`json_extract` beside it is to write it first and rely on `OR` short-circuiting.
+That was written and executed: on SQLite 3.53.2 a trigger `WHEN` clause whose
+terms carry subqueries evaluates them anyway, and an `INSERT` carrying
+`'{"op_evidence": '` came back as the engine's `malformed JSON` rather than as
+HQ's refusal. Documenting the order as a guarantee would have been the eleventh
+disclosure defect of this wave. Every expression over these columns is made
+TOTAL instead (`totalCommitmentJson`), and the test asserts the MESSAGE rather
+than merely that the row did not land.
+
+**The residual, unchanged in kind.** This is still a `BEFORE INSERT` guard: it
+bounds what LANDS. A row of the old shape planted with the guards temporarily
+dropped is still in the file — but the reader it defeated no longer builds a path
+out of it and no longer fails open, so the DETECTOR survives the planted row.
+Executed: plant the empty-key row through the three-statement path, then delete
+`hq_reliability_verdicts` rowid 2, and the mid-ledger deletion is still reported
+at every process afterwards. And the strict fallback gives up one thing, stated
+rather than traded silently: a ledger whose rowids legitimately had a hole
+BEFORE HQ first committed on it would be reported while the commitment columns
+are unreadable.
+
+### MEDIUM 1 — the cost clause undercounted by 4, a fourth time in the same direction, because `statementsExecutedByOneStructuralPass` could not see `db.pragma()`
+
+`INTEGRITY_DEPTH_STATEMENT` says a pass reads "the durability pragmas" in its
+own first clause and priced the fixed term at "11 catalogue, pragma and
+commitment-ledger reads". `readDurabilityPosture` reads `journal_mode`,
+`synchronous`, `foreign_keys` and `wal_autocheckpoint` through better-sqlite3's
+`db.pragma()`, which compiles and steps its own statement and never touches a
+prepared handle — and the instrument wrapped `db.prepare` only. The four were in
+neither the 11 nor the total.
+
+**The parse-back rule could not catch this**, because it compares the prose to a
+MEASUREMENT and the measurement shared the blind spot. So the instrument was
+fixed first: it now counts `db.pragma` and `db.exec` as well as prepared
+statements, and a new test asserts the four pragmas BY NAME off the `db.pragma`
+route, asserts that none of them appears in the prepared-statement stream (which
+is why they were missed), and pins `db.exec` at zero in a structural pass.
+
+Measured at this head with the fixed instrument:
+
+| File | prepared | pragma | exec | identities | seeks | fixed | total |
+|---|---|---|---|---|---|---|---|
+| pre-commitment | 11 | 4 | 0 | 0 | 1 | — | **15** |
+| booted twice | 46 | 4 | 0 | 33 | 2 | 15 | **50** |
+| `warmedFile()` | 47 | 4 | 0 | 33 | 4 | 15 | **52** |
+
+`STRUCTURAL_STATEMENT_BASE` is therefore **48**, not 44, and every figure that
+quotes it moved by four: the module header, the constant's docblock, the served
+sentence, and this page's residual bullet. The constant's own comparative moved
+too and is restated at what it measures rather than carried over — the
+pre-commitment branch gained the same four pragmas, so the ratio between the two
+branches fell from four to a little over three (50 / 15). Everything else the
+review independently confirmed about the clause is unchanged: the rule holds on
+both committed-on files, the pre-commitment branch reads zero identities, the
+seeked set is the `sqlite_sequence` set and demonstrably not the committed set,
+and a full assessment adds exactly `PRAGMA integrity_check` and
+`PRAGMA foreign_key_check`.
+
+**Figures in EARLIER sections of this page are historical.** Each `##` section
+records what a given round measured at its own head. They are not restated here
+and they are not rewritten; the numbers that describe THIS head are the ones in
+the table above, in the residual bullet, and in `integrity.ts`.
+
+### LOW 1 — a test docblock's count was stale by one
+
+`reliability-durability.test.ts`'s docblock said `BACKUP_REFUSAL_REASONS` "holds
+fifteen … Twelve are exercised". The constant holds **16** and **13** are
+exercised, which is what the page correctly says. No assertion was ever
+unpinned — they all derive from the constant — but a false sentence in a test
+file is the same artifact as a false sentence in a served string. The docblock is
+corrected, and its two numbers are now parsed back out of the file itself and
+compared to the constant and to the sweep, so the next addition to the vocabulary
+fails a test rather than leaving a fourth stale sentence behind.
+
+### LOW 2 — this wave's heaviest real-file tests were still at the 5 s default
+
+`reliability-crash-recovery.test.ts` had no explicit deadline anywhere while
+three of its tests `spawnSync` a real child `node` process against a file-backed
+SQLite database. Measured with the whole package running in parallel:
+**825–1137 ms** for those three, against the **361 ms** test that actually failed
+CI #552 with `Test timed out in 5000ms`. This is a residual of the previous
+round's timeout remediation rather than a false claim in it — that fix's claims
+were correctly scoped to its own two files.
+
+Treated the same way: an explicit per-test deadline of **60 s** (~53x the
+slowest observed run, the same headroom the other two files carry), a documented
+constant, no assertion changed, and **no** global `testTimeout` — raising the
+default would relax the deadline for every test in the package, including the
+many where a hang is the real signal.
+
+**The other nine tests in that file are deliberately left at the default** and
+that is stated rather than quietly done: they use the same file-backed fixture,
+spawn no child process, and measure 129–186 ms under the same parallel load.
+**`decide-routing-cli.test.ts` is measured and deliberately NOT changed here**:
+its slowest test (`treats an unrecognised value as unknown rather than as a clean
+answer`) runs 1393 ms at the same 5 s default. It is a different subsystem and
+not this round's finding, so it is recorded for whoever picks it up rather than
+folded into a commit that did not measure the rest of that file.
+
+### The reader audit this round's High required
+
+Every reader of `ledger_marks`, `ledger_rows` and `chain_length`, checked against
+each other over the input space the guard now admits — a `TEXT` value that is
+valid JSON, whose top-level type is `object`, whose keys are distinct members of
+the 33 declared ledger names, and whose values are non-negative JSON integers;
+plus a `chain_length` that is a non-negative SQL integer.
+
+| Reader | Spelling | Agrees over the admitted space because |
+|---|---|---|
+| `overclaimGuardDdl` value bounds | `json_extract(<total>, '$.<literal>')` | the path is a fixed literal built from the frozen `ENGINE_IMMUTABLE_TABLES`, never from a row; keys are distinct, so `json_extract` and `json_each` return the same single value for the same key |
+| `AMBIGUOUS_COMMITMENT_CLAUSES` | `json_each(<total>)` cardinality vs distinct keys | equal for every object with distinct keys; this clause is what makes "distinct" true of the admitted space in the first place |
+| `COMMITMENT_SHAPE_CLAUSES` | `TYPEOF` / `json_valid` / `json_type` / `json_each` | `TYPEOF` and `json_valid` are total by definition; the other two read the `<total>` expression, so no value the column can hold raises |
+| `committedGreatest` (both columns) | `json_each(<total>)` + `MAX(CAST(value AS INTEGER))` | one row per key, so `MAX` is that key's single value; non-declared keys are dropped in JS, and only positive integers are kept |
+| `committedLedgerGaps` | `json_each(<total>)` on both columns, joined on `key` | no path is built at all; `LEFT JOIN` preserves the previous `NULL → MAX ignores → 0` behaviour for a key present in rows and absent from marks, which HQ's writer cannot produce anyway (`rows > 0` implies `top >= 1`) |
+| `committedChainLength` | `MAX(chain_length)` | `chain_length` is a non-negative integer, so `Number.isInteger` keeps exactly what the column holds |
+| `contradictedChainCommitment` | `c.chain_length` joined to `op_evidence.seq` | same column, same type; the two readers cannot disagree on an integer |
+
+Outside the admitted space there is nothing left to agree about: those values are
+refused where they are written. The only remaining disagreement is over rows a
+raw writer planted at a build without these clauses, and that is closed at the
+READER rather than argued away — no reader builds a path out of a row, no reader
+raises on any content, and the one that used to fail open now fails closed.
+
+### The residual this round leaves standing, re-executed rather than carried over
+
+**A cost figure written in THIS document is still read by no test.** The
+parse-back rule reaches `integrity.ts` — the served string, the module header
+and the docblock above `STRUCTURAL_STATEMENT_BASE` — and stops there. Executed at
+THIS head rather than quoted from the round that first disclosed it: changing
+"52 statements executed per pass" in the residual bullet above to "61 statements
+executed per pass" and running the whole suite gives **191 files / 3434 tests
+passed**, unchanged. The figure is wrong and nothing fails. It is disclosed at
+that price; the cheapest close is a doc parse-back of the same shape as
+`reliability-durability.test.ts`'s backup-refusal count pin, and it is a separate
+scoped change rather than something to fold into a correction round.
+
+### Verification at this head
+
+All green, exit 0, run in this worktree on top of `237fc768e55ae50fab3deda87276ff3c56d34ff4`.
+
+| Check | Round twelve merge (`237fc76`) | This head |
+|---|---|---|
+| `npm run test:hq` | 191 files / 3425 tests | **191 files / 3434 tests** |
+| `typecheck @factoryos/headquarter` | clean | clean |
+| `@factoryos/hq-host` test + typecheck | 23 / 222, clean | **23 / 222**, clean |
+| `@factoryos/hq-server` test + typecheck | 2 / 20, clean | **2 / 20**, clean |
+| root `npm test` (`@factoryos/server`) | 37 / 569 + 3 skips | **37 / 569 + 3 pre-existing skips** |
+| `npm run build:site` | 10 pages | **10 pages** + `hq-snapshot.json` |
+| `npm run build` web initial JS | 215.66 kB / 69.22 kB gzip | **215.66 kB / 69.22 kB gzip** |
+
+The nine tests added here were also run against `237fc76` itself, with the source
+untouched: **9 failed**. Nothing was deleted, renamed, skipped, weakened or
+narrowed; no `.skip` / `.only` / `.todo` / `xit` / `xdescribe` was added, and no
+`as any`, `@ts-expect-error` or `eslint-disable` appears in an added line. Zero
+new dependencies. The diff touches `packages/headquarter/` and
+`docs/HEADQUARTER/` only.

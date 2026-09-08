@@ -2049,12 +2049,24 @@ describe('the two nearly-true facts about a file HQ has been in', () => {
  * guard's refusals was two short, and its count of the exercised ones was two
  * short of that.
  *
- * `BACKUP_REFUSAL_REASONS` holds fifteen; the paragraph said thirteen, and
- * omitted `file_has_multiple_links` and `candidate_is_the_live_database` from
- * the list it wrote out — both added by this wave, neither picked up by the
- * prose. Twelve are exercised, not ten. Nothing compared either number to
- * anything, which is the same reason the cost clause went wrong three times.
- * Both are compared here.
+ * `BACKUP_REFUSAL_REASONS` held fifteen when this paragraph was written; the
+ * page said thirteen, and omitted `file_has_multiple_links` and
+ * `candidate_is_the_live_database` from the list it wrote out — both added by
+ * this wave, neither picked up by the prose. Twelve were exercised, not ten.
+ * Nothing compared either number to anything, which is the same reason the cost
+ * clause went wrong three times. Both are compared here.
+ *
+ * **This paragraph then went stale itself, in exactly the way it was written to
+ * stop** (Wave 5 correction round thirteen, Low 1). The merge with the
+ * concurrent round-ten lane added `would_latch_safe_mode`, so the constant holds
+ * SIXTEEN and THIRTEEN are exercised. The page was updated and this docblock was
+ * not: the tests below derive their assertions from the constant, so nothing was
+ * ever unpinned — only the prose describing them was false, which is the same
+ * artifact-versus-behaviour gap the whole file exists to close. The numbers are
+ * therefore no longer written here at all as free-standing claims; the third
+ * test below parses them back out of this very docblock and compares them to the
+ * constant and to the sweep, so the next addition to the vocabulary fails a test
+ * rather than leaving a fourth stale sentence behind.
  */
 const HERE_FOR_PHASE_13 = path.dirname(fileURLToPath(import.meta.url));
 
@@ -2130,5 +2142,38 @@ describe('the page’s count of the backup guard’s refusals is the constant’
       expect(page, `the page must say ${reason} is not exercised`).toContain(`\`${reason}\``);
       expect(page).toMatch(new RegExp(`${reason}[\\s\\S]{0,400}?NOT exercised|NOT exercised[\\s\\S]{0,400}?${reason}|${reason}[\\s\\S]{0,400}?not exercised`));
     }
+  });
+
+  /**
+   * Round thirteen, Low 1 — the same rule turned on THIS FILE'S OWN prose.
+   *
+   * The two tests above pin the PAGE against the constant, and they held: the
+   * page says sixteen and thirteen and both are right. What nothing pinned was
+   * the docblock above them, which still said fifteen and twelve after the merge
+   * that added `would_latch_safe_mode`. No assertion was ever weakened by it —
+   * they all derive from the constant — but a false sentence in a test file is
+   * the same artifact as a false sentence in a served string, and this wave has
+   * now shipped ten defects that were defects in a disclosure.
+   *
+   * So the docblock's two numbers are parsed back out of this file and compared
+   * to the constant and to the sweep, exactly as the page's are.
+   */
+  it('states its own two counts in the docblock, and both are the measured ones', () => {
+    const source = fs.readFileSync(path.join(HERE_FOR_PHASE_13, 'reliability-durability.test.ts'), 'utf8');
+    const anchor = source.indexOf('const HERE_FOR_PHASE_13');
+    expect(anchor, 'the anchor this docblock sits above must exist').toBeGreaterThan(0);
+    const opened = source.lastIndexOf('/**', anchor);
+    expect(opened, 'that anchor must carry a docblock').toBeGreaterThan(0);
+    const prose = source
+      .slice(opened, anchor)
+      .split('\n')
+      .map((line) => line.replace(/^\s*\/?\*+\/?\s?/, ''))
+      .join(' ')
+      .replace(/\s+/g, ' ');
+
+    const stated = /constant holds (\w+) and (\w+) are exercised/i.exec(prose);
+    expect(stated, 'the docblock must state how many the constant holds and how many are driven').toBeTruthy();
+    expect(NUMBER_WORDS[stated![1]!.toLowerCase()]).toBe(BACKUP_REFUSAL_REASONS.length);
+    expect(NUMBER_WORDS[stated![2]!.toLowerCase()]).toBe(exercised().length);
   });
 });
