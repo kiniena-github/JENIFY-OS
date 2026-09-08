@@ -1169,6 +1169,21 @@ describe('the module header’s counts are the constants’ counts', () => {
     ten: 10,
     eleven: 11,
     twelve: 12,
+    // Round seventeen (Medium-2): the table used to stop at twelve, so
+    // "thirteen names" walked straight past a sweep whose own docblock claimed
+    // "any phrasing". Extended to twenty plus the round tens, which is where a
+    // count of enforcement constants can plausibly land.
+    thirteen: 13,
+    fourteen: 14,
+    fifteen: 15,
+    sixteen: 16,
+    seventeen: 17,
+    eighteen: 18,
+    nineteen: 19,
+    twenty: 20,
+    thirty: 30,
+    forty: 40,
+    fifty: 50,
   };
 
   it('says how many finding names there are, and is right', () => {
@@ -1231,8 +1246,17 @@ describe('the module header’s counts are the constants’ counts', () => {
    * phrasings that evaded its predecessor.
    */
   function statedCardinals(text: string): number[] {
-    const prose = text.replace(/`[^`]*`/g, ' ');
     const words = Object.keys(NUMBER_WORDS).join('|');
+    const prose = text
+      // A backticked span whose WHOLE content is a cardinal is prose wearing a
+      // code span (Wave 5 correction round seventeen, Medium-2): backticking a
+      // numeral is the prevailing style in these very docblocks, and stripping
+      // every span meant "`SAFE_MODE_BLOCKING_FINDINGS` holds `three` names"
+      // and "… holds `3` names" both evaded. Unwrapped to the bare token.
+      .replace(new RegExp('`\\s*(' + words + '|\\d+)\\s*`', 'gi'), ' $1 ')
+      // Every OTHER span is still stripped, so a digit inside an identifier, a
+      // commit sha or a file name is not read as prose.
+      .replace(/`[^`]*`/g, ' ');
     const found: number[] = [];
     const pattern = new RegExp(`\\b(${words}|\\d+)\\b`, 'gi');
     let match: RegExpExecArray | null;
@@ -1279,7 +1303,82 @@ describe('the module header’s counts are the constants’ counts', () => {
     expect(statedCardinals('Wave 5 correction round fifteen, issue 200')).toEqual([]);
   });
 
-  it('is right about the count WHEREVER the package states it, in any phrasing', () => {
+  /**
+   * The TWELVE phrasings a third hostile review measured against
+   * `statedCardinals` (Wave 5 correction round seventeen, Medium-2). Eleven of
+   * the twelve evaded, and the test below still called itself "in any
+   * phrasing".
+   *
+   * Four are closed here. The other seven are NOT, and the claim is narrowed to
+   * match rather than left overclaiming — see `EVADES_BY_DESIGN` and the test
+   * title, which no longer says "any phrasing".
+   */
+  const NOW_CAUGHT: readonly string[] = [
+    // Backticking a numeral is the prevailing style in these very docblocks,
+    // and stripping every code span meant both of these read as silent.
+    '`SAFE_MODE_BLOCKING_FINDINGS` holds `three` names',
+    '`SAFE_MODE_BLOCKING_FINDINGS` holds `3` names',
+    // The word table stopped at twelve.
+    '`SAFE_MODE_BLOCKING_FINDINGS` holds thirteen names',
+    // The window was ±1, so a wrong number three lines above was outside it.
+    // (Exercised against the file sweep below rather than the extractor.)
+    '`SAFE_MODE_BLOCKING_FINDINGS` holds seventeen names',
+  ];
+
+  /**
+   * What still evades, listed because a guard that overclaims is itself a
+   * finding — which is the whole reason this file exists.
+   *
+   * Every one of these is a natural-language count expressed without a
+   * cardinal token this extractor recognises. Catching them needs either an
+   * unbounded synonym vocabulary ("a trio", "a pair", "both", "thrice", "a
+   * triple") or Roman numerals, and a sweep that tried would produce false
+   * positives on ordinary prose faster than it caught anything. The
+   * reference-label shield (`round 3`, `no. 3`) is a DELIBERATE carve-out: a
+   * citation is not a count, and the same rule that lets "Wave 5" through lets
+   * "see round 3 for the count" through with it.
+   */
+  const EVADES_BY_DESIGN: readonly string[] = [
+    '`SAFE_MODE_BLOCKING_FINDINGS` holds a trio of names',
+    '`SAFE_MODE_BLOCKING_FINDINGS` holds a pair of names',
+    'both `SAFE_MODE_BLOCKING_FINDINGS` names',
+    '`SAFE_MODE_BLOCKING_FINDINGS` names it thrice',
+    '`SAFE_MODE_BLOCKING_FINDINGS` holds a triple',
+    '`SAFE_MODE_BLOCKING_FINDINGS` holds III names',
+    'see round 3 for the count of `SAFE_MODE_BLOCKING_FINDINGS`',
+    '`SAFE_MODE_BLOCKING_FINDINGS` holds no. 3 names',
+  ];
+
+  it('catches the backticked, larger-worded phrasings the third review measured', () => {
+    const size = SAFE_MODE_BLOCKING_FINDINGS.length;
+    for (const phrasing of NOW_CAUGHT) {
+      const cardinals = statedCardinals(phrasing);
+      expect(cardinals, `${phrasing} must state a cardinal`).not.toEqual([]);
+      expect(
+        cardinals.some((value) => value !== size),
+        `${phrasing} states a wrong size and must be caught`,
+      ).toBe(true);
+    }
+    // The unwrapping must not turn identifiers and shas into counts: that is
+    // exactly what stripping code spans was protecting against.
+    expect(statedCardinals('`HQ_INTEGRITY_FINDINGS` at `85b720d`')).toEqual([]);
+    expect(statedCardinals('see `SAFE_MODE_BLOCKING_FINDINGS[3]`')).toEqual([]);
+    expect(statedCardinals('`hq_reliability_run_events` and `f1ce71c6`')).toEqual([]);
+  });
+
+  it('states, by execution, exactly which phrasings it still cannot read', () => {
+    // The honest half. Each of these is asserted to be SILENT, so the
+    // disclosure is a measurement: if a future change starts catching one, this
+    // fails and whoever made it moves the line into `NOW_CAUGHT` — and if one
+    // silently stops being listed, the count below fails.
+    for (const phrasing of EVADES_BY_DESIGN) {
+      expect(statedCardinals(phrasing), `${phrasing} is disclosed as evading`).toEqual([]);
+    }
+    expect(NOW_CAUGHT.length + EVADES_BY_DESIGN.length, 'the review measured twelve').toBe(12);
+    expect(EVADES_BY_DESIGN.length, 'and seven of them still evade').toBe(8);
+  });
+
+  it('is right about the count wherever the package states it in a CARDINAL, within three lines', () => {
     const counts: Record<string, number> = {
       SAFE_MODE_BLOCKING_FINDINGS: SAFE_MODE_BLOCKING_FINDINGS.length,
       HQ_INTEGRITY_FINDINGS: HQ_INTEGRITY_FINDINGS.length,
@@ -1305,7 +1404,12 @@ describe('the module header’s counts are the constants’ counts', () => {
         for (let i = 0; i < lines.length; i += 1) {
           if (!lines[i]!.includes(constant)) continue;
           mentions += 1;
-          const window = [lines[i - 1] ?? '', lines[i]!, lines[i + 1] ?? '']
+          // A SEVEN-line window (±3), widened from ±1 in round seventeen
+          // (Medium-2): a wrong number three lines above the mention was
+          // outside the old window, and a wrapped docblock routinely puts the
+          // count that far from the constant it counts.
+          const window = [-3, -2, -1, 0, 1, 2, 3]
+            .map((offset) => lines[i + offset] ?? '')
             .map((line) => line.replace(/^\s*\*\s?/, '').replace(/^\s*\/\/\s?/, ''))
             .join(' ')
             .replace(/\s+/g, ' ');
