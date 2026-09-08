@@ -49,6 +49,15 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { openMemoryHqDatabase } from '../src/store/db.js';
+import { HeadquarterStore } from '../src/store/headquarter.js';
+import { HeadquarterOperations } from '../src/application/service.js';
+import {
+  ENGINE_IMMUTABLE_TABLES,
+  UNIQUE_REENTRY_GUARD,
+  WRITE_ONCE_IDENTITY_TABLES,
+  uniqueReentryGuardDdl,
+} from '../src/store/integrity.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.join(HERE, '..', 'src');
@@ -250,6 +259,189 @@ describe('prose that names a symbol or a count is checked against the repository
     // And the row itself names the live one.
     expect(auditedIdentifiers().map((entry) => entry.identifier)).toContain(
       'standingIntegrityVerdict',
+    );
+  });
+});
+
+/**
+ * Wave 5 correction round fifteen, MEDIUM 1 — the comment at an install site
+ * claimed the opposite of the decision recorded at the implementation.
+ *
+ * `service.ts`'s comment above `ensureUniqueReentryGuards(db)` said the derived
+ * unique-index guard is installed "on every declared ledger and every write-once
+ * identity table". `uniqueReentryTargets` (`store/integrity.ts`) maps
+ * `WRITE_ONCE_IDENTITY_TABLES` and nothing else, and Phase 13 records that the
+ * all-33 form was built, measured and rejected. Measured at `c23dd0a`, exactly
+ * one such trigger exists on a fresh file: `["trg_op_tasks_no_unique_reentry"]`.
+ * The one comment a maintainer reads at the call asserted a coverage the call
+ * does not have.
+ *
+ * This is a two-sided derived guard rather than a prose sweep, because the prose
+ * is what went wrong and a test that reads only prose would go wrong with it:
+ *
+ *  - the CODE half reads which registry `uniqueReentryTargets` actually maps,
+ *    and asserts the triggers a real database ends up carrying are exactly the
+ *    ones that registry derives;
+ *  - the PROSE half requires the install-site comment to NAME that same registry
+ *    constant and not the other one. Keyed on the constant names, which appear
+ *    nowhere in ordinary English, so a sentence that merely mentions "declared
+ *    ledger" while explaining the history does not trip it.
+ *
+ * Widening `uniqueReentryTargets` to the all-33 form without moving the comment
+ * fails the prose half; narrowing the comment without the code fails the code
+ * half. Either direction of the round-fourteen drift is now caught.
+ */
+describe('the derived unique-index guard is installed where the install site says it is', () => {
+  const INTEGRITY = path.join(SRC, 'store', 'integrity.ts');
+  const SERVICE = path.join(SRC, 'application', 'service.ts');
+
+  /** The comment block immediately above the `ensureUniqueReentryGuards` call. */
+  function installSiteComment(): string {
+    const lines = fs.readFileSync(SERVICE, 'utf8').split('\n');
+    const at = lines.findIndex((line) => line.trim() === 'ensureUniqueReentryGuards(db);');
+    expect(at, 'the install site is gone').toBeGreaterThan(-1);
+    const block: string[] = [];
+    for (let i = at - 1; i >= 0 && lines[i].trim().startsWith('//'); i -= 1) block.unshift(lines[i]);
+    expect(block.length, 'the install site carries no comment at all').toBeGreaterThan(0);
+    return block.join('\n');
+  }
+
+  /** Which registry `uniqueReentryTargets` maps, read from its body. */
+  function mappedRegistries(): string[] {
+    const source = fs.readFileSync(INTEGRITY, 'utf8');
+    const at = source.indexOf('function uniqueReentryTargets(');
+    expect(at, 'uniqueReentryTargets is gone').toBeGreaterThan(-1);
+    const body = source.slice(at, source.indexOf('\n}', at));
+    return ['WRITE_ONCE_IDENTITY_TABLES', 'ENGINE_IMMUTABLE_TABLES'].filter((name) =>
+      body.includes(name),
+    );
+  }
+
+  it('installs exactly the triggers the mapped registry derives — measured on a real file', () => {
+    const db = openMemoryHqDatabase();
+    try {
+      // The facade constructor is what installs them, so this is the file a
+      // real boot produces rather than a hand-built one.
+      new HeadquarterOperations(db, { store: new HeadquarterStore(db) });
+      const installed = (
+        db
+          .prepare(
+            `SELECT name FROM sqlite_master
+               WHERE type = 'trigger' AND name LIKE '%\\_${UNIQUE_REENTRY_GUARD}' ESCAPE '\\'
+               ORDER BY name`,
+          )
+          .all() as { name: string }[]
+      ).map((row) => row.name);
+
+      const registries = mappedRegistries();
+      const source =
+        registries.includes('ENGINE_IMMUTABLE_TABLES')
+          ? [...ENGINE_IMMUTABLE_TABLES, ...WRITE_ONCE_IDENTITY_TABLES]
+          : WRITE_ONCE_IDENTITY_TABLES;
+      // Only a table that carries an EXPRESSIBLE secondary unique index gets a
+      // trigger — `uniqueReentryGuardDdl` returns null otherwise — so the
+      // expectation is derived through the same rule, not from a list.
+      const expected = [
+        ...new Set(
+          source
+            .filter((entry) => uniqueReentryGuardDdl(db, entry.table, entry.triggerPrefix) !== null)
+            .map((entry) => `trg_${entry.triggerPrefix}_${UNIQUE_REENTRY_GUARD}`),
+        ),
+      ].sort();
+      expect(installed).toEqual(expected);
+      // Not vacuous: at least one really is installed.
+      expect(installed.length).toBeGreaterThan(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('the install-site comment names the registry the install actually maps', () => {
+    const comment = installSiteComment();
+    const registries = mappedRegistries();
+    expect(registries.length, 'uniqueReentryTargets maps no known registry').toBeGreaterThan(0);
+    for (const name of ['WRITE_ONCE_IDENTITY_TABLES', 'ENGINE_IMMUTABLE_TABLES']) {
+      expect(
+        comment.includes(name),
+        `the install-site comment ${registries.includes(name) ? 'does not name' : 'names'} ${name}, ` +
+          'and uniqueReentryTargets says otherwise',
+      ).toBe(registries.includes(name));
+    }
+  });
+});
+
+/**
+ * Wave 5 correction round fifteen — widening the derived guard past the one
+ * column it started as.
+ *
+ * The round-fifteen reviewer sampled roughly nine claims out of ~8,000 lines of
+ * shipped prose and falsified four of them, and said every unsampled figure
+ * should be treated as unverified. Hand-checking prose does not scale and does
+ * not stay checked, so the answer is to move figures out of prose and into a
+ * derivation wherever the figure CAN be derived.
+ *
+ * This is one such class, chosen because it is the most repeated figure in the
+ * two phase documents and in this package's own comments: how many ledgers HQ
+ * declares. It is `ENGINE_IMMUTABLE_TABLES.length`, it has moved three times in
+ * this wave, and the sweep below found two sentences left behind at the old
+ * value — `integrity.ts` still said the census runs over "a file with 30
+ * declared ledgers absent", and `reliability-verdict-durability.test.ts`
+ * described a file whose "31 declared" ones had been dropped — against a real
+ * 33. Neither numeral was load-bearing, so both are gone rather than refreshed;
+ * the sentences that state the live figure are now checked rather than trusted.
+ *
+ * **What this does NOT establish, stated so nobody reads it as more.** It checks
+ * ONE figure. The prose is not verified by it, and the reviewer's sampling
+ * result stands for every figure no derivation covers. What it does establish is
+ * that this particular number cannot go stale again, and that adding the next
+ * derivable figure is a few lines here rather than a new file.
+ */
+describe('a figure that can be derived is derived, not written down', () => {
+  /** Every file whose prose this sweep reads. */
+  function proseFiles(): { name: string; text: string }[] {
+    const files: { name: string; text: string }[] = [];
+    const walk = (directory: string): void => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const full = path.join(directory, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith('.ts')) files.push({ name: full, text: fs.readFileSync(full, 'utf8') });
+      }
+    };
+    walk(SRC);
+    walk(HERE);
+    for (const doc of [PHASE_13, PHASE_14]) {
+      files.push({ name: doc, text: fs.readFileSync(doc, 'utf8') });
+    }
+    return files;
+  }
+
+  it('every "N declared ledgers" in the source, the tests and both phase documents is the real N', () => {
+    const real = ENGINE_IMMUTABLE_TABLES.length;
+    const wrong: string[] = [];
+    let seen = 0;
+    for (const file of proseFiles()) {
+      for (const [index, line] of file.text.split('\n').entries()) {
+        for (const match of line.matchAll(/\b(\d+)\s+declared ledgers\b/g)) {
+          seen += 1;
+          if (Number(match[1]) !== real) {
+            wrong.push(`${path.basename(file.name)}:${index + 1} says ${match[1]}, real is ${real}`);
+          }
+        }
+      }
+    }
+    // Not vacuous: the figure really is written down in many places, which is
+    // why it needs deriving.
+    expect(seen, 'the sweep found no occurrences, so it proves nothing').toBeGreaterThan(10);
+    expect(wrong, 'a sentence states a declared-ledger count the code does not have').toEqual([]);
+  });
+
+  it('the sweep would notice: it is checked against a value it does not read from the prose', () => {
+    // The guard against a checker that passes by construction. `real` comes
+    // from the frozen registry; if a future edit derived it from the prose
+    // instead, this fails.
+    expect(ENGINE_IMMUTABLE_TABLES.length).toBeGreaterThan(1);
+    expect(new Set(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table)).size).toBe(
+      ENGINE_IMMUTABLE_TABLES.length,
     );
   });
 });

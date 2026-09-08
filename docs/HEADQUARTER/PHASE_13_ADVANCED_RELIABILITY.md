@@ -2872,9 +2872,101 @@ each review actually found. What the merge had to decide is recorded here:
   committed mark is now `MAX(rowid)` alone, with `sqlite_sequence` used only as
   the gate for "has this ledger ever been appended to"; that is strictly stronger
   in both directions and every detection the `min` gave is unchanged. The Low 1
-  test is ported with that reasoning inline, and it now also asserts the
-  stronger truth: the inflating boot is blocking, and the latch it leaves is
-  cleared by one Founder assessment rather than standing for ever.
+  test is ported with that reasoning inline, and it also asserts that the
+  inflating boot is blocking.
+
+  **It does NOT assert that the latch clears, because the latch does not clear**
+  (Wave 5 correction round fifteen, High 1). The sentence here used to read "the
+  latch it leaves is cleared by one Founder assessment rather than standing for
+  ever", and the test that pinned it restored `sqlite_sequence` to the real value
+  before asserting the clearing — so the version WITHOUT the barrier the sentence
+  names was never executed, which is precisely what the round-six rule two
+  sections down forbids. Executed at `c23dd0a` with the mark left inflated, ONE
+  statement and no DDL — `UPDATE sqlite_sequence SET seq = 999 WHERE name =
+  'hq_reliability_verdicts'`, all six of that ledger's triggers still present:
+
+  ```
+  p1  boot safeMode=false []                                    release ADMITTED
+  --- UPDATE sqlite_sequence SET seq = 999 (one statement, 6 triggers intact) ---
+  p2  boot safeMode=true  ["append_only_ledger_truncated"]      release REFUSED
+      FOUNDER assessHqIntegrity -> safeMode=true ["append_only_guard_missing"]
+      identity {rows:5, top:1001}   regressed ["hq_reliability_verdicts"]
+  p3  boot safeMode=true  ["append_only_guard_missing"]         release REFUSED
+      FOUNDER assessHqIntegrity -> safeMode=true ["append_only_guard_missing"]
+  p4  boot safeMode=true  ["append_only_guard_missing"]         release REFUSED
+      FOUNDER assessHqIntegrity -> safeMode=true ["append_only_guard_missing"]
+  ```
+
+  Each of p2/p3/p4 ran a full Founder assessment and none of them cleared it.
+  The mechanism is a loop the file cannot leave: the inflating boot is blocking,
+  a blocking boot APPENDS its own safe-mode verdict row to
+  `hq_reliability_verdicts`, SQLite gives that row the rowid the burned counter
+  names, `no_rowid_skip` permits it by design (its `sequenceTerm` exists so HQ
+  never refuses what the engine itself would allocate) and `no_rowid_reseat`
+  permits it because the row IS the greatest — and the gap `top − rows` is now
+  998 against a committed baseline of 0, which `regressedImmutableLedgers`
+  reports for ever. Only a CLEAN assessment commits a checkpoint, so no boot can
+  ever re-baseline the gap. A two-statement variant on `hq_intel_cost_entries`
+  reproduces identically.
+
+  `SAFE_MODE_STATEMENT` was already honest about this — it says a writer that
+  "raises the engine's own high-water mark for some other ledger" can
+  "manufacture a finding HQ will then report and keep reporting" — so what was
+  wrong was this page contradicting it for the one path it names. The sentence
+  is corrected here, and `reliability-commitment-ledger.test.ts` grows a second
+  arm that leaves the mark inflated and asserts what actually happens, so the
+  corrected sentence is executed rather than asserted.
+
+  **Restoring the mark is not the remedy either**, and the first draft of this
+  correction said it was, so it was executed too. By the time a reader could act,
+  HQ's own verdict rows already stand at the rowids the burned counter named;
+  putting `sqlite_sequence` back to `MAX(rowid)` leaves those rows and the gap
+  exactly where they are — measured: `regressed
+  ["hq_reliability_verdicts"]`, `assess ["append_only_guard_missing"]`,
+  `releaseKillSwitch REFUSED`. What does clear it is a re-baseline of the
+  committed gap — a direct `recordIntegrityCheckpoint` against the file as it now
+  stands (`regressed []`, `assess []`, `release ADMITTED`) — and **no facade path
+  performs it**, because both call sites are gated on `!safeMode`. So the honest
+  statement is: once the inflating boot has appended, nothing a Founder can reach
+  through HQ clears this latch. Both halves are pinned.
+
+  **The structural half was designed and is NOT closed**, and both candidates
+  are recorded rather than left for a later round to rediscover:
+
+  1. **Let a boot re-baseline the gap when the gap is its only blocking
+     finding.** This is the mechanism that works, and it is rejected on a
+     MEASURED reason rather than a feared one: the identical re-baseline clears a
+     GENUINE mid-ledger deletion just as completely. Executed — drop the six
+     triggers, `DELETE` one row from the middle, put the triggers back, then one
+     `recordIntegrityCheckpoint`: `regressed []`, `assess []`,
+     `releaseKillSwitch ADMITTED`. A real removal presents as exactly "the gap is
+     the only blocking finding", so automating this would launder it, which is a
+     direct regression of the round-seven High the gap clause exists for.
+  2. **Do not count a gap rise that is attributable to a `sqlite_sequence` mark
+     HQ never committed.** HQ deliberately commits `MAX(rowid)` and never
+     `sqlite_sequence` (that is the Low 1 fix immediately above), so the only
+     available witness for the attribution is the CURRENT `sqlite_sequence` —
+     which is the attacker's own value. A real mid-ledger deletion could then be
+     masked by inflating the counter beside it, trading a false alarm for a
+     false reassurance, which this module ranks strictly worse.
+     A third variant — replace `top − rows > committedGap` with "holes below the
+     COMMITTED top", `mark.top − COUNT(rowid <= mark.top) > committedGap` — is
+     immune to that masking. It was implemented and measured on this head, and it
+     does both things: it closes this finding, and it drops a detection the suite
+     already pins.
+
+     ```
+     scenario                                    shipped clause          holes-below-top
+     sqlite_sequence inflation (this finding)    ["hq_reliability_verdicts"]   []
+     INSERT above the top, guard removed         ["hq_reliability_verdicts"]   []
+     ```
+
+     The second row is the round-thirteen exploit, and it is not hypothetical:
+     with the variant in place, `ledger-rowid-guard.test.ts`'s *"still falls to
+     three statements, and that is what the residual is priced at"* FAILS.
+     Trading a fabricated finding for a lost real one is the same trade in the
+     other direction, so the disclosure stands and the sentence is corrected
+     instead.
 - **The vocabulary grew by one and the count assertions moved with it.** This
   lane added `append_only_ledger_truncated` because in its attack every declared
   guard is present when the census looks, so reporting it as
@@ -5403,6 +5495,20 @@ filled" but "an engine guard refuses any later row that would fill the gap …
 Those are guards on this file, not properties of the engine: a writer that first
 removes them can fill the gap, and HQ says so rather than promising otherwise."
 
+**"served verbatim on the unauthenticated `hq-snapshot.json`" was false when
+this was written, and is true now** (Wave 5 correction round fifteen, Medium 2).
+The correction to the clause was real; the AUDIENCE claim was not.
+`SAFE_MODE_STATEMENT` reached `#integrityView()` — `assessHqIntegrity` and
+`hqReliabilityPosture`, both authenticated — and the safe-mode refusal message,
+and nothing else. Executed with safe mode genuinely engaged at `c23dd0a`: full
+statement on the snapshot **false**, mid-ledger clause **false**, even the
+opening words "Safe mode is a statement" **false**. The snapshot's reliability
+section is built by `reliabilitySummary()`, which the constant never reached.
+`summarizeReliability` now carries `safeModeStatement` — the same constant, one
+spelling — so the sentence above is true of the artifact rather than of an
+intention, and `live-snapshot.test.ts` pins both the presence and the identity
+with the authenticated view.
+
 ### HIGH 2 — one `INSERT OR REPLACE` on a SECONDARY unique index rewrote a write-once identity
 
 `REPLACE` resolves a conflict on ANY unique index by DELETING the standing row,
@@ -5434,15 +5540,41 @@ and plain `=` equality — exactly the engine's own uniqueness rule, so it is
 neither wider nor narrower than the conflict it stands in for.
 
 **Installing that derived guard on all 33 declared ledgers was built, measured
-and REJECTED**, and the measurement is why: it pre-empts the engine's own
-`UNIQUE` conflict on the paths that legitimately rely on it. Run against the full
-suite it turned `action-gateway`'s side-effect deduplication — a plain `INSERT`
-colliding on `hq_action_events.side_effect_key`, whose whole purpose is to raise
-`SQLITE_CONSTRAINT_UNIQUE` so the caller can see the side effect already happened
-— into a trigger `ABORT` with a different code, and the attempt stopped being
-recognised as a duplicate. Refusing a write HQ itself depends on is the outcome
-this module ranks strictly worse than the hole, the same trade
-`ledgerRowidGuardDdl` records for `sqlite_sequence`.
+and REJECTED.**
+
+**The measurement recorded here for that rejection was wrong, and is replaced
+with the executed one** (Wave 5 correction round fifteen, Medium 4). The page
+said the wider guard "pre-empts the engine's own `UNIQUE` conflict … into a
+trigger `ABORT` with a different code". The code is identical with and without
+it — the engine's `SQLITE_CONSTRAINT_UNIQUE` was already pre-empted at that head
+by the shipped `trg_hq_action_events_no_replace_unique`:
+
+```
+without the derived guard: code=SQLITE_CONSTRAINT_TRIGGER
+   msg="hq_action_events is append-only (UNIQUE side_effect_key already reserved)"
+with the derived guard:    code=SQLITE_CONSTRAINT_TRIGGER
+   msg="hq_action_events unique keys are write-once"
+```
+
+What broke was one substring test, `errorMessage(error).includes('side_effect_key')`
+in `executeAction`'s catch — a fail-closed classification resting on a trigger's
+message text. That is fixed at its source rather than worked around: the
+duplicate arm now asks `sideEffectHolder`, a read of the ledger that no rename
+can move. The derived guard's `RAISE` text also names the colliding columns now.
+
+**Re-measured with both fixed, the wider form still does not ship, for a
+different and real reason.** Installed on all 33 declared ledgers it SHADOWS the
+hand-written `no_replace_unique`-family guard each already carries — a second
+`BEFORE INSERT` trigger fires ahead of the declared one, so every refusal that
+said "<table> is append-only" says "<table> unique keys are write-once" instead,
+and every ledger's declared guard SET grows by one. Against the full suite at
+this head that is **36 failures across 20 files**: tests that pin which guard
+held a write-once identity, and tests that derive each ledger's guard inventory.
+And it buys nothing to pay that with — the round-fourteen audit found ZERO
+unguarded secondary unique indexes across all 54 on the 33 ledgers, so the wider
+install adds no coverage today. Its only value would be forward coverage for an
+index added tomorrow, which `unique-index-reentry.test.ts` already provides by
+execution on the day it is added.
 
 So the CLASS is closed by EXECUTION rather than by installation:
 `unique-index-reentry.test.ts` enumerates every unique index of all 33 declared
